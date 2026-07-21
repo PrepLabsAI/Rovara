@@ -9,12 +9,23 @@ dependencies = [
     "agentx-control-plane",
 ]
 
+[project.optional-dependencies]
+openhands = [
+    "agentx-runner[openhands]",
+]
+
 [dependency-groups]
 dev = [
     "ruff>=0.9",
     "mypy>=1.14",
     "pytest>=8.3",
 ]
+
+[tool.uv]
+# litellm >=1.92 ships Linux-only wheels; on macOS dev machines it would build
+# from source (Rust) and fail without crates.io access. <1.92 is pure Python.
+# Revisit when litellm publishes macOS/universal wheels again.
+constraint-dependencies = ["litellm<1.92"]
 
 [tool.uv.workspace]
 members = ["shared", "runner", "control-plane"]
@@ -36,6 +47,11 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 python_version = "3.12"
 strict = true
 packages = ["agentx_schemas", "agentx_runner", "agentx_control_plane"]
+
+[[tool.mypy.overrides]]
+# Optional engine dependency; not installed in the default dev/CI environment.
+module = "openhands.*"
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["shared/tests", "runner/tests", "control-plane/tests"]

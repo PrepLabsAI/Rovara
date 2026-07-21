@@ -7,6 +7,13 @@ dependencies = [
     "agentx-schemas",
 ]
 
+[project.optional-dependencies]
+# Matched set — the OpenHands docs require installing/upgrading both together.
+openhands = [
+    "openhands-sdk==1.36.1",
+    "openhands-tools==1.36.1",
+]
+
 [project.scripts]
 agentx-runner = "agentx_runner.cli:main"
 agentx-conformance = "agentx_runner.conformance.cli:main"

@@ -69,9 +69,7 @@ def materialize_workspace(fixture: Fixture, dest: Path) -> None:
         if item.name in ("task.json", ORACLE_DIR) or item.name in _IGNORED_NAMES:
             continue
         if item.is_dir():
-            shutil.copytree(
-                item, dest / item.name, ignore=shutil.ignore_patterns(*_IGNORED_NAMES)
-            )
+            shutil.copytree(item, dest / item.name, ignore=shutil.ignore_patterns(*_IGNORED_NAMES))
         else:
             shutil.copy2(item, dest / item.name)
     _git(dest, "init", "-q", "-b", "main")
