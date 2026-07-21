@@ -2,7 +2,7 @@
 
 Companion to [README.md](README.md) (requirements) and [ARCHITECTURE.md](ARCHITECTURE.md) (design). Phases are ordered to de-risk the hardest, most uncertain pieces first (engine loop → sandbox → GitHub plumbing → Slack UX → review loop), and each phase ends with something runnable.
 
-**Status: Phases 0–1 complete (all exit criteria met, incl. real-model conformance runs). Phase 2 next.**
+**Status: Phases 0–2 complete (conformance green in-sandbox with the real engine; egress/key-hygiene/runaway-kill proofs done). Phase 3 next.**
 
 ## Proposed stack decisions (confirm at Phase 0)
 
@@ -53,12 +53,12 @@ Prove "task in → branch out" on a laptop, no sandbox, no Slack, no GitHub. Thi
 
 Wrap the runner in the devcontainer-based sandbox from README §3.
 
-- [ ] `WorkspaceProvider` interface: `provision(repo, ref) → Workspace`, `exec_runner(ws, task)`, `teardown(ws)` — so the Docker implementation is swappable for a production substrate later.
-- [ ] Docker implementation: clone repo → detect `.devcontainer/devcontainer.json` → build/start via devcontainer CLI → inject runner + task → stream events out.
-- [ ] Auto-detection fallback when no devcontainer (lockfile-based base-image pick), with an "inferred setup" note surfaced in events.
-- [ ] Resource limits (CPU/mem/disk), hard container timeout, guaranteed teardown (including on control-plane crash — reaper job).
-- [ ] Egress policy v1: default-deny with allowlist (model provider, package registries, github.com).
-- [ ] LLM key injection into runner env only; verify the workspace filesystem never contains it.
+- [x] `WorkspaceProvider` interface: `provision(repo, ref) → Workspace`, `exec_runner(ws, task)`, `teardown(ws)` — so the Docker implementation is swappable for a production substrate later.
+- [x] Docker implementation: clone repo → detect `.devcontainer/devcontainer.json` → build/start via devcontainer CLI → inject runner + task → stream events out.
+- [x] Auto-detection fallback when no devcontainer (lockfile-based base-image pick), with an "inferred setup" note surfaced in events.
+- [x] Resource limits (CPU/mem/disk), hard container timeout, guaranteed teardown (including on control-plane crash — reaper job).
+- [x] Egress policy v1: default-deny with allowlist (model provider, package registries, github.com).
+- [x] LLM key injection into runner env only; verify the workspace filesystem never contains it.
 
 **Exit criteria:** conformance suite passes running *inside* provisioned RDEs (not on the host); a fixture with a devcontainer and one without both work; a runaway task is provably killed and reaped.
 
