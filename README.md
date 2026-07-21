@@ -41,7 +41,13 @@ When a task is accepted, AgentX provisions an isolated, ephemeral remote environ
 - If a repo has no devcontainer, AgentX falls back to auto-detection from lockfiles (`package.json`, `pyproject.toml`, `go.mod`, …), posts what it inferred to the Slack thread, and offers to open a PR adding a generated `devcontainer.json` so subsequent tasks are deterministic.
 - Test/lint commands not expressible in devcontainer.json can be declared in repo config (see §2) or inferred from CI config.
 
-**Open question — sandbox infrastructure:** what the devcontainer runs *on*. Candidates: Firecracker microVMs (e.g. Vercel Sandbox, Fly machines), gVisor containers, or plain Docker on a job runner (e.g. Kubernetes Jobs). Requirements regardless of choice: network egress controls, per-task isolation (untrusted code runs here), secrets injection for repo tokens, and a hard timeout/cost cap per task. Note: devcontainers assume a Docker-compatible runtime, so the choice must support running OCI images and ideally docker-compose (for service containers).
+**Decision: sandbox substrate on AWS.** The orchestrator/control plane is hosted on **Amazon Bedrock AgentCore Runtime**; the RDEs cannot run there (AgentCore sessions have no Docker daemon, a 2 GB image cap, and 2 vCPU/8 GB limits), so they run on a separate substrate:
+
+- **Production RDE: ECS Fargate tasks running per-repo prebuilt devcontainer images.** A CodeBuild job (privileged) runs `devcontainer build --push` to ECR — cached per repo, rebuilt only when the devcontainer changes — and the Fargate task runs that image with `agentx-runner` injected, replaying `postCreate`-style lifecycle commands at start. Fargate gives Firecracker VM isolation per task, up to 16 vCPU/120 GB, 200 GiB disk, and trivial teardown.
+- **Fallback for compose/docker-in-docker devcontainers** (which Fargate can't run): route the task to a **CodeBuild Sandbox** (privileged — `devcontainer up` works unmodified, up to 36 h, per-minute billing). Per-repo config flag, same provider interface.
+- **Graduation path at scale:** EKS with sysbox/Kata for cluster-level control; not v1.
+
+Requirements regardless of substrate: network egress controls, per-task isolation (untrusted code runs here), secrets injection for repo tokens, and a hard timeout/cost cap per task. Full rationale in [ARCHITECTURE.md](ARCHITECTURE.md) §9.
 
 ### 4. Task execution flow
 
@@ -94,8 +100,10 @@ Slack workspace
    ▼
 Control plane  ──  task queue, repo/token management, spec approval,
    │               PR lifecycle, review loop, risk-based automerge
+   │               (hosted on Amazon Bedrock AgentCore Runtime)
    ▼  provisions per task
-RDE (devcontainer sandbox)
+RDE (devcontainer sandbox — ECS Fargate task from a prebuilt per-repo image;
+   │  CodeBuild Sandbox fallback for compose/DinD devcontainers)
    └─ agentx-runner   ← the only component that knows which engine is used
         └─ EngineAdapter → OpenHands SDK │ opencode serve │ (optional) Claude Agent SDK
 ```
@@ -107,9 +115,10 @@ RDE (devcontainer sandbox)
 ## Open Questions
 
 1. Repo access mechanism (§2) — GitHub App vs OAuth vs user-supplied credentials.
-2. RDE sandbox infrastructure (§3) — what the devcontainer runs on (microVMs vs gVisor vs Docker-on-K8s). Setup strategy is decided: devcontainer-driven.
-3. Implementation language for the `agentx-runner` (§6) — the runner hosts the engine adapter, so *its* language constrains engine choice (OpenHands adapter needs a Python runner; OpenCode only needs an HTTP client). The control plane's language is independent — runner ↔ control plane is a wire protocol.
-4. Which review integrations to support first (Greptile, CodeRabbit, native GitHub reviews?).
-5. How review-comment iteration is bounded (max rounds? escalate to human in Slack?).
-6. Deployment step — the original vision includes deployment after merge; scope and mechanism TBD.
-7. Pricing/quota model per workspace.
+2. Implementation language for the `agentx-runner` (§6) — the runner hosts the engine adapter, so *its* language constrains engine choice (OpenHands adapter needs a Python runner; OpenCode only needs an HTTP client). The control plane's language is independent — runner ↔ control plane is a wire protocol. (PLAN.md proposes Python for both.)
+3. Which review integrations to support first (Greptile, CodeRabbit, native GitHub reviews?).
+4. How review-comment iteration is bounded (max rounds? escalate to human in Slack?).
+5. Deployment step — the original vision includes deployment after merge; scope and mechanism TBD.
+6. Pricing/quota model per workspace.
+
+*Resolved:* RDE setup strategy (devcontainer-driven, §3) and RDE sandbox substrate (AgentCore-hosted control plane + Fargate/CodeBuild RDEs, §3).

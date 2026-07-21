@@ -29,7 +29,7 @@ RDE (devcontainer sandbox)
 
 Everything here is engine- and model-agnostic by construction — it only ever sees the normalized event stream (§4).
 
-**Layer 3 — RDE (the sandbox).** One ephemeral devcontainer-based environment per task. It exists because we run untrusted code twice over: the customer's repo (their tests, their `postCreateCommand`) *and* whatever the LLM writes. The RDE is the blast-radius wall — network egress controls, resource caps, hard timeout, no long-lived secrets.
+**Layer 3 — RDE (the sandbox).** One ephemeral devcontainer-based environment per task. It exists because we run untrusted code twice over: the customer's repo (their tests, their `postCreateCommand`) *and* whatever the LLM writes. The RDE is the blast-radius wall — network egress controls, resource caps, hard timeout, no long-lived secrets. Production substrate: ECS Fargate running prebuilt per-repo devcontainer images, with a CodeBuild Sandbox fallback — see §9.
 
 **Layer 4 — `agentx-runner` + adapter (the engine seam).** The runner is a small supervisor process that is the entrypoint of the RDE. It reads a `TaskSpec`, instantiates the configured `EngineAdapter`, runs it, and relays normalized events upward. It is the only code in the system that imports an engine SDK.
 
@@ -175,7 +175,48 @@ CI runs each fixture through each adapter with a pinned model, applies the oracl
 
 ## 8. Where the hard engineering is (risk-ranked)
 
-1. **RDE infrastructure** — running arbitrary devcontainers securely and fast at scale; the sandbox-substrate question (microVMs vs gVisor vs Docker-on-K8s) is still open.
+1. **RDE infrastructure** — running arbitrary devcontainers securely and fast at scale. The substrate is decided (§9: Fargate + prebuilt images), so the risk concentrates in the prebuild pipeline: build latency on first task per repo, lifecycle-command fidelity (`postCreate` replay at task start), and correctly routing compose/DinD repos to the CodeBuild Sandbox fallback.
 2. **The review-fix loop** — parsing heterogeneous review feedback (Greptile vs CodeRabbit vs humans) into bounded fix tasks without oscillating.
 3. **Event-stream UX** — making the Slack thread informative without being spammy.
 4. **The engine adapters** — genuinely the easy part, which is the sign the boundary is drawn right.
+
+## 9. Deployment on AWS: AgentCore Runtime + the RDE substrate
+
+**Constraint:** the orchestrator is hosted on **Amazon Bedrock AgentCore Runtime**.
+
+### Why AgentCore cannot host the RDEs
+
+An AgentCore Runtime session is a per-session microVM with hard caps (verified Jul 2026): **2 vCPU / 8 GB max, ~1–10 GB disk, 2 GB container-image limit, no Docker daemon / privileged mode / nested containers, image fixed per deployed runtime version, 8 h max lifetime**. The devcontainer CLI requires a container runtime, so `devcontainer up` cannot run in a session — and independent of devcontainers, those caps are not a build-and-test box for arbitrary customer repos. AgentCore Code Interpreter is likewise ruled out (prebuilt Python/JS sandboxes only, no custom images). The RDE therefore lives on a separate substrate in every design.
+
+### What runs where
+
+- **AgentCore Runtime: the control plane / orchestrator.** A good fit on its own merits: per-second pricing that doesn't bill I/O wait (the control plane mostly waits on engines, humans, and reviews), microVM session isolation, 8 h sessions, and AgentCore Identity/Gateway/Observability. Packaging constraint: linux/arm64 image ≤ 2 GB.
+- **ECS Fargate: the production RDE substrate.** Per-task flow:
+
+```
+Task arrives
+  → CodeBuild job (privileged): clone repo → `devcontainer build --push` → ECR
+     (per-repo image cache — repeat tasks skip this; rebuild only when the
+      devcontainer config changes)
+  → ECS Fargate RunTask with that image + an appended layer containing
+     agentx-runner + engine; entrypoint replays postCreate/postStart
+     lifecycle commands (prebuild bakes image + features only)
+  → agent edits code and runs tests locally inside the task — no remote-exec hop
+  → branch ready → control plane pushes + opens PR → StopTask (full teardown)
+```
+
+  Why Fargate: Firecracker VM isolation per task, up to 16 vCPU / 120 GB and 200 GiB ephemeral disk, clean teardown. Why prebuild: Fargate does not allow privileged mode / docker-in-docker, so the devcontainer is assembled by CodeBuild (which does) rather than at runtime; `devcontainer build --push` is the officially supported prebuild path. Startup is ~30–45 s image-pull-dominated; SOCI indexing roughly halves it.
+
+- **CodeBuild Sandbox: the fidelity fallback.** Devcontainers using docker-compose or the docker-in-docker feature can't run on Fargate; those repos route the *whole task* to a CodeBuild Sandbox (privileged — `devcontainer up` runs unmodified; up to 36 h; per-minute billing; command-execution API). Selected by a per-repo config flag behind the same `WorkspaceProvider` interface.
+- **Graduation path:** EKS with sysbox/Kata (nested-virt EC2 instance types make this practical without bare metal) if scale ever justifies operating a cluster. Not v1.
+
+All substrates implement the same `WorkspaceProvider` interface (`provision / exec_runner / teardown`), alongside the local-Docker provider used for development and the conformance suite.
+
+### Rejected alternative: engine on AgentCore, remote tool execution
+
+Running the engine inside the AgentCore session and proxying its bash/edit tools into the RDE over an exec bridge would keep "the agent runs on AgentCore" literally true, but costs: per-tool-call network latency, two lifecycles to keep synchronized (AgentCore's 15-min idle / 8-h caps vs. the RDE's), an exec API to secure, and file-editing-over-a-wire — the classic flakiness source in remote-runtime agents. It contradicts the layer-4 principle that tools run where the code is. Revisit only if an organizational mandate requires the engine itself on AgentCore.
+
+### Known fidelity caveats (recorded deliberately)
+
+- Prebuild bakes the image and devcontainer *features*; `postCreateCommand`/`postStartCommand` run at task start, not build time — first-run behavior can differ from a local `devcontainer up` in edge cases.
+- Compose/DinD repos take the sandbox path, which has different latency and billing characteristics than Fargate.
