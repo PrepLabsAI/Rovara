@@ -108,7 +108,7 @@ RDE (devcontainer sandbox)
 
 1. Repo access mechanism (§2) — GitHub App vs OAuth vs user-supplied credentials.
 2. RDE sandbox infrastructure (§3) — what the devcontainer runs on (microVMs vs gVisor vs Docker-on-K8s). Setup strategy is decided: devcontainer-driven.
-3. Control-plane implementation language (§6) — Python favors OpenHands SDK in-process; TypeScript favors OpenCode server mode. Decide language, then default engine.
+3. Implementation language for the `agentx-runner` (§6) — the runner hosts the engine adapter, so *its* language constrains engine choice (OpenHands adapter needs a Python runner; OpenCode only needs an HTTP client). The control plane's language is independent — runner ↔ control plane is a wire protocol.
 4. Which review integrations to support first (Greptile, CodeRabbit, native GitHub reviews?).
 5. How review-comment iteration is bounded (max rounds? escalate to human in Slack?).
 6. Deployment step — the original vision includes deployment after merge; scope and mechanism TBD.
