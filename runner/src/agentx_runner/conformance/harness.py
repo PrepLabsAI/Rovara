@@ -7,12 +7,14 @@ Statuses:
 - REVIEW — spec_review oracle: the spec was captured for human/LLM judging
 """
 
+import contextlib
 import json
 import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -42,6 +44,46 @@ class FixtureOutcome:
     detail: str
     events: list[EngineEvent] = field(default_factory=list)
     spec_markdown: str | None = None
+
+
+@dataclass
+class ExecResult:
+    """What a runner execution produced, wherever it ran."""
+
+    events: list[EngineEvent]
+    log: str
+    repo: Path
+    """Where the result branch lives (host-visible) — grading happens here."""
+
+
+# Executes the runner against a materialized repo. Yields exactly one ExecResult;
+# cleanup (e.g. sandbox teardown) runs after grading, when the generator resumes.
+RunnerExecutor = Callable[[TaskSpec, Path], "contextlib.AbstractContextManager[ExecResult]"]
+
+
+@contextlib.contextmanager
+def local_executor(task: TaskSpec, repo: Path) -> Iterator[ExecResult]:
+    """Default executor: the runner as a host subprocess (Phase 1 behavior)."""
+    with tempfile.TemporaryDirectory(prefix="agentx-conf-task-") as tmp:
+        task_file = Path(tmp) / "task.json"
+        task_file.write_text(task.model_dump_json())
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "agentx_runner.cli",
+                "--task",
+                str(task_file),
+                "--repo",
+                str(repo),
+            ],
+            capture_output=True,
+            text=True,
+            # runner enforces its own timeout; this is a backstop
+            timeout=task.constraints.timeout_sec + 60,
+        )
+        events = [parse_event(line) for line in proc.stdout.splitlines() if line.strip()]
+        yield ExecResult(events=events, log=proc.stderr, repo=repo)
 
 
 def load_fixture(path: Path) -> Fixture:
@@ -86,10 +128,10 @@ def run_fixture(
     model: str | None,
     timeout_sec: int,
     engine_config: dict[str, Any] | None = None,
+    executor: RunnerExecutor = local_executor,
 ) -> FixtureOutcome:
     with tempfile.TemporaryDirectory(prefix=f"agentx-conf-{fixture.name}-") as tmp:
-        tmp_path = Path(tmp)
-        repo = tmp_path / "repo"
+        repo = Path(tmp) / "repo"
         repo.mkdir()
         materialize_workspace(fixture, repo)
 
@@ -101,25 +143,8 @@ def run_fixture(
             engine_config=engine_config or {},
             constraints=TaskConstraints(timeout_sec=timeout_sec, model=model),
         )
-        task_file = tmp_path / "task.json"
-        task_file.write_text(task.model_dump_json())
-
-        proc = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "agentx_runner.cli",
-                "--task",
-                str(task_file),
-                "--repo",
-                str(repo),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=timeout_sec + 60,  # runner enforces its own timeout; this is a backstop
-        )
-        events = [parse_event(line) for line in proc.stdout.splitlines() if line.strip()]
-        return _grade(fixture, repo, events, runner_stderr=proc.stderr)
+        with executor(task, repo) as result:
+            return _grade(fixture, result.repo, result.events, runner_stderr=result.log)
 
 
 def _grade(
@@ -188,6 +213,7 @@ def run_suite(
     timeout_sec: int,
     engine_configs: dict[str, dict[str, Any]] | None = None,
     only: list[str] | None = None,
+    executor: RunnerExecutor = local_executor,
 ) -> list[FixtureOutcome]:
     outcomes = []
     for fixture in discover_fixtures(fixtures_dir):
@@ -200,6 +226,7 @@ def run_suite(
                 model=model,
                 timeout_sec=timeout_sec,
                 engine_config=(engine_configs or {}).get(fixture.name),
+                executor=executor,
             )
         )
     return outcomes
