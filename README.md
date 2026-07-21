@@ -86,6 +86,8 @@ When a task is accepted, AgentX provisions an isolated, ephemeral remote environ
 
 ## Architecture (high level)
 
+> Full design — layers, task lifecycle, state machine, engine interface, event protocol, security model, conformance suite — lives in [ARCHITECTURE.md](ARCHITECTURE.md).
+
 ```
 Slack workspace
    │  @agent-quick / @agent-spec (events via Slack app)
