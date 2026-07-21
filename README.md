@@ -65,18 +65,49 @@ When a task is accepted, AgentX provisions an isolated, ephemeral remote environ
 
 - Risk level could be set per-repo, overridden per-task, or eventually inferred (e.g. changes touching auth/payments/migrations are always High).
 
-### 6. Non-functional requirements
+### 6. Agent engine — no model lock-in
+
+**Decision: AgentX must not be locked to a single LLM vendor.** The coding-agent harness (agentic loop, file/bash tools, subagent orchestration) is therefore an off-the-shelf **model-agnostic engine**, kept behind a pluggable interface — not the Claude Agent SDK, which is Claude-only.
+
+- **Engine shortlist** (evaluated Jul 2026): **OpenHands Agent SDK** (MIT, Python, LiteLLM → 100+ providers, in-process library, subagent delegation, Docker/K8s workspaces — closest feature match) and **OpenCode** (MIT, TypeScript, 75+ providers, headless `opencode serve` + typed SDK — largest community). Runner-up: **Cline SDK** (Apache-2.0, TS, in-process, multi-agent teams; young). The control plane's implementation language is the tiebreaker.
+- **Pluggable interface:** the engine sits behind a coarse `AgentEngine` contract — *task + workspace in → event stream out → local branch + summary + test evidence as the result*. One thin adapter per engine; swapping engines is a config change, and engines can be A/B tested per model.
+- **Boundary decisions:**
+  - The engine's job **ends at a local branch**. Pushing, opening the PR, and PR formatting belong to the control plane — credentials stay out of engine reach and PRs look uniform regardless of engine.
+  - **Spec mode is two engine invocations** (plan → Slack approval → implement with approved spec), so the interface never needs mid-run bidirectional chat — the least portable feature across engines.
+  - Engine-specific features pass through an opaque `engineConfig` blob rather than widening the typed contract (avoids lowest-common-denominator drift).
+- **Conformance suite:** a set of golden tasks ("fix this failing test", "add an endpoint") runs against every adapter in CI — guards engine upgrades/swaps and doubles as the harness for benchmarking engines and models.
+
+### 7. Non-functional requirements
 
 - **Security:** short-lived credentials only; RDE sandboxing (untrusted code execution); no repo data retained after task completion beyond logs the user opts into.
 - **Observability:** every task has a full trace (Slack thread + internal logs) of what the agent did.
 - **Cost control:** per-task compute budget and timeout; per-workspace quotas.
 - **Concurrency:** multiple tasks can run in parallel, each in its own RDE.
 
+## Architecture (high level)
+
+```
+Slack workspace
+   │  @agent-quick / @agent-spec (events via Slack app)
+   ▼
+Control plane  ──  task queue, repo/token management, spec approval,
+   │               PR lifecycle, review loop, risk-based automerge
+   ▼  provisions per task
+RDE (devcontainer sandbox)
+   └─ agentx-runner   ← the only component that knows which engine is used
+        └─ EngineAdapter → OpenHands SDK │ opencode serve │ (optional) Claude Agent SDK
+```
+
+- **Control plane** owns everything user- and Git-facing; it consumes a normalized event stream (`progress`, `spec`, `approval_request`, `usage`, `done`, `failed`) from the runner and relays it to the Slack thread.
+- **`agentx-runner`** is a thin process shipped into every RDE; it loads the configured adapter, runs the engine against the task spec, and emits events (JSONL) back to the control plane.
+- Per-engine prompt tuning (house rules, "run tests before finishing", commit conventions) lives in the adapter; task instructions stay engine-neutral.
+
 ## Open Questions
 
 1. Repo access mechanism (§2) — GitHub App vs OAuth vs user-supplied credentials.
 2. RDE sandbox infrastructure (§3) — what the devcontainer runs on (microVMs vs gVisor vs Docker-on-K8s). Setup strategy is decided: devcontainer-driven.
-3. Which review integrations to support first (Greptile, CodeRabbit, native GitHub reviews?).
-4. How review-comment iteration is bounded (max rounds? escalate to human in Slack?).
-5. Deployment step — the original vision includes deployment after merge; scope and mechanism TBD.
-6. Pricing/quota model per workspace.
+3. Control-plane implementation language (§6) — Python favors OpenHands SDK in-process; TypeScript favors OpenCode server mode. Decide language, then default engine.
+4. Which review integrations to support first (Greptile, CodeRabbit, native GitHub reviews?).
+5. How review-comment iteration is bounded (max rounds? escalate to human in Slack?).
+6. Deployment step — the original vision includes deployment after merge; scope and mechanism TBD.
+7. Pricing/quota model per workspace.
