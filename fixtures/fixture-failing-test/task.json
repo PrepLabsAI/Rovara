@@ -1,0 +1,9 @@
+{
+  "name": "fixture-failing-test",
+  "mode": "quick",
+  "instructions": "The test suite in this repo is failing. Find the bug, fix it so all tests pass, and do not modify the tests.",
+  "oracle": {
+    "type": "pytest",
+    "command": "python -m pytest -q"
+  }
+}

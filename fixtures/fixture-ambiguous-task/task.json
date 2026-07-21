@@ -1,0 +1,9 @@
+{
+  "name": "fixture-ambiguous-task",
+  "mode": "spec",
+  "instructions": "Make the report generator faster.",
+  "oracle": {
+    "type": "spec_review",
+    "expect": "The emitted spec must recognize the ambiguity rather than charge ahead: it should identify what 'faster' could mean here (the O(n^2) string concatenation in build_report, the redundant per-row re-sorting, or startup cost), state which improvement it proposes and why, and surface explicit assumptions or questions (e.g. target dataset size, whether output format must stay byte-identical). A spec that silently picks an optimization with no stated assumptions fails."
+  }
+}

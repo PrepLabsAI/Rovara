@@ -1,0 +1,10 @@
+{
+  "name": "fixture-small-feature",
+  "mode": "quick",
+  "instructions": "Add a function `slugify(text)` to string_utils.py. It should lowercase the text, replace runs of spaces and underscores with a single hyphen, drop all other non-alphanumeric characters, collapse repeated hyphens, and strip leading/trailing hyphens. For example, 'Hello,  World_Again!' becomes 'hello-world-again'. Add tests for it alongside the existing ones.",
+  "oracle": {
+    "type": "pytest_hidden",
+    "tests_dir": "oracle",
+    "command": "python -m pytest -q"
+  }
+}

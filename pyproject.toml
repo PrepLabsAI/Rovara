@@ -1,0 +1,42 @@
+[project]
+name = "agentx"
+version = "0.1.0"
+description = "AgentX workspace root — see README.md, ARCHITECTURE.md, PLAN.md"
+requires-python = ">=3.12"
+dependencies = [
+    "agentx-schemas",
+    "agentx-runner",
+    "agentx-control-plane",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.9",
+    "mypy>=1.14",
+    "pytest>=8.3",
+]
+
+[tool.uv.workspace]
+members = ["shared", "runner", "control-plane"]
+
+[tool.uv.sources]
+agentx-schemas = { workspace = true }
+agentx-runner = { workspace = true }
+agentx-control-plane = { workspace = true }
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["fixtures"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["agentx_schemas", "agentx_runner", "agentx_control_plane"]
+
+[tool.pytest.ini_options]
+testpaths = ["shared/tests", "runner/tests", "control-plane/tests"]
+addopts = "-q"
