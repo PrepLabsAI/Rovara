@@ -5,7 +5,12 @@ description = "AgentX control plane: task state machine, GitHub + Slack integrat
 requires-python = ">=3.12"
 dependencies = [
     "agentx-schemas",
+    "agentx-runner",
 ]
+
+[project.scripts]
+agentx-reaper = "agentx_control_plane.providers.reaper:main"
+agentx-sandbox-conformance = "agentx_control_plane.sandbox_conformance:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -16,3 +21,4 @@ packages = ["src/agentx_control_plane"]
 
 [tool.uv.sources]
 agentx-schemas = { workspace = true }
+agentx-runner = { workspace = true }

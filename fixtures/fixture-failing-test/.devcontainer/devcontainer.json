@@ -1,0 +1,5 @@
+{
+  // Exercises the "repo ships its own devcontainer" path of LocalDockerProvider.
+  "name": "fixture-failing-test",
+  "image": "mcr.microsoft.com/devcontainers/python:3.12"
+}

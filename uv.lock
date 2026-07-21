@@ -75,11 +75,15 @@ name = "agentx-control-plane"
 version = "0.1.0"
 source = { editable = "control-plane" }
 dependencies = [
+    { name = "agentx-runner" },
     { name = "agentx-schemas" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "agentx-schemas", editable = "shared" }]
+requires-dist = [
+    { name = "agentx-runner", editable = "runner" },
+    { name = "agentx-schemas", editable = "shared" },
+]
 
 [[package]]
 name = "agentx-runner"
