@@ -9,6 +9,7 @@ dependencies = [
 
 [project.scripts]
 agentx-runner = "agentx_runner.cli:main"
+agentx-conformance = "agentx_runner.conformance.cli:main"
 
 [build-system]
 requires = ["hatchling"]
