@@ -2,7 +2,7 @@
 
 Companion to [README.md](README.md) (requirements) and [ARCHITECTURE.md](ARCHITECTURE.md) (design). Phases are ordered to de-risk the hardest, most uncertain pieces first (engine loop → sandbox → GitHub plumbing → Slack UX → review loop), and each phase ends with something runnable.
 
-**Status: awaiting review — no implementation started.**
+**Status: Phases 0–1 complete (all exit criteria met, incl. real-model conformance runs). Phase 2 next.**
 
 ## Proposed stack decisions (confirm at Phase 0)
 
@@ -23,11 +23,11 @@ Companion to [README.md](README.md) (requirements) and [ARCHITECTURE.md](ARCHITE
 
 Scaffolding and the decisions that everything else builds on.
 
-- [ ] Confirm the stack decisions above (review gate).
-- [ ] Monorepo scaffolding: `control-plane/`, `runner/`, `shared/` (event + task schemas), `fixtures/` (conformance), `infra/`.
-- [ ] Define the wire schemas as code: `TaskSpec`, `EngineEvent`, `TaskResult` (pydantic models in `shared/`, versioned).
-- [ ] CI: lint, type-check, unit tests on every PR.
-- [ ] 2–3 golden fixture repos (start tiny): `fixture-failing-test` (Python), `fixture-small-feature` (Python), `fixture-ambiguous-task`.
+- [x] Confirm the stack decisions above (review gate).
+- [x] Monorepo scaffolding: `control-plane/`, `runner/`, `shared/` (event + task schemas), `fixtures/` (conformance), `infra/`.
+- [x] Define the wire schemas as code: `TaskSpec`, `EngineEvent`, `TaskResult` (pydantic models in `shared/`, versioned).
+- [x] CI: lint, type-check, unit tests on every PR.
+- [x] 2–3 golden fixture repos (start tiny): `fixture-failing-test` (Python), `fixture-small-feature` (Python), `fixture-ambiguous-task`.
 
 **Exit criteria:** CI green on an empty-but-structured monorepo; schemas importable from both `control-plane` and `runner`; fixtures cloneable.
 
@@ -37,13 +37,13 @@ Scaffolding and the decisions that everything else builds on.
 
 Prove "task in → branch out" on a laptop, no sandbox, no Slack, no GitHub. This is the highest-uncertainty component, so it goes first.
 
-- [ ] `agentx-runner` skeleton: read `TaskSpec` from file/stdin, emit JSONL `EngineEvent`s to stdout, exit codes mapped to terminal events.
-- [ ] Supervision: wall-clock timeout, token-budget cutoff (from `constraints`), crash → `failed` event with log tail, SIGTERM-driven `cancel`.
-- [ ] `EngineAdapter` base interface (mirrors `AgentEngine` from ARCHITECTURE.md §4).
-- [ ] `OpenHandsAdapter`: conversation setup, LiteLLM model selection from `constraints.model`, event mapping (progress/usage/done), commit-to-branch convention.
-- [ ] Quick mode end-to-end locally: run against `fixture-failing-test`, verify a branch exists where the test passes.
-- [ ] Spec mode: planning invocation emits `spec` event; implementation invocation consumes `approvedSpec`.
-- [ ] Conformance harness v1: script that runs all fixtures through the runner with a pinned model and applies oracles; wire into CI (manual trigger or nightly — it costs tokens).
+- [x] `agentx-runner` skeleton: read `TaskSpec` from file/stdin, emit JSONL `EngineEvent`s to stdout, exit codes mapped to terminal events.
+- [x] Supervision: wall-clock timeout, token-budget cutoff (from `constraints`), crash → `failed` event with log tail, SIGTERM-driven `cancel`.
+- [x] `EngineAdapter` base interface (mirrors `AgentEngine` from ARCHITECTURE.md §4).
+- [x] `OpenHandsAdapter`: conversation setup, LiteLLM model selection from `constraints.model`, event mapping (progress/usage/done), commit-to-branch convention.
+- [x] Quick mode end-to-end locally: run against `fixture-failing-test`, verify a branch exists where the test passes.
+- [x] Spec mode: planning invocation emits `spec` event; implementation invocation consumes `approvedSpec`.
+- [x] Conformance harness v1: script that runs all fixtures through the runner with a pinned model and applies oracles; wire into CI (manual trigger or nightly — it costs tokens).
 
 **Exit criteria:** `agentx-runner --task task.json` on a laptop produces a green branch on all fixtures; conformance harness reports a pass/fail matrix.
 
