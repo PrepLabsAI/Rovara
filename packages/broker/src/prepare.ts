@@ -125,7 +125,10 @@ export class PreparationCoordinator {
       projectName: input.projectName,
       workspaceId: workspace.id,
       operationId,
-      credentialRefs: registered.definition.repositories.map((repository) => repository.credentialRef),
+      repositories: registered.definition.repositories.map((repository) => ({
+        credentialRef: repository.credentialRef,
+        repositoryUrl: repository.url,
+      })),
     });
     const invocation = WorkerInvocationSchema.parse({
       protocolVersion: 1,

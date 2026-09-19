@@ -2,6 +2,7 @@ import type { WorkerInvocation } from "@agentx/contracts";
 import { OperationJournal } from "./journal.js";
 import { prepareWorkspace } from "./prepare.js";
 import { createWorkerCallbackSinks } from "./callback-client.js";
+import { createRepositoryCredentialProvider } from "./repository-credentials.js";
 import { runTaskInvocation } from "./run-task.js";
 import { WorkerCancellationController } from "./cancel.js";
 import { createWorkerServerState, startWorkerServer } from "./server.js";
@@ -16,10 +17,15 @@ const state = createWorkerServerState(
   {
     async execute(invocation: WorkerInvocation): Promise<unknown> {
       if (invocation.kind === "prepare") {
+        const controlPlaneUrl = requiredEnvironment("AGENTX_CONTROL_PLANE_URL");
         const manifest = await prepareWorkspace({
           rootPath,
           project: invocation.payload.project,
           creationIdentity: invocation.workspaceId,
+          credentialProvider: createRepositoryCredentialProvider({
+            controlPlaneUrl,
+            invocation,
+          }),
         });
         return {
           manifestPath: ".agentx/preparation-manifest.json",

@@ -5,6 +5,7 @@ export * from "./conversations.js";
 export * from "./diagnostics.js";
 export * from "./dispatcher.js";
 export * from "./events.js";
+export * from "./github-app.js";
 export * from "./handler.js";
 export * from "./lifecycle.js";
 export * from "./operations.js";

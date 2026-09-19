@@ -43,6 +43,10 @@ describe("control-plane infrastructure", () => {
     expect(json).toContain("DISPATCH_QUEUE_URL");
     expect(json).toContain("CALLBACK_SIGNING_KEY");
     expect(json).toContain("ADMIN_CLAIM");
+    expect(json).toContain("GITHUB_APP_PRIVATE_KEY_SECRET_ARN");
+    expect(json).toContain("GITHUB_APP_INSTALLATION_ID");
+    expect(json).toContain("secretsmanager:GetSecretValue");
+    expect(json.match(/secretsmanager:GetSecretValue/g)).toHaveLength(1);
   });
 });
 

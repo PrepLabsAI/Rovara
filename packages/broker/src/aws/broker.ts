@@ -14,6 +14,10 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import {
+  GetSecretValueCommand,
+  SecretsManagerClient,
+} from "@aws-sdk/client-secrets-manager";
+import {
   AgentXError,
   OperationRequestSchema,
   OperationSchema,
@@ -27,6 +31,8 @@ import {
   type WorkspaceInstance,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
+import { GitHubAppCredentialProvider, privateKeyFromSecret } from "../github-app.js";
+import { RepositoryGrantService } from "../repository-access.js";
 import { publicWorkspace } from "../workspaces.js";
 import {
   adaptHttpApiEvent,
@@ -93,6 +99,7 @@ interface AwsBrokerDependencies {
   adminClaim: string;
   adminValues: readonly string[];
   callbackSigningKey: string;
+  repositoryGrants: RepositoryGrantService;
 }
 
 export function createAwsBrokerHandler(dependencies: AwsBrokerDependencies) {
@@ -108,6 +115,22 @@ export function createAwsBrokerHandler(dependencies: AwsBrokerDependencies) {
       );
       if (request.method === "POST" && callback?.[1] && callback[2] && callback[3]) {
         return await handleCallback(dependencies, request, callback[1], callback[2], callback[3]);
+      }
+      const credentialExchange = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/repository-credentials$/.exec(
+        url.pathname,
+      );
+      if (request.method === "POST" && credentialExchange?.[1] && credentialExchange[2]) {
+        return json(
+          {
+            credential: await exchangeRepositoryCredential(
+              dependencies,
+              request,
+              credentialExchange[1],
+              credentialExchange[2],
+            ),
+          },
+          request.requestId,
+        );
       }
 
       const identity = identityFromJwtClaims(request.jwtClaims, {
@@ -330,7 +353,16 @@ async function prepareWorkspace(
     fence: workspace.fence,
     projectRevision,
     callbackCapability: issueCapability(dependencies, workspaceId, operationId, workspace.fence),
-    payload: { project: project.definition, repositoryGrant: "public-repositories-only" },
+    payload: {
+      project: project.definition,
+      repositoryGrant: issueRepositoryGrant(
+        dependencies,
+        project,
+        targetOwnerKey,
+        workspaceId,
+        operationId,
+      ),
+    },
   };
   const outbox = outboxRecord(project.runtimeBinding, workspace, invocation);
   const existingMembership = await getMembership(dependencies, targetOwnerKey, projectName);
@@ -388,7 +420,16 @@ async function retryWorkspacePreparation(
     fence,
     projectRevision: workspace.projectRevision,
     callbackCapability: issueCapability(dependencies, workspace.id, operationId, fence),
-    payload: { project: project.definition, repositoryGrant: "public-repositories-only" },
+    payload: {
+      project: project.definition,
+      repositoryGrant: issueRepositoryGrant(
+        dependencies,
+        project,
+        targetOwnerKey,
+        workspace.id,
+        operationId,
+      ),
+    },
   };
   const updated = WorkspaceInstanceSchema.parse({
     ...workspace,
@@ -1059,6 +1100,46 @@ function operationKey(workspaceId: string, operationId: string) {
   return { pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}` };
 }
 
+function issueRepositoryGrant(
+  dependencies: AwsBrokerDependencies,
+  project: RegisteredProjectRecord,
+  ownerKey: string,
+  workspaceId: string,
+  operationId: string,
+): string {
+  return dependencies.repositoryGrants.issue({
+    ownerKey,
+    projectName: project.definition.name,
+    workspaceId,
+    operationId,
+    repositories: project.definition.repositories.map((repository) => ({
+      credentialRef: repository.credentialRef,
+      repositoryUrl: repository.url,
+    })),
+  });
+}
+
+async function exchangeRepositoryCredential(
+  dependencies: AwsBrokerDependencies,
+  request: AdaptedHttpRequest,
+  workspaceId: string,
+  operationId: string,
+) {
+  const grant = request.headers["x-agentx-repository-grant"];
+  if (!grant) throw agentXError("FORBIDDEN", "repository grant is required");
+  const input = object(parseBody(request.body), "repository credential exchange");
+  const credentialRef = name(input.credentialRef, "credentialRef");
+  if (typeof input.repositoryUrl !== "string" || input.repositoryUrl.length > 2_048) {
+    throw agentXError("CONFIG_INVALID", "repositoryUrl is invalid");
+  }
+  return dependencies.repositoryGrants.exchange(grant, {
+    workspaceId,
+    operationId,
+    credentialRef,
+    repositoryUrl: input.repositoryUrl,
+  });
+}
+
 function issueCapability(
   dependencies: AwsBrokerDependencies,
   workspaceId: string,
@@ -1204,6 +1285,40 @@ const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(awsClientC
 });
 const s3 = new S3Client(awsClientConfiguration);
 const agentCore = new BedrockAgentCoreClient(awsClientConfiguration);
+const secretsManager = new SecretsManagerClient(awsClientConfiguration);
+const githubPrivateKeySecretArn = requiredEnvironment("GITHUB_APP_PRIVATE_KEY_SECRET_ARN");
+let githubPrivateKey: Promise<string> | undefined;
+const loadGitHubPrivateKey = (): Promise<string> => {
+  githubPrivateKey ??= secretsManager.send(new GetSecretValueCommand({
+    SecretId: githubPrivateKeySecretArn,
+  })).then((response) => {
+    const secret = response.SecretString ?? (
+      response.SecretBinary === undefined
+        ? undefined
+        : Buffer.from(response.SecretBinary).toString("utf8")
+    );
+    if (!secret) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub App private-key secret is empty");
+    return privateKeyFromSecret(secret);
+  }).catch((error: unknown) => {
+    githubPrivateKey = undefined;
+    throw error;
+  });
+  return githubPrivateKey;
+};
+const githubCredentials = new GitHubAppCredentialProvider({
+  credentialRef: requiredEnvironment("GITHUB_APP_CREDENTIAL_REF"),
+  account: requiredEnvironment("GITHUB_APP_ACCOUNT"),
+  appId: requiredEnvironment("GITHUB_APP_ID"),
+  installationId: requiredEnvironment("GITHUB_APP_INSTALLATION_ID"),
+  getPrivateKey: loadGitHubPrivateKey,
+});
+const repositoryGrantSigningKey = createHmac("sha256", requiredEnvironment("CALLBACK_SIGNING_KEY"))
+  .update("agentx:repository-grants:v2")
+  .digest();
+const repositoryGrants = new RepositoryGrantService(
+  repositoryGrantSigningKey,
+  (credentialRef, repositoryUrl) => githubCredentials.resolve(credentialRef, repositoryUrl),
+);
 
 export const handler = createAwsBrokerHandler({
   documentClient,
@@ -1214,6 +1329,7 @@ export const handler = createAwsBrokerHandler({
   adminClaim: process.env.ADMIN_CLAIM ?? "cognito:groups",
   adminValues: JSON.parse(process.env.ADMIN_VALUES ?? "[\"agentx-admin\"]") as string[],
   callbackSigningKey: requiredEnvironment("CALLBACK_SIGNING_KEY"),
+  repositoryGrants,
   async stopRuntimeSession(input) {
     await agentCore.send(new StopRuntimeSessionCommand({
       agentRuntimeArn: input.runtimeArn,

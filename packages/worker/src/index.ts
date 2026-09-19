@@ -9,6 +9,7 @@ export * from "./diagnostics.js";
 export * from "./pi-session.js";
 export * from "./prepare.js";
 export * from "./readiness.js";
+export * from "./repository-credentials.js";
 export * from "./reconcile.js";
 export * from "./resume.js";
 export * from "./run-task.js";

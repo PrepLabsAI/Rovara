@@ -37,6 +37,19 @@ export class ControlPlaneStack extends Stack {
       default: '["agentx-admin"]',
       description: "JSON string array of claim values that grant AgentX administrator access",
     });
+    const githubAppCredentialRef = new CfnParameter(this, "GitHubAppCredentialRef", {
+      type: "String",
+      default: "github-agentx-sdlc",
+    });
+    const githubAppAccount = new CfnParameter(this, "GitHubAppAccount", { type: "String" });
+    const githubAppId = new CfnParameter(this, "GitHubAppId", { type: "String" });
+    const githubAppInstallationId = new CfnParameter(this, "GitHubAppInstallationId", {
+      type: "String",
+    });
+    const githubAppPrivateKeySecretArn = new CfnParameter(this, "GitHubAppPrivateKeySecretArn", {
+      type: "String",
+      description: "Complete Secrets Manager ARN containing the GitHub App private key PEM",
+    });
 
     const state = new dynamodb.Table(this, "State", {
       partitionKey: { name: "pk", type: dynamodb.AttributeType.STRING },
@@ -72,12 +85,21 @@ export class ControlPlaneStack extends Stack {
       ADMIN_CLAIM: adminClaim.valueAsString,
       ADMIN_VALUES: adminValues.valueAsString,
       CALLBACK_SIGNING_KEY: callbackSigningKey.valueAsString,
+      GITHUB_APP_CREDENTIAL_REF: githubAppCredentialRef.valueAsString,
+      GITHUB_APP_ACCOUNT: githubAppAccount.valueAsString,
+      GITHUB_APP_ID: githubAppId.valueAsString,
+      GITHUB_APP_INSTALLATION_ID: githubAppInstallationId.valueAsString,
+      GITHUB_APP_PRIVATE_KEY_SECRET_ARN: githubAppPrivateKeySecretArn.valueAsString,
     });
     state.grantReadWriteData(broker);
     artifacts.grantReadWrite(broker);
     broker.addToRolePolicy(new iam.PolicyStatement({
       actions: ["bedrock-agentcore:StopRuntimeSession"],
       resources: [runtimeArn(this)],
+    }));
+    broker.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["secretsmanager:GetSecretValue"],
+      resources: [githubAppPrivateKeySecretArn.valueAsString],
     }));
 
     const outboxPublisher = packagedFunction(

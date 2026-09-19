@@ -14,11 +14,14 @@ describe("workspace preparation", () => {
     const root = await mkdtemp(join(tmpdir(), "agentx-workspace-"));
     const source = await createGitFixture("no-checkout");
     const project = fixtureProject([{ name: "no-checkout", commit: source.commit }]);
+    const credentialProvider = async () => ({ token: "short-lived-token" });
 
     const manifest = await prepareWorkspace({
       rootPath: root,
       project,
-      materializer: async (_repository, destination) => {
+      credentialProvider,
+      materializer: async (_repository, destination, credential) => {
+        expect(credential).toEqual({ token: "short-lived-token" });
         await run("git", ["clone", "--quiet", "--no-checkout", source.directory, destination]);
       },
     });

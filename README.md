@@ -8,14 +8,12 @@ development images. Every developer uses an isolated persistent workspace instan
 
 The VPC-free `demo-microvm` profile is deployed and has been validated end to end in `us-east-1`:
 OIDC login, workspace preparation, control-plane dispatch, AgentCore managed session storage, Pi
-tool use, Amazon Bedrock inference, and result/artifact callbacks are working. The current demo uses
-Amazon Nova Pro and a public GitHub repository. The latest local suite passes 61 tests across 24
-test files.
+tool use, Amazon Bedrock inference, GitHub App authentication for private repositories, and
+result/artifact callbacks are working. The current demo uses Amazon Nova Pro. The latest local
+suite passes 70 tests across 26 test files.
 
 The production `instances-ebs` profile and its EBS isolation/stop-resume acceptance remain T045.
-The demo currently supports publicly clonable HTTPS repositories; private repository credential
-exchange is not connected yet. The existing directory name `Pi-Bedrock` is retained, but the
-product is named AgentX.
+The existing directory name `Pi-Bedrock` is retained, but the product is named AgentX.
 
 ## How AgentX is structured
 
@@ -65,6 +63,9 @@ the illustrative files in [`examples/projects/`](examples/projects/).
 
 Each developer receives a distinct workspace instance. Sharing the project YAML does not share a
 writable checkout; another developer sees changes only after they are published through Git.
+For a private GitHub repository, set its `credentialRef` to the GitHub App credential reference
+configured on the control plane (the deployed demo uses `github-agentx-sdlc`). The YAML still
+contains no private key or installation token.
 
 ### 3. Log in
 

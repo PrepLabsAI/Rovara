@@ -2,14 +2,19 @@ import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { agentXError } from "@agentx/contracts";
 
 interface RepositoryGrantClaims {
-  version: 1;
+  version: 2;
   ownerKey: string;
   projectName: string;
   workspaceId: string;
   operationId: string;
-  credentialRefs: string[];
+  repositories: RepositoryGrantScope[];
   expiresAt: number;
   nonce: string;
+}
+
+export interface RepositoryGrantScope {
+  credentialRef: string;
+  repositoryUrl: string;
 }
 
 export interface RepositoryCredential {
@@ -22,7 +27,10 @@ export interface RepositoryCredential {
 export class RepositoryGrantService {
   constructor(
     private readonly signingKey: Buffer,
-    private readonly resolveCredential: (reference: string) => Promise<RepositoryCredential>,
+    private readonly resolveCredential: (
+      reference: string,
+      repositoryUrl: string,
+    ) => Promise<RepositoryCredential>,
   ) {
     if (signingKey.byteLength < 32) throw new Error("repository grant signing key must be at least 32 bytes");
   }
@@ -32,16 +40,16 @@ export class RepositoryGrantService {
     projectName: string;
     workspaceId: string;
     operationId: string;
-    credentialRefs: readonly string[];
+    repositories: readonly RepositoryGrantScope[];
     ttlSeconds?: number;
   }): string {
     const claims: RepositoryGrantClaims = {
-      version: 1,
+      version: 2,
       ownerKey: input.ownerKey,
       projectName: input.projectName,
       workspaceId: input.workspaceId,
       operationId: input.operationId,
-      credentialRefs: [...new Set(input.credentialRefs)],
+      repositories: uniqueScopes(input.repositories),
       expiresAt: Math.floor(Date.now() / 1_000) + (input.ttlSeconds ?? 900),
       nonce: randomUUID(),
     };
@@ -51,17 +59,26 @@ export class RepositoryGrantService {
 
   async exchange(
     grant: string,
-    request: { workspaceId: string; operationId: string; credentialRef: string },
+    request: {
+      workspaceId: string;
+      operationId: string;
+      credentialRef: string;
+      repositoryUrl: string;
+    },
   ): Promise<RepositoryCredential> {
     const claims = this.verify(grant);
     if (
       claims.workspaceId !== request.workspaceId ||
       claims.operationId !== request.operationId ||
-      !claims.credentialRefs.includes(request.credentialRef)
+      !claims.repositories.some(
+        (repository) =>
+          repository.credentialRef === request.credentialRef &&
+          repository.repositoryUrl === request.repositoryUrl,
+      )
     ) {
       throw agentXError("FORBIDDEN", "repository credential grant does not cover this request");
     }
-    return this.resolveCredential(request.credentialRef);
+    return this.resolveCredential(request.credentialRef, request.repositoryUrl);
   }
 
   inspect(grant: string): Omit<RepositoryGrantClaims, "nonce"> {
@@ -72,7 +89,7 @@ export class RepositoryGrantService {
       projectName: claims.projectName,
       workspaceId: claims.workspaceId,
       operationId: claims.operationId,
-      credentialRefs: claims.credentialRefs,
+      repositories: claims.repositories,
       expiresAt: claims.expiresAt,
     };
   }
@@ -85,8 +102,17 @@ export class RepositoryGrantService {
     if (expected.byteLength !== received.byteLength || !timingSafeEqual(expected, received)) {
       throw agentXError("FORBIDDEN", "invalid repository grant signature");
     }
-    const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as RepositoryGrantClaims;
-    if (claims.version !== 1 || claims.expiresAt <= Math.floor(Date.now() / 1_000)) {
+    let claims: RepositoryGrantClaims;
+    try {
+      claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as RepositoryGrantClaims;
+    } catch {
+      throw agentXError("FORBIDDEN", "invalid repository grant payload");
+    }
+    if (
+      claims.version !== 2 ||
+      !Array.isArray(claims.repositories) ||
+      claims.expiresAt <= Math.floor(Date.now() / 1_000)
+    ) {
       throw agentXError("FORBIDDEN", "repository grant is expired or unsupported");
     }
     return claims;
@@ -95,4 +121,14 @@ export class RepositoryGrantService {
   private sign(payload: string): string {
     return createHmac("sha256", this.signingKey).update(payload).digest("base64url");
   }
+}
+
+function uniqueScopes(scopes: readonly RepositoryGrantScope[]): RepositoryGrantScope[] {
+  const seen = new Set<string>();
+  return scopes.flatMap((scope) => {
+    const key = `${scope.credentialRef}\0${scope.repositoryUrl}`;
+    if (seen.has(key)) return [];
+    seen.add(key);
+    return [{ ...scope }];
+  });
 }

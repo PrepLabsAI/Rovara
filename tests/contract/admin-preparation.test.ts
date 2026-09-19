@@ -94,6 +94,7 @@ describe("workspace preparation coordination", () => {
         workspaceId: dispatch.workspace.id,
         operationId: dispatch.operationId,
         credentialRef: "payments-readwrite",
+        repositoryUrl: "https://git.example.test/payments.git",
       }),
     ).resolves.toEqual({ token: "resolved-payments-readwrite" });
     await expect(
@@ -101,6 +102,15 @@ describe("workspace preparation coordination", () => {
         workspaceId: randomUUID(),
         operationId: dispatch.operationId,
         credentialRef: "payments-readwrite",
+        repositoryUrl: "https://git.example.test/payments.git",
+      }),
+    ).rejects.toThrow(/does not cover/i);
+    await expect(
+      grants.exchange(grant, {
+        workspaceId: dispatch.workspace.id,
+        operationId: dispatch.operationId,
+        credentialRef: "payments-readwrite",
+        repositoryUrl: "https://git.example.test/another-repository.git",
       }),
     ).rejects.toThrow(/does not cover/i);
 
