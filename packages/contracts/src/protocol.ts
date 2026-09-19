@@ -1,0 +1,35 @@
+import { z } from "zod";
+import { ProjectDefinitionSchema } from "./project.js";
+
+export const AGENTX_PROTOCOL_VERSION = 1 as const;
+
+const InvocationBaseSchema = z.object({
+  protocolVersion: z.literal(AGENTX_PROTOCOL_VERSION),
+  operationId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  fence: z.number().int().positive(),
+  projectRevision: z.number().int().positive(),
+  callbackCapability: z.string().min(32).max(8_192),
+});
+
+export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
+  InvocationBaseSchema.extend({
+    kind: z.literal("prepare"),
+    payload: z.object({ project: ProjectDefinitionSchema, repositoryGrant: z.string().min(1) }).strict(),
+  }).strict(),
+  InvocationBaseSchema.extend({
+    kind: z.literal("task"),
+    payload: z.object({ conversationId: z.string().uuid(), prompt: z.string().min(1).max(65_536) }).strict(),
+  }).strict(),
+  InvocationBaseSchema.extend({
+    kind: z.literal("cancel"),
+    payload: z.object({ targetOperationId: z.string().uuid() }).strict(),
+  }).strict(),
+  InvocationBaseSchema.extend({ kind: z.literal("resume"), payload: z.object({}).strict() }).strict(),
+]);
+
+export const WorkerAcknowledgementSchema = z
+  .object({ accepted: z.boolean(), operationId: z.string().uuid(), status: z.string().min(1) })
+  .strict();
+
+export type WorkerInvocation = z.infer<typeof WorkerInvocationSchema>;
