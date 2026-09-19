@@ -4,6 +4,7 @@ import { Type } from "typebox";
 
 export const ORCHESTRATION_TOOL_NAMES = [
   "agentx_submit_task",
+  "agentx_create_pull_request",
   "agentx_task_status",
   "agentx_task_result",
   "agentx_follow_up",
@@ -30,6 +31,20 @@ export interface OrchestrationApi {
     requestId: string;
     prompt: string;
   }): Promise<unknown>;
+  createPullRequest(input: {
+    workspaceId: string;
+    requestId: string;
+    repository: string;
+    title: string;
+    body?: string;
+  }): Promise<unknown>;
+  pullRequestResult(
+    input: { workspaceId: string; operationId: string },
+    options?: {
+      signal?: AbortSignal;
+      onProgress?: (progress: { operationId: string; status: string; message: string }) => void;
+    },
+  ): Promise<unknown>;
 }
 
 export interface OrchestrationContext {
@@ -60,6 +75,36 @@ export function createOrchestrationTools(
         const operationId = acceptedOperationId(accepted);
         onUpdate?.(toolResult({ operationId, status: "ACCEPTED", message: "Remote AgentX worker accepted the task." }));
         return toolResult(await api.taskResult(
+          { workspaceId: context.workspaceId, operationId },
+          {
+            ...(signal === undefined ? {} : { signal }),
+            onProgress: (progress) => onUpdate?.(toolResult(progress)),
+          },
+        ));
+      },
+    }),
+    defineTool({
+      name: "agentx_create_pull_request",
+      label: "Create pull request",
+      description:
+        "Explicitly validate and publish one changed registered repository as a ready-for-review pull request. " +
+        "Call this only when the user clearly asks to create or raise a pull request.",
+      parameters: Type.Object({
+        repository: Type.String({ minLength: 1, maxLength: 63 }),
+        title: Type.String({ minLength: 1, maxLength: 256 }),
+        body: Type.Optional(Type.String({ maxLength: 32_768 })),
+      }),
+      execute: async (_id, parameters, signal, onUpdate) => {
+        const accepted = await api.createPullRequest({
+          workspaceId: context.workspaceId,
+          requestId: randomUUID(),
+          repository: parameters.repository,
+          title: parameters.title,
+          ...(parameters.body === undefined ? {} : { body: parameters.body }),
+        });
+        const operationId = acceptedOperationId(accepted);
+        onUpdate?.(toolResult({ operationId, status: "ACCEPTED", message: "AgentX accepted pull request publication." }));
+        return toolResult(await api.pullRequestResult(
           { workspaceId: context.workspaceId, operationId },
           {
             ...(signal === undefined ? {} : { signal }),

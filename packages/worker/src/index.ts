@@ -7,6 +7,7 @@ export * from "./conversations.js";
 export * from "./events.js";
 export * from "./diagnostics.js";
 export * from "./pi-session.js";
+export * from "./publish.js";
 export * from "./prepare.js";
 export * from "./readiness.js";
 export * from "./repository-credentials.js";

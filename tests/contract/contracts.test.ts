@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   OperationRequestSchema,
+  PullRequestRequestSchema,
+  PullRequestResultSchema,
   ProjectDefinitionSchema,
+  WorkerInvocationSchema,
   WorkspaceInstanceSchema,
 } from "../../packages/contracts/src/index.js";
 
@@ -142,5 +145,61 @@ describe("strict contracts", () => {
       /65536 UTF-8 bytes/,
     );
     expect(() => OperationRequestSchema.parse({ ...base, ownerKey: "alice" })).toThrow();
+  });
+
+  it("validates publication requests, results, and worker invocations", () => {
+    const request = {
+      requestId: crypto.randomUUID(),
+      repository: "api",
+      title: "  Publish API change  ",
+      body: "Validated locally.",
+    };
+    expect(PullRequestRequestSchema.parse(request).title).toBe("Publish API change");
+    expect(() => PullRequestRequestSchema.parse({ ...request, title: "bad\ntitle" })).toThrow(
+      /control characters/,
+    );
+    expect(() => PullRequestRequestSchema.parse({ ...request, body: "🧑‍💻".repeat(9_000) })).toThrow(
+      /32768 UTF-8 bytes/,
+    );
+
+    const operationId = crypto.randomUUID();
+    const invocation = WorkerInvocationSchema.parse({
+      protocolVersion: 1,
+      kind: "publish",
+      operationId,
+      workspaceId: crypto.randomUUID(),
+      fence: 2,
+      projectRevision: 1,
+      callbackCapability: "c".repeat(64),
+      payload: {
+        project: projectDefinition(),
+        repository: "api",
+        title: "Publish API change",
+        headBranch: `agentx/${operationId}`,
+        repositoryGrant: "signed-grant",
+      },
+    });
+    expect(invocation.kind).toBe("publish");
+
+    expect(PullRequestResultSchema.parse({
+      repository: "api",
+      number: 42,
+      url: "https://github.com/example/api/pull/42",
+      headBranch: `agentx/${operationId}`,
+      baseBranch: "main",
+      commit: "a".repeat(40),
+      checks: [{
+        index: 0,
+        cwd: "services/api",
+        executable: "npm",
+        exitCode: 0,
+        stdout: "ok",
+        stderr: "",
+        startedAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+        outcome: "passed",
+      }],
+      reconciled: false,
+    }).number).toBe(42);
   });
 });

@@ -21,6 +21,7 @@ import { loadProjectConfig } from "./config.js";
 import { connectToProject, type ConnectedWorkspace } from "./connect.js";
 import { acceptedOperationId, ControlPlaneApi } from "./control-plane-api.js";
 import { pollOperation } from "./event-client.js";
+import { createPullRequestAndWait } from "./pull-request.js";
 import { runOrchestratorInteractive, type OrchestratorOptions } from "./orchestrator.js";
 import { formatError, formatSuccess } from "./output.js";
 import { formatWorkspaceStatus } from "./status.js";
@@ -189,6 +190,40 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       };
       await saveReconnectState(globals.stateDir, state);
       services.stdout.write(formatSuccess(state, globals.json));
+    });
+
+  const pullRequest = program.command("pr").description("publish validated workspace changes");
+  pullRequest
+    .command("create")
+    .description("create a ready-for-review pull request from one changed repository")
+    .requiredOption("--repository <name>", "registered repository name")
+    .requiredOption("--title <title>", "pull request title")
+    .option("--body <markdown>", "pull request body")
+    .action(async (options: { repository: string; title: string; body?: string }, command: Command) => {
+      const globals = globalOptions(command);
+      const authenticated = await authenticateProject(globals, requireProject(globals), services.tokenStore);
+      const workspace = await connectToProject(
+        authenticated.definition,
+        authenticated.accessToken,
+        services.fetchImplementation,
+      );
+      const api = new ControlPlaneApi(
+        authenticated.definition.controlPlaneUrl,
+        authenticated.accessToken,
+        workspace.id,
+        services.fetchImplementation,
+      );
+      const result = await createPullRequestAndWait({
+        api,
+        workspaceId: workspace.id,
+        repository: options.repository,
+        title: options.title,
+        ...(options.body === undefined ? {} : { body: options.body }),
+        ...(globals.json ? {} : {
+          onProgress: (progress: { message: string }) => services.stdout.write(`${progress.message}\n`),
+        }),
+      });
+      services.stdout.write(formatSuccess(result, globals.json));
     });
 
   program

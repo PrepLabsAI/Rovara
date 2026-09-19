@@ -128,6 +128,7 @@ export class PreparationCoordinator {
       repositories: registered.definition.repositories.map((repository) => ({
         credentialRef: repository.credentialRef,
         repositoryUrl: repository.url,
+        access: "clone",
       })),
     });
     const invocation = WorkerInvocationSchema.parse({

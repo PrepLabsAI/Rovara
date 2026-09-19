@@ -62,6 +62,154 @@ describe("GitHub App repository credentials", () => {
     ).toBe(true);
   });
 
+  it("mints contents-write credentials only for push access", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const bodies: unknown[] = [];
+    const provider = new GitHubAppCredentialProvider({
+      credentialRef: "github-agentx-sdlc",
+      account: "ps06756",
+      appId: "5002502",
+      installationId: "163046162",
+      getPrivateKey: async () => pem,
+      fetchImplementation: async (_url, init) => {
+        if (typeof init?.body !== "string") throw new Error("expected JSON request body");
+        bodies.push(JSON.parse(init.body));
+        return new Response(JSON.stringify({ token: "push-token" }), { status: 201 });
+      },
+    });
+
+    await provider.resolve(
+      "github-agentx-sdlc",
+      "https://github.com/ps06756/personal-website-test.git",
+      "push",
+    );
+    expect(bodies).toEqual([{
+      repositories: ["personal-website-test"],
+      permissions: { contents: "write" },
+    }]);
+  });
+
+  it("uses a repository-scoped PR token that can resolve private refs", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const provider = new GitHubAppCredentialProvider({
+      credentialRef: "github-agentx-sdlc",
+      account: "ps06756",
+      appId: "5002502",
+      installationId: "163046162",
+      getPrivateKey: async () => pem,
+      fetchImplementation: async (url, init) => {
+        const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+        requests.push({ url: requestUrl, init });
+        if (requestUrl.endsWith("/access_tokens")) {
+          return new Response(JSON.stringify({ token: "pr-token" }), { status: 201 });
+        }
+        if (init?.method === "POST") {
+          return new Response(JSON.stringify({
+            number: 42,
+            html_url: "https://github.com/ps06756/personal-website-test/pull/42",
+          }), { status: 201 });
+        }
+        return new Response("[]", { status: 200 });
+      },
+    });
+
+    await expect(provider.reconcilePullRequest({
+      repositoryUrl: "https://github.com/ps06756/personal-website-test.git",
+      headBranch: "agentx/00000000-0000-4000-8000-000000000001",
+      baseBranch: "main",
+      title: "Publish change",
+    })).resolves.toEqual({
+      number: 42,
+      url: "https://github.com/ps06756/personal-website-test/pull/42",
+      reconciled: false,
+    });
+    const tokenRequestBody = requests[0]?.init?.body;
+    if (typeof tokenRequestBody !== "string") throw new Error("expected JSON request body");
+    expect(JSON.parse(tokenRequestBody)).toEqual({
+      repositories: ["personal-website-test"],
+      permissions: { contents: "read", pull_requests: "write" },
+    });
+    expect(new Headers(requests[1]?.init?.headers).get("authorization")).toBe("Bearer pr-token");
+    expect(requests[1]?.url).toContain("head=ps06756%3Aagentx%2F");
+  });
+
+  it("reconciles an existing PR and never reflects failed response bodies", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    let mode: "existing" | "failure" = "existing";
+    const provider = new GitHubAppCredentialProvider({
+      credentialRef: "github-agentx-sdlc",
+      account: "ps06756",
+      appId: "5002502",
+      installationId: "163046162",
+      getPrivateKey: async () => pem,
+      fetchImplementation: async (url) => {
+        const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+        if (requestUrl.endsWith("/access_tokens")) {
+          return new Response(JSON.stringify({ token: "pr-token" }), { status: 201 });
+        }
+        if (mode === "existing") {
+          return new Response(JSON.stringify([{
+            number: 7,
+            html_url: "https://github.com/ps06756/personal-website-test/pull/7",
+          }]), { status: 200 });
+        }
+        return new Response("sensitive-github-error", { status: 403 });
+      },
+    });
+    const input = {
+      repositoryUrl: "https://github.com/ps06756/personal-website-test.git",
+      headBranch: "agentx/00000000-0000-4000-8000-000000000001",
+      baseBranch: "main",
+      title: "Publish change",
+    };
+    await expect(provider.reconcilePullRequest(input)).resolves.toMatchObject({ number: 7, reconciled: true });
+    mode = "failure";
+    await expect(provider.reconcilePullRequest(input)).rejects.toThrow(/HTTP 403/);
+    await expect(provider.reconcilePullRequest(input)).rejects.not.toThrow(/sensitive-github-error/);
+  });
+
+  it("reconciles after an ambiguous create timeout instead of creating a duplicate", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    let lookupCount = 0;
+    let createCount = 0;
+    const provider = new GitHubAppCredentialProvider({
+      credentialRef: "github-agentx-sdlc",
+      account: "ps06756",
+      appId: "5002502",
+      installationId: "163046162",
+      getPrivateKey: async () => pem,
+      fetchImplementation: async (url, init) => {
+        const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+        if (requestUrl.endsWith("/access_tokens")) {
+          return new Response(JSON.stringify({ token: "pr-token" }), { status: 201 });
+        }
+        if (init?.method === "POST") {
+          createCount += 1;
+          throw new TypeError("socket closed after request body was sent");
+        }
+        lookupCount += 1;
+        return new Response(JSON.stringify(lookupCount === 1 ? [] : [{
+          number: 19,
+          html_url: "https://github.com/ps06756/personal-website-test/pull/19",
+        }]), { status: 200 });
+      },
+    });
+
+    await expect(provider.reconcilePullRequest({
+      repositoryUrl: "https://github.com/ps06756/personal-website-test.git",
+      headBranch: "agentx/00000000-0000-4000-8000-000000000001",
+      baseBranch: "main",
+      title: "Publish change",
+    })).resolves.toMatchObject({ number: 19, reconciled: true });
+    expect(createCount).toBe(1);
+    expect(lookupCount).toBe(2);
+  });
+
   it("rejects cross-account URLs before contacting GitHub", async () => {
     const fetchImplementation = vi.fn();
     const provider = new GitHubAppCredentialProvider({

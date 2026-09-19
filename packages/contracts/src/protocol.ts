@@ -22,6 +22,26 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
     payload: z.object({ conversationId: z.string().uuid(), prompt: z.string().min(1).max(65_536) }).strict(),
   }).strict(),
   InvocationBaseSchema.extend({
+    kind: z.literal("publish"),
+    payload: z
+      .object({
+        project: ProjectDefinitionSchema,
+        repository: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),
+        title: z.string().min(1).max(256),
+        body: z
+          .string()
+          .refine((value) => !value.includes("\0"), "body contains a NUL character")
+          .refine(
+            (value) => new TextEncoder().encode(value).byteLength <= 32_768,
+            "body exceeds 32768 UTF-8 bytes",
+          )
+          .optional(),
+        headBranch: z.string().regex(/^agentx\/[0-9a-f-]{36}$/i),
+        repositoryGrant: z.string().min(1),
+      })
+      .strict(),
+  }).strict(),
+  InvocationBaseSchema.extend({
     kind: z.literal("cancel"),
     payload: z.object({ targetOperationId: z.string().uuid() }).strict(),
   }).strict(),

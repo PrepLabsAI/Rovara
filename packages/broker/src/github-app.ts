@@ -1,6 +1,6 @@
 import { createSign } from "node:crypto";
 import { agentXError, type AgentXError } from "@agentx/contracts";
-import type { RepositoryCredential } from "./repository-access.js";
+import type { RepositoryAccess, RepositoryCredential } from "./repository-access.js";
 
 export interface GitHubAppCredentialProviderOptions {
   credentialRef: string;
@@ -10,6 +10,20 @@ export interface GitHubAppCredentialProviderOptions {
   getPrivateKey: () => Promise<string>;
   fetchImplementation?: typeof fetch;
   now?: () => number;
+}
+
+export interface GitHubPullRequestInput {
+  repositoryUrl: string;
+  headBranch: string;
+  baseBranch: string;
+  title: string;
+  body?: string;
+}
+
+export interface GitHubPullRequestResult {
+  number: number;
+  url: string;
+  reconciled: boolean;
 }
 
 export class GitHubAppCredentialProvider {
@@ -28,9 +42,61 @@ export class GitHubAppCredentialProvider {
     this.now = options.now ?? Date.now;
   }
 
-  async resolve(credentialRef: string, repositoryUrl: string): Promise<RepositoryCredential> {
+  async resolve(
+    credentialRef: string,
+    repositoryUrl: string,
+    access: RepositoryAccess = "clone",
+  ): Promise<RepositoryCredential> {
     if (credentialRef !== this.options.credentialRef) return {};
     const repository = parseGitHubRepository(repositoryUrl, this.options.account);
+    const token = await this.createInstallationToken(repository.name, {
+      contents: access === "push" ? "write" : "read",
+    });
+    return { username: "x-access-token", password: token };
+  }
+
+  async reconcilePullRequest(input: GitHubPullRequestInput): Promise<GitHubPullRequestResult> {
+    const repository = parseGitHubRepository(input.repositoryUrl, this.options.account);
+    // GitHub's pull-request endpoint needs to resolve the private repository's
+    // base and head refs. Keep the token repository-scoped, but allow it to
+    // read those refs in addition to creating the pull request.
+    const token = await this.createInstallationToken(repository.name, {
+      contents: "read",
+      pull_requests: "write",
+    });
+    const existing = await this.findOpenPullRequest(repository.name, input, token);
+    if (existing) return { ...existing, reconciled: true };
+
+    try {
+      const response = await this.fetchImplementation(
+        `https://api.github.com/repos/${encodeURIComponent(this.options.account)}/${encodeURIComponent(repository.name)}/pulls`,
+        {
+          method: "POST",
+          headers: githubHeaders(token),
+          body: JSON.stringify({
+            title: input.title,
+            head: input.headBranch,
+            base: input.baseBranch,
+            ...(input.body === undefined ? {} : { body: input.body }),
+          }),
+        },
+      );
+      if (response.ok) return { ...parsePullRequest(await response.json(), this.options.account, repository.name), reconciled: false };
+      const afterFailure = await this.findOpenPullRequest(repository.name, input, token);
+      if (afterFailure) return { ...afterFailure, reconciled: true };
+      throw agentXError("RUNTIME_UNAVAILABLE", `GitHub pull request creation failed with HTTP ${response.status}`);
+    } catch (error) {
+      if (isAgentXError(error)) throw error;
+      const afterFailure = await this.findOpenPullRequest(repository.name, input, token);
+      if (afterFailure) return { ...afterFailure, reconciled: true };
+      throw agentXError("RUNTIME_UNAVAILABLE", "GitHub pull request creation outcome is unknown");
+    }
+  }
+
+  private async createInstallationToken(
+    repositoryName: string,
+    permissions: Record<string, "read" | "write">,
+  ): Promise<string> {
     const privateKey = await this.options.getPrivateKey();
     const jwt = createGitHubAppJwt(this.options.appId, privateKey, this.now());
     const response = await this.fetchImplementation(
@@ -45,8 +111,8 @@ export class GitHubAppCredentialProvider {
           "x-github-api-version": "2022-11-28",
         },
         body: JSON.stringify({
-          repositories: [repository.name],
-          permissions: { contents: "read" },
+          repositories: [repositoryName],
+          permissions,
         }),
       },
     );
@@ -60,8 +126,63 @@ export class GitHubAppCredentialProvider {
     if (!body || typeof body !== "object" || !("token" in body) || typeof body.token !== "string") {
       throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid installation token response");
     }
-    return { username: "x-access-token", password: body.token };
+    return body.token;
   }
+
+  private async findOpenPullRequest(
+    repositoryName: string,
+    input: GitHubPullRequestInput,
+    token: string,
+  ): Promise<Omit<GitHubPullRequestResult, "reconciled"> | undefined> {
+    const query = new URLSearchParams({
+      state: "open",
+      head: `${this.options.account}:${input.headBranch}`,
+      base: input.baseBranch,
+      per_page: "2",
+    });
+    const response = await this.fetchImplementation(
+      `https://api.github.com/repos/${encodeURIComponent(this.options.account)}/${encodeURIComponent(repositoryName)}/pulls?${query.toString()}`,
+      { headers: githubHeaders(token) },
+    );
+    if (!response.ok) {
+      throw agentXError("RUNTIME_UNAVAILABLE", `GitHub pull request lookup failed with HTTP ${response.status}`);
+    }
+    const value: unknown = await response.json();
+    if (!Array.isArray(value)) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid pull request response");
+    }
+    if (value.length === 0) return undefined;
+    return parsePullRequest(value[0], this.options.account, repositoryName);
+  }
+}
+
+function githubHeaders(token: string): Record<string, string> {
+  return {
+    accept: "application/vnd.github+json",
+    authorization: `Bearer ${token}`,
+    "content-type": "application/json",
+    "user-agent": "agentx-control-plane",
+    "x-github-api-version": "2022-11-28",
+  };
+}
+
+function parsePullRequest(
+  value: unknown,
+  account: string,
+  repositoryName: string,
+): Omit<GitHubPullRequestResult, "reconciled"> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid pull request response");
+  }
+  const candidate = value as Record<string, unknown>;
+  if (!Number.isInteger(candidate.number) || (candidate.number as number) < 1 || typeof candidate.html_url !== "string") {
+    throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid pull request response");
+  }
+  const expected = `https://github.com/${account}/${repositoryName}/pull/${String(candidate.number)}`;
+  if (candidate.html_url !== expected) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned a non-canonical pull request URL");
+  }
+  return { number: candidate.number as number, url: candidate.html_url };
 }
 
 export function createGitHubAppJwt(appId: string, privateKey: string, nowMilliseconds: number): string {

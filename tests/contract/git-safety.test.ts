@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { gitSafeEnvironment } from "../../packages/worker/src/git.js";
+import { assertCredentialFreeRemote, runGitWithCredential } from "../../packages/worker/src/git-auth.js";
 
 describe("AgentCore Git mount safety", () => {
   it("scopes safe.directory to the repository being operated on", () => {
@@ -10,5 +11,29 @@ describe("AgentCore Git mount safety", () => {
       GIT_CONFIG_VALUE_0: "/mnt/workspace/repo/example",
     });
     expect(environment.GIT_CONFIG_VALUE_0).not.toBe("*");
+  });
+});
+
+describe("credential-safe Git execution", () => {
+  it("rejects credential-bearing remotes", () => {
+    expect(() => assertCredentialFreeRemote("https://token@github.com/example/repo.git")).toThrow(
+      /must not contain credentials/,
+    );
+  });
+
+  it("does not require credentials for local Git commands", async () => {
+    const result = await runGitWithCredential({
+      directory: process.cwd(),
+      args: ["--version"],
+    });
+    expect(result.stdout).toMatch(/^git version /);
+  });
+
+  it("rejects incomplete HTTP credentials before invoking Git", async () => {
+    await expect(runGitWithCredential({
+      directory: process.cwd(),
+      args: ["--version"],
+      credential: { username: "x-access-token" },
+    })).rejects.toThrow(/both username and password/);
   });
 });

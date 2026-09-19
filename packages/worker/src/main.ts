@@ -4,6 +4,7 @@ import { prepareWorkspace } from "./prepare.js";
 import { createWorkerCallbackSinks } from "./callback-client.js";
 import { createRepositoryCredentialProvider } from "./repository-credentials.js";
 import { runTaskInvocation } from "./run-task.js";
+import { publishWorkspace } from "./publish.js";
 import { WorkerCancellationController } from "./cancel.js";
 import { createWorkerServerState, startWorkerServer } from "./server.js";
 
@@ -45,6 +46,16 @@ const state = createWorkerServerState(
           },
           ...callbacks,
           cancellationController,
+        });
+      }
+      if (invocation.kind === "publish") {
+        const controlPlaneUrl = requiredEnvironment("AGENTX_CONTROL_PLANE_URL");
+        const callbacks = createWorkerCallbackSinks({ controlPlaneUrl, invocation });
+        return publishWorkspace({
+          rootPath,
+          invocation,
+          credentialProvider: createRepositoryCredentialProvider({ controlPlaneUrl, invocation }),
+          pullRequestSink: callbacks.pullRequestSink,
         });
       }
       if (invocation.kind === "cancel") {

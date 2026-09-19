@@ -10,9 +10,11 @@ export type RepositoryCredentialProvider = (
   repository: ProjectDefinition["repositories"][number],
 ) => Promise<RepositoryCloneCredential>;
 
+type RepositoryCredentialInvocation = Extract<WorkerInvocation, { kind: "prepare" | "publish" }>;
+
 export function createRepositoryCredentialProvider(input: {
   controlPlaneUrl: string;
-  invocation: Extract<WorkerInvocation, { kind: "prepare" }>;
+  invocation: RepositoryCredentialInvocation;
   fetchImplementation?: typeof fetch;
 }): RepositoryCredentialProvider {
   const fetchImplementation = input.fetchImplementation ?? fetch;
@@ -28,6 +30,7 @@ export function createRepositoryCredentialProvider(input: {
       body: JSON.stringify({
         credentialRef: repository.credentialRef,
         repositoryUrl: repository.url,
+        access: input.invocation.kind === "publish" ? "push" : "clone",
       }),
     });
     if (!response.ok) {

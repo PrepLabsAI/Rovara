@@ -89,6 +89,49 @@ export class ControlPlaneApi implements OrchestrationApi, OperationPollingTransp
     return this.submitTask(input);
   }
 
+  async createPullRequest(input: {
+    workspaceId: string;
+    requestId: string;
+    repository: string;
+    title: string;
+    body?: string;
+  }): Promise<unknown> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(`/v1/workspaces/${this.workspaceId}/pull-requests`, {
+      method: "POST",
+      body: JSON.stringify({
+        requestId: input.requestId,
+        repository: input.repository,
+        title: input.title,
+        ...(input.body === undefined ? {} : { body: input.body }),
+      }),
+    });
+  }
+
+  async pullRequestResult(
+    input: { workspaceId: string; operationId: string },
+    options: {
+      signal?: AbortSignal;
+      onProgress?: (progress: { operationId: string; status: string; message: string }) => void;
+    } = {},
+  ): Promise<unknown> {
+    this.assertWorkspace(input.workspaceId);
+    const completed = await pollOperation(input.operationId, this, {
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      onEvents: (events) => options.onProgress?.({
+        operationId: input.operationId,
+        status: "RUNNING",
+        message: `Remote AgentX publication is running (${events.length} new events).`,
+      }),
+    });
+    return {
+      operationId: completed.operation.id,
+      status: completed.operation.status,
+      ...(completed.operation.result === undefined ? {} : { result: completed.operation.result }),
+      ...(completed.operation.error === undefined ? {} : { error: completed.operation.error }),
+    };
+  }
+
   async getOperation(operationId: string): Promise<Operation> {
     const value = object(await this.request(
       `/v1/workspaces/${this.workspaceId}/operations/${encodeURIComponent(operationId)}`,

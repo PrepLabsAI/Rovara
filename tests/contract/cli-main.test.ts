@@ -5,7 +5,10 @@ describe("AgentX executable command surface", () => {
   it("exposes developer and administrator workflows without runtime routing options", () => {
     const program = createCliProgram();
     const rootCommands = program.commands.map((command) => command.name());
-    expect(rootCommands).toEqual(expect.arrayContaining(["login", "status", "conversation", "cancel", "admin"]));
+    expect(rootCommands).toEqual(expect.arrayContaining(["login", "status", "conversation", "pr", "cancel", "admin"]));
+
+    const pullRequest = program.commands.find((command) => command.name() === "pr");
+    expect(pullRequest?.commands.map((command) => command.name())).toContain("create");
 
     const admin = program.commands.find((command) => command.name() === "admin");
     const adminCommands = admin?.commands.map((command) => command.name()) ?? [];

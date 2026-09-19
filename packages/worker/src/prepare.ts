@@ -3,17 +3,14 @@ import { randomUUID } from "node:crypto";
 import {
   lstat,
   mkdir,
-  mkdtemp,
   readFile,
   readdir,
   realpath,
   rename,
-  rm,
   stat,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import {
   ProjectDefinitionSchema,
@@ -23,6 +20,7 @@ import {
 } from "@agentx/contracts";
 import { evaluateReadiness, type CommandResult } from "./readiness.js";
 import { gitSafeEnvironment } from "./git.js";
+import { assertCredentialFreeRemote, runGitWithCredential } from "./git-auth.js";
 import type {
   RepositoryCloneCredential,
   RepositoryCredentialProvider,
@@ -224,57 +222,19 @@ async function cloneRepository(
   credential: RepositoryCloneCredential,
 ): Promise<void> {
   assertCredentialFreeRemote(repository.url);
-  const username = credential.username ?? (credential.token === undefined ? undefined : "x-access-token");
-  const password = credential.password ?? credential.token;
-  if ((username === undefined) !== (password === undefined)) {
-    throw new Error("repository credential must include both username and password");
-  }
-  const askPassDirectory = username === undefined
-    ? undefined
-    : await mkdtemp(join(tmpdir(), "agentx-git-askpass-"));
-  try {
-    const environment = gitSafeEnvironment(destination);
-    if (askPassDirectory && username && password) {
-      const askPassPath = join(askPassDirectory, "askpass.sh");
-      await writeFile(
-        askPassPath,
-        "#!/bin/sh\ncase \"$1\" in\n  *Username*) printf '%s\\n' \"$AGENTX_GIT_USERNAME\" ;;\n  *Password*) printf '%s\\n' \"$AGENTX_GIT_PASSWORD\" ;;\n  *) exit 1 ;;\nesac\n",
-        { encoding: "utf8", mode: 0o700, flag: "wx" },
-      );
-      Object.assign(environment, {
-        GIT_ASKPASS: askPassPath,
-        GIT_TERMINAL_PROMPT: "0",
-        AGENTX_GIT_USERNAME: username,
-        AGENTX_GIT_PASSWORD: password,
-      });
-    } else {
-      environment.GIT_TERMINAL_PROMPT = "0";
-    }
-    await execFileAsync(
-      "git",
-      ["clone", "--no-checkout", "--branch", repository.defaultBranch, "--", repository.url, destination],
-      {
-        timeout: 300_000,
-        maxBuffer: MAX_COMMAND_OUTPUT_BYTES,
-        env: environment,
-      },
-    );
-    const remote = await execFileAsync("git", ["-C", destination, "remote", "get-url", "origin"], {
-      timeout: 30_000,
-      maxBuffer: 4_096,
-      env: gitSafeEnvironment(destination),
-    });
-    assertCredentialFreeRemote(remote.stdout.trim());
-  } finally {
-    if (askPassDirectory) await rm(askPassDirectory, { recursive: true, force: true });
-  }
-}
-
-function assertCredentialFreeRemote(value: string): void {
-  const url = new URL(value);
-  if (url.username || url.password) {
-    throw new Error("repository remote URL must not contain credentials");
-  }
+  await runGitWithCredential({
+    directory: destination,
+    args: ["clone", "--no-checkout", "--branch", repository.defaultBranch, "--", repository.url, destination],
+    credential,
+    timeout: 300_000,
+    maxBuffer: MAX_COMMAND_OUTPUT_BYTES,
+  });
+  const remote = await execFileAsync("git", ["-C", destination, "remote", "get-url", "origin"], {
+    timeout: 30_000,
+    maxBuffer: 4_096,
+    env: gitSafeEnvironment(destination),
+  });
+  assertCredentialFreeRemote(remote.stdout.trim());
 }
 
 async function resolveDefaultBranch(directory: string, branch: string): Promise<string> {

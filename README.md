@@ -9,8 +9,9 @@ development images. Every developer uses an isolated persistent workspace instan
 The VPC-free `demo-microvm` profile is deployed and has been validated end to end in `us-east-1`:
 OIDC login, workspace preparation, control-plane dispatch, AgentCore managed session storage, Pi
 tool use, Amazon Bedrock inference, GitHub App authentication for private repositories, and
-result/artifact callbacks are working. The current demo uses Amazon Nova Pro. The latest local
-suite passes 70 tests across 26 test files.
+result/artifact callbacks are working. Pull-request creation is deployed and its clean-checkout
+safety path and changed-checkout publication path have both been validated against a private
+repository. The current demo uses Amazon Nova Pro.
 
 The production `instances-ebs` profile and its EBS isolation/stop-resume acceptance remain T045.
 The existing directory name `Pi-Bedrock` is retained, but the product is named AgentX.
@@ -151,7 +152,45 @@ profile name. Pi stores the profile selection, not the underlying IAM secret key
 The local model can call only AgentX orchestration tools. Repository inspection, editing, shell
 commands, builds, and tests are delegated to the remote Pi worker in AgentCore.
 
-### 7. Administrator workflow
+### 7. Validate changes and create a pull request
+
+Pull-request creation is explicit; AgentX never publishes automatically after a coding task. The
+registered project's `readiness` commands are the publication gate. AgentX rejects an empty diff,
+merge conflicts, or any failed/timed-out readiness command before it pushes a branch.
+
+From the CLI, select the configured repository by its project YAML `name`:
+
+```sh
+agentx --project personal-website pr create \
+  --repository personal-website \
+  --title "Improve homepage navigation" \
+  --body "Summary of the change and validation performed."
+```
+
+AgentX creates `agentx/<operation-id>`, makes an AgentX-authored commit, pushes without force, and
+creates a ready-for-review PR against the repository's configured `defaultBranch`. The terminal
+result includes the PR URL and number, commit, head/base branches, and check evidence. Repeating the
+same accepted request reconciles the existing branch and PR rather than creating a duplicate.
+
+In the interactive TUI, ask explicitly, for example: `Create a pull request for the
+personal-website repository titled "Improve homepage navigation".` The local Pi orchestrator then
+uses `agentx_create_pull_request`; ordinary coding requests do not expose an implicit publish step.
+
+The installed GitHub App must have these repository permissions:
+
+- **Contents: Read and write** for cloning and pushing the AgentX branch.
+- **Pull requests: Read and write** for finding or creating the PR.
+
+Change them under **GitHub Settings → Developer settings → GitHub Apps → AgentX SDLC → Permissions
+& events → Repository permissions**. After saving, the installation owner must approve the updated
+permissions for the installation. The App private key stays in Secrets Manager; it is never sent to
+the AgentCore runtime. AgentX mints short-lived, single-repository tokens separately for clone,
+push, and PR operations.
+
+AgentX does not merge, approve, delete branches, add reviewers/labels, or force-push in this
+workflow.
+
+### 8. Administrator workflow
 
 Before a developer can use a project, an administrator registers its immutable revision and
 prepares that developer's private workspace:
@@ -177,6 +216,10 @@ use the [VPC-free AWS runbook](docs/deployment-demo.md).
 
 ## Implementation documents
 
+- [Pull-request task list](specs/002-create-pull-request/tasks.md): implementation and validation
+  status for explicit publication.
+- [Pull-request specification](specs/002-create-pull-request/spec.md): publication behavior,
+  safety, and retry requirements.
 - [Task list](specs/001-agentx-foundation/tasks.md): 50 dependency-ordered implementation tasks.
 - [Specification](specs/001-agentx-foundation/spec.md): agreed workflows and acceptance criteria.
 - [Plan](specs/001-agentx-foundation/plan.md): architecture, boundaries and delivery sequence.
@@ -198,7 +241,7 @@ uvx --from specify-cli==1.0.7 specify init --here --integration codex --integrat
 Initialization has already run; do not rerun it over these artifacts unnecessarily.
 The installed skills are in `.agents/skills/`, with templates/scripts under `.specify/`.
 
-Continue with `$speckit-implement` for the remaining production EBS acceptance beginning at T045.
+Continue with `$speckit-implement` for the remaining production EBS acceptance.
 Use `$speckit-converge` only after the remaining release tasks. Spec Kit skills are agent
 instructions, not shell commands. No Git repository or branch was created by this setup.
 

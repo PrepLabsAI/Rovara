@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { z } from "zod";
 
-export const OperationKindSchema = z.enum(["prepare", "task", "resume", "stop", "cancel"]);
+export const OperationKindSchema = z.enum(["prepare", "task", "publish", "resume", "stop", "cancel"]);
 export const OperationStatusSchema = z.enum([
   "ACCEPTED",
   "DISPATCHING",
@@ -21,6 +21,57 @@ export const OperationRequestSchema = z
       .string()
       .min(1)
       .refine((value) => Buffer.byteLength(value, "utf8") <= 65_536, "prompt exceeds 65536 UTF-8 bytes"),
+  })
+  .strict();
+
+export const PullRequestRequestSchema = z
+  .object({
+    requestId: z.string().uuid(),
+    repository: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),
+    title: z
+      .string()
+      .trim()
+      .min(1)
+      .max(256)
+      .refine(
+        (value) => ![...value].some((character) => {
+          const code = character.codePointAt(0) ?? 0;
+          return code < 32 || code === 127;
+        }),
+        "title contains control characters",
+      ),
+    body: z
+      .string()
+      .refine((value) => !value.includes("\0"), "body contains a NUL character")
+      .refine((value) => Buffer.byteLength(value, "utf8") <= 32_768, "body exceeds 32768 UTF-8 bytes")
+      .optional(),
+  })
+  .strict();
+
+export const PublicationCheckResultSchema = z
+  .object({
+    index: z.number().int().nonnegative(),
+    cwd: z.string().min(1).max(512),
+    executable: z.string().min(1).max(256),
+    exitCode: z.number().int(),
+    stdout: z.string().max(1_048_576),
+    stderr: z.string().max(1_048_576),
+    startedAt: z.string().datetime(),
+    completedAt: z.string().datetime(),
+    outcome: z.enum(["passed", "failed", "timed_out"]),
+  })
+  .strict();
+
+export const PullRequestResultSchema = z
+  .object({
+    repository: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),
+    number: z.number().int().positive(),
+    url: z.string().url().refine((value) => new URL(value).protocol === "https:", "URL must use HTTPS"),
+    headBranch: z.string().regex(/^agentx\/[0-9a-f-]{36}$/i),
+    baseBranch: z.string().min(1).max(255),
+    commit: z.string().regex(/^[a-f0-9]{40,64}$/),
+    checks: z.array(PublicationCheckResultSchema).max(64),
+    reconciled: z.boolean(),
   })
   .strict();
 
@@ -52,3 +103,6 @@ export const TERMINAL_OPERATION_STATUSES = new Set([
 export type Operation = z.infer<typeof OperationSchema>;
 export type OperationRequest = z.infer<typeof OperationRequestSchema>;
 export type OperationStatus = z.infer<typeof OperationStatusSchema>;
+export type PullRequestRequest = z.infer<typeof PullRequestRequestSchema>;
+export type PublicationCheckResult = z.infer<typeof PublicationCheckResultSchema>;
+export type PullRequestResult = z.infer<typeof PullRequestResultSchema>;

@@ -21,6 +21,8 @@ import {
   AgentXError,
   OperationRequestSchema,
   OperationSchema,
+  PullRequestRequestSchema,
+  PullRequestResultSchema,
   ProjectDefinitionSchema,
   WorkspaceInstanceSchema,
   agentXError,
@@ -75,13 +77,21 @@ interface OperationRecord extends Operation {
   entityType: "OPERATION";
   eventSequence: number;
   targetOperationId?: string;
+  publication?: {
+    repository: string;
+    repositoryUrl: string;
+    headBranch: string;
+    baseBranch: string;
+    title: string;
+    body?: string;
+  };
 }
 
 interface CallbackClaims {
   workspaceId: string;
   operationId: string;
   fence: number;
-  actions: Array<"events" | "artifacts" | "result">;
+  actions: Array<"events" | "artifacts" | "result" | "pull-request">;
   expiresAt: number;
 }
 
@@ -100,6 +110,7 @@ interface AwsBrokerDependencies {
   adminValues: readonly string[];
   callbackSigningKey: string;
   repositoryGrants: RepositoryGrantService;
+  githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest">;
 }
 
 export function createAwsBrokerHandler(dependencies: AwsBrokerDependencies) {
@@ -110,7 +121,7 @@ export function createAwsBrokerHandler(dependencies: AwsBrokerDependencies) {
     const request = adaptHttpApiEvent(event);
     try {
       const url = new URL(request.path, "https://agentx.invalid");
-      const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result)$/.exec(
+      const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|pull-request)$/.exec(
         url.pathname,
       );
       if (request.method === "POST" && callback?.[1] && callback[2] && callback[3]) {
@@ -168,6 +179,11 @@ export function createAwsBrokerHandler(dependencies: AwsBrokerDependencies) {
       const tasks = /^\/v1\/workspaces\/([0-9a-f-]+)\/tasks$/.exec(url.pathname);
       if (request.method === "POST" && tasks?.[1]) {
         return json(await acceptTask(dependencies, identity, tasks[1], body), request.requestId, 202);
+      }
+
+      const pullRequests = /^\/v1\/workspaces\/([0-9a-f-]+)\/pull-requests$/.exec(url.pathname);
+      if (request.method === "POST" && pullRequests?.[1]) {
+        return json(await acceptPullRequest(dependencies, identity, pullRequests[1], body), request.requestId, 202);
       }
 
       const operation = /^\/v1\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)$/.exec(url.pathname);
@@ -583,7 +599,156 @@ async function acceptTask(
       { Put: { TableName: dependencies.tableName, Item: { ...idempotencyKey, entityType: "IDEMPOTENCY", operationId, payloadHash: requestHash }, ConditionExpression: "attribute_not_exists(pk)" } },
     ] }));
   } catch (error) {
-    if (isConditional(error)) throw agentXError("WORKSPACE_BUSY", "workspace already has an active writer");
+    if (isConditional(error)) {
+      const concurrent = await getItem<{ operationId: string; payloadHash: string }>(dependencies, idempotencyKey);
+      if (concurrent) {
+        if (concurrent.payloadHash !== requestHash) {
+          throw agentXError("IDEMPOTENCY_CONFLICT", "request ID was reused with another payload");
+        }
+        return {
+          operation: publicOperation(await requireOperation(dependencies, workspaceId, concurrent.operationId)),
+          duplicate: true,
+        };
+      }
+      throw agentXError("WORKSPACE_BUSY", "workspace already has an active writer");
+    }
+    throw error;
+  }
+  return { operation: publicOperation(operation), duplicate: false };
+}
+
+async function acceptPullRequest(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  workspaceId: string,
+  value: unknown,
+): Promise<{ operation: Operation; duplicate: boolean }> {
+  const request = PullRequestRequestSchema.parse(value);
+  const workspace = await requireOwnedWorkspace(dependencies, identity, workspaceId);
+  await requireMembership(dependencies, identity.ownerKey, workspace.projectName);
+  const requestHash = hashJson({
+    repository: request.repository,
+    title: request.title,
+    ...(request.body === undefined ? {} : { body: request.body }),
+  });
+  const idempotencyKey = {
+    pk: `IDEMPOTENCY#${identity.ownerKey}#${workspaceId}`,
+    sk: `REQUEST#${request.requestId}`,
+  };
+  const previous = await getItem<{ operationId: string; payloadHash: string }>(dependencies, idempotencyKey);
+  if (previous) {
+    if (previous.payloadHash !== requestHash) {
+      throw agentXError("IDEMPOTENCY_CONFLICT", "request ID was reused with another payload");
+    }
+    return {
+      operation: publicOperation(await requireOperation(dependencies, workspaceId, previous.operationId)),
+      duplicate: true,
+    };
+  }
+  if (!['READY', 'STOPPED'].includes(workspace.status) || workspace.activeOperationId) {
+    throw agentXError(
+      workspace.status === "BUSY" ? "WORKSPACE_BUSY" : "WORKSPACE_NOT_READY",
+      `workspace is ${workspace.status}`,
+    );
+  }
+  const project = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
+  const repository = project.definition.repositories.find((candidate) => candidate.name === request.repository);
+  if (!repository) throw agentXError("CONFIG_INVALID", "repository is not registered for this project");
+
+  const now = new Date().toISOString();
+  const operationId = randomUUID();
+  const fence = workspace.fence + 1;
+  const headBranch = `agentx/${operationId}`;
+  const operation = operationRecord({
+    id: operationId,
+    workspaceId,
+    kind: "publish",
+    requestId: request.requestId,
+    payloadHash: requestHash,
+    status: "ACCEPTED",
+    fence,
+    createdAt: now,
+    updatedAt: now,
+  });
+  operation.publication = {
+    repository: repository.name,
+    repositoryUrl: repository.url,
+    headBranch,
+    baseBranch: repository.defaultBranch,
+    title: request.title,
+    ...(request.body === undefined ? {} : { body: request.body }),
+  };
+  const invocation: WorkerInvocation = {
+    protocolVersion: 1,
+    kind: "publish",
+    operationId,
+    workspaceId,
+    fence,
+    projectRevision: workspace.projectRevision,
+    callbackCapability: issueCapability(dependencies, workspaceId, operationId, fence, true),
+    payload: {
+      project: project.definition,
+      repository: repository.name,
+      title: request.title,
+      ...(request.body === undefined ? {} : { body: request.body }),
+      headBranch,
+      repositoryGrant: issueRepositoryGrant(
+        dependencies,
+        project,
+        identity.ownerKey,
+        workspaceId,
+        operationId,
+        "push",
+        repository.name,
+      ),
+    },
+  };
+  const outbox = outboxRecord({
+    runtimeArn: workspace.runtimeArn,
+    endpointQualifier: workspace.endpointQualifier,
+    deploymentMode: workspace.deploymentMode,
+    ...(workspace.capacityProviderArn === undefined ? {} : { capacityProviderArn: workspace.capacityProviderArn }),
+  }, workspace, invocation);
+  try {
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { Update: {
+        TableName: dependencies.tableName,
+        Key: workspaceKey(workspaceId),
+        UpdateExpression: "SET #status = :busy, activeOperationId = :operation, fence = :fence, updatedAt = :now",
+        ConditionExpression: "ownerKey = :owner AND attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped)",
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: {
+          ":owner": identity.ownerKey,
+          ":busy": "BUSY",
+          ":ready": "READY",
+          ":stopped": "STOPPED",
+          ":operation": operationId,
+          ":fence": fence,
+          ":now": now,
+        },
+      } },
+      { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
+      { Put: { TableName: dependencies.tableName, Item: outbox, ConditionExpression: "attribute_not_exists(pk)" } },
+      { Put: {
+        TableName: dependencies.tableName,
+        Item: { ...idempotencyKey, entityType: "IDEMPOTENCY", operationId, payloadHash: requestHash },
+        ConditionExpression: "attribute_not_exists(pk)",
+      } },
+    ] }));
+  } catch (error) {
+    if (isConditional(error)) {
+      const concurrent = await getItem<{ operationId: string; payloadHash: string }>(dependencies, idempotencyKey);
+      if (concurrent) {
+        if (concurrent.payloadHash !== requestHash) {
+          throw agentXError("IDEMPOTENCY_CONFLICT", "request ID was reused with another payload");
+        }
+        return {
+          operation: publicOperation(await requireOperation(dependencies, workspaceId, concurrent.operationId)),
+          duplicate: true,
+        };
+      }
+      throw agentXError("WORKSPACE_BUSY", "workspace already has an active writer");
+    }
     throw error;
   }
   return { operation: publicOperation(operation), duplicate: false };
@@ -690,8 +855,46 @@ async function handleCallback(
     const artifactId = await putArtifact(dependencies, operation, body);
     return json({ artifactId }, request.requestId);
   }
+  if (action === "pull-request") {
+    const pullRequest = await reconcilePullRequest(dependencies, operation, body);
+    return json(pullRequest, request.requestId);
+  }
   const result = await recordTerminalResult(dependencies, operation, body);
   return json({ operation: publicOperation(result) }, request.requestId);
+}
+
+async function reconcilePullRequest(
+  dependencies: AwsBrokerDependencies,
+  operation: OperationRecord,
+  value: unknown,
+) {
+  if (operation.kind !== "publish" || !operation.publication) {
+    throw agentXError("CALLBACK_FORBIDDEN", "operation cannot create a pull request");
+  }
+  const input = object(value, "pull request callback");
+  const expected = operation.publication;
+  const allowed = new Set(["repository", "repositoryUrl", "headBranch", "baseBranch", "commit", "title", "body"]);
+  if (Object.keys(input).some((key) => !allowed.has(key))) {
+    throw agentXError("CONFIG_INVALID", "pull request callback contains unknown fields");
+  }
+  for (const [key, expectedValue] of Object.entries(expected)) {
+    if (input[key] !== expectedValue) {
+      throw agentXError("CALLBACK_FORBIDDEN", `pull request callback ${key} is outside the operation scope`);
+    }
+  }
+  if (expected.body === undefined && input.body !== undefined) {
+    throw agentXError("CALLBACK_FORBIDDEN", "pull request callback body is outside the operation scope");
+  }
+  if (typeof input.commit !== "string" || !/^[a-f0-9]{40,64}$/.test(input.commit)) {
+    throw agentXError("CONFIG_INVALID", "published commit is invalid");
+  }
+  return dependencies.githubPullRequests.reconcilePullRequest({
+    repositoryUrl: expected.repositoryUrl,
+    headBranch: expected.headBranch,
+    baseBranch: expected.baseBranch,
+    title: expected.title,
+    ...(expected.body === undefined ? {} : { body: expected.body }),
+  });
 }
 
 async function appendEvents(
@@ -824,7 +1027,9 @@ async function recordTerminalResult(
   const now = new Date().toISOString();
   const terminalStatus = status as OperationStatus;
   const error = typeof input.error === "string" ? input.error.slice(0, 16_384) : undefined;
-  const result = input.result;
+  const result = operation.kind === "publish" && status === "SUCCEEDED"
+    ? PullRequestResultSchema.parse(input.result)
+    : input.result;
   const workspaceStatus =
     operation.kind === "prepare"
       ? terminalStatus === "SUCCEEDED"
@@ -1106,15 +1311,20 @@ function issueRepositoryGrant(
   ownerKey: string,
   workspaceId: string,
   operationId: string,
+  access: "clone" | "push" = "clone",
+  repositoryName?: string,
 ): string {
   return dependencies.repositoryGrants.issue({
     ownerKey,
     projectName: project.definition.name,
     workspaceId,
     operationId,
-    repositories: project.definition.repositories.map((repository) => ({
+    repositories: project.definition.repositories
+      .filter((repository) => repositoryName === undefined || repository.name === repositoryName)
+      .map((repository) => ({
       credentialRef: repository.credentialRef,
       repositoryUrl: repository.url,
+      access,
     })),
   });
 }
@@ -1129,6 +1339,8 @@ async function exchangeRepositoryCredential(
   if (!grant) throw agentXError("FORBIDDEN", "repository grant is required");
   const input = object(parseBody(request.body), "repository credential exchange");
   const credentialRef = name(input.credentialRef, "credentialRef");
+  const access = input.access === "clone" || input.access === "push" ? input.access : undefined;
+  if (!access) throw agentXError("CONFIG_INVALID", "repository access is invalid");
   if (typeof input.repositoryUrl !== "string" || input.repositoryUrl.length > 2_048) {
     throw agentXError("CONFIG_INVALID", "repositoryUrl is invalid");
   }
@@ -1137,6 +1349,7 @@ async function exchangeRepositoryCredential(
     operationId,
     credentialRef,
     repositoryUrl: input.repositoryUrl,
+    access,
   });
 }
 
@@ -1145,12 +1358,13 @@ function issueCapability(
   workspaceId: string,
   operationId: string,
   fence: number,
+  allowPullRequest = false,
 ): string {
   const claims: CallbackClaims = {
     workspaceId,
     operationId,
     fence,
-    actions: ["artifacts", "events", "result"],
+    actions: ["artifacts", "events", "result", ...(allowPullRequest ? ["pull-request" as const] : [])],
     expiresAt: Math.floor(Date.now() / 1_000) + 32_400,
   };
   const body = Buffer.from(JSON.stringify(claims)).toString("base64url");
@@ -1313,11 +1527,11 @@ const githubCredentials = new GitHubAppCredentialProvider({
   getPrivateKey: loadGitHubPrivateKey,
 });
 const repositoryGrantSigningKey = createHmac("sha256", requiredEnvironment("CALLBACK_SIGNING_KEY"))
-  .update("agentx:repository-grants:v2")
+  .update("agentx:repository-grants:v3")
   .digest();
 const repositoryGrants = new RepositoryGrantService(
   repositoryGrantSigningKey,
-  (credentialRef, repositoryUrl) => githubCredentials.resolve(credentialRef, repositoryUrl),
+  (credentialRef, repositoryUrl, access) => githubCredentials.resolve(credentialRef, repositoryUrl, access),
 );
 
 export const handler = createAwsBrokerHandler({
@@ -1330,6 +1544,7 @@ export const handler = createAwsBrokerHandler({
   adminValues: JSON.parse(process.env.ADMIN_VALUES ?? "[\"agentx-admin\"]") as string[],
   callbackSigningKey: requiredEnvironment("CALLBACK_SIGNING_KEY"),
   repositoryGrants,
+  githubPullRequests: githubCredentials,
   async stopRuntimeSession(input) {
     await agentCore.send(new StopRuntimeSessionCommand({
       agentRuntimeArn: input.runtimeArn,

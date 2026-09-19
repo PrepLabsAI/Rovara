@@ -47,6 +47,7 @@ describe("control-plane infrastructure", () => {
     expect(json).toContain("GITHUB_APP_INSTALLATION_ID");
     expect(json).toContain("secretsmanager:GetSecretValue");
     expect(json.match(/secretsmanager:GetSecretValue/g)).toHaveLength(1);
+    expect(json.match(/GITHUB_APP_PRIVATE_KEY_SECRET_ARN/g)).toHaveLength(1);
   });
 });
 
@@ -120,6 +121,8 @@ describe("AgentCore VPC-free microVM demo infrastructure", () => {
     const json = JSON.stringify(template.toJSON());
     expect(json).toContain("ecr:GetAuthorizationToken");
     expect(json).toContain("bedrock:InvokeModel");
+    expect(json).not.toContain("GITHUB_APP_PRIVATE_KEY_SECRET_ARN");
+    expect(json).not.toContain("GITHUB_APP_ID");
   });
 
   it("enforces the microVM mount and eight-hour lifecycle ceiling", () => {

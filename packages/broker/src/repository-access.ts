@@ -2,7 +2,7 @@ import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { agentXError } from "@agentx/contracts";
 
 interface RepositoryGrantClaims {
-  version: 2;
+  version: 3;
   ownerKey: string;
   projectName: string;
   workspaceId: string;
@@ -15,7 +15,10 @@ interface RepositoryGrantClaims {
 export interface RepositoryGrantScope {
   credentialRef: string;
   repositoryUrl: string;
+  access: RepositoryAccess;
 }
+
+export type RepositoryAccess = "clone" | "push";
 
 export interface RepositoryCredential {
   username?: string;
@@ -30,6 +33,7 @@ export class RepositoryGrantService {
     private readonly resolveCredential: (
       reference: string,
       repositoryUrl: string,
+      access: RepositoryAccess,
     ) => Promise<RepositoryCredential>,
   ) {
     if (signingKey.byteLength < 32) throw new Error("repository grant signing key must be at least 32 bytes");
@@ -44,7 +48,7 @@ export class RepositoryGrantService {
     ttlSeconds?: number;
   }): string {
     const claims: RepositoryGrantClaims = {
-      version: 2,
+      version: 3,
       ownerKey: input.ownerKey,
       projectName: input.projectName,
       workspaceId: input.workspaceId,
@@ -64,6 +68,7 @@ export class RepositoryGrantService {
       operationId: string;
       credentialRef: string;
       repositoryUrl: string;
+      access: RepositoryAccess;
     },
   ): Promise<RepositoryCredential> {
     const claims = this.verify(grant);
@@ -73,12 +78,13 @@ export class RepositoryGrantService {
       !claims.repositories.some(
         (repository) =>
           repository.credentialRef === request.credentialRef &&
-          repository.repositoryUrl === request.repositoryUrl,
+          repository.repositoryUrl === request.repositoryUrl &&
+          repository.access === request.access,
       )
     ) {
       throw agentXError("FORBIDDEN", "repository credential grant does not cover this request");
     }
-    return this.resolveCredential(request.credentialRef, request.repositoryUrl);
+    return this.resolveCredential(request.credentialRef, request.repositoryUrl, request.access);
   }
 
   inspect(grant: string): Omit<RepositoryGrantClaims, "nonce"> {
@@ -109,7 +115,7 @@ export class RepositoryGrantService {
       throw agentXError("FORBIDDEN", "invalid repository grant payload");
     }
     if (
-      claims.version !== 2 ||
+      claims.version !== 3 ||
       !Array.isArray(claims.repositories) ||
       claims.expiresAt <= Math.floor(Date.now() / 1_000)
     ) {
@@ -126,7 +132,7 @@ export class RepositoryGrantService {
 function uniqueScopes(scopes: readonly RepositoryGrantScope[]): RepositoryGrantScope[] {
   const seen = new Set<string>();
   return scopes.flatMap((scope) => {
-    const key = `${scope.credentialRef}\0${scope.repositoryUrl}`;
+    const key = `${scope.credentialRef}\0${scope.repositoryUrl}\0${scope.access}`;
     if (seen.has(key)) return [];
     seen.add(key);
     return [{ ...scope }];

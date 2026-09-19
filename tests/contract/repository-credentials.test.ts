@@ -46,6 +46,7 @@ describe("worker repository credential exchange", () => {
     expect(requests[0]?.init?.body).toBe(JSON.stringify({
       credentialRef: "github-agentx-sdlc",
       repositoryUrl: "https://github.com/ps06756/personal-website-test.git",
+      access: "clone",
     }));
   });
 
@@ -70,6 +71,39 @@ describe("worker repository credential exchange", () => {
     await expect(provider(invocation.payload.project.repositories[0])).rejects.not.toThrow(
       /secret-response-body/,
     );
+  });
+
+  it("requests exact push access for a publish invocation", async () => {
+    const operationId = randomUUID();
+    const invocation = {
+      protocolVersion: 1,
+      kind: "publish",
+      operationId,
+      workspaceId: randomUUID(),
+      fence: 4,
+      projectRevision: 1,
+      callbackCapability: "c".repeat(64),
+      payload: {
+        project: project(),
+        repository: "personal-website",
+        title: "Publish change",
+        headBranch: `agentx/${operationId}`,
+        repositoryGrant: "push-grant",
+      },
+    } as const satisfies Extract<WorkerInvocation, { kind: "publish" }>;
+    const bodies: string[] = [];
+    const provider = createRepositoryCredentialProvider({
+      controlPlaneUrl: "https://agentx.example.test",
+      invocation,
+      fetchImplementation: async (_url, init) => {
+        if (typeof init?.body !== "string") throw new Error("expected JSON request body");
+        bodies.push(init.body);
+        return new Response(JSON.stringify({ credential: { token: "push-token" } }), { status: 200 });
+      },
+    });
+
+    await provider(invocation.payload.project.repositories[0]);
+    expect(JSON.parse(bodies[0]!)).toMatchObject({ access: "push" });
   });
 });
 
