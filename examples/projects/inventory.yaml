@@ -1,0 +1,28 @@
+# Illustrative only: the digest and repository are deliberately non-deployable placeholders.
+schemaVersion: 1
+name: inventory
+revision: 1
+controlPlaneUrl: https://agentx.example.test
+auth:
+  issuer: https://identity.example.test
+  clientId: agentx-client
+  audience: agentx-api
+environment:
+  image: 111122223333.dkr.ecr.us-east-1.amazonaws.com/agentx-inventory@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+repositories:
+  - name: inventory-service
+    url: https://git.example.test/inventory-service.git
+    path: repo/inventory-service
+    initialCommit: "3333333333333333333333333333333333333333"
+    credentialRef: inventory-readwrite
+setup:
+  - cwd: repo/inventory-service
+    executable: ./gradlew
+    args: [dependencies]
+    timeoutSeconds: 900
+readiness:
+  - cwd: repo/inventory-service
+    executable: ./gradlew
+    args: [test]
+    timeoutSeconds: 900
+orchestratorInstructions: Delegate source inspection and modifications to the remote workspace.

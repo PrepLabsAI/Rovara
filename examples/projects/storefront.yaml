@@ -1,0 +1,28 @@
+# Illustrative only: replace all example deployment values before registration.
+schemaVersion: 1
+name: storefront
+revision: 1
+controlPlaneUrl: https://agentx.example.test
+auth:
+  issuer: https://identity.example.test
+  clientId: agentx-client
+  audience: agentx-api
+environment:
+  image: 111122223333.dkr.ecr.us-east-1.amazonaws.com/agentx-storefront@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+repositories:
+  - name: storefront-web
+    url: https://git.example.test/storefront-web.git
+    path: repo/storefront-web
+    initialCommit: "2222222222222222222222222222222222222222"
+    credentialRef: storefront-readwrite
+setup:
+  - cwd: repo/storefront-web
+    executable: npm
+    args: [ci]
+    timeoutSeconds: 600
+readiness:
+  - cwd: repo/storefront-web
+    executable: npm
+    args: [test]
+    timeoutSeconds: 600
+orchestratorInstructions: Keep all source operations remote and return concise test and diff evidence.

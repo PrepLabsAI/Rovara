@@ -1,0 +1,41 @@
+{
+  "name": "agentx",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0 <23"
+  },
+  "workspaces": [
+    "packages/*",
+    "infra"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean",
+    "lint": "eslint .",
+    "agentx": "node packages/cli/dist/main.js",
+    "preflight": "tsx scripts/preflight.ts",
+    "test": "vitest run",
+    "test:contract": "vitest run tests/contract",
+    "test:integration": "vitest run tests/integration",
+    "test:e2e": "vitest run tests/e2e",
+    "typecheck": "tsc -b --pretty false",
+    "image:build:demo": "docker buildx build --platform linux/arm64 --load --tag agentx-worker:demo-arm64 --file environments/base/Dockerfile .",
+    "infra:synth": "npm run build --workspace @agentx/infra && cdk synth --app 'node infra/dist/bin/agentx.js'",
+    "infra:synth:demo": "npm run build --workspace @agentx/infra && cdk synth AgentXDemoRuntime --app 'node infra/dist/bin/agentx.js' -c agentxDeploymentMode=demo-microvm -c agentxRegion=us-east-1"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-bedrock-agentcore": "3.1134.0",
+    "@aws-sdk/client-bedrock-agentcore-control": "3.1134.0",
+    "@aws-sdk/client-sts": "3.1134.0",
+    "@eslint/js": "10.0.1",
+    "@types/node": "22.20.3",
+    "esbuild": "0.28.2",
+    "eslint": "10.10.0",
+    "tsx": "4.23.13",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.70.0",
+    "vitest": "5.0.1"
+  }
+}

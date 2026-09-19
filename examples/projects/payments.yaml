@@ -1,0 +1,28 @@
+# Illustrative only: replace URLs, commit IDs, identity settings and digest before registration.
+schemaVersion: 1
+name: payments
+revision: 1
+controlPlaneUrl: https://agentx.example.test
+auth:
+  issuer: https://identity.example.test
+  clientId: agentx-client
+  audience: agentx-api
+environment:
+  image: 111122223333.dkr.ecr.us-east-1.amazonaws.com/agentx-payments@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+repositories:
+  - name: payments-api
+    url: https://git.example.test/payments-api.git
+    path: repo/payments-api
+    initialCommit: "1111111111111111111111111111111111111111"
+    credentialRef: payments-readwrite
+setup:
+  - cwd: repo/payments-api
+    executable: npm
+    args: [ci]
+    timeoutSeconds: 600
+readiness:
+  - cwd: repo/payments-api
+    executable: npm
+    args: [test, "--", --runInBand]
+    timeoutSeconds: 600
+orchestratorInstructions: Delegate every repository read, edit, build, and test to the remote AgentX worker.

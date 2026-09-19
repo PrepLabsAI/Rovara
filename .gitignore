@@ -1,0 +1,20 @@
+node_modules/
+dist/
+build/
+coverage/
+cdk.out/
+docs/
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+*.swp
+.vscode/
+.idea/
+.env
+.env.*
+!.env.example
+.agentx/
+.codex/
+*.tsbuildinfo
+# Keep .agents/skills/ versioned; it contains Spec Kit instructions, not credentials.

@@ -1,0 +1,16 @@
+{
+  "name": "@agentx/broker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@agentx/contracts": "0.1.0",
+    "@aws-sdk/client-bedrock-agentcore": "3.1134.0",
+    "@aws-sdk/client-dynamodb": "3.1134.0",
+    "@aws-sdk/client-s3": "3.1134.0",
+    "@aws-sdk/client-sqs": "3.1134.0",
+    "@aws-sdk/lib-dynamodb": "3.1134.0",
+    "@aws-sdk/util-dynamodb": "3.996.9",
+    "jose": "6.2.12"
+  }
+}
