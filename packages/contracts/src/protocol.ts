@@ -38,6 +38,38 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
           .optional(),
         headBranch: z.string().regex(/^agentx\/[0-9a-f-]{36}$/i),
         repositoryGrant: z.string().min(1),
+        mode: z.enum(["create", "replace", "revert"]).default("create"),
+        targetPullRequestNumber: z.number().int().positive().optional(),
+        revertCommit: z.string().regex(/^[a-f0-9]{40,64}$/).optional(),
+      })
+      .strict()
+      .superRefine((value, context) => {
+        if (value.mode === "create" && (value.targetPullRequestNumber !== undefined || value.revertCommit !== undefined)) {
+          context.addIssue({ code: "custom", message: "create mode must not target another pull request" });
+        }
+        if ((value.mode === "replace" || value.mode === "revert") && value.targetPullRequestNumber === undefined) {
+          context.addIssue({ code: "custom", message: `${value.mode} mode requires targetPullRequestNumber` });
+        }
+        if (value.mode === "revert" && value.revertCommit === undefined) {
+          context.addIssue({ code: "custom", message: "revert mode requires revertCommit" });
+        }
+        if (value.mode !== "revert" && value.revertCommit !== undefined) {
+          context.addIssue({ code: "custom", message: "revertCommit is allowed only in revert mode" });
+        }
+      }),
+  }).strict(),
+  InvocationBaseSchema.extend({
+    kind: z.literal("maintain"),
+    payload: z
+      .object({
+        action: z.enum(["append", "sync"]),
+        project: ProjectDefinitionSchema,
+        repository: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),
+        pullRequestNumber: z.number().int().positive(),
+        headBranch: z.string().regex(/^agentx\/[0-9a-f-]{36}$/i),
+        baseBranch: z.string().min(1).max(255),
+        expectedHeadCommit: z.string().regex(/^[a-f0-9]{40,64}$/),
+        repositoryGrant: z.string().min(1),
       })
       .strict(),
   }).strict(),

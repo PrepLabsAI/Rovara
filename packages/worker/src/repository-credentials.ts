@@ -10,7 +10,7 @@ export type RepositoryCredentialProvider = (
   repository: ProjectDefinition["repositories"][number],
 ) => Promise<RepositoryCloneCredential>;
 
-type RepositoryCredentialInvocation = Extract<WorkerInvocation, { kind: "prepare" | "publish" }>;
+type RepositoryCredentialInvocation = Extract<WorkerInvocation, { kind: "prepare" | "publish" | "maintain" }>;
 
 export function createRepositoryCredentialProvider(input: {
   controlPlaneUrl: string;
@@ -30,7 +30,7 @@ export function createRepositoryCredentialProvider(input: {
       body: JSON.stringify({
         credentialRef: repository.credentialRef,
         repositoryUrl: repository.url,
-        access: input.invocation.kind === "publish" ? "push" : "clone",
+        access: input.invocation.kind === "prepare" ? "clone" : "push",
       }),
     });
     if (!response.ok) {

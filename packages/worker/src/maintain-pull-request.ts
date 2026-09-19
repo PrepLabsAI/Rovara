@@ -1,0 +1,221 @@
+import { execFile } from "node:child_process";
+import { readFile, realpath, stat } from "node:fs/promises";
+import { isAbsolute, relative, resolve, sep } from "node:path";
+import { promisify } from "node:util";
+import {
+  PullRequestLifecycleResultSchema,
+  agentXError,
+  type WorkerInvocation,
+  type PullRequestLifecycleResult,
+} from "@agentx/contracts";
+import { gitSafeEnvironment } from "./git.js";
+import { assertCredentialFreeRemote, runGitWithCredential } from "./git-auth.js";
+import type { PullRequestUpdateSink } from "./callback-client.js";
+import type { RepositoryCredentialProvider } from "./repository-credentials.js";
+import { runReadinessChecks } from "./publish.js";
+import type { PreparationManifest } from "./prepare.js";
+
+const execFileAsync = promisify(execFile);
+const MAX_GIT_OUTPUT = 1_048_576;
+type MaintainInvocation = Extract<WorkerInvocation, { kind: "maintain" }>;
+
+export async function maintainPullRequest(options: {
+  rootPath: string;
+  invocation: MaintainInvocation;
+  credentialProvider: RepositoryCredentialProvider;
+  pullRequestUpdateSink: PullRequestUpdateSink;
+}): Promise<PullRequestLifecycleResult> {
+  const { invocation } = options;
+  const rootPath = await realpath(resolve(options.rootPath));
+  const manifest = await loadManifest(rootPath, invocation);
+  const repository = invocation.payload.project.repositories.find(
+    (candidate) => candidate.name === invocation.payload.repository,
+  );
+  if (!repository) throw agentXError("CONFIG_INVALID", "repository is not registered for this project");
+  const prepared = manifest.repositories.find((candidate) => candidate.name === repository.name);
+  if (!prepared || prepared.path !== repository.path) {
+    throw agentXError("WORKSPACE_NOT_READY", "prepared repository is missing from the workspace manifest");
+  }
+  const repositoryPath = containedPath(rootPath, repository.path);
+  if (!(await stat(repositoryPath).catch(() => undefined))?.isDirectory()) {
+    throw agentXError("WORKSPACE_NOT_READY", "prepared repository checkout is missing");
+  }
+  assertContained(rootPath, await realpath(repositoryPath));
+  const remoteUrl = (await git(repositoryPath, ["remote", "get-url", "origin"])).trim();
+  assertCredentialFreeRemote(remoteUrl);
+  if (remoteUrl !== repository.url) throw agentXError("CONFIG_INVALID", "repository remote does not match the registered project");
+
+  const credential = await options.credentialProvider(repository);
+  await credentialedGit(repositoryPath, [
+    "-C", repositoryPath, "fetch", "--no-tags", "origin",
+    `refs/heads/${invocation.payload.headBranch}:refs/remotes/origin/${invocation.payload.headBranch}`,
+    `refs/heads/${invocation.payload.baseBranch}:refs/remotes/origin/${invocation.payload.baseBranch}`,
+  ], credential, "Git fetch failed");
+  const remoteHead = (await git(repositoryPath, ["rev-parse", `refs/remotes/origin/${invocation.payload.headBranch}^{commit}`])).trim();
+  if (remoteHead !== invocation.payload.expectedHeadCommit) {
+    throw agentXError("STALE_FENCE", "pull request head changed since AgentX last observed it");
+  }
+  const conflicts = await git(repositoryPath, ["diff", "--name-only", "--diff-filter=U"]);
+  if (conflicts.trim()) throw agentXError("CONFIG_INVALID", "repository has unresolved merge conflicts");
+
+  let commit: string;
+  let reconciled = false;
+  if (invocation.payload.action === "append") {
+    const currentHead = (await git(repositoryPath, ["rev-parse", "HEAD"])).trim();
+    if (!(await isAncestor(repositoryPath, remoteHead, currentHead))) {
+      throw agentXError("STALE_FENCE", "workspace history is not a fast-forward of the pull request head");
+    }
+    const status = await git(repositoryPath, ["status", "--porcelain=v1", "--untracked-files=all"]);
+    if (currentHead === remoteHead && !status.trim()) {
+      throw agentXError("CONFIG_INVALID", "repository has no new changes to append");
+    }
+    const checks = await runReadinessChecks(rootPath, invocation);
+    if (checks.some((check) => check.outcome !== "passed")) {
+      throw agentXError("CONFIG_INVALID", "one or more registered readiness checks failed");
+    }
+    await git(repositoryPath, ["add", "--all"]);
+    const workspaceTree = (await git(repositoryPath, ["write-tree"])).trim();
+    const publishedTree = (await git(repositoryPath, ["rev-parse", `${remoteHead}^{tree}`])).trim();
+    if (workspaceTree === publishedTree) {
+      throw agentXError("CONFIG_INVALID", "repository has no effective changes to append");
+    }
+    commit = (await git(repositoryPath, [
+      "-c", "user.name=AgentX", "-c", "user.email=agentx@noreply.local",
+      "commit-tree", workspaceTree, "-p", remoteHead,
+      "-m", `AgentX: update PR #${invocation.payload.pullRequestNumber}`,
+    ])).trim();
+    await git(repositoryPath, ["checkout", "--force", "-B", invocation.payload.headBranch, commit]);
+    await push(repositoryPath, invocation.payload.headBranch, credential);
+    const callback = await options.pullRequestUpdateSink({
+      repository: repository.name,
+      pullRequestNumber: invocation.payload.pullRequestNumber,
+      action: "append",
+      headBranch: invocation.payload.headBranch,
+      baseBranch: invocation.payload.baseBranch,
+      previousCommit: remoteHead,
+      commit,
+    });
+    return PullRequestLifecycleResultSchema.parse({
+      action: "append", repository: repository.name, number: invocation.payload.pullRequestNumber,
+      url: callback.url, state: callback.state, headBranch: invocation.payload.headBranch,
+      baseBranch: invocation.payload.baseBranch, previousCommit: remoteHead, commit,
+      checks, reconciled: callback.reconciled,
+    });
+  }
+
+  const status = await git(repositoryPath, ["status", "--porcelain=v1", "--untracked-files=all"]);
+  if (status.trim()) throw agentXError("CONFIG_INVALID", "sync requires a clean repository");
+  await git(repositoryPath, ["checkout", "--force", "-B", invocation.payload.headBranch, remoteHead]);
+  const remoteBase = (await git(repositoryPath, ["rev-parse", `refs/remotes/origin/${invocation.payload.baseBranch}^{commit}`])).trim();
+  if (await isAncestor(repositoryPath, remoteBase, remoteHead)) {
+    commit = remoteHead;
+    reconciled = true;
+  } else {
+    try {
+      await git(repositoryPath, [
+        "-c", "user.name=AgentX", "-c", "user.email=agentx@noreply.local",
+        "merge", "--no-edit", "--no-ff", remoteBase,
+      ]);
+    } catch {
+      await git(repositoryPath, ["merge", "--abort"]).catch(() => undefined);
+      throw agentXError("CONFIG_INVALID", "pull request branch conflicts with the latest base");
+    }
+    commit = (await git(repositoryPath, ["rev-parse", "HEAD"])).trim();
+  }
+  const checks = await runReadinessChecks(rootPath, invocation);
+  if (checks.some((check) => check.outcome !== "passed")) {
+    if (!reconciled) await git(repositoryPath, ["reset", "--hard", remoteHead]);
+    throw agentXError("CONFIG_INVALID", "one or more registered readiness checks failed");
+  }
+  if (!reconciled) await push(repositoryPath, invocation.payload.headBranch, credential);
+  const callback = await options.pullRequestUpdateSink({
+    repository: repository.name,
+    pullRequestNumber: invocation.payload.pullRequestNumber,
+    action: "sync",
+    headBranch: invocation.payload.headBranch,
+    baseBranch: invocation.payload.baseBranch,
+    previousCommit: remoteHead,
+    commit,
+  });
+  return PullRequestLifecycleResultSchema.parse({
+    action: "sync", repository: repository.name, number: invocation.payload.pullRequestNumber,
+    url: callback.url, state: callback.state, headBranch: invocation.payload.headBranch,
+    baseBranch: invocation.payload.baseBranch, previousCommit: remoteHead, commit,
+    checks, reconciled: reconciled || callback.reconciled,
+  });
+}
+
+async function push(directory: string, branch: string, credential: Awaited<ReturnType<RepositoryCredentialProvider>>) {
+  await credentialedGit(directory, ["-C", directory, "push", "--porcelain", "origin", `HEAD:refs/heads/${branch}`], credential, "Git push failed");
+}
+
+async function credentialedGit(
+  directory: string,
+  args: string[],
+  credential: Awaited<ReturnType<RepositoryCredentialProvider>>,
+  fallback: string,
+): Promise<void> {
+  try {
+    await runGitWithCredential({ directory, args, credential, timeout: 300_000, maxBuffer: MAX_GIT_OUTPUT });
+  } catch (error) {
+    throw agentXError("RUNTIME_UNAVAILABLE", sanitize(error instanceof Error ? error.message : fallback));
+  }
+}
+
+async function isAncestor(directory: string, ancestor: string, descendant: string): Promise<boolean> {
+  try {
+    await execFileAsync("git", ["-C", directory, "merge-base", "--is-ancestor", ancestor, descendant], {
+      timeout: 120_000, maxBuffer: MAX_GIT_OUTPUT, env: gitSafeEnvironment(directory),
+    });
+    return true;
+  } catch (error) {
+    const exitCode = (error as { code?: unknown }).code;
+    if (exitCode === 1) return false;
+    throw agentXError("CONFIG_INVALID", "Git could not compare pull request history");
+  }
+}
+
+async function loadManifest(rootPath: string, invocation: MaintainInvocation): Promise<PreparationManifest> {
+  try {
+    const manifest = JSON.parse(await readFile(resolve(rootPath, ".agentx/preparation-manifest.json"), "utf8")) as PreparationManifest;
+    if (
+      manifest.schemaVersion !== 2 || !manifest.complete ||
+      manifest.projectName !== invocation.payload.project.name ||
+      manifest.projectRevision !== invocation.projectRevision ||
+      manifest.environmentDigest !== invocation.payload.project.environment.image
+    ) throw new Error("stale");
+    return manifest;
+  } catch {
+    throw agentXError("WORKSPACE_NOT_READY", "workspace preparation manifest is missing or stale");
+  }
+}
+
+async function git(directory: string, args: readonly string[]): Promise<string> {
+  try {
+    const result = await execFileAsync("git", ["-C", directory, ...args], {
+      timeout: 120_000, maxBuffer: MAX_GIT_OUTPUT, encoding: "utf8", env: gitSafeEnvironment(directory),
+    });
+    return result.stdout;
+  } catch (error) {
+    const processError = error as Error & { stderr?: string };
+    throw agentXError("CONFIG_INVALID", sanitize(processError.stderr ?? processError.message));
+  }
+}
+
+function containedPath(rootPath: string, configuredPath: string): string {
+  if (isAbsolute(configuredPath)) throw agentXError("CONFIG_INVALID", "repository path must be relative");
+  const candidate = resolve(rootPath, configuredPath);
+  assertContained(rootPath, candidate);
+  return candidate;
+}
+
+function assertContained(rootPath: string, candidate: string): void {
+  const fromRoot = relative(rootPath, candidate);
+  if (fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
+    throw agentXError("CONFIG_INVALID", "repository path escapes the workspace root");
+  }
+}
+
+function sanitize(value: string): string {
+  return value.replace(/https:\/\/[^@\s/]+@/giu, "https://[redacted]@").slice(0, 16_384) || "Git command failed";
+}

@@ -1,7 +1,15 @@
 import { Buffer } from "node:buffer";
 import { z } from "zod";
 
-export const OperationKindSchema = z.enum(["prepare", "task", "publish", "resume", "stop", "cancel"]);
+export const OperationKindSchema = z.enum([
+  "prepare",
+  "task",
+  "publish",
+  "maintain",
+  "resume",
+  "stop",
+  "cancel",
+]);
 export const OperationStatusSchema = z.enum([
   "ACCEPTED",
   "DISPATCHING",
@@ -48,6 +56,56 @@ export const PullRequestRequestSchema = z
   })
   .strict();
 
+export const PullRequestLifecycleActionSchema = z.enum([
+  "append",
+  "sync",
+  "edit",
+  "close",
+  "reopen",
+  "replace",
+  "revert",
+]);
+
+const lifecycleTitleSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(256)
+  .refine(
+    (value) => ![...value].some((character) => {
+      const code = character.codePointAt(0) ?? 0;
+      return code < 32 || code === 127;
+    }),
+    "title contains control characters",
+  );
+
+const lifecycleBodySchema = z
+  .string()
+  .refine((value) => !value.includes("\0"), "body contains a NUL character")
+  .refine((value) => Buffer.byteLength(value, "utf8") <= 32_768, "body exceeds 32768 UTF-8 bytes");
+
+export const PullRequestLifecycleRequestSchema = z
+  .object({
+    requestId: z.string().uuid(),
+    repository: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),
+    pullRequestNumber: z.number().int().positive(),
+    action: PullRequestLifecycleActionSchema,
+    title: lifecycleTitleSchema.optional(),
+    body: lifecycleBodySchema.optional(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.action === "edit" && value.title === undefined && value.body === undefined) {
+      context.addIssue({ code: "custom", message: "edit requires title or body" });
+    }
+    if (
+      ["append", "sync", "close", "reopen"].includes(value.action) &&
+      (value.title !== undefined || value.body !== undefined)
+    ) {
+      context.addIssue({ code: "custom", message: `${value.action} must not include title or body` });
+    }
+  });
+
 export const PublicationCheckResultSchema = z
   .object({
     index: z.number().int().nonnegative(),
@@ -72,6 +130,24 @@ export const PullRequestResultSchema = z
     commit: z.string().regex(/^[a-f0-9]{40,64}$/),
     checks: z.array(PublicationCheckResultSchema).max(64),
     reconciled: z.boolean(),
+  })
+  .strict();
+
+export const PullRequestLifecycleResultSchema = z
+  .object({
+    action: PullRequestLifecycleActionSchema,
+    repository: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),
+    number: z.number().int().positive(),
+    url: z.string().url().refine((value) => new URL(value).protocol === "https:", "URL must use HTTPS"),
+    state: z.enum(["open", "closed", "merged"]),
+    headBranch: z.string().regex(/^agentx\/[0-9a-f-]{36}$/i),
+    baseBranch: z.string().min(1).max(255),
+    previousCommit: z.string().regex(/^[a-f0-9]{40,64}$/).optional(),
+    commit: z.string().regex(/^[a-f0-9]{40,64}$/),
+    checks: z.array(PublicationCheckResultSchema).max(64),
+    reconciled: z.boolean(),
+    replacementFor: z.number().int().positive().optional(),
+    replacedBy: z.number().int().positive().optional(),
   })
   .strict();
 
@@ -104,5 +180,8 @@ export type Operation = z.infer<typeof OperationSchema>;
 export type OperationRequest = z.infer<typeof OperationRequestSchema>;
 export type OperationStatus = z.infer<typeof OperationStatusSchema>;
 export type PullRequestRequest = z.infer<typeof PullRequestRequestSchema>;
+export type PullRequestLifecycleAction = z.infer<typeof PullRequestLifecycleActionSchema>;
+export type PullRequestLifecycleRequest = z.infer<typeof PullRequestLifecycleRequestSchema>;
+export type PullRequestLifecycleResult = z.infer<typeof PullRequestLifecycleResultSchema>;
 export type PublicationCheckResult = z.infer<typeof PublicationCheckResultSchema>;
 export type PullRequestResult = z.infer<typeof PullRequestResultSchema>;

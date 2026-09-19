@@ -20,6 +20,7 @@ export async function runGitWithCredential(input: {
   timeout?: number;
   maxBuffer?: number;
 }): Promise<{ stdout: string; stderr: string }> {
+  assertNonForceGitArguments(input.args);
   const credential = input.credential ?? {};
   const username = credential.username ?? (credential.token === undefined ? undefined : "x-access-token");
   const password = credential.password ?? credential.token;
@@ -55,6 +56,21 @@ export async function runGitWithCredential(input: {
   } finally {
     if (askPassDirectory) await rm(askPassDirectory, { recursive: true, force: true });
   }
+}
+
+export function assertNonForceGitArguments(args: readonly string[]): void {
+  const pushIndex = args.indexOf("push");
+  if (pushIndex < 0) return;
+  const forceArgument = args.slice(pushIndex + 1).some((argument) =>
+    argument === "-f" ||
+    argument === "--force" ||
+    argument.startsWith("--force=") ||
+    argument === "--force-with-lease" ||
+    argument.startsWith("--force-with-lease=") ||
+    argument.startsWith("+") ||
+    argument.includes(":+refs/"),
+  );
+  if (forceArgument) throw new Error("force push is forbidden");
 }
 
 export function assertCredentialFreeRemote(value: string): void {

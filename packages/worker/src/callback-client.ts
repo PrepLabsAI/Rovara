@@ -23,6 +23,26 @@ export interface PullRequestCallbackResult {
 
 export type PullRequestSink = (input: PullRequestCallbackInput) => Promise<PullRequestCallbackResult>;
 
+export interface PullRequestUpdateCallbackInput {
+  repository: string;
+  pullRequestNumber: number;
+  action: "append" | "sync";
+  headBranch: string;
+  baseBranch: string;
+  previousCommit: string;
+  commit: string;
+}
+
+export interface PullRequestUpdateCallbackResult {
+  url: string;
+  state: "open" | "closed" | "merged";
+  reconciled: boolean;
+}
+
+export type PullRequestUpdateSink = (
+  input: PullRequestUpdateCallbackInput,
+) => Promise<PullRequestUpdateCallbackResult>;
+
 export function createWorkerCallbackSinks(input: {
   controlPlaneUrl: string;
   invocation: WorkerInvocation;
@@ -32,6 +52,7 @@ export function createWorkerCallbackSinks(input: {
   artifactSink: ArtifactSink;
   terminalSink: TerminalResultSink;
   pullRequestSink: PullRequestSink;
+  pullRequestUpdateSink: PullRequestUpdateSink;
 } {
   const fetchImplementation = input.fetchImplementation ?? fetch;
   const base = input.controlPlaneUrl.replace(/\/$/, "");
@@ -91,6 +112,22 @@ export function createWorkerCallbackSinks(input: {
         url: result.url,
         reconciled: result.reconciled,
       };
+    },
+    pullRequestUpdateSink: async (request) => {
+      const value = await postForResult("pull-request-update", request);
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        throw agentXError("RUNTIME_UNAVAILABLE", "pull request update callback response is invalid");
+      }
+      const result = value as Record<string, unknown>;
+      if (
+        typeof result.url !== "string" ||
+        !result.url.startsWith("https://") ||
+        (result.state !== "open" && result.state !== "closed" && result.state !== "merged") ||
+        typeof result.reconciled !== "boolean"
+      ) {
+        throw agentXError("RUNTIME_UNAVAILABLE", "pull request update callback response is invalid");
+      }
+      return { url: result.url, state: result.state, reconciled: result.reconciled };
     },
   };
 }

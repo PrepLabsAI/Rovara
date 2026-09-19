@@ -108,6 +108,29 @@ export class ControlPlaneApi implements OrchestrationApi, OperationPollingTransp
     });
   }
 
+  async managePullRequest(input: {
+    workspaceId: string;
+    requestId: string;
+    repository: string;
+    pullRequestNumber: number;
+    action: "append" | "sync" | "edit" | "close" | "reopen" | "replace" | "revert";
+    title?: string;
+    body?: string;
+  }): Promise<unknown> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(`/v1/workspaces/${this.workspaceId}/pull-request-actions`, {
+      method: "POST",
+      body: JSON.stringify({
+        requestId: input.requestId,
+        repository: input.repository,
+        pullRequestNumber: input.pullRequestNumber,
+        action: input.action,
+        ...(input.title === undefined ? {} : { title: input.title }),
+        ...(input.body === undefined ? {} : { body: input.body }),
+      }),
+    });
+  }
+
   async pullRequestResult(
     input: { workspaceId: string; operationId: string },
     options: {

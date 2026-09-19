@@ -8,6 +8,13 @@ export const ORCHESTRATION_TOOL_NAMES = [
   "agentx_task_status",
   "agentx_task_result",
   "agentx_follow_up",
+  "agentx_update_pull_request",
+  "agentx_append_pull_request",
+  "agentx_sync_pull_request",
+  "agentx_close_pull_request",
+  "agentx_reopen_pull_request",
+  "agentx_replace_pull_request",
+  "agentx_revert_pull_request",
 ] as const;
 
 export interface OrchestrationApi {
@@ -38,6 +45,15 @@ export interface OrchestrationApi {
     title: string;
     body?: string;
   }): Promise<unknown>;
+  managePullRequest(input: {
+    workspaceId: string;
+    requestId: string;
+    repository: string;
+    pullRequestNumber: number;
+    action: "append" | "sync" | "edit" | "close" | "reopen" | "replace" | "revert";
+    title?: string;
+    body?: string;
+  }): Promise<unknown>;
   pullRequestResult(
     input: { workspaceId: string; operationId: string },
     options?: {
@@ -58,7 +74,7 @@ export function createOrchestrationTools(
 ): ToolDefinition[] {
   const promptParameters = Type.Object({ prompt: Type.String({ minLength: 1, maxLength: 65_536 }) });
   const operationParameters = Type.Object({ operationId: Type.String({ format: "uuid" }) });
-  return [
+  const tools: ToolDefinition[] = [
     defineTool({
       name: "agentx_submit_task",
       label: "Delegate coding task",
@@ -163,6 +179,57 @@ export function createOrchestrationTools(
       },
     }),
   ];
+  const lifecycleTools = [
+    ["update", "edit", "Edit the title or body of an AgentX-owned pull request."],
+    ["append", "append", "Run checks and append workspace changes with a normal fast-forward push; force push is prohibited."],
+    ["sync", "sync", "Merge the latest base branch into an open pull request; history is never rebased or force-pushed."],
+    ["close", "close", "Close an open AgentX-owned pull request."],
+    ["reopen", "reopen", "Reopen a closed, unmerged AgentX-owned pull request."],
+    ["replace", "replace", "Create a clean replacement pull request before closing the original; never rewrite the old branch."],
+    ["revert", "revert", "Create a reviewable revert pull request for a merged AgentX-owned pull request."],
+  ] as const;
+  for (const [toolName, action, description] of lifecycleTools) {
+    tools.push(defineTool({
+      name: `agentx_${toolName}_pull_request`,
+      label: `${toolName[0]?.toUpperCase()}${toolName.slice(1)} pull request`,
+      description: `${description} Call only when the user explicitly requests this pull request action.`,
+      parameters: Type.Object({
+        repository: Type.String({ minLength: 1, maxLength: 63 }),
+        pullRequestNumber: Type.Integer({ minimum: 1 }),
+        ...((action === "edit" || action === "replace" || action === "revert") ? {
+          title: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+          body: Type.Optional(Type.String({ maxLength: 32_768 })),
+        } : {}),
+      }),
+      execute: async (_id, parameters, signal, onUpdate) => {
+        const lifecycle = parameters as {
+          repository: string;
+          pullRequestNumber: number;
+          title?: string;
+          body?: string;
+        };
+        const accepted = await api.managePullRequest({
+          workspaceId: context.workspaceId,
+          requestId: randomUUID(),
+          repository: lifecycle.repository,
+          pullRequestNumber: lifecycle.pullRequestNumber,
+          action,
+          ...(lifecycle.title === undefined ? {} : { title: lifecycle.title }),
+          ...(lifecycle.body === undefined ? {} : { body: lifecycle.body }),
+        });
+        const operationId = acceptedOperationId(accepted);
+        onUpdate?.(toolResult({ operationId, status: "ACCEPTED", message: `AgentX accepted pull request ${action}.` }));
+        return toolResult(await api.pullRequestResult(
+          { workspaceId: context.workspaceId, operationId },
+          {
+            ...(signal === undefined ? {} : { signal }),
+            onProgress: (progress) => onUpdate?.(toolResult(progress)),
+          },
+        ));
+      },
+    }));
+  }
+  return tools;
 }
 
 export function assertOrchestrationOnly(tools: readonly Pick<ToolDefinition, "name">[]): void {

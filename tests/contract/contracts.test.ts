@@ -3,6 +3,8 @@ import {
   OperationRequestSchema,
   PullRequestRequestSchema,
   PullRequestResultSchema,
+  PullRequestLifecycleRequestSchema,
+  PullRequestLifecycleResultSchema,
   ProjectDefinitionSchema,
   WorkerInvocationSchema,
   WorkspaceInstanceSchema,
@@ -201,5 +203,91 @@ describe("strict contracts", () => {
       }],
       reconciled: false,
     }).number).toBe(42);
+  });
+
+  it("validates conditional pull request lifecycle requests and maintain invocations", () => {
+    const base = {
+      requestId: crypto.randomUUID(),
+      repository: "api",
+      pullRequestNumber: 42,
+    };
+    expect(PullRequestLifecycleRequestSchema.parse({ ...base, action: "append" }).action).toBe("append");
+    expect(PullRequestLifecycleRequestSchema.parse({
+      ...base,
+      action: "edit",
+      title: "Updated title",
+    }).title).toBe("Updated title");
+    expect(() => PullRequestLifecycleRequestSchema.parse({ ...base, action: "edit" })).toThrow(
+      /title or body/,
+    );
+    expect(() => PullRequestLifecycleRequestSchema.parse({
+      ...base,
+      action: "close",
+      title: "not allowed",
+    })).toThrow(/must not include/);
+
+    const invocation = WorkerInvocationSchema.parse({
+      protocolVersion: 1,
+      kind: "maintain",
+      operationId: crypto.randomUUID(),
+      workspaceId: crypto.randomUUID(),
+      fence: 3,
+      projectRevision: 1,
+      callbackCapability: "c".repeat(64),
+      payload: {
+        action: "sync",
+        project: projectDefinition(),
+        repository: "api",
+        pullRequestNumber: 42,
+        headBranch: `agentx/${crypto.randomUUID()}`,
+        baseBranch: "main",
+        expectedHeadCommit: "a".repeat(40),
+        repositoryGrant: "signed-grant",
+      },
+    });
+    expect(invocation.kind).toBe("maintain");
+
+    expect(PullRequestLifecycleResultSchema.parse({
+      action: "sync",
+      repository: "api",
+      number: 42,
+      url: "https://github.com/example/api/pull/42",
+      state: "open",
+      headBranch: `agentx/${crypto.randomUUID()}`,
+      baseBranch: "main",
+      previousCommit: "a".repeat(40),
+      commit: "b".repeat(40),
+      checks: [],
+      reconciled: false,
+    }).number).toBe(42);
+
+    const publish = {
+      protocolVersion: 1,
+      kind: "publish",
+      operationId: crypto.randomUUID(),
+      workspaceId: crypto.randomUUID(),
+      fence: 2,
+      projectRevision: 1,
+      callbackCapability: "c".repeat(64),
+      payload: {
+        project: projectDefinition(),
+        repository: "api",
+        title: "Lifecycle",
+        headBranch: `agentx/${crypto.randomUUID()}`,
+        repositoryGrant: "signed-grant",
+      },
+    };
+    expect(WorkerInvocationSchema.safeParse({
+      ...publish,
+      payload: { ...publish.payload, mode: "replace" },
+    }).success).toBe(false);
+    expect(WorkerInvocationSchema.safeParse({
+      ...publish,
+      payload: { ...publish.payload, mode: "revert", targetPullRequestNumber: 3 },
+    }).success).toBe(false);
+    expect(WorkerInvocationSchema.safeParse({
+      ...publish,
+      payload: { ...publish.payload, mode: "create", revertCommit: "a".repeat(40) },
+    }).success).toBe(false);
   });
 });

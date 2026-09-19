@@ -210,6 +210,137 @@ describe("GitHub App repository credentials", () => {
     expect(lookupCount).toBe(2);
   });
 
+  it("looks up canonical pull request state with read-only permissions", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const provider = new GitHubAppCredentialProvider({
+      credentialRef: "github-agentx-sdlc",
+      account: "ps06756",
+      appId: "5002502",
+      installationId: "163046162",
+      getPrivateKey: async () => pem,
+      fetchImplementation: async (url, init) => {
+        const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+        requests.push({ url: requestUrl, init });
+        if (requestUrl.endsWith("/access_tokens")) {
+          return new Response(JSON.stringify({ token: "lookup-token" }), { status: 201 });
+        }
+        return new Response(JSON.stringify(pullRequestFixture()), { status: 200 });
+      },
+    });
+
+    await expect(provider.getPullRequest(
+      "https://github.com/ps06756/personal-website-test.git",
+      42,
+    )).resolves.toEqual({
+      number: 42,
+      url: "https://github.com/ps06756/personal-website-test/pull/42",
+      state: "open",
+      headBranch: "agentx/00000000-0000-4000-8000-000000000001",
+      baseBranch: "main",
+      headCommit: "a".repeat(40),
+      title: "Current title",
+      body: "Current body",
+    });
+    const tokenBody = requests[0]?.init?.body;
+    if (typeof tokenBody !== "string") throw new Error("expected token body");
+    expect((JSON.parse(tokenBody) as { permissions: unknown }).permissions)
+      .toEqual({ contents: "read", pull_requests: "read" });
+    expect(requests[1]?.url).toBe("https://api.github.com/repos/ps06756/personal-website-test/pulls/42");
+  });
+
+  it("updates metadata and state with pull-request write permission", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const provider = new GitHubAppCredentialProvider({
+      credentialRef: "github-agentx-sdlc",
+      account: "ps06756",
+      appId: "5002502",
+      installationId: "163046162",
+      getPrivateKey: async () => pem,
+      fetchImplementation: async (url, init) => {
+        const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+        requests.push({ url: requestUrl, init });
+        if (requestUrl.endsWith("/access_tokens")) {
+          return new Response(JSON.stringify({ token: "update-token" }), { status: 201 });
+        }
+        return new Response(JSON.stringify({
+          ...pullRequestFixture(),
+          state: "closed",
+          title: "Updated title",
+          body: "Updated body",
+        }), { status: 200 });
+      },
+    });
+
+    await expect(provider.updatePullRequest(
+      "https://github.com/ps06756/personal-website-test.git",
+      42,
+      { title: "Updated title", body: "Updated body", state: "closed" },
+    )).resolves.toMatchObject({ state: "closed", title: "Updated title", body: "Updated body" });
+    const tokenBody = requests[0]?.init?.body;
+    const updateBody = requests[1]?.init?.body;
+    if (typeof tokenBody !== "string" || typeof updateBody !== "string") throw new Error("expected JSON bodies");
+    expect((JSON.parse(tokenBody) as { permissions: unknown }).permissions)
+      .toEqual({ contents: "read", pull_requests: "write" });
+    expect(requests[1]?.init?.method).toBe("PATCH");
+    expect(JSON.parse(updateBody)).toEqual({ title: "Updated title", body: "Updated body", state: "closed" });
+  });
+
+  it("does not reflect GitHub bodies when pull request lookup or update fails", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const provider = new GitHubAppCredentialProvider({
+      credentialRef: "github-agentx-sdlc",
+      account: "ps06756",
+      appId: "5002502",
+      installationId: "163046162",
+      getPrivateKey: async () => pem,
+      fetchImplementation: async (url) => {
+        const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+        return requestUrl.endsWith("/access_tokens")
+          ? new Response(JSON.stringify({ token: "token" }), { status: 201 })
+          : new Response("sensitive-github-body", { status: 403 });
+      },
+    });
+    await expect(provider.getPullRequest("https://github.com/ps06756/personal-website-test", 42))
+      .rejects.not.toThrow(/sensitive-github-body/);
+    await expect(provider.updatePullRequest("https://github.com/ps06756/personal-website-test", 42, { state: "closed" }))
+      .rejects.not.toThrow(/sensitive-github-body/);
+  });
+
+  it("reconciles an ambiguous update when GitHub already applied the requested state", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    let patchCount = 0;
+    const provider = new GitHubAppCredentialProvider({
+      credentialRef: "github-agentx-sdlc",
+      account: "ps06756",
+      appId: "5002502",
+      installationId: "163046162",
+      getPrivateKey: async () => pem,
+      fetchImplementation: async (url, init) => {
+        const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+        if (requestUrl.endsWith("/access_tokens")) {
+          return new Response(JSON.stringify({ token: "update-token" }), { status: 201 });
+        }
+        if (init?.method === "PATCH") {
+          patchCount += 1;
+          throw new TypeError("connection closed after request");
+        }
+        return new Response(JSON.stringify({ ...pullRequestFixture(), state: "closed" }), { status: 200 });
+      },
+    });
+    await expect(provider.updatePullRequest(
+      "https://github.com/ps06756/personal-website-test",
+      42,
+      { state: "closed" },
+    )).resolves.toMatchObject({ state: "closed" });
+    expect(patchCount).toBe(1);
+  });
+
   it("rejects cross-account URLs before contacting GitHub", async () => {
     const fetchImplementation = vi.fn();
     const provider = new GitHubAppCredentialProvider({
@@ -240,3 +371,17 @@ describe("GitHub App repository credentials", () => {
     );
   });
 });
+
+function pullRequestFixture(): Record<string, unknown> {
+  return {
+    number: 42,
+    html_url: "https://github.com/ps06756/personal-website-test/pull/42",
+    state: "open",
+    merged: false,
+    merge_commit_sha: null,
+    head: { ref: "agentx/00000000-0000-4000-8000-000000000001", sha: "a".repeat(40) },
+    base: { ref: "main" },
+    title: "Current title",
+    body: "Current body",
+  };
+}

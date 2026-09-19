@@ -22,6 +22,8 @@ import {
   OperationRequestSchema,
   OperationSchema,
   PullRequestRequestSchema,
+  PullRequestLifecycleRequestSchema,
+  PullRequestLifecycleResultSchema,
   PullRequestResultSchema,
   ProjectDefinitionSchema,
   WorkspaceInstanceSchema,
@@ -29,6 +31,7 @@ import {
   type Operation,
   type OperationStatus,
   type ProjectDefinition,
+  type PullRequestLifecycleResult,
   type WorkerInvocation,
   type WorkspaceInstance,
 } from "@agentx/contracts";
@@ -84,6 +87,18 @@ interface OperationRecord extends Operation {
     baseBranch: string;
     title: string;
     body?: string;
+    mode?: "create" | "replace" | "revert";
+    targetPullRequestNumber?: number;
+    revertCommit?: string;
+  };
+  maintenance?: {
+    action: "append" | "sync";
+    repository: string;
+    repositoryUrl: string;
+    pullRequestNumber: number;
+    headBranch: string;
+    baseBranch: string;
+    expectedHeadCommit: string;
   };
 }
 
@@ -91,8 +106,29 @@ interface CallbackClaims {
   workspaceId: string;
   operationId: string;
   fence: number;
-  actions: Array<"events" | "artifacts" | "result" | "pull-request">;
+  actions: Array<"events" | "artifacts" | "result" | "pull-request" | "pull-request-update">;
   expiresAt: number;
+}
+
+interface PullRequestRecord {
+  pk: string;
+  sk: string;
+  entityType: "PULL_REQUEST";
+  workspaceId: string;
+  repository: string;
+  repositoryUrl: string;
+  number: number;
+  url: string;
+  state: "open" | "closed" | "merged";
+  headBranch: string;
+  baseBranch: string;
+  expectedHeadCommit: string;
+  title: string;
+  body: string;
+  createdByOperationId: string;
+  replacedBy?: number;
+  replacementFor?: number;
+  updatedAt: string;
 }
 
 interface AwsBrokerDependencies {
@@ -110,7 +146,7 @@ interface AwsBrokerDependencies {
   adminValues: readonly string[];
   callbackSigningKey: string;
   repositoryGrants: RepositoryGrantService;
-  githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest">;
+  githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest">;
 }
 
 export function createAwsBrokerHandler(dependencies: AwsBrokerDependencies) {
@@ -121,7 +157,7 @@ export function createAwsBrokerHandler(dependencies: AwsBrokerDependencies) {
     const request = adaptHttpApiEvent(event);
     try {
       const url = new URL(request.path, "https://agentx.invalid");
-      const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|pull-request)$/.exec(
+      const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|pull-request|pull-request-update)$/.exec(
         url.pathname,
       );
       if (request.method === "POST" && callback?.[1] && callback[2] && callback[3]) {
@@ -184,6 +220,14 @@ export function createAwsBrokerHandler(dependencies: AwsBrokerDependencies) {
       const pullRequests = /^\/v1\/workspaces\/([0-9a-f-]+)\/pull-requests$/.exec(url.pathname);
       if (request.method === "POST" && pullRequests?.[1]) {
         return json(await acceptPullRequest(dependencies, identity, pullRequests[1], body), request.requestId, 202);
+      }
+      const pullRequestActions = /^\/v1\/workspaces\/([0-9a-f-]+)\/pull-request-actions$/.exec(url.pathname);
+      if (request.method === "POST" && pullRequestActions?.[1]) {
+        return json(
+          await acceptPullRequestLifecycle(dependencies, identity, pullRequestActions[1], body),
+          request.requestId,
+          202,
+        );
       }
 
       const operation = /^\/v1\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)$/.exec(url.pathname);
@@ -687,6 +731,7 @@ async function acceptPullRequest(
     projectRevision: workspace.projectRevision,
     callbackCapability: issueCapability(dependencies, workspaceId, operationId, fence, true),
     payload: {
+      mode: "create",
       project: project.definition,
       repository: repository.name,
       title: request.title,
@@ -751,6 +796,264 @@ async function acceptPullRequest(
     }
     throw error;
   }
+  return { operation: publicOperation(operation), duplicate: false };
+}
+
+async function acceptPullRequestLifecycle(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  workspaceId: string,
+  value: unknown,
+): Promise<{ operation: Operation; duplicate: boolean }> {
+  const request = PullRequestLifecycleRequestSchema.parse(value);
+  const workspace = await requireOwnedWorkspace(dependencies, identity, workspaceId);
+  await requireMembership(dependencies, identity.ownerKey, workspace.projectName);
+  const requestHash = hashJson({
+    repository: request.repository,
+    pullRequestNumber: request.pullRequestNumber,
+    action: request.action,
+    ...(request.title === undefined ? {} : { title: request.title }),
+    ...(request.body === undefined ? {} : { body: request.body }),
+  });
+  const idempotencyKey = {
+    pk: `IDEMPOTENCY#${identity.ownerKey}#${workspaceId}`,
+    sk: `REQUEST#${request.requestId}`,
+  };
+  const previous = await getItem<{ operationId: string; payloadHash: string }>(dependencies, idempotencyKey);
+  if (previous) {
+    if (previous.payloadHash !== requestHash) {
+      throw agentXError("IDEMPOTENCY_CONFLICT", "request ID was reused with another payload");
+    }
+    return { operation: publicOperation(await requireOperation(dependencies, workspaceId, previous.operationId)), duplicate: true };
+  }
+  const project = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
+  const repository = project.definition.repositories.find((candidate) => candidate.name === request.repository);
+  if (!repository) throw agentXError("CONFIG_INVALID", "repository is not registered for this project");
+  const existingRecord = await getItem<PullRequestRecord>(
+    dependencies,
+    pullRequestKey(workspaceId, request.repository, request.pullRequestNumber),
+  );
+  const remote = await dependencies.githubPullRequests.getPullRequest(repository.url, request.pullRequestNumber);
+  const record = existingRecord ?? await adoptLegacyPullRequest(
+    dependencies,
+    workspaceId,
+    repository.name,
+    repository.url,
+    remote,
+  );
+  if (record.repositoryUrl !== repository.url) throw agentXError("FORBIDDEN", "pull request repository is outside this project revision");
+  if (remote.headBranch !== record.headBranch || remote.baseBranch !== record.baseBranch) {
+    throw agentXError("STALE_FENCE", "pull request branch identity changed outside AgentX");
+  }
+  if (remote.headCommit !== record.expectedHeadCommit) {
+    throw agentXError("STALE_FENCE", "pull request head changed outside AgentX; reconcile it before retrying");
+  }
+
+  const now = new Date().toISOString();
+  const operationId = randomUUID();
+  if (request.action === "edit" || request.action === "close" || request.action === "reopen") {
+    if (request.action === "edit" && remote.state === "merged") {
+      throw agentXError("CONFIG_INVALID", "merged pull request metadata is immutable through AgentX");
+    }
+    if (request.action === "close" && remote.state !== "open") {
+      throw agentXError("CONFIG_INVALID", "only an open pull request can be closed");
+    }
+    if (request.action === "reopen" && remote.state !== "closed") {
+      throw agentXError("CONFIG_INVALID", "only a closed, unmerged pull request can be reopened");
+    }
+    const updated = await dependencies.githubPullRequests.updatePullRequest(record.repositoryUrl, record.number, {
+      ...(request.title === undefined ? {} : { title: request.title }),
+      ...(request.body === undefined ? {} : { body: request.body }),
+      ...(request.action === "close" ? { state: "closed" as const } : {}),
+      ...(request.action === "reopen" ? { state: "open" as const } : {}),
+    });
+    const result: PullRequestLifecycleResult = PullRequestLifecycleResultSchema.parse({
+      action: request.action,
+      repository: record.repository,
+      number: record.number,
+      url: updated.url,
+      state: updated.state,
+      headBranch: record.headBranch,
+      baseBranch: record.baseBranch,
+      commit: updated.headCommit,
+      checks: [],
+      reconciled: false,
+    });
+    const operation = operationRecord({
+      id: operationId, workspaceId, kind: "maintain", requestId: request.requestId,
+      payloadHash: requestHash, status: "SUCCEEDED", fence: workspace.fence,
+      createdAt: now, updatedAt: now, result,
+    });
+    const updatedRecord: PullRequestRecord = {
+      ...record,
+      state: updated.state,
+      expectedHeadCommit: updated.headCommit,
+      title: updated.title,
+      body: updated.body,
+      updatedAt: now,
+    };
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
+      { Put: { TableName: dependencies.tableName, Item: updatedRecord } },
+      { Put: {
+        TableName: dependencies.tableName,
+        Item: { ...idempotencyKey, entityType: "IDEMPOTENCY", operationId, payloadHash: requestHash },
+        ConditionExpression: "attribute_not_exists(pk)",
+      } },
+    ] }));
+    return { operation: publicOperation(operation), duplicate: false };
+  }
+
+  if (request.action === "replace" || request.action === "revert") {
+    if (request.action === "replace" && remote.state !== "open") {
+      throw agentXError("CONFIG_INVALID", "only an open pull request can be replaced");
+    }
+    if (request.action === "revert" && (remote.state !== "merged" || !remote.mergeCommit)) {
+      throw agentXError("CONFIG_INVALID", "only a merged pull request with a merge commit can be reverted");
+    }
+    if (!['READY', 'STOPPED'].includes(workspace.status) || workspace.activeOperationId) {
+      throw agentXError(workspace.status === "BUSY" ? "WORKSPACE_BUSY" : "WORKSPACE_NOT_READY", `workspace is ${workspace.status}`);
+    }
+    const fence = workspace.fence + 1;
+    const title = request.title ?? `${request.action === "replace" ? "Replace" : "Revert"}: ${remote.title}`;
+    const body = request.body ?? (request.action === "replace"
+      ? `Clean replacement for #${record.number}.`
+      : `Reverts merged pull request #${record.number}.`);
+    const headBranch = `agentx/${operationId}`;
+    const operation = operationRecord({
+      id: operationId, workspaceId, kind: "publish", requestId: request.requestId,
+      payloadHash: requestHash, status: "ACCEPTED", fence, createdAt: now, updatedAt: now,
+    });
+    operation.publication = {
+      repository: record.repository,
+      repositoryUrl: record.repositoryUrl,
+      headBranch,
+      baseBranch: record.baseBranch,
+      title,
+      body,
+      mode: request.action,
+      targetPullRequestNumber: record.number,
+      ...(remote.mergeCommit === undefined ? {} : { revertCommit: remote.mergeCommit }),
+    };
+    const invocation: WorkerInvocation = {
+      protocolVersion: 1,
+      kind: "publish",
+      operationId,
+      workspaceId,
+      fence,
+      projectRevision: workspace.projectRevision,
+      callbackCapability: issueCapability(dependencies, workspaceId, operationId, fence, true),
+      payload: {
+        mode: request.action,
+        project: project.definition,
+        repository: record.repository,
+        title,
+        body,
+        headBranch,
+        repositoryGrant: issueRepositoryGrant(
+          dependencies, project, identity.ownerKey, workspaceId, operationId, "push", record.repository,
+        ),
+        targetPullRequestNumber: record.number,
+        ...(remote.mergeCommit === undefined ? {} : { revertCommit: remote.mergeCommit }),
+      },
+    };
+    const outbox = outboxRecord({
+      runtimeArn: workspace.runtimeArn,
+      endpointQualifier: workspace.endpointQualifier,
+      deploymentMode: workspace.deploymentMode,
+      ...(workspace.capacityProviderArn === undefined ? {} : { capacityProviderArn: workspace.capacityProviderArn }),
+    }, workspace, invocation);
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { Update: {
+        TableName: dependencies.tableName,
+        Key: workspaceKey(workspaceId),
+        UpdateExpression: "SET #status = :busy, activeOperationId = :operation, fence = :fence, updatedAt = :now",
+        ConditionExpression: "ownerKey = :owner AND attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped)",
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: {
+          ":owner": identity.ownerKey, ":busy": "BUSY", ":ready": "READY", ":stopped": "STOPPED",
+          ":operation": operationId, ":fence": fence, ":now": now,
+        },
+      } },
+      { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
+      { Put: { TableName: dependencies.tableName, Item: outbox, ConditionExpression: "attribute_not_exists(pk)" } },
+      { Put: {
+        TableName: dependencies.tableName,
+        Item: { ...idempotencyKey, entityType: "IDEMPOTENCY", operationId, payloadHash: requestHash },
+        ConditionExpression: "attribute_not_exists(pk)",
+      } },
+    ] }));
+    return { operation: publicOperation(operation), duplicate: false };
+  }
+
+  if (request.action !== "append" && request.action !== "sync") {
+    throw agentXError("CONFIG_INVALID", "pull request action is not supported");
+  }
+  if (remote.state !== "open") throw agentXError("CONFIG_INVALID", "only an open pull request can be maintained");
+  if (!['READY', 'STOPPED'].includes(workspace.status) || workspace.activeOperationId) {
+    throw agentXError(workspace.status === "BUSY" ? "WORKSPACE_BUSY" : "WORKSPACE_NOT_READY", `workspace is ${workspace.status}`);
+  }
+  const fence = workspace.fence + 1;
+  const operation = operationRecord({
+    id: operationId, workspaceId, kind: "maintain", requestId: request.requestId,
+    payloadHash: requestHash, status: "ACCEPTED", fence, createdAt: now, updatedAt: now,
+  });
+  operation.maintenance = {
+    action: request.action,
+    repository: record.repository,
+    repositoryUrl: record.repositoryUrl,
+    pullRequestNumber: record.number,
+    headBranch: record.headBranch,
+    baseBranch: record.baseBranch,
+    expectedHeadCommit: record.expectedHeadCommit,
+  };
+  const invocation: WorkerInvocation = {
+    protocolVersion: 1,
+    kind: "maintain",
+    operationId,
+    workspaceId,
+    fence,
+    projectRevision: workspace.projectRevision,
+    callbackCapability: issueCapability(dependencies, workspaceId, operationId, fence, true),
+    payload: {
+      action: request.action,
+      project: project.definition,
+      repository: record.repository,
+      pullRequestNumber: record.number,
+      headBranch: record.headBranch,
+      baseBranch: record.baseBranch,
+      expectedHeadCommit: record.expectedHeadCommit,
+      repositoryGrant: issueRepositoryGrant(
+        dependencies, project, identity.ownerKey, workspaceId, operationId, "push", record.repository,
+      ),
+    },
+  };
+  const outbox = outboxRecord({
+    runtimeArn: workspace.runtimeArn,
+    endpointQualifier: workspace.endpointQualifier,
+    deploymentMode: workspace.deploymentMode,
+    ...(workspace.capacityProviderArn === undefined ? {} : { capacityProviderArn: workspace.capacityProviderArn }),
+  }, workspace, invocation);
+  await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+    { Update: {
+      TableName: dependencies.tableName,
+      Key: workspaceKey(workspaceId),
+      UpdateExpression: "SET #status = :busy, activeOperationId = :operation, fence = :fence, updatedAt = :now",
+      ConditionExpression: "ownerKey = :owner AND attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped)",
+      ExpressionAttributeNames: { "#status": "status" },
+      ExpressionAttributeValues: {
+        ":owner": identity.ownerKey, ":busy": "BUSY", ":ready": "READY", ":stopped": "STOPPED",
+        ":operation": operationId, ":fence": fence, ":now": now,
+      },
+    } },
+    { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
+    { Put: { TableName: dependencies.tableName, Item: outbox, ConditionExpression: "attribute_not_exists(pk)" } },
+    { Put: {
+      TableName: dependencies.tableName,
+      Item: { ...idempotencyKey, entityType: "IDEMPOTENCY", operationId, payloadHash: requestHash },
+      ConditionExpression: "attribute_not_exists(pk)",
+    } },
+  ] }));
   return { operation: publicOperation(operation), duplicate: false };
 }
 
@@ -837,7 +1140,7 @@ async function handleCallback(
 ) {
   const token = request.headers["x-agentx-callback-capability"];
   if (!token) throw agentXError("CALLBACK_FORBIDDEN", "callback capability is required");
-  const claims = verifyCapability(dependencies, token, action as "events" | "artifacts" | "result");
+  const claims = verifyCapability(dependencies, token, action as CallbackClaims["actions"][number]);
   if (claims.workspaceId !== workspaceId || claims.operationId !== operationId) {
     throw agentXError("CALLBACK_FORBIDDEN", "callback route is outside the capability scope");
   }
@@ -859,8 +1162,74 @@ async function handleCallback(
     const pullRequest = await reconcilePullRequest(dependencies, operation, body);
     return json(pullRequest, request.requestId);
   }
+  if (action === "pull-request-update") {
+    const pullRequest = await reconcilePullRequestUpdate(dependencies, operation, body);
+    return json(pullRequest, request.requestId);
+  }
   const result = await recordTerminalResult(dependencies, operation, body);
   return json({ operation: publicOperation(result) }, request.requestId);
+}
+
+async function reconcilePullRequestUpdate(
+  dependencies: AwsBrokerDependencies,
+  operation: OperationRecord,
+  value: unknown,
+) {
+  if (operation.kind !== "maintain" || !operation.maintenance) {
+    throw agentXError("CALLBACK_FORBIDDEN", "operation cannot update a pull request");
+  }
+  const input = object(value, "pull request update callback");
+  const expected = operation.maintenance;
+  const allowed = new Set([
+    "repository", "pullRequestNumber", "action", "headBranch", "baseBranch", "previousCommit", "commit",
+  ]);
+  if (Object.keys(input).some((key) => !allowed.has(key))) {
+    throw agentXError("CONFIG_INVALID", "pull request update callback contains unknown fields");
+  }
+  for (const key of ["repository", "pullRequestNumber", "action", "headBranch", "baseBranch"] as const) {
+    if (input[key] !== expected[key]) {
+      throw agentXError("CALLBACK_FORBIDDEN", `pull request update callback ${key} is outside the operation scope`);
+    }
+  }
+  if (input.previousCommit !== expected.expectedHeadCommit) {
+    throw agentXError("STALE_FENCE", "pull request update used a stale expected head");
+  }
+  if (typeof input.commit !== "string" || !/^[a-f0-9]{40,64}$/u.test(input.commit)) {
+    throw agentXError("CONFIG_INVALID", "updated pull request commit is invalid");
+  }
+  const record = await requirePullRequest(
+    dependencies,
+    operation.workspaceId,
+    expected.repository,
+    expected.pullRequestNumber,
+  );
+  if (record.expectedHeadCommit === input.commit) {
+    return { url: record.url, state: record.state, reconciled: true };
+  }
+  if (record.expectedHeadCommit !== expected.expectedHeadCommit) {
+    throw agentXError("STALE_FENCE", "pull request record changed before callback reconciliation");
+  }
+  const remote = await dependencies.githubPullRequests.getPullRequest(record.repositoryUrl, record.number);
+  if (
+    remote.state !== "open" || remote.headBranch !== record.headBranch ||
+    remote.baseBranch !== record.baseBranch || remote.headCommit !== input.commit
+  ) {
+    throw agentXError("STALE_FENCE", "GitHub pull request state does not match the worker update");
+  }
+  await dependencies.documentClient.send(new UpdateCommand({
+    TableName: dependencies.tableName,
+    Key: pullRequestKey(operation.workspaceId, expected.repository, expected.pullRequestNumber),
+    UpdateExpression: "SET expectedHeadCommit = :commit, #state = :state, updatedAt = :now",
+    ConditionExpression: "expectedHeadCommit = :previous",
+    ExpressionAttributeNames: { "#state": "state" },
+    ExpressionAttributeValues: {
+      ":commit": input.commit,
+      ":previous": expected.expectedHeadCommit,
+      ":state": remote.state,
+      ":now": new Date().toISOString(),
+    },
+  }));
+  return { url: remote.url, state: remote.state, reconciled: false };
 }
 
 async function reconcilePullRequest(
@@ -877,7 +1246,8 @@ async function reconcilePullRequest(
   if (Object.keys(input).some((key) => !allowed.has(key))) {
     throw agentXError("CONFIG_INVALID", "pull request callback contains unknown fields");
   }
-  for (const [key, expectedValue] of Object.entries(expected)) {
+  for (const key of ["repository", "repositoryUrl", "headBranch", "baseBranch", "title"] as const) {
+    const expectedValue = expected[key];
     if (input[key] !== expectedValue) {
       throw agentXError("CALLBACK_FORBIDDEN", `pull request callback ${key} is outside the operation scope`);
     }
@@ -888,13 +1258,62 @@ async function reconcilePullRequest(
   if (typeof input.commit !== "string" || !/^[a-f0-9]{40,64}$/.test(input.commit)) {
     throw agentXError("CONFIG_INVALID", "published commit is invalid");
   }
-  return dependencies.githubPullRequests.reconcilePullRequest({
+  const pullRequest = await dependencies.githubPullRequests.reconcilePullRequest({
     repositoryUrl: expected.repositoryUrl,
     headBranch: expected.headBranch,
     baseBranch: expected.baseBranch,
     title: expected.title,
     ...(expected.body === undefined ? {} : { body: expected.body }),
   });
+  const record: PullRequestRecord = {
+    ...pullRequestKey(operation.workspaceId, expected.repository, pullRequest.number),
+    entityType: "PULL_REQUEST",
+    workspaceId: operation.workspaceId,
+    repository: expected.repository,
+    repositoryUrl: expected.repositoryUrl,
+    number: pullRequest.number,
+    url: pullRequest.url,
+    state: "open",
+    headBranch: expected.headBranch,
+    baseBranch: expected.baseBranch,
+    expectedHeadCommit: input.commit,
+    title: expected.title,
+    body: expected.body ?? "",
+    createdByOperationId: operation.id,
+    ...(expected.mode === "replace" && expected.targetPullRequestNumber !== undefined
+      ? { replacementFor: expected.targetPullRequestNumber }
+      : {}),
+    updatedAt: new Date().toISOString(),
+  };
+  if (expected.mode === "replace" && expected.targetPullRequestNumber !== undefined) {
+    const original = await requirePullRequest(
+      dependencies,
+      operation.workspaceId,
+      expected.repository,
+      expected.targetPullRequestNumber,
+    );
+    const closed = await dependencies.githubPullRequests.updatePullRequest(
+      original.repositoryUrl,
+      original.number,
+      { state: "closed" },
+    );
+    const linkedOriginal: PullRequestRecord = {
+      ...original,
+      state: closed.state,
+      replacedBy: pullRequest.number,
+      updatedAt: new Date().toISOString(),
+    };
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { Put: { TableName: dependencies.tableName, Item: record } },
+      { Put: { TableName: dependencies.tableName, Item: linkedOriginal } },
+    ] }));
+  } else {
+    await dependencies.documentClient.send(new PutCommand({
+      TableName: dependencies.tableName,
+      Item: record,
+    }));
+  }
+  return pullRequest;
 }
 
 async function appendEvents(
@@ -1200,6 +1619,55 @@ async function requireOperation(
   return operation;
 }
 
+async function requirePullRequest(
+  dependencies: AwsBrokerDependencies,
+  workspaceId: string,
+  repository: string,
+  number: number,
+): Promise<PullRequestRecord> {
+  const record = await getItem<PullRequestRecord>(dependencies, pullRequestKey(workspaceId, repository, number));
+  if (!record) throw agentXError("NOT_FOUND", "AgentX pull request record not found");
+  return record;
+}
+
+async function adoptLegacyPullRequest(
+  dependencies: AwsBrokerDependencies,
+  workspaceId: string,
+  repository: string,
+  repositoryUrl: string,
+  remote: Awaited<ReturnType<GitHubAppCredentialProvider["getPullRequest"]>>,
+): Promise<PullRequestRecord> {
+  const match = /^agentx\/([0-9a-f-]{36})$/iu.exec(remote.headBranch);
+  if (!match?.[1]) throw agentXError("NOT_FOUND", "pull request is not owned by this AgentX workspace");
+  const operation = await requireOperation(dependencies, workspaceId, match[1]);
+  if (
+    operation.kind !== "publish" || operation.status !== "SUCCEEDED" || !operation.publication ||
+    operation.publication.repository !== repository || operation.publication.repositoryUrl !== repositoryUrl ||
+    operation.publication.headBranch !== remote.headBranch || operation.publication.baseBranch !== remote.baseBranch
+  ) {
+    throw agentXError("NOT_FOUND", "pull request is not backed by a successful AgentX publication");
+  }
+  const record: PullRequestRecord = {
+    ...pullRequestKey(workspaceId, repository, remote.number),
+    entityType: "PULL_REQUEST",
+    workspaceId,
+    repository,
+    repositoryUrl,
+    number: remote.number,
+    url: remote.url,
+    state: remote.state,
+    headBranch: remote.headBranch,
+    baseBranch: remote.baseBranch,
+    expectedHeadCommit: remote.headCommit,
+    title: remote.title,
+    body: remote.body,
+    createdByOperationId: operation.id,
+    updatedAt: new Date().toISOString(),
+  };
+  await dependencies.documentClient.send(new PutCommand({ TableName: dependencies.tableName, Item: record }));
+  return record;
+}
+
 async function requireMembership(
   dependencies: AwsBrokerDependencies,
   ownerKey: string,
@@ -1305,6 +1773,13 @@ function operationKey(workspaceId: string, operationId: string) {
   return { pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}` };
 }
 
+function pullRequestKey(workspaceId: string, repository: string, number: number) {
+  return {
+    pk: `WORKSPACE#${workspaceId}`,
+    sk: `PULL_REQUEST#${repository}#${String(number).padStart(12, "0")}`,
+  };
+}
+
 function issueRepositoryGrant(
   dependencies: AwsBrokerDependencies,
   project: RegisteredProjectRecord,
@@ -1364,7 +1839,12 @@ function issueCapability(
     workspaceId,
     operationId,
     fence,
-    actions: ["artifacts", "events", "result", ...(allowPullRequest ? ["pull-request" as const] : [])],
+    actions: [
+      "artifacts",
+      "events",
+      "result",
+      ...(allowPullRequest ? ["pull-request" as const, "pull-request-update" as const] : []),
+    ],
     expiresAt: Math.floor(Date.now() / 1_000) + 32_400,
   };
   const body = Buffer.from(JSON.stringify(claims)).toString("base64url");

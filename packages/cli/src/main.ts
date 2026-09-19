@@ -226,6 +226,82 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       services.stdout.write(formatSuccess(result, globals.json));
     });
 
+  const runPullRequestLifecycle = async (
+    action: "append" | "sync" | "edit" | "close" | "reopen" | "replace" | "revert",
+    options: { repository: string; number: number; title?: string; body?: string },
+    command: Command,
+  ) => {
+    const globals = globalOptions(command);
+    const authenticated = await authenticateProject(globals, requireProject(globals), services.tokenStore);
+    const workspace = await connectToProject(
+      authenticated.definition,
+      authenticated.accessToken,
+      services.fetchImplementation,
+    );
+    const api = new ControlPlaneApi(
+      authenticated.definition.controlPlaneUrl,
+      authenticated.accessToken,
+      workspace.id,
+      services.fetchImplementation,
+    );
+    const accepted = await api.managePullRequest({
+      workspaceId: workspace.id,
+      requestId: randomUUID(),
+      repository: options.repository,
+      pullRequestNumber: options.number,
+      action,
+      ...(options.title === undefined ? {} : { title: options.title }),
+      ...(options.body === undefined ? {} : { body: options.body }),
+    });
+    const operationId = acceptedOperationId(accepted);
+    const result = await api.pullRequestResult(
+      { workspaceId: workspace.id, operationId },
+      globals.json ? {} : {
+        onProgress: (progress) => services.stdout.write(`${progress.message}\n`),
+      },
+    );
+    services.stdout.write(formatSuccess(result, globals.json));
+  };
+
+  pullRequest
+    .command("update")
+    .description("edit the title or body of an AgentX pull request")
+    .requiredOption("--repository <name>", "registered repository name")
+    .requiredOption("--number <number>", "pull request number", parsePositiveInteger)
+    .option("--title <title>", "new pull request title")
+    .option("--body <markdown>", "new pull request body")
+    .action((options: { repository: string; number: number; title?: string; body?: string }, command: Command) =>
+      runPullRequestLifecycle("edit", options, command));
+
+  for (const action of ["append", "sync", "close", "reopen"] as const) {
+    pullRequest
+      .command(action)
+      .description({
+        append: "validate and append workspace changes to an open AgentX pull request without force push",
+        sync: "merge the latest base into an open AgentX pull request without rewriting history",
+        close: "close an open AgentX pull request",
+        reopen: "reopen a closed, unmerged AgentX pull request",
+      }[action])
+      .requiredOption("--repository <name>", "registered repository name")
+      .requiredOption("--number <number>", "pull request number", parsePositiveInteger)
+      .action((options: { repository: string; number: number }, command: Command) =>
+        runPullRequestLifecycle(action, options, command));
+  }
+
+  for (const action of ["replace", "revert"] as const) {
+    pullRequest
+      .command(action)
+      .description(action === "replace"
+        ? "create a clean replacement before closing the original pull request"
+        : "create a reviewed revert pull request for a merged AgentX pull request")
+      .requiredOption("--repository <name>", "registered repository name")
+      .requiredOption("--number <number>", "pull request number", parsePositiveInteger)
+      .option("--title <title>", "new pull request title")
+      .option("--body <markdown>", "new pull request body")
+      .action((options: { repository: string; number: number; title?: string; body?: string }, command: Command) =>
+        runPullRequestLifecycle(action, options, command));
+  }
+
   program
     .command("cancel")
     .description("request cooperative cancellation of a remote operation")
@@ -451,6 +527,14 @@ function parsePort(value: string): number {
     throw agentXError("CONFIG_INVALID", "callback port must be from 1 through 65535");
   }
   return port;
+}
+
+function parsePositiveInteger(value: string): number {
+  const parsed = Number.parseInt(value, 10);
+  if (!/^[1-9][0-9]*$/u.test(value) || !Number.isSafeInteger(parsed)) {
+    throw agentXError("CONFIG_INVALID", "value must be a positive integer");
+  }
+  return parsed;
 }
 
 function globalOptions(command: Command): GlobalOptions {

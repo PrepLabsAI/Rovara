@@ -4,9 +4,11 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import {
   PullRequestResultSchema,
+  PullRequestLifecycleResultSchema,
   agentXError,
   type PublicationCheckResult,
   type PullRequestResult,
+  type PullRequestLifecycleResult,
   type WorkerInvocation,
 } from "@agentx/contracts";
 import { gitSafeEnvironment } from "./git.js";
@@ -18,6 +20,7 @@ import { runProjectCommand, type PreparationManifest } from "./prepare.js";
 const execFileAsync = promisify(execFile);
 const MAX_GIT_OUTPUT = 1_048_576;
 type PublishInvocation = Extract<WorkerInvocation, { kind: "publish" }>;
+type CheckedInvocation = Extract<WorkerInvocation, { kind: "publish" | "maintain" }>;
 
 export interface PublishWorkspaceOptions {
   rootPath: string;
@@ -26,8 +29,11 @@ export interface PublishWorkspaceOptions {
   pullRequestSink: PullRequestSink;
 }
 
-export async function publishWorkspace(options: PublishWorkspaceOptions): Promise<PullRequestResult> {
+export async function publishWorkspace(
+  options: PublishWorkspaceOptions,
+): Promise<PullRequestResult | PullRequestLifecycleResult> {
   const { invocation } = options;
+  const mode = invocation.payload.mode ?? "create";
   const rootPath = await realpath(resolve(options.rootPath));
   const manifest = await loadCompleteManifest(rootPath, invocation);
   const repository = invocation.payload.project.repositories.find(
@@ -58,36 +64,41 @@ export async function publishWorkspace(options: PublishWorkspaceOptions): Promis
   const retryingCommittedPublication =
     currentBranch.trim() === invocation.payload.headBranch && status.trim().length === 0;
   const hasCommittedChanges = currentCommit !== manifestRepository.resolvedCommit;
-  if (!retryingCommittedPublication && status.trim().length === 0 && !hasCommittedChanges) {
+  if (mode !== "revert" && !retryingCommittedPublication && status.trim().length === 0 && !hasCommittedChanges) {
     throw agentXError("CONFIG_INVALID", "repository has no changes to publish");
   }
 
-  const checks = await runReadinessChecks(rootPath, invocation);
+  const credential = await options.credentialProvider(repository);
+  let commit: string;
+  if (retryingCommittedPublication) {
+    commit = (await git(repositoryPath, ["rev-parse", "HEAD"])).trim();
+  } else if (mode === "revert") {
+    if (!invocation.payload.revertCommit) {
+      throw agentXError("CONFIG_INVALID", "revert publication is missing the merged commit");
+    }
+    commit = await prepareRevertCommit({
+      repositoryPath,
+      baseBranch: repository.defaultBranch,
+      headBranch: invocation.payload.headBranch,
+      revertCommit: invocation.payload.revertCommit,
+      credential,
+    });
+  } else {
+    commit = await prepareCleanPublicationCommit({
+      repositoryPath,
+      baseBranch: repository.defaultBranch,
+      preparationCommit: manifestRepository.resolvedCommit,
+      headBranch: invocation.payload.headBranch,
+      title: invocation.payload.title,
+      credential,
+    });
+  }
+
+  const checks: PublicationCheckResult[] = await runReadinessChecks(rootPath, invocation);
   if (checks.some((check) => check.outcome !== "passed")) {
     throw agentXError("CONFIG_INVALID", "one or more registered readiness checks failed");
   }
 
-  let commit: string;
-  if (retryingCommittedPublication) {
-    commit = (await git(repositoryPath, ["rev-parse", "HEAD"])).trim();
-  } else {
-    await git(repositoryPath, ["checkout", "-B", invocation.payload.headBranch]);
-    await git(repositoryPath, ["add", "--all"]);
-    await git(repositoryPath, [
-      "-c",
-      "user.name=AgentX",
-      "-c",
-      "user.email=agentx@noreply.local",
-      "commit",
-      "--no-gpg-sign",
-      ...(status.trim().length === 0 ? ["--allow-empty"] : []),
-      "-m",
-      `AgentX: ${invocation.payload.title}`,
-    ]);
-    commit = (await git(repositoryPath, ["rev-parse", "HEAD"])).trim();
-  }
-
-  const credential = await options.credentialProvider(repository);
   try {
     await runGitWithCredential({
       directory: repositoryPath,
@@ -117,7 +128,7 @@ export async function publishWorkspace(options: PublishWorkspaceOptions): Promis
     title: invocation.payload.title,
     ...(invocation.payload.body === undefined ? {} : { body: invocation.payload.body }),
   });
-  return PullRequestResultSchema.parse({
+  const baseResult = {
     repository: repository.name,
     number: pullRequest.number,
     url: pullRequest.url,
@@ -126,7 +137,170 @@ export async function publishWorkspace(options: PublishWorkspaceOptions): Promis
     commit,
     checks,
     reconciled: pullRequest.reconciled,
+  };
+  if (mode === "create") return PullRequestResultSchema.parse(baseResult);
+  return PullRequestLifecycleResultSchema.parse({
+    ...baseResult,
+    action: mode,
+    state: "open",
+    ...(mode === "replace" && invocation.payload.targetPullRequestNumber !== undefined
+      ? { replacementFor: invocation.payload.targetPullRequestNumber }
+      : {}),
   });
+}
+
+async function prepareRevertCommit(input: {
+  repositoryPath: string;
+  baseBranch: string;
+  headBranch: string;
+  revertCommit: string;
+  credential: Awaited<ReturnType<RepositoryCredentialProvider>>;
+}): Promise<string> {
+  try {
+    await runGitWithCredential({
+      directory: input.repositoryPath,
+      args: [
+        "-C", input.repositoryPath, "fetch", "--no-tags", "origin",
+        `refs/heads/${input.baseBranch}:refs/remotes/origin/${input.baseBranch}`,
+      ],
+      credential: input.credential,
+      timeout: 300_000,
+      maxBuffer: MAX_GIT_OUTPUT,
+    });
+  } catch (error) {
+    throw agentXError("RUNTIME_UNAVAILABLE", sanitizeGitError(error instanceof Error ? error.message : "Git fetch failed"));
+  }
+  const baseCommit = (await git(input.repositoryPath, ["rev-parse", `refs/remotes/origin/${input.baseBranch}^{commit}`])).trim();
+  if (!(await isAncestor(input.repositoryPath, input.revertCommit, baseCommit))) {
+    throw agentXError("STALE_FENCE", "merged pull request commit is not reachable from the latest base");
+  }
+  await git(input.repositoryPath, ["checkout", "--force", "-B", input.headBranch, baseCommit]);
+  const parents = (await git(input.repositoryPath, ["rev-list", "--parents", "-n", "1", input.revertCommit]))
+    .trim().split(/\s+/u);
+  if (parents.length < 2) throw agentXError("CONFIG_INVALID", "cannot revert a root commit");
+  try {
+    await git(input.repositoryPath, [
+      "-c", "user.name=AgentX", "-c", "user.email=agentx@noreply.local",
+      "revert", "--no-edit", ...(parents.length > 2 ? ["-m", "1"] : []), input.revertCommit,
+    ]);
+  } catch {
+    await git(input.repositoryPath, ["revert", "--abort"]).catch(() => undefined);
+    await git(input.repositoryPath, ["reset", "--hard", baseCommit]);
+    throw agentXError("CONFIG_INVALID", "merged pull request cannot be reverted cleanly");
+  }
+  const commit = (await git(input.repositoryPath, ["rev-parse", "HEAD"])).trim();
+  if (commit === baseCommit) throw agentXError("CONFIG_INVALID", "revert produced no change");
+  return commit;
+}
+
+async function prepareCleanPublicationCommit(input: {
+  repositoryPath: string;
+  baseBranch: string;
+  preparationCommit: string;
+  headBranch: string;
+  title: string;
+  credential: Awaited<ReturnType<RepositoryCredentialProvider>>;
+}): Promise<string> {
+  await git(input.repositoryPath, ["add", "--all"]);
+  const workspaceTree = (await git(input.repositoryPath, ["write-tree"])).trim();
+  const workspaceCommit = (await git(input.repositoryPath, [
+    "-c",
+    "user.name=AgentX",
+    "-c",
+    "user.email=agentx@noreply.local",
+    "commit-tree",
+    workspaceTree,
+    "-p",
+    input.preparationCommit,
+    "-m",
+    "AgentX workspace snapshot",
+  ])).trim();
+
+  try {
+    await runGitWithCredential({
+      directory: input.repositoryPath,
+      args: [
+        "-C",
+        input.repositoryPath,
+        "fetch",
+        "--no-tags",
+        "origin",
+        `refs/heads/${input.baseBranch}:refs/remotes/origin/${input.baseBranch}`,
+      ],
+      credential: input.credential,
+      timeout: 300_000,
+      maxBuffer: MAX_GIT_OUTPUT,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Git fetch failed";
+    throw agentXError("RUNTIME_UNAVAILABLE", sanitizeGitError(message));
+  }
+
+  const baseCommit = (await git(input.repositoryPath, [
+    "rev-parse",
+    `refs/remotes/origin/${input.baseBranch}^{commit}`,
+  ])).trim();
+  const mergedTree = await mergeWorkspaceTree(input.repositoryPath, baseCommit, workspaceCommit);
+  const baseTree = (await git(input.repositoryPath, ["rev-parse", `${baseCommit}^{tree}`])).trim();
+  if (mergedTree === baseTree) {
+    throw agentXError("CONFIG_INVALID", "repository has no changes to publish against the latest base");
+  }
+
+  const commit = (await git(input.repositoryPath, [
+    "-c",
+    "user.name=AgentX",
+    "-c",
+    "user.email=agentx@noreply.local",
+    "commit-tree",
+    mergedTree,
+    "-p",
+    baseCommit,
+    "-m",
+    `AgentX: ${input.title}`,
+  ])).trim();
+  await git(input.repositoryPath, ["checkout", "--force", "-B", input.headBranch, commit]);
+  return commit;
+}
+
+async function mergeWorkspaceTree(
+  repositoryPath: string,
+  baseCommit: string,
+  workspaceCommit: string,
+): Promise<string> {
+  try {
+    const result = await execFileAsync(
+      "git",
+      ["-C", repositoryPath, "merge-tree", "--write-tree", baseCommit, workspaceCommit],
+      {
+        timeout: 120_000,
+        maxBuffer: MAX_GIT_OUTPUT,
+        encoding: "utf8",
+        env: gitSafeEnvironment(repositoryPath),
+      },
+    );
+    const tree = result.stdout.trim().split(/\s/u)[0];
+    if (!tree || !/^[a-f0-9]{40,64}$/u.test(tree)) {
+      throw agentXError("CONFIG_INVALID", "Git did not produce a merged workspace tree");
+    }
+    return tree;
+  } catch (error) {
+    if (error instanceof Error && error.name === "AgentXError") throw error;
+    throw agentXError("CONFIG_INVALID", "workspace changes conflict with the latest default branch");
+  }
+}
+
+async function isAncestor(repositoryPath: string, ancestor: string, descendant: string): Promise<boolean> {
+  try {
+    await execFileAsync("git", ["-C", repositoryPath, "merge-base", "--is-ancestor", ancestor, descendant], {
+      timeout: 120_000,
+      maxBuffer: MAX_GIT_OUTPUT,
+      env: gitSafeEnvironment(repositoryPath),
+    });
+    return true;
+  } catch (error) {
+    if ((error as { code?: unknown }).code === 1) return false;
+    throw agentXError("CONFIG_INVALID", "Git could not validate merged commit ancestry");
+  }
 }
 
 async function loadCompleteManifest(
@@ -151,9 +325,9 @@ async function loadCompleteManifest(
   return manifest;
 }
 
-async function runReadinessChecks(
+export async function runReadinessChecks(
   rootPath: string,
-  invocation: PublishInvocation,
+  invocation: CheckedInvocation,
 ): Promise<PublicationCheckResult[]> {
   const results: PublicationCheckResult[] = [];
   for (const [index, command] of invocation.payload.project.readiness.entries()) {

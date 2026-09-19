@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { gitSafeEnvironment } from "../../packages/worker/src/git.js";
-import { assertCredentialFreeRemote, runGitWithCredential } from "../../packages/worker/src/git-auth.js";
+import {
+  assertCredentialFreeRemote,
+  assertNonForceGitArguments,
+  runGitWithCredential,
+} from "../../packages/worker/src/git-auth.js";
 
 describe("AgentCore Git mount safety", () => {
   it("scopes safe.directory to the repository being operated on", () => {
@@ -35,5 +39,24 @@ describe("credential-safe Git execution", () => {
       args: ["--version"],
       credential: { username: "x-access-token" },
     })).rejects.toThrow(/both username and password/);
+  });
+
+  it("rejects every force-like push argument and refspec", () => {
+    for (const args of [
+      ["push", "--force", "origin", "HEAD:refs/heads/agentx/example"],
+      ["push", "--force-with-lease", "origin", "HEAD:refs/heads/agentx/example"],
+      ["push", "-f", "origin", "HEAD:refs/heads/agentx/example"],
+      ["push", "origin", "+HEAD:refs/heads/agentx/example"],
+      ["push", "origin", "HEAD:+refs/heads/agentx/example"],
+      ["-C", "/mnt/workspace/repo/example", "push", "--force", "origin", "HEAD:refs/heads/agentx/example"],
+    ]) {
+      expect(() => assertNonForceGitArguments(args)).toThrow(/force push/i);
+    }
+    expect(() => assertNonForceGitArguments([
+      "push",
+      "--porcelain",
+      "origin",
+      "HEAD:refs/heads/agentx/example",
+    ])).not.toThrow();
   });
 });

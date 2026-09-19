@@ -5,6 +5,7 @@ import { createWorkerCallbackSinks } from "./callback-client.js";
 import { createRepositoryCredentialProvider } from "./repository-credentials.js";
 import { runTaskInvocation } from "./run-task.js";
 import { publishWorkspace } from "./publish.js";
+import { maintainPullRequest } from "./maintain-pull-request.js";
 import { WorkerCancellationController } from "./cancel.js";
 import { createWorkerServerState, startWorkerServer } from "./server.js";
 
@@ -56,6 +57,16 @@ const state = createWorkerServerState(
           invocation,
           credentialProvider: createRepositoryCredentialProvider({ controlPlaneUrl, invocation }),
           pullRequestSink: callbacks.pullRequestSink,
+        });
+      }
+      if (invocation.kind === "maintain") {
+        const controlPlaneUrl = requiredEnvironment("AGENTX_CONTROL_PLANE_URL");
+        const callbacks = createWorkerCallbackSinks({ controlPlaneUrl, invocation });
+        return maintainPullRequest({
+          rootPath,
+          invocation,
+          credentialProvider: createRepositoryCredentialProvider({ controlPlaneUrl, invocation }),
+          pullRequestUpdateSink: callbacks.pullRequestUpdateSink,
         });
       }
       if (invocation.kind === "cancel") {

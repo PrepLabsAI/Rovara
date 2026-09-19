@@ -26,6 +26,24 @@ export interface GitHubPullRequestResult {
   reconciled: boolean;
 }
 
+export interface GitHubPullRequestDetails {
+  number: number;
+  url: string;
+  state: "open" | "closed" | "merged";
+  headBranch: string;
+  baseBranch: string;
+  headCommit: string;
+  mergeCommit?: string;
+  title: string;
+  body: string;
+}
+
+export interface GitHubPullRequestUpdate {
+  title?: string;
+  body?: string;
+  state?: "open" | "closed";
+}
+
 export class GitHubAppCredentialProvider {
   private readonly fetchImplementation: typeof fetch;
   private readonly now: () => number;
@@ -93,6 +111,66 @@ export class GitHubAppCredentialProvider {
     }
   }
 
+  async getPullRequest(repositoryUrl: string, number: number): Promise<GitHubPullRequestDetails> {
+    const repository = parseGitHubRepository(repositoryUrl, this.options.account);
+    const token = await this.createInstallationToken(repository.name, {
+      contents: "read",
+      pull_requests: "read",
+    });
+    return this.getPullRequestWithToken(repository.name, number, token);
+  }
+
+  async updatePullRequest(
+    repositoryUrl: string,
+    number: number,
+    update: GitHubPullRequestUpdate,
+  ): Promise<GitHubPullRequestDetails> {
+    if (update.title === undefined && update.body === undefined && update.state === undefined) {
+      throw agentXError("CONFIG_INVALID", "pull request update is empty");
+    }
+    const repository = parseGitHubRepository(repositoryUrl, this.options.account);
+    const token = await this.createInstallationToken(repository.name, {
+      contents: "read",
+      pull_requests: "write",
+    });
+    try {
+      const response = await this.fetchImplementation(
+        pullRequestUrl(this.options.account, repository.name, number),
+        {
+          method: "PATCH",
+          headers: githubHeaders(token),
+          body: JSON.stringify(update),
+        },
+      );
+      if (response.ok) {
+        return parsePullRequestDetails(await response.json(), this.options.account, repository.name);
+      }
+      const reconciled = await this.getPullRequestWithToken(repository.name, number, token);
+      if (matchesUpdate(reconciled, update)) return reconciled;
+      throw agentXError("RUNTIME_UNAVAILABLE", `GitHub pull request update failed with HTTP ${response.status}`);
+    } catch (error) {
+      if (isAgentXError(error)) throw error;
+      const reconciled = await this.getPullRequestWithToken(repository.name, number, token).catch(() => undefined);
+      if (reconciled && matchesUpdate(reconciled, update)) return reconciled;
+      throw agentXError("RUNTIME_UNAVAILABLE", "GitHub pull request update outcome is unknown");
+    }
+  }
+
+  private async getPullRequestWithToken(
+    repositoryName: string,
+    number: number,
+    token: string,
+  ): Promise<GitHubPullRequestDetails> {
+    const response = await this.fetchImplementation(
+      pullRequestUrl(this.options.account, repositoryName, number),
+      { headers: githubHeaders(token) },
+    );
+    if (!response.ok) {
+      throw agentXError("RUNTIME_UNAVAILABLE", `GitHub pull request lookup failed with HTTP ${response.status}`);
+    }
+    return parsePullRequestDetails(await response.json(), this.options.account, repositoryName);
+  }
+
   private async createInstallationToken(
     repositoryName: string,
     permissions: Record<string, "read" | "write">,
@@ -156,6 +234,17 @@ export class GitHubAppCredentialProvider {
   }
 }
 
+function pullRequestUrl(account: string, repositoryName: string, number: number): string {
+  if (!Number.isInteger(number) || number < 1) throw agentXError("CONFIG_INVALID", "pull request number is invalid");
+  return `https://api.github.com/repos/${encodeURIComponent(account)}/${encodeURIComponent(repositoryName)}/pulls/${number}`;
+}
+
+function matchesUpdate(details: GitHubPullRequestDetails, update: GitHubPullRequestUpdate): boolean {
+  return (update.title === undefined || details.title === update.title) &&
+    (update.body === undefined || details.body === update.body) &&
+    (update.state === undefined || details.state === update.state);
+}
+
 function githubHeaders(token: string): Record<string, string> {
   return {
     accept: "application/vnd.github+json",
@@ -183,6 +272,42 @@ function parsePullRequest(
     throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned a non-canonical pull request URL");
   }
   return { number: candidate.number as number, url: candidate.html_url };
+}
+
+function parsePullRequestDetails(
+  value: unknown,
+  account: string,
+  repositoryName: string,
+): GitHubPullRequestDetails {
+  const basic = parsePullRequest(value, account, repositoryName);
+  const candidate = value as Record<string, unknown>;
+  const head = candidate.head;
+  const base = candidate.base;
+  if (
+    (candidate.state !== "open" && candidate.state !== "closed") ||
+    typeof candidate.merged !== "boolean" ||
+    !head || typeof head !== "object" || Array.isArray(head) ||
+    !base || typeof base !== "object" || Array.isArray(base) ||
+    typeof (head as Record<string, unknown>).ref !== "string" ||
+    typeof (head as Record<string, unknown>).sha !== "string" ||
+    !/^[a-f0-9]{40,64}$/u.test((head as Record<string, unknown>).sha as string) ||
+    typeof (base as Record<string, unknown>).ref !== "string" ||
+    typeof candidate.title !== "string" ||
+    (candidate.body !== null && typeof candidate.body !== "string") ||
+    (candidate.merge_commit_sha !== null && typeof candidate.merge_commit_sha !== "string")
+  ) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid pull request response");
+  }
+  return {
+    ...basic,
+    state: candidate.merged ? "merged" : candidate.state,
+    headBranch: (head as Record<string, unknown>).ref as string,
+    baseBranch: (base as Record<string, unknown>).ref as string,
+    headCommit: (head as Record<string, unknown>).sha as string,
+    ...(typeof candidate.merge_commit_sha === "string" ? { mergeCommit: candidate.merge_commit_sha } : {}),
+    title: candidate.title,
+    body: candidate.body ?? "",
+  };
 }
 
 export function createGitHubAppJwt(appId: string, privateKey: string, nowMilliseconds: number): string {

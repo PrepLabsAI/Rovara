@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -16,6 +16,72 @@ afterEach(async () => {
 });
 
 describe("pull request publication", () => {
+  it("replays the workspace tree onto the latest base without inheriting stale publication commits", async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.checkout, "ABOUT.md"), "old unpublished change\n", "utf8");
+    await git(fixture.checkout, ["add", "ABOUT.md"]);
+    await git(fixture.checkout, [
+      "-c", "user.name=AgentX", "-c", "user.email=agentx@noreply.local",
+      "commit", "-m", "AgentX: stale publication",
+    ]);
+    const staleCommit = (await git(fixture.checkout, ["rev-parse", "HEAD"])).trim();
+    await git(fixture.checkout, [
+      "-c", "user.name=AgentX", "-c", "user.email=agentx@noreply.local",
+      "commit", "--allow-empty", "-m", "AgentX: stale retry",
+    ]);
+
+    await writeFile(join(fixture.seed, "UPSTREAM.md"), "upstream\n", "utf8");
+    await git(fixture.seed, ["add", "UPSTREAM.md"]);
+    await git(fixture.seed, [
+      "-c", "user.name=Upstream", "-c", "user.email=upstream@example.test",
+      "commit", "-m", "upstream change",
+    ]);
+    await git(fixture.seed, ["push", "origin", "main"]);
+    const latestBase = (await git(fixture.seed, ["rev-parse", "HEAD"])).trim();
+    await writeFile(join(fixture.checkout, "WORK.md"), "new work\n", "utf8");
+
+    const result = await publishWorkspace({
+      rootPath: fixture.root,
+      invocation: fixture.invocation,
+      credentialProvider: async () => ({}),
+      pullRequestSink: async () => ({
+        number: 13,
+        url: "https://github.com/example/demo/pull/13",
+        reconciled: false,
+      }),
+    });
+
+    const parents = (await git(fixture.checkout, ["rev-list", "--parents", "-n", "1", result.commit]))
+      .trim().split(" ");
+    expect(parents).toEqual([result.commit, latestBase]);
+    expect(await git(fixture.checkout, ["rev-list", "--count", `origin/main..${result.commit}`])).toBe("1\n");
+    await expect(git(fixture.checkout, ["merge-base", "--is-ancestor", staleCommit, result.commit])).rejects.toThrow();
+    expect(await readFile(join(fixture.checkout, "UPSTREAM.md"), "utf8")).toBe("upstream\n");
+    expect(await readFile(join(fixture.checkout, "WORK.md"), "utf8")).toBe("new work\n");
+  });
+
+  it("rejects workspace changes that conflict with the latest base before push", async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.checkout, "README.md"), "workspace\n", "utf8");
+    await writeFile(join(fixture.seed, "README.md"), "upstream\n", "utf8");
+    await git(fixture.seed, ["add", "README.md"]);
+    await git(fixture.seed, [
+      "-c", "user.name=Upstream", "-c", "user.email=upstream@example.test",
+      "commit", "-m", "conflicting upstream change",
+    ]);
+    await git(fixture.seed, ["push", "origin", "main"]);
+    const pullRequestSink = vi.fn();
+    await expect(publishWorkspace({
+      rootPath: fixture.root,
+      invocation: fixture.invocation,
+      credentialProvider: async () => ({}),
+      pullRequestSink,
+    })).rejects.toThrow(/conflict with the latest default branch/i);
+    expect(pullRequestSink).not.toHaveBeenCalled();
+    await expect(git(fixture.bare, ["rev-parse", `refs/heads/${fixture.invocation.payload.headBranch}`]))
+      .rejects.toThrow();
+  });
+
   it("runs registered checks, creates a deterministic commit, pushes without credentials, and requests a PR", async () => {
     const fixture = await createFixture();
     await writeFile(join(fixture.checkout, "README.md"), "changed\n", "utf8");
@@ -80,7 +146,7 @@ describe("pull request publication", () => {
       credentialProvider: failedPushCredential,
       pullRequestSink: failedPullRequest,
     })).rejects.toThrow(/readiness checks failed/i);
-    expect(failedPushCredential).not.toHaveBeenCalled();
+    expect(failedPushCredential).toHaveBeenCalledOnce();
     expect(failedPullRequest).not.toHaveBeenCalled();
 
     const timedOut = await createFixture("timeout");
@@ -91,7 +157,7 @@ describe("pull request publication", () => {
       credentialProvider: failedPushCredential,
       pullRequestSink: failedPullRequest,
     })).rejects.toThrow(/readiness checks failed/i);
-    expect(failedPushCredential).not.toHaveBeenCalled();
+    expect(failedPushCredential).toHaveBeenCalledTimes(2);
     expect(failedPullRequest).not.toHaveBeenCalled();
   });
 
@@ -132,6 +198,104 @@ describe("pull request publication", () => {
     })).rejects.toThrow(/not registered/i);
     expect(credentialProvider).not.toHaveBeenCalled();
     expect(pullRequestSink).not.toHaveBeenCalled();
+  });
+
+  it("creates a clean replacement result without rewriting the original branch", async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.checkout, "README.md"), "clean replacement\n", "utf8");
+    const originalBranch = `agentx/${crypto.randomUUID()}`;
+    await git(fixture.bare, ["branch", originalBranch, "main"]);
+    const originalHead = (await git(fixture.bare, ["rev-parse", originalBranch])).trim();
+    const invocation = {
+      ...fixture.invocation,
+      payload: { ...fixture.invocation.payload, mode: "replace", targetPullRequestNumber: 6 },
+    } as const satisfies Extract<WorkerInvocation, { kind: "publish" }>;
+    const result = await publishWorkspace({
+      rootPath: fixture.root,
+      invocation,
+      credentialProvider: async () => ({}),
+      pullRequestSink: async () => ({
+        number: 8,
+        url: "https://github.com/example/demo/pull/8",
+        reconciled: false,
+      }),
+    });
+    expect(result).toMatchObject({ action: "replace", number: 8, replacementFor: 6 });
+    expect(await git(fixture.bare, ["rev-parse", originalBranch])).toBe(`${originalHead}\n`);
+  });
+
+  it.each([false, true])("creates a reviewed revert for a %s-parent merged change", async (mergeCommit) => {
+    const fixture = await createFixture();
+    let commitToRevert: string;
+    if (mergeCommit) {
+      await git(fixture.seed, ["checkout", "-b", "feature"]);
+      await writeFile(join(fixture.seed, "MERGED.md"), "merged feature\n", "utf8");
+      await git(fixture.seed, ["add", "MERGED.md"]);
+      await git(fixture.seed, ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "feature"]);
+      await git(fixture.seed, ["checkout", "main"]);
+      await git(fixture.seed, ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "merge", "--no-ff", "feature", "-m", "merge feature"]);
+      commitToRevert = (await git(fixture.seed, ["rev-parse", "HEAD"])).trim();
+    } else {
+      await writeFile(join(fixture.seed, "MERGED.md"), "squashed feature\n", "utf8");
+      await git(fixture.seed, ["add", "MERGED.md"]);
+      await git(fixture.seed, ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "squashed feature"]);
+      commitToRevert = (await git(fixture.seed, ["rev-parse", "HEAD"])).trim();
+    }
+    await git(fixture.seed, ["push", "origin", "main"]);
+    const invocation = {
+      ...fixture.invocation,
+      payload: {
+        ...fixture.invocation.payload,
+        mode: "revert",
+        targetPullRequestNumber: 5,
+        revertCommit: commitToRevert,
+      },
+    } as const satisfies Extract<WorkerInvocation, { kind: "publish" }>;
+    const result = await publishWorkspace({
+      rootPath: fixture.root,
+      invocation,
+      credentialProvider: async () => ({}),
+      pullRequestSink: async () => ({
+        number: 9,
+        url: "https://github.com/example/demo/pull/9",
+        reconciled: false,
+      }),
+    });
+    expect(result).toMatchObject({ action: "revert", number: 9 });
+    await expect(readFile(join(fixture.checkout, "MERGED.md"), "utf8")).rejects.toThrow();
+  });
+
+  it("creates no remote branch when a merged revert conflicts with later base changes", async () => {
+    const fixture = await createFixture();
+    await git(fixture.seed, ["checkout", "-b", "conflicting-feature"]);
+    await writeFile(join(fixture.seed, "README.md"), "feature version\n", "utf8");
+    await git(fixture.seed, ["add", "README.md"]);
+    await git(fixture.seed, ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "feature version"]);
+    await git(fixture.seed, ["checkout", "main"]);
+    await git(fixture.seed, ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "merge", "--no-ff", "conflicting-feature", "-m", "merge feature"]);
+    const mergeCommit = (await git(fixture.seed, ["rev-parse", "HEAD"])).trim();
+    await writeFile(join(fixture.seed, "README.md"), "later base version\n", "utf8");
+    await git(fixture.seed, ["add", "README.md"]);
+    await git(fixture.seed, ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "later base edit"]);
+    await git(fixture.seed, ["push", "origin", "main"]);
+    const invocation = {
+      ...fixture.invocation,
+      payload: {
+        ...fixture.invocation.payload,
+        mode: "revert",
+        targetPullRequestNumber: 5,
+        revertCommit: mergeCommit,
+      },
+    } as const satisfies Extract<WorkerInvocation, { kind: "publish" }>;
+    const sink = vi.fn();
+    await expect(publishWorkspace({
+      rootPath: fixture.root,
+      invocation,
+      credentialProvider: async () => ({}),
+      pullRequestSink: sink,
+    })).rejects.toThrow(/cannot be reverted cleanly/i);
+    expect(sink).not.toHaveBeenCalled();
+    await expect(git(fixture.bare, ["rev-parse", `refs/heads/${invocation.payload.headBranch}`])).rejects.toThrow();
   });
 });
 
@@ -220,7 +384,7 @@ async function createFixture(checkPasses: boolean | "timeout" = true) {
       repositoryGrant: "push-grant",
     },
   } as const satisfies Extract<WorkerInvocation, { kind: "publish" }>;
-  return { root, bare, checkout, invocation };
+  return { root, bare, seed, checkout, invocation };
 }
 
 async function git(directory: string, args: string[]): Promise<string> {

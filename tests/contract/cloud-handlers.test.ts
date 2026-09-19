@@ -213,15 +213,55 @@ describe("AWS control-plane handlers", () => {
           }
           return {};
         }
+        if (command.constructor.name === "PutCommand") {
+          const record = command.input.Item as Record<string, unknown>;
+          written.push(record);
+          if (typeof record.pk === "string" && typeof record.sk === "string") {
+            records.set(key(record.pk, record.sk), record);
+          }
+          return {};
+        }
         throw new Error(`unexpected command ${command.constructor.name}`);
       }),
     };
     const grants = new RepositoryGrantService(Buffer.alloc(32, 4), async () => ({ token: "unused" }));
-    const reconcilePullRequest = vi.fn(async () => ({
-      number: 3,
-      url: "https://github.com/example/demo/pull/3",
+    let reconciledPullRequestNumber = 3;
+    const lifecycleOrdering: string[] = [];
+    const reconcilePullRequest = vi.fn(async () => {
+      lifecycleOrdering.push("create");
+      return {
+      number: reconciledPullRequestNumber,
+      url: `https://github.com/example/demo/pull/${reconciledPullRequestNumber}`,
       reconciled: false,
-    }));
+      };
+    });
+    let githubState: "open" | "closed" | "merged" = "open";
+    let githubTitle = "Publish demo";
+    let githubBody = "";
+    let githubHead = "d".repeat(40);
+    const getPullRequest = vi.fn(async () => {
+      const record = [...records.values()].find((candidate) => candidate.entityType === "PULL_REQUEST");
+      return {
+        number: 3,
+        url: "https://github.com/example/demo/pull/3",
+        state: githubState,
+        headBranch: record?.headBranch as string,
+        baseBranch: "main",
+        headCommit: githubHead,
+        ...(githubState === "merged" ? { mergeCommit: "1".repeat(40) } : {}),
+        title: githubTitle,
+        body: githubBody,
+      } as const;
+    });
+    const updatePullRequest = vi.fn(async (_url: string, _number: number, update: {
+      title?: string; body?: string; state?: "open" | "closed";
+    }) => {
+      lifecycleOrdering.push("update");
+      githubState = update.state ?? githubState;
+      githubTitle = update.title ?? githubTitle;
+      githubBody = update.body ?? githubBody;
+      return { ...(await getPullRequest()), state: githubState, title: githubTitle, body: githubBody };
+    });
     const handler = createAwsBrokerHandler({
       documentClient: documentClient as never,
       s3: { send: vi.fn() } as never,
@@ -233,7 +273,7 @@ describe("AWS control-plane handlers", () => {
       adminValues: ["admins"],
       callbackSigningKey: "c".repeat(64),
       repositoryGrants: grants,
-      githubPullRequests: { reconcilePullRequest },
+      githubPullRequests: { reconcilePullRequest, getPullRequest, updatePullRequest },
     });
     const requestId = randomUUID();
     const publicationEvent = {
@@ -288,6 +328,140 @@ describe("AWS control-plane handlers", () => {
       headBranch: invocation.payload.headBranch,
       baseBranch: "main",
       title: "Publish demo",
+    });
+
+    const editRequestId = randomUUID();
+    const editEvent = {
+      version: "2.0",
+      rawPath: `/v1/workspaces/${workspaceId}/pull-request-actions`,
+      headers: {},
+      body: JSON.stringify({
+        requestId: editRequestId,
+        repository: "demo",
+        pullRequestNumber: 3,
+        action: "edit",
+        title: "Updated review title",
+      }),
+      requestContext: {
+        requestId: "edit-request",
+        http: { method: "POST" },
+        authorizer: { jwt: { claims: { iss: "https://identity.example.test", sub: subject } } },
+      },
+    } as const;
+    const edit = await handler(editEvent);
+    expect(edit.statusCode).toBe(202);
+    expect(JSON.parse(edit.body)).toMatchObject({
+      operation: { kind: "maintain", status: "SUCCEEDED", result: { action: "edit", number: 3 } },
+    });
+    expect(updatePullRequest).toHaveBeenCalledWith(
+      "https://github.com/example/demo.git",
+      3,
+      { title: "Updated review title" },
+    );
+    const duplicateEdit = await handler(editEvent);
+    expect(JSON.parse(duplicateEdit.body)).toMatchObject({ duplicate: true });
+    expect(updatePullRequest).toHaveBeenCalledTimes(1);
+
+    githubHead = "e".repeat(40);
+    const stale = await handler({
+      ...editEvent,
+      requestContext: { ...editEvent.requestContext, requestId: "stale-request" },
+      body: JSON.stringify({
+        requestId: randomUUID(), repository: "demo", pullRequestNumber: 3, action: "close",
+      }),
+    });
+    expect(stale.statusCode).toBe(409);
+    expect(JSON.parse(stale.body)).toMatchObject({ error: { code: "STALE_FENCE" } });
+    const unauthorizedLifecycle = await handler({
+      ...editEvent,
+      requestContext: {
+        requestId: "unauthorized-request",
+        http: { method: "POST" },
+        authorizer: { jwt: { claims: { iss: "https://identity.example.test", sub: "bob" } } },
+      },
+      body: JSON.stringify({
+        requestId: randomUUID(), repository: "demo", pullRequestNumber: 3, action: "close",
+      }),
+    });
+    expect(unauthorizedLifecycle.statusCode).toBe(404);
+
+    githubHead = "d".repeat(40);
+    githubState = "open";
+    lifecycleOrdering.length = 0;
+    const workspaceRecord = records.get(key(`WORKSPACE#${workspaceId}`, "META"));
+    if (!workspaceRecord) throw new Error("workspace fixture is missing");
+    Object.assign(workspaceRecord, { status: "READY", activeOperationId: null });
+    reconciledPullRequestNumber = 4;
+    const replacement = await handler({
+      ...editEvent,
+      requestContext: { ...editEvent.requestContext, requestId: "replacement-request" },
+      body: JSON.stringify({
+        requestId: randomUUID(), repository: "demo", pullRequestNumber: 3,
+        action: "replace", title: "Clean replacement",
+      }),
+    });
+    expect(replacement.statusCode).toBe(202);
+    const replacementBody = JSON.parse(replacement.body) as { operation: { id: string } };
+    const replacementOutbox = [...written].reverse().find((candidate) => {
+      const candidateInvocation = candidate.invocation as { operationId?: string } | undefined;
+      return candidate.entityType === "OUTBOX" && candidateInvocation?.operationId === replacementBody.operation.id;
+    });
+    const replacementInvocation = replacementOutbox?.invocation as {
+      callbackCapability: string;
+      payload: { headBranch: string };
+    };
+    const replacementCallback = await handler({
+      version: "2.0",
+      rawPath: `/v1/internal/workspaces/${workspaceId}/operations/${replacementBody.operation.id}/pull-request`,
+      headers: { "x-agentx-callback-capability": replacementInvocation.callbackCapability },
+      body: JSON.stringify({
+        repository: "demo",
+        repositoryUrl: "https://github.com/example/demo.git",
+        headBranch: replacementInvocation.payload.headBranch,
+        baseBranch: "main",
+        commit: "f".repeat(40),
+        title: "Clean replacement",
+        body: "Clean replacement for #3.",
+      }),
+      requestContext: { requestId: "replacement-callback", http: { method: "POST" } },
+    });
+    expect(replacementCallback.statusCode).toBe(200);
+    expect(lifecycleOrdering).toEqual(["create", "update"]);
+    expect([...records.values()].find((candidate) =>
+      candidate.entityType === "PULL_REQUEST" && candidate.number === 3)).toMatchObject({
+      state: "closed",
+      replacedBy: 4,
+    });
+    expect(written.find((candidate) =>
+      candidate.entityType === "PULL_REQUEST" && candidate.number === 4)).toMatchObject({ replacementFor: 3 });
+
+    Object.assign(workspaceRecord, { status: "READY", activeOperationId: null });
+    const revertEvent = {
+      ...editEvent,
+      requestContext: { ...editEvent.requestContext, requestId: "revert-request" },
+      body: JSON.stringify({
+        requestId: randomUUID(), repository: "demo", pullRequestNumber: 3, action: "revert",
+      }),
+    } as const;
+    const unmergedRevert = await handler(revertEvent);
+    expect(unmergedRevert.statusCode).toBe(400);
+    githubState = "merged";
+    const mergedRevert = await handler({
+      ...revertEvent,
+      requestContext: { ...revertEvent.requestContext, requestId: "merged-revert-request" },
+      body: JSON.stringify({
+        requestId: randomUUID(), repository: "demo", pullRequestNumber: 3, action: "revert",
+      }),
+    });
+    expect(mergedRevert.statusCode).toBe(202);
+    const mergedRevertBody = JSON.parse(mergedRevert.body) as { operation: { id: string } };
+    const revertOutbox = [...written].reverse().find((candidate) => {
+      const candidateInvocation = candidate.invocation as { operationId?: string } | undefined;
+      return candidate.entityType === "OUTBOX" && candidateInvocation?.operationId === mergedRevertBody.operation.id;
+    });
+    expect(revertOutbox?.invocation).toMatchObject({
+      kind: "publish",
+      payload: { mode: "revert", targetPullRequestNumber: 3, revertCommit: "1".repeat(40) },
     });
 
     const duplicate = await handler(publicationEvent);
