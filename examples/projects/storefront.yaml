@@ -1,5 +1,5 @@
 # Illustrative only: replace all example deployment values before registration.
-schemaVersion: 1
+schemaVersion: 2
 name: storefront
 revision: 1
 controlPlaneUrl: https://agentx.example.test
@@ -13,7 +13,7 @@ repositories:
   - name: storefront-web
     url: https://git.example.test/storefront-web.git
     path: repo/storefront-web
-    initialCommit: "2222222222222222222222222222222222222222"
+    defaultBranch: main
     credentialRef: storefront-readwrite
 setup:
   - cwd: repo/storefront-web

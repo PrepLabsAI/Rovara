@@ -24,6 +24,10 @@ describe("workspace preparation", () => {
     });
 
     expect(manifest.complete).toBe(true);
+    expect(manifest.repositories[0]).toMatchObject({
+      defaultBranch: "main",
+      resolvedCommit: source.commit,
+    });
     await expect(readFile(join(root, "repo/no-checkout/README.md"), "utf8")).resolves.toBe(
       "# no-checkout\n",
     );
@@ -119,7 +123,7 @@ describe("workspace preparation", () => {
 
 async function createGitFixture(name: string): Promise<{ directory: string; commit: string }> {
   const directory = await mkdtemp(join(tmpdir(), `agentx-${name}-source-`));
-  await run("git", ["init", "--quiet", directory]);
+  await run("git", ["init", "--quiet", "--initial-branch=main", directory]);
   await writeFile(join(directory, "README.md"), `# ${name}\n`);
   await run("git", ["-C", directory, "add", "README.md"]);
   await run("git", ["-C", directory, "-c", "user.name=AgentX", "-c", "user.email=agentx@example.test", "commit", "--quiet", "-m", "fixture"]);
@@ -129,7 +133,7 @@ async function createGitFixture(name: string): Promise<{ directory: string; comm
 
 function fixtureProject(repositories: Array<{ name: string; commit: string }>): ProjectDefinition {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     name: "payments",
     revision: 1,
     controlPlaneUrl: "http://127.0.0.1:8787",
@@ -145,7 +149,7 @@ function fixtureProject(repositories: Array<{ name: string; commit: string }>): 
       name: repository.name,
       url: `http://127.0.0.1/${repository.name}.git`,
       path: `repo/${repository.name}`,
-      initialCommit: repository.commit,
+      defaultBranch: "main",
       credentialRef: `${repository.name}-readwrite`,
     })),
     setup: [],

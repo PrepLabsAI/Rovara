@@ -11,7 +11,8 @@ Fields: `schemaVersion`, `name`, `revision`, `controlPlaneUrl`, `auth`, `environ
 - `environment.image` is an OCI reference ending in `@sha256:` followed by 64 lowercase hex digits.
 - Repository paths are unique relative POSIX paths; absolute paths, `..` segments and overlaps
   are rejected; resolved paths and symlinks must remain inside the workspace.
-- Repository initial refs are full commit IDs; at least one repository is required.
+- Repository defaults name a safe branch; at least one repository is required. Workspace
+  preparation resolves each branch to a full commit ID and records it in the preparation manifest.
 - `controlPlaneUrl` uses HTTPS; loopback HTTP is allowed only in explicit local test mode.
 - Commands use executable/argument arrays with repository-relative cwd and positive timeout.
 - Secret values and developer-specific workspace/session identifiers are forbidden in shared definitions.

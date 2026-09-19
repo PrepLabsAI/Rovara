@@ -54,7 +54,7 @@ describe("local project selection", () => {
 
 function projectConfig() {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     name: "payments",
     revision: 1,
     controlPlaneUrl: "https://agentx.example.test",
@@ -71,7 +71,7 @@ function projectConfig() {
         name: "payments",
         url: "https://git.example.test/payments.git",
         path: "repo/payments",
-        initialCommit: "1".repeat(40),
+        defaultBranch: "main",
         credentialRef: "payments-readwrite",
       },
     ],

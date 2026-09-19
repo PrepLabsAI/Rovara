@@ -1,5 +1,5 @@
 # Illustrative only: the digest and repository are deliberately non-deployable placeholders.
-schemaVersion: 1
+schemaVersion: 2
 name: inventory
 revision: 1
 controlPlaneUrl: https://agentx.example.test
@@ -13,7 +13,7 @@ repositories:
   - name: inventory-service
     url: https://git.example.test/inventory-service.git
     path: repo/inventory-service
-    initialCommit: "3333333333333333333333333333333333333333"
+    defaultBranch: main
     credentialRef: inventory-readwrite
 setup:
   - cwd: repo/inventory-service

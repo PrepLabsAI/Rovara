@@ -94,7 +94,7 @@ describe("AgentX executable workflow", () => {
 
 function projectDefinition(): ProjectDefinition {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     name: "payments",
     revision: 1,
     controlPlaneUrl: "http://127.0.0.1:8787",
@@ -110,7 +110,7 @@ function projectDefinition(): ProjectDefinition {
       name: "payments",
       url: "https://git.example.test/payments.git",
       path: "repo/payments",
-      initialCommit: "1".repeat(40),
+      defaultBranch: "main",
       credentialRef: "payments-readwrite",
     }],
     setup: [],

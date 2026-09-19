@@ -3,9 +3,30 @@ import { z } from "zod";
 
 export const AGENTX_NAME_PATTERN = /^[a-z][a-z0-9-]{0,62}$/;
 export const OCI_DIGEST_PATTERN = /@sha256:[a-f0-9]{64}$/;
-export const FULL_COMMIT_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 
 export const AgentXNameSchema = z.string().regex(AGENTX_NAME_PATTERN);
+
+export const GitBranchNameSchema = z
+  .string()
+  .min(1)
+  .max(255)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._/-]*$/, "defaultBranch contains unsupported characters")
+  .superRefine((value, context) => {
+    const segments = value.split("/");
+    if (
+      value === "@" ||
+      value.endsWith(".") ||
+      value.endsWith("/") ||
+      value.includes("..") ||
+      value.includes("//") ||
+      value.includes("@{") ||
+      segments.some(
+        (segment) => segment.startsWith(".") || segment === ".." || segment.endsWith(".lock"),
+      )
+    ) {
+      context.addIssue({ code: "custom", message: "defaultBranch is not a safe Git branch name" });
+    }
+  });
 
 export const RelativeWorkspacePathSchema = z
   .string()
@@ -48,14 +69,14 @@ export const RepositoryDefinitionSchema = z
     name: AgentXNameSchema,
     url: HttpsOrLoopbackUrlSchema,
     path: RelativeWorkspacePathSchema,
-    initialCommit: z.string().regex(FULL_COMMIT_PATTERN, "initialCommit must be a full commit ID"),
+    defaultBranch: GitBranchNameSchema,
     credentialRef: AgentXNameSchema,
   })
   .strict();
 
 export const ProjectDefinitionSchema = z
   .object({
-    schemaVersion: z.literal(1),
+    schemaVersion: z.literal(2),
     name: AgentXNameSchema,
     revision: z.number().int().positive(),
     controlPlaneUrl: HttpsOrLoopbackUrlSchema,

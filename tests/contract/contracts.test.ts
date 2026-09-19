@@ -6,11 +6,9 @@ import {
 } from "../../packages/contracts/src/index.js";
 
 const digest = `registry.example.com/payments@sha256:${"a".repeat(64)}`;
-const commit = "b".repeat(40);
-
 function projectDefinition() {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     name: "payments",
     revision: 1,
     controlPlaneUrl: "https://agentx.example.com",
@@ -25,7 +23,7 @@ function projectDefinition() {
         name: "api",
         url: "https://git.example.com/team/api.git",
         path: "services/api",
-        initialCommit: commit,
+        defaultBranch: "main",
         credentialRef: "payments-read",
       },
     ],
@@ -38,6 +36,20 @@ function projectDefinition() {
 describe("strict contracts", () => {
   it("accepts a valid versioned project", () => {
     expect(ProjectDefinitionSchema.parse(projectDefinition()).name).toBe("payments");
+  });
+
+  it("requires a safe default branch and rejects the retired initialCommit field", () => {
+    const invalidBranch = projectDefinition();
+    invalidBranch.repositories[0]!.defaultBranch = "../main";
+    expect(() => ProjectDefinitionSchema.parse(invalidBranch)).toThrow(/defaultBranch/);
+
+    const retired = projectDefinition() as ReturnType<typeof projectDefinition> & {
+      repositories: Array<ReturnType<typeof projectDefinition>["repositories"][number] & {
+        initialCommit?: string;
+      }>;
+    };
+    retired.repositories[0]!.initialCommit = "b".repeat(40);
+    expect(() => ProjectDefinitionSchema.parse(retired)).toThrow();
   });
 
   it("rejects secrets, routing IDs and overlapping repository paths", () => {

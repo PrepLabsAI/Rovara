@@ -1,5 +1,5 @@
 # Illustrative only: administrators must substitute real immutable values.
-schemaVersion: 1
+schemaVersion: 2
 name: analytics
 revision: 1
 controlPlaneUrl: https://agentx.example.test
@@ -13,7 +13,7 @@ repositories:
   - name: analytics-pipeline
     url: https://git.example.test/analytics-pipeline.git
     path: repo/analytics-pipeline
-    initialCommit: "4444444444444444444444444444444444444444"
+    defaultBranch: main
     credentialRef: analytics-readwrite
 setup:
   - cwd: repo/analytics-pipeline

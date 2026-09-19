@@ -1,5 +1,5 @@
 # Illustrative only: replace URLs, commit IDs, identity settings and digest before registration.
-schemaVersion: 1
+schemaVersion: 2
 name: payments
 revision: 1
 controlPlaneUrl: https://agentx.example.test
@@ -13,7 +13,7 @@ repositories:
   - name: payments-api
     url: https://git.example.test/payments-api.git
     path: repo/payments-api
-    initialCommit: "1111111111111111111111111111111111111111"
+    defaultBranch: main
     credentialRef: payments-readwrite
 setup:
   - cwd: repo/payments-api

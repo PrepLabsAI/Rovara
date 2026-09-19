@@ -22,7 +22,7 @@ describe("remote coding delegation", () => {
   it("changes and tests only the worker workspace, returns private evidence, and does not commit", async () => {
     const source = await createSourceRepository();
     const rootPath = await mkdtemp(join(tmpdir(), "agentx-remote-worker-"));
-    const project = projectDefinition(source.commit);
+    const project = projectDefinition();
     await prepareWorkspace({
       rootPath,
       project,
@@ -152,7 +152,7 @@ function fixturePiAdapter(rootPath: string, conversationId: string, onRun: () =>
 
 async function createSourceRepository(): Promise<{ directory: string; commit: string }> {
   const directory = await mkdtemp(join(tmpdir(), "agentx-remote-source-"));
-  await run("git", ["init", "--quiet", directory]);
+  await run("git", ["init", "--quiet", "--initial-branch=main", directory]);
   await writeFile(join(directory, "value.txt"), "1\n");
   await writeFile(
     join(directory, "test.mjs"),
@@ -164,9 +164,9 @@ async function createSourceRepository(): Promise<{ directory: string; commit: st
   return { directory, commit: stdout.trim() };
 }
 
-function projectDefinition(commit: string): ProjectDefinition {
+function projectDefinition(): ProjectDefinition {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     name: "payments",
     revision: 1,
     controlPlaneUrl: "http://127.0.0.1:8787",
@@ -177,7 +177,7 @@ function projectDefinition(commit: string): ProjectDefinition {
         name: "app",
         url: "http://127.0.0.1/app.git",
         path: "repo/app",
-        initialCommit: commit,
+        defaultBranch: "main",
         credentialRef: "app-readwrite",
       },
     ],

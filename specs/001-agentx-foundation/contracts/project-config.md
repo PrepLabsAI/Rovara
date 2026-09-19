@@ -10,7 +10,7 @@ working-directory files or execute configuration as code. The shared config cann
 `runtimeSessionId`, `workspaceId`, an owner identity, or secrets.
 
 ```yaml
-schemaVersion: 1
+schemaVersion: 2
 name: payments
 revision: 1
 controlPlaneUrl: https://agentx.example.com
@@ -24,7 +24,7 @@ repositories:
   - name: api
     url: https://git.example.com/team/payments-api.git
     path: services/api
-    initialCommit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    defaultBranch: main
     credentialRef: payments-repo-access
 setup:
   - cwd: services/api

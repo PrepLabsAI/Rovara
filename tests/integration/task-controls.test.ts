@@ -139,7 +139,7 @@ function identity(ownerKey: string, isAdministrator: boolean): AuthenticatedIden
 
 function project(revision: number, digestCharacter: string): ProjectDefinition {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     name: "payments",
     revision,
     controlPlaneUrl: "https://agentx.example.test",
@@ -150,7 +150,7 @@ function project(revision: number, digestCharacter: string): ProjectDefinition {
         name: "app",
         url: "https://git.example.test/app.git",
         path: "repo/app",
-        initialCommit: "1".repeat(40),
+        defaultBranch: "main",
         credentialRef: "app-readwrite",
       },
     ],

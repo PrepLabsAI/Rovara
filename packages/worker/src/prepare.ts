@@ -26,14 +26,16 @@ const MANIFEST_PATH = ".agentx/preparation-manifest.json";
 const MAX_COMMAND_OUTPUT_BYTES = 1_048_576;
 
 export interface PreparationManifest {
-  schemaVersion: 1;
+  schemaVersion: 2;
   projectName: string;
   projectRevision: number;
   environmentDigest: string;
   repositories: Array<{
     name: string;
     path: string;
-    initialCommit: string;
+    defaultBranch: string;
+    resolvedCommit: string;
+    resolvedAt: string;
     completedAt: string;
   }>;
   completedSetupSteps: number[];
@@ -95,24 +97,29 @@ export async function prepareWorkspace(options: PrepareWorkspaceOptions): Promis
       if (existing === "missing") {
         await mkdir(resolve(destination, ".."), { recursive: true });
         await materializer(repository, destination);
-        await checkoutInitialCommit(destination, repository.initialCommit);
       } else {
         if (existing !== "directory" || (await pathKind(resolve(destination, ".git"))) === "missing") {
           throw new Error(`repository path already exists and is not a Git checkout: ${repository.path}`);
         }
-        const head = await gitHead(destination);
-        if (head !== repository.initialCommit) {
-          throw new Error(
-            `unrecorded checkout at ${repository.path} has HEAD ${head}; refusing to reset it`,
-          );
-        }
+      }
+      const resolvedCommit = await resolveDefaultBranch(destination, repository.defaultBranch);
+      const head = await gitHead(destination);
+      if (existing === "missing") {
+        await checkoutResolvedCommit(destination, resolvedCommit);
+      } else if (head !== resolvedCommit) {
+        throw new Error(
+          `unrecorded checkout at ${repository.path} has HEAD ${head}; refusing to reset it`,
+        );
       }
       await assertContainedSymlinks(canonicalRoot);
+      const now = new Date().toISOString();
       manifest.repositories.push({
         name: repository.name,
         path: repository.path,
-        initialCommit: repository.initialCommit,
-        completedAt: new Date().toISOString(),
+        defaultBranch: repository.defaultBranch,
+        resolvedCommit,
+        resolvedAt: now,
+        completedAt: now,
       });
       manifest = await writeManifest(canonicalRoot, withoutFailure(manifest));
     }
@@ -160,7 +167,7 @@ async function loadOrCreateManifest(
   try {
     const parsed = JSON.parse(await readFile(path, "utf8")) as PreparationManifest;
     if (
-      parsed.schemaVersion !== 1 ||
+      parsed.schemaVersion !== 2 ||
       parsed.projectName !== project.name ||
       parsed.projectRevision !== project.revision ||
       parsed.environmentDigest !== project.environment.image
@@ -174,7 +181,7 @@ async function loadOrCreateManifest(
   } catch (error) {
     if (isNodeError(error) && error.code === "ENOENT") {
       return writeManifest(rootPath, {
-        schemaVersion: 1,
+        schemaVersion: 2,
         projectName: project.name,
         projectRevision: project.revision,
         environmentDigest: project.environment.image,
@@ -205,23 +212,44 @@ async function cloneRepository(
   repository: ProjectDefinition["repositories"][number],
   destination: string,
 ): Promise<void> {
-  await execFileAsync("git", ["clone", "--no-checkout", "--", repository.url, destination], {
-    timeout: 300_000,
-    maxBuffer: MAX_COMMAND_OUTPUT_BYTES,
-    env: gitSafeEnvironment(destination),
-  });
+  await execFileAsync(
+    "git",
+    ["clone", "--no-checkout", "--branch", repository.defaultBranch, "--", repository.url, destination],
+    {
+      timeout: 300_000,
+      maxBuffer: MAX_COMMAND_OUTPUT_BYTES,
+      env: gitSafeEnvironment(destination),
+    },
+  );
 }
 
-async function checkoutInitialCommit(directory: string, commit: string): Promise<void> {
+async function resolveDefaultBranch(directory: string, branch: string): Promise<string> {
+  try {
+    const result = await execFileAsync(
+      "git",
+      ["-C", directory, "rev-parse", "--verify", `refs/remotes/origin/${branch}^{commit}`],
+      {
+        timeout: 30_000,
+        maxBuffer: 4_096,
+        env: gitSafeEnvironment(directory),
+      },
+    );
+    return result.stdout.trim();
+  } catch {
+    throw new Error(`repository default branch does not exist: ${branch}`);
+  }
+}
+
+async function checkoutResolvedCommit(directory: string, commit: string): Promise<void> {
   // A --no-checkout clone can report the requested commit from HEAD while its
-  // working tree is still empty. Always materialize the pinned tree.
+  // working tree is still empty. Always materialize the resolved branch head.
   await execFileAsync("git", ["-C", directory, "checkout", "--detach", "--force", commit], {
     timeout: 120_000,
     maxBuffer: MAX_COMMAND_OUTPUT_BYTES,
     env: gitSafeEnvironment(directory),
   });
   const resolved = await gitHead(directory);
-  if (resolved !== commit) throw new Error("repository did not resolve to the configured initial commit");
+  if (resolved !== commit) throw new Error("repository did not check out the resolved branch commit");
 }
 
 async function gitHead(directory: string): Promise<string> {
