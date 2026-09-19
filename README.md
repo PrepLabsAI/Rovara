@@ -132,6 +132,22 @@ export AGENTX_ORCHESTRATOR_MODEL=<pi-model-id>
 agentx --project speckit
 ```
 
+When the local orchestrator uses Amazon Bedrock, the `agentx` process must also inherit an AWS
+credential source. Selecting a profile on an earlier `aws` command does not export it to later
+commands:
+
+```sh
+export AWS_PROFILE=agentx-deployer
+export AWS_REGION=us-east-1
+export AWS_SDK_LOAD_CONFIG=1
+export AGENTX_ORCHESTRATOR_PROVIDER=amazon-bedrock
+export AGENTX_ORCHESTRATOR_MODEL=amazon.nova-pro-v1:0
+agentx --project personal-website
+```
+
+Alternatively, run `/login amazon-bedrock` inside the TUI, choose **AWS profile**, and enter the
+profile name. Pi stores the profile selection, not the underlying IAM secret key.
+
 The local model can call only AgentX orchestration tools. Repository inspection, editing, shell
 commands, builds, and tests are delegated to the remote Pi worker in AgentCore.
 
