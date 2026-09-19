@@ -11,7 +11,9 @@ OIDC login, workspace preparation, control-plane dispatch, AgentCore managed ses
 tool use, Amazon Bedrock inference, GitHub App authentication for private repositories, and
 result/artifact callbacks are working. Pull-request creation is deployed and its clean-checkout
 safety path and changed-checkout publication path have both been validated against a private
-repository. The current demo uses Amazon Nova Pro.
+repository. Safe existing-PR maintenance, clean replacement, and merged-PR revert are implemented
+and locally validated; they require the next AWS deployment before use against the demo account.
+The current demo uses Amazon Nova Pro.
 
 The production `instances-ebs` profile and its EBS isolation/stop-resume acceptance remain T045.
 The existing directory name `Pi-Bedrock` is retained, but the product is named AgentX.
@@ -172,6 +174,47 @@ creates a ready-for-review PR against the repository's configured `defaultBranch
 result includes the PR URL and number, commit, head/base branches, and check evidence. Repeating the
 same accepted request reconciles the existing branch and PR rather than creating a duplicate.
 
+New publication always captures the intended workspace tree and replays it onto the latest remote
+default branch as exactly one commit. Earlier AgentX publication commits left in the persistent
+workspace are not inherited by the new PR. A conflict or effective empty diff stops before push.
+
+Maintain an AgentX-owned PR by repository name and PR number:
+
+```sh
+agentx --project personal-website pr append --repository personal-website --number 12
+agentx --project personal-website pr sync --repository personal-website --number 12
+agentx --project personal-website pr update --repository personal-website --number 12 \
+  --title "Updated review title" --body "Updated context"
+agentx --project personal-website pr close --repository personal-website --number 12
+agentx --project personal-website pr reopen --repository personal-website --number 12
+```
+
+`append` runs readiness checks and accepts only workspace commits that descend from the recorded
+PR head. `sync` merges the latest default branch into the PR branch. Neither action rebases or
+force-pushes published history. Remote Pi may rebase or amend commits that are still unpublished,
+provided the resulting history remains a descendant of the published PR head; once published, use
+another append, or replace the PR with clean history:
+
+```sh
+agentx --project personal-website pr replace \
+  --repository personal-website --number 12 \
+  --title "Clean replacement"
+```
+
+Replacement creates the new PR before closing the original and never changes the original branch.
+For an already merged AgentX PR, create a reviewable revert PR instead of changing the default
+branch directly:
+
+```sh
+agentx --project personal-website pr revert \
+  --repository personal-website --number 12 \
+  --title "Revert unintended changes from #12"
+```
+
+Only PRs with durable AgentX ownership evidence are eligible. PRs created by an earlier AgentX
+version are adopted only when their `agentx/<operation-id>` branch matches a successful publication
+operation in the same developer workspace.
+
 In the interactive TUI, ask explicitly, for example: `Create a pull request for the
 personal-website repository titled "Improve homepage navigation".` The local Pi orchestrator then
 uses `agentx_create_pull_request`; ordinary coding requests do not expose an implicit publish step.
@@ -188,7 +231,8 @@ the AgentCore runtime. AgentX mints short-lived, single-repository tokens separa
 push, and PR operations.
 
 AgentX does not merge, approve, delete branches, add reviewers/labels, or force-push in this
-workflow.
+workflow. The worker rejects force flags, force-with-lease flags, and plus-prefixed refspecs at the
+credentialed Git command boundary.
 
 ### 8. Administrator workflow
 
@@ -218,6 +262,8 @@ use the [VPC-free AWS runbook](docs/deployment-demo.md).
 
 - [Pull-request task list](specs/002-create-pull-request/tasks.md): implementation and validation
   status for explicit publication.
+- [Safe PR lifecycle task list](specs/003-safe-pr-lifecycle/tasks.md): clean publication,
+  append/sync, replacement, and revert progress.
 - [Pull-request specification](specs/002-create-pull-request/spec.md): publication behavior,
   safety, and retry requirements.
 - [Task list](specs/001-agentx-foundation/tasks.md): 50 dependency-ordered implementation tasks.
