@@ -1156,14 +1156,36 @@ async function stopWorkspace(
   if (workspace.status !== "READY" || workspace.activeOperationId) {
     throw agentXError("WORKSPACE_BUSY", "cancel or finish active work before stopping compute");
   }
+  const stopFence = workspace.fence + 1;
+  try {
+    await dependencies.documentClient.send(new UpdateCommand({
+      TableName: dependencies.tableName, Key: workspaceKey(workspaceId),
+      UpdateExpression: "SET #status = :stopping, fence = :nextFence, updatedAt = :now",
+      ConditionExpression: "#status = :ready AND fence = :fence AND attribute_not_exists(activeOperationId)",
+      ExpressionAttributeNames: { "#status": "status" },
+      ExpressionAttributeValues: { ":ready": "READY", ":stopping": "STOPPING", ":fence": workspace.fence,
+        ":nextFence": stopFence, ":now": new Date().toISOString() },
+    }));
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+    throw agentXError("WORKSPACE_BUSY", "workspace changed before compute stop was reserved");
+  }
+  // If the remote outcome is uncertain, retain STOPPING. Reopening admission
+  // could send work into a session that is still being terminated.
   await dependencies.stopRuntimeSession({
     runtimeArn: workspace.runtimeArn,
     endpointQualifier: workspace.endpointQualifier,
     runtimeSessionId: workspace.runtimeSessionId,
   });
-  const updated = WorkspaceInstanceSchema.parse({ ...workspace, status: "STOPPED", updatedAt: new Date().toISOString() });
-  await dependencies.documentClient.send(new PutCommand({ TableName: dependencies.tableName, Item: workspaceItem(updated) }));
-  return publicWorkspace(updated);
+  await dependencies.documentClient.send(new UpdateCommand({
+    TableName: dependencies.tableName, Key: workspaceKey(workspaceId),
+    UpdateExpression: "SET #status = :stopped, updatedAt = :now",
+    ConditionExpression: "#status = :observedStatus AND fence = :fence AND attribute_not_exists(activeOperationId)",
+    ExpressionAttributeNames: { "#status": "status" },
+    ExpressionAttributeValues: { ":stopped": "STOPPED", ":observedStatus": "STOPPING",
+      ":fence": stopFence, ":now": new Date().toISOString() },
+  }));
+  return publicWorkspace(await requireWorkspace(dependencies, workspaceId));
 }
 
 async function handleCallback(

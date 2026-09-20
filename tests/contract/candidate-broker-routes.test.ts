@@ -22,7 +22,7 @@ function barrier() {
   return { entered, enter, release, wait };
 }
 
-async function fixture() {
+async function fixture(stopRuntimeSession: () => Promise<void> = async () => {}) {
   Object.assign(process.env, { AWS_REGION: "us-east-1", STATE_TABLE_NAME: "unused", ARTIFACT_BUCKET_NAME: "unused", OIDC_ISSUER: issuer,
     CALLBACK_SIGNING_KEY: "c".repeat(64), GITHUB_APP_PRIVATE_KEY_SECRET_ARN: "arn:aws:secretsmanager:us-east-1:111122223333:secret:test",
     GITHUB_APP_CREDENTIAL_REF: "github-app", GITHUB_APP_ACCOUNT: "example", GITHUB_APP_ID: "123", GITHUB_APP_INSTALLATION_ID: "456" });
@@ -47,6 +47,8 @@ async function fixture() {
     createdAt: now, updatedAt: now };
   put(workspace);
   put({ pk: `MEMBER#${ownerKey}`, sk: "PROJECT#demo", ownerKey, projectName: "demo", role: "developer" });
+  const adminKey = sha(`${issuer}\0admin`);
+  put({ pk: `MEMBER#${adminKey}`, sk: "PROJECT#demo", ownerKey: adminKey, projectName: "demo", role: "administrator" });
   put({ pk: `WORKSPACE#${workspaceId}`, sk: `CONVERSATION#${conversationId}` });
   const project = { schemaVersion: 2, name: "demo", revision: 1, controlPlaneUrl: "https://agentx.example.test",
     auth: { issuer, clientId: "agentx", audience: "agentx" }, environment: { image: workspace.environmentDigest },
@@ -72,6 +74,7 @@ async function fixture() {
     if (condition?.includes("ownerKey = :owner") && current.ownerKey !== values[":owner"]) throw conditional();
     if (condition?.includes("(#status = :ready OR #status = :stopped)") && current.status !== values[":ready"] && current.status !== values[":stopped"]) throw conditional();
     if (condition?.includes("#status = :observedStatus") && current.status !== values[":observedStatus"]) throw conditional();
+    if (condition?.includes("#status = :ready") && !condition.includes(" OR ") && current.status !== values[":ready"]) throw conditional();
     if (condition?.includes("#status = :cancelRequested") && current.status !== values[":cancelRequested"]) throw conditional();
     if (condition?.includes("activeOperationId = :operation") && current.activeOperationId !== values[":operation"]) throw conditional();
     if (condition?.includes("activeOperationId = :target") && current.activeOperationId !== values[":target"]) throw conditional();
@@ -94,6 +97,7 @@ async function fixture() {
       return { Item: structuredClone(rows.get(key(requestKey))) };
     }
     if (command.constructor.name === "PutCommand") { write(command.input); return {}; }
+    if (command.constructor.name === "UpdateCommand") { update(command.input); return {}; }
     if (command.constructor.name === "TransactWriteCommand") {
       const items = command.input.TransactItems as Array<{ Put?: Row; Update?: Row; ConditionCheck?: Row }>;
       if (heldCancellation && items.some((item) => (item.Update?.ExpressionAttributeValues as Row | undefined)?.[":cancel"] === "CANCEL_REQUESTED")) {
@@ -136,12 +140,12 @@ async function fixture() {
       baseBranch: "main", headCommit: "b".repeat(40), title: "Existing", body: "", ...(record.state === "merged" ? { mergeCommit: "c".repeat(40) } : {}) };
   };
   const handler = createAwsBrokerHandler({ documentClient: documentClient as never, s3: s3 as never,
-    stopRuntimeSession: async () => {}, tableName: "state", artifactBucketName: "artifacts", issuer, adminClaim: "groups", adminValues: ["admins"],
+    stopRuntimeSession, tableName: "state", artifactBucketName: "artifacts", issuer, adminClaim: "groups", adminValues: ["admins"],
     callbackSigningKey: "c".repeat(64), repositoryGrants: new RepositoryGrantService(Buffer.alloc(32, 1), async () => ({})),
     githubPullRequests: { reconcilePullRequest: github, getPullRequest, updatePullRequest: github } });
   async function request(path: string, body?: unknown, headers: Record<string, string> = {}, subject = "alice") {
     const event: HttpApiV2Event = { version: "2.0", rawPath: path, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      requestContext: { requestId: randomUUID(), http: { method: body === undefined ? "GET" : "POST" }, authorizer: { jwt: { claims: { iss: issuer, sub: subject } } } } };
+      requestContext: { requestId: randomUUID(), http: { method: body === undefined ? "GET" : "POST" }, authorizer: { jwt: { claims: { iss: issuer, sub: subject, ...(subject === "admin" ? { groups: ["admins"] } : {}) } } } } };
     const response = await handler(event);
     return { status: response.statusCode, body: JSON.parse(response.body) as { operation?: Operation; duplicate?: boolean; artifact?: { content: string }; error?: unknown } };
   }
@@ -175,6 +179,37 @@ function chunkAndCandidate(f: Awaited<ReturnType<typeof fixture>>, invocation: E
 }
 
 describe("live broker candidate routes", () => {
+  it("reserves a stop before remote work so task admission cannot race it", async () => {
+    const gate = barrier();
+    const f = await fixture(async () => { gate.enter(); await gate.wait; });
+    const stopping = f.request(`/v1/admin/workspaces/${f.workspaceId}/stop`, {}, {}, "admin");
+    await gate.entered;
+    const concurrent = await f.request(f.taskPath, f.task);
+    gate.release();
+    await stopping;
+    expect(concurrent.status).toBeGreaterThanOrEqual(400);
+    expect([...f.rows.values()].filter((row) => row.entityType === "OUTBOX")).toHaveLength(0);
+    expect([...f.rows.values()].find((row) => row.entityType === "WORKSPACE")).toMatchObject({ status: "STOPPED", fence: 2 });
+  });
+
+  it("retains candidate authority when stopping a completed workspace", async () => {
+    const f = await fixture(); const { invocation, callbacks } = await f.admit();
+    const { artifact, candidate } = chunkAndCandidate(f, invocation);
+    await callbacks.artifactSink(artifact);
+    await callbacks.terminalSink({ operationId: invocation.operationId, status: "SUCCEEDED", result: { candidate } });
+    expect((await f.request(`/v1/admin/workspaces/${f.workspaceId}/stop`, {}, {}, "admin")).status).toBe(202);
+    expect([...f.rows.values()].find((row) => row.entityType === "WORKSPACE")).toMatchObject({
+      status: "STOPPED", fence: 3, candidateTaskOperationId: invocation.operationId,
+    });
+  });
+
+  it("keeps an uncertain stop closed to new work", async () => {
+    const f = await fixture(async () => { throw new Error("remote timeout"); });
+    expect((await f.request(`/v1/admin/workspaces/${f.workspaceId}/stop`, {}, {}, "admin")).status).toBeGreaterThanOrEqual(400);
+    expect((await f.request(f.taskPath, f.task)).status).toBeGreaterThanOrEqual(400);
+    expect([...f.rows.values()].find((row) => row.entityType === "WORKSPACE")).toMatchObject({ status: "STOPPING", fence: 2 });
+  });
+
   it.each(["legacy-task", "governed-task", "publish", "append", "sync", "replace", "revert"])("rejects stale %s admission after a governed task finishes", async (kind) => {
     const f = await fixture();
     if (["append", "sync", "replace", "revert"].includes(kind)) f.seedPullRequest(kind === "revert" ? "merged" : "open");

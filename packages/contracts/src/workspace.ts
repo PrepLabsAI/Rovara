@@ -8,6 +8,7 @@ export const WorkspaceStatusSchema = z.enum([
   "BUSY",
   "UNHEALTHY",
   "STOPPED",
+  "STOPPING",
   "RESUMING",
 ]);
 
