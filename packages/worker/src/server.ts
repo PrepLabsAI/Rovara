@@ -56,6 +56,13 @@ export async function handleWorkerRequest(request: Request, state: WorkerServerS
         queueMicrotask(() => {
           void executeInBackground(invocation, state);
         });
+      } else if (["SUCCEEDED", "FAILED", "CANCELLED"].includes(accepted.record.status)) {
+        await reportTerminal(state, {
+          operationId: invocation.operationId,
+          status: accepted.record.status as WorkerTerminalResult["status"],
+          ...(accepted.record.result === undefined ? {} : { result: accepted.record.result }),
+          ...(accepted.record.error === undefined ? {} : { error: accepted.record.error }),
+        }, invocation);
       }
       return response(200, {
         accepted: true,
@@ -116,7 +123,7 @@ async function executeInBackground(invocation: WorkerInvocation, state: WorkerSe
   try {
     await state.journal.transition(invocation.operationId, "RUNNING");
     const result = await state.executor.execute(invocation);
-    await state.journal.transition(invocation.operationId, "SUCCEEDED");
+    await state.journal.transition(invocation.operationId, "SUCCEEDED", undefined, result);
     terminal = {
       operationId: invocation.operationId,
       status: "SUCCEEDED",

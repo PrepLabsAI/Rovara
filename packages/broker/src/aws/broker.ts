@@ -40,6 +40,8 @@ import type { GitHubAppCredentialProvider } from "../github-app.js";
 import { createConfiguredGitHubAppRouter } from "./github-app-routing.js";
 import { RepositoryGrantService } from "../repository-access.js";
 import { publicWorkspace } from "../workspaces.js";
+import { validateCandidateBinding, type ExpectedCandidateBinding } from "../candidate-bindings.js";
+import { putCandidateArtifact, validateStoredCandidateArtifacts } from "./candidate-artifacts.js";
 import {
   adaptHttpApiEvent,
   identityFromJwtClaims,
@@ -81,6 +83,7 @@ interface OperationRecord extends Operation {
   entityType: "OPERATION";
   eventSequence: number;
   targetOperationId?: string;
+  candidateBinding?: ExpectedCandidateBinding;
   publication?: {
     repository: string;
     repositoryUrl: string;
@@ -576,7 +579,8 @@ async function acceptTask(
   const request = OperationRequestSchema.parse(value);
   const workspace = await requireOwnedWorkspace(dependencies, identity, workspaceId);
   await requireMembership(dependencies, identity.ownerKey, workspace.projectName);
-  const requestHash = hashJson({ conversationId: request.conversationId, prompt: request.prompt });
+  const requestHash = hashJson({ conversationId: request.conversationId, prompt: request.prompt,
+    ...(request.candidate === undefined ? {} : { candidate: request.candidate }) });
   const idempotencyKey = {
     pk: `IDEMPOTENCY#${identity.ownerKey}#${workspaceId}`,
     sk: `REQUEST#${request.requestId}`,
@@ -586,6 +590,12 @@ async function acceptTask(
     if (previous.payloadHash !== requestHash) throw agentXError("IDEMPOTENCY_CONFLICT", "request ID was reused with another payload");
     return { operation: publicOperation(await requireOperation(dependencies, workspaceId, previous.operationId)), duplicate: true };
   }
+  if (workspace.candidateTaskOperationId && !request.candidate) {
+    throw agentXError("FORBIDDEN", "governed workspace tasks require an exact candidate binding");
+  }
+  const project = request.candidate ? await requireProject(dependencies, workspace.projectName, workspace.projectRevision) : undefined;
+  const repository = project?.definition.repositories.find((entry) => entry.name === request.candidate!.repository);
+  if (request.candidate && !repository) throw agentXError("CONFIG_INVALID", "candidate repository is not registered for this project");
   const conversation = await getItem(dependencies, {
     pk: `WORKSPACE#${workspaceId}`,
     sk: `CONVERSATION#${request.conversationId}`,
@@ -609,6 +619,9 @@ async function acceptTask(
     createdAt: now,
     updatedAt: now,
   });
+  if (request.candidate && repository) operation.candidateBinding = {
+    ...request.candidate, operationId, workspaceId, projectRevision: workspace.projectRevision, repositoryUrl: repository.url,
+  };
   const invocation: WorkerInvocation = {
     protocolVersion: 1,
     kind: "task",
@@ -617,7 +630,8 @@ async function acceptTask(
     fence,
     projectRevision: workspace.projectRevision,
     callbackCapability: issueCapability(dependencies, workspaceId, operationId, fence),
-    payload: { conversationId: request.conversationId, prompt: request.prompt },
+    payload: { conversationId: request.conversationId, prompt: request.prompt,
+      ...(request.candidate && project ? { candidate: request.candidate, project: project.definition } : {}) },
   };
   const outbox = outboxRecord(
     {
@@ -634,10 +648,10 @@ async function acceptTask(
       { Update: {
         TableName: dependencies.tableName,
         Key: workspaceKey(workspaceId),
-        UpdateExpression: "SET #status = :busy, activeOperationId = :operation, fence = :fence, updatedAt = :now",
-        ConditionExpression: "ownerKey = :owner AND attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped)",
+        UpdateExpression: `SET #status = :busy, activeOperationId = :operation, fence = :fence, updatedAt = :now${request.candidate ? ", candidateTaskOperationId = :operation" : ""}`,
+        ConditionExpression: `ownerKey = :owner AND fence = :observedFence AND attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped)${request.candidate ? "" : " AND attribute_not_exists(candidateTaskOperationId)"}`,
         ExpressionAttributeNames: { "#status": "status" },
-        ExpressionAttributeValues: { ":owner": identity.ownerKey, ":busy": "BUSY", ":ready": "READY", ":stopped": "STOPPED", ":operation": operationId, ":fence": fence, ":now": now },
+        ExpressionAttributeValues: { ":owner": identity.ownerKey, ":observedFence": workspace.fence, ":busy": "BUSY", ":ready": "READY", ":stopped": "STOPPED", ":operation": operationId, ":fence": fence, ":now": now },
       } },
       { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
       { Put: { TableName: dependencies.tableName, Item: outbox, ConditionExpression: "attribute_not_exists(pk)" } },
@@ -671,6 +685,9 @@ async function acceptPullRequest(
   const request = PullRequestRequestSchema.parse(value);
   const workspace = await requireOwnedWorkspace(dependencies, identity, workspaceId);
   await requireMembership(dependencies, identity.ownerKey, workspace.projectName);
+  if (request.candidateOperationId !== undefined || request.authorization !== undefined || workspace.candidateTaskOperationId) {
+    throw agentXError("FORBIDDEN", "exact candidate publication is not enabled; candidate authorization cannot use legacy publication");
+  }
   const requestHash = hashJson({
     repository: request.repository,
     title: request.title,
@@ -761,10 +778,11 @@ async function acceptPullRequest(
         TableName: dependencies.tableName,
         Key: workspaceKey(workspaceId),
         UpdateExpression: "SET #status = :busy, activeOperationId = :operation, fence = :fence, updatedAt = :now",
-        ConditionExpression: "ownerKey = :owner AND attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped)",
+        ConditionExpression: "ownerKey = :owner AND fence = :observedFence AND attribute_not_exists(candidateTaskOperationId) AND attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped)",
         ExpressionAttributeNames: { "#status": "status" },
         ExpressionAttributeValues: {
           ":owner": identity.ownerKey,
+          ":observedFence": workspace.fence,
           ":busy": "BUSY",
           ":ready": "READY",
           ":stopped": "STOPPED",
@@ -809,6 +827,9 @@ async function acceptPullRequestLifecycle(
   const request = PullRequestLifecycleRequestSchema.parse(value);
   const workspace = await requireOwnedWorkspace(dependencies, identity, workspaceId);
   await requireMembership(dependencies, identity.ownerKey, workspace.projectName);
+  if (workspace.candidateTaskOperationId && ["append", "sync", "replace", "revert"].includes(request.action)) {
+    throw agentXError("FORBIDDEN", "governed candidate changes require a new independently verified candidate");
+  }
   const requestHash = hashJson({
     repository: request.repository,
     pullRequestNumber: request.pullRequestNumber,
@@ -969,11 +990,11 @@ async function acceptPullRequestLifecycle(
         TableName: dependencies.tableName,
         Key: workspaceKey(workspaceId),
         UpdateExpression: "SET #status = :busy, activeOperationId = :operation, fence = :fence, updatedAt = :now",
-        ConditionExpression: "ownerKey = :owner AND attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped)",
+        ConditionExpression: "ownerKey = :owner AND fence = :observedFence AND attribute_not_exists(candidateTaskOperationId) AND attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped)",
         ExpressionAttributeNames: { "#status": "status" },
         ExpressionAttributeValues: {
           ":owner": identity.ownerKey, ":busy": "BUSY", ":ready": "READY", ":stopped": "STOPPED",
-          ":operation": operationId, ":fence": fence, ":now": now,
+          ":operation": operationId, ":fence": fence, ":observedFence": workspace.fence, ":now": now,
         },
       } },
       { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
@@ -1040,11 +1061,11 @@ async function acceptPullRequestLifecycle(
       TableName: dependencies.tableName,
       Key: workspaceKey(workspaceId),
       UpdateExpression: "SET #status = :busy, activeOperationId = :operation, fence = :fence, updatedAt = :now",
-      ConditionExpression: "ownerKey = :owner AND attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped)",
+      ConditionExpression: "ownerKey = :owner AND fence = :observedFence AND attribute_not_exists(candidateTaskOperationId) AND attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped)",
       ExpressionAttributeNames: { "#status": "status" },
       ExpressionAttributeValues: {
         ":owner": identity.ownerKey, ":busy": "BUSY", ":ready": "READY", ":stopped": "STOPPED",
-        ":operation": operationId, ":fence": fence, ":now": now,
+        ":operation": operationId, ":fence": fence, ":observedFence": workspace.fence, ":now": now,
       },
     } },
     { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
@@ -1097,18 +1118,31 @@ async function acceptCancellation(
     deploymentMode: workspace.deploymentMode,
     ...(workspace.capacityProviderArn === undefined ? {} : { capacityProviderArn: workspace.capacityProviderArn }),
   }, workspace, invocation);
-  await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
-    { Update: {
-      TableName: dependencies.tableName,
-      Key: operationKey(workspaceId, targetOperationId),
-      UpdateExpression: "SET #status = :cancel, updatedAt = :now",
-      ConditionExpression: "fence = :fence",
-      ExpressionAttributeNames: { "#status": "status" },
-      ExpressionAttributeValues: { ":cancel": "CANCEL_REQUESTED", ":now": now, ":fence": workspace.fence },
-    } },
-    { Put: { TableName: dependencies.tableName, Item: operation } },
-    { Put: { TableName: dependencies.tableName, Item: outbox } },
-  ] }));
+  try {
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { ConditionCheck: {
+        TableName: dependencies.tableName,
+        Key: workspaceKey(workspaceId),
+        ConditionExpression: "activeOperationId = :operation AND fence = :fence",
+        ExpressionAttributeValues: { ":operation": targetOperationId, ":fence": workspace.fence },
+      } },
+      { Update: {
+        TableName: dependencies.tableName,
+        Key: operationKey(workspaceId, targetOperationId),
+        UpdateExpression: "SET #status = :cancel, updatedAt = :now",
+        ConditionExpression: "fence = :fence AND #status = :observedStatus",
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: { ":cancel": "CANCEL_REQUESTED", ":now": now, ":fence": workspace.fence, ":observedStatus": target.status },
+      } },
+      { Put: { TableName: dependencies.tableName, Item: operation } },
+      { Put: { TableName: dependencies.tableName, Item: outbox } },
+    ] }));
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+    const current = await requireOperation(dependencies, workspaceId, targetOperationId);
+    if (TERMINAL.has(current.status)) return { operation: publicOperation(current), duplicate: true };
+    throw agentXError("STALE_FENCE", "operation changed before cancellation was admitted");
+  }
   return { operation: publicOperation(operation), duplicate: false };
 }
 
@@ -1150,12 +1184,23 @@ async function handleCallback(
   if (action !== "result" && TERMINAL.has(operation.status)) {
     throw agentXError("STALE_FENCE", "terminal operations cannot publish more output");
   }
+  if (operation.candidateBinding && !TERMINAL.has(operation.status)) {
+    const workspace = await requireWorkspace(dependencies, workspaceId);
+    if (workspace.fence !== operation.fence || workspace.activeOperationId !== operation.id || operation.status === "CANCEL_REQUESTED") {
+      throw agentXError("STALE_FENCE", "candidate callback no longer owns an active workspace writer");
+    }
+  }
   const body = parseBody(request.body);
   if (action === "events") {
     const accepted = await appendEvents(dependencies, operation, body);
     return json({ accepted }, request.requestId);
   }
   if (action === "artifacts") {
+    const artifact = object(body, "artifact callback");
+    if (artifact.id !== undefined || (typeof artifact.name === "string" && artifact.name.startsWith("candidate-"))) {
+      const workspace = await requireWorkspace(dependencies, workspaceId);
+      return json(await putCandidateArtifact(dependencies, operation, workspace.ownerKey, artifact), request.requestId);
+    }
     const artifactId = await putArtifact(dependencies, operation, body);
     return json({ artifactId }, request.requestId);
   }
@@ -1441,6 +1486,9 @@ async function recordTerminalResult(
   if (!TERMINAL.has(status as OperationStatus)) throw agentXError("CONFIG_INVALID", "terminal status is invalid");
   if (TERMINAL.has(operation.status)) {
     if (operation.status !== status) throw agentXError("IDEMPOTENCY_CONFLICT", "terminal result is immutable");
+    if (operation.candidateBinding && hashJson(operation.result ?? null) !== hashJson(input.result ?? null)) {
+      throw agentXError("IDEMPOTENCY_CONFLICT", "candidate terminal result is immutable");
+    }
     return operation;
   }
   const workspace = await requireWorkspace(dependencies, operation.workspaceId);
@@ -1450,6 +1498,12 @@ async function recordTerminalResult(
   const result = operation.kind === "publish" && status === "SUCCEEDED"
     ? PullRequestResultSchema.parse(input.result)
     : input.result;
+  if (operation.candidateBinding && status === "SUCCEEDED") {
+    const candidate = validateCandidateBinding(object(result, "candidate task result").candidate, operation.candidateBinding);
+    await validateStoredCandidateArtifacts(dependencies, operation, candidate);
+  } else if (!operation.candidateBinding && result && typeof result === "object" && "candidate" in result) {
+    throw agentXError("CALLBACK_FORBIDDEN", "operation was not admitted for candidate capture");
+  }
   const workspaceStatus =
     operation.kind === "prepare"
       ? terminalStatus === "SUCCEEDED"
@@ -1464,9 +1518,10 @@ async function recordTerminalResult(
       TableName: dependencies.tableName,
       Key: operationKey(operation.workspaceId, operation.id),
       UpdateExpression: "SET #status = :status, updatedAt = :now, #result = :result, #error = :error",
-      ConditionExpression: "fence = :fence",
+      ConditionExpression: operation.candidateBinding ? "fence = :fence AND #status <> :cancelled AND #status <> :cancelRequested AND #status <> :succeeded AND #status <> :failed AND #status <> :interrupted" : "fence = :fence",
       ExpressionAttributeNames: { "#status": "status", "#result": "result", "#error": "error" },
-      ExpressionAttributeValues: { ":status": terminalStatus, ":now": now, ":result": result ?? null, ":error": error ?? null, ":fence": operation.fence },
+      ExpressionAttributeValues: { ":status": terminalStatus, ":now": now, ":result": result ?? null, ":error": error ?? null, ":fence": operation.fence,
+        ...(operation.candidateBinding ? { ":cancelled": "CANCELLED", ":cancelRequested": "CANCEL_REQUESTED", ":succeeded": "SUCCEEDED", ":failed": "FAILED", ":interrupted": "INTERRUPTED" } : {}) },
     } },
   ];
   if (operation.kind === "cancel" && terminalTarget) {
@@ -1474,9 +1529,18 @@ async function recordTerminalResult(
       TableName: dependencies.tableName,
       Key: terminalTarget,
       UpdateExpression: "SET #status = :status, updatedAt = :now",
+      ConditionExpression: "fence = :fence AND #status = :cancelRequested",
       ExpressionAttributeNames: { "#status": "status" },
-      ExpressionAttributeValues: { ":status": terminalStatus === "SUCCEEDED" ? "CANCELLED" : "INTERRUPTED", ":now": now },
+      ExpressionAttributeValues: { ":status": terminalStatus === "SUCCEEDED" ? "CANCELLED" : "INTERRUPTED", ":now": now, ":fence": operation.fence, ":cancelRequested": "CANCEL_REQUESTED" },
     } });
+    if (terminalStatus !== "SUCCEEDED") {
+      transactItems.push({ ConditionCheck: {
+        TableName: dependencies.tableName,
+        Key: workspaceKey(workspace.id),
+        ConditionExpression: "activeOperationId = :operation AND fence = :fence",
+        ExpressionAttributeValues: { ":operation": operation.targetOperationId, ":fence": operation.fence },
+      } });
+    }
   }
   if (operation.kind !== "cancel" || terminalStatus === "SUCCEEDED") {
     transactItems.push({ Update: {
@@ -1503,7 +1567,7 @@ async function recordTerminalResult(
   } catch (transactionError) {
     if (!isConditional(transactionError)) throw transactionError;
     const existing = await requireOperation(dependencies, operation.workspaceId, operation.id);
-    if (existing.status === terminalStatus) return existing;
+    if (existing.status === terminalStatus && (!operation.candidateBinding || hashJson(existing.result ?? null) === hashJson(result ?? null))) return existing;
     throw agentXError("STALE_FENCE", "terminal callback no longer owns the workspace");
   }
   return { ...operation, status: terminalStatus, updatedAt: now, ...(result === undefined ? {} : { result }), ...(error === undefined ? {} : { error }) };
@@ -1553,8 +1617,12 @@ async function getArtifact(
   if (!artifact || artifact.ownerKey !== identity.ownerKey || typeof artifact.objectKey !== "string") {
     throw agentXError("NOT_FOUND", "artifact not found");
   }
+  if (typeof artifact.expiresAt === "string" && Date.parse(artifact.expiresAt) <= Date.now()) throw agentXError("NOT_FOUND", "artifact retention expired");
   const object = await dependencies.s3.send(new GetObjectCommand({ Bucket: dependencies.artifactBucketName, Key: artifact.objectKey }));
   const content = object.Body ? await object.Body.transformToString("utf8") : "";
+  if (typeof artifact.sha256 === "string" && createHash("sha256").update(content).digest("hex") !== artifact.sha256) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "retained candidate artifact integrity mismatch");
+  }
   return { id: artifactId, name: artifact.name, mediaType: artifact.mediaType, operationId: artifact.operationId, content };
 }
 

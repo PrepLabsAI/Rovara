@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { WorkerInvocationSchema, agentXError, type WorkerInvocation } from "@agentx/contracts";
+import { WorkerInvocationSchema, agentXError, type CandidateResult, type WorkerInvocation } from "@agentx/contracts";
+import { assertTaskCandidateBase, freezeTaskCandidate } from "./candidate.js";
 import { publishWorkspaceDiff, type ArtifactSink } from "./artifacts.js";
 import { EventBatcher, redactCredentials, type EventBatchSink } from "./events.js";
 import { createWorkspacePiSession, type PiSessionAdapter, type PiSessionHandle, type WorkspaceModelConfiguration } from "./pi-session.js";
@@ -21,7 +22,7 @@ interface TaskDependencies {
 export async function runTaskInvocation(
   untrustedInvocation: WorkerInvocation,
   dependencies: TaskDependencies,
-): Promise<{ conversationId: string; sessionFile: string }> {
+): Promise<{ conversationId: string; sessionFile: string; candidate?: CandidateResult }> {
   const limits = dependencies.demoLimits ? new DemoRunLimits() : undefined;
   let session: PiSessionHandle | undefined;
   const execute = () => executeTaskInvocation(untrustedInvocation, dependencies, limits, (value) => { session = value; });
@@ -35,7 +36,7 @@ export async function runTaskInvocation(
 async function executeTaskInvocation(
   untrustedInvocation: WorkerInvocation, dependencies: TaskDependencies,
   limits: DemoRunLimits | undefined, onSession: (session: PiSessionHandle) => void,
-): Promise<{ conversationId: string; sessionFile: string }> {
+): Promise<{ conversationId: string; sessionFile: string; candidate?: CandidateResult }> {
   const invocation = WorkerInvocationSchema.parse(untrustedInvocation);
   if (invocation.kind !== "task") throw agentXError("CONFIG_INVALID", "runTaskInvocation requires a task");
   const manifest = JSON.parse(
@@ -46,6 +47,7 @@ async function executeTaskInvocation(
   }
 
   const events = new EventBatcher(dependencies.eventSink);
+  if (invocation.payload.candidate) await assertTaskCandidateBase(dependencies.rootPath, invocation);
   const toolEvidence: unknown[] = [];
   const session = await createWorkspacePiSession(
     { rootPath: dependencies.rootPath, model: dependencies.model, ...(limits ? { limits } : {}) },
@@ -53,6 +55,7 @@ async function executeTaskInvocation(
   );
   onSession(session);
   const unregisterCancellation = dependencies.cancellationController?.register(invocation.operationId, session);
+  let disposed = false;
   const unsubscribe = session.subscribe((event) => {
     if (eventType(event) === "tool_end") toolEvidence.push(redactCredentials(event));
     void events.append(eventType(event), event).catch(() => undefined);
@@ -61,6 +64,17 @@ async function executeTaskInvocation(
     limits?.assertActive();
     await events.append("lifecycle", { status: "RUNNING", conversationId: session.conversationId });
     await session.prompt(invocation.payload.prompt);
+    limits?.assertActive();
+    if (dependencies.cancellationController?.isCancelled(invocation.operationId)) throw new WorkerOperationCancelledError(invocation.operationId);
+    session.dispose();
+    disposed = true;
+    const candidate = invocation.payload.candidate ? await freezeTaskCandidate({
+      rootPath: dependencies.rootPath, invocation, artifactSink: dependencies.artifactSink,
+      isCancelled: () => {
+        limits?.assertActive();
+        return dependencies.cancellationController?.isCancelled(invocation.operationId) ?? false;
+      },
+    }) : undefined;
     limits?.assertActive();
     await publishWorkspaceDiff(dependencies.rootPath, dependencies.artifactSink);
     limits?.assertActive();
@@ -72,7 +86,8 @@ async function executeTaskInvocation(
     limits?.assertActive();
     await events.append("result", { status: "SUCCEEDED", sessionFile: "agent-sessions/[server-generated]" });
     await events.flush();
-    return { conversationId: session.conversationId, sessionFile: session.sessionFile };
+    if (dependencies.cancellationController?.isCancelled(invocation.operationId)) throw new WorkerOperationCancelledError(invocation.operationId);
+    return { conversationId: session.conversationId, sessionFile: session.sessionFile, ...(candidate === undefined ? {} : { candidate }) };
   } catch (error) {
     if (dependencies.cancellationController?.isCancelled(invocation.operationId)) {
       await events.append("lifecycle", { status: "CANCELLED" });
@@ -85,7 +100,7 @@ async function executeTaskInvocation(
   } finally {
     unsubscribe();
     unregisterCancellation?.();
-    session.dispose();
+    if (!disposed) session.dispose();
   }
 }
 

@@ -33,6 +33,9 @@ export async function publishWorkspace(
   options: PublishWorkspaceOptions,
 ): Promise<PullRequestResult | PullRequestLifecycleResult> {
   const { invocation } = options;
+  if (invocation.payload.candidate !== undefined || invocation.payload.authorization !== undefined) {
+    throw agentXError("FORBIDDEN", "exact candidate publication is not enabled; legacy publication cannot consume candidate authorization");
+  }
   const mode = invocation.payload.mode ?? "create";
   const rootPath = await realpath(resolve(options.rootPath));
   const manifest = await loadCompleteManifest(rootPath, invocation);

@@ -15,6 +15,7 @@ export interface JournalRecord {
   acceptedAt: string;
   updatedAt: string;
   error?: string;
+  result?: unknown;
 }
 
 export class OperationJournal {
@@ -68,7 +69,7 @@ export class OperationJournal {
     }
   }
 
-  async transition(operationId: string, status: JournalStatus, error?: string): Promise<JournalRecord> {
+  async transition(operationId: string, status: JournalStatus, error?: string, result?: unknown): Promise<JournalRecord> {
     const current = await this.get(operationId);
     if (!current) throw agentXError("NOT_FOUND", "journal operation not found");
     const terminal = new Set<JournalStatus>(["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"]);
@@ -81,6 +82,7 @@ export class OperationJournal {
       status,
       updatedAt: new Date().toISOString(),
       ...(error === undefined ? {} : { error }),
+      ...(result === undefined ? {} : { result }),
     };
     const temporary = resolve(this.directory, `${operationId}.${randomUUID()}.tmp`);
     await writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
