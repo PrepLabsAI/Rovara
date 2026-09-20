@@ -3,6 +3,8 @@ import { parseAdditionalGitHubAppBindings, type GitHubAppBinding } from "@agentx
 import {
   CfnOutput,
   CfnParameter,
+  CfnRule,
+  Fn,
   Duration,
   RemovalPolicy,
   Stack,
@@ -58,6 +60,17 @@ export class ControlPlaneStack extends Stack {
     const githubAppCredentialRef = new CfnParameter(this, "GitHubAppCredentialRef", {
       type: "String",
       default: "github-agentx-sdlc",
+    });
+    // The deployed legacy parameter may differ from its default. Validate at
+    // deployment as well as startup so a retained custom ref cannot take down
+    // the existing broker when an additional binding is activated.
+    additional.forEach((binding, index) => {
+      new CfnRule(this, `DistinctAdditionalGitHubCredential${index}`, {
+        assertions: [{
+          assert: Fn.conditionNot(Fn.conditionEquals(githubAppCredentialRef.valueAsString, binding.credentialRef)),
+          assertDescription: "Additional GitHub App credentials must differ from the legacy credential reference",
+        }],
+      });
     });
     const githubAppAccount = new CfnParameter(this, "GitHubAppAccount", { type: "String" });
     const githubAppId = new CfnParameter(this, "GitHubAppId", { type: "String" });

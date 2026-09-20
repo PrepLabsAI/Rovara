@@ -16,6 +16,23 @@ describe("control-plane infrastructure", () => {
     privateKeySecretArn: "arn:aws:secretsmanager:us-east-1:944937319445:secret:new-AbCd12",
     repositories: ["https://github.com/PrepLabsAI/charterarc-integration-demo.git"] };
   const env = { account: "944937319445", region: "us-east-1" };
+  it("guards additional references against the actual retained legacy deployment parameter", () => {
+    const template = Template.fromStack(new ControlPlaneStack(new App(), "CustomLegacyRef", {
+      env, additionalGitHubApps: [{ ...binding, credentialRef: "existing-custom-ref" }],
+    })).toJSON() as { Rules?: Record<string, { Assertions: Array<{ Assert: unknown }> }> };
+    const assertions = Object.entries(template.Rules ?? {})
+      .filter(([name]) => name.startsWith("DistinctAdditionalGitHubCredential"))
+      .flatMap(([, rule]) => rule.Assertions);
+    expect(assertions).toHaveLength(1);
+    expect(assertions[0]?.Assert).toEqual({ "Fn::Not": [{ "Fn::Equals": [
+      { Ref: "GitHubAppCredentialRef" }, "existing-custom-ref",
+    ] }] });
+    const expression = assertions[0]!.Assert as { "Fn::Not": [{ "Fn::Equals": [{ Ref: string }, string] }] };
+    const [parameter, additionalRef] = expression["Fn::Not"][0]["Fn::Equals"];
+    const permits = (parameters: Record<string, string>) => parameters[parameter.Ref] !== additionalRef;
+    expect(permits({ GitHubAppCredentialRef: "existing-custom-ref" })).toBe(false);
+    expect(permits({ GitHubAppCredentialRef: "another-custom-ref" })).toBe(true);
+  });
   it("adds only the new broker secret permission and preserves storage identities", () => {
     type Resource = { Type: string; Properties: {
       Environment?: { Variables?: Record<string, string> };

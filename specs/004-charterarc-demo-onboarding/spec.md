@@ -1,6 +1,6 @@
 # Additive CharterArc demo onboarding
 
-Status: proposed implementation specification for owner review. No runtime change or deployment is claimed.
+Status: owner approved the credential-routing implementation plan on 2026-09-20. Credential code and local checks are implemented on the separate branch; live activation and sections 3–4 remain pending. See execution-report.md. No deployment is claimed.
 
 ## Purpose
 
@@ -12,7 +12,7 @@ The owner requested the required setup changes on a separate branch. Use `codex/
 
 Preserve the AgentX constitution: administrator-prepared projects, authenticated workspace ownership, remote coding, one writer, explicit recovery and honest demo-storage limits. No customer data, production merge/deploy, broader model access or evidence qualification is added.
 
-## Observed setup and missing proof
+## Baseline observations before implementation and missing proof
 
 - New private GitHub App ID 5006456, installation 163149623, selected repository `PrepLabsAI/charterarc-integration-demo` only. Contents/PR write and Metadata read are approved.
 - Existing broker configuration uses app 5002502, installation 163046162 and credential reference `github-agentx-sdlc`. Preserve these settings and the existing private key.

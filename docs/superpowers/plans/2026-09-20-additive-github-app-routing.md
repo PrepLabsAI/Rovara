@@ -32,7 +32,7 @@
 
 ## Preflight and environment
 
-Read the spec and repository constitution. Confirm the branch and a clean tracked tree. The owner has approved supporting both apps; the detailed execution plan still needs the writing-plans review gate. Use native execution in this session after that review; a new Codex task is unnecessary.
+Read the spec and repository constitution. Confirm the branch and a clean tracked tree. The owner approved this detailed execution plan on 2026-09-20. Native execution is complete for the coding tasks; see `specs/004-charterarc-demo-onboarding/execution-report.md` for evidence and remaining live gates. A new Codex task is unnecessary. The checklists below preserve the original execution recipe; the report records completion.
 
 Local Node binary is installed from the producer archive with SHA-256
 `61130f394c1630d211dd50aecc4353d379480f36d3ac913cd85dbba1aed585c6`:

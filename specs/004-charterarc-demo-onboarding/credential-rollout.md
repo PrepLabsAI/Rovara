@@ -13,6 +13,11 @@ repositories not explicitly assigned to a new binding. An assigned repository wi
 a wrong credential reference is rejected; an installation/key/network failure never
 falls back to a different app.
 
+CloudFormation rules compare every additional reference against the actual
+`GitHubAppCredentialRef` deployment parameter, including retained nondefault
+values. A collision must reject deployment before any broker update. Runtime
+validation remains as a second check for manually configured environments.
+
 CDK context `agentxAdditionalGitHubApps` accepts an array or a JSON array string.
 Each entry requires `credentialRef`, `account`, `appId`, `installationId`,
 `privateKeySecretArn`, and a nonempty `repositories` allowlist. Secret ARNs are
