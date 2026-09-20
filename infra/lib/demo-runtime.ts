@@ -2,6 +2,7 @@ import {
   CfnOutput,
   CfnParameter,
   Stack,
+  Token,
   type StackProps,
   aws_bedrockagentcore as agentcore,
   aws_iam as iam,
@@ -22,6 +23,7 @@ export interface DemoRuntimeStackProps extends StackProps {
   deploymentRegion: string;
   configuration?: Partial<DemoRuntimeConfiguration>;
   runtimeName?: string;
+  permissionProfile?: "team-tasks";
 }
 
 export function selectDemoRuntime(deploymentMode: string, teamTasks: unknown): { stackId: string; runtimeName: string } {
@@ -68,6 +70,11 @@ export class DemoRuntimeStack extends Stack {
   constructor(scope: Construct, id: string, props: DemoRuntimeStackProps) {
     super(scope, id, props);
     const runtimeName = props.runtimeName ?? "agentx_demo_worker";
+    const teamTasks = props.permissionProfile === "team-tasks";
+    if (teamTasks && (runtimeName !== "charterarc_team_tasks_worker" || props.deploymentRegion !== "us-east-1" || Token.isUnresolved(this.account) || !/^\d{12}$/.test(this.account))) {
+      throw new Error("Team Tasks permissions require the named runtime, us-east-1 and a concrete account");
+    }
+    const partition = teamTasks ? "aws" : this.partition;
     if (!/^[A-Za-z][A-Za-z0-9_]{0,47}$/.test(runtimeName) || runtimeName.trim() !== runtimeName) {
       throw new Error("invalid AgentCore runtime name");
     }
@@ -79,7 +86,9 @@ export class DemoRuntimeStack extends Stack {
 
     const imageUri = new CfnParameter(this, "WorkerImageUri", {
       type: "String",
-      allowedPattern: "^.+@sha256:[a-f0-9]{64}$",
+      allowedPattern: teamTasks
+        ? `^${this.account}\\.dkr\\.ecr\\.us-east-1\\.amazonaws\\.com/charterarc-team-tasks-worker@sha256:[a-f0-9]{64}$`
+        : "^.+@sha256:[a-f0-9]{64}$",
       description: "Immutable private ECR linux/arm64 worker image URI",
     });
     const controlPlaneUrl = new CfnParameter(this, "ControlPlaneUrl", {
@@ -90,19 +99,28 @@ export class DemoRuntimeStack extends Stack {
     const modelProvider = new CfnParameter(this, "ModelProvider", {
       type: "String",
       default: "amazon-bedrock",
+      ...(teamTasks ? { allowedValues: ["amazon-bedrock"] } : {}),
       description: "pi model provider identifier",
     });
     const modelId = new CfnParameter(this, "ModelId", {
       type: "String",
       description: "pi model identifier available in the deployment region",
+      ...(teamTasks ? { allowedValues: ["amazon.nova-pro-v1:0"] } : {}),
     });
 
     const executionRole = new iam.Role(this, "RuntimeExecutionRole", {
+      ...(teamTasks ? {
+        roleName: "CharterArcTeamTasksRuntimeWorker",
+        permissionsBoundary: iam.ManagedPolicy.fromManagedPolicyArn(this, "RuntimeBoundary",
+          `arn:aws:iam::${this.account}:policy/CharterArcTeamTasksRuntimeBoundary`),
+      } : {}),
       assumedBy: new iam.ServicePrincipal("bedrock-agentcore.amazonaws.com", {
         conditions: {
           StringEquals: { "aws:SourceAccount": this.account },
           ArnLike: {
-            "aws:SourceArn": `arn:${this.partition}:bedrock-agentcore:${props.deploymentRegion}:${this.account}:*`,
+            "aws:SourceArn": teamTasks
+              ? `arn:aws:bedrock-agentcore:${props.deploymentRegion}:${this.account}:runtime/${runtimeName}-*`
+              : `arn:${this.partition}:bedrock-agentcore:${props.deploymentRegion}:${this.account}:*`,
           },
         },
       }),
@@ -115,7 +133,7 @@ export class DemoRuntimeStack extends Stack {
         sid: "EcrImageAccess",
         actions: ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
         resources: [
-          `arn:${this.partition}:ecr:${props.deploymentRegion}:${this.account}:repository/*`,
+          `arn:${partition}:ecr:${props.deploymentRegion}:${this.account}:repository/${teamTasks ? "charterarc-team-tasks-worker" : "*"}`,
         ],
         }),
         new iam.PolicyStatement({
@@ -126,7 +144,7 @@ export class DemoRuntimeStack extends Stack {
         new iam.PolicyStatement({
         sid: "BedrockModelInvocation",
         actions: ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
-        resources: [
+        resources: teamTasks ? ["arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-pro-v1:0"] : [
           `arn:${this.partition}:bedrock:*::foundation-model/*`,
           `arn:${this.partition}:bedrock:${props.deploymentRegion}:${this.account}:*`,
         ],
@@ -135,14 +153,21 @@ export class DemoRuntimeStack extends Stack {
         sid: "RuntimeLogs",
         actions: [
           "logs:CreateLogGroup",
-          "logs:DescribeLogGroups",
+          ...(teamTasks ? [] : ["logs:DescribeLogGroups"]),
           "logs:DescribeLogStreams",
           "logs:CreateLogStream",
           "logs:PutLogEvents",
-          "logs:PutResourcePolicy",
+          ...(teamTasks ? [] : ["logs:PutResourcePolicy"]),
         ],
-        resources: ["*"],
+        resources: teamTasks ? [
+          `arn:aws:logs:us-east-1:${this.account}:log-group:/aws/bedrock-agentcore/runtimes/${runtimeName}-*`,
+        ] : ["*"],
         }),
+        ...(teamTasks ? [new iam.PolicyStatement({
+          sid: "RuntimeLogDiscovery",
+          actions: ["logs:DescribeLogGroups"],
+          resources: ["*"],
+        })] : []),
         new iam.PolicyStatement({
         sid: "RuntimeTracing",
         actions: [
@@ -184,7 +209,9 @@ export class DemoRuntimeStack extends Stack {
         AGENTX_MODEL_PROVIDER: modelProvider.valueAsString,
         AGENTX_MODEL_ID: modelId.valueAsString,
       },
-      tags: { Application: "AgentX", DeploymentMode: AGENTX_DEMO_DEPLOYMENT_MODE },
+      tags: { Application: "AgentX", DeploymentMode: AGENTX_DEMO_DEPLOYMENT_MODE,
+        ...(teamTasks ? { CharterArcScope: "TeamTasksDemo" } : {}),
+      },
     });
     runtime.node.addDependency(runtimePolicy);
 

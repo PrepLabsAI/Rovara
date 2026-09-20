@@ -35,9 +35,12 @@ new ControlPlaneStack(app, "AgentXControlPlane", {
 if (deploymentMode === "demo-microvm") {
   new DemoRuntimeStack(app, demoSelection.stackId, {
     runtimeName: demoSelection.runtimeName,
+    ...(demoSelection.stackId === "CharterArcTeamTasksRuntime" ? { permissionProfile: "team-tasks" as const } : {}),
     description: "AgentX VPC-free microVM demonstration runtime",
     deploymentRegion: deploymentRegion ?? "us-east-1",
-    env: { region: deploymentRegion ?? "us-east-1" },
+    env: { region: deploymentRegion ?? "us-east-1",
+      ...(demoSelection.stackId === "CharterArcTeamTasksRuntime" ? { account: process.env.CDK_DEFAULT_ACCOUNT ?? "" } : {}),
+    },
   });
 } else {
   new AgentRuntimeStack(app, "AgentXRuntime", {

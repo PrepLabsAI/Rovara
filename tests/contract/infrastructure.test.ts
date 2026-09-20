@@ -145,6 +145,47 @@ describe("AgentCore Instances infrastructure", () => {
 });
 
 describe("AgentCore VPC-free microVM demo infrastructure", () => {
+  it("confines the new Team Tasks worker to its image, model and runtime logs", () => {
+    const template = Template.fromStack(new DemoRuntimeStack(new App(), "CharterArcTeamTasksRuntime", {
+      deploymentRegion: "us-east-1", runtimeName: "charterarc_team_tasks_worker",
+      permissionProfile: "team-tasks",
+      env: { account: "944937319445", region: "us-east-1" },
+    }));
+    template.hasResourceProperties("AWS::IAM::Role", {
+      RoleName: "CharterArcTeamTasksRuntimeWorker",
+      PermissionsBoundary: "arn:aws:iam::944937319445:policy/CharterArcTeamTasksRuntimeBoundary",
+      AssumeRolePolicyDocument: { Statement: [Match.objectLike({
+        Condition: {
+          StringEquals: { "aws:SourceAccount": "944937319445" },
+          ArnLike: { "aws:SourceArn": "arn:aws:bedrock-agentcore:us-east-1:944937319445:runtime/charterarc_team_tasks_worker-*" },
+        },
+      })], Version: "2012-10-17" },
+    });
+    type Statement = {Sid:string;Action:string|string[];Resource:unknown};
+    const policies = template.findResources("AWS::IAM::Policy") as Record<string, { Properties: { PolicyDocument: { Statement: Statement[] } } }>;
+    const statements = Object.values(policies).flatMap((p) => p.Properties.PolicyDocument.Statement);
+    expect(statements.find(s => s.Sid === "EcrImageAccess")?.Resource).toBe("arn:aws:ecr:us-east-1:944937319445:repository/charterarc-team-tasks-worker");
+    expect(statements.find(s => s.Sid === "BedrockModelInvocation")?.Resource).toBe("arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-pro-v1:0");
+    const logWrites = statements.filter(s => [s.Action].flat().some(a => ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"].includes(a)));
+    expect(logWrites.length).toBeGreaterThan(0);
+    expect(logWrites.every(s => JSON.stringify(s.Resource).includes("/aws/bedrock-agentcore/runtimes/charterarc_team_tasks_worker-"))).toBe(true);
+    expect(statements.some(s => [s.Action].flat().includes("logs:PutResourcePolicy"))).toBe(false);
+    template.hasParameter("ModelId", { AllowedValues: ["amazon.nova-pro-v1:0"] });
+    template.hasParameter("ModelProvider", { AllowedValues: ["amazon-bedrock"] });
+    const document = template.toJSON() as { Parameters: {WorkerImageUri: {AllowedPattern:string}} };
+    const imagePattern = document.Parameters.WorkerImageUri.AllowedPattern;
+    const acceptsImage = new RegExp(imagePattern);
+    expect(acceptsImage.test("944937319445.dkr.ecr.us-east-1.amazonaws.com/charterarc-team-tasks-worker@sha256:" + "a".repeat(64))).toBe(true);
+    expect(acceptsImage.test("944937319445.dkr.ecr.us-east-1.amazonaws.com/other@sha256:" + "a".repeat(64))).toBe(false);
+  });
+
+  it("rejects a Team Tasks permission profile on an unrelated runtime", () => {
+    expect(() => new DemoRuntimeStack(new App(), "WrongRuntime", {
+      deploymentRegion: "us-east-1", permissionProfile: "team-tasks",
+      env: { account: "944937319445", region: "us-east-1" },
+    })).toThrow(/Team Tasks/);
+  });
+
   it("selects the isolated runtime only with explicit demo context", () => {
     expect(selectDemoRuntime("demo-microvm", undefined)).toEqual({ stackId: "AgentXDemoRuntime", runtimeName: "agentx_demo_worker" });
     for (const flag of [true, "true"]) {
