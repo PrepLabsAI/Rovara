@@ -14,12 +14,13 @@ export const MAX_WORKSPACE_DIFF_BYTES = 4_500_000;
 const TRUNCATION_NOTICE = "\n\n[workspace diff truncated to fit the AgentX artifact limit]\n";
 
 export interface WorkerArtifact {
+  id?: string;
   name: string;
   mediaType: string;
   content: string;
 }
 
-export type ArtifactSink = (artifact: WorkerArtifact) => Promise<void>;
+export type ArtifactSink = (artifact: WorkerArtifact) => Promise<void | { artifactId: string; sha256: string; sizeBytes: number }>;
 
 export async function publishWorkspaceDiff(rootPath: string, sink: ArtifactSink): Promise<void> {
   const manifest = JSON.parse(

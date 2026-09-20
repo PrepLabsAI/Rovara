@@ -29,6 +29,7 @@ export const WorkspaceInstanceSchema = z
     status: WorkspaceStatusSchema,
     preparationManifest: z.string().max(1_024).optional(),
     activeOperationId: z.string().uuid().nullable().default(null),
+    candidateTaskOperationId: z.string().uuid().optional(),
     fence: z.number().int().nonnegative(),
     createdAt: z.string().datetime(),
     updatedAt: z.string().datetime(),

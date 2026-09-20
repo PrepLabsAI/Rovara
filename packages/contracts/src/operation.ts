@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { z } from "zod";
+import { CandidateRequestSchema, CandidatePublicationAuthorizationSchema } from "./candidate.js";
 
 export const OperationKindSchema = z.enum([
   "prepare",
@@ -25,6 +26,7 @@ export const OperationRequestSchema = z
   .object({
     requestId: z.string().uuid(),
     conversationId: z.string().uuid(),
+    candidate: CandidateRequestSchema.optional(),
     prompt: z
       .string()
       .min(1)
@@ -35,6 +37,8 @@ export const OperationRequestSchema = z
 export const PullRequestRequestSchema = z
   .object({
     requestId: z.string().uuid(),
+    candidateOperationId: z.string().uuid().optional(),
+    authorization: CandidatePublicationAuthorizationSchema.optional(),
     repository: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),
     title: z
       .string()

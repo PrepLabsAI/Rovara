@@ -16,6 +16,16 @@ afterEach(async () => {
 });
 
 describe("pull request publication", () => {
+  it("rejects candidate authorization before the legacy publisher can stage or push", async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.checkout, "README.md"), "changed\n", "utf8");
+    fixture.invocation.payload.authorization = { actor: "alice", jobId: fixture.invocation.operationId,
+      candidateId: fixture.invocation.operationId, commit: "a".repeat(40), action: "create-pull-request", repository: "demo",
+      baseBranch: "main", evidencePacketRef: "evidence-ref", expiresAt: new Date(Date.now() + 60000).toISOString() };
+    const credentialProvider = vi.fn(async () => ({})); const pullRequestSink = vi.fn();
+    await expect(publishWorkspace({ rootPath: fixture.root, invocation: fixture.invocation, credentialProvider, pullRequestSink })).rejects.toThrow(/candidate publication is not enabled/i);
+    expect(credentialProvider).not.toHaveBeenCalled(); expect(pullRequestSink).not.toHaveBeenCalled();
+  });
   it("replays the workspace tree onto the latest base without inheriting stale publication commits", async () => {
     const fixture = await createFixture();
     await writeFile(join(fixture.checkout, "ABOUT.md"), "old unpublished change\n", "utf8");

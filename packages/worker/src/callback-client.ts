@@ -86,7 +86,15 @@ export function createWorkerCallbackSinks(input: {
   };
   return {
     eventSink: async (events) => post("events", { events }),
-    artifactSink: async (artifact) => post("artifacts", artifact),
+    artifactSink: async (artifact) => {
+      if (artifact.id === undefined) return post("artifacts", artifact);
+      const value = await postForResult("artifacts", artifact);
+      if (!value || typeof value !== "object" || !("artifactId" in value) || !("sha256" in value) || !("sizeBytes" in value) ||
+          typeof value.artifactId !== "string" || typeof value.sha256 !== "string" || typeof value.sizeBytes !== "number") {
+        throw agentXError("RUNTIME_UNAVAILABLE", "candidate artifact receipt is invalid");
+      }
+      return { artifactId: value.artifactId, sha256: value.sha256, sizeBytes: value.sizeBytes };
+    },
     terminalSink: async (result) => post("result", {
       status: result.status,
       ...(result.result === undefined ? {} : { result: result.result }),

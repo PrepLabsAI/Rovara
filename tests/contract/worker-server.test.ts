@@ -11,6 +11,21 @@ import {
 import { describe, expect, it, vi } from "vitest";
 
 describe("AgentCore worker HTTP contract", () => {
+  it("replays a durable terminal payload after a lost callback without re-executing", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentx-replay-"));
+    const journal = new OperationJournal(root);
+    const invocation = taskInvocation();
+    const result = { candidate: { commit: "a".repeat(40) } };
+    let executions = 0;
+    const state = createWorkerServerState(journal, { execute: async () => { executions += 1; return result; } });
+    await handleWorkerRequest(invocationRequest(invocation), state);
+    await vi.waitFor(async () => expect((await journal.get(invocation.operationId))?.status).toBe("SUCCEEDED"));
+    const receipts: unknown[] = [];
+    const restarted = createWorkerServerState(new OperationJournal(root), { execute: async () => { executions += 1; } }, { onTerminal: async (receipt) => { receipts.push(receipt); } });
+    await handleWorkerRequest(invocationRequest(invocation), restarted);
+    await vi.waitFor(() => expect(receipts).toEqual([{ operationId: invocation.operationId, status: "SUCCEEDED", result }]));
+    expect(executions).toBe(1);
+  });
   it("journals before acknowledging and reports HealthyBusy during background execution", async () => {
     const root = await mkdtemp(join(tmpdir(), "agentx-journal-"));
     const journal = new OperationJournal(root);

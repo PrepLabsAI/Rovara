@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ProjectDefinitionSchema } from "./project.js";
+import { CandidateRequestSchema, CandidateResultSchema, CandidatePublicationAuthorizationSchema } from "./candidate.js";
 
 export const AGENTX_PROTOCOL_VERSION = 1 as const;
 
@@ -19,13 +20,15 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
   }).strict(),
   InvocationBaseSchema.extend({
     kind: z.literal("task"),
-    payload: z.object({ conversationId: z.string().uuid(), prompt: z.string().min(1).max(65_536) }).strict(),
+    payload: z.object({ conversationId: z.string().uuid(), prompt: z.string().min(1).max(65_536), candidate: CandidateRequestSchema.optional(), project: ProjectDefinitionSchema.optional() }).strict(),
   }).strict(),
   InvocationBaseSchema.extend({
     kind: z.literal("publish"),
     payload: z
       .object({
         project: ProjectDefinitionSchema,
+        candidate: CandidateResultSchema.optional(),
+        authorization: CandidatePublicationAuthorizationSchema.optional(),
         repository: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),
         title: z.string().min(1).max(256),
         body: z
