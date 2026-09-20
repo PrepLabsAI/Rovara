@@ -81,7 +81,7 @@ export class DemoRuntimeStack extends Stack {
     const configuration = validateDemoRuntimeConfiguration({
       mountPath: props.configuration?.mountPath ?? AGENTX_WORKSPACE_MOUNT,
       idleSeconds: props.configuration?.idleSeconds ?? 900,
-      maxLifetimeSeconds: props.configuration?.maxLifetimeSeconds ?? 28_800,
+      maxLifetimeSeconds: props.configuration?.maxLifetimeSeconds ?? (teamTasks ? 3600 : 28_800),
     });
 
     const imageUri = new CfnParameter(this, "WorkerImageUri", {
@@ -204,6 +204,7 @@ export class DemoRuntimeStack extends Stack {
       },
       protocolConfiguration: "HTTP",
       environmentVariables: {
+        ...(teamTasks ? { AGENTX_DEMO_RUN_LIMITS: "1" } : {}),
         AGENTX_WORKSPACE_ROOT: configuration.mountPath,
         AGENTX_CONTROL_PLANE_URL: controlPlaneUrl.valueAsString,
         AGENTX_MODEL_PROVIDER: modelProvider.valueAsString,

@@ -172,6 +172,10 @@ describe("AgentCore VPC-free microVM demo infrastructure", () => {
     expect(statements.some(s => [s.Action].flat().includes("logs:PutResourcePolicy"))).toBe(false);
     template.hasParameter("ModelId", { AllowedValues: ["amazon.nova-pro-v1:0"] });
     template.hasParameter("ModelProvider", { AllowedValues: ["amazon-bedrock"] });
+    template.hasResourceProperties("AWS::BedrockAgentCore::Runtime", {
+      EnvironmentVariables: { AGENTX_DEMO_RUN_LIMITS: "1" },
+      LifecycleConfiguration: { IdleRuntimeSessionTimeout: 900, MaxLifetime: 3600 },
+    });
     const document = template.toJSON() as { Parameters: {WorkerImageUri: {AllowedPattern:string}} };
     const imagePattern = document.Parameters.WorkerImageUri.AllowedPattern;
     const acceptsImage = new RegExp(imagePattern);
@@ -228,6 +232,7 @@ describe("AgentCore VPC-free microVM demo infrastructure", () => {
         MaxLifetime: 28_800,
       },
       EnvironmentVariables: {
+        AGENTX_DEMO_RUN_LIMITS: Match.absent(),
         AGENTX_WORKSPACE_ROOT: "/mnt/workspace",
         AGENTX_CONTROL_PLANE_URL: { Ref: "ControlPlaneUrl" },
         AGENTX_MODEL_PROVIDER: { Ref: "ModelProvider" },
