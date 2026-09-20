@@ -1,10 +1,12 @@
 import { resolve } from "node:path";
+import { parseAdditionalGitHubAppBindings, type GitHubAppBinding } from "@agentx/contracts";
 import {
   CfnOutput,
   CfnParameter,
   Duration,
   RemovalPolicy,
   Stack,
+  Token,
   type StackProps,
   aws_apigatewayv2 as apigwv2,
   aws_dynamodb as dynamodb,
@@ -16,9 +18,25 @@ import {
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
 
+export interface ControlPlaneStackProps extends StackProps {
+  additionalGitHubApps?: GitHubAppBinding[];
+}
+
 export class ControlPlaneStack extends Stack {
-  constructor(scope: Construct, id: string, props?: StackProps) {
+  constructor(scope: Construct, id: string, props?: ControlPlaneStackProps) {
     super(scope, id, props);
+
+    const additional = parseAdditionalGitHubAppBindings(props?.additionalGitHubApps ?? [], "github-agentx-sdlc");
+    if (Buffer.byteLength(JSON.stringify(additional), "utf8") > 2048) {
+      throw new Error("additional GitHub App registry exceeds the environment budget");
+    }
+    for (const binding of additional) {
+      const parts = binding.privateKeySecretArn.split(":");
+      if (Token.isUnresolved(this.account) || Token.isUnresolved(this.region) ||
+          parts[1] !== "aws" || parts[3] !== this.region || parts[4] !== this.account) {
+        throw new Error("additional GitHub App secret requires a matching explicit AWS account and region");
+      }
+    }
 
     const oidcIssuer = new CfnParameter(this, "OidcIssuer", { type: "String" });
     const oidcAudience = new CfnParameter(this, "OidcAudience", { type: "String" });
@@ -101,6 +119,13 @@ export class ControlPlaneStack extends Stack {
       actions: ["secretsmanager:GetSecretValue"],
       resources: [githubAppPrivateKeySecretArn.valueAsString],
     }));
+    if (additional.length > 0) {
+      broker.addEnvironment("GITHUB_APP_ADDITIONAL_BINDINGS", JSON.stringify(additional));
+      broker.addToRolePolicy(new iam.PolicyStatement({
+        actions: ["secretsmanager:GetSecretValue"],
+        resources: [...new Set(additional.map((binding) => binding.privateKeySecretArn))],
+      }));
+    }
 
     const outboxPublisher = packagedFunction(
       this,

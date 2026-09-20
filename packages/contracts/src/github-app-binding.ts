@@ -21,7 +21,8 @@ export function canonicalGitHubRepository(value: string): string {
   const match = typeof value === "string" && !/\s/.test(value)
     ? /^https:\/\/github\.com\/([A-Za-z0-9][A-Za-z0-9-]{0,38})\/([A-Za-z0-9_.-]{1,104})$/i.exec(value)
     : null;
-  const repository = match?.[2]?.replace(/\.git$/i, "");
+  // Keep transport-suffix handling identical to GitHubAppCredentialProvider.
+  const repository = match?.[2]?.replace(/\.git$/, "");
   if (!match || !repository || repository.length > 100 || repository === "." || repository === "..") {
     throw agentXError("CONFIG_INVALID", "invalid GitHub repository identity");
   }

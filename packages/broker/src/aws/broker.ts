@@ -36,7 +36,8 @@ import {
   type WorkspaceInstance,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
-import { GitHubAppCredentialProvider, privateKeyFromSecret } from "../github-app.js";
+import type { GitHubAppCredentialProvider } from "../github-app.js";
+import { createConfiguredGitHubAppRouter } from "./github-app-routing.js";
 import { RepositoryGrantService } from "../repository-access.js";
 import { publicWorkspace } from "../workspaces.js";
 import {
@@ -1980,31 +1981,27 @@ const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(awsClientC
 const s3 = new S3Client(awsClientConfiguration);
 const agentCore = new BedrockAgentCoreClient(awsClientConfiguration);
 const secretsManager = new SecretsManagerClient(awsClientConfiguration);
-const githubPrivateKeySecretArn = requiredEnvironment("GITHUB_APP_PRIVATE_KEY_SECRET_ARN");
-let githubPrivateKey: Promise<string> | undefined;
-const loadGitHubPrivateKey = (): Promise<string> => {
-  githubPrivateKey ??= secretsManager.send(new GetSecretValueCommand({
-    SecretId: githubPrivateKeySecretArn,
-  })).then((response) => {
+const githubCredentials = createConfiguredGitHubAppRouter({
+  legacy: {
+    credentialRef: requiredEnvironment("GITHUB_APP_CREDENTIAL_REF"),
+    account: requiredEnvironment("GITHUB_APP_ACCOUNT"),
+    appId: requiredEnvironment("GITHUB_APP_ID"),
+    installationId: requiredEnvironment("GITHUB_APP_INSTALLATION_ID"),
+    privateKeySecretArn: requiredEnvironment("GITHUB_APP_PRIVATE_KEY_SECRET_ARN"),
+  },
+  ...(process.env.GITHUB_APP_ADDITIONAL_BINDINGS === undefined ? {} : {
+    additionalBindingsJson: process.env.GITHUB_APP_ADDITIONAL_BINDINGS,
+  }),
+  async loadSecret(arn) {
+    const response = await secretsManager.send(new GetSecretValueCommand({ SecretId: arn }));
     const secret = response.SecretString ?? (
       response.SecretBinary === undefined
         ? undefined
         : Buffer.from(response.SecretBinary).toString("utf8")
     );
     if (!secret) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub App private-key secret is empty");
-    return privateKeyFromSecret(secret);
-  }).catch((error: unknown) => {
-    githubPrivateKey = undefined;
-    throw error;
-  });
-  return githubPrivateKey;
-};
-const githubCredentials = new GitHubAppCredentialProvider({
-  credentialRef: requiredEnvironment("GITHUB_APP_CREDENTIAL_REF"),
-  account: requiredEnvironment("GITHUB_APP_ACCOUNT"),
-  appId: requiredEnvironment("GITHUB_APP_ID"),
-  installationId: requiredEnvironment("GITHUB_APP_INSTALLATION_ID"),
-  getPrivateKey: loadGitHubPrivateKey,
+    return secret;
+  },
 });
 const repositoryGrantSigningKey = createHmac("sha256", requiredEnvironment("CALLBACK_SIGNING_KEY"))
   .update("agentx:repository-grants:v3")

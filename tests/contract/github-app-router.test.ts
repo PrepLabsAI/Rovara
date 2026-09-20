@@ -16,10 +16,12 @@ function fixture(enabled = true, fail = false) {
   const tokens: Array<{ installation: string; permissions: unknown }> = [];
   const requests: Array<{ url: string; authorization: string | null }> = [];
   const fetchImplementation: typeof fetch = async (input, init) => {
-    const url = String(input);
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     if (url.endsWith("/access_tokens")) {
       const installation = url.split("/")[5]!;
-      tokens.push({ installation, permissions: JSON.parse(String(init?.body)).permissions });
+      if (typeof init?.body !== "string") throw new Error("expected a JSON request body");
+      const body = JSON.parse(init.body) as { permissions: unknown };
+      tokens.push({ installation, permissions: body.permissions });
       return new Response(JSON.stringify({ token: `token-${installation}` }), { status: fail ? 403 : 201 });
     }
     requests.push({ url, authorization: new Headers(init?.headers).get("authorization") });

@@ -14,6 +14,10 @@ describe("additional GitHub App bindings", () => {
     expect(parseAdditionalGitHubAppBindings([binding], "legacy")[0]?.repositories)
       .toEqual(["https://github.com/preplabsai/charterarc-integration-demo.git"]);
   });
+  it("does not confuse a repository ending in .GIT with the adapter's lowercase transport suffix", () => {
+    expect(canonicalGitHubRepository("https://github.com/PrepLabsAI/repo.GIT"))
+      .toBe("https://github.com/preplabsai/repo.git.git");
+  });
   it.each([
     "https://token@github.com/PrepLabsAI/repo.git", "https://github.com:443/PrepLabsAI/repo.git",
     "https://github.com.evil.test/PrepLabsAI/repo.git", "http://github.com/PrepLabsAI/repo.git",
