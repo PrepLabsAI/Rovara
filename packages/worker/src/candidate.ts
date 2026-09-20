@@ -44,7 +44,7 @@ async function repository(root: string, invocation: Task) {
   return { path, selected, candidate };
 }
 
-export async function assertTaskCandidateBase(rootPath: string, invocation: Task): Promise<void> {
+export async function assertTaskCandidateBase(rootPath: string, invocation: Task): Promise<string> {
   WorkerInvocationSchema.parse(invocation);
   const { path, candidate } = await repository(rootPath, invocation);
   if ((await git(path, ["rev-parse", "HEAD"])).trim() !== candidate.baseCommit) throw agentXError("CONFIG_INVALID", "candidate base commit does not match job start");
@@ -52,6 +52,7 @@ export async function assertTaskCandidateBase(rootPath: string, invocation: Task
   const directory = candidateDirectory(rootPath, invocation.operationId);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await writeFile(resolve(directory, "start.json"), JSON.stringify({ binding: binding(invocation) }), { flag: "wx", mode: 0o600 });
+  return path;
 }
 
 export async function freezeTaskCandidate(input: {

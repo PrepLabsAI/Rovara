@@ -47,10 +47,12 @@ async function executeTaskInvocation(
   }
 
   const events = new EventBatcher(dependencies.eventSink);
-  if (invocation.payload.candidate) await assertTaskCandidateBase(dependencies.rootPath, invocation);
+  const toolCwd = invocation.payload.candidate
+    ? await assertTaskCandidateBase(dependencies.rootPath, invocation) : undefined;
   const toolEvidence: unknown[] = [];
   const session = await createWorkspacePiSession(
-    { rootPath: dependencies.rootPath, model: dependencies.model, ...(limits ? { limits } : {}) },
+    { rootPath: dependencies.rootPath, ...(toolCwd === undefined ? {} : { toolCwd }),
+      model: dependencies.model, ...(limits ? { limits } : {}) },
     dependencies.piAdapter,
   );
   onSession(session);

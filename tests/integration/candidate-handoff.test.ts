@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -9,6 +9,8 @@ import type { WorkerInvocation } from "@agentx/contracts";
 import { assertTaskCandidateBase, freezeTaskCandidate } from "../../packages/worker/src/candidate.js";
 import type { WorkerArtifact } from "../../packages/worker/src/artifacts.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
+import { createWorkspacePiSession } from "../../packages/worker/src/pi-session.js";
+import { createEditTool } from "@earendil-works/pi-coding-agent";
 
 const run = promisify(execFile);
 const roots: string[] = [];
@@ -16,9 +18,9 @@ const digest = (bytes: Uint8Array | string) => createHash("sha256").update(bytes
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 async function git(path: string, ...args: string[]) { return (await run("git", ["-C", path, ...args])).stdout.trim(); }
 
-async function fixture() {
+async function fixture(repositoryPath = "repo") {
   const root = await mkdtemp(join(tmpdir(), "agentx-candidate-test-")); roots.push(root);
-  const repo = join(root, "repo"); await mkdir(repo);
+  const repo = join(root, repositoryPath); await mkdir(repo, { recursive: true });
   await git(repo, "init", "--initial-branch=main");
   await writeFile(join(repo, "keep.txt"), "base\n"); await writeFile(join(repo, "delete.txt"), "delete\n");
   await git(repo, "add", ".");
@@ -32,6 +34,7 @@ async function fixture() {
       project: { schemaVersion: 2, name: "demo", revision: 1, controlPlaneUrl: "https://broker.example.test", auth: { issuer: "https://id.example.test", audience: "demo", clientId: "demo" }, environment: { image: `example.test/worker@sha256:${"a".repeat(64)}` }, repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo", defaultBranch: "main", credentialRef: "demo" }], setup: [], readiness: [], orchestratorInstructions: "work" },
     },
   };
+  invocation.payload.project!.repositories[0]!.path = repositoryPath;
   const artifacts = new Map<string, WorkerArtifact>();
   const artifactSink = async (artifact: WorkerArtifact) => {
     artifacts.set(artifact.name, artifact);
@@ -41,6 +44,57 @@ async function fixture() {
 }
 
 describe("immutable complete candidate", () => {
+  it("edits candidate-relative paths in the validated repository while retaining workspace session storage", async () => {
+    const f = await fixture("repo/team-tasks");
+    await mkdir(join(f.repo, "app/web/src"), { recursive: true });
+    await writeFile(join(f.repo, "app/web/src/App.tsx"), "<h1>Before</h1>\n");
+    await git(f.repo, "add", ".");
+    await git(f.repo, "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-m", "nested app");
+    f.invocation.payload.candidate!.baseCommit = await git(f.repo, "rev-parse", "HEAD");
+    await mkdir(join(f.root, ".agentx"), { recursive: true });
+    await writeFile(join(f.root, ".agentx/preparation-manifest.json"), JSON.stringify({
+      complete: true, projectRevision: 1, repositories: [{ name: "demo", path: "repo/team-tasks" }],
+    }));
+    const root = await realpath(f.root);
+    const result = await runTaskInvocation(f.invocation, {
+      rootPath: f.root, model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" },
+      eventSink: async () => undefined, artifactSink: f.artifactSink,
+      piAdapter: { create: async ({ cwd, sessionDirectory, agentDirectory }) => {
+        expect(sessionDirectory).toBe(join(root, "agent-sessions"));
+        expect(agentDirectory).toBe(join(root, ".agentx/pi"));
+        return { conversationId: f.invocation.payload.conversationId, sessionFile: join(sessionDirectory, "fixture.jsonl"),
+          prompt: async () => { await createEditTool(cwd).execute("edit-heading", {
+            path: "app/web/src/App.tsx", edits: [{ oldText: "Before", newText: "After" }],
+          }); },
+          abort: async () => undefined, dispose: () => undefined, subscribe: () => () => undefined };
+      } },
+    });
+    expect(await readFile(join(f.repo, "app/web/src/App.tsx"), "utf8")).toBe("<h1>After</h1>\n");
+    expect(result.candidate!.tree).not.toBe(await git(f.repo, "rev-parse", "HEAD^{tree}"));
+  });
+
+  it.each(["outside", "symlink"])("rejects an escaping %s tool working directory before creating a session", async (kind) => {
+    const f = await fixture();
+    const outside = await mkdtemp(join(tmpdir(), "agentx-outside-cwd-")); roots.push(outside);
+    const link = join(f.root, "escape"); await symlink(outside, link);
+    const create = vi.fn();
+    await expect(createWorkspacePiSession({ rootPath: f.root, toolCwd: kind === "outside" ? outside : link,
+      model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" } }, { create })).rejects.toThrow(/escap/i);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("keeps the workspace as the default tool working directory", async () => {
+    const f = await fixture();
+    const root = await realpath(f.root);
+    const session = await createWorkspacePiSession({ rootPath: f.root,
+      model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" } }, { create: async ({ cwd, sessionDirectory }) => {
+      expect(cwd).toBe(root);
+      return { conversationId: randomUUID(), sessionFile: join(sessionDirectory, "ordinary.jsonl"),
+        prompt: async () => undefined, abort: async () => undefined, dispose: () => undefined, subscribe: () => () => undefined };
+    } });
+    session.dispose();
+  });
+
   it("does not upload more artifacts when the demo deadline expires during candidate handoff", async () => {
     const f = await fixture();
     await mkdir(join(f.root, ".agentx"), { recursive: true });

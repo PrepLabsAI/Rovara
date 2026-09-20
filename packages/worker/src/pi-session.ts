@@ -1,4 +1,4 @@
-import { mkdir, realpath } from "node:fs/promises";
+import { mkdir, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import {
   createAgentSession,
@@ -49,19 +49,26 @@ export interface PiSessionAdapter {
 export async function createWorkspacePiSession(
   input: {
     rootPath: string;
+    toolCwd?: string;
     model: WorkspaceModelConfiguration;
     limits?: DemoRunLimits;
   },
   adapter: PiSessionAdapter = defaultPiSessionAdapter,
 ): Promise<PiSessionHandle> {
   const rootPath = await realpath(resolve(input.rootPath));
+  const cwd = input.toolCwd === undefined ? rootPath : await realpath(resolve(rootPath, input.toolCwd));
+  const fromRoot = relative(rootPath, cwd);
+  if (fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
+    throw agentXError("CONFIG_INVALID", "pi tool working directory escapes workspace");
+  }
+  if (!(await stat(cwd)).isDirectory()) throw agentXError("CONFIG_INVALID", "pi tool working directory is not a directory");
   const sessionDirectory = resolve(rootPath, "agent-sessions");
   const agentDirectory = resolve(rootPath, ".agentx/pi");
   await Promise.all([
     mkdir(sessionDirectory, { recursive: true, mode: 0o700 }),
     mkdir(agentDirectory, { recursive: true, mode: 0o700 }),
   ]);
-  const handle = await adapter.create({ cwd: rootPath, sessionDirectory, agentDirectory, model: input.model,
+  const handle = await adapter.create({ cwd, sessionDirectory, agentDirectory, model: input.model,
     ...(input.limits ? { limits: input.limits } : {}),
   });
   assertContained(sessionDirectory, handle.sessionFile);
