@@ -8,6 +8,7 @@ import {
 } from "../../infra/lib/agent-runtime.js";
 import {
   DemoRuntimeStack,
+  selectDemoRuntime,
   validateDemoRuntimeConfiguration,
 } from "../../infra/lib/demo-runtime.js";
 
@@ -144,6 +145,32 @@ describe("AgentCore Instances infrastructure", () => {
 });
 
 describe("AgentCore VPC-free microVM demo infrastructure", () => {
+  it("selects the isolated runtime only with explicit demo context", () => {
+    expect(selectDemoRuntime("demo-microvm", undefined)).toEqual({ stackId: "AgentXDemoRuntime", runtimeName: "agentx_demo_worker" });
+    for (const flag of [true, "true"]) {
+      expect(selectDemoRuntime("demo-microvm", flag)).toEqual({ stackId: "CharterArcTeamTasksRuntime", runtimeName: "charterarc_team_tasks_worker" });
+      expect(() => selectDemoRuntime("instances-ebs", flag)).toThrow(/demo-microvm/);
+    }
+    for (const flag of [false, "false", "yes", 1, null, {}]) {
+      expect(() => selectDemoRuntime("demo-microvm", flag)).toThrow(/agentxTeamTasksRuntime/);
+    }
+  });
+  it("creates a separate named runtime without changing legacy resource identities", () => {
+    const legacy = Template.fromStack(new DemoRuntimeStack(new App(), "AgentXDemoRuntime", { deploymentRegion: "us-east-1" }));
+    legacy.hasResourceProperties("AWS::BedrockAgentCore::Runtime", { AgentRuntimeName: "agentx_demo_worker" });
+    const separate = Template.fromStack(new DemoRuntimeStack(new App(), "CharterArcTeamTasksRuntime", {
+      deploymentRegion: "us-east-1", runtimeName: "charterarc_team_tasks_worker",
+    }));
+    separate.hasResourceProperties("AWS::BedrockAgentCore::Runtime", { AgentRuntimeName: "charterarc_team_tasks_worker" });
+    separate.resourceCountIs("AWS::BedrockAgentCore::Runtime", 1);
+    expect(Object.keys(separate.findResources("AWS::BedrockAgentCore::Runtime"))).toEqual(["AgentXDemoRuntime"]);
+    expect(Object.keys(legacy.findResources("AWS::BedrockAgentCore::Runtime"))).toEqual(["AgentXDemoRuntime"]);
+  });
+
+  it.each(["", "bad-name", "1runtime", "a".repeat(49), "runtime\n"])("rejects invalid runtime name %j before synthesis", (runtimeName) => {
+    expect(() => new DemoRuntimeStack(new App(), "Invalid", { deploymentRegion: "us-east-1", runtimeName })).toThrow(/runtime name/i);
+  });
+
   it("uses PUBLIC networking and isolated session storage without a capacity provider", () => {
     const app = new App();
     const stack = new DemoRuntimeStack(app, "TestDemoRuntime", { deploymentRegion: "us-east-1" });

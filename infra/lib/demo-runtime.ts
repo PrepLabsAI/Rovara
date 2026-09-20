@@ -21,6 +21,19 @@ export interface DemoRuntimeConfiguration {
 export interface DemoRuntimeStackProps extends StackProps {
   deploymentRegion: string;
   configuration?: Partial<DemoRuntimeConfiguration>;
+  runtimeName?: string;
+}
+
+export function selectDemoRuntime(deploymentMode: string, teamTasks: unknown): { stackId: string; runtimeName: string } {
+  if (teamTasks !== undefined && teamTasks !== true && teamTasks !== "true") {
+    throw new Error("agentxTeamTasksRuntime must be true or absent");
+  }
+  if (teamTasks !== undefined && deploymentMode !== "demo-microvm") {
+    throw new Error("agentxTeamTasksRuntime requires demo-microvm");
+  }
+  return teamTasks === undefined
+    ? { stackId: "AgentXDemoRuntime", runtimeName: "agentx_demo_worker" }
+    : { stackId: "CharterArcTeamTasksRuntime", runtimeName: "charterarc_team_tasks_worker" };
 }
 
 export function validateDemoRuntimeConfiguration(
@@ -54,6 +67,10 @@ export class DemoRuntimeStack extends Stack {
 
   constructor(scope: Construct, id: string, props: DemoRuntimeStackProps) {
     super(scope, id, props);
+    const runtimeName = props.runtimeName ?? "agentx_demo_worker";
+    if (!/^[A-Za-z][A-Za-z0-9_]{0,47}$/.test(runtimeName) || runtimeName.trim() !== runtimeName) {
+      throw new Error("invalid AgentCore runtime name");
+    }
     const configuration = validateDemoRuntimeConfiguration({
       mountPath: props.configuration?.mountPath ?? AGENTX_WORKSPACE_MOUNT,
       idleSeconds: props.configuration?.idleSeconds ?? 900,
@@ -146,7 +163,7 @@ export class DemoRuntimeStack extends Stack {
     });
 
     const runtime = new agentcore.CfnRuntime(this, "AgentXDemoRuntime", {
-      agentRuntimeName: "agentx_demo_worker",
+      agentRuntimeName: runtimeName,
       description: "AgentX VPC-free microVM demonstration worker",
       roleArn: executionRole.roleArn,
       agentRuntimeArtifact: {

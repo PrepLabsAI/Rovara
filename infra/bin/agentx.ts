@@ -3,7 +3,7 @@ import { App } from "aws-cdk-lib";
 import { parseAdditionalGitHubAppBindings } from "@agentx/contracts";
 import { AgentRuntimeStack } from "../lib/agent-runtime.js";
 import { ControlPlaneStack } from "../lib/control-plane.js";
-import { DemoRuntimeStack } from "../lib/demo-runtime.js";
+import { DemoRuntimeStack, selectDemoRuntime } from "../lib/demo-runtime.js";
 
 const app = new App();
 const deploymentRegion = app.node.tryGetContext("agentxRegion") as string | undefined;
@@ -14,6 +14,7 @@ if (deploymentMode !== "instances-ebs" && deploymentMode !== "demo-microvm") {
     `unsupported agentxDeploymentMode ${deploymentMode}; expected instances-ebs or demo-microvm`,
   );
 }
+const demoSelection = selectDemoRuntime(deploymentMode, app.node.tryGetContext("agentxTeamTasksRuntime"));
 const additionalContext: unknown = app.node.tryGetContext("agentxAdditionalGitHubApps");
 let additionalInput: unknown = additionalContext ?? [];
 if (typeof additionalInput === "string") {
@@ -32,7 +33,8 @@ new ControlPlaneStack(app, "AgentXControlPlane", {
   } : {}),
 });
 if (deploymentMode === "demo-microvm") {
-  new DemoRuntimeStack(app, "AgentXDemoRuntime", {
+  new DemoRuntimeStack(app, demoSelection.stackId, {
+    runtimeName: demoSelection.runtimeName,
     description: "AgentX VPC-free microVM demonstration runtime",
     deploymentRegion: deploymentRegion ?? "us-east-1",
     env: { region: deploymentRegion ?? "us-east-1" },
