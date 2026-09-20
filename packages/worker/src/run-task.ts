@@ -3,20 +3,38 @@ import { resolve } from "node:path";
 import { WorkerInvocationSchema, agentXError, type WorkerInvocation } from "@agentx/contracts";
 import { publishWorkspaceDiff, type ArtifactSink } from "./artifacts.js";
 import { EventBatcher, redactCredentials, type EventBatchSink } from "./events.js";
-import { createWorkspacePiSession, type PiSessionAdapter, type WorkspaceModelConfiguration } from "./pi-session.js";
+import { createWorkspacePiSession, type PiSessionAdapter, type PiSessionHandle, type WorkspaceModelConfiguration } from "./pi-session.js";
+import { DemoRunLimits } from "./demo-run-limits.js";
 import type { PreparationManifest } from "./prepare.js";
 import { WorkerOperationCancelledError, type WorkerCancellationController } from "./cancel.js";
 
-export async function runTaskInvocation(
-  untrustedInvocation: WorkerInvocation,
-  dependencies: {
+interface TaskDependencies {
     rootPath: string;
     model: WorkspaceModelConfiguration;
     eventSink: EventBatchSink;
     artifactSink: ArtifactSink;
     piAdapter?: PiSessionAdapter;
     cancellationController?: WorkerCancellationController;
-  },
+    demoLimits?: boolean;
+}
+
+export async function runTaskInvocation(
+  untrustedInvocation: WorkerInvocation,
+  dependencies: TaskDependencies,
+): Promise<{ conversationId: string; sessionFile: string }> {
+  const limits = dependencies.demoLimits ? new DemoRunLimits() : undefined;
+  let session: PiSessionHandle | undefined;
+  const execute = () => executeTaskInvocation(untrustedInvocation, dependencies, limits, (value) => { session = value; });
+  try {
+    return limits ? await limits.run(execute, async () => { await session?.abort(); }) : await execute();
+  } finally {
+    limits?.dispose();
+  }
+}
+
+async function executeTaskInvocation(
+  untrustedInvocation: WorkerInvocation, dependencies: TaskDependencies,
+  limits: DemoRunLimits | undefined, onSession: (session: PiSessionHandle) => void,
 ): Promise<{ conversationId: string; sessionFile: string }> {
   const invocation = WorkerInvocationSchema.parse(untrustedInvocation);
   if (invocation.kind !== "task") throw agentXError("CONFIG_INVALID", "runTaskInvocation requires a task");
@@ -30,23 +48,28 @@ export async function runTaskInvocation(
   const events = new EventBatcher(dependencies.eventSink);
   const toolEvidence: unknown[] = [];
   const session = await createWorkspacePiSession(
-    { rootPath: dependencies.rootPath, model: dependencies.model },
+    { rootPath: dependencies.rootPath, model: dependencies.model, ...(limits ? { limits } : {}) },
     dependencies.piAdapter,
   );
+  onSession(session);
   const unregisterCancellation = dependencies.cancellationController?.register(invocation.operationId, session);
   const unsubscribe = session.subscribe((event) => {
     if (eventType(event) === "tool_end") toolEvidence.push(redactCredentials(event));
     void events.append(eventType(event), event).catch(() => undefined);
   });
   try {
+    limits?.assertActive();
     await events.append("lifecycle", { status: "RUNNING", conversationId: session.conversationId });
     await session.prompt(invocation.payload.prompt);
+    limits?.assertActive();
     await publishWorkspaceDiff(dependencies.rootPath, dependencies.artifactSink);
+    limits?.assertActive();
     await dependencies.artifactSink({
       name: "test-and-tool-evidence.json",
       mediaType: "application/json",
       content: JSON.stringify(toolEvidence, null, 2),
     });
+    limits?.assertActive();
     await events.append("result", { status: "SUCCEEDED", sessionFile: "agent-sessions/[server-generated]" });
     await events.flush();
     return { conversationId: session.conversationId, sessionFile: session.sessionFile };

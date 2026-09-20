@@ -8,9 +8,11 @@ import { publishWorkspace } from "./publish.js";
 import { maintainPullRequest } from "./maintain-pull-request.js";
 import { WorkerCancellationController } from "./cancel.js";
 import { createWorkerServerState, startWorkerServer } from "./server.js";
+import { demoRunLimitsEnabled } from "./demo-run-limits.js";
 
 const rootPath = process.env.AGENTX_WORKSPACE_ROOT ?? "/mnt/workspace";
 const port = Number.parseInt(process.env.PORT ?? "8080", 10);
+const demoLimits = demoRunLimitsEnabled(process.env);
 
 const journal = new OperationJournal(rootPath);
 const cancellationController = new WorkerCancellationController();
@@ -47,6 +49,7 @@ const state = createWorkerServerState(
           },
           ...callbacks,
           cancellationController,
+          demoLimits,
         });
       }
       if (invocation.kind === "publish") {
