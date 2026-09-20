@@ -15,6 +15,12 @@ const sha = (value: string | Uint8Array) => createHash("sha256").update(value).d
 const issuer = "https://identity.example.test";
 const ownerKey = sha(`${issuer}\0alice`);
 type Row = Record<string, unknown>;
+function barrier() {
+  let enter!: () => void; let release!: () => void;
+  const entered = new Promise<void>((resolve) => { enter = resolve; });
+  const wait = new Promise<void>((resolve) => { release = resolve; });
+  return { entered, enter, release, wait };
+}
 
 async function fixture() {
   Object.assign(process.env, { AWS_REGION: "us-east-1", STATE_TABLE_NAME: "unused", ARTIFACT_BUCKET_NAME: "unused", OIDC_ISSUER: issuer,
@@ -25,6 +31,10 @@ async function fixture() {
   const now = new Date().toISOString();
   const rows = new Map<string, Row>(); const objects = new Map<string, string>();
   const faults = { failNextRead: false };
+  let heldRead: { sk: string; gate: ReturnType<typeof barrier> } | undefined;
+  let heldCancellation: ReturnType<typeof barrier> | undefined;
+  const pauseNextRead = (sk: string) => { const gate = barrier(); heldRead = { sk, gate }; return gate; };
+  const pauseNextCancellation = () => { const gate = barrier(); heldCancellation = gate; return gate; };
   const key = (value: Row) => {
     if (typeof value.pk !== "string" || typeof value.sk !== "string") throw new Error("invalid fixture key");
     return `${value.pk}\0${value.sk}`;
@@ -34,7 +44,7 @@ async function fixture() {
     projectName: "demo", projectRevision: 1, environmentDigest: `example.test/worker@sha256:${"a".repeat(64)}`,
     runtimeArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/agentx", endpointQualifier: "DEFAULT",
     runtimeSessionId: randomUUID(), deploymentMode: "demo-microvm", rootPath: "/mnt/workspace", status: "READY", fence: 1,
-    activeOperationId: null, createdAt: now, updatedAt: now };
+    createdAt: now, updatedAt: now };
   put(workspace);
   put({ pk: `MEMBER#${ownerKey}`, sk: "PROJECT#demo", ownerKey, projectName: "demo", role: "developer" });
   put({ pk: `WORKSPACE#${workspaceId}`, sk: `CONVERSATION#${conversationId}` });
@@ -56,7 +66,15 @@ async function fixture() {
     const expression = input.UpdateExpression as string;
     const condition = input.ConditionExpression as string | undefined;
     if (condition?.includes("fence = :fence") && current.fence !== values[":fence"]) throw conditional();
+    if (condition?.includes("fence = :observedFence") && current.fence !== values[":observedFence"]) throw conditional();
+    if (condition?.includes("attribute_not_exists(candidateTaskOperationId)") && "candidateTaskOperationId" in current) throw conditional();
+    if (condition?.includes("attribute_not_exists(activeOperationId)") && "activeOperationId" in current) throw conditional();
+    if (condition?.includes("ownerKey = :owner") && current.ownerKey !== values[":owner"]) throw conditional();
+    if (condition?.includes("(#status = :ready OR #status = :stopped)") && current.status !== values[":ready"] && current.status !== values[":stopped"]) throw conditional();
+    if (condition?.includes("#status = :observedStatus") && current.status !== values[":observedStatus"]) throw conditional();
+    if (condition?.includes("#status = :cancelRequested") && current.status !== values[":cancelRequested"]) throw conditional();
     if (condition?.includes("activeOperationId = :operation") && current.activeOperationId !== values[":operation"]) throw conditional();
+    if (condition?.includes("activeOperationId = :target") && current.activeOperationId !== values[":target"]) throw conditional();
     for (const status of [":cancelled", ":cancelRequested", ":succeeded", ":failed", ":interrupted"]) {
       if (condition?.includes(`#status <> ${status}`) && current.status === values[status]) throw conditional();
     }
@@ -68,17 +86,28 @@ async function fixture() {
     for (const field of removes?.split(",") ?? []) delete current[field.trim()];
   };
   const documentClient = { send: async (command: { constructor: { name: string }; input: Row }) => {
-    if (command.constructor.name === "GetCommand") return { Item: structuredClone(rows.get(key(command.input.Key as Row))) };
+    if (command.constructor.name === "GetCommand") {
+      const requestKey = command.input.Key as Row;
+      if (heldRead?.sk === requestKey.sk) {
+        const gate = heldRead.gate; heldRead = undefined; gate.enter(); await gate.wait;
+      }
+      return { Item: structuredClone(rows.get(key(requestKey))) };
+    }
     if (command.constructor.name === "PutCommand") { write(command.input); return {}; }
     if (command.constructor.name === "TransactWriteCommand") {
-      for (const item of command.input.TransactItems as Array<{ Put?: Row; Update?: Row; ConditionCheck?: Row }>) {
+      const items = command.input.TransactItems as Array<{ Put?: Row; Update?: Row; ConditionCheck?: Row }>;
+      if (heldCancellation && items.some((item) => (item.Update?.ExpressionAttributeValues as Row | undefined)?.[":cancel"] === "CANCEL_REQUESTED")) {
+        const gate = heldCancellation; heldCancellation = undefined; gate.enter(); await gate.wait;
+      }
+      const prior = structuredClone(rows);
+      try { for (const item of items) {
         if (item.ConditionCheck) {
           const row = rows.get(key(item.ConditionCheck.Key as Row));
           const values = item.ConditionCheck.ExpressionAttributeValues as Row;
           if (row?.activeOperationId !== values[":operation"] || row?.fence !== values[":fence"]) throw conditional();
         }
         if (item.Put) write(item.Put); if (item.Update) update(item.Update);
-      }
+      } } catch (error) { rows.clear(); for (const [key, row] of prior) rows.set(key, row); throw error; }
       return {};
     }
     throw new Error(`unexpected ${command.constructor.name}`);
@@ -94,10 +123,22 @@ async function fixture() {
     return { Body: { transformToString: async () => objects.get(objectKey)! } };
   } };
   const github = vi.fn(async () => { throw new Error("publication must not run"); });
+  const seedPullRequest = (state: "open" | "merged") => {
+    const record = { pk: `WORKSPACE#${workspaceId}`, sk: "PULL_REQUEST#demo#000000000001", entityType: "PULL_REQUEST", workspaceId,
+      repository: "demo", repositoryUrl: "https://github.com/example/demo.git", number: 1, url: "https://github.com/example/demo/pull/1", state,
+      headBranch: `agentx/${randomUUID()}`, baseBranch: "main", expectedHeadCommit: "b".repeat(40), title: "Existing", body: "", createdByOperationId: randomUUID(), updatedAt: now };
+    put(record); return record;
+  };
+  const getPullRequest = async () => {
+    const record = [...rows.values()].find((row) => row.entityType === "PULL_REQUEST");
+    if (!record) throw new Error("fixture pull request missing");
+    return { number: 1, url: "https://github.com/example/demo/pull/1", state: record.state as "open" | "merged", headBranch: record.headBranch as string,
+      baseBranch: "main", headCommit: "b".repeat(40), title: "Existing", body: "", ...(record.state === "merged" ? { mergeCommit: "c".repeat(40) } : {}) };
+  };
   const handler = createAwsBrokerHandler({ documentClient: documentClient as never, s3: s3 as never,
     stopRuntimeSession: async () => {}, tableName: "state", artifactBucketName: "artifacts", issuer, adminClaim: "groups", adminValues: ["admins"],
     callbackSigningKey: "c".repeat(64), repositoryGrants: new RepositoryGrantService(Buffer.alloc(32, 1), async () => ({})),
-    githubPullRequests: { reconcilePullRequest: github, getPullRequest: github, updatePullRequest: github } });
+    githubPullRequests: { reconcilePullRequest: github, getPullRequest, updatePullRequest: github } });
   async function request(path: string, body?: unknown, headers: Record<string, string> = {}, subject = "alice") {
     const event: HttpApiV2Event = { version: "2.0", rawPath: path, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       requestContext: { requestId: randomUUID(), http: { method: body === undefined ? "GET" : "POST" }, authorizer: { jwt: { claims: { iss: issuer, sub: subject } } } } };
@@ -117,7 +158,7 @@ async function fixture() {
       } });
     return { response, invocation, callbacks };
   }
-  return { rows, objects, workspace, project, task, taskPath, workspaceId, request, admit, github, faults };
+  return { rows, objects, workspace, project, task, taskPath, workspaceId, request, admit, github, faults, pauseNextRead, pauseNextCancellation, seedPullRequest };
 }
 
 function chunkAndCandidate(f: Awaited<ReturnType<typeof fixture>>, invocation: Extract<WorkerInvocation, { kind: "task" }>) {
@@ -134,6 +175,64 @@ function chunkAndCandidate(f: Awaited<ReturnType<typeof fixture>>, invocation: E
 }
 
 describe("live broker candidate routes", () => {
+  it.each(["legacy-task", "governed-task", "publish", "append", "sync", "replace", "revert"])("rejects stale %s admission after a governed task finishes", async (kind) => {
+    const f = await fixture();
+    if (["append", "sync", "replace", "revert"].includes(kind)) f.seedPullRequest(kind === "revert" ? "merged" : "open");
+    const gate = f.pauseNextRead(kind === "legacy-task" ? `CONVERSATION#${f.task.conversationId}` : "REV#000000000001");
+    const path = kind.endsWith("task") ? f.taskPath : `/v1/workspaces/${f.workspaceId}/${kind === "publish" ? "pull-requests" : "pull-request-actions"}`;
+    const staleRequest = kind.endsWith("task")
+      ? { requestId: randomUUID(), conversationId: f.task.conversationId, prompt: "Paused task", ...(kind === "governed-task" ? { candidate: { ...f.task.candidate, jobId: randomUUID() } } : {}) }
+      : { requestId: randomUUID(), repository: "demo", ...(kind === "publish" ? { title: "Paused publication" } : { pullRequestNumber: 1, action: kind }) };
+    const pending = f.request(path, staleRequest);
+    await gate.entered;
+    const { invocation, callbacks } = await f.admit(); const { artifact, candidate } = chunkAndCandidate(f, invocation);
+    await callbacks.artifactSink(artifact);
+    await callbacks.terminalSink({ operationId: invocation.operationId, status: "SUCCEEDED", result: { candidate } });
+    gate.release();
+    const rejected = await pending;
+    expect(rejected.status).toBeGreaterThanOrEqual(400);
+    expect([...f.rows.values()].filter((row) => row.entityType === "OUTBOX")).toHaveLength(1);
+    expect([...f.rows.values()].filter((row) => row.entityType === "OPERATION")).toHaveLength(1);
+    const workspace = [...f.rows.values()].find((row) => row.entityType === "WORKSPACE")!;
+    expect(workspace).toMatchObject({ fence: 2, status: "READY", candidateTaskOperationId: invocation.operationId });
+    expect(workspace.activeOperationId).toBeUndefined();
+  });
+
+  it("preserves a completed candidate when cancellation loses the terminal race", async () => {
+    const f = await fixture(); const { invocation, callbacks } = await f.admit();
+    const { artifact, candidate } = chunkAndCandidate(f, invocation); await callbacks.artifactSink(artifact);
+    const gate = f.pauseNextCancellation();
+    const cancelling = f.request(`/v1/workspaces/${f.workspaceId}/operations/${invocation.operationId}/cancel`, {});
+    await gate.entered;
+    await callbacks.terminalSink({ operationId: invocation.operationId, status: "SUCCEEDED", result: { candidate } });
+    gate.release();
+    const response = await cancelling;
+    expect(response.body.operation?.status).toBe("SUCCEEDED");
+    expect(response.body.duplicate).toBe(true);
+    expect(response.body.operation?.result).toEqual({ candidate });
+    expect([...f.rows.values()].filter((row) => row.entityType === "OUTBOX")).toHaveLength(1);
+    expect([...f.rows.values()].filter((row) => row.entityType === "OPERATION")).toHaveLength(1);
+  });
+
+  it.each([
+    ["SUCCEEDED", "FAILED"], ["FAILED", "SUCCEEDED"], ["FAILED", "FAILED"],
+  ])("preserves the target after cancellation %s wins over %s", async (winnerStatus, loserStatus) => {
+    const f = await fixture(); const { invocation } = await f.admit();
+    const cancelPath = `/v1/workspaces/${f.workspaceId}/operations/${invocation.operationId}/cancel`;
+    const first = await f.request(cancelPath, {}); const second = await f.request(cancelPath, {});
+    expect(first.status).toBe(202); expect(second.status).toBe(202);
+    const finish = async (id: string, status: string) => {
+      const outbox = [...f.rows.values()].find((row) => row.entityType === "OUTBOX" && (row.invocation as WorkerInvocation).operationId === id)!;
+      const cancel = outbox.invocation as WorkerInvocation;
+      return f.request(`/v1/internal/workspaces/${f.workspaceId}/operations/${id}/result`, { status }, { "x-agentx-callback-capability": cancel.callbackCapability });
+    };
+    expect((await finish(first.body.operation!.id, winnerStatus)).status).toBe(200);
+    const before = structuredClone(f.rows);
+    expect((await finish(second.body.operation!.id, loserStatus)).status).toBeGreaterThanOrEqual(400);
+    expect(f.rows).toEqual(before);
+    expect((await f.request(`/v1/workspaces/${f.workspaceId}/operations/${invocation.operationId}`)).body.operation!.status)
+      .toBe(winnerStatus === "SUCCEEDED" ? "CANCELLED" : "INTERRUPTED");
+  });
   it("runs the real task freezer through authenticated broker callbacks and reconstructs the returned source", async () => {
     const f = await fixture();
     const root = await mkdtemp(join(tmpdir(), "agentx-broker-worker-"));

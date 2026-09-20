@@ -74,3 +74,28 @@ failed for dropped bindings, missing receipts, accepting unretained results and 
 selection; the legacy-worker publication guard also failed before its correction. The final route
 suite includes full worker/broker reconstruction, interrupted readback retry, wrong bindings,
 corrupted retention, bundle digest mismatch, cancellation, stale fence and publication bypass.
+
+## Independent-review race correction
+
+Independent review reproduced stale admission after a candidate finished: a request paused after
+reading the old workspace could reuse its old fence and create a legacy publication outbox. Seven
+deterministic interleavings (legacy/governed task, publish, append, sync, replace and revert) failed
+on checkpoint `41b0dc2`. A separate cancellation interleaving also failed: cancellation could
+overwrite a successful candidate after completion won the race.
+
+Admission transactions now require the observed workspace fence; legacy tasks, publication and
+code-changing PR lifecycle operations also require the candidate marker to be absent atomically.
+Cancellation atomically checks workspace ownership/fence and the observed nonterminal operation
+status; if completion wins, it returns the retained terminal result without creating cancellation
+state or an outbox. Cancellation completion also requires its target to remain `CANCEL_REQUESTED`
+at the matching fence, and checks workspace ownership even when cancellation fails. Three further
+regressions reproduced competing cancellation callbacks overwriting a terminal target before this
+completion guard. No new authority, publication implementation or deployment is included.
+
+All eleven regressions pass after the correction. Fresh local verification on 2026-09-20 with
+Node 22.23.2: `npm test` passed 203 tests in 37 files; `npm run build`, `npm run lint`, and
+`git diff --check` passed. These are deterministic service-substitute checks, not live AWS evidence.
+One intervening rerun timed out the existing CDK infrastructure synthesis test at its 10s limit
+(202 passed, one timeout) while another agent also ran the suite. The unchanged-code rerun passed
+all 203 tests; no test timeout or infrastructure behavior was changed to obtain that pass.
+The objective digest remains unchanged and all previously listed remaining gates still apply.

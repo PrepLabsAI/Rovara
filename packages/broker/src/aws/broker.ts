@@ -649,9 +649,9 @@ async function acceptTask(
         TableName: dependencies.tableName,
         Key: workspaceKey(workspaceId),
         UpdateExpression: `SET #status = :busy, activeOperationId = :operation, fence = :fence, updatedAt = :now${request.candidate ? ", candidateTaskOperationId = :operation" : ""}`,
-        ConditionExpression: "ownerKey = :owner AND attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped)",
+        ConditionExpression: `ownerKey = :owner AND fence = :observedFence AND attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped)${request.candidate ? "" : " AND attribute_not_exists(candidateTaskOperationId)"}`,
         ExpressionAttributeNames: { "#status": "status" },
-        ExpressionAttributeValues: { ":owner": identity.ownerKey, ":busy": "BUSY", ":ready": "READY", ":stopped": "STOPPED", ":operation": operationId, ":fence": fence, ":now": now },
+        ExpressionAttributeValues: { ":owner": identity.ownerKey, ":observedFence": workspace.fence, ":busy": "BUSY", ":ready": "READY", ":stopped": "STOPPED", ":operation": operationId, ":fence": fence, ":now": now },
       } },
       { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
       { Put: { TableName: dependencies.tableName, Item: outbox, ConditionExpression: "attribute_not_exists(pk)" } },
@@ -778,10 +778,11 @@ async function acceptPullRequest(
         TableName: dependencies.tableName,
         Key: workspaceKey(workspaceId),
         UpdateExpression: "SET #status = :busy, activeOperationId = :operation, fence = :fence, updatedAt = :now",
-        ConditionExpression: "ownerKey = :owner AND attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped)",
+        ConditionExpression: "ownerKey = :owner AND fence = :observedFence AND attribute_not_exists(candidateTaskOperationId) AND attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped)",
         ExpressionAttributeNames: { "#status": "status" },
         ExpressionAttributeValues: {
           ":owner": identity.ownerKey,
+          ":observedFence": workspace.fence,
           ":busy": "BUSY",
           ":ready": "READY",
           ":stopped": "STOPPED",
@@ -989,11 +990,11 @@ async function acceptPullRequestLifecycle(
         TableName: dependencies.tableName,
         Key: workspaceKey(workspaceId),
         UpdateExpression: "SET #status = :busy, activeOperationId = :operation, fence = :fence, updatedAt = :now",
-        ConditionExpression: "ownerKey = :owner AND attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped)",
+        ConditionExpression: "ownerKey = :owner AND fence = :observedFence AND attribute_not_exists(candidateTaskOperationId) AND attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped)",
         ExpressionAttributeNames: { "#status": "status" },
         ExpressionAttributeValues: {
           ":owner": identity.ownerKey, ":busy": "BUSY", ":ready": "READY", ":stopped": "STOPPED",
-          ":operation": operationId, ":fence": fence, ":now": now,
+          ":operation": operationId, ":fence": fence, ":observedFence": workspace.fence, ":now": now,
         },
       } },
       { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
@@ -1060,11 +1061,11 @@ async function acceptPullRequestLifecycle(
       TableName: dependencies.tableName,
       Key: workspaceKey(workspaceId),
       UpdateExpression: "SET #status = :busy, activeOperationId = :operation, fence = :fence, updatedAt = :now",
-      ConditionExpression: "ownerKey = :owner AND attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped)",
+      ConditionExpression: "ownerKey = :owner AND fence = :observedFence AND attribute_not_exists(candidateTaskOperationId) AND attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped)",
       ExpressionAttributeNames: { "#status": "status" },
       ExpressionAttributeValues: {
         ":owner": identity.ownerKey, ":busy": "BUSY", ":ready": "READY", ":stopped": "STOPPED",
-        ":operation": operationId, ":fence": fence, ":now": now,
+        ":operation": operationId, ":fence": fence, ":observedFence": workspace.fence, ":now": now,
       },
     } },
     { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
@@ -1117,18 +1118,31 @@ async function acceptCancellation(
     deploymentMode: workspace.deploymentMode,
     ...(workspace.capacityProviderArn === undefined ? {} : { capacityProviderArn: workspace.capacityProviderArn }),
   }, workspace, invocation);
-  await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
-    { Update: {
-      TableName: dependencies.tableName,
-      Key: operationKey(workspaceId, targetOperationId),
-      UpdateExpression: "SET #status = :cancel, updatedAt = :now",
-      ConditionExpression: "fence = :fence",
-      ExpressionAttributeNames: { "#status": "status" },
-      ExpressionAttributeValues: { ":cancel": "CANCEL_REQUESTED", ":now": now, ":fence": workspace.fence },
-    } },
-    { Put: { TableName: dependencies.tableName, Item: operation } },
-    { Put: { TableName: dependencies.tableName, Item: outbox } },
-  ] }));
+  try {
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { ConditionCheck: {
+        TableName: dependencies.tableName,
+        Key: workspaceKey(workspaceId),
+        ConditionExpression: "activeOperationId = :operation AND fence = :fence",
+        ExpressionAttributeValues: { ":operation": targetOperationId, ":fence": workspace.fence },
+      } },
+      { Update: {
+        TableName: dependencies.tableName,
+        Key: operationKey(workspaceId, targetOperationId),
+        UpdateExpression: "SET #status = :cancel, updatedAt = :now",
+        ConditionExpression: "fence = :fence AND #status = :observedStatus",
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: { ":cancel": "CANCEL_REQUESTED", ":now": now, ":fence": workspace.fence, ":observedStatus": target.status },
+      } },
+      { Put: { TableName: dependencies.tableName, Item: operation } },
+      { Put: { TableName: dependencies.tableName, Item: outbox } },
+    ] }));
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+    const current = await requireOperation(dependencies, workspaceId, targetOperationId);
+    if (TERMINAL.has(current.status)) return { operation: publicOperation(current), duplicate: true };
+    throw agentXError("STALE_FENCE", "operation changed before cancellation was admitted");
+  }
   return { operation: publicOperation(operation), duplicate: false };
 }
 
@@ -1515,9 +1529,18 @@ async function recordTerminalResult(
       TableName: dependencies.tableName,
       Key: terminalTarget,
       UpdateExpression: "SET #status = :status, updatedAt = :now",
+      ConditionExpression: "fence = :fence AND #status = :cancelRequested",
       ExpressionAttributeNames: { "#status": "status" },
-      ExpressionAttributeValues: { ":status": terminalStatus === "SUCCEEDED" ? "CANCELLED" : "INTERRUPTED", ":now": now },
+      ExpressionAttributeValues: { ":status": terminalStatus === "SUCCEEDED" ? "CANCELLED" : "INTERRUPTED", ":now": now, ":fence": operation.fence, ":cancelRequested": "CANCEL_REQUESTED" },
     } });
+    if (terminalStatus !== "SUCCEEDED") {
+      transactItems.push({ ConditionCheck: {
+        TableName: dependencies.tableName,
+        Key: workspaceKey(workspace.id),
+        ConditionExpression: "activeOperationId = :operation AND fence = :fence",
+        ExpressionAttributeValues: { ":operation": operation.targetOperationId, ":fence": operation.fence },
+      } });
+    }
   }
   if (operation.kind !== "cancel" || terminalStatus === "SUCCEEDED") {
     transactItems.push({ Update: {
