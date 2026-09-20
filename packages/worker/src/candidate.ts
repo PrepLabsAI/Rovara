@@ -166,7 +166,10 @@ async function captureSource(path: string) {
 export async function candidateGit(directory: string, args: readonly string[]): Promise<string> { return git(directory, args); }
 
 async function git(directory: string, args: readonly string[]): Promise<string> {
-  const result = await exec("git", ["--no-replace-objects", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", "-c", "core.fsmonitor=false", "-c", "protocol.file.allow=always", "-C", directory, ...args], {
+  // Managed workspace mounts can use a different UID. Match preparation's
+  // exact-directory trust without inheriting ambient Git config or trusting '*'.
+  const canonicalDirectory = await realpath(directory);
+  const result = await exec("git", ["--no-replace-objects", "-c", `safe.directory=${canonicalDirectory}`, "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", "-c", "core.fsmonitor=false", "-c", "protocol.file.allow=always", "-C", canonicalDirectory, ...args], {
     env: { PATH: process.env.PATH, HOME: "/nonexistent", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0", GIT_NO_REPLACE_OBJECTS: "1" },
     timeout: 120_000, maxBuffer: MAX_CANDIDATE_BYTES, encoding: "utf8",
   });

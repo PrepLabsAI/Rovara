@@ -27,7 +27,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ["environments/team-tasks/**/*.mjs"],
+    files: ["environments/team-tasks/**/*.mjs", "scripts/check-candidate-ownership.mjs"],
     extends: [tseslint.configs.disableTypeChecked],
     languageOptions: { globals: { process: "readonly", console: "readonly", setTimeout: "readonly", fetch: "readonly" } },
   },
