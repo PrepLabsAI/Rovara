@@ -7,3 +7,4 @@ Dockerfile*
 coverage/
 dist/
 cdk.out/
+.superpowers/

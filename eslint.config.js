@@ -26,4 +26,9 @@ export default tseslint.config(
       "@typescript-eslint/require-await": "off"
     },
   },
+  {
+    files: ["environments/team-tasks/**/*.mjs"],
+    extends: [tseslint.configs.disableTypeChecked],
+    languageOptions: { globals: { process: "readonly", console: "readonly", setTimeout: "readonly", fetch: "readonly" } },
+  },
 );

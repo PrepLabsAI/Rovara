@@ -1,0 +1,21 @@
+{
+  "platform": "linux/arm64",
+  "pythonVersion": "3.12.14",
+  "pythonImage": "python:3.12.14-slim-bookworm@sha256:eb5be8e5b4d0a159c237946bbdd06356dda5d19c30fc4f7843e8046d3a590333",
+  "playwrightVersion": "1.63.0",
+  "workerNode": {
+    "version": "22.23.2", "path": "/opt/agentx-node",
+    "url": "https://nodejs.org/dist/v22.23.2/node-v22.23.2-linux-arm64.tar.xz",
+    "sha256": "fff4078c5def658577f92c88db7db3bc0072924bfb93fe52c1e744a54e94abb8"
+  },
+  "appNode": {
+    "version": "24.19.0", "path": "/opt/app-node",
+    "url": "https://nodejs.org/dist/v24.19.0/node-v24.19.0-linux-arm64.tar.xz",
+    "sha256": "01443c1e1a29e531ccad5a46fefa6df490d2189c49f7955904aecdbb0fe86fdc"
+  },
+  "uv": {
+    "version": "0.12.5", "path": "/usr/local/bin",
+    "url": "https://github.com/astral-sh/uv/releases/download/0.12.5/uv-aarch64-unknown-linux-gnu.tar.gz",
+    "sha256": "9bf43b4d1a07665bf64d4c4e710930b382321a785e0eb10aac07f46471f86a31"
+  }
+}

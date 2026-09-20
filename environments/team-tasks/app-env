@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+export PATH="/opt/app-node/bin:/usr/local/bin:/usr/bin:/bin"
+export PLAYWRIGHT_BROWSERS_PATH=/opt/team-tasks/browsers
+export UV_PYTHON_DOWNLOADS=never
+export UV_LINK_MODE=copy
+export UV_CACHE_DIR=/tmp/team-tasks-uv-cache
+export npm_config_cache=/tmp/team-tasks-npm-cache
+exec "$@"
