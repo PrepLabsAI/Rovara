@@ -8,6 +8,7 @@ import type { CreateAgentSessionOptions } from "@earendil-works/pi-coding-agent"
 import type * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
+import { createWorkspacePiSession } from "../../packages/worker/src/pi-session.js";
 import * as limitsModule from "../../packages/worker/src/demo-run-limits.js";
 
 const fixture = vi.hoisted(() => ({ options: undefined as CreateAgentSessionOptions | undefined }));
@@ -46,6 +47,16 @@ it("uses a trusted off-by-default flag and fails closed on invalid configuration
   expect(() => limitsModule.demoRunLimitsEnabled({ AGENTX_DEMO_RUN_LIMITS: "true" })).toThrow();
 });
 
+it("retains the legacy coding shell when demo limits are off", async () => {
+  const rootPath = await mkdtemp(join(tmpdir(), "agentx-legacy-session-"));
+  const session = await createWorkspacePiSession({
+    rootPath, model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" },
+  });
+  expect(fixture.options?.tools).toEqual(["read", "bash", "edit", "write", "grep", "find", "ls"]);
+  expect(fixture.options?.settingsManager).toBeUndefined();
+  session.dispose();
+});
+
 it("wires the default Pi provider to the task budget and refuses a swallowed provider-limit error", async () => {
   let dispatches = 0;
   const sdk = BedrockRuntimeClient.prototype as { send(command: ConverseStreamCommand): Promise<ConverseStreamCommandOutput> };
@@ -70,4 +81,5 @@ it("wires the default Pi provider to the task budget and refuses a swallowed pro
   expect(fixture.options?.settingsManager?.getRetryEnabled()).toBe(false);
   expect(fixture.options?.settingsManager?.getCompactionEnabled()).toBe(false);
   expect(fixture.options?.settingsManager?.getBlockImages()).toBe(true);
+  expect(fixture.options?.tools).toEqual(["read", "edit", "write", "grep", "find", "ls"]);
 });

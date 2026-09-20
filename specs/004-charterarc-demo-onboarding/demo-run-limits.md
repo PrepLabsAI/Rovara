@@ -28,6 +28,9 @@ Enabled tasks have fixed, non-configurable limits:
   closed. This byte counter is not represented as measured billed input tokens.
 - Only `amazon-bedrock` / `amazon.nova-pro-v1:0`; no fallback, extra model-request
   fields, project model override or enabled image input.
+- Coding tools restricted to `read/edit/write/grep/find/ls`, with no `bash`, for
+  this two-attempt minimal demo. Trusted preparation/readiness remain outside the
+  coding session and unchanged. Parent explicitly approved this narrowing.
 - Pi automatic retry and compaction disabled with an in-memory settings manager.
   Worker forces `AWS_MAX_ATTEMPTS=1`: the installed pi-ai 0.85.1 Bedrock adapter
   does not forward its generic `maxRetries` option to `BedrockRuntimeClient`.
@@ -37,7 +40,9 @@ The parent separately limits admission to **two live attempts total** and tracks
 the owner's **under $30 additional AWS/Bedrock** budget. These are not global
 worker counters: a new task has a new reservation. Infrastructure charges,
 other runtimes/clients and direct SDK use outside the guarded Pi provider are
-not metered by this module. No claim of an account-wide AWS billing cap or
+not metered by this module. Removing the coding shell closes the straightforward
+tool-originated SDK bypass, but does not establish general hostile-code isolation.
+No claim of an account-wide AWS billing cap or
 hostile-process security isolation is made. SDK abort is cancellation, not proof
 that already-accepted remote usage was never billed. Session abort cannot prove
 every descendant process stopped.
@@ -56,6 +61,9 @@ every descendant process stopped.
 - Ruling: timeout rejects without waiting for an unresponsive abort. Source and
   process quiescence are not claimed; the cost is retaining an uncertain operation
   that requires explicit reconciliation rather than silently rerunning it.
+- Ruling: omit shell execution only in the enabled demo, as approved by the parent.
+  This sacrifices coding-time builds/tests; the minimal Slack demonstration must
+  not claim application verification from this no-shell run.
 
 Final test/build/lint results and commit are reported in the parent handoff.
 Postflight: objective unchanged; scope delta none; result implemented/local-tested,

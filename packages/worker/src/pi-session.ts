@@ -156,7 +156,8 @@ async function createDefaultSession(
       modelRuntime,
       model,
       thinkingLevel: input.model.thinkingLevel ?? "medium",
-      tools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
+      tools: input.limits ? ["read", "edit", "write", "grep", "find", "ls"]
+        : ["read", "bash", "edit", "write", "grep", "find", "ls"],
       resourceLoader,
       sessionManager: manager,
       ...(settingsManager ? { settingsManager } : {}),
