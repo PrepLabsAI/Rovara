@@ -17,7 +17,7 @@ mainline is unchanged. This is synthetic internal setup, not customer validation
 | Project generator | Rejects missing/mismatched runtime, region, account, image, base and unexpected metadata | Locally verified; registration not attempted |
 | Full source checks | 176 tests across 33 files, build, lint | Passed before final review |
 | AWS activation | Setup session works; CloudFormation GetTemplate denied | Blocked on scoped access |
-| Whole-branch review | Pending at this report's initial commit | Not yet complete |
+| Whole-branch review | Fresh reviewer examined 925ad38..96b068b and independently passed 81 focused tests | No Critical, Important or Minor findings; local-code review only |
 
 ## Exact identities
 
@@ -37,6 +37,8 @@ mainline is unchanged. This is synthetic internal setup, not customer validation
 This image ID is not a registry manifest digest. ECR upload and source/build
 provenance registration remain cloud-delivery steps. The final image smoke used
 no script overlays; earlier diagnostic overlays are explicitly not image proof.
+Copied worker/contracts sources and the preparation script were compared against
+the committed checkout. Image-build inputs are retained as a Git-tree manifest.
 
 ## Corrections established by actual runs
 
@@ -72,6 +74,32 @@ The dedicated Colima VM has no host mounts or SSH-agent forwarding and did not
 activate the global Docker context. No AWS resource was created or updated in
 this runtime implementation turn. The GitHub private key remains outside all
 source, images and workers.
+The dedicated VM was stopped after verification; its image, disk and receipts
+were retained. No user data or unrelated container resources were deleted.
+
+The original frozen control-plane assembly remains the deployment input. A fresh
+synthesis changed asset hashes only because source-map paths were relative to a
+different output directory. All three JavaScript bundles, map content and resolved
+source paths were compared equal; the templates differed only in those asset
+identities. Keep the original three-key preparation policy; no new access is
+needed merely because of that local output-directory difference.
+
+## Final review dispositions
+
+The reviewer inspected the author's image receipt but did not repeat the image
+run. Independently repeated proof is 81 source tests, not AWS or image execution.
+No code fixes or deferred minors resulted. These reviewed boundaries stand:
+
+| Boundary retained | Why | Cost / remaining risk |
+|---|---|---|
+| Live AWS activation and both-app compatibility are unproved | No authorized deployment occurred | Existing-project smoke must pass before activation is accepted |
+| Runtime observation truth/freshness remains an operator gate | Generator validates inputs; runbook requires fresh endpoint/version/image reads | Skipping the gate can select stale or wrong runtime metadata |
+| No server-side registration attestation added | Bounded approved plan uses administrator admission | Operator mistake remains possible; do not present this as general secure onboarding |
+| Completed manifests resume without automatic revalidation | Existing workspace behavior preserves edits; runtime changes require new admission | Reusing a changed runtime without that gate can leave stale readiness |
+| Candidate publication and conversation continuity remain #2/#1 | Distinct explicitly tracked contracts | Setup alone cannot prove a complete or follow-up demo |
+| Existing PR-URL case sensitivity is unchanged | Unchanged provider behavior already retained in prior review | Case-only URL edge cases remain unsupported |
+| Production isolation/durability, IAM posture and model availability are not established | Existing demo boundaries were preserved, no live runtime test | Production or model-access claims would be premature |
+| Independent acceptance/customer outcomes are not established | All image/application tests are synthetic executor/environment checks | CharterArc verification and customer validation remain separate work |
 
 Next: grant deployment-preparation access, compare the live template, prepare and
 review the exact change set, grant narrowly scoped execution, and activate the
@@ -80,5 +108,5 @@ generate/register the project and prove private clone/readiness. AgentX #1/#2 an
 the CharterArc live adapter remain separate dependencies of the complete demo.
 
 Postflight: alignment pass; implemented and locally verified, not delivered or
-validated; scope delta none; no objective change; digest matches. Cloud proof and
-final review remain explicitly pending rather than inferred from local tests.
+validated; scope delta none; no objective change; digest matches. Final source
+review passed; cloud proof remains pending rather than inferred from local tests.

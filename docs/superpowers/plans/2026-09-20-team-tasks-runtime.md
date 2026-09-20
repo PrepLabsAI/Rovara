@@ -10,7 +10,7 @@
 
 **Spec:** `specs/004-charterarc-demo-onboarding/spec.md`, sections 3–4 and runtime/project acceptance.
 
-Status: written for owner review; not implemented. Continue inline after approval. Credential routing is already implemented at `a84b323891dac3c940e6b52cecf2abb9e9d1f3b3` on `codex/charterarc-demo-setup`. Keep using that separate branch; no mainline merge.
+Status: owner approved on 2026-09-20; executed inline. Tasks 1–2 are implemented and locally verified. Task 3's generator is implemented and locally tested; its live admission gate remains blocked on cloud activation/access. See `specs/004-charterarc-demo-onboarding/runtime-execution-report.md` for evidence and deviations. Credential routing is implemented at `a84b323891dac3c940e6b52cecf2abb9e9d1f3b3` on `codex/charterarc-demo-setup`. Keep that separate branch; no mainline merge.
 
 ## Global constraints
 
@@ -171,7 +171,7 @@ Construct `valid` with synthetic pinned image metadata, correct account/region/r
 
 | Gate | Owner/action | Required result |
 |---|---|---|
-| Broker activation | Codex prepares; owner executes reviewed change set | Old/new app routing works, no existing-resource replacement |
+| Broker activation | Codex prepares; execution requires explicitly granted access to the reviewed update | Old/new app routing works, no existing-resource replacement |
 | New image/runtime | Codex prepares exact assets and narrow access proposal | New runtime only; READY and exact image matches |
 | Project admission | Codex with owner's authenticated admin session | Private clone and readiness pass at pinned base |
 | Coding handoff | AgentX issue #2 plus CharterArc adapter | Full immutable code returned and independently reconstructed |

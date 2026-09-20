@@ -1,6 +1,6 @@
 # Additive CharterArc demo onboarding
 
-Status: owner approved the credential-routing implementation plan on 2026-09-20. Credential code and local checks are implemented on the separate branch; live activation and sections 3–4 remain pending. See execution-report.md. No deployment is claimed.
+Status: owner approved both the credential-routing and runtime implementation plans on 2026-09-20. Credential routing, separate-runtime support, a real locally tested image and project-validation code are implemented on the separate branch. Live activation and project admission remain pending. See execution-report.md and runtime-execution-report.md. No AWS deployment is claimed.
 
 ## Purpose
 
