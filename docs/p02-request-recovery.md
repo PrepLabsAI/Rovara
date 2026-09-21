@@ -79,6 +79,31 @@ Ownership and project membership are both checked on every call, against current
 Membership revoked after the job was accepted stops disclosure immediately — it is not
 evaluated once at acceptance time.
 
+## Request identity is case-sensitive
+
+`requestId` is matched **byte for byte**, not case-insensitively.
+
+Task acceptance stores whatever spelling the caller sent and keys its idempotency index on
+that exact string — `ownerKey \0 workspaceId \0 requestId` in memory, and the
+`REQUEST#<requestId>` sort key on AWS. The schema accepts uppercase and mixed-case UUIDs, so
+`AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA` and its lowercase form are two distinct request
+identities at every layer.
+
+Recovery therefore preserves the identifier exactly as received. An earlier revision of this
+route lowercased the path segments, which made a recovery of an uppercase request look up a
+key acceptance had never written and answer `404` for a job that existed. Independent review
+caught it; six tests across both real handlers now cover it.
+
+Two consequences worth stating plainly:
+
+- Recover with the **same spelling you submitted**. A different spelling answers `404`,
+  correctly: that identity really was never accepted. As everywhere else on this route, that
+  `404` must not trigger a resubmission.
+- Nothing normalizes stored identity. Case-folding in one layer only would rewrite identities
+  the other layer already persisted and lose the operation being recovered. If a canonical
+  spelling is ever wanted, it belongs at the point of acceptance, applied consistently, with a
+  migration for existing records — not bolted onto the read path.
+
 ## A 404 is not proof
 
 **`404` means this owner has no index entry for this request in this workspace. It does not

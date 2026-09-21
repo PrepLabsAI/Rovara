@@ -382,6 +382,44 @@ describe("live broker candidate routes", () => {
     expect(f.github).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["uppercase", "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"],
+    ["mixed-case", "AaAaAAAA-aaaa-4AAA-8aAA-AAAAaaaaAAAA"],
+  ])("submits and recovers a %s request id through the real AWS handlers", async (_label, requestId) => {
+    const f = await fixture();
+    const task = { ...f.task, requestId };
+
+    const accepted = await f.request(f.taskPath, task);
+    expect(accepted.status).toBe(202);
+    expect(accepted.body.operation!.requestId).toBe(requestId);
+
+    const before = structuredClone(f.rows);
+    const recovered = await f.request(`/v1/workspaces/${f.workspaceId}/requests/${requestId}`);
+
+    expect(recovered.status).toBe(200);
+    expect(recovered.body.operation!.id).toBe(accepted.body.operation!.id);
+    expect(recovered.body.operation!.requestId).toBe(requestId);
+    expect(recovered.body.operation!.payloadHash).toBe(taskPayloadHash(task));
+
+    // Read-only, and no second job.
+    expect(f.rows).toEqual(before);
+    expect([...f.rows.values()].filter((row) => row.entityType === "OUTBOX")).toHaveLength(1);
+    expect([...f.rows.values()].filter((row) => row.entityType === "OPERATION")).toHaveLength(1);
+    expect(f.github).not.toHaveBeenCalled();
+
+    // Another owner still gets nothing.
+    const stranger = await f.request(`/v1/workspaces/${f.workspaceId}/requests/${requestId}`, undefined, {}, "mallory");
+    expect(stranger.status).toBe(404);
+    expect(stranger.body.operation).toBeUndefined();
+
+    // A different spelling is a different identity; acceptance stored only this one.
+    const other = await f.request(`/v1/workspaces/${f.workspaceId}/requests/${requestId.toLowerCase()}`);
+    expect(other.status).toBe(404);
+    expect(other.body.operation).toBeUndefined();
+
+    expect(f.rows).toEqual(before);
+  });
+
   it("recovers a terminal operation and its retained candidate result", async () => {
     const f = await fixture(); const { invocation, callbacks } = await f.admit();
     const { artifact, candidate } = chunkAndCandidate(f, invocation);

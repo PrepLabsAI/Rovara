@@ -14,11 +14,18 @@ export interface RequestLookupPath {
  *
  * Both path fields must be well-formed UUIDs. A malformed path simply does not match the
  * route, so it can never reach storage or authorization with an attacker-chosen key.
+ *
+ * The identifiers are returned exactly as received. Task acceptance stores `requestId`
+ * verbatim and keys its index on that exact string, both in the in-memory store and in the
+ * AWS `REQUEST#<requestId>` sort key, so case-folding here would look up a key acceptance
+ * never wrote. Two spellings of one UUID are therefore two distinct request identities at
+ * every layer; folding in one place only would rewrite a stored identity and lose the
+ * operation the caller is trying to recover.
  */
 export function parseRequestLookupPath(pathname: string): RequestLookupPath | undefined {
   const match = REQUEST_LOOKUP_PATH.exec(pathname);
   if (!match?.[1] || !match[2]) return undefined;
-  return { workspaceId: match[1].toLowerCase(), requestId: match[2].toLowerCase() };
+  return { workspaceId: match[1], requestId: match[2] };
 }
 
 /**

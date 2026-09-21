@@ -195,7 +195,7 @@ executed_against: MSDLC-OBJ-001@0.3
 alignment: pass
 result_status: implemented
 evidence_added:
-  - "tests/fixtures/p02-request-recovery.json (sha256 3982a8cf…acd16e)"
+  - "tests/fixtures/p02-request-recovery.json (sha256 3982a8cf4cf86343ab65ab9338c5c2f3e81b503df44c6fe4934712b11679910d)"
   - "docs/p02-request-recovery.md"
   - "docs/unified-execution-capabilities.md"
   - "tests/contract/task-payload.test.ts, request-lookup.test.ts, unified-execution-capabilities.test.ts"
@@ -258,5 +258,93 @@ What this does and does not mean:
   establish whether the flake pre-dates this lane.
 
 Smallest next step for a reviewer: run the suite with `--reporter=json --outputFile` in a loop
-on both `067ea9e8…` and this branch, and compare failure rates per test file. Until then the
+on both `067ea9e82a6affee106c4854416cc693ed444d77` and this branch, and compare failure rates per test file. Until then the
 correct status for suite stability is `unknown`.
+
+## Independent review round 1 — one reproducible B2 defect, fixed
+
+**Finding (valid).** Submitting `AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA` through the real
+generic `POST /tasks` handler returned `202`; recovering that same id returned `404`.
+
+**Cause.** `parseRequestLookupPath` lowercased both path segments. Task acceptance stores the
+caller's spelling verbatim and keys its idempotency index on that exact string — `ownerKey \0
+workspaceId \0 requestId` in memory, `REQUEST#<requestId>` as the AWS sort key. The schema
+accepts uppercase and mixed-case UUIDs, so case-folding on the read path looked up a key
+acceptance had never written. Recovery of an uppercase or mixed-case request was impossible,
+and it failed in the single worst way for this route: reporting a job that existed as absent.
+
+**Fix.** Preserve the identifiers exactly as received. One line, plus the reasoning recorded
+where the next reader will need it.
+
+No stored identity was normalized and no persisted hash changed. `requestId` is not an input
+to `taskPayloadHash`, so the published vectors and the fixture digest are untouched.
+
+**Semantics now pinned:** request identity is byte-for-byte. Two spellings of one UUID are two
+distinct request identities at every layer, so recovering with a different spelling correctly
+answers `404` — and, as everywhere on this route, that `404` must not trigger a resubmission.
+Canonicalizing would have to happen at acceptance, consistently, with a migration; it must
+never be bolted onto the read path alone.
+
+**My own test had encoded the bug.** `matches only well-formed UUID pairs` asserted that an
+uppercase workspace id came back lowercased. Corrected to assert exact preservation. A test
+that asserts the defect is worse than no test, and this one existed because I wrote the
+assertion from the implementation instead of from the acceptance path's storage behavior.
+
+**Regression coverage**, verified RED by reintroducing the case-folding — 6 tests fail across
+both real handlers, then pass with the fix:
+
+| Test | Handler |
+|---|---|
+| `REVIEW recovers an accepted uppercase request ID without creating new work` (adopted verbatim) | generic |
+| `submits and recovers a uppercase request id through the real handlers` | generic |
+| `submits and recovers a mixed-case request id through the real handlers` | generic |
+| `still refuses a case-variant request id to another owner` | generic |
+| `treats a different spelling of the same UUID as a different request identity` | generic |
+| `submits and recovers a uppercase request id through the real AWS handlers` | AWS |
+| `submits and recovers a mixed-case request id through the real AWS handlers` | AWS |
+| `matches only well-formed UUID pairs` (corrected) | path parsing |
+
+Each submits through the real acceptance handler and recovers through the real lookup handler,
+and each still asserts read-only behavior (full store snapshot equality), ownership and
+membership refusal, one outbox record, and zero `acceptTask` / `acquireWriter` / publication
+calls.
+
+### Regression receipt with actual exit statuses
+
+Tree: working tree of `codex/lane-agentx` at the review fix. Node 22.23.2.
+
+```
+npm run clean && npm run build   BUILD_EXIT=0
+npm run typecheck                TYPECHECK_EXIT=0
+npm run lint                     LINT_EXIT=0
+npm test                         TEST_EXIT=0
+
+ Test Files  43 passed (43)
+      Tests  285 passed | 1 skipped (286)
+   Duration  10.05s
+```
+
+Exit statuses are the real ones, captured with `$?` on the command itself rather than through
+a pipe. That pipe is what lost the flake's identity in the first place.
+
+### The unidentified flake remains unresolved
+
+This green run does **not** explain or close it. One earlier full-suite run failed one
+unidentified test; it has not recurred, and repeated passes are not evidence of a cause. The
+observed record is now 1 failure in roughly 28 runs, still unattributed and still uncompared
+against the baseline. Suite stability stays `unknown` until a reviewer runs the loop with
+`--reporter=json --outputFile` on both `067ea9e82a6affee106c4854416cc693ed444d77` and this
+branch and compares per-file failure rates.
+
+### Handoff corrections
+
+- The fixture digest is
+  `3982a8cf4cf86343ab65ab9338c5c2f3e81b503df44c6fe4934712b11679910d` in full. The abbreviated
+  form is removed from this log. The fixture bytes are deliberately unchanged, so the digest
+  the reviewer verified still holds; the case-sensitivity rule is documented in
+  `docs/p02-request-recovery.md` rather than churning a digest other lanes may have pinned.
+- The advice to rebind evidence to a changed published head is withdrawn and replaced. Changed
+  code is different code: it requires new verification and a new approval, and the earlier
+  evidence and decision are invalidated. Evidence binds to the exact candidate digest it was
+  produced against, and moving that binding would let unverified code inherit a verdict it
+  never earned.

@@ -125,8 +125,11 @@ rebase of the candidate commit — the candidate bundle is untouched and the res
 own base and head — but the published head can differ from the exact tested tree.
 
 For CharterArc this means: a publication observation from this branch cannot be treated as
-"the verified candidate reached the remote". Lane A must rebind evidence to the observed head,
-and a moved base must invalidate the prior approval rather than inherit it.
+"the verified candidate reached the remote". When the published head is not the verified
+candidate, the code is different code. It requires new verification and a new approval, and
+the earlier evidence and decision are invalidated. Existing evidence must not be re-pointed at
+the new head: evidence binds to the exact candidate digest it was produced against, and moving
+that binding would let unverified code inherit a verdict it never earned.
 
 Source: `packages/worker/src/publish.ts:32` (the refusal), `:242`–`:264` (base merge),
 `packages/contracts/src/candidate.ts`.

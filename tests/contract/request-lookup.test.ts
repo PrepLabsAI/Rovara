@@ -111,8 +111,15 @@ describe("request lookup path matching", () => {
     const requestId = randomUUID();
     expect(parseRequestLookupPath(lookupPath(workspaceId, requestId)))
       .toEqual({ workspaceId, requestId });
+    // Identifiers are preserved exactly. Acceptance keys its index on the verbatim string,
+    // so folding case here would look up a key acceptance never wrote.
     expect(parseRequestLookupPath(lookupPath(workspaceId.toUpperCase(), requestId)))
-      .toEqual({ workspaceId, requestId });
+      .toEqual({ workspaceId: workspaceId.toUpperCase(), requestId });
+    expect(parseRequestLookupPath(lookupPath(workspaceId, requestId.toUpperCase())))
+      .toEqual({ workspaceId, requestId: requestId.toUpperCase() });
+    const mixed = "AaAaAAAA-aaaa-4AAA-8aAA-AAAAaaaaAAAA";
+    expect(parseRequestLookupPath(lookupPath(workspaceId, mixed)))
+      .toEqual({ workspaceId, requestId: mixed });
     for (const path of [
       lookupPath("not-a-uuid", requestId),
       lookupPath(workspaceId, "../../admin"),
@@ -127,6 +134,95 @@ describe("request lookup path matching", () => {
 });
 
 describe("generic broker request recovery", () => {
+  it("REVIEW recovers an accepted uppercase request ID without creating new work", async () => {
+    const h = await harness();
+    const request = { requestId: "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA", conversationId: randomUUID(), prompt: "Add a check" };
+    const accepted = await h.call(`/v1/workspaces/${h.workspace.id}/tasks`, "alice", {method: "POST", body: JSON.stringify(request)});
+    expect(accepted.status).toBe(202);
+    const before = h.snapshot();
+    const recovered = await h.call(lookupPath(h.workspace.id, request.requestId));
+    expect(recovered.status).toBe(200);
+    expect(recovered.body.operation?.id).toBe(accepted.body.operation?.id);
+    expect(h.snapshot()).toEqual(before);
+  });
+
+  it.each([
+    ["uppercase", "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB"],
+    ["mixed-case", "CcCcCCCC-cccc-4CCC-8cCC-CCCCccccCCCC"],
+  ])("submits and recovers a %s request id through the real handlers", async (_label, requestId) => {
+    const h = await harness();
+    const request = { requestId, conversationId: randomUUID(), prompt: "Add a check" };
+
+    const accepted = await h.call(`/v1/workspaces/${h.workspace.id}/tasks`, "alice", {
+      method: "POST", body: JSON.stringify(request),
+    });
+    expect(accepted.status).toBe(202);
+    expect(accepted.body.operation?.requestId).toBe(requestId);
+
+    const before = h.snapshot();
+    h.arm();
+    const recovered = await h.call(lookupPath(h.workspace.id, requestId));
+
+    expect(recovered.status).toBe(200);
+    expect(recovered.body.operation?.id).toBe(accepted.body.operation?.id);
+    // Stored identity is preserved verbatim, not normalized on the way out.
+    expect(recovered.body.operation?.requestId).toBe(requestId);
+    expect(recovered.body.operation?.payloadHash).toBe(taskPayloadHash(request));
+
+    // Read-only, and no second job.
+    expect(h.snapshot()).toEqual(before);
+    expect(h.acceptTask).not.toHaveBeenCalled();
+    expect(h.acquireWriter).not.toHaveBeenCalled();
+    expect(h.operations.pendingOutbox()).toHaveLength(1);
+  });
+
+  it("still refuses a case-variant request id to another owner", async () => {
+    const h = await harness({
+      memberships: [
+        { ownerKey: ownerKeyFor("alice"), project: "payments", role: "developer" },
+        { ownerKey: ownerKeyFor("mallory"), project: "payments", role: "developer" },
+      ],
+    });
+    const requestId = "DDDDDDDD-DDDD-4DDD-8DDD-DDDDDDDDDDDD";
+    const request = { requestId, conversationId: randomUUID(), prompt: "Add a check" };
+    expect((await h.call(`/v1/workspaces/${h.workspace.id}/tasks`, "alice", {
+      method: "POST", body: JSON.stringify(request),
+    })).status).toBe(202);
+    const before = h.snapshot();
+    h.arm();
+
+    const stranger = await h.call(lookupPath(h.workspace.id, requestId), "mallory");
+
+    expect(stranger.status).toBe(404);
+    expect(stranger.body.operation).toBeUndefined();
+    expect(h.snapshot()).toEqual(before);
+    expect(h.acceptTask).not.toHaveBeenCalled();
+  });
+
+  it("treats a different spelling of the same UUID as a different request identity", async () => {
+    const h = await harness();
+    const submitted = "EEEEEEEE-EEEE-4EEE-8EEE-EEEEEEEEEEEE";
+    const request = { requestId: submitted, conversationId: randomUUID(), prompt: "Add a check" };
+    expect((await h.call(`/v1/workspaces/${h.workspace.id}/tasks`, "alice", {
+      method: "POST", body: JSON.stringify(request),
+    })).status).toBe(202);
+    const before = h.snapshot();
+    h.arm();
+
+    // Acceptance keys its index on the verbatim string, so the lowercase spelling is a
+    // different identity and was never accepted. Reporting it as found would hand back an
+    // operation the caller did not submit; reporting 404 is correct, and per
+    // docs/p02-request-recovery.md a 404 must not trigger a resubmission.
+    const other = await h.call(lookupPath(h.workspace.id, submitted.toLowerCase()));
+
+    expect(other.status).toBe(404);
+    expect(other.body.operation).toBeUndefined();
+    expect(h.snapshot()).toEqual(before);
+    expect(h.acceptTask).not.toHaveBeenCalled();
+    expect(h.acquireWriter).not.toHaveBeenCalled();
+    expect(h.operations.pendingOutbox()).toHaveLength(1);
+  });
+
   it("returns the already accepted operation to its authenticated owner", async () => {
     const h = await harness();
     const request = { requestId: randomUUID(), conversationId: randomUUID(), prompt: "Add a check" };
