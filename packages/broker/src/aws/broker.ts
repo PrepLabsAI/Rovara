@@ -39,6 +39,8 @@ import type { AuthenticatedIdentity } from "../auth.js";
 import type { GitHubAppCredentialProvider } from "../github-app.js";
 import { createConfiguredGitHubAppRouter } from "./github-app-routing.js";
 import { RepositoryGrantService } from "../repository-access.js";
+import { RequestIndexIntegrityError } from "../operations.js";
+import { parseRequestLookupPath, requestLookupFailure } from "../request-lookup.js";
 import { taskPayloadHash } from "../task-payload.js";
 import { publicWorkspace } from "../workspaces.js";
 import { validateCandidateBinding, type ExpectedCandidateBinding } from "../candidate-bindings.js";
@@ -232,6 +234,14 @@ export function createAwsBrokerHandler(dependencies: AwsBrokerDependencies) {
           await acceptPullRequestLifecycle(dependencies, identity, pullRequestActions[1], body),
           request.requestId,
           202,
+        );
+      }
+
+      const requestLookup = parseRequestLookupPath(url.pathname);
+      if (request.method === "GET" && requestLookup) {
+        return json(
+          { operation: await getOperationByRequest(dependencies, identity, requestLookup.workspaceId, requestLookup.requestId) },
+          request.requestId,
         );
       }
 
@@ -1657,6 +1667,40 @@ async function getAuthorizedOperation(
   const workspace = await requireOwnedWorkspace(dependencies, identity, workspaceId);
   await requireMembership(dependencies, identity.ownerKey, workspace.projectName);
   return publicOperation(await requireOperation(dependencies, workspaceId, operationId));
+}
+
+/**
+ * Read the operation already accepted for an authenticated owner's request id.
+ *
+ * Recovery only. It performs consistent reads of the owner/workspace-scoped request index
+ * and the operation it references, and nothing else: no acceptTask, no writer lease, no
+ * session creation, no queue send, no runtime call, no cross-owner scan and no write. A
+ * NOT_FOUND result means this owner has no index entry for this request in this workspace;
+ * it is not proof that the original submission never reached a worker.
+ */
+async function getOperationByRequest(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  workspaceId: string,
+  requestId: string,
+): Promise<Operation> {
+  const workspace = await requireOwnedWorkspace(dependencies, identity, workspaceId);
+  await requireMembership(dependencies, identity.ownerKey, workspace.projectName);
+  try {
+    const index = await getItem<{ operationId?: unknown }>(dependencies, {
+      pk: `IDEMPOTENCY#${identity.ownerKey}#${workspaceId}`,
+      sk: `REQUEST#${requestId}`,
+    });
+    if (!index) throw agentXError("NOT_FOUND", "request not found");
+    if (typeof index.operationId !== "string") throw new RequestIndexIntegrityError();
+    const record = await getItem<OperationRecord>(dependencies, operationKey(workspaceId, index.operationId));
+    if (!record || record.workspaceId !== workspaceId || record.requestId !== requestId) {
+      throw new RequestIndexIntegrityError();
+    }
+    return publicOperation(record);
+  } catch (error) {
+    throw requestLookupFailure(error);
+  }
 }
 
 async function requireOwnedWorkspace(

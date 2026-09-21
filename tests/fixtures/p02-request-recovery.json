@@ -1,0 +1,131 @@
+{
+  "fixtureVersion": "charterarc.unified-private.v1",
+  "fixtureName": "p02-request-recovery",
+  "sourceRepository": "AgentX",
+  "sourceBranch": "codex/lane-agentx",
+  "baseCommit": "067ea9e82a6affee106c4854416cc693ed444d77",
+  "objective": {
+    "id": "MSDLC-OBJ-001",
+    "version": "0.3",
+    "sha256": "bc902e9dcecec61f32d748ae290dcab417311db1382e5dbcac59bb1887845843"
+  },
+  "warning": "Synthetic identifiers. Offline contract vectors only. Not a live job, deployment record, authorization receipt or qualified evidence. This route was proven against the real in-memory and AWS broker handlers with injected fake dependencies. No AWS deployment is claimed.",
+  "hashDefinition": {
+    "algorithm": "sha256",
+    "encoding": "hex",
+    "serialization": "JSON.stringify of {conversationId, prompt} plus {candidate} only when the request carries one, in that key order, unsorted, after schema parsing normalizes field order.",
+    "excludes": [
+      "requestId"
+    ],
+    "note": "requestId is the idempotency key, not part of the payload hash. Two different payloads under one requestId must conflict."
+  },
+  "route": {
+    "method": "GET",
+    "path": "/v1/workspaces/{workspaceId}/requests/{requestId}",
+    "authentication": "bearer",
+    "ownerIdentity": "taken from the authenticated token, never from the request",
+    "sideEffects": "none",
+    "responses": {
+      "200": {
+        "body": {
+          "operation": "<existing Operation envelope>"
+        },
+        "meaning": "the already accepted operation"
+      },
+      "401": {
+        "code": "AUTH_REQUIRED",
+        "meaning": "missing, malformed or expired token"
+      },
+      "404": {
+        "code": "NOT_FOUND",
+        "meaning": "no index entry for this owner, workspace and request; also returned for an unknown or non-owned workspace and for revoked project membership",
+        "caution": "This does NOT prove the original submission never reached a worker. It must never trigger an automatic re-submission."
+      },
+      "409": {
+        "code": "IDEMPOTENCY_CONFLICT",
+        "meaning": "acceptance only: the requestId was reused with different content"
+      },
+      "503": {
+        "code": "RUNTIME_UNAVAILABLE",
+        "meaning": "the request index is dangling or corrupt, or storage failed; state is unknown",
+        "caution": "Never reported as 404 and never carries the underlying message or a stored row."
+      }
+    }
+  },
+  "vectors": [
+    {
+      "name": "task-without-candidate",
+      "description": "Ungoverned task. Hash covers conversationId and prompt only.",
+      "request": {
+        "requestId": "22222222-2222-4222-8222-222222222222",
+        "conversationId": "44444444-4444-4444-8444-444444444444",
+        "prompt": "Add All / Open / Done filtering. Preserve pagination and team isolation."
+      },
+      "payloadHash": "7ebc88630f8c615cf869fac3cb2c15794525b4fbdf3d94f1531f4462b6ada032"
+    },
+    {
+      "name": "task-with-candidate",
+      "description": "Governed task bound to an exact candidate. Hash covers the candidate.",
+      "request": {
+        "requestId": "22222222-2222-4222-8222-222222222222",
+        "conversationId": "44444444-4444-4444-8444-444444444444",
+        "prompt": "Add All / Open / Done filtering. Preserve pagination and team isolation.",
+        "candidate": {
+          "jobId": "11111111-1111-4111-8111-111111111111",
+          "attempt": 1,
+          "repository": "team-tasks",
+          "baseCommit": "1111111111111111111111111111111111111111"
+        }
+      },
+      "payloadHash": "52057768a1df1ff0ce80dba0a5b1b49a19627b716db554165e94219f02067a04"
+    },
+    {
+      "name": "task-with-candidate-non-ascii-prompt",
+      "description": "Non-ASCII prompt. JSON.stringify emits these characters literally rather than as \\u escapes; the hash is over that serialization encoded as UTF-8.",
+      "request": {
+        "requestId": "22222222-2222-4222-8222-222222222222",
+        "conversationId": "44444444-4444-4444-8444-444444444444",
+        "prompt": "Keep café labels — 日本語 🙂",
+        "candidate": {
+          "jobId": "11111111-1111-4111-8111-111111111111",
+          "attempt": 1,
+          "repository": "team-tasks",
+          "baseCommit": "1111111111111111111111111111111111111111"
+        }
+      },
+      "payloadHash": "e1ff8c66db69e3ac70334e1806c9780a8ade4722496d70f10415d07691f0d606"
+    },
+    {
+      "name": "task-with-candidate-reordered-keys",
+      "description": "Same content as task-with-candidate with every key reordered. Must hash identically.",
+      "request": {
+        "candidate": {
+          "baseCommit": "1111111111111111111111111111111111111111",
+          "repository": "team-tasks",
+          "attempt": 1,
+          "jobId": "11111111-1111-4111-8111-111111111111"
+        },
+        "prompt": "Add All / Open / Done filtering. Preserve pagination and team isolation.",
+        "conversationId": "44444444-4444-4444-8444-444444444444",
+        "requestId": "22222222-2222-4222-8222-222222222222"
+      },
+      "payloadHash": "52057768a1df1ff0ce80dba0a5b1b49a19627b716db554165e94219f02067a04"
+    },
+    {
+      "name": "task-with-candidate-changed-base-commit",
+      "description": "Different content under the same requestId. Must NOT match task-with-candidate; acceptance must conflict.",
+      "request": {
+        "requestId": "22222222-2222-4222-8222-222222222222",
+        "conversationId": "44444444-4444-4444-8444-444444444444",
+        "prompt": "Add All / Open / Done filtering. Preserve pagination and team isolation.",
+        "candidate": {
+          "jobId": "11111111-1111-4111-8111-111111111111",
+          "attempt": 1,
+          "repository": "team-tasks",
+          "baseCommit": "2222222222222222222222222222222222222222"
+        }
+      },
+      "payloadHash": "cd10571f00058f8767f7afd3d71b599b3194af46b892d55b8622732bbd7d1f6a"
+    }
+  ]
+}

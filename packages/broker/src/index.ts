@@ -13,6 +13,7 @@ export * from "./outbox.js";
 export * from "./prepare.js";
 export * from "./projects.js";
 export * from "./repository-access.js";
+export * from "./request-lookup.js";
 export * from "./resume.js";
 export * from "./registry.js";
 export * from "./task-payload.js";

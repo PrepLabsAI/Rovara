@@ -31,7 +31,7 @@ async function fixture(stopRuntimeSession: () => Promise<void> = async () => {})
   const workspaceId = randomUUID(); const conversationId = randomUUID();
   const now = new Date().toISOString();
   const rows = new Map<string, Row>(); const objects = new Map<string, string>();
-  const faults = { failNextRead: false };
+  const faults: { failNextRead: boolean; failItemRead?: string } = { failNextRead: false };
   let heldRead: { sk: string; gate: ReturnType<typeof barrier> } | undefined;
   let heldCancellation: ReturnType<typeof barrier> | undefined;
   const pauseNextRead = (sk: string) => { const gate = barrier(); heldRead = { sk, gate }; return gate; };
@@ -92,6 +92,10 @@ async function fixture(stopRuntimeSession: () => Promise<void> = async () => {})
   const documentClient = { send: async (command: { constructor: { name: string }; input: Row }) => {
     if (command.constructor.name === "GetCommand") {
       const requestKey = command.input.Key as Row;
+      if (faults.failItemRead !== undefined && requestKey.sk === faults.failItemRead) {
+        faults.failItemRead = undefined;
+        throw new Error("dynamodb unavailable: secret-table-detail");
+      }
       if (heldRead?.sk === requestKey.sk) {
         const gate = heldRead.gate; heldRead = undefined; gate.enter(); await gate.wait;
       }
@@ -163,7 +167,7 @@ async function fixture(stopRuntimeSession: () => Promise<void> = async () => {})
       } });
     return { response, invocation, callbacks };
   }
-  return { rows, objects, workspace, project, task, taskPath, workspaceId, request, admit, github, faults, pauseNextRead, pauseNextCancellation, seedPullRequest };
+  return { rows, objects, workspace, project, task, taskPath, workspaceId, request, handler, admit, github, faults, pauseNextRead, pauseNextCancellation, seedPullRequest };
 }
 
 function chunkAndCandidate(f: Awaited<ReturnType<typeof fixture>>, invocation: Extract<WorkerInvocation, { kind: "task" }>) {
@@ -359,6 +363,140 @@ describe("live broker candidate routes", () => {
     expect(reordered.body.duplicate).toBe(true);
     expect(reordered.body.operation!.id).toBe(accepted.body.operation!.id);
     expect([...f.rows.values()].filter((row) => row.entityType === "OUTBOX")).toHaveLength(1);
+  });
+
+  it("recovers the accepted operation by request identity without dispatching anything", async () => {
+    const f = await fixture(); const { response, invocation } = await f.admit();
+    const before = structuredClone(f.rows);
+    const lookupPath = `/v1/workspaces/${f.workspaceId}/requests/${f.task.requestId}`;
+
+    const recovered = await f.request(lookupPath);
+
+    expect(recovered.status).toBe(200);
+    expect(recovered.body.operation).toEqual(response.body.operation);
+    expect(recovered.body.operation!.id).toBe(invocation.operationId);
+    expect(recovered.body.operation!.payloadHash).toBe(taskPayloadHash(f.task));
+    expect(f.rows).toEqual(before);
+    expect([...f.rows.values()].filter((row) => row.entityType === "OUTBOX")).toHaveLength(1);
+    expect([...f.rows.values()].filter((row) => row.entityType === "OPERATION")).toHaveLength(1);
+    expect(f.github).not.toHaveBeenCalled();
+  });
+
+  it("recovers a terminal operation and its retained candidate result", async () => {
+    const f = await fixture(); const { invocation, callbacks } = await f.admit();
+    const { artifact, candidate } = chunkAndCandidate(f, invocation);
+    await callbacks.artifactSink(artifact);
+    const result = { conversationId: f.task.conversationId, sessionFile: "agent-sessions/task.jsonl", candidate };
+    await callbacks.terminalSink({ operationId: invocation.operationId, status: "SUCCEEDED", result });
+    const before = structuredClone(f.rows);
+
+    const recovered = await f.request(`/v1/workspaces/${f.workspaceId}/requests/${f.task.requestId}`);
+
+    expect(recovered.status).toBe(200);
+    expect(recovered.body.operation!.status).toBe("SUCCEEDED");
+    expect(recovered.body.operation!.result).toEqual(result);
+    expect(f.rows).toEqual(before);
+    expect(f.github).not.toHaveBeenCalled();
+  });
+
+  it("discloses nothing to another owner or without project membership", async () => {
+    const f = await fixture(); await f.admit();
+    const lookupPath = `/v1/workspaces/${f.workspaceId}/requests/${f.task.requestId}`;
+    const before = structuredClone(f.rows);
+
+    const stranger = await f.request(lookupPath, undefined, {}, "mallory");
+    expect(stranger.status).toBe(404);
+    expect(stranger.body.operation).toBeUndefined();
+    expect(JSON.stringify(stranger.body)).not.toContain(f.task.conversationId);
+
+    const memberKey = [...f.rows.keys()].find((key) => key.includes("MEMBER#") && key.includes("PROJECT#demo"))!;
+    const membership = f.rows.get(memberKey)!;
+    f.rows.delete(memberKey);
+    const revoked = await f.request(lookupPath);
+    expect(revoked.status).toBe(404);
+    expect(revoked.body.operation).toBeUndefined();
+    f.rows.set(memberKey, membership);
+
+    expect(f.rows).toEqual(before);
+    expect(f.github).not.toHaveBeenCalled();
+  });
+
+  it("reports an unknown request as not found without admitting a job", async () => {
+    const f = await fixture(); await f.admit();
+    const before = structuredClone(f.rows);
+
+    const missing = await f.request(`/v1/workspaces/${f.workspaceId}/requests/${randomUUID()}`);
+
+    expect(missing.status).toBe(404);
+    expect(missing.body.operation).toBeUndefined();
+    expect(f.rows).toEqual(before);
+    expect([...f.rows.values()].filter((row) => row.entityType === "OUTBOX")).toHaveLength(1);
+    expect([...f.rows.values()].filter((row) => row.entityType === "OPERATION")).toHaveLength(1);
+  });
+
+  it("reports a dangling request index as a storage failure, never as absence", async () => {
+    const f = await fixture(); const { invocation } = await f.admit();
+    const indexKey = [...f.rows.keys()].find((key) => key.includes(`REQUEST#${f.task.requestId}`))!;
+    f.rows.set(indexKey, { ...f.rows.get(indexKey)!, operationId: randomUUID() });
+
+    const dangling = await f.request(`/v1/workspaces/${f.workspaceId}/requests/${f.task.requestId}`);
+
+    expect(dangling.status).toBe(503);
+    expect(dangling.body.error).toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    expect(dangling.status).not.toBe(404);
+    expect(dangling.body.operation).toBeUndefined();
+    expect(JSON.stringify(dangling.body)).not.toContain(invocation.operationId);
+    expect(f.github).not.toHaveBeenCalled();
+  });
+
+  it("reports a storage read failure without leaking its detail", async () => {
+    const f = await fixture(); await f.admit();
+    const before = structuredClone(f.rows);
+    f.faults.failItemRead = `REQUEST#${f.task.requestId}`;
+
+    const failed = await f.request(`/v1/workspaces/${f.workspaceId}/requests/${f.task.requestId}`);
+
+    expect(failed.status).toBe(503);
+    expect(failed.body.error).toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    expect(JSON.stringify(failed.body)).not.toContain("secret-table-detail");
+    expect(JSON.stringify(failed.body)).not.toContain(f.task.conversationId);
+    expect(f.rows).toEqual(before);
+    expect(f.github).not.toHaveBeenCalled();
+  });
+
+  it("does not route a malformed request identifier to storage", async () => {
+    const f = await fixture(); await f.admit();
+    const before = structuredClone(f.rows);
+    for (const suffix of ["not-a-uuid", `${f.task.requestId}extra`, ".."]) {
+      const response = await f.request(`/v1/workspaces/${f.workspaceId}/requests/${suffix}`);
+      expect(response.status).toBe(404);
+      expect(response.body.operation).toBeUndefined();
+    }
+    expect(f.rows).toEqual(before);
+  });
+
+  it.each([
+    ["absent JWT claims", undefined],
+    ["a foreign issuer", { iss: "https://attacker.example.test", sub: "alice" }],
+    ["an empty subject", { iss: issuer, sub: "" }],
+  ])("refuses a request lookup with %s", async (_label, claims) => {
+    const f = await fixture(); await f.admit();
+    const before = structuredClone(f.rows);
+    const event: HttpApiV2Event = {
+      version: "2.0", rawPath: `/v1/workspaces/${f.workspaceId}/requests/${f.task.requestId}`, headers: {},
+      requestContext: { requestId: randomUUID(), http: { method: "GET" },
+        ...(claims === undefined ? {} : { authorizer: { jwt: { claims } } }) },
+    };
+    const response = await f.handler(event);
+    const body = JSON.parse(response.body) as { operation?: Operation; error?: { code: string; message: string } };
+
+    expect(response.statusCode).toBe(401);
+    expect(body.error).toMatchObject({ code: "AUTH_REQUIRED" });
+    expect(body.error!.message.startsWith("AUTH_REQUIRED:")).toBe(false);
+    expect(body.operation).toBeUndefined();
+    expect(JSON.stringify(body)).not.toContain(f.task.conversationId);
+    expect(f.rows).toEqual(before);
+    expect(f.github).not.toHaveBeenCalled();
   });
 
   it("returns immutable readback receipts and makes the complete candidate retrievable from operation state", async () => {

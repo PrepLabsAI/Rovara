@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { InMemoryRegistry, OperationStore, taskPayloadHash } from "../../packages/broker/src/index.js";
+import { AgentXError } from "@agentx/contracts";
+import {
+  InMemoryRegistry,
+  OperationStore,
+  RequestIndexIntegrityError,
+  taskPayloadHash,
+} from "../../packages/broker/src/index.js";
 
 function workspace(ownerKey = "alice-owner-key-0000") {
   const timestamp = new Date().toISOString();
@@ -122,6 +128,82 @@ describe("workspace registry and idempotent operations", () => {
     expect(reordered.duplicate).toBe(true);
     expect(reordered.operation.id).toBe(accepted.operation.id);
     expect(operations.pendingOutbox()).toHaveLength(1);
+  });
+
+  it("finds the original operation without taking another writer", async () => {
+    const registry = new InMemoryRegistry();
+    const stored = await registry.createDefault(workspace());
+    const operations = new OperationStore(registry);
+    const request = {
+      requestId: crypto.randomUUID(), conversationId: crypto.randomUUID(), prompt: "Add a check",
+    };
+    const accepted = await operations.acceptTask(stored.id, stored.ownerKey, request);
+    expect(operations.getByRequest(stored.id, stored.ownerKey, request.requestId)?.id)
+      .toBe(accepted.operation.id);
+    expect(operations.getByRequest(stored.id, "another-owner", request.requestId)).toBeUndefined();
+    expect(operations.pendingOutbox()).toHaveLength(1);
+  });
+
+  it("keeps a request lookup free of dispatch, writers and stored-state change", async () => {
+    const registry = new InMemoryRegistry();
+    const stored = await registry.createDefault(workspace());
+    const operations = new OperationStore(registry);
+    const request = {
+      requestId: crypto.randomUUID(), conversationId: crypto.randomUUID(), prompt: "Add a check",
+    };
+    await operations.acceptTask(stored.id, stored.ownerKey, request);
+    const before = {
+      operations: structuredClone([...operations.operations.entries()]),
+      idempotency: structuredClone([...operations.idempotency.entries()]),
+      outbox: structuredClone([...operations.outbox.entries()]),
+      events: structuredClone([...operations.events.entries()]),
+      workspace: structuredClone(await registry.get(stored.id)),
+    };
+    for (let index = 0; index < 3; index += 1) {
+      expect(operations.getByRequest(stored.id, stored.ownerKey, request.requestId)).toBeDefined();
+    }
+    expect(operations.getByRequest(stored.id, stored.ownerKey, crypto.randomUUID())).toBeUndefined();
+    expect(operations.getByRequest(crypto.randomUUID(), stored.ownerKey, request.requestId)).toBeUndefined();
+    expect([...operations.operations.entries()]).toEqual(before.operations);
+    expect([...operations.idempotency.entries()]).toEqual(before.idempotency);
+    expect([...operations.outbox.entries()]).toEqual(before.outbox);
+    expect([...operations.events.entries()]).toEqual(before.events);
+    expect(await registry.get(stored.id)).toEqual(before.workspace);
+  });
+
+  it("returns a copy so a caller cannot mutate stored operation state", async () => {
+    const registry = new InMemoryRegistry();
+    const stored = await registry.createDefault(workspace());
+    const operations = new OperationStore(registry);
+    const request = {
+      requestId: crypto.randomUUID(), conversationId: crypto.randomUUID(), prompt: "Add a check",
+    };
+    await operations.acceptTask(stored.id, stored.ownerKey, request);
+    const found = operations.getByRequest(stored.id, stored.ownerKey, request.requestId)!;
+    found.status = "SUCCEEDED";
+    expect(operations.getByRequest(stored.id, stored.ownerKey, request.requestId)!.status).toBe("ACCEPTED");
+  });
+
+  it("reports a dangling request index as an integrity failure, never as absence", async () => {
+    const registry = new InMemoryRegistry();
+    const stored = await registry.createDefault(workspace());
+    const operations = new OperationStore(registry);
+    const request = {
+      requestId: crypto.randomUUID(), conversationId: crypto.randomUUID(), prompt: "Add a check",
+    };
+    const accepted = await operations.acceptTask(stored.id, stored.ownerKey, request);
+    operations.operations.delete(accepted.operation.id);
+    expect(typeof RequestIndexIntegrityError).toBe("function");
+    let thrown: unknown;
+    try {
+      operations.getByRequest(stored.id, stored.ownerKey, request.requestId);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(RequestIndexIntegrityError);
+    expect(thrown).not.toBeInstanceOf(TypeError);
+    expect(thrown).not.toBeInstanceOf(AgentXError);
+    expect(String((thrown as Error).message)).not.toMatch(/NOT_FOUND/);
   });
 
   it("allows only one active writer", async () => {

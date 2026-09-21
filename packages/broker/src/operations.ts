@@ -26,6 +26,18 @@ export interface OperationEvent {
   payload: unknown;
 }
 
+/**
+ * A stored request index pointed at an operation that is missing or does not match the
+ * indexed workspace/request identity. This is a storage integrity failure, never absence:
+ * mapping it to NOT_FOUND would let a caller conclude that an accepted job never started.
+ */
+export class RequestIndexIntegrityError extends Error {
+  constructor(message = "request index integrity failure") {
+    super(message);
+    this.name = "RequestIndexIntegrityError";
+  }
+}
+
 export class OperationStore {
   readonly operations = new Map<string, Operation>();
   readonly idempotency = new Map<string, string>();
@@ -95,6 +107,25 @@ export class OperationStore {
     const record = this.outbox.get(id);
     if (!record) throw agentXError("NOT_FOUND", "outbox record not found");
     record.deliveredAt = new Date().toISOString();
+  }
+
+  /**
+   * Read the operation already accepted for an authenticated owner's request id.
+   *
+   * Recovery only: this takes no writer lease, enqueues nothing, creates no session and
+   * changes no stored state. `undefined` means no index entry exists for this owner,
+   * workspace and request; it does not prove the original submission never reached a
+   * worker, so a caller must not answer it by submitting another job.
+   */
+  getByRequest(workspaceId: string, ownerKey: string, requestId: string): Operation | undefined {
+    const key = `${ownerKey}\0${workspaceId}\0${requestId}`;
+    const id = this.idempotency.get(key);
+    if (!id) return undefined;
+    const operation = this.operations.get(id);
+    if (!operation || operation.workspaceId !== workspaceId || operation.requestId !== requestId) {
+      throw new RequestIndexIntegrityError();
+    }
+    return structuredClone(operation);
   }
 
   get(id: string): Operation | undefined {

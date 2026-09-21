@@ -16,6 +16,7 @@ import type { LifecycleService } from "./lifecycle.js";
 import type { PreparationCoordinator } from "./prepare.js";
 import type { InMemoryProjectRegistry } from "./projects.js";
 import type { InMemoryRegistry } from "./registry.js";
+import { parseRequestLookupPath, requestLookupFailure } from "./request-lookup.js";
 import { publicWorkspace, WorkspaceResolver } from "./workspaces.js";
 import type { WorkerCallbackService } from "./worker-callbacks.js";
 
@@ -113,6 +114,22 @@ export function createBrokerHandler(dependencies: {
         const task = OperationRequestSchema.parse(body);
         const accepted = await dependencies.operations.acceptTask(workspace.id, identity.ownerKey, task);
         return json(202, accepted, requestId);
+      }
+
+      const lookup = parseRequestLookupPath(requestPath);
+      if (request.method === "GET" && lookup) {
+        const workspace = await dependencies.registry.get(lookup.workspaceId);
+        if (!workspace) throw agentXError("NOT_FOUND", "workspace not found");
+        authorizeWorkspace(identity, workspace);
+        authorizeProject(identity, workspace.projectName, dependencies.memberships);
+        let operation;
+        try {
+          operation = dependencies.operations.getByRequest(workspace.id, identity.ownerKey, lookup.requestId);
+        } catch (error) {
+          throw requestLookupFailure(error);
+        }
+        if (!operation) throw agentXError("NOT_FOUND", "request not found");
+        return json(200, { operation }, requestId);
       }
 
       const operationMatch = /^\/v1\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)$/.exec(
