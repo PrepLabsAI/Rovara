@@ -226,3 +226,37 @@ Status semantics: `implemented` means an executor produced a candidate and its n
 tests pass on the stated tree. It is not `verified` (no independent reviewer), not `delivered`
 (nothing deployed), and not `validated` (no outcome observed). No AWS route exists until a
 separately authorized deployment and live test establish one.
+
+## Unresolved: one non-reproducing test failure
+
+Recorded as an open unknown rather than rounded to a pass.
+
+One full-suite run on the final tree reported `Test Files 1 failed | 42 passed (43)`,
+`Tests 1 failed | 277 passed | 1 skipped (279)`. The command piped output through `grep`, so
+the failing test's name and assertion were not captured and the exit status was lost.
+
+Attempts to reproduce on the same tree, same Node build, same machine:
+
+- 12 consecutive full-suite runs: 0 failures.
+- 8 consecutive runs of the timing-sensitive subset (`task-controls`, `demo-run-deadline`,
+  `candidate-broker-routes`, `unified-execution-capabilities`): 0 failures.
+- 6 further full-suite runs during the same session: 0 failures.
+
+So the observed rate is 1 failure in roughly 27 runs, and the failing test is unidentified.
+
+What this does and does not mean:
+
+- It is **not** evidence that the suite is green in the sense of "always passes". The honest
+  statement is that 26 of 27 observed runs passed and one did not, for reasons not determined.
+- It is **not** attributed to this lane's changes. Several pre-existing tests in this
+  repository are timing- and process-sensitive: `task-controls` spawns real child process
+  groups and relies on `SIGTERM`/`SIGKILL` grace windows, `demo-run-deadline` is wall-clock
+  driven, and `candidate-broker-routes` coordinates concurrent handler calls through barriers.
+  Any of those is a more likely source than the read-only lookup or the characterization
+  tests, but that is inference, not evidence.
+- It has **not** been compared against the unmodified baseline, which would be the way to
+  establish whether the flake pre-dates this lane.
+
+Smallest next step for a reviewer: run the suite with `--reporter=json --outputFile` in a loop
+on both `067ea9e8…` and this branch, and compare failure rates per test file. Until then the
+correct status for suite stability is `unknown`.
