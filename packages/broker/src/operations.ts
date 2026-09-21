@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
   agentXError,
   OperationRequestSchema,
@@ -8,6 +8,7 @@ import {
   type OperationStatus,
 } from "@agentx/contracts";
 import type { InMemoryRegistry } from "./registry.js";
+import { taskPayloadHash } from "./task-payload.js";
 
 export interface OutboxRecord {
   id: string;
@@ -39,7 +40,7 @@ export class OperationStore {
     untrustedRequest: OperationRequest,
   ): Promise<{ operation: Operation; duplicate: boolean }> {
     const request = OperationRequestSchema.parse(untrustedRequest);
-    const hash = payloadHash(request);
+    const hash = taskPayloadHash(request);
     const key = `${ownerKey}\0${workspaceId}\0${request.requestId}`;
     const existingId = this.idempotency.get(key);
     if (existingId) {
@@ -131,10 +132,4 @@ export class OperationStore {
     if (!operation) throw agentXError("NOT_FOUND", "operation not found");
     return operation;
   }
-}
-
-function payloadHash(request: OperationRequest): string {
-  return createHash("sha256")
-    .update(JSON.stringify({ conversationId: request.conversationId, prompt: request.prompt }))
-    .digest("hex");
 }

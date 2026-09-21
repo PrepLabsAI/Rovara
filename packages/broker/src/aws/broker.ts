@@ -39,6 +39,7 @@ import type { AuthenticatedIdentity } from "../auth.js";
 import type { GitHubAppCredentialProvider } from "../github-app.js";
 import { createConfiguredGitHubAppRouter } from "./github-app-routing.js";
 import { RepositoryGrantService } from "../repository-access.js";
+import { taskPayloadHash } from "../task-payload.js";
 import { publicWorkspace } from "../workspaces.js";
 import { validateCandidateBinding, type ExpectedCandidateBinding } from "../candidate-bindings.js";
 import { putCandidateArtifact, validateStoredCandidateArtifacts } from "./candidate-artifacts.js";
@@ -579,8 +580,7 @@ async function acceptTask(
   const request = OperationRequestSchema.parse(value);
   const workspace = await requireOwnedWorkspace(dependencies, identity, workspaceId);
   await requireMembership(dependencies, identity.ownerKey, workspace.projectName);
-  const requestHash = hashJson({ conversationId: request.conversationId, prompt: request.prompt,
-    ...(request.candidate === undefined ? {} : { candidate: request.candidate }) });
+  const requestHash = taskPayloadHash(request);
   const idempotencyKey = {
     pk: `IDEMPOTENCY#${identity.ownerKey}#${workspaceId}`,
     sk: `REQUEST#${request.requestId}`,

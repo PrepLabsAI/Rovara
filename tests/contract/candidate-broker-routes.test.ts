@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { describe, expect, it, vi } from "vitest";
 import { candidateArtifactId, type Operation, type WorkerInvocation } from "@agentx/contracts";
 import { RepositoryGrantService } from "../../packages/broker/src/repository-access.js";
+import { taskPayloadHash } from "../../packages/broker/src/task-payload.js";
 import { createWorkerCallbackSinks } from "../../packages/worker/src/callback-client.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
 import type { HttpApiV2Event } from "../../packages/broker/src/aws/lambda.js";
@@ -316,8 +317,48 @@ describe("live broker candidate routes", () => {
     expect(invocation.payload.candidate).toEqual(f.task.candidate);
     expect(invocation.payload.project).toEqual(f.project);
     expect(response.body.operation!.payloadHash).toBe(sha(JSON.stringify({ conversationId: f.task.conversationId, prompt: f.task.prompt, candidate: f.task.candidate })));
+    expect(response.body.operation!.payloadHash).toBe(taskPayloadHash(f.task));
     expect((await f.request(f.taskPath, f.task)).body.duplicate).toBe(true);
     expect((await f.request(f.taskPath, { ...f.task, candidate: { ...f.task.candidate, baseCommit: "b".repeat(40) } })).status).toBe(409);
+  });
+
+  it("conflicts on every changed candidate field without admitting a second job", async () => {
+    const f = await fixture(); await f.admit();
+    for (const change of [
+      { jobId: randomUUID() },
+      { attempt: 2 },
+      { repository: "other" },
+      { baseCommit: "b".repeat(40) },
+    ]) {
+      const replayed = await f.request(f.taskPath, { ...f.task, candidate: { ...f.task.candidate, ...change } });
+      expect(replayed.status).toBe(409);
+      expect(replayed.body.error).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    }
+    expect((await f.request(f.taskPath, { ...f.task, prompt: "Edit differently" })).status).toBe(409);
+    expect([...f.rows.values()].filter((row) => row.entityType === "OUTBOX")).toHaveLength(1);
+    expect([...f.rows.values()].filter((row) => row.entityType === "OPERATION")).toHaveLength(1);
+    expect([...f.rows.values()].filter((row) => row.entityType === "IDEMPOTENCY")).toHaveLength(1);
+  });
+
+  it("replays one job for a non-ASCII request whose keys arrive reordered", async () => {
+    const f = await fixture();
+    const task = { requestId: randomUUID(), conversationId: f.task.conversationId,
+      prompt: "Keep caf\u00e9 labels \u2014 \u65e5\u672c\u8a9e", candidate: { ...f.task.candidate, jobId: randomUUID() } };
+    const accepted = await f.request(f.taskPath, task);
+    expect(accepted.status).toBe(202);
+    expect(accepted.body.operation!.payloadHash).toBe(taskPayloadHash(task));
+    expect(accepted.body.operation!.payloadHash).toBe(
+      sha(JSON.stringify({ conversationId: task.conversationId, prompt: task.prompt, candidate: task.candidate })),
+    );
+    const reordered = await f.request(f.taskPath, {
+      candidate: { baseCommit: task.candidate.baseCommit, repository: task.candidate.repository,
+        attempt: task.candidate.attempt, jobId: task.candidate.jobId },
+      prompt: task.prompt, conversationId: task.conversationId, requestId: task.requestId,
+    });
+    expect(reordered.status).toBe(202);
+    expect(reordered.body.duplicate).toBe(true);
+    expect(reordered.body.operation!.id).toBe(accepted.body.operation!.id);
+    expect([...f.rows.values()].filter((row) => row.entityType === "OUTBOX")).toHaveLength(1);
   });
 
   it("returns immutable readback receipts and makes the complete candidate retrievable from operation state", async () => {

@@ -15,6 +15,7 @@ export * from "./projects.js";
 export * from "./repository-access.js";
 export * from "./resume.js";
 export * from "./registry.js";
+export * from "./task-payload.js";
 export * from "./tasks.js";
 export * from "./workspaces.js";
 export * from "./worker-callbacks.js";
