@@ -135,3 +135,94 @@ Result: `Test Files 40 passed (40)`, `Tests 222 passed (222)`, exit code 0.
 through their `dist` entry points; without a build 34 of 40 files fail with
 `Failed to resolve entry for package "@agentx/contracts"`. That is a build-order fact about
 the pinned baseline, not a defect introduced by this lane.
+
+## Handoff receipt
+
+```yaml
+lane: B
+result_status: implemented          # not verified by an independent reviewer; not delivered; not validated
+base_commit: "067ea9e82a6affee106c4854416cc693ed444d77"
+base_tree: "a94e07fec36998cabce78b724f2d7c8941d97ef3"
+branch: codex/lane-agentx
+result_commit: "5e537d69d2db18a5875ecdef957e74f910db280f"
+tree: "b0a44096c224fdc24cdc2b2915f64f631bfd94df"
+contract_revision: unified-private-r1
+fixture_sha256: "3982a8cf4cf86343ab65ab9338c5c2f3e81b503df44c6fe4934712b11679910d"
+node_version: "22.23.2"
+tests:
+  - command: "npm run build && npm test"
+    tree: "a94e07fec36998cabce78b724f2d7c8941d97ef3 (baseline, pre-edit)"
+    result: "40 files / 222 tests passed, exit 0"
+  - command: "npm test -- tests/contract/task-payload.test.ts"
+    result: "RED before AX1: missing helper, not an environment failure"
+  - command: "npm test -- tests/contract/idempotency.test.ts (original operations.ts)"
+    result: "RED: acceptTask resolved with the earlier job instead of rejecting"
+  - command: "npm run clean && npm run build && npm run typecheck && npm run lint && npm test"
+    tree: "b0a44096c224fdc24cdc2b2915f64f631bfd94df (committed)"
+    result: "build 0, typecheck 0, lint 0, tests 43 files / 278 passed, 1 skipped, exit 0"
+  - command: "npm test -- task-payload request-lookup idempotency candidate-broker-routes"
+    tree: "13be686b88810ad9067538403455aaec18f53cea (B2 commit)"
+    result: "4 files / 74 tests passed"
+independent_review: not_yet_done
+offline_live_boundary: offline_only
+capabilities_added:
+  - "taskPayloadHash: one complete idempotency serializer shared by both acceptance paths"
+  - "OperationStore.getByRequest: owner-scoped read-only request index lookup"
+  - "GET /v1/workspaces/{workspaceId}/requests/{requestId} on both real handlers"
+  - "RequestIndexIntegrityError mapped to a safe 503, never to 404"
+capabilities_preserved:
+  - "Persisted AWS payloadHash bytes; the golden-vector assertion is unchanged"
+  - "Complete frozen candidate export including new and deleted files"
+  - "Candidate creation separate from pull-request publication"
+  - "Executor output remains Claimed; no evidence qualification added"
+known_gaps:
+  - "nativeConversationRestore unsupported: the task path never reopens a session"
+  - "Exact-candidate publication unsupported: publishWorkspace refuses candidate authorization"
+  - "Per-job deadline/budget/allowed_paths absent from the wire, enforced by nothing"
+  - "Generic handler answers 400 CONFIG_INVALID for an expired token, not 401"
+  - "Real Pi conversation-history restoration is unknown; the resumption test uses a fake adapter"
+files_outside_lane: []
+integration_dependencies:
+  - "Cross-repository vector equality with Lane A needs both reviewed implementations"
+deployment_performed: false
+objective_change_attempted: false
+```
+
+## Postflight
+
+```yaml
+executed_against: MSDLC-OBJ-001@0.3
+alignment: pass
+result_status: implemented
+evidence_added:
+  - "tests/fixtures/p02-request-recovery.json (sha256 3982a8cf…acd16e)"
+  - "docs/p02-request-recovery.md"
+  - "docs/unified-execution-capabilities.md"
+  - "tests/contract/task-payload.test.ts, request-lookup.test.ts, unified-execution-capabilities.test.ts"
+decision_proposals: []
+assumption_changes:
+  - "Confirmed empirically that Zod 4 normalizes parsed key order to schema shape order, which
+     is what lets one serializer reproduce the persisted AWS hash bytes."
+scope_delta: >-
+  Two additions beyond the literal AX1/AX2 file lists, both inside the lane and neither
+  changing a contract: packages/broker/src/request-lookup.ts, so the two handlers share path
+  parsing and failure mapping rather than diverging again; and an off-by-default failItemRead
+  fault hook in the existing AWS test fixture, so a storage read failure could be tested
+  without duplicating the fixture. Every pre-existing assertion in that fixture is unchanged.
+contradictions:
+  - "The AX2 route spec says 401/403 uses the 'existing authentication envelope'. On
+     createBrokerHandler an expired token actually produces 400 CONFIG_INVALID. Pinned as
+     current behavior and documented rather than silently changing authentication semantics
+     for every route on that handler."
+  - "The lane plan asks to preserve that publication cannot silently change verified code. It
+     is preserved, but the stronger reading does not hold on this branch: exact-candidate
+     publication is refused outright, and the legacy path merges onto a moved base, so a
+     published head can differ from the verified tree. Recorded as a gap with successor S5."
+objective_change_attempted: false
+objective_digest_match: true
+```
+
+Status semantics: `implemented` means an executor produced a candidate and its named offline
+tests pass on the stated tree. It is not `verified` (no independent reviewer), not `delivered`
+(nothing deployed), and not `validated` (no outcome observed). No AWS route exists until a
+separately authorized deployment and live test establish one.
