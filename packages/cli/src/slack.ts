@@ -448,7 +448,11 @@ export function lastAssistantText(messages: readonly unknown[]): string {
     const message = messages[index];
     if (!message || typeof message !== "object") continue;
     const candidate = message as Record<string, unknown>;
-    if (candidate.role !== "assistant" || !Array.isArray(candidate.content)) continue;
+    if (candidate.role !== "assistant") continue;
+    if (candidate.stopReason === "error" && typeof candidate.errorMessage === "string") {
+      throw agentXError("RUNTIME_UNAVAILABLE", candidate.errorMessage);
+    }
+    if (!Array.isArray(candidate.content)) continue;
     const text = candidate.content
       .flatMap((block) => {
         if (!block || typeof block !== "object") return [];

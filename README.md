@@ -239,6 +239,18 @@ Subscriptions → Subscribe to bot events**, save the change, and reinstall if S
 Once `task.started` appears, failures are in the AgentX/Pi workflow rather than Slack delivery and
 are reported as `task.failed` plus a safe error type or code.
 
+Slack mode uses the local model provider credentials for the entire lifetime of the bridge. If the
+Amazon Bedrock profile expires, refresh it, verify it, and restart the bridge:
+
+```sh
+aws login --profile agentx-deployer
+AWS_PROFILE=agentx-deployer AWS_REGION=us-east-1 aws sts get-caller-identity
+agentx --project project-a slack run
+```
+
+Provider failures such as an expired AWS session are returned in the Slack thread as an AgentX
+failure; they are not replaced with an empty-response message.
+
 ### 8. Validate changes and create a pull request
 
 Pull-request creation is explicit; AgentX never publishes automatically after a coding task. The
