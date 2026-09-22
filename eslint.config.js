@@ -27,8 +27,12 @@ export default tseslint.config(
     },
   },
   {
-    files: ["environments/team-tasks/**/*.mjs", "scripts/check-candidate-ownership.mjs"],
+    files: [
+      "environments/team-tasks/**/*.mjs",
+      "environments/fixture-worker/**/*.mjs",
+      "scripts/check-candidate-ownership.mjs",
+    ],
     extends: [tseslint.configs.disableTypeChecked],
-    languageOptions: { globals: { process: "readonly", console: "readonly", setTimeout: "readonly", fetch: "readonly" } },
+    languageOptions: { globals: { process: "readonly", console: "readonly", setTimeout: "readonly", fetch: "readonly", Buffer: "readonly" } },
   },
 );

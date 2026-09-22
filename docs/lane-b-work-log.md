@@ -348,3 +348,107 @@ branch and compares per-file failure rates.
   evidence and decision are invalidated. Evidence binds to the exact candidate digest it was
   produced against, and moving that binding would let unverified code inherit a verdict it
   never earned.
+
+## Isolated fixture worker and mock-only model route
+
+Continuation from `b948278d16adec5e743b5c6357f08f84634fc81c`, tree
+`3f386a283c3ac317138a9b8040237470cd781485`, verified clean at entry. Objective
+`MSDLC-OBJ-001@0.3`, digest `bc902e9d…845843`. Governed by DEC-038 and its runtime
+addendum; no ManagedSDLC commit was copied into this repository.
+
+### What changed about the evidence
+
+The previous in-process Pi fixture was component evidence. It showed the durable host
+drives the real worker; it never showed isolation, and `npm test -- packages/host` could
+not close that gap by itself. The same real code now runs inside an invocation-owned
+container with no network, and the model route is a mock-only broker with real
+accounting. See `docs/isolated-mock-execution.md`.
+
+### Runtime inputs
+
+| Field | Value |
+|---|---|
+| Runtime CLI | `/Users/abhishekgarg/Documents/ChatGPT/ManagedSDLC/.local/toolchain/bin/docker` |
+| `DOCKER_HOST` | `unix:///Users/abhishekgarg/.colima/charterarc-team-tasks/docker.sock` |
+| Daemon | Server 29.5.2, `linux/arm64` |
+| Base registry reference + platform digest | `node@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9` (linux/arm64) |
+| Built local image ID | `sha256:8620a338e2807f68d3b259aa18dd0eaf333db7a9e6d37a50996f8787bf1ae6fb` |
+| Image tag | `agentx-fixture-worker:lane-b` |
+| Added to base | `git` 1:2.39.5-0+deb12u3 |
+
+The local image ID is **not** a distributable registry pin; this image was never pushed
+and no registry digest exists for it.
+
+### Slot check before running
+
+Inspected non-secret runtime metadata first. No running containers. Stale **exited**
+resources from other work were present and were left completely untouched: D's
+`charterarc-c-browser-838712f8-*` containers and its `charterarc-c-browser-838712f8_local`
+network, plus `charterarc-team-tasks-*` containers from two days earlier. Nothing was
+stopped, removed or reconfigured, and the existing daemon was used as-is.
+
+Per run: one container, 2 GiB, 256 pids, 2 CPUs, ten-minute whole-run deadline — inside
+the approved three-container / 6 GiB aggregate ceiling. After the final run, no container
+carrying `charterarc.lane=b` remained.
+
+### Two defects the tests caught
+
+1. **Cleanup reported success for a container it never saw.** `docker rm --force` exits 0
+   for an id that never existed, so trusting its exit status reported a clean removal of
+   something this process never owned. `cleanupOutcomeFor` now returns `removed` only
+   after observing the container present, removing it, and observing it gone; everything
+   else is `unknown`.
+2. **A denial probe passed because a tool was missing.** The other-run-network probe ran
+   `ip`, which is not in this image, so it reported "denied" whether or not a network was
+   attached. It now reads `/sys/class/net`, and both directions were verified by hand:
+   `lo` alone with `--network none`, `eth0` present when a network is attached. The
+   external-network probe was verified the same way — it resolves `example.com` when a
+   network is attached and fails without one.
+
+### Commands and results (Node v22.23.2, verified before running)
+
+```
+npm run build                      BUILD_EXIT=0
+npm run typecheck                  TYPECHECK_EXIT=0
+npm run lint                       LINT_EXIT=0
+npm test -- packages/host          7 files, 44 passed, 8 skipped (container cases ungated)
+npm test -- <7 affected suites>    7 files, 96 passed, 1 skipped
+npm test                           50 files, 329 passed, 9 skipped, FULL_EXIT=0
+CHARTERARC_REQUIRE_ISOLATED_MOCK=1 \
+  npm test -- packages/host/tests/isolated-mock-execution.test.ts
+                                   1 file, 17 passed, 0 skipped, EXIT=0
+```
+
+Skip counts: the 8 skips in the ungated host run and 9 of the full-suite skips are the
+container cases plus the pre-existing desired-behaviour test. **Under
+`CHARTERARC_REQUIRE_ISOLATED_MOCK=1` the skip count is zero**; a missing prerequisite
+fails rather than skipping, so a green gated run cannot mean the containers were absent.
+
+RED before implementation: the whole file failed with
+`Cannot find module '../src/isolated/runtime.js'`, with and without the flag.
+
+### Changes outside `packages/host/**` and `environments/fixture-worker/**`
+
+- `eslint.config.js`: added `environments/fixture-worker/**/*.mjs` to the existing
+  `disableTypeChecked` list that already covers `environments/team-tasks/**/*.mjs`, plus
+  `Buffer` to that block's globals. Lint wiring for a new environment file, following the
+  established pattern; no rule was relaxed for any other path.
+- **No change was needed in `packages/worker/src/**`.** The real `runTaskInvocation` is
+  reused as-is through its existing `piAdapter`, `eventSink` and `artifactSink` injection
+  points. No worker file was edited, duplicated or re-exported.
+- No dependency was added and no lockfile was touched. SQLite is Node 22's built-in
+  `node:sqlite`; the container uses the image's own `tar` and `git`.
+
+### Still false, still unknown
+
+`enforced_scope` remains false: a container confines which filesystem the worker sees, not
+which paths inside it may be written, and capture-time refusal is detection. Requests
+requiring path containment are rejected rather than silently unenforced. `enforced_deadline`
+is not asserted either: the orchestrator terminates the container and its children, which
+is real termination, but it is not a per-job deadline inside the executor. No ManagedSDLC
+capability flag is set by this package or by the mock route.
+
+Callback authority is proven at the host boundary, not inside the container: the container
+has no network and is never given a capability.
+
+The unidentified historical flake remains unresolved. Nothing in this package explains it.
