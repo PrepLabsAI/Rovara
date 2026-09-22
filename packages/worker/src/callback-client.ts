@@ -1,7 +1,12 @@
-import { agentXError, type WorkerInvocation } from "@agentx/contracts";
+import {
+  CodeBuildCheckResultSchema,
+  agentXError,
+  type WorkerInvocation,
+} from "@agentx/contracts";
 import type { ArtifactSink } from "./artifacts.js";
 import type { EventBatchSink } from "./events.js";
 import type { WorkerTerminalResult } from "./server.js";
+import type { CodeBuildSink } from "./codebuild.js";
 
 export type TerminalResultSink = (result: WorkerTerminalResult) => Promise<void>;
 
@@ -53,6 +58,7 @@ export function createWorkerCallbackSinks(input: {
   terminalSink: TerminalResultSink;
   pullRequestSink: PullRequestSink;
   pullRequestUpdateSink: PullRequestUpdateSink;
+  codeBuildSink: CodeBuildSink;
 } {
   const fetchImplementation = input.fetchImplementation ?? fetch;
   const base = input.controlPlaneUrl.replace(/\/$/, "");
@@ -128,6 +134,16 @@ export function createWorkerCallbackSinks(input: {
         throw agentXError("RUNTIME_UNAVAILABLE", "pull request update callback response is invalid");
       }
       return { url: result.url, state: result.state, reconciled: result.reconciled };
+    },
+    codeBuildSink: async (request) => {
+      const value = await postForResult("codebuild", request);
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        throw agentXError("RUNTIME_UNAVAILABLE", "CodeBuild callback response is invalid");
+      }
+      const build = Object.fromEntries(
+        Object.entries(value as Record<string, unknown>).filter(([key]) => key !== "requestId"),
+      );
+      return CodeBuildCheckResultSchema.parse(build);
     },
   };
 }

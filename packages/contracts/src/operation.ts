@@ -120,6 +120,30 @@ export const PublicationCheckResultSchema = z
   })
   .strict();
 
+export const CodeBuildStatusSchema = z.enum([
+  "IN_PROGRESS",
+  "SUCCEEDED",
+  "FAILED",
+  "FAULT",
+  "STOPPED",
+  "TIMED_OUT",
+]);
+
+export const CodeBuildCheckResultSchema = z
+  .object({
+    gate: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),
+    projectName: z.string().regex(/^agentx-[A-Za-z0-9_-]+$/),
+    buildId: z.string().min(3).max(1_024),
+    status: CodeBuildStatusSchema,
+    requestedSourceVersion: z.string().regex(/^[a-f0-9]{40,64}$/),
+    resolvedSourceVersion: z.string().regex(/^[a-f0-9]{40,64}$/).optional(),
+    currentPhase: z.string().min(1).max(128).optional(),
+    startedAt: z.string().datetime().optional(),
+    completedAt: z.string().datetime().optional(),
+    logsUrl: z.string().url().refine((value) => new URL(value).protocol === "https:", "URL must use HTTPS").optional(),
+  })
+  .strict();
+
 export const PullRequestResultSchema = z
   .object({
     repository: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),
@@ -129,6 +153,7 @@ export const PullRequestResultSchema = z
     baseBranch: z.string().min(1).max(255),
     commit: z.string().regex(/^[a-f0-9]{40,64}$/),
     checks: z.array(PublicationCheckResultSchema).max(64),
+    codeBuildChecks: z.array(CodeBuildCheckResultSchema).max(8).default([]),
     reconciled: z.boolean(),
   })
   .strict();
@@ -145,6 +170,7 @@ export const PullRequestLifecycleResultSchema = z
     previousCommit: z.string().regex(/^[a-f0-9]{40,64}$/).optional(),
     commit: z.string().regex(/^[a-f0-9]{40,64}$/),
     checks: z.array(PublicationCheckResultSchema).max(64),
+    codeBuildChecks: z.array(CodeBuildCheckResultSchema).max(8).default([]),
     reconciled: z.boolean(),
     replacementFor: z.number().int().positive().optional(),
     replacedBy: z.number().int().positive().optional(),
@@ -184,4 +210,6 @@ export type PullRequestLifecycleAction = z.infer<typeof PullRequestLifecycleActi
 export type PullRequestLifecycleRequest = z.infer<typeof PullRequestLifecycleRequestSchema>;
 export type PullRequestLifecycleResult = z.infer<typeof PullRequestLifecycleResultSchema>;
 export type PublicationCheckResult = z.infer<typeof PublicationCheckResultSchema>;
+export type CodeBuildStatus = z.infer<typeof CodeBuildStatusSchema>;
+export type CodeBuildCheckResult = z.infer<typeof CodeBuildCheckResultSchema>;
 export type PullRequestResult = z.infer<typeof PullRequestResultSchema>;

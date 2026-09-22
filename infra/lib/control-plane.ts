@@ -101,6 +101,10 @@ export class ControlPlaneStack extends Stack {
       actions: ["secretsmanager:GetSecretValue"],
       resources: [githubAppPrivateKeySecretArn.valueAsString],
     }));
+    broker.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["codebuild:StartBuild", "codebuild:BatchGetBuilds"],
+      resources: [this.formatArn({ service: "codebuild", resource: "project", resourceName: "agentx-*" })],
+    }));
 
     const outboxPublisher = packagedFunction(
       this,

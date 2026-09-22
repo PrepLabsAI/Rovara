@@ -5,7 +5,9 @@ describe("AgentX executable command surface", () => {
   it("exposes developer and administrator workflows without runtime routing options", () => {
     const program = createCliProgram();
     const rootCommands = program.commands.map((command) => command.name());
-    expect(rootCommands).toEqual(expect.arrayContaining(["login", "status", "conversation", "pr", "cancel", "admin"]));
+    expect(rootCommands).toEqual(expect.arrayContaining([
+      "login", "status", "conversation", "pr", "cancel", "slack", "admin",
+    ]));
 
     const pullRequest = program.commands.find((command) => command.name() === "pr");
     expect(pullRequest?.commands.map((command) => command.name())).toContain("create");
@@ -13,6 +15,11 @@ describe("AgentX executable command surface", () => {
     const admin = program.commands.find((command) => command.name() === "admin");
     const adminCommands = admin?.commands.map((command) => command.name()) ?? [];
     expect(adminCommands).toEqual(expect.arrayContaining(["project", "workspace"]));
+
+    const slack = program.commands.find((command) => command.name() === "slack");
+    expect(slack?.commands.map((command) => command.name())).toEqual([
+      "configure", "login", "logout", "run",
+    ]);
 
     const optionNames = allCommands(program).flatMap((command) =>
       command.options.map((option) => option.long),

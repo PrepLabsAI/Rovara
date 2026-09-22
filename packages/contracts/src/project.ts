@@ -64,6 +64,18 @@ export const ProjectCommandSchema = z
   })
   .strict();
 
+export const CodeBuildGateDefinitionSchema = z
+  .object({
+    name: AgentXNameSchema,
+    projectName: z
+      .string()
+      .min(2)
+      .max(255)
+      .regex(/^agentx-[A-Za-z0-9_-]+$/, "CodeBuild projectName must begin with agentx-"),
+    timeoutMinutes: z.number().int().min(5).max(420),
+  })
+  .strict();
+
 export const RepositoryDefinitionSchema = z
   .object({
     name: AgentXNameSchema,
@@ -71,8 +83,40 @@ export const RepositoryDefinitionSchema = z
     path: RelativeWorkspacePathSchema,
     defaultBranch: GitBranchNameSchema,
     credentialRef: AgentXNameSchema,
+    codeBuildGates: z.array(CodeBuildGateDefinitionSchema).max(8).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((repository, context) => {
+    const names = new Set<string>();
+    const projects = new Set<string>();
+    for (const [index, gate] of (repository.codeBuildGates ?? []).entries()) {
+      if (names.has(gate.name)) {
+        context.addIssue({
+          code: "custom",
+          path: ["codeBuildGates", index, "name"],
+          message: "CodeBuild gate names must be unique",
+        });
+      }
+      if (projects.has(gate.projectName)) {
+        context.addIssue({
+          code: "custom",
+          path: ["codeBuildGates", index, "projectName"],
+          message: "CodeBuild projects must be unique within a repository",
+        });
+      }
+      names.add(gate.name);
+      projects.add(gate.projectName);
+    }
+    const totalTimeout = (repository.codeBuildGates ?? [])
+      .reduce((total, gate) => total + gate.timeoutMinutes, 0);
+    if (totalTimeout > 420) {
+      context.addIssue({
+        code: "custom",
+        path: ["codeBuildGates"],
+        message: "total CodeBuild gate timeout must not exceed 420 minutes",
+      });
+    }
+  });
 
 export const ProjectDefinitionSchema = z
   .object({
@@ -120,3 +164,4 @@ export const ProjectDefinitionSchema = z
 
 export type ProjectDefinition = z.infer<typeof ProjectDefinitionSchema>;
 export type ProjectCommand = z.infer<typeof ProjectCommandSchema>;
+export type CodeBuildGateDefinition = z.infer<typeof CodeBuildGateDefinitionSchema>;

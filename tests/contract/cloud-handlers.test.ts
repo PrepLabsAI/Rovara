@@ -161,7 +161,14 @@ describe("AWS control-plane handlers", () => {
         auth: { issuer: "https://identity.example.test", clientId: "agentx", audience: "agentx" },
         environment: { image: `example.test/agentx@sha256:${"a".repeat(64)}` },
         repositories: [
-          { name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "github-app" },
+          {
+            name: "demo",
+            url: "https://github.com/example/demo.git",
+            path: "repo/demo",
+            defaultBranch: "main",
+            credentialRef: "github-app",
+            codeBuildGates: [{ name: "quality", projectName: "agentx-demo-quality", timeoutMinutes: 30 }],
+          },
           { name: "other", url: "https://github.com/example/other.git", path: "repo/other", defaultBranch: "main", credentialRef: "github-app" },
         ],
         setup: [],
@@ -221,6 +228,15 @@ describe("AWS control-plane handlers", () => {
           }
           return {};
         }
+        if (command.constructor.name === "UpdateCommand") {
+          const inputKey = command.input.Key as { pk: string; sk: string };
+          const current = records.get(key(inputKey.pk, inputKey.sk));
+          if (!current) throw new Error("missing update record");
+          const values = command.input.ExpressionAttributeValues as Record<string, unknown>;
+          if (values[":commit"] !== undefined) current.candidateCommit ??= values[":commit"];
+          if (values[":evidence"] !== undefined) current.evidence = values[":evidence"];
+          return {};
+        }
         throw new Error(`unexpected command ${command.constructor.name}`);
       }),
     };
@@ -262,6 +278,23 @@ describe("AWS control-plane handlers", () => {
       githubBody = update.body ?? githubBody;
       return { ...(await getPullRequest()), state: githubState, title: githubTitle, body: githubBody };
     });
+    const codeBuildStart = vi.fn(async (input: { gate: string; projectName: string; commit: string }) => ({
+      gate: input.gate,
+      projectName: input.projectName,
+      buildId: `${input.projectName}:${randomUUID()}`,
+      status: "IN_PROGRESS" as const,
+      requestedSourceVersion: input.commit,
+    }));
+    const codeBuildStatus = vi.fn(async (input: {
+      gate: string; projectName: string; commit: string; buildId: string;
+    }) => ({
+      gate: input.gate,
+      projectName: input.projectName,
+      buildId: input.buildId,
+      status: "SUCCEEDED" as const,
+      requestedSourceVersion: input.commit,
+      resolvedSourceVersion: input.commit,
+    }));
     const handler = createAwsBrokerHandler({
       documentClient: documentClient as never,
       s3: { send: vi.fn() } as never,
@@ -274,6 +307,7 @@ describe("AWS control-plane handlers", () => {
       callbackSigningKey: "c".repeat(64),
       repositoryGrants: grants,
       githubPullRequests: { reconcilePullRequest, getPullRequest, updatePullRequest },
+      codeBuild: { start: codeBuildStart, status: codeBuildStatus },
     });
     const requestId = randomUUID();
     const publicationEvent = {
@@ -302,6 +336,56 @@ describe("AWS control-plane handlers", () => {
       repositoryUrl: "https://github.com/example/demo.git",
       access: "push",
     }]);
+
+    const buildCommit = "d".repeat(40);
+    const startBuildEvent = {
+      version: "2.0",
+      rawPath: `/v1/internal/workspaces/${workspaceId}/operations/${body.operation.id}/codebuild`,
+      headers: { "x-agentx-callback-capability": invocation.callbackCapability },
+      body: JSON.stringify({
+        action: "start",
+        repository: "demo",
+        gate: "quality",
+        projectName: "agentx-demo-quality",
+        commit: buildCommit,
+      }),
+      requestContext: { requestId: "codebuild-start", http: { method: "POST" } },
+    } as const;
+    const startedBuild = await handler(startBuildEvent);
+    expect(startedBuild.statusCode).toBe(200);
+    const startedBuildBody = JSON.parse(startedBuild.body) as { buildId: string; status: string };
+    expect(startedBuildBody.status).toBe("IN_PROGRESS");
+    const repeatedStart = await handler(startBuildEvent);
+    expect(repeatedStart.statusCode).toBe(200);
+    const repeatedStartBody = JSON.parse(repeatedStart.body) as { buildId: string };
+    expect(repeatedStartBody.buildId).toBe(startedBuildBody.buildId);
+    expect(codeBuildStart).toHaveBeenCalledOnce();
+
+    const statusBuild = await handler({
+      ...startBuildEvent,
+      body: JSON.stringify({
+        action: "status",
+        repository: "demo",
+        gate: "quality",
+        projectName: "agentx-demo-quality",
+        commit: buildCommit,
+        buildId: startedBuildBody.buildId,
+      }),
+      requestContext: { requestId: "codebuild-status", http: { method: "POST" } },
+    });
+    expect(statusBuild.statusCode).toBe(200);
+    expect(JSON.parse(statusBuild.body)).toMatchObject({ status: "SUCCEEDED", resolvedSourceVersion: buildCommit });
+    const unscopedBuild = await handler({
+      ...startBuildEvent,
+      body: JSON.stringify({
+        action: "start", repository: "demo", gate: "quality",
+        projectName: "other-project", commit: buildCommit,
+      }),
+      requestContext: { requestId: "codebuild-unscoped", http: { method: "POST" } },
+    });
+    expect(JSON.parse(unscopedBuild.body)).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    expect(unscopedBuild.statusCode).toBe(409);
+    expect(codeBuildStart).toHaveBeenCalledOnce();
 
     const callback = await handler({
       version: "2.0",
@@ -410,6 +494,29 @@ describe("AWS control-plane handlers", () => {
       callbackCapability: string;
       payload: { headBranch: string };
     };
+    const replacementCommit = "f".repeat(40);
+    const replacementBuildStart = await handler({
+      version: "2.0",
+      rawPath: `/v1/internal/workspaces/${workspaceId}/operations/${replacementBody.operation.id}/codebuild`,
+      headers: { "x-agentx-callback-capability": replacementInvocation.callbackCapability },
+      body: JSON.stringify({
+        action: "start", repository: "demo", gate: "quality",
+        projectName: "agentx-demo-quality", commit: replacementCommit,
+      }),
+      requestContext: { requestId: "replacement-build-start", http: { method: "POST" } },
+    });
+    const replacementBuild = JSON.parse(replacementBuildStart.body) as { buildId: string };
+    await handler({
+      version: "2.0",
+      rawPath: `/v1/internal/workspaces/${workspaceId}/operations/${replacementBody.operation.id}/codebuild`,
+      headers: { "x-agentx-callback-capability": replacementInvocation.callbackCapability },
+      body: JSON.stringify({
+        action: "status", repository: "demo", gate: "quality",
+        projectName: "agentx-demo-quality", commit: replacementCommit,
+        buildId: replacementBuild.buildId,
+      }),
+      requestContext: { requestId: "replacement-build-status", http: { method: "POST" } },
+    });
     const replacementCallback = await handler({
       version: "2.0",
       rawPath: `/v1/internal/workspaces/${workspaceId}/operations/${replacementBody.operation.id}/pull-request`,
@@ -419,7 +526,7 @@ describe("AWS control-plane handlers", () => {
         repositoryUrl: "https://github.com/example/demo.git",
         headBranch: replacementInvocation.payload.headBranch,
         baseBranch: "main",
-        commit: "f".repeat(40),
+        commit: replacementCommit,
         title: "Clean replacement",
         body: "Clean replacement for #3.",
       }),

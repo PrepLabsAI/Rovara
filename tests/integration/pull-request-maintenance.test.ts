@@ -66,6 +66,90 @@ describe("pull request maintenance", () => {
     expect(await git(fixture.bare, ["rev-parse", `refs/heads/${fixture.headBranch}`])).toBe(`${fixture.pullRequestHead}\n`);
   });
 
+  it("keeps the visible PR head unchanged when a validation-branch CodeBuild gate fails", async () => {
+    const fixture = await createFixture("append");
+    await writeFile(join(fixture.checkout, "APPEND.md"), "candidate\n", "utf8");
+    const invocation = {
+      ...fixture.invocation,
+      payload: {
+        ...fixture.invocation.payload,
+        project: {
+          ...fixture.invocation.payload.project,
+          repositories: fixture.invocation.payload.project.repositories.map((repository) => ({
+            ...repository,
+            codeBuildGates: [{ name: "quality", projectName: "agentx-demo-quality", timeoutMinutes: 5 }],
+          })),
+        },
+      },
+    } as Extract<WorkerInvocation, { kind: "maintain" }>;
+    const sink = vi.fn();
+    await expect(maintainPullRequest({
+      rootPath: fixture.root,
+      invocation,
+      credentialProvider: async () => ({}),
+      codeBuildSink: async (request) => ({
+        gate: request.gate,
+        projectName: request.projectName,
+        buildId: `${request.projectName}:${crypto.randomUUID()}`,
+        status: "FAILED",
+        requestedSourceVersion: request.commit,
+      }),
+      pullRequestUpdateSink: sink,
+    })).rejects.toThrow(/FAILED/);
+    expect(sink).not.toHaveBeenCalled();
+    expect(await git(fixture.bare, ["rev-parse", `refs/heads/${fixture.headBranch}`])).toBe(`${fixture.pullRequestHead}\n`);
+    await expect(git(fixture.bare, ["rev-parse", `refs/heads/agentx/${invocation.operationId}`]))
+      .resolves.toMatch(/^[a-f0-9]{40}\n$/);
+  });
+
+  it("fast-forwards the visible PR head only after a validation gate succeeds", async () => {
+    const fixture = await createFixture("append");
+    await writeFile(join(fixture.checkout, "APPEND.md"), "validated candidate\n", "utf8");
+    const invocation = {
+      ...fixture.invocation,
+      payload: {
+        ...fixture.invocation.payload,
+        project: {
+          ...fixture.invocation.payload.project,
+          repositories: fixture.invocation.payload.project.repositories.map((repository) => ({
+            ...repository,
+            codeBuildGates: [{ name: "quality", projectName: "agentx-demo-quality", timeoutMinutes: 5 }],
+          })),
+        },
+      },
+    } as Extract<WorkerInvocation, { kind: "maintain" }>;
+    const calls: string[] = [];
+    const result = await maintainPullRequest({
+      rootPath: fixture.root,
+      invocation,
+      credentialProvider: async () => ({}),
+      codeBuildSink: async (request) => {
+        calls.push("build");
+        return {
+          gate: request.gate,
+          projectName: request.projectName,
+          buildId: `${request.projectName}:${crypto.randomUUID()}`,
+          status: "SUCCEEDED",
+          requestedSourceVersion: request.commit,
+          resolvedSourceVersion: request.commit,
+        };
+      },
+      pullRequestUpdateSink: async () => {
+        calls.push("pull-request-update");
+        return {
+          url: "https://github.com/example/demo/pull/7",
+          state: "open",
+          reconciled: false,
+        };
+      },
+    });
+    expect(calls).toEqual(["build", "pull-request-update"]);
+    expect(result.codeBuildChecks).toMatchObject([{ status: "SUCCEEDED", requestedSourceVersion: result.commit }]);
+    expect(await git(fixture.bare, ["rev-parse", `refs/heads/${fixture.headBranch}`])).toBe(`${result.commit}\n`);
+    await expect(git(fixture.checkout, ["merge-base", "--is-ancestor", fixture.pullRequestHead, result.commit]))
+      .resolves.toBe("");
+  });
+
   it("syncs the latest base with a merge commit and never rewrites the PR head", async () => {
     const fixture = await createFixture("sync");
     await writeFile(join(fixture.seed, "UPSTREAM.md"), "latest base\n", "utf8");

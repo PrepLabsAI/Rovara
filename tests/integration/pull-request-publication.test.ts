@@ -123,6 +123,80 @@ describe("pull request publication", () => {
     expect(await git(fixture.bare, ["rev-list", "--count", `refs/heads/${result.headBranch}`])).toBe("2\n");
   });
 
+  it("creates a pull request only after CodeBuild succeeds for the exact candidate", async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.checkout, "README.md"), "validated change\n", "utf8");
+    const project = {
+      ...fixture.invocation.payload.project,
+      repositories: fixture.invocation.payload.project.repositories.map((repository) => ({
+        ...repository,
+        codeBuildGates: [{ name: "quality", projectName: "agentx-demo-quality", timeoutMinutes: 5 }],
+      })),
+    };
+    const invocation = {
+      ...fixture.invocation,
+      payload: { ...fixture.invocation.payload, project },
+    } as Extract<WorkerInvocation, { kind: "publish" }>;
+    const calls: string[] = [];
+    const result = await publishWorkspace({
+      rootPath: fixture.root,
+      invocation,
+      credentialProvider: async () => ({}),
+      codeBuildSink: async (request) => {
+        calls.push(`build:${request.action}`);
+        return {
+          gate: request.gate,
+          projectName: request.projectName,
+          buildId: `${request.projectName}:${crypto.randomUUID()}`,
+          status: "SUCCEEDED",
+          requestedSourceVersion: request.commit,
+          resolvedSourceVersion: request.commit,
+        };
+      },
+      pullRequestSink: async () => {
+        calls.push("pull-request");
+        return { number: 22, url: "https://github.com/example/demo/pull/22", reconciled: false };
+      },
+    });
+    expect(calls).toEqual(["build:start", "pull-request"]);
+    expect(result.codeBuildChecks).toMatchObject([{ status: "SUCCEEDED", requestedSourceVersion: result.commit }]);
+  });
+
+  it("leaves the candidate branch but creates no pull request when CodeBuild fails", async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.checkout, "README.md"), "failing change\n", "utf8");
+    const invocation = {
+      ...fixture.invocation,
+      payload: {
+        ...fixture.invocation.payload,
+        project: {
+          ...fixture.invocation.payload.project,
+          repositories: fixture.invocation.payload.project.repositories.map((repository) => ({
+            ...repository,
+            codeBuildGates: [{ name: "quality", projectName: "agentx-demo-quality", timeoutMinutes: 5 }],
+          })),
+        },
+      },
+    } as Extract<WorkerInvocation, { kind: "publish" }>;
+    const pullRequestSink = vi.fn();
+    await expect(publishWorkspace({
+      rootPath: fixture.root,
+      invocation,
+      credentialProvider: async () => ({}),
+      codeBuildSink: async (request) => ({
+        gate: request.gate,
+        projectName: request.projectName,
+        buildId: `${request.projectName}:${crypto.randomUUID()}`,
+        status: "FAILED",
+        requestedSourceVersion: request.commit,
+      }),
+      pullRequestSink,
+    })).rejects.toThrow(/FAILED/);
+    expect(pullRequestSink).not.toHaveBeenCalled();
+    await expect(git(fixture.bare, ["rev-parse", `refs/heads/${invocation.payload.headBranch}`]))
+      .resolves.toMatch(/^[a-f0-9]{40}\n$/);
+  });
+
   it("creates no side effect when there is no diff or a registered check fails", async () => {
     const empty = await createFixture();
     const emptyPushCredential = vi.fn(async () => ({}));

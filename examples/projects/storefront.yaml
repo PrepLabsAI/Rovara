@@ -15,6 +15,13 @@ repositories:
     path: repo/storefront-web
     defaultBranch: main
     credentialRef: storefront-readwrite
+    codeBuildGates:
+      - name: quality
+        projectName: agentx-storefront-quality
+        timeoutMinutes: 30
+      - name: browser
+        projectName: agentx-storefront-playwright
+        timeoutMinutes: 45
 setup:
   - cwd: repo/storefront-web
     executable: npm

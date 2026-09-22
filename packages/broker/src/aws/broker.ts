@@ -30,6 +30,8 @@ import {
   agentXError,
   type Operation,
   type OperationStatus,
+  type CodeBuildCheckResult,
+  type CodeBuildGateDefinition,
   type ProjectDefinition,
   type PullRequestLifecycleResult,
   type WorkerInvocation,
@@ -37,6 +39,7 @@ import {
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { GitHubAppCredentialProvider, privateKeyFromSecret } from "../github-app.js";
+import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
 import { RepositoryGrantService } from "../repository-access.js";
 import { publicWorkspace } from "../workspaces.js";
 import {
@@ -90,6 +93,7 @@ interface OperationRecord extends Operation {
     mode?: "create" | "replace" | "revert";
     targetPullRequestNumber?: number;
     revertCommit?: string;
+    codeBuildGates: CodeBuildGateDefinition[];
   };
   maintenance?: {
     action: "append" | "sync";
@@ -99,14 +103,16 @@ interface OperationRecord extends Operation {
     headBranch: string;
     baseBranch: string;
     expectedHeadCommit: string;
+    codeBuildGates: CodeBuildGateDefinition[];
   };
+  candidateCommit?: string;
 }
 
 interface CallbackClaims {
   workspaceId: string;
   operationId: string;
   fence: number;
-  actions: Array<"events" | "artifacts" | "result" | "pull-request" | "pull-request-update">;
+  actions: Array<"events" | "artifacts" | "result" | "pull-request" | "pull-request-update" | "codebuild">;
   expiresAt: number;
 }
 
@@ -131,6 +137,24 @@ interface PullRequestRecord {
   updatedAt: string;
 }
 
+interface CodeBuildRecord {
+  pk: string;
+  sk: string;
+  entityType: "CODEBUILD";
+  workspaceId: string;
+  operationId: string;
+  fence: number;
+  repository: string;
+  gate: string;
+  projectName: string;
+  requestedSourceVersion: string;
+  idempotencyToken: string;
+  buildId: string;
+  evidence: CodeBuildCheckResult;
+  createdAt: string;
+  updatedAt: string;
+}
+
 interface AwsBrokerDependencies {
   documentClient: DynamoDBDocumentClient;
   s3: S3Client;
@@ -147,6 +171,7 @@ interface AwsBrokerDependencies {
   callbackSigningKey: string;
   repositoryGrants: RepositoryGrantService;
   githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest">;
+  codeBuild: CodeBuildGateway;
 }
 
 export function createAwsBrokerHandler(dependencies: AwsBrokerDependencies) {
@@ -157,7 +182,7 @@ export function createAwsBrokerHandler(dependencies: AwsBrokerDependencies) {
     const request = adaptHttpApiEvent(event);
     try {
       const url = new URL(request.path, "https://agentx.invalid");
-      const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|pull-request|pull-request-update)$/.exec(
+      const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|pull-request|pull-request-update|codebuild)$/.exec(
         url.pathname,
       );
       if (request.method === "POST" && callback?.[1] && callback[2] && callback[3]) {
@@ -720,6 +745,7 @@ async function acceptPullRequest(
     headBranch,
     baseBranch: repository.defaultBranch,
     title: request.title,
+    codeBuildGates: repository.codeBuildGates ?? [],
     ...(request.body === undefined ? {} : { body: request.body }),
   };
   const invocation: WorkerInvocation = {
@@ -931,6 +957,7 @@ async function acceptPullRequestLifecycle(
       baseBranch: record.baseBranch,
       title,
       body,
+      codeBuildGates: repository.codeBuildGates ?? [],
       mode: request.action,
       targetPullRequestNumber: record.number,
       ...(remote.mergeCommit === undefined ? {} : { revertCommit: remote.mergeCommit }),
@@ -1006,6 +1033,7 @@ async function acceptPullRequestLifecycle(
     headBranch: record.headBranch,
     baseBranch: record.baseBranch,
     expectedHeadCommit: record.expectedHeadCommit,
+    codeBuildGates: repository.codeBuildGates ?? [],
   };
   const invocation: WorkerInvocation = {
     protocolVersion: 1,
@@ -1166,8 +1194,166 @@ async function handleCallback(
     const pullRequest = await reconcilePullRequestUpdate(dependencies, operation, body);
     return json(pullRequest, request.requestId);
   }
+  if (action === "codebuild") {
+    const build = await handleCodeBuild(dependencies, operation, body);
+    return json(build, request.requestId);
+  }
   const result = await recordTerminalResult(dependencies, operation, body);
   return json({ operation: publicOperation(result) }, request.requestId);
+}
+
+async function handleCodeBuild(
+  dependencies: AwsBrokerDependencies,
+  operation: OperationRecord,
+  value: unknown,
+): Promise<CodeBuildCheckResult> {
+  const scope = operation.publication ?? operation.maintenance;
+  if ((operation.kind !== "publish" && operation.kind !== "maintain") || !scope) {
+    throw agentXError("CALLBACK_FORBIDDEN", "operation cannot start CodeBuild gates");
+  }
+  const input = object(value, "CodeBuild callback");
+  const allowed = new Set(["action", "repository", "gate", "projectName", "commit", "buildId"]);
+  if (Object.keys(input).some((key) => !allowed.has(key))) {
+    throw agentXError("CONFIG_INVALID", "CodeBuild callback contains unknown fields");
+  }
+  if (input.action !== "start" && input.action !== "status") {
+    throw agentXError("CONFIG_INVALID", "CodeBuild callback action is invalid");
+  }
+  if (input.repository !== scope.repository) {
+    throw agentXError("CALLBACK_FORBIDDEN", "CodeBuild repository is outside the operation scope");
+  }
+  if (typeof input.gate !== "string" || typeof input.projectName !== "string") {
+    throw agentXError("CONFIG_INVALID", "CodeBuild gate and projectName are required");
+  }
+  const gate = scope.codeBuildGates.find((candidate) => candidate.name === input.gate);
+  if (!gate || gate.projectName !== input.projectName) {
+    throw agentXError("CALLBACK_FORBIDDEN", "CodeBuild gate is outside the registered project scope");
+  }
+  if (typeof input.commit !== "string" || !/^[a-f0-9]{40,64}$/u.test(input.commit)) {
+    throw agentXError("CONFIG_INVALID", "CodeBuild candidate commit is invalid");
+  }
+
+  await bindCandidateCommit(dependencies, operation, input.commit);
+  const key = codeBuildKey(operation.workspaceId, operation.id, gate.name);
+  const existing = await getItem<CodeBuildRecord>(dependencies, key);
+  if (existing) {
+    assertCodeBuildRecord(existing, operation, scope.repository, gate, input.commit);
+    if (input.action === "start") return existing.evidence;
+    if (input.buildId !== existing.buildId) {
+      throw agentXError("CALLBACK_FORBIDDEN", "CodeBuild build ID is outside the operation scope");
+    }
+    return refreshCodeBuildRecord(dependencies, existing);
+  }
+  if (input.action !== "start" || input.buildId !== undefined) {
+    throw agentXError("NOT_FOUND", "CodeBuild gate has not been started");
+  }
+
+  const idempotencyToken = createHash("sha256")
+    .update(`${operation.id}:${gate.name}:${input.commit}`)
+    .digest("hex");
+  const evidence = await dependencies.codeBuild.start({
+    gate: gate.name,
+    projectName: gate.projectName,
+    commit: input.commit,
+    timeoutMinutes: gate.timeoutMinutes,
+    idempotencyToken,
+  });
+  const now = new Date().toISOString();
+  const record: CodeBuildRecord = {
+    ...key,
+    entityType: "CODEBUILD",
+    workspaceId: operation.workspaceId,
+    operationId: operation.id,
+    fence: operation.fence,
+    repository: scope.repository,
+    gate: gate.name,
+    projectName: gate.projectName,
+    requestedSourceVersion: input.commit,
+    idempotencyToken,
+    buildId: evidence.buildId,
+    evidence,
+    createdAt: now,
+    updatedAt: now,
+  };
+  try {
+    await dependencies.documentClient.send(new PutCommand({
+      TableName: dependencies.tableName,
+      Item: record,
+      ConditionExpression: "attribute_not_exists(pk)",
+    }));
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+    const concurrent = await getItem<CodeBuildRecord>(dependencies, key);
+    if (!concurrent) throw error;
+    assertCodeBuildRecord(concurrent, operation, scope.repository, gate, input.commit);
+    return concurrent.evidence;
+  }
+  return evidence;
+}
+
+async function bindCandidateCommit(
+  dependencies: AwsBrokerDependencies,
+  operation: OperationRecord,
+  commit: string,
+): Promise<void> {
+  if (operation.candidateCommit !== undefined && operation.candidateCommit !== commit) {
+    throw agentXError("CALLBACK_FORBIDDEN", "CodeBuild candidate commit changed during the operation");
+  }
+  try {
+    await dependencies.documentClient.send(new UpdateCommand({
+      TableName: dependencies.tableName,
+      Key: operationKey(operation.workspaceId, operation.id),
+      UpdateExpression: "SET candidateCommit = if_not_exists(candidateCommit, :commit)",
+      ConditionExpression: "attribute_not_exists(candidateCommit) OR candidateCommit = :commit",
+      ExpressionAttributeValues: { ":commit": commit },
+    }));
+  } catch (error) {
+    if (isConditional(error)) {
+      throw agentXError("CALLBACK_FORBIDDEN", "CodeBuild candidate commit changed during the operation");
+    }
+    throw error;
+  }
+}
+
+function assertCodeBuildRecord(
+  record: CodeBuildRecord,
+  operation: OperationRecord,
+  repository: string,
+  gate: CodeBuildGateDefinition,
+  commit: string,
+): void {
+  if (
+    record.operationId !== operation.id || record.fence !== operation.fence ||
+    record.repository !== repository || record.gate !== gate.name ||
+    record.projectName !== gate.projectName || record.requestedSourceVersion !== commit
+  ) {
+    throw agentXError("CALLBACK_FORBIDDEN", "CodeBuild record is outside the operation scope");
+  }
+}
+
+async function refreshCodeBuildRecord(
+  dependencies: AwsBrokerDependencies,
+  record: CodeBuildRecord,
+): Promise<CodeBuildCheckResult> {
+  const evidence = await dependencies.codeBuild.status({
+    gate: record.gate,
+    projectName: record.projectName,
+    commit: record.requestedSourceVersion,
+    buildId: record.buildId,
+  });
+  await dependencies.documentClient.send(new UpdateCommand({
+    TableName: dependencies.tableName,
+    Key: { pk: record.pk, sk: record.sk },
+    UpdateExpression: "SET evidence = :evidence, updatedAt = :now",
+    ConditionExpression: "buildId = :buildId AND fence = :fence",
+    ExpressionAttributeValues: {
+      ":evidence": evidence,
+      ":now": new Date().toISOString(),
+      ":buildId": record.buildId,
+      ":fence": record.fence,
+    },
+  }));
+  return evidence;
 }
 
 async function reconcilePullRequestUpdate(
@@ -1197,6 +1383,7 @@ async function reconcilePullRequestUpdate(
   if (typeof input.commit !== "string" || !/^[a-f0-9]{40,64}$/u.test(input.commit)) {
     throw agentXError("CONFIG_INVALID", "updated pull request commit is invalid");
   }
+  await assertCodeBuildGatesPassed(dependencies, operation, input.commit);
   const record = await requirePullRequest(
     dependencies,
     operation.workspaceId,
@@ -1258,6 +1445,7 @@ async function reconcilePullRequest(
   if (typeof input.commit !== "string" || !/^[a-f0-9]{40,64}$/.test(input.commit)) {
     throw agentXError("CONFIG_INVALID", "published commit is invalid");
   }
+  await assertCodeBuildGatesPassed(dependencies, operation, input.commit);
   const pullRequest = await dependencies.githubPullRequests.reconcilePullRequest({
     repositoryUrl: expected.repositoryUrl,
     headBranch: expected.headBranch,
@@ -1314,6 +1502,32 @@ async function reconcilePullRequest(
     }));
   }
   return pullRequest;
+}
+
+async function assertCodeBuildGatesPassed(
+  dependencies: AwsBrokerDependencies,
+  operation: OperationRecord,
+  commit: string,
+): Promise<void> {
+  const scope = operation.publication ?? operation.maintenance;
+  if (!scope) throw agentXError("CALLBACK_FORBIDDEN", "operation has no publication scope");
+  if (
+    operation.maintenance?.action === "sync" &&
+    commit === operation.maintenance.expectedHeadCommit
+  ) return;
+  for (const gate of scope.codeBuildGates) {
+    const record = await getItem<CodeBuildRecord>(
+      dependencies,
+      codeBuildKey(operation.workspaceId, operation.id, gate.name),
+    );
+    if (
+      !record || record.fence !== operation.fence || record.repository !== scope.repository ||
+      record.projectName !== gate.projectName || record.requestedSourceVersion !== commit ||
+      record.evidence.status !== "SUCCEEDED" || record.evidence.resolvedSourceVersion !== commit
+    ) {
+      throw agentXError("CALLBACK_FORBIDDEN", `CodeBuild gate ${gate.name} has not passed for this candidate`);
+    }
+  }
 }
 
 async function appendEvents(
@@ -1780,6 +1994,13 @@ function pullRequestKey(workspaceId: string, repository: string, number: number)
   };
 }
 
+function codeBuildKey(workspaceId: string, operationId: string, gate: string) {
+  return {
+    pk: `WORKSPACE#${workspaceId}`,
+    sk: `CODEBUILD#${operationId}#${gate}`,
+  };
+}
+
 function issueRepositoryGrant(
   dependencies: AwsBrokerDependencies,
   project: RegisteredProjectRecord,
@@ -1843,7 +2064,9 @@ function issueCapability(
       "artifacts",
       "events",
       "result",
-      ...(allowPullRequest ? ["pull-request" as const, "pull-request-update" as const] : []),
+      ...(allowPullRequest
+        ? ["pull-request" as const, "pull-request-update" as const, "codebuild" as const]
+        : []),
     ],
     expiresAt: Math.floor(Date.now() / 1_000) + 32_400,
   };
@@ -1980,6 +2203,7 @@ const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(awsClientC
 const s3 = new S3Client(awsClientConfiguration);
 const agentCore = new BedrockAgentCoreClient(awsClientConfiguration);
 const secretsManager = new SecretsManagerClient(awsClientConfiguration);
+const codeBuild = createCodeBuildGateway(awsClientConfiguration);
 const githubPrivateKeySecretArn = requiredEnvironment("GITHUB_APP_PRIVATE_KEY_SECRET_ARN");
 let githubPrivateKey: Promise<string> | undefined;
 const loadGitHubPrivateKey = (): Promise<string> => {
@@ -2025,6 +2249,7 @@ export const handler = createAwsBrokerHandler({
   callbackSigningKey: requiredEnvironment("CALLBACK_SIGNING_KEY"),
   repositoryGrants,
   githubPullRequests: githubCredentials,
+  codeBuild,
   async stopRuntimeSession(input) {
     await agentCore.send(new StopRuntimeSessionCommand({
       agentRuntimeArn: input.runtimeArn,

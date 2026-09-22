@@ -48,6 +48,10 @@ describe("control-plane infrastructure", () => {
     expect(json).toContain("secretsmanager:GetSecretValue");
     expect(json.match(/secretsmanager:GetSecretValue/g)).toHaveLength(1);
     expect(json.match(/GITHUB_APP_PRIVATE_KEY_SECRET_ARN/g)).toHaveLength(1);
+    expect(json).toContain("codebuild:StartBuild");
+    expect(json).toContain("codebuild:BatchGetBuilds");
+    expect(json).toContain(":codebuild:");
+    expect(json).toContain("project/agentx-*");
   });
 });
 

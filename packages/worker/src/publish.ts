@@ -14,6 +14,7 @@ import {
 import { gitSafeEnvironment } from "./git.js";
 import { assertCredentialFreeRemote, runGitWithCredential } from "./git-auth.js";
 import type { PullRequestSink } from "./callback-client.js";
+import { runCodeBuildGates, type CodeBuildSink } from "./codebuild.js";
 import type { RepositoryCredentialProvider } from "./repository-credentials.js";
 import { runProjectCommand, type PreparationManifest } from "./prepare.js";
 
@@ -27,6 +28,7 @@ export interface PublishWorkspaceOptions {
   invocation: PublishInvocation;
   credentialProvider: RepositoryCredentialProvider;
   pullRequestSink: PullRequestSink;
+  codeBuildSink?: CodeBuildSink;
 }
 
 export async function publishWorkspace(
@@ -119,6 +121,13 @@ export async function publishWorkspace(
     throw agentXError("RUNTIME_UNAVAILABLE", sanitizeGitError(message));
   }
 
+  const codeBuildChecks = await runCodeBuildGates({
+    repository: repository.name,
+    commit,
+    gates: repository.codeBuildGates ?? [],
+    ...(options.codeBuildSink === undefined ? {} : { sink: options.codeBuildSink }),
+  });
+
   const pullRequest = await options.pullRequestSink({
     repository: repository.name,
     repositoryUrl: repository.url,
@@ -136,6 +145,7 @@ export async function publishWorkspace(
     baseBranch: repository.defaultBranch,
     commit,
     checks,
+    codeBuildChecks,
     reconciled: pullRequest.reconciled,
   };
   if (mode === "create") return PullRequestResultSchema.parse(baseResult);

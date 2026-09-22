@@ -43,6 +43,30 @@ describe("strict contracts", () => {
     expect(ProjectDefinitionSchema.parse(projectDefinition()).name).toBe("payments");
   });
 
+  it("accepts optional CodeBuild gates and rejects unsafe or duplicate projects", () => {
+    const project = projectDefinition();
+    project.repositories[0] = {
+      ...project.repositories[0]!,
+      codeBuildGates: [
+        { name: "quality", projectName: "agentx-payments-quality", timeoutMinutes: 30 },
+        { name: "browser", projectName: "agentx-payments-browser", timeoutMinutes: 45 },
+      ],
+    } as typeof project.repositories[number];
+    expect(ProjectDefinitionSchema.parse(project).repositories[0]!.codeBuildGates).toHaveLength(2);
+
+    const duplicate = structuredClone(project) as unknown as Record<string, unknown>;
+    const repositories = duplicate.repositories as Array<Record<string, unknown>>;
+    const gates = repositories[0]!.codeBuildGates as Array<Record<string, unknown>>;
+    gates[1]!.projectName = gates[0]!.projectName;
+    expect(() => ProjectDefinitionSchema.parse(duplicate)).toThrow(/unique/i);
+
+    const unsafe = structuredClone(project) as unknown as Record<string, unknown>;
+    const unsafeRepositories = unsafe.repositories as Array<Record<string, unknown>>;
+    const unsafeGates = unsafeRepositories[0]!.codeBuildGates as Array<Record<string, unknown>>;
+    unsafeGates[0]!.projectName = "unmanaged-project";
+    expect(() => ProjectDefinitionSchema.parse(unsafe)).toThrow(/agentx-/i);
+  });
+
   it("requires a safe default branch and rejects the retired initialCommit field", () => {
     const invalidBranch = projectDefinition();
     invalidBranch.repositories[0]!.defaultBranch = "../main";
@@ -200,6 +224,16 @@ describe("strict contracts", () => {
         startedAt: new Date().toISOString(),
         completedAt: new Date().toISOString(),
         outcome: "passed",
+      }],
+      codeBuildChecks: [{
+        gate: "quality",
+        projectName: "agentx-payments-quality",
+        buildId: `agentx-payments-quality:${crypto.randomUUID()}`,
+        status: "SUCCEEDED",
+        requestedSourceVersion: "a".repeat(40),
+        resolvedSourceVersion: "a".repeat(40),
+        currentPhase: "COMPLETED",
+        logsUrl: "https://console.aws.amazon.com/codesuite/codebuild/projects/agentx-payments-quality",
       }],
       reconciled: false,
     }).number).toBe(42);

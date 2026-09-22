@@ -13,6 +13,8 @@ result/artifact callbacks are working. Pull-request creation is deployed and its
 safety path and changed-checkout publication path have both been validated against a private
 repository. Safe existing-PR maintenance, clean replacement, and merged-PR revert are implemented
 and locally validated; they require the next AWS deployment before use against the demo account.
+Administrator-configured CodeBuild gates are also implemented locally: they test the exact pushed
+candidate and block PR creation or PR-head advancement unless every gate succeeds.
 The current demo uses Amazon Nova Pro.
 
 The production `instances-ebs` profile and its EBS isolation/stop-resume acceptance remain T045.
@@ -154,11 +156,95 @@ profile name. Pi stores the profile selection, not the underlying IAM secret key
 The local model can call only AgentX orchestration tools. Repository inspection, editing, shell
 commands, builds, and tests are delegated to the remote Pi worker in AgentCore.
 
-### 7. Validate changes and create a pull request
+### 7. Use a project Slack channel
+
+Slack mode runs the local Pi orchestrator as a headless Socket Mode client. It makes only an
+outbound WebSocket connection to Slack, so it does not require a public callback URL. The local
+machine must remain awake and the command must remain running.
+
+Configure the Slack app with these minimum permissions:
+
+- Bot token scopes: `app_mentions:read` and `chat:write`.
+- Bot event subscription: `app_mention`.
+- Socket Mode enabled.
+- An app-level token with `connections:write`.
+
+After changing bot scopes, reinstall the app to the workspace. The app-level token is the `xapp-`
+value under **Basic Information → App-Level Tokens**. The separate `xoxb-` bot token appears under
+**OAuth & Permissions → OAuth Tokens for Your Workspace** after installation. Invite the app to the
+project channel with `/invite @AgentX`.
+
+Copy the immutable Slack channel ID and the member IDs that may invoke AgentX, then save the
+non-secret project binding locally:
+
+```sh
+agentx --project project-a slack configure \
+  --team T0BSHLLUGBD \
+  --channel C0123456789 \
+  --allow-user U0123456789
+```
+
+Import both tokens into macOS Keychain or Linux Secret Service. The tokens are never written to the
+project YAML or reconnect-state files:
+
+```sh
+export SLACK_APP_TOKEN='xapp-...'
+export SLACK_BOT_TOKEN='xoxb-...'
+agentx --project project-a slack login
+unset SLACK_APP_TOKEN SLACK_BOT_TOKEN
+```
+
+Start the bridge with the same local model configuration used by the TUI:
+
+```sh
+export AWS_PROFILE=agentx-deployer
+export AWS_REGION=us-east-1
+export AWS_SDK_LOAD_CONFIG=1
+export AGENTX_ORCHESTRATOR_PROVIDER=amazon-bedrock
+export AGENTX_ORCHESTRATOR_MODEL=amazon.nova-pro-v1:0
+agentx --project project-a slack run
+```
+
+In the configured channel, mention the app for every request, including follow-ups:
+
+```text
+@AgentX inspect the project and implement the navigation fix. Run the relevant tests, but do not
+create a pull request.
+```
+
+AgentX acknowledges the request and posts the final local-orchestrator response in the same Slack
+thread. Requests are serialized because they share one developer workspace and one local Pi
+session. Events from other workspaces, channels, users, bots, or duplicate Slack deliveries are
+ignored. Stop the bridge with `Ctrl-C`. Remove stored Slack credentials with:
+
+```sh
+agentx --project project-a slack logout
+```
+
+The running bridge writes timestamped diagnostics to stderr. It logs Socket Mode connection state,
+incoming event metadata, allowlist/filter decisions, queue activity, task duration, and Slack reply
+status. Tokens, prompt text, and response text are never logged. For example,
+`mention.ignored reason="channel_mismatch"` identifies a saved channel-ID mismatch, while no
+`socket.envelope_received` line after a real app mention means Slack did not deliver an envelope to
+this local Socket Mode connection. Raw-envelope diagnostics include Slack's `apiAppId` and event
+type, but omit the message text and all credentials. If envelopes are absent despite a connected
+socket, verify the bot-event subscription on that exact App ID and make sure another process or
+machine is not connected with the same `xapp-` token and consuming events.
+
+For a working request, the log progresses through `socket.envelope_received` with
+`eventType="app_mention"`, `socket.event_received`, `mention.accepted`, `message.posted`, and
+`task.started`. An envelope with `eventType="message"` means the Slack app is subscribed to
+`message.channels` but not emitting the required `app_mention`; add `app_mention` under **Event
+Subscriptions → Subscribe to bot events**, save the change, and reinstall if Slack requests it.
+Once `task.started` appears, failures are in the AgentX/Pi workflow rather than Slack delivery and
+are reported as `task.failed` plus a safe error type or code.
+
+### 8. Validate changes and create a pull request
 
 Pull-request creation is explicit; AgentX never publishes automatically after a coding task. The
-registered project's `readiness` commands are the publication gate. AgentX rejects an empty diff,
-merge conflicts, or any failed/timed-out readiness command before it pushes a branch.
+registered project's `readiness` commands run inside the AgentCore workspace before a candidate is
+pushed. Optional repository `codeBuildGates` then run remotely against that exact pushed commit.
+AgentX rejects an empty diff, merge conflicts, or any failed/timed-out check before creating a PR.
 
 From the CLI, select the configured repository by its project YAML `name`:
 
@@ -172,7 +258,9 @@ agentx --project personal-website pr create \
 AgentX creates `agentx/<operation-id>`, makes an AgentX-authored commit, pushes without force, and
 creates a ready-for-review PR against the repository's configured `defaultBranch`. The terminal
 result includes the PR URL and number, commit, head/base branches, and check evidence. Repeating the
-same accepted request reconciles the existing branch and PR rather than creating a duplicate.
+same accepted request reconciles the existing branch and PR rather than creating a duplicate. When
+CodeBuild gates are configured, the result also identifies each build and its resolved commit,
+status, phase, timestamps, and CloudWatch logs link supplied by AWS.
 
 New publication always captures the intended workspace tree and replays it onto the latest remote
 default branch as exactly one commit. Earlier AgentX publication commits left in the persistent
@@ -190,7 +278,9 @@ agentx --project personal-website pr reopen --repository personal-website --numb
 ```
 
 `append` runs readiness checks and accepts only workspace commits that descend from the recorded
-PR head. `sync` merges the latest default branch into the PR branch. Neither action rebases or
+PR head. With CodeBuild gates, append and sync first push an operation-specific validation branch;
+the visible PR branch advances only after every build passes. `sync` merges the latest default
+branch into the PR branch. Neither action rebases or
 force-pushes published history. Remote Pi may rebase or amend commits that are still unpublished,
 provided the resulting history remains a descendant of the published PR head; once published, use
 another append, or replace the PR with clean history:
@@ -234,7 +324,43 @@ AgentX does not merge, approve, delete branches, add reviewers/labels, or force-
 workflow. The worker rejects force flags, force-with-lease flags, and plus-prefixed refspecs at the
 credentialed Git command boundary.
 
-### 8. Administrator workflow
+#### Configure CodeBuild gates
+
+CodeBuild projects are administrator-owned infrastructure. Create a project with a GitHub source
+(use AWS CodeConnections for private repositories), a service role, compute image, and repository
+`buildspec.yml`. Its name must begin with `agentx-`. Add the approved project to the repository in
+the AgentX project YAML, increment `revision`, register that immutable revision, and re-prepare the
+developer workspace:
+
+```yaml
+repositories:
+  - name: personal-website
+    url: https://github.com/example/personal-website.git
+    path: repo/personal-website
+    defaultBranch: main
+    credentialRef: github-agentx-sdlc
+    codeBuildGates:
+      - name: quality
+        projectName: agentx-personal-website-quality
+        timeoutMinutes: 30
+      - name: browser
+        projectName: agentx-personal-website-playwright
+        timeoutMinutes: 45
+```
+
+Unit tests, backend integration tests, and Playwright commands belong in the CodeBuild project's
+buildspec. AgentX supplies only the exact Git commit as `sourceVersion`; it does not allow the
+worker to override the buildspec, image, role, environment, source, or artifacts. The broker owns
+`StartBuild`/`BatchGetBuilds` permission scoped to `agentx-*` projects, while AgentCore receives no
+CodeBuild AWS credentials. A failed new-PR build leaves its candidate branch for diagnosis but
+creates no PR. A failed existing-PR build leaves the PR head unchanged.
+
+This release gates one repository publication at a time. Testing unpublished frontend and backend
+candidates together and creating multiple PRs as one unit requires a future multi-repository
+change-set workflow; a CodeBuild project may use secondary sources, but AgentX does not yet bind
+multiple candidate commits atomically.
+
+### 9. Administrator workflow
 
 Before a developer can use a project, an administrator registers its immutable revision and
 prepares that developer's private workspace:

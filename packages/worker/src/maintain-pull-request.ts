@@ -11,6 +11,7 @@ import {
 import { gitSafeEnvironment } from "./git.js";
 import { assertCredentialFreeRemote, runGitWithCredential } from "./git-auth.js";
 import type { PullRequestUpdateSink } from "./callback-client.js";
+import { runCodeBuildGates, type CodeBuildSink } from "./codebuild.js";
 import type { RepositoryCredentialProvider } from "./repository-credentials.js";
 import { runReadinessChecks } from "./publish.js";
 import type { PreparationManifest } from "./prepare.js";
@@ -24,6 +25,7 @@ export async function maintainPullRequest(options: {
   invocation: MaintainInvocation;
   credentialProvider: RepositoryCredentialProvider;
   pullRequestUpdateSink: PullRequestUpdateSink;
+  codeBuildSink?: CodeBuildSink;
 }): Promise<PullRequestLifecycleResult> {
   const { invocation } = options;
   const rootPath = await realpath(resolve(options.rootPath));
@@ -85,6 +87,15 @@ export async function maintainPullRequest(options: {
       "-m", `AgentX: update PR #${invocation.payload.pullRequestNumber}`,
     ])).trim();
     await git(repositoryPath, ["checkout", "--force", "-B", invocation.payload.headBranch, commit]);
+    const codeBuildChecks = await validateCandidate(
+      repositoryPath,
+      invocation,
+      repository.name,
+      repository.codeBuildGates ?? [],
+      commit,
+      credential,
+      options.codeBuildSink,
+    );
     await push(repositoryPath, invocation.payload.headBranch, credential);
     const callback = await options.pullRequestUpdateSink({
       repository: repository.name,
@@ -99,7 +110,7 @@ export async function maintainPullRequest(options: {
       action: "append", repository: repository.name, number: invocation.payload.pullRequestNumber,
       url: callback.url, state: callback.state, headBranch: invocation.payload.headBranch,
       baseBranch: invocation.payload.baseBranch, previousCommit: remoteHead, commit,
-      checks, reconciled: callback.reconciled,
+      checks, codeBuildChecks, reconciled: callback.reconciled,
     });
   }
 
@@ -127,6 +138,17 @@ export async function maintainPullRequest(options: {
     if (!reconciled) await git(repositoryPath, ["reset", "--hard", remoteHead]);
     throw agentXError("CONFIG_INVALID", "one or more registered readiness checks failed");
   }
+  const codeBuildChecks = reconciled
+    ? []
+    : await validateCandidate(
+      repositoryPath,
+      invocation,
+      repository.name,
+      repository.codeBuildGates ?? [],
+      commit,
+      credential,
+      options.codeBuildSink,
+    );
   if (!reconciled) await push(repositoryPath, invocation.payload.headBranch, credential);
   const callback = await options.pullRequestUpdateSink({
     repository: repository.name,
@@ -141,7 +163,27 @@ export async function maintainPullRequest(options: {
     action: "sync", repository: repository.name, number: invocation.payload.pullRequestNumber,
     url: callback.url, state: callback.state, headBranch: invocation.payload.headBranch,
     baseBranch: invocation.payload.baseBranch, previousCommit: remoteHead, commit,
-    checks, reconciled: reconciled || callback.reconciled,
+    checks, codeBuildChecks, reconciled: reconciled || callback.reconciled,
+  });
+}
+
+async function validateCandidate(
+  repositoryPath: string,
+  invocation: MaintainInvocation,
+  repository: string,
+  gates: NonNullable<MaintainInvocation["payload"]["project"]["repositories"][number]["codeBuildGates"]>,
+  commit: string,
+  credential: Awaited<ReturnType<RepositoryCredentialProvider>>,
+  sink: CodeBuildSink | undefined,
+) {
+  if (gates.length === 0) return [];
+  const validationBranch = `agentx/${invocation.operationId}`;
+  await push(repositoryPath, validationBranch, credential);
+  return runCodeBuildGates({
+    repository,
+    commit,
+    gates,
+    ...(sink === undefined ? {} : { sink }),
   });
 }
 

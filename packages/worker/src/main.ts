@@ -57,6 +57,7 @@ const state = createWorkerServerState(
           invocation,
           credentialProvider: createRepositoryCredentialProvider({ controlPlaneUrl, invocation }),
           pullRequestSink: callbacks.pullRequestSink,
+          codeBuildSink: callbacks.codeBuildSink,
         });
       }
       if (invocation.kind === "maintain") {
@@ -67,6 +68,7 @@ const state = createWorkerServerState(
           invocation,
           credentialProvider: createRepositoryCredentialProvider({ controlPlaneUrl, invocation }),
           pullRequestUpdateSink: callbacks.pullRequestUpdateSink,
+          codeBuildSink: callbacks.codeBuildSink,
         });
       }
       if (invocation.kind === "cancel") {
