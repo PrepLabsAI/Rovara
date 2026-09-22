@@ -12,3 +12,4 @@ export * from "./isolated/mock-model-route.js";
 export * from "./isolated/runtime.js";
 export * from "./isolated/bridge.js";
 export * from "./isolated/tar.js";
+export * from "./serve-isolated.js";

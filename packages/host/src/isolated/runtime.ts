@@ -225,15 +225,19 @@ export class IsolatedFixtureRuntime {
   /** Tar of `{invocation.json, edits.json, workspace/}` for the container's stdin. */
   private async buildPayload(staging: string, workspacePath: string): Promise<Buffer> {
     const archive = join(staging, "payload.tar");
+    // macOS tar otherwise adds AppleDouble `._*` members for extended attributes. Inside
+    // the container those are untracked files in the repository, so the worker (correctly)
+    // refuses a workspace that is no longer clean. Host metadata never belongs in the payload.
+    const tarEnv = { ...process.env, COPYFILE_DISABLE: "1" };
     await execFileAsync("tar", ["-c", "-f", archive, "-C", staging, "invocation.json", "edits.json"], {
-      timeout: 60_000,
+      timeout: 60_000, env: tarEnv,
     });
     await execFileAsync("tar", ["-r", "-f", archive, "-C", workspacePath, "--transform", "s,^\\.,workspace,", "."], {
-      timeout: 300_000,
+      timeout: 300_000, env: tarEnv,
     }).catch(async () => {
       // BSD tar has no --transform; stage the workspace under the expected name instead.
-      await execFileAsync("cp", ["-R", workspacePath, join(staging, "workspace")], { timeout: 300_000 });
-      await execFileAsync("tar", ["-r", "-f", archive, "-C", staging, "workspace"], { timeout: 300_000 });
+      await execFileAsync("cp", ["-R", "-X", workspacePath, join(staging, "workspace")], { timeout: 300_000 });
+      await execFileAsync("tar", ["-r", "-f", archive, "-C", staging, "workspace"], { timeout: 300_000, env: tarEnv });
     });
     const { readFile } = await import("node:fs/promises");
     return readFile(archive);

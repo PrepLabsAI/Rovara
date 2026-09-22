@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { WorkerInvocation } from "@agentx/contracts";
 import type { WorkerTransport } from "../dispatcher.js";
 import type { SqliteOperationStore } from "../store/sqlite-operations.js";
-import type { FixtureMode } from "../fixture-worker.js";
+import type { FixtureEdit, FixtureMode } from "../fixture-worker.js";
 import { ingestIsolatedRun, recordUnsettledRun, type IngestHandler } from "./ingest.js";
 import type { MockModelRoute } from "./mock-model-route.js";
 import type { IsolatedFixtureRuntime } from "./runtime.js";
@@ -16,7 +16,10 @@ export interface IsolatedExecutionTransportOptions {
   mode: FixtureMode;
   /** Mock-only route. It holds no credential and reaches no provider. */
   route: MockModelRoute;
-  caseId: string;
+  /** The case (or, when the wire carries none, the exact request) receipts bind to. */
+  caseId: string | ((invocation: WorkerInvocation) => string);
+  /** Operator-configured deterministic edits; the runtime default when absent. */
+  edits?: readonly FixtureEdit[];
   /** Authorized ceiling for this attempt, enforced by the route before dispatch. */
   budget?: { maxMicrounits: number; maxCalls: number; ttlMs: number };
   modelId?: string;
@@ -61,7 +64,7 @@ export function createIsolatedExecutionTransport(
       // 2. Price the request before dispatch. A refusal here stops the run.
       const token = options.route.mint({
         operationId: invocation.operationId,
-        caseId: options.caseId,
+        caseId: typeof options.caseId === "function" ? options.caseId(invocation) : options.caseId,
         attemptNumber: 1,
         maxMicrounits: budget.maxMicrounits,
         maxCalls: budget.maxCalls,
@@ -79,6 +82,7 @@ export function createIsolatedExecutionTransport(
           invocation,
           workspacePath: options.workspacePath,
           mode: options.mode,
+          ...(options.edits === undefined ? {} : { edits: options.edits }),
         });
       } catch (error) {
         // The launch itself is in doubt, which is not the same as knowing it failed.
