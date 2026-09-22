@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -13,10 +13,15 @@ import { SqliteRegistry } from "../src/store/sqlite-registry.js";
 import { SqliteOperationStore } from "../src/store/sqlite-operations.js";
 import { createLocalBrokerHandler } from "../src/routes.js";
 import { mintCallbackCapability } from "../src/capability.js";
-import { runTrustedCheckPlan } from "../src/fixture-worker.js";
-import { IsolatedFixtureRuntime, resolveIsolatedRuntimeConfig } from "../src/isolated/runtime.js";
-import { ingestIsolatedRun } from "../src/isolated/ingest.js";
+import { runTrustedCheckPlan, type FixtureMode } from "../src/fixture-worker.js";
+import {
+  IsolatedFixtureRuntime, REDACTED_CAPABILITY, resolveIsolatedRuntimeConfig,
+} from "../src/isolated/runtime.js";
+import { UnsettledRunError, ingestIsolatedRun, type IngestHandler } from "../src/isolated/ingest.js";
 import { MockModelRoute, MockModelRouteError } from "../src/isolated/mock-model-route.js";
+import { createIsolatedExecutionTransport } from "../src/isolated/bridge.js";
+import { createOutboxDispatcher } from "../src/dispatcher.js";
+import { UntrustedArchiveError, readTarEntries } from "../src/isolated/tar.js";
 
 const run = promisify(execFile);
 const roots: string[] = [];
@@ -237,6 +242,45 @@ describe("mock-only model route", () => {
     expect(() => r.reserve({ token: expired, modelId: "mock/deterministic-v1", inputBytes: 1 }))
       .toThrow(/expired/i);
     expect(() => r.mint(token({ attemptNumber: 0 }))).toThrow(MockModelRouteError);
+    expect(() => r.mint(token({ notAfter: "invalid" }))).toThrow(/finite timestamp/i);
+  });
+
+  it("REGRESSION refuses an edited token and governs by the retained authority", () => {
+    const r = route();
+    // Issued with no budget at all and already expired.
+    const issued = r.mint(token({ maxMicrounits: 0, notAfter: new Date(Date.now() - 1_000).toISOString() }));
+
+    // The independent review edited every field that would matter if the token were
+    // the authority: a larger budget, an invalid expiry, a different route, policy,
+    // data class and an empty allowlist.
+    const forged = {
+      ...issued, maxMicrounits: 100_000, notAfter: "invalid",
+      routeVersion: "OTHER", policyDigest: "OTHER", dataClass: "OTHER", modelAllowlist: [],
+    };
+    expect(() => r.reserve({ token: forged, modelId: "mock/deterministic-v1", inputBytes: 100 }))
+      .toThrow(MockModelRouteError);
+
+    // Even presented unedited, the retained authority still governs: zero budget and
+    // an expired window mean no reservation exists to spend.
+    expect(() => r.reserve({ token: issued, modelId: "mock/deterministic-v1", inputBytes: 100 }))
+      .toThrow(MockModelRouteError);
+    expect(r.ledger()).toHaveLength(0);
+
+    // A token this route never issued is refused outright.
+    expect(() => r.reserve({
+      token: { ...issued, tokenId: randomUUID(), maxMicrounits: 100_000 },
+      modelId: "mock/deterministic-v1", inputBytes: 1,
+    })).toThrow(/never issued|no such route token/i);
+  });
+
+  it("REGRESSION keeps case identity on every receipt", () => {
+    const r = route();
+    const minted = r.mint(token({ caseId: "case-42" }));
+    const reservation = r.reserve({ token: minted, modelId: "mock/deterministic-v1", inputBytes: 10 });
+    expect(r.settleUnknown(reservation.reservationId, "unknown").caseId).toBe("case-42");
+    const second = r.reserve({ token: minted, modelId: "mock/deterministic-v1", inputBytes: 10 });
+    expect(r.settleObserved(second.reservationId, { outcome: "succeeded", observedMicrounits: 4 }).caseId)
+      .toBe("case-42");
   });
 
   it("holds no credential and produces receipts only the route can write", () => {
@@ -249,6 +293,257 @@ describe("mock-only model route", () => {
     // reservation this route made, so a claimed outcome has nothing to attach to.
     expect(() => r.settleObserved("not-a-reservation", { outcome: "succeeded", observedMicrounits: 1 }))
       .toThrow(MockModelRouteError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Untrusted archive parsing. No container needed; these always run.
+// ---------------------------------------------------------------------------
+
+describe("untrusted worker archive", () => {
+  async function archive(build: (root: string) => Promise<void>): Promise<Buffer> {
+    const root = await scratch("agentx-archive-");
+    await mkdir(join(root, "artifacts"), { recursive: true });
+    await build(root);
+    return (await run("tar", ["-cf", "-", "-C", root, "."], { encoding: "buffer", maxBuffer: 64 * 1024 * 1024 }))
+      .stdout;
+  }
+
+  async function wellFormed(root: string, extra?: () => Promise<void>): Promise<void> {
+    await writeFile(join(root, "events.json"), JSON.stringify([{ type: "progress", payload: { step: 1 } }]));
+    await writeFile(join(root, "terminal.json"), JSON.stringify({
+      operationId: "11111111-1111-4111-8111-111111111111", status: "SUCCEEDED", result: { ok: true },
+    }));
+    await writeFile(join(root, "artifacts.json"), JSON.stringify([{ file: "a0.json", name: "workspace.diff" }]));
+    await writeFile(join(root, "artifacts/a0.json"), JSON.stringify({
+      name: "workspace.diff", mediaType: "text/plain; charset=utf-8", content: "+2\n",
+    }));
+    await extra?.();
+  }
+
+  it("reads a regular, valid archive", async () => {
+    const runtime = new IsolatedFixtureRuntime(resolveIsolatedRuntimeConfig({}));
+    const extracted = runtime.extract(await archive(wellFormed));
+
+    expect(extracted.events).toHaveLength(1);
+    expect(extracted.terminal.status).toBe("SUCCEEDED");
+    expect(extracted.artifacts).toHaveLength(1);
+    expect(extracted.artifacts[0]?.content).toBe("+2\n");
+  });
+
+  it("REGRESSION refuses a symlink member pointing outside the archive", async () => {
+    const runtime = new IsolatedFixtureRuntime(resolveIsolatedRuntimeConfig({}));
+    const outsideRoot = await scratch("agentx-archive-outside-");
+    const outside = join(outsideRoot, "outside-sentinel.json");
+    // A sentinel this test owns. Nothing reads a credential or a real host file.
+    await writeFile(outside, JSON.stringify({
+      name: "leaked-host-file", mediaType: "text/plain", content: "TEST-OWNED-SENTINEL",
+    }));
+
+    const bytes = await archive(async (root) => {
+      await wellFormed(root, async () => {
+        await writeFile(join(root, "artifacts.json"), JSON.stringify([{ file: "leak.json", name: "leak" }]));
+        await symlink(outside, join(root, "artifacts/leak.json"));
+      });
+    });
+
+    expect(() => runtime.extract(bytes)).toThrow(UntrustedArchiveError);
+    // And the sentinel's content never appears in anything the host would admit.
+    expect(() => runtime.extract(bytes)).toThrow(/unsupported type/i);
+  });
+
+  it("refuses traversal, absolute names, duplicates and oversized archives", () => {
+    expect(() => readTarEntries(synthesise([{ name: "../escape.json", body: "{}" }])))
+      .toThrow(/escapes the archive/i);
+    expect(() => readTarEntries(synthesise([{ name: "/etc/passwd", body: "{}" }])))
+      .toThrow(/absolute/i);
+    expect(() => readTarEntries(synthesise([{ name: "a.json", body: "{}" }, { name: "a.json", body: "{}" }])))
+      .toThrow(/repeats/i);
+    expect(() => readTarEntries(synthesise([{ name: "a.json", body: "{}", typeflag: "2" }])))
+      .toThrow(/unsupported type/i);
+    expect(() => readTarEntries(synthesise([{ name: "a.json", body: "{}", typeflag: "3" }])))
+      .toThrow(/unsupported type/i);
+    expect(() => readTarEntries(synthesise([{ name: "a.json", body: "x".repeat(64) }]), {
+      maxTotalBytes: 8, maxEntryBytes: 8, maxEntries: 8,
+    })).toThrow(/exceeds/i);
+    expect(() => readTarEntries(synthesise([{ name: "a.json", body: "{}" }]), {
+      maxTotalBytes: 1_024, maxEntryBytes: 1_024, maxEntries: 0,
+    })).toThrow(/more than/i);
+  });
+
+  it("refuses a malformed index or artifact rather than trusting it", async () => {
+    const runtime = new IsolatedFixtureRuntime(resolveIsolatedRuntimeConfig({}));
+    const missingMember = await archive(async (root) => {
+      await wellFormed(root, async () => {
+        await writeFile(join(root, "artifacts.json"), JSON.stringify([{ file: "absent.json", name: "x" }]));
+      });
+    });
+    expect(() => runtime.extract(missingMember)).toThrow(/references missing/i);
+
+    const badTerminal = await archive(async (root) => {
+      await wellFormed(root, async () => {
+        await writeFile(join(root, "terminal.json"), "not json");
+      });
+    });
+    expect(() => runtime.extract(badTerminal)).toThrow(UntrustedArchiveError);
+  });
+});
+
+/** Build a tar in memory so a member's type and name can be chosen exactly. */
+function synthesise(members: Array<{ name: string; body: string; typeflag?: string }>): Buffer {
+  const blocks: Buffer[] = [];
+  for (const member of members) {
+    const header = Buffer.alloc(512);
+    header.write(member.name, 0, 100, "utf8");
+    header.write("000644 \0", 100, 8, "utf8");
+    header.write("000000 \0", 108, 8, "utf8");
+    header.write("000000 \0", 116, 8, "utf8");
+    header.write(`${Buffer.byteLength(member.body).toString(8).padStart(11, "0")} `, 124, 12, "utf8");
+    header.write("00000000000 ", 136, 12, "utf8");
+    header.write("        ", 148, 8, "utf8");
+    header.write(member.typeflag ?? "0", 156, 1, "utf8");
+    header.write("ustar\0", 257, 6, "utf8");
+    header.write("00", 263, 2, "utf8");
+    let checksum = 0;
+    for (const byte of header) checksum += byte;
+    header.write(`${checksum.toString(8).padStart(6, "0")}\0 `, 148, 8, "utf8");
+    blocks.push(header);
+    const body = Buffer.alloc(Math.ceil(Buffer.byteLength(member.body) / 512) * 512);
+    body.write(member.body, 0, "utf8");
+    blocks.push(body);
+  }
+  blocks.push(Buffer.alloc(1024));
+  return Buffer.concat(blocks);
+}
+
+// ---------------------------------------------------------------------------
+// Admission gate. No container needed; these always run.
+// ---------------------------------------------------------------------------
+
+describe("isolated run admission", () => {
+  function runResult(b: Awaited<ReturnType<typeof bench>>, operation: Operation, over: Record<string, unknown> = {}) {
+    return {
+      cid: "a".repeat(64), exitCode: 0, outcome: "completed" as const, operationId: operation.id,
+      workspaceId: b.workspace.id, callbackCapability: b.first.operations.pendingOutbox()[0]!.invocation.callbackCapability,
+      events: [{ type: "progress", payload: { step: 1 } }], artifacts: [],
+      terminal: { operationId: operation.id, status: "SUCCEEDED" as const, result: { ok: true } },
+      cleanup: "removed" as const, stderr: "", ...over,
+    };
+  }
+
+  it("REGRESSION refuses an unconfirmed cleanup, a timeout and a non-zero exit", async () => {
+    const b = await bench();
+    const session = b.first;
+    const { operation } = await submit(b, session);
+
+    for (const broken of [
+      { cleanup: "unknown" as const },
+      { outcome: "timed_out" as const },
+      { outcome: "unknown" as const },
+      { exitCode: 70 },
+    ]) {
+      await expect(ingestIsolatedRun({
+        handler: session.handler, store: session.operations,
+        result: runResult(b, operation, broken),
+      })).rejects.toThrow(UnsettledRunError);
+    }
+
+    // Nothing was admitted, so the operation keeps exactly what it honestly had.
+    expect(session.operations.get(operation.id)?.status).toBe("ACCEPTED");
+    expect(session.operations.listEvents(operation.id)).toHaveLength(0);
+    session.database.close();
+  });
+
+  it("refuses a malformed terminal record", async () => {
+    const b = await bench();
+    const session = b.first;
+    const { operation } = await submit(b, session);
+
+    for (const broken of [
+      { terminal: { operationId: randomUUID(), status: "SUCCEEDED", result: {} } },
+      { terminal: { operationId: operation.id, status: "WEIRD", result: {} } },
+      { terminal: { operationId: operation.id, status: "SUCCEEDED" } },
+    ]) {
+      await expect(ingestIsolatedRun({
+        handler: session.handler, store: session.operations,
+        result: runResult(b, operation, broken),
+      })).rejects.toThrow(UnsettledRunError);
+    }
+    expect(session.operations.get(operation.id)?.status).toBe("ACCEPTED");
+    session.database.close();
+  });
+
+  it("REGRESSION makes an exact replay one effect, settling the queued work", async () => {
+    const b = await bench();
+    const session = b.first;
+    const { operation } = await submit(b, session);
+    const result = runResult(b, operation);
+
+    const first = await ingestIsolatedRun({ handler: session.handler, store: session.operations, result: result });
+    const second = await ingestIsolatedRun({ handler: session.handler, store: session.operations, result: result });
+
+    expect(first.status).toBe("SUCCEEDED");
+    expect(second.status).toBe("SUCCEEDED");
+    // One effect: progress is not duplicated and the outbox no longer holds work.
+    expect(session.operations.listEvents(operation.id)).toHaveLength(1);
+    expect(session.operations.pendingOutbox()).toHaveLength(0);
+    // Admission never leaves the execution held; the bridge owns the 'settled' record.
+    expect(session.operations.executionState(operation.id)?.state).not.toBe("unknown");
+    session.database.close();
+  });
+
+  it("admits a failed execution as FAILED without inventing a result", async () => {
+    const b = await bench();
+    const session = b.first;
+    const { operation } = await submit(b, session);
+    const failed = runResult(b, operation, {
+      exitCode: 1, terminal: { operationId: operation.id, status: "FAILED", error: "fixture failed" },
+    });
+
+    const admitted = await ingestIsolatedRun({
+      handler: session.handler, store: session.operations, result: failed,
+    });
+
+    expect(admitted.status).toBe("FAILED");
+    expect(admitted.result).toBeUndefined();
+    session.database.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Execution ownership across a reopen. No container needed.
+// ---------------------------------------------------------------------------
+
+describe("unobserved execution", () => {
+  it("REGRESSION holds the queued work across a reopen instead of dispatching again", async () => {
+    const b = await bench();
+    const first = b.first;
+    const { operation } = await submit(b, first);
+    const runtime = new IsolatedFixtureRuntime(resolveIsolatedRuntimeConfig({}));
+
+    await runtime.recordUnobservedRun(operation.id, first.operations);
+    first.database.close();
+
+    // Reopen the durable store and drive the REAL dispatcher, as the review did.
+    const second = b.open();
+    let delivered = 0;
+    const dispatcher = createOutboxDispatcher({
+      operations: second.operations,
+      transport: { async deliver() { delivered += 1; throw new Error("no runtime may be launched"); } },
+    });
+    const outcomes = await dispatcher.drainOnce();
+
+    expect(delivered).toBe(0);
+    expect(outcomes[0]?.delivered).toBe(false);
+    expect(outcomes[0]?.reason).toMatch(/not observed|unknown/i);
+    expect(second.operations.get(operation.id)?.status).toBe("ACCEPTED");
+    expect(second.operations.executionState(operation.id)?.state).toBe("unknown");
+
+    // Only an explicit reconciliation releases it.
+    second.operations.reconcileUnknownExecution(operation.id, "abandon", "operator decided to retry");
+    await dispatcher.drainOnce();
+    expect(delivered).toBe(1);
+    second.database.close();
   });
 });
 
@@ -297,59 +592,114 @@ describeRuntime("isolated fixture worker", () => {
     runtime = new IsolatedFixtureRuntime(config);
   }, 120_000);
 
-  it("freezes a correct candidate inside the container and admits it through the host", async () => {
-    const b = await bench();
-    const session = b.first;
-    const { requestId, operation } = await submit(b, session);
-
-    const result = await runtime.runTask({
-      invocation: session.operations.pendingOutbox()[0]!.invocation,
-      workspacePath: b.rootPath,
-      mode: "correct",
+  /** The joined flow: accepted task -> durable dispatch -> isolated worker -> ingestion. */
+  function joined(
+    workspacePath: string,
+    handler: IngestHandler,
+    store: SqliteOperationStore,
+    mode: FixtureMode,
+  ) {
+    const route = new MockModelRoute({
+      routeVersion: "mock-fixture@v1", policyDigest: `sha256:${"b".repeat(64)}`,
+      dataClass: "synthetic-fixture", modelAllowlist: ["mock/deterministic-v1"],
+      priceVersion: "fixture-prices@2026-09-22", microunitsPerInputByte: 2,
+      microunitsPerOutputByte: 8, outputCapBytes: 1_024,
+    }, store);
+    const transport = createIsolatedExecutionTransport({
+      runtime: new IsolatedFixtureRuntime(resolveIsolatedRuntimeConfig(process.env)),
+      handler, store, workspacePath, mode, route, caseId: "case-lane-b-1",
     });
-    expect(result.outcome).toBe("completed");
-    expect(result.exitCode).toBe(0);
+    return { route, transport, dispatcher: createOutboxDispatcher({ operations: store, transport }) };
+  }
 
-    const admitted = await ingestIsolatedRun({ handler: session.handler, result });
-    expect(admitted.status).toBe("SUCCEEDED");
+  it.each([
+    ["correct", true],
+    ["defective", false],
+  ] as const)(
+    "runs the joined flow end to end for a %s candidate",
+    async (mode, shouldPass) => {
+      const b = await bench();
+      const session = b.first;
+      const { requestId, operation } = await submit(b, session);
+      const { transport, dispatcher } = joined(b.rootPath, session.handler, session.operations, mode);
 
-    const settled = session.operations.get(operation.id)!;
-    const candidate = (settled.result as { candidate: CandidateResult }).candidate;
-    expect(candidate.baseCommit).toBe(b.baseCommit);
-    expect(candidate.commit).not.toBe(b.baseCommit);
-    expect(candidate.qualification).toBe("claimed");
+      // Nothing is plucked from the outbox by hand: the real dispatcher delivers.
+      const outcomes = await dispatcher.drainOnce();
+      expect(outcomes).toEqual([expect.objectContaining({ delivered: true })]);
 
-    const consumer = await reconstruct(b, session, candidate);
-    const checks = await runTrustedCheckPlan(consumer, CHECK_PLAN);
-    expect(checks).toHaveLength(CHECK_PLAN.length);
-    expect(checks.every((check) => check.passed)).toBe(true);
+      const settled = session.operations.get(operation.id)!;
+      expect(settled.status).toBe("SUCCEEDED");
+      const candidate = (settled.result as { candidate: CandidateResult }).candidate;
+      expect(candidate.baseCommit).toBe(b.baseCommit);
+      expect(candidate.commit).not.toBe(b.baseCommit);
+      expect(candidate.qualification).toBe("claimed");
 
-    const recovered = await session.call("GET", `/v1/workspaces/${b.workspace.id}/requests/${requestId}`);
-    expect(recovered.status).toBe(200);
-    session.database.close();
-  }, 600_000);
+      // The mock route priced this execution and recorded an observed receipt.
+      const receipts = transport.lastReceiptFor(operation.id) as Array<{ caseId: string; outcome: string }>;
+      expect(receipts).toHaveLength(1);
+      expect(receipts[0]?.caseId).toBe("case-lane-b-1");
+      expect(receipts[0]?.outcome).toBe("succeeded");
 
-  it("freezes a defective candidate that the identical plan fails", async () => {
+      // The identical trusted plan judges real reconstructed source, both arms.
+      const consumer = await reconstruct(b, session, candidate);
+      const checks = await runTrustedCheckPlan(consumer, CHECK_PLAN);
+      expect(checks).toHaveLength(CHECK_PLAN.length);
+      expect(checks.every((check) => check.passed)).toBe(shouldPass);
+      if (!shouldPass) {
+        expect(checks.find((check) => !check.passed)?.name).toBe("filter-preserves-pagination");
+      }
+
+      // Queued work is settled and recovery still answers for this exact request.
+      expect(session.operations.pendingOutbox()).toHaveLength(0);
+      expect(session.operations.executionState(operation.id)?.state).toBe("settled");
+      const recovered = await session.call("GET", `/v1/workspaces/${b.workspace.id}/requests/${requestId}`);
+      expect(recovered.status).toBe(200);
+      session.database.close();
+    },
+    600_000,
+  );
+
+  it("does not stream the callback capability to the container", async () => {
     const b = await bench();
     const session = b.first;
     const { operation } = await submit(b, session);
+    const invocation = session.operations.pendingOutbox()[0]!.invocation;
+    const { dispatcher } = joined(b.rootPath, session.handler, session.operations, "correct");
+    await dispatcher.drainOnce();
 
-    const result = await runtime.runTask({
-      invocation: session.operations.pendingOutbox()[0]!.invocation,
-      workspacePath: b.rootPath,
-      mode: "defective",
-    });
-    expect(result.outcome).toBe("completed");
-    await ingestIsolatedRun({ handler: session.handler, result });
-
-    const candidate = (session.operations.get(operation.id)!.result as { candidate: CandidateResult }).candidate;
-    const consumer = await reconstruct(b, session, candidate);
-    const checks = await runTrustedCheckPlan(consumer, CHECK_PLAN);
-
-    expect(checks).toHaveLength(CHECK_PLAN.length);
-    expect(checks.every((check) => check.passed)).toBe(false);
-    expect(checks.find((check) => !check.passed)?.name).toBe("filter-preserves-pagination");
+    // The host kept the real capability and admitted with it; the container was given
+    // an obvious placeholder instead, so the bytes it saw carry no credential.
+    expect(invocation.callbackCapability).not.toBe(REDACTED_CAPABILITY);
+    expect(session.operations.get(operation.id)?.status).toBe("SUCCEEDED");
+    expect(REDACTED_CAPABILITY.length).toBeGreaterThanOrEqual(32);
     session.database.close();
+  }, 600_000);
+
+  it("restarts across the durable store without rerunning the work", async () => {
+    const b = await bench();
+    const first = b.first;
+    const { requestId, operation } = await submit(b, first);
+    const joinedFirst = joined(b.rootPath, first.handler, first.operations, "correct");
+    await joinedFirst.dispatcher.drainOnce();
+    expect(first.operations.get(operation.id)?.status).toBe("SUCCEEDED");
+    first.database.close();
+
+    // Reopen both services and drive the dispatcher again: the work is settled, so
+    // there is nothing left to deliver and no second execution is launched.
+    const second = b.open();
+    let launched = 0;
+    const watching = createOutboxDispatcher({
+      operations: second.operations,
+      transport: { async deliver() { launched += 1; } },
+    });
+    await watching.drainOnce();
+
+    expect(launched).toBe(0);
+    expect(second.operations.countOperations()).toBe(1);
+    const recovered = await second.call("GET", `/v1/workspaces/${b.workspace.id}/requests/${requestId}`);
+    expect(recovered.status).toBe(200);
+    expect(second.operations.listArtifacts(operation.id).length).toBeGreaterThan(0);
+    second.database.close();
   }, 600_000);
 
   it("denies the external network, the host gateway and the runtime socket", async () => {
@@ -399,32 +749,6 @@ describeRuntime("isolated fixture worker", () => {
     session.database.close();
   }, 120_000);
 
-  it("recovers a duplicate run and a lost reply across reopened stores without rerunning", async () => {
-    const b = await bench();
-    const first = b.first;
-    const { requestId, operation } = await submit(b, first);
-    const invocation = first.operations.pendingOutbox()[0]!.invocation;
-
-    const result = await runtime.runTask({ invocation, workspacePath: b.rootPath, mode: "correct" });
-    // The reply is lost: the host never learns the outcome from this run.
-    expect(result.outcome).toBe("completed");
-    expect(first.operations.get(operation.id)?.status).toBe("ACCEPTED");
-    first.database.close();
-
-    const second = b.open();
-    const admitted = await ingestIsolatedRun({ handler: second.handler, result });
-    expect(admitted.status).toBe("SUCCEEDED");
-    // Admitting the identical retained result again is not a second candidate.
-    const again = await ingestIsolatedRun({ handler: second.handler, result });
-    expect(again.status).toBe("SUCCEEDED");
-
-    expect(second.operations.countOperations()).toBe(1);
-    const recovered = await second.call("GET", `/v1/workspaces/${b.workspace.id}/requests/${requestId}`);
-    expect(recovered.status).toBe(200);
-    expect((recovered.body as { operation: Operation }).operation.id).toBe(operation.id);
-    second.database.close();
-  }, 600_000);
-
   it("keeps an interrupted unknown run unknown instead of rerunning it", async () => {
     const b = await bench();
     const session = b.first;
@@ -432,7 +756,7 @@ describeRuntime("isolated fixture worker", () => {
 
     // A run whose outcome the host cannot observe leaves the operation untouched:
     // no terminal row, no second dispatch, and nothing that claims the checks failed.
-    const unknown = await runtime.recordUnobservedRun(operation.id);
+    const unknown = await runtime.recordUnobservedRun(operation.id, session.operations);
     expect(unknown.outcome).toBe("unknown");
 
     expect(session.operations.get(operation.id)?.status).toBe("ACCEPTED");

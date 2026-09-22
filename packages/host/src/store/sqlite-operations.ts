@@ -381,6 +381,135 @@ export class SqliteOperationStore {
     ).map((row) => this.getArtifact(row.workspace_id, row.id)!);
   }
 
+  // -- execution ownership and uncertainty -------------------------------
+
+  /**
+   * Claim ownership of an execution before anything is launched.
+   *
+   * Written first so that a launch we then lose sight of still has a durable owner. A
+   * repeat for the same operation returns the existing claim rather than starting a
+   * second one.
+   */
+  beginExecution(operationId: string, executionId: string): { executionId: string; duplicate: boolean } {
+    return inTransaction(this.database, () => {
+      this.requireOperation(operationId);
+      const existing = this.database
+        .prepare("SELECT execution_id FROM executions WHERE operation_id = ?")
+        .get(operationId) as { execution_id: string } | undefined;
+      if (existing) return { executionId: existing.execution_id, duplicate: true };
+      const now = new Date().toISOString();
+      this.database
+        .prepare(
+          `INSERT INTO executions (operation_id, execution_id, state, created_at, updated_at)
+           VALUES (?, ?, 'dispatched', ?, ?)`,
+        )
+        .run(operationId, executionId, now, now);
+      return { executionId, duplicate: false };
+    });
+  }
+
+  /**
+   * Record that an execution's outcome could not be observed.
+   *
+   * This is a hold, not a verdict. It does not touch the operation: a host that cannot
+   * see what a worker did must not convert its own blindness into evidence about the
+   * work. What it does do is stop the outbox from handing the same job out again.
+   */
+  markExecutionUnknown(operationId: string, reason: string): void {
+    inTransaction(this.database, () => {
+      const existing = this.database
+        .prepare("SELECT execution_id FROM executions WHERE operation_id = ?")
+        .get(operationId) as { execution_id: string } | undefined;
+      const now = new Date().toISOString();
+      if (existing) {
+        this.database
+          .prepare("UPDATE executions SET state = 'unknown', reason = ?, updated_at = ? WHERE operation_id = ?")
+          .run(reason, now, operationId);
+        return;
+      }
+      this.requireOperation(operationId);
+      this.database
+        .prepare(
+          `INSERT INTO executions (operation_id, execution_id, state, reason, created_at, updated_at)
+           VALUES (?, ?, 'unknown', ?, ?, ?)`,
+        )
+        .run(operationId, randomUUID(), reason, now, now);
+    });
+  }
+
+  markExecutionSettled(operationId: string): void {
+    this.database
+      .prepare("UPDATE executions SET state = 'settled', updated_at = ? WHERE operation_id = ?")
+      .run(new Date().toISOString(), operationId);
+  }
+
+  executionState(operationId: string): { executionId: string; state: string; reason?: string } | undefined {
+    const row = this.database
+      .prepare("SELECT execution_id, state, reason FROM executions WHERE operation_id = ?")
+      .get(operationId) as { execution_id: string; state: string; reason: string | null } | undefined;
+    return row
+      ? { executionId: row.execution_id, state: row.state, ...(row.reason === null ? {} : { reason: row.reason }) }
+      : undefined;
+  }
+
+  /** True while an operation must not be dispatched again without a decision. */
+  executionHold(operationId: string): { held: boolean; reason?: string } {
+    const state = this.executionState(operationId);
+    if (state?.state === "unknown") {
+      return { held: true, reason: state.reason ?? "execution outcome unknown; reconcile before retry" };
+    }
+    return { held: false };
+  }
+
+  /**
+   * Release an unknown execution explicitly.
+   *
+   * `abandon` leaves the operation alone and lets the queued work be offered again;
+   * `retain` keeps the hold. Either way the decision is recorded, because "we chose to
+   * run it again knowing we could not see the first attempt" is a different fact from
+   * "nothing happened".
+   */
+  reconcileUnknownExecution(operationId: string, resolution: "abandon" | "retain", reason: string): void {
+    inTransaction(this.database, () => {
+      const state = this.executionState(operationId);
+      if (!state || state.state !== "unknown") return;
+      this.database
+        .prepare("UPDATE executions SET state = ?, reason = ?, updated_at = ? WHERE operation_id = ?")
+        .run(resolution === "abandon" ? "reconciled" : "unknown", reason, new Date().toISOString(), operationId);
+    });
+  }
+
+  // -- admissions --------------------------------------------------------
+
+  /**
+   * Claim one admission effect, keyed by a stable identity.
+   *
+   * Admitting the identical retained result twice is the same effect. Returning
+   * `duplicate` lets the caller stop before appending the same events again.
+   */
+  claimAdmission(effectId: string, operationId: string, terminalStatus: string): { duplicate: boolean } {
+    return inTransaction(this.database, () => {
+      const existing = this.database
+        .prepare("SELECT effect_id FROM admissions WHERE effect_id = ?")
+        .get(effectId);
+      if (existing) return { duplicate: true };
+      this.database
+        .prepare(
+          "INSERT INTO admissions (effect_id, operation_id, terminal_status, admitted_at) VALUES (?, ?, ?, ?)",
+        )
+        .run(effectId, operationId, terminalStatus, new Date().toISOString());
+      return { duplicate: false };
+    });
+  }
+
+  /** Mark every queued invocation for an operation delivered once it has settled. */
+  settleOutboxFor(operationId: string): number {
+    const changes = this.database
+      .prepare("UPDATE outbox SET delivered_at = ? WHERE operation_id = ? AND delivered_at IS NULL")
+      .run(new Date().toISOString(), operationId);
+    return Number(changes.changes);
+  }
+
   // -- outbox -----------------------------------------------------------
 
   pendingOutbox(): OutboxRecord[] {
@@ -415,6 +544,131 @@ export class SqliteOperationStore {
       .prepare("UPDATE outbox SET delivered_at = ? WHERE id = ?")
       .run(new Date().toISOString(), id);
     if (changes.changes !== 1) throw agentXError("NOT_FOUND", "outbox record not found");
+  }
+
+  // -- model route (durable authority, reservations, receipts) -----------
+
+  putRouteToken(token: {
+    tokenId: string; operationId: string; caseId: string; attemptNumber: number;
+    routeVersion: string; policyDigest: string; dataClass: string;
+    modelAllowlist: readonly string[]; maxMicrounits: number; maxCalls: number; notAfter: string;
+  }): void {
+    this.database
+      .prepare(
+        `INSERT INTO model_route_tokens (token_id, operation_id, case_id, attempt_number, route_version,
+           policy_digest, data_class, model_allowlist, max_microunits, max_calls, not_after, issued_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(token_id) DO NOTHING`,
+      )
+      .run(
+        token.tokenId, token.operationId, token.caseId, token.attemptNumber, token.routeVersion,
+        token.policyDigest, token.dataClass, JSON.stringify([...token.modelAllowlist]),
+        token.maxMicrounits, token.maxCalls, token.notAfter, new Date().toISOString(),
+      );
+  }
+
+  getRouteToken(tokenId: string): {
+    tokenId: string; operationId: string; caseId: string; attemptNumber: number;
+    routeVersion: string; policyDigest: string; dataClass: string;
+    modelAllowlist: string[]; maxMicrounits: number; maxCalls: number; notAfter: string;
+  } | undefined {
+    const row = this.database
+      .prepare("SELECT * FROM model_route_tokens WHERE token_id = ?")
+      .get(tokenId) as Record<string, string | number> | undefined;
+    if (!row) return undefined;
+    return {
+      tokenId: String(row.token_id), operationId: String(row.operation_id), caseId: String(row.case_id),
+      attemptNumber: Number(row.attempt_number), routeVersion: String(row.route_version),
+      policyDigest: String(row.policy_digest), dataClass: String(row.data_class),
+      modelAllowlist: JSON.parse(String(row.model_allowlist)) as string[],
+      maxMicrounits: Number(row.max_microunits), maxCalls: Number(row.max_calls),
+      notAfter: String(row.not_after),
+    };
+  }
+
+  putRouteReservation(reservation: {
+    reservationId: string; tokenId: string; operationId: string; attemptNumber: number;
+    modelId: string; routeVersion: string; priceVersion: string; reservedMicrounits: number;
+    observedMicrounits?: number; state: string; reason?: string; requestedAt: string; settledAt?: string;
+  }): void {
+    this.database
+      .prepare(
+        `INSERT INTO model_route_reservations (reservation_id, token_id, operation_id, attempt_number,
+           model_id, route_version, price_version, reserved_microunits, observed_microunits, state,
+           reason, requested_at, settled_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(reservation_id) DO UPDATE SET observed_microunits = excluded.observed_microunits,
+           state = excluded.state, reason = excluded.reason, settled_at = excluded.settled_at`,
+      )
+      .run(
+        reservation.reservationId, reservation.tokenId, reservation.operationId, reservation.attemptNumber,
+        reservation.modelId, reservation.routeVersion, reservation.priceVersion,
+        reservation.reservedMicrounits, reservation.observedMicrounits ?? null, reservation.state,
+        reservation.reason ?? null, reservation.requestedAt, reservation.settledAt ?? null,
+      );
+  }
+
+  listRouteReservations(operationId: string, attemptNumber: number): Array<{
+    reservationId: string; operationId: string; attemptNumber: number; modelId: string;
+    routeVersion: string; priceVersion: string; reservedMicrounits: number;
+    observedMicrounits?: number; state: "reserved" | "observed" | "unknown"; requestedAt: string;
+  }> {
+    return (
+      this.database
+        .prepare(
+          "SELECT * FROM model_route_reservations WHERE operation_id = ? AND attempt_number = ? ORDER BY requested_at",
+        )
+        .all(operationId, attemptNumber) as Array<Record<string, string | number | null>>
+    ).map((row) => ({
+      reservationId: String(row.reservation_id), operationId: String(row.operation_id),
+      attemptNumber: Number(row.attempt_number), modelId: String(row.model_id),
+      routeVersion: String(row.route_version), priceVersion: String(row.price_version),
+      reservedMicrounits: Number(row.reserved_microunits),
+      ...(row.observed_microunits === null ? {} : { observedMicrounits: Number(row.observed_microunits) }),
+      state: String(row.state) as "reserved" | "observed" | "unknown",
+      requestedAt: String(row.requested_at),
+    }));
+  }
+
+  getRouteReservation(reservationId: string): {
+    reservationId: string; tokenId: string; operationId: string; attemptNumber: number;
+    modelId: string; routeVersion: string; priceVersion: string; reservedMicrounits: number;
+    observedMicrounits?: number; state: "reserved" | "observed" | "unknown"; requestedAt: string;
+  } | undefined {
+    const row = this.database
+      .prepare("SELECT * FROM model_route_reservations WHERE reservation_id = ?")
+      .get(reservationId) as Record<string, string | number | null> | undefined;
+    if (!row) return undefined;
+    return {
+      reservationId: String(row.reservation_id), tokenId: String(row.token_id),
+      operationId: String(row.operation_id), attemptNumber: Number(row.attempt_number),
+      modelId: String(row.model_id), routeVersion: String(row.route_version),
+      priceVersion: String(row.price_version), reservedMicrounits: Number(row.reserved_microunits),
+      ...(row.observed_microunits === null ? {} : { observedMicrounits: Number(row.observed_microunits) }),
+      state: String(row.state) as "reserved" | "observed" | "unknown",
+      requestedAt: String(row.requested_at),
+    };
+  }
+
+  putRouteReceipt(receipt: { receiptId: string; reservationId: string; settledAt: string }): void {
+    this.database
+      .prepare(
+        `INSERT INTO model_route_receipts (receipt_id, reservation_id, document, settled_at)
+         VALUES (?, ?, ?, ?) ON CONFLICT(receipt_id) DO NOTHING`,
+      )
+      .run(receipt.receiptId, receipt.reservationId, JSON.stringify(receipt), receipt.settledAt);
+  }
+
+  listRouteReceipts(operationId: string): unknown[] {
+    return (
+      this.database
+        .prepare(
+          `SELECT r.document FROM model_route_receipts r
+           JOIN model_route_reservations v ON v.reservation_id = r.reservation_id
+           WHERE v.operation_id = ? ORDER BY r.settled_at`,
+        )
+        .all(operationId) as Array<{ document: string }>
+    ).map((row) => JSON.parse(row.document) as unknown);
   }
 
   // -- internals --------------------------------------------------------

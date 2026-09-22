@@ -10,3 +10,5 @@ export * from "./store/sqlite-registry.js";
 export * from "./isolated/ingest.js";
 export * from "./isolated/mock-model-route.js";
 export * from "./isolated/runtime.js";
+export * from "./isolated/bridge.js";
+export * from "./isolated/tar.js";

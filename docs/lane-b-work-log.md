@@ -452,3 +452,95 @@ Callback authority is proven at the host boundary, not inside the container: the
 has no network and is never given a capability.
 
 The unidentified historical flake remains unresolved. Nothing in this package explains it.
+
+## Independent review round 2 — five reproduced defects, all closed
+
+Entry `67de8fd02a3cd6a01adcccabf8cad628b5d788f1`, tree `2d6c85d6…`, verified clean.
+Capacity rechecked first: no running containers, no `charterarc.lane=b` leftovers.
+
+The supplied probe was run **unchanged before any fix** and reproduced all five:
+
+```
+ARCHIVE_HOST_READ [{"name":"leaked-host-file",…,"content":"HOST-ONLY-SENTINEL"}]
+FORGED_TOKEN_ACCEPTED {… "reservedMicrounits":8392 …}
+CASE_BINDING_DROPPED {… "caseId":"" …}
+UNKNOWN_REOPEN_REDISPATCH 1 status ACCEPTED
+UNKNOWN_CLEANUP_ADMITTED SUCCEEDED
+DUPLICATE_ADMISSION_EVENTS 2 pendingOutbox 1
+```
+
+After the fixes the probe refuses at its first stage:
+
+```
+UntrustedArchiveError: archive entry ./artifacts/leak.json has unsupported type '2'
+```
+
+Because the probe is a single script it now aborts there, so stages 2–5 were re-run
+with their behaviour unchanged to show each refusal:
+
+```
+FORGED_TOKEN_REFUSED MockModelRouteError: route token routeVersion does not match the issued authority
+CASE_BINDING_PRESERVED caseId="case-42"
+UNKNOWN_REOPEN_REDISPATCH 0 status ACCEPTED | held: "isolated execution outcome was not observed"
+UNKNOWN_CLEANUP_REFUSED UnsettledRunError: run cleanup is unknown; an unconfirmed container cannot produce a successful admission
+REPLAY_STATUS SUCCEEDED SUCCEEDED | events 1 | pendingOutbox 0
+```
+
+Each is also a permanent regression test in `packages/host/tests/isolated-mock-execution.test.ts`
+(`REGRESSION …` names), including a valid-archive case so the reader is not only proved
+to refuse things.
+
+### What changed
+
+| Defect | Fix |
+|---|---|
+| 1 archive symlink | new `isolated/tar.ts`: in-memory ustar parse, no filesystem write; refuses traversal, absolute names, both link types, special entries, duplicates, oversize; skips pax headers without applying them |
+| 2 unobserved run | durable `executions` table; dispatcher holds an `unknown` execution; explicit `reconcileUnknownExecution` releases it |
+| 3 admission | requires `completed` + `cleanup=removed` + consistent exit + well-formed terminal; stable `admissionEffectId`; settles the outbox; failed runs admit as FAILED |
+| 4 route | server-retained authority, full binding match, finite-timestamp check, durable tokens/reservations/receipts, `caseId` preserved |
+| 5 connection | `isolated/bridge.ts` is a real `WorkerTransport` driven by `createOutboxDispatcher`; capability redacted from streamed bytes |
+
+### Commands and results (Node v22.23.2)
+
+```
+node --import tsx /tmp/lane-b-independent-review.mjs   reproduced 5/5 before, refuses after
+npm run build        BUILD=0
+npm run typecheck    TYPECHECK=0
+npm run lint         LINT=0
+npm test -- packages/host                7 files, 55 passed, 9 skipped
+npm test -- <7 affected broker/worker>   7 files, 96 passed, 1 skipped
+npm test                                 50 files, 340 passed, 10 skipped, FULL=0
+CHARTERARC_REQUIRE_ISOLATED_MOCK=1 \
+  npm test -- packages/host/tests/isolated-mock-execution.test.ts
+                                         1 file, 29 passed, 0 skipped, GATED=0
+```
+
+Skip counts: 9–10 skips offline are the container-gated cases. **Under the flag the skip
+count is zero.** No `charterarc.lane=b` container remained after the run. Limits unchanged:
+one container per run, 2 GiB, 256 pids, `--network none`, ten-minute deadline.
+
+### Joined acceptance
+
+`runs the joined flow end to end for a correct|defective candidate` drives the real
+`createOutboxDispatcher` over `createIsolatedExecutionTransport`: accepted task → durable
+dispatch → isolated real worker → mock reservation/receipt → artifact and terminal
+ingestion → settled outbox → request recovery. Both arms reconstruct real source from the
+emitted bundle and are judged by the same plan with 2 collected checks each. The receipt
+carries `caseId: "case-lane-b-1"` and `outcome: "succeeded"`.
+
+### Still truthful
+
+`enforced_scope` remains false and the gap is unchanged: a container confines which
+filesystem is visible, not which paths inside it may be written. The deadline terminates
+the container and its children; that is termination, not a per-job deadline inside the
+executor. No ManagedSDLC capability is advertised as enforced on this fixture. The
+unidentified historical flake remains unresolved.
+
+### Residual gaps
+
+- The mock route is mock-only. Real provider credential placement remains a separate
+  Tier-3 decision and nothing here anticipates it.
+- Host-gateway denial is evidenced mainly by the interface list (`lo` only); the direct
+  connect attempt is a weaker second signal.
+- `reconcileUnknownExecution` is an operator-facing primitive; no UI or policy decides
+  when to abandon an unknown execution.

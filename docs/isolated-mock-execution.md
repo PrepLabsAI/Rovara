@@ -26,15 +26,51 @@ baked into the image, so the image is identical for every run.
 
 ### Why the container does not call back
 
-It has no network, so it cannot. Worker callbacks normally POST to the control plane; here
-the sinks write to the container's scratch and the host admits those bytes afterwards through
-its own authenticated routes (`ingestIsolatedRun`). The capability is minted by the host for
-exactly that operation and fence and is **never given to the container** — a worker with no
-network has no use for a callback credential, and not issuing one is cheaper than trusting it.
+It has no network, so it cannot. Worker callbacks normally POST to the control plane;
+here the sinks write to the container's scratch and the host admits those bytes afterwards
+through its own authenticated routes (`ingestIsolatedRun`).
+
+It is also **not given a capability**. The streamed invocation carries an obvious
+placeholder in `callbackCapability`, and the host keeps the real one, minted for exactly
+that operation and fence, for its own admission. An earlier revision serialized the whole
+invocation including the real capability, which contradicted this very claim; independent
+review caught it. A worker with no network has no use for a callback credential, and not
+issuing one is cheaper than trusting it.
 
 The consequence is worth stating plainly: **callback authority is proven at the host boundary,
 not inside the container.** The cross-operation and stale-fence refusals are exercised against
 the host's real routes.
+
+## Independent review corrections
+
+Five defects were reproduced by the coordinator and an independent reviewer at
+`67de8fd0`, and all five are closed. They are worth stating because each was a case of
+something *looking* settled while not being it.
+
+1. **Archive extraction followed symlinks.** The returned tar was written to disk and
+   read back, so a symlink member returned a file from outside the extraction directory.
+   The archive is now parsed **in memory** by `isolated/tar.ts` and never written, so
+   there is no path to redirect. Traversal, absolute names, both link types, device and
+   other special entries, duplicates, oversized members and oversized totals are refused.
+   Extended (pax) headers are skipped and deliberately **not applied**, because honouring
+   a pax path record would reintroduce the same traversal.
+2. **`recordUnobservedRun` persisted nothing.** After a reopen the real outbox dispatcher
+   delivered the job again, so a lost observation silently authorized a second execution.
+   Execution ownership and uncertainty are now durable (`executions`), the dispatcher
+   **holds** a job whose execution is `unknown`, and only an explicit
+   `reconcileUnknownExecution` releases it.
+3. **Admission accepted an unconfirmed cleanup as SUCCEEDED.** Admission now requires a
+   clean, owned, settled run: `outcome=completed`, `cleanup=removed`, a matching exit
+   status and a well-formed terminal record. Repeat admission is keyed by a stable
+   effect id, so an exact replay is one effect — no duplicated progress events — and it
+   settles the queued work instead of leaving the outbox pending.
+4. **The route trusted a caller-editable token.** Authority is now retained server-side
+   and read back at reservation time; the presented token must match it in full, and
+   non-finite timestamps are rejected. Reservations, tokens and receipts are durable, and
+   every receipt keeps its `caseId`.
+5. **The isolated runtime was not connected to durable dispatch.** `isolated/bridge.ts`
+   is a real `WorkerTransport`, so the ordinary outbox dispatcher drives the whole
+   journey. The acceptance no longer plucks an outbox record by hand.
 
 ## Image identity
 
@@ -89,8 +125,11 @@ This matters more than it looks. `docker rm --force` exits 0 for an id that neve
 trusting its exit status reported a clean removal of a container this process never owned. A
 test caught exactly that. An uncertain cleanup cannot pass a gate.
 
-Likewise `recordUnobservedRun` writes nothing to the operation. A host that cannot see what a
-worker did must not convert its own recovery policy into evidence that the checks failed.
+Likewise an unobserved run writes nothing **to the operation**: a host that cannot see what
+a worker did must not convert its own blindness into evidence that the checks failed. What
+it does write is a durable hold, so the outbox will not hand the same job out again until
+someone decides what happened. Recording only in memory — as an earlier revision did — meant
+the next reopen dispatched it a second time.
 
 ## The mock-only model route
 

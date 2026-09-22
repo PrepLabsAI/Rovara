@@ -37,10 +37,22 @@ export interface MockRouteTokenInput {
 }
 
 export interface MockRouteToken extends MockRouteTokenInput {
+  /** Reference to the authority this route retained. The token is not the authority. */
+  tokenId: string;
   routeVersion: string;
   policyDigest: string;
   dataClass: string;
   modelAllowlist: readonly string[];
+}
+
+/** Durable backing for retained authority, reservations and receipts. */
+export interface ModelRouteStore {
+  putRouteToken(token: MockRouteToken): void;
+  getRouteToken(tokenId: string): MockRouteToken | undefined;
+  putRouteReservation(reservation: Reservation & { tokenId: string }): void;
+  listRouteReservations(operationId: string, attemptNumber: number): Reservation[];
+  getRouteReservation(reservationId: string): (Reservation & { tokenId: string }) | undefined;
+  putRouteReceipt(receipt: ModelReceipt): void;
 }
 
 export type ReservationState = "reserved" | "observed" | "unknown";
@@ -98,8 +110,14 @@ export interface ModelReceipt {
 export class MockModelRoute {
   private readonly reservations = new Map<string, Reservation>();
   private readonly issued = new Map<string, ModelReceipt>();
+  private readonly authorities = new Map<string, MockRouteToken>();
+  private readonly tokenOf = new Map<string, string>();
 
-  constructor(private readonly config: MockModelRouteConfig) {
+  constructor(
+    private readonly config: MockModelRouteConfig,
+    /** When present, tokens, reservations and receipts survive a restart. */
+    private readonly store?: ModelRouteStore,
+  ) {
     if (config.modelAllowlist.length === 0) {
       throw new MockModelRouteError("a route with an empty allowlist can dispatch nothing");
     }
@@ -127,16 +145,33 @@ export class MockModelRoute {
     if (!Number.isInteger(input.maxMicrounits) || input.maxMicrounits < 0) {
       throw new MockModelRouteError("maxMicrounits must be a non-negative integer");
     }
-    if (!Number.isFinite(Date.parse(input.notAfter))) {
-      throw new MockModelRouteError("notAfter must be a timestamp");
+    assertFiniteTimestamp(input.notAfter, "notAfter");
+    if (typeof input.operationId !== "string" || input.operationId === "") {
+      throw new MockModelRouteError("operationId is required");
     }
-    return {
+    if (typeof input.caseId !== "string" || input.caseId === "") {
+      throw new MockModelRouteError("caseId is required");
+    }
+    const token: MockRouteToken = {
       ...input,
+      tokenId: randomUUID(),
       routeVersion: this.config.routeVersion,
       policyDigest: this.config.policyDigest,
       dataClass: this.config.dataClass,
       modelAllowlist: [...this.config.modelAllowlist],
     };
+    // The authority is retained here. What the caller holds is a reference to it.
+    this.authorities.set(token.tokenId, token);
+    this.store?.putRouteToken(token);
+    return { ...token };
+  }
+
+  /** The authority this route issued, read back from where it was retained. */
+  private authority(tokenId: string): MockRouteToken {
+    const retained = this.authorities.get(tokenId) ?? this.store?.getRouteToken(tokenId);
+    if (!retained) throw new MockModelRouteError("no such route token was issued by this route");
+    this.authorities.set(tokenId, retained);
+    return retained;
   }
 
   /**
@@ -148,31 +183,43 @@ export class MockModelRoute {
    * charged in full rather than estimated optimistically and reconciled later.
    */
   reserve(input: { token: MockRouteToken; modelId: string; inputBytes: number }): Reservation {
-    const { token } = input;
+    if (typeof input.token?.tokenId !== "string") {
+      throw new MockModelRouteError("reservation requires a token issued by this route");
+    }
+    // Read the authority back from where this route retained it, and require the
+    // presented token to still match it in full. A token edited in flight therefore
+    // changes nothing: the limits, expiry and binding that govern are the issued ones.
+    const authority = this.authority(input.token.tokenId);
+    assertSameBinding(authority, input.token);
+
     if (!this.config.modelAllowlist.includes(input.modelId)) {
       throw new MockModelRouteError(`model ${input.modelId} is not on route ${this.config.routeVersion}`);
     }
-    if (Date.parse(token.notAfter) <= Date.now()) {
-      throw new MockModelRouteError("route token has expired");
+    if (!authority.modelAllowlist.includes(input.modelId)) {
+      throw new MockModelRouteError(`model ${input.modelId} is not on this token's allowlist`);
     }
+    const notAfter = assertFiniteTimestamp(authority.notAfter, "notAfter");
+    if (notAfter <= Date.now()) throw new MockModelRouteError("route token has expired");
     if (!Number.isInteger(input.inputBytes) || input.inputBytes < 0) {
       throw new MockModelRouteError("inputBytes must be a non-negative integer");
     }
-    const already = this.forOperation(token.operationId, token.attemptNumber);
-    if (already.length >= token.maxCalls) {
+
+    const already = this.forOperation(authority.operationId, authority.attemptNumber);
+    if (already.length >= authority.maxCalls) {
       throw new MockModelRouteError("route call limit reached for this attempt");
     }
     const reservedMicrounits =
       input.inputBytes * this.config.microunitsPerInputByte +
       this.config.outputCapBytes * this.config.microunitsPerOutputByte;
     const spent = already.reduce((total, entry) => total + entry.reservedMicrounits, 0);
-    if (spent + reservedMicrounits > token.maxMicrounits) {
+    if (spent + reservedMicrounits > authority.maxMicrounits) {
       throw new MockModelRouteError("reservation would exceed the authorized budget");
     }
+
     const reservation: Reservation = {
       reservationId: randomUUID(),
-      operationId: token.operationId,
-      attemptNumber: token.attemptNumber,
+      operationId: authority.operationId,
+      attemptNumber: authority.attemptNumber,
       modelId: input.modelId,
       routeVersion: this.config.routeVersion,
       priceVersion: this.config.priceVersion,
@@ -181,6 +228,8 @@ export class MockModelRoute {
       requestedAt: new Date().toISOString(),
     };
     this.reservations.set(reservation.reservationId, reservation);
+    this.tokenOf.set(reservation.reservationId, authority.tokenId);
+    this.store?.putRouteReservation({ ...reservation, tokenId: authority.tokenId });
     return { ...reservation };
   }
 
@@ -226,14 +275,19 @@ export class MockModelRoute {
   }
 
   private forOperation(operationId: string, attemptNumber: number): Reservation[] {
+    // Durable rows are authoritative when a store is attached, so reservations survive
+    // a restart and a recovered route cannot hand out budget that was already spent.
+    if (this.store) return this.store.listRouteReservations(operationId, attemptNumber);
     return [...this.reservations.values()].filter(
       (entry) => entry.operationId === operationId && entry.attemptNumber === attemptNumber,
     );
   }
 
   private require(reservationId: string): Reservation {
-    const reservation = this.reservations.get(reservationId);
+    const reservation =
+      this.reservations.get(reservationId) ?? this.store?.getRouteReservation(reservationId);
     if (!reservation) throw new MockModelRouteError("no such reservation on this route");
+    this.reservations.set(reservationId, reservation);
     if (reservation.state !== "reserved") {
       throw new MockModelRouteError("reservation is already settled");
     }
@@ -247,7 +301,7 @@ export class MockModelRoute {
         .digest("hex"),
       reservationId: reservation.reservationId,
       operationId: reservation.operationId,
-      caseId: "",
+      caseId: this.caseIdFor(reservation.reservationId),
       attemptNumber: reservation.attemptNumber,
       routeVersion: reservation.routeVersion,
       policyDigest: this.config.policyDigest,
@@ -262,6 +316,46 @@ export class MockModelRoute {
       settledAt: reservation.settledAt ?? new Date().toISOString(),
     };
     this.issued.set(receipt.receiptId, receipt);
+    this.store?.putRouteReceipt(receipt);
     return { ...receipt };
+  }
+
+  /** The case a reservation was authorized under, kept on every receipt. */
+  private caseIdFor(reservationId: string): string {
+    const tokenId =
+      this.tokenOf.get(reservationId) ?? this.store?.getRouteReservation(reservationId)?.tokenId;
+    if (!tokenId) throw new MockModelRouteError("reservation has no issuing token");
+    return this.authority(tokenId).caseId;
+  }
+}
+
+/** Reject a timestamp that is absent, malformed or non-finite. */
+function assertFiniteTimestamp(value: string, label: string): number {
+  if (typeof value !== "string") throw new MockModelRouteError(`${label} must be a timestamp`);
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) throw new MockModelRouteError(`${label} is not a finite timestamp`);
+  return parsed;
+}
+
+/**
+ * Require a presented token to match the retained authority in full.
+ *
+ * Checked field by field rather than by shape so that an edited copy is refused rather
+ * than silently governed by the stored values it disagrees with.
+ */
+function assertSameBinding(authority: MockRouteToken, presented: MockRouteToken): void {
+  const fields: Array<keyof MockRouteToken> = [
+    "tokenId", "operationId", "caseId", "attemptNumber", "routeVersion",
+    "policyDigest", "dataClass", "maxMicrounits", "maxCalls", "notAfter",
+  ];
+  for (const field of fields) {
+    if (authority[field] !== presented[field]) {
+      throw new MockModelRouteError(`route token ${String(field)} does not match the issued authority`);
+    }
+  }
+  const issued = [...authority.modelAllowlist].sort().join("\u0000");
+  const shown = [...(presented.modelAllowlist ?? [])].sort().join("\u0000");
+  if (issued !== shown) {
+    throw new MockModelRouteError("route token allowlist does not match the issued authority");
   }
 }

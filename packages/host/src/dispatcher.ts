@@ -41,6 +41,19 @@ export function createOutboxDispatcher(dependencies: {
     async drainOnce(): Promise<DeliveryOutcome[]> {
       const outcomes: DeliveryOutcome[] = [];
       for (const record of dependencies.operations.pendingOutbox()) {
+        // An execution whose outcome we could not observe is held. Handing the same job
+        // out again would authorize a second execution on the strength of our own
+        // ignorance, so it waits for an explicit reconciliation instead.
+        const hold = dependencies.operations.executionHold(record.operationId);
+        if (hold.held) {
+          outcomes.push({
+            outboxId: record.id,
+            operationId: record.operationId,
+            delivered: false,
+            reason: hold.reason ?? "execution outcome unknown; reconcile before retry",
+          });
+          continue;
+        }
         if (record.attempts >= maxAttempts) {
           outcomes.push({
             outboxId: record.id,

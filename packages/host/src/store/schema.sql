@@ -110,3 +110,73 @@ CREATE TABLE IF NOT EXISTS outbox (
 CREATE INDEX IF NOT EXISTS operations_by_workspace ON operations (workspace_id, id);
 CREATE INDEX IF NOT EXISTS artifacts_by_workspace ON artifacts (workspace_id, id);
 CREATE INDEX IF NOT EXISTS outbox_pending ON outbox (delivered_at, created_at);
+
+-- Execution ownership and uncertainty.
+--
+-- A dispatched execution is owned by this row before the runtime is touched, so a lost
+-- observation has somewhere to be recorded. `unknown` is a hold: the outbox row stays,
+-- but nothing may deliver it again until a person or a reconciliation step decides what
+-- happened. Silently redelivering would authorize a second execution on the strength of
+-- our own ignorance.
+CREATE TABLE IF NOT EXISTS executions (
+  operation_id  TEXT PRIMARY KEY COLLATE BINARY REFERENCES operations(id),
+  execution_id  TEXT NOT NULL COLLATE BINARY,
+  state         TEXT NOT NULL,
+  reason        TEXT,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
+) STRICT;
+
+-- Stable effect identity for admitting a run's bytes.
+--
+-- Re-admitting the identical retained result after a lost reply must be the same effect,
+-- not a second one: same operation, no duplicated events, no extra candidate.
+CREATE TABLE IF NOT EXISTS admissions (
+  effect_id        TEXT PRIMARY KEY COLLATE BINARY,
+  operation_id     TEXT NOT NULL COLLATE BINARY REFERENCES operations(id),
+  terminal_status  TEXT NOT NULL,
+  admitted_at      TEXT NOT NULL
+) STRICT;
+
+-- Model-route authority, retained server-side.
+--
+-- The token handed to a caller is a reference, not the authority itself. Limits, expiry
+-- and the whole binding are read back from here at reservation time, so editing a token
+-- in flight changes nothing.
+CREATE TABLE IF NOT EXISTS model_route_tokens (
+  token_id        TEXT PRIMARY KEY COLLATE BINARY,
+  operation_id    TEXT NOT NULL COLLATE BINARY,
+  case_id         TEXT NOT NULL COLLATE BINARY,
+  attempt_number  INTEGER NOT NULL,
+  route_version   TEXT NOT NULL COLLATE BINARY,
+  policy_digest   TEXT NOT NULL COLLATE BINARY,
+  data_class      TEXT NOT NULL COLLATE BINARY,
+  model_allowlist TEXT NOT NULL,
+  max_microunits  INTEGER NOT NULL,
+  max_calls       INTEGER NOT NULL,
+  not_after       TEXT NOT NULL,
+  issued_at       TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS model_route_reservations (
+  reservation_id      TEXT PRIMARY KEY COLLATE BINARY,
+  token_id            TEXT NOT NULL COLLATE BINARY REFERENCES model_route_tokens(token_id),
+  operation_id        TEXT NOT NULL COLLATE BINARY,
+  attempt_number      INTEGER NOT NULL,
+  model_id            TEXT NOT NULL COLLATE BINARY,
+  route_version       TEXT NOT NULL COLLATE BINARY,
+  price_version       TEXT NOT NULL COLLATE BINARY,
+  reserved_microunits INTEGER NOT NULL,
+  observed_microunits INTEGER,
+  state               TEXT NOT NULL,
+  reason              TEXT,
+  requested_at        TEXT NOT NULL,
+  settled_at          TEXT
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS model_route_receipts (
+  receipt_id      TEXT PRIMARY KEY COLLATE BINARY,
+  reservation_id  TEXT NOT NULL COLLATE BINARY REFERENCES model_route_reservations(reservation_id),
+  document        TEXT NOT NULL,
+  settled_at      TEXT NOT NULL
+) STRICT;

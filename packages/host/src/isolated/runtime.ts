@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import type { WorkerInvocation } from "@agentx/contracts";
 import type { FixtureEdit, FixtureMode } from "../fixture-worker.js";
+import { UntrustedArchiveError, readTarEntries, requireEntry } from "./tar.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -94,6 +95,14 @@ export interface DenialReport {
   otherRunNetwork: "denied" | "reachable" | "unknown";
 }
 
+/**
+ * Placeholder written in place of the callback capability.
+ *
+ * Long enough to satisfy the invocation schema and obviously not a credential, so a
+ * reader of the streamed bytes cannot mistake it for one.
+ */
+export const REDACTED_CAPABILITY = "redacted-no-callback-capability-is-streamed-to-the-container";
+
 const DEFAULT_EDITS: FixtureEdit[] = [
   { path: "src/filter.txt", correct: "all|open|done+pagination\n", defective: "all|open|done\n" },
   { path: "src/isolation.txt", correct: "team-scoped\n", defective: "team-scoped\n" },
@@ -165,7 +174,12 @@ export class IsolatedFixtureRuntime {
     const label = randomUUID();
     const staging = await mkdtemp(join(tmpdir(), "agentx-iso-stage-"));
     try {
-      await writeFile(join(staging, "invocation.json"), JSON.stringify(input.invocation));
+      // The container gets no callback capability. It has no network and cannot call
+      // back, so shipping the real one would hand out a credential for nothing. The
+      // schema requires the field, so it carries an obvious non-credential placeholder
+      // and the host keeps the real capability for its own admission.
+      const streamed = { ...input.invocation, callbackCapability: REDACTED_CAPABILITY };
+      await writeFile(join(staging, "invocation.json"), JSON.stringify(streamed));
       await writeFile(join(staging, "edits.json"), JSON.stringify(input.edits ?? DEFAULT_EDITS));
 
       const created = await execFileAsync(
@@ -195,7 +209,7 @@ export class IsolatedFixtureRuntime {
         };
       }
 
-      const extracted = await this.extract(run.stdout);
+      const extracted = this.extract(run.stdout);
       return {
         cid, exitCode: run.exitCode, outcome: "completed", operationId: input.invocation.operationId,
         workspaceId: input.invocation.workspaceId,
@@ -258,36 +272,57 @@ export class IsolatedFixtureRuntime {
     });
   }
 
-  private async extract(stdout: Buffer): Promise<{
+  /**
+   * Parse what the container returned, in memory and under strict limits.
+   *
+   * The archive is untrusted: it comes from the worker. It is never written to disk, so
+   * a member cannot become a path that a later read follows somewhere else. Traversal,
+   * links, special entries, duplicates and oversized members are refused outright.
+   *
+   * Public because it is the boundary worth testing directly.
+   */
+  extract(stdout: Buffer): {
     events: IsolatedRunResult["events"];
     artifacts: IsolatedRunResult["artifacts"];
     terminal: IsolatedRunResult["terminal"];
-  }> {
-    const directory = await mkdtemp(join(tmpdir(), "agentx-iso-out-"));
-    try {
-      const archive = join(directory, "out.tar");
-      await writeFile(archive, stdout);
-      await execFileAsync("tar", ["-x", "-f", archive, "-C", directory], { timeout: 120_000 });
-      const { readFile, readdir } = await import("node:fs/promises");
-      const events = JSON.parse(await readFile(join(directory, "events.json"), "utf8")) as
-        IsolatedRunResult["events"];
-      const index = JSON.parse(await readFile(join(directory, "artifacts.json"), "utf8")) as
-        Array<{ file: string; name: string }>;
-      const terminal = JSON.parse(await readFile(join(directory, "terminal.json"), "utf8")) as
-        IsolatedRunResult["terminal"];
-      const names = new Set(await readdir(join(directory, "artifacts")).catch(() => []));
-      const artifacts: IsolatedRunResult["artifacts"] = [];
-      for (const entry of index) {
-        if (!names.has(entry.file)) continue;
-        artifacts.push(
-          JSON.parse(await readFile(join(directory, "artifacts", entry.file), "utf8")) as
-            IsolatedRunResult["artifacts"][number],
-        );
-      }
-      return { events, artifacts, terminal };
-    } finally {
-      await rm(directory, { recursive: true, force: true });
+  } {
+    const entries = readTarEntries(stdout);
+    const events = parseJson<IsolatedRunResult["events"]>(requireEntry(entries, "events.json"), "events.json");
+    const index = parseJson<Array<{ file: string; name: string }>>(
+      requireEntry(entries, "artifacts.json"), "artifacts.json",
+    );
+    const terminal = parseJson<IsolatedRunResult["terminal"]>(
+      requireEntry(entries, "terminal.json"), "terminal.json",
+    );
+    if (!Array.isArray(events)) throw new UntrustedArchiveError("events.json is not an array");
+    if (!Array.isArray(index)) throw new UntrustedArchiveError("artifacts.json is not an array");
+    if (!terminal || typeof terminal !== "object" || typeof terminal.status !== "string") {
+      throw new UntrustedArchiveError("terminal.json is malformed");
     }
+
+    const artifacts: IsolatedRunResult["artifacts"] = [];
+    const seen = new Set<string>();
+    for (const entry of index) {
+      if (!entry || typeof entry.file !== "string") {
+        throw new UntrustedArchiveError("artifacts.json names a malformed entry");
+      }
+      if (seen.has(entry.file)) throw new UntrustedArchiveError(`artifacts.json repeats ${entry.file}`);
+      seen.add(entry.file);
+      // The index may only reference members the archive actually carried as regular
+      // files, addressed by their validated relative path.
+      const bytes = entries.get(`artifacts/${entry.file}`);
+      if (!bytes) throw new UntrustedArchiveError(`artifacts.json references missing ${entry.file}`);
+      const artifact = parseJson<IsolatedRunResult["artifacts"][number]>(bytes, entry.file);
+      if (
+        !artifact || typeof artifact !== "object" ||
+        typeof artifact.name !== "string" || typeof artifact.mediaType !== "string" ||
+        typeof artifact.content !== "string"
+      ) {
+        throw new UntrustedArchiveError(`artifact ${entry.file} is malformed`);
+      }
+      artifacts.push(artifact);
+    }
+    return { events, artifacts, terminal };
   }
 
   /**
@@ -418,7 +453,23 @@ export class IsolatedFixtureRuntime {
    * It writes nothing to the operation. A host that cannot see what a worker did must
    * not turn its own recovery policy into evidence that the work failed its checks.
    */
-  async recordUnobservedRun(operationId: string): Promise<{ operationId: string; outcome: "unknown" }> {
+  async recordUnobservedRun(
+    operationId: string,
+    store: { markExecutionUnknown: (operationId: string, reason: string) => void },
+    reason = "isolated execution outcome was not observed",
+  ): Promise<{ operationId: string; outcome: "unknown" }> {
+    // Persisted, not merely returned. An unobserved run has to leave a durable hold, or
+    // the next reopen lets the outbox dispatch the same job again and our blindness
+    // quietly becomes authorization for a second execution.
+    store.markExecutionUnknown(operationId, reason);
     return { operationId, outcome: "unknown" };
+  }
+}
+
+function parseJson<T>(bytes: Buffer, label: string): T {
+  try {
+    return JSON.parse(bytes.toString("utf8")) as T;
+  } catch {
+    throw new UntrustedArchiveError(`${label} is not valid JSON`);
   }
 }
