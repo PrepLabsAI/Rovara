@@ -3,6 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "exports": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "dependencies": {
     "@agentx/contracts": "0.1.0",
     "@aws-sdk/client-bedrock-agentcore": "3.1134.0",

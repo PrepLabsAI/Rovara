@@ -1,0 +1,11 @@
+{
+  "name": "@agentx/host",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@agentx/broker": "0.1.0",
+    "@agentx/contracts": "0.1.0",
+    "@agentx/worker": "0.1.0"
+  }
+}

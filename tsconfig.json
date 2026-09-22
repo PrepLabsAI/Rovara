@@ -4,6 +4,7 @@
     { "path": "packages/contracts" },
     { "path": "packages/broker" },
     { "path": "packages/worker" },
+    { "path": "packages/host" },
     { "path": "packages/cli" },
     { "path": "infra" }
   ]
