@@ -182,6 +182,7 @@ export function createAwsBrokerHandler(dependencies: AwsBrokerDependencies) {
     const request = adaptHttpApiEvent(event);
     try {
       const url = new URL(request.path, "https://agentx.invalid");
+      // Internal worker routes authenticate with operation-scoped capabilities; user JWT auth starts below them.
       const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|pull-request|pull-request-update|codebuild)$/.exec(
         url.pathname,
       );
