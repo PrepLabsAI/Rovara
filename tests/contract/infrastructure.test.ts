@@ -109,7 +109,7 @@ describe("AgentCore Instances infrastructure", () => {
       }],
     });
     template.hasResourceProperties("AWS::BedrockAgentCore::CapacityProvider", {
-      Name: "agentx_production_capacity",
+      Name: "agentx_production_capacity_v2",
       ComputeConfiguration: {
         Ec2Configuration: Match.objectLike({
           LaunchTemplateSource: {
@@ -122,7 +122,7 @@ describe("AgentCore Instances infrastructure", () => {
           Volumes: [{
             EbsConfiguration: Match.objectLike({
               Name: "workspace",
-              SizeGiB: 100,
+              SizeGiB: 20,
               VolumeType: "gp3",
               Encrypted: true,
             }),
@@ -141,11 +141,8 @@ describe("AgentCore Instances infrastructure", () => {
 
   it("synthesizes a separately releasable runtime mounted on the stable capacity provider", () => {
     const app = new App();
-    const capacityProviderArn =
-      "arn:aws:bedrock-agentcore:us-east-1:123456789012:capacity-provider/agentx_production_capacity-1234567890";
     const stack = new AgentRuntimeStack(app, "TestRuntime", {
       deploymentRegion: "us-east-1",
-      capacityProviderArn,
     });
     const template = Template.fromStack(stack);
 
@@ -154,12 +151,12 @@ describe("AgentCore Instances infrastructure", () => {
     template.resourceCountIs("AWS::BedrockAgentCore::Runtime", 1);
     template.hasResourceProperties("AWS::BedrockAgentCore::Runtime", {
       AgentRuntimeName: "agentx_production_worker",
-      CapacityProviderConfiguration: { CapacityProviderArn: capacityProviderArn },
+      CapacityProviderConfiguration: { CapacityProviderArn: { Ref: "CapacityProviderArn" } },
       FilesystemConfigurations: [{
         CapacityProviderVolume: { VolumeName: "workspace", MountPath: "/mnt/workspace" },
       }],
       LifecycleConfiguration: {
-        IdleRuntimeSessionTimeout: 900,
+        IdleRuntimeSessionTimeout: 300,
         MaxLifetime: 1_209_600,
       },
       EnvironmentVariables: {
@@ -193,9 +190,9 @@ describe("AgentCore Instances infrastructure", () => {
     const foundation = {
       region: "us-east-1",
       availabilityZoneIds: defaultProductionAvailabilityZoneIds("us-east-1"),
-      providerIdleSeconds: 900,
+      providerIdleSeconds: 300,
       providerMaxLifetimeSeconds: 1_209_600,
-      volumeSizeGiB: 100,
+      volumeSizeGiB: 20,
       instanceType: "m7g.large",
     };
     expect(validateProductionFoundationConfiguration(foundation)).toEqual(foundation);

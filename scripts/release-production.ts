@@ -152,6 +152,8 @@ export async function releaseProduction(
     `${RUNTIME_STACK}:ModelProvider=${modelProvider}`,
     "--parameters",
     `${RUNTIME_STACK}:ModelId=${modelId}`,
+    "--parameters",
+    `${RUNTIME_STACK}:CapacityProviderArn=${capacityProviderArn}`,
     "--outputs-file",
     "cdk.out/agentx-production-runtime-outputs.json",
   ]);

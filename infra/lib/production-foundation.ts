@@ -96,10 +96,10 @@ export class ProductionFoundationStack extends Stack {
       availabilityZoneIds:
         props.configuration?.availabilityZoneIds ??
         defaultProductionAvailabilityZoneIds(props.deploymentRegion),
-      providerIdleSeconds: props.configuration?.providerIdleSeconds ?? 900,
+      providerIdleSeconds: props.configuration?.providerIdleSeconds ?? 300,
       providerMaxLifetimeSeconds:
         props.configuration?.providerMaxLifetimeSeconds ?? 1_209_600,
-      volumeSizeGiB: props.configuration?.volumeSizeGiB ?? 100,
+      volumeSizeGiB: props.configuration?.volumeSizeGiB ?? 20,
       instanceType: props.configuration?.instanceType ?? AGENTX_PRODUCTION_INSTANCE_TYPE,
     });
 
@@ -263,7 +263,7 @@ export class ProductionFoundationStack extends Stack {
       this,
       "AgentXProductionCapacityProvider",
       {
-        name: "agentx_production_capacity",
+        name: "agentx_production_capacity_v2",
         description: "Stable AgentX production compute and per-session EBS workspace boundary",
         permissionsConfiguration: {
           capacityProviderOperatorRoleArn: operatorRole.roleArn,

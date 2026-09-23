@@ -32,7 +32,6 @@ export interface AgentRuntimeConfiguration {
 
 export interface AgentRuntimeStackProps extends StackProps {
   deploymentRegion: string;
-  capacityProviderArn: string;
   configuration?: Partial<Omit<AgentRuntimeConfiguration, "region">>;
 }
 
@@ -64,7 +63,7 @@ export class AgentRuntimeStack extends Stack {
     const configuration = validateAgentRuntimeConfiguration({
       region: props.deploymentRegion,
       mountPath: props.configuration?.mountPath ?? AGENTX_WORKSPACE_MOUNT,
-      runtimeIdleSeconds: props.configuration?.runtimeIdleSeconds ?? 900,
+      runtimeIdleSeconds: props.configuration?.runtimeIdleSeconds ?? 300,
       runtimeMaxLifetimeSeconds: props.configuration?.runtimeMaxLifetimeSeconds ?? 1_209_600,
     });
 
@@ -87,6 +86,13 @@ export class AgentRuntimeStack extends Stack {
       type: "String",
       description: "pi model identifier available in the deployment region",
     });
+    const capacityProviderArn = new CfnParameter(this, "CapacityProviderArnParameter", {
+      type: "String",
+      allowedPattern:
+        "^arn:aws(-[^:]+)?:bedrock-agentcore:[a-z0-9-]+:[0-9]{12}:capacity-provider/[a-zA-Z][a-zA-Z0-9_]{0,47}-[a-zA-Z0-9]{10}$",
+      description: "Stable AgentCore Instances capacity provider for production workspaces",
+    });
+    capacityProviderArn.overrideLogicalId("CapacityProviderArn");
 
     const executionRole = new iam.Role(this, "RuntimeExecutionRole", {
       assumedBy: new iam.ServicePrincipal("bedrock-agentcore.amazonaws.com", {
@@ -160,7 +166,7 @@ export class AgentRuntimeStack extends Stack {
       agentRuntimeArtifact: {
         containerConfiguration: { containerUri: imageUri.valueAsString },
       },
-      capacityProviderConfiguration: { capacityProviderArn: props.capacityProviderArn },
+      capacityProviderConfiguration: { capacityProviderArn: capacityProviderArn.valueAsString },
       filesystemConfigurations: [
         {
           capacityProviderVolume: {
@@ -190,7 +196,7 @@ export class AgentRuntimeStack extends Stack {
     runtime.applyRemovalPolicy(RemovalPolicy.RETAIN);
 
     this.runtimeArn = runtime.attrAgentRuntimeArn;
-    this.capacityProviderArn = props.capacityProviderArn;
+    this.capacityProviderArn = capacityProviderArn.valueAsString;
     new CfnOutput(this, "AgentRuntimeArn", { value: this.runtimeArn });
     new CfnOutput(this, "CapacityProviderArn", { value: this.capacityProviderArn });
     new CfnOutput(this, "RuntimeExecutionRoleArn", { value: executionRole.roleArn });

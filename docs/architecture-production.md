@@ -69,7 +69,7 @@ session and one EBS workspace volume. Alice and Bob therefore receive different 
 volumes even when they use the same shared project definition. They see each other's work only
 through Git commits and remote branches.
 
-The instance stops after 15 idle minutes to bound EC2 cost. A later invocation using the same
+The instance stops after five idle minutes to bound EC2 cost. A later invocation using the same
 session ID starts managed compute and reattaches the existing EBS volume. The maximum compute
 lifetime is 14 days, but the volume remains associated with the session across stop/resume. An
 administrator must explicitly delete the AgentCore session or capacity provider to delete its
@@ -85,7 +85,7 @@ managed persistent volume.
 - A free S3 gateway endpoint and VPC flow logs retained for 30 days.
 - A rotating customer-managed KMS key retained for workspace recovery safety.
 - The retained ARM64 capacity provider, `m7g.large` compute policy, encrypted root volume, and a
-  named 100 GiB gp3 `workspace` volume.
+  named 20 GiB gp3 `workspace` volume.
 
 `AgentXProductionRuntime` owns the changeable application layer:
 

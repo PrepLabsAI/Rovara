@@ -26,7 +26,7 @@ if (deploymentMode === "demo-microvm") {
     env: { region: deploymentRegion ?? "us-east-1" },
   });
 } else {
-  const foundation = new ProductionFoundationStack(app, "AgentXProductionFoundation", {
+  new ProductionFoundationStack(app, "AgentXProductionFoundation", {
     description: "Stable AgentX production network, encryption, and persistent workspace capacity",
     deploymentRegion: deploymentRegion ?? "us-east-1",
     env: { region: deploymentRegion ?? "us-east-1" },
@@ -35,7 +35,6 @@ if (deploymentMode === "demo-microvm") {
   new AgentRuntimeStack(app, "AgentXProductionRuntime", {
     description: "AgentX production coding runtime on stable EBS-backed capacity",
     deploymentRegion: deploymentRegion ?? "us-east-1",
-    capacityProviderArn: foundation.capacityProviderArn,
     env: { region: deploymentRegion ?? "us-east-1" },
     terminationProtection: true,
   });
