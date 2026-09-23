@@ -17,9 +17,9 @@ only orchestration capabilities to their agents. Repository inspection, editing,
 builds, and tests MUST run in remote coding workers. Tool registration and extension loading MUST
 enforce this boundary; prompts alone are insufficient. Local configuration and client-state I/O
 are permitted. The hosted Slack orchestrator MAY run unattended. It MUST accept only requests that
-Slack has signed and that come from an allowlisted member of the channel bound to the project. It
-MUST act through a service identity limited to Slack thread workspaces, and MUST record the
-requesting Slack user with every operation.
+Slack has signed and that come from a member of the channel bound to the project. It MUST act
+through a service identity limited to Slack thread workspaces, and MUST record the requesting
+Slack user with every operation.
 
 ### II. Administrator-prepared projects
 
@@ -36,8 +36,7 @@ owner and workspace instance. A client-supplied name or session identifier MUST 
 access. Changes become available to colleagues through explicit repository publication and
 integration, never through a shared writable checkout. The only exception is a Slack thread
 workspace. It is owned by its Slack thread (team, channel, and thread, as verified by Slack's
-signed request) and is intentionally shared by the allowlisted channel members who post in that
-thread. It MUST NOT be reachable from any other thread, from a personal workspace, or by a thread
+signed request) and is intentionally shared by the channel members who post in that thread. It MUST NOT be reachable from any other thread, from a personal workspace, or by a thread
 identifier supplied through any other client.
 
 ### IV. Durable working state, replaceable processes
