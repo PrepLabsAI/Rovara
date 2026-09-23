@@ -203,7 +203,7 @@ export async function releaseProduction(
       "6. Update the control plane after the runtime is READY, then enforce 30-day log retention.",
       options.createSlackOrchestrator
         ? "7. Build or reuse the Slack orchestrator image and create or update AgentXSlackOrchestrator."
-        : "7. Build or reuse the Slack orchestrator image and update AgentXSlackOrchestrator only if it already exists.",
+        : "7. If AgentXSlackOrchestrator exists, build or reuse its image and update it; otherwise skip it.",
       "8. Do not register, prepare, rewrite, stop, or migrate any workspace.",
       "",
     ].join("\n"));

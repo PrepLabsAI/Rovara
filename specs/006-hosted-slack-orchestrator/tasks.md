@@ -121,7 +121,23 @@
 
 ## Phase 7: Local Validation
 
-- [ ] T023 Run typecheck, lint, the full test suite (including with git identity auto-detection disabled), infrastructure synthesis, both image builds with smoke tests, and a production release dry run
+- [X] T023 Run typecheck, lint, the full test suite (including with git identity auto-detection disabled), infrastructure synthesis, both image builds with smoke tests, and a production release dry run
+
+### Phase 7 evidence (local, plus read-only AWS diffs)
+
+- **Checks.** Typecheck, lint, and the full suite (36 files, 198 tests) pass, with git identity auto-detection disabled.
+- **Synthesis.** `cdk synth` in `instances-ebs` mode produces all five stacks. The only validation warning is the pre-existing `GitHubAppPrivateKeySecretArn` "looks like a password" false positive: the parameter is an ARN, not a secret.
+- **Images.** Both images build for linux/arm64 and pass the release smoke tests.
+  - Slack orchestrator (186 MB): the orchestrator, control-plane client, and consumer modules resolve.
+  - Worker (219 MB): `/ping` reports `Healthy`.
+- **Dry run.** `release:prod --dry-run` prints the plan with and without `--create-slack-orchestrator`. Step 7 now says the orchestrator image is built only when its stack exists or is being created.
+- **`AgentXControlPlane` diff against AWS.**
+  - Adds the Slack parameters, secret, threads table, queue and dead-letter queue, session bucket, orchestrator task role, ingress Lambda and its log group, the two routes, and the Slack outputs.
+  - Updates the three existing Lambdas in place.
+  - Replaces or removes nothing.
+  - Until the secret is set and the Slack app points at the events URL, the new ingress rejects every request.
+- **`AgentXReleasePipeline` diff against AWS.** It only adds build-role permissions: `DescribeStacks` on `AgentXSlackOrchestrator`, and push access to `agentx-slack-orchestrator`.
+- **Deployment order (confirmed by reading `stackExists`).** `stackExists` throws on `AccessDenied`. If `mainline` releases this branch before `AgentXReleasePipeline` is redeployed, the run deploys the runtime and control plane and then fails at the orchestrator step. Redeploy the pipeline stack before merging. Its changes only add permissions and widen the trigger, so they are compatible with the current `mainline`.
 
 ## Phase 8: Deployment and Live Acceptance
 
