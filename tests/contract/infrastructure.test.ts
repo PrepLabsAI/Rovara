@@ -288,7 +288,7 @@ describe("production release pipeline", () => {
     expect(actions.filter((action) => action === "*" || action.endsWith(":*"))).toEqual([]);
     expect(
       statements.filter((statement) => statement.Resource === "*").flatMap(actionsOf),
-    ).toEqual(["ecr:GetAuthorizationToken"]);
+    ).toEqual(["ecr:GetAuthorizationToken", "logs:DescribeLogGroups"]);
     const assume = statements.find((statement) => statement.Sid === "AssumeCdkBootstrapRoles");
     expect(JSON.stringify(assume?.Resource)).toContain(":role/cdk-hnb659fds-*-");
     const repository = statements.find((statement) => statement.Sid === "ProductionWorkerRepository");

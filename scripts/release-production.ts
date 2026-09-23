@@ -204,7 +204,8 @@ export async function releaseProduction(
   const existingRuntime = stackExists(runner, options.region, RUNTIME_STACK)
     ? describeStack(runner, options.region, RUNTIME_STACK)
     : undefined;
-  const demoRuntime = stackExists(runner, options.region, DEMO_RUNTIME_STACK)
+  // The retired demo runtime only supplies model defaults for the first production release.
+  const demoRuntime = !existingRuntime && stackExists(runner, options.region, DEMO_RUNTIME_STACK)
     ? describeStack(runner, options.region, DEMO_RUNTIME_STACK)
     : undefined;
   const modelProvider = process.env.AGENTX_MODEL_PROVIDER

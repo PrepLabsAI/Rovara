@@ -159,10 +159,11 @@ export class ReleasePipelineStack extends Stack {
           scoped("bedrock-agentcore", "capacity-provider/agentx_production_capacity_*"),
         ],
       }),
+      // DescribeLogGroups has no resource-level permissions; IAM denies any narrower resource.
       new iam.PolicyStatement({
         sid: "DescribeLogGroups",
         actions: ["logs:DescribeLogGroups"],
-        resources: [scoped("logs", "log-group:*")],
+        resources: ["*"],
       }),
       new iam.PolicyStatement({
         sid: "RuntimeLogRetention",
