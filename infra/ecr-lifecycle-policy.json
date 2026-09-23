@@ -1,0 +1,56 @@
+{
+  "rules": [
+    {
+      "rulePriority": 1,
+      "description": "Expire untagged worker builds after seven days",
+      "selection": {
+        "tagStatus": "untagged",
+        "countType": "sinceImagePushed",
+        "countUnit": "days",
+        "countNumber": 7
+      },
+      "action": {
+        "type": "expire"
+      }
+    },
+    {
+      "rulePriority": 2,
+      "description": "Keep the newest twenty AgentX release images",
+      "selection": {
+        "tagStatus": "tagged",
+        "tagPrefixList": ["release-"],
+        "countType": "imageCountMoreThan",
+        "countNumber": 20
+      },
+      "action": {
+        "type": "expire"
+      }
+    },
+    {
+      "rulePriority": 3,
+      "description": "Keep five legacy demo images during migration to release tags",
+      "selection": {
+        "tagStatus": "tagged",
+        "tagPrefixList": ["demo-"],
+        "countType": "imageCountMoreThan",
+        "countNumber": 5
+      },
+      "action": {
+        "type": "expire"
+      }
+    },
+    {
+      "rulePriority": 4,
+      "description": "Keep five legacy PR validation images during migration to release tags",
+      "selection": {
+        "tagStatus": "tagged",
+        "tagPrefixList": ["pr-create-"],
+        "countType": "imageCountMoreThan",
+        "countNumber": 5
+      },
+      "action": {
+        "type": "expire"
+      }
+    }
+  ]
+}
