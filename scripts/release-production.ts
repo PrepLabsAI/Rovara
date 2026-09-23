@@ -5,6 +5,7 @@ import { AGENTX_PROTOCOL_VERSION } from "../packages/contracts/src/protocol.js";
 import {
   Runner,
   assertDigestImage,
+  buildAndPushImage,
   buildAndPushWorker,
   describeStack,
   ensureLogRetention,
@@ -20,6 +21,7 @@ import {
   waitForRuntime,
   type ReleaseManifest,
   type ReleaseOptions,
+  type StackDescription,
 } from "./release-demo.js";
 
 const DEFAULT_REPOSITORY = "agentx-worker-production";
@@ -27,7 +29,9 @@ const CONTROL_PLANE_STACK = "AgentXControlPlane";
 const DEMO_RUNTIME_STACK = "AgentXDemoRuntime";
 const FOUNDATION_STACK = "AgentXProductionFoundation";
 const RUNTIME_STACK = "AgentXProductionRuntime";
-const PRODUCTION_FLAGS = ["--reuse-unchanged-worker", "--require-existing-foundation"];
+export const SLACK_ORCHESTRATOR_STACK = "AgentXSlackOrchestrator";
+export const SLACK_ORCHESTRATOR_REPOSITORY = "agentx-slack-orchestrator";
+const PRODUCTION_FLAGS = ["--reuse-unchanged-worker", "--require-existing-foundation", "--create-slack-orchestrator"];
 const RELEASE_TAG_PATTERN = /^release-\d{8}T\d{6}Z-([a-f0-9]{7,40})$/;
 
 // Every path that environments/base/Dockerfile copies into the worker image, plus the build files.
@@ -46,14 +50,41 @@ export const WORKER_IMAGE_INPUTS = [
   "infra/package.json",
 ] as const;
 
+// Every path that environments/slack/Dockerfile copies into the Slack orchestrator image, plus the build files.
+export const SLACK_ORCHESTRATOR_IMAGE_INPUTS = [
+  "environments/slack/Dockerfile",
+  ".dockerignore",
+  "package.json",
+  "package-lock.json",
+  "tsconfig.json",
+  "tsconfig.base.json",
+  "packages/contracts",
+  "packages/cli",
+  "packages/slack-service",
+  "packages/worker/package.json",
+  "packages/broker/package.json",
+  "infra/package.json",
+] as const;
+
 export interface ProductionReleaseOptions extends ReleaseOptions {
   reuseUnchangedWorker: boolean;
   requireExistingFoundation: boolean;
+  createSlackOrchestrator: boolean;
 }
 
 export interface ProductionReleaseManifest extends ReleaseManifest {
   capacityProviderArn: string;
   deploymentMode: "instances-ebs";
+  slackOrchestratorImage?: string;
+}
+
+interface DeployedImage {
+  label: string;
+  stack: string;
+  parameter: string;
+  repository: string;
+  repositoryUri: string;
+  inputs: readonly string[];
 }
 
 interface CapacityProviderDescription {
@@ -71,6 +102,7 @@ export function parseProductionReleaseArgs(
     ...(argv.includes("--repository") ? {} : { repository: DEFAULT_REPOSITORY }),
     reuseUnchangedWorker: argv.includes("--reuse-unchanged-worker"),
     requireExistingFoundation: argv.includes("--require-existing-foundation"),
+    createSlackOrchestrator: argv.includes("--create-slack-orchestrator"),
   };
 }
 
@@ -87,19 +119,27 @@ export function reusableWorkerImage(
   options: ReleaseOptions,
   repositoryUri: string,
 ): string | undefined {
+  return reusableImage(runner, options, {
+    label: "worker",
+    stack: RUNTIME_STACK,
+    parameter: "WorkerImageUri",
+    repository: options.repository,
+    repositoryUri,
+    inputs: WORKER_IMAGE_INPUTS,
+  });
+}
+
+export function reusableImage(runner: Runner, options: ReleaseOptions, image: DeployedImage): string | undefined {
   const build = (reason: string): undefined => {
-    process.stdout.write(`\nBuilding a new worker image: ${reason}.\n`);
+    process.stdout.write(`\nBuilding a new ${image.label} image: ${reason}.\n`);
     return undefined;
   };
-  if (!stackExists(runner, options.region, RUNTIME_STACK)) {
-    return build(`${RUNTIME_STACK} is not deployed`);
+  if (!stackExists(runner, options.region, image.stack)) {
+    return build(`${image.stack} is not deployed`);
   }
-  const deployedImage = stackParameter(
-    describeStack(runner, options.region, RUNTIME_STACK),
-    "WorkerImageUri",
-  );
-  if (!deployedImage?.startsWith(`${repositoryUri}@sha256:`)) {
-    return build(`the deployed image ${deployedImage ?? "(none)"} is not in ${repositoryUri}`);
+  const deployedImage = stackParameter(describeStack(runner, options.region, image.stack), image.parameter);
+  if (!deployedImage?.startsWith(`${image.repositoryUri}@sha256:`)) {
+    return build(`the deployed image ${deployedImage ?? "(none)"} is not in ${image.repositoryUri}`);
   }
   const digest = deployedImage.slice(deployedImage.indexOf("@") + 1);
   const described = runner.aws([
@@ -108,7 +148,7 @@ export function reusableWorkerImage(
     "--region",
     options.region,
     "--repository-name",
-    options.repository,
+    image.repository,
     "--image-ids",
     `imageDigest=${digest}`,
     "--query",
@@ -126,15 +166,11 @@ export function reusableWorkerImage(
   if (runner.capture("git", ["cat-file", "-e", `${revision}^{commit}`], true).status !== 0) {
     return build(`the deployed commit ${revision} is not in this checkout's history`);
   }
-  const diff = runner.capture(
-    "git",
-    ["diff", "--quiet", revision, "HEAD", "--", ...WORKER_IMAGE_INPUTS],
-    true,
-  );
-  if (diff.status === 1) return build(`worker image inputs changed since ${revision}`);
+  const diff = runner.capture("git", ["diff", "--quiet", revision, "HEAD", "--", ...image.inputs], true);
+  if (diff.status === 1) return build(`${image.label} image inputs changed since ${revision}`);
   if (diff.status !== 0) return build(`git could not compare ${revision} with HEAD`);
   process.stdout.write(
-    `\nReusing deployed worker image ${deployedImage}: no worker image inputs changed since ${revision}.\n`,
+    `\nReusing deployed ${image.label} image ${deployedImage}: no ${image.label} image inputs changed since ${revision}.\n`,
   );
   return deployedImage;
 }
@@ -165,7 +201,10 @@ export async function releaseProduction(
         : "4. Create the protected VPC/EBS capacity foundation only when it does not exist.",
       "5. Refuse foundation drift on routine releases; update only the production runtime.",
       "6. Update the control plane after the runtime is READY, then enforce 30-day log retention.",
-      "7. Do not register, prepare, rewrite, stop, or migrate any workspace.",
+      options.createSlackOrchestrator
+        ? "7. Build or reuse the Slack orchestrator image and create or update AgentXSlackOrchestrator."
+        : "7. Build or reuse the Slack orchestrator image and update AgentXSlackOrchestrator only if it already exists.",
+      "8. Do not register, prepare, rewrite, stop, or migrate any workspace.",
       "",
     ].join("\n"));
     return undefined;
@@ -279,6 +318,7 @@ export async function releaseProduction(
       "the control-plane URL changed; rerun the production release so the runtime receives the new callback URL",
     );
   }
+  const slackOrchestratorImage = await releaseSlackOrchestrator(runner, options, identity.Account, revision, foundation);
 
   const manifest: ProductionReleaseManifest = {
     releasedAt: new Date().toISOString(),
@@ -292,6 +332,7 @@ export async function releaseProduction(
     accountId: identity.Account,
     capacityProviderArn,
     deploymentMode: "instances-ebs",
+    ...(slackOrchestratorImage === undefined ? {} : { slackOrchestratorImage }),
   };
   mkdirSync(resolve("cdk.out"), { recursive: true });
   writeFileSync(
@@ -301,6 +342,88 @@ export async function releaseProduction(
   );
   process.stdout.write(`\nAgentX production release complete:\n${JSON.stringify(manifest, null, 2)}\n`);
   return manifest;
+}
+
+async function releaseSlackOrchestrator(
+  runner: Runner,
+  options: ProductionReleaseOptions,
+  accountId: string,
+  revision: string,
+  foundation: StackDescription,
+): Promise<string | undefined> {
+  const exists = stackExists(runner, options.region, SLACK_ORCHESTRATOR_STACK);
+  if (!exists && !options.createSlackOrchestrator) {
+    process.stdout.write(
+      `\nSkipping ${SLACK_ORCHESTRATOR_STACK}: it does not exist. Create it once with --create-slack-orchestrator.\n`,
+    );
+    return undefined;
+  }
+  const imageOptions: ReleaseOptions = { ...options, repository: SLACK_ORCHESTRATOR_REPOSITORY };
+  const repositoryUri = `${accountId}.dkr.ecr.${options.region}.amazonaws.com/${SLACK_ORCHESTRATOR_REPOSITORY}`;
+  ensureRepository(runner, imageOptions);
+  const image = (options.reuseUnchangedWorker
+    ? reusableImage(runner, imageOptions, {
+        label: "Slack orchestrator",
+        stack: SLACK_ORCHESTRATOR_STACK,
+        parameter: "OrchestratorImageUri",
+        repository: SLACK_ORCHESTRATOR_REPOSITORY,
+        repositoryUri,
+        inputs: SLACK_ORCHESTRATOR_IMAGE_INPUTS,
+      })
+    : undefined)
+    ?? await buildAndPushImage(runner, imageOptions, {
+      repository: SLACK_ORCHESTRATOR_REPOSITORY,
+      repositoryUri,
+      dockerfile: "environments/slack/Dockerfile",
+      localName: "agentx-slack-orchestrator",
+      smokeTest: smokeTestSlackOrchestrator,
+    }, revision);
+  assertDigestImage(image, repositoryUri);
+  verifyRepositoryImage(runner, imageOptions, image);
+
+  const controlPlane = describeStack(runner, options.region, CONTROL_PLANE_STACK);
+  const parameter = (name: string, value: string) => ["--parameters", `${SLACK_ORCHESTRATOR_STACK}:${name}=${value}`];
+  runner.run("npx", [
+    "cdk",
+    "deploy",
+    SLACK_ORCHESTRATOR_STACK,
+    "--exclusively",
+    "--app",
+    "node infra/dist/bin/agentx.js",
+    "--require-approval",
+    "never",
+    "-c",
+    "agentxDeploymentMode=instances-ebs",
+    "-c",
+    `agentxRegion=${options.region}`,
+    ...profileArgs(options.profile),
+    ...parameter("OrchestratorImageUri", image),
+    ...parameter("TaskRoleArn", stackOutput(controlPlane, "SlackOrchestratorTaskRoleArn")),
+    ...parameter("ControlPlaneUrl", stackOutput(controlPlane, "ApiEndpoint")),
+    ...parameter("SlackRequestQueueUrl", stackOutput(controlPlane, "SlackRequestQueueUrl")),
+    ...parameter("SlackThreadsTableName", stackOutput(controlPlane, "SlackThreadsTableName")),
+    ...parameter("ThreadSessionBucketName", stackOutput(controlPlane, "SlackThreadSessionBucketName")),
+    ...parameter("SlackSecretArn", stackOutput(controlPlane, "SlackSecretArn")),
+    ...parameter("VpcId", stackOutput(foundation, "VpcId")),
+    ...parameter("PrivateSubnetIds", stackOutput(foundation, "PrivateSubnetIds")),
+    "--outputs-file",
+    "cdk.out/agentx-slack-orchestrator-outputs.json",
+  ]);
+  return image;
+}
+
+async function smokeTestSlackOrchestrator(runner: Runner, image: string): Promise<void> {
+  const script = [
+    "await import('@agentx/cli/orchestrator');",
+    "await import('@agentx/cli/control-plane-api');",
+    "await import('/opt/agentx/packages/slack-service/dist/consumer.js');",
+    "console.log('slack orchestrator modules ok');",
+  ].join(" ");
+  const result = runner.capture("docker", ["run", "--rm", image, "node", "--input-type=module", "-e", script], true);
+  if (result.status !== 0 || !result.stdout.includes("slack orchestrator modules ok")) {
+    process.stderr.write(result.stderr);
+    throw new Error("Slack orchestrator image smoke test failed");
+  }
 }
 
 function deployFoundation(runner: Runner, options: ReleaseOptions): void {
@@ -403,8 +526,9 @@ function usage(): string {
     `  --profile <profile>        AWS CLI/CDK profile\n` +
     `  --repository <name>        ECR repository (default: agentx-worker-production)\n` +
     `  --worker-image <digest>    Deploy an already-published image from that repository\n` +
-    `  --reuse-unchanged-worker   Reuse the deployed image when no worker image input changed\n` +
+    `  --reuse-unchanged-worker   Reuse the deployed worker and Slack orchestrator images when their inputs are unchanged\n` +
     `  --require-existing-foundation  Fail instead of creating the production foundation\n` +
+    `  --create-slack-orchestrator    Create AgentXSlackOrchestrator if it does not exist (first release only)\n` +
     `  --allow-dirty              Explicitly allow releasing an uncommitted checkout\n` +
     `  --skip-checks              Skip typecheck, lint, and tests\n` +
     `  --dry-run                  Print the release stages without changing AWS\n` +

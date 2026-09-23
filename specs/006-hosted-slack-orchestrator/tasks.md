@@ -81,9 +81,22 @@
 
 ## Phase 5: Release Pipeline
 
-- [ ] T018 Generalize the worker-image reuse decision to per-image inputs, and add orchestrator image build, push, and conditional stack deployment in `scripts/release-production.ts`
-- [ ] T019 Update the pipeline trigger patterns, the ECR repository permissions, and the stack describe permissions in `infra/lib/release-pipeline.ts`
-- [ ] T020 Extend the release command and pipeline tests for the orchestrator inputs, the trigger coverage, and the permissions
+- [X] T018 Generalize the worker-image reuse decision to per-image inputs, and add orchestrator image build, push, and conditional stack deployment in `scripts/release-production.ts`
+- [X] T019 Update the pipeline trigger patterns, the ECR repository permissions, and the stack describe permissions in `infra/lib/release-pipeline.ts`
+- [X] T020 Extend the release command and pipeline tests for the orchestrator inputs, the trigger coverage, and the permissions
+
+### Phase 5 evidence (local only)
+
+- **Shared helpers.** `buildAndPushImage` (in `scripts/release-demo.ts`) and `reusableImage` (in `scripts/release-production.ts`) are shared by both images; `buildAndPushWorker` and `reusableWorkerImage` are thin wrappers, so the worker path is unchanged.
+- **New release steps.** After the control plane is deployed, `release:prod`:
+  1. builds or reuses the Slack orchestrator image
+  2. smoke-tests that its modules resolve inside the container
+  3. deploys `AgentXSlackOrchestrator`, passing control-plane and foundation outputs as parameters
+- **Creating the stack.** If the stack does not exist, the release skips it, unless an operator passes `--create-slack-orchestrator`. The pipeline never passes that flag.
+- **Pipeline permissions.** The build role may push to `agentx-slack-orchestrator` and describe `AgentXSlackOrchestrator`. These permissions reach AWS only when `AgentXReleasePipeline` is redeployed by hand (T025).
+- **Tests.** Slack orchestrator Dockerfile coverage, trigger coverage for both images' inputs, the creation flag, repository-name agreement between the script and the infrastructure, and pipeline IAM.
+- **Checks.** Full suite (36 files, 202 tests), typecheck, and lint pass.
+- **Unchanged pre-existing errors.** A stricter compile of scripts and tests with `tsconfig.lint.json` reports the same errors on `mainline` as on this branch. None are in files or lines this feature added. CI does not run that check.
 
 ## Phase 6: Retire Local Slack Mode
 

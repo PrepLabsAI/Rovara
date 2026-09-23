@@ -4,6 +4,7 @@ import {
   AGENTX_PRODUCTION_WORKER_REPOSITORY,
   AGENTX_RELEASE_TRIGGER_PATHS,
 } from "../../infra/lib/release-pipeline.js";
+import { AGENTX_SLACK_ORCHESTRATOR_REPOSITORY } from "../../infra/lib/slack-orchestrator.js";
 import {
   assertDigestImage,
   parseReleaseArgs,
@@ -12,12 +13,21 @@ import {
   type Runner,
 } from "../../scripts/release-demo.js";
 import {
+  SLACK_ORCHESTRATOR_IMAGE_INPUTS,
+  SLACK_ORCHESTRATOR_REPOSITORY,
   WORKER_IMAGE_INPUTS,
   capacityProviderIdFromArn,
   parseProductionReleaseArgs,
   releaseRevisionFromTags,
   reusableWorkerImage,
 } from "../../scripts/release-production.js";
+
+function dockerfileSources(path: string): string[] {
+  return readFileSync(path, "utf8")
+    .split("\n")
+    .filter((line) => line.startsWith("COPY ") && !line.includes("--from="))
+    .flatMap((line) => line.trim().split(/\s+/).slice(1, -1));
+}
 
 describe("demo release command", () => {
   it("parses safe defaults and explicit deployment options", () => {
@@ -196,10 +206,7 @@ describe("worker image reuse", () => {
   });
 
   it("treats every file the worker Dockerfile copies as a worker image input", () => {
-    const sources = readFileSync("environments/base/Dockerfile", "utf8")
-      .split("\n")
-      .filter((line) => line.startsWith("COPY ") && !line.includes("--from="))
-      .flatMap((line) => line.trim().split(/\s+/).slice(1, -1));
+    const sources = dockerfileSources("environments/base/Dockerfile");
     expect(sources.length).toBeGreaterThan(0);
     const covered = (path: string) =>
       WORKER_IMAGE_INPUTS.some((input) => path === input || path.startsWith(`${input}/`));
@@ -207,6 +214,26 @@ describe("worker image reuse", () => {
     expect(WORKER_IMAGE_INPUTS).toContain("environments/base/Dockerfile");
     expect(WORKER_IMAGE_INPUTS).toContain(".dockerignore");
     expect(WORKER_IMAGE_INPUTS.filter((input) => !existsSync(input))).toEqual([]);
+  });
+});
+
+describe("Slack orchestrator release", () => {
+  it("treats every file the Slack orchestrator Dockerfile copies as one of its image inputs", () => {
+    const sources = dockerfileSources("environments/slack/Dockerfile");
+    expect(sources.length).toBeGreaterThan(0);
+    const covered = (path: string) =>
+      SLACK_ORCHESTRATOR_IMAGE_INPUTS.some((input) => path === input || path.startsWith(`${input}/`));
+    expect(sources.filter((source) => !covered(source))).toEqual([]);
+    expect(SLACK_ORCHESTRATOR_IMAGE_INPUTS).toContain("environments/slack/Dockerfile");
+    expect(SLACK_ORCHESTRATOR_IMAGE_INPUTS).toContain(".dockerignore");
+    expect(SLACK_ORCHESTRATOR_IMAGE_INPUTS.filter((input) => !existsSync(input))).toEqual([]);
+  });
+
+  it("creates the orchestrator stack only when asked, and pushes to the repository the pipeline may write", () => {
+    expect(parseProductionReleaseArgs([], {}).createSlackOrchestrator).toBe(false);
+    expect(parseProductionReleaseArgs(["--create-slack-orchestrator"], {}).createSlackOrchestrator).toBe(true);
+    expect(() => parseReleaseArgs(["--create-slack-orchestrator"], {})).toThrow(/unknown option/);
+    expect(SLACK_ORCHESTRATOR_REPOSITORY).toBe(AGENTX_SLACK_ORCHESTRATOR_REPOSITORY);
   });
 });
 
@@ -239,8 +266,8 @@ describe("release pipeline trigger", () => {
     expect(AGENTX_RELEASE_TRIGGER_PATHS.length).toBeLessThanOrEqual(8);
   });
 
-  it("starts the pipeline for every worker image input and control-plane source", () => {
-    const samples = WORKER_IMAGE_INPUTS.map((input) =>
+  it("starts the pipeline for every worker and Slack orchestrator image input and control-plane source", () => {
+    const samples = [...WORKER_IMAGE_INPUTS, ...SLACK_ORCHESTRATOR_IMAGE_INPUTS].map((input) =>
       statSync(input).isDirectory() ? `${input}/src/index.ts` : input);
     expect(samples.filter((sample) => !triggered(sample))).toEqual([]);
     expect(triggered("packages/broker/src/aws/dispatcher.ts")).toBe(true);

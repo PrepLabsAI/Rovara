@@ -427,7 +427,10 @@ describe("production release pipeline", () => {
     expect(JSON.stringify(assume?.Resource)).toContain(":role/cdk-hnb659fds-*-");
     const repository = statements.find((statement) => statement.Sid === "ProductionWorkerRepository");
     expect(JSON.stringify(repository?.Resource)).toContain("repository/agentx-worker-production");
+    expect(JSON.stringify(repository?.Resource)).toContain("repository/agentx-slack-orchestrator");
     expect(actionsOf(repository!)).not.toContain("ecr:CreateRepository");
+    const stacks = statements.find((statement) => statement.Sid === "ReadReleaseStacks");
+    expect(JSON.stringify(stacks?.Resource)).toContain("stack/AgentXSlackOrchestrator/*");
     expect(json).toContain("codeconnections:UseConnection");
     expect(json).toContain("bedrock-agentcore:GetCapacityProvider");
     expect(actions).not.toContain("cloudformation:CreateStack");

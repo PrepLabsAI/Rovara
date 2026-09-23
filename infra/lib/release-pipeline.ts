@@ -12,6 +12,7 @@ import {
   aws_s3 as s3,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
+import { AGENTX_SLACK_ORCHESTRATOR_REPOSITORY } from "./slack-orchestrator.js";
 
 export const AGENTX_RELEASE_REPOSITORY_OWNER = "PrepLabsAI";
 export const AGENTX_RELEASE_REPOSITORY_NAME = "AgentX";
@@ -24,6 +25,7 @@ export const AGENTX_RELEASE_STACKS = [
   "AgentXControlPlane",
   "AgentXProductionFoundation",
   "AgentXProductionRuntime",
+  "AgentXSlackOrchestrator",
 ] as const;
 // Deployable inputs only: the worker and Slack orchestrator images, the control-plane Lambdas, and the CDK app.
 export const AGENTX_RELEASE_TRIGGER_PATHS = [
@@ -141,7 +143,10 @@ export class ReleasePipelineStack extends Stack {
           "ecr:PutLifecyclePolicy",
           "ecr:UploadLayerPart",
         ],
-        resources: [scoped("ecr", `repository/${AGENTX_PRODUCTION_WORKER_REPOSITORY}`)],
+        resources: [
+          scoped("ecr", `repository/${AGENTX_PRODUCTION_WORKER_REPOSITORY}`),
+          scoped("ecr", `repository/${AGENTX_SLACK_ORCHESTRATOR_REPOSITORY}`),
+        ],
       }),
       new iam.PolicyStatement({
         sid: "ReadReleaseStacks",

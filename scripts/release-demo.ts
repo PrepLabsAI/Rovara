@@ -417,15 +417,38 @@ export function verifyRepositoryImage(runner: Runner, options: ReleaseOptions, w
   ]);
 }
 
+export interface ImageBuild {
+  repository: string;
+  repositoryUri: string;
+  dockerfile: string;
+  localName: string;
+  smokeTest: (runner: Runner, image: string) => Promise<void>;
+}
+
 export async function buildAndPushWorker(
   runner: Runner,
   options: ReleaseOptions,
   repositoryUri: string,
   revision: string,
 ): Promise<string> {
+  return buildAndPushImage(runner, options, {
+    repository: options.repository,
+    repositoryUri,
+    dockerfile: "environments/base/Dockerfile",
+    localName: "agentx-worker",
+    smokeTest: smokeTestWorker,
+  }, revision);
+}
+
+export async function buildAndPushImage(
+  runner: Runner,
+  options: ReleaseOptions,
+  image: ImageBuild,
+  revision: string,
+): Promise<string> {
   const tag = releaseTag(new Date(), revision);
-  const localImage = `agentx-worker:${tag}`;
-  const remoteImage = `${repositoryUri}:${tag}`;
+  const localImage = `${image.localName}:${tag}`;
+  const remoteImage = `${image.repositoryUri}:${tag}`;
   runner.run("docker", [
     "buildx",
     "build",
@@ -439,10 +462,10 @@ export async function buildAndPushWorker(
     "--label",
     `org.opencontainers.image.created=${new Date().toISOString()}`,
     "--file",
-    "environments/base/Dockerfile",
+    image.dockerfile,
     ".",
   ]);
-  await smokeTestWorker(runner, localImage);
+  await image.smokeTest(runner, localImage);
 
   const password = runner.aws([
     "ecr",
@@ -450,7 +473,7 @@ export async function buildAndPushWorker(
     "--region",
     options.region,
   ]).stdout;
-  runner.run("docker", ["login", "--username", "AWS", "--password-stdin", repositoryUri.split("/")[0]!], password);
+  runner.run("docker", ["login", "--username", "AWS", "--password-stdin", image.repositoryUri.split("/")[0]!], password);
   runner.run("docker", ["tag", localImage, remoteImage]);
   runner.run("docker", ["push", remoteImage]);
   const digest = runner.aws([
@@ -459,7 +482,7 @@ export async function buildAndPushWorker(
     "--region",
     options.region,
     "--repository-name",
-    options.repository,
+    image.repository,
     "--image-ids",
     `imageTag=${tag}`,
     "--query",
@@ -467,9 +490,9 @@ export async function buildAndPushWorker(
     "--output",
     "text",
   ]).stdout.trim();
-  const workerImage = `${repositoryUri}@${digest}`;
-  assertDigestImage(workerImage, repositoryUri);
-  return workerImage;
+  const pushed = `${image.repositoryUri}@${digest}`;
+  assertDigestImage(pushed, image.repositoryUri);
+  return pushed;
 }
 
 async function smokeTestWorker(runner: Runner, image: string): Promise<void> {
