@@ -28,7 +28,7 @@
 
 ## Phase 5: Deployment and Live Acceptance
 
-- [ ] T011 Deploy `AgentXReleasePipeline` with the authorized GitHub connection ARN
+- [X] T011 Deploy `AgentXReleasePipeline` with the authorized GitHub connection ARN
 - [ ] T012 Enable branch protection on `mainline`
 - [ ] T013 Live: a worker-changing commit produces a new image and a `READY` runtime on that digest
 - [ ] T014 Live: a broker-only commit reuses the deployed digest and leaves the runtime version unchanged

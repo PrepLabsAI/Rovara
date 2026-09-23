@@ -247,7 +247,10 @@ describe("pull request publication", () => {
     await git(conflicted.checkout, ["add", "README.md"]);
     await git(conflicted.checkout, ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "theirs"]);
     await git(conflicted.checkout, ["checkout", "ours"]);
-    await expect(git(conflicted.checkout, ["merge", "theirs"])).rejects.toThrow();
+    await expect(git(conflicted.checkout, [
+      "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "merge", "theirs",
+    ])).rejects.toThrow();
+    expect(await git(conflicted.checkout, ["diff", "--name-only", "--diff-filter=U"])).toBe("README.md\n");
     const credentialProvider = vi.fn(async () => ({}));
     const pullRequestSink = vi.fn();
     await expect(publishWorkspace({
