@@ -10,6 +10,11 @@ import {
   DemoRuntimeStack,
   validateDemoRuntimeConfiguration,
 } from "../../infra/lib/demo-runtime.js";
+import {
+  ProductionFoundationStack,
+  defaultProductionAvailabilityZoneIds,
+  validateProductionFoundationConfiguration,
+} from "../../infra/lib/production-foundation.js";
 
 describe("control-plane infrastructure", () => {
   it("synthesizes private storage, durable dispatch, JWT auth and a single runtime invoker", () => {
@@ -77,35 +82,128 @@ describe("control-plane infrastructure", () => {
 });
 
 describe("AgentCore Instances infrastructure", () => {
-  it("synthesizes an encrypted per-session EBS volume at /mnt/workspace", () => {
+  it("synthesizes a retained ARM64 capacity provider in a dedicated two-AZ VPC", () => {
     const app = new App();
-    const stack = new AgentRuntimeStack(app, "TestRuntime", { deploymentRegion: "us-east-1" });
-    const template = Template.fromStack(stack).toJSON();
-    const json = JSON.stringify(template);
+    const stack = new ProductionFoundationStack(app, "TestFoundation", {
+      deploymentRegion: "us-east-1",
+    });
+    const template = Template.fromStack(stack);
+    const json = JSON.stringify(template.toJSON());
 
-    expect(json).toContain("AWS::BedrockAgentCore::CapacityProvider");
-    expect(json).toContain("AWS::BedrockAgentCore::Runtime");
-    expect(json).toContain("/mnt/workspace");
-    expect(json).toContain('"Encrypted":true');
-    expect(json).toContain('"VolumeName":"workspace"');
+    template.resourceCountIs("AWS::EC2::VPC", 1);
+    template.resourceCountIs("AWS::EC2::Subnet", 4);
+    template.resourceCountIs("AWS::EC2::NatGateway", 2);
+    template.resourceCountIs("AWS::EC2::FlowLog", 1);
+    template.resourceCountIs("AWS::EC2::VPCEndpoint", 1);
+    template.resourceCountIs("AWS::KMS::Key", 1);
+    template.resourceCountIs("AWS::BedrockAgentCore::CapacityProvider", 1);
+    template.resourceCountIs("AWS::BedrockAgentCore::Runtime", 0);
+    template.hasResourceProperties("AWS::EC2::SecurityGroup", {
+      GroupDescription: "AgentX production workers: no ingress and HTTPS-only egress",
+      SecurityGroupEgress: [{
+        IpProtocol: "tcp",
+        FromPort: 443,
+        ToPort: 443,
+        CidrIp: "0.0.0.0/0",
+        Description: Match.anyValue(),
+      }],
+    });
+    template.hasResourceProperties("AWS::BedrockAgentCore::CapacityProvider", {
+      Name: "agentx_production_capacity",
+      ComputeConfiguration: {
+        Ec2Configuration: Match.objectLike({
+          LaunchTemplateSource: {
+            LaunchParameters: Match.objectLike({
+              OperatingSystem: "LINUX_ARM64",
+              InstanceRequirements: { AllowedInstanceTypes: ["m7g.large"] },
+            }),
+          },
+          RootVolume: Match.objectLike({ Encrypted: true, VolumeType: "gp3" }),
+          Volumes: [{
+            EbsConfiguration: Match.objectLike({
+              Name: "workspace",
+              SizeGiB: 100,
+              VolumeType: "gp3",
+              Encrypted: true,
+            }),
+          }],
+        }),
+      },
+    });
+    template.hasResource("AWS::BedrockAgentCore::CapacityProvider", {
+      DeletionPolicy: "Retain",
+      UpdateReplacePolicy: "Retain",
+    });
+    expect(json).toContain("BedrockAgentCoreRuntimeInstancesOperatorRolePolicy");
+    expect(json).toContain("alias/agentx/production-workspaces");
+    expect(json).toContain('"RetentionInDays":30');
   });
 
-  it("rejects unsupported regions and runtime lifetimes beyond their provider", () => {
+  it("synthesizes a separately releasable runtime mounted on the stable capacity provider", () => {
+    const app = new App();
+    const capacityProviderArn =
+      "arn:aws:bedrock-agentcore:us-east-1:123456789012:capacity-provider/agentx_production_capacity-1234567890";
+    const stack = new AgentRuntimeStack(app, "TestRuntime", {
+      deploymentRegion: "us-east-1",
+      capacityProviderArn,
+    });
+    const template = Template.fromStack(stack);
+
+    template.resourceCountIs("AWS::BedrockAgentCore::CapacityProvider", 0);
+    template.resourceCountIs("AWS::EC2::VPC", 0);
+    template.resourceCountIs("AWS::BedrockAgentCore::Runtime", 1);
+    template.hasResourceProperties("AWS::BedrockAgentCore::Runtime", {
+      AgentRuntimeName: "agentx_production_worker",
+      CapacityProviderConfiguration: { CapacityProviderArn: capacityProviderArn },
+      FilesystemConfigurations: [{
+        CapacityProviderVolume: { VolumeName: "workspace", MountPath: "/mnt/workspace" },
+      }],
+      LifecycleConfiguration: {
+        IdleRuntimeSessionTimeout: 900,
+        MaxLifetime: 1_209_600,
+      },
+      EnvironmentVariables: {
+        AGENTX_WORKSPACE_ROOT: "/mnt/workspace",
+        AGENTX_CONTROL_PLANE_URL: { Ref: "ControlPlaneUrl" },
+        AGENTX_MODEL_PROVIDER: { Ref: "ModelProvider" },
+        AGENTX_MODEL_ID: { Ref: "ModelId" },
+      },
+      NetworkConfiguration: Match.absent(),
+    });
+    template.hasResource("AWS::BedrockAgentCore::Runtime", {
+      DeletionPolicy: "Retain",
+      UpdateReplacePolicy: "Retain",
+    });
+  });
+
+  it("rejects unsupported regions and invalid lifecycle or AZ settings", () => {
     const base = {
       region: "us-east-1",
       mountPath: "/mnt/workspace",
-      providerIdleSeconds: 900,
-      providerMaxLifetimeSeconds: 28_800,
       runtimeIdleSeconds: 900,
-      runtimeMaxLifetimeSeconds: 28_800,
-      volumeSizeGiB: 100,
+      runtimeMaxLifetimeSeconds: 1_209_600,
     };
     expect(() => validateAgentRuntimeConfiguration({ ...base, region: "eu-north-1" })).toThrow(
       /not supported/i,
     );
     expect(() =>
-      validateAgentRuntimeConfiguration({ ...base, runtimeMaxLifetimeSeconds: 28_801 }),
-    ).toThrow(/cannot exceed/i);
+      validateAgentRuntimeConfiguration({ ...base, runtimeIdleSeconds: 1_000, runtimeMaxLifetimeSeconds: 900 }),
+    ).toThrow(/idle/i);
+
+    const foundation = {
+      region: "us-east-1",
+      availabilityZoneIds: defaultProductionAvailabilityZoneIds("us-east-1"),
+      providerIdleSeconds: 900,
+      providerMaxLifetimeSeconds: 1_209_600,
+      volumeSizeGiB: 100,
+      instanceType: "m7g.large",
+    };
+    expect(validateProductionFoundationConfiguration(foundation)).toEqual(foundation);
+    expect(() => validateProductionFoundationConfiguration({
+      ...foundation,
+      availabilityZoneIds: ["use1-az1", "use1-az1"],
+    })).toThrow(/distinct/i);
+    expect(() => defaultProductionAvailabilityZoneIds("us-west-2")).toThrow(/no verified/i);
   });
 });
 

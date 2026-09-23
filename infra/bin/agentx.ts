@@ -3,8 +3,11 @@ import { App } from "aws-cdk-lib";
 import { AgentRuntimeStack } from "../lib/agent-runtime.js";
 import { ControlPlaneStack } from "../lib/control-plane.js";
 import { DemoRuntimeStack } from "../lib/demo-runtime.js";
+import { ProductionFoundationStack } from "../lib/production-foundation.js";
 
-const app = new App();
+const app = new App({
+  context: { "@aws-cdk/core:defaultCrossStackReferences": "strong" },
+});
 const deploymentRegion = app.node.tryGetContext("agentxRegion") as string | undefined;
 const deploymentMode =
   (app.node.tryGetContext("agentxDeploymentMode") as string | undefined) ?? "instances-ebs";
@@ -23,9 +26,17 @@ if (deploymentMode === "demo-microvm") {
     env: { region: deploymentRegion ?? "us-east-1" },
   });
 } else {
-  new AgentRuntimeStack(app, "AgentXRuntime", {
-    description: "AgentX AgentCore Instances runtime and persistent workspace volume",
+  const foundation = new ProductionFoundationStack(app, "AgentXProductionFoundation", {
+    description: "Stable AgentX production network, encryption, and persistent workspace capacity",
     deploymentRegion: deploymentRegion ?? "us-east-1",
     env: { region: deploymentRegion ?? "us-east-1" },
+    terminationProtection: true,
+  });
+  new AgentRuntimeStack(app, "AgentXProductionRuntime", {
+    description: "AgentX production coding runtime on stable EBS-backed capacity",
+    deploymentRegion: deploymentRegion ?? "us-east-1",
+    capacityProviderArn: foundation.capacityProviderArn,
+    env: { region: deploymentRegion ?? "us-east-1" },
+    terminationProtection: true,
   });
 }
