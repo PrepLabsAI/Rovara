@@ -84,7 +84,7 @@ managed persistent volume.
 - A worker security group with no ingress and outbound TCP 443 only.
 - A free S3 gateway endpoint and VPC flow logs retained for 30 days.
 - A rotating customer-managed KMS key retained for workspace recovery safety.
-- The retained ARM64 capacity provider, `m7g.large` compute policy, encrypted root volume, and a
+- The retained ARM64 capacity provider, `m6g.medium` compute policy, encrypted root volume, and a
   named 20 GiB gp3 `workspace` volume.
 
 `AgentXProductionRuntime` owns the changeable application layer:

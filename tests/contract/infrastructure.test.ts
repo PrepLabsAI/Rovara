@@ -109,13 +109,13 @@ describe("AgentCore Instances infrastructure", () => {
       }],
     });
     template.hasResourceProperties("AWS::BedrockAgentCore::CapacityProvider", {
-      Name: "agentx_production_capacity_v2",
+      Name: "agentx_production_capacity_v3",
       ComputeConfiguration: {
         Ec2Configuration: Match.objectLike({
           LaunchTemplateSource: {
             LaunchParameters: Match.objectLike({
               OperatingSystem: "LINUX_ARM64",
-              InstanceRequirements: { AllowedInstanceTypes: ["m7g.large"] },
+              InstanceRequirements: { AllowedInstanceTypes: ["m6g.medium"] },
             }),
           },
           RootVolume: Match.objectLike({ Encrypted: true, VolumeType: "gp3" }),
@@ -193,7 +193,7 @@ describe("AgentCore Instances infrastructure", () => {
       providerIdleSeconds: 300,
       providerMaxLifetimeSeconds: 1_209_600,
       volumeSizeGiB: 20,
-      instanceType: "m7g.large",
+      instanceType: "m6g.medium",
     };
     expect(validateProductionFoundationConfiguration(foundation)).toEqual(foundation);
     expect(() => validateProductionFoundationConfiguration({

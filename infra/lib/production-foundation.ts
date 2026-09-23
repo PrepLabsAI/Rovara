@@ -18,7 +18,7 @@ import {
 
 export const AGENTX_PRODUCTION_DEPLOYMENT_MODE = "instances-ebs";
 export const AGENTX_PRODUCTION_VPC_CIDR = "10.42.0.0/16";
-export const AGENTX_PRODUCTION_INSTANCE_TYPE = "m7g.large";
+export const AGENTX_PRODUCTION_INSTANCE_TYPE = "m6g.medium";
 export const AGENTX_PRODUCTION_OPERATING_SYSTEM = "LINUX_ARM64";
 
 const DEFAULT_AZ_IDS: Readonly<Record<string, readonly [string, string]>> = {
@@ -263,7 +263,7 @@ export class ProductionFoundationStack extends Stack {
       this,
       "AgentXProductionCapacityProvider",
       {
-        name: "agentx_production_capacity_v2",
+        name: "agentx_production_capacity_v3",
         description: "Stable AgentX production compute and per-session EBS workspace boundary",
         permissionsConfiguration: {
           capacityProviderOperatorRoleArn: operatorRole.roleArn,
