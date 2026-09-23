@@ -5,6 +5,7 @@ import { ControlPlaneStack } from "../lib/control-plane.js";
 import { DemoRuntimeStack } from "../lib/demo-runtime.js";
 import { ProductionFoundationStack } from "../lib/production-foundation.js";
 import { ReleasePipelineStack } from "../lib/release-pipeline.js";
+import { SlackOrchestratorStack } from "../lib/slack-orchestrator.js";
 
 const app = new App({
   context: { "@aws-cdk/core:defaultCrossStackReferences": "strong" },
@@ -41,6 +42,10 @@ if (deploymentMode === "demo-microvm") {
   });
   new ReleasePipelineStack(app, "AgentXReleasePipeline", {
     description: "AgentX production release pipeline for the mainline branch",
+    env: { region: deploymentRegion ?? "us-east-1" },
+  });
+  new SlackOrchestratorStack(app, "AgentXSlackOrchestrator", {
+    description: "Hosted AgentX Slack orchestrator on ECS Fargate",
     env: { region: deploymentRegion ?? "us-east-1" },
   });
 }

@@ -59,9 +59,25 @@
 
 ## Phase 4: Infrastructure
 
-- [ ] T015 Extend `infra/lib/control-plane.ts` with the service and Slack routes, the ingress Lambda, the FIFO queue and dead-letter queue, the `SlackThreads` table, the Slack secret and orchestrator-role parameters, and the limit parameters
-- [ ] T016 Add `infra/lib/slack-orchestrator.ts` (ECS cluster, Fargate ARM service, 443-only security group, thread session bucket, task role, log retention) and register it in `infra/bin/agentx.ts`
-- [ ] T017 Add CDK assertions for route authorization types, least-privilege roles (the orchestrator gets no state-table access), FIFO configuration, the Fargate architecture, and security group egress in `tests/contract/infrastructure.test.ts`
+- [X] T015 Extend `infra/lib/control-plane.ts` with the service and Slack routes, the ingress Lambda, the FIFO queue and dead-letter queue, the `SlackThreads` table, the Slack secret and orchestrator-role parameters, and the limit parameters
+- [X] T016 Add `infra/lib/slack-orchestrator.ts` (ECS cluster, Fargate ARM service, 443-only security group, thread session bucket, task role, log retention) and register it in `infra/bin/agentx.ts`
+- [X] T017 Add CDK assertions for route authorization types, least-privilege roles (the orchestrator gets no state-table access), FIFO configuration, the Fargate architecture, and security group egress in `tests/contract/infrastructure.test.ts`
+
+### Phase 4 evidence (local only)
+
+- **The orchestrator task role lives in `AgentXControlPlane`**, not the orchestrator stack. The control plane must know the role before the orchestrator exists: the broker only accepts `/v1/service` calls from that role. The role's queue, table, bucket, secret, Bedrock, and `/v1/service/*` invoke permissions live there too.
+- **`AgentXSlackOrchestrator` only runs the container.** It uses L1 resources with parameters for the image digest, task role, queue, table, bucket, secret, VPC, and private subnets. This matches the foundation-to-runtime pattern: values are handed over through outputs and parameters, not CloudFormation exports.
+- **The Slack secret is created with a generated placeholder `signingSecret`**, so no request passes signature verification until an operator stores the real values with `put-secret-value`. Real tokens never pass through CloudFormation.
+- **Tests.** Infrastructure tests (19) cover:
+  - authorization type per route
+  - the FIFO queue with a dead-letter queue after 5 receives
+  - thread record TTL, the secret placeholder, and limit parameters
+  - broker environment wiring for the orchestrator role and limits
+  - an orchestrator role limited to service routes, with no state-table access
+  - ingress state-table reads limited to `SLACK_BINDING#*` keys
+  - ARM64 Fargate with no public IP and a deployment circuit breaker
+  - outbound-HTTPS-only networking, and image pulls limited to `agentx-slack-orchestrator`
+- **Checks.** `cdk synth` of all stacks succeeds. Full suite (36 files, 200 tests), typecheck, and lint pass.
 
 ## Phase 5: Release Pipeline
 

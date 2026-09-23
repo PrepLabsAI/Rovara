@@ -13,11 +13,14 @@ import {
   aws_lambda_nodejs as lambdaNodejs,
   aws_logs as logs,
   aws_s3 as s3,
+  aws_secretsmanager as secretsmanager,
   aws_sqs as sqs,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
 
 const MAX_DISPATCH_ATTEMPTS = 5;
+// Matches MAX_RECEIVE_COUNT in packages/slack-service, which reports the final attempt in the thread.
+export const SLACK_MAX_RECEIVE_COUNT = 5;
 
 export class ControlPlaneStack extends Stack {
   constructor(scope: Construct, id: string, props?: StackProps) {
@@ -153,6 +156,100 @@ export class ControlPlaneStack extends Stack {
       reportBatchItemFailures: true,
     });
 
+    const memberWorkspaceLimit = new CfnParameter(this, "SlackMemberWorkspaceLimit", {
+      type: "Number",
+      default: 3,
+      minValue: 1,
+      description: "Maximum Slack thread workspaces one channel member may start",
+    });
+    const organizationWorkspaceLimit = new CfnParameter(this, "SlackOrganizationWorkspaceLimit", {
+      type: "Number",
+      default: 20,
+      minValue: 1,
+      description: "Maximum Slack thread workspaces for the whole Slack organization",
+    });
+    // Operators store the real values with put-secret-value; the generated placeholder rejects every request until then.
+    const slackSecret = new secretsmanager.Secret(this, "SlackSecret", {
+      description: "AgentX Slack app credentials as JSON: {\"signingSecret\":\"...\",\"botToken\":\"xoxb-...\"}",
+      generateSecretString: {
+        secretStringTemplate: JSON.stringify({ botToken: "unset" }),
+        generateStringKey: "signingSecret",
+        excludePunctuation: true,
+      },
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+    const slackThreads = new dynamodb.Table(this, "SlackThreads", {
+      partitionKey: { name: "pk", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "sk", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      encryption: dynamodb.TableEncryption.AWS_MANAGED,
+      timeToLiveAttribute: "expiresAt",
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+    const slackDeadLetterQueue = new sqs.Queue(this, "SlackRequestDeadLetterQueue", {
+      fifo: true,
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      retentionPeriod: Duration.days(14),
+    });
+    const slackRequestQueue = new sqs.Queue(this, "SlackRequestQueue", {
+      fifo: true,
+      contentBasedDeduplication: false,
+      deadLetterQueue: { queue: slackDeadLetterQueue, maxReceiveCount: SLACK_MAX_RECEIVE_COUNT },
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      visibilityTimeout: Duration.minutes(15),
+      retentionPeriod: Duration.days(4),
+    });
+    const threadSessions = new s3.Bucket(this, "SlackThreadSessions", {
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      enforceSSL: true,
+      versioned: true,
+      lifecycleRules: [{ noncurrentVersionExpiration: Duration.days(30) }],
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+
+    const slackOrchestratorRole = new iam.Role(this, "SlackOrchestratorTaskRole", {
+      assumedBy: new iam.ServicePrincipal("ecs-tasks.amazonaws.com", {
+        conditions: { StringEquals: { "aws:SourceAccount": this.account } },
+      }),
+      description: "Hosted AgentX Slack orchestrator; the only principal allowed on /v1/service routes",
+    });
+    slackRequestQueue.grantConsumeMessages(slackOrchestratorRole);
+    slackThreads.grantReadWriteData(slackOrchestratorRole);
+    threadSessions.grantReadWrite(slackOrchestratorRole);
+    slackSecret.grantRead(slackOrchestratorRole);
+    slackOrchestratorRole.addToPolicy(new iam.PolicyStatement({
+      actions: ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+      resources: [
+        `arn:${this.partition}:bedrock:*::foundation-model/*`,
+        `arn:${this.partition}:bedrock:${this.region}:${this.account}:inference-profile/*`,
+      ],
+    }));
+    broker.addEnvironment("SLACK_ORCHESTRATOR_ROLE_ARN", slackOrchestratorRole.roleArn);
+    broker.addEnvironment("SLACK_MEMBER_WORKSPACE_LIMIT", memberWorkspaceLimit.valueAsString);
+    broker.addEnvironment("SLACK_ORGANIZATION_WORKSPACE_LIMIT", organizationWorkspaceLimit.valueAsString);
+
+    const slackIngress = packagedFunction(
+      this,
+      "SlackIngress",
+      "packages/broker/src/aws/slack-ingress.ts",
+      {
+        STATE_TABLE_NAME: state.tableName,
+        SLACK_THREADS_TABLE_NAME: slackThreads.tableName,
+        SLACK_REQUEST_QUEUE_URL: slackRequestQueue.queueUrl,
+        SLACK_SECRET_ARN: slackSecret.secretArn,
+      },
+      Duration.seconds(10),
+    );
+    slackIngress.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["dynamodb:GetItem"],
+      resources: [state.tableArn],
+      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SLACK_BINDING#*"] } },
+    }));
+    slackThreads.grantReadWriteData(slackIngress);
+    slackRequestQueue.grantSendMessages(slackIngress);
+    slackSecret.grantRead(slackIngress);
+
     const api = new apigwv2.CfnApi(this, "HttpApi", {
       name: "agentx-control-plane",
       protocolType: "HTTP",
@@ -196,10 +293,44 @@ export class ControlPlaneStack extends Stack {
       sourceArn: `arn:${this.partition}:execute-api:${this.region}:${this.account}:${api.ref}/*/*/*`,
     });
 
+    const slackIntegration = new apigwv2.CfnIntegration(this, "SlackIngressIntegration", {
+      apiId: api.ref,
+      integrationType: "AWS_PROXY",
+      integrationUri: slackIngress.functionArn,
+      payloadFormatVersion: "2.0",
+    });
+    new apigwv2.CfnRoute(this, "SlackEventsRoute", {
+      apiId: api.ref,
+      routeKey: "POST /v1/slack/events",
+      target: `integrations/${slackIntegration.ref}`,
+      authorizationType: "NONE",
+    });
+    new apigwv2.CfnRoute(this, "SlackServiceRoute", {
+      apiId: api.ref,
+      routeKey: "ANY /v1/service/{proxy+}",
+      target: `integrations/${integration.ref}`,
+      authorizationType: "AWS_IAM",
+    });
+    slackIngress.addPermission("ApiInvoke", {
+      principal: new iam.ServicePrincipal("apigateway.amazonaws.com"),
+      sourceArn: `arn:${this.partition}:execute-api:${this.region}:${this.account}:${api.ref}/*/*/v1/slack/events`,
+    });
+    slackOrchestratorRole.addToPolicy(new iam.PolicyStatement({
+      actions: ["execute-api:Invoke"],
+      resources: [`arn:${this.partition}:execute-api:${this.region}:${this.account}:${api.ref}/*/*/v1/service/*`],
+    }));
+
     new CfnOutput(this, "ApiEndpoint", { value: api.attrApiEndpoint });
     new CfnOutput(this, "StateTableName", { value: state.tableName });
     new CfnOutput(this, "ArtifactBucketName", { value: artifacts.bucketName });
     new CfnOutput(this, "DispatchDeadLetterQueueUrl", { value: deadLetterQueue.queueUrl });
+    new CfnOutput(this, "SlackEventsUrl", { value: `${api.attrApiEndpoint}/v1/slack/events` });
+    new CfnOutput(this, "SlackSecretArn", { value: slackSecret.secretArn });
+    new CfnOutput(this, "SlackRequestQueueUrl", { value: slackRequestQueue.queueUrl });
+    new CfnOutput(this, "SlackRequestDeadLetterQueueUrl", { value: slackDeadLetterQueue.queueUrl });
+    new CfnOutput(this, "SlackThreadsTableName", { value: slackThreads.tableName });
+    new CfnOutput(this, "SlackThreadSessionBucketName", { value: threadSessions.bucketName });
+    new CfnOutput(this, "SlackOrchestratorTaskRoleArn", { value: slackOrchestratorRole.roleArn });
   }
 }
 

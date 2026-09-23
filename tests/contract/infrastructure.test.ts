@@ -20,6 +20,136 @@ import {
   AGENTX_RELEASE_TRIGGER_PATHS,
   ReleasePipelineStack,
 } from "../../infra/lib/release-pipeline.js";
+import { SlackOrchestratorStack } from "../../infra/lib/slack-orchestrator.js";
+
+interface PolicyStatement {
+  Sid?: string;
+  Action: string | string[];
+  Resource: unknown;
+  Condition?: unknown;
+}
+
+function policyStatements(template: Template): PolicyStatement[] {
+  return (Object.values(template.findResources("AWS::IAM::Policy")) as Array<{
+    Properties: { PolicyDocument: { Statement: PolicyStatement[] }; Roles: unknown[] };
+  }>).flatMap((policy) => policy.Properties.PolicyDocument.Statement);
+}
+
+function statementsForRole(template: Template, roleLogicalIdPrefix: string): PolicyStatement[] {
+  return (Object.values(template.findResources("AWS::IAM::Policy")) as Array<{
+    Properties: { PolicyDocument: { Statement: PolicyStatement[] }; Roles: Array<{ Ref?: string }> };
+  }>)
+    .filter((policy) => policy.Properties.Roles.some((role) => role.Ref?.startsWith(roleLogicalIdPrefix)))
+    .flatMap((policy) => policy.Properties.PolicyDocument.Statement);
+}
+
+const actionsOf = (statement: PolicyStatement) => [statement.Action].flat();
+
+describe("hosted Slack control-plane infrastructure", () => {
+  const template = Template.fromStack(new ControlPlaneStack(new App(), "SlackControlPlane"));
+
+  it("routes Slack events without a JWT and service calls only with IAM authorization", () => {
+    template.hasResourceProperties("AWS::ApiGatewayV2::Route", {
+      RouteKey: "POST /v1/slack/events",
+      AuthorizationType: "NONE",
+      Target: { "Fn::Join": ["", ["integrations/", { Ref: Match.stringLikeRegexp("^SlackIngressIntegration") }]] },
+    });
+    template.hasResourceProperties("AWS::ApiGatewayV2::Route", {
+      RouteKey: "ANY /v1/service/{proxy+}",
+      AuthorizationType: "AWS_IAM",
+      Target: { "Fn::Join": ["", ["integrations/", { Ref: Match.stringLikeRegexp("^BrokerIntegration") }]] },
+    });
+  });
+
+  it("queues Slack requests in a FIFO queue with a dead-letter queue after five receives", () => {
+    template.hasResourceProperties("AWS::SQS::Queue", {
+      FifoQueue: true,
+      ContentBasedDeduplication: false,
+      VisibilityTimeout: 900,
+      RedrivePolicy: { maxReceiveCount: 5, deadLetterTargetArn: Match.anyValue() },
+    });
+    template.hasResourceProperties("AWS::DynamoDB::Table", {
+      TimeToLiveSpecification: { AttributeName: "expiresAt", Enabled: true },
+    });
+    template.hasResourceProperties("AWS::SecretsManager::Secret", {
+      GenerateSecretString: Match.objectLike({ GenerateStringKey: "signingSecret" }),
+    });
+    template.hasParameter("SlackMemberWorkspaceLimit", { Type: "Number", Default: 3 });
+    template.hasParameter("SlackOrganizationWorkspaceLimit", { Type: "Number", Default: 20 });
+  });
+
+  it("tells the broker which role is the orchestrator and which limits apply", () => {
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Environment: {
+        Variables: Match.objectLike({
+          SLACK_ORCHESTRATOR_ROLE_ARN: { "Fn::GetAtt": [Match.stringLikeRegexp("^SlackOrchestratorTaskRole"), "Arn"] },
+          SLACK_MEMBER_WORKSPACE_LIMIT: { Ref: "SlackMemberWorkspaceLimit" },
+          SLACK_ORGANIZATION_WORKSPACE_LIMIT: { Ref: "SlackOrganizationWorkspaceLimit" },
+        }),
+      },
+    });
+  });
+
+  it("gives the orchestrator role service-route invoke only, and no access to the control-plane state table", () => {
+    template.hasResourceProperties("AWS::IAM::Role", {
+      AssumeRolePolicyDocument: Match.objectLike({
+        Statement: Match.arrayWith([Match.objectLike({ Principal: { Service: "ecs-tasks.amazonaws.com" } })]),
+      }),
+    });
+    const statements = statementsForRole(template, "SlackOrchestratorTaskRole");
+    const invoke = statements.find((statement) => actionsOf(statement).includes("execute-api:Invoke"));
+    expect(JSON.stringify(invoke?.Resource)).toContain("/*/*/v1/service/*");
+    expect(JSON.stringify(statements)).not.toMatch(/"State[0-9A-F]{8}"/);
+    expect(statements.flatMap(actionsOf)).not.toContain("dynamodb:*");
+  });
+
+  it("limits the ingress Lambda to reading channel bindings from the state table", () => {
+    const statements = statementsForRole(template, "SlackIngress");
+    const stateAccess = statements.filter((statement) => JSON.stringify(statement.Resource).match(/"State[0-9A-F]{8}"/));
+    expect(stateAccess).toHaveLength(1);
+    expect(actionsOf(stateAccess[0]!)).toEqual(["dynamodb:GetItem"]);
+    expect(stateAccess[0]?.Condition).toEqual({ "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SLACK_BINDING#*"] } });
+  });
+});
+
+describe("hosted Slack orchestrator service", () => {
+  const template = Template.fromStack(new SlackOrchestratorStack(new App(), "TestSlackOrchestrator", { env: { region: "us-east-1" } }));
+
+  it("runs one ARM64 Fargate task with the control-plane task role and no public IP", () => {
+    template.hasResourceProperties("AWS::ECS::TaskDefinition", {
+      RequiresCompatibilities: ["FARGATE"],
+      RuntimePlatform: { CpuArchitecture: "ARM64", OperatingSystemFamily: "LINUX" },
+      TaskRoleArn: { Ref: "TaskRoleArn" },
+      ContainerDefinitions: [Match.objectLike({
+        Image: { Ref: "OrchestratorImageUri" },
+        Environment: Match.arrayWith([
+          { Name: "CONTROL_PLANE_URL", Value: { Ref: "ControlPlaneUrl" } },
+          { Name: "SLACK_REQUEST_QUEUE_URL", Value: { Ref: "SlackRequestQueueUrl" } },
+        ]),
+      })],
+    });
+    template.hasResourceProperties("AWS::ECS::Service", {
+      LaunchType: "FARGATE",
+      DesiredCount: 1,
+      DeploymentConfiguration: Match.objectLike({
+        DeploymentCircuitBreaker: { Enable: true, Rollback: true },
+      }),
+      NetworkConfiguration: { AwsvpcConfiguration: Match.objectLike({ AssignPublicIp: "DISABLED", Subnets: { Ref: "PrivateSubnetIds" } }) },
+    });
+    template.hasParameter("OrchestratorImageUri", { AllowedPattern: "^.+@sha256:[a-f0-9]{64}$" });
+  });
+
+  it("allows only outbound HTTPS and pulls only the orchestrator image", () => {
+    template.hasResourceProperties("AWS::EC2::SecurityGroup", {
+      SecurityGroupEgress: [Match.objectLike({ IpProtocol: "tcp", FromPort: 443, ToPort: 443 })],
+      SecurityGroupIngress: Match.absent(),
+    });
+    const statements = policyStatements(template);
+    expect(statements.filter((statement) => statement.Resource === "*").flatMap(actionsOf)).toEqual(["ecr:GetAuthorizationToken"]);
+    const pull = statements.find((statement) => actionsOf(statement).includes("ecr:BatchGetImage"));
+    expect(JSON.stringify(pull?.Resource)).toContain("repository/agentx-slack-orchestrator");
+  });
+});
 
 describe("control-plane infrastructure", () => {
   it("synthesizes private storage, durable dispatch, JWT auth and a single runtime invoker", () => {
@@ -45,7 +175,7 @@ describe("control-plane infrastructure", () => {
     const template = Template.fromStack(stack);
     const json = JSON.stringify(template.toJSON());
 
-    template.resourceCountIs("AWS::Lambda::Function", 3);
+    template.resourceCountIs("AWS::Lambda::Function", 4);
     expect(json).not.toContain("ZipFile");
     expect(json).not.toContain("not packaged");
     expect(json).toContain("STATE_TABLE_NAME");
@@ -57,7 +187,11 @@ describe("control-plane infrastructure", () => {
     expect(json).toContain("GITHUB_APP_PRIVATE_KEY_SECRET_ARN");
     expect(json).toContain("GITHUB_APP_INSTALLATION_ID");
     expect(json).toContain("secretsmanager:GetSecretValue");
-    expect(json.match(/secretsmanager:GetSecretValue/g)).toHaveLength(1);
+    const githubSecretGrants = Object.values(template.findResources("AWS::IAM::Policy"))
+      .flatMap((policy) => (policy as { Properties: { PolicyDocument: { Statement: Array<{ Resource: unknown }> } } })
+        .Properties.PolicyDocument.Statement)
+      .filter((statement) => JSON.stringify(statement.Resource).includes("GitHubAppPrivateKeySecretArn"));
+    expect(githubSecretGrants).toHaveLength(1);
     expect(json.match(/GITHUB_APP_PRIVATE_KEY_SECRET_ARN/g)).toHaveLength(1);
     expect(json).toContain("codebuild:StartBuild");
     expect(json).toContain("codebuild:BatchGetBuilds");
@@ -70,7 +204,7 @@ describe("control-plane infrastructure", () => {
     const stack = new ControlPlaneStack(app, "LoggedControlPlane");
     const template = Template.fromStack(stack);
 
-    template.resourceCountIs("AWS::Logs::LogGroup", 3);
+    template.resourceCountIs("AWS::Logs::LogGroup", 4);
     template.allResourcesProperties("AWS::Logs::LogGroup", {
       RetentionInDays: 30,
     });
