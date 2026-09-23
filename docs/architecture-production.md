@@ -8,7 +8,7 @@ state and AgentCore owns compute-session lifecycle.
 ```mermaid
 flowchart LR
   subgraph Developer[Developer machine]
-    Client[AgentX CLI / Pi TUI / Slack bridge]
+    Client[AgentX CLI / Pi TUI]
   end
 
   subgraph Control[AgentX control plane]
@@ -74,6 +74,70 @@ session ID starts managed compute and reattaches the existing EBS volume. The ma
 lifetime is 14 days, but the volume remains associated with the session across stop/resume. An
 administrator must explicitly delete the AgentCore session or capacity provider to delete its
 managed persistent volume.
+
+## Hosted Slack orchestrator
+
+Slack requests are orchestrated in AWS rather than on a developer machine. Each Slack thread is its
+own workspace owner, so a thread receives its own AgentCore session and EBS volume, exactly like a
+developer/project pair. Every channel member who posts in the thread shares that workspace.
+
+```mermaid
+flowchart LR
+  Slack[Slack Events API]
+
+  subgraph Control[AgentX control plane]
+    Route[API Gateway\nPOST /v1/slack/events]
+    Ingress[Slack ingress Lambda]
+    Fifo[SQS FIFO request queue\none message group per thread]
+    Service[API Gateway IAM route\n/v1/service/*]
+    Broker[Broker Lambda]
+    State[(DynamoDB state\nbindings, limits, workspaces)]
+  end
+
+  subgraph Orchestrator[Hosted Slack orchestrator]
+    Fargate[ECS Fargate ARM64 service\nPi orchestrator, AgentX tools only]
+    Threads[(DynamoDB thread records)]
+    Sessions[(S3 Pi session per thread)]
+  end
+
+  Worker[AgentCore thread workspace\nremote Pi worker on EBS]
+
+  Slack -->|signed app_mention| Route --> Ingress
+  Ingress -->|binding lookup| State
+  Ingress -->|acknowledge in thread| Slack
+  Ingress --> Fifo --> Fargate
+  Fargate --> Threads
+  Fargate --> Sessions
+  Fargate -->|SigV4 + thread headers| Service --> Broker
+  Broker --> State
+  Broker -->|dispatch| Worker
+  Fargate -->|result in thread| Slack
+```
+
+- **Ingress.** The ingress Lambda verifies Slack's signature, ignores anything that is not a human
+  `app_mention` in a bound channel of the same Slack organization, suppresses duplicate
+  deliveries, and acknowledges in the thread before queueing. It can read only channel bindings
+  from the state table.
+- **Ordering.** The FIFO message group is the thread, so requests in one thread run in order while
+  different threads run in parallel. The Slack event ID is the deduplication ID.
+- **Orchestration.** The Fargate service runs the same Pi orchestrator as the CLI, restricted to
+  AgentX orchestration tools. It restores the thread's Pi session from S3 before each turn and
+  saves it afterward. Tool request IDs derive from the Slack event ID, so a redelivered request
+  resumes the operations it already started instead of creating duplicates.
+- **Service identity.** The orchestrator calls the control plane through an `AWS_IAM` route that
+  accepts only its task role. The broker derives the workspace owner from the signed Slack thread
+  headers, and requires a bound channel. The resulting owner keys are disjoint from developer
+  logins, so the service identity cannot reach a developer's personal workspace or another
+  thread's workspace. Each operation records the Slack member who requested it.
+- **Limits.** Creating a thread workspace checks per-starter and per-organization counters (3 and
+  20 by default) in the same DynamoDB transaction that creates the workspace, so concurrent threads
+  cannot exceed either limit.
+- **Network.** The Fargate tasks run in the production VPC's private subnets with no public IP and
+  outbound HTTPS only. Slack tokens and the signing secret stay in Secrets Manager.
+
+`AgentXControlPlane` owns the ingress, queue, thread storage, Slack secret, and orchestrator task
+role, because the broker must know that role before the service exists. `AgentXSlackOrchestrator`
+owns only the ECS service, and receives those values as parameters from the release command.
 
 ## Stable foundation versus releasable runtime
 

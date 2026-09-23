@@ -100,8 +100,24 @@
 
 ## Phase 6: Retire Local Slack Mode
 
-- [ ] T021 Remove `slack run`, `configure`, and `login`, the Socket Mode code, and `@slack/bolt`. Keep `slack logout`. Update `tests/contract/slack-mode.test.ts` and `tests/contract/cli-main.test.ts`
-- [ ] T022 Replace the README Slack section with the hosted setup, and add the hosted Slack path to `docs/architecture-production.md`
+- [X] T021 Remove `slack run`, `configure`, and `login`, the Socket Mode code, and `@slack/bolt`. Keep `slack logout`. Update `tests/contract/slack-mode.test.ts` and `tests/contract/cli-main.test.ts`
+- [X] T022 Replace the README Slack section with the hosted setup, and add the hosted Slack path to `docs/architecture-production.md`
+
+### Phase 6 evidence (local only)
+
+- **CLI.** `agentx slack` keeps only `logout`, which still deletes the `slack:<project>` entry that the local mode stored in the OS credential store. The retired subcommands exit with an error.
+- **Removed code.**
+  - `packages/cli/src/slack.ts` and `slack-config.ts` are deleted.
+  - `slack-credentials.ts` keeps only the deletion helper.
+  - `@slack/bolt` and its 99 transitive packages are gone from the lockfile.
+- **README.** The setup now covers:
+  - reading the Slack stack outputs
+  - storing the signing secret and bot token without echoing them
+  - switching the Slack app from Socket Mode to the Events API request URL
+  - channel binding and rebinding per project revision
+  - thread behavior, limits, diagnostics, and retries
+- **Architecture doc.** `docs/architecture-production.md` gains a hosted Slack section with a diagram. It covers ingress, per-thread ordering, session restore, the service identity, and the atomic limits, and states which stack owns each resource.
+- **Checks.** Full suite (36 files, 198 tests) and lint pass. The test count drops from 202 because the Socket Mode bridge tests were removed with the bridge.
 
 ## Phase 7: Local Validation
 

@@ -19,9 +19,7 @@ describe("AgentX executable command surface", () => {
     expect(adminSlack?.commands.map((command) => command.name())).toEqual(["bind", "unbind"]);
 
     const slack = program.commands.find((command) => command.name() === "slack");
-    expect(slack?.commands.map((command) => command.name())).toEqual([
-      "configure", "login", "logout", "run",
-    ]);
+    expect(slack?.commands.map((command) => command.name())).toEqual(["logout"]);
 
     const optionNames = allCommands(program).flatMap((command) =>
       command.options.map((option) => option.long),

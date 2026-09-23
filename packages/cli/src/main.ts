@@ -26,16 +26,7 @@ import { createPullRequestAndWait } from "./pull-request.js";
 import { runOrchestratorInteractive, type OrchestratorOptions } from "./orchestrator.js";
 import { formatError, formatSuccess } from "./output.js";
 import { SystemSecretStore, type SecretStore } from "./secret-store.js";
-import {
-  deleteSlackCredentials,
-  loadSlackCredentials,
-  saveSlackCredentials,
-} from "./slack-credentials.js";
-import {
-  loadSlackProjectConfiguration,
-  saveSlackProjectConfiguration,
-} from "./slack-config.js";
-import { formatSlackLogEntry, runSlackMode, type SlackModeOptions } from "./slack.js";
+import { deleteSlackCredentials } from "./slack-credentials.js";
 import { formatWorkspaceStatus } from "./status.js";
 import { SystemCredentialTokenStore, type TokenStore } from "./token-store.js";
 import { renderProgressEvent } from "./tui.js";
@@ -61,7 +52,6 @@ export interface CliDependencies {
   stdout?: TextWriter;
   stderr?: TextWriter;
   runInteractive?: (options: OrchestratorOptions) => Promise<void>;
-  runSlack?: (options: SlackModeOptions) => Promise<void>;
 }
 
 interface AuthenticatedProject {
@@ -77,7 +67,6 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     stdout: dependencies.stdout ?? process.stdout,
     stderr: dependencies.stderr ?? process.stderr,
     runInteractive: dependencies.runInteractive ?? runOrchestratorInteractive,
-    runSlack: dependencies.runSlack ?? runSlackMode,
   };
 
   const program = new Command()
@@ -341,111 +330,15 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       services.stdout.write(formatSuccess(result, globals.json));
     });
 
-  const slack = program.command("slack").description("use Slack as a local AgentX orchestration frontend");
-  slack
-    .command("configure")
-    .description("bind the selected project to one Slack workspace channel and an invocation allowlist")
-    .requiredOption("--team <team-id>", "Slack workspace/team ID")
-    .requiredOption("--channel <channel-id>", "Slack channel ID")
-    .requiredOption("--allow-user <user-ids...>", "Slack user IDs allowed to invoke AgentX")
-    .action(async (options: { team: string; channel: string; allowUser: string[] }, command: Command) => {
-      const globals = globalOptions(command);
-      const definition = await selectedProject(globals);
-      const configuration = {
-        schemaVersion: 1 as const,
-        projectName: definition.name,
-        teamId: options.team,
-        channelId: options.channel,
-        allowedUserIds: options.allowUser,
-      };
-      await saveSlackProjectConfiguration(globals.stateDir, configuration);
-      services.stdout.write(formatSuccess(configuration, globals.json));
-    });
-
-  slack
-    .command("login")
-    .description("import Slack Socket Mode tokens from the environment into the OS credential store")
-    .action(async (_options, command: Command) => {
-      const globals = globalOptions(command);
-      const definition = await selectedProject(globals);
-      const appToken = process.env.SLACK_APP_TOKEN;
-      const botToken = process.env.SLACK_BOT_TOKEN;
-      if (!appToken || !botToken) {
-        throw agentXError(
-          "AUTH_REQUIRED",
-          "set SLACK_APP_TOKEN (xapp-) and SLACK_BOT_TOKEN (xoxb-) before Slack login",
-        );
-      }
-      await saveSlackCredentials(services.slackSecretStore, definition.name, { appToken, botToken });
-      services.stdout.write(formatSuccess({ project: definition.name, slackAuthenticated: true }, globals.json));
-    });
-
+  const slack = program.command("slack").description("clean up the retired local Slack mode; Slack now runs as a hosted service");
   slack
     .command("logout")
-    .description("remove the selected project's Slack tokens from the OS credential store")
+    .description("remove Slack tokens stored by the retired local Slack mode from the OS credential store")
     .action(async (_options, command: Command) => {
       const globals = globalOptions(command);
       const definition = await selectedProject(globals);
       await deleteSlackCredentials(services.slackSecretStore, definition.name);
       services.stdout.write(formatSuccess({ project: definition.name, slackAuthenticated: false }, globals.json));
-    });
-
-  slack
-    .command("run")
-    .description("run the local Pi orchestrator through the configured Slack channel")
-    .action(async (_options, command: Command) => {
-      const globals = globalOptions(command);
-      if (globals.json) throw agentXError("CONFIG_INVALID", "Slack run mode does not support --json");
-      const authenticated = await authenticateProject(globals, requireProject(globals), services.tokenStore);
-      const workspace = await connectToProject(
-        authenticated.definition,
-        authenticated.accessToken,
-        services.fetchImplementation,
-      );
-      const api = new ControlPlaneApi(
-        authenticated.definition.controlPlaneUrl,
-        authenticated.accessToken,
-        workspace.id,
-        services.fetchImplementation,
-      );
-      const connection = await loadOrCreateConnection(
-        globals.stateDir,
-        authenticated.definition.name,
-        workspace,
-        api,
-      );
-      const provider = globals.orchestratorProvider ?? process.env.AGENTX_ORCHESTRATOR_PROVIDER;
-      const modelId = globals.orchestratorModel ?? process.env.AGENTX_ORCHESTRATOR_MODEL;
-      if (!provider || !modelId) {
-        throw agentXError(
-          "CONFIG_INVALID",
-          "Slack mode requires --orchestrator-provider and --orchestrator-model",
-        );
-      }
-      const credentials = await loadSlackCredentials(
-        services.slackSecretStore,
-        authenticated.definition.name,
-      );
-      const configuration = await loadSlackProjectConfiguration(
-        globals.stateDir,
-        authenticated.definition.name,
-      );
-      await services.runSlack({
-        configuration,
-        appToken: credentials.appToken,
-        botToken: credentials.botToken,
-        orchestrator: {
-          stateDirectory: resolve(globals.stateDir, authenticated.definition.name, "slack-orchestrator"),
-          projectInstructions: authenticated.definition.orchestratorInstructions,
-          api,
-          context: { workspaceId: workspace.id, conversationId: connection.conversationId },
-          model: { provider, modelId, thinkingLevel: "medium" },
-        },
-        onReady: () => services.stdout.write(
-          `AgentX is listening for allowlisted mentions in Slack channel ${configuration.channelId}.\n`,
-        ),
-        log: (entry) => services.stderr.write(formatSlackLogEntry(entry)),
-      });
     });
 
   const admin = program.command("admin").description("administrator workflows");

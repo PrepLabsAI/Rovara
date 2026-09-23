@@ -160,98 +160,120 @@ commands, builds, and tests are delegated to the remote Pi worker in AgentCore.
 
 ### 7. Use a project Slack channel
 
-Slack mode runs the local Pi orchestrator as a headless Socket Mode client. It makes only an
-outbound WebSocket connection to Slack, so it does not require a public callback URL. The local
-machine must remain awake and the command must remain running.
+AgentX runs a hosted orchestrator for Slack in the production AWS account, so no developer machine
+has to stay online. Slack calls the AgentX Events API route; an ingress Lambda verifies Slack's
+signature, acknowledges in the thread, and queues the request. An ECS Fargate service runs the Pi
+orchestrator for that thread and posts the result back. Like the local orchestrator, it can call
+only AgentX orchestration tools; all repository work runs in the remote Pi worker.
 
-Configure the Slack app with these minimum permissions:
+Each Slack thread has its own workspace. The first mention in a new thread creates a workspace
+for the channel's bound project. Later mentions in that thread, by any channel member, continue
+in the same workspace and Pi conversation. Requests in one thread run in order; different threads
+run in parallel.
 
-- Bot token scopes: `app_mentions:read` and `chat:write`.
-- Bot event subscription: `app_mention`.
-- Socket Mode enabled.
-- An app-level token with `connections:write`.
+#### One-time administrator setup
 
-After changing bot scopes, reinstall the app to the workspace. The app-level token is the `xapp-`
-value under **Basic Information → App-Level Tokens**. The separate `xoxb-` bot token appears under
-**OAuth & Permissions → OAuth Tokens for Your Workspace** after installation. Invite the app to the
-project channel with `/invite @AgentX`.
-
-Copy the immutable Slack channel ID and the member IDs that may invoke AgentX, then save the
-non-secret project binding locally:
-
-```sh
-agentx --project project-a slack configure \
-  --team T0BSHLLUGBD \
-  --channel C0123456789 \
-  --allow-user U0123456789
-```
-
-Import both tokens into macOS Keychain or Linux Secret Service. The tokens are never written to the
-project YAML or reconnect-state files:
+The production release creates the Slack ingress route, queue, and thread storage in
+`AgentXControlPlane`. Create the orchestrator service once with the release command's
+`--create-slack-orchestrator` flag; the release pipeline updates it after that. Read the Slack
+outputs from the control plane stack:
 
 ```sh
-export SLACK_APP_TOKEN='xapp-...'
-export SLACK_BOT_TOKEN='xoxb-...'
-agentx --project project-a slack login
-unset SLACK_APP_TOKEN SLACK_BOT_TOKEN
+AWS_PROFILE=agentx-deployer AWS_REGION=us-east-1 aws cloudformation describe-stacks \
+  --stack-name AgentXControlPlane \
+  --query "Stacks[0].Outputs[?starts_with(OutputKey, 'Slack')].[OutputKey,OutputValue]" \
+  --output table
 ```
 
-Start the bridge with the same local model configuration used by the TUI:
+Store the Slack app's **Signing Secret** (under **Basic Information → App Credentials**) and its
+`xoxb-` bot token (under **OAuth & Permissions**) in the `SlackSecretArn` secret. Until you do,
+the secret holds a generated placeholder and every Slack request is rejected. The commands below
+read both values without echoing them or writing them to shell history:
 
 ```sh
-export AWS_PROFILE=agentx-deployer
-export AWS_REGION=us-east-1
-export AWS_SDK_LOAD_CONFIG=1
-export AGENTX_ORCHESTRATOR_PROVIDER=amazon-bedrock
-export AGENTX_ORCHESTRATOR_MODEL=amazon.nova-pro-v1:0
-agentx --project project-a slack run
+export AWS_PROFILE=agentx-deployer AWS_REGION=us-east-1
+SLACK_SECRET_ARN='<SlackSecretArn output>'
+read -rs SLACK_SIGNING_SECRET   # paste the Signing Secret, then press Enter
+read -rs SLACK_BOT_TOKEN        # paste the xoxb- bot token, then press Enter
+export SLACK_SIGNING_SECRET SLACK_BOT_TOKEN
+node -e 'process.stdout.write(JSON.stringify({
+  signingSecret: process.env.SLACK_SIGNING_SECRET,
+  botToken: process.env.SLACK_BOT_TOKEN,
+}))' | aws secretsmanager put-secret-value \
+  --secret-id "$SLACK_SECRET_ARN" --secret-string file:///dev/stdin
+unset SLACK_SIGNING_SECRET SLACK_BOT_TOKEN
 ```
 
-In the configured channel, mention the app for every request, including follow-ups:
+Both services cache the secret for up to five minutes, so allow that long after a change.
+
+Then configure the Slack app:
+
+- Turn **Socket Mode** off. While it is on, Slack delivers events over the socket instead of the
+  request URL. The app-level `xapp-` token is no longer used and can be revoked.
+- Under **Event Subscriptions**, enable events and set the request URL to the `SlackEventsUrl`
+  output. Slack verifies the URL immediately, which succeeds only after the secret is stored.
+- Subscribe to the bot event `app_mention`.
+- Bot token scopes: `app_mentions:read` and `chat:write`. Reinstall the app after changing scopes.
+- Invite the app to the project channel with `/invite @AgentX`.
+
+Finally, bind the channel to the project. Binding requires an administrator login, and uses the
+revision in your local project YAML:
+
+```sh
+agentx --project project-a admin slack bind --team T0123456789 --channel C0123456789
+```
+
+A channel is bound to exactly one project revision. After registering a new revision, run `bind`
+again; existing thread workspaces keep the revision they were created with. `admin slack unbind`
+removes the binding, so new mentions in that channel are ignored, but it keeps existing thread
+workspaces.
+
+#### Working in a thread
+
+Mention the app in the bound channel for every request, including follow-ups in a thread:
 
 ```text
 @AgentX inspect the project and implement the navigation fix. Run the relevant tests, but do not
 create a pull request.
 ```
 
-AgentX acknowledges the request and posts the final local-orchestrator response in the same Slack
-thread. Requests are serialized because they share one developer workspace and one local Pi
-session. Events from other workspaces, channels, users, bots, or duplicate Slack deliveries are
-ignored. Stop the bridge with `Ctrl-C`. Remove stored Slack credentials with:
+AgentX replies within a few seconds. If earlier requests in the thread are still running, it says
+how many are ahead. The first request in a new thread also prepares the workspace, which takes a
+few minutes. Messages without a mention, edits, bot messages, direct messages, and users from other
+Slack organizations are ignored.
+
+Pull requests created from a thread end with a link to the thread and the Slack members who made
+requests in it. Every operation records the Slack member who requested it.
+
+Workspaces are limited to protect cost. The member who starts a thread may be the starter of at
+most 3 thread workspaces, and the organization may have at most 20. A new thread over either limit
+creates nothing, and AgentX replies with the limit that was reached; for the member limit, it also
+links to that member's existing threads. Thread workspaces are not deleted yet, so they keep
+counting toward the limits. An administrator can change the limits with the `AgentXControlPlane`
+parameters `SlackMemberWorkspaceLimit` and `SlackOrganizationWorkspaceLimit`.
+
+#### Diagnostics
+
+The ingress Lambda and the orchestrator service write JSON log lines to CloudWatch Logs, with the
+components `slack-ingress` and `slack-orchestrator`. They record event IDs, decisions such as
+`event.ignored` with a reason, and failures by error type. Tokens, request text, and response text
+are never logged. `event.ignored reason="channel_not_bound"` means the channel has no binding, and
+`request.rejected reason="invalid_signature"` usually means the stored signing secret is wrong.
+
+If the orchestrator's turn fails, AgentX posts the failure in the thread. Other failures, such as
+workspace preparation or a Slack API error, are retried; on the fifth attempt AgentX posts the
+failure and stops. A retry resumes the operations the earlier attempt started instead of starting
+new ones. A request that the service could not finish handling five times, for example because it
+restarted each time, moves to the `SlackRequestDeadLetterQueueUrl` queue.
+
+#### Retired local Slack mode
+
+`agentx slack run`, `slack configure`, and `slack login` are removed. To delete Slack tokens stored
+by the local mode from the OS credential store, run:
 
 ```sh
 agentx --project project-a slack logout
 ```
-
-The running bridge writes timestamped diagnostics to stderr. It logs Socket Mode connection state,
-incoming event metadata, allowlist/filter decisions, queue activity, task duration, and Slack reply
-status. Tokens, prompt text, and response text are never logged. For example,
-`mention.ignored reason="channel_mismatch"` identifies a saved channel-ID mismatch, while no
-`socket.envelope_received` line after a real app mention means Slack did not deliver an envelope to
-this local Socket Mode connection. Raw-envelope diagnostics include Slack's `apiAppId` and event
-type, but omit the message text and all credentials. If envelopes are absent despite a connected
-socket, verify the bot-event subscription on that exact App ID and make sure another process or
-machine is not connected with the same `xapp-` token and consuming events.
-
-For a working request, the log progresses through `socket.envelope_received` with
-`eventType="app_mention"`, `socket.event_received`, `mention.accepted`, `message.posted`, and
-`task.started`. An envelope with `eventType="message"` means the Slack app is subscribed to
-`message.channels` but not emitting the required `app_mention`; add `app_mention` under **Event
-Subscriptions → Subscribe to bot events**, save the change, and reinstall if Slack requests it.
-Once `task.started` appears, failures are in the AgentX/Pi workflow rather than Slack delivery and
-are reported as `task.failed` plus a safe error type or code.
-
-Slack mode uses the local model provider credentials for the entire lifetime of the bridge. If the
-Amazon Bedrock profile expires, refresh it, verify it, and restart the bridge:
-
-```sh
-aws login --profile agentx-deployer
-AWS_PROFILE=agentx-deployer AWS_REGION=us-east-1 aws sts get-caller-identity
-agentx --project project-a slack run
-```
-
-Provider failures such as an expired AWS session are returned in the Slack thread as an AgentX
-failure; they are not replaced with an empty-response message.
 
 ### 8. Validate changes and create a pull request
 
