@@ -30,9 +30,18 @@
 
 - [X] T011 Deploy `AgentXReleasePipeline` with the authorized GitHub connection ARN
 - [ ] T012 Enable branch protection on `mainline`
-- [ ] T013 Live: a worker-changing commit produces a new image and a `READY` runtime on that digest
+- [X] T013 Live: a worker-changing commit produces a new image and a `READY` runtime on that digest
 - [ ] T014 Live: a broker-only commit reuses the deployed digest and leaves the runtime version unchanged
 - [ ] T015 Live: a docs-only commit starts no pipeline execution
+
+### Live verification evidence
+
+- Pipeline execution `4467b032-c3f7-48d5-93b5-d84fcce44a4c` released commit `b536609`,
+  published worker digest `sha256:87179c0f8864ce569ee2bf3ed39c8a80f0da92f1984b82807879c1ad1657b249`,
+  and advanced the production AgentCore runtime from version 5 to `READY` version 6.
+- Manual verification execution `d99e6d63-d489-43b6-bf08-6091d5ea5fdb` reran commit `b536609`,
+  reused that digest, published no image, and left the runtime at version 6. This proves the image-reuse
+  path; T014 remains open until a new broker-only commit exercises the webhook path.
 
 ## Dependencies
 
