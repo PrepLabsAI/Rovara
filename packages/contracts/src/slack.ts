@@ -57,6 +57,21 @@ export const SlackThreadWorkspaceResultSchema = z.discriminatedUnion("outcome", 
     .strict(),
 ]);
 
+export const SLACK_MESSAGE_CHUNK_LENGTH = 3_500;
+const EMPTY_RESPONSE = "AgentX completed the request without returning a textual response.";
+
+// One accepted app_mention, handed from the ingress Lambda to the orchestrator through the FIFO queue.
+export const SlackRequestMessageSchema = z
+  .object({
+    version: z.literal(1),
+    eventId: z.string().regex(/^Ev[A-Za-z0-9]{4,64}$/),
+    thread: SlackThreadSchema,
+    userId: SlackUserIdSchema,
+    text: z.string().min(1).max(40_000),
+    receivedAt: z.string().datetime(),
+  })
+  .strict();
+
 export function slackThreadSubject(thread: SlackThread): string {
   const parsed = SlackThreadSchema.parse(thread);
   return `${parsed.teamId}/${parsed.channelId}/${parsed.threadTs}`;
@@ -68,8 +83,32 @@ export function parseSlackThreadSubject(subject: string): SlackThread {
   return SlackThreadSchema.parse({ teamId, channelId, threadTs });
 }
 
+export function slackRequestText(text: string, botUserId?: string): string {
+  const withoutMention = botUserId
+    ? text.replace(new RegExp(`<@${botUserId}>`, "gu"), "")
+    : text.replace(/^\s*<@[A-Z0-9]+>\s*/u, "");
+  return withoutMention.trim();
+}
+
+export function splitSlackMessage(text: string): string[] {
+  const chunks: string[] = [];
+  let remaining = text.trim() || EMPTY_RESPONSE;
+  while (remaining.length > SLACK_MESSAGE_CHUNK_LENGTH) {
+    const boundary = Math.max(
+      remaining.lastIndexOf("\n", SLACK_MESSAGE_CHUNK_LENGTH),
+      remaining.lastIndexOf(" ", SLACK_MESSAGE_CHUNK_LENGTH),
+    );
+    const end = boundary > SLACK_MESSAGE_CHUNK_LENGTH / 2 ? boundary : SLACK_MESSAGE_CHUNK_LENGTH;
+    chunks.push(remaining.slice(0, end).trimEnd());
+    remaining = remaining.slice(end).trimStart();
+  }
+  if (remaining.length > 0) chunks.push(remaining);
+  return chunks;
+}
+
 export type SlackThread = z.infer<typeof SlackThreadSchema>;
 export type SlackRequester = z.infer<typeof SlackRequesterSchema>;
 export type SlackChannelBinding = z.infer<typeof SlackChannelBindingSchema>;
 export type SlackWorkspaceLimit = z.infer<typeof SlackWorkspaceLimitSchema>;
 export type SlackThreadWorkspaceResult = z.infer<typeof SlackThreadWorkspaceResultSchema>;
+export type SlackRequestMessage = z.infer<typeof SlackRequestMessageSchema>;

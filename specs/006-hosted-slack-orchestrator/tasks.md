@@ -21,8 +21,15 @@
 
 ## Phase 2: Slack Ingress
 
-- [ ] T007 Implement the ingress handler in `packages/broker/src/aws/slack-ingress.ts`: signature and timestamp verification, the `url_verification` challenge, human `app_mention` filtering, bound-channel and same-team checks, duplicate suppression, the pending counter, FIFO enqueue, and acknowledgement or queued notice
-- [ ] T008 Add ingress tests for invalid, stale, and valid signatures; bot, edited, direct-message, unbound, and Slack Connect events; duplicate `event_id`; and thread-root derivation in `tests/contract/slack-ingress.test.ts`
+- [X] T007 Implement the ingress handler in `packages/broker/src/aws/slack-ingress.ts`: signature and timestamp verification, the `url_verification` challenge, human `app_mention` filtering, bound-channel and same-team checks, duplicate suppression, the pending counter, FIFO enqueue, and acknowledgement or queued notice
+- [X] T008 Add ingress tests for invalid, stale, and valid signatures; bot, edited, direct-message, unbound, and Slack Connect events; duplicate `event_id`; and thread-root derivation in `tests/contract/slack-ingress.test.ts`
+
+### Phase 2 evidence (local only)
+
+- 16 ingress tests cover signatures, the challenge, filtering, thread-root lanes, queued-ahead notices, duplicate events, empty mentions, enqueue-failure retry, and no request text in logs.
+- A failed enqueue undoes the pending increment and the event claim, then returns 500, so Slack's retry is processed as new.
+- The shared helpers `slackRequestText`, `splitSlackMessage`, and the queue message schema now live in `packages/contracts/src/slack.ts`.
+- Full suite (35 files, 179 tests), typecheck, and lint pass.
 
 ## Phase 3: Hosted Orchestrator Service
 
