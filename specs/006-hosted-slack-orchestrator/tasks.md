@@ -33,12 +33,29 @@
 
 ## Phase 3: Hosted Orchestrator Service
 
-- [ ] T009 Create the `packages/slack-service` workspace package, with a SigV4 signing `fetch` for `/v1/service` that adds the thread and user headers
-- [ ] T010 Implement the queue consumer: visibility heartbeat, thread workspace ensure with setup notices, conversation creation, one orchestrator turn, chunked replies, safe failures, pending-counter decrement, and message deletion
-- [ ] T011 Persist and restore each thread's Pi session in S3 with `SessionManager.open`
-- [ ] T012 Derive deterministic tool request IDs from `(event_id, tool-call index)` so redelivery resumes existing operations
-- [ ] T013 Add consumer tests for per-thread ordering, parallel threads, redelivery after a crash (no duplicate operation, result posted), limit refusal messaging, and conversation restore in `tests/integration/slack-service.test.ts`
-- [ ] T014 Add `environments/slack/Dockerfile`, pinned by digest from ECR Public, and a local build and smoke test
+- [X] T009 Create the `packages/slack-service` workspace package, with a SigV4 signing `fetch` for `/v1/service` that adds the thread and user headers
+- [X] T010 Implement the queue consumer: visibility heartbeat, thread workspace ensure with setup notices, conversation creation, one orchestrator turn, chunked replies, safe failures, pending-counter decrement, and message deletion
+- [X] T011 Persist and restore each thread's Pi session in S3 with `SessionManager.open`
+- [X] T012 Derive deterministic tool request IDs from `(event_id, tool-call index)` so redelivery resumes existing operations
+- [X] T013 Add consumer tests for per-thread ordering, parallel threads, redelivery after a crash (no duplicate operation, result posted), limit refusal messaging, and conversation restore in `tests/integration/slack-service.test.ts`
+- [X] T014 Add `environments/slack/Dockerfile`, pinned by digest from ECR Public, and a local build and smoke test
+
+### Phase 3 evidence (local only)
+
+- **CLI changes for reuse.**
+  - `@agentx/cli` now exports `orchestrator`, `control-plane-api`, and `event-client`.
+  - `createOrchestratorRuntime` accepts an existing `sessionFile` and a `requestId` generator. The local CLI keeps random request IDs.
+  - `runOrchestratorTurn` and `lastAssistantText` now live in `orchestrator.ts`.
+- **Workspace response.** The thread workspace response now carries the project's `orchestratorInstructions`, so the hosted orchestrator uses the same system prompt as the local one.
+- **Tests.** `tests/integration/slack-service.test.ts` (14 tests) covers:
+  - deterministic request IDs, and SigV4 signing with path rewriting and thread headers
+  - the new-thread, follow-up, limit, setup-failure, and turn-failure paths
+  - retry versus final-attempt handling, and identical tool request IDs on redelivery
+  - per-thread ordering with parallel threads, keeping a failed thread's messages for redelivery, and visibility heartbeats
+- **Not unit-tested.** S3 session persistence and the AWS wiring in `src/main.ts` are verified only by the Phase 8 live tests.
+- **Images.** `environments/slack/Dockerfile` builds for linux/arm64 locally, and every module resolves in the container. The worker Dockerfile now copies `packages/slack-service/package.json` for `npm ci`; that file is a worker image input, and the rebuilt worker still reports `Healthy`.
+- **Phase 5 work done early.** The pipeline trigger now covers `packages/{broker,cli,contracts,slack-service,worker}/**`.
+- **Checks.** Full suite (36 files, 193 tests), typecheck, and lint pass.
 
 ## Phase 4: Infrastructure
 

@@ -2,6 +2,7 @@ import { App, LogLevel, SocketModeReceiver } from "@slack/bolt";
 import { agentXError } from "@agentx/contracts";
 import {
   createOrchestratorRuntime,
+  runOrchestratorTurn,
   type OrchestratorOptions,
 } from "./orchestrator.js";
 import type { SlackProjectConfiguration } from "./slack-config.js";
@@ -236,11 +237,7 @@ export async function runSlackMode(options: SlackModeOptions): Promise<void> {
   log({ level: "info", event: "orchestrator.initialized" });
   const transport = new BoltSocketModeTransport(options.appToken, options.botToken, log);
   const bridge = new SlackProjectBridge(options.configuration, transport, {
-    prompt: async (text) => {
-      await runtime.session.prompt(text, { expandPromptTemplates: false });
-      await runtime.session.waitForIdle();
-      return lastAssistantText(runtime.session.messages);
-    },
+    prompt: (text) => runOrchestratorTurn(runtime, text),
   }, log);
   try {
     await bridge.start();
@@ -441,30 +438,6 @@ export function splitSlackMessage(text: string): string[] {
   }
   if (remaining.length > 0) chunks.push(remaining);
   return chunks;
-}
-
-export function lastAssistantText(messages: readonly unknown[]): string {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (!message || typeof message !== "object") continue;
-    const candidate = message as Record<string, unknown>;
-    if (candidate.role !== "assistant") continue;
-    if (candidate.stopReason === "error" && typeof candidate.errorMessage === "string") {
-      throw agentXError("RUNTIME_UNAVAILABLE", candidate.errorMessage);
-    }
-    if (!Array.isArray(candidate.content)) continue;
-    const text = candidate.content
-      .flatMap((block) => {
-        if (!block || typeof block !== "object") return [];
-        const content = block as Record<string, unknown>;
-        return content.type === "text" && typeof content.text === "string" ? [content.text] : [];
-      })
-      .join("\n")
-      .replace(/<thinking>[\s\S]*?<\/thinking>\s*/giu, "")
-      .trim();
-    if (text.length > 0) return text;
-  }
-  return "AgentX completed the request without returning a textual response.";
 }
 
 function rememberEvent(seen: Set<string>, eventId: string): void {

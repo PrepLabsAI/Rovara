@@ -1,5 +1,5 @@
-# The VPC-free AgentCore microVM profile builds this Dockerfile with --platform linux/arm64.
-# The production Instances profile controls architecture through its capacity provider.
+# Hosted Slack orchestrator for ECS Fargate (linux/arm64). It consumes the Slack request queue and runs the
+# Pi orchestrator with AgentX orchestration tools only; coding still runs in the AgentCore worker.
 # Base images come from ECR Public by digest: CodeBuild's shared IPs hit Docker Hub pull limits.
 FROM public.ecr.aws/docker/library/node:22.23.2-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS build
 
@@ -14,23 +14,23 @@ COPY infra/package.json infra/package.json
 RUN npm ci --ignore-scripts
 
 COPY packages/contracts packages/contracts
-COPY packages/worker packages/worker
-RUN npx tsc -b packages/contracts packages/worker --pretty false
+COPY packages/cli packages/cli
+COPY packages/slack-service packages/slack-service
+RUN npx tsc -b packages/contracts packages/cli packages/slack-service --pretty false
 RUN npm prune --omit=dev --workspaces
 
 FROM public.ecr.aws/docker/library/node:22.23.2-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
 
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates git openssh-client \
+    && apt-get install --yes --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /opt/agentx
 COPY --from=build /opt/agentx/node_modules ./node_modules
 COPY --from=build /opt/agentx/packages/contracts ./packages/contracts
-COPY --from=build /opt/agentx/packages/worker ./packages/worker
+COPY --from=build /opt/agentx/packages/cli ./packages/cli
+COPY --from=build /opt/agentx/packages/slack-service ./packages/slack-service
 
-ENV AGENTX_WORKSPACE_ROOT=/mnt/workspace \
-    NODE_ENV=production \
-    PORT=8080
-EXPOSE 8080
+ENV NODE_ENV=production \
+    STATE_DIRECTORY=/tmp/agentx-slack
 USER node
-CMD ["node", "packages/worker/dist/main.js"]
+CMD ["node", "packages/slack-service/dist/main.js"]

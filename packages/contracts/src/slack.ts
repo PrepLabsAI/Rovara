@@ -45,6 +45,7 @@ export const SlackThreadWorkspaceResultSchema = z.discriminatedUnion("outcome", 
       status: WorkspaceStatusSchema,
       operationId: z.string().uuid().nullable(),
       created: z.boolean(),
+      orchestratorInstructions: z.string().min(1).max(32_768),
     })
     .strict(),
   z

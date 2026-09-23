@@ -25,14 +25,11 @@ export const AGENTX_RELEASE_STACKS = [
   "AgentXProductionFoundation",
   "AgentXProductionRuntime",
 ] as const;
-// Deployable inputs only: the worker image, the control-plane Lambdas, and the CDK app.
+// Deployable inputs only: the worker and Slack orchestrator images, the control-plane Lambdas, and the CDK app.
 export const AGENTX_RELEASE_TRIGGER_PATHS = [
   "environments/**",
   "infra/**",
-  "packages/broker/**",
-  "packages/contracts/**",
-  "packages/worker/**",
-  "packages/cli/package.json",
+  "packages/{broker,cli,contracts,slack-service,worker}/**",
   "{package.json,package-lock.json,tsconfig.json,tsconfig.base.json,.dockerignore}",
 ] as const;
 

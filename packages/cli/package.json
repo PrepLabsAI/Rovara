@@ -4,6 +4,11 @@
   "private": true,
   "type": "module",
   "bin": { "agentx": "./dist/main.js" },
+  "exports": {
+    "./control-plane-api": "./dist/control-plane-api.js",
+    "./event-client": "./dist/event-client.js",
+    "./orchestrator": "./dist/orchestrator.js"
+  },
   "dependencies": {
     "@agentx/contracts": "0.1.0",
     "@earendil-works/pi-coding-agent": "0.85.1",

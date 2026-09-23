@@ -27,6 +27,8 @@ export interface OrchestratorOptions {
   context: OrchestrationContext;
   model: { provider: string; modelId: string; thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" };
   initialMessage?: string;
+  sessionFile?: string;
+  requestId?: () => string;
 }
 
 export async function createOrchestratorRuntime(options: OrchestratorOptions): Promise<AgentSessionRuntime> {
@@ -40,7 +42,11 @@ export async function createOrchestratorRuntime(options: OrchestratorOptions): P
   const modelRuntime = await ModelRuntime.create({ refreshOnCreate: false });
   const selectedModel = modelRuntime.getModel(options.model.provider, options.model.modelId);
   if (!selectedModel) throw agentXError("RUNTIME_UNAVAILABLE", "configured local orchestrator model is unavailable");
-  const customTools = createOrchestrationTools(options.api, options.context);
+  const customTools = createOrchestrationTools(
+    options.api,
+    options.context,
+    options.requestId === undefined ? {} : { requestId: options.requestId },
+  );
   assertOrchestrationOnly(customTools);
   const boundaryExtension: InlineExtension = {
     name: "agentx-local-boundary",
@@ -89,8 +95,40 @@ export async function createOrchestratorRuntime(options: OrchestratorOptions): P
   return createAgentSessionRuntime(createRuntime, {
     cwd,
     agentDir: agentDirectory,
-    sessionManager: SessionManager.create(cwd, sessions),
+    sessionManager: options.sessionFile === undefined
+      ? SessionManager.create(cwd, sessions)
+      : SessionManager.open(options.sessionFile, sessions, cwd),
   });
+}
+
+export async function runOrchestratorTurn(runtime: AgentSessionRuntime, prompt: string): Promise<string> {
+  await runtime.session.prompt(prompt, { expandPromptTemplates: false });
+  await runtime.session.waitForIdle();
+  return lastAssistantText(runtime.session.messages);
+}
+
+export function lastAssistantText(messages: readonly unknown[]): string {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message || typeof message !== "object") continue;
+    const candidate = message as Record<string, unknown>;
+    if (candidate.role !== "assistant") continue;
+    if (candidate.stopReason === "error" && typeof candidate.errorMessage === "string") {
+      throw agentXError("RUNTIME_UNAVAILABLE", candidate.errorMessage);
+    }
+    if (!Array.isArray(candidate.content)) continue;
+    const text = candidate.content
+      .flatMap((block) => {
+        if (!block || typeof block !== "object") return [];
+        const content = block as Record<string, unknown>;
+        return content.type === "text" && typeof content.text === "string" ? [content.text] : [];
+      })
+      .join("\n")
+      .replace(/<thinking>[\s\S]*?<\/thinking>\s*/giu, "")
+      .trim();
+    if (text.length > 0) return text;
+  }
+  return "AgentX completed the request without returning a textual response.";
 }
 
 export async function runOrchestratorInteractive(options: OrchestratorOptions): Promise<void> {

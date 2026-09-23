@@ -13,10 +13,10 @@ import {
   validateSlackProjectConfiguration,
   type SlackProjectConfiguration,
 } from "../../packages/cli/src/slack-config.js";
+import { lastAssistantText } from "../../packages/cli/src/orchestrator.js";
 import {
   SlackProjectBridge,
   formatSlackLogEntry,
-  lastAssistantText,
   removeBotMention,
   splitSlackMessage,
   type SlackMention,

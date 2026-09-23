@@ -49,6 +49,7 @@ describe("Slack contracts", () => {
       status: "PREPARING",
       operationId: "22222222-2222-4222-8222-222222222222",
       created: true,
+      orchestratorInstructions: "Delegate work.",
     }).outcome).toBe("WORKSPACE");
     expect(SlackThreadWorkspaceResultSchema.parse({
       outcome: "LIMIT_REACHED",

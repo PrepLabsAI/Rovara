@@ -245,6 +245,9 @@ describe("release pipeline trigger", () => {
     expect(samples.filter((sample) => !triggered(sample))).toEqual([]);
     expect(triggered("packages/broker/src/aws/dispatcher.ts")).toBe(true);
     expect(triggered("infra/lib/control-plane.ts")).toBe(true);
+    expect(triggered("packages/cli/src/orchestrator.ts")).toBe(true);
+    expect(triggered("packages/slack-service/src/main.ts")).toBe(true);
+    expect(triggered("environments/slack/Dockerfile")).toBe(true);
   });
 
   it("does not start the pipeline for paths that cannot change production", () => {
@@ -253,7 +256,7 @@ describe("release pipeline trigger", () => {
       "docs/architecture-production.md",
       "specs/005-release-pipeline/spec.md",
       ".github/workflows/ci.yml",
-      "packages/cli/src/main.ts",
+      "examples/payments.yaml",
       "tests/contract/release-command.test.ts",
       "scripts/preflight.ts",
       "docs/package.json",

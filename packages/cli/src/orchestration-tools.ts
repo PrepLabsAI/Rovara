@@ -71,7 +71,9 @@ export interface OrchestrationContext {
 export function createOrchestrationTools(
   api: OrchestrationApi,
   context: OrchestrationContext,
+  options: { requestId?: () => string } = {},
 ): ToolDefinition[] {
+  const nextRequestId = options.requestId ?? randomUUID;
   const promptParameters = Type.Object({ prompt: Type.String({ minLength: 1, maxLength: 65_536 }) });
   const operationParameters = Type.Object({ operationId: Type.String({ format: "uuid" }) });
   const tools: ToolDefinition[] = [
@@ -85,7 +87,7 @@ export function createOrchestrationTools(
       execute: async (_id, parameters, signal, onUpdate) => {
         const accepted = await api.submitTask({
           ...context,
-          requestId: randomUUID(),
+          requestId: nextRequestId(),
           prompt: parameters.prompt,
         });
         const operationId = acceptedOperationId(accepted);
@@ -113,7 +115,7 @@ export function createOrchestrationTools(
       execute: async (_id, parameters, signal, onUpdate) => {
         const accepted = await api.createPullRequest({
           workspaceId: context.workspaceId,
-          requestId: randomUUID(),
+          requestId: nextRequestId(),
           repository: parameters.repository,
           title: parameters.title,
           ...(parameters.body === undefined ? {} : { body: parameters.body }),
@@ -164,7 +166,7 @@ export function createOrchestrationTools(
       execute: async (_id, parameters, signal, onUpdate) => {
         const accepted = await api.followUp({
           ...context,
-          requestId: randomUUID(),
+          requestId: nextRequestId(),
           prompt: parameters.prompt,
         });
         const operationId = acceptedOperationId(accepted);
@@ -210,7 +212,7 @@ export function createOrchestrationTools(
         };
         const accepted = await api.managePullRequest({
           workspaceId: context.workspaceId,
-          requestId: randomUUID(),
+          requestId: nextRequestId(),
           repository: lifecycle.repository,
           pullRequestNumber: lifecycle.pullRequestNumber,
           action,

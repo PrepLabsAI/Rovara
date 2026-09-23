@@ -694,6 +694,7 @@ async function ensureThreadWorkspace(
     status: "PREPARING",
     operationId: preparation.operationId,
     created: true,
+    orchestratorInstructions: project.definition.orchestratorInstructions,
   };
 }
 
@@ -704,10 +705,18 @@ async function existingThreadWorkspace(
   workspace: WorkspaceInstance,
 ): Promise<SlackThreadWorkspaceResult> {
   await recordThreadRequester(dependencies, identity, workspace.id, false);
+  const project = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
+  const orchestratorInstructions = project.definition.orchestratorInstructions;
   if (workspace.status === "PREPARATION_FAILED" && !workspace.activeOperationId) {
-    const project = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
     const retried = await retryWorkspacePreparation(dependencies, identity, requestId, identity.ownerKey, project, workspace);
-    return { outcome: "WORKSPACE", workspaceId: workspace.id, status: "PREPARING", operationId: retried.operationId, created: false };
+    return {
+      outcome: "WORKSPACE",
+      workspaceId: workspace.id,
+      status: "PREPARING",
+      operationId: retried.operationId,
+      created: false,
+      orchestratorInstructions,
+    };
   }
   return {
     outcome: "WORKSPACE",
@@ -715,6 +724,7 @@ async function existingThreadWorkspace(
     status: workspace.status,
     operationId: workspace.activeOperationId,
     created: false,
+    orchestratorInstructions,
   };
 }
 
