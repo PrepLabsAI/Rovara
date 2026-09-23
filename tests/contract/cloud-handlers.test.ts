@@ -63,7 +63,8 @@ describe("AWS control-plane handlers", () => {
     const invoke = vi.fn(async () => ({ statusCode: 200 }));
     const markDispatching = vi.fn(async () => undefined);
     const markDelivered = vi.fn(async () => undefined);
-    const handler = createDispatcherHandler({ invoke, markDispatching, markDelivered });
+    const markFailed = vi.fn(async () => undefined);
+    const handler = createDispatcherHandler({ invoke, markDispatching, markDelivered, markFailed });
     const operationId = randomUUID();
     const workspaceId = randomUUID();
     const invocation = {
@@ -95,6 +96,71 @@ describe("AWS control-plane handlers", () => {
     }));
     expect(markDispatching).toHaveBeenCalledWith(outbox);
     expect(markDelivered).toHaveBeenCalledWith(outbox.id);
+    expect(markFailed).not.toHaveBeenCalled();
+  });
+
+  it("retries transient dispatch errors and terminally fails the final attempt", async () => {
+    const invoke = vi.fn(async () => ({ statusCode: 400, error: "worker rejected the invocation" }));
+    const markDispatching = vi.fn(async () => undefined);
+    const markDelivered = vi.fn(async () => undefined);
+    const markFailed = vi.fn(async () => undefined);
+    const log = vi.fn();
+    const handler = createDispatcherHandler({
+      invoke,
+      markDispatching,
+      markDelivered,
+      markFailed,
+      maxAttempts: 3,
+      log,
+    });
+    const operationId = randomUUID();
+    const workspaceId = randomUUID();
+    const outbox = {
+      id: randomUUID(),
+      entityType: "OUTBOX",
+      status: "QUEUED",
+      operationId,
+      workspaceId,
+      runtimeArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/agentx",
+      endpointQualifier: "DEFAULT",
+      runtimeSessionId: randomUUID(),
+      invocation: {
+        protocolVersion: 1,
+        operationId,
+        workspaceId,
+        kind: "resume",
+        fence: 2,
+        projectRevision: 1,
+        callbackCapability: "c".repeat(64),
+        payload: {},
+      },
+    } as const;
+
+    await expect(handler({ Records: [{
+      messageId: "retry",
+      body: JSON.stringify(outbox),
+      attributes: { ApproximateReceiveCount: "2" },
+    }] })).resolves.toEqual({ batchItemFailures: [{ itemIdentifier: "retry" }] });
+    expect(markFailed).not.toHaveBeenCalled();
+
+    await expect(handler({ Records: [{
+      messageId: "terminal",
+      body: JSON.stringify(outbox),
+      attributes: { ApproximateReceiveCount: "3" },
+    }] })).resolves.toEqual({ batchItemFailures: [] });
+    expect(markFailed).toHaveBeenCalledWith(
+      expect.objectContaining({ operationId, workspaceId }),
+      expect.stringMatching(/dispatch failed after 3 attempts.*worker rejected the invocation/u),
+    );
+    expect(markDelivered).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.objectContaining({
+      event: "dispatch.attempt_failed",
+      operationId,
+      attempt: 3,
+      maxAttempts: 3,
+      terminal: true,
+      errorMessage: "RUNTIME_UNAVAILABLE: AgentCore returned HTTP 400: worker rejected the invocation",
+    }));
   });
 
   it("accepts one fenced publication and scopes its grant to push on the selected repository", async () => {

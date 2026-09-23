@@ -16,6 +16,8 @@ import {
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
 
+const MAX_DISPATCH_ATTEMPTS = 5;
+
 export class ControlPlaneStack extends Stack {
   constructor(scope: Construct, id: string, props?: StackProps) {
     super(scope, id, props);
@@ -73,7 +75,7 @@ export class ControlPlaneStack extends Stack {
       retentionPeriod: Duration.days(14),
     });
     const dispatchQueue = new sqs.Queue(this, "DispatchQueue", {
-      deadLetterQueue: { queue: deadLetterQueue, maxReceiveCount: 5 },
+      deadLetterQueue: { queue: deadLetterQueue, maxReceiveCount: MAX_DISPATCH_ATTEMPTS },
       encryption: sqs.QueueEncryption.SQS_MANAGED,
       visibilityTimeout: Duration.minutes(2),
     });
@@ -131,7 +133,10 @@ export class ControlPlaneStack extends Stack {
       this,
       "Dispatcher",
       "packages/broker/src/aws/dispatcher.ts",
-      { STATE_TABLE_NAME: state.tableName },
+      {
+        STATE_TABLE_NAME: state.tableName,
+        MAX_DISPATCH_ATTEMPTS: String(MAX_DISPATCH_ATTEMPTS),
+      },
       Duration.seconds(60),
     );
     dispatchQueue.grantConsumeMessages(dispatcher);

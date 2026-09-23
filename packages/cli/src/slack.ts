@@ -509,6 +509,7 @@ function diagnosticErrorFields(error: unknown): Readonly<Record<string, string |
   const fields: Record<string, string | number | boolean> = {
     errorType: error instanceof Error ? error.name : "object",
   };
+  if (error instanceof Error) fields.errorMessage = sanitizeDiagnosticMessage(error.message);
   if (typeof candidate.code === "string" || typeof candidate.code === "number") {
     fields.errorCode = candidate.code;
   }
@@ -518,6 +519,13 @@ function diagnosticErrorFields(error: unknown): Readonly<Record<string, string |
     if (typeof slackError === "string") fields.slackError = slackError;
   }
   return fields;
+}
+
+function sanitizeDiagnosticMessage(message: string): string {
+  return message
+    .replace(/\b(?:xapp|xoxb|xoxp|xoxa|xoxr|AKIA)[A-Za-z0-9_-]+\b/gu, "<redacted>")
+    .replace(/\bBearer\s+\S+/giu, "Bearer <redacted>")
+    .slice(0, 512);
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

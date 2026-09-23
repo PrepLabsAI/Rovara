@@ -96,6 +96,7 @@ describe("Slack local orchestration bridge", () => {
   it("serializes accepted work and reports failures without breaking the queue", async () => {
     const transport = new FakeSlackTransport();
     const order: string[] = [];
+    const logs: Array<{ event: string; fields?: Readonly<Record<string, string | number | boolean>> }> = [];
     const first = deferred<void>();
     const prompt = vi.fn(async (text: string) => {
       order.push(`start:${text}`);
@@ -104,7 +105,12 @@ describe("Slack local orchestration bridge", () => {
       order.push(`end:${text}`);
       return `done:${text}`;
     });
-    const bridge = new SlackProjectBridge(projectConfiguration(), transport, { prompt });
+    const bridge = new SlackProjectBridge(
+      projectConfiguration(),
+      transport,
+      { prompt },
+      (entry) => logs.push(entry),
+    );
 
     await bridge.accept(mention({ eventId: "Ev1", text: "<@UAGENTX01> first" }));
     await bridge.accept(mention({ eventId: "Ev2", text: "<@UAGENTX01> second", messageTimestamp: "2.0" }));
@@ -115,6 +121,11 @@ describe("Slack local orchestration bridge", () => {
 
     expect(order).toEqual(["start:first", "end:first", "start:second"]);
     expect(transport.messages.at(-1)?.text).toBe("AgentX could not complete the request: workspace is busy");
+    const failureLog = logs.find((entry) => entry.event === "task.failed");
+    expect(failureLog?.fields).toMatchObject({
+      errorType: "Error",
+      errorMessage: "workspace is busy",
+    });
   });
 
   it("normalizes mentions, extracts assistant text, and bounds Slack messages", () => {

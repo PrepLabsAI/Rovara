@@ -41,6 +41,7 @@ describe("control-plane infrastructure", () => {
     expect(json).toContain("STATE_TABLE_NAME");
     expect(json).toContain("ARTIFACT_BUCKET_NAME");
     expect(json).toContain("DISPATCH_QUEUE_URL");
+    expect(json).toContain("MAX_DISPATCH_ATTEMPTS");
     expect(json).toContain("CALLBACK_SIGNING_KEY");
     expect(json).toContain("ADMIN_CLAIM");
     expect(json).toContain("GITHUB_APP_PRIVATE_KEY_SECRET_ARN");

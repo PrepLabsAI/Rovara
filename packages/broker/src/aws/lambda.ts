@@ -40,7 +40,7 @@ export interface RuntimeBinding {
 export interface DurableOutboxRecord {
   id: string;
   entityType: "OUTBOX";
-  status: "PENDING" | "QUEUED" | "DELIVERED";
+  status: "PENDING" | "QUEUED" | "DELIVERED" | "FAILED";
   operationId: string;
   workspaceId: string;
   runtimeArn: string;
