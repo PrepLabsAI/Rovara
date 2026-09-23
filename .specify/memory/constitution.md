@@ -1,18 +1,25 @@
-<!-- Sync impact: 1.0.0 -> 1.1.0 (adds an explicitly limited deployment mode).
-Principles modified: IV. Durable working state, replaceable processes (evidence must identify
-the storage mode and its retention boundary).
-Sections added: VPC-free demo deployment mode within Scope and Operational Constraints.
-Removed sections: none. Follow-up TODOs: none. -->
+<!-- Sync impact: 1.1.0 -> 1.2.0 (adds a hosted Slack orchestrator with thread-owned workspaces).
+Principles modified: I. Orchestration-only clients, remote coding (renamed; the boundary now covers
+the hosted Slack orchestrator); III. Shared definitions, isolated instances (adds Slack thread
+workspaces as the only shared writable checkout).
+Sections modified: Scope and Operational Constraints (unattended orchestration is limited to the
+hosted Slack orchestrator). Removed sections: none.
+Follow-up TODOs: specify the hosted Slack orchestrator as its own Spec Kit feature. -->
+<!-- Previous: 1.0.0 -> 1.1.0 added the explicitly limited demo-microvm deployment mode. -->
 # AgentX Constitution
 
 ## Core Principles
 
-### I. Local orchestration, remote coding
+### I. Orchestration-only clients, remote coding
 
-The local pi-based client MUST expose only orchestration capabilities to its agent.
-Repository inspection, editing, shell execution, builds, and tests MUST run in remote coding
-workers. Tool registration and extension loading MUST enforce this boundary; prompts alone
-are insufficient. Local configuration and client-state I/O are permitted.
+Orchestrators, meaning the local pi-based client and the hosted Slack orchestrator, MUST expose
+only orchestration capabilities to their agents. Repository inspection, editing, shell execution,
+builds, and tests MUST run in remote coding workers. Tool registration and extension loading MUST
+enforce this boundary; prompts alone are insufficient. Local configuration and client-state I/O
+are permitted. The hosted Slack orchestrator MAY run unattended. It MUST accept only requests that
+Slack has signed and that come from an allowlisted member of the channel bound to the project. It
+MUST act through a service identity limited to Slack thread workspaces, and MUST record the
+requesting Slack user with every operation.
 
 ### II. Administrator-prepared projects
 
@@ -27,7 +34,11 @@ Project configuration and immutable environment images MAY be shared. Writable w
 uncommitted changes, caches, credentials, and agent histories MUST be isolated by authenticated
 owner and workspace instance. A client-supplied name or session identifier MUST NOT grant
 access. Changes become available to colleagues through explicit repository publication and
-integration, never through a shared writable checkout.
+integration, never through a shared writable checkout. The only exception is a Slack thread
+workspace. It is owned by its Slack thread (team, channel, and thread, as verified by Slack's
+signed request) and is intentionally shared by the allowlisted channel members who post in that
+thread. It MUST NOT be reachable from any other thread, from a personal workspace, or by a thread
+identifier supplied through any other client.
 
 ### IV. Durable working state, replaceable processes
 
@@ -52,8 +63,9 @@ need; optional features MUST NOT delay the first complete coding workflow.
 The production target is pi on Amazon Bedrock AgentCore Instances with persistent EBS-backed
 workspace instances. Use a versioned development image and local AgentX project configuration.
 Dev Container metadata, automatic checkpoints, concurrent writers within one workspace,
-automatic merging, deployment of generated applications, and unattended orchestration after
-client exit are outside the initial release. These may be specified separately.
+automatic merging, and deployment of generated applications are outside the initial release.
+These may be specified separately. Unattended orchestration after client exit is limited to the
+hosted Slack orchestrator described in Principle I, and is specified as its own feature.
 
 A deployment mode named `demo-microvm` MAY use AgentCore microVM compute with public networking
 and managed session storage at `/mnt/workspace` to validate the first live workflow without a
@@ -82,4 +94,4 @@ Amendments MUST identify changed principles and update affected specifications a
 Use semantic versioning: major for incompatible principles, minor for new principles, patch
 for clarifications. Reviewers MUST identify and resolve violations before declaring delivery complete.
 
-**Version**: 1.1.0 | **Ratified**: 2026-09-17 | **Last Amended**: 2026-09-17
+**Version**: 1.2.0 | **Ratified**: 2026-09-17 | **Last Amended**: 2026-09-23
