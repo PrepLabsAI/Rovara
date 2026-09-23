@@ -32,7 +32,7 @@
 - [ ] T012 Enable branch protection on `mainline`
 - [X] T013 Live: a worker-changing commit produces a new image and a `READY` runtime on that digest
 - [ ] T014 Live: a broker-only commit reuses the deployed digest and leaves the runtime version unchanged
-- [ ] T015 Live: a docs-only commit starts no pipeline execution
+- [X] T015 Live: a docs-only commit starts no pipeline execution
 
 ### Live verification evidence
 
@@ -42,6 +42,8 @@
 - Manual verification execution `d99e6d63-d489-43b6-bf08-6091d5ea5fdb` reran commit `b536609`,
   reused that digest, published no image, and left the runtime at version 6. This proves the image-reuse
   path; T014 remains open until a new broker-only commit exercises the webhook path.
+- Docs-only commit `57a7c6e` produced no CodePipeline execution, proving the path filter excludes
+  documentation and specification changes.
 
 ## Dependencies
 
