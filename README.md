@@ -16,14 +16,17 @@ succeeds. The release workflow deploys the control plane and worker together to 
 version skew.
 The current demo uses Amazon Nova Pro.
 
-The production `instances-ebs` profile and its EBS isolation/stop-resume acceptance remain T045.
-The existing directory name `Pi-Bedrock` is retained, but the product is named AgentX.
+The production `instances-ebs` infrastructure is implemented and locally validated. It uses a
+protected, retained capacity-provider foundation and a separately releasable runtime so routine
+backend releases do not recreate or refresh developer workspaces. The existing demo workspaces
+continue to serve traffic until the explicit one-time migration is performed. The existing
+directory name `Pi-Bedrock` is retained, but the product is named AgentX.
 
 ## How AgentX is structured
 
 ```text
-local Pi TUI/CLI -> AgentX control plane -> AgentCore microVM -> remote Pi coding agent
-                                                        └── /mnt/workspace
+local Pi TUI/CLI -> AgentX control plane -> AgentCore Runtime -> remote Pi coding agent
+                                                               └── /mnt/workspace
 ```
 
 The local Pi session is an orchestration-only client. It has AgentX control-plane tools but no
@@ -35,8 +38,8 @@ durable callbacks, and Git/tool-evidence artifacts.
 Both roles currently use `@earendil-works/pi-coding-agent` 0.85.1. GitHub Spec Kit supplies the
 specification workflow and demo repository; it is not the coding-agent runtime.
 
-See the [deployed AWS architecture](docs/architecture-deployed-demo.md) for the complete request,
-dispatch, runtime, storage, model, and callback paths.
+See the [deployed demo architecture](docs/architecture-deployed-demo.md) for the current request
+path and the [production architecture](docs/architecture-production.md) for the EBS-backed target.
 
 ## Use AgentX
 
@@ -380,7 +383,7 @@ prepares that developer's private workspace:
 agentx --project payments admin project register \
   --file "$HOME/.agentx/projects/payments.yaml" \
   --runtime-arn <agentcore-runtime-arn> \
-  --deployment-mode demo-microvm \
+  --deployment-mode <demo-microvm-or-instances-ebs> \
   --endpoint-qualifier DEFAULT
 
 agentx --project payments admin workspace prepare \
@@ -404,6 +407,27 @@ pushes an immutable digest, deploys both stacks, verifies AgentCore `READY`, and
 runtime-log retention. See the [VPC-free AWS runbook](docs/deployment-demo.md) for first-deployment
 environment variables, rollback options, and the manual procedure.
 
+For the production EBS-backed platform, preview the release without changing AWS:
+
+```sh
+npm run release:prod -- --profile agentx-deployer --region us-east-1 --dry-run
+```
+
+The first real production release creates the protected foundation (dedicated two-AZ VPC, two NAT
+gateways, KMS key, private worker security group, flow logs, and stable AgentCore capacity
+provider), then creates the production runtime. Later releases refuse to modify that foundation
+and update only the runtime and control plane:
+
+```sh
+npm run release:prod -- --profile agentx-deployer --region us-east-1
+```
+
+This command does not register a project, prepare a workspace, rewrite a workspace record, stop a
+demo session, or migrate data. Those are separate, explicit administrative operations. An
+`instances-ebs` workspace is identified by the stable capacity provider plus its developer/project
+runtime session ID; updating the worker image on the production runtime does not change either
+identifier and therefore does not require a workspace refresh.
+
 ## Implementation documents
 
 - [Pull-request task list](specs/002-create-pull-request/tasks.md): implementation and validation
@@ -418,6 +442,8 @@ environment variables, rollback options, and the manual procedure.
 - [Research](specs/001-agentx-foundation/research.md): decisions and primary sources.
 - [Deployed AWS architecture](docs/architecture-deployed-demo.md): current VPC-free demo resources
   and request flow.
+- [Production AWS architecture](docs/architecture-production.md): stable AgentCore Instances,
+  per-session EBS, networking, release, isolation, and migration boundaries.
 - [Contracts](specs/001-agentx-foundation/contracts/): project config, control API and worker protocol.
 - [Validation guide](specs/001-agentx-foundation/quickstart.md).
 - [Constitution](.specify/memory/constitution.md): project principles, version 1.0.0.
@@ -433,9 +459,8 @@ uvx --from specify-cli==1.0.7 specify init --here --integration codex --integrat
 Initialization has already run; do not rerun it over these artifacts unnecessarily.
 The installed skills are in `.agents/skills/`, with templates/scripts under `.specify/`.
 
-Continue with `$speckit-implement` for the remaining production EBS acceptance.
-Use `$speckit-converge` only after the remaining release tasks. Spec Kit skills are agent
-instructions, not shell commands. No Git repository or branch was created by this setup.
+Spec Kit skills are agent instructions, not shell commands. No Git repository or branch was
+created by this setup.
 
 Validate the active feature now:
 

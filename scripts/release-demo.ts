@@ -32,12 +32,12 @@ export interface ReleaseManifest {
   accountId: string;
 }
 
-interface StackDescription {
+export interface StackDescription {
   Parameters?: Array<{ ParameterKey?: string; ParameterValue?: string }>;
   Outputs?: Array<{ OutputKey?: string; OutputValue?: string }>;
 }
 
-interface RuntimeDescription {
+export interface RuntimeDescription {
   status?: string;
   agentRuntimeVersion?: string;
   agentRuntimeArtifact?: { containerConfiguration?: { containerUri?: string } };
@@ -109,7 +109,7 @@ export function assertDigestImage(value: string, expectedRepositoryUri?: string)
   }
 }
 
-class Runner {
+export class Runner {
   constructor(private readonly options: ReleaseOptions) {}
 
   run(command: string, args: readonly string[], input?: string): string {
@@ -333,7 +333,7 @@ async function deployRuntime(
   return { runtimeArn, runtime };
 }
 
-function ensureRepository(runner: Runner, options: ReleaseOptions): void {
+export function ensureRepository(runner: Runner, options: ReleaseOptions): void {
   const describe = runner.aws([
     "ecr",
     "describe-repositories",
@@ -394,7 +394,7 @@ function ensureRepository(runner: Runner, options: ReleaseOptions): void {
   ]);
 }
 
-function verifyRepositoryImage(runner: Runner, options: ReleaseOptions, workerImage: string): void {
+export function verifyRepositoryImage(runner: Runner, options: ReleaseOptions, workerImage: string): void {
   const digest = workerImage.slice(workerImage.indexOf("@") + 1);
   runner.aws([
     "ecr",
@@ -412,7 +412,7 @@ function verifyRepositoryImage(runner: Runner, options: ReleaseOptions, workerIm
   ]);
 }
 
-async function buildAndPushWorker(
+export async function buildAndPushWorker(
   runner: Runner,
   options: ReleaseOptions,
   repositoryUri: string,
@@ -493,7 +493,7 @@ async function smokeTestWorker(runner: Runner, image: string): Promise<void> {
   }
 }
 
-function stackExists(runner: Runner, region: string, stack: string): boolean {
+export function stackExists(runner: Runner, region: string, stack: string): boolean {
   const result = runner.aws([
     "cloudformation",
     "describe-stacks",
@@ -508,7 +508,7 @@ function stackExists(runner: Runner, region: string, stack: string): boolean {
   throw new Error(`unable to inspect CloudFormation stack ${stack}`);
 }
 
-function describeStack(runner: Runner, region: string, stack: string): StackDescription {
+export function describeStack(runner: Runner, region: string, stack: string): StackDescription {
   const result = runner.aws([
     "cloudformation",
     "describe-stacks",
@@ -524,17 +524,17 @@ function describeStack(runner: Runner, region: string, stack: string): StackDesc
   return parseJson<StackDescription>(result.stdout);
 }
 
-function stackOutput(stack: StackDescription, key: string): string {
+export function stackOutput(stack: StackDescription, key: string): string {
   const value = stack.Outputs?.find((output) => output.OutputKey === key)?.OutputValue;
   if (!value) throw new Error(`CloudFormation output ${key} is missing`);
   return value;
 }
 
-function stackParameter(stack: StackDescription, key: string): string | undefined {
+export function stackParameter(stack: StackDescription, key: string): string | undefined {
   return stack.Parameters?.find((parameter) => parameter.ParameterKey === key)?.ParameterValue;
 }
 
-function optionalControlPlaneParameters(): string[] {
+export function optionalControlPlaneParameters(): string[] {
   return controlPlaneParameterDefinitions().flatMap(({ parameter, environment }) => {
     const value = process.env[environment];
     return value ? ["--parameters", `${CONTROL_PLANE_STACK}:${parameter}=${value}`] : [];
@@ -566,7 +566,7 @@ function controlPlaneParameterDefinitions(): Array<{ parameter: string; environm
   ];
 }
 
-async function waitForRuntime(
+export async function waitForRuntime(
   runner: Runner,
   region: string,
   runtimeId: string,
@@ -599,7 +599,7 @@ async function waitForRuntime(
   throw new Error("AgentCore runtime did not become READY within ten minutes");
 }
 
-function ensureLogRetention(runner: Runner, region: string, logGroup: string): void {
+export function ensureLogRetention(runner: Runner, region: string, logGroup: string): void {
   const describe = runner.aws([
     "logs",
     "describe-log-groups",
@@ -627,7 +627,7 @@ function ensureLogRetention(runner: Runner, region: string, logGroup: string): v
   ]);
 }
 
-function profileArgs(profile: string | undefined): string[] {
+export function profileArgs(profile: string | undefined): string[] {
   return profile ? ["--profile", profile] : [];
 }
 

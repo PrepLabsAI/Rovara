@@ -6,6 +6,10 @@ import {
   releaseTag,
   runtimeIdFromArn,
 } from "../../scripts/release-demo.js";
+import {
+  capacityProviderIdFromArn,
+  parseProductionReleaseArgs,
+} from "../../scripts/release-production.js";
 
 describe("demo release command", () => {
   it("parses safe defaults and explicit deployment options", () => {
@@ -63,5 +67,25 @@ describe("demo release command", () => {
     });
     expect(policy.rules.slice(2).map((rule) => rule.selection.tagPrefixList?.[0]))
       .toEqual(["demo-", "pr-create-"]);
+  });
+});
+
+describe("production release command", () => {
+  it("defaults to a distinct production ECR repository", () => {
+    expect(parseProductionReleaseArgs([], {})).toMatchObject({
+      region: "us-east-1",
+      repository: "agentx-worker-production",
+      dryRun: false,
+    });
+    expect(parseProductionReleaseArgs(["--repository", "custom"], {})).toMatchObject({
+      repository: "custom",
+    });
+  });
+
+  it("extracts a capacity provider ID and rejects malformed ARNs", () => {
+    expect(capacityProviderIdFromArn(
+      "arn:aws:bedrock-agentcore:us-east-1:944937319445:capacity-provider/agentx_production_capacity-1234567890",
+    )).toBe("agentx_production_capacity-1234567890");
+    expect(() => capacityProviderIdFromArn("not-an-arn")).toThrow(/invalid/i);
   });
 });
