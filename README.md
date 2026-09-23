@@ -9,12 +9,11 @@ development images. Every developer uses an isolated persistent workspace instan
 The VPC-free `demo-microvm` profile is deployed and has been validated end to end in `us-east-1`:
 OIDC login, workspace preparation, control-plane dispatch, AgentCore managed session storage, Pi
 tool use, Amazon Bedrock inference, GitHub App authentication for private repositories, and
-result/artifact callbacks are working. Pull-request creation is deployed and its clean-checkout
-safety path and changed-checkout publication path have both been validated against a private
-repository. Safe existing-PR maintenance, clean replacement, and merged-PR revert are implemented
-and locally validated; they require the next AWS deployment before use against the demo account.
-Administrator-configured CodeBuild gates are also implemented locally: they test the exact pushed
-candidate and block PR creation or PR-head advancement unless every gate succeeds.
+result/artifact callbacks are working. Pull-request creation, safe existing-PR maintenance, clean
+replacement, merged-PR revert, and administrator-configured CodeBuild gates are deployed. Gates
+test the exact pushed candidate and block PR creation or PR-head advancement unless every gate
+succeeds. The release workflow deploys the control plane and worker together to prevent protocol
+version skew.
 The current demo uses Amazon Nova Pro.
 
 The production `instances-ebs` profile and its EBS isolation/stop-resume acceptance remain T045.
@@ -393,8 +392,17 @@ the Cognito `agentx-admin` group. Project revisions and runtime bindings are imm
 the YAML revision before registering a changed image, repository commit, setup, or readiness
 definition.
 
-Run `agentx --help` or `agentx <command> --help` for the complete command surface. For deployment,
-use the [VPC-free AWS runbook](docs/deployment-demo.md).
+Run `agentx --help` or `agentx <command> --help` for the complete command surface. A subsequent
+demo release is one command from a clean checkout:
+
+```sh
+npm run release:demo -- --profile agentx-deployer --region us-east-1
+```
+
+The command runs all quality gates, applies bounded ECR retention, builds and smoke-tests ARM64,
+pushes an immutable digest, deploys both stacks, verifies AgentCore `READY`, and enforces 30-day
+runtime-log retention. See the [VPC-free AWS runbook](docs/deployment-demo.md) for first-deployment
+environment variables, rollback options, and the manual procedure.
 
 ## Implementation documents
 
