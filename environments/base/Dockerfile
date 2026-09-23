@@ -1,7 +1,7 @@
-# syntax=docker/dockerfile:1.7
 # The VPC-free AgentCore microVM profile builds this Dockerfile with --platform linux/arm64.
 # The production Instances profile controls architecture through its capacity provider.
-FROM node:22.23.2-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS build
+# Base images come from ECR Public by digest: CodeBuild's shared IPs hit Docker Hub pull limits.
+FROM public.ecr.aws/docker/library/node:22.23.2-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS build
 
 WORKDIR /opt/agentx
 COPY package.json package-lock.json tsconfig.json tsconfig.base.json ./
@@ -17,7 +17,7 @@ COPY packages/worker packages/worker
 RUN npx tsc -b packages/contracts packages/worker --pretty false
 RUN npm prune --omit=dev --workspaces
 
-FROM node:22.23.2-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
+FROM public.ecr.aws/docker/library/node:22.23.2-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates git openssh-client \

@@ -27,6 +27,29 @@ const CONTROL_PLANE_STACK = "AgentXControlPlane";
 const DEMO_RUNTIME_STACK = "AgentXDemoRuntime";
 const FOUNDATION_STACK = "AgentXProductionFoundation";
 const RUNTIME_STACK = "AgentXProductionRuntime";
+const PRODUCTION_FLAGS = ["--reuse-unchanged-worker", "--require-existing-foundation"];
+const RELEASE_TAG_PATTERN = /^release-\d{8}T\d{6}Z-([a-f0-9]{7,40})$/;
+
+// Every path that environments/base/Dockerfile copies into the worker image, plus the build files.
+export const WORKER_IMAGE_INPUTS = [
+  "environments/base/Dockerfile",
+  ".dockerignore",
+  "package.json",
+  "package-lock.json",
+  "tsconfig.json",
+  "tsconfig.base.json",
+  "packages/contracts",
+  "packages/worker",
+  "packages/cli/package.json",
+  "packages/broker/package.json",
+  "infra/package.json",
+] as const;
+
+export interface ProductionReleaseOptions extends ReleaseOptions {
+  reuseUnchangedWorker: boolean;
+  requireExistingFoundation: boolean;
+}
+
 export interface ProductionReleaseManifest extends ReleaseManifest {
   capacityProviderArn: string;
   deploymentMode: "instances-ebs";
@@ -40,11 +63,79 @@ interface CapacityProviderDescription {
 export function parseProductionReleaseArgs(
   argv: readonly string[],
   environment = process.env,
-): ReleaseOptions {
-  const options = parseReleaseArgs(argv, environment);
-  return argv.includes("--repository")
-    ? options
-    : { ...options, repository: DEFAULT_REPOSITORY };
+): ProductionReleaseOptions {
+  const options = parseReleaseArgs(argv, environment, PRODUCTION_FLAGS);
+  return {
+    ...options,
+    ...(argv.includes("--repository") ? {} : { repository: DEFAULT_REPOSITORY }),
+    reuseUnchangedWorker: argv.includes("--reuse-unchanged-worker"),
+    requireExistingFoundation: argv.includes("--require-existing-foundation"),
+  };
+}
+
+export function releaseRevisionFromTags(tags: readonly string[]): string | undefined {
+  for (const tag of tags) {
+    const revision = RELEASE_TAG_PATTERN.exec(tag)?.[1];
+    if (revision) return revision;
+  }
+  return undefined;
+}
+
+export function reusableWorkerImage(
+  runner: Runner,
+  options: ReleaseOptions,
+  repositoryUri: string,
+): string | undefined {
+  const build = (reason: string): undefined => {
+    process.stdout.write(`\nBuilding a new worker image: ${reason}.\n`);
+    return undefined;
+  };
+  if (!stackExists(runner, options.region, RUNTIME_STACK)) {
+    return build(`${RUNTIME_STACK} is not deployed`);
+  }
+  const deployedImage = stackParameter(
+    describeStack(runner, options.region, RUNTIME_STACK),
+    "WorkerImageUri",
+  );
+  if (!deployedImage?.startsWith(`${repositoryUri}@sha256:`)) {
+    return build(`the deployed image ${deployedImage ?? "(none)"} is not in ${repositoryUri}`);
+  }
+  const digest = deployedImage.slice(deployedImage.indexOf("@") + 1);
+  const described = runner.aws([
+    "ecr",
+    "describe-images",
+    "--region",
+    options.region,
+    "--repository-name",
+    options.repository,
+    "--image-ids",
+    `imageDigest=${digest}`,
+    "--query",
+    "imageDetails[0].imageTags",
+    "--output",
+    "json",
+  ], true);
+  if (described.status !== 0) {
+    return build(`ECR could not describe the deployed image ${digest}`);
+  }
+  const revision = releaseRevisionFromTags((JSON.parse(described.stdout) as string[] | null) ?? []);
+  if (!revision) {
+    return build(`the deployed image ${digest} has no release-<time>-<commit> tag`);
+  }
+  if (runner.capture("git", ["cat-file", "-e", `${revision}^{commit}`], true).status !== 0) {
+    return build(`the deployed commit ${revision} is not in this checkout's history`);
+  }
+  const diff = runner.capture(
+    "git",
+    ["diff", "--quiet", revision, "HEAD", "--", ...WORKER_IMAGE_INPUTS],
+    true,
+  );
+  if (diff.status === 1) return build(`worker image inputs changed since ${revision}`);
+  if (diff.status !== 0) return build(`git could not compare ${revision} with HEAD`);
+  process.stdout.write(
+    `\nReusing deployed worker image ${deployedImage}: no worker image inputs changed since ${revision}.\n`,
+  );
+  return deployedImage;
 }
 
 export function capacityProviderIdFromArn(capacityProviderArn: string): string {
@@ -58,15 +149,19 @@ export function capacityProviderIdFromArn(capacityProviderArn: string): string {
 }
 
 export async function releaseProduction(
-  options: ReleaseOptions,
+  options: ProductionReleaseOptions,
 ): Promise<ProductionReleaseManifest | undefined> {
   if (options.dryRun) {
     process.stdout.write([
       "AgentX production release plan:",
       "1. Verify the working tree and run typecheck, lint and tests.",
       "2. Apply bounded retention and immutable tags to the production ECR repository.",
-      "3. Build, smoke-test and push a linux/arm64 worker by immutable digest.",
-      "4. Create the protected VPC/EBS capacity foundation only when it does not exist.",
+      options.reuseUnchangedWorker
+        ? "3. Reuse the deployed worker digest when no worker image input changed; otherwise build, smoke-test and push a linux/arm64 worker."
+        : "3. Build, smoke-test and push a linux/arm64 worker by immutable digest.",
+      options.requireExistingFoundation
+        ? "4. Refuse to continue unless the protected VPC/EBS capacity foundation already exists."
+        : "4. Create the protected VPC/EBS capacity foundation only when it does not exist.",
       "5. Refuse foundation drift on routine releases; update only the production runtime.",
       "6. Update the control plane after the runtime is READY, then enforce 30-day log retention.",
       "7. Do not register, prepare, rewrite, stop, or migrate any workspace.",
@@ -95,6 +190,7 @@ export async function releaseProduction(
   ensureRepository(runner, options);
 
   const workerImage = options.workerImage
+    ?? (options.reuseUnchangedWorker ? reusableWorkerImage(runner, options, repositoryUri) : undefined)
     ?? await buildAndPushWorker(runner, options, repositoryUri, revision);
   assertDigestImage(workerImage, repositoryUri);
   verifyRepositoryImage(runner, options, workerImage);
@@ -122,6 +218,9 @@ export async function releaseProduction(
   }
 
   if (!stackExists(runner, options.region, FOUNDATION_STACK)) {
+    if (options.requireExistingFoundation) {
+      throw new Error(`${FOUNDATION_STACK} does not exist; create it with a reviewed manual release first`);
+    }
     deployFoundation(runner, options);
   } else {
     assertFoundationHasNoPendingChanges(runner, options);
@@ -302,6 +401,8 @@ function usage(): string {
     `  --profile <profile>        AWS CLI/CDK profile\n` +
     `  --repository <name>        ECR repository (default: agentx-worker-production)\n` +
     `  --worker-image <digest>    Deploy an already-published image from that repository\n` +
+    `  --reuse-unchanged-worker   Reuse the deployed image when no worker image input changed\n` +
+    `  --require-existing-foundation  Fail instead of creating the production foundation\n` +
     `  --allow-dirty              Explicitly allow releasing an uncommitted checkout\n` +
     `  --skip-checks              Skip typecheck, lint, and tests\n` +
     `  --dry-run                  Print the release stages without changing AWS\n` +

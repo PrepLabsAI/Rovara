@@ -15,6 +15,11 @@ import {
   defaultProductionAvailabilityZoneIds,
   validateProductionFoundationConfiguration,
 } from "../../infra/lib/production-foundation.js";
+import {
+  AGENTX_RELEASE_PROJECT_NAME,
+  AGENTX_RELEASE_TRIGGER_PATHS,
+  ReleasePipelineStack,
+} from "../../infra/lib/release-pipeline.js";
 
 describe("control-plane infrastructure", () => {
   it("synthesizes private storage, durable dispatch, JWT auth and a single runtime invoker", () => {
@@ -201,6 +206,97 @@ describe("AgentCore Instances infrastructure", () => {
       availabilityZoneIds: ["use1-az1", "use1-az1"],
     })).toThrow(/distinct/i);
     expect(() => defaultProductionAvailabilityZoneIds("us-west-2")).toThrow(/no verified/i);
+  });
+});
+
+describe("production release pipeline", () => {
+  const template = Template.fromStack(
+    new ReleasePipelineStack(new App(), "TestReleasePipeline", { env: { region: "us-east-1" } }),
+  );
+  interface Statement {
+    Sid?: string;
+    Action: string | string[];
+    Resource: unknown;
+  }
+  const policies = Object.values(template.findResources("AWS::IAM::Policy")) as Array<{
+    Properties: { PolicyDocument: { Statement: Statement[] } };
+  }>;
+  const statements = policies.flatMap((policy) => policy.Properties.PolicyDocument.Statement);
+  const actionsOf = (statement: Statement) => [statement.Action].flat();
+
+  it("starts a V2 pipeline only for filtered mainline pushes, with a full Git clone", () => {
+    template.hasResourceProperties("AWS::CodePipeline::Pipeline", {
+      PipelineType: "V2",
+      ExecutionMode: "SUPERSEDED",
+      Triggers: [{
+        ProviderType: "CodeStarSourceConnection",
+        GitConfiguration: {
+          SourceActionName: "GitHub",
+          Push: [{
+            Branches: { Includes: ["mainline"] },
+            FilePaths: { Includes: [...AGENTX_RELEASE_TRIGGER_PATHS] },
+          }],
+        },
+      }],
+      Stages: Match.arrayWith([Match.objectLike({
+        Name: "Source",
+        Actions: [Match.objectLike({
+          Configuration: {
+            ConnectionArn: { Ref: "GitHubConnectionArn" },
+            FullRepositoryId: "PrepLabsAI/AgentX",
+            BranchName: "mainline",
+            OutputArtifactFormat: "CODEBUILD_CLONE_REF",
+          },
+        })],
+      })]),
+    });
+    template.resourceCountIs("AWS::KMS::Key", 0);
+  });
+
+  it("runs the checked production release on one native ARM Docker build at a time", () => {
+    template.hasResourceProperties("AWS::CodeBuild::Project", {
+      Name: AGENTX_RELEASE_PROJECT_NAME,
+      ConcurrentBuildLimit: 1,
+      TimeoutInMinutes: 60,
+      Environment: Match.objectLike({
+        Type: "ARM_CONTAINER",
+        ComputeType: "BUILD_GENERAL1_MEDIUM",
+        Image: "aws/codebuild/amazonlinux-aarch64-standard:3.0",
+        PrivilegedMode: true,
+      }),
+    });
+    template.hasResourceProperties("AWS::Logs::LogGroup", { RetentionInDays: 30 });
+    const [project] = Object.values(template.findResources("AWS::CodeBuild::Project")) as Array<{
+      Properties: { Source: { BuildSpec: string } };
+    }>;
+    const buildSpec = project?.Properties.Source.BuildSpec ?? "";
+    expect(buildSpec).toContain("npm run release:prod");
+    expect(buildSpec).toContain("--reuse-unchanged-worker");
+    expect(buildSpec).toContain("--require-existing-foundation");
+    expect(buildSpec).not.toMatch(/--skip-checks|--allow-dirty/);
+    expect(buildSpec).toContain("sha256sum -c");
+    expect(buildSpec).toContain("awscli-exe-linux-aarch64-${AWS_CLI_VERSION}.zip");
+  });
+
+  it("keeps the release project outside the broker's CodeBuild gate allow-list", () => {
+    expect(AGENTX_RELEASE_PROJECT_NAME).not.toMatch(/^agentx-/i);
+  });
+
+  it("grants no wildcard actions and scopes release permissions to production resources", () => {
+    const json = JSON.stringify(template.toJSON());
+    const actions = statements.flatMap(actionsOf);
+    expect(actions.filter((action) => action === "*" || action.endsWith(":*"))).toEqual([]);
+    expect(
+      statements.filter((statement) => statement.Resource === "*").flatMap(actionsOf),
+    ).toEqual(["ecr:GetAuthorizationToken"]);
+    const assume = statements.find((statement) => statement.Sid === "AssumeCdkBootstrapRoles");
+    expect(JSON.stringify(assume?.Resource)).toContain(":role/cdk-hnb659fds-*-");
+    const repository = statements.find((statement) => statement.Sid === "ProductionWorkerRepository");
+    expect(JSON.stringify(repository?.Resource)).toContain("repository/agentx-worker-production");
+    expect(actionsOf(repository!)).not.toContain("ecr:CreateRepository");
+    expect(json).toContain("codeconnections:UseConnection");
+    expect(json).toContain("bedrock-agentcore:GetCapacityProvider");
+    expect(actions).not.toContain("cloudformation:CreateStack");
   });
 });
 

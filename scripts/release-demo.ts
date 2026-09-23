@@ -49,7 +49,11 @@ interface CommandResult {
   stderr: string;
 }
 
-export function parseReleaseArgs(argv: readonly string[], environment = process.env): ReleaseOptions {
+export function parseReleaseArgs(
+  argv: readonly string[],
+  environment = process.env,
+  extraFlags: readonly string[] = [],
+): ReleaseOptions {
   const valueAfter = (flag: string): string | undefined => {
     const index = argv.indexOf(flag);
     if (index < 0) return undefined;
@@ -66,6 +70,7 @@ export function parseReleaseArgs(argv: readonly string[], environment = process.
     "--skip-checks",
     "--dry-run",
     "--help",
+    ...extraFlags,
   ]);
   for (const argument of argv) {
     if (argument.startsWith("--") && !known.has(argument)) {

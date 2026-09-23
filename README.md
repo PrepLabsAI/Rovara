@@ -428,6 +428,43 @@ demo session, or migrate data. Those are separate, explicit administrative opera
 runtime session ID; updating the worker image on the production runtime does not change either
 identifier and therefore does not require a workspace refresh.
 
+#### Continuous production releases
+
+`AgentXReleasePipeline` runs the same production release from AWS for every qualifying push to
+`mainline`. It is a CodePipeline V2 pipeline with a native ARM CodeBuild project,
+`release-agentx-production`, which runs:
+
+```sh
+npm run release:prod -- --region "$AWS_REGION" --reuse-unchanged-worker --require-existing-foundation
+```
+
+| A push to `mainline` that changes | Result |
+|---|---|
+| Only docs, specs, top-level `tests/`, CLI source, `scripts/` or `.github` | No pipeline execution |
+| `packages/broker`, `infra` or other control-plane code, but no worker image input | Checks, then a control-plane deploy. The deployed worker digest is reused and the runtime is unchanged |
+| A worker image input: `packages/worker`, `packages/contracts`, the Dockerfile, `.dockerignore`, root `package.json`, `package-lock.json` or tsconfigs, or a workspace `package.json` | Checks, a new ARM64 image, a runtime update to `READY` on that digest, then a control-plane deploy |
+
+Whether the worker changed is judged against the deployed image. The pipeline reads the commit
+from the image's `release-<time>-<commit>` tag and diffs the worker image inputs up to `HEAD`. So
+a worker change from a failed or superseded execution is still released by the next one. If that
+commit cannot be determined, the pipeline builds a new image. Any change under `infra/` that
+alters `AgentXProductionFoundation` fails the release until an administrator reviews and deploys
+the foundation manually. The pipeline never creates the foundation and never deploys itself.
+
+One-time setup, with an administrator's credentials:
+
+```sh
+npm run build --workspace @agentx/infra
+npx cdk deploy AgentXReleasePipeline --app 'node infra/dist/bin/agentx.js' \
+  --profile agentx-deployer -c agentxRegion=us-east-1 \
+  --parameters GitHubConnectionArn=arn:aws:codeconnections:us-east-1:944937319445:connection/7e76074b-e840-439f-b94c-6806a2bf9513
+```
+
+Protect `mainline` in GitHub. The build role can deploy through the CDK bootstrap roles, so push
+access to `mainline` is deploy access. To roll back, revert the change on `mainline`, or run
+`npm run release:prod -- --worker-image <digest>` locally with an earlier digest from
+`agentx-worker-production`.
+
 ## Implementation documents
 
 - [Pull-request task list](specs/002-create-pull-request/tasks.md): implementation and validation
