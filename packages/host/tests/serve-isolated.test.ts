@@ -107,6 +107,21 @@ describe("isolated host process entry", () => {
   });
 });
 
+describe("isolated host ownership", () => {
+  it("refuses a second live host on the same state directory", async () => {
+    const state = await scratch("agentx-serve-lock-");
+    const repo = await source();
+    const first = await startIsolatedHost(config(state, repo));
+    try {
+      await expect(startIsolatedHost(config(state, repo))).rejects.toThrow(/owns this state directory/);
+    } finally {
+      await first.close();
+    }
+    const again = await startIsolatedHost(config(state, repo));
+    await again.close();
+  });
+});
+
 describe("isolated payload", () => {
   it("REGRESSION never carries host AppleDouble metadata into the worker workspace", async () => {
     const workspace = await scratch("agentx-payload-ws-");

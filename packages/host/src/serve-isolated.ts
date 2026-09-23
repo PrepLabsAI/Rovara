@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { execFile } from "node:child_process";
-import { access, chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { agentXError } from "@agentx/contracts";
@@ -82,7 +82,13 @@ async function exists(path: string): Promise<boolean> {
 async function loopbackTls(directory: string): Promise<{ cert: string; key: string; certPath: string }> {
   const certPath = join(directory, "loopback-cert.pem");
   const keyPath = join(directory, "loopback-key.pem");
-  if (!(await exists(certPath)) || !(await exists(keyPath))) {
+  const current = (await exists(certPath)) && (await exists(keyPath)) &&
+    (await run("openssl", ["x509", "-checkend", "3600", "-noout", "-in", certPath]).then(() => true, () => false));
+  if (!current) {
+    // Missing or within an hour of expiry: regenerate. The directory is 0700, so the key
+    // is never readable by others even before its own chmod.
+    await rm(certPath, { force: true });
+    await rm(keyPath, { force: true });
     await run("openssl", [
       "req", "-x509", "-newkey", "rsa:2048", "-keyout", keyPath, "-out", certPath,
       "-days", "2", "-nodes", "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1",
@@ -118,6 +124,22 @@ function sameSecret(presented: string, expected: string): boolean {
 export async function startIsolatedHost(config: IsolatedHostConfig): Promise<IsolatedHost> {
   const state = resolve(config.stateDirectory);
   await mkdir(state, { recursive: true, mode: 0o700 });
+  // mkdir's mode is ignored for a directory that already exists (or is shaped by umask).
+  await chmod(state, 0o700);
+  // One host per state directory: two drainers over one outbox could run a job twice.
+  const lockPath = join(state, "host.lock");
+  const lock = await open(lockPath, "wx", 0o600).catch(async (error: NodeJS.ErrnoException) => {
+    if (error.code !== "EEXIST") throw error;
+    const holder = Number((await readFile(lockPath, "utf8")).trim());
+    const alive = (() => {
+      try { process.kill(holder, 0); return true; } catch { return false; }
+    })();
+    if (alive) throw agentXError("CONFIG_INVALID", `another host (pid ${holder}) owns this state directory`);
+    await rm(lockPath, { force: true });
+    return open(lockPath, "wx", 0o600);
+  });
+  await lock.writeFile(String(process.pid));
+  await lock.close();
   const tls = await loopbackTls(state);
   const bearer = await hostBearer(state);
 
@@ -234,7 +256,12 @@ export async function startIsolatedHost(config: IsolatedHostConfig): Promise<Iso
     route,
     // The wire carries the request, not the control plane's case: receipts are bound to
     // the exact request identity, which the control plane maps to its own case.
-    caseId: (invocation) => `request:${operations.get(invocation.operationId)?.requestId ?? "unobserved"}`,
+    caseId: (invocation) => {
+      const requestId = operations.get(invocation.operationId)?.requestId;
+      // Fail closed: a receipt must never bind to a shared placeholder.
+      if (!requestId) throw agentXError("CONFIG_INVALID", "invocation names no known operation");
+      return `request:${requestId}`;
+    },
     budget: config.budget,
   });
   const dispatcher = createOutboxDispatcher({ operations, transport });
@@ -257,6 +284,7 @@ export async function startIsolatedHost(config: IsolatedHostConfig): Promise<Iso
     async close() {
       await listener.close();
       database.close();
+      await rm(lockPath, { force: true });
     },
   };
 }
