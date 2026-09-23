@@ -31,7 +31,7 @@
 - [X] T011 Deploy `AgentXReleasePipeline` with the authorized GitHub connection ARN
 - [ ] T012 Enable branch protection on `mainline`
 - [X] T013 Live: a worker-changing commit produces a new image and a `READY` runtime on that digest
-- [ ] T014 Live: a broker-only commit reuses the deployed digest and leaves the runtime version unchanged
+- [X] T014 Live: a broker-only commit reuses the deployed digest and leaves the runtime version unchanged
 - [X] T015 Live: a docs-only commit starts no pipeline execution
 
 ### Live verification evidence
@@ -44,6 +44,9 @@
   path; T014 remains open until a new broker-only commit exercises the webhook path.
 - Docs-only commit `57a7c6e` produced no CodePipeline execution, proving the path filter excludes
   documentation and specification changes.
+- Broker-only commit `c78a2bf` triggered webhook execution `154ed5f9-f233-4817-8933-d662863e7380`,
+  reused the deployed worker digest, updated the control plane, and left the AgentCore runtime at
+  version 6.
 
 ## Dependencies
 
