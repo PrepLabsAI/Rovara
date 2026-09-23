@@ -6,12 +6,18 @@
 
 ## Phase 1: Contracts and Control Plane
 
-- [ ] T001 Add Slack binding, thread key, requester, and workspace-limit error contracts, with validation tests, in `packages/contracts/src/slack.ts` and `tests/contract/contracts.test.ts`
-- [ ] T002 Add the administrator channel-binding API (`PUT`/`DELETE /v1/admin/slack/bindings/{teamId}/{channelId}`) in `packages/broker/src/aws/broker.ts`, with authorization tests
-- [ ] T003 Add the IAM-authorized service route identity. It accepts only the configured orchestrator role, derives thread owner keys from the Slack headers, and requires a bound channel. Tests cover rejected callers, unbound channels, and disjoint thread and personal owner keys
-- [ ] T004 Add thread workspace preparation with a single transaction for the workspace record and the member and organization limit counters. Tests cover limit refusal, concurrent requests for the last slot, and idempotent repeat preparation
-- [ ] T005 Route existing task, follow-up, event, status, and pull-request handlers through the service identity. Record `requestedBy` and append Slack requesters to pull request bodies. Tests cover cross-thread and personal-workspace isolation
-- [ ] T006 Add `agentx admin slack bind` and `agentx admin slack unbind` in `packages/cli/src/admin.ts` and `packages/cli/src/main.ts`, with CLI tests
+- [X] T001 Add Slack binding, thread key, requester, and thread-workspace result contracts, with validation tests, in `packages/contracts/src/slack.ts` and `tests/contract/slack-contracts.test.ts`
+- [X] T002 Add the administrator channel-binding API (`PUT`/`DELETE /v1/admin/slack/bindings/{teamId}/{channelId}`) in `packages/broker/src/aws/broker.ts`, with authorization tests
+- [X] T003 Add the IAM-authorized service route identity. It accepts only the configured orchestrator role, derives thread owner keys from the Slack headers, and requires a bound channel. Tests cover rejected callers, unbound channels, and disjoint thread and personal owner keys
+- [X] T004 Add thread workspace preparation with a single transaction for the workspace record and the member and organization limit counters. Tests cover limit refusal, concurrent requests for the last slot, and idempotent repeat preparation
+- [X] T005 Route existing task, follow-up, event, status, and pull-request handlers through the service identity. Record `requestedBy` and append Slack requesters to pull request bodies. Tests cover cross-thread and personal-workspace isolation
+- [X] T006 Add `agentx admin slack bind` and `agentx admin slack unbind` in `packages/cli/src/admin/slack.ts` and `packages/cli/src/main.ts`, with CLI tests
+
+### Phase 1 evidence (local only)
+
+- `tests/contract/slack-contracts.test.ts`, `tests/contract/slack-control-plane.test.ts`, and `tests/contract/slack-admin-cli.test.ts` cover: service identity, bindings, one workspace per thread, member and organization limits (including a race for the last slot), isolation from personal logins and other threads, and requester attribution on tasks and pull requests.
+- Broker tests use `tests/support/fake-dynamodb.ts`, which evaluates condition and update expressions and applies transactions all-or-nothing.
+- Full suite (34 files, 163 tests), typecheck, and lint pass, including with git identity auto-detection disabled.
 
 ## Phase 2: Slack Ingress
 

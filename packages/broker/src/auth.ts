@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
-import { agentXError } from "@agentx/contracts";
+import {
+  agentXError,
+  type SlackChannelBinding,
+  type SlackRequester,
+  type SlackThread,
+} from "@agentx/contracts";
 import {
   createRemoteJWKSet,
   jwtVerify,
@@ -13,6 +18,11 @@ export interface AuthenticatedIdentity {
   ownerKey: string;
   isAdministrator: boolean;
   claims: JWTPayload;
+  slack?: {
+    thread: SlackThread;
+    requester: SlackRequester;
+    binding: SlackChannelBinding;
+  };
 }
 
 export interface JwtAuthenticatorConfig {

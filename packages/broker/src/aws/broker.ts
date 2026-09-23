@@ -5,12 +5,14 @@ import {
 } from "@aws-sdk/client-bedrock-agentcore";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
+  DeleteCommand,
   DynamoDBDocumentClient,
   GetCommand,
   PutCommand,
   QueryCommand,
   TransactWriteCommand,
   UpdateCommand,
+  type TransactWriteCommandInput,
 } from "@aws-sdk/lib-dynamodb";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import {
@@ -26,14 +28,24 @@ import {
   PullRequestLifecycleResultSchema,
   PullRequestResultSchema,
   ProjectDefinitionSchema,
+  SLACK_THREAD_OWNER_ISSUER,
+  SlackChannelBindingSchema,
+  SlackChannelIdSchema,
+  SlackRequesterSchema,
+  SlackTeamIdSchema,
   WorkspaceInstanceSchema,
   agentXError,
+  parseSlackThreadSubject,
+  slackThreadSubject,
   type Operation,
   type OperationStatus,
   type CodeBuildCheckResult,
   type CodeBuildGateDefinition,
   type ProjectDefinition,
   type PullRequestLifecycleResult,
+  type SlackChannelBinding,
+  type SlackRequester,
+  type SlackThreadWorkspaceResult,
   type WorkerInvocation,
   type WorkspaceInstance,
 } from "@agentx/contracts";
@@ -45,6 +57,7 @@ import { publicWorkspace } from "../workspaces.js";
 import {
   adaptHttpApiEvent,
   identityFromJwtClaims,
+  isAssumedRoleOf,
   ownerKeyForSubject,
   parseRuntimeBinding,
   requiredEnvironment,
@@ -172,7 +185,16 @@ interface AwsBrokerDependencies {
   repositoryGrants: RepositoryGrantService;
   githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest">;
   codeBuild: CodeBuildGateway;
+  slack?: SlackServiceConfiguration;
 }
+
+interface SlackServiceConfiguration {
+  orchestratorRoleArn: string;
+  memberWorkspaceLimit: number;
+  organizationWorkspaceLimit: number;
+}
+
+type TransactItems = NonNullable<TransactWriteCommandInput["TransactItems"]>;
 
 export function createAwsBrokerHandler(dependencies: AwsBrokerDependencies) {
   if (Buffer.byteLength(dependencies.callbackSigningKey, "utf8") < 32) {
@@ -206,6 +228,16 @@ export function createAwsBrokerHandler(dependencies: AwsBrokerDependencies) {
         );
       }
 
+      // The hosted Slack orchestrator authenticates with its IAM role and acts only as a Slack thread owner.
+      if (url.pathname.startsWith("/v1/service/")) {
+        const identity = await slackServiceIdentity(dependencies, request);
+        const serviceUrl = new URL(`/v1${url.pathname.slice("/v1/service".length)}${url.search}`, "https://agentx.invalid");
+        if (request.method === "POST" && serviceUrl.pathname === "/v1/threads/workspace") {
+          return json(await ensureThreadWorkspace(dependencies, identity, parseBody(request.body)), request.requestId);
+        }
+        return await routeWorkspaceRequest(dependencies, request, serviceUrl, identity);
+      }
+
       const identity = identityFromJwtClaims(request.jwtClaims, {
         issuer: dependencies.issuer,
         adminClaim: dependencies.adminClaim,
@@ -219,83 +251,22 @@ export function createAwsBrokerHandler(dependencies: AwsBrokerDependencies) {
       if (request.method === "POST" && url.pathname === "/v1/admin/workspaces/prepare") {
         return json(await prepareWorkspace(dependencies, identity, body), request.requestId, 202);
       }
-
-      const resolve = /^\/v1\/projects\/([^/]+)\/workspace$/.exec(url.pathname);
-      if (request.method === "GET" && resolve?.[1]) {
-        const revision = Number.parseInt(url.searchParams.get("revision") ?? "", 10);
+      const slackBinding = /^\/v1\/admin\/slack\/bindings\/([^/]+)\/([^/]+)$/.exec(url.pathname);
+      if (slackBinding?.[1] && slackBinding[2] && request.method === "PUT") {
         return json(
-          { workspace: await resolveWorkspace(dependencies, identity, decodeURIComponent(resolve[1]), revision) },
+          { binding: await putSlackBinding(dependencies, identity, slackBinding[1], slackBinding[2], body) },
           request.requestId,
         );
       }
-
-      const conversations = /^\/v1\/workspaces\/([0-9a-f-]+)\/conversations$/.exec(url.pathname);
-      if (request.method === "POST" && conversations?.[1]) {
-        return json(
-          { conversation: await createConversation(dependencies, identity, conversations[1]) },
-          request.requestId,
-          201,
-        );
+      if (slackBinding?.[1] && slackBinding[2] && request.method === "DELETE") {
+        return json(await deleteSlackBinding(dependencies, identity, slackBinding[1], slackBinding[2]), request.requestId);
       }
-
-      const tasks = /^\/v1\/workspaces\/([0-9a-f-]+)\/tasks$/.exec(url.pathname);
-      if (request.method === "POST" && tasks?.[1]) {
-        return json(await acceptTask(dependencies, identity, tasks[1], body), request.requestId, 202);
-      }
-
-      const pullRequests = /^\/v1\/workspaces\/([0-9a-f-]+)\/pull-requests$/.exec(url.pathname);
-      if (request.method === "POST" && pullRequests?.[1]) {
-        return json(await acceptPullRequest(dependencies, identity, pullRequests[1], body), request.requestId, 202);
-      }
-      const pullRequestActions = /^\/v1\/workspaces\/([0-9a-f-]+)\/pull-request-actions$/.exec(url.pathname);
-      if (request.method === "POST" && pullRequestActions?.[1]) {
-        return json(
-          await acceptPullRequestLifecycle(dependencies, identity, pullRequestActions[1], body),
-          request.requestId,
-          202,
-        );
-      }
-
-      const operation = /^\/v1\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)$/.exec(url.pathname);
-      if (request.method === "GET" && operation?.[1] && operation[2]) {
-        return json(
-          { operation: await getAuthorizedOperation(dependencies, identity, operation[1], operation[2]) },
-          request.requestId,
-        );
-      }
-
-      const events = /^\/v1\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/events$/.exec(url.pathname);
-      if (request.method === "GET" && events?.[1] && events[2]) {
-        return json(
-          await pageEvents(dependencies, identity, events[1], events[2], {
-            limit: Number.parseInt(url.searchParams.get("limit") ?? "100", 10),
-            ...(url.searchParams.get("cursor") === null
-              ? {}
-              : { cursor: url.searchParams.get("cursor")! }),
-          }),
-          request.requestId,
-        );
-      }
-
-      const artifact = /^\/v1\/workspaces\/([0-9a-f-]+)\/artifacts\/([0-9a-f-]+)$/.exec(url.pathname);
-      if (request.method === "GET" && artifact?.[1] && artifact[2]) {
-        return json(
-          { artifact: await getArtifact(dependencies, identity, artifact[1], artifact[2]) },
-          request.requestId,
-        );
-      }
-
-      const cancel = /^\/v1\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/cancel$/.exec(url.pathname);
-      if (request.method === "POST" && cancel?.[1] && cancel[2]) {
-        return json(await acceptCancellation(dependencies, identity, cancel[1], cancel[2]), request.requestId, 202);
-      }
-
       const stop = /^\/v1\/admin\/workspaces\/([0-9a-f-]+)\/stop$/.exec(url.pathname);
       if (request.method === "POST" && stop?.[1]) {
         return json({ workspace: await stopWorkspace(dependencies, identity, stop[1]) }, request.requestId, 202);
       }
 
-      throw agentXError("NOT_FOUND", "route not found");
+      return await routeWorkspaceRequest(dependencies, request, url, identity);
     } catch (error) {
       if (error instanceof AgentXError) {
         return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, request.requestId, error.statusCode);
@@ -304,6 +275,86 @@ export function createAwsBrokerHandler(dependencies: AwsBrokerDependencies) {
       return json({ error: { code: "CONFIG_INVALID", message } }, request.requestId, 400);
     }
   };
+}
+
+async function routeWorkspaceRequest(
+  dependencies: AwsBrokerDependencies,
+  request: AdaptedHttpRequest,
+  url: URL,
+  identity: AuthenticatedIdentity,
+): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> {
+  const body = parseBody(request.body);
+  const resolve = /^\/v1\/projects\/([^/]+)\/workspace$/.exec(url.pathname);
+  if (request.method === "GET" && resolve?.[1]) {
+    const revision = Number.parseInt(url.searchParams.get("revision") ?? "", 10);
+    return json(
+      { workspace: await resolveWorkspace(dependencies, identity, decodeURIComponent(resolve[1]), revision) },
+      request.requestId,
+    );
+  }
+
+  const conversations = /^\/v1\/workspaces\/([0-9a-f-]+)\/conversations$/.exec(url.pathname);
+  if (request.method === "POST" && conversations?.[1]) {
+    return json(
+      { conversation: await createConversation(dependencies, identity, conversations[1]) },
+      request.requestId,
+      201,
+    );
+  }
+
+  const tasks = /^\/v1\/workspaces\/([0-9a-f-]+)\/tasks$/.exec(url.pathname);
+  if (request.method === "POST" && tasks?.[1]) {
+    return json(await acceptTask(dependencies, identity, tasks[1], body), request.requestId, 202);
+  }
+
+  const pullRequests = /^\/v1\/workspaces\/([0-9a-f-]+)\/pull-requests$/.exec(url.pathname);
+  if (request.method === "POST" && pullRequests?.[1]) {
+    return json(await acceptPullRequest(dependencies, identity, pullRequests[1], body), request.requestId, 202);
+  }
+  const pullRequestActions = /^\/v1\/workspaces\/([0-9a-f-]+)\/pull-request-actions$/.exec(url.pathname);
+  if (request.method === "POST" && pullRequestActions?.[1]) {
+    return json(
+      await acceptPullRequestLifecycle(dependencies, identity, pullRequestActions[1], body),
+      request.requestId,
+      202,
+    );
+  }
+
+  const operation = /^\/v1\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)$/.exec(url.pathname);
+  if (request.method === "GET" && operation?.[1] && operation[2]) {
+    return json(
+      { operation: await getAuthorizedOperation(dependencies, identity, operation[1], operation[2]) },
+      request.requestId,
+    );
+  }
+
+  const events = /^\/v1\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/events$/.exec(url.pathname);
+  if (request.method === "GET" && events?.[1] && events[2]) {
+    return json(
+      await pageEvents(dependencies, identity, events[1], events[2], {
+        limit: Number.parseInt(url.searchParams.get("limit") ?? "100", 10),
+        ...(url.searchParams.get("cursor") === null
+          ? {}
+          : { cursor: url.searchParams.get("cursor")! }),
+      }),
+      request.requestId,
+    );
+  }
+
+  const artifact = /^\/v1\/workspaces\/([0-9a-f-]+)\/artifacts\/([0-9a-f-]+)$/.exec(url.pathname);
+  if (request.method === "GET" && artifact?.[1] && artifact[2]) {
+    return json(
+      { artifact: await getArtifact(dependencies, identity, artifact[1], artifact[2]) },
+      request.requestId,
+    );
+  }
+
+  const cancel = /^\/v1\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/cancel$/.exec(url.pathname);
+  if (request.method === "POST" && cancel?.[1] && cancel[2]) {
+    return json(await acceptCancellation(dependencies, identity, cancel[1], cancel[2]), request.requestId, 202);
+  }
+
+  throw agentXError("NOT_FOUND", "route not found");
 }
 
 async function registerProject(
@@ -398,6 +449,23 @@ async function prepareWorkspace(
     throw agentXError("WORKSPACE_BUSY", `workspace cannot be prepared while ${existing.status}`);
   }
 
+  const preparation = await newWorkspacePreparation(dependencies, identity, project, targetOwnerKey, requestId);
+  await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+    ...preparation.items,
+    { Put: { TableName: dependencies.tableName, Item: { pk: `IDEMPOTENCY#${identity.ownerKey}#ADMIN`, sk: `REQUEST#${requestId}`, entityType: "IDEMPOTENCY", operationId: preparation.operationId, workspaceId: preparation.workspace.id }, ConditionExpression: "attribute_not_exists(pk)" } },
+  ] }));
+  return { operationId: preparation.operationId, workspace: publicWorkspace(preparation.workspace), alreadyReady: false };
+}
+
+async function newWorkspacePreparation(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  project: RegisteredProjectRecord,
+  targetOwnerKey: string,
+  requestId: string,
+): Promise<{ workspace: WorkspaceInstance; operationId: string; items: TransactItems }> {
+  const projectName = project.definition.name;
+  const projectRevision = project.definition.revision;
   const now = new Date().toISOString();
   const workspaceId = randomUUID();
   const operationId = randomUUID();
@@ -430,6 +498,7 @@ async function prepareWorkspace(
     fence: workspace.fence,
     createdAt: now,
     updatedAt: now,
+    ...requesterOf(identity),
   });
   const invocation: WorkerInvocation = {
     protocolVersion: 1,
@@ -457,15 +526,286 @@ async function prepareWorkspace(
     projectName,
     existingMembership?.role ?? "developer",
   );
-  await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
-    { Put: { TableName: dependencies.tableName, Item: workspaceItem(workspace), ConditionExpression: "attribute_not_exists(pk)" } },
-    { Put: { TableName: dependencies.tableName, Item: { pk: `OWNER#${targetOwnerKey}`, sk: `PROJECT#${projectName}`, entityType: "DEFAULT_WORKSPACE", workspaceId }, ConditionExpression: "attribute_not_exists(pk)" } },
-    { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
-    { Put: { TableName: dependencies.tableName, Item: outbox, ConditionExpression: "attribute_not_exists(pk)" } },
-    { Put: { TableName: dependencies.tableName, Item: membership } },
-    { Put: { TableName: dependencies.tableName, Item: { pk: `IDEMPOTENCY#${identity.ownerKey}#ADMIN`, sk: `REQUEST#${requestId}`, entityType: "IDEMPOTENCY", operationId, workspaceId }, ConditionExpression: "attribute_not_exists(pk)" } },
-  ] }));
-  return { operationId, workspace: publicWorkspace(workspace), alreadyReady: false };
+  return {
+    workspace,
+    operationId,
+    items: [
+      { Put: { TableName: dependencies.tableName, Item: workspaceItem(workspace), ConditionExpression: "attribute_not_exists(pk)" } },
+      { Put: { TableName: dependencies.tableName, Item: { pk: `OWNER#${targetOwnerKey}`, sk: `PROJECT#${projectName}`, entityType: "DEFAULT_WORKSPACE", workspaceId }, ConditionExpression: "attribute_not_exists(pk)" } },
+      { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
+      { Put: { TableName: dependencies.tableName, Item: outbox, ConditionExpression: "attribute_not_exists(pk)" } },
+      { Put: { TableName: dependencies.tableName, Item: membership } },
+    ],
+  };
+}
+
+async function slackServiceIdentity(
+  dependencies: AwsBrokerDependencies,
+  request: AdaptedHttpRequest,
+): Promise<AuthenticatedIdentity> {
+  const configuration = dependencies.slack;
+  if (!configuration) throw agentXError("NOT_FOUND", "route not found");
+  if (!request.iamPrincipalArn || !isAssumedRoleOf(request.iamPrincipalArn, configuration.orchestratorRoleArn)) {
+    throw agentXError("FORBIDDEN", "only the Slack orchestrator role may call service routes");
+  }
+  const context = parseSlackHeaders(request.headers);
+  const binding = await getSlackBinding(dependencies, context.thread.teamId, context.thread.channelId);
+  if (!binding) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
+  const subject = slackThreadSubject(context.thread);
+  return {
+    issuer: SLACK_THREAD_OWNER_ISSUER,
+    subject,
+    ownerKey: ownerKeyForSubject(SLACK_THREAD_OWNER_ISSUER, subject),
+    isAdministrator: false,
+    claims: {},
+    slack: { ...context, binding },
+  };
+}
+
+function parseSlackHeaders(headers: Record<string, string | undefined>): Omit<NonNullable<AuthenticatedIdentity["slack"]>, "binding"> {
+  try {
+    const thread = parseSlackThreadSubject(headers["x-agentx-slack-thread"] ?? "");
+    const requester = SlackRequesterSchema.parse({ teamId: thread.teamId, userId: headers["x-agentx-slack-user"] });
+    return { thread, requester };
+  } catch {
+    throw agentXError("CONFIG_INVALID", "valid x-agentx-slack-thread and x-agentx-slack-user headers are required");
+  }
+}
+
+async function putSlackBinding(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  teamIdValue: string,
+  channelIdValue: string,
+  value: unknown,
+): Promise<SlackChannelBinding> {
+  const input = object(value, "Slack channel binding");
+  const binding = SlackChannelBindingSchema.parse({
+    teamId: decodeURIComponent(teamIdValue),
+    channelId: decodeURIComponent(channelIdValue),
+    projectName: input.projectName,
+    projectRevision: input.projectRevision,
+    updatedAt: new Date().toISOString(),
+  });
+  await requireAdministrator(dependencies, identity, binding.projectName);
+  const existing = await getSlackBinding(dependencies, binding.teamId, binding.channelId);
+  if (existing && existing.projectName !== binding.projectName) {
+    await requireAdministrator(dependencies, identity, existing.projectName);
+  }
+  await requireProject(dependencies, binding.projectName, binding.projectRevision);
+  await dependencies.documentClient.send(new PutCommand({
+    TableName: dependencies.tableName,
+    Item: { ...slackBindingKey(binding.teamId, binding.channelId), entityType: "SLACK_BINDING", ...binding, updatedBy: identity.ownerKey },
+  }));
+  return binding;
+}
+
+async function deleteSlackBinding(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  teamIdValue: string,
+  channelIdValue: string,
+): Promise<{ deleted: true; binding: SlackChannelBinding }> {
+  const teamId = SlackTeamIdSchema.parse(decodeURIComponent(teamIdValue));
+  const channelId = SlackChannelIdSchema.parse(decodeURIComponent(channelIdValue));
+  const binding = await getSlackBinding(dependencies, teamId, channelId);
+  if (!binding) throw agentXError("NOT_FOUND", "Slack channel binding not found");
+  await requireAdministrator(dependencies, identity, binding.projectName);
+  await dependencies.documentClient.send(new DeleteCommand({
+    TableName: dependencies.tableName,
+    Key: slackBindingKey(teamId, channelId),
+  }));
+  return { deleted: true, binding };
+}
+
+async function getSlackBinding(
+  dependencies: AwsBrokerDependencies,
+  teamId: string,
+  channelId: string,
+): Promise<SlackChannelBinding | undefined> {
+  const item = await getItem<Record<string, unknown>>(dependencies, slackBindingKey(teamId, channelId));
+  if (!item) return undefined;
+  return SlackChannelBindingSchema.parse({
+    teamId: item.teamId,
+    channelId: item.channelId,
+    projectName: item.projectName,
+    projectRevision: item.projectRevision,
+    updatedAt: item.updatedAt,
+  });
+}
+
+async function ensureThreadWorkspace(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  value: unknown,
+): Promise<SlackThreadWorkspaceResult> {
+  const slack = identity.slack;
+  const limits = dependencies.slack;
+  if (!slack || !limits) throw agentXError("FORBIDDEN", "a Slack thread identity is required");
+  const requestId = uuid(object(value, "thread workspace request").requestId, "requestId");
+  const existing = await getDefaultWorkspace(dependencies, identity.ownerKey, slack.binding.projectName);
+  if (existing) return existingThreadWorkspace(dependencies, identity, requestId, existing);
+
+  const project = await requireProject(dependencies, slack.binding.projectName, slack.binding.projectRevision);
+  const preparation = await newWorkspacePreparation(dependencies, identity, project, identity.ownerKey, requestId);
+  const { teamId, userId } = slack.requester;
+  try {
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      ...preparation.items,
+      { Put: {
+        TableName: dependencies.tableName,
+        Item: { pk: `IDEMPOTENCY#${identity.ownerKey}#THREAD`, sk: `REQUEST#${requestId}`, entityType: "IDEMPOTENCY", operationId: preparation.operationId, workspaceId: preparation.workspace.id },
+        ConditionExpression: "attribute_not_exists(pk)",
+      } },
+      { Update: {
+        TableName: dependencies.tableName,
+        Key: slackOrganizationLimitKey(teamId),
+        UpdateExpression: "SET #count = if_not_exists(#count, :zero) + :one, entityType = :entity",
+        ConditionExpression: "attribute_not_exists(#count) OR #count < :limit",
+        ExpressionAttributeNames: { "#count": "count" },
+        ExpressionAttributeValues: { ":zero": 0, ":one": 1, ":limit": limits.organizationWorkspaceLimit, ":entity": "SLACK_LIMIT" },
+      } },
+      { Update: {
+        TableName: dependencies.tableName,
+        Key: slackMemberLimitKey(teamId, userId),
+        UpdateExpression: "SET #count = if_not_exists(#count, :zero) + :one, #threads = list_append(if_not_exists(#threads, :none), :thread), entityType = :entity",
+        ConditionExpression: "attribute_not_exists(#count) OR #count < :limit",
+        ExpressionAttributeNames: { "#count": "count", "#threads": "threads" },
+        ExpressionAttributeValues: {
+          ":zero": 0,
+          ":one": 1,
+          ":limit": limits.memberWorkspaceLimit,
+          ":none": [],
+          ":thread": [identity.subject],
+          ":entity": "SLACK_LIMIT",
+        },
+      } },
+    ] }));
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+    const concurrent = await getDefaultWorkspace(dependencies, identity.ownerKey, slack.binding.projectName);
+    if (concurrent) return existingThreadWorkspace(dependencies, identity, requestId, concurrent);
+    return threadWorkspaceLimitRefusal(dependencies, teamId, userId, limits);
+  }
+  await recordThreadRequester(dependencies, identity, preparation.workspace.id, true);
+  return {
+    outcome: "WORKSPACE",
+    workspaceId: preparation.workspace.id,
+    status: "PREPARING",
+    operationId: preparation.operationId,
+    created: true,
+  };
+}
+
+async function existingThreadWorkspace(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  requestId: string,
+  workspace: WorkspaceInstance,
+): Promise<SlackThreadWorkspaceResult> {
+  await recordThreadRequester(dependencies, identity, workspace.id, false);
+  if (workspace.status === "PREPARATION_FAILED" && !workspace.activeOperationId) {
+    const project = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
+    const retried = await retryWorkspacePreparation(dependencies, identity, requestId, identity.ownerKey, project, workspace);
+    return { outcome: "WORKSPACE", workspaceId: workspace.id, status: "PREPARING", operationId: retried.operationId, created: false };
+  }
+  return {
+    outcome: "WORKSPACE",
+    workspaceId: workspace.id,
+    status: workspace.status,
+    operationId: workspace.activeOperationId,
+    created: false,
+  };
+}
+
+async function threadWorkspaceLimitRefusal(
+  dependencies: AwsBrokerDependencies,
+  teamId: string,
+  userId: string,
+  limits: SlackServiceConfiguration,
+): Promise<SlackThreadWorkspaceResult> {
+  const member = await getItem<{ count?: number; threads?: string[] }>(dependencies, slackMemberLimitKey(teamId, userId));
+  if ((member?.count ?? 0) >= limits.memberWorkspaceLimit) {
+    return {
+      outcome: "LIMIT_REACHED",
+      limit: "MEMBER",
+      maximum: limits.memberWorkspaceLimit,
+      starterThreads: (member?.threads ?? []).map((subject) => parseSlackThreadSubject(subject)),
+    };
+  }
+  const organization = await getItem<{ count?: number }>(dependencies, slackOrganizationLimitKey(teamId));
+  if ((organization?.count ?? 0) >= limits.organizationWorkspaceLimit) {
+    return { outcome: "LIMIT_REACHED", limit: "ORGANIZATION", maximum: limits.organizationWorkspaceLimit, starterThreads: [] };
+  }
+  throw agentXError("WORKSPACE_BUSY", "thread workspace creation conflicted with another request; retry");
+}
+
+async function recordThreadRequester(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  workspaceId: string,
+  starter: boolean,
+): Promise<void> {
+  const slack = identity.slack;
+  if (!slack) return;
+  await dependencies.documentClient.send(new UpdateCommand({
+    TableName: dependencies.tableName,
+    Key: slackThreadKey(identity.ownerKey),
+    UpdateExpression: [
+      "SET #entity = :entity, #thread = if_not_exists(#thread, :thread), #workspace = if_not_exists(#workspace, :workspace)",
+      ...(starter ? [", #starter = if_not_exists(#starter, :user)"] : []),
+      " ADD #requesters :users",
+    ].join(""),
+    ExpressionAttributeNames: {
+      "#entity": "entityType",
+      "#thread": "thread",
+      "#workspace": "workspaceId",
+      "#requesters": "requesters",
+      ...(starter ? { "#starter": "starterUserId" } : {}),
+    },
+    ExpressionAttributeValues: {
+      ":entity": "SLACK_THREAD",
+      ":thread": identity.subject,
+      ":workspace": workspaceId,
+      ":users": new Set([slack.requester.userId]),
+      ...(starter ? { ":user": slack.requester.userId } : {}),
+    },
+  }));
+}
+
+async function slackAttributedBody(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  body: string | undefined,
+): Promise<string | undefined> {
+  const slack = identity.slack;
+  if (!slack) return body;
+  const thread = await getItem<{ requesters?: Iterable<string> }>(dependencies, slackThreadKey(identity.ownerKey));
+  const requesters = [...new Set([...(thread?.requesters ?? []), slack.requester.userId])].sort();
+  const link = `https://slack.com/archives/${slack.thread.channelId}/p${slack.thread.threadTs.replace(".", "")}`;
+  const attribution = `Requested in Slack thread ${link} by ${requesters.join(", ")}.`;
+  const attributed = body ? `${body}\n\n---\n${attribution}` : attribution;
+  return Buffer.byteLength(attributed, "utf8") <= 32_768 ? attributed : body;
+}
+
+function requesterOf(identity: AuthenticatedIdentity): { requestedBy?: SlackRequester } {
+  return identity.slack ? { requestedBy: identity.slack.requester } : {};
+}
+
+function slackBindingKey(teamId: string, channelId: string) {
+  return { pk: `SLACK_BINDING#${teamId}`, sk: `CHANNEL#${channelId}` };
+}
+
+function slackOrganizationLimitKey(teamId: string) {
+  return { pk: `SLACK_LIMIT#${teamId}`, sk: "ORGANIZATION" };
+}
+
+function slackMemberLimitKey(teamId: string, userId: string) {
+  return { pk: `SLACK_LIMIT#${teamId}`, sk: `MEMBER#${userId}` };
+}
+
+function slackThreadKey(ownerKey: string) {
+  return { pk: `SLACK_THREAD#${ownerKey}`, sk: "META" };
 }
 
 async function retryWorkspacePreparation(
@@ -497,6 +837,7 @@ async function retryWorkspacePreparation(
     fence,
     createdAt: now,
     updatedAt: now,
+    ...requesterOf(identity),
   });
   const invocation: WorkerInvocation = {
     protocolVersion: 1,
@@ -633,6 +974,7 @@ async function acceptTask(
     fence,
     createdAt: now,
     updatedAt: now,
+    ...requesterOf(identity),
   });
   const invocation: WorkerInvocation = {
     protocolVersion: 1,
@@ -724,6 +1066,7 @@ async function acceptPullRequest(
   const project = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
   const repository = project.definition.repositories.find((candidate) => candidate.name === request.repository);
   if (!repository) throw agentXError("CONFIG_INVALID", "repository is not registered for this project");
+  const body = await slackAttributedBody(dependencies, identity, request.body);
 
   const now = new Date().toISOString();
   const operationId = randomUUID();
@@ -739,6 +1082,7 @@ async function acceptPullRequest(
     fence,
     createdAt: now,
     updatedAt: now,
+    ...requesterOf(identity),
   });
   operation.publication = {
     repository: repository.name,
@@ -747,7 +1091,7 @@ async function acceptPullRequest(
     baseBranch: repository.defaultBranch,
     title: request.title,
     codeBuildGates: repository.codeBuildGates ?? [],
-    ...(request.body === undefined ? {} : { body: request.body }),
+    ...(body === undefined ? {} : { body }),
   };
   const invocation: WorkerInvocation = {
     protocolVersion: 1,
@@ -762,7 +1106,7 @@ async function acceptPullRequest(
       project: project.definition,
       repository: repository.name,
       title: request.title,
-      ...(request.body === undefined ? {} : { body: request.body }),
+      ...(body === undefined ? {} : { body }),
       headBranch,
       repositoryGrant: issueRepositoryGrant(
         dependencies,
@@ -890,7 +1234,9 @@ async function acceptPullRequestLifecycle(
     }
     const updated = await dependencies.githubPullRequests.updatePullRequest(record.repositoryUrl, record.number, {
       ...(request.title === undefined ? {} : { title: request.title }),
-      ...(request.body === undefined ? {} : { body: request.body }),
+      ...(request.body === undefined
+        ? {}
+        : { body: (await slackAttributedBody(dependencies, identity, request.body)) ?? request.body }),
       ...(request.action === "close" ? { state: "closed" as const } : {}),
       ...(request.action === "reopen" ? { state: "open" as const } : {}),
     });
@@ -910,6 +1256,7 @@ async function acceptPullRequestLifecycle(
       id: operationId, workspaceId, kind: "maintain", requestId: request.requestId,
       payloadHash: requestHash, status: "SUCCEEDED", fence: workspace.fence,
       createdAt: now, updatedAt: now, result,
+      ...requesterOf(identity),
     });
     const updatedRecord: PullRequestRecord = {
       ...record,
@@ -943,13 +1290,15 @@ async function acceptPullRequestLifecycle(
     }
     const fence = workspace.fence + 1;
     const title = request.title ?? `${request.action === "replace" ? "Replace" : "Revert"}: ${remote.title}`;
-    const body = request.body ?? (request.action === "replace"
+    const baseBody = request.body ?? (request.action === "replace"
       ? `Clean replacement for #${record.number}.`
       : `Reverts merged pull request #${record.number}.`);
+    const body = (await slackAttributedBody(dependencies, identity, baseBody)) ?? baseBody;
     const headBranch = `agentx/${operationId}`;
     const operation = operationRecord({
       id: operationId, workspaceId, kind: "publish", requestId: request.requestId,
       payloadHash: requestHash, status: "ACCEPTED", fence, createdAt: now, updatedAt: now,
+      ...requesterOf(identity),
     });
     operation.publication = {
       repository: record.repository,
@@ -1025,6 +1374,7 @@ async function acceptPullRequestLifecycle(
   const operation = operationRecord({
     id: operationId, workspaceId, kind: "maintain", requestId: request.requestId,
     payloadHash: requestHash, status: "ACCEPTED", fence, createdAt: now, updatedAt: now,
+    ...requesterOf(identity),
   });
   operation.maintenance = {
     action: request.action,
@@ -1108,6 +1458,7 @@ async function acceptCancellation(
     fence: workspace.fence,
     createdAt: now,
     updatedAt: now,
+    ...requesterOf(identity),
   }, targetOperationId);
   const invocation: WorkerInvocation = {
     protocolVersion: 1,
@@ -1943,6 +2294,7 @@ function publicOperation(record: OperationRecord): Operation {
     ...(record.heartbeatAt === undefined ? {} : { heartbeatAt: record.heartbeatAt }),
     ...(record.result === undefined ? {} : { result: record.result }),
     ...(typeof record.error === "string" ? { error: record.error } : {}),
+    ...(record.requestedBy === undefined ? {} : { requestedBy: record.requestedBy }),
   });
 }
 
@@ -2251,6 +2603,21 @@ export const handler = createAwsBrokerHandler({
   repositoryGrants,
   githubPullRequests: githubCredentials,
   codeBuild,
+  ...(process.env.SLACK_ORCHESTRATOR_ROLE_ARN
+    ? {
+        slack: {
+          orchestratorRoleArn: process.env.SLACK_ORCHESTRATOR_ROLE_ARN,
+          memberWorkspaceLimit: positiveInteger(
+            Number(process.env.SLACK_MEMBER_WORKSPACE_LIMIT ?? "3"),
+            "SLACK_MEMBER_WORKSPACE_LIMIT",
+          ),
+          organizationWorkspaceLimit: positiveInteger(
+            Number(process.env.SLACK_ORGANIZATION_WORKSPACE_LIMIT ?? "20"),
+            "SLACK_ORGANIZATION_WORKSPACE_LIMIT",
+          ),
+        },
+      }
+    : {}),
   async stopRuntimeSession(input) {
     await agentCore.send(new StopRuntimeSessionCommand({
       agentRuntimeArn: input.runtimeArn,

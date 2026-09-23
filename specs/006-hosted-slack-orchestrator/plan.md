@@ -27,8 +27,8 @@ The control plane treats each thread as a workspace owner. The existing one-work
 
 ### 1. Control plane (broker and `ControlPlaneStack`)
 
-1. **Channel bindings.** Administrators manage bindings with `PUT` and `DELETE /v1/admin/slack/bindings/{teamId}/{channelId}`, with body `{ projectName }`, through the existing JWT route and `requireAdministrator`. Bindings are stored as `SLACK_BINDING#<teamId>` / `CHANNEL#<channelId>`. The CLI adds `agentx admin slack bind` and `agentx admin slack unbind`.
-2. **Service route.** A new `ANY /v1/service/{proxy+}` route with `AWS_IAM` authorization. The broker accepts it only when the caller's IAM role equals the configured orchestrator task role. Each request carries `x-agentx-slack-thread` (team, channel, root timestamp) and `x-agentx-slack-user`. The broker:
+1. **Channel bindings.** Administrators manage bindings with `PUT` and `DELETE /v1/admin/slack/bindings/{teamId}/{channelId}`, with body `{ projectName, projectRevision }`, through the existing JWT route and `requireAdministrator`. Project revisions are immutable and there is no "latest" pointer, so a binding names its revision explicitly. Bindings are stored as `SLACK_BINDING#<teamId>` / `CHANNEL#<channelId>`. The CLI adds `agentx admin slack bind` and `agentx admin slack unbind`.
+2. **Service route.** A new `ANY /v1/service/{proxy+}` route with `AWS_IAM` authorization. The broker maps `/v1/service/<rest>` to `/v1/<rest>`, so the orchestrator reuses the ordinary API paths. The broker accepts it only when the caller's IAM role equals the configured orchestrator task role. Each request carries `x-agentx-slack-thread` (team, channel, root timestamp) and `x-agentx-slack-user`. The broker:
    - derives the thread owner key and an identity from those headers
    - verifies that the channel is bound
    - dispatches to the existing workspace, task, follow-up, event, status, and pull-request handlers with that identity

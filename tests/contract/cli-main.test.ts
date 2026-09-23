@@ -14,7 +14,9 @@ describe("AgentX executable command surface", () => {
 
     const admin = program.commands.find((command) => command.name() === "admin");
     const adminCommands = admin?.commands.map((command) => command.name()) ?? [];
-    expect(adminCommands).toEqual(expect.arrayContaining(["project", "workspace"]));
+    expect(adminCommands).toEqual(expect.arrayContaining(["project", "workspace", "slack"]));
+    const adminSlack = admin?.commands.find((command) => command.name() === "slack");
+    expect(adminSlack?.commands.map((command) => command.name())).toEqual(["bind", "unbind"]);
 
     const slack = program.commands.find((command) => command.name() === "slack");
     expect(slack?.commands.map((command) => command.name())).toEqual([

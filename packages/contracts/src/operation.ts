@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { z } from "zod";
+import { SlackRequesterSchema } from "./slack.js";
 
 export const OperationKindSchema = z.enum([
   "prepare",
@@ -192,6 +193,7 @@ export const OperationSchema = z
     updatedAt: z.string().datetime(),
     result: z.unknown().optional(),
     error: z.string().max(16_384).optional(),
+    requestedBy: SlackRequesterSchema.optional(),
   })
   .strict();
 

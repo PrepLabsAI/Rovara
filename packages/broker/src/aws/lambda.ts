@@ -17,7 +17,10 @@ export interface HttpApiV2Event {
   requestContext?: {
     requestId?: string;
     http?: { method?: string };
-    authorizer?: { jwt?: { claims?: Record<string, unknown> } };
+    authorizer?: {
+      jwt?: { claims?: Record<string, unknown> };
+      iam?: { userArn?: string };
+    };
   };
 }
 
@@ -28,6 +31,7 @@ export interface AdaptedHttpRequest {
   body?: string;
   requestId: string;
   jwtClaims?: Record<string, unknown>;
+  iamPrincipalArn?: string;
 }
 
 export interface RuntimeBinding {
@@ -70,7 +74,17 @@ export function adaptHttpApiEvent(event: HttpApiV2Event): AdaptedHttpRequest {
     ...(event.requestContext?.authorizer?.jwt?.claims === undefined
       ? {}
       : { jwtClaims: event.requestContext.authorizer.jwt.claims }),
+    ...(event.requestContext?.authorizer?.iam?.userArn === undefined
+      ? {}
+      : { iamPrincipalArn: event.requestContext.authorizer.iam.userArn }),
   };
+}
+
+// API Gateway reports an assumed role as arn:aws:sts::<account>:assumed-role/<name>/<session>, without the role path.
+export function isAssumedRoleOf(principalArn: string, roleArn: string): boolean {
+  const role = /^arn:(aws[a-z-]*):iam::(\d{12}):role\/(?:[^/]+\/)*([^/]+)$/.exec(roleArn);
+  const principal = /^arn:(aws[a-z-]*):sts::(\d{12}):assumed-role\/([^/]+)\/[^/]+$/.exec(principalArn);
+  return Boolean(role && principal && role[1] === principal[1] && role[2] === principal[2] && role[3] === principal[3]);
 }
 
 export function identityFromJwtClaims(

@@ -13,6 +13,7 @@ import {
 import { Command } from "commander";
 import { requestWorkspacePreparation } from "./admin/prepare.js";
 import { registerProject } from "./admin/register.js";
+import { bindSlackChannel, unbindSlackChannel } from "./admin/slack.js";
 import { stopWorkspace } from "./admin/stop.js";
 import { loginWithPkce, tokenStoreKey } from "./auth.js";
 import { requestCancellation } from "./cancel.js";
@@ -528,6 +529,42 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         controlPlaneUrl: authenticated.definition.controlPlaneUrl,
         accessToken: authenticated.accessToken,
         workspaceId: options.workspace,
+      }, services.fetchImplementation);
+      services.stdout.write(formatSuccess(result, globals.json));
+    });
+
+  const adminSlack = admin.command("slack").description("bind Slack channels to this project for the hosted orchestrator");
+  adminSlack
+    .command("bind")
+    .description("bind a Slack channel to this project revision; channel members can then start thread workspaces")
+    .requiredOption("--team <team-id>", "Slack team ID, for example T0123456789")
+    .requiredOption("--channel <channel-id>", "Slack channel ID, for example C0123456789")
+    .action(async (options: { team: string; channel: string }, command: Command) => {
+      const globals = globalOptions(command);
+      const authenticated = await authenticateProject(globals, requireProject(globals), services.tokenStore);
+      const result = await bindSlackChannel({
+        controlPlaneUrl: authenticated.definition.controlPlaneUrl,
+        accessToken: authenticated.accessToken,
+        teamId: options.team,
+        channelId: options.channel,
+        projectName: authenticated.definition.name,
+        projectRevision: authenticated.definition.revision,
+      }, services.fetchImplementation);
+      services.stdout.write(formatSuccess(result, globals.json));
+    });
+  adminSlack
+    .command("unbind")
+    .description("remove a Slack channel binding; existing thread workspaces are kept")
+    .requiredOption("--team <team-id>", "Slack team ID")
+    .requiredOption("--channel <channel-id>", "Slack channel ID")
+    .action(async (options: { team: string; channel: string }, command: Command) => {
+      const globals = globalOptions(command);
+      const authenticated = await authenticateProject(globals, requireProject(globals), services.tokenStore);
+      const result = await unbindSlackChannel({
+        controlPlaneUrl: authenticated.definition.controlPlaneUrl,
+        accessToken: authenticated.accessToken,
+        teamId: options.team,
+        channelId: options.channel,
       }, services.fetchImplementation);
       services.stdout.write(formatSuccess(result, globals.json));
     });
