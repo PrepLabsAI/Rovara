@@ -11,6 +11,7 @@ import {
   aws_iam as iam,
   aws_lambda as lambda,
   aws_lambda_nodejs as lambdaNodejs,
+  aws_logs as logs,
   aws_s3 as s3,
   aws_sqs as sqs,
 } from "aws-cdk-lib";
@@ -217,6 +218,10 @@ function packagedFunction(
     memorySize: 512,
     tracing: lambda.Tracing.ACTIVE,
     environment,
+    logGroup: new logs.LogGroup(scope, `${id}Logs`, {
+      retention: logs.RetentionDays.ONE_MONTH,
+      removalPolicy: RemovalPolicy.DESTROY,
+    }),
     bundling: {
       externalModules: [],
       minify: true,

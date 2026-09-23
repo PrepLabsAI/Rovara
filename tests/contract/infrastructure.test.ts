@@ -54,6 +54,26 @@ describe("control-plane infrastructure", () => {
     expect(json).toContain(":codebuild:");
     expect(json).toContain("project/agentx-*");
   });
+
+  it("retains each Lambda log group for 30 days and removes it with the demo stack", () => {
+    const app = new App();
+    const stack = new ControlPlaneStack(app, "LoggedControlPlane");
+    const template = Template.fromStack(stack);
+
+    template.resourceCountIs("AWS::Logs::LogGroup", 3);
+    template.allResourcesProperties("AWS::Logs::LogGroup", {
+      RetentionInDays: 30,
+    });
+    template.allResources("AWS::Logs::LogGroup", {
+      DeletionPolicy: "Delete",
+      UpdateReplacePolicy: "Delete",
+    });
+    template.allResourcesProperties("AWS::Lambda::Function", {
+      LoggingConfig: {
+        LogGroup: Match.anyValue(),
+      },
+    });
+  });
 });
 
 describe("AgentCore Instances infrastructure", () => {
