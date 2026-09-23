@@ -314,7 +314,21 @@ function containedPath(rootPath: string, configuredPath: string): string {
 }
 
 async function assertContainedSymlinks(rootPath: string, directory = rootPath): Promise<void> {
-  for (const entry of await readdir(directory, { withFileTypes: true })) {
+  let entries;
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    const workspaceRelativePath = relative(rootPath, directory);
+    if (
+      workspaceRelativePath === "lost+found" &&
+      isNodeError(error) &&
+      (error.code === "EACCES" || error.code === "EPERM")
+    ) {
+      return;
+    }
+    throw error;
+  }
+  for (const entry of entries) {
     const entryPath = resolve(directory, entry.name);
     const metadata = await lstat(entryPath);
     if (metadata.isSymbolicLink()) {

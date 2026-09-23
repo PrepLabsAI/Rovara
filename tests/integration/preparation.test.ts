@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -105,6 +105,28 @@ describe("workspace preparation", () => {
     expect(JSON.parse(await readFile(join(root, ".agentx/preparation-manifest.json"), "utf8"))).toEqual(
       manifest,
     );
+  });
+
+  it("ignores an inaccessible filesystem-owned lost+found directory at the workspace root", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentx-workspace-"));
+    const source = await createGitFixture("ebs-root");
+    const project = fixtureProject([{ name: "ebs-root", commit: source.commit }]);
+    const systemDirectory = join(root, "lost+found");
+    await mkdir(systemDirectory);
+    await chmod(systemDirectory, 0o000);
+
+    try {
+      const manifest = await prepareWorkspace({
+        rootPath: root,
+        project,
+        materializer: async (_repository, destination) => {
+          await run("git", ["clone", "--quiet", source.directory, destination]);
+        },
+      });
+      expect(manifest.complete).toBe(true);
+    } finally {
+      await chmod(systemDirectory, 0o700);
+    }
   });
 
   it("does not permit coding until every configured readiness check succeeds", async () => {
