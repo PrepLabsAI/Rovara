@@ -93,6 +93,8 @@ export interface ToolResult {
   text: string;
   truncated: boolean;
   replayed: boolean;
+  /** Why a FAILED result failed, when the gateway knows. */
+  reason?: "not_connected" | "schema_changed" | "policy_denied" | "vendor_error";
 }
 
 export interface Invocation {

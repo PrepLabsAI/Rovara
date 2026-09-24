@@ -204,4 +204,19 @@ describe("gateway execution", () => {
     expect(f.connect).toHaveBeenCalledWith(expect.objectContaining({ tools: ["list_items", "create_item", "unscoped", "composed", "either", "retired"] }));
     expect(f.close).toHaveBeenCalledOnce();
   });
+
+  it("gives every failure a reason the model and the broker can act on", async () => {
+    const f = fixture();
+    const changed = f.request("list_items", { state: "open" });
+    f.tools[0]!.description = "Changed upstream";
+    expect(await executeTool(changed, f.connector, f.context, { connect: f.connect, ledger: f.ledger })).toMatchObject({ status: "FAILED", reason: "schema_changed" });
+    f.tools[0]!.description = "List items";
+    const guard = fixture([{ requiredTools: () => [], check: async () => { throw new GuardRejection("No."); } }]);
+    expect(await executeTool(guard.request("list_items", { state: "open" }), guard.connector, guard.context, { connect: guard.connect, ledger: guard.ledger }))
+      .toMatchObject({ status: "FAILED", reason: "policy_denied" });
+    const vendor = fixture();
+    vendor.issue.mockRejectedValueOnce(new Error("down"));
+    expect(await executeTool(vendor.request("list_items", { state: "open" }), vendor.connector, vendor.context, { connect: vendor.connect, ledger: vendor.ledger }))
+      .toMatchObject({ status: "FAILED", reason: "vendor_error" });
+  });
 });
