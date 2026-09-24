@@ -91,7 +91,7 @@ function threadApi(message: SlackRequestMessage): ThreadServiceApi {
       const response = await signedFetch(`${controlPlaneUrl}/v1/threads/workspace`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ requestId, includeIntegrations: true }),
+        body: JSON.stringify({ requestId, includeIntegrations: true, includeSettingsRevision: true }),
       });
       const body = await response.json() as Record<string, unknown>;
       if (!response.ok) {
@@ -118,10 +118,15 @@ const threads: ThreadStore = {
       Key: { pk: `THREAD#${subject}`, sk: "META" },
       ConsistentRead: true,
     }));
-    const item = response.Item as { workspaceId?: string; conversationId?: string } | undefined;
+    const item = response.Item as {
+      workspaceId?: string;
+      conversationId?: string;
+      settingsRevision?: number;
+    } | undefined;
     return {
       ...(item?.workspaceId === undefined ? {} : { workspaceId: item.workspaceId }),
       ...(item?.conversationId === undefined ? {} : { conversationId: item.conversationId }),
+      ...(item?.settingsRevision === undefined ? {} : { settingsRevision: item.settingsRevision }),
     };
   },
   async saveConversation(subject, state) {
@@ -130,6 +135,14 @@ const threads: ThreadStore = {
       Key: { pk: `THREAD#${subject}`, sk: "META" },
       UpdateExpression: "SET workspaceId = :workspace, conversationId = :conversation",
       ExpressionAttributeValues: { ":workspace": state.workspaceId, ":conversation": state.conversationId },
+    }));
+  },
+  async saveSettingsRevision(subject, revision) {
+    await documentClient.send(new UpdateCommand({
+      TableName: threadsTableName,
+      Key: { pk: `THREAD#${subject}`, sk: "META" },
+      UpdateExpression: "SET settingsRevision = :revision",
+      ExpressionAttributeValues: { ":revision": revision },
     }));
   },
   async finish(subject) {

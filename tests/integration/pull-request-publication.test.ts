@@ -235,6 +235,31 @@ describe("pull request publication", () => {
     expect(failedPullRequest).not.toHaveBeenCalled();
   });
 
+  it("fails a readiness command whose directory this workspace does not have", async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.checkout, "README.md"), "changed\n", "utf8");
+    // Readiness follows the project's latest revision, which may name a repository this workspace
+    // was never prepared with. The gate fails rather than being skipped.
+    const invocation = structuredClone(fixture.invocation) as typeof fixture.invocation & {
+      payload: { project: { readiness: Array<Record<string, unknown>> } };
+    };
+    invocation.payload.project.readiness = [{
+      cwd: "repo/new-service",
+      executable: process.execPath,
+      args: ["-e", "process.exit(0)"],
+      timeoutSeconds: 10,
+    }];
+    const pullRequest = vi.fn();
+
+    await expect(publishWorkspace({
+      rootPath: fixture.root,
+      invocation,
+      credentialProvider: async () => ({}),
+      pullRequestSink: pullRequest,
+    })).rejects.toThrow(/readiness checks failed/i);
+    expect(pullRequest).not.toHaveBeenCalled();
+  });
+
   it("rejects conflicts and unregistered repository selection before push or PR creation", async () => {
     const conflicted = await createFixture();
     await git(conflicted.checkout, ["checkout", "-b", "ours"]);

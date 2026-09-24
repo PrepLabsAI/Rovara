@@ -39,12 +39,21 @@ describe("thread-authenticated GitHub MCP routes", () => {
     });
     const repository = { name: "demo", url: "https://github.com/example/demo.git", credentialRef: "github-app" };
     const policy = { tools: [{ name: "issue_write", access: "write" }] };
-    const definition = { repositories: [repository], integrations: { githubMcp: policy } };
+    const definition = { revision: 2, repositories: [repository], integrations: { githubMcp: policy } };
     records.set(key("PROJECT#demo", "REV#000000000002"), { definition });
     const documentClient = { send: vi.fn(async (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
       if (command.constructor.name === "GetCommand") {
         const itemKey = command.input.Key as { pk: string; sk: string };
         return { Item: records.get(key(itemKey.pk, itemKey.sk)) };
+      }
+      if (command.constructor.name === "QueryCommand") {
+        const values = command.input.ExpressionAttributeValues as Record<string, string>;
+        const prefix = `${values[":pk"]}\0${values[":revision"] ?? ""}`;
+        const matches = [...records.entries()]
+          .filter(([recordKey]) => recordKey.startsWith(prefix))
+          .sort(([left], [right]) => right.localeCompare(left))
+          .map(([, item]) => item);
+        return { Items: matches.slice(0, (command.input.Limit as number | undefined) ?? matches.length) };
       }
       if (command.constructor.name === "PutCommand") {
         const item = command.input.Item as { pk: string; sk: string; result: { status: string } };
@@ -92,7 +101,7 @@ describe("thread-authenticated GitHub MCP routes", () => {
     records.delete(membershipKey);
     expect((await request("GET")).statusCode).toBe(404);
     records.set(membershipKey, membership);
-    records.set(key("PROJECT#demo", "REV#000000000002"), { definition: { repositories: [repository] } });
+    records.set(key("PROJECT#demo", "REV#000000000002"), { definition: { revision: 2, repositories: [repository] } });
     expect((await request("GET")).statusCode).toBe(403);
     records.set(key("PROJECT#demo", "REV#000000000002"), { definition });
     expect(credentials).not.toHaveBeenCalled();
@@ -112,6 +121,19 @@ describe("thread-authenticated GitHub MCP routes", () => {
     expect((await request("POST", thread, { ...input, token: "caller-controlled" })).statusCode).toBe(400);
     expect(call).toHaveBeenCalledExactlyOnceWith("issue_write", { method: "create", title: "Native tool", owner: "example", repo: "demo" });
     expect(credentials).toHaveBeenLastCalledWith(repository, "write");
+    // The invocation records the revision whose policy authorized it, not the workspace's.
+    expect(records.get(key(`WORKSPACE#${workspaceId}`, `GITHUB_MCP#${input.requestId}`))).toMatchObject({
+      settingsRevision: 2,
+    });
+
+    // A newer revision that withdraws the tool rejects the next call, including one whose schema
+    // was discovered while the tool was still approved.
+    records.set(key("PROJECT#demo", "REV#000000000003"), {
+      definition: { revision: 3, repositories: [repository], integrations: { githubMcp: { tools: [{ name: "list_issues", access: "read" }] } } },
+    });
+    const withdrawn = await request("POST", thread, { ...input, requestId: randomUUID() });
+    expect(withdrawn.statusCode).toBe(403);
+    expect(call).toHaveBeenCalledOnce();
     expect(JSON.stringify([...records.values()])).not.toContain("server-secret");
     expect(records.get(key(`WORKSPACE#${workspaceId}`, "META"))?.status).toBe("READY");
   });

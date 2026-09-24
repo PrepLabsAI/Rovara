@@ -99,6 +99,8 @@ interface OperationRecord extends Operation {
   entityType: "OPERATION";
   eventSequence: number;
   targetOperationId?: string;
+  /** The project revision whose non-disk settings applied, which may be newer than the workspace's. */
+  settingsRevision?: number;
   publication?: {
     repository: string;
     repositoryUrl: string;
@@ -295,7 +297,9 @@ async function routeWorkspaceRequest(
     const workspace = await requireOwnedWorkspace(dependencies, identity, githubMcp[1]);
     if (identity.slack && identity.slack.binding.projectName !== workspace.projectName) throw agentXError("FORBIDDEN", "Slack channel is no longer bound to this project");
     await requireMembership(dependencies, identity.ownerKey, workspace.projectName);
-    const project = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
+    // The policy and the repositories it may address come from the project's latest registered
+    // revision, so enabling, narrowing or revoking a tool reaches an existing thread at once.
+    const project = await requireLatestProject(dependencies, workspace.projectName);
     const policy = project.definition.integrations?.githubMcp;
     if (!policy) throw agentXError("FORBIDDEN", "GitHub MCP is not enabled for this project revision");
     if (!dependencies.githubMcp) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub MCP is not configured");
@@ -304,7 +308,14 @@ async function routeWorkspaceRequest(
     const repositoryName = parsed?.success ? parsed.data.repository : url.searchParams.get("repository");
     const repository = project.definition.repositories.find((entry) => entry.name === repositoryName);
     if (!repository) throw agentXError("NOT_FOUND", "registered repository not found");
-    const context = { workspaceId: workspace.id, ownerKey: identity.ownerKey, repository, policy, ...requesterOf(identity) };
+    const context = {
+      workspaceId: workspace.id,
+      ownerKey: identity.ownerKey,
+      repository,
+      policy,
+      settingsRevision: project.definition.revision,
+      ...requesterOf(identity),
+    };
     if (!parsed?.success) return json({ catalog: await discoverGitHubTools(context, dependencies.githubMcp) }, request.requestId);
     const result = await executeGitHubTool(parsed.data, context, {
       ...dependencies.githubMcp,
@@ -675,8 +686,11 @@ async function ensureThreadWorkspace(
   const requestId = uuid(input.requestId, "requestId");
   // Older deployed Slack services parse a strict response; add discovery metadata only on opt-in.
   const includeIntegrations = input.includeIntegrations === true;
+  const includeSettingsRevision = input.includeSettingsRevision === true;
   const existing = await getDefaultWorkspace(dependencies, identity.ownerKey, slack.binding.projectName);
-  if (existing) return existingThreadWorkspace(dependencies, identity, requestId, existing, includeIntegrations);
+  if (existing) {
+    return existingThreadWorkspace(dependencies, identity, requestId, existing, includeIntegrations, includeSettingsRevision);
+  }
 
   // New threads use the latest revision; an existing thread keeps the revision its workspace was prepared with.
   const project = await requireLatestProject(dependencies, slack.binding.projectName);
@@ -717,7 +731,9 @@ async function ensureThreadWorkspace(
   } catch (error) {
     if (!isConditional(error)) throw error;
     const concurrent = await getDefaultWorkspace(dependencies, identity.ownerKey, slack.binding.projectName);
-    if (concurrent) return existingThreadWorkspace(dependencies, identity, requestId, concurrent, includeIntegrations);
+    if (concurrent) {
+      return existingThreadWorkspace(dependencies, identity, requestId, concurrent, includeIntegrations, includeSettingsRevision);
+    }
     return threadWorkspaceLimitRefusal(dependencies, teamId, userId, limits);
   }
   await recordThreadRequester(dependencies, identity, preparation.workspace.id, true);
@@ -729,6 +745,7 @@ async function ensureThreadWorkspace(
     created: true,
     orchestratorInstructions: project.definition.orchestratorInstructions,
     ...(includeIntegrations ? threadIntegrations(project.definition) : {}),
+    ...(includeSettingsRevision ? { settingsRevision: project.definition.revision } : {}),
   };
 }
 
@@ -738,20 +755,27 @@ async function existingThreadWorkspace(
   requestId: string,
   workspace: WorkspaceInstance,
   includeIntegrations: boolean,
+  includeSettingsRevision: boolean,
 ): Promise<SlackThreadWorkspaceResult> {
   await recordThreadRequester(dependencies, identity, workspace.id, false);
-  const project = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
-  const orchestratorInstructions = project.definition.orchestratorInstructions;
+  // Preparation rebuilds the workspace's disk, so it keeps the revision the workspace was created
+  // with. Everything the model is told comes from the project's latest registered revision.
+  const pinned = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
+  const settings = await requireLatestProject(dependencies, workspace.projectName);
+  const applied = {
+    orchestratorInstructions: settings.definition.orchestratorInstructions,
+    ...(includeIntegrations ? threadIntegrations(settings.definition) : {}),
+    ...(includeSettingsRevision ? { settingsRevision: settings.definition.revision } : {}),
+  };
   if (workspace.status === "PREPARATION_FAILED" && !workspace.activeOperationId) {
-    const retried = await retryWorkspacePreparation(dependencies, identity, requestId, identity.ownerKey, project, workspace);
+    const retried = await retryWorkspacePreparation(dependencies, identity, requestId, identity.ownerKey, pinned, workspace);
     return {
       outcome: "WORKSPACE",
       workspaceId: workspace.id,
       status: "PREPARING",
       operationId: retried.operationId,
       created: false,
-      orchestratorInstructions,
-      ...(includeIntegrations ? threadIntegrations(project.definition) : {}),
+      ...applied,
     };
   }
   return {
@@ -760,8 +784,7 @@ async function existingThreadWorkspace(
     status: workspace.status,
     operationId: workspace.activeOperationId,
     created: false,
-    orchestratorInstructions,
-    ...(includeIntegrations ? threadIntegrations(project.definition) : {}),
+    ...applied,
   };
 }
 
@@ -1013,6 +1036,7 @@ async function acceptTask(
   if (!["READY", "STOPPED"].includes(workspace.status) || workspace.activeOperationId) {
     throw agentXError(workspace.status === "BUSY" ? "WORKSPACE_BUSY" : "WORKSPACE_NOT_READY", `workspace is ${workspace.status}`);
   }
+  const settings = await requireLatestProject(dependencies, workspace.projectName);
   const now = new Date().toISOString();
   const operationId = randomUUID();
   const fence = workspace.fence + 1;
@@ -1029,6 +1053,7 @@ async function acceptTask(
     updatedAt: now,
     ...requesterOf(identity),
   });
+  operation.settingsRevision = settings.definition.revision;
   const invocation: WorkerInvocation = {
     protocolVersion: 1,
     kind: "task",
@@ -1116,7 +1141,7 @@ async function acceptPullRequest(
       `workspace is ${workspace.status}`,
     );
   }
-  const project = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
+  const { project, settingsRevision } = await publicationProject(dependencies, workspace);
   const repository = project.definition.repositories.find((candidate) => candidate.name === request.repository);
   if (!repository) throw agentXError("CONFIG_INVALID", "repository is not registered for this project");
   const body = await slackAttributedBody(dependencies, identity, request.body);
@@ -1137,6 +1162,7 @@ async function acceptPullRequest(
     updatedAt: now,
     ...requesterOf(identity),
   });
+  operation.settingsRevision = settingsRevision;
   operation.publication = {
     repository: repository.name,
     repositoryUrl: repository.url,
@@ -1250,7 +1276,7 @@ async function acceptPullRequestLifecycle(
     }
     return { operation: publicOperation(await requireOperation(dependencies, workspaceId, previous.operationId)), duplicate: true };
   }
-  const project = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
+  const { project, settingsRevision } = await publicationProject(dependencies, workspace);
   const repository = project.definition.repositories.find((candidate) => candidate.name === request.repository);
   if (!repository) throw agentXError("CONFIG_INVALID", "repository is not registered for this project");
   const existingRecord = await getItem<PullRequestRecord>(
@@ -1353,6 +1379,7 @@ async function acceptPullRequestLifecycle(
       payloadHash: requestHash, status: "ACCEPTED", fence, createdAt: now, updatedAt: now,
       ...requesterOf(identity),
     });
+    operation.settingsRevision = settingsRevision;
     operation.publication = {
       repository: record.repository,
       repositoryUrl: record.repositoryUrl,
@@ -1429,6 +1456,7 @@ async function acceptPullRequestLifecycle(
     payloadHash: requestHash, status: "ACCEPTED", fence, createdAt: now, updatedAt: now,
     ...requesterOf(identity),
   });
+  operation.settingsRevision = settingsRevision;
   operation.maintenance = {
     action: request.action,
     repository: record.repository,
@@ -2226,6 +2254,35 @@ async function requireProject(
   const project = await getItem<RegisteredProjectRecord>(dependencies, projectKey(projectName, revision));
   if (!project) throw agentXError("NOT_FOUND", "registered project revision not found");
   return project;
+}
+
+/**
+ * The definition a publication or maintenance run works from: the workspace's own revision for
+ * everything that touches its disk, and the project's latest registered revision for the settings
+ * that do not. Returns the revision whose settings applied, for the operation record.
+ */
+async function publicationProject(
+  dependencies: AwsBrokerDependencies,
+  workspace: WorkspaceInstance,
+): Promise<{ project: RegisteredProjectRecord; settingsRevision: number }> {
+  const pinned = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
+  const settings = await requireLatestProject(dependencies, workspace.projectName);
+  if (settings.definition.revision === pinned.definition.revision) {
+    return { project: pinned, settingsRevision: pinned.definition.revision };
+  }
+  const definition: ProjectDefinition = {
+    ...pinned.definition,
+    readiness: settings.definition.readiness,
+    repositories: pinned.definition.repositories.map((repository) => {
+      const latest = settings.definition.repositories.find((candidate) => candidate.name === repository.name);
+      // A repository the latest revision dropped keeps the gates it was registered with.
+      if (!latest) return repository;
+      const withoutGates = { ...repository };
+      delete withoutGates.codeBuildGates;
+      return { ...withoutGates, ...(latest.codeBuildGates === undefined ? {} : { codeBuildGates: latest.codeBuildGates }) };
+    }),
+  };
+  return { project: { ...pinned, definition }, settingsRevision: settings.definition.revision };
 }
 
 async function requireLatestProject(
