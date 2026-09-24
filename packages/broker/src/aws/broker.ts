@@ -257,10 +257,7 @@ export function createAwsBrokerHandler(dependencies: AwsBrokerDependencies) {
       }
       const slackBinding = /^\/v1\/admin\/slack\/bindings\/([^/]+)\/([^/]+)$/.exec(url.pathname);
       if (slackBinding?.[1] && slackBinding[2] && request.method === "PUT") {
-        return json(
-          { binding: await putSlackBinding(dependencies, identity, slackBinding[1], slackBinding[2], body) },
-          request.requestId,
-        );
+        return json(await putSlackBinding(dependencies, identity, slackBinding[1], slackBinding[2], body), request.requestId);
       }
       if (slackBinding?.[1] && slackBinding[2] && request.method === "DELETE") {
         return json(await deleteSlackBinding(dependencies, identity, slackBinding[1], slackBinding[2]), request.requestId);
@@ -605,13 +602,13 @@ async function putSlackBinding(
   teamIdValue: string,
   channelIdValue: string,
   value: unknown,
-): Promise<SlackChannelBinding> {
+): Promise<{ binding: SlackChannelBinding; latestRevision: number }> {
   const input = object(value, "Slack channel binding");
+  // Older CLIs still send projectRevision; the binding follows the project's latest revision instead.
   const binding = SlackChannelBindingSchema.parse({
     teamId: decodeURIComponent(teamIdValue),
     channelId: decodeURIComponent(channelIdValue),
     projectName: input.projectName,
-    projectRevision: input.projectRevision,
     updatedAt: new Date().toISOString(),
   });
   await requireAdministrator(dependencies, identity, binding.projectName);
@@ -619,12 +616,12 @@ async function putSlackBinding(
   if (existing && existing.projectName !== binding.projectName) {
     await requireAdministrator(dependencies, identity, existing.projectName);
   }
-  await requireProject(dependencies, binding.projectName, binding.projectRevision);
+  const latest = await requireLatestProject(dependencies, binding.projectName);
   await dependencies.documentClient.send(new PutCommand({
     TableName: dependencies.tableName,
     Item: { ...slackBindingKey(binding.teamId, binding.channelId), entityType: "SLACK_BINDING", ...binding, updatedBy: identity.ownerKey },
   }));
-  return binding;
+  return { binding, latestRevision: latest.definition.revision };
 }
 
 async function deleteSlackBinding(
@@ -652,11 +649,11 @@ async function getSlackBinding(
 ): Promise<SlackChannelBinding | undefined> {
   const item = await getItem<Record<string, unknown>>(dependencies, slackBindingKey(teamId, channelId));
   if (!item) return undefined;
+  // Bindings written before channels followed the latest revision also carry projectRevision; it is ignored.
   return SlackChannelBindingSchema.parse({
     teamId: item.teamId,
     channelId: item.channelId,
     projectName: item.projectName,
-    projectRevision: item.projectRevision,
     updatedAt: item.updatedAt,
   });
 }
@@ -676,7 +673,8 @@ async function ensureThreadWorkspace(
   const existing = await getDefaultWorkspace(dependencies, identity.ownerKey, slack.binding.projectName);
   if (existing) return existingThreadWorkspace(dependencies, identity, requestId, existing, includeIntegrations);
 
-  const project = await requireProject(dependencies, slack.binding.projectName, slack.binding.projectRevision);
+  // New threads use the latest revision; an existing thread keeps the revision its workspace was prepared with.
+  const project = await requireLatestProject(dependencies, slack.binding.projectName);
   const preparation = await newWorkspacePreparation(dependencies, identity, project, identity.ownerKey, requestId);
   const { teamId, userId } = slack.requester;
   try {
@@ -2222,6 +2220,24 @@ async function requireProject(
 ): Promise<RegisteredProjectRecord> {
   const project = await getItem<RegisteredProjectRecord>(dependencies, projectKey(projectName, revision));
   if (!project) throw agentXError("NOT_FOUND", "registered project revision not found");
+  return project;
+}
+
+async function requireLatestProject(
+  dependencies: AwsBrokerDependencies,
+  projectName: string,
+): Promise<RegisteredProjectRecord> {
+  // Revision sort keys are zero-padded, so the last key in descending order is the highest revision.
+  const response = await dependencies.documentClient.send(new QueryCommand({
+    TableName: dependencies.tableName,
+    KeyConditionExpression: "pk = :pk AND begins_with(sk, :revision)",
+    ExpressionAttributeValues: { ":pk": `PROJECT#${projectName}`, ":revision": "REV#" },
+    ScanIndexForward: false,
+    Limit: 1,
+    ConsistentRead: true,
+  }));
+  const project = response.Items?.[0] as RegisteredProjectRecord | undefined;
+  if (!project) throw agentXError("NOT_FOUND", "registered project not found");
   return project;
 }
 

@@ -43,6 +43,8 @@ export class FakeDynamoDb {
         const item = this.get(key.pk, key.sk);
         return { Item: item === undefined ? undefined : structuredClone(item) };
       }
+      case "QueryCommand":
+        return { Items: this.query(input) };
       case "PutCommand":
       case "UpdateCommand":
       case "DeleteCommand":
@@ -60,6 +62,20 @@ export class FakeDynamoDb {
         throw new Error(`FakeDynamoDb does not support ${command.constructor.name}`);
     }
   };
+
+  // Supports only the key condition the broker uses to find a project's latest revision.
+  private query(input: Record<string, unknown>): Item[] {
+    const values = input.ExpressionAttributeValues as Values;
+    if (input.KeyConditionExpression !== "pk = :pk AND begins_with(sk, :revision)") {
+      throw new Error(`FakeDynamoDb does not support the key condition ${String(input.KeyConditionExpression)}`);
+    }
+    const prefix = values[":revision"] as string;
+    const items = this.find((item) => item.pk === values[":pk"] && (item.sk as string).startsWith(prefix))
+      .sort((left, right) => compareKeys(left.sk as string, right.sk as string));
+    if (input.ScanIndexForward === false) items.reverse();
+    const limit = input.Limit as number | undefined;
+    return (limit === undefined ? items : items.slice(0, limit)).map((item) => structuredClone(item));
+  }
 
   private commit(actions: WriteAction[], errorName: string): void {
     for (const action of actions) {
@@ -80,6 +96,12 @@ export class FakeDynamoDb {
 
 function itemKey(pk: string, sk: string): string {
   return `${pk}\u0000${sk}`;
+}
+
+// DynamoDB orders string sort keys by code point, not by locale collation.
+function compareKeys(left: string, right: string): number {
+  if (left === right) return 0;
+  return left < right ? -1 : 1;
 }
 
 function toAction(kind: WriteAction["kind"], input: Record<string, unknown>): WriteAction {

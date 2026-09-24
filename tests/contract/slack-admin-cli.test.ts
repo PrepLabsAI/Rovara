@@ -14,14 +14,14 @@ const input = {
 };
 
 describe("administrator Slack channel binding client", () => {
-  it("binds a channel to the configured project revision", async () => {
-    const fetchImplementation = fakeFetch(200, { binding: { projectName: "payments" } });
-    await bindSlackChannel({ ...input, projectName: "payments", projectRevision: 3 }, fetchImplementation);
+  it("binds a channel to the configured project without naming a revision", async () => {
+    const fetchImplementation = fakeFetch(200, { binding: { projectName: "payments" }, latestRevision: 3 });
+    await bindSlackChannel({ ...input, projectName: "payments" }, fetchImplementation);
     const [url, init] = fetchImplementation.mock.calls[0] ?? [];
     expect(url).toBe("https://agentx.example.test/v1/admin/slack/bindings/T0BSHLLUGBD/C0123456789");
     expect(init?.method).toBe("PUT");
     expect(init?.headers).toMatchObject({ authorization: "Bearer token", "content-type": "application/json" });
-    expect(JSON.parse(init?.body as string)).toEqual({ projectName: "payments", projectRevision: 3 });
+    expect(JSON.parse(init?.body as string)).toEqual({ projectName: "payments" });
   });
 
   it("unbinds a channel and surfaces the control plane's error message", async () => {

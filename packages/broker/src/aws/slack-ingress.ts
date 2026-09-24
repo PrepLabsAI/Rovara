@@ -256,7 +256,6 @@ function createAwsSlackIngressHandler() {
             teamId: item.teamId,
             channelId: item.channelId,
             projectName: item.projectName,
-            projectRevision: item.projectRevision,
             updatedAt: item.updatedAt,
           })
         : undefined;

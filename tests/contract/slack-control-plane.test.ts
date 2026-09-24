@@ -100,6 +100,17 @@ async function call(handler: Handler, options: CallOptions): Promise<{ status: n
 const admin = { subject: "admin-subject", admin: true };
 
 async function registerProjectAndBind(handler: Handler, githubMcp = false): Promise<void> {
+  await registerRevision(handler, 1, githubMcp);
+  const bound = await call(handler, {
+    method: "PUT",
+    path: `/v1/admin/slack/bindings/${team}/${channel}`,
+    user: admin,
+    body: { projectName: "payments" },
+  });
+  expect(bound.status).toBe(200);
+}
+
+async function registerRevision(handler: Handler, revision: number, githubMcp = false): Promise<void> {
   const registered = await call(handler, {
     method: "POST",
     path: "/v1/admin/projects",
@@ -108,7 +119,7 @@ async function registerProjectAndBind(handler: Handler, githubMcp = false): Prom
       definition: {
         schemaVersion: 2,
         name: "payments",
-        revision: 1,
+        revision,
         controlPlaneUrl: "https://agentx.example.test",
         auth: { issuer, clientId: "agentx", audience: "agentx" },
         environment: { image: `example.test/agentx@sha256:${"a".repeat(64)}` },
@@ -117,7 +128,7 @@ async function registerProjectAndBind(handler: Handler, githubMcp = false): Prom
         ],
         setup: [],
         readiness: [],
-        orchestratorInstructions: "Delegate work.",
+        orchestratorInstructions: `Delegate work (revision ${revision}).`,
         ...(githubMcp ? { integrations: { githubMcp: { tools: [{ name: "issue_write", access: "write" }, { name: "list_issues", access: "read" }] } } } : {}),
       },
       runtimeBinding: {
@@ -129,13 +140,6 @@ async function registerProjectAndBind(handler: Handler, githubMcp = false): Prom
     },
   });
   expect(registered.status).toBe(201);
-  const bound = await call(handler, {
-    method: "PUT",
-    path: `/v1/admin/slack/bindings/${team}/${channel}`,
-    user: admin,
-    body: { projectName: "payments", projectRevision: 1 },
-  });
-  expect(bound.status).toBe(200);
 }
 
 function ensureWorkspace(handler: Handler, thread: string, slackUser: string, requestId = randomUUID()) {
@@ -224,9 +228,11 @@ describe("hosted Slack GitHub MCP", () => {
     const service = { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik };
     expect((await call(handler, { method: "GET", path: `/v1/service/workspaces/${workspaceId}/github/tools?repository=demo`, service })).status).toBe(403);
     expect(credentials).not.toHaveBeenCalled();
-    // A newer channel binding does not silently upgrade this existing thread's policy.
-    db.get(`SLACK_BINDING#${team}`, `CHANNEL#${channel}`)!.projectRevision = 2;
+    // A newer revision with a policy reaches new threads without re-binding, but does not silently
+    // upgrade this existing thread, which keeps the revision its workspace was prepared with.
+    await registerRevision(handler, 2, true);
     expect((await ensureWorkspace(handler, threadOne, pratik)).body.githubMcpRepositories).toBeUndefined();
+    expect((await ensureWorkspace(handler, threadTwo, pratik)).body.githubMcpRepositories).toEqual(["demo"]);
   });
 });
 
@@ -265,22 +271,34 @@ describe("Slack channel bindings", () => {
   it("lets only project administrators bind and unbind channels", async () => {
     const { db, handler } = createBroker();
     await registerProjectAndBind(handler);
-    expect(db.get(`SLACK_BINDING#${team}`, `CHANNEL#${channel}`)).toMatchObject({ projectName: "payments", projectRevision: 1 });
+    const stored = db.get(`SLACK_BINDING#${team}`, `CHANNEL#${channel}`);
+    expect(stored).toMatchObject({ projectName: "payments" });
+    expect(stored).not.toHaveProperty("projectRevision");
 
     const denied = await call(handler, {
       method: "PUT",
       path: `/v1/admin/slack/bindings/${team}/C0222222222`,
       user: { subject: "developer" },
-      body: { projectName: "payments", projectRevision: 1 },
+      body: { projectName: "payments" },
     });
     expect(denied.status).toBe(403);
-    const unknownRevision = await call(handler, {
+    const unknownProject = await call(handler, {
+      method: "PUT",
+      path: `/v1/admin/slack/bindings/${team}/C0222222222`,
+      user: admin,
+      body: { projectName: "ledger" },
+    });
+    expect(unknownProject.status).toBe(404);
+    // Older CLIs still send a revision; the binding ignores it and follows the latest revision.
+    const olderClient = await call(handler, {
       method: "PUT",
       path: `/v1/admin/slack/bindings/${team}/C0222222222`,
       user: admin,
       body: { projectName: "payments", projectRevision: 7 },
     });
-    expect(unknownRevision.status).toBe(404);
+    expect(olderClient.status).toBe(200);
+    expect(olderClient.body).toMatchObject({ binding: { projectName: "payments" }, latestRevision: 1 });
+    expect(db.get(`SLACK_BINDING#${team}`, "CHANNEL#C0222222222")).not.toHaveProperty("projectRevision");
 
     expect((await call(handler, { method: "DELETE", path: `/v1/admin/slack/bindings/${team}/C0333333333`, user: admin })).status).toBe(404);
     const removed = await call(handler, { method: "DELETE", path: `/v1/admin/slack/bindings/${team}/${channel}`, user: admin });
@@ -316,6 +334,36 @@ describe("Slack thread workspaces", () => {
     const second = await ensureWorkspace(handler, threadTwo, pratik);
     expect(second.body).toMatchObject({ outcome: "WORKSPACE", created: true });
     expect(second.body.workspaceId).not.toBe(first.body.workspaceId);
+  });
+
+  it("gives new threads the latest registered revision and keeps existing threads on theirs", async () => {
+    const { db, handler } = createBroker();
+    await registerProjectAndBind(handler);
+    const first = await ensureWorkspace(handler, threadOne, pratik);
+    expect(first.body).toMatchObject({ created: true, orchestratorInstructions: "Delegate work (revision 1)." });
+    expect(db.get(`WORKSPACE#${String(first.body.workspaceId)}`, "META")).toMatchObject({ projectRevision: 1 });
+
+    // Revision keys are zero-padded, so revision 10 sorts after revision 2.
+    await registerRevision(handler, 10);
+    await registerRevision(handler, 2);
+    const second = await ensureWorkspace(handler, threadTwo, pratik);
+    expect(second.body).toMatchObject({ created: true, orchestratorInstructions: "Delegate work (revision 10)." });
+    expect(db.get(`WORKSPACE#${String(second.body.workspaceId)}`, "META")).toMatchObject({ projectRevision: 10 });
+
+    markReady(db, String(first.body.workspaceId));
+    const followUp = await ensureWorkspace(handler, threadOne, bob);
+    expect(followUp.body).toMatchObject({
+      workspaceId: first.body.workspaceId,
+      created: false,
+      orchestratorInstructions: "Delegate work (revision 1).",
+    });
+
+    // A binding stored while bindings named a revision still follows the latest revision.
+    const stored = db.get(`SLACK_BINDING#${team}`, `CHANNEL#${channel}`);
+    if (!stored) throw new Error("binding record is missing");
+    stored.projectRevision = 1;
+    const third = await ensureWorkspace(handler, threadThree, bob);
+    expect(db.get(`WORKSPACE#${String(third.body.workspaceId)}`, "META")).toMatchObject({ projectRevision: 10 });
   });
 
   it("declines new threads beyond the member and organization limits without blocking follow-ups", async () => {
