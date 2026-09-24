@@ -1,15 +1,19 @@
 import { z } from "zod";
 import { ToolApprovalListSchema } from "./github-mcp.js";
+import { AGENTX_NAME_PATTERN } from "./names.js";
 
 /** Becomes the tool prefix `<name>__<tool>`, so it is short and lowercase. */
 export const ConnectorNameSchema = z.string().regex(/^[a-z][a-z0-9-]{0,19}$/);
-const RepositoryNameSchema = z.string().regex(/^[a-z][a-z0-9-]{0,62}$/);
+const RepositoryNameSchema = z.string().regex(AGENTX_NAME_PATTERN);
 
 /** GitHub uses each scoped repository's own GitHub App credential, as feature 007 does. */
 export const GitHubConnectorSchema = z.object({
   name: ConnectorNameSchema,
   type: z.literal("github"),
-  scopes: z.union([z.literal("all-repositories"), z.array(RepositoryNameSchema).min(1).max(32)]),
+  scopes: z.union([
+    z.literal("all-repositories"),
+    z.array(RepositoryNameSchema).min(1).max(32).refine((names) => new Set(names).size === names.length, "connector scopes must be unique"),
+  ]),
   tools: ToolApprovalListSchema,
 }).strict();
 

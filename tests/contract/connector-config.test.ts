@@ -46,6 +46,11 @@ describe("connector configuration", () => {
       .toContain("connector github scopes unregistered repository mobile");
   });
 
+  it("refuses a repository listed twice in one connector's scopes", () => {
+    expect(issues(project({ connectors: [{ name: "github", type: "github", scopes: ["web", "web"], tools }] })))
+      .toContain("connector scopes must be unique");
+  });
+
   it("refuses duplicate names, a second github connector and types that are not supported yet", () => {
     const github = { name: "github", type: "github", scopes: "all-repositories", tools };
     expect(issues(project({ connectors: [github, github] }))).toContain("connector names must be unique");

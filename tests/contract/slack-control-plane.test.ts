@@ -295,11 +295,12 @@ describe("hosted Slack GitHub MCP", () => {
     expect(db.get(`WORKSPACE#${workspaceId}`, `GITHUB_MCP#${request.requestId}`)).toMatchObject({ connector: "github" });
   });
 
-  it("reuses a revision's discovered catalog and rediscovers after a new revision or a failed call", async () => {
+  it("reuses a revision's discovered catalog and rediscovers after a new revision or a vendor schema change", async () => {
     const credentials = vi.fn(async () => ({ owner: "example", repo: "demo", token: "installation-secret" }));
     const invoke = vi.fn(async () => ({ content: [{ type: "text", text: "GitHub result" }] }));
+    let description = "Native list_issues";
     const connect = vi.fn(async () => ({
-      tools: [{ name: "list_issues", description: "Native list_issues", inputSchema: {
+      tools: [{ name: "list_issues", description, inputSchema: {
         type: "object", properties: { owner: { type: "string" }, repo: { type: "string" } }, required: ["owner", "repo"],
       } }], call: invoke, close: async () => undefined,
     }));
@@ -321,9 +322,18 @@ describe("hosted Slack GitHub MCP", () => {
     const tool = GitHubMcpCatalogSchema.parse(first.body.catalog).tools[0]!;
     const failed = await call(handler, { method: "POST", path: `${path}/call`, service, body: { requestId: randomUUID(), repository: "demo", tool: "list_issues", schemaHash: tool.schemaHash, arguments: {} } });
     expect(failed.body.result).toMatchObject({ status: "FAILED" });
+    // A vendor error is not a definition change, so the cached catalog stays.
     const callsAfterFailure = connect.mock.calls.length;
     await discover();
-    expect(connect).toHaveBeenCalledTimes(callsAfterFailure + 1);
+    expect(connect).toHaveBeenCalledTimes(callsAfterFailure);
+    // A changed vendor definition fails the call and forces the next discovery to the vendor.
+    description = "Changed list_issues";
+    const changed = await call(handler, { method: "POST", path: `${path}/call`, service, body: { requestId: randomUUID(), repository: "demo", tool: "list_issues", schemaHash: tool.schemaHash, arguments: {} } });
+    expect(changed.body.result).toMatchObject({ status: "FAILED" });
+    expect((changed.body.result as { text: string }).text).toContain("definition changed");
+    const callsAfterChange = connect.mock.calls.length;
+    await discover();
+    expect(connect).toHaveBeenCalledTimes(callsAfterChange + 1);
   });
 
   it("discovers and executes within the thread, audits the requester and never repeats a write", async () => {

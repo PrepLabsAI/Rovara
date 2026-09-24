@@ -99,6 +99,17 @@ describe("gateway tool approval", () => {
     ]));
   });
 
+  it("skips a tool whose schema grows past the size limit once references are inlined", () => {
+    const f = fixture();
+    const $defs = { Big: { type: "string", description: "y".repeat(3_000) } };
+    const properties = Object.fromEntries(Array.from({ length: 12 }, (_, index) => [`p${index}`, { $ref: "#/$defs/Big" }]));
+    // "composed" has no argument narrowing, so only the size limit can refuse it.
+    const tools: McpConnection["tools"] = [{ name: "composed", description: "Expands", inputSchema: { ...schema(properties), $defs } }];
+    const review = reviewTools({ tools }, f.connector, f.context);
+    expect(review.tools).toEqual([]);
+    expect(review.skipped).toContainEqual({ tool: "composed", reason: "flattened schema exceeds 32768 characters" });
+  });
+
   it("reports every approved tool it cannot offer, with a reason", () => {
     const f = fixture();
     const review = reviewTools({ tools: f.tools }, f.connector, f.context);

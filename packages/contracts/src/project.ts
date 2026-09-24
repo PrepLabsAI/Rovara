@@ -4,7 +4,9 @@ import { GitHubMcpPolicySchema } from "./github-mcp.js";
 import { ConnectorsSchema } from "./connectors.js";
 import type { GitHubMcpPolicy } from "./github-mcp.js";
 
-export const AGENTX_NAME_PATTERN = /^[a-z][a-z0-9-]{0,62}$/;
+import { AGENTX_NAME_PATTERN } from "./names.js";
+
+export { AGENTX_NAME_PATTERN };
 export const OCI_DIGEST_PATTERN = /@sha256:[a-f0-9]{64}$/;
 
 export const AgentXNameSchema = z.string().regex(AGENTX_NAME_PATTERN);

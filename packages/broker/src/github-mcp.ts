@@ -26,6 +26,7 @@ export interface GitHubMcpDiscovery extends GitHubMcpCatalog { skipped: SkippedT
 export interface GitHubMcpDependencies {
   credentials(repository: { url: string; credentialRef: string }, access: "read" | "write"): Promise<{ owner: string; repo: string; token: string }>;
   connect?: typeof connectMcp;
+  onDefinitionChanged?: () => void;
 }
 
 export interface GitHubMcpContext {
@@ -55,7 +56,11 @@ export async function executeGitHubTool(
     { requestId: request.requestId, scope: request.repository, tool: request.tool, schemaHash: request.schemaHash, arguments: request.arguments },
     githubConnector(issuer(dependencies)),
     connectorContext(context),
-    { ...connectOption(dependencies), ledger: dependencies.store },
+    {
+      ...connectOption(dependencies),
+      ...(dependencies.onDefinitionChanged === undefined ? {} : { onDefinitionChanged: dependencies.onDefinitionChanged }),
+      ledger: dependencies.store,
+    },
   );
 }
 

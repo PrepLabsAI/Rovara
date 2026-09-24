@@ -204,8 +204,11 @@ interface AwsBrokerDependencies {
   codeBuild: CodeBuildGateway;
   slack?: SlackServiceConfiguration;
   githubMcp?: GitHubMcpDependencies;
-  catalogs?: CatalogCache<GitHubMcpCatalog>;
+  catalogs: CatalogCache<GitHubMcpCatalog>;
 }
+
+/** What callers supply; the handler creates the per-container catalog cache when none is given. */
+export type AwsBrokerInput = Omit<AwsBrokerDependencies, "catalogs"> & { catalogs?: CatalogCache<GitHubMcpCatalog> };
 
 interface SlackServiceConfiguration {
   orchestratorRoleArn: string;
@@ -215,9 +218,9 @@ interface SlackServiceConfiguration {
 
 type TransactItems = NonNullable<TransactWriteCommandInput["TransactItems"]>;
 
-export function createAwsBrokerHandler(dependencies: AwsBrokerDependencies) {
+export function createAwsBrokerHandler(input: AwsBrokerInput) {
   // One cache per container: discovery per revision, connector and repository costs one vendor round trip.
-  dependencies = { ...dependencies, catalogs: dependencies.catalogs ?? new CatalogCache<GitHubMcpCatalog>({ ttlMs: 600_000, maxEntries: 256 }) };
+  const dependencies: AwsBrokerDependencies = { ...input, catalogs: input.catalogs ?? new CatalogCache<GitHubMcpCatalog>({ ttlMs: 600_000, maxEntries: 256 }) };
   if (Buffer.byteLength(dependencies.callbackSigningKey, "utf8") < 32) {
     throw new Error("CALLBACK_SIGNING_KEY must contain at least 32 bytes");
   }
@@ -339,7 +342,7 @@ async function routeWorkspaceRequest(
     };
     const cacheKey = JSON.stringify([workspace.projectName, project.definition.revision, github.name, repository.name]);
     if (!parsed?.success) {
-      const cached = dependencies.catalogs?.get(cacheKey);
+      const cached = dependencies.catalogs.get(cacheKey);
       if (cached) return json({ catalog: cached }, request.requestId);
       const { skipped, ...catalog } = await discoverGitHubTools(context, dependencies.githubMcp);
       if (skipped.length > 0) {
@@ -348,15 +351,15 @@ async function routeWorkspaceRequest(
           revision: project.definition.revision, connector: github.name, scope: repository.name, skipped,
         }));
       }
-      dependencies.catalogs?.set(cacheKey, catalog);
+      dependencies.catalogs.set(cacheKey, catalog);
       return json({ catalog }, request.requestId);
     }
     const result = await executeGitHubTool(parsed.data, context, {
       ...dependencies.githubMcp,
       store: new DynamoConnectorLedger(dependencies.documentClient, dependencies.tableName, workspace.id, GITHUB_LEDGER, github.name),
+      // The vendor changed the tool, so the next discovery must go to the vendor, not the cache.
+      onDefinitionChanged: () => dependencies.catalogs.delete(cacheKey),
     });
-    // A failed call may mean the vendor changed the tool; the next discovery must see the change.
-    if (result.status === "FAILED" && !result.replayed) dependencies.catalogs?.delete(cacheKey);
     return json({ result }, request.requestId);
   }
 

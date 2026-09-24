@@ -50,6 +50,26 @@ describe("vendor schema flattening", () => {
       .toEqual({ unsupported: "conflicting type" });
   });
 
+  it("treats the same property defined with keys in a different order as one definition", () => {
+    const result = flattenSchema({ allOf: [
+      { type: "object", properties: { a: { type: "string", description: "A" } } },
+      { type: "object", properties: { a: { description: "A", type: "string" } } },
+    ] });
+    expect(result).toEqual({ schema: { type: "object", properties: { a: { type: "string", description: "A" } } } });
+  });
+
+  it("resolves references into arrays", () => {
+    const result = flattenSchema({ type: "object", properties: { a: { $ref: "#/$defs/choices/1" } }, $defs: { choices: [{ type: "number" }, { type: "string" }] } });
+    expect(result).toEqual({ schema: { type: "object", properties: { a: { type: "string" } } } });
+  });
+
+  it("names anchor and boolean-schema references accurately", () => {
+    expect(flattenSchema({ type: "object", properties: { a: { $ref: "#T" } } }))
+      .toEqual({ unsupported: "anchor reference #T" });
+    expect(flattenSchema({ type: "object", properties: { a: { $ref: "#/$defs/Any", description: "x" } }, $defs: { Any: true } }))
+      .toEqual({ unsupported: "reference to a boolean schema #/$defs/Any" });
+  });
+
   it("refuses a malformed reference instead of throwing", () => {
     expect(flattenSchema({ type: "object", properties: { a: { $ref: "#/$defs/100%" } }, $defs: { "100%": { type: "string" } } }))
       .toEqual({ unsupported: "malformed reference #/$defs/100%" });

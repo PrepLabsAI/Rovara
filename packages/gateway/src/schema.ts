@@ -1,4 +1,4 @@
-import { isObject } from "./util.js";
+import { canonical, isObject } from "./util.js";
 
 export type FlattenResult = { schema: Record<string, unknown> } | { unsupported: string };
 
@@ -39,6 +39,7 @@ function resolveNode(node: unknown, root: Record<string, unknown>, stack: readon
     const target = resolveNode(lookup(root, ref), root, [...stack, ref], depth + 1, budget);
     const siblings = Object.fromEntries(Object.entries(node).filter(([key]) => key !== "$ref"));
     if (Object.keys(siblings).length === 0) return target;
+    if (typeof target === "boolean") throw new Unsupported(`reference to a boolean schema ${ref}`);
     return mergeAll([resolveNode(siblings, root, stack, depth + 1, budget), target]);
   }
   const out: Record<string, unknown> = {};
@@ -55,12 +56,17 @@ function resolveNode(node: unknown, root: Record<string, unknown>, stack: readon
 }
 
 function lookup(root: Record<string, unknown>, ref: string): unknown {
+  if (ref.startsWith("#") && !ref.startsWith("#/")) throw new Unsupported(`anchor reference ${ref}`);
   if (!ref.startsWith("#/")) throw new Unsupported(`external reference ${ref}`);
   let node: unknown = root;
   for (const raw of ref.slice(2).split("/")) {
     let decoded: string;
     try { decoded = decodeURIComponent(raw); } catch { throw new Unsupported(`malformed reference ${ref}`); }
     const segment = decoded.replace(/~1/g, "/").replace(/~0/g, "~");
+    if (Array.isArray(node) && /^(0|[1-9][0-9]*)$/.test(segment) && Number(segment) < node.length) {
+      node = node[Number(segment)] as unknown;
+      continue;
+    }
     if (!isObject(node) || !Object.hasOwn(node, segment)) throw new Unsupported(`unresolvable reference ${ref}`);
     node = node[segment];
   }
@@ -76,7 +82,7 @@ function mergeAll(parts: readonly unknown[]): Record<string, unknown> {
         if (!isObject(value)) throw new Unsupported("properties is not an object");
         const target: Record<string, unknown> = isObject(merged.properties) ? merged.properties : {};
         for (const [name, schema] of Object.entries(value)) {
-          if (Object.hasOwn(target, name) && JSON.stringify(target[name]) !== JSON.stringify(schema)) {
+          if (Object.hasOwn(target, name) && !sameSchema(target[name], schema)) {
             throw new Unsupported(`conflicting definitions of property ${name}`);
           }
           target[name] = schema;
@@ -91,11 +97,16 @@ function mergeAll(parts: readonly unknown[]): Record<string, unknown> {
         continue;
       } else if (Object.hasOwn(merged, key)) {
         if (ANNOTATIONS.has(key)) continue;
-        if (JSON.stringify(merged[key]) !== JSON.stringify(value)) throw new Unsupported(`conflicting ${key}`);
+        if (!sameSchema(merged[key], value)) throw new Unsupported(`conflicting ${key}`);
       } else {
         merged[key] = value;
       }
     }
   }
   return merged;
+}
+
+/** Structural equality that ignores key order, which vendors do not keep stable. */
+function sameSchema(left: unknown, right: unknown): boolean {
+  return JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
 }

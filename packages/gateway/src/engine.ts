@@ -65,6 +65,7 @@ export function reviewTools<Scope>(
     }
     if (incompatible !== undefined) { skipped.push({ tool: upstream.name, reason: `argumentValues do not match ${incompatible}` }); continue; }
     schema.additionalProperties = false;
+    if (JSON.stringify(schema).length > 32_768) { skipped.push({ tool: upstream.name, reason: "flattened schema exceeds 32768 characters" }); continue; }
     // Compile during discovery too; schemas we cannot validate must never be advertised.
     try { new AjvJsonSchemaValidator().getValidator(schema); } catch { skipped.push({ tool: upstream.name, reason: "schema does not compile" }); continue; }
     tools.push({
@@ -88,7 +89,11 @@ export function approveTools<Scope>(
   return reviewTools(connection, connector, context).tools;
 }
 
-export interface EngineOptions { connect?: typeof connectMcp }
+export interface EngineOptions {
+  connect?: typeof connectMcp;
+  /** Called when the vendor's definition no longer matches the one the model was given. */
+  onDefinitionChanged?: () => void;
+}
 
 class PolicyFailure extends Error {}
 
@@ -157,7 +162,10 @@ export async function executeTool<Scope>(
     }
     connection = await (options.connect ?? connectMcp)({ endpoint: connector.endpoint, token: credential.token, tools, signal });
     const approved = approveTools(connection, connector, context).find((tool) => tool.name === request.tool);
-    if (!approved || approved.schemaHash !== request.schemaHash) throw new PolicyFailure("MCP tool definition changed or is unavailable. Refresh tool discovery before submitting a new request.");
+    if (!approved || approved.schemaHash !== request.schemaHash) {
+      options.onDefinitionChanged?.();
+      throw new PolicyFailure("MCP tool definition changed or is unavailable. Refresh tool discovery before submitting a new request.");
+    }
     const validate = new AjvJsonSchemaValidator().getValidator(approved.inputSchema);
     if (!validate(request.arguments).valid) throw new PolicyFailure("Arguments do not match the approved MCP tool schema.");
     const bound = connector.binder.bind(context.scope, credential);
