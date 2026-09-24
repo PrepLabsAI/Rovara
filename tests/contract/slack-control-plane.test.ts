@@ -451,6 +451,38 @@ describe("hosted Slack GitHub MCP", () => {
     } finally { log.mockRestore(); }
   });
 
+  it("logs a footer dropped on the legacy GitHub route too, without request text", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      const credentials = vi.fn(async () => ({ owner: "example", repo: "demo", token: "installation-secret" }));
+      const invoke = vi.fn(async () => ({ content: [{ type: "text", text: "created" }] }));
+      const connect = vi.fn(async () => ({
+        tools: [{ name: "issue_write", description: "Create an issue", inputSchema: { type: "object", properties: {
+          owner: { type: "string" }, repo: { type: "string" }, title: { type: "string" }, body: { type: "string", maxLength: 20 },
+        }, required: ["owner", "repo", "title"] } }], call: invoke, close: async () => undefined,
+      }));
+      const { db, handler } = createBroker({ githubMcp: { credentials, connect } });
+      await registerProjectAndBind(handler, { connectors: [{ name: "github", type: "github", scopes: "all-repositories", tools: [{ name: "issue_write", access: "write" }] }] });
+      const workspaceId = (await ensureWorkspace(handler, threadOne, pratik)).body.workspaceId as string;
+      markReady(db, workspaceId);
+      const service = { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik };
+      const path = `/v1/service/workspaces/${workspaceId}/github`;
+      const catalog = GitHubMcpCatalogSchema.parse((await call(handler, { method: "GET", path: `${path}/tools?repository=demo`, service })).body.catalog);
+      const requestId = randomUUID();
+      const response = await call(handler, { method: "POST", path: `${path}/call`, service,
+        headers: { "x-agentx-slack-user-name": encodeURIComponent("Pratik Singhal") },
+        body: { requestId, repository: "demo", tool: "issue_write", schemaHash: catalog.tools[0]!.schemaHash, arguments: { title: "Secret title", body: "Private steps" } } });
+      expect(response.body.result).toMatchObject({ status: "SUCCEEDED" });
+      expect(invoke).toHaveBeenLastCalledWith("issue_write", { owner: "example", repo: "demo", title: "Secret title", body: "Private steps" });
+      const lines = log.mock.calls.map(([line]) => String(line)).filter((line) => line.includes("connector.attribution_dropped"));
+      expect(lines).toHaveLength(1);
+      expect(JSON.parse(lines[0]!)).toEqual({
+        component: "broker", event: "connector.attribution_dropped", project: "payments", revision: 1, connector: "github", scope: "demo", tool: "issue_write", requestId,
+      });
+      expect(lines[0]).not.toContain("Private steps");
+    } finally { log.mockRestore(); }
+  });
+
   it("serves a github connector declared in integrations.connectors", async () => {
     const credentials = vi.fn(async () => ({ owner: "example", repo: "demo", token: "installation-secret" }));
     const invoke = vi.fn(async () => ({ content: [{ type: "text", text: "GitHub result" }] }));

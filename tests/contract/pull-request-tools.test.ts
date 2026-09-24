@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { validateToolArguments } from "@earendil-works/pi-ai";
 import { createOrchestrationTools } from "../../packages/orchestrator/src/orchestration-tools.js";
 import { CONVERSATION_ID, LIFECYCLE_CASES, OPERATION_ID, REQUEST_ID, WORKSPACE_ID, managePullRequestApi } from "../support/pull-request-cases.js";
 
@@ -25,6 +26,13 @@ describe("agentx_manage_pull_request replaces the seven lifecycle tools call for
     await tools.find((entry) => entry.name === "agentx_manage_pull_request")!
       .execute("call-1", { action, repository: "web", pullRequestNumber: 12, title: "Ignored", body: "Ignored" }, undefined, undefined, {} as never);
     expect(api.managePullRequest).toHaveBeenCalledExactlyOnceWith({ workspaceId: WORKSPACE_ID, requestId: REQUEST_ID, action, repository: "web", pullRequestNumber: 12 });
+  });
+
+  it("rejects an action outside the enum before anything reaches the control plane", () => {
+    const tool = createOrchestrationTools(managePullRequestApi(), { workspaceId: WORKSPACE_ID, conversationId: CONVERSATION_ID }).find((entry) => entry.name === "agentx_manage_pull_request")!;
+    const call = (action: string) => ({ type: "toolCall" as const, id: "call-1", name: tool.name, arguments: { action, repository: "web", pullRequestNumber: 12 } });
+    expect(() => { validateToolArguments(tool as never, call("merge")); }).toThrow();
+    expect(validateToolArguments(tool as never, call("close")) as unknown).toMatchObject({ action: "close" });
   });
 
   it("no longer offers the retired tool names", () => {

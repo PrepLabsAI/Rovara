@@ -215,19 +215,18 @@ export function createOrchestrationTools(
       body: Type.Optional(Type.String({ maxLength: 32_768 })),
     }),
     execute: async (_id, parameters, signal, onUpdate) => {
-      const request = parameters;
-      const titled = TITLED_ACTIONS.has(request.action);
+      const titled = TITLED_ACTIONS.has(parameters.action);
       const accepted = await api.managePullRequest({
         workspaceId: context.workspaceId,
         requestId: nextRequestId(),
-        repository: request.repository,
-        pullRequestNumber: request.pullRequestNumber,
-        action: request.action,
-        ...(titled && request.title !== undefined ? { title: request.title } : {}),
-        ...(titled && request.body !== undefined ? { body: request.body } : {}),
+        repository: parameters.repository,
+        pullRequestNumber: parameters.pullRequestNumber,
+        action: parameters.action,
+        ...(titled && parameters.title !== undefined ? { title: parameters.title } : {}),
+        ...(titled && parameters.body !== undefined ? { body: parameters.body } : {}),
       });
       const operationId = acceptedOperationId(accepted);
-      onUpdate?.(toolResult({ operationId, status: "ACCEPTED", message: `AgentX accepted pull request ${request.action}.` }));
+      onUpdate?.(toolResult({ operationId, status: "ACCEPTED", message: `AgentX accepted pull request ${parameters.action}.` }));
       return toolResult(await api.pullRequestResult(
         { workspaceId: context.workspaceId, operationId },
         {
