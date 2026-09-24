@@ -21,6 +21,10 @@ const carol = "U0789012345";
 
 type Handler = (event: unknown) => Promise<{ statusCode: number; body: string }>;
 let createAwsBrokerHandler: (dependencies: never) => Handler;
+let deleteCapacityProviderWorkspaceSession: (
+  client: { send(command: unknown): Promise<unknown> },
+  input: { capacityProviderArn: string; runtimeSessionId: string },
+) => Promise<void>;
 
 beforeAll(async () => {
   Object.assign(process.env, {
@@ -35,17 +39,26 @@ beforeAll(async () => {
     GITHUB_APP_ID: "123",
     GITHUB_APP_INSTALLATION_ID: "456",
   });
-  ({ createAwsBrokerHandler } = await import("../../packages/broker/src/aws/broker.js") as unknown as {
+  ({ createAwsBrokerHandler, deleteCapacityProviderWorkspaceSession } = await import("../../packages/broker/src/aws/broker.js") as unknown as {
     createAwsBrokerHandler: typeof createAwsBrokerHandler;
+    deleteCapacityProviderWorkspaceSession: typeof deleteCapacityProviderWorkspaceSession;
   });
 });
 
-function createBroker(options: { memberLimit?: number; organizationLimit?: number; slack?: boolean; githubMcp?: GitHubMcpDependencies } = {}) {
+function createBroker(options: {
+  memberLimit?: number;
+  organizationLimit?: number;
+  slack?: boolean;
+  githubMcp?: GitHubMcpDependencies;
+  deleteWorkspaceSession?: () => Promise<void>;
+} = {}) {
   const db = new FakeDynamoDb();
+  const deleteWorkspaceSession = vi.fn(options.deleteWorkspaceSession ?? (async () => undefined));
   const handler = createAwsBrokerHandler({
     documentClient: db,
     s3: { send: vi.fn() },
     stopRuntimeSession: vi.fn(),
+    deleteWorkspaceSession,
     tableName: "state",
     artifactBucketName: "artifacts",
     issuer,
@@ -66,7 +79,7 @@ function createBroker(options: { memberLimit?: number; organizationLimit?: numbe
           },
         }),
   } as never);
-  return { db, handler };
+  return { db, handler, deleteWorkspaceSession };
 }
 
 interface CallOptions {
@@ -75,10 +88,11 @@ interface CallOptions {
   body?: unknown;
   user?: { subject: string; admin?: boolean };
   service?: { principal?: string; thread?: string; slackUser?: string };
+  headers?: Record<string, string>;
 }
 
 async function call(handler: Handler, options: CallOptions): Promise<{ status: number; body: Record<string, unknown> }> {
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = { ...options.headers };
   if (options.service?.thread !== undefined) headers["x-agentx-slack-thread"] = options.service.thread;
   if (options.service?.slackUser !== undefined) headers["x-agentx-slack-user"] = options.service.slackUser;
   const authorizer = options.user
@@ -145,6 +159,43 @@ function ensureWorkspace(handler: Handler, thread: string, slackUser: string, re
     service: { principal: orchestratorPrincipal, thread, slackUser },
     body: { requestId, includeIntegrations: true, includeSettingsRevision: true },
   });
+}
+
+function startClose(handler: Handler, thread: string, slackUser: string, requestId = randomUUID()) {
+  return call(handler, {
+    method: "POST",
+    path: "/v1/service/threads/workspace/close",
+    service: { principal: orchestratorPrincipal, thread, slackUser },
+    body: { requestId },
+  });
+}
+
+function completeClose(handler: Handler, thread: string, slackUser: string, operationId: string) {
+  return call(handler, {
+    method: "POST",
+    path: "/v1/service/threads/workspace/close/complete",
+    service: { principal: orchestratorPrincipal, thread, slackUser },
+    body: { requestId: randomUUID(), operationId },
+  });
+}
+
+async function finishClosePreflight(
+  handler: Handler,
+  db: FakeDynamoDb,
+  workspaceId: string,
+  operationId: string,
+  result: { safeToClose: boolean; repositories: Array<{ name: string; reasons: string[] }> },
+): Promise<void> {
+  const outbox = db.find((item) => item.entityType === "OUTBOX" && item.operationId === operationId)[0];
+  const invocation = outbox?.invocation as { callbackCapability?: string } | undefined;
+  if (!invocation?.callbackCapability) throw new Error("close callback capability is missing");
+  const response = await call(handler, {
+    method: "POST",
+    path: `/v1/internal/workspaces/${workspaceId}/operations/${operationId}/result`,
+    headers: { "x-agentx-callback-capability": invocation.callbackCapability },
+    body: { operationId, status: "SUCCEEDED", result },
+  });
+  expect(response.status).toBe(200);
 }
 
 function markReady(db: FakeDynamoDb, workspaceId: string): void {
@@ -473,6 +524,138 @@ describe("Slack thread workspaces", () => {
     const retried = await ensureWorkspace(handler, threadOne, pratik, requestId);
     expect(retried.body).toMatchObject({ workspaceId: first.body.workspaceId, created: false });
     expect(db.get(`SLACK_LIMIT#${team}`, `MEMBER#${pratik}`)).toMatchObject({ count: 1 });
+  });
+});
+
+describe("Slack thread workspace closure", () => {
+  it("treats an already-absent capacity-provider session as idempotent cleanup", async () => {
+    const notFound = new Error("session is absent");
+    notFound.name = "ResourceNotFoundException";
+    const send = vi.fn(async () => Promise.reject(notFound));
+    await expect(deleteCapacityProviderWorkspaceSession(
+      { send },
+      {
+        capacityProviderArn: `arn:aws:bedrock-agentcore:us-east-1:${account}:capacity-provider/provider-1234567890`,
+        runtimeSessionId: "11111111-1111-4111-8111-111111111111",
+      },
+    )).resolves.toBeUndefined();
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("fences a clean workspace, deletes its capacity-provider session, releases quota, and retains a tombstone", async () => {
+    const { db, handler, deleteWorkspaceSession } = createBroker();
+    await registerProjectAndBind(handler);
+    const created = await ensureWorkspace(handler, threadOne, pratik);
+    const workspaceId = created.body.workspaceId as string;
+    markReady(db, workspaceId);
+
+    const requestId = randomUUID();
+    const started = await startClose(handler, threadOne, bob, requestId);
+    expect(started.status).toBe(202);
+    expect(started.body).toMatchObject({ outcome: "PREFLIGHT", workspaceId, status: "ACCEPTED" });
+    const operationId = started.body.operationId as string;
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({
+      status: "CLOSING",
+      activeOperationId: operationId,
+      closeOperationId: operationId,
+      closedBy: { teamId: team, userId: bob },
+    });
+    expect(db.find((item) => item.entityType === "OPERATION" && item.kind === "close")).toHaveLength(1);
+
+    const duplicates = await Promise.all(Array.from({ length: 10 }, () => startClose(handler, threadOne, bob, requestId)));
+    expect(duplicates.every((duplicate) => duplicate.body.operationId === operationId)).toBe(true);
+    expect(db.find((item) => item.entityType === "OPERATION" && item.kind === "close")).toHaveLength(1);
+
+    const conversation = await call(handler, {
+      method: "POST",
+      path: `/v1/service/workspaces/${workspaceId}/conversations`,
+      service: { principal: orchestratorPrincipal, thread: threadOne, slackUser: bob },
+    });
+    const task = await call(handler, {
+      method: "POST",
+      path: `/v1/service/workspaces/${workspaceId}/tasks`,
+      service: { principal: orchestratorPrincipal, thread: threadOne, slackUser: bob },
+      body: { requestId: randomUUID(), conversationId: (conversation.body.conversation as { id: string }).id, prompt: "race" },
+    });
+    expect(task.status).toBe(409);
+
+    await finishClosePreflight(handler, db, workspaceId, operationId, { safeToClose: true, repositories: [] });
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "CLOSING", closeOperationId: operationId });
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).not.toHaveProperty("activeOperationId");
+
+    const runtimeSessionId = db.get(`WORKSPACE#${workspaceId}`, "META")?.runtimeSessionId;
+    const completed = await completeClose(handler, threadOne, bob, operationId);
+    expect(completed.status).toBe(200);
+    expect(completed.body).toMatchObject({ outcome: "CLOSED", workspaceId, operationId, storageReleased: true });
+    expect(deleteWorkspaceSession).toHaveBeenCalledExactlyOnceWith({
+      capacityProviderArn: `arn:aws:bedrock-agentcore:us-east-1:${account}:capacity-provider/agentx_production_capacity_v3-VwkM93EABZ`,
+      runtimeSessionId,
+    });
+    const closed = db.get(`WORKSPACE#${workspaceId}`, "META");
+    expect(closed).toMatchObject({ status: "CLOSED" });
+    expect(typeof closed?.closedAt).toBe("string");
+    expect(db.get(`SLACK_LIMIT#${team}`, "ORGANIZATION")).toMatchObject({ count: 0 });
+    expect(db.get(`SLACK_LIMIT#${team}`, `MEMBER#${pratik}`)).toMatchObject({ count: 0, threads: [] });
+
+    const repeated = await completeClose(handler, threadOne, pratik, operationId);
+    expect(repeated.body).toMatchObject({ outcome: "CLOSED", workspaceId, operationId });
+    expect(deleteWorkspaceSession).toHaveBeenCalledTimes(1);
+    expect((await ensureWorkspace(handler, threadOne, pratik)).body).toMatchObject({ outcome: "CLOSED", workspaceId });
+  });
+
+  it("does not create a workspace for an empty thread and cannot close another thread's workspace", async () => {
+    const { db, handler, deleteWorkspaceSession } = createBroker();
+    await registerProjectAndBind(handler);
+    const created = await ensureWorkspace(handler, threadOne, pratik);
+    markReady(db, created.body.workspaceId as string);
+    expect((await startClose(handler, threadTwo, bob)).body).toEqual(expect.objectContaining({ outcome: "NOT_FOUND" }));
+    expect(deleteWorkspaceSession).not.toHaveBeenCalled();
+    expect(db.get(`WORKSPACE#${String(created.body.workspaceId)}`, "META")).toMatchObject({ status: "READY" });
+  });
+
+  it("refuses busy workspaces and restores an unsafe workspace without deleting storage", async () => {
+    const { db, handler, deleteWorkspaceSession } = createBroker();
+    await registerProjectAndBind(handler);
+    const created = await ensureWorkspace(handler, threadOne, pratik);
+    const workspaceId = created.body.workspaceId as string;
+    expect((await startClose(handler, threadOne, pratik)).status).toBe(409);
+    markReady(db, workspaceId);
+    const started = await startClose(handler, threadOne, pratik);
+    const operationId = started.body.operationId as string;
+    await finishClosePreflight(handler, db, workspaceId, operationId, {
+      safeToClose: false,
+      repositories: [{ name: "demo", reasons: ["untracked_files"] }],
+    });
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "READY", closeError: "workspace contains unpublished work" });
+    expect((await completeClose(handler, threadOne, pratik, operationId)).status).toBe(409);
+    expect(deleteWorkspaceSession).not.toHaveBeenCalled();
+    expect(db.get(`SLACK_LIMIT#${team}`, "ORGANIZATION")).toMatchObject({ count: 1 });
+  });
+
+  it("keeps a safe workspace closing when resource cleanup fails and succeeds on retry", async () => {
+    let attempts = 0;
+    const { db, handler, deleteWorkspaceSession } = createBroker({
+      deleteWorkspaceSession: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("temporary AgentCore failure");
+      },
+    });
+    await registerProjectAndBind(handler);
+    const created = await ensureWorkspace(handler, threadOne, pratik);
+    const workspaceId = created.body.workspaceId as string;
+    markReady(db, workspaceId);
+    const started = await startClose(handler, threadOne, pratik);
+    const operationId = started.body.operationId as string;
+    await finishClosePreflight(handler, db, workspaceId, operationId, { safeToClose: true, repositories: [] });
+
+    const failed = await completeClose(handler, threadOne, pratik, operationId);
+    expect(failed.status).toBe(503);
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "CLOSING" });
+    expect(db.get(`SLACK_LIMIT#${team}`, "ORGANIZATION")).toMatchObject({ count: 1 });
+
+    expect((await completeClose(handler, threadOne, pratik, operationId)).status).toBe(200);
+    expect(deleteWorkspaceSession).toHaveBeenCalledTimes(2);
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "CLOSED" });
   });
 });
 

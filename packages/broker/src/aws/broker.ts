@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   BedrockAgentCoreClient,
+  DeleteCapacityProviderSessionCommand,
   StopRuntimeSessionCommand,
 } from "@aws-sdk/client-bedrock-agentcore";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
@@ -35,6 +36,7 @@ import {
   SlackChannelIdSchema,
   SlackRequesterSchema,
   SlackTeamIdSchema,
+  WorkspaceClosePreflightResultSchema,
   WorkspaceInstanceSchema,
   agentXError,
   parseSlackThreadSubject,
@@ -48,6 +50,8 @@ import {
   type SlackChannelBinding,
   type SlackRequester,
   type SlackThreadWorkspaceResult,
+  type SlackWorkspaceCloseCompleteResult,
+  type SlackWorkspaceCloseStartResult,
   type WorkerInvocation,
   type WorkspaceInstance,
 } from "@agentx/contracts";
@@ -125,6 +129,7 @@ interface OperationRecord extends Operation {
     codeBuildGates: CodeBuildGateDefinition[];
   };
   candidateCommit?: string;
+  closePreviousStatus?: "READY" | "STOPPED";
 }
 
 interface CallbackClaims {
@@ -180,6 +185,10 @@ interface AwsBrokerDependencies {
   stopRuntimeSession: (input: {
     runtimeArn: string;
     endpointQualifier: string;
+    runtimeSessionId: string;
+  }) => Promise<void>;
+  deleteWorkspaceSession: (input: {
+    capacityProviderArn: string;
     runtimeSessionId: string;
   }) => Promise<void>;
   tableName: string;
@@ -241,6 +250,12 @@ export function createAwsBrokerHandler(dependencies: AwsBrokerDependencies) {
         const serviceUrl = new URL(`/v1${url.pathname.slice("/v1/service".length)}${url.search}`, "https://agentx.invalid");
         if (request.method === "POST" && serviceUrl.pathname === "/v1/threads/workspace") {
           return json(await ensureThreadWorkspace(dependencies, identity, parseBody(request.body)), request.requestId);
+        }
+        if (request.method === "POST" && serviceUrl.pathname === "/v1/threads/workspace/close") {
+          return json(await startThreadWorkspaceClose(dependencies, identity, parseBody(request.body)), request.requestId, 202);
+        }
+        if (request.method === "POST" && serviceUrl.pathname === "/v1/threads/workspace/close/complete") {
+          return json(await completeThreadWorkspaceClose(dependencies, identity, parseBody(request.body)), request.requestId);
         }
         return await routeWorkspaceRequest(dependencies, request, serviceUrl, identity);
       }
@@ -678,6 +693,200 @@ async function getSlackBinding(
   });
 }
 
+async function startThreadWorkspaceClose(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  value: unknown,
+): Promise<SlackWorkspaceCloseStartResult> {
+  if (!identity.slack) throw agentXError("FORBIDDEN", "a Slack thread identity is required");
+  const input = object(value, "thread workspace close request");
+  const requestId = uuid(input.requestId, "requestId");
+  const workspace = await getThreadWorkspace(dependencies, identity.ownerKey);
+  if (!workspace) return { outcome: "NOT_FOUND" };
+  if (workspace.status === "CLOSED" && workspace.closedAt) {
+    return { outcome: "CLOSED", workspaceId: workspace.id, closedAt: workspace.closedAt };
+  }
+  if (workspace.status === "CLOSING" && workspace.closeOperationId) {
+    const operation = await requireOperation(dependencies, workspace.id, workspace.closeOperationId);
+    return { outcome: "PREFLIGHT", workspaceId: workspace.id, operationId: operation.id, status: operation.status };
+  }
+
+  const idempotencyKey = {
+    pk: `IDEMPOTENCY#${identity.ownerKey}#CLOSE`,
+    sk: `REQUEST#${requestId}`,
+  };
+  const previous = await getItem<{ operationId: string; workspaceId: string }>(dependencies, idempotencyKey);
+  if (previous) {
+    const operation = await requireOperation(dependencies, previous.workspaceId, previous.operationId);
+    return { outcome: "PREFLIGHT", workspaceId: previous.workspaceId, operationId: operation.id, status: operation.status };
+  }
+  if ((workspace.status !== "READY" && workspace.status !== "STOPPED") || workspace.activeOperationId) {
+    throw agentXError("WORKSPACE_BUSY", `workspace is ${workspace.status}; wait for active work before closing it`);
+  }
+
+  const now = new Date().toISOString();
+  const operationId = randomUUID();
+  const fence = workspace.fence + 1;
+  const operation = operationRecord({
+    id: operationId,
+    workspaceId: workspace.id,
+    kind: "close",
+    requestId,
+    payloadHash: hashJson({ action: "close", workspaceId: workspace.id }),
+    status: "ACCEPTED",
+    fence,
+    createdAt: now,
+    updatedAt: now,
+    ...requesterOf(identity),
+  });
+  operation.closePreviousStatus = workspace.status;
+  const invocation: WorkerInvocation = {
+    protocolVersion: 1,
+    kind: "close",
+    operationId,
+    workspaceId: workspace.id,
+    fence,
+    projectRevision: workspace.projectRevision,
+    callbackCapability: issueCapability(dependencies, workspace.id, operationId, fence),
+    payload: {},
+  };
+  const outbox = outboxRecord({
+    runtimeArn: workspace.runtimeArn,
+    endpointQualifier: workspace.endpointQualifier,
+    deploymentMode: workspace.deploymentMode,
+    ...(workspace.capacityProviderArn === undefined ? {} : { capacityProviderArn: workspace.capacityProviderArn }),
+  }, workspace, invocation);
+  try {
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { Update: {
+        TableName: dependencies.tableName,
+        Key: workspaceKey(workspace.id),
+        UpdateExpression: "SET #status = :closing, activeOperationId = :operation, closeOperationId = :operation, closedBy = :requester, fence = :fence, updatedAt = :now REMOVE closeError",
+        ConditionExpression: "ownerKey = :owner AND attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped)",
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: {
+          ":owner": identity.ownerKey,
+          ":closing": "CLOSING",
+          ":ready": "READY",
+          ":stopped": "STOPPED",
+          ":operation": operationId,
+          ":requester": identity.slack.requester,
+          ":fence": fence,
+          ":now": now,
+        },
+      } },
+      { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
+      { Put: { TableName: dependencies.tableName, Item: outbox, ConditionExpression: "attribute_not_exists(pk)" } },
+      { Put: {
+        TableName: dependencies.tableName,
+        Item: { ...idempotencyKey, entityType: "IDEMPOTENCY", operationId, workspaceId: workspace.id },
+        ConditionExpression: "attribute_not_exists(pk)",
+      } },
+    ] }));
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+    const concurrent = await getItem<{ operationId: string; workspaceId: string }>(dependencies, idempotencyKey);
+    if (concurrent) {
+      const existing = await requireOperation(dependencies, concurrent.workspaceId, concurrent.operationId);
+      return { outcome: "PREFLIGHT", workspaceId: concurrent.workspaceId, operationId: existing.id, status: existing.status };
+    }
+    throw agentXError("WORKSPACE_BUSY", "another operation acquired the workspace before closure");
+  }
+  return { outcome: "PREFLIGHT", workspaceId: workspace.id, operationId, status: "ACCEPTED" };
+}
+
+async function completeThreadWorkspaceClose(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  value: unknown,
+): Promise<SlackWorkspaceCloseCompleteResult> {
+  const slack = identity.slack;
+  if (!slack) throw agentXError("FORBIDDEN", "a Slack thread identity is required");
+  const input = object(value, "thread workspace close completion");
+  uuid(input.requestId, "requestId");
+  const operationId = uuid(input.operationId, "operationId");
+  const workspace = await getThreadWorkspace(dependencies, identity.ownerKey);
+  if (!workspace) throw agentXError("NOT_FOUND", "thread workspace not found");
+  if (workspace.status === "CLOSED" && workspace.closedAt && workspace.closeOperationId === operationId) {
+    return { outcome: "CLOSED", workspaceId: workspace.id, operationId, closedAt: workspace.closedAt, storageReleased: workspace.deploymentMode === "instances-ebs" };
+  }
+  const operation = await requireOperation(dependencies, workspace.id, operationId);
+  if (operation.kind !== "close" || operation.status !== "SUCCEEDED" || workspace.status !== "CLOSING" || workspace.closeOperationId !== operationId) {
+    throw agentXError("WORKSPACE_NOT_READY", "workspace close preflight has not completed safely");
+  }
+  const preflight = WorkspaceClosePreflightResultSchema.parse(operation.result);
+  if (!preflight.safeToClose) throw agentXError("WORKSPACE_NOT_READY", "workspace contains unpublished work");
+
+  let storageReleased = false;
+  if (workspace.deploymentMode === "instances-ebs") {
+    if (!workspace.capacityProviderArn) throw agentXError("CONFIG_INVALID", "workspace capacity provider is missing");
+    try {
+      await dependencies.deleteWorkspaceSession({
+        capacityProviderArn: workspace.capacityProviderArn,
+        runtimeSessionId: workspace.runtimeSessionId,
+      });
+    } catch {
+      throw agentXError("RUNTIME_UNAVAILABLE", "workspace resource cleanup failed; retry the close request");
+    }
+    storageReleased = true;
+  }
+
+  const thread = await getItem<{ starterUserId?: string; closedAt?: string }>(dependencies, slackThreadKey(identity.ownerKey));
+  if (typeof thread?.starterUserId !== "string") throw agentXError("CONFIG_INVALID", "Slack thread starter is missing");
+  const organizationKey = slackOrganizationLimitKey(slack.thread.teamId);
+  const memberKey = slackMemberLimitKey(slack.thread.teamId, thread.starterUserId);
+  const organization = await getItem<{ count?: number }>(dependencies, organizationKey);
+  const member = await getItem<{ count?: number; threads?: string[] }>(dependencies, memberKey);
+  const organizationCount = organization?.count ?? 0;
+  const memberCount = member?.count ?? 0;
+  if (organizationCount < 1 || memberCount < 1) throw agentXError("CONFIG_INVALID", "workspace quota record is inconsistent");
+  const remainingThreads = (member?.threads ?? []).filter((subject) => subject !== identity.subject);
+  const closedAt = new Date().toISOString();
+  try {
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { Update: {
+        TableName: dependencies.tableName,
+        Key: workspaceKey(workspace.id),
+        UpdateExpression: "SET #status = :closed, closedAt = :closedAt, updatedAt = :closedAt REMOVE activeOperationId, closeError",
+        ConditionExpression: "#status = :closing AND closeOperationId = :operation AND fence = :fence",
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: { ":closed": "CLOSED", ":closing": "CLOSING", ":closedAt": closedAt, ":operation": operationId, ":fence": operation.fence },
+      } },
+      { Update: {
+        TableName: dependencies.tableName,
+        Key: organizationKey,
+        UpdateExpression: "SET #count = :next",
+        ConditionExpression: "#count = :current",
+        ExpressionAttributeNames: { "#count": "count" },
+        ExpressionAttributeValues: { ":next": organizationCount - 1, ":current": organizationCount },
+      } },
+      { Update: {
+        TableName: dependencies.tableName,
+        Key: memberKey,
+        UpdateExpression: "SET #count = :next, #threads = :threads",
+        ConditionExpression: "#count = :current",
+        ExpressionAttributeNames: { "#count": "count", "#threads": "threads" },
+        ExpressionAttributeValues: { ":next": memberCount - 1, ":current": memberCount, ":threads": remainingThreads },
+      } },
+      { Update: {
+        TableName: dependencies.tableName,
+        Key: slackThreadKey(identity.ownerKey),
+        UpdateExpression: "SET closedAt = :closedAt, closeOperationId = :operation",
+        ConditionExpression: "attribute_not_exists(closedAt)",
+        ExpressionAttributeValues: { ":closedAt": closedAt, ":operation": operationId },
+      } },
+    ] }));
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+    const closed = await requireWorkspace(dependencies, workspace.id);
+    if (closed.status === "CLOSED" && closed.closedAt) {
+      return { outcome: "CLOSED", workspaceId: closed.id, operationId, closedAt: closed.closedAt, storageReleased };
+    }
+    throw agentXError("WORKSPACE_BUSY", "workspace close completion conflicted; retry");
+  }
+  return { outcome: "CLOSED", workspaceId: workspace.id, operationId, closedAt, storageReleased };
+}
+
 async function ensureThreadWorkspace(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
@@ -691,8 +900,20 @@ async function ensureThreadWorkspace(
   // Older deployed Slack services parse a strict response; add discovery metadata only on opt-in.
   const includeIntegrations = input.includeIntegrations === true;
   const includeSettingsRevision = input.includeSettingsRevision === true;
-  const existing = await getDefaultWorkspace(dependencies, identity.ownerKey, slack.binding.projectName);
+  const threadWorkspace = await getThreadWorkspace(dependencies, identity.ownerKey);
+  if (threadWorkspace) {
+    if (threadWorkspace.status === "CLOSED" && threadWorkspace.closedAt) {
+      return { outcome: "CLOSED", workspaceId: threadWorkspace.id, closedAt: threadWorkspace.closedAt };
+    }
+    if (threadWorkspace.projectName !== slack.binding.projectName) {
+      throw agentXError("FORBIDDEN", "this thread's workspace belongs to the channel's previous project binding");
+    }
+  }
+  const existing = threadWorkspace ?? await getDefaultWorkspace(dependencies, identity.ownerKey, slack.binding.projectName);
   if (existing) {
+    if (existing.status === "CLOSED" && existing.closedAt) {
+      return { outcome: "CLOSED", workspaceId: existing.id, closedAt: existing.closedAt };
+    }
     return existingThreadWorkspace(dependencies, identity, requestId, existing, includeIntegrations, includeSettingsRevision);
   }
 
@@ -2099,13 +2320,22 @@ async function recordTerminalResult(
   const error = typeof input.error === "string" ? input.error.slice(0, 16_384) : undefined;
   const result = operation.kind === "publish" && status === "SUCCEEDED"
     ? PullRequestResultSchema.parse(input.result)
-    : input.result;
+    : operation.kind === "close" && status === "SUCCEEDED"
+      ? WorkspaceClosePreflightResultSchema.parse(input.result)
+      : input.result;
+  const closePreflight = operation.kind === "close" && terminalStatus === "SUCCEEDED"
+    ? WorkspaceClosePreflightResultSchema.parse(result)
+    : undefined;
   const workspaceStatus =
     operation.kind === "prepare"
       ? terminalStatus === "SUCCEEDED"
         ? "READY"
         : "PREPARATION_FAILED"
-      : "READY";
+      : operation.kind === "close"
+        ? closePreflight?.safeToClose === true
+          ? "CLOSING"
+          : operation.closePreviousStatus ?? "READY"
+        : "READY";
   const terminalTarget = operation.kind === "cancel" && operation.targetOperationId
     ? operationKey(operation.workspaceId, operation.targetOperationId)
     : undefined;
@@ -2134,7 +2364,9 @@ async function recordTerminalResult(
       Key: workspaceKey(workspace.id),
       UpdateExpression: operation.kind === "prepare" && terminalStatus === "SUCCEEDED"
         ? "SET #status = :status, updatedAt = :now, preparationManifest = :manifest REMOVE activeOperationId"
-        : "SET #status = :status, updatedAt = :now REMOVE activeOperationId",
+        : operation.kind === "close" && closePreflight?.safeToClose !== true
+          ? "SET #status = :status, updatedAt = :now, closeError = :closeError REMOVE activeOperationId"
+          : "SET #status = :status, updatedAt = :now REMOVE activeOperationId, closeError",
       ConditionExpression: operation.kind === "cancel"
         ? "activeOperationId = :target AND fence = :fence"
         : "activeOperationId = :operation AND fence = :fence",
@@ -2145,6 +2377,9 @@ async function recordTerminalResult(
         ":fence": operation.fence,
         ...(operation.kind === "cancel" ? { ":target": operation.targetOperationId } : { ":operation": operation.id }),
         ...(operation.kind === "prepare" && terminalStatus === "SUCCEEDED" ? { ":manifest": ".agentx/preparation-manifest.json" } : {}),
+        ...(operation.kind === "close" && closePreflight?.safeToClose !== true
+          ? { ":closeError": error ?? (closePreflight ? "workspace contains unpublished work" : "workspace close preflight failed") }
+          : {}),
       },
     } });
   }
@@ -2248,6 +2483,14 @@ async function getDefaultWorkspace(
     sk: `PROJECT#${projectName}`,
   });
   return mapping ? requireWorkspace(dependencies, mapping.workspaceId) : undefined;
+}
+
+async function getThreadWorkspace(
+  dependencies: AwsBrokerDependencies,
+  ownerKey: string,
+): Promise<WorkspaceInstance | undefined> {
+  const thread = await getItem<{ workspaceId?: string }>(dependencies, slackThreadKey(ownerKey));
+  return typeof thread?.workspaceId === "string" ? requireWorkspace(dependencies, thread.workspaceId) : undefined;
 }
 
 async function requireProject(
@@ -2470,6 +2713,22 @@ function workspaceKey(id: string) {
 
 function operationKey(workspaceId: string, operationId: string) {
   return { pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}` };
+}
+
+export async function deleteCapacityProviderWorkspaceSession(
+  client: { send(command: DeleteCapacityProviderSessionCommand): Promise<unknown> },
+  input: { capacityProviderArn: string; runtimeSessionId: string },
+): Promise<void> {
+  const capacityProviderId = input.capacityProviderArn.split("/").at(-1);
+  if (!capacityProviderId) throw agentXError("CONFIG_INVALID", "capacity provider ARN is invalid");
+  try {
+    await client.send(new DeleteCapacityProviderSessionCommand({
+      capacityProviderId,
+      sessionId: input.runtimeSessionId,
+    }));
+  } catch (error) {
+    if (!(error instanceof Error && error.name === "ResourceNotFoundException")) throw error;
+  }
 }
 
 function pullRequestKey(workspaceId: string, repository: string, number: number) {
@@ -2758,5 +3017,8 @@ export const handler = createAwsBrokerHandler({
       runtimeSessionId: input.runtimeSessionId,
       clientToken: randomUUID(),
     }));
+  },
+  async deleteWorkspaceSession(input) {
+    await deleteCapacityProviderWorkspaceSession(agentCore, input);
   },
 });

@@ -60,7 +60,37 @@ export const SlackThreadWorkspaceResultSchema = z.discriminatedUnion("outcome", 
       starterThreads: z.array(SlackThreadSchema),
     })
     .strict(),
+  z
+    .object({
+      outcome: z.literal("CLOSED"),
+      workspaceId: z.string().uuid(),
+      closedAt: z.string().datetime(),
+    })
+    .strict(),
 ]);
+
+export const SlackWorkspaceCloseStartResultSchema = z.discriminatedUnion("outcome", [
+  z.object({ outcome: z.literal("NOT_FOUND") }).strict(),
+  z.object({
+    outcome: z.literal("CLOSED"),
+    workspaceId: z.string().uuid(),
+    closedAt: z.string().datetime(),
+  }).strict(),
+  z.object({
+    outcome: z.literal("PREFLIGHT"),
+    workspaceId: z.string().uuid(),
+    operationId: z.string().uuid(),
+    status: z.enum(["ACCEPTED", "DISPATCHING", "RUNNING", "CANCEL_REQUESTED", "SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"]),
+  }).strict(),
+]);
+
+export const SlackWorkspaceCloseCompleteResultSchema = z.object({
+  outcome: z.literal("CLOSED"),
+  workspaceId: z.string().uuid(),
+  operationId: z.string().uuid(),
+  closedAt: z.string().datetime(),
+  storageReleased: z.boolean(),
+}).strict();
 
 export const SLACK_MESSAGE_CHUNK_LENGTH = 3_500;
 const EMPTY_RESPONSE = "AgentX completed the request without returning a textual response.";
@@ -116,4 +146,6 @@ export type SlackRequester = z.infer<typeof SlackRequesterSchema>;
 export type SlackChannelBinding = z.infer<typeof SlackChannelBindingSchema>;
 export type SlackWorkspaceLimit = z.infer<typeof SlackWorkspaceLimitSchema>;
 export type SlackThreadWorkspaceResult = z.infer<typeof SlackThreadWorkspaceResultSchema>;
+export type SlackWorkspaceCloseStartResult = z.infer<typeof SlackWorkspaceCloseStartResultSchema>;
+export type SlackWorkspaceCloseCompleteResult = z.infer<typeof SlackWorkspaceCloseCompleteResultSchema>;
 export type SlackRequestMessage = z.infer<typeof SlackRequestMessageSchema>;

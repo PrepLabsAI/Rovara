@@ -3,7 +3,7 @@ import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promise
 import { join } from "node:path";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { GetCommand, DynamoDBDocumentClient, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { GetObjectCommand, NoSuchKey, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, GetObjectCommand, NoSuchKey, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import {
   ChangeMessageVisibilityCommand,
@@ -12,7 +12,12 @@ import {
   SQSClient,
 } from "@aws-sdk/client-sqs";
 import { defaultProvider } from "@aws-sdk/credential-provider-node";
-import { SlackThreadWorkspaceResultSchema, type SlackRequestMessage } from "@agentx/contracts";
+import {
+  SlackThreadWorkspaceResultSchema,
+  SlackWorkspaceCloseCompleteResultSchema,
+  SlackWorkspaceCloseStartResultSchema,
+  type SlackRequestMessage,
+} from "@agentx/contracts";
 import { ControlPlaneApi } from "@agentx/orchestrator/control-plane-api";
 import { pollOperation } from "@agentx/orchestrator/event-client";
 import { runOrchestratorTurn } from "@agentx/orchestrator/orchestrator";
@@ -101,9 +106,41 @@ function threadApi(message: SlackRequestMessage): ThreadServiceApi {
       delete body.requestId;
       return SlackThreadWorkspaceResultSchema.parse(body);
     },
+    async startClose(requestId) {
+      const response = await signedFetch(`${controlPlaneUrl}/v1/threads/workspace/close`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ requestId }),
+      });
+      const body = await response.json() as Record<string, unknown>;
+      if (!response.ok) {
+        const error = body.error as { code?: string; message?: string } | undefined;
+        throw new Error(`workspace close request failed: ${error?.code ?? response.status} ${error?.message ?? ""}`.trim());
+      }
+      delete body.requestId;
+      return SlackWorkspaceCloseStartResultSchema.parse(body);
+    },
+    async completeClose(requestId, operationId) {
+      const response = await signedFetch(`${controlPlaneUrl}/v1/threads/workspace/close/complete`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ requestId, operationId }),
+      });
+      const body = await response.json() as Record<string, unknown>;
+      if (!response.ok) {
+        const error = body.error as { code?: string; message?: string } | undefined;
+        throw new Error(`workspace close completion failed: ${error?.code ?? response.status} ${error?.message ?? ""}`.trim());
+      }
+      delete body.requestId;
+      return SlackWorkspaceCloseCompleteResultSchema.parse(body);
+    },
     async waitForOperation(workspaceId, operationId) {
       const { operation } = await pollOperation(operationId, client(workspaceId), { intervalMilliseconds: 5_000 });
-      return { status: operation.status, error: operation.error };
+      return {
+        status: operation.status,
+        ...(operation.error === undefined ? {} : { error: operation.error }),
+        ...(operation.result === undefined ? {} : { result: operation.result }),
+      };
     },
     async createConversation(workspaceId) {
       return (await client(workspaceId).createConversation()).id;
@@ -122,11 +159,13 @@ const threads: ThreadStore = {
       workspaceId?: string;
       conversationId?: string;
       settingsRevision?: number;
+      closedAt?: string;
     } | undefined;
     return {
       ...(item?.workspaceId === undefined ? {} : { workspaceId: item.workspaceId }),
       ...(item?.conversationId === undefined ? {} : { conversationId: item.conversationId }),
       ...(item?.settingsRevision === undefined ? {} : { settingsRevision: item.settingsRevision }),
+      ...(item?.closedAt === undefined ? {} : { closedAt: item.closedAt }),
     };
   },
   async saveConversation(subject, state) {
@@ -144,6 +183,15 @@ const threads: ThreadStore = {
       UpdateExpression: "SET settingsRevision = :revision",
       ExpressionAttributeValues: { ":revision": revision },
     }));
+  },
+  async close(subject, state) {
+    await documentClient.send(new UpdateCommand({
+      TableName: threadsTableName,
+      Key: { pk: `THREAD#${subject}`, sk: "META" },
+      UpdateExpression: "SET workspaceId = :workspace, closedAt = :closedAt REMOVE conversationId, settingsRevision",
+      ExpressionAttributeValues: { ":workspace": state.workspaceId, ":closedAt": state.closedAt },
+    }));
+    await s3.send(new DeleteObjectCommand({ Bucket: sessionBucketName, Key: sessionKey(subject) }));
   },
   async finish(subject) {
     try {

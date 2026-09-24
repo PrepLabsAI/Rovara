@@ -1,15 +1,20 @@
 import {
   slackThreadSubject,
   splitSlackMessage,
+  WorkspaceClosePreflightResultSchema,
   type SlackRequestMessage,
   type SlackThread,
   type SlackThreadWorkspaceResult,
+  type SlackWorkspaceCloseCompleteResult,
+  type SlackWorkspaceCloseStartResult,
 } from "@agentx/contracts";
 import { deterministicUuid, requestIdSequence } from "./ids.js";
 
 export interface ThreadServiceApi {
   ensureWorkspace(requestId: string): Promise<SlackThreadWorkspaceResult>;
-  waitForOperation(workspaceId: string, operationId: string): Promise<{ status: string; error?: string | undefined }>;
+  startClose(requestId: string): Promise<SlackWorkspaceCloseStartResult>;
+  completeClose(requestId: string, operationId: string): Promise<SlackWorkspaceCloseCompleteResult>;
+  waitForOperation(workspaceId: string, operationId: string): Promise<{ status: string; error?: string | undefined; result?: unknown }>;
   createConversation(workspaceId: string): Promise<string>;
 }
 
@@ -18,12 +23,14 @@ export interface ThreadState {
   conversationId?: string;
   /** The settings revision this thread was last told about, so a change is announced once. */
   settingsRevision?: number;
+  closedAt?: string;
 }
 
 export interface ThreadStore {
   load(subject: string): Promise<ThreadState>;
   saveConversation(subject: string, state: { workspaceId: string; conversationId: string }): Promise<void>;
   saveSettingsRevision(subject: string, revision: number): Promise<void>;
+  close(subject: string, state: { workspaceId: string; closedAt: string }): Promise<void>;
   finish(subject: string): Promise<void>;
 }
 
@@ -60,10 +67,49 @@ export async function processSlackRequest(
   const api = dependencies.api(message);
   let finished = false;
   try {
+    if (isCloseWorkspaceRequest(message.text)) {
+      const started = await api.startClose(deterministicUuid(`${message.eventId}:close`));
+      if (started.outcome === "NOT_FOUND") {
+        await post("This thread does not have a workspace to close.");
+        finished = true;
+        return;
+      }
+      if (started.outcome === "CLOSED") {
+        await dependencies.threads.close(subject, { workspaceId: started.workspaceId, closedAt: started.closedAt });
+        await post("This thread's workspace is already closed and its workspace resources have been released.");
+        finished = true;
+        return;
+      }
+      await post("Checking this workspace for unpublished work before closing it.");
+      const preflight = await api.waitForOperation(started.workspaceId, started.operationId);
+      if (preflight.status !== "SUCCEEDED") {
+        await post(`I couldn't close this workspace because its safety check ${preflight.status.toLowerCase()}${preflight.error ? `: ${preflight.error}` : "."}`);
+        finished = true;
+        return;
+      }
+      const result = WorkspaceClosePreflightResultSchema.parse(preflight.result);
+      if (!result.safeToClose) {
+        await post(closeBlockedMessage(result));
+        finished = true;
+        return;
+      }
+      const closed = await api.completeClose(deterministicUuid(`${message.eventId}:close-complete`), started.operationId);
+      await dependencies.threads.close(subject, { workspaceId: closed.workspaceId, closedAt: closed.closedAt });
+      await post(closed.storageReleased
+        ? "Workspace closed. Its runtime session and persistent workspace storage have been released."
+        : "Workspace closed. This deployment mode has no persistent EBS session to release.");
+      finished = true;
+      return;
+    }
     const workspace = await api.ensureWorkspace(deterministicUuid(`${message.eventId}:workspace`));
     if (workspace.outcome === "LIMIT_REACHED") {
       log("request.limit_reached", { eventId: message.eventId, limit: workspace.limit, maximum: workspace.maximum });
       await post(limitMessage(workspace));
+      finished = true;
+      return;
+    }
+    if (workspace.outcome === "CLOSED") {
+      await post("This thread's workspace is closed. Start a new Slack thread to create a fresh workspace.");
       finished = true;
       return;
     }
@@ -129,6 +175,33 @@ export async function processSlackRequest(
   } finally {
     if (finished) await dependencies.threads.finish(subject);
   }
+}
+
+export function isCloseWorkspaceRequest(text: string): boolean {
+  const normalized = text
+    .replace(/^\s*<@[A-Z0-9]+>\s*/iu, "")
+    .trim()
+    .replace(/[.!?]+$/u, "")
+    .trim()
+    .toLowerCase();
+  return normalized === "close this workspace" || normalized === "close workspace";
+}
+
+function closeBlockedMessage(result: ReturnType<typeof WorkspaceClosePreflightResultSchema.parse>): string {
+  const findings = result.repositories.map((repository) => {
+    const reasons = repository.reasons.map((reason) => ({
+      worktree_changes: "uncommitted changes",
+      untracked_files: "untracked files",
+      unpushed_head: "an unpushed current commit",
+      unpushed_branch: "commits on a local-only branch",
+    })[reason]);
+    return `• ${repository.name}: ${reasons.join(", ")}`;
+  });
+  return [
+    "I didn't close this workspace because it contains unpublished work:",
+    ...findings,
+    "Publish or remove that work, then ask me to close the workspace again.",
+  ].join("\n");
 }
 
 export function slackThreadUrl(thread: SlackThread): string {

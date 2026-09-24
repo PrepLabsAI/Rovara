@@ -248,9 +248,27 @@ requests in it. Every operation records the Slack member who requested it.
 Workspaces are limited to protect cost. The member who starts a thread may be the starter of at
 most 3 thread workspaces, and the organization may have at most 20. A new thread over either limit
 creates nothing, and AgentX replies with the limit that was reached; for the member limit, it also
-links to that member's existing threads. Thread workspaces are not deleted yet, so they keep
-counting toward the limits. An administrator can change the limits with the `AgentXControlPlane`
+links to that member's existing threads. An administrator can change the limits with the `AgentXControlPlane`
 parameters `SlackMemberWorkspaceLimit` and `SlackOrganizationWorkspaceLimit`.
+
+To release a thread workspace, mention AgentX in that thread with an explicit close request:
+
+```text
+@AgentX close this workspace
+```
+
+AgentX first fences new work and checks every prepared repository. Uncommitted changes, untracked
+files, an unpushed current commit, or commits on a local-only branch block closure; AgentX lists the
+affected repositories in the thread and keeps the workspace intact. Publish or remove that work,
+then retry the close request. A running preparation, task, publication, maintenance, resume, or
+cancellation also blocks closure until it finishes.
+
+For a clean production workspace, AgentX deletes its AgentCore capacity-provider session, which
+releases the persistent EBS volume, and then confirms completion in the same Slack thread. It
+retains the workspace and operation records as a closed tombstone for audit and retry safety, but
+removes the hosted orchestrator conversation session and releases the organization and original
+starter's workspace quota. Later mentions in the closed thread do not create another workspace;
+start a new Slack thread for fresh work.
 
 #### Diagnostics
 

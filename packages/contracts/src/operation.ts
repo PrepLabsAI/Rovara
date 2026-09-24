@@ -10,6 +10,7 @@ export const OperationKindSchema = z.enum([
   "resume",
   "stop",
   "cancel",
+  "close",
 ]);
 export const OperationStatusSchema = z.enum([
   "ACCEPTED",
