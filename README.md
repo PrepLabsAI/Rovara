@@ -307,6 +307,9 @@ components `slack-ingress` and `slack-orchestrator`. They record event IDs, deci
 `event.ignored` with a reason, and failures by error type. Tokens, request text, and response text
 are never logged. `event.ignored reason="channel_not_bound"` means the channel has no binding, and
 `request.rejected reason="invalid_signature"` usually means the stored signing secret is wrong.
+`connector.discovery_failed` means a connector's tools were left out of a turn: `cause="transient"`
+is an outage the next turn may clear, and `cause="setup"` (with its error `code`) needs an
+administrator, for example a missing GitHub App installation or a withdrawn approval.
 
 If the orchestrator's turn fails, AgentX posts the failure in the thread. Other failures, such as
 workspace preparation or a Slack API error, are retried; on the fifth attempt AgentX posts the

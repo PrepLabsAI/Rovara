@@ -64,16 +64,52 @@ describe("connector tools in the real Pi runtime", () => {
       throw new Error(`unexpected request: ${requestUrl}`);
     });
     const api = new ControlPlaneApi("https://agentx.example.test", "agentx-jwt", workspaceId, fetchImplementation);
+    const onConnectorUnavailable = vi.fn();
     const runtime = await createOrchestratorRuntime({
       stateDirectory: await createFixtureDirectory("agentx-mcp-runtime-"), projectInstructions: "Delegate coding.",
       api, context: { workspaceId, conversationId: randomUUID() },
       model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" },
       repositories: ["demo"],
       connectors: [{ name: "github", type: "github", label: "GitHub issues", scopes: ["demo"], connected: true }],
+      onConnectorUnavailable,
     });
     try {
       expect(runtime.session.getActiveToolNames()).toEqual([...ORCHESTRATION_TOOL_NAMES]);
       expect(runtime.session.systemPrompt).toContain("Temporarily unavailable: GitHub issues");
+      expect(onConnectorUnavailable).toHaveBeenCalledExactlyOnceWith({
+        connector: "github", cause: "transient", code: "RUNTIME_UNAVAILABLE",
+        message: "RUNTIME_UNAVAILABLE: GitHub MCP discovery failed for demo: no GitHub App installation",
+      });
+    } finally { await runtime.dispose(); }
+  });
+
+  it("reports an authorization or configuration failure as a setup problem, not a temporary outage", async () => {
+    const workspaceId = randomUUID();
+    const fetchImplementation = vi.fn<typeof fetch>(async (url) => {
+      const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+      if (requestUrl.endsWith("/connectors/github/tools")) {
+        return Response.json({ requestId: "http-request", error: { code: "FORBIDDEN", message: "GitHub MCP is not enabled for this project revision" } }, { status: 403 });
+      }
+      throw new Error(`unexpected request: ${requestUrl}`);
+    });
+    const api = new ControlPlaneApi("https://agentx.example.test", "agentx-jwt", workspaceId, fetchImplementation);
+    const onConnectorUnavailable = vi.fn();
+    const runtime = await createOrchestratorRuntime({
+      stateDirectory: await createFixtureDirectory("agentx-mcp-runtime-"), projectInstructions: "Delegate coding.",
+      api, context: { workspaceId, conversationId: randomUUID() },
+      model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" },
+      repositories: ["demo"],
+      connectors: [{ name: "github", type: "github", label: "GitHub issues", scopes: ["demo"], connected: true }],
+      onConnectorUnavailable,
+    });
+    try {
+      expect(runtime.session.getActiveToolNames()).toEqual([...ORCHESTRATION_TOOL_NAMES]);
+      expect(runtime.session.systemPrompt).toContain("Unavailable because of a setup problem: GitHub issues");
+      expect(runtime.session.systemPrompt).not.toContain("Temporarily unavailable");
+      expect(onConnectorUnavailable).toHaveBeenCalledExactlyOnceWith({
+        connector: "github", cause: "setup", code: "FORBIDDEN",
+        message: "FORBIDDEN: GitHub MCP is not enabled for this project revision",
+      });
     } finally { await runtime.dispose(); }
   });
 

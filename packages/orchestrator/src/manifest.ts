@@ -12,11 +12,14 @@ export function capabilitiesManifest(input: {
   repositories: readonly string[];
   connectors: readonly ThreadConnector[];
   catalogs: readonly ConnectorCatalog[];
-  /** Connector names whose discovery failed this turn; listed on their own line, not as "not connected". */
+  /** Connector names whose discovery failed transiently this turn; listed on their own line, not as "not connected". */
   unavailable?: readonly string[];
+  /** Connector names whose discovery failed for an authorization or configuration reason. */
+  misconfigured?: readonly string[];
 }): string {
   const repositories = input.repositories.join(", ");
-  const unavailableNames = new Set(input.unavailable ?? []);
+  const misconfiguredNames = new Set(input.misconfigured ?? []);
+  const unavailableNames = new Set([...(input.unavailable ?? []), ...misconfiguredNames]);
   const connectors = input.connectors.filter((connector) => !unavailableNames.has(connector.name));
   const usable = connectors.filter((connector) =>
     connector.connected && (input.catalogs.find((catalog) => catalog.connector === connector.name)?.tools.length ?? 0) > 0);
@@ -26,9 +29,14 @@ export function capabilitiesManifest(input: {
     `- Pull requests (${repositories}): agentx_create_pull_request and the pull-request tools`,
     ...usable.map((connector) => `- ${connector.label} (${connector.scopes.join(", ")}): ${connector.name}__* tools`),
   ];
-  const unavailableLabels = input.connectors.filter((connector) => unavailableNames.has(connector.name)).map((connector) => connector.label);
-  if (unavailableLabels.length > 0) {
-    lines.push(`Temporarily unavailable: ${unavailableLabels.join(", ")}. Tell the user it is temporarily unavailable and continue with the rest.`);
+  const transientLabels = input.connectors
+    .filter((connector) => unavailableNames.has(connector.name) && !misconfiguredNames.has(connector.name)).map((connector) => connector.label);
+  if (transientLabels.length > 0) {
+    lines.push(`Temporarily unavailable: ${transientLabels.join(", ")}. Tell the user it is temporarily unavailable and continue with the rest.`);
+  }
+  const misconfiguredLabels = input.connectors.filter((connector) => misconfiguredNames.has(connector.name)).map((connector) => connector.label);
+  if (misconfiguredLabels.length > 0) {
+    lines.push(`Unavailable because of a setup problem: ${misconfiguredLabels.join(", ")}. Tell the user an administrator needs to check this connector, and continue with the rest.`);
   }
   const usableTypes = new Set<string>(usable.map((connector) => connector.type));
   const unusable = [

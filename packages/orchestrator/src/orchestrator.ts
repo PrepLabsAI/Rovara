@@ -10,7 +10,7 @@ import {
   type CreateAgentSessionRuntimeFactory,
   type InlineExtension,
 } from "@earendil-works/pi-coding-agent";
-import { agentXError, type ConnectorCatalog, type ThreadConnector } from "@agentx/contracts";
+import { AgentXError, agentXError, type ConnectorCatalog, type ThreadConnector } from "@agentx/contracts";
 import {
   assertOrchestrationOnly,
   createOrchestrationTools,
@@ -29,6 +29,16 @@ export interface OrchestratorOptions {
   requestId?: () => string;
   connectors?: readonly ThreadConnector[];
   repositories?: readonly string[];
+  /** Told about each connector whose discovery failed this turn, so the host can log it. */
+  onConnectorUnavailable?: (failure: ConnectorUnavailable) => void;
+}
+
+export interface ConnectorUnavailable {
+  connector: string;
+  /** "transient" for an unreachable or failing service; "setup" for authorization, configuration or a malformed response. */
+  cause: "transient" | "setup";
+  code: string;
+  message: string;
 }
 
 export const MAX_VISIBLE_TOOLS = 40;
@@ -46,6 +56,7 @@ export async function createOrchestratorRuntime(options: OrchestratorOptions): P
   if (!selectedModel) throw agentXError("RUNTIME_UNAVAILABLE", "configured orchestrator model is unavailable");
   const catalogs: ConnectorCatalog[] = [];
   const unavailable: string[] = [];
+  const misconfigured: string[] = [];
   for (const connector of options.connectors ?? []) {
     if (!connector.connected) continue;
     if (!options.api.discoverConnectorTools) throw agentXError("CONFIG_INVALID", "connector discovery API is missing");
@@ -54,8 +65,10 @@ export async function createOrchestratorRuntime(options: OrchestratorOptions): P
     // runtime with the in-house tools and every other connector.
     try {
       catalogs.push(await options.api.discoverConnectorTools({ workspaceId: options.context.workspaceId, connector: connector.name }));
-    } catch {
-      unavailable.push(connector.name);
+    } catch (error) {
+      const failure = connectorFailure(connector.name, error);
+      (failure.cause === "transient" ? unavailable : misconfigured).push(connector.name);
+      options.onConnectorUnavailable?.(failure);
     }
   }
   const customTools = createOrchestrationTools(options.api, options.context, {
@@ -71,6 +84,7 @@ export async function createOrchestratorRuntime(options: OrchestratorOptions): P
     connectors: options.connectors ?? [],
     catalogs,
     ...(unavailable.length > 0 ? { unavailable } : {}),
+    ...(misconfigured.length > 0 ? { misconfigured } : {}),
   });
   const boundaryExtension: InlineExtension = {
     name: "agentx-orchestration-boundary",
@@ -123,6 +137,13 @@ export async function createOrchestratorRuntime(options: OrchestratorOptions): P
       ? SessionManager.create(cwd, sessions)
       : SessionManager.open(options.sessionFile, sessions, cwd),
   });
+}
+
+/** Only an unreachable or failing service is temporary; everything else needs an administrator. */
+function connectorFailure(connector: string, error: unknown): ConnectorUnavailable {
+  const code = error instanceof AgentXError ? error.code : "UNKNOWN";
+  const message = (error instanceof Error ? error.message : "connector discovery failed").slice(0, 500);
+  return { connector, cause: code === "RUNTIME_UNAVAILABLE" ? "transient" : "setup", code, message };
 }
 
 export async function runOrchestratorTurn(runtime: AgentSessionRuntime, prompt: string): Promise<string> {

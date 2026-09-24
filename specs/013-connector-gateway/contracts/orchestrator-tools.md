@@ -68,8 +68,13 @@ Closing this thread's workspace is a command, not a tool: the user writes "close
 When a connected connector's tool discovery fails for this turn (for example the broker returns
 `RUNTIME_UNAVAILABLE`), the orchestrator registers no tools for it and continues with the in-house
 tools and every other connector; the manifest lists that connector on its own line, before "Not
-connected for this channel", as `Temporarily unavailable: <label>. Tell the user it is temporarily
-unavailable and continue with the rest.`
+connected for this channel". A `RUNTIME_UNAVAILABLE` failure (the service is down or unreachable)
+reads `Temporarily unavailable: <label>. Tell the user it is temporarily unavailable and continue
+with the rest.` Any other failure (authorization, configuration, a malformed response) reads
+`Unavailable because of a setup problem: <label>. Tell the user an administrator needs to check this
+connector, and continue with the rest.` Either way the host logs `connector.discovery_failed` with
+the connector, the cause (`transient` or `setup`), the error code and the control plane's sanitized
+message.
 
 Phase 2b inserts a rename table between the close-command line and the end of the manifest once
 `agentx_manage_pull_request` retires the seven lifecycle tools, for example: "Renamed tools:

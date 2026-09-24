@@ -237,6 +237,10 @@ async function runTurn(input: TurnInput): Promise<string> {
       api: new ControlPlaneApi(controlPlaneUrl, "slack-service", input.workspaceId, signedFetch),
       model,
       ...(sessionFile === undefined ? {} : { sessionFile }),
+      // Operators see why a connector was missing from a turn; the message is the control plane's sanitized error.
+      onConnectorUnavailable: (failure) => log("connector.discovery_failed", {
+        eventId: input.message.eventId, connector: failure.connector, cause: failure.cause, code: failure.code, message: failure.message,
+      }),
     });
     try {
       const response = await runOrchestratorTurn(runtime, input.message.text);
