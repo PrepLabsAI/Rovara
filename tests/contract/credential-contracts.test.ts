@@ -19,6 +19,8 @@ describe("credential registration input", () => {
     }
     expect(CredentialRegistrationSchema.safeParse({ ref: "x", type: "static-secret", secretName: "prod/db-password" }).success).toBe(false);
     expect(CredentialRegistrationSchema.safeParse({ ref: "x", type: "static-secret", secretName: "agentx/connectors/../x" }).success).toBe(false);
+    expect(CredentialRegistrationSchema.safeParse({ ref: "x", type: "static-secret", secretName: "agentx/connectors/.." }).success).toBe(false);
+    expect(CredentialRegistrationSchema.safeParse({ ref: "x", type: "static-secret", secretName: "agentx/connectors/." }).success).toBe(false);
     expect(CredentialRegistrationSchema.safeParse({ ref: "Bad Ref", type: "static-secret", secretName: "agentx/connectors/x" }).success).toBe(false);
     expect(CredentialRegistrationSchema.safeParse({ ref: "x", type: "static-secret", secretName: "agentx/connectors/x", tokenEndpoint: "https://evil.test" }).success).toBe(false);
   });
@@ -55,6 +57,12 @@ describe("tool budget at registration", () => {
   it("names every approval whose presented name exceeds 64 characters", () => {
     const long = "t".repeat(57);
     const definition = { repositories: [], integrations: { connectors: [{ name: "github", type: "github", scopes: "all-repositories", tools: [{ name: long, access: "read" }, { name: "short", access: "read" }] }] } };
+    expect(presentedNameProblems(definition as never)).toEqual([`connector github tool ${long}: presented name github__${long} exceeds 64 characters`]);
+  });
+
+  it("names presented-name problems for the legacy githubMcp connector too", () => {
+    const long = "t".repeat(57);
+    const definition = { repositories: [], integrations: { githubMcp: { tools: [{ name: long, access: "read" }] } } };
     expect(presentedNameProblems(definition as never)).toEqual([`connector github tool ${long}: presented name github__${long} exceeds 64 characters`]);
   });
 });

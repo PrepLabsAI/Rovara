@@ -6,7 +6,16 @@ export const CredentialTypeSchema = z.enum(["github-app", "static-secret", "oaut
 export const RegistrableCredentialTypeSchema = z.enum(["static-secret", "oauth-client-credentials"]);
 export const CONNECTOR_SECRET_PREFIX = "agentx/connectors/";
 
-const SecretNameSchema = z.string().regex(/^agentx\/connectors\/[A-Za-z0-9_+=.@-]{1,128}$/, "secret name must be agentx/connectors/<name>");
+/** Escapes regex metacharacters (including "/") so a literal can be embedded in a RegExp built from a string. */
+function escapeRegExp(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+}
+
+/** No "/" in the character class (so no path segments) and the name cannot be only dots (so no "." or ".."). */
+const SecretNameSchema = z.string().regex(
+  new RegExp(`^${escapeRegExp(CONNECTOR_SECRET_PREFIX)}(?!\\.+$)[A-Za-z0-9_+=.@-]{1,128}$`),
+  "secret name must be agentx/connectors/<name>",
+);
 
 export const CredentialRegistrationSchema = z.object({
   ref: z.string().regex(AGENTX_NAME_PATTERN),
