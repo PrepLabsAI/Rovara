@@ -13,6 +13,7 @@ import {
   type Ledger,
   type SkippedTool,
   type McpConnection,
+  type ToolResult,
   type connectMcp,
 } from "@agentx/gateway";
 
@@ -47,11 +48,12 @@ export function approvedTools(connection: Pick<McpConnection, "tools">, context:
   return approveTools(connection, { binder: githubBinder }, connectorContext(context)).map(toGitHubTool);
 }
 
-export async function executeGitHubTool(
+/** The full gateway result, including why a call failed, for the connector routes. */
+export async function executeGitHubConnectorTool(
   request: GitHubMcpRequest,
   context: GitHubMcpContext,
   dependencies: GitHubMcpDependencies & { store: GitHubMcpStore },
-): Promise<GitHubMcpResult> {
+): Promise<ToolResult> {
   return executeTool(
     { requestId: request.requestId, scope: request.repository, tool: request.tool, schemaHash: request.schemaHash, arguments: request.arguments },
     githubConnector(issuer(dependencies)),
@@ -62,6 +64,16 @@ export async function executeGitHubTool(
       ledger: dependencies.store,
     },
   );
+}
+
+/** Feature 007 result: the legacy route's strict schema has no reason. */
+export async function executeGitHubTool(
+  request: GitHubMcpRequest,
+  context: GitHubMcpContext,
+  dependencies: GitHubMcpDependencies & { store: GitHubMcpStore },
+): Promise<GitHubMcpResult> {
+  const { requestId, status, text, truncated, replayed } = await executeGitHubConnectorTool(request, context, dependencies);
+  return { requestId, status, text, truncated, replayed };
 }
 
 function issuer(dependencies: GitHubMcpDependencies): GitHubIssuer {
