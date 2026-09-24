@@ -63,7 +63,7 @@ import {
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { GitHubAppCredentialProvider, privateKeyFromSecret } from "../github-app.js";
-import { CatalogCache, presentCatalog, type ScopeCatalog } from "@agentx/gateway";
+import { CatalogCache, ConnectorNotConnected, presentCatalog, type ScopeCatalog } from "@agentx/gateway";
 import { discoverGitHubTools, executeGitHubConnectorTool, executeGitHubTool, type GitHubMcpCatalog, type GitHubMcpDependencies } from "../github-mcp.js";
 import { DynamoConnectorLedger, GITHUB_LEDGER } from "./connector-ledger.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
@@ -355,7 +355,18 @@ async function routeWorkspaceRequest(
       if (!dependencies.githubMcp) return json({ catalog: { connector: github.name, notConnected: true, tools: [], skipped: [] } }, request.requestId);
       const scopes: ScopeCatalog[] = [];
       for (const repository of github.repositories) {
-        const discovered = await discoverGitHubScope(dependencies, identity, workspace, project, github, repository);
+        let discovered: GitHubMcpCatalog;
+        try {
+          discovered = await discoverGitHubScope(dependencies, identity, workspace, project, github, repository);
+        } catch (error) {
+          if (!(error instanceof ConnectorNotConnected)) throw error;
+          console.log(JSON.stringify({
+            component: "broker", event: "connector.not_connected", project: workspace.projectName,
+            revision: project.definition.revision, connector: github.name, scope: repository.name,
+            message: stripCode(error.message, error.code),
+          }));
+          return json({ catalog: { connector: github.name, notConnected: true, tools: [], skipped: [] } }, request.requestId);
+        }
         scopes.push({ alias: repository.name, tools: discovered.tools.map(({ repository: scope, ...tool }) => ({ ...tool, scope })) });
       }
       const presented = presentCatalog({ connector: github.name, label: "GitHub", scopeNoun: "repository", approvals: github.policy.tools, scopes });

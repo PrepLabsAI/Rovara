@@ -63,4 +63,20 @@ describe("MCP Streamable HTTP bridge", () => {
     try { await expect(connection.call("issue_write", {})).rejects.toThrow(); expect(calls).toBe(1); }
     finally { await connection.close(); }
   });
+
+  it("reports an HTTP 401 as a rejected credential and any other failure unchanged", async () => {
+    // connectMcp above resolves through packages/broker/src/mcp-client.js, which re-exports the
+    // built @agentx/gateway package; McpUnauthorized must come from that same module copy for
+    // instanceof to hold, not from packages/gateway/src directly.
+    const { McpUnauthorized } = await import("@agentx/gateway");
+    const open = (status: number) => connectMcp({
+      endpoint: new URL("https://mcp.example.test/"), token: "rejected-token", tools: ["issue_read"], signal: AbortSignal.timeout(5000),
+      fetchImplementation: async () => new Response("denied rejected-token", { status }),
+    });
+    const unauthorized = await open(401).catch((error: unknown) => error);
+    expect(unauthorized).toBeInstanceOf(McpUnauthorized);
+    expect(String((unauthorized as Error).message)).not.toContain("rejected-token");
+    expect(await open(500).catch((error: unknown) => error)).not.toBeInstanceOf(McpUnauthorized);
+    expect(await open(403).catch((error: unknown) => error)).not.toBeInstanceOf(McpUnauthorized);
+  });
 });

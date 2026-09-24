@@ -6,6 +6,9 @@ import {
   executeTool,
   reviewTools,
   GuardRejection,
+  McpUnauthorized,
+  CredentialUnavailable,
+  ConnectorNotConnected,
   type ConnectorContext,
   type ConnectorDefinition,
   type Guard,
@@ -298,5 +301,56 @@ describe("gateway execution", () => {
     vendor.issue.mockRejectedValueOnce(new Error("down"));
     expect(await executeTool(vendor.request("list_items", { state: "open" }), vendor.connector, vendor.context, { connect: vendor.connect, ledger: vendor.ledger }))
       .toMatchObject({ status: "FAILED", reason: "vendor_error" });
+  });
+});
+
+describe("credentials that are missing or rejected", () => {
+  it("re-issues once after a 401 and succeeds with the new credential", async () => {
+    const f = fixture();
+    const invalidate = vi.fn(async () => undefined);
+    f.connector.credentials.invalidate = invalidate;
+    f.issue.mockResolvedValueOnce({ token: "stale", bindings: {} }).mockResolvedValueOnce({ token: "fresh", bindings: {} });
+    f.connect.mockRejectedValueOnce(new McpUnauthorized());
+    const result = await executeTool(f.request("list_items", { state: "open" }), f.connector, f.context, { connect: f.connect, ledger: f.ledger });
+    expect(result.status).toBe("SUCCEEDED");
+    expect(invalidate).toHaveBeenCalledOnce();
+    expect(f.connect.mock.calls.map(([options]) => options.token)).toEqual(["stale", "fresh"]);
+  });
+
+  it("reports a second 401 as not connected without a third attempt, even when invalidate fails", async () => {
+    const f = fixture();
+    f.connector.credentials.invalidate = vi.fn(async () => { throw new Error("cache down"); });
+    f.connect.mockRejectedValue(new McpUnauthorized());
+    const result = await executeTool(f.request("create_item", { title: "Bug" }), f.connector, f.context, { connect: f.connect, ledger: f.ledger });
+    expect(result).toMatchObject({ status: "FAILED", reason: "not_connected" });
+    expect(result.text).toContain("Tracker is not connected");
+    expect(f.issue).toHaveBeenCalledTimes(2);
+    expect(f.connect).toHaveBeenCalledTimes(2);
+    expect(f.call).not.toHaveBeenCalled();
+  });
+
+  it("reports a missing credential as not connected with the administrator-facing reason", async () => {
+    const f = fixture();
+    f.issue.mockRejectedValueOnce(new CredentialUnavailable("credential tracker-key is not registered"));
+    const result = await executeTool(f.request("create_item", { title: "Bug" }), f.connector, f.context, { connect: f.connect, ledger: f.ledger });
+    expect(result).toMatchObject({ status: "FAILED", reason: "not_connected" });
+    expect(result.text).toContain("credential tracker-key is not registered");
+    expect(f.connect).not.toHaveBeenCalled();
+  });
+
+  it("raises ConnectorNotConnected from discovery, which keeps the RUNTIME_UNAVAILABLE code", async () => {
+    const f = fixture();
+    f.connect.mockRejectedValue(new McpUnauthorized());
+    const error = await discoverTools(f.connector, f.context, { connect: f.connect }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ConnectorNotConnected);
+    expect(error).toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    expect(f.connect).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a plain issuer failure a vendor error, as before", async () => {
+    const f = fixture();
+    f.issue.mockRejectedValueOnce(new Error("app not installed"));
+    const result = await executeTool(f.request("create_item", { title: "Bug" }), f.connector, f.context, { connect: f.connect, ledger: f.ledger });
+    expect(result).toMatchObject({ status: "FAILED", reason: "vendor_error" });
   });
 });

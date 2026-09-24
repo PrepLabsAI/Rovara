@@ -15,6 +15,11 @@ export interface McpConnection {
   close(): Promise<void>;
 }
 
+/** The MCP server answered HTTP 401: the credential was rejected. Carries no server text. */
+export class McpUnauthorized extends Error {
+  constructor() { super("MCP server rejected the credential"); this.name = "McpUnauthorized"; }
+}
+
 /** Server-owned endpoint/credentials only. Never expose these options to the model. */
 export async function connectMcp(options: {
   endpoint: URL;
@@ -24,6 +29,7 @@ export async function connectMcp(options: {
   fetchImplementation?: typeof fetch;
 }): Promise<McpConnection> {
   const fetchImplementation = options.fetchImplementation ?? fetch;
+  let unauthorized = false;
   const transport = new StreamableHTTPClientTransport(options.endpoint, {
     requestInit: { headers: { Authorization: `Bearer ${options.token}`, "X-MCP-Tools": options.tools.join(",") } },
     reconnectionOptions: { maxRetries: 0, maxReconnectionDelay: 0, initialReconnectionDelay: 0, reconnectionDelayGrowFactor: 1 },
@@ -33,6 +39,7 @@ export async function connectMcp(options: {
         redirect: "error",
         signal: AbortSignal.any([options.signal, ...(init?.signal ? [init.signal] : [])]),
       });
+      if (response.status === 401) unauthorized = true;
       if (!response.body) return response;
       let bytes = 0;
       const body = response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
@@ -70,6 +77,6 @@ export async function connectMcp(options: {
     };
   } catch (error) {
     await client.close().catch(() => undefined);
-    throw error;
+    throw unauthorized ? new McpUnauthorized() : error;
   }
 }

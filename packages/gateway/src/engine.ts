@@ -1,11 +1,14 @@
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
-import { agentXError } from "@agentx/contracts";
-import { connectMcp, type McpConnection } from "./mcp-client.js";
+import { AgentXError, agentXError, errorStatus } from "@agentx/contracts";
+import { connectMcp, McpUnauthorized, type McpConnection } from "./mcp-client.js";
+import { CredentialUnavailable } from "./credentials.js";
 import {
   GuardRejection,
+  type Access,
   type CatalogTool,
   type ConnectorContext,
   type ConnectorDefinition,
+  type IssuedCredential,
   type Invocation,
   type Ledger,
   type ToolRequest,
@@ -130,6 +133,28 @@ export function requestFingerprint(request: ToolRequest): string {
   return fingerprint({ requestId: request.requestId, repository: request.scope, tool: request.tool, schemaHash: request.schemaHash, arguments: request.arguments });
 }
 
+/** Discovery found the connector's credential missing or rejected. RUNTIME_UNAVAILABLE keeps feature 007 callers unchanged. */
+export class ConnectorNotConnected extends AgentXError {
+  constructor(message: string) { super("RUNTIME_UNAVAILABLE", message, errorStatus("RUNTIME_UNAVAILABLE")); this.name = "ConnectorNotConnected"; }
+}
+
+/** Issues a credential and connects; after a 401, invalidates and tries exactly once more. */
+async function openConnection<Scope>(
+  connector: ConnectorDefinition<Scope>, context: ConnectorContext<Scope>, access: Access,
+  tools: string[], signal: AbortSignal, options: EngineOptions,
+): Promise<{ credential: IssuedCredential; connection: McpConnection }> {
+  for (let attempt = 0; ; attempt += 1) {
+    const credential = await withDeadline(connector.credentials.issue(context.scope, access, context.requestedBy), signal);
+    try {
+      return { credential, connection: await (options.connect ?? connectMcp)({ endpoint: connector.endpoint, token: credential.token, tools, signal }) };
+    } catch (error) {
+      if (!(error instanceof McpUnauthorized)) throw error;
+      if (attempt > 0) throw new CredentialUnavailable(`${connector.label} rejected the credential twice; check ${connector.permissionsHint}`);
+      await connector.credentials.invalidate?.(context.scope).catch(() => undefined);
+    }
+  }
+}
+
 export async function discoverTools<Scope>(
   connector: ConnectorDefinition<Scope>,
   context: ConnectorContext<Scope>,
@@ -138,10 +163,10 @@ export async function discoverTools<Scope>(
   let connection: McpConnection | undefined;
   const signal = AbortSignal.timeout(20_000);
   try {
-    const credential = await withDeadline(connector.credentials.issue(context.scope, "read", context.requestedBy), signal);
-    connection = await (options.connect ?? connectMcp)({ endpoint: connector.endpoint, token: credential.token, tools: context.policy.tools.map((tool) => tool.name), signal });
+    ({ connection } = await openConnection(connector, context, "read", context.policy.tools.map((tool) => tool.name), signal, options));
     return reviewTools(connection, connector, context);
-  } catch {
+  } catch (error) {
+    if (error instanceof CredentialUnavailable) throw new ConnectorNotConnected(`${connector.label} is not connected: ${error.message}`);
     throw agentXError("RUNTIME_UNAVAILABLE", `${connector.label} MCP discovery failed; check ${connector.permissionsHint} and endpoint availability`);
   } finally { await connection?.close().catch(() => undefined); }
 }
@@ -179,16 +204,16 @@ export async function executeTool<Scope>(
     return { ...previous.result, replayed: true };
   }
   let connection: McpConnection | undefined;
+  let credential: IssuedCredential;
   let writeAttempted = false;
   let response: ToolResult;
   const signal = AbortSignal.timeout(20_000);
   try {
-    const credential = await withDeadline(connector.credentials.issue(context.scope, policy.access, context.requestedBy), signal);
     const tools = [request.tool];
     for (const guard of connector.guards) {
       for (const name of guard.requiredTools(request.tool, request.arguments)) if (!tools.includes(name)) tools.push(name);
     }
-    connection = await (options.connect ?? connectMcp)({ endpoint: connector.endpoint, token: credential.token, tools, signal });
+    ({ credential, connection } = await openConnection(connector, context, policy.access, tools, signal, options));
     const approved = approveTools(connection, connector, context).find((tool) => tool.name === request.tool);
     if (!approved || approved.schemaHash !== request.schemaHash) {
       options.onDefinitionChanged?.();
@@ -214,13 +239,15 @@ export async function executeTool<Scope>(
     if (result.isError) throw new Error("MCP tool reported an error");
     response = publicResult(request, "SUCCEEDED", resultText(result).split(credential.token).join("[REDACTED]"));
   } catch (error) {
-    response = error instanceof DefinitionChanged
-      ? publicResult(request, "FAILED", error.message, "schema_changed")
-      : error instanceof PolicyFailure || error instanceof GuardRejection
-        ? publicResult(request, "FAILED", error.message, "policy_denied")
-        : writeAttempted
-          ? publicResult(request, "UNKNOWN", `${label} write outcome is unknown. Inspect ${label} before issuing another request. Do not automatically retry.`)
-          : publicResult(request, "FAILED", `${label} MCP request failed before any write. Check ${connector.permissionsHint} and MCP availability.`, "vendor_error");
+    response = error instanceof CredentialUnavailable
+      ? publicResult(request, "FAILED", `${label} is not connected for this project: ${error.message}. An administrator must fix its credential.`, "not_connected")
+      : error instanceof DefinitionChanged
+        ? publicResult(request, "FAILED", error.message, "schema_changed")
+        : error instanceof PolicyFailure || error instanceof GuardRejection
+          ? publicResult(request, "FAILED", error.message, "policy_denied")
+          : writeAttempted
+            ? publicResult(request, "UNKNOWN", `${label} write outcome is unknown. Inspect ${label} before issuing another request. Do not automatically retry.`)
+            : publicResult(request, "FAILED", `${label} MCP request failed before any write. Check ${connector.permissionsHint} and MCP availability.`, "vendor_error");
   } finally { await connection?.close().catch(() => undefined); }
   if (durable) {
     record = { ...record, updatedAt: new Date().toISOString(), result: response };
