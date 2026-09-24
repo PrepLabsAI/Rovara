@@ -23,7 +23,7 @@ Each phase is one pull request to `mainline`. Check a task only after its eviden
 - [X] T011 Add `connectors` and `repositories` to thread workspace resolution for `includeConnectors`; keep `githubMcpRepositories`. (moved from phase 1b)
 - [X] T012 Present connector tools as `<connector>__<tool>`, one per tool, with a `target` enum for multiple scopes; refuse names over 64 characters and `target` collisions.
 - [X] T013 Assemble descriptions from override or vendor text, target line, access line and examples; cap at 2,048 characters.
-- [X] T014 Generate the capabilities manifest, including not-connected connectors, the close command and the rename table.
+- [X] T014 Generate the capabilities manifest, including not-connected connectors and the close command.
 - [X] T015 Return `reason: not_connected` for approved connectors without a working credential.
 - [X] T016 Replace the seven lifecycle tools with `agentx_manage_pull_request`; update `assertOrchestrationOnly` and feature 002/003 documents. For one release, list the retired tool names and their replacement action in the orchestrator system prompt (not a rename table in the manifest).
 - [X] T017 Offer recovery tools only when `recoverableOperations` is non-empty.
