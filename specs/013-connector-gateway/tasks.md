@@ -20,7 +20,7 @@ Each phase is one pull request to `mainline`. Check a task only after its eviden
 ## Phase 2: Presentation (US4)
 
 - [X] T007 Add `/v1/workspaces/{id}/connectors/{name}/tools|call` in `packages/broker/src/aws/connectors.ts`; serve `/github/...` as aliases with feature 007 shapes. (moved from phase 1b).
-- [X] T011 Add `connectors` and `repositories` to thread workspace resolution for `includeConnectors`; keep `githubMcpRepositories`.
+- [X] T011 Add `connectors` and `repositories` to thread workspace resolution for `includeConnectors`; keep `githubMcpRepositories`. (moved from phase 1b)
 - [X] T012 Present connector tools as `<connector>__<tool>`, one per tool, with a `target` enum for multiple scopes; refuse names over 64 characters and `target` collisions.
 - [X] T013 Assemble descriptions from override or vendor text, target line, access line and examples; cap at 2,048 characters.
 - [X] T014 Generate the capabilities manifest, including not-connected connectors, the close command and the rename table.
@@ -42,12 +42,13 @@ Each phase is one pull request to `mainline`. Check a task only after its eviden
 ## Phase 4: Turn records, metrics, evaluation (US5)
 
 - [ ] T025 Move `TaskUsageTelemetry` to `@agentx/contracts`; the worker imports it unchanged.
-- [ ] T026 Add the hidden turn-recorder extension and the `TurnRecords` writer; one record per Slack event. The tools route honours `refresh=1` to bypass the per-container catalog cache, and the orchestrator sends it after a "definition changed" failure.
+- [ ] T026 Add the hidden turn-recorder extension and the `TurnRecords` writer; one record per Slack event.
 - [ ] T027 Add `TurnRecords`, the SNS topic and the two alarms to `AgentXControlPlane`; grant the Slack service write and the broker read.
 - [ ] T028 Emit the metrics in `contracts/metrics.md` from broker and Slack service.
 - [ ] T029 Add the admin turn export route and `agentx admin turns export`.
 - [ ] T030 Add `npm run eval` with seed cases, legacy presentation mode and baselines; record SC-004.
 - [ ] T031 Update the README diagnostics paragraph for turn-record retention.
+- [ ] T039 Send `refresh=1` for connector discovery after a turn recorded a definition-changed failure; the tools route bypasses the per-container catalog cache for it.
 
 ## Phase 5: Linear (US2)
 
