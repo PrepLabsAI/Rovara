@@ -1,10 +1,12 @@
 import {
+  AgentXErrorCodeSchema,
   ProjectDefinitionSchema,
   WorkspaceDeploymentModeSchema,
   agentXError,
   type ProjectDefinition,
   type WorkspaceDeploymentMode,
 } from "@agentx/contracts";
+import { readJsonResponse, serverError } from "./http.js";
 
 export interface ProjectRuntimeBinding {
   runtimeArn: string;
@@ -36,9 +38,16 @@ export async function registerProject(
       authorization: `Bearer ${options.accessToken}`,
       "content-type": "application/json",
     },
-    body: JSON.stringify({ definition, runtimeBinding: options.runtimeBinding }),
+    // Asks the control plane to check each connector with its vendor; older control planes ignore it.
+    body: JSON.stringify({ definition, runtimeBinding: options.runtimeBinding, preflight: true }),
   });
-  const result: unknown = await response.json();
-  if (!response.ok) throw agentXError("CONFIG_INVALID", `project registration failed with HTTP ${response.status}`);
-  return result;
+  const { ok, status, body } = await readJsonResponse(response);
+  if (!ok) {
+    // The server names what to fix (a tool budget, a presented name, a target conflict); pass it on.
+    const { code, message } = serverError(body);
+    const parsedCode = AgentXErrorCodeSchema.safeParse(code);
+    throw agentXError(parsedCode.success ? parsedCode.data : "CONFIG_INVALID", `project registration failed with HTTP ${status}${message ? `: ${message}` : ""}`);
+  }
+  if (body === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "control plane returned an invalid response");
+  return body;
 }

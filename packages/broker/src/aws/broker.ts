@@ -31,7 +31,10 @@ import {
   PullRequestLifecycleResultSchema,
   PullRequestResultSchema,
   ProjectDefinitionSchema,
+  approvedToolCount,
   githubConnectorOf,
+  presentedNameProblems,
+  toolBudget,
   legacyProjectFields,
   SLACK_THREAD_OWNER_ISSUER,
   SlackChannelBindingSchema,
@@ -49,6 +52,7 @@ import {
   type CodeBuildCheckResult,
   type CodeBuildGateDefinition,
   type ProjectDefinition,
+  type RegistrationPreflight,
   type PullRequestLifecycleResult,
   type SlackChannelBinding,
   type SlackRequester,
@@ -67,6 +71,7 @@ import { CatalogCache, ConnectorNotConnected, presentCatalog, type ScopeCatalog 
 import { discoverGitHubTools, executeGitHubConnectorTool, executeGitHubTool, type GitHubMcpCatalog, type GitHubMcpDependencies } from "../github-mcp.js";
 import { DynamoConnectorLedger, GITHUB_LEDGER } from "./connector-ledger.js";
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
+import { preflightConnectors, registrationWarnings } from "./registration-preflight.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
 import { RepositoryGrantService } from "../repository-access.js";
 import { publicWorkspace } from "../workspaces.js";
@@ -590,7 +595,8 @@ async function registerProject(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
   value: unknown,
-): Promise<{ project: Omit<RegisteredProjectRecord, "pk" | "sk">; duplicate: boolean }> {
+  checked?: { report?: RegistrationPreflight },
+): Promise<{ project: Omit<RegisteredProjectRecord, "pk" | "sk">; duplicate: boolean; warnings?: string[]; preflight?: RegistrationPreflight }> {
   if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
   const input = object(value, "project registration");
   const retired = legacyProjectFields(input.definition);
@@ -599,6 +605,13 @@ async function registerProject(
   }
   const definition = ProjectDefinitionSchema.parse(input.definition);
   const runtimeBinding = parseRuntimeBinding(input.runtimeBinding);
+  // Preflight contacts the vendor, so it runs only when the caller asks; older clients never do.
+  const wantsPreflight = input.preflight === true;
+  const budget = toolBudget(approvedToolCount(definition));
+  const respond = (project: Omit<RegisteredProjectRecord, "pk" | "sk">, duplicate: boolean, preflight: RegistrationPreflight | undefined) => {
+    const warnings = registrationWarnings(budget.warning, preflight);
+    return { project, duplicate, ...(warnings.length ? { warnings } : {}), ...(preflight ? { preflight } : {}) };
+  };
   const key = projectKey(definition.name, definition.revision);
   const existing = await getItem<RegisteredProjectRecord>(dependencies, key);
   if (existing) {
@@ -608,7 +621,19 @@ async function registerProject(
     ) {
       throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revisions and runtime bindings are immutable");
     }
-    return { project: withoutKeys(existing), duplicate: true };
+    // A revision stored before the static checks existed stays idempotent: report, never refuse.
+    const preflight = checked?.report
+      ?? (wantsPreflight ? (await preflightConnectors(definition, dependencies.githubMcp, identity.ownerKey)).report : undefined);
+    return respond(withoutKeys(existing), true, preflight);
+  }
+  const nameProblems = presentedNameProblems(definition);
+  if (nameProblems.length > 0) throw agentXError("CONFIG_INVALID", nameProblems.join("; "));
+  if (budget.refusal) throw agentXError("CONFIG_INVALID", budget.refusal);
+  let preflight: RegistrationPreflight | undefined;
+  if (wantsPreflight) {
+    const result = await preflightConnectors(definition, dependencies.githubMcp, identity.ownerKey);
+    if (result.refusals.length > 0) throw agentXError("CONFIG_INVALID", result.refusals.join("; "));
+    preflight = result.report;
   }
   const now = new Date().toISOString();
   const record: RegisteredProjectRecord = {
@@ -626,10 +651,11 @@ async function registerProject(
       { Put: { TableName: dependencies.tableName, Item: membership } },
     ] }));
   } catch (error) {
-    if (isConditional(error)) return registerProject(dependencies, identity, value);
+    // A concurrent registration won; answer as a duplicate without contacting the vendor again.
+    if (isConditional(error)) return registerProject(dependencies, identity, value, preflight ? { report: preflight } : {});
     throw error;
   }
-  return { project: withoutKeys(record), duplicate: false };
+  return respond(withoutKeys(record), false, preflight);
 }
 
 async function prepareWorkspace(

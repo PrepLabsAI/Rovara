@@ -115,6 +115,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         },
       }, services.fetchImplementation);
       services.stdout.write(formatSuccess(result, globals.json));
+      for (const warning of registrationWarnings(result, definition)) services.stderr.write(`Warning: ${warning}\n`);
     });
 
   const adminWorkspace = admin.command("workspace").description("administer AgentX workspaces");
@@ -216,6 +217,16 @@ async function authenticate(
   const tokens = await tokenStore.get(tokenStoreKey(settings.auth));
   if (!tokens || tokens.expiresAt <= Date.now()) throw agentXError("AUTH_REQUIRED", "run agentx login");
   return { settings, accessToken: tokens.accessToken };
+}
+
+/** The server's warnings, plus a note when a control plane too old to run preflight answered. */
+function registrationWarnings(result: unknown, definition: ProjectDefinition): string[] {
+  const record = result && typeof result === "object" ? result as Record<string, unknown> : {};
+  const warnings = Array.isArray(record.warnings) ? record.warnings.filter((entry): entry is string => typeof entry === "string") : [];
+  if (definition.integrations && record.preflight === undefined) {
+    warnings.push("this control plane did not check connectors at registration; deploy the latest AgentX release to get the preflight report.");
+  }
+  return warnings;
 }
 
 async function projectFromFile(path: string, allowLoopback: boolean): Promise<ProjectDefinition> {
