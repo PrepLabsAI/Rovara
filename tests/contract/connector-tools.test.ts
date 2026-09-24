@@ -83,7 +83,7 @@ describe("capabilities manifest", () => {
     expect(manifest).toBe([
       "What this channel can do:",
       "- Repository code and files (demo, docs): agentx_submit_task, agentx_follow_up",
-      "- Pull requests (demo, docs): agentx_create_pull_request and the pull-request tools",
+      "- Pull requests (demo, docs): agentx_create_pull_request, agentx_manage_pull_request",
       "- GitHub issues (demo, docs): github__* tools",
       "Not connected for this channel: Linear, Jira, Asana. If asked about something that is not connected, say it is not connected for this channel and do not attempt a workaround.",
       "Closing this thread's workspace is a command, not a tool: the user writes \"close this workspace\".",
@@ -110,7 +110,7 @@ describe("capabilities manifest", () => {
     expect(manifest).toBe([
       "What this channel can do:",
       "- Repository code and files (demo): agentx_submit_task, agentx_follow_up",
-      "- Pull requests (demo): agentx_create_pull_request and the pull-request tools",
+      "- Pull requests (demo): agentx_create_pull_request, agentx_manage_pull_request",
       "Temporarily unavailable: GitHub issues. Tell the user it is temporarily unavailable and continue with the rest.",
       "Not connected for this channel: Linear, Jira, Asana. If asked about something that is not connected, say it is not connected for this channel and do not attempt a workaround.",
       "Closing this thread's workspace is a command, not a tool: the user writes \"close this workspace\".",
@@ -127,7 +127,7 @@ describe("capabilities manifest", () => {
     expect(manifest).toBe([
       "What this channel can do:",
       "- Repository code and files (demo): agentx_submit_task, agentx_follow_up",
-      "- Pull requests (demo): agentx_create_pull_request and the pull-request tools",
+      "- Pull requests (demo): agentx_create_pull_request, agentx_manage_pull_request",
       "Unavailable because of a setup problem: GitHub issues. Tell the user an administrator needs to check this connector, and continue with the rest.",
       "Not connected for this channel: Linear, Jira, Asana. If asked about something that is not connected, say it is not connected for this channel and do not attempt a workaround.",
       "Closing this thread's workspace is a command, not a tool: the user writes \"close this workspace\".",

@@ -10,14 +10,24 @@ export const ORCHESTRATION_TOOL_NAMES = [
   "agentx_task_status",
   "agentx_task_result",
   "agentx_follow_up",
-  "agentx_update_pull_request",
-  "agentx_append_pull_request",
-  "agentx_sync_pull_request",
-  "agentx_close_pull_request",
-  "agentx_reopen_pull_request",
-  "agentx_replace_pull_request",
-  "agentx_revert_pull_request",
+  "agentx_manage_pull_request",
 ] as const;
+
+/** Retired in feature 013; kept so the orchestrator can tell the model the new name for one release. */
+export const RETIRED_PULL_REQUEST_TOOLS = {
+  agentx_update_pull_request: "edit",
+  agentx_append_pull_request: "append",
+  agentx_sync_pull_request: "sync",
+  agentx_close_pull_request: "close",
+  agentx_reopen_pull_request: "reopen",
+  agentx_replace_pull_request: "replace",
+  agentx_revert_pull_request: "revert",
+} as const;
+
+const PULL_REQUEST_ACTIONS = ["edit", "append", "sync", "close", "reopen", "replace", "revert"] as const;
+type PullRequestAction = (typeof PULL_REQUEST_ACTIONS)[number];
+/** Only these actions ever carried a title or body. */
+const TITLED_ACTIONS = new Set<PullRequestAction>(["edit", "replace", "revert"]);
 
 export interface OrchestrationApi {
   discoverConnectorTools?(input: { workspaceId: string; connector: string }): Promise<ConnectorCatalog>;
@@ -185,56 +195,44 @@ export function createOrchestrationTools(
       },
     }),
   ];
-  const lifecycleTools = [
-    ["update", "edit", "Edit the title or body of an AgentX-owned pull request."],
-    ["append", "append", "Run checks and append workspace changes with a normal fast-forward push; force push is prohibited."],
-    ["sync", "sync", "Merge the latest base branch into an open pull request; history is never rebased or force-pushed."],
-    ["close", "close", "Close an open AgentX-owned pull request."],
-    ["reopen", "reopen", "Reopen a closed, unmerged AgentX-owned pull request."],
-    ["replace", "replace", "Create a clean replacement pull request before closing the original; never rewrite the old branch."],
-    ["revert", "revert", "Create a reviewable revert pull request for a merged AgentX-owned pull request."],
-  ] as const;
-  for (const [toolName, action, description] of lifecycleTools) {
-    tools.push(defineTool({
-      name: `agentx_${toolName}_pull_request`,
-      label: `${toolName[0]?.toUpperCase()}${toolName.slice(1)} pull request`,
-      description: `${description} Call only when the user explicitly requests this pull request action.`,
-      parameters: Type.Object({
-        repository: Type.String({ minLength: 1, maxLength: 63 }),
-        pullRequestNumber: Type.Integer({ minimum: 1 }),
-        ...((action === "edit" || action === "replace" || action === "revert") ? {
-          title: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
-          body: Type.Optional(Type.String({ maxLength: 32_768 })),
-        } : {}),
-      }),
-      execute: async (_id, parameters, signal, onUpdate) => {
-        const lifecycle = parameters as {
-          repository: string;
-          pullRequestNumber: number;
-          title?: string;
-          body?: string;
-        };
-        const accepted = await api.managePullRequest({
-          workspaceId: context.workspaceId,
-          requestId: nextRequestId(),
-          repository: lifecycle.repository,
-          pullRequestNumber: lifecycle.pullRequestNumber,
-          action,
-          ...(lifecycle.title === undefined ? {} : { title: lifecycle.title }),
-          ...(lifecycle.body === undefined ? {} : { body: lifecycle.body }),
-        });
-        const operationId = acceptedOperationId(accepted);
-        onUpdate?.(toolResult({ operationId, status: "ACCEPTED", message: `AgentX accepted pull request ${action}.` }));
-        return toolResult(await api.pullRequestResult(
-          { workspaceId: context.workspaceId, operationId },
-          {
-            ...(signal === undefined ? {} : { signal }),
-            onProgress: (progress) => onUpdate?.(toolResult(progress)),
-          },
-        ));
-      },
-    }));
-  }
+  tools.push(defineTool({
+    name: "agentx_manage_pull_request",
+    label: "Manage pull request",
+    description:
+      "Change an existing AgentX-owned pull request. Actions: edit its title or body; append new workspace commits with a normal fast-forward push; " +
+      "sync by merging the latest base branch into it; close it; reopen a closed, unmerged one; replace it with clean history (the new pull request is " +
+      "created before the original is closed); revert a merged one with a reviewable revert pull request. History is never rebased or force-pushed. " +
+      "Title and body apply only to edit, replace and revert. Call only for the action the user explicitly asked for.",
+    parameters: Type.Object({
+      repository: Type.String({ minLength: 1, maxLength: 63 }),
+      pullRequestNumber: Type.Integer({ minimum: 1 }),
+      action: Type.Unsafe<PullRequestAction>({ type: "string", enum: [...PULL_REQUEST_ACTIONS] }),
+      title: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+      body: Type.Optional(Type.String({ maxLength: 32_768 })),
+    }),
+    execute: async (_id, parameters, signal, onUpdate) => {
+      const request = parameters;
+      const titled = TITLED_ACTIONS.has(request.action);
+      const accepted = await api.managePullRequest({
+        workspaceId: context.workspaceId,
+        requestId: nextRequestId(),
+        repository: request.repository,
+        pullRequestNumber: request.pullRequestNumber,
+        action: request.action,
+        ...(titled && request.title !== undefined ? { title: request.title } : {}),
+        ...(titled && request.body !== undefined ? { body: request.body } : {}),
+      });
+      const operationId = acceptedOperationId(accepted);
+      onUpdate?.(toolResult({ operationId, status: "ACCEPTED", message: `AgentX accepted pull request ${request.action}.` }));
+      return toolResult(await api.pullRequestResult(
+        { workspaceId: context.workspaceId, operationId },
+        {
+          ...(signal === undefined ? {} : { signal }),
+          onProgress: (progress) => onUpdate?.(toolResult(progress)),
+        },
+      ));
+    },
+  }));
   if (options.connectorCatalogs?.some((catalog) => catalog.tools.length > 0)) {
     if (!api.callConnectorTool) throw new Error("connector API is not configured");
     tools.push(...createConnectorTools(options.connectorCatalogs, (input) => api.callConnectorTool!(input), context, options));

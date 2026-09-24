@@ -77,7 +77,7 @@ exports[`what the orchestrator sees > for a two-repository project with GitHub i
 exports[`what the orchestrator sees > for a two-repository project with GitHub issues 2`] = `
 "What this channel can do:
 - Repository code and files (api, web): agentx_submit_task, agentx_follow_up
-- Pull requests (api, web): agentx_create_pull_request and the pull-request tools
+- Pull requests (api, web): agentx_create_pull_request, agentx_manage_pull_request
 - GitHub issues (api, web): github__* tools
 Not connected for this channel: Linear, Jira, Asana. If asked about something that is not connected, say it is not connected for this channel and do not attempt a workaround.
 Closing this thread's workspace is a command, not a tool: the user writes "close this workspace".

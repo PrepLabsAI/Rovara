@@ -26,7 +26,7 @@ export function capabilitiesManifest(input: {
   const lines = [
     "What this channel can do:",
     `- Repository code and files (${repositories}): agentx_submit_task, agentx_follow_up`,
-    `- Pull requests (${repositories}): agentx_create_pull_request and the pull-request tools`,
+    `- Pull requests (${repositories}): agentx_create_pull_request, agentx_manage_pull_request`,
     ...usable.map((connector) => `- ${connector.label} (${connector.scopes.join(", ")}): ${connector.name}__* tools`),
   ];
   const transientLabels = input.connectors
