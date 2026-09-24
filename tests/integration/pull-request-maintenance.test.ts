@@ -226,12 +226,8 @@ async function createFixture(action: "append" | "sync") {
   const pullRequestHead = (await git(checkout, ["rev-parse", "HEAD"])).trim();
   const remoteUrl = (await git(checkout, ["remote", "get-url", "origin"])).trim();
   const project = {
-    schemaVersion: 2,
     name: "demo",
     revision: 1,
-    controlPlaneUrl: "https://agentx.example.test",
-    auth: { issuer: "https://identity.example.test", clientId: "agentx", audience: "agentx" },
-    environment: { image: `example.test/agentx@sha256:${"a".repeat(64)}` },
     repositories: [{ name: "demo", url: remoteUrl, path: "repo/demo", defaultBranch: "main", credentialRef: "github-app" }],
     setup: [],
     readiness: [{ cwd: "repo/demo", executable: process.execPath, args: ["-e", "process.exit(0)"], timeoutSeconds: 10 }],
@@ -242,7 +238,7 @@ async function createFixture(action: "append" | "sync") {
     schemaVersion: 2,
     projectName: "demo",
     projectRevision: 1,
-    environmentDigest: project.environment.image,
+    environmentDigest: `registry.example.test/worker@sha256:${"a".repeat(64)}`,
     repositories: [{
       name: "demo", path: "repo/demo", defaultBranch: "main", resolvedCommit: preparedCommit,
       resolvedAt: new Date().toISOString(), completedAt: new Date().toISOString(),

@@ -102,7 +102,6 @@ export class PreparationCoordinator {
         ownerKey: input.targetOwnerKey,
         projectName: input.projectName,
         projectRevision: input.projectRevision,
-        environmentDigest: registered.definition.environment.image,
         runtimeArn: runtime.runtimeArn,
         endpointQualifier: runtime.endpointQualifier,
         runtimeSessionId: runtime.runtimeSessionId,

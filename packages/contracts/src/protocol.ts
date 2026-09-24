@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ProjectDefinitionSchema } from "./project.js";
+import { StoredProjectDefinitionSchema } from "./project.js";
 
 export const AGENTX_PROTOCOL_VERSION = 1 as const;
 
@@ -15,7 +15,7 @@ const InvocationBaseSchema = z.object({
 export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
   InvocationBaseSchema.extend({
     kind: z.literal("prepare"),
-    payload: z.object({ project: ProjectDefinitionSchema, repositoryGrant: z.string().min(1) }).strict(),
+    payload: z.object({ project: StoredProjectDefinitionSchema, repositoryGrant: z.string().min(1) }).strict(),
   }).strict(),
   InvocationBaseSchema.extend({
     kind: z.literal("task"),
@@ -25,7 +25,7 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
     kind: z.literal("publish"),
     payload: z
       .object({
-        project: ProjectDefinitionSchema,
+        project: StoredProjectDefinitionSchema,
         repository: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),
         title: z.string().min(1).max(256),
         body: z
@@ -63,7 +63,7 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
     payload: z
       .object({
         action: z.enum(["append", "sync"]),
-        project: ProjectDefinitionSchema,
+        project: StoredProjectDefinitionSchema,
         repository: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),
         pullRequestNumber: z.number().int().positive(),
         headBranch: z.string().regex(/^agentx\/[0-9a-f-]{36}$/i),

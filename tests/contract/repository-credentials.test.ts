@@ -109,18 +109,8 @@ describe("worker repository credential exchange", () => {
 
 function project() {
   return {
-    schemaVersion: 2,
     name: "personal-website",
     revision: 1,
-    controlPlaneUrl: "https://agentx.example.test",
-    auth: {
-      issuer: "https://identity.example.test",
-      clientId: "agentx",
-      audience: "agentx",
-    },
-    environment: {
-      image: `registry.example.test/agentx@sha256:${"a".repeat(64)}`,
-    },
     repositories: [{
       name: "personal-website",
       url: "https://github.com/ps06756/personal-website-test.git",

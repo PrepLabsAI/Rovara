@@ -119,22 +119,19 @@ export const RepositoryDefinitionSchema = z
     }
   });
 
+/**
+ * Fields the project definition carried while AgentX had a local client. `schemaVersion` marked a
+ * file format, `controlPlaneUrl` and `auth` told that client where to connect, and
+ * `environment.image` pinned nothing: the runtime runs the image the release deployed. Definitions
+ * registered before they were removed still contain them, so readers drop them and registration
+ * refuses them.
+ */
+export const LEGACY_PROJECT_FIELDS = ["schemaVersion", "controlPlaneUrl", "auth", "environment"] as const;
+
 export const ProjectDefinitionSchema = z
   .object({
-    schemaVersion: z.literal(2),
     name: AgentXNameSchema,
     revision: z.number().int().positive(),
-    controlPlaneUrl: HttpsOrLoopbackUrlSchema,
-    auth: z
-      .object({
-        issuer: HttpsOrLoopbackUrlSchema,
-        clientId: z.string().min(1).max(256),
-        audience: z.string().min(1).max(256),
-      })
-      .strict(),
-    environment: z
-      .object({ image: z.string().regex(OCI_DIGEST_PATTERN, "image must be pinned by sha256 digest") })
-      .strict(),
     repositories: z.array(RepositoryDefinitionSchema).min(1).max(32),
     setup: z.array(ProjectCommandSchema).max(64),
     readiness: z.array(ProjectCommandSchema).max(64),
@@ -163,6 +160,25 @@ export const ProjectDefinitionSchema = z
       }
     }
   });
+
+/** Parses a definition that may predate the removal of {@link LEGACY_PROJECT_FIELDS}. */
+export const StoredProjectDefinitionSchema = z.preprocess(
+  (value) => withoutFields(value, LEGACY_PROJECT_FIELDS),
+  ProjectDefinitionSchema,
+);
+
+/** The legacy fields a value carries, so a caller can name them in its own error. */
+export function legacyProjectFields(value: unknown): string[] {
+  if (!value || typeof value !== "object") return [];
+  return LEGACY_PROJECT_FIELDS.filter((field) => Object.hasOwn(value, field));
+}
+
+function withoutFields(value: unknown, fields: readonly string[]): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const remaining: Record<string, unknown> = { ...(value as Record<string, unknown>) };
+  for (const field of fields) delete remaining[field];
+  return remaining;
+}
 
 export type ProjectDefinition = z.infer<typeof ProjectDefinitionSchema>;
 export type ProjectCommand = z.infer<typeof ProjectCommandSchema>;

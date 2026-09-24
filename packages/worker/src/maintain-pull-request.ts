@@ -223,8 +223,7 @@ async function loadManifest(rootPath: string, invocation: MaintainInvocation): P
     if (
       manifest.schemaVersion !== 2 || !manifest.complete ||
       manifest.projectName !== invocation.payload.project.name ||
-      manifest.projectRevision !== invocation.projectRevision ||
-      manifest.environmentDigest !== invocation.payload.project.environment.image
+      manifest.projectRevision !== invocation.projectRevision
     ) throw new Error("stale");
     return manifest;
   } catch {

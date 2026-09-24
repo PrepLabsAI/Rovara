@@ -117,12 +117,8 @@ async function registerRevision(handler: Handler, revision: number, githubMcp = 
     user: admin,
     body: {
       definition: {
-        schemaVersion: 2,
         name: "payments",
         revision,
-        controlPlaneUrl: "https://agentx.example.test",
-        auth: { issuer, clientId: "agentx", audience: "agentx" },
-        environment: { image: `example.test/agentx@sha256:${"a".repeat(64)}` },
         repositories: [
           { name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "github-app" },
         ],
@@ -319,6 +315,54 @@ describe("Slack channel bindings", () => {
     expect(removed.status).toBe(200);
     expect(db.get(`SLACK_BINDING#${team}`, `CHANNEL#${channel}`)).toBeUndefined();
     expect((await ensureWorkspace(handler, threadOne, pratik)).status).toBe(403);
+  });
+});
+
+describe("project registration", () => {
+  it("refuses a definition that still carries the retired fields, and keeps serving the ones already stored", async () => {
+    const { db, handler } = createBroker();
+    await registerProjectAndBind(handler);
+
+    const refused = await call(handler, {
+      method: "POST",
+      path: "/v1/admin/projects",
+      user: admin,
+      body: {
+        definition: {
+          name: "payments",
+          revision: 2,
+          controlPlaneUrl: "https://agentx.example.test",
+          environment: { image: `example.test/agentx@sha256:${"a".repeat(64)}` },
+          repositories: [
+            { name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "github-app" },
+          ],
+          setup: [],
+          readiness: [],
+          orchestratorInstructions: "Delegate work (revision 2).",
+        },
+        runtimeBinding: {
+          runtimeArn: `arn:aws:bedrock-agentcore:us-east-1:${account}:runtime/agentx_production_worker-YVirjlFgvk`,
+          endpointQualifier: "DEFAULT",
+          deploymentMode: "instances-ebs",
+          capacityProviderArn: `arn:aws:bedrock-agentcore:us-east-1:${account}:capacity-provider/agentx_production_capacity_v3-VwkM93EABZ`,
+        },
+      },
+    });
+    expect(refused.status).toBe(400);
+    expect(JSON.stringify(refused.body)).toContain("controlPlaneUrl, environment");
+    expect(db.get("PROJECT#payments", "REV#000000000002")).toBeUndefined();
+
+    // A revision stored before the removal keeps working for an existing thread.
+    const stored = db.get("PROJECT#payments", "REV#000000000001");
+    if (!stored) throw new Error("registered revision is missing");
+    const definition = stored.definition as Record<string, unknown>;
+    definition.schemaVersion = 2;
+    definition.controlPlaneUrl = "https://agentx.example.test";
+    definition.auth = { issuer, clientId: "agentx", audience: "agentx" };
+    definition.environment = { image: `example.test/agentx@sha256:${"a".repeat(64)}` };
+    const created = await ensureWorkspace(handler, threadOne, pratik);
+    expect(created.status).toBe(200);
+    expect(created.body).toMatchObject({ created: true, orchestratorInstructions: "Delegate work (revision 1)." });
   });
 });
 

@@ -1,14 +1,6 @@
 # Illustrative only: replace all example deployment values before registration.
-schemaVersion: 2
 name: storefront
 revision: 1
-controlPlaneUrl: https://agentx.example.test
-auth:
-  issuer: https://identity.example.test
-  clientId: agentx-client
-  audience: agentx-api
-environment:
-  image: 111122223333.dkr.ecr.us-east-1.amazonaws.com/agentx-storefront@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 repositories:
   - name: storefront-web
     url: https://git.example.test/storefront-web.git

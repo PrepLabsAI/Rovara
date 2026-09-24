@@ -65,8 +65,8 @@ describe("task and lifecycle controls", () => {
       { ownerKey: developer.ownerKey, project: "payments", role: "developer" },
     ];
     const projects = new InMemoryProjectRegistry();
-    projects.register(admin, project(1, "a"), memberships);
-    projects.register(admin, project(2, "b"), memberships);
+    projects.register(admin, project(1), memberships);
+    projects.register(admin, project(2), memberships);
     const ready = await registry.createDefault(workspace(developer.ownerKey));
     const stopRuntimeSession = vi.fn(async () => undefined);
     const lifecycle = new LifecycleService({ registry, memberships, stopRuntimeSession });
@@ -81,7 +81,6 @@ describe("task and lifecycle controls", () => {
     const resuming = await resume.begin(developer, ready.id);
     expect(resuming.status).toBe("RESUMING");
     expect(resuming.projectRevision).toBe(1);
-    expect(resuming.environmentDigest).toBe(project(1, "a").environment.image);
   });
 
   it("redacts structured diagnostics and classifies disk/auth/setup failures", () => {
@@ -111,7 +110,6 @@ function workspace(ownerKey: string) {
     ownerKey,
     projectName: "payments",
     projectRevision: 1,
-    environmentDigest: project(1, "a").environment.image,
     runtimeArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/agentx",
     endpointQualifier: "DEFAULT",
     runtimeSessionId: randomUUID(),
@@ -137,14 +135,10 @@ function identity(ownerKey: string, isAdministrator: boolean): AuthenticatedIden
   };
 }
 
-function project(revision: number, digestCharacter: string): ProjectDefinition {
+function project(revision: number): ProjectDefinition {
   return {
-    schemaVersion: 2,
     name: "payments",
     revision,
-    controlPlaneUrl: "https://agentx.example.test",
-    auth: { issuer: "https://identity.example.test", clientId: "agentx", audience: "agentx" },
-    environment: { image: `registry.example.test/worker@sha256:${digestCharacter.repeat(64)}` },
     repositories: [
       {
         name: "app",

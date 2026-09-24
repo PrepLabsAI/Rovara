@@ -70,6 +70,34 @@ describe("AgentX administration workflow", () => {
     expect(JSON.parse(output)).toMatchObject({ ok: true, data: { binding: { channelId: "C0123456789" } } });
   });
 
+  it("reads its connection settings from the deployment file, not from a project file", async () => {
+    const context = await administratorContext("agentx-cli-login-");
+    const fetchImplementation = vi.fn<typeof fetch>(async () => {
+      throw new Error("login must not reach the network before its settings load");
+    });
+    // No --project, and a deployment file that does not exist: the error names the settings the
+    // command actually needs, proving nothing is read from a project file any more.
+    const globals = context.globals.filter((value, index, values) =>
+      value !== "--project" && values[index - 1] !== "--project"
+      && value !== "--deployment-file" && values[index - 1] !== "--deployment-file");
+    const errors: string[] = [];
+
+    const exitCode = await executeCli([
+      ...globals,
+      "--deployment-file", join(context.directory, "absent.yaml"),
+      "login",
+    ], {
+      fetchImplementation,
+      tokenStore: context.tokens,
+      stdout: { write() {} },
+      stderr: { write(text: string) { errors.push(text); } },
+    });
+
+    expect(exitCode).toBe(2);
+    expect(errors.join("")).toMatch(/deployment settings are not configured/);
+    expect(fetchImplementation).not.toHaveBeenCalled();
+  });
+
   it("refuses the retired developer commands without calling the control plane", async () => {
     const context = await administratorContext("agentx-cli-retired-");
     const fetchImplementation = vi.fn<typeof fetch>(async () => {
@@ -90,22 +118,35 @@ describe("AgentX administration workflow", () => {
   });
 });
 
+const deployment = {
+  controlPlaneUrl: "http://127.0.0.1:8787",
+  auth: { issuer: "https://identity.example.test", clientId: "agentx-client", audience: "agentx-api" },
+};
+
 async function administratorContext(prefix: string): Promise<{
   globals: string[];
+  directory: string;
   tokens: InMemoryTokenStore;
 }> {
   const directory = await mkdtemp(join(tmpdir(), prefix));
-  const definition = projectDefinition();
-  await writeFile(join(directory, "payments.yaml"), JSON.stringify(definition), "utf8");
+  // One deployment file serves every project; the project file holds the definition alone.
+  const deploymentFile = join(directory, "deployment.yaml");
+  await writeFile(deploymentFile, JSON.stringify(deployment), "utf8");
+  await writeFile(join(directory, "payments.yaml"), JSON.stringify(projectDefinition()), "utf8");
   const tokens = new InMemoryTokenStore();
-  await tokens.set(tokenStoreKey({
-    issuer: definition.auth.issuer,
-    clientId: definition.auth.clientId,
-    audience: definition.auth.audience,
-  }), { accessToken: "access-secret", expiresAt: Date.now() + 60_000 });
+  await tokens.set(tokenStoreKey(deployment.auth), {
+    accessToken: "access-secret",
+    expiresAt: Date.now() + 60_000,
+  });
   return {
     tokens,
-    globals: ["--project", "payments", "--config-dir", directory, "--allow-loopback"],
+    directory,
+    globals: [
+      "--project", "payments",
+      "--config-dir", directory,
+      "--deployment-file", deploymentFile,
+      "--allow-loopback",
+    ],
   };
 }
 
@@ -115,18 +156,8 @@ function requestUrl(input: Parameters<typeof fetch>[0]): string {
 
 function projectDefinition(): ProjectDefinition {
   return {
-    schemaVersion: 2,
     name: "payments",
     revision: 1,
-    controlPlaneUrl: "http://127.0.0.1:8787",
-    auth: {
-      issuer: "https://identity.example.test",
-      clientId: "agentx-client",
-      audience: "agentx-api",
-    },
-    environment: {
-      image: `111122223333.dkr.ecr.us-east-1.amazonaws.com/agentx@sha256:${"a".repeat(64)}`,
-    },
     repositories: [{
       name: "payments",
       url: "https://git.example.test/payments.git",

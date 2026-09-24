@@ -1,6 +1,12 @@
 import { readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { AgentXNameSchema, ProjectDefinitionSchema, agentXError, type ProjectDefinition } from "@agentx/contracts";
+import {
+  AgentXNameSchema,
+  ProjectDefinitionSchema,
+  agentXError,
+  legacyProjectFields,
+  type ProjectDefinition,
+} from "@agentx/contracts";
 import YAML from "yaml";
 
 const MAX_CONFIG_BYTES = 1_048_576;
@@ -32,7 +38,15 @@ export async function loadProjectConfig(options: LoadProjectConfigOptions): Prom
   if (document.errors.length > 0) {
     throw agentXError("CONFIG_INVALID", document.errors[0]?.message ?? "project YAML is invalid");
   }
-  const definition = ProjectDefinitionSchema.parse(document.toJS({ maxAliasCount: 0 }));
+  const contents: unknown = document.toJS({ maxAliasCount: 0 });
+  const retired = legacyProjectFields(contents);
+  if (retired.length > 0) {
+    throw agentXError(
+      "CONFIG_INVALID",
+      `project file must not contain ${retired.join(", ")}; the control-plane URL and login settings now live in the deployment file`,
+    );
+  }
+  const definition = ProjectDefinitionSchema.parse(contents);
   if (definition.name !== projectName) {
     throw agentXError("CONFIG_INVALID", "project filename and definition name must match");
   }
@@ -41,8 +55,7 @@ export async function loadProjectConfig(options: LoadProjectConfigOptions): Prom
 }
 
 function assertHttps(definition: ProjectDefinition): void {
-  const urls = [definition.controlPlaneUrl, definition.auth.issuer, ...definition.repositories.map(({ url }) => url)];
-  if (urls.some((value) => new URL(value).protocol !== "https:")) {
+  if (definition.repositories.some(({ url }) => new URL(url).protocol !== "https:")) {
     throw agentXError("CONFIG_INVALID", "project URLs must use HTTPS outside explicit loopback test mode");
   }
 }

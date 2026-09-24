@@ -327,8 +327,7 @@ async function loadCompleteManifest(
     manifest.schemaVersion !== 2 ||
     !manifest.complete ||
     manifest.projectName !== invocation.payload.project.name ||
-    manifest.projectRevision !== invocation.projectRevision ||
-    manifest.environmentDigest !== invocation.payload.project.environment.image
+    manifest.projectRevision !== invocation.projectRevision
   ) {
     throw agentXError("WORKSPACE_NOT_READY", "workspace preparation manifest is incomplete or stale");
   }

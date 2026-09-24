@@ -15,7 +15,7 @@ describe("local project selection", () => {
     expect(loaded.revision).toBe(1);
   });
 
-  it("rejects traversal, unknown keys and non-HTTPS control planes by default", async () => {
+  it("rejects traversal, unknown keys, retired fields and non-HTTPS repositories by default", async () => {
     const configDirectory = await createFixtureDirectory("agentx-config-");
     await expect(
       loadProjectConfig({ projectName: "../payments", configDirectory }),
@@ -28,11 +28,25 @@ describe("local project selection", () => {
     );
     await expect(loadProjectConfig({ projectName: "payments", configDirectory })).rejects.toThrow();
 
+    // A file still carrying the retired connection fields is named in the error, not ignored.
     await writeFile(
       join(configDirectory, "payments.yaml"),
-      YAML.stringify({ ...projectConfig(), controlPlaneUrl: "http://127.0.0.1:8787" }),
+      YAML.stringify({
+        ...projectConfig(),
+        schemaVersion: 2,
+        controlPlaneUrl: "https://agentx.example.test",
+        auth: { issuer: "https://identity.example.test", clientId: "agentx", audience: "agentx" },
+        environment: { image: `example.test/agentx@sha256:${"a".repeat(64)}` },
+      }),
       "utf8",
     );
+    await expect(loadProjectConfig({ projectName: "payments", configDirectory })).rejects.toThrow(
+      /schemaVersion, controlPlaneUrl, auth, environment/,
+    );
+
+    const loopback = { ...projectConfig() };
+    loopback.repositories = [{ ...loopback.repositories[0]!, url: "http://127.0.0.1/payments.git" }];
+    await writeFile(join(configDirectory, "payments.yaml"), YAML.stringify(loopback), "utf8");
     await expect(loadProjectConfig({ projectName: "payments", configDirectory })).rejects.toThrow(/HTTPS/i);
     await expect(
       loadProjectConfig({ projectName: "payments", configDirectory, allowLoopback: true }),
@@ -54,18 +68,8 @@ describe("local project selection", () => {
 
 function projectConfig() {
   return {
-    schemaVersion: 2,
     name: "payments",
     revision: 1,
-    controlPlaneUrl: "https://agentx.example.test",
-    auth: {
-      issuer: "https://identity.example.test",
-      clientId: "agentx-client",
-      audience: "agentx-api",
-    },
-    environment: {
-      image: `111122223333.dkr.ecr.us-east-1.amazonaws.com/agentx@sha256:${"a".repeat(64)}`,
-    },
     repositories: [
       {
         name: "payments",

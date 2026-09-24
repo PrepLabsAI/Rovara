@@ -158,18 +158,8 @@ async function createGitFixture(name: string): Promise<{ directory: string; comm
 
 function fixtureProject(repositories: Array<{ name: string; commit: string }>): ProjectDefinition {
   return {
-    schemaVersion: 2,
     name: "payments",
     revision: 1,
-    controlPlaneUrl: "http://127.0.0.1:8787",
-    auth: {
-      issuer: "http://127.0.0.1:9000",
-      clientId: "agentx-local",
-      audience: "agentx",
-    },
-    environment: {
-      image: `registry.example.test/agentx/worker@sha256:${"a".repeat(64)}`,
-    },
     repositories: repositories.map((repository) => ({
       name: repository.name,
       url: `http://127.0.0.1/${repository.name}.git`,

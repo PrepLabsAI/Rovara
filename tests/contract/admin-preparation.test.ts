@@ -157,18 +157,8 @@ function identity(ownerKey: string, isAdministrator: boolean): AuthenticatedIden
 
 function projectDefinition(): ProjectDefinition {
   return {
-    schemaVersion: 2,
     name: "payments",
     revision: 1,
-    controlPlaneUrl: "https://agentx.example.test",
-    auth: {
-      issuer: "https://identity.example.test",
-      clientId: "agentx",
-      audience: "agentx-api",
-    },
-    environment: {
-      image: `111122223333.dkr.ecr.us-east-1.amazonaws.com/agentx@sha256:${"a".repeat(64)}`,
-    },
     repositories: [
       {
         name: "payments",

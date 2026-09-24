@@ -34,7 +34,8 @@ export interface PreparationManifest {
   schemaVersion: 2;
   projectName: string;
   projectRevision: number;
-  environmentDigest: string;
+  /** Written by workers that predate the removal of the project's environment pin. */
+  environmentDigest?: string;
   repositories: Array<{
     name: string;
     path: string;
@@ -177,12 +178,11 @@ async function loadOrCreateManifest(
     if (
       parsed.schemaVersion !== 2 ||
       parsed.projectName !== project.name ||
-      parsed.projectRevision !== project.revision ||
-      parsed.environmentDigest !== project.environment.image
+      parsed.projectRevision !== project.revision
     ) {
       throw agentXError(
         "CONFIG_INVALID",
-        "existing workspace manifest is pinned to a different project revision or environment",
+        "existing workspace manifest is pinned to a different project revision",
       );
     }
     return parsed;
@@ -192,7 +192,6 @@ async function loadOrCreateManifest(
         schemaVersion: 2,
         projectName: project.name,
         projectRevision: project.revision,
-        environmentDigest: project.environment.image,
         repositories: [],
         completedSetupSteps: [],
         readinessResults: [],

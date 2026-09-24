@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
+  AgentXNameSchema,
   WorkspaceDeploymentModeSchema,
   agentXError,
   type ProjectDefinition,
@@ -14,12 +15,14 @@ import { bindSlackChannel, unbindSlackChannel } from "./admin/slack.js";
 import { stopWorkspace } from "./admin/stop.js";
 import { loginWithPkce, tokenStoreKey } from "./auth.js";
 import { loadProjectConfig } from "./config.js";
+import { loadDeploymentSettings, type DeploymentSettings } from "./deployment.js";
 import { formatError, formatSuccess } from "./output.js";
 import { SystemCredentialTokenStore, type TokenStore } from "./token-store.js";
 
 interface GlobalOptions {
   project?: string;
   configDir: string;
+  deploymentFile: string;
   allowLoopback: boolean;
   json: boolean;
 }
@@ -35,8 +38,8 @@ export interface CliDependencies {
   stderr?: TextWriter;
 }
 
-interface AuthenticatedProject {
-  definition: ProjectDefinition;
+interface AuthenticatedDeployment {
+  settings: DeploymentSettings;
   accessToken: string;
 }
 
@@ -54,6 +57,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .version("0.1.0")
     .option("--project <project-name>", "select a locally configured AgentX project")
     .option("--config-dir <directory>", "project configuration directory", join(homedir(), ".agentx/projects"))
+    .option("--deployment-file <path>", "AgentX deployment settings", join(homedir(), ".agentx/deployment.yaml"))
     .option("--allow-loopback", "allow loopback HTTP endpoints for local testing only", false)
     .option("--json", "emit stable machine-readable output", false);
 
@@ -63,16 +67,16 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--callback-port <port>", "fixed loopback callback port registered with the OIDC client", parsePort, 8765)
     .action(async (options: { callbackPort: number }, command: Command) => {
       const globals = globalOptions(command);
-      const definition = await selectedProject(globals);
+      const settings = await deploymentSettings(globals);
       await loginWithPkce({
-        issuer: definition.auth.issuer,
-        clientId: definition.auth.clientId,
-        audience: definition.auth.audience,
+        issuer: settings.auth.issuer,
+        clientId: settings.auth.clientId,
+        audience: settings.auth.audience,
         tokenStore: services.tokenStore,
         fetchImplementation: services.fetchImplementation,
         callbackPort: options.callbackPort,
       });
-      services.stdout.write(formatSuccess({ project: definition.name, authenticated: true }, globals.json));
+      services.stdout.write(formatSuccess({ controlPlaneUrl: settings.controlPlaneUrl, authenticated: true }, globals.json));
     });
 
   const admin = program.command("admin").description("administrator workflows");
@@ -94,10 +98,10 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     }, command: Command) => {
       const globals = globalOptions(command);
       const definition = await projectFromFile(options.file, globals.allowLoopback);
-      const accessToken = await requiredAccessToken(definition, services.tokenStore);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
       const deploymentMode = WorkspaceDeploymentModeSchema.parse(options.deploymentMode);
       const result = await registerProject({
-        controlPlaneUrl: definition.controlPlaneUrl,
+        controlPlaneUrl: settings.controlPlaneUrl,
         accessToken,
         definition,
         runtimeBinding: {
@@ -119,10 +123,10 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .requiredOption("--workspace <workspace-id>", "workspace to stop")
     .action(async (options: { workspace: string }, command: Command) => {
       const globals = globalOptions(command);
-      const authenticated = await authenticateProject(globals, requireProject(globals), services.tokenStore);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
       const result = await stopWorkspace({
-        controlPlaneUrl: authenticated.definition.controlPlaneUrl,
-        accessToken: authenticated.accessToken,
+        controlPlaneUrl: settings.controlPlaneUrl,
+        accessToken,
         workspaceId: options.workspace,
       }, services.fetchImplementation);
       services.stdout.write(formatSuccess(result, globals.json));
@@ -136,13 +140,13 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .requiredOption("--channel <channel-id>", "Slack channel ID, for example C0123456789")
     .action(async (options: { team: string; channel: string }, command: Command) => {
       const globals = globalOptions(command);
-      const authenticated = await authenticateProject(globals, requireProject(globals), services.tokenStore);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
       const result = await bindSlackChannel({
-        controlPlaneUrl: authenticated.definition.controlPlaneUrl,
-        accessToken: authenticated.accessToken,
+        controlPlaneUrl: settings.controlPlaneUrl,
+        accessToken,
         teamId: options.team,
         channelId: options.channel,
-        projectName: authenticated.definition.name,
+        projectName: AgentXNameSchema.parse(requireProject(globals)),
       }, services.fetchImplementation);
       services.stdout.write(formatSuccess(result, globals.json));
     });
@@ -153,10 +157,10 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .requiredOption("--channel <channel-id>", "Slack channel ID")
     .action(async (options: { team: string; channel: string }, command: Command) => {
       const globals = globalOptions(command);
-      const authenticated = await authenticateProject(globals, requireProject(globals), services.tokenStore);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
       const result = await unbindSlackChannel({
-        controlPlaneUrl: authenticated.definition.controlPlaneUrl,
-        accessToken: authenticated.accessToken,
+        controlPlaneUrl: settings.controlPlaneUrl,
+        accessToken,
         teamId: options.team,
         channelId: options.channel,
       }, services.fetchImplementation);
@@ -178,38 +182,18 @@ export async function executeCli(argv = process.argv.slice(2), dependencies: Cli
   }
 }
 
-async function authenticateProject(
+function deploymentSettings(options: GlobalOptions): Promise<DeploymentSettings> {
+  return loadDeploymentSettings({ path: options.deploymentFile, allowLoopback: options.allowLoopback });
+}
+
+async function authenticate(
   options: GlobalOptions,
-  projectName: string,
   tokenStore: TokenStore,
-): Promise<AuthenticatedProject> {
-  const definition = await loadProjectConfig({
-    projectName,
-    configDirectory: options.configDir,
-    allowLoopback: options.allowLoopback,
-  });
-  return { definition, accessToken: await requiredAccessToken(definition, tokenStore) };
-}
-
-async function selectedProject(options: GlobalOptions): Promise<ProjectDefinition> {
-  return loadProjectConfig({
-    projectName: requireProject(options),
-    configDirectory: options.configDir,
-    allowLoopback: options.allowLoopback,
-  });
-}
-
-async function requiredAccessToken(definition: ProjectDefinition, tokenStore: TokenStore): Promise<string> {
-  const key = tokenStoreKey({
-    issuer: definition.auth.issuer,
-    clientId: definition.auth.clientId,
-    audience: definition.auth.audience,
-  });
-  const tokens = await tokenStore.get(key);
-  if (!tokens || tokens.expiresAt <= Date.now()) {
-    throw agentXError("AUTH_REQUIRED", `run agentx login --project ${definition.name}`);
-  }
-  return tokens.accessToken;
+): Promise<AuthenticatedDeployment> {
+  const settings = await deploymentSettings(options);
+  const tokens = await tokenStore.get(tokenStoreKey(settings.auth));
+  if (!tokens || tokens.expiresAt <= Date.now()) throw agentXError("AUTH_REQUIRED", "run agentx login");
+  return { settings, accessToken: tokens.accessToken };
 }
 
 async function projectFromFile(path: string, allowLoopback: boolean): Promise<ProjectDefinition> {

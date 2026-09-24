@@ -6,23 +6,17 @@ import {
   PullRequestLifecycleRequestSchema,
   PullRequestLifecycleResultSchema,
   ProjectDefinitionSchema,
+  StoredProjectDefinitionSchema,
   WorkerInvocationSchema,
+  legacyProjectFields,
   WorkspaceInstanceSchema,
 } from "../../packages/contracts/src/index.js";
 
 const digest = `registry.example.com/payments@sha256:${"a".repeat(64)}`;
 function projectDefinition() {
   return {
-    schemaVersion: 2,
     name: "payments",
     revision: 1,
-    controlPlaneUrl: "https://agentx.example.com",
-    auth: {
-      issuer: "https://identity.example.com",
-      clientId: "agentx-cli",
-      audience: "agentx",
-    },
-    environment: { image: digest },
     repositories: [
       {
         name: "api",
@@ -41,6 +35,79 @@ function projectDefinition() {
 describe("strict contracts", () => {
   it("accepts a valid versioned project", () => {
     expect(ProjectDefinitionSchema.parse(projectDefinition()).name).toBe("payments");
+  });
+
+  it("rejects the retired connection and environment fields, and names them for a caller", () => {
+    const legacy = {
+      ...projectDefinition(),
+      schemaVersion: 2,
+      controlPlaneUrl: "https://agentx.example.test",
+      auth: { issuer: "https://identity.example.test", clientId: "agentx", audience: "agentx" },
+      environment: { image: digest },
+    };
+    expect(() => ProjectDefinitionSchema.parse(legacy)).toThrow();
+    expect(legacyProjectFields(legacy)).toEqual([
+      "schemaVersion",
+      "controlPlaneUrl",
+      "auth",
+      "environment",
+    ]);
+    expect(legacyProjectFields(projectDefinition())).toEqual([]);
+
+    // A definition registered before the removal still loads, without those fields.
+    const stored = StoredProjectDefinitionSchema.parse(legacy);
+    expect(stored).toEqual(projectDefinition());
+  });
+
+  it("drops the environment pin from a workspace record written before it was removed", () => {
+    const now = new Date().toISOString();
+    const workspace = WorkspaceInstanceSchema.parse({
+      id: crypto.randomUUID(),
+      ownerKey: "a".repeat(64),
+      projectName: "payments",
+      projectRevision: 1,
+      environmentDigest: digest,
+      runtimeArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/agentx",
+      endpointQualifier: "DEFAULT",
+      runtimeSessionId: crypto.randomUUID(),
+      deploymentMode: "demo-microvm",
+      rootPath: "/mnt/workspace",
+      status: "READY",
+      fence: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+    expect(workspace).not.toHaveProperty("environmentDigest");
+    expect(workspace.projectRevision).toBe(1);
+  });
+
+  it("accepts a worker invocation from a broker that still sends the retired fields", () => {
+    // The release deploys the runtime before the control plane, so a new worker briefly receives
+    // definitions from the old broker.
+    const operationId = crypto.randomUUID();
+    const invocation = WorkerInvocationSchema.parse({
+      protocolVersion: 1,
+      kind: "publish",
+      operationId,
+      workspaceId: crypto.randomUUID(),
+      fence: 2,
+      projectRevision: 1,
+      callbackCapability: "c".repeat(64),
+      payload: {
+        project: {
+          ...projectDefinition(),
+          schemaVersion: 2,
+          controlPlaneUrl: "https://agentx.example.test",
+          auth: { issuer: "https://identity.example.test", clientId: "agentx", audience: "agentx" },
+          environment: { image: digest },
+        },
+        repository: "api",
+        title: "Publish API change",
+        headBranch: `agentx/${operationId}`,
+        repositoryGrant: "signed-grant",
+      },
+    });
+    expect(invocation.payload).toMatchObject({ project: projectDefinition() });
   });
 
   it("accepts optional CodeBuild gates and rejects unsafe or duplicate projects", () => {

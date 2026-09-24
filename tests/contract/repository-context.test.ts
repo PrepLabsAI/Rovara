@@ -166,7 +166,6 @@ async function workspace(): Promise<string> {
   await writeFile(
     join(rootPath, ".agentx/preparation-manifest.json"),
     JSON.stringify({
-      schemaVersion: 2,
       projectName: "payments",
       projectRevision: 1,
       environmentDigest: `registry.example.test/worker@sha256:${"a".repeat(64)}`,
