@@ -771,12 +771,12 @@ function parseSlackHeaders(headers: Record<string, string | undefined>): Omit<No
 
 /**
  * A Slack display name from the orchestrator, percent-encoded. Control characters and the zero-width
- * and bidi format characters become spaces; U+200D (ZWJ) stays so emoji sequences survive.
+ * and bidi format characters become spaces; U+200C and U+200D (ZWNJ, ZWJ) stay because scripts and emoji sequences need them.
  */
 function displayName(value: string | undefined): string | undefined {
   if (!value || value.length > 1024) return undefined;
   try {
-    const name = Array.from(decodeURIComponent(value).replace(/[\p{Cc}\u200B\u200E\u200F\u202A-\u202E\u2066-\u2069\uFEFF]+/gu, " ").replace(/\s+/g, " ").trim()).slice(0, 80).join("");
+    const name = Array.from(decodeURIComponent(value).replace(/[\p{Cc}\u061C\u200B\u200E\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]+/gu, " ").replace(/\s+/g, " ").trim()).slice(0, 80).join("");
     return name.length > 0 ? name : undefined;
   } catch { return undefined; }
 }

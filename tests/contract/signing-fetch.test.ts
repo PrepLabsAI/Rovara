@@ -32,6 +32,12 @@ describe("signed service fetch", () => {
     expect(sent()).toBe("a b c d e f g h i");
   });
 
+  it("removes the Arabic letter mark and the invisible operators but keeps the zero-width non-joiner", async () => {
+    const baseFetch = vi.fn<typeof fetch>(async () => Response.json({}));
+    await createSignedServiceFetch({ region: "us-east-1", credentials, thread, userId: "U0123456789", userName: "a\u061Cb\u2060c\u2061d\u2064e\u200Cf", baseFetch })("https://agentx.example.test/v1/threads/workspace", { method: "POST", body: "{}" });
+    expect(decodeURIComponent(new Headers(baseFetch.mock.lastCall?.[1]?.headers).get("x-agentx-slack-user-name")!)).toBe("a b c d e\u200Cf");
+  });
+
   it("omits the display name instead of failing when it cannot be encoded", async () => {
     const baseFetch = vi.fn<typeof fetch>(async () => Response.json({}));
     const response = await createSignedServiceFetch({ region: "us-east-1", credentials, thread, userId: "U0123456789", userName: "bad\uD800name", baseFetch })("https://agentx.example.test/v1/threads/workspace", { method: "POST", body: "{}" });

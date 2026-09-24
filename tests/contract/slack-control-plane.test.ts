@@ -329,6 +329,10 @@ describe("hosted Slack GitHub MCP", () => {
       headers: { "x-agentx-slack-user-name": encodeURIComponent(`${family}\u202E\u200Bx`) },
       body: { requestId: randomUUID(), scope: "demo", tool: "issue_write", schemaHash: catalog.tools[0]!.scopes[0]!.schemaHash, arguments: { title: "Bug", body: "Steps" } } });
     expect(invoke).toHaveBeenLastCalledWith("issue_write", expect.objectContaining({ body: `Steps\n\n—\nRequested by \`${family} x\` via AgentX · ${threadUrl}` }));
+    await call(handler, { method: "POST", path: `${path}/call`, service,
+      headers: { "x-agentx-slack-user-name": encodeURIComponent("a\u061Cb\u2060c\u200Cd") },
+      body: { requestId: randomUUID(), scope: "demo", tool: "issue_write", schemaHash: catalog.tools[0]!.scopes[0]!.schemaHash, arguments: { title: "Bug", body: "Steps" } } });
+    expect(invoke).toHaveBeenLastCalledWith("issue_write", expect.objectContaining({ body: `Steps\n\n—\nRequested by \`a b c\u200Cd\` via AgentX · ${threadUrl}` }));
   });
 
   it("ignores a deployment-level attribution when the connector turns attribution off, on both GitHub routes", async () => {

@@ -158,8 +158,9 @@ Rules:
   unavailable (no scope, timeout, or lookup failure) the footer reads ``Requested by `Slack member
   <user ID>` via AgentX · …`` instead.
 - The name is sanitized before it reaches the footer: percent-decoded, control characters and the
-  zero-width/bidi format characters (U+200B, U+200E, U+200F, U+202A–U+202E, U+2066–U+2069, U+FEFF)
-  turned into spaces (U+200D, the zero-width joiner, is kept so emoji sequences survive),
+  zero-width/bidi format characters (U+061C, U+200B, U+200E, U+200F, U+202A–U+202E, U+2060–U+2064, U+2066–U+2069, U+FEFF)
+  turned into spaces (U+200C and U+200D, the zero-width non-joiner and joiner, are kept because scripts and emoji
+  sequences need them),
   whitespace collapsed and trimmed, truncated to 80 Unicode code points without splitting a
   surrogate pair. The name (or the member-ID fallback) is then rendered as a GFM code
   span, so GitHub shows it literally — no mention, link, bare-URL autolink, HTML or `#1`/`GH-2`

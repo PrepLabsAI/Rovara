@@ -6,8 +6,8 @@ type Credentials = ConstructorParameters<typeof SignatureV4>[0]["credentials"];
 
 /** At most 80 characters (code points, so an emoji is never split); a name that cannot be encoded is omitted. */
 function encodedDisplayName(name: string): string | undefined {
-  // Control characters plus the zero-width and bidi format characters; U+200D (ZWJ) stays so emoji sequences survive.
-  const clean = name.replace(/[\p{Cc}\u200B\u200E\u200F\u202A-\u202E\u2066-\u2069\uFEFF]+/gu, " ").replace(/\s+/g, " ").trim();
+  // Control characters plus the zero-width and bidi format characters; U+200C and U+200D (ZWNJ, ZWJ) stay because scripts and emoji sequences need them.
+  const clean = name.replace(/[\p{Cc}\u061C\u200B\u200E\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]+/gu, " ").replace(/\s+/g, " ").trim();
   try {
     return encodeURIComponent(Array.from(clean).slice(0, 80).join("")) || undefined;
   } catch { return undefined; }
