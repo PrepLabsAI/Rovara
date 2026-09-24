@@ -568,6 +568,7 @@ async function registerProject(
   // Preflight contacts the vendor, so it runs only when the caller asks; older clients never do.
   const wantsPreflight = input.preflight === true;
   const budget = toolBudget(approvedToolCount(definition));
+  const connectors = () => resolveConnectors(definition, connectorTypeContext(dependencies), dependencies.connectorTypes);
   const respond = (project: Omit<RegisteredProjectRecord, "pk" | "sk">, duplicate: boolean, preflight: RegistrationPreflight | undefined) => {
     const warnings = registrationWarnings(budget.warning, preflight);
     return {
@@ -587,7 +588,7 @@ async function registerProject(
     }
     // A revision stored before the static checks existed stays idempotent: report, never refuse.
     const preflight = checked?.report
-      ?? (wantsPreflight ? (await preflightConnectors(definition, dependencies.githubMcp, identity.ownerKey)).report : undefined);
+      ?? (wantsPreflight ? (await preflightConnectors(connectors(), definition, identity.ownerKey)).report : undefined);
     return respond(withoutKeys(existing), true, preflight);
   }
   const nameProblems = presentedNameProblems(definition);
@@ -595,7 +596,7 @@ async function registerProject(
   if (budget.refusal) throw agentXError("CONFIG_INVALID", budget.refusal);
   let preflight: RegistrationPreflight | undefined;
   if (wantsPreflight) {
-    const result = await preflightConnectors(definition, dependencies.githubMcp, identity.ownerKey);
+    const result = await preflightConnectors(connectors(), definition, identity.ownerKey);
     if (result.refusals.length > 0) throw agentXError("CONFIG_INVALID", result.refusals.join("; "));
     preflight = result.report;
   }

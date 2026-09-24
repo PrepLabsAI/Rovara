@@ -2,9 +2,13 @@ import { createHash } from "node:crypto";
 import { IN_HOUSE_TOOL_COUNT, ProjectDefinitionSchema, TOOL_LIMIT, TOOL_WARNING_THRESHOLD } from "@agentx/contracts";
 import { TARGET_CONFLICT_REASON } from "@agentx/gateway";
 import { describe, expect, it, vi } from "vitest";
+import { resolveConnectors } from "../../packages/broker/src/aws/connector-types.js";
+import { CredentialRegistry } from "../../packages/broker/src/aws/credentials.js";
+import { preflightConnectors } from "../../packages/broker/src/aws/registration-preflight.js";
 import type { GitHubMcpDependencies } from "../../packages/broker/src/github-mcp.js";
 import { adminCall, adminIssuer, createAdminBroker, type AdminHandler } from "../support/admin-broker.js";
-import type { FakeDynamoDb } from "../support/fake-dynamodb.js";
+import { FakeDynamoDb } from "../support/fake-dynamodb.js";
+import { trackerConnectorType } from "../support/tracker-connector.js";
 
 const account = "111122223333";
 
@@ -130,6 +134,53 @@ describe("registration preflight", () => {
     const registeredWithPreflight = await register(preflightHandler, githubConnector(["list_issues"]), { preflight: true });
     expect(registeredWithPreflight.status).toBe(201);
     expect(registeredWithPreflight.body.tools).toEqual({ maximum: IN_HOUSE_TOOL_COUNT + 1, warnAbove: TOOL_WARNING_THRESHOLD, limit: TOOL_LIMIT });
+  });
+});
+
+describe("registration preflight across connector types", () => {
+  it("reports a resolved tracker connector alongside github, unchanged, moving from not connected to connected as its credential registers", async () => {
+    const project = ProjectDefinitionSchema.parse(definition(githubConnector(["list_issues"])));
+    const [github] = resolveConnectors(project, { githubMcp: vendor([plainTool("list_issues")]) });
+    expect(github).toBeDefined();
+
+    const db = new FakeDynamoDb();
+    const credentialRegistry = new CredentialRegistry({
+      documentClient: db as never, tableName: "state",
+      secrets: { read: vi.fn(async (name: string) => (name === "agentx/connectors/tracker-key" ? JSON.stringify({ apiKey: "tracker-api-key-value" }) : undefined)) },
+      githubApp: { ref: "github-app", secretName: "agentx/connectors/github-app" },
+    });
+    const trackerConfig = {
+      name: "tracker", type: "tracker", credentialRef: "tracker-key",
+      scopes: [{ alias: "site", siteId: "site-1" }],
+      tools: [{ name: "list_items", access: "read" }],
+    };
+    const resolved = trackerConnectorType.resolve(trackerConfig, project, { credentialRegistry });
+    if ("unusable" in resolved) throw new Error(resolved.unusable);
+    const connect = vi.fn(async () => ({
+      tools: [{ name: "list_items", description: "List items on a site", inputSchema: { type: "object", properties: { siteId: { type: "string" } }, required: ["siteId"] } }],
+      call: vi.fn(), close: async () => undefined,
+    }));
+    const tracker = { ...resolved, connect: connect as never };
+
+    const before = await preflightConnectors([github!, tracker], project, "owner-key");
+    expect(before.refusals).toEqual([]);
+    expect(before.report.connectors).toEqual([
+      { name: "github", status: "connected", offered: ["github__list_issues"], skipped: [] },
+      { name: "tracker", status: "not_connected", problem: "credential tracker-key is not registered", offered: [], skipped: [] },
+    ]);
+
+    db.set({
+      pk: "CREDENTIALS", sk: "REF#tracker-key", entityType: "CREDENTIAL", ref: "tracker-key", type: "static-secret",
+      secretName: "agentx/connectors/tracker-key", registeredBy: "admin", registeredAt: "2026-09-01T00:00:00.000Z",
+    });
+
+    const after = await preflightConnectors([github!, tracker], project, "owner-key");
+    expect(after.refusals).toEqual([]);
+    expect(after.report.connectors).toEqual([
+      { name: "github", status: "connected", offered: ["github__list_issues"], skipped: [] },
+      { name: "tracker", status: "connected", offered: ["tracker__list_items"], skipped: [] },
+    ]);
+    expect(connect).toHaveBeenCalledTimes(1);
   });
 });
 
