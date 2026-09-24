@@ -73,6 +73,18 @@ export class GitHubAppCredentialProvider {
     return { username: "x-access-token", password: token };
   }
 
+  async issueCredentials(
+    repository: { credentialRef: string; url: string },
+    access: "read" | "write",
+  ): Promise<{ owner: string; repo: string; token: string }> {
+    if (repository.credentialRef !== this.options.credentialRef) {
+      throw agentXError("FORBIDDEN", "repository does not use the configured GitHub App");
+    }
+    const parsed = parseGitHubRepository(repository.url, this.options.account);
+    const token = await this.createInstallationToken(parsed.name, { issues: access });
+    return { owner: this.options.account, repo: parsed.name, token };
+  }
+
   async reconcilePullRequest(input: GitHubPullRequestInput): Promise<GitHubPullRequestResult> {
     const repository = parseGitHubRepository(input.repositoryUrl, this.options.account);
     // GitHub's pull-request endpoint needs to resolve the private repository's
@@ -192,6 +204,8 @@ export class GitHubAppCredentialProvider {
           repositories: [repositoryName],
           permissions,
         }),
+        signal: AbortSignal.timeout(5_000),
+        redirect: "error",
       },
     );
     if (!response.ok) {

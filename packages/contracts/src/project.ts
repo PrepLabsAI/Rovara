@@ -1,5 +1,6 @@
 import { posix } from "node:path";
 import { z } from "zod";
+import { GitHubMcpPolicySchema } from "./github-mcp.js";
 
 export const AGENTX_NAME_PATTERN = /^[a-z][a-z0-9-]{0,62}$/;
 export const OCI_DIGEST_PATTERN = /@sha256:[a-f0-9]{64}$/;
@@ -138,6 +139,7 @@ export const ProjectDefinitionSchema = z
     setup: z.array(ProjectCommandSchema).max(64),
     readiness: z.array(ProjectCommandSchema).max(64),
     orchestratorInstructions: z.string().min(1).max(32_768),
+    integrations: z.object({ githubMcp: GitHubMcpPolicySchema.optional() }).strict().optional(),
   })
   .strict()
   .superRefine((project, context) => {

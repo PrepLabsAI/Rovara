@@ -1,5 +1,8 @@
 import {
   AgentXErrorCodeSchema,
+  GitHubMcpResultSchema,
+  GitHubMcpCatalogSchema,
+  type GitHubMcpRequest,
   OperationSchema,
   agentXError,
   type Operation,
@@ -33,6 +36,21 @@ export class ControlPlaneApi implements OrchestrationApi, OperationPollingTransp
       throw agentXError("RUNTIME_UNAVAILABLE", "control plane returned an invalid conversation");
     }
     return { id: conversation.id, workspaceId: conversation.workspaceId };
+  }
+
+  async discoverGitHubTools(input: { workspaceId: string; repository: string }) {
+    this.assertWorkspace(input.workspaceId);
+    const response = object(await this.request(`/v1/workspaces/${this.workspaceId}/github/tools?repository=${encodeURIComponent(input.repository)}`, { method: "GET" }));
+    return GitHubMcpCatalogSchema.parse(response.catalog);
+  }
+
+  async callGitHubTool(input: GitHubMcpRequest & { workspaceId: string }) {
+    this.assertWorkspace(input.workspaceId);
+    const { workspaceId, ...body } = input;
+    const response = object(await this.request(`/v1/workspaces/${workspaceId}/github/call`, {
+      method: "POST", body: JSON.stringify(body),
+    }));
+    return GitHubMcpResultSchema.parse(response.result);
   }
 
   async submitTask(input: {

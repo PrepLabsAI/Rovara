@@ -1,3 +1,6 @@
+<!-- Sync impact: 1.2.0 -> 1.3.0. Principle I permits project-approved third-party issue
+tools through the authenticated control plane. Repository code/file and shell access remains
+worker-only. Design and verification are recorded in specs/007-github-mcp/. -->
 <!-- Sync impact: 1.1.0 -> 1.2.0 (adds a hosted Slack orchestrator with thread-owned workspaces).
 Principles modified: I. Orchestration-only clients, remote coding (renamed; the boundary now covers
 the hosted Slack orchestrator); III. Shared definitions, isolated instances (adds Slack thread
@@ -13,7 +16,10 @@ Follow-up TODOs: specify the hosted Slack orchestrator as its own Spec Kit featu
 ### I. Orchestration-only clients, remote coding
 
 Orchestrators, meaning the local pi-based client and the hosted Slack orchestrator, MUST expose
-only orchestration capabilities to their agents. Repository inspection, editing, shell execution,
+only orchestration capabilities and administrator-enabled third-party issue tools mediated by
+the authenticated control plane to their agents. Those issue tools MUST enforce project and
+repository scope, keep credentials out of model context, and deduplicate writes durably.
+Repository code inspection, editing, shell execution,
 builds, and tests MUST run in remote coding workers. Tool registration and extension loading MUST
 enforce this boundary; prompts alone are insufficient. Local configuration and client-state I/O
 are permitted. The hosted Slack orchestrator MAY run unattended. It MUST accept only requests that
@@ -93,4 +99,4 @@ Amendments MUST identify changed principles and update affected specifications a
 Use semantic versioning: major for incompatible principles, minor for new principles, patch
 for clarifications. Reviewers MUST identify and resolve violations before declaring delivery complete.
 
-**Version**: 1.2.0 | **Ratified**: 2026-09-17 | **Last Amended**: 2026-09-23
+**Version**: 1.3.0 | **Ratified**: 2026-09-17 | **Last Amended**: 2026-09-23
