@@ -66,6 +66,7 @@ import { GitHubAppCredentialProvider, privateKeyFromSecret } from "../github-app
 import { CatalogCache, ConnectorNotConnected, presentCatalog, type ScopeCatalog } from "@agentx/gateway";
 import { discoverGitHubTools, executeGitHubConnectorTool, executeGitHubTool, type GitHubMcpCatalog, type GitHubMcpDependencies } from "../github-mcp.js";
 import { DynamoConnectorLedger, GITHUB_LEDGER } from "./connector-ledger.js";
+import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
 import { RepositoryGrantService } from "../repository-access.js";
 import { publicWorkspace } from "../workspaces.js";
@@ -210,10 +211,17 @@ interface AwsBrokerDependencies {
   slack?: SlackServiceConfiguration;
   githubMcp?: GitHubMcpDependencies;
   catalogs: CatalogCache<GitHubMcpCatalog>;
+  credentialRegistry?: CredentialRegistry;
 }
 
-/** What callers supply; the handler creates the per-container catalog cache when none is given. */
-export type AwsBrokerInput = Omit<AwsBrokerDependencies, "catalogs"> & { catalogs?: CatalogCache<GitHubMcpCatalog> };
+/**
+ * What callers supply; the handler creates the per-container catalog cache when none is given, and
+ * the credential registry from `connectorCredentials` unless one is injected.
+ */
+export type AwsBrokerInput = Omit<AwsBrokerDependencies, "catalogs"> & {
+  catalogs?: CatalogCache<GitHubMcpCatalog>;
+  connectorCredentials?: ConnectorCredentialsConfiguration;
+};
 
 interface SlackServiceConfiguration {
   orchestratorRoleArn: string;
@@ -225,7 +233,15 @@ type TransactItems = NonNullable<TransactWriteCommandInput["TransactItems"]>;
 
 export function createAwsBrokerHandler(input: AwsBrokerInput) {
   // One cache per container: discovery per revision, connector and repository costs one vendor round trip.
-  const dependencies: AwsBrokerDependencies = { ...input, catalogs: input.catalogs ?? new CatalogCache<GitHubMcpCatalog>({ ttlMs: 600_000, maxEntries: 256 }) };
+  const { connectorCredentials, ...rest } = input;
+  const credentialRegistry = input.credentialRegistry ?? (connectorCredentials
+    ? new CredentialRegistry({ ...connectorCredentials, documentClient: input.documentClient, tableName: input.tableName })
+    : undefined);
+  const dependencies: AwsBrokerDependencies = {
+    ...rest,
+    catalogs: input.catalogs ?? new CatalogCache<GitHubMcpCatalog>({ ttlMs: 600_000, maxEntries: 256 }),
+    ...(credentialRegistry ? { credentialRegistry } : {}),
+  };
   if (Buffer.byteLength(dependencies.callbackSigningKey, "utf8") < 32) {
     throw new Error("CALLBACK_SIGNING_KEY must contain at least 32 bytes");
   }
@@ -282,6 +298,13 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
 
       if (request.method === "POST" && url.pathname === "/v1/admin/projects") {
         return json(await registerProject(dependencies, identity, body), request.requestId, 201);
+      }
+      if (url.pathname === "/v1/admin/credentials" && (request.method === "POST" || request.method === "GET")) {
+        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+        if (!dependencies.credentialRegistry) throw agentXError("RUNTIME_UNAVAILABLE", "connector credentials are not configured in this deployment");
+        return request.method === "POST"
+          ? json(await dependencies.credentialRegistry.register(identity, body), request.requestId, 201)
+          : json(await dependencies.credentialRegistry.list(identity), request.requestId);
       }
       if (request.method === "POST" && url.pathname === "/v1/admin/workspaces/prepare") {
         return json(await prepareWorkspace(dependencies, identity, body), request.requestId, 202);
@@ -3216,6 +3239,10 @@ export const handler = createAwsBrokerHandler({
   repositoryGrants,
   githubPullRequests: githubCredentials,
   githubMcp: { credentials: (repository, access) => githubCredentials.issueCredentials(repository, access) },
+  connectorCredentials: {
+    secrets: secretsManagerSource(secretsManager),
+    githubApp: { ref: requiredEnvironment("GITHUB_APP_CREDENTIAL_REF"), secretName: githubPrivateKeySecretArn },
+  },
   codeBuild,
   ...(process.env.SLACK_ORCHESTRATOR_ROLE_ARN
     ? {

@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import {
+  ArnFormat,
   CfnOutput,
   CfnParameter,
   Duration,
@@ -110,6 +111,10 @@ export class ControlPlaneStack extends Stack {
     broker.addToRolePolicy(new iam.PolicyStatement({
       actions: ["secretsmanager:GetSecretValue"],
       resources: [githubAppPrivateKeySecretArn.valueAsString],
+    }));
+    broker.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["secretsmanager:GetSecretValue"],
+      resources: [this.formatArn({ service: "secretsmanager", resource: "secret", resourceName: "agentx/connectors/*", arnFormat: ArnFormat.COLON_RESOURCE_NAME })],
     }));
     broker.addToRolePolicy(new iam.PolicyStatement({
       actions: ["codebuild:StartBuild", "codebuild:BatchGetBuilds"],
