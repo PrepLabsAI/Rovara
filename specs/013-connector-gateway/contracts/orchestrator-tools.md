@@ -65,6 +65,12 @@ not connected for this channel and do not attempt a workaround.
 Closing this thread's workspace is a command, not a tool: the user writes "close this workspace".
 ```
 
+When a connected connector's tool discovery fails for this turn (for example the broker returns
+`RUNTIME_UNAVAILABLE`), the orchestrator registers no tools for it and continues with the in-house
+tools and every other connector; the manifest lists that connector on its own line, before "Not
+connected for this channel", as `Temporarily unavailable: <label>. Tell the user it is temporarily
+unavailable and continue with the rest.`
+
 Phase 2b inserts a rename table between the close-command line and the end of the manifest once
 `agentx_manage_pull_request` retires the seven lifecycle tools, for example: "Renamed tools:
 agentx_append_pull_request is now agentx_manage_pull_request with action "append" (likewise
