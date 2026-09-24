@@ -8,6 +8,7 @@ export function createHostedSlackRuntime(input: TurnInput, options: Pick<Orchest
     projectInstructions: input.orchestratorInstructions,
     context: { workspaceId: input.workspaceId, conversationId: input.conversationId },
     requestId: input.requestId,
-    ...(input.githubMcpRepositories === undefined ? {} : { githubMcpRepositories: input.githubMcpRepositories }),
+    ...(input.connectors === undefined ? {} : { connectors: input.connectors }),
+    ...(input.repositories === undefined ? {} : { repositories: input.repositories }),
   });
 }

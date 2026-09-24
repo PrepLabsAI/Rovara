@@ -96,7 +96,7 @@ function threadApi(message: SlackRequestMessage): ThreadServiceApi {
       const response = await signedFetch(`${controlPlaneUrl}/v1/threads/workspace`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ requestId, includeIntegrations: true, includeSettingsRevision: true }),
+        body: JSON.stringify({ requestId, includeIntegrations: true, includeSettingsRevision: true, includeConnectors: true }),
       });
       const body = await response.json() as Record<string, unknown>;
       if (!response.ok) {

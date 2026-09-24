@@ -2,8 +2,7 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { ControlPlaneApi } from "../../packages/orchestrator/src/control-plane-api.js";
 import { ORCHESTRATION_TOOL_NAMES } from "../../packages/orchestrator/src/orchestration-tools.js";
-import { mcpToolName } from "../../packages/orchestrator/src/mcp-tools.js";
-import { GitHubMcpRequestSchema, type GitHubMcpTool } from "../../packages/contracts/src/github-mcp.js";
+import { ConnectorCallRequestSchema, type ConnectorCatalog } from "../../packages/contracts/src/index.js";
 import type { SlackRequestMessage } from "../../packages/contracts/src/slack.js";
 import { processSlackRequest, type ProcessorDependencies } from "../../packages/slack-service/src/processor.js";
 import { createHostedSlackRuntime } from "../../packages/slack-service/src/runtime.js";
@@ -18,9 +17,11 @@ describe("hosted Slack processor and MCP runtime", () => {
       text: "Create a test issue in demo.",
     };
     const workspaceId = randomUUID();
-    const descriptor: GitHubMcpTool = {
-      name: "new_issue_tool", repository: "demo", description: "Discovered native write tool", access: "write", schemaHash: "a".repeat(64),
-      inputSchema: { type: "object", properties: { title: { type: "string" } }, required: ["title"], additionalProperties: false },
+    const catalog: ConnectorCatalog = {
+      connector: "github", skipped: [],
+      tools: [{ name: "github__new_issue_tool", upstreamName: "new_issue_tool", description: "Discovered native write tool.", access: "write",
+        scopes: [{ alias: "demo", schemaHash: "a".repeat(64) }],
+        inputSchema: { type: "object", properties: { title: { type: "string" } }, required: ["title"], additionalProperties: false } }],
     };
     const invocationIds: string[] = [];
     const baseFetch = vi.fn<typeof fetch>(async (url, init) => {
@@ -29,15 +30,14 @@ describe("hosted Slack processor and MCP runtime", () => {
       expect(headers.get("authorization")).toMatch(/^AWS4-HMAC-SHA256/);
       expect(headers.get("x-agentx-slack-user")).toBe(message.userId);
       expect(headers.get("x-agentx-slack-thread")).toBe("T0123456789/C0123456789/1695500000.000001");
-      if (path.pathname.endsWith("/github/tools")) {
-        expect(path.pathname).toBe(`/v1/service/workspaces/${workspaceId}/github/tools`);
-        expect(path.searchParams.get("repository")).toBe("demo");
-        return Response.json({ catalog: { tools: [descriptor] }, requestId: "http-trace" });
+      if (path.pathname.endsWith("/connectors/github/tools")) {
+        expect(path.pathname).toBe(`/v1/service/workspaces/${workspaceId}/connectors/github/tools`);
+        return Response.json({ catalog, requestId: "http-trace" });
       }
-      expect(path.pathname).toBe(`/v1/service/workspaces/${workspaceId}/github/call`);
+      expect(path.pathname).toBe(`/v1/service/workspaces/${workspaceId}/connectors/github/call`);
       if (typeof init?.body !== "string") throw new Error("expected body");
-      const request = GitHubMcpRequestSchema.parse(JSON.parse(init.body));
-      expect(request).toMatchObject({ tool: descriptor.name, repository: "demo", arguments: { title: "From Slack" } });
+      const request = ConnectorCallRequestSchema.parse(JSON.parse(init.body));
+      expect(request).toMatchObject({ tool: "new_issue_tool", scope: "demo", arguments: { title: "From Slack" } });
       const replayed = invocationIds.includes(request.requestId);
       invocationIds.push(request.requestId);
       return Response.json({ requestId: "http-trace", result: { requestId: request.requestId, status: "SUCCEEDED", text: "Issue created", replayed, truncated: false } });
@@ -53,7 +53,8 @@ describe("hosted Slack processor and MCP runtime", () => {
       api: () => ({
         ensureWorkspace: async () => ({
           outcome: "WORKSPACE", workspaceId, status: "READY", operationId: null, created: false,
-          orchestratorInstructions: "Delegate coding.", ...(enabled ? { githubMcpRepositories: ["demo"] } : {}),
+          orchestratorInstructions: "Delegate coding.",
+          repositories: ["demo"], connectors: enabled ? [{ name: "github", type: "github", label: "GitHub issues", scopes: ["demo"], connected: true }] : [],
         }),
         createConversation: async () => randomUUID(), waitForOperation: vi.fn(),
       }),
@@ -64,10 +65,10 @@ describe("hosted Slack processor and MCP runtime", () => {
           model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" },
         });
         try {
-          expect(runtime.session.getActiveToolNames()).toEqual([...ORCHESTRATION_TOOL_NAMES, ...(enabled ? [mcpToolName(descriptor)] : [])]);
+          expect(runtime.session.getActiveToolNames()).toEqual([...ORCHESTRATION_TOOL_NAMES, ...(enabled ? ["github__new_issue_tool"] : [])]);
           if (!enabled) return "Integration is not enabled.";
-          const tool = runtime.session.getToolDefinition(mcpToolName(descriptor))!;
-          expect(tool.parameters).toMatchObject(descriptor.inputSchema);
+          const tool = runtime.session.getToolDefinition("github__new_issue_tool")!;
+          expect(tool.parameters).toMatchObject(catalog.tools[0]!.inputSchema);
           // Reconstructed model turns may emit a different call ID for the same redelivered event.
           const callId = `model-call-${turn++}`;
           await tool.execute(callId, { title: "From Slack" }, undefined, undefined, {} as never);
