@@ -76,3 +76,53 @@ export type ThreadConnector = z.infer<typeof ThreadConnectorSchema>;
 
 export type GitHubConnectorConfig = z.infer<typeof GitHubConnectorSchema>;
 export type ConnectorConfig = z.infer<typeof ConnectorConfigSchema>;
+
+/** Six in-house tools when recovery tools are shown; kept equal to ORCHESTRATION_TOOL_NAMES by a test. */
+export const IN_HOUSE_TOOL_COUNT = 6;
+export const TOOL_WARNING_THRESHOLD = 20;
+export const TOOL_LIMIT = 40;
+
+interface ConnectorApprovals {
+  integrations?: {
+    githubMcp?: { tools: ReadonlyArray<{ name: string }> } | undefined;
+    connectors?: ReadonlyArray<{ name: string; tools: ReadonlyArray<{ name: string }> }> | undefined;
+  } | undefined;
+}
+
+export function approvedToolCount(definition: ConnectorApprovals): number {
+  const legacy = definition.integrations?.githubMcp?.tools.length ?? 0;
+  return legacy + (definition.integrations?.connectors ?? []).reduce((sum, connector) => sum + connector.tools.length, 0);
+}
+
+/** The most tools the model could see: every in-house tool plus every approval. */
+export function toolBudget(approved: number): { maximum: number; warning?: string; refusal?: string } {
+  const maximum = IN_HOUSE_TOOL_COUNT + approved;
+  if (maximum > TOOL_LIMIT) return { maximum, refusal: `this project could expose ${maximum} tools; at most ${TOOL_LIMIT} are allowed. Approve fewer connector tools.` };
+  if (maximum > TOOL_WARNING_THRESHOLD) return { maximum, warning: `the model could see ${maximum} tools; above ${TOOL_WARNING_THRESHOLD}, tool choice gets less reliable. Approve fewer connector tools.` };
+  return { maximum };
+}
+
+export function presentedNameProblems(definition: ConnectorApprovals): string[] {
+  const connectors = definition.integrations?.githubMcp
+    ? [{ name: "github", tools: definition.integrations.githubMcp.tools }]
+    : definition.integrations?.connectors ?? [];
+  return connectors.flatMap((connector) => connector.tools
+    .map((tool) => `${connector.name}__${tool.name}`)
+    .filter((presented) => presented.length > 64)
+    .map((presented) => `connector ${connector.name} tool ${presented.slice(connector.name.length + 2)}: presented name ${presented} exceeds 64 characters`));
+}
+
+export const ConnectorPreflightSchema = z.object({
+  name: ConnectorNameSchema,
+  status: z.enum(["connected", "not_connected", "unavailable"]),
+  problem: z.string().max(512).optional(),
+  offered: z.array(z.string().max(64)).max(40),
+  skipped: z.array(z.object({ tool: z.string().max(64), reason: z.string().max(256) }).strict()).max(64),
+}).strict();
+
+export const RegistrationPreflightSchema = z.object({
+  connectors: z.array(ConnectorPreflightSchema).max(8),
+}).strict();
+
+export type ConnectorPreflight = z.infer<typeof ConnectorPreflightSchema>;
+export type RegistrationPreflight = z.infer<typeof RegistrationPreflightSchema>;

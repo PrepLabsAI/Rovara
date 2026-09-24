@@ -187,4 +187,12 @@ describe("pi orchestration boundary", () => {
     expect(getEvents).toHaveBeenNthCalledWith(2, "operation-1", "next");
     expect(received).toEqual([first, second]);
   });
+
+  it("keeps the shared registration budget in step with the orchestrator", async () => {
+    const { IN_HOUSE_TOOL_COUNT, TOOL_LIMIT } = await import("../../packages/contracts/src/connectors.js");
+    const { ORCHESTRATION_TOOL_NAMES } = await import("../../packages/orchestrator/src/orchestration-tools.js");
+    const { MAX_VISIBLE_TOOLS } = await import("../../packages/orchestrator/src/orchestrator.js");
+    expect(ORCHESTRATION_TOOL_NAMES).toHaveLength(IN_HOUSE_TOOL_COUNT);
+    expect(MAX_VISIBLE_TOOLS).toBe(TOOL_LIMIT);
+  });
 });
