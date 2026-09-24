@@ -1,6 +1,8 @@
 import { posix } from "node:path";
 import { z } from "zod";
 import { GitHubMcpPolicySchema } from "./github-mcp.js";
+import { ConnectorsSchema } from "./connectors.js";
+import type { GitHubMcpPolicy } from "./github-mcp.js";
 
 export const AGENTX_NAME_PATTERN = /^[a-z][a-z0-9-]{0,62}$/;
 export const OCI_DIGEST_PATTERN = /@sha256:[a-f0-9]{64}$/;
@@ -136,7 +138,10 @@ export const ProjectDefinitionSchema = z
     setup: z.array(ProjectCommandSchema).max(64),
     readiness: z.array(ProjectCommandSchema).max(64),
     orchestratorInstructions: z.string().min(1).max(32_768),
-    integrations: z.object({ githubMcp: GitHubMcpPolicySchema.optional() }).strict().optional(),
+    integrations: z.object({
+      githubMcp: GitHubMcpPolicySchema.optional(),
+      connectors: ConnectorsSchema.optional(),
+    }).strict().optional(),
   })
   .strict()
   .superRefine((project, context) => {
@@ -157,6 +162,17 @@ export const ProjectDefinitionSchema = z
       const current = paths[index];
       if (previous && current && (current === previous || current.startsWith(`${previous}/`))) {
         context.addIssue({ code: "custom", path: ["repositories"], message: "repository paths overlap" });
+      }
+    }
+    if (project.integrations?.githubMcp && project.integrations.connectors) {
+      context.addIssue({ code: "custom", path: ["integrations"], message: "use either integrations.githubMcp or integrations.connectors, not both" });
+    }
+    for (const connector of project.integrations?.connectors ?? []) {
+      if (connector.scopes === "all-repositories") continue;
+      for (const name of connector.scopes) {
+        if (!names.has(name)) {
+          context.addIssue({ code: "custom", path: ["integrations", "connectors"], message: `connector ${connector.name} scopes unregistered repository ${name}` });
+        }
       }
     }
   });
@@ -183,3 +199,27 @@ function withoutFields(value: unknown, fields: readonly string[]): unknown {
 export type ProjectDefinition = z.infer<typeof ProjectDefinitionSchema>;
 export type ProjectCommand = z.infer<typeof ProjectCommandSchema>;
 export type CodeBuildGateDefinition = z.infer<typeof CodeBuildGateDefinitionSchema>;
+
+export type RepositoryDefinition = z.infer<typeof RepositoryDefinitionSchema>;
+
+export interface ResolvedGitHubConnector {
+  name: string;
+  repositories: RepositoryDefinition[];
+  policy: GitHubMcpPolicy;
+}
+
+/**
+ * The project's GitHub connector from either configuration form. Definitions registered with the
+ * feature 007 `githubMcp` policy read as a connector named `github` over every repository.
+ */
+export function githubConnectorOf(project: Pick<ProjectDefinition, "repositories" | "integrations">): ResolvedGitHubConnector | undefined {
+  const legacy = project.integrations?.githubMcp;
+  if (legacy) return { name: "github", repositories: project.repositories, policy: legacy };
+  const connector = project.integrations?.connectors?.find((entry) => entry.type === "github");
+  if (!connector) return undefined;
+  const scopes = connector.scopes;
+  const repositories = scopes === "all-repositories"
+    ? project.repositories
+    : project.repositories.filter((repository) => scopes.includes(repository.name));
+  return { name: connector.name, repositories, policy: { tools: connector.tools } };
+}
