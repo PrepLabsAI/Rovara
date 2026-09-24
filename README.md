@@ -156,9 +156,11 @@ run in parallel.
 #### GitHub MCP through hosted Slack
 
 The control plane connects to GitHub's hosted MCP server, discovers its tools with `tools/list`,
-and exposes only tools approved in the registered project revision. The orchestrator registers
-their discovered descriptions and JSON schemas through one generic bridge; no per-tool GitHub
-implementations are needed. Calls go orchestrator → control plane → GitHub MCP, without a worker.
+and exposes only tools approved in the registered project revision. The orchestrator sees each
+approved tool once, as `github__<tool>`, with a `target` argument naming the repository when the
+connector covers several. Its instructions open with a list of what the channel can do and which
+integrations are not connected. Calls go orchestrator → control plane → GitHub MCP, without a
+worker.
 
 See [GitHub MCP setup and policy example](specs/007-github-mcp/quickstart.md). The policy can be
 written as `integrations.githubMcp` or, since feature 013, as a `github` entry in
