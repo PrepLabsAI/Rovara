@@ -10,6 +10,7 @@ import {
   type ProjectDefinition,
 } from "@agentx/contracts";
 import { Command } from "commander";
+import { listCredentials, registerCredential } from "./admin/credential.js";
 import { registerProject } from "./admin/register.js";
 import { bindSlackChannel, unbindSlackChannel } from "./admin/slack.js";
 import { stopWorkspace } from "./admin/stop.js";
@@ -165,6 +166,27 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         channelId: options.channel,
       }, services.fetchImplementation);
       services.stdout.write(formatSuccess(result, globals.json));
+    });
+
+  const adminCredential = admin.command("credential").description("register connector credentials stored in Secrets Manager under agentx/connectors/");
+  adminCredential
+    .command("register")
+    .description("register or replace a credential reference; the secret must already exist")
+    .requiredOption("--ref <reference>", "credential reference used by connectors' credentialRef")
+    .requiredOption("--type <type>", "static-secret or oauth-client-credentials")
+    .requiredOption("--secret <name>", "Secrets Manager secret name, agentx/connectors/<name>")
+    .action(async (options: { ref: string; type: string; secret: string }, command: Command) => {
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      services.stdout.write(formatSuccess(await registerCredential({ controlPlaneUrl: settings.controlPlaneUrl, accessToken, ref: options.ref, type: options.type, secretName: options.secret }, services.fetchImplementation), globals.json));
+    });
+  adminCredential
+    .command("list")
+    .description("list credential references, types, secret names and whether a token is cached; never secret values")
+    .action(async (_options: unknown, command: Command) => {
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      services.stdout.write(formatSuccess(await listCredentials({ controlPlaneUrl: settings.controlPlaneUrl, accessToken }, services.fetchImplementation), globals.json));
     });
 
   return program;
