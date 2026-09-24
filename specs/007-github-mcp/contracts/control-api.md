@@ -1,7 +1,15 @@
 # GitHub MCP API
 
-Both routes require AgentX JWT authentication, workspace ownership and project membership.
-The server loads the workspace's registered project revision and githubMcp policy.
+Hosted Slack calls both routes under /v1/service/workspaces/{workspaceId}/github/... using
+SigV4, the configured orchestrator IAM role and signed Slack thread/requester headers. The broker
+checks the channel binding, thread workspace ownership, bound project and project membership.
+The existing JWT routes remain for compatibility; a personal identity cannot access a Slack workspace.
+The server loads the workspace's pinned registered project revision and githubMcp policy.
+
+The hosted service resolves its workspace with POST /v1/service/threads/workspace and
+includeIntegrations:true. Enabled responses include githubMcpRepositories, derived only from the
+registered definition. Disabled projects omit it. Older clients omit the flag and receive the
+original strict response shape, allowing broker-first rolling deployment.
 
 ## Discover
 
@@ -27,3 +35,7 @@ Invalid outer requests return CONFIG_INVALID.
 
 Neither route dispatches a worker or locks a checkout. The internal MCP client is not an
 arbitrary-endpoint proxy.
+
+Hosted execution records contain requestedBy:{teamId,userId}, derived from the authenticated
+service context, for reads and writes. Replays under a different requester are rejected. Invocation
+UUIDs derive from the Slack event sequence, not ephemeral model tool-call IDs.

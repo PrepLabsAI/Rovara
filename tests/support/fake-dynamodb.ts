@@ -105,7 +105,7 @@ function toAction(kind: WriteAction["kind"], input: Record<string, unknown>): Wr
   };
 }
 
-const TOKEN = /\s*(attribute_not_exists|attribute_exists|if_not_exists|list_append|AND|OR|NOT|<>|<=|>=|[=<>(),+-]|#[A-Za-z0-9_]+|:[A-Za-z0-9_]+|[A-Za-z_][A-Za-z0-9_]*)/y;
+const TOKEN = /\s*(attribute_not_exists|attribute_exists|if_not_exists|list_append|AND|OR|NOT|<>|<=|>=|[=<>(),.+-]|#[A-Za-z0-9_]+|:[A-Za-z0-9_]+|[A-Za-z_][A-Za-z0-9_]*)/y;
 
 function tokenize(expression: string): string[] {
   const tokens: string[] = [];
@@ -144,7 +144,10 @@ class Parser {
 
   path(): string {
     const token = this.next();
-    return token.startsWith("#") ? this.names[token] ?? token : token;
+    const resolved = token.startsWith("#") ? this.names[token] ?? token : token;
+    if (this.peek() !== ".") return resolved;
+    this.next();
+    return `${resolved}.${this.path()}`;
   }
 
   operand(item: Item): unknown {
@@ -171,7 +174,8 @@ class Parser {
       this.expect(")");
       return [...first, ...second];
     }
-    return item[this.path()];
+    return this.path().split(".").reduce<unknown>((value, segment) =>
+      value && typeof value === "object" ? (value as Item)[segment] : undefined, item);
   }
 
   valueExpression(item: Item): unknown {

@@ -1,7 +1,7 @@
 # Feature Specification: Discovered GitHub MCP integration
 
 **Created**: 2026-09-23
-**Status**: Implemented and validated locally; not deployed
+**Status**: Initial bridge deployed; hosted Slack correction implemented and validated locally, not deployed
 **Input**: Use MCP discovery and dynamically expose approved tools instead of individual GitHub wrappers.
 Discuss the separate AgentX tool after implementation.
 
@@ -60,3 +60,18 @@ Native assignment may replace existing assignees or silently omit ineligible use
 read existing state when adding people and verify afterward. External concurrent changes are not atomic.
 Live deployment and external test writes are separate from local implementation. Separate AgentX workflow
 tools remain; consolidating them or exposing an AgentX MCP server is a later discussion.
+
+## Scope correction: hosted Slack is the required user interface
+
+The initial CLI-only implementation did not satisfy the user's intended workflow. A signed Slack mention
+in an administrator-bound channel MUST reach the hosted orchestrator, discover the tools approved for
+that thread workspace's registered project revision, execute through IAM-authenticated control-plane
+routes, and reply in the same thread. Local CLI interaction is not an acceptance criterion.
+
+- **FR-011**: Hosted turns MUST receive enabled repository aliases from the control plane, not user text.
+- **FR-012**: Service MCP routes MUST enforce the configured IAM role, bound channel/project, thread
+  ownership and project membership; personal JWT users and other threads cannot access the workspace.
+- **FR-013**: MCP execution records MUST attribute the requesting Slack user; event redelivery MUST
+  retain stable invocation IDs even when the model generates new tool-call IDs.
+- **SC-007**: A hosted Slack processor/runtime integration test discovers and executes a tool and
+  replies in the original thread without submitting a coding task. Disabled projects expose none.

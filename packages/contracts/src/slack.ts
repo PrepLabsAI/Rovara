@@ -46,6 +46,7 @@ export const SlackThreadWorkspaceResultSchema = z.discriminatedUnion("outcome", 
       operationId: z.string().uuid().nullable(),
       created: z.boolean(),
       orchestratorInstructions: z.string().min(1).max(32_768),
+      githubMcpRepositories: z.array(AgentXNameSchema).max(32).optional(),
     })
     .strict(),
   z

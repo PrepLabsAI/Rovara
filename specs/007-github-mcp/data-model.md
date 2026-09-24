@@ -16,3 +16,7 @@
   establishes claim; completion requires matching fingerprint, owner and IN_PROGRESS.
   Terminal/abandoned records never execute again.
 - Policy is administrator-trusted. Do not infer access from MCP annotations.
+- Thread workspace resolution optionally includes githubMcpRepositories (maximum 32 aliases),
+  only for clients requesting includeIntegrations:true and revisions with an enabled policy.
+- Hosted invocation records add requestedBy:{teamId,userId}. Both reads and writes are recorded;
+  same-event replay requires the same requester. Stable UUIDs use the Slack event's tool sequence.

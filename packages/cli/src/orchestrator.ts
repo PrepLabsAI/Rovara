@@ -151,7 +151,7 @@ export async function runOrchestratorInteractive(options: OrchestratorOptions): 
 
 export function orchestratorSystemPrompt(projectInstructions: string): string {
   return [
-    "You are the local AgentX orchestrator.",
+    "You are the AgentX orchestrator.",
     "Never inspect, edit, or execute project source locally. Use only AgentX orchestration tools and approved discovered MCP tools.",
     "agentx_submit_task and agentx_follow_up wait for the remote worker and return its final response.",
     "Use agentx_create_pull_request only when the user explicitly asks to create or raise a pull request.",

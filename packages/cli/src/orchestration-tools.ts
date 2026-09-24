@@ -237,7 +237,7 @@ export function createOrchestrationTools(
   }
   if (options.mcpTools?.length) {
     if (!api.callGitHubTool) throw new Error("GitHub MCP API is not configured");
-    tools.push(...createMcpTools(options.mcpTools, (input) => api.callGitHubTool!(input), context));
+    tools.push(...createMcpTools(options.mcpTools, (input) => api.callGitHubTool!(input), context, options));
   }
   return tools;
 }

@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
-import { agentXError, type GitHubMcpPolicy, type GitHubMcpRequest, type GitHubMcpResult, type GitHubMcpTool } from "@agentx/contracts";
+import { agentXError, type GitHubMcpPolicy, type GitHubMcpRequest, type GitHubMcpResult, type GitHubMcpTool, type SlackRequester } from "@agentx/contracts";
 import { connectMcp, type McpConnection, type McpToolResult } from "./mcp-client.js";
 
 export interface GitHubMcpInvocation {
+  requestedBy?: SlackRequester;
   requestId: string; workspaceId: string; ownerKey: string; repository: string; tool: string;
   fingerprint: string; createdAt: string; updatedAt: string; result: GitHubMcpResult;
 }
@@ -17,6 +18,7 @@ export interface GitHubMcpDependencies {
   connect?: typeof connectMcp;
 }
 export interface GitHubMcpContext {
+  requestedBy?: SlackRequester;
   workspaceId: string; ownerKey: string;
   repository: { name: string; url: string; credentialRef: string };
   policy: GitHubMcpPolicy;
@@ -85,16 +87,21 @@ export async function executeGitHubTool(request: GitHubMcpRequest, context: GitH
   if (!policy) throw agentXError("FORBIDDEN", "GitHub MCP tool is not approved for this project");
   if (Object.hasOwn(request.arguments, "owner") || Object.hasOwn(request.arguments, "repo")) throw agentXError("FORBIDDEN", "GitHub repository routing is server controlled");
   const write = policy.access === "write";
-  const pending = publicResult(request, "IN_PROGRESS", "This write is running or its outcome is unknown. Inspect GitHub before issuing a new write; do not automatically retry.");
+  const durable = write || context.requestedBy !== undefined;
+  const pending = publicResult(request, "IN_PROGRESS", write
+    ? "This write is running or its outcome is unknown. Inspect GitHub before issuing a new write; do not automatically retry."
+    : "This read is running or its result has not been recorded.");
   let record: GitHubMcpInvocation = {
     requestId: request.requestId, workspaceId: context.workspaceId, ownerKey: context.ownerKey,
     repository: request.repository, tool: request.tool, fingerprint: fingerprint(request),
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), result: pending,
+    ...(context.requestedBy === undefined ? {} : { requestedBy: context.requestedBy }),
   };
-  if (write && !await dependencies.store.claim(record)) {
+  if (durable && !await dependencies.store.claim(record)) {
     const previous = await dependencies.store.get(request.requestId);
     if (!previous) throw agentXError("RUNTIME_UNAVAILABLE", "MCP invocation record unavailable; retry only with the same request ID");
     if (previous.ownerKey !== context.ownerKey || previous.workspaceId !== context.workspaceId) throw agentXError("NOT_FOUND", "MCP invocation not found");
+    if (previous.requestedBy?.teamId !== context.requestedBy?.teamId || previous.requestedBy?.userId !== context.requestedBy?.userId) throw agentXError("NOT_FOUND", "MCP invocation not found");
     if (previous.fingerprint !== record.fingerprint) throw agentXError("IDEMPOTENCY_CONFLICT", "MCP request ID already used with different inputs");
     return { ...previous.result, replayed: true };
   }
@@ -137,10 +144,12 @@ export async function executeGitHubTool(request: GitHubMcpRequest, context: GitH
         ? "GitHub write outcome is unknown. Inspect GitHub before issuing another request. Do not automatically retry."
         : "GitHub MCP request failed before any write. Check GitHub App issue permissions and MCP availability.");
   } finally { await connection?.close().catch(() => undefined); }
-  if (write) {
+  if (durable) {
     record = { ...record, updatedAt: new Date().toISOString(), result: response };
     try { await dependencies.store.finish(record); }
-    catch { return publicResult(request, "UNKNOWN", "Could not persist the GitHub write outcome. Inspect GitHub; retry only with the same request ID to recover its record."); }
+    catch { return publicResult(request, write ? "UNKNOWN" : "FAILED", write
+      ? "Could not persist the GitHub write outcome. Inspect GitHub; retry only with the same request ID to recover its record."
+      : "Could not persist the GitHub read outcome."); }
   }
   return response;
 }

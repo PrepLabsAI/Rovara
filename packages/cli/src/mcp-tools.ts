@@ -13,7 +13,9 @@ export function createMcpTools(
   catalog: readonly GitHubMcpTool[],
   invoke: (input: GitHubMcpRequest & { workspaceId: string }) => Promise<unknown>,
   context: { workspaceId: string; conversationId: string },
+  options: { requestId?: () => string } = {},
 ): ToolDefinition[] {
+  const requestIds = new Map<string, string>();
   return catalog.map((tool) => defineTool({
     name: mcpToolName(tool),
     label: `GitHub / ${tool.repository} / ${tool.name}`,
@@ -21,7 +23,10 @@ export function createMcpTools(
     parameters: Type.Unsafe<Record<string, unknown>>(tool.inputSchema),
     execute: async (callId, parameters) => {
       const hash = createHash("sha256").update(JSON.stringify([context.workspaceId, context.conversationId, tool.repository, tool.name, callId])).digest("hex");
-      const requestId = `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(13, 16)}-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+      // Hosted redeliveries regenerate model call IDs; use the Slack event's stable sequence.
+      const key = JSON.stringify([tool.repository, tool.name, callId]);
+      const requestId = requestIds.get(key) ?? options.requestId?.() ?? `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(13, 16)}-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+      requestIds.set(key, requestId);
       const result = await invoke({
         workspaceId: context.workspaceId, requestId, repository: tool.repository,
         tool: tool.name, schemaHash: tool.schemaHash, arguments: parameters,

@@ -32,3 +32,11 @@
 
 Setup -> foundation -> US1 -> US2 -> validation. Read/write tools use one generic bridge.
 Existing projects expose only the original AgentX tools. No deployment/live mutation is authorized.
+
+## Phase 6: Correct hosted Slack integration
+
+- [X] T014 Add failing hosted-service authorization, runtime discovery and redelivery tests for FR-011–013 and SC-007.
+- [X] T015 Carry server-derived integration repositories through contracts/slack.ts, broker workspace resolution, slack-service processor and hosted runtime factory.
+- [X] T016 Route service MCP calls through existing authenticated workspace checks and attribute invocation records to the Slack requester.
+- [X] T017 Use Slack event-derived request IDs in the generic MCP bridge and verify retries cannot duplicate mutations.
+- [X] T018 Replace CLI-first setup/testing guidance with hosted Slack acceptance steps; run build, lint, all tests and synthesis.
