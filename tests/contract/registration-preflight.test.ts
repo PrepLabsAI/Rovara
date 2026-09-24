@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { ProjectDefinitionSchema } from "@agentx/contracts";
+import { IN_HOUSE_TOOL_COUNT, ProjectDefinitionSchema, TOOL_LIMIT, TOOL_WARNING_THRESHOLD } from "@agentx/contracts";
 import { TARGET_CONFLICT_REASON } from "@agentx/gateway";
 import { describe, expect, it, vi } from "vitest";
 import type { GitHubMcpDependencies } from "../../packages/broker/src/github-mcp.js";
@@ -118,6 +118,13 @@ describe("registration preflight", () => {
     const { handler } = await createAdminBroker({});
     const names = Array.from({ length: 15 }, (_, index) => `tool_${index}`);
     expect((await register(handler, githubConnector(names))).body.warnings).toEqual(["the model could see 21 tools; above 20, tool choice gets less reliable. Approve fewer connector tools."]);
+  });
+
+  it("always includes the visible tool budget in the response, with or without preflight", async () => {
+    const { handler } = await createAdminBroker({});
+    const registered = await register(handler, githubConnector(["list_issues"]));
+    expect(registered.status).toBe(201);
+    expect(registered.body.tools).toEqual({ maximum: IN_HOUSE_TOOL_COUNT + 1, warnAbove: TOOL_WARNING_THRESHOLD, limit: TOOL_LIMIT });
   });
 });
 

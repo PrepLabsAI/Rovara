@@ -35,6 +35,8 @@ import {
   githubConnectorOf,
   presentedNameProblems,
   toolBudget,
+  TOOL_LIMIT,
+  TOOL_WARNING_THRESHOLD,
   legacyProjectFields,
   SLACK_THREAD_OWNER_ISSUER,
   SlackChannelBindingSchema,
@@ -610,7 +612,11 @@ async function registerProject(
   const budget = toolBudget(approvedToolCount(definition));
   const respond = (project: Omit<RegisteredProjectRecord, "pk" | "sk">, duplicate: boolean, preflight: RegistrationPreflight | undefined) => {
     const warnings = registrationWarnings(budget.warning, preflight);
-    return { project, duplicate, ...(warnings.length ? { warnings } : {}), ...(preflight ? { preflight } : {}) };
+    return {
+      project, duplicate,
+      tools: { maximum: budget.maximum, warnAbove: TOOL_WARNING_THRESHOLD, limit: TOOL_LIMIT },
+      ...(warnings.length ? { warnings } : {}), ...(preflight ? { preflight } : {}),
+    };
   };
   const key = projectKey(definition.name, definition.revision);
   const existing = await getItem<RegisteredProjectRecord>(dependencies, key);

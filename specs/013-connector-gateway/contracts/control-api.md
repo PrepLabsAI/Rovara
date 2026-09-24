@@ -63,6 +63,11 @@ never blocked on it). `problem` is set for the two failing statuses. `offered` l
 names the vendor actually presented; `skipped` lists `{ tool, reason }` for each approved tool it
 could not present.
 
+The response always includes `tools`: `{ maximum, warnAbove: 20, limit: 40 }`. `maximum` is the
+most tools the model could see for this project (six built-in plus every connector approval).
+`warnAbove` and `limit` are the fixed thresholds below, sent so a client never has to hardcode
+them.
+
 Independently of `preflight`, the response adds `warnings` whenever it is non-empty: one line if
 the project could expose more than 20 tools to the model (six built-in plus every connector
 approval; this needs no vendor call, so it appears whether or not preflight ran), one line per
@@ -90,7 +95,8 @@ credential routes answer `RUNTIME_UNAVAILABLE` when the deployment has no creden
 secretName }`, strict; `secretName` must begin `agentx/connectors/`. Registration reads the named
 secret and checks its shape for `type`, but never echoes it back in the response, an error, or a
 log. Response: `{ credential: <list entry>, replaced }`, HTTP 201. Refuses `CONFIG_INVALID` for:
-the built-in `github-app` reference; a secret Secrets Manager cannot find or the broker cannot read
+the built-in GitHub App reference (the deployment's `GITHUB_APP_CREDENTIAL_REF`); a secret
+Secrets Manager cannot find or the broker cannot read
 (naming only the secret, never the cause); or a secret that does not parse for `type` (naming the
 required shape, never its content). A transient Secrets Manager error instead (throttling, a
 service fault) refuses `RUNTIME_UNAVAILABLE`: "could not read secret \<name\> from Secrets Manager;
