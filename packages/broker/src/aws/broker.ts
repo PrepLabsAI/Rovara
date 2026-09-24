@@ -58,6 +58,8 @@ import {
   type ThreadConnector,
   type WorkerInvocation,
   type WorkspaceInstance,
+  cleanDisplayName,
+  DISPLAY_NAME_MAX_ENCODED_LENGTH,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { GitHubAppCredentialProvider, privateKeyFromSecret } from "../github-app.js";
@@ -769,15 +771,11 @@ function parseSlackHeaders(headers: Record<string, string | undefined>): Omit<No
   }
 }
 
-/**
- * A Slack display name from the orchestrator, percent-encoded. Control characters and the zero-width
- * and bidi format characters become spaces; U+200C and U+200D (ZWNJ, ZWJ) stay because scripts and emoji sequences need them.
- */
+/** A Slack display name from the orchestrator, percent-encoded, cleaned by the same rules the Slack service used. */
 function displayName(value: string | undefined): string | undefined {
-  if (!value || value.length > 1024) return undefined;
+  if (!value || value.length > DISPLAY_NAME_MAX_ENCODED_LENGTH) return undefined;
   try {
-    const name = Array.from(decodeURIComponent(value).replace(/[\p{Cc}\u061C\u200B\u200E\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]+/gu, " ").replace(/\s+/g, " ").trim()).slice(0, 80).join("");
-    return name.length > 0 ? name : undefined;
+    return cleanDisplayName(decodeURIComponent(value));
   } catch { return undefined; }
 }
 

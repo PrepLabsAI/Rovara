@@ -44,4 +44,10 @@ describe("signed service fetch", () => {
     expect(response.ok).toBe(true);
     expect(new Headers(baseFetch.mock.calls[0]?.[1]?.headers).has("x-agentx-slack-user-name")).toBe(false);
   });
+
+  it("does not split a character cluster when it shortens a long name", async () => {
+    const baseFetch = vi.fn<typeof fetch>(async () => new Response("{}"));
+    await createSignedServiceFetch({ region: "us-east-1", credentials, thread, userId: "U0123456789", userName: "a".repeat(78) + "\u{1F469}\u200D\u{1F4BB}", baseFetch })("https://agentx.example.test/v1/threads/workspace", { method: "POST", body: "{}" });
+    expect(decodeURIComponent(new Headers(baseFetch.mock.lastCall?.[1]?.headers).get("x-agentx-slack-user-name")!)).toBe("a".repeat(78));
+  });
 });

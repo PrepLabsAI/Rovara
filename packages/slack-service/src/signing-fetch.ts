@@ -1,15 +1,14 @@
 import { Sha256 } from "@aws-crypto/sha256-js";
 import { SignatureV4 } from "@smithy/signature-v4";
-import { slackThreadSubject, type SlackThread } from "@agentx/contracts";
+import { cleanDisplayName, slackThreadSubject, type SlackThread } from "@agentx/contracts";
 
 type Credentials = ConstructorParameters<typeof SignatureV4>[0]["credentials"];
 
-/** At most 80 characters (code points, so an emoji is never split); a name that cannot be encoded is omitted. */
+/** A name that is empty after cleaning, or cannot be encoded, is omitted. */
 function encodedDisplayName(name: string): string | undefined {
-  // Control characters plus the zero-width and bidi format characters; U+200C and U+200D (ZWNJ, ZWJ) stay because scripts and emoji sequences need them.
-  const clean = name.replace(/[\p{Cc}\u061C\u200B\u200E\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]+/gu, " ").replace(/\s+/g, " ").trim();
   try {
-    return encodeURIComponent(Array.from(clean).slice(0, 80).join("")) || undefined;
+    const clean = cleanDisplayName(name);
+    return clean === undefined ? undefined : encodeURIComponent(clean);
   } catch { return undefined; }
 }
 
