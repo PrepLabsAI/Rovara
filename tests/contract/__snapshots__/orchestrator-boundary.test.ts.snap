@@ -278,3 +278,106 @@ exports[`pi orchestration boundary > characterizes the in-house agentx_* tools b
   },
 ]
 `;
+
+exports[`pi orchestration boundary > keeps the five tools outside the pull-request lifecycle byte-for-byte (regression guard) 1`] = `
+[
+  {
+    "description": "Run repository inspection, editing, build, or test work on the remote AgentX worker. This waits for completion and returns the worker's final response; do not poll or resubmit the task.",
+    "label": "Delegate coding task",
+    "name": "agentx_submit_task",
+    "parameters": {
+      "properties": {
+        "prompt": {
+          "maxLength": 65536,
+          "minLength": 1,
+          "type": "string",
+        },
+      },
+      "required": [
+        "prompt",
+      ],
+      "type": "object",
+    },
+  },
+  {
+    "description": "Explicitly validate and publish one changed registered repository as a ready-for-review pull request. Call this only when the user clearly asks to create or raise a pull request.",
+    "label": "Create pull request",
+    "name": "agentx_create_pull_request",
+    "parameters": {
+      "properties": {
+        "body": {
+          "maxLength": 32768,
+          "type": "string",
+        },
+        "repository": {
+          "maxLength": 63,
+          "minLength": 1,
+          "type": "string",
+        },
+        "title": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string",
+        },
+      },
+      "required": [
+        "repository",
+        "title",
+      ],
+      "type": "object",
+    },
+  },
+  {
+    "description": "Recovery only: read durable status for a previously interrupted AgentX operation.",
+    "label": "Remote task status",
+    "name": "agentx_task_status",
+    "parameters": {
+      "properties": {
+        "operationId": {
+          "format": "uuid",
+          "type": "string",
+        },
+      },
+      "required": [
+        "operationId",
+      ],
+      "type": "object",
+    },
+  },
+  {
+    "description": "Recovery only: wait for a previously interrupted operation and retrieve its final remote assistant response.",
+    "label": "Remote task result",
+    "name": "agentx_task_result",
+    "parameters": {
+      "properties": {
+        "operationId": {
+          "format": "uuid",
+          "type": "string",
+        },
+      },
+      "required": [
+        "operationId",
+      ],
+      "type": "object",
+    },
+  },
+  {
+    "description": "Run a follow-up on the same remote workspace and conversation. This waits for completion and returns the worker's final response; do not poll or resubmit it.",
+    "label": "Remote follow-up",
+    "name": "agentx_follow_up",
+    "parameters": {
+      "properties": {
+        "prompt": {
+          "maxLength": 65536,
+          "minLength": 1,
+          "type": "string",
+        },
+      },
+      "required": [
+        "prompt",
+      ],
+      "type": "object",
+    },
+  },
+]
+`;

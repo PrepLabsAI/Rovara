@@ -49,6 +49,15 @@ describe("pi orchestration boundary", () => {
       .toMatchSnapshot();
   });
 
+  it("keeps the five tools outside the pull-request lifecycle byte-for-byte (regression guard)", () => {
+    const api = { submitTask: vi.fn(), taskStatus: vi.fn(), taskResult: vi.fn(), followUp: vi.fn(), createPullRequest: vi.fn(), pullRequestResult: vi.fn() };
+    const unchanged = ["agentx_submit_task", "agentx_create_pull_request", "agentx_task_status", "agentx_task_result", "agentx_follow_up"];
+    const tools = createOrchestrationTools(api, { workspaceId: crypto.randomUUID(), conversationId: crypto.randomUUID() })
+      .filter((tool) => unchanged.includes(tool.name));
+    expect(tools.map((tool) => tool.name)).toEqual(unchanged);
+    expect(tools.map(({ name, label, description, parameters }) => ({ name, label, description, parameters }))).toMatchSnapshot();
+  });
+
   it("submits an interactive task once and waits for its final response", async () => {
     const operationId = "11111111-1111-4111-8111-111111111111";
     const api = {
