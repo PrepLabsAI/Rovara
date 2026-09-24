@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   ORCHESTRATION_TOOL_NAMES,
+  RETIRED_PULL_REQUEST_TOOLS,
   assertOrchestrationOnly,
   createOrchestrationTools,
 } from "../../packages/orchestrator/src/orchestration-tools.js";
@@ -29,6 +30,14 @@ describe("pi orchestration boundary", () => {
     expect(prompt).toContain("Never inspect, edit, or execute project source yourself");
     expect(prompt).toContain("Never publish automatically");
     expect(prompt).toContain("<project-instructions>");
+  });
+
+  it("names every retired pull-request tool and its replacement action", () => {
+    const prompt = orchestratorSystemPrompt("Delegate.");
+    for (const [tool, action] of Object.entries(RETIRED_PULL_REQUEST_TOOLS)) {
+      expect(prompt).toContain(`${tool} → agentx_manage_pull_request action "${action}"`);
+    }
+    expect(prompt).toContain("If a call to a retired name fails, use agentx_manage_pull_request instead.");
   });
 
   it("characterizes the in-house agentx_* tools byte-for-byte with no connector catalogs (regression guard)", () => {

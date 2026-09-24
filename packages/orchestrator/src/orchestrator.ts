@@ -12,6 +12,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { AgentXError, agentXError, type ConnectorCatalog, type ThreadConnector } from "@agentx/contracts";
 import {
+  RETIRED_PULL_REQUEST_TOOLS,
   assertOrchestrationOnly,
   createOrchestrationTools,
   type OrchestrationApi,
@@ -186,6 +187,7 @@ export function orchestratorSystemPrompt(projectInstructions: string, manifest?:
     "Never inspect, edit, or execute project source yourself. Use only AgentX orchestration tools and approved connector tools.",
     "agentx_submit_task and agentx_follow_up wait for the remote worker and return its final response.",
     "Use agentx_create_pull_request only when the user explicitly asks to create or raise a pull request.",
+    `Retired tool names (renamed in feature 013): ${Object.entries(RETIRED_PULL_REQUEST_TOOLS).map(([tool, action]) => `${tool} → agentx_manage_pull_request action "${action}"`).join("; ")}. If a call to a retired name fails, use agentx_manage_pull_request instead.`,
     "Never publish automatically after a coding task. For ordinary coding requests, call one task tool exactly once; do not poll, resubmit, or ask the worker to read its session file.",
     "Use connector tools (named <connector>__<tool>) directly for issues and tickets; do not start a coding worker for them. Create, comment, update or assign only as the user asked. Never guess a username.",
     "GitHub assignment may replace the whole assignee list: read the existing assignees first when asked to add a person, and verify the result.",
