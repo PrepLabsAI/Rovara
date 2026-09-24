@@ -19,11 +19,21 @@ const context = { workspaceId: "11111111-1111-4111-8111-111111111111", conversat
 describe("connector tool bridge", () => {
   it("calls the single scope without asking the model for a target", async () => {
     const invoke = vi.fn(async () => ({ status: "SUCCEEDED" }));
-    const [tool] = createConnectorTools([catalog(["demo"])], invoke, context);
+    const presented = catalog(["demo"]);
+    const [tool] = createConnectorTools([presented], invoke, context);
+    expect(tool!.description).toBe(presented.tools[0]!.description);
     await tool!.execute("call-1", { state: "OPEN" }, undefined, undefined, {} as never);
     expect(invoke).toHaveBeenCalledWith(expect.objectContaining({
       connector: "github", scope: "demo", tool: "list_issues", schemaHash: hash("0"), arguments: { state: "OPEN" },
     }));
+  });
+
+  it("keeps a full request identical on replay of the same call ID with the default hash-derived request ID", async () => {
+    const invoke = vi.fn(async () => ({ status: "SUCCEEDED" }));
+    const [tool] = createConnectorTools([catalog(["demo"])], invoke, context);
+    await tool!.execute("call-1", { state: "OPEN" }, undefined, undefined, {} as never);
+    await tool!.execute("call-1", { state: "OPEN" }, undefined, undefined, {} as never);
+    expect(invoke.mock.calls[0]).toEqual(invoke.mock.calls[1]);
   });
 
   it("routes a target to its scope's hash, strips it from the arguments, and refuses an unknown target", async () => {

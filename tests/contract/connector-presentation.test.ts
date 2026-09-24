@@ -21,6 +21,16 @@ describe("connector catalog presentation", () => {
     }]);
   });
 
+  it("skips a tool that already defines target, even with a single scope", () => {
+    const { tools, skipped } = presentCatalog({
+      connector: "github", label: "GitHub", scopeNoun: "repository",
+      approvals: [{ name: "has_target" }],
+      scopes: [{ alias: "demo", tools: [tool("has_target", "demo", { inputSchema: { type: "object", properties: { target: { type: "string" } } } })] }],
+    });
+    expect(tools).toEqual([]);
+    expect(skipped).toEqual([{ tool: "has_target", reason: "tool already has a target argument" }]);
+  });
+
   it("adds a required target enum and keeps each scope's schema hash when there are several scopes", () => {
     const { tools } = presentCatalog({
       connector: "github", label: "GitHub", scopeNoun: "repository",

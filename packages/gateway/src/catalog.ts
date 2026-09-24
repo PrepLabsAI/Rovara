@@ -44,9 +44,9 @@ export function presentCatalog(input: {
     }
     const aliases = entries.map(({ alias }) => alias);
     const inputSchema = structuredClone(first.tool.inputSchema);
+    const properties = isObject(inputSchema.properties) ? inputSchema.properties : {};
+    if (Object.hasOwn(properties, "target")) { skipped.push({ tool: approval.name, reason: "tool already has a target argument" }); continue; }
     if (multiple) {
-      const properties = isObject(inputSchema.properties) ? inputSchema.properties : {};
-      if (Object.hasOwn(properties, "target")) { skipped.push({ tool: approval.name, reason: "tool already has a target argument" }); continue; }
       properties.target = { type: "string", enum: aliases, description: `Which ${input.scopeNoun} to use.` };
       inputSchema.properties = properties;
       const required = Array.isArray(inputSchema.required) ? inputSchema.required as string[] : [];
