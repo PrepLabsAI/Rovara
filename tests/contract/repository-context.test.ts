@@ -197,6 +197,18 @@ function capturingAdapter(): { adapter: PiSessionAdapter; inputs: PiSessionInput
       sessionFile,
       async prompt() {},
       async abort() {},
+      getModel: () => ({ provider: input.model.provider, modelId: input.model.modelId }),
+      getSessionStats: () => ({
+        sessionFile,
+        sessionId: conversationId,
+        userMessages: 0,
+        assistantMessages: 0,
+        toolCalls: 0,
+        toolResults: 0,
+        totalMessages: 0,
+        tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        cost: 0,
+      }),
       subscribe: () => () => undefined,
       dispose() {},
     };

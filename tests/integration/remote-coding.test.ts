@@ -110,6 +110,20 @@ describe("remote coding delegation", () => {
     expect(artifacts.find(({ name }) => name === "test-and-tool-evidence.json")?.content).toContain(
       "tests passed",
     );
+    const usageArtifact = artifacts.find(({ name }) => name === "usage.json");
+    const usagePayload = JSON.parse(usageArtifact?.content ?? "null") as unknown;
+    expect(usagePayload).toMatchObject({
+      schemaVersion: 1,
+      outcome: "SUCCEEDED",
+      provider: "fixture",
+      modelId: "fixture",
+      cacheRetention: "short",
+      tokens: { input: 100, output: 25, cacheRead: 50, cacheWrite: 10, total: 185 },
+      cacheReadRatio: 0.3125,
+      costUsd: 0.0042,
+    });
+    expect(output.events.get(first.operation.id)?.filter(({ type }) => type === "usage"))
+      .toEqual([expect.objectContaining({ payload: usagePayload })]);
     await expect(output.getArtifact(identity("b".repeat(64)), workspace.id, artifactIds[0]!)).rejects.toThrow(
       /not found/i,
     );
@@ -137,6 +151,18 @@ function fixturePiAdapter(rootPath: string, conversationId: string, onRun: () =>
           listener({ type: "tool_execution_end", toolName: "bash", result: stdout.trim() });
         },
         async abort() {},
+        getModel: () => ({ provider: "fixture", modelId: "fixture" }),
+        getSessionStats: () => ({
+          sessionFile,
+          sessionId: conversationId,
+          userMessages: 1,
+          assistantMessages: 1,
+          toolCalls: 2,
+          toolResults: 2,
+          totalMessages: 4,
+          tokens: { input: 100, output: 25, cacheRead: 50, cacheWrite: 10, total: 185 },
+          cost: 0.0042,
+        }),
         subscribe(next) {
           listener = next;
           return () => {

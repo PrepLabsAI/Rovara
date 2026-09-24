@@ -86,6 +86,12 @@ export class AgentRuntimeStack extends Stack {
       type: "String",
       description: "pi model identifier available in the deployment region",
     });
+    const promptCacheRetention = new CfnParameter(this, "PromptCacheRetention", {
+      type: "String",
+      default: "long",
+      allowedValues: ["short", "long"],
+      description: "Bedrock prompt-cache retention mode used by pi",
+    });
     const capacityProviderArn = new CfnParameter(this, "CapacityProviderArnParameter", {
       type: "String",
       allowedPattern:
@@ -185,6 +191,7 @@ export class AgentRuntimeStack extends Stack {
         AGENTX_CONTROL_PLANE_URL: controlPlaneUrl.valueAsString,
         AGENTX_MODEL_PROVIDER: modelProvider.valueAsString,
         AGENTX_MODEL_ID: modelId.valueAsString,
+        PI_CACHE_RETENTION: promptCacheRetention.valueAsString,
       },
       tags: {
         Application: "AgentX",
