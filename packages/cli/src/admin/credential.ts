@@ -62,7 +62,10 @@ async function parseCredentialResponse(response: Response): Promise<unknown> {
     if (body === undefined) throw agentXError("RUNTIME_UNAVAILABLE", `HTTP ${status}`);
     const { code, message } = serverError(body);
     const parsedCode = AgentXErrorCodeSchema.safeParse(code);
-    throw agentXError(parsedCode.success ? parsedCode.data : "RUNTIME_UNAVAILABLE", message ?? `HTTP ${status}`);
+    // An unlabeled body is classified by its status, as the project registration client does:
+    // 5xx is the control plane's own fault, not a problem with what the administrator sent.
+    const fallback = status >= 500 ? "RUNTIME_UNAVAILABLE" : "CONFIG_INVALID";
+    throw agentXError(parsedCode.success ? parsedCode.data : fallback, message ?? `HTTP ${status}`);
   }
   if (body === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "control plane returned an invalid response");
   return body;

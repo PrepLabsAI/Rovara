@@ -138,7 +138,10 @@ export class ConnectorNotConnected extends AgentXError {
   constructor(message: string) { super("RUNTIME_UNAVAILABLE", message, errorStatus("RUNTIME_UNAVAILABLE")); this.name = "ConnectorNotConnected"; }
 }
 
-/** Issues a credential and connects; after a 401, invalidates and tries exactly once more. */
+/**
+ * Issues a credential and connects; after a 401, invalidates and tries exactly once more.
+ * @internal Exported for tests only.
+ */
 export async function openConnection<Scope>(
   connector: ConnectorDefinition<Scope>, context: ConnectorContext<Scope>, access: Access,
   tools: string[], signal: AbortSignal, options: EngineOptions,

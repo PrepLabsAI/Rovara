@@ -95,10 +95,11 @@ credential routes answer `RUNTIME_UNAVAILABLE` when the deployment has no creden
 secretName }`, strict; `secretName` must begin `agentx/connectors/`. Registration reads the named
 secret and checks its shape for `type`, but never echoes it back in the response, an error, or a
 log. Response: `{ credential: <list entry>, replaced }`, HTTP 201. Refuses `CONFIG_INVALID` for:
-the built-in GitHub App reference (the deployment's `GITHUB_APP_CREDENTIAL_REF`); a secret
-Secrets Manager cannot find or the broker cannot read
-(naming only the secret, never the cause); or a secret that does not parse for `type` (naming the
-required shape, never its content). A transient Secrets Manager error instead (throttling, a
+the built-in GitHub App reference (the deployment's `GITHUB_APP_CREDENTIAL_REF`); a secret that
+Secrets Manager cannot find, that the broker cannot read or decrypt, or that is scheduled for
+deletion (naming only the secret, never the cause); or a secret that does not parse for `type`
+(naming the required shape, never its content). A transient Secrets Manager error instead
+(throttling, a
 service fault) refuses `RUNTIME_UNAVAILABLE`: "could not read secret \<name\> from Secrets Manager;
 try again". Re-registering an existing `ref` replaces its record and deletes its cached tokens.
 

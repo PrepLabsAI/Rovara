@@ -39,6 +39,13 @@ describe("credential administration client", () => {
       .rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: "RUNTIME_UNAVAILABLE: HTTP 502" });
   });
 
+  it("classifies an unlabeled 4xx error as CONFIG_INVALID instead of always RUNTIME_UNAVAILABLE", async () => {
+    // An HTTP API gateway's own default error shape: no { error: { code, message } } envelope.
+    const fetchImplementation = vi.fn<typeof fetch>(async () => Response.json({ message: "Bad Request" }, { status: 400 }));
+    await expect(registerCredential({ controlPlaneUrl: "https://agentx.example.test", accessToken: "t", ref: "linear", type: "static-secret", secretName: "agentx/connectors/linear" }, fetchImplementation))
+      .rejects.toMatchObject({ code: "CONFIG_INVALID", message: "CONFIG_INVALID: HTTP 400" });
+  });
+
   it("lists credentials", async () => {
     const credentials = [{ ref: "github-app", type: "github-app", secretName: "arn", builtIn: true, tokenCached: false }];
     const fetchImplementation = vi.fn<typeof fetch>(async () => Response.json({ credentials }));

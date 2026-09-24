@@ -140,6 +140,9 @@ Run `agentx --help` or `agentx <command> --help` for the complete surface: `logi
 `admin project register`, `admin workspace stop`, and `admin slack bind|unbind`. There is no
 developer command; coding work happens only in Slack.
 
+An admin command's exit code names the kind of failure: 2 for invalid input, 3 when login is
+required, 4 for forbidden or not found, 6 when the control plane is unavailable.
+
 ### 3. Work in the project's Slack channel
 
 AgentX runs a hosted orchestrator for Slack in the production AWS account, so no developer machine

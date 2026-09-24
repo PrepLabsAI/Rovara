@@ -125,6 +125,11 @@ describe("registration preflight", () => {
     const registered = await register(handler, githubConnector(["list_issues"]));
     expect(registered.status).toBe(201);
     expect(registered.body.tools).toEqual({ maximum: IN_HOUSE_TOOL_COUNT + 1, warnAbove: TOOL_WARNING_THRESHOLD, limit: TOOL_LIMIT });
+
+    const { handler: preflightHandler } = await createAdminBroker({});
+    const registeredWithPreflight = await register(preflightHandler, githubConnector(["list_issues"]), { preflight: true });
+    expect(registeredWithPreflight.status).toBe(201);
+    expect(registeredWithPreflight.body.tools).toEqual({ maximum: IN_HOUSE_TOOL_COUNT + 1, warnAbove: TOOL_WARNING_THRESHOLD, limit: TOOL_LIMIT });
   });
 });
 
