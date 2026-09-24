@@ -584,23 +584,42 @@ describe("hosted Slack GitHub MCP", () => {
     expect(result.status).toBe("FAILED");
   });
 
-  it("reports a thread's unfinished operation as recoverable, only to connector-aware services", async () => {
+  it("reports a thread's unfinished operation as recoverable, only to services that opt in to recoverable operations", async () => {
     const { db, handler } = createBroker({ githubMcp: { credentials: vi.fn(), connect: vi.fn() } });
     await registerProjectAndBind(handler, true);
     const service = { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik };
-    const resolve = (includeConnectors: boolean) => call(handler, { method: "POST", path: "/v1/service/threads/workspace", service,
-      body: { requestId: randomUUID(), includeIntegrations: true, ...(includeConnectors ? { includeConnectors: true } : {}) } });
-    const created = await resolve(true);
+    // "connectors" is the Slack service deployed before this flag existed; "recoverable" is the current one.
+    const resolve = (client: "legacy" | "connectors" | "recoverable") => call(handler, { method: "POST", path: "/v1/service/threads/workspace", service,
+      body: {
+        requestId: randomUUID(), includeIntegrations: true,
+        ...(client === "legacy" ? {} : { includeConnectors: true }),
+        ...(client === "recoverable" ? { includeRecoverableOperations: true } : {}),
+      } });
+    const created = await resolve("recoverable");
     expect(created.body.recoverableOperations).toEqual([]);
     const workspaceId = created.body.workspaceId as string;
     markReady(db, workspaceId);
-    expect((await resolve(true)).body.recoverableOperations).toEqual([]);
+    expect((await resolve("recoverable")).body.recoverableOperations).toEqual([]);
     const running = randomUUID();
     const workspace = db.get(`WORKSPACE#${workspaceId}`, "META")!;
     workspace.status = "BUSY";
     workspace.activeOperationId = running;
-    expect((await resolve(true)).body.recoverableOperations).toEqual([running]);
-    expect((await resolve(false)).body).not.toHaveProperty("recoverableOperations");
+    expect((await resolve("recoverable")).body.recoverableOperations).toEqual([running]);
+    expect((await resolve("legacy")).body).not.toHaveProperty("recoverableOperations");
+    const deployed = await resolve("connectors");
+    expect(deployed.body).toHaveProperty("connectors");
+    expect(deployed.body).not.toHaveProperty("recoverableOperations");
+  });
+
+  it("does not send recoverable operations for a new workspace to a service that sends only includeConnectors", async () => {
+    const { handler } = createBroker({ githubMcp: { credentials: vi.fn(), connect: vi.fn() } });
+    await registerProjectAndBind(handler, true);
+    const service = { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik };
+    const created = await call(handler, { method: "POST", path: "/v1/service/threads/workspace", service,
+      body: { requestId: randomUUID(), includeIntegrations: true, includeSettingsRevision: true, includeConnectors: true } });
+    expect(created.body.created).toBe(true);
+    expect(created.body).toHaveProperty("connectors");
+    expect(created.body).not.toHaveProperty("recoverableOperations");
   });
 });
 

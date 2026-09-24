@@ -1024,7 +1024,17 @@ async function ensureThreadWorkspace(
   const includeIntegrations = input.includeIntegrations === true;
   const includeSettingsRevision = input.includeSettingsRevision === true;
   const includeConnectors = input.includeConnectors === true;
-  const include: IntegrationInclude = { integrations: includeIntegrations, connectors: includeConnectors, connected: dependencies.githubMcp !== undefined };
+  // A separate opt-in: the Slack service released before this field existed already sends
+  // includeConnectors: true but parses the WORKSPACE result with a strict schema that lacks
+  // recoverableOperations. The control plane deploys first, so gating this on includeConnectors
+  // would fail every turn until the Slack service caught up.
+  const includeRecoverableOperations = input.includeRecoverableOperations === true;
+  const include: IntegrationInclude = {
+    integrations: includeIntegrations,
+    connectors: includeConnectors,
+    recoverableOperations: includeRecoverableOperations,
+    connected: dependencies.githubMcp !== undefined,
+  };
   const threadWorkspace = await getThreadWorkspace(dependencies, identity.ownerKey);
   if (threadWorkspace) {
     if (threadWorkspace.status === "CLOSED" && threadWorkspace.closedAt) {
@@ -1095,7 +1105,7 @@ async function ensureThreadWorkspace(
     created: true,
     orchestratorInstructions: project.definition.orchestratorInstructions,
     ...threadIntegrations(project.definition, include),
-    ...(include.connectors ? { recoverableOperations: [] } : {}),
+    ...(include.recoverableOperations ? { recoverableOperations: [] } : {}),
     ...(includeSettingsRevision ? { settingsRevision: project.definition.revision } : {}),
   };
 }
@@ -1116,7 +1126,7 @@ async function existingThreadWorkspace(
   const applied = {
     orchestratorInstructions: settings.definition.orchestratorInstructions,
     ...threadIntegrations(settings.definition, include),
-    ...(include.connectors ? { recoverableOperations: workspace.status === "BUSY" && workspace.activeOperationId ? [workspace.activeOperationId] : [] } : {}),
+    ...(include.recoverableOperations ? { recoverableOperations: workspace.status === "BUSY" && workspace.activeOperationId ? [workspace.activeOperationId] : [] } : {}),
     ...(includeSettingsRevision ? { settingsRevision: settings.definition.revision } : {}),
   };
   if (workspace.status === "PREPARATION_FAILED" && !workspace.activeOperationId) {
@@ -1140,7 +1150,7 @@ async function existingThreadWorkspace(
   };
 }
 
-interface IntegrationInclude { integrations: boolean; connectors: boolean; connected: boolean }
+interface IntegrationInclude { integrations: boolean; connectors: boolean; recoverableOperations: boolean; connected: boolean }
 
 function threadIntegrations(project: ProjectDefinition, include: IntegrationInclude): {
   githubMcpRepositories?: string[];
