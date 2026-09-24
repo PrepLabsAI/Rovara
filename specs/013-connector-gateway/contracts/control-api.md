@@ -83,8 +83,8 @@ preflight the same tool is instead reported skipped the first time the connector
 | `GET /v1/admin/credentials` | List credential records |
 | `GET /v1/admin/turns?since=<ISO>&cursor=<c>` | Page turn records for export, newest first |
 
-All require the administrator claim. Both credential routes answer `RUNTIME_UNAVAILABLE` when the
-deployment has no credential configuration.
+All require the administrator claim. Turn export is read-only and paginated at 100 records. Both
+credential routes answer `RUNTIME_UNAVAILABLE` when the deployment has no credential configuration.
 
 `POST /v1/admin/credentials` body: `{ ref, type: "static-secret" | "oauth-client-credentials",
 secretName }`, strict; `secretName` must begin `agentx/connectors/`. Registration reads the named

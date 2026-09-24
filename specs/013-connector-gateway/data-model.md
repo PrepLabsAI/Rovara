@@ -69,9 +69,10 @@ it just wrote) — `{ ref, type, secretName, builtIn, tokenCached, registeredBy?
 `tokenCached` is `true` only for an `oauth-client-credentials` entry with a still-fresh cached
 token; never a secret or token value.
 
-**Minted token cache** — `pk = CREDENTIAL#<ref>`, `sk = TOKEN#<scopeKey>` (`scopeKey` a SHA-256 of
-the secret's sorted scopes), fields `token` (the table is encrypted at rest; no route returns this
-item) and `expiresAt`. No TTL: the state table has no TTL attribute, and adding one for this item
+**Minted token cache** — `pk = CREDENTIAL#<ref>`, `sk = TOKEN#<scopeKey>` (`scopeKey` the first 32
+hex characters of a SHA-256 over the secret's sorted scopes), fields `token` (the table is
+encrypted at rest; no route returns this item) and `expiresAt`. No TTL: the state table has no TTL
+attribute, and adding one for this item
 alone risks expiring unrelated items that share the attribute name; expiry is instead checked on
 read. There is one item per credential and scope set. It is overwritten whenever the credential is
 re-minted, and deleted when the credential is re-registered, so a token minted from the old secret

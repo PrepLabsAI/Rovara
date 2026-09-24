@@ -195,8 +195,9 @@ agentx admin credential list
 A secret is one of two shapes: `static-secret` is `{"apiKey": "..."}`; `oauth-client-credentials`
 is `{"clientId", "clientSecret", "scopes": [...]}`. Registration reads the secret and checks its
 shape but never echoes it back, and `list` never prints a secret value, only each reference, its
-type, secret name, whether it is the built-in GitHub App entry, and whether a token is cached. No
-connector type reads a registered credential yet; Linear is the first, in a later release.
+type, secret name, whether it is the built-in GitHub App entry, whether a token is cached, and (for
+a registered entry) who registered it and when. No connector type reads a registered credential
+yet; Linear is the first, in a later release.
 
 Registering a project revision can ask the control plane to check each connector with its vendor
 by sending `preflight: true` in the registration body (the current administration client always
