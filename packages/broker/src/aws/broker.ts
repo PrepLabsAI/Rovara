@@ -1253,11 +1253,14 @@ async function acceptTask(
     if (previous.payloadHash !== requestHash) throw agentXError("IDEMPOTENCY_CONFLICT", "request ID was reused with another payload");
     return { operation: publicOperation(await requireOperation(dependencies, workspaceId, previous.operationId)), duplicate: true };
   }
-  const conversation = await getItem(dependencies, {
+  const conversation = await getItem<{ startedAt?: string }>(dependencies, {
     pk: `WORKSPACE#${workspaceId}`,
     sk: `CONVERSATION#${request.conversationId}`,
   });
   if (!conversation) throw agentXError("NOT_FOUND", "conversation not found");
+  // Only a recorded attribute means "started"; conversations from before this attribute existed
+  // have none, so their next task creates the session instead of failing closed.
+  const conversationStarted = typeof conversation.startedAt === "string";
   if (!["READY", "STOPPED"].includes(workspace.status) || workspace.activeOperationId) {
     throw agentXError(workspace.status === "BUSY" ? "WORKSPACE_BUSY" : "WORKSPACE_NOT_READY", `workspace is ${workspace.status}`);
   }
@@ -1287,7 +1290,7 @@ async function acceptTask(
     fence,
     projectRevision: workspace.projectRevision,
     callbackCapability: issueCapability(dependencies, workspaceId, operationId, fence),
-    payload: { conversationId: request.conversationId, prompt: request.prompt },
+    payload: { conversationId: request.conversationId, prompt: request.prompt, conversationStarted },
   };
   const outbox = outboxRecord(
     {
@@ -2218,7 +2221,32 @@ async function appendEvents(
       ExpressionAttributeValues: { ":running": "RUNNING", ":dispatching": "DISPATCHING", ":accepted": "ACCEPTED", ":now": new Date().toISOString() },
     })).catch(() => undefined);
   }
+  if (events.some((event) => event.type === "lifecycle" && startsConversation(event.payload))) {
+    await markConversationStarted(dependencies, operation);
+  }
   return events.length;
+}
+
+/**
+ * The authoritative record that a conversation owns a session. It outlives the workspace volume,
+ * so a replaced volume fails closed on the next turn instead of silently starting the thread over.
+ */
+async function markConversationStarted(
+  dependencies: AwsBrokerDependencies,
+  operation: OperationRecord,
+): Promise<void> {
+  if (!operation.conversationId) return;
+  await dependencies.documentClient.send(new UpdateCommand({
+    TableName: dependencies.tableName,
+    Key: { pk: `WORKSPACE#${operation.workspaceId}`, sk: `CONVERSATION#${operation.conversationId}` },
+    UpdateExpression: "SET startedAt = :now, updatedAt = :now",
+    ConditionExpression: "attribute_exists(pk) AND attribute_not_exists(startedAt)",
+    ExpressionAttributeValues: { ":now": new Date().toISOString() },
+  })).catch((error: unknown) => {
+    // Already marked by an earlier delivery of the same event. Anything else must reach the worker,
+    // which retries the batch, so the record cannot quietly fall behind the workspace.
+    if (!isConditional(error)) throw error;
+  });
 }
 
 async function appendEventChunk(
@@ -2886,6 +2914,15 @@ function decodeCursor(cursor: string | undefined): number {
 
 function isConditional(error: unknown): boolean {
   return error instanceof Error && ["ConditionalCheckFailedException", "TransactionCanceledException"].includes(error.name);
+}
+
+/** The worker reports, once per conversation, that a saved session now exists for it. */
+function startsConversation(value: unknown): boolean {
+  if (!value || typeof value !== "object" || !("conversation" in value)) return false;
+  const conversation = value.conversation;
+  return Boolean(
+    conversation && typeof conversation === "object" && "started" in conversation && conversation.started === true,
+  );
 }
 
 function isStatus(value: unknown, status: string): boolean {

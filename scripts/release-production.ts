@@ -310,6 +310,9 @@ export async function releaseProduction(
     `/aws/bedrock-agentcore/runtimes/${runtimeId}-DEFAULT`,
   );
 
+  // The control plane goes last. The worker parses invocations strictly, so a broker that sends a
+  // field the running worker image does not know about fails every task until the runtime catches
+  // up. Deploying the runtime first means the new worker is always the tolerant side of the window.
   deployControlPlane(runner, options);
   const deployedControlPlaneUrl = stackOutput(
     describeStack(runner, options.region, CONTROL_PLANE_STACK),

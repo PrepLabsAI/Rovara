@@ -39,6 +39,8 @@ export interface PiSessionHandle {
 
 export interface PiSessionInput {
   cwd: string;
+  /** The broker-issued public conversation ID, which Pi's own session ID never replaces. */
+  conversationId?: string;
   sessionDirectory: string;
   agentDirectory: string;
   model: WorkspaceModelConfiguration;
@@ -55,6 +57,7 @@ export async function createWorkspacePiSession(
   input: {
     rootPath: string;
     model: WorkspaceModelConfiguration;
+    conversationId?: string;
     onDiagnostic?: (message: string) => void;
   },
   adapter: PiSessionAdapter = defaultPiSessionAdapter,
@@ -73,6 +76,7 @@ export async function createWorkspacePiSession(
     agentDirectory,
     model: input.model,
     contextFiles,
+    ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }),
   });
   assertContained(sessionDirectory, handle.sessionFile);
   return handle;
@@ -91,7 +95,12 @@ export async function openRegisteredWorkspacePiSession(
   const rootPath = await realpath(resolve(input.rootPath));
   const sessionDirectory = resolve(rootPath, "agent-sessions");
   const agentDirectory = resolve(rootPath, ".agentx/pi");
-  const sessionFile = await realpath(resolve(input.sessionFile));
+  const sessionFile = await realpath(resolve(input.sessionFile)).catch(() => {
+    throw agentXError(
+      "CONVERSATION_STATE_LOST",
+      "the saved transcript for this conversation is missing from the workspace",
+    );
+  });
   assertContained(sessionDirectory, sessionFile);
   if (!adapter.open) throw new Error("pi session adapter does not support saved-session reopen");
   const contextFiles = await loadWorkspaceContextFiles(rootPath, input.onDiagnostic);
@@ -110,7 +119,11 @@ export async function openRegisteredWorkspacePiSession(
 
 const defaultPiSessionAdapter: PiSessionAdapter = {
   async create(input) {
-    return createDefaultSession(input, SessionManager.create(input.cwd, input.sessionDirectory));
+    return createDefaultSession(
+      input,
+      SessionManager.create(input.cwd, input.sessionDirectory),
+      input.conversationId,
+    );
   },
   async open(input) {
     return createDefaultSession(
@@ -203,9 +216,9 @@ async function loadWorkspaceContextFiles(
 }
 
 function assertContained(parent: string, child: string): void {
-  if (!isAbsolute(child)) throw new Error("pi session path must be absolute");
+  if (!isAbsolute(child)) throw agentXError("FORBIDDEN", "pi session path must be absolute");
   const path = relative(parent, resolve(child));
   if (path === ".." || path.startsWith(`..${sep}`) || isAbsolute(path)) {
-    throw new Error("pi session path escaped /mnt/workspace/agent-sessions");
+    throw agentXError("FORBIDDEN", "pi session path escaped /mnt/workspace/agent-sessions");
   }
 }

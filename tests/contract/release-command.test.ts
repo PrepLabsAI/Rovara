@@ -217,6 +217,31 @@ describe("worker image reuse", () => {
   });
 });
 
+describe("release ordering", () => {
+  // WorkerInvocationSchema parses the task payload strictly, so a broker that sends a field the
+  // running worker image predates rejects every invocation. The runtime must reach the new image
+  // before the control plane starts sending the new shape.
+  it("updates the production runtime before the control plane", () => {
+    const source = readFileSync("scripts/release-production.ts", "utf8");
+    const runtimeDeploy = source.indexOf("\n    RUNTIME_STACK,\n");
+    const controlPlaneDeploy = source.indexOf("\n  deployControlPlane(runner, options);\n");
+    expect(runtimeDeploy).toBeGreaterThan(-1);
+    expect(controlPlaneDeploy).toBeGreaterThan(-1);
+    expect(runtimeDeploy).toBeLessThan(controlPlaneDeploy);
+  });
+
+  it("updates the demo runtime before the control plane once both stacks exist", () => {
+    const source = readFileSync("scripts/release-demo.ts", "utf8");
+    const update = source.indexOf("if (existingControlPlane && existingRuntime) {");
+    expect(update).toBeGreaterThan(-1);
+    const runtimeDeploy = source.indexOf("deployedRuntime = await deployRuntime(", update);
+    const controlPlaneDeploy = source.indexOf("deployControlPlane(runner, options, true);", update);
+    expect(runtimeDeploy).toBeGreaterThan(-1);
+    expect(controlPlaneDeploy).toBeGreaterThan(-1);
+    expect(runtimeDeploy).toBeLessThan(controlPlaneDeploy);
+  });
+});
+
 describe("Slack orchestrator release", () => {
   it("treats every file the Slack orchestrator Dockerfile copies as one of its image inputs", () => {
     const sources = dockerfileSources("environments/slack/Dockerfile");
