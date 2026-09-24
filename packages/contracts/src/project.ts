@@ -208,6 +208,7 @@ export interface ResolvedGitHubConnector {
   name: string;
   repositories: RepositoryDefinition[];
   policy: GitHubMcpPolicy;
+  attribution: boolean;
 }
 
 /**
@@ -216,12 +217,12 @@ export interface ResolvedGitHubConnector {
  */
 export function githubConnectorOf(project: Pick<ProjectDefinition, "repositories" | "integrations">): ResolvedGitHubConnector | undefined {
   const legacy = project.integrations?.githubMcp;
-  if (legacy) return { name: "github", repositories: project.repositories, policy: legacy };
+  if (legacy) return { name: "github", repositories: project.repositories, policy: legacy, attribution: true };
   const connector = project.integrations?.connectors?.find((entry) => entry.type === "github");
   if (!connector) return undefined;
   const scopes = connector.scopes;
   const repositories = scopes === "all-repositories"
     ? project.repositories
     : project.repositories.filter((repository) => scopes.includes(repository.name));
-  return { name: connector.name, repositories, policy: { tools: connector.tools } };
+  return { name: connector.name, repositories, policy: { tools: connector.tools }, attribution: connector.attribution ?? true };
 }

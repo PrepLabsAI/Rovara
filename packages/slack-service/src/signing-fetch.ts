@@ -10,6 +10,7 @@ export function createSignedServiceFetch(options: {
   credentials: Credentials;
   thread: SlackThread;
   userId: string;
+  userName?: string;
   baseFetch?: typeof fetch;
 }): typeof fetch {
   const signer = new SignatureV4({ service: "execute-api", region: options.region, credentials: options.credentials, sha256: Sha256 });
@@ -24,6 +25,7 @@ export function createSignedServiceFetch(options: {
     });
     headers["x-agentx-slack-thread"] = slackThreadSubject(options.thread);
     headers["x-agentx-slack-user"] = options.userId;
+    if (options.userName) headers["x-agentx-slack-user-name"] = encodeURIComponent(options.userName.replace(/[\p{Cc}\p{Cf}]+/gu, " ").replace(/\s+/g, " ").trim().slice(0, 80));
     const body = typeof init?.body === "string" ? init.body : undefined;
     if (init?.body !== undefined && init.body !== null && body === undefined) {
       throw new Error("control-plane service requests must use string bodies");

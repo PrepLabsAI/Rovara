@@ -16,6 +16,13 @@ const issues = (value: unknown) => {
 };
 
 describe("connector configuration", () => {
+  it("turns attribution off only when a connector says so", () => {
+    const off = ProjectDefinitionSchema.parse(project({ connectors: [{ name: "github", type: "github", scopes: "all-repositories", tools, attribution: false }] }));
+    expect(githubConnectorOf(off)?.attribution).toBe(false);
+    const on = ProjectDefinitionSchema.parse(project({ connectors: [{ name: "github", type: "github", scopes: "all-repositories", tools }] }));
+    expect(githubConnectorOf(on)?.attribution).toBe(true);
+  });
+
   it("resolves a github connector over all repositories", () => {
     const definition = ProjectDefinitionSchema.parse(project({ connectors: [{ name: "github", type: "github", scopes: "all-repositories", tools }] }));
     const github = githubConnectorOf(definition);
@@ -32,7 +39,7 @@ describe("connector configuration", () => {
 
   it("reads the legacy githubMcp policy as a github connector over all repositories", () => {
     const definition = ProjectDefinitionSchema.parse(project({ githubMcp: { tools } }));
-    expect(githubConnectorOf(definition)).toEqual({ name: "github", repositories: definition.repositories, policy: { tools } });
+    expect(githubConnectorOf(definition)).toEqual({ name: "github", repositories: definition.repositories, policy: { tools }, attribution: true });
     expect(githubConnectorOf(ProjectDefinitionSchema.parse(project()))).toBeUndefined();
   });
 

@@ -93,6 +93,19 @@ export interface EngineOptions {
   connect?: typeof connectMcp;
   /** Called when the vendor's definition no longer matches the one the model was given. */
   onDefinitionChanged?: () => void;
+  /** Footer appended to a write's body or description when the model supplied one. */
+  attribution?: string;
+}
+
+/** Signs a write without ever creating a body: an absent body on an update means "leave it unchanged". */
+function withAttribution(args: Record<string, unknown>, attribution: string | undefined, schema: Record<string, unknown>): Record<string, unknown> {
+  if (!attribution) return args;
+  const properties = isObject(schema.properties) ? schema.properties : {};
+  for (const key of ["body", "description"]) {
+    const value = args[key];
+    if (typeof value === "string" && Object.hasOwn(properties, key)) return { ...args, [key]: `${value}\n\n—\n${attribution}` };
+  }
+  return args;
 }
 
 class PolicyFailure extends Error {}
@@ -170,8 +183,8 @@ export async function executeTool<Scope>(
     const validate = new AjvJsonSchemaValidator().getValidator(approved.inputSchema);
     if (!validate(request.arguments).valid) throw new PolicyFailure("Arguments do not match the approved MCP tool schema.");
     const bound = connector.binder.bind(context.scope, credential);
-    const args = { ...request.arguments, ...bound };
     const upstream = connection.tools.find((tool) => tool.name === request.tool)!;
+    const args = withAttribution({ ...request.arguments, ...bound }, write ? options.attribution : undefined, upstream.inputSchema);
     if (!new AjvJsonSchemaValidator().getValidator(upstream.inputSchema)(args).valid) throw new PolicyFailure("Arguments do not match the upstream MCP tool schema.");
     for (const guard of connector.guards) await guard.check({ tool: request.tool, arguments: request.arguments, bound, connection });
     signal.throwIfAborted();

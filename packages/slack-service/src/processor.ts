@@ -1,5 +1,6 @@
 import {
   slackThreadSubject,
+  slackThreadUrl,
   splitSlackMessage,
   WorkspaceClosePreflightResultSchema,
   type SlackRequestMessage,
@@ -209,9 +210,7 @@ function closeBlockedMessage(result: ReturnType<typeof WorkspaceClosePreflightRe
   ].join("\n");
 }
 
-export function slackThreadUrl(thread: SlackThread): string {
-  return `https://slack.com/archives/${thread.channelId}/p${thread.threadTs.replace(".", "")}`;
-}
+export { slackThreadUrl } from "@agentx/contracts";
 
 function limitMessage(result: Extract<SlackThreadWorkspaceResult, { outcome: "LIMIT_REACHED" }>): string {
   if (result.limit === "ORGANIZATION") {

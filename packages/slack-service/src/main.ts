@@ -78,6 +78,21 @@ function slackBotToken(): Promise<string> {
   return botToken.value;
 }
 
+const userNames = new Map<string, { name: string | undefined; at: number }>();
+/** Display name for footers; needs the optional users:read scope and falls back to undefined. */
+async function slackUserName(userId: string): Promise<string | undefined> {
+  const cached = userNames.get(userId);
+  if (cached && Date.now() - cached.at < 60 * 60 * 1_000) return cached.name;
+  let name: string | undefined;
+  try {
+    const response = await fetch(`https://slack.com/api/users.info?user=${encodeURIComponent(userId)}`, { headers: { authorization: `Bearer ${await slackBotToken()}` } });
+    const body = await response.json() as { ok?: boolean; user?: { name?: string; real_name?: string; profile?: { display_name?: string; real_name?: string } } };
+    if (body.ok) name = body.user?.profile?.display_name || body.user?.profile?.real_name || body.user?.real_name || body.user?.name || undefined;
+  } catch { name = undefined; }
+  userNames.set(userId, { name, at: Date.now() });
+  return name;
+}
+
 async function postToSlack(channel: string, threadTs: string, text: string): Promise<void> {
   const response = await fetch("https://slack.com/api/chat.postMessage", {
     method: "POST",
@@ -231,7 +246,8 @@ async function runTurn(input: TurnInput): Promise<string> {
     const saved = await loadSession(input.subject);
     const sessionFile = saved === undefined ? undefined : join(sessions, "thread.jsonl");
     if (sessionFile !== undefined && saved !== undefined) await writeFile(sessionFile, saved, { mode: 0o600 });
-    const signedFetch = createSignedServiceFetch({ region, credentials, thread: input.message.thread, userId: input.message.userId });
+    const userName = await slackUserName(input.message.userId);
+    const signedFetch = createSignedServiceFetch({ region, credentials, thread: input.message.thread, userId: input.message.userId, ...(userName === undefined ? {} : { userName }) });
     const runtime = await createHostedSlackRuntime(input, {
       stateDirectory: directory,
       api: new ControlPlaneApi(controlPlaneUrl, "slack-service", input.workspaceId, signedFetch),

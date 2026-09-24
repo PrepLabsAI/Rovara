@@ -117,6 +117,10 @@ export function slackThreadSubject(thread: SlackThread): string {
   return `${parsed.teamId}/${parsed.channelId}/${parsed.threadTs}`;
 }
 
+export function slackThreadUrl(thread: SlackThread): string {
+  return `https://slack.com/archives/${thread.channelId}/p${thread.threadTs.replace(".", "")}`;
+}
+
 export function parseSlackThreadSubject(subject: string): SlackThread {
   const [teamId, channelId, threadTs, ...rest] = subject.split("/");
   if (rest.length > 0) throw new Error("Slack thread subject has too many segments");

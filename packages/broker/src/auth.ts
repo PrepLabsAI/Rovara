@@ -21,6 +21,7 @@ export interface AuthenticatedIdentity {
   slack?: {
     thread: SlackThread;
     requester: SlackRequester;
+    requesterName?: string;
     binding: SlackChannelBinding;
   };
 }

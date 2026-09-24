@@ -130,6 +130,30 @@ const legacyFingerprint = (value: unknown): string => {
 };
 
 describe("gateway execution", () => {
+  it("appends the attribution to a body the model supplied on a write, and to nothing else", async () => {
+    const f = fixture();
+    f.tools[1]!.inputSchema = schema({ title: { type: "string" }, body: { type: "string" } }, ["title"]);
+    f.context.policy.tools[1] = { name: "create_item", access: "write", allowedArguments: ["title", "body"] };
+    const options = { connect: f.connect, ledger: f.ledger, attribution: "Requested by Pratik via AgentX · https://slack.com/archives/C1/p1" };
+    await executeTool(f.request("create_item", { title: "Bug", body: "Steps" }), f.connector, f.context, options);
+    expect(f.call).toHaveBeenLastCalledWith("create_item", { title: "Bug", body: "Steps\n\n—\nRequested by Pratik via AgentX · https://slack.com/archives/C1/p1", siteId: "site-42" });
+    await executeTool(f.request("create_item", { title: "No body" }), f.connector, f.context, options);
+    expect(f.call).toHaveBeenLastCalledWith("create_item", { title: "No body", siteId: "site-42" });
+    await executeTool(f.request("list_items", { state: "open" }), f.connector, f.context, options);
+    expect(f.call).toHaveBeenLastCalledWith("list_items", { state: "open", siteId: "site-42" });
+  });
+
+  it("replays an attributed write from the ledger instead of conflicting", async () => {
+    const f = fixture();
+    f.tools[1]!.inputSchema = schema({ title: { type: "string" }, body: { type: "string" } }, ["title"]);
+    f.context.policy.tools[1] = { name: "create_item", access: "write", allowedArguments: ["title", "body"] };
+    const request = f.request("create_item", { title: "Bug", body: "Steps" });
+    const options = { connect: f.connect, ledger: f.ledger, attribution: "Requested by Pratik via AgentX · https://slack.com/archives/C1/p1" };
+    await executeTool(request, f.connector, f.context, options);
+    expect(await executeTool(request, f.connector, f.context, options)).toMatchObject({ status: "SUCCEEDED", replayed: true });
+    expect(f.call).toHaveBeenCalledOnce();
+  });
+
   it("injects bound values from the scope and passes the requester to the credential provider", async () => {
     const f = fixture();
     const context = { ...f.context, requestedBy: { teamId: "T1", userId: "U1" } };

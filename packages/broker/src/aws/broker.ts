@@ -43,6 +43,7 @@ import {
   agentXError,
   parseSlackThreadSubject,
   slackThreadSubject,
+  slackThreadUrl,
   type Operation,
   type OperationStatus,
   type CodeBuildCheckResult,
@@ -331,8 +332,10 @@ async function routeWorkspaceRequest(
     if (!parsed?.success) {
       return json({ catalog: await discoverGitHubScope(dependencies, identity, workspace, project, github, repository) }, request.requestId);
     }
+    const attribution = attributionText(identity, github);
     const result = await executeGitHubTool(parsed.data, gitHubContext(identity, workspace, project, github, repository), {
       ...dependencies.githubMcp,
+      ...(attribution === undefined ? {} : { attribution }),
       store: new DynamoConnectorLedger(dependencies.documentClient, dependencies.tableName, workspace.id, GITHUB_LEDGER, github.name),
       onDefinitionChanged: () => dependencies.catalogs.delete(catalogKey(workspace, project, github, repository)),
     });
@@ -368,11 +371,13 @@ async function routeWorkspaceRequest(
         text: `${GITHUB_LABEL} is not connected for this project. An administrator must configure its credential.`,
       } }, request.requestId);
     }
+    const attribution = attributionText(identity, github);
     const result = await executeGitHubConnectorTool(
       { requestId: parsed.data.requestId, repository: repository.name, tool: parsed.data.tool, schemaHash: parsed.data.schemaHash, arguments: parsed.data.arguments },
       gitHubContext(identity, workspace, project, github, repository),
       {
         ...dependencies.githubMcp,
+        ...(attribution === undefined ? {} : { attribution }),
         store: new DynamoConnectorLedger(dependencies.documentClient, dependencies.tableName, workspace.id, GITHUB_LEDGER, github.name),
         onDefinitionChanged: () => dependencies.catalogs.delete(catalogKey(workspace, project, github, repository)),
       },
@@ -470,6 +475,12 @@ async function authorizeGitHubConnector(dependencies: AwsBrokerDependencies, ide
 
 type GitHubConnector = NonNullable<ReturnType<typeof githubConnectorOf>>;
 type GitHubRepository = GitHubConnector["repositories"][number];
+
+function attributionText(identity: AuthenticatedIdentity, github: GitHubConnector): string | undefined {
+  if (!github.attribution || !identity.slack) return undefined;
+  const who = identity.slack.requesterName ?? `Slack member ${identity.slack.requester.userId}`;
+  return `Requested by ${who} via AgentX · ${slackThreadUrl(identity.slack.thread)}`;
+}
 
 function gitHubContext(identity: AuthenticatedIdentity, workspace: WorkspaceInstance, project: RegisteredProjectRecord, github: GitHubConnector, repository: GitHubRepository) {
   return {
@@ -721,10 +732,20 @@ function parseSlackHeaders(headers: Record<string, string | undefined>): Omit<No
   try {
     const thread = parseSlackThreadSubject(headers["x-agentx-slack-thread"] ?? "");
     const requester = SlackRequesterSchema.parse({ teamId: thread.teamId, userId: headers["x-agentx-slack-user"] });
-    return { thread, requester };
+    const requesterName = displayName(headers["x-agentx-slack-user-name"]);
+    return { thread, requester, ...(requesterName === undefined ? {} : { requesterName }) };
   } catch {
     throw agentXError("CONFIG_INVALID", "valid x-agentx-slack-thread and x-agentx-slack-user headers are required");
   }
+}
+
+/** A Slack display name from the orchestrator, percent-encoded; control characters become spaces. */
+function displayName(value: string | undefined): string | undefined {
+  if (!value || value.length > 512) return undefined;
+  try {
+    const name = decodeURIComponent(value).replace(/[\p{Cc}\p{Cf}]+/gu, " ").replace(/\s+/g, " ").trim().slice(0, 80);
+    return name.length > 0 ? name : undefined;
+  } catch { return undefined; }
 }
 
 async function putSlackBinding(
