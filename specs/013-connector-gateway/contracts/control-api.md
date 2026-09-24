@@ -4,6 +4,11 @@ All workspace routes accept the existing SigV4 service identity with signed Slac
 requester headers, and enforce channel binding, thread ownership, bound project and project
 membership before any connector work. Policy comes from the project's latest registered revision.
 
+One discovery route and one call route serve every connector type the project configures; the
+`{connector}` path segment names the entry, and the route resolves its type to decide how to reach
+it. A type this deployment does not know, or a stored entry it cannot parse, was already skipped
+when the revision's connectors were resolved, so it answers `NOT_FOUND` like any other unknown name.
+
 ## Discover
 
 `GET /v1/workspaces/{workspaceId}/connectors/{connector}/tools`
@@ -47,6 +52,11 @@ described in [data-model.md](../data-model.md). `includeIntegrations: true` alon
 `includeConnectors`) still returns only the feature 007 `githubMcpRepositories` field; the two flags
 are independent, and an older Slack service that only ever sends `includeIntegrations: true` never
 receives `connectors` or `repositories`.
+
+`includeConnectors: true` alone lists only `github` connectors, because an older Slack service
+parses the list with a schema that still requires that literal type. Sending
+`includeAllConnectorTypes: true` as well adds every other resolved connector to the list, in
+definition order. A service that cannot yet parse other connector types must not send this flag.
 
 ## Registration preflight
 

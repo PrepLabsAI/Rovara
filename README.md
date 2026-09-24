@@ -183,6 +183,10 @@ workspace revision.
 
 #### Connector credentials
 
+Each connector type is one definition in the control plane. A new type supplies its scopes, its
+credential and its binder; the routes, catalog cache, ledger and registration checks then work for
+it without further change.
+
 Connectors other than GitHub read their credential from an AWS Secrets Manager secret named
 `agentx/connectors/<name>`, registered once with the control plane:
 
@@ -362,6 +366,10 @@ the signed arguments would have broken the vendor's schema, for example a `body`
 the connector reports itself not connected instead of failing the call. `connector.token_cache_failed`
 means a shared token-cache read, write or delete failed; it names the operation and the error's
 class name, never the token, and the provider simply mints again.
+`connector.type_unknown` means a stored connector's type is not one this deployment knows, for
+example a newer type left over after a rollback; it is skipped, not served. `connector.unusable`
+means a stored connector's configuration failed to parse for its own type; it is skipped too, and
+the log line names the reason. Both name the project, revision, connector and type, never a secret.
 
 If the orchestrator's turn fails, AgentX posts the failure in the thread. Other failures, such as
 workspace preparation or a Slack API error, are retried; on the fifth attempt AgentX posts the
