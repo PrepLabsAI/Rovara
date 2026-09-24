@@ -4,8 +4,13 @@ import {
   approveTools,
   discoverTools,
   executeTool,
+  openConnection,
   reviewTools,
+  staticSecretProvider,
   GuardRejection,
+  McpUnauthorized,
+  CredentialUnavailable,
+  ConnectorNotConnected,
   type ConnectorContext,
   type ConnectorDefinition,
   type Guard,
@@ -298,5 +303,120 @@ describe("gateway execution", () => {
     vendor.issue.mockRejectedValueOnce(new Error("down"));
     expect(await executeTool(vendor.request("list_items", { state: "open" }), vendor.connector, vendor.context, { connect: vendor.connect, ledger: vendor.ledger }))
       .toMatchObject({ status: "FAILED", reason: "vendor_error" });
+  });
+});
+
+describe("credentials that are missing or rejected", () => {
+  it("re-issues once after a 401 and succeeds with the new credential", async () => {
+    const f = fixture();
+    const invalidate = vi.fn(async () => undefined);
+    f.connector.credentials.invalidate = invalidate;
+    f.issue.mockResolvedValueOnce({ token: "stale", bindings: {} }).mockResolvedValueOnce({ token: "fresh", bindings: {} });
+    f.connect.mockRejectedValueOnce(new McpUnauthorized());
+    const result = await executeTool(f.request("list_items", { state: "open" }), f.connector, f.context, { connect: f.connect, ledger: f.ledger });
+    expect(result.status).toBe("SUCCEEDED");
+    expect(invalidate).toHaveBeenCalledOnce();
+    expect(f.connect.mock.calls.map(([options]) => options.token)).toEqual(["stale", "fresh"]);
+  });
+
+  it("reports a second 401 as not connected without a third attempt, even when invalidate fails", async () => {
+    const f = fixture();
+    f.connector.credentials.invalidate = vi.fn(async () => { throw new Error("cache down"); });
+    f.connect.mockRejectedValue(new McpUnauthorized());
+    const result = await executeTool(f.request("create_item", { title: "Bug" }), f.connector, f.context, { connect: f.connect, ledger: f.ledger });
+    expect(result).toMatchObject({ status: "FAILED", reason: "not_connected" });
+    expect(result.text).toContain("Tracker is not connected");
+    // The invalidate failure is reported (so an admin doesn't see a stale-credential retry as a
+    // clean "rejected twice"), but never the invalidate error's own text, which could carry secrets.
+    expect(result.text).toContain("clearing the cached credential also failed");
+    expect(result.text).not.toContain("cache down");
+    expect(f.issue).toHaveBeenCalledTimes(2);
+    expect(f.connect).toHaveBeenCalledTimes(2);
+    expect(f.call).not.toHaveBeenCalled();
+    const stored = f.records.get(result.requestId);
+    expect(stored?.result).toMatchObject({ status: "FAILED", reason: "not_connected" });
+    expect(JSON.stringify(stored)).not.toContain("tracker-secret-token");
+  });
+
+  it("reports a missing credential as not connected with the administrator-facing reason", async () => {
+    const f = fixture();
+    f.issue.mockRejectedValueOnce(new CredentialUnavailable("credential tracker-key is not registered"));
+    const result = await executeTool(f.request("create_item", { title: "Bug" }), f.connector, f.context, { connect: f.connect, ledger: f.ledger });
+    expect(result).toMatchObject({ status: "FAILED", reason: "not_connected" });
+    expect(result.text).toContain("credential tracker-key is not registered");
+    expect(f.connect).not.toHaveBeenCalled();
+    const stored = f.records.get(result.requestId);
+    expect(stored?.result).toMatchObject({ status: "FAILED", reason: "not_connected" });
+    expect(JSON.stringify(stored)).not.toContain("tracker-secret-token");
+  });
+
+  it("treats a CredentialUnavailable raised after a write attempt as UNKNOWN, not not_connected", async () => {
+    const f = fixture();
+    // Not reachable through openConnection today (it only throws CredentialUnavailable before any
+    // write is attempted), but the classification is explicit so it stays correct if that changes.
+    f.call.mockRejectedValueOnce(new CredentialUnavailable("credential expired mid-call"));
+    const result = await executeTool(f.request("create_item", { title: "Bug" }), f.connector, f.context, { connect: f.connect, ledger: f.ledger });
+    expect(result.status).toBe("UNKNOWN");
+    expect(result.reason).toBeUndefined();
+  });
+
+  it("raises ConnectorNotConnected from discovery, which keeps the RUNTIME_UNAVAILABLE code", async () => {
+    const f = fixture();
+    f.connect.mockRejectedValue(new McpUnauthorized());
+    const error = await discoverTools(f.connector, f.context, { connect: f.connect }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ConnectorNotConnected);
+    expect(error).toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    expect(f.connect).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a plain issuer failure a vendor error, as before", async () => {
+    const f = fixture();
+    f.issue.mockRejectedValueOnce(new Error("app not installed"));
+    const result = await executeTool(f.request("create_item", { title: "Bug" }), f.connector, f.context, { connect: f.connect, ledger: f.ledger });
+    expect(result).toMatchObject({ status: "FAILED", reason: "vendor_error" });
+  });
+
+  it("still retries when invalidate throws synchronously instead of returning a rejected promise", async () => {
+    const f = fixture();
+    // Not an async function: throws immediately while being called, before any .catch could attach.
+    f.connector.credentials.invalidate = vi.fn((): Promise<void> => { throw new Error("boom"); });
+    f.issue.mockResolvedValueOnce({ token: "stale", bindings: {} }).mockResolvedValueOnce({ token: "fresh", bindings: {} });
+    f.connect.mockRejectedValueOnce(new McpUnauthorized());
+    const result = await executeTool(f.request("list_items", { state: "open" }), f.connector, f.context, { connect: f.connect, ledger: f.ledger });
+    expect(result.status).toBe("SUCCEEDED");
+    expect(f.connect.mock.calls.map(([options]) => options.token)).toEqual(["stale", "fresh"]);
+  });
+
+  it("bounds a hung invalidate by the deadline instead of waiting on it forever", async () => {
+    const f = fixture();
+    const controller = new AbortController();
+    // Trips the same deadline signal openConnection is using, as a real broker's own deadline
+    // would eventually do, then never settles: only the deadline can end the wait for it.
+    const invalidate = vi.fn(() => {
+      controller.abort(new Error("Connector request deadline exceeded"));
+      return new Promise<void>(() => undefined);
+    });
+    f.connector.credentials.invalidate = invalidate;
+    f.connect.mockRejectedValueOnce(new McpUnauthorized());
+    const opening = openConnection(f.connector, f.context, "read", ["list_items"], controller.signal, { connect: f.connect });
+    await expect(opening).rejects.toThrow("Connector request deadline exceeded");
+    expect(invalidate).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-reads a rotated secret from a real static-secret provider after a 401, and the retry succeeds with it", async () => {
+    const f = fixture();
+    const values: Record<string, string> = { "agentx/connectors/tracker": JSON.stringify({ apiKey: "key-1" }) };
+    const secrets = { read: vi.fn(async (name: string) => values[name]) };
+    f.connector.credentials = staticSecretProvider({ ref: "tracker", secretName: "agentx/connectors/tracker", secrets });
+    f.connect.mockImplementationOnce(async () => {
+      // Rotated by the administrator, as a side effect of the vendor's rejection landing, so the
+      // ordering does not depend on when the provider happens to read the secret.
+      values["agentx/connectors/tracker"] = JSON.stringify({ apiKey: "key-2" });
+      throw new McpUnauthorized();
+    });
+    f.connect.mockImplementationOnce(async () => ({ tools: f.tools, call: f.call, close: f.close }));
+    const result = await openConnection(f.connector, f.context, "read", ["list_items"], AbortSignal.timeout(20_000), { connect: f.connect });
+    expect(result.credential.token).toBe("key-2");
+    expect(f.connect.mock.calls.map(([options]) => options.token)).toEqual(["key-1", "key-2"]);
   });
 });

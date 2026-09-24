@@ -40,7 +40,8 @@ Both keys together refuse registration.
 
 ## Credential record (control-plane state)
 
-`pk = CREDENTIAL#<ref>`, `sk = META` in the state table.
+`pk = CREDENTIALS`, `sk = REF#<ref>` in the state table, so one Query lists every record (amended
+from the original `CREDENTIAL#<ref>/META` layout, which would need a Scan to list).
 
 | Field | Rules |
 |---|---|
@@ -52,11 +53,32 @@ Both keys together refuse registration.
 Secret payloads: `static-secret` → `{ "apiKey": "…" }`;
 `oauth-client-credentials` → `{ "clientId", "clientSecret", "scopes": ["…"] }`. The token endpoint
 comes from the connector type in code, never from the secret, so a secret cannot redirect the broker.
-The built-in `github-app` entry is synthesized from the existing `GitHubApp*` stack parameters.
+The built-in `github-app` entry is synthesized from the existing `GitHubApp*` stack parameters and
+cannot be registered or replaced; it is not a stored record and always lists first.
 
-**Minted token cache** — `pk = CREDENTIAL#<ref>`, `sk = TOKEN#<scopeHash>`, fields `token`
-(the table is encrypted at rest; no route returns this item), `expiresAt`, TTL at `expiresAt`. Only
-`oauth-client-credentials` writes it.
+Registering an already-used `ref` replaces its record (its previous secret's cached tokens are
+deleted, below) and validates the new secret the same way a first registration does. Re-reading the
+record on every credential use, rather than only at registration, lets a re-registration take
+effect without a broker restart. A stored item that fails to parse is treated as absent, skipped
+when listing (logged as `connector.credential_record_invalid`, naming only the reference) and
+`register` treats it as replaceable.
+
+**List entry** (`GET /v1/admin/credentials`, and the object `register` returns for the credential
+it just wrote) — `{ ref, type, secretName, builtIn, tokenCached, registeredBy?, registeredAt? }`.
+`builtIn` is `true` only for `github-app`, which never has `registeredBy`/`registeredAt`.
+`tokenCached` is `true` only for an `oauth-client-credentials` entry with a still-fresh cached
+token; never a secret or token value.
+
+**Minted token cache** — `pk = CREDENTIAL#<ref>`, `sk = TOKEN#<scopeKey>` (`scopeKey` the first 32
+hex characters of a SHA-256 over the secret's sorted scopes), fields `token` (the table is
+encrypted at rest; no route returns this item) and `expiresAt`. No TTL: the state table has no TTL
+attribute, and adding one for this item
+alone risks expiring unrelated items that share the attribute name; expiry is instead checked on
+read. There is one item per credential and scope set. It is overwritten whenever the credential is
+re-minted, and deleted when the credential is re-registered, so a token minted from the old secret
+cannot outlive it. Only `oauth-client-credentials` writes it. A cache read, write or delete failure
+is swallowed (the provider simply mints again) and logged as `connector.token_cache_failed` with
+the operation and the error's class name only, never the token or any SDK-supplied detail.
 
 ## Catalog entry (cached, not durable)
 

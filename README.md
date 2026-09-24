@@ -140,6 +140,9 @@ Run `agentx --help` or `agentx <command> --help` for the complete surface: `logi
 `admin project register`, `admin workspace stop`, and `admin slack bind|unbind`. There is no
 developer command; coding work happens only in Slack.
 
+An admin command's exit code names the kind of failure: 2 for invalid input, 3 when login is
+required, 4 for forbidden or not found, 6 when the control plane is unavailable.
+
 ### 3. Work in the project's Slack channel
 
 AgentX runs a hosted orchestrator for Slack in the production AWS account, so no developer machine
@@ -177,6 +180,40 @@ The hosted Slack service discovers tools from the thread workspace's registered 
 Calls use its IAM service identity and carry the requesting Slack user; tokens remain in the broker.
 Use a new thread after binding the channel to an enabled revision. Existing threads retain their
 workspace revision.
+
+#### Connector credentials
+
+Connectors other than GitHub read their credential from an AWS Secrets Manager secret named
+`agentx/connectors/<name>`, registered once with the control plane:
+
+```sh
+aws secretsmanager create-secret --name agentx/connectors/linear-payments \
+  --secret-string '{"clientId":"...","clientSecret":"...","scopes":["read","write"]}'
+
+agentx admin credential register --ref linear-payments \
+  --type oauth-client-credentials --secret agentx/connectors/linear-payments
+agentx admin credential list
+```
+
+The secret must use the default `aws/secretsmanager` key. If you encrypt it with a
+customer-managed KMS key instead, grant the broker role `kms:Decrypt` on that key.
+
+A secret is one of two shapes: `static-secret` is `{"apiKey": "..."}`; `oauth-client-credentials`
+is `{"clientId", "clientSecret", "scopes": [...]}`. Registration reads the secret and checks its
+shape but never echoes it back, and `list` never prints a secret value, only each reference, its
+type, secret name, whether it is the built-in GitHub App entry, whether a token is cached, and (for
+a registered entry) who registered it and when. No connector type reads a registered credential
+yet; Linear is the first, in a later release.
+
+Registering a project revision can ask the control plane to check each connector with its vendor
+by sending `preflight: true` in the registration body (the current administration client always
+does). Preflight never blocks registration on that check failing: it reports which approved tools
+the vendor actually offers, which it could not present, and whether the connector is connected.
+It runs only when asked, so an older administration client, or an existing test, never makes a
+vendor call at registration. Separately, and regardless of preflight, a project that could expose
+more than 40 tools to the model (six built-in plus every connector approval) refuses registration;
+above 20 tools it registers with a warning, because the model's tool choice gets less reliable
+past that point.
 
 #### One-time administrator setup
 
@@ -321,6 +358,10 @@ installed on a scoped repository, still arrive as `RUNTIME_UNAVAILABLE` and are 
 The broker logs `connector.attribution_dropped` (project, revision, connector, scope, tool and
 request ID, never the request's text) when a write went out without its attribution footer because
 the signed arguments would have broken the vendor's schema, for example a `body` length limit.
+`connector.not_connected` means a connector's credential is missing or was rejected by its vendor;
+the connector reports itself not connected instead of failing the call. `connector.token_cache_failed`
+means a shared token-cache read, write or delete failed; it names the operation and the error's
+class name, never the token, and the provider simply mints again.
 
 If the orchestrator's turn fails, AgentX posts the failure in the thread. Other failures, such as
 workspace preparation or a Slack API error, are retried; on the fifth attempt AgentX posts the

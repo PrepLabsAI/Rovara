@@ -7,6 +7,10 @@ import type { GitHubMcpDependencies } from "../../packages/broker/src/github-mcp
 import { GitHubMcpCatalogSchema, GitHubMcpResultSchema } from "../../packages/contracts/src/github-mcp.js";
 import { ConnectorCatalogSchema } from "../../packages/contracts/src/connectors.js";
 import { createSignedServiceFetch } from "../../packages/slack-service/src/signing-fetch.js";
+// Broker code resolves @agentx/gateway to the built dist; importing from there (not from
+// packages/gateway/src) keeps this the same module copy the broker's connect fake must throw
+// through, so `instanceof McpUnauthorized` holds inside the engine.
+import { McpUnauthorized } from "@agentx/gateway";
 
 const issuer = "https://identity.example.test";
 const account = "111122223333";
@@ -696,6 +700,42 @@ describe("hosted Slack GitHub MCP", () => {
       body: { requestId: randomUUID(), scope: "mobile", tool: "list_issues", schemaHash: "a".repeat(64), arguments: {} } })).status).toBe(404);
     expect((await call(handler, { method: "POST", path: `${path}/call`, service,
       body: { requestId: randomUUID(), scope: "demo", tool: "issue_write", schemaHash: "a".repeat(64), arguments: {} } })).status).toBe(403);
+  });
+
+  it("reports a rejected GitHub credential as not connected on the connector route, without a secret in the log", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      const credentials = vi.fn(async () => ({ owner: "example", repo: "demo", token: "installation-secret" }));
+      const connect = vi.fn(async () => { throw new McpUnauthorized(); });
+      const { db, handler } = createBroker({ githubMcp: { credentials, connect } });
+      await registerProjectAndBind(handler, { connectors: [{ name: "github", type: "github", scopes: "all-repositories", tools: [{ name: "list_issues", access: "read" }] }] });
+      const workspaceId = (await ensureWorkspace(handler, threadOne, pratik)).body.workspaceId as string;
+      markReady(db, workspaceId);
+      const service = { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik };
+      const path = `/v1/service/workspaces/${workspaceId}/connectors/github`;
+      const response = await call(handler, { method: "GET", path: `${path}/tools`, service });
+      expect(response.status).toBe(200);
+      expect(response.body.catalog).toEqual({ connector: "github", notConnected: true, tools: [], skipped: [] });
+      const lines = log.mock.calls.map(([line]) => String(line)).filter((line) => line.includes("connector.not_connected"));
+      expect(lines).toHaveLength(1);
+      const parsed = JSON.parse(lines[0]!) as Record<string, unknown>;
+      expect(parsed).toMatchObject({ component: "broker", event: "connector.not_connected", project: "payments", revision: 1, connector: "github", scope: "demo" });
+      expect(parsed.message).toEqual(expect.stringContaining("not connected"));
+      expect(lines[0]).not.toContain("installation-secret");
+    } finally { log.mockRestore(); }
+  });
+
+  it("keeps the legacy GitHub route's 503 for a rejected credential, exactly as a discovery failure did before", async () => {
+    const credentials = vi.fn(async () => ({ owner: "example", repo: "demo", token: "installation-secret" }));
+    const connect = vi.fn(async () => { throw new McpUnauthorized(); });
+    const { db, handler } = createBroker({ githubMcp: { credentials, connect } });
+    await registerProjectAndBind(handler, { connectors: [{ name: "github", type: "github", scopes: "all-repositories", tools: [{ name: "list_issues", access: "read" }] }] });
+    const workspaceId = (await ensureWorkspace(handler, threadOne, pratik)).body.workspaceId as string;
+    markReady(db, workspaceId);
+    const service = { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik };
+    const response = await call(handler, { method: "GET", path: `/v1/service/workspaces/${workspaceId}/github/tools?repository=demo`, service });
+    expect(response.status).toBe(503);
+    expect(response.body.error).toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
   });
 
   it("gives an older Slack service exactly the feature 007 fields", async () => {

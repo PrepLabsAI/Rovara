@@ -10,6 +10,7 @@ import {
   type ProjectDefinition,
 } from "@agentx/contracts";
 import { Command } from "commander";
+import { listCredentials, registerCredential } from "./admin/credential.js";
 import { registerProject } from "./admin/register.js";
 import { bindSlackChannel, unbindSlackChannel } from "./admin/slack.js";
 import { stopWorkspace } from "./admin/stop.js";
@@ -114,6 +115,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         },
       }, services.fetchImplementation);
       services.stdout.write(formatSuccess(result, globals.json));
+      for (const warning of registrationWarnings(result, definition)) services.stderr.write(`Warning: ${warning}\n`);
     });
 
   const adminWorkspace = admin.command("workspace").description("administer AgentX workspaces");
@@ -167,6 +169,27 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       services.stdout.write(formatSuccess(result, globals.json));
     });
 
+  const adminCredential = admin.command("credential").description("register connector credentials stored in Secrets Manager under agentx/connectors/");
+  adminCredential
+    .command("register")
+    .description("register or replace a credential reference; the secret must already exist")
+    .requiredOption("--ref <reference>", "credential reference used by connectors' credentialRef")
+    .requiredOption("--type <type>", "static-secret or oauth-client-credentials")
+    .requiredOption("--secret <name>", "Secrets Manager secret name, agentx/connectors/<name>")
+    .action(async (options: { ref: string; type: string; secret: string }, command: Command) => {
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      services.stdout.write(formatSuccess(await registerCredential({ controlPlaneUrl: settings.controlPlaneUrl, accessToken, ref: options.ref, type: options.type, secretName: options.secret }, services.fetchImplementation), globals.json));
+    });
+  adminCredential
+    .command("list")
+    .description("list credential references, types, secret names and whether a token is cached; never secret values")
+    .action(async (_options: unknown, command: Command) => {
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      services.stdout.write(formatSuccess(await listCredentials({ controlPlaneUrl: settings.controlPlaneUrl, accessToken }, services.fetchImplementation), globals.json));
+    });
+
   return program;
 }
 
@@ -194,6 +217,16 @@ async function authenticate(
   const tokens = await tokenStore.get(tokenStoreKey(settings.auth));
   if (!tokens || tokens.expiresAt <= Date.now()) throw agentXError("AUTH_REQUIRED", "run agentx login");
   return { settings, accessToken: tokens.accessToken };
+}
+
+/** The server's warnings, plus a note when a control plane too old to run preflight answered. */
+function registrationWarnings(result: unknown, definition: ProjectDefinition): string[] {
+  const record = result && typeof result === "object" ? result as Record<string, unknown> : {};
+  const warnings = Array.isArray(record.warnings) ? record.warnings.filter((entry): entry is string => typeof entry === "string") : [];
+  if (definition.integrations && record.preflight === undefined) {
+    warnings.push("this control plane did not check connectors at registration; deploy the latest AgentX release to get the preflight report.");
+  }
+  return warnings;
 }
 
 async function projectFromFile(path: string, allowLoopback: boolean): Promise<ProjectDefinition> {

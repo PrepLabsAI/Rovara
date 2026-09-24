@@ -20,6 +20,8 @@ export interface PresentedCatalogTool {
 const MAX_NAME = 64;
 const MAX_DESCRIPTION = 2_048;
 const MAX_TARGET_SENTENCE = 512;
+/** Why a tool is skipped when its schema already has a `target` property the presentation would add. */
+export const TARGET_CONFLICT_REASON = "tool already has a target argument";
 
 /** One presented tool per approved connector tool, merged across scopes, in approval order. */
 export function presentCatalog(input: {
@@ -45,7 +47,7 @@ export function presentCatalog(input: {
     const aliases = entries.map(({ alias }) => alias);
     const inputSchema = structuredClone(first.tool.inputSchema);
     const properties = isObject(inputSchema.properties) ? inputSchema.properties : {};
-    if (Object.hasOwn(properties, "target")) { skipped.push({ tool: approval.name, reason: "tool already has a target argument" }); continue; }
+    if (Object.hasOwn(properties, "target")) { skipped.push({ tool: approval.name, reason: TARGET_CONFLICT_REASON }); continue; }
     if (multiple) {
       properties.target = { type: "string", enum: aliases, description: `Which ${input.scopeNoun} to use.` };
       inputSchema.properties = properties;

@@ -23,6 +23,8 @@ export type Actor = SlackRequester;
 
 export interface CredentialProvider<Scope> {
   issue(scope: Scope, access: Access, actor?: Actor): Promise<IssuedCredential>;
+  /** Drops any cached credential after the vendor rejected it; the next issue() mints or reads a fresh one. */
+  invalidate?(scope: Scope): Promise<void>;
 }
 
 export interface Binder<Scope> {

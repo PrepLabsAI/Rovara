@@ -1,4 +1,5 @@
 import { SlackChannelIdSchema, SlackTeamIdSchema, agentXError } from "@agentx/contracts";
+import { readJsonResponse, serverError } from "./http.js";
 
 interface SlackChannelInput {
   controlPlaneUrl: string;
@@ -40,17 +41,11 @@ async function sendBindingRequest(
       ...(body === undefined ? {} : { body }),
     },
   );
-  const result: unknown = await response.json();
-  if (!response.ok) {
-    const message = serverMessage(result) ?? `HTTP ${response.status}`;
+  const { ok, status, body: parsedBody } = await readJsonResponse(response);
+  if (!ok) {
+    const message = parsedBody === undefined ? `HTTP ${status}` : (serverError(parsedBody).message ?? `HTTP ${status}`);
     throw agentXError("RUNTIME_UNAVAILABLE", `Slack channel ${method === "PUT" ? "binding" : "unbinding"} failed: ${message}`);
   }
-  return result;
-}
-
-function serverMessage(value: unknown): string | undefined {
-  if (!value || typeof value !== "object" || !("error" in value)) return undefined;
-  const error = value.error;
-  if (!error || typeof error !== "object" || !("message" in error)) return undefined;
-  return typeof error.message === "string" ? error.message : undefined;
+  if (parsedBody === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "control plane returned an invalid response");
+  return parsedBody;
 }

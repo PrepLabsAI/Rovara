@@ -63,13 +63,13 @@ export class FakeDynamoDb {
     }
   };
 
-  // Supports only the key condition the broker uses to find a project's latest revision.
+  // Supports only `pk = :pk AND begins_with(sk, :<name>)`, the key condition shape the broker uses
+  // (a project's latest revision, credential records and a credential's cached tokens).
   private query(input: Record<string, unknown>): Item[] {
     const values = input.ExpressionAttributeValues as Values;
-    if (input.KeyConditionExpression !== "pk = :pk AND begins_with(sk, :revision)") {
-      throw new Error(`FakeDynamoDb does not support the key condition ${String(input.KeyConditionExpression)}`);
-    }
-    const prefix = values[":revision"] as string;
+    const match = /^pk = :pk AND begins_with\(sk, (:[a-zA-Z]+)\)$/.exec(String(input.KeyConditionExpression));
+    if (!match) throw new Error(`FakeDynamoDb does not support the key condition ${String(input.KeyConditionExpression)}`);
+    const prefix = values[match[1]!] as string;
     const items = this.find((item) => item.pk === values[":pk"] && (item.sk as string).startsWith(prefix))
       .sort((left, right) => compareKeys(left.sk as string, right.sk as string));
     if (input.ScanIndexForward === false) items.reverse();

@@ -33,11 +33,11 @@ Each phase is one pull request to `mainline`. Check a task only after its eviden
 
 ## Phase 3: Credentials (US2, US3 foundation)
 
-- [ ] T020 Add the credential registry store and admin routes; synthesize the built-in GitHub App entry.
-- [ ] T021 Implement `static-secret` and `oauth-client-credentials` providers with token cache, one re-mint and not-connected reporting.
-- [ ] T022 Grant the broker `secretsmanager:GetSecretValue` on `agentx/connectors/*` only.
-- [ ] T023 Add `agentx admin credential register|list`.
-- [ ] T024 Add registration preflight: missing tools, skipped tools, authentication failures, budget.
+- [X] T020 Add the credential registry store and admin routes; synthesize the built-in GitHub App entry.
+- [X] T021 Implement `static-secret` and `oauth-client-credentials` providers with token cache, one re-mint and not-connected reporting.
+- [X] T022 Grant the broker `secretsmanager:GetSecretValue` on `agentx/connectors/*` only.
+- [X] T023 Add `agentx admin credential register|list`.
+- [X] T024 Add registration preflight: missing tools, skipped tools, authentication failures, budget.
 
 ## Phase 4: Turn records, metrics, evaluation (US5)
 

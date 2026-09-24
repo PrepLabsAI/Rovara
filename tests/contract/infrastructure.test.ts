@@ -201,6 +201,16 @@ describe("control-plane infrastructure", () => {
     expect(json).toContain(":capacity-provider/*");
   });
 
+  it("lets the broker read connector secrets under agentx/connectors/* and never every secret", () => {
+    const app = new App();
+    const stack = new ControlPlaneStack(app, "ConnectorSecretsControlPlane");
+    const reads = policyStatements(Template.fromStack(stack))
+      .filter((statement) => [statement.Action].flat().includes("secretsmanager:GetSecretValue"));
+    const connectorGrants = reads.filter((statement) => JSON.stringify(statement.Resource).includes("secret:agentx/connectors/*"));
+    expect(connectorGrants).toHaveLength(1);
+    expect(reads.some((statement) => [statement.Resource].flat().includes("*"))).toBe(false);
+  });
+
   it("retains each Lambda log group for 30 days and removes it with the demo stack", () => {
     const app = new App();
     const stack = new ControlPlaneStack(app, "LoggedControlPlane");

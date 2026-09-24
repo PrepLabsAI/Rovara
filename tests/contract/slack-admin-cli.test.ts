@@ -33,6 +33,12 @@ describe("administrator Slack channel binding client", () => {
     await expect(unbindSlackChannel(input, denied)).rejects.toThrow(/unbinding failed: administrator claim is required/);
   });
 
+  it("surfaces a clean HTTP status when the control plane returns a non-JSON error body", async () => {
+    const fetchImplementation = vi.fn<typeof fetch>(async () =>
+      new Response("<html><body>502 Bad Gateway</body></html>", { status: 502, headers: { "content-type": "text/html" } }));
+    await expect(unbindSlackChannel(input, fetchImplementation)).rejects.toThrow(/unbinding failed: HTTP 502/);
+  });
+
   it("rejects direct-message channels and malformed IDs before calling the control plane", async () => {
     const fetchImplementation = fakeFetch(200, {});
     await expect(unbindSlackChannel({ ...input, channelId: "D0123456789" }, fetchImplementation)).rejects.toThrow();

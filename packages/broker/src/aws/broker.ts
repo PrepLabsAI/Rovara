@@ -31,7 +31,12 @@ import {
   PullRequestLifecycleResultSchema,
   PullRequestResultSchema,
   ProjectDefinitionSchema,
+  approvedToolCount,
   githubConnectorOf,
+  presentedNameProblems,
+  toolBudget,
+  TOOL_LIMIT,
+  TOOL_WARNING_THRESHOLD,
   legacyProjectFields,
   SLACK_THREAD_OWNER_ISSUER,
   SlackChannelBindingSchema,
@@ -49,6 +54,7 @@ import {
   type CodeBuildCheckResult,
   type CodeBuildGateDefinition,
   type ProjectDefinition,
+  type RegistrationPreflight,
   type PullRequestLifecycleResult,
   type SlackChannelBinding,
   type SlackRequester,
@@ -63,9 +69,11 @@ import {
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { GitHubAppCredentialProvider, privateKeyFromSecret } from "../github-app.js";
-import { CatalogCache, presentCatalog, type ScopeCatalog } from "@agentx/gateway";
+import { CatalogCache, ConnectorNotConnected, presentCatalog, type ScopeCatalog } from "@agentx/gateway";
 import { discoverGitHubTools, executeGitHubConnectorTool, executeGitHubTool, type GitHubMcpCatalog, type GitHubMcpDependencies } from "../github-mcp.js";
 import { DynamoConnectorLedger, GITHUB_LEDGER } from "./connector-ledger.js";
+import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
+import { preflightConnectors, registrationWarnings } from "./registration-preflight.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
 import { RepositoryGrantService } from "../repository-access.js";
 import { publicWorkspace } from "../workspaces.js";
@@ -210,10 +218,17 @@ interface AwsBrokerDependencies {
   slack?: SlackServiceConfiguration;
   githubMcp?: GitHubMcpDependencies;
   catalogs: CatalogCache<GitHubMcpCatalog>;
+  credentialRegistry?: CredentialRegistry;
 }
 
-/** What callers supply; the handler creates the per-container catalog cache when none is given. */
-export type AwsBrokerInput = Omit<AwsBrokerDependencies, "catalogs"> & { catalogs?: CatalogCache<GitHubMcpCatalog> };
+/**
+ * What callers supply; the handler creates the per-container catalog cache when none is given, and
+ * the credential registry from `connectorCredentials` unless one is injected.
+ */
+export type AwsBrokerInput = Omit<AwsBrokerDependencies, "catalogs"> & {
+  catalogs?: CatalogCache<GitHubMcpCatalog>;
+  connectorCredentials?: ConnectorCredentialsConfiguration;
+};
 
 interface SlackServiceConfiguration {
   orchestratorRoleArn: string;
@@ -225,7 +240,15 @@ type TransactItems = NonNullable<TransactWriteCommandInput["TransactItems"]>;
 
 export function createAwsBrokerHandler(input: AwsBrokerInput) {
   // One cache per container: discovery per revision, connector and repository costs one vendor round trip.
-  const dependencies: AwsBrokerDependencies = { ...input, catalogs: input.catalogs ?? new CatalogCache<GitHubMcpCatalog>({ ttlMs: 600_000, maxEntries: 256 }) };
+  const { connectorCredentials, ...rest } = input;
+  const credentialRegistry = input.credentialRegistry ?? (connectorCredentials
+    ? new CredentialRegistry({ ...connectorCredentials, documentClient: input.documentClient, tableName: input.tableName })
+    : undefined);
+  const dependencies: AwsBrokerDependencies = {
+    ...rest,
+    catalogs: input.catalogs ?? new CatalogCache<GitHubMcpCatalog>({ ttlMs: 600_000, maxEntries: 256 }),
+    ...(credentialRegistry ? { credentialRegistry } : {}),
+  };
   if (Buffer.byteLength(dependencies.callbackSigningKey, "utf8") < 32) {
     throw new Error("CALLBACK_SIGNING_KEY must contain at least 32 bytes");
   }
@@ -282,6 +305,13 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
 
       if (request.method === "POST" && url.pathname === "/v1/admin/projects") {
         return json(await registerProject(dependencies, identity, body), request.requestId, 201);
+      }
+      if (url.pathname === "/v1/admin/credentials" && (request.method === "POST" || request.method === "GET")) {
+        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+        if (!dependencies.credentialRegistry) throw agentXError("RUNTIME_UNAVAILABLE", "connector credentials are not configured in this deployment");
+        return request.method === "POST"
+          ? json(await dependencies.credentialRegistry.register(identity, body), request.requestId, 201)
+          : json(await dependencies.credentialRegistry.list(identity), request.requestId);
       }
       if (request.method === "POST" && url.pathname === "/v1/admin/workspaces/prepare") {
         return json(await prepareWorkspace(dependencies, identity, body), request.requestId, 202);
@@ -355,7 +385,18 @@ async function routeWorkspaceRequest(
       if (!dependencies.githubMcp) return json({ catalog: { connector: github.name, notConnected: true, tools: [], skipped: [] } }, request.requestId);
       const scopes: ScopeCatalog[] = [];
       for (const repository of github.repositories) {
-        const discovered = await discoverGitHubScope(dependencies, identity, workspace, project, github, repository);
+        let discovered: GitHubMcpCatalog;
+        try {
+          discovered = await discoverGitHubScope(dependencies, identity, workspace, project, github, repository);
+        } catch (error) {
+          if (!(error instanceof ConnectorNotConnected)) throw error;
+          console.log(JSON.stringify({
+            component: "broker", event: "connector.not_connected", project: workspace.projectName,
+            revision: project.definition.revision, connector: github.name, scope: repository.name,
+            message: stripCode(error.message, error.code),
+          }));
+          return json({ catalog: { connector: github.name, notConnected: true, tools: [], skipped: [] } }, request.requestId);
+        }
         scopes.push({ alias: repository.name, tools: discovered.tools.map(({ repository: scope, ...tool }) => ({ ...tool, scope })) });
       }
       const presented = presentCatalog({ connector: github.name, label: "GitHub", scopeNoun: "repository", approvals: github.policy.tools, scopes });
@@ -556,7 +597,8 @@ async function registerProject(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
   value: unknown,
-): Promise<{ project: Omit<RegisteredProjectRecord, "pk" | "sk">; duplicate: boolean }> {
+  checked?: { report?: RegistrationPreflight },
+): Promise<{ project: Omit<RegisteredProjectRecord, "pk" | "sk">; duplicate: boolean; warnings?: string[]; preflight?: RegistrationPreflight }> {
   if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
   const input = object(value, "project registration");
   const retired = legacyProjectFields(input.definition);
@@ -565,6 +607,17 @@ async function registerProject(
   }
   const definition = ProjectDefinitionSchema.parse(input.definition);
   const runtimeBinding = parseRuntimeBinding(input.runtimeBinding);
+  // Preflight contacts the vendor, so it runs only when the caller asks; older clients never do.
+  const wantsPreflight = input.preflight === true;
+  const budget = toolBudget(approvedToolCount(definition));
+  const respond = (project: Omit<RegisteredProjectRecord, "pk" | "sk">, duplicate: boolean, preflight: RegistrationPreflight | undefined) => {
+    const warnings = registrationWarnings(budget.warning, preflight);
+    return {
+      project, duplicate,
+      tools: { maximum: budget.maximum, warnAbove: TOOL_WARNING_THRESHOLD, limit: TOOL_LIMIT },
+      ...(warnings.length ? { warnings } : {}), ...(preflight ? { preflight } : {}),
+    };
+  };
   const key = projectKey(definition.name, definition.revision);
   const existing = await getItem<RegisteredProjectRecord>(dependencies, key);
   if (existing) {
@@ -574,7 +627,19 @@ async function registerProject(
     ) {
       throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revisions and runtime bindings are immutable");
     }
-    return { project: withoutKeys(existing), duplicate: true };
+    // A revision stored before the static checks existed stays idempotent: report, never refuse.
+    const preflight = checked?.report
+      ?? (wantsPreflight ? (await preflightConnectors(definition, dependencies.githubMcp, identity.ownerKey)).report : undefined);
+    return respond(withoutKeys(existing), true, preflight);
+  }
+  const nameProblems = presentedNameProblems(definition);
+  if (nameProblems.length > 0) throw agentXError("CONFIG_INVALID", nameProblems.join("; "));
+  if (budget.refusal) throw agentXError("CONFIG_INVALID", budget.refusal);
+  let preflight: RegistrationPreflight | undefined;
+  if (wantsPreflight) {
+    const result = await preflightConnectors(definition, dependencies.githubMcp, identity.ownerKey);
+    if (result.refusals.length > 0) throw agentXError("CONFIG_INVALID", result.refusals.join("; "));
+    preflight = result.report;
   }
   const now = new Date().toISOString();
   const record: RegisteredProjectRecord = {
@@ -592,10 +657,11 @@ async function registerProject(
       { Put: { TableName: dependencies.tableName, Item: membership } },
     ] }));
   } catch (error) {
-    if (isConditional(error)) return registerProject(dependencies, identity, value);
+    // A concurrent registration won; answer as a duplicate without contacting the vendor again.
+    if (isConditional(error)) return registerProject(dependencies, identity, value, preflight ? { report: preflight } : {});
     throw error;
   }
-  return { project: withoutKeys(record), duplicate: false };
+  return respond(withoutKeys(record), false, preflight);
 }
 
 async function prepareWorkspace(
@@ -3205,6 +3271,10 @@ export const handler = createAwsBrokerHandler({
   repositoryGrants,
   githubPullRequests: githubCredentials,
   githubMcp: { credentials: (repository, access) => githubCredentials.issueCredentials(repository, access) },
+  connectorCredentials: {
+    secrets: secretsManagerSource(secretsManager),
+    githubApp: { ref: requiredEnvironment("GITHUB_APP_CREDENTIAL_REF"), secretName: githubPrivateKeySecretArn },
+  },
   codeBuild,
   ...(process.env.SLACK_ORCHESTRATOR_ROLE_ARN
     ? {

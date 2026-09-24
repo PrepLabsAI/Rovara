@@ -48,6 +48,38 @@ described in [data-model.md](../data-model.md). `includeIntegrations: true` alon
 are independent, and an older Slack service that only ever sends `includeIntegrations: true` never
 receives `connectors` or `repositories`.
 
+## Registration preflight
+
+`POST /v1/admin/projects` (feature 001) accepts an added body field, `preflight: true`. It asks
+each connector's vendor, at registration, which of its approved tools it can actually offer.
+Preflight never blocks registration on that check failing, and it runs only when the field is
+sent, so an older administration client, or an existing test that posts a plain registration body,
+never makes a vendor call.
+
+When it runs, the response adds `preflight`: `{ connectors: [{ name, status, problem?, offered,
+skipped }] }`. `status` is `connected`, `not_connected` (no working credential, or the vendor
+rejected it) or `unavailable` (discovery failed for another reason, reported so registration is
+never blocked on it). `problem` is set for the two failing statuses. `offered` lists the tool
+names the vendor actually presented; `skipped` lists `{ tool, reason }` for each approved tool it
+could not present.
+
+The response always includes `tools`: `{ maximum, warnAbove: 20, limit: 40 }`. `maximum` is the
+most tools the model could see for this project (six built-in plus every connector approval).
+`warnAbove` and `limit` are the fixed thresholds below, sent so a client never has to hardcode
+them.
+
+Independently of `preflight`, the response adds `warnings` whenever it is non-empty: one line if
+the project could expose more than 20 tools to the model (six built-in plus every connector
+approval; this needs no vendor call, so it appears whether or not preflight ran), one line per
+connector reported `not_connected` or `unavailable`, and one line per skipped tool.
+
+A project that could expose more than 40 tools, or whose presented name (`<connector>__<tool>`)
+exceeds 64 characters, refuses registration outright, naming the count or the tool; both checks
+run for a new revision only; a resubmitted, already-registered revision stays idempotent. A
+`target` argument collision on a connector with several scopes also refuses a new revision, but
+only when preflight ran, because finding it needs the vendor's own tool definitions; without
+preflight the same tool is instead reported skipped the first time the connector is used.
+
 ## Administration
 
 | Route | Purpose |
@@ -56,4 +88,22 @@ receives `connectors` or `repositories`.
 | `GET /v1/admin/credentials` | List credential records |
 | `GET /v1/admin/turns?since=<ISO>&cursor=<c>` | Page turn records for export, newest first |
 
-All require the administrator claim. Turn export is read-only and paginated at 100 records.
+All require the administrator claim. Turn export is read-only and paginated at 100 records. Both
+credential routes answer `RUNTIME_UNAVAILABLE` when the deployment has no credential configuration.
+
+`POST /v1/admin/credentials` body: `{ ref, type: "static-secret" | "oauth-client-credentials",
+secretName }`, strict; `secretName` must begin `agentx/connectors/`. Registration reads the named
+secret and checks its shape for `type`, but never echoes it back in the response, an error, or a
+log. Response: `{ credential: <list entry>, replaced }`, HTTP 201. Refuses `CONFIG_INVALID` for:
+the built-in GitHub App reference (the deployment's `GITHUB_APP_CREDENTIAL_REF`); a secret that
+Secrets Manager cannot find, that the broker cannot read or decrypt, or that is scheduled for
+deletion (naming only the secret, never the cause); or a secret that does not parse for `type`
+(naming the required shape, never its content). A transient Secrets Manager error instead
+(throttling, a
+service fault) refuses `RUNTIME_UNAVAILABLE`: "could not read secret \<name\> from Secrets Manager;
+try again". Re-registering an existing `ref` replaces its record and deletes its cached tokens.
+
+`GET /v1/admin/credentials` response: `{ credentials: [<list entry>] }`, the built-in `github-app`
+entry first. A stored record that fails to parse is left out (logged as
+`connector.credential_record_invalid`) rather than failing the list. See
+[data-model.md](../data-model.md) for the list entry's fields.

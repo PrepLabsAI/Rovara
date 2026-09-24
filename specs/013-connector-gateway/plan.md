@@ -70,7 +70,7 @@ tests/eval/                       phase 4: cases, runner, baselines
 | 1a | Extract `@agentx/gateway`; GitHub behind it; no behavior change | — | [plans/phase-1a-gateway-extraction.md](plans/phase-1a-gateway-extraction.md) |
 | 1b | `integrations.connectors` with `githubMcp` shim; `/connectors/` routes with `/github/` aliases; ledger key; schema flattening; catalog cache | 1a | written after 1a merges |
 | 2 | Presentation: names, `target`, descriptions, manifest, not-connected result, PR tool consolidation, conditional recovery tools, rename table, budget | 1b | written after 1b merges |
-| 3 | Credential registry, providers, admin commands, registration preflight | 1b | written after 1b merges |
+| 3 | Credential registry, providers, admin commands, registration preflight | 1b | [plans/phase-3-credentials.md](plans/phase-3-credentials.md) |
 | 4 | Turn records, shared usage contract, metrics, alarms, export, evaluation tiers | 2 | written after 2 merges |
 | 5 | Linear connector | 3 | written after 3 merges |
 | 6 | Jira connector (live check gated on Atlassian administrator) | 3 | written after 3 merges |
