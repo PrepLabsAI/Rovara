@@ -58,7 +58,7 @@ import {
 import type { AuthenticatedIdentity } from "../auth.js";
 import { GitHubAppCredentialProvider, privateKeyFromSecret } from "../github-app.js";
 import { discoverGitHubTools, executeGitHubTool, type GitHubMcpDependencies } from "../github-mcp.js";
-import { DynamoGitHubMcpStore } from "./github-mcp.js";
+import { DynamoConnectorLedger, GITHUB_LEDGER } from "./connector-ledger.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
 import { RepositoryGrantService } from "../repository-access.js";
 import { publicWorkspace } from "../workspaces.js";
@@ -335,7 +335,7 @@ async function routeWorkspaceRequest(
     if (!parsed?.success) return json({ catalog: await discoverGitHubTools(context, dependencies.githubMcp) }, request.requestId);
     const result = await executeGitHubTool(parsed.data, context, {
       ...dependencies.githubMcp,
-      store: new DynamoGitHubMcpStore(dependencies.documentClient, dependencies.tableName, workspace.id),
+      store: new DynamoConnectorLedger(dependencies.documentClient, dependencies.tableName, workspace.id, GITHUB_LEDGER, "github"),
     });
     return json({ result }, request.requestId);
   }
