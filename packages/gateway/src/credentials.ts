@@ -173,6 +173,13 @@ export function oauthClientCredentialsProvider(options: {
           await options.tokens.put(key, result);
           // invalidate() may have run while the put above was in flight; its own delete could
           // have landed before this write, leaving the now-stale token stored. Compensate.
+          //
+          // Narrower residual, intentionally not closed: if a newer mint (started after that
+          // invalidate()) also finished and wrote its own valid token to this same key before
+          // this delete runs, this removes that valid entry too. The outcome is a cache miss
+          // (the next issue() simply mints again), never a stale token — TokenCache has no
+          // conditional/compare-and-delete primitive to tell "my own stale write" apart from
+          // "a newer valid one" here, and adding one isn't worth it for a self-healing miss.
           if (generation !== generationAtStart) await options.tokens.delete(key);
         }
         return result;

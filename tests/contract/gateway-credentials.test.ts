@@ -321,4 +321,47 @@ describe("oauth-client-credentials provider", () => {
     expect((error as Error).message).toBe("token endpoint response exceeded limit");
     expect(cancelled).toBe(true);
   });
+
+  // --- fix round 3 -----------------------------------------------------------------------
+
+  it("does not let an old task's finally delete a newer task's still-active in-flight entry", async () => {
+    const tokens = memoryCache();
+    let resolveA!: (response: Response) => void;
+    const pendingA = new Promise<Response>((resolve) => { resolveA = resolve; });
+    let resolveB!: (response: Response) => void;
+    const pendingB = new Promise<Response>((resolve) => { resolveB = resolve; });
+    let callCount = 0;
+    const fetchImplementation = vi.fn<typeof fetch>(() => {
+      callCount += 1;
+      if (callCount === 1) return pendingA;
+      if (callCount === 2) return pendingB;
+      return Promise.resolve(tokenResponse({ access_token: "unexpected-token", expires_in: 3600 }));
+    });
+    const provider = oauthClientCredentialsProvider({ ref: "linear", secretName: "s", secrets: secrets({ s: client }), tokens, tokenEndpoint: endpoint, fetchImplementation, now: () => 0 });
+
+    // A: a mint starts and is held.
+    const issuingA = provider.issue(undefined, "read");
+    await vi.waitFor(() => expect(fetchImplementation).toHaveBeenCalledOnce());
+
+    // invalidate() drops A's in-flight entry, but A's own mint keeps running in the background.
+    await provider.invalidate?.(undefined);
+
+    // B: a fresh mint starts under the same key (A's entry is gone), also held.
+    const issuingB = provider.issue(undefined, "read");
+    await vi.waitFor(() => expect(fetchImplementation).toHaveBeenCalledTimes(2));
+
+    // Let A settle *first* — its own finally must not touch B's still-active in-flight entry.
+    resolveA(tokenResponse({ access_token: "stale-token", expires_in: 3600 }));
+    await expect(issuingA).resolves.toEqual({ token: "stale-token", bindings: {} });
+
+    // C arrives while B is still in flight. If A's finally wrongly deleted B's entry above, C
+    // would start a third mint here instead of joining B's.
+    const issuingC = provider.issue(undefined, "read");
+    await new Promise((resolve) => { setImmediate(resolve); });
+    resolveB(tokenResponse({ access_token: "shared-token", expires_in: 3600 }));
+
+    await expect(issuingB).resolves.toEqual({ token: "shared-token", bindings: {} });
+    await expect(issuingC).resolves.toEqual({ token: "shared-token", bindings: {} });
+    expect(fetchImplementation).toHaveBeenCalledTimes(2);
+  });
 });
