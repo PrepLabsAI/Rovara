@@ -174,6 +174,11 @@ export class CredentialRegistry {
     return { credentials: [builtIn, ...entries] };
   }
 
+  /** Whether a valid record is registered under this reference; a malformed record counts as absent. */
+  async has(ref: string): Promise<boolean> {
+    return await this.readRecord(ref) !== undefined;
+  }
+
   /** Phase 5 entry point: a provider that resolves the record on each issue, so re-registration takes effect. */
   provider(ref: string, options: { tokenEndpoint?: URL } = {}): CredentialProvider<unknown> {
     const memoKey = `${ref}\u0000${options.tokenEndpoint?.href ?? ""}`;
