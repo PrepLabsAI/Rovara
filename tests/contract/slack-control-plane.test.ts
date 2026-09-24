@@ -481,6 +481,11 @@ describe("hosted Slack GitHub MCP", () => {
       requestId, status: "FAILED", reason: "not_connected", truncated: false, replayed: false,
       text: "GitHub issues is not connected for this project. An administrator must configure its credential.",
     });
+    // An unknown scope or an unapproved tool is refused the same way whether or not a credential is configured.
+    expect((await call(handler, { method: "POST", path: `${path}/call`, service,
+      body: { requestId: randomUUID(), scope: "mobile", tool: "list_issues", schemaHash: "a".repeat(64), arguments: {} } })).status).toBe(404);
+    expect((await call(handler, { method: "POST", path: `${path}/call`, service,
+      body: { requestId: randomUUID(), scope: "demo", tool: "issue_write", schemaHash: "a".repeat(64), arguments: {} } })).status).toBe(403);
   });
 
   it("gives an older Slack service exactly the feature 007 fields", async () => {

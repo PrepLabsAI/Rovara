@@ -345,14 +345,8 @@ async function routeWorkspaceRequest(
     if (github.name !== connectorRoute[2]) throw agentXError("NOT_FOUND", "connector not found");
     const parsed = request.method === "POST" ? ConnectorCallRequestSchema.safeParse(body) : undefined;
     if (parsed && !parsed.success) throw agentXError("CONFIG_INVALID", "invalid connector request");
-    if (!dependencies.githubMcp) {
-      if (!parsed?.success) return json({ catalog: { connector: github.name, notConnected: true, tools: [], skipped: [] } }, request.requestId);
-      return json({ result: {
-        requestId: parsed.data.requestId, status: "FAILED", reason: "not_connected", truncated: false, replayed: false,
-        text: `${GITHUB_LABEL} is not connected for this project. An administrator must configure its credential.`,
-      } }, request.requestId);
-    }
     if (!parsed?.success) {
+      if (!dependencies.githubMcp) return json({ catalog: { connector: github.name, notConnected: true, tools: [], skipped: [] } }, request.requestId);
       const scopes: ScopeCatalog[] = [];
       for (const repository of github.repositories) {
         const discovered = await discoverGitHubScope(dependencies, identity, workspace, project, github, repository);
@@ -361,8 +355,19 @@ async function routeWorkspaceRequest(
       const presented = presentCatalog({ connector: github.name, label: "GitHub", scopeNoun: "repository", approvals: github.policy.tools, scopes });
       return json({ catalog: { connector: github.name, tools: presented.tools, skipped: presented.skipped } }, request.requestId);
     }
+    // A malformed request (unknown scope or unapproved tool) is refused the same way regardless of
+    // whether this deployment has a GitHub credential configured.
     const repository = github.repositories.find((entry) => entry.name === parsed.data.scope);
     if (!repository) throw agentXError("NOT_FOUND", "connector scope not found");
+    if (!github.policy.tools.some((tool) => tool.name === parsed.data.tool)) {
+      throw agentXError("FORBIDDEN", "GitHub MCP tool is not approved for this project");
+    }
+    if (!dependencies.githubMcp) {
+      return json({ result: {
+        requestId: parsed.data.requestId, status: "FAILED", reason: "not_connected", truncated: false, replayed: false,
+        text: `${GITHUB_LABEL} is not connected for this project. An administrator must configure its credential.`,
+      } }, request.requestId);
+    }
     const result = await executeGitHubConnectorTool(
       { requestId: parsed.data.requestId, repository: repository.name, tool: parsed.data.tool, schemaHash: parsed.data.schemaHash, arguments: parsed.data.arguments },
       gitHubContext(identity, workspace, project, github, repository),
