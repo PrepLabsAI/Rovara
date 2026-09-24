@@ -6,6 +6,7 @@ FROM public.ecr.aws/docker/library/node:22.23.2-bookworm-slim@sha256:83f487e0a63
 WORKDIR /opt/agentx
 COPY package.json package-lock.json tsconfig.json tsconfig.base.json ./
 COPY packages/contracts/package.json packages/contracts/package.json
+COPY packages/gateway/package.json packages/gateway/package.json
 COPY packages/worker/package.json packages/worker/package.json
 COPY packages/cli/package.json packages/cli/package.json
 COPY packages/orchestrator/package.json packages/orchestrator/package.json

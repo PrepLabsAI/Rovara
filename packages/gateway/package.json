@@ -1,0 +1,12 @@
+{
+  "name": "@agentx/gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "dependencies": {
+    "@agentx/contracts": "0.1.0",
+    "@modelcontextprotocol/sdk": "1.30.1"
+  }
+}

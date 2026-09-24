@@ -47,6 +47,7 @@ export const WORKER_IMAGE_INPUTS = [
   "packages/cli/package.json",
   "packages/orchestrator/package.json",
   "packages/broker/package.json",
+  "packages/gateway/package.json",
   "packages/slack-service/package.json",
   "infra/package.json",
 ] as const;
@@ -65,6 +66,7 @@ export const SLACK_ORCHESTRATOR_IMAGE_INPUTS = [
   "packages/cli/package.json",
   "packages/worker/package.json",
   "packages/broker/package.json",
+  "packages/gateway/package.json",
   "infra/package.json",
 ] as const;
 
