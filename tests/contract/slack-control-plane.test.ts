@@ -285,6 +285,9 @@ describe("hosted Slack GitHub MCP", () => {
     expect(invoke).toHaveBeenLastCalledWith("issue_write", expect.objectContaining({ body: `Steps\n\n—\nRequested by \`Slack member ${pratik}\` via AgentX · ${threadUrl}` }));
     await write({ "x-agentx-slack-user-name": encodeURIComponent("Evil\u0007Name") });
     expect(invoke).toHaveBeenLastCalledWith("issue_write", expect.objectContaining({ body: `Steps\n\n—\nRequested by \`Evil Name\` via AgentX · ${threadUrl}` }));
+    // A header that is not valid percent-encoding is ignored, not rejected: the footer names the member ID.
+    await write({ "x-agentx-slack-user-name": "%E0%A4" });
+    expect(invoke).toHaveBeenLastCalledWith("issue_write", expect.objectContaining({ body: `Steps\n\n—\nRequested by \`Slack member ${pratik}\` via AgentX · ${threadUrl}` }));
     await registerRevision(handler, 2, { connectors: [{ ...connector, attribution: false }] });
     const catalogOff = ConnectorCatalogSchema.parse((await call(handler, { method: "GET", path: `${path}/tools`, service })).body.catalog);
     await call(handler, { method: "POST", path: `${path}/call`, service,
