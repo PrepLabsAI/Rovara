@@ -46,7 +46,12 @@ export function secretsManagerSource(client: {
         const errorName = error instanceof Error ? error.name : undefined;
         if (errorName === "ResourceNotFoundException") return undefined;
         if (errorName === "AccessDeniedException") {
-          throw new CredentialUnavailable(`AgentX cannot read secret ${name}; connector secrets must be named agentx/connectors/<name> in this account and region`);
+          throw new CredentialUnavailable(`AgentX cannot read secret ${name}; connector secrets must be named agentx/connectors/<name> in this account and region, or its KMS key does not allow the AgentX broker`);
+        }
+        // These name a permanent problem with the secret itself (its ciphertext, its KMS key or
+        // its deletion state), never a transient AWS fault, so a retry would never help.
+        if (errorName === "DecryptionFailure" || errorName === "InvalidRequestException" || errorName === "InvalidParameterException") {
+          throw new CredentialUnavailable(`secret ${name} cannot be decrypted or is scheduled for deletion`);
         }
         throw error;
       }
@@ -154,6 +159,10 @@ export class CredentialRegistry {
         console.log(JSON.stringify({ component: "broker", event: "connector.credential_record_invalid", credential: ref }));
         continue;
       }
+      // The built-in GitHub App entry is always listed below; a stored record under its ref
+      // cannot be registered (register() refuses it), but a leftover or seeded one must not
+      // duplicate that row.
+      if (record.ref === this.options.githubApp.ref) continue;
       let tokenCached = false;
       if (record.type === "oauth-client-credentials") {
         const tokens = await this.queryAll(tokenPartition(record.ref), TOKEN_PREFIX);

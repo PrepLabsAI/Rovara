@@ -192,6 +192,9 @@ agentx admin credential register --ref linear-payments \
 agentx admin credential list
 ```
 
+The secret must use the default `aws/secretsmanager` key. If you encrypt it with a
+customer-managed KMS key instead, grant the broker role `kms:Decrypt` on that key.
+
 A secret is one of two shapes: `static-secret` is `{"apiKey": "..."}`; `oauth-client-credentials`
 is `{"clientId", "clientSecret", "scopes": [...]}`. Registration reads the secret and checks its
 shape but never echoes it back, and `list` never prints a secret value, only each reference, its

@@ -81,6 +81,9 @@ agentx admin credential register --ref linear-payments \
 agentx admin credential list
 ```
 
+The secret must use the default `aws/secretsmanager` key. If the administrator uses a
+customer-managed KMS key instead, they must grant the broker role `kms:Decrypt` on that key.
+
 `list` prints each credential's reference, type, secret name, whether it is the built-in GitHub App
 entry (which always lists first), and whether a token is cached; a registered entry also carries
 who registered it and when. It never prints a secret or token value.

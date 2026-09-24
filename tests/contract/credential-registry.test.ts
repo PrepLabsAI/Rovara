@@ -65,6 +65,20 @@ describe("registry providers", () => {
     await expect(registry!.provider("linear").issue(undefined, "read")).rejects.toThrow(CredentialUnavailable);
     await expect(registry!.provider("github-app").issue(undefined, "read")).rejects.toThrow("credential github-app is the built-in GitHub App and serves only the github connector");
   });
+
+  it("passes invalidate through to the stored provider, so the next issue rereads the secret", async () => {
+    let value = "jira-key-1";
+    const source = { read: vi.fn(async () => JSON.stringify({ apiKey: value })) };
+    const { handler, registry } = await createAdminBroker({ connectorCredentials: { secrets: source, githubApp } });
+    await adminCall(handler, { method: "POST", path: "/v1/admin/credentials", body: { ref: "jira-sa", type: "static-secret", secretName: "agentx/connectors/jira-sa" } });
+    const provider = registry!.provider("jira-sa");
+    expect(await provider.issue(undefined, "read")).toEqual({ token: "jira-key-1", bindings: {} });
+    value = "jira-key-2";
+    // Within the in-memory cache window, issue() alone must not pick up the change.
+    expect(await provider.issue(undefined, "read")).toEqual({ token: "jira-key-1", bindings: {} });
+    await provider.invalidate?.(undefined);
+    expect(await provider.issue(undefined, "read")).toEqual({ token: "jira-key-2", bindings: {} });
+  });
 });
 
 describe("Secrets Manager source and token cache", () => {
@@ -74,6 +88,25 @@ describe("Secrets Manager source and token cache", () => {
     await expect(secretsManagerSource(failing("ResourceNotFoundException")).read("agentx/connectors/x")).resolves.toBeUndefined();
     await expect(secretsManagerSource(failing("AccessDeniedException")).read("agentx/connectors/x")).rejects.toBeInstanceOf(CredentialUnavailable);
     await expect(secretsManagerSource(failing("ThrottlingException")).read("agentx/connectors/x")).rejects.not.toBeInstanceOf(CredentialUnavailable);
+  });
+
+  it("maps DecryptionFailure, InvalidRequestException and InvalidParameterException to CredentialUnavailable, naming only the secret", async () => {
+    const { secretsManagerSource } = await import("../../packages/broker/src/aws/credentials.js");
+    const failing = (name: string) => ({ send: vi.fn(async () => { throw Object.assign(new Error("aws-internal-detail: ciphertext blob invalid"), { name }); }) });
+    for (const name of ["DecryptionFailure", "InvalidRequestException", "InvalidParameterException"]) {
+      const error = await secretsManagerSource(failing(name)).read("agentx/connectors/x").catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(CredentialUnavailable);
+      expect((error as Error).message).toBe("secret agentx/connectors/x cannot be decrypted or is scheduled for deletion");
+      expect((error as Error).message).not.toContain("aws-internal-detail");
+    }
+  });
+
+  it("extends the access-denied message to name the KMS key as a possible cause", async () => {
+    const { secretsManagerSource } = await import("../../packages/broker/src/aws/credentials.js");
+    const failing = { send: vi.fn(async () => { throw Object.assign(new Error("denied"), { name: "AccessDeniedException" }); }) };
+    const error = await secretsManagerSource(failing).read("agentx/connectors/x").catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(CredentialUnavailable);
+    expect((error as Error).message).toBe("AgentX cannot read secret agentx/connectors/x; connector secrets must be named agentx/connectors/<name> in this account and region, or its KMS key does not allow the AgentX broker");
   });
 
   it("logs and swallows a token cache write failure without the token", async () => {
@@ -104,6 +137,16 @@ describe("registry failure modes", () => {
     expect(response.status).toBe(503);
     expect(response.body).toMatchObject({ error: { code: "RUNTIME_UNAVAILABLE", message: "could not read secret agentx/connectors/jira-sa from Secrets Manager; try again" } });
     expect(JSON.stringify(response.body)).not.toMatch(/Rate exceeded|aws-internal-detail/);
+  });
+
+  it("answers CONFIG_INVALID naming only the secret when it cannot be decrypted, not RUNTIME_UNAVAILABLE", async () => {
+    const { secretsManagerSource } = await import("../../packages/broker/src/aws/credentials.js");
+    const undecryptable = secretsManagerSource({ send: vi.fn(async () => { throw Object.assign(new Error("aws-internal-detail: ciphertext blob"), { name: "DecryptionFailure" }); }) });
+    const { handler } = await createAdminBroker({ connectorCredentials: { secrets: undecryptable, githubApp } });
+    const response = await register(handler, "jira-sa", "static-secret", "agentx/connectors/jira-sa");
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({ error: { code: "CONFIG_INVALID", message: "secret agentx/connectors/jira-sa cannot be decrypted or is scheduled for deletion" } });
+    expect(JSON.stringify(response.body)).not.toMatch(/aws-internal-detail/);
   });
 
   it("keeps a transient Secrets Manager error a plain error on the provider path", async () => {
@@ -148,5 +191,18 @@ describe("registry failure modes", () => {
       const lines = log.mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>);
       expect(lines).toContainEqual({ component: "broker", event: "connector.credential_record_invalid", credential: "broken" });
     } finally { log.mockRestore(); }
+  });
+
+  it("skips a stored record whose ref equals the built-in GitHub App reference, so list never returns it twice", async () => {
+    const { db, handler } = await createAdminBroker({ connectorCredentials: { secrets, githubApp } });
+    db.set({
+      pk: "CREDENTIALS", sk: `REF#${githubApp.ref}`, entityType: "CREDENTIAL",
+      ref: githubApp.ref, type: "static-secret", secretName: "agentx/connectors/shadow-github-app",
+      registeredBy: "someone", registeredAt: new Date().toISOString(),
+    });
+    const listed = await adminCall(handler, { method: "GET", path: "/v1/admin/credentials" });
+    const refs = (listed.body.credentials as Array<{ ref: string }>).map((entry) => entry.ref);
+    expect(refs).toEqual(["github-app"]);
+    expect(listed.body.credentials).toContainEqual({ ref: "github-app", type: "github-app", secretName: githubApp.secretName, builtIn: true, tokenCached: false });
   });
 });
