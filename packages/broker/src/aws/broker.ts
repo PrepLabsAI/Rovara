@@ -72,7 +72,7 @@ import { GitHubAppCredentialProvider, privateKeyFromSecret } from "../github-app
 import { CatalogCache } from "@agentx/gateway";
 import { executeGitHubTool, toGitHubCatalog, type GitHubMcpDependencies } from "../github-mcp.js";
 import { DynamoConnectorLedger, GITHUB_LEDGER } from "./connector-ledger.js";
-import { attributionDroppedLog, callConnector, connectorCatalogKey, discoverCachedScope, discoverConnector, type ConnectorContextBase, type ScopeDiscovery } from "./connector-routes.js";
+import { attributionDroppedLog, callConnector, connectorCatalogKey, discoverConnector, discoverLegacyGitHubScope, stripCode, type ConnectorContextBase, type ScopeDiscovery } from "./connector-routes.js";
 import { resolveConnectors, type ConnectorType, type ConnectorTypeContext, type ResolvedConnector } from "./connector-types.js";
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
 import { preflightConnectors, registrationWarnings } from "./registration-preflight.js";
@@ -367,15 +367,10 @@ async function routeWorkspaceRequest(
     if (!repository) throw agentXError("NOT_FOUND", "registered repository not found");
     const revision = project.definition.revision;
     if (!parsed?.success) {
-      // The connector route's cache, under the same key, so either route's discovery serves both.
-      const connector = resolveConnectors(project.definition, connectorTypeContext(dependencies), dependencies.connectorTypes)
-        .find((entry) => entry.type === "github" && entry.name === github.name);
-      const scope = connector?.scopes.find((entry) => entry.alias === repository.name);
-      if (!connector || !scope) throw agentXError("FORBIDDEN", "GitHub MCP is not enabled for this project revision");
-      const definition = await connector.definition();
-      if ("notConnected" in definition) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub MCP is not configured");
-      const discovery = await discoverCachedScope({
-        connector, definition, scope, projectName: workspace.projectName, context: connectorContext(identity, workspace, project), catalogs: dependencies.catalogs,
+      const discovery = await discoverLegacyGitHubScope({
+        connectors: resolveConnectors(project.definition, connectorTypeContext(dependencies), dependencies.connectorTypes),
+        connectorName: github.name, repository: repository.name, projectName: workspace.projectName,
+        context: connectorContext(identity, workspace, project), catalogs: dependencies.catalogs,
       });
       return json({ catalog: toGitHubCatalog(discovery) }, request.requestId);
     }
@@ -3163,10 +3158,6 @@ function parseStoredEvent(item: Record<string, unknown>): {
     timestamp: item.timestamp,
     payload: item.payload,
   };
-}
-
-function stripCode(message: string, code: string): string {
-  return message.startsWith(`${code}: `) ? message.slice(code.length + 2) : message;
 }
 
 function json(

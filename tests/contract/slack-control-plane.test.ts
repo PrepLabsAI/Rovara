@@ -12,7 +12,7 @@ import { createSignedServiceFetch } from "../../packages/slack-service/src/signi
 // Broker code resolves @agentx/gateway to the built dist; importing from there (not from
 // packages/gateway/src) keeps this the same module copy the broker's connect fake must throw
 // through, so `instanceof McpUnauthorized` holds inside the engine.
-import { McpUnauthorized } from "@agentx/gateway";
+import { McpUnauthorized, requestFingerprint } from "@agentx/gateway";
 
 const team = "T0BSHLLUGBD";
 const channel = "C0123456789";
@@ -783,6 +783,24 @@ describe("hosted Slack GitHub MCP", () => {
       body: { requestId, scope: "demo", tool: "issue_write", schemaHash: write.scopes.find((scope) => scope.alias === "demo")!.schemaHash, arguments: { title: "Bug" } } });
     expect(written.body.result).toMatchObject({ status: "SUCCEEDED", replayed: false });
     expect(db.get(`WORKSPACE#${workspaceId}`, `GITHUB_MCP#${requestId}`)).toMatchObject({ connector: "github", entityType: "GITHUB_MCP_INVOCATION" });
+    // The whole stored record, so the refactor cannot add, drop or rename a ledger field.
+    expect(db.get(`WORKSPACE#${workspaceId}`, `GITHUB_MCP#${requestId}`)).toEqual({
+      pk: `WORKSPACE#${workspaceId}`,
+      sk: `GITHUB_MCP#${requestId}`,
+      entityType: "GITHUB_MCP_INVOCATION",
+      connector: "github",
+      requestId,
+      workspaceId,
+      ownerKey: db.get(`WORKSPACE#${workspaceId}`, "META")!.ownerKey,
+      repository: "demo",
+      tool: "issue_write",
+      fingerprint: requestFingerprint({ requestId, scope: "demo", tool: "issue_write", schemaHash: write.scopes.find((scope) => scope.alias === "demo")!.schemaHash, arguments: { title: "Bug" } }),
+      createdAt: expect.any(String) as unknown,
+      updatedAt: expect.any(String) as unknown,
+      result: { requestId, status: "SUCCEEDED", text: "GitHub result", truncated: false, replayed: false },
+      requestedBy: { teamId: team, userId: pratik },
+      settingsRevision: 1,
+    });
 
     // A definition change seen through the connector route forces the legacy route to rediscover
     // that repository, and only that repository.

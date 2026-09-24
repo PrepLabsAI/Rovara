@@ -1,4 +1,4 @@
-import { agentXError, type AgentXError, type ConnectorCallRequest, type ConnectorCatalog, type ConnectorResult, type SlackRequester, type WorkspaceInstance } from "@agentx/contracts";
+import { agentXError, type ConnectorCallRequest, type ConnectorCatalog, type ConnectorResult, type SlackRequester, type WorkspaceInstance } from "@agentx/contracts";
 import {
   ConnectorNotConnected,
   discoverTools,
@@ -76,11 +76,11 @@ export async function discoverConnector(input: {
   context: ConnectorContextBase;
   catalogs: CatalogCache<ScopeDiscovery>;
 }): Promise<ConnectorCatalog> {
-  const { connector, workspace, project, context, catalogs } = input;
+  const { connector, workspace, context, catalogs } = input;
   const notConnected = (message: string, scope?: string): ConnectorCatalog => {
     console.log(JSON.stringify({
       component: "broker", event: "connector.not_connected", project: workspace.projectName,
-      revision: project.definition.revision, connector: connector.name, ...(scope === undefined ? {} : { scope }), message,
+      revision: context.settingsRevision, connector: connector.name, ...(scope === undefined ? {} : { scope }), message,
     }));
     return { connector: connector.name, notConnected: true, tools: [], skipped: [] };
   };
@@ -93,7 +93,7 @@ export async function discoverConnector(input: {
       discovery = await discoverCachedScope({ connector, definition, scope, projectName: workspace.projectName, context, catalogs });
     } catch (error) {
       if (!(error instanceof ConnectorNotConnected)) throw error;
-      return notConnected(withoutCode(error), scope.alias);
+      return notConnected(stripCode(error.message, error.code), scope.alias);
     }
     scopes.push({ alias: scope.alias, tools: discovery.tools });
   }
@@ -112,7 +112,8 @@ export async function callConnector(input: {
   ledger: Ledger;
   catalogs: CatalogCache<ScopeDiscovery>;
 }): Promise<ConnectorResult> {
-  const { connector, request, workspace, project, context, attribution, ledger, catalogs } = input;
+  const { connector, request, workspace, context, attribution, ledger, catalogs } = input;
+  const revision = context.settingsRevision;
   // A malformed request (unknown scope or unapproved tool) is refused the same way whether or not
   // the connector is connected in this deployment.
   const scope = connector.scopes.find((entry) => entry.alias === request.scope);
@@ -134,11 +135,33 @@ export async function callConnector(input: {
     {
       ...(connector.connect ? { connect: connector.connect } : {}),
       ...(attribution === undefined ? {} : { attribution }),
-      onAttributionDropped: attributionDroppedLog(workspace.projectName, project.definition.revision, connector.name, scope.alias, request.requestId),
-      onDefinitionChanged: () => catalogs.delete(connectorCatalogKey(workspace.projectName, context.settingsRevision, connector.name, scope.alias)),
+      onAttributionDropped: attributionDroppedLog(workspace.projectName, revision, connector.name, scope.alias, request.requestId),
+      onDefinitionChanged: () => catalogs.delete(connectorCatalogKey(workspace.projectName, revision, connector.name, scope.alias)),
       ledger,
     },
   );
+}
+
+/**
+ * The legacy GitHub route's discovery of one repository, through the connector route's cache.
+ * Feature 007 answers: a missing deployment credential or a rejected one is RUNTIME_UNAVAILABLE.
+ */
+export async function discoverLegacyGitHubScope(input: {
+  connectors: readonly ResolvedConnector[];
+  connectorName: string;
+  repository: string;
+  projectName: string;
+  context: ConnectorContextBase;
+  catalogs: CatalogCache<ScopeDiscovery>;
+}): Promise<ScopeDiscovery> {
+  const connector = input.connectors.find((entry) => entry.type === "github" && entry.name === input.connectorName);
+  // The revision configures a github connector (the caller checked), but this deployment cannot serve its type.
+  if (!connector) throw agentXError("FORBIDDEN", "github connector type is not available in this deployment");
+  const scope = connector.scopes.find((entry) => entry.alias === input.repository);
+  if (!scope) throw agentXError("NOT_FOUND", "registered repository not found");
+  const definition = await connector.definition();
+  if ("notConnected" in definition) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub MCP is not configured");
+  return discoverCachedScope({ connector, definition, scope, projectName: input.projectName, context: input.context, catalogs: input.catalogs });
 }
 
 /** One diagnostic line when a write went out without its footer; never the request's text. */
@@ -161,7 +184,7 @@ function scopeContext<Scope>(connector: ResolvedConnector<Scope>, scope: Connect
   };
 }
 
-/** The error's message without its "CODE: " prefix. */
-function withoutCode(error: AgentXError): string {
-  return error.message.startsWith(`${error.code}: `) ? error.message.slice(error.code.length + 2) : error.message;
+/** An AgentXError message without its "CODE: " prefix. */
+export function stripCode(message: string, code: string): string {
+  return message.startsWith(`${code}: `) ? message.slice(code.length + 2) : message;
 }

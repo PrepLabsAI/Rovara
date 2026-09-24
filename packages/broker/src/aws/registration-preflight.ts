@@ -5,6 +5,7 @@ import {
   type RegistrationPreflight,
 } from "@agentx/contracts";
 import { ConnectorNotConnected, presentCatalog, TARGET_CONFLICT_REASON, type SkippedTool } from "@agentx/gateway";
+import { stripCode } from "./connector-routes.js";
 import { discoverGitHubTools, type GitHubMcpDependencies, type GitHubMcpDiscovery } from "../github-mcp.js";
 
 const MAX_SKIPPED = 64;
@@ -33,7 +34,7 @@ export async function preflightConnectors(
   if (rejection) {
     const reason = rejection.reason as Error;
     // discoverTools only surfaces messages it wrote itself, so no credential reaches the report.
-    const message = reason instanceof AgentXError ? withoutCode(reason.message, reason.code) : "GitHub MCP discovery failed";
+    const message = reason instanceof AgentXError ? stripCode(reason.message, reason.code) : "GitHub MCP discovery failed";
     return { report: { connectors: [{
       name: github.name, status: notConnected ? "not_connected" : "unavailable",
       problem: message.slice(0, MAX_PROBLEM), offered: [], skipped: [],
@@ -74,8 +75,4 @@ function uniqueSkipped(entries: readonly SkippedTool[]): Array<{ tool: string; r
     if (unique.length === MAX_SKIPPED) break;
   }
   return unique;
-}
-
-function withoutCode(message: string, code: string): string {
-  return message.startsWith(`${code}: `) ? message.slice(code.length + 2) : message;
 }

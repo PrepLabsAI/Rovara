@@ -100,6 +100,21 @@ function registerTrackerKey(handler: Handler) {
     body: { ref: "tracker-key", type: "static-secret", secretName: "agentx/connectors/tracker-key" } });
 }
 
+describe("legacy GitHub route", () => {
+  it("says the github type is unavailable, not that GitHub MCP is disabled, when this deployment cannot resolve a configured github connector", async () => {
+    const { db, handler } = createBroker({
+      githubMcp: { credentials: vi.fn(), connect: vi.fn() },
+      connectorTypes: { tracker: trackerConnectorType },
+    });
+    await registerAndBind(handler);
+    const workspaceId = (await ensureWorkspace(handler, thread, pratik)).body.workspaceId as string;
+    markReady(db, workspaceId);
+    const response = await call(handler, { method: "GET", path: `/v1/service/workspaces/${workspaceId}/github/tools?repository=demo`, service });
+    expect(response.status).toBe(403);
+    expect(response.body.error).toEqual({ code: "FORBIDDEN", message: "github connector type is not available in this deployment" });
+  });
+});
+
 describe("generic connector routes", () => {
   it("answers not connected, and says why in one log line, while the tracker's credential is unregistered", async () => {
     const { handler, path, connect } = await trackerBroker();
@@ -117,6 +132,15 @@ describe("generic connector routes", () => {
     expect(called.status).toBe(200);
     expect(called.body.result).toMatchObject({ requestId, status: "FAILED", reason: "not_connected", replayed: false });
     expect((called.body.result as { text: string }).text).toContain("Tracker issues is not connected");
+    // A malformed request is refused the same way whether or not the connector is connected.
+    const unapproved = await call(handler, { method: "POST", path: `${path}/call`, service,
+      body: { requestId: randomUUID(), scope: "payments", tool: "delete_item", schemaHash: "a".repeat(64), arguments: {} } });
+    expect(unapproved.status).toBe(403);
+    expect(unapproved.body.error).toMatchObject({ code: "FORBIDDEN" });
+    const unknownScope = await call(handler, { method: "POST", path: `${path}/call`, service,
+      body: { requestId: randomUUID(), scope: "shipping", tool: "list_items", schemaHash: "a".repeat(64), arguments: {} } });
+    expect(unknownScope.status).toBe(404);
+    expect(unknownScope.body.error).toMatchObject({ code: "NOT_FOUND" });
     expect(connect).not.toHaveBeenCalled();
   });
 
