@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { ProjectDefinitionSchema } from "@agentx/contracts";
+import { TARGET_CONFLICT_REASON } from "@agentx/gateway";
 import { describe, expect, it, vi } from "vitest";
 import type { GitHubMcpDependencies } from "../../packages/broker/src/github-mcp.js";
 import { adminCall, adminIssuer, createAdminBroker, type AdminHandler } from "../support/admin-broker.js";
@@ -72,6 +73,45 @@ describe("registration preflight", () => {
     // Seed a revision registered before this check existed; re-submitting it stays idempotent.
     seedRegisteredRevision(db, githubConnector([long]));
     expect((await register(handler, githubConnector([long]))).body).toMatchObject({ duplicate: true });
+  });
+
+  it("answers a registration that lost the write race as a duplicate, with its preflight report and one vendor contact", async () => {
+    const githubMcp = vendor([plainTool("list_issues")]);
+    const { handler, db } = await createAdminBroker({ githubMcp });
+    const overrides = githubConnector(["list_issues"]);
+    const send = db.send;
+    let raced = false;
+    // Another writer stores the same revision between this request's read and its conditional write.
+    db.send = async (command) => {
+      if (!raced && command.constructor.name === "TransactWriteCommand") {
+        raced = true;
+        seedRegisteredRevision(db, overrides);
+        throw Object.assign(new Error("transaction cancelled"), { name: "TransactionCanceledException" });
+      }
+      return send(command);
+    };
+    const registered = await register(handler, overrides, { preflight: true });
+    expect(raced).toBe(true);
+    expect(registered.status).toBe(201);
+    expect(registered.body).toMatchObject({ duplicate: true, preflight: { connectors: [{ name: "github", status: "connected", offered: ["github__list_issues"], skipped: [] }] } });
+    expect(githubMcp.connect).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports an unreachable vendor with the fixed discovery message, never the raw error", async () => {
+    const { handler } = await createAdminBroker({ githubMcp: { credentials: async () => ({ owner: "example", repo: "demo", token: "t" }), connect: vi.fn(async () => { throw new Error("ECONNRESET"); }) } });
+    const registered = await register(handler, githubConnector(["list_issues"]), { preflight: true });
+    const problem = (registered.body.preflight as { connectors: Array<{ problem?: string }> }).connectors[0]!.problem;
+    expect(problem).toBe("GitHub MCP discovery failed; check GitHub App issue permissions and endpoint availability");
+    expect(JSON.stringify(registered.body)).not.toContain("ECONNRESET");
+  });
+
+  it("registers a single-repository tool that already has a target argument and reports it skipped", async () => {
+    const { handler, db } = await createAdminBroker({ githubMcp: vendor([toolWithTarget("list_issues")]) });
+    const registered = await register(handler, githubConnector(["list_issues"]), { preflight: true });
+    expect(registered.status).toBe(201);
+    expect(registered.body.preflight).toEqual({ connectors: [{ name: "github", status: "connected", offered: [], skipped: [{ tool: "list_issues", reason: TARGET_CONFLICT_REASON }] }] });
+    expect(registered.body.warnings).toEqual([`connector github: tool list_issues skipped: ${TARGET_CONFLICT_REASON}`]);
+    expect(db.get("PROJECT#payments", "REV#000000000001")).toBeDefined();
   });
 
   it("warns when the model could see more than 20 tools", async () => {

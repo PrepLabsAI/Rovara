@@ -70,6 +70,20 @@ describe("project registration from the command line", () => {
   });
 });
 
+describe("project registration without connectors", () => {
+  it("does not mention connector checks when the definition has no integrations", async () => {
+    const context = await administratorContext("agentx-cli-register-plain-");
+    const plain = projectDefinition();
+    delete plain.integrations;
+    await writeFile(context.projectFile, JSON.stringify(plain), "utf8");
+    const fetchImplementation = vi.fn<typeof fetch>(async () => Response.json({ project: { definition: { name: "payments" } }, duplicate: false }, { status: 201 }));
+    const { exitCode, stderr } = await runRegister(context, fetchImplementation);
+    expect(exitCode).toBe(0);
+    expect(stderr).not.toContain("did not check connectors");
+    expect(stderr).toBe("");
+  });
+});
+
 describe("project registration errors", () => {
   it("surfaces the control plane's refusal so the administrator knows what to fix", async () => {
     const context = await administratorContext("agentx-cli-register-refused-");
