@@ -61,6 +61,19 @@ describe("connector resolution", () => {
     } finally { log.mockRestore(); }
   });
 
+  it("skips, with a log line and without throwing, a malformed stored github connector", () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      const connectors = resolveConnectors(project({ connectors: [
+        { name: "gh", type: "github", scopes: 5, tools: [{ name: "list_issues", access: "read" }] },
+      ] }), { githubMcp });
+      expect(connectors).toEqual([]);
+      const lines = log.mock.calls.map(([line]) => String(line)).filter((line) => line.includes("connector.unusable"));
+      expect(lines).toHaveLength(1);
+      expect(JSON.parse(lines[0]!)).toMatchObject({ component: "broker", event: "connector.unusable", project: "payments", revision: 3, connector: "gh", type: "github", reason: "invalid github connector configuration: scopes" });
+    } finally { log.mockRestore(); }
+  });
+
   it("reports a type-owned connector as configured only when its credential is registered", async () => {
     const db = new FakeDynamoDb();
     const credentialRegistry = new CredentialRegistry({

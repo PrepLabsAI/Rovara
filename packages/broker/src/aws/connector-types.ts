@@ -1,4 +1,4 @@
-import { githubConnectorOf, type ProjectDefinition, type RepositoryDefinition } from "@agentx/contracts";
+import { GitHubConnectorSchema, githubConnectorOf, type ProjectDefinition, type RepositoryDefinition } from "@agentx/contracts";
 import { githubConnector, type ConnectorDefinition, type ConnectorPolicy, type PresentationApproval, type connectMcp } from "@agentx/gateway";
 import type { GitHubMcpDependencies } from "../github-mcp.js";
 import { GITHUB_LEDGER } from "./connector-ledger.js";
@@ -46,8 +46,13 @@ const GITHUB_NOT_CONFIGURED = "GitHub MCP is not configured in this deployment";
 export const githubConnectorType: ConnectorType = {
   type: "github",
   resolve(config, project, context) {
-    const connectors = [config] as unknown as NonNullable<ProjectDefinition["integrations"]>["connectors"];
-    const resolved = githubConnectorOf({ repositories: project.repositories, integrations: { connectors } });
+    // Stored data is validated here, not trusted: a malformed entry is unusable, never a throw.
+    const parsed = GitHubConnectorSchema.safeParse(config);
+    if (!parsed.success) {
+      const fields = [...new Set(parsed.error.issues.map((issue) => issue.path[0] === undefined ? "entry" : String(issue.path[0])))];
+      return { unusable: `invalid github connector configuration: ${fields.join(", ")}` };
+    }
+    const resolved = githubConnectorOf({ repositories: project.repositories, integrations: { connectors: [parsed.data] } });
     if (!resolved) return { unusable: "not a github connector" };
     const githubMcp = context.githubMcp;
     const connector: ResolvedConnector<RepositoryDefinition> = {
