@@ -8,6 +8,12 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { amazonBedrockProvider } from "@earendil-works/pi-ai/providers/amazon-bedrock";
 import { agentXError } from "@agentx/contracts";
+import {
+  appendRepositoryContextFiles,
+  loadRepositoryContextFiles,
+  readPreparedRepositories,
+  type RepositoryContextFile,
+} from "./repository-context.js";
 
 export type PiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
@@ -26,27 +32,25 @@ export interface PiSessionHandle {
   dispose(): void;
 }
 
+export interface PiSessionInput {
+  cwd: string;
+  sessionDirectory: string;
+  agentDirectory: string;
+  model: WorkspaceModelConfiguration;
+  /** Each prepared repository's own context file, which Pi cannot discover from the root. */
+  contextFiles: RepositoryContextFile[];
+}
+
 export interface PiSessionAdapter {
-  create(input: {
-    cwd: string;
-    sessionDirectory: string;
-    agentDirectory: string;
-    model: WorkspaceModelConfiguration;
-  }): Promise<PiSessionHandle>;
-  open?(input: {
-    cwd: string;
-    sessionDirectory: string;
-    agentDirectory: string;
-    model: WorkspaceModelConfiguration;
-    conversationId: string;
-    sessionFile: string;
-  }): Promise<PiSessionHandle>;
+  create(input: PiSessionInput): Promise<PiSessionHandle>;
+  open?(input: PiSessionInput & { conversationId: string; sessionFile: string }): Promise<PiSessionHandle>;
 }
 
 export async function createWorkspacePiSession(
   input: {
     rootPath: string;
     model: WorkspaceModelConfiguration;
+    onDiagnostic?: (message: string) => void;
   },
   adapter: PiSessionAdapter = defaultPiSessionAdapter,
 ): Promise<PiSessionHandle> {
@@ -57,7 +61,14 @@ export async function createWorkspacePiSession(
     mkdir(sessionDirectory, { recursive: true, mode: 0o700 }),
     mkdir(agentDirectory, { recursive: true, mode: 0o700 }),
   ]);
-  const handle = await adapter.create({ cwd: rootPath, sessionDirectory, agentDirectory, model: input.model });
+  const contextFiles = await loadWorkspaceContextFiles(rootPath, input.onDiagnostic);
+  const handle = await adapter.create({
+    cwd: rootPath,
+    sessionDirectory,
+    agentDirectory,
+    model: input.model,
+    contextFiles,
+  });
   assertContained(sessionDirectory, handle.sessionFile);
   return handle;
 }
@@ -68,6 +79,7 @@ export async function openRegisteredWorkspacePiSession(
     model: WorkspaceModelConfiguration;
     conversationId: string;
     sessionFile: string;
+    onDiagnostic?: (message: string) => void;
   },
   adapter: PiSessionAdapter = defaultPiSessionAdapter,
 ): Promise<PiSessionHandle> {
@@ -77,11 +89,13 @@ export async function openRegisteredWorkspacePiSession(
   const sessionFile = await realpath(resolve(input.sessionFile));
   assertContained(sessionDirectory, sessionFile);
   if (!adapter.open) throw new Error("pi session adapter does not support saved-session reopen");
+  const contextFiles = await loadWorkspaceContextFiles(rootPath, input.onDiagnostic);
   const handle = await adapter.open({
     cwd: rootPath,
     sessionDirectory,
     agentDirectory,
     model: input.model,
+    contextFiles,
     conversationId: input.conversationId,
     sessionFile,
   });
@@ -103,12 +117,7 @@ const defaultPiSessionAdapter: PiSessionAdapter = {
 };
 
 async function createDefaultSession(
-  input: {
-    cwd: string;
-    sessionDirectory: string;
-    agentDirectory: string;
-    model: WorkspaceModelConfiguration;
-  },
+  input: PiSessionInput,
   manager: SessionManager,
   conversationId?: string,
 ): Promise<PiSessionHandle> {
@@ -130,6 +139,7 @@ async function createDefaultSession(
       noExtensions: true,
       noPromptTemplates: true,
       noThemes: true,
+      agentsFilesOverride: appendRepositoryContextFiles(input.contextFiles),
     });
     await resourceLoader.reload();
     const { session } = await createAgentSession({
@@ -169,6 +179,17 @@ export function agentCoreBedrockProvider(): ReturnType<typeof amazonBedrockProvi
       },
     },
   };
+}
+
+/** Reloaded for every session, so an edited context file reaches the next task. */
+async function loadWorkspaceContextFiles(
+  rootPath: string,
+  onDiagnostic?: (message: string) => void,
+): Promise<RepositoryContextFile[]> {
+  const repositories = await readPreparedRepositories(rootPath);
+  const { files, diagnostics } = await loadRepositoryContextFiles(rootPath, repositories);
+  for (const diagnostic of diagnostics) onDiagnostic?.(diagnostic);
+  return files;
 }
 
 function assertContained(parent: string, child: string): void {

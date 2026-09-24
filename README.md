@@ -35,6 +35,14 @@ local source, file-editing, or shell tools. The remote Pi session owns the codin
 AgentX wraps remote Pi only to provide authentication, workspace allocation, operation fencing,
 durable callbacks, and Git/tool-evidence artifacts.
 
+The remote session runs at the workspace root, above the repositories, so Pi's own context-file
+discovery never reaches them. For each prepared repository the worker loads the first of
+`AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, and `CLAUDE.MD` that exists in the
+repository root, and adds it to the session context labelled with that repository's name and
+workspace path. The files are read again for every task, so an edited one applies to the next
+task. A file that resolves outside its repository or exceeds 64 KiB is skipped and reported as a
+progress event.
+
 Both roles currently use `@earendil-works/pi-coding-agent` 0.85.1. GitHub Spec Kit supplies the
 specification workflow and demo repository; it is not the coding-agent runtime.
 
