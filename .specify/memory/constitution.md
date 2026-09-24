@@ -1,4 +1,13 @@
-<!-- Sync impact: 1.3.0 -> 2.0.0 (retires the local development client; AgentX is Slack-only).
+<!-- Sync impact: 2.0.0 -> 2.1.0 (widens third-party issue tools to connector tools).
+Principles modified: I. One orchestrator, remote coding (administrator-enabled third-party tools are
+no longer limited to issue tools, so Linear, Jira and later connectors share one boundary; scope is
+the project plus each connector's registered scope rather than repositories alone; the third-party
+credential, not project policy, is the access boundary). The permission widens under the same
+conditions plus one new one; no other rule changes.
+Sections modified: none. Removed sections: none.
+Design and verification will be recorded in specs/013-connector-gateway/.
+Follow-up TODOs: none. -->
+<!-- Previous: 1.3.0 -> 2.0.0 (retires the local development client; AgentX is Slack-only).
 Principles modified: I. Orchestration-only clients, remote coding -> I. One orchestrator, remote
 coding (the local pi-based client is removed; the hosted Slack orchestrator is the only
 orchestrator, and the remaining client administers projects); II. Administrator-prepared projects
@@ -27,9 +36,11 @@ Follow-up TODOs: specify the hosted Slack orchestrator as its own Spec Kit featu
 ### I. One orchestrator, remote coding
 
 The hosted Slack orchestrator is the only orchestrator. It MUST expose only orchestration
-capabilities and administrator-enabled third-party issue tools mediated by the authenticated
-control plane to its agent. Those issue tools MUST enforce project and repository scope, keep
-credentials out of model context, and deduplicate writes durably.
+capabilities and administrator-enabled third-party connector tools mediated by the authenticated
+control plane to its agent. Those connector tools MUST enforce project scope and each connector's
+registered scope, keep credentials out of model context, and deduplicate writes durably. The
+credential a connector uses MUST itself be limited at the third party to that registered scope;
+project policy narrows what the agent is offered but is not the access boundary.
 Repository code inspection, editing, shell execution,
 builds, and tests MUST run in remote coding workers. Tool registration and extension loading MUST
 enforce this boundary; prompts alone are insufficient. The orchestrator runs unattended. It MUST
@@ -118,4 +129,4 @@ Amendments MUST identify changed principles and update affected specifications a
 Use semantic versioning: major for incompatible principles, minor for new principles, patch
 for clarifications. Reviewers MUST identify and resolve violations before declaring delivery complete.
 
-**Version**: 2.0.0 | **Ratified**: 2026-09-17 | **Last Amended**: 2026-09-23
+**Version**: 2.1.0 | **Ratified**: 2026-09-17 | **Last Amended**: 2026-09-24
