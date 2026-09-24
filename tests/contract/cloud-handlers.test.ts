@@ -266,12 +266,52 @@ describe("AWS control-plane handlers", () => {
       registeredBy: ownerKey,
       registeredAt: now,
     });
+    const pinnedDefinition = (records.get(key("PROJECT#demo", "REV#000000000001")) as { definition: Record<string, unknown> }).definition;
+    records.set(key("PROJECT#demo", "REV#000000000002"), {
+      pk: "PROJECT#demo",
+      sk: "REV#000000000002",
+      entityType: "PROJECT",
+      definition: {
+        ...pinnedDefinition,
+        revision: 2,
+        readiness: [{ cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 600 }],
+        repositories: [
+          {
+            name: "demo",
+            url: "https://github.com/example/demo.git",
+            path: "repo/demo",
+            defaultBranch: "main",
+            credentialRef: "github-app",
+            codeBuildGates: [{ name: "quality", projectName: "agentx-demo-quality-v2", timeoutMinutes: 45 }],
+          },
+          { name: "other", url: "https://github.com/example/other.git", path: "repo/other", defaultBranch: "main", credentialRef: "github-app" },
+        ],
+        orchestratorInstructions: "Delegate work (revision 2).",
+      },
+      runtimeBinding: {
+        runtimeArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/agentx",
+        endpointQualifier: "DEFAULT",
+        deploymentMode: "demo-microvm",
+      },
+      registeredBy: ownerKey,
+      registeredAt: now,
+    });
     const written: Record<string, unknown>[] = [];
     const documentClient = {
       send: vi.fn(async (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
         if (command.constructor.name === "GetCommand") {
           const inputKey = command.input.Key as { pk: string; sk: string };
           return { Item: records.get(key(inputKey.pk, inputKey.sk)) };
+        }
+        if (command.constructor.name === "QueryCommand") {
+          // The broker finds a project's latest revision with one descending query on REV# keys.
+          const values = command.input.ExpressionAttributeValues as Record<string, string>;
+          const prefix = `${values[":pk"]}\0${values[":revision"] ?? ""}`;
+          const matches = [...records.entries()]
+            .filter(([recordKey]) => recordKey.startsWith(prefix))
+            .sort(([left], [right]) => right.localeCompare(left))
+            .map(([, item]) => item);
+          return { Items: matches.slice(0, (command.input.Limit as number | undefined) ?? matches.length) };
         }
         if (command.constructor.name === "TransactWriteCommand") {
           const transaction = command.input.TransactItems as Array<{
@@ -426,6 +466,27 @@ describe("AWS control-plane handlers", () => {
     expect(throughOidc.body).toContain("Slack");
     const body = JSON.parse(response.body) as { operation: { id: string; kind: string } };
     expect(body.operation.kind).toBe("publish");
+
+    // The workspace stays on the revision its disk was prepared with, while readiness and the
+    // CodeBuild gates come from the project's latest registered revision.
+    const accepted = records.get(key(`WORKSPACE#${workspaceId}`, `OPERATION#${body.operation.id}`)) as {
+      settingsRevision?: number;
+      publication?: { codeBuildGates: Array<{ projectName: string }> };
+    };
+    expect(accepted.settingsRevision).toBe(2);
+    expect(accepted.publication?.codeBuildGates).toEqual([
+      { name: "quality", projectName: "agentx-demo-quality-v2", timeoutMinutes: 45 },
+    ]);
+    const dispatched = written.find((record) => record.entityType === "OUTBOX")?.invocation as {
+      projectRevision: number;
+      payload: { project: { revision: number; readiness: unknown[]; repositories: Array<{ path: string }> } };
+    };
+    expect(dispatched.projectRevision).toBe(1);
+    expect(dispatched.payload.project.revision).toBe(1);
+    expect(dispatched.payload.project.readiness).toEqual([
+      { cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 600 },
+    ]);
+    expect(dispatched.payload.project.repositories.map(({ path }) => path)).toEqual(["repo/demo", "repo/other"]);
     const outbox = written.find((record) => record.entityType === "OUTBOX");
     const invocation = outbox?.invocation as {
       callbackCapability: string;
@@ -447,7 +508,7 @@ describe("AWS control-plane handlers", () => {
         action: "start",
         repository: "demo",
         gate: "quality",
-        projectName: "agentx-demo-quality",
+        projectName: "agentx-demo-quality-v2",
         commit: buildCommit,
       }),
       requestContext: { requestId: "codebuild-start", http: { method: "POST" } },
@@ -468,7 +529,7 @@ describe("AWS control-plane handlers", () => {
         action: "status",
         repository: "demo",
         gate: "quality",
-        projectName: "agentx-demo-quality",
+        projectName: "agentx-demo-quality-v2",
         commit: buildCommit,
         buildId: startedBuildBody.buildId,
       }),
@@ -608,7 +669,7 @@ describe("AWS control-plane handlers", () => {
       headers: { "x-agentx-callback-capability": replacementInvocation.callbackCapability },
       body: JSON.stringify({
         action: "start", repository: "demo", gate: "quality",
-        projectName: "agentx-demo-quality", commit: replacementCommit,
+        projectName: "agentx-demo-quality-v2", commit: replacementCommit,
       }),
       requestContext: { requestId: "replacement-build-start", http: { method: "POST" } },
     });
@@ -619,7 +680,7 @@ describe("AWS control-plane handlers", () => {
       headers: { "x-agentx-callback-capability": replacementInvocation.callbackCapability },
       body: JSON.stringify({
         action: "status", repository: "demo", gate: "quality",
-        projectName: "agentx-demo-quality", commit: replacementCommit,
+        projectName: "agentx-demo-quality-v2", commit: replacementCommit,
         buildId: replacementBuild.buildId,
       }),
       requestContext: { requestId: "replacement-build-status", http: { method: "POST" } },

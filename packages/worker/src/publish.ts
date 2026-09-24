@@ -342,6 +342,23 @@ export async function runReadinessChecks(
   const results: PublicationCheckResult[] = [];
   for (const [index, command] of invocation.payload.project.readiness.entries()) {
     const startedAt = new Date().toISOString();
+    // Readiness comes from the project's latest revision, which may name a repository this
+    // workspace was never prepared with. Fail the check rather than skip a gate.
+    const missing = await missingCommandDirectory(rootPath, command.cwd);
+    if (missing) {
+      results.push({
+        index,
+        cwd: command.cwd,
+        executable: command.executable,
+        exitCode: 127,
+        stdout: "",
+        stderr: `readiness command ${index} cannot run: ${command.cwd} is not a directory in this workspace`,
+        startedAt,
+        completedAt: new Date().toISOString(),
+        outcome: "failed",
+      });
+      continue;
+    }
     const result = await runProjectCommand(command, index, rootPath);
     results.push({
       index,
@@ -356,6 +373,14 @@ export async function runReadinessChecks(
     });
   }
   return results;
+}
+
+async function missingCommandDirectory(rootPath: string, cwd: string): Promise<boolean> {
+  try {
+    return !(await stat(resolve(rootPath, cwd))).isDirectory();
+  } catch {
+    return true;
+  }
 }
 
 async function git(directory: string, args: readonly string[]): Promise<string> {

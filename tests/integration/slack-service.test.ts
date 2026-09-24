@@ -49,6 +49,7 @@ function processorHarness(options: {
   const posts: string[] = [];
   const turns: TurnInput[] = [];
   const saved: Array<{ workspaceId: string; conversationId: string }> = [];
+  const savedRevisions: number[] = [];
   const finished: string[] = [];
   const createConversation = vi.fn(async () => "33333333-3333-4333-8333-333333333333");
   const ensureWorkspace = vi.fn(async () => {
@@ -66,6 +67,9 @@ function processorHarness(options: {
       saveConversation: async (_subject, state) => {
         saved.push(state);
       },
+      saveSettingsRevision: async (_subject, revision) => {
+        savedRevisions.push(revision);
+      },
       finish: async (subject) => {
         finished.push(subject);
       },
@@ -78,7 +82,7 @@ function processorHarness(options: {
       posts.push(text);
     },
   };
-  return { dependencies, posts, turns, saved, finished, createConversation, ensureWorkspace };
+  return { dependencies, posts, turns, saved, savedRevisions, finished, createConversation, ensureWorkspace };
 }
 
 describe("deterministic request IDs", () => {
@@ -150,6 +154,33 @@ describe("Slack request processing", () => {
     expect(harness.createConversation).not.toHaveBeenCalled();
     expect(harness.turns[0]?.conversationId).toBe("44444444-4444-4444-8444-444444444444");
     expect(harness.posts[0]).toBe("Working on it now. I'll post the result in this thread when it's done.");
+  });
+
+  it("announces a settings revision change once, and records it silently the first time", async () => {
+    const first = processorHarness({
+      workspace: workspaceResult({ settingsRevision: 4 }),
+      state: { workspaceId, conversationId: "44444444-4444-4444-8444-444444444444" },
+    });
+    await processSlackRequest(slackMessage(), first.dependencies, { finalAttempt: false });
+    // A thread that has never been told a revision is not announced to; it is only recorded.
+    expect(first.posts).not.toContain("Settings updated to revision 4.");
+    expect(first.savedRevisions).toEqual([4]);
+
+    const moved = processorHarness({
+      workspace: workspaceResult({ settingsRevision: 5 }),
+      state: { workspaceId, conversationId: "44444444-4444-4444-8444-444444444444", settingsRevision: 4 },
+    });
+    await processSlackRequest(slackMessage(), moved.dependencies, { finalAttempt: false });
+    expect(moved.posts[0]).toBe("Settings updated to revision 5.");
+    expect(moved.savedRevisions).toEqual([5]);
+
+    const unchanged = processorHarness({
+      workspace: workspaceResult({ settingsRevision: 5 }),
+      state: { workspaceId, conversationId: "44444444-4444-4444-8444-444444444444", settingsRevision: 5 },
+    });
+    await processSlackRequest(slackMessage(), unchanged.dependencies, { finalAttempt: false });
+    expect(unchanged.posts.some((text) => text.startsWith("Settings updated"))).toBe(false);
+    expect(unchanged.savedRevisions).toEqual([]);
   });
 
   it("explains the member limit with links to the member's threads, without running a turn", async () => {

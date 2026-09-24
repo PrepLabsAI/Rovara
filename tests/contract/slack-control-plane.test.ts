@@ -147,7 +147,7 @@ function ensureWorkspace(handler: Handler, thread: string, slackUser: string, re
     method: "POST",
     path: "/v1/service/threads/workspace",
     service: { principal: orchestratorPrincipal, thread, slackUser },
-    body: { requestId, includeIntegrations: true },
+    body: { requestId, includeIntegrations: true, includeSettingsRevision: true },
   });
 }
 
@@ -218,7 +218,7 @@ describe("hosted Slack GitHub MCP", () => {
     expect(credentials).toHaveBeenCalledTimes(callsBefore);
   });
 
-  it("does not advertise or execute MCP when the pinned project revision has no policy", async () => {
+  it("follows the latest revision's MCP policy in an existing thread, both ways", async () => {
     const credentials = vi.fn();
     const { db, handler } = createBroker({ githubMcp: { credentials } });
     await registerProjectAndBind(handler);
@@ -227,13 +227,26 @@ describe("hosted Slack GitHub MCP", () => {
     const workspaceId = resolved.body.workspaceId as string;
     markReady(db, workspaceId);
     const service = { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik };
-    expect((await call(handler, { method: "GET", path: `/v1/service/workspaces/${workspaceId}/github/tools?repository=demo`, service })).status).toBe(403);
-    expect(credentials).not.toHaveBeenCalled();
-    // A newer revision with a policy reaches new threads without re-binding, but does not silently
-    // upgrade this existing thread, which keeps the revision its workspace was prepared with.
+    const tools = () => call(handler, {
+      method: "GET",
+      path: `/v1/service/workspaces/${workspaceId}/github/tools?repository=demo`,
+      service,
+    });
+    expect((await tools()).status).toBe(403);
+
+    // Registering a revision that adds the policy reaches this existing thread's next turn.
     await registerRevision(handler, 2, true);
-    expect((await ensureWorkspace(handler, threadOne, pratik)).body.githubMcpRepositories).toBeUndefined();
-    expect((await ensureWorkspace(handler, threadTwo, pratik)).body.githubMcpRepositories).toEqual(["demo"]);
+    const enabled = await ensureWorkspace(handler, threadOne, pratik);
+    expect(enabled.body).toMatchObject({ githubMcpRepositories: ["demo"], settingsRevision: 2 });
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ projectRevision: 1 });
+
+    // Registering a revision that removes it revokes the tools from the same thread.
+    await registerRevision(handler, 3);
+    const revoked = await ensureWorkspace(handler, threadOne, pratik);
+    expect(revoked.body.githubMcpRepositories).toBeUndefined();
+    expect(revoked.body.settingsRevision).toBe(3);
+    expect((await tools()).status).toBe(403);
+    expect(credentials).not.toHaveBeenCalled();
   });
 });
 
@@ -337,7 +350,7 @@ describe("Slack thread workspaces", () => {
     expect(second.body.workspaceId).not.toBe(first.body.workspaceId);
   });
 
-  it("gives new threads the latest registered revision and keeps existing threads on theirs", async () => {
+  it("prepares each workspace once and applies the latest revision's settings to every thread", async () => {
     const { db, handler } = createBroker();
     await registerProjectAndBind(handler);
     const first = await ensureWorkspace(handler, threadOne, pratik);
@@ -351,13 +364,17 @@ describe("Slack thread workspaces", () => {
     expect(second.body).toMatchObject({ created: true, orchestratorInstructions: "Delegate work (revision 10)." });
     expect(db.get(`WORKSPACE#${String(second.body.workspaceId)}`, "META")).toMatchObject({ projectRevision: 10 });
 
+    // The workspace keeps the revision its disk was prepared with, while the instructions the
+    // orchestrator runs with follow the project's latest revision.
     markReady(db, String(first.body.workspaceId));
     const followUp = await ensureWorkspace(handler, threadOne, bob);
     expect(followUp.body).toMatchObject({
       workspaceId: first.body.workspaceId,
       created: false,
-      orchestratorInstructions: "Delegate work (revision 1).",
+      orchestratorInstructions: "Delegate work (revision 10).",
+      settingsRevision: 10,
     });
+    expect(db.get(`WORKSPACE#${String(first.body.workspaceId)}`, "META")).toMatchObject({ projectRevision: 1 });
 
     // A binding stored while bindings named a revision still follows the latest revision.
     const stored = db.get(`SLACK_BINDING#${team}`, `CHANNEL#${channel}`);

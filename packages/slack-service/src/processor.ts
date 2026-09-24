@@ -16,11 +16,14 @@ export interface ThreadServiceApi {
 export interface ThreadState {
   workspaceId?: string;
   conversationId?: string;
+  /** The settings revision this thread was last told about, so a change is announced once. */
+  settingsRevision?: number;
 }
 
 export interface ThreadStore {
   load(subject: string): Promise<ThreadState>;
   saveConversation(subject: string, state: { workspaceId: string; conversationId: string }): Promise<void>;
+  saveSettingsRevision(subject: string, revision: number): Promise<void>;
   finish(subject: string): Promise<void>;
 }
 
@@ -87,6 +90,14 @@ export async function processSlackRequest(
     if (!conversationId) {
       conversationId = await api.createConversation(workspace.workspaceId);
       await dependencies.threads.saveConversation(subject, { workspaceId: workspace.workspaceId, conversationId });
+    }
+
+    // Settings follow the project's latest revision, so say so the first time a thread moves.
+    if (workspace.settingsRevision !== undefined && workspace.settingsRevision !== state.settingsRevision) {
+      if (state.settingsRevision !== undefined) {
+        await post(`Settings updated to revision ${workspace.settingsRevision}.`);
+      }
+      await dependencies.threads.saveSettingsRevision(subject, workspace.settingsRevision);
     }
 
     await post("Working on it now. I'll post the result in this thread when it's done.");

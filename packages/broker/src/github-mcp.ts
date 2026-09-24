@@ -7,6 +7,8 @@ export interface GitHubMcpInvocation {
   requestedBy?: SlackRequester;
   requestId: string; workspaceId: string; ownerKey: string; repository: string; tool: string;
   fingerprint: string; createdAt: string; updatedAt: string; result: GitHubMcpResult;
+  /** The project revision whose policy authorized this call, which is not the workspace's revision. */
+  settingsRevision?: number;
 }
 export interface GitHubMcpStore {
   claim(record: GitHubMcpInvocation): Promise<boolean>;
@@ -22,6 +24,7 @@ export interface GitHubMcpContext {
   workspaceId: string; ownerKey: string;
   repository: { name: string; url: string; credentialRef: string };
   policy: GitHubMcpPolicy;
+  settingsRevision?: number;
 }
 const ENDPOINT = new URL("https://api.githubcopilot.com/mcp/");
 class PolicyFailure extends Error {}
@@ -96,6 +99,7 @@ export async function executeGitHubTool(request: GitHubMcpRequest, context: GitH
     repository: request.repository, tool: request.tool, fingerprint: fingerprint(request),
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), result: pending,
     ...(context.requestedBy === undefined ? {} : { requestedBy: context.requestedBy }),
+    ...(context.settingsRevision === undefined ? {} : { settingsRevision: context.settingsRevision }),
   };
   if (durable && !await dependencies.store.claim(record)) {
     const previous = await dependencies.store.get(request.requestId);

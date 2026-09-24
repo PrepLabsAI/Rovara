@@ -202,9 +202,17 @@ agentx --project project-a admin slack bind --team T0123456789 --channel C012345
 
 A channel is bound to one project, not to a revision. Each new thread uses the project's latest
 registered revision at the moment its workspace is created, so registering a revision publishes it
-to every bound channel without binding again. Existing thread workspaces keep the revision they
-were created with. `admin slack unbind` removes the binding, so new mentions in that channel are
-ignored, but it keeps existing thread workspaces.
+to every bound channel without binding again. `admin slack unbind` removes the binding, so new
+mentions in that channel are ignored, but it keeps existing thread workspaces.
+
+An existing thread's checkout stays on the revision it was prepared with: `repositories`, `setup`
+and `environment` do not change under a running thread. Everything else follows the project's
+latest registered revision from the next mention onwards — the GitHub MCP policy and the
+repositories it may address, `orchestratorInstructions`, `readiness` and each repository's
+`codeBuildGates`. So enabling a tool, correcting a test command or withdrawing a write tool takes
+effect in every thread without starting a new one, and the thread is told once that its settings
+moved. Each operation and MCP call records the revision whose settings applied. A readiness
+command whose directory the workspace does not have fails that check rather than being skipped.
 
 #### Working in a thread
 

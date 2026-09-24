@@ -45,7 +45,9 @@ integrations:
 
 Names, descriptions and schemas come from discovery. YAML approves/narrows tools, not implementations.
 New compatible issue tools require no per-tool wrappers. The hosted runtime refreshes discovery on
-each turn; definition changes within a turn fail closed at execution.
+each turn; definition changes within a turn fail closed at execution. Since feature 009 the policy
+comes from the project's latest registered revision, so approving or withdrawing a tool reaches
+every existing thread on its next turn.
 
 Owner/repo are bound server-side, excluded from model inputs. Endpoints/credentials are not accepted
 from the model. Native assignment may replace the whole list: read existing assignees when adding
