@@ -12,9 +12,13 @@ export function capabilitiesManifest(input: {
   repositories: readonly string[];
   connectors: readonly ThreadConnector[];
   catalogs: readonly ConnectorCatalog[];
+  /** Connector names whose discovery failed this turn; listed on their own line, not as "not connected". */
+  unavailable?: readonly string[];
 }): string {
   const repositories = input.repositories.join(", ");
-  const usable = input.connectors.filter((connector) =>
+  const unavailableNames = new Set(input.unavailable ?? []);
+  const connectors = input.connectors.filter((connector) => !unavailableNames.has(connector.name));
+  const usable = connectors.filter((connector) =>
     connector.connected && (input.catalogs.find((catalog) => catalog.connector === connector.name)?.tools.length ?? 0) > 0);
   const lines = [
     "What this channel can do:",
@@ -22,9 +26,13 @@ export function capabilitiesManifest(input: {
     `- Pull requests (${repositories}): agentx_create_pull_request and the pull-request tools`,
     ...usable.map((connector) => `- ${connector.label} (${connector.scopes.join(", ")}): ${connector.name}__* tools`),
   ];
+  const unavailableLabels = input.connectors.filter((connector) => unavailableNames.has(connector.name)).map((connector) => connector.label);
+  if (unavailableLabels.length > 0) {
+    lines.push(`Temporarily unavailable: ${unavailableLabels.join(", ")}. Tell the user it is temporarily unavailable and continue with the rest.`);
+  }
   const usableTypes = new Set<string>(usable.map((connector) => connector.type));
   const unusable = [
-    ...input.connectors.filter((connector) => !usable.includes(connector)).map((connector) => connector.label),
+    ...connectors.filter((connector) => !usable.includes(connector)).map((connector) => connector.label),
     ...KNOWN_CONNECTORS.filter((known) => !usableTypes.has(known.type) && !input.connectors.some((connector) => connector.type === known.type)).map((known) => known.label),
   ];
   if (unusable.length > 0) {

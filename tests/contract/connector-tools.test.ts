@@ -99,4 +99,21 @@ describe("capabilities manifest", () => {
     expect(manifest).toContain("Not connected for this channel: GitHub issues, Linear, Jira, Asana.");
     expect(manifest).not.toContain("github__*");
   });
+
+  it("lists a connector whose discovery failed this turn as temporarily unavailable, distinct from not connected", () => {
+    const manifest = capabilitiesManifest({
+      repositories: ["demo"],
+      connectors: [{ name: "github", type: "github", label: "GitHub issues", scopes: ["demo"], connected: true }],
+      catalogs: [],
+      unavailable: ["github"],
+    });
+    expect(manifest).toBe([
+      "What this channel can do:",
+      "- Repository code and files (demo): agentx_submit_task, agentx_follow_up",
+      "- Pull requests (demo): agentx_create_pull_request and the pull-request tools",
+      "Temporarily unavailable: GitHub issues. Tell the user it is temporarily unavailable and continue with the rest.",
+      "Not connected for this channel: Linear, Jira, Asana. If asked about something that is not connected, say it is not connected for this channel and do not attempt a workaround.",
+      "Closing this thread's workspace is a command, not a tool: the user writes \"close this workspace\".",
+    ].join("\n"));
+  });
 });

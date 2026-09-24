@@ -45,10 +45,18 @@ export async function createOrchestratorRuntime(options: OrchestratorOptions): P
   const selectedModel = modelRuntime.getModel(options.model.provider, options.model.modelId);
   if (!selectedModel) throw agentXError("RUNTIME_UNAVAILABLE", "configured orchestrator model is unavailable");
   const catalogs: ConnectorCatalog[] = [];
+  const unavailable: string[] = [];
   for (const connector of options.connectors ?? []) {
     if (!connector.connected) continue;
     if (!options.api.discoverConnectorTools) throw agentXError("CONFIG_INVALID", "connector discovery API is missing");
-    catalogs.push(await options.api.discoverConnectorTools({ workspaceId: options.context.workspaceId, connector: connector.name }));
+    // One connector's discovery failure (e.g. a broker RUNTIME_UNAVAILABLE because one repository
+    // lacks the GitHub App) must not stop the whole turn: skip its tools and keep building the
+    // runtime with the in-house tools and every other connector.
+    try {
+      catalogs.push(await options.api.discoverConnectorTools({ workspaceId: options.context.workspaceId, connector: connector.name }));
+    } catch {
+      unavailable.push(connector.name);
+    }
   }
   const customTools = createOrchestrationTools(options.api, options.context, {
     connectorCatalogs: catalogs,
@@ -58,7 +66,12 @@ export async function createOrchestratorRuntime(options: OrchestratorOptions): P
   if (customTools.length > MAX_VISIBLE_TOOLS) {
     throw agentXError("CONFIG_INVALID", `this project exposes ${customTools.length} tools; at most ${MAX_VISIBLE_TOOLS} are allowed. Approve fewer connector tools.`);
   }
-  const manifest = capabilitiesManifest({ repositories: options.repositories ?? [], connectors: options.connectors ?? [], catalogs });
+  const manifest = capabilitiesManifest({
+    repositories: options.repositories ?? [],
+    connectors: options.connectors ?? [],
+    catalogs,
+    ...(unavailable.length > 0 ? { unavailable } : {}),
+  });
   const boundaryExtension: InlineExtension = {
     name: "agentx-orchestration-boundary",
     hidden: true,
