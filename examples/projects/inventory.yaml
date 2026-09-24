@@ -1,14 +1,6 @@
 # Illustrative only: the digest and repository are deliberately non-deployable placeholders.
-schemaVersion: 2
 name: inventory
 revision: 1
-controlPlaneUrl: https://agentx.example.test
-auth:
-  issuer: https://identity.example.test
-  clientId: agentx-client
-  audience: agentx-api
-environment:
-  image: 111122223333.dkr.ecr.us-east-1.amazonaws.com/agentx-inventory@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 repositories:
   - name: inventory-service
     url: https://git.example.test/inventory-service.git

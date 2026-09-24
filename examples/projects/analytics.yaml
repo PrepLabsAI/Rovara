@@ -1,14 +1,6 @@
 # Illustrative only: administrators must substitute real immutable values.
-schemaVersion: 2
 name: analytics
 revision: 1
-controlPlaneUrl: https://agentx.example.test
-auth:
-  issuer: https://identity.example.test
-  clientId: agentx-client
-  audience: agentx-api
-environment:
-  image: 111122223333.dkr.ecr.us-east-1.amazonaws.com/agentx-analytics@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 repositories:
   - name: analytics-pipeline
     url: https://git.example.test/analytics-pipeline.git

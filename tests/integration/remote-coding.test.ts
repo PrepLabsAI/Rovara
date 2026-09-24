@@ -38,7 +38,6 @@ describe("remote coding delegation", () => {
       ownerKey: owner.ownerKey,
       projectName: project.name,
       projectRevision: project.revision,
-      environmentDigest: project.environment.image,
       runtimeArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/agentx",
       endpointQualifier: "DEFAULT",
       runtimeSessionId: randomUUID(),
@@ -166,12 +165,8 @@ async function createSourceRepository(): Promise<{ directory: string; commit: st
 
 function projectDefinition(): ProjectDefinition {
   return {
-    schemaVersion: 2,
     name: "payments",
     revision: 1,
-    controlPlaneUrl: "http://127.0.0.1:8787",
-    auth: { issuer: "http://127.0.0.1:9000", clientId: "agentx", audience: "agentx" },
-    environment: { image: `registry.example.test/worker@sha256:${"a".repeat(64)}` },
     repositories: [
       {
         name: "app",

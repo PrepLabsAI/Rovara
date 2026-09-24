@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { AgentXNameSchema, OCI_DIGEST_PATTERN } from "./project.js";
+import { AgentXNameSchema } from "./project.js";
 
 export const WorkspaceStatusSchema = z.enum([
   "PREPARING",
@@ -13,13 +13,19 @@ export const WorkspaceStatusSchema = z.enum([
 
 export const WorkspaceDeploymentModeSchema = z.enum(["instances-ebs", "demo-microvm"]);
 
-export const WorkspaceInstanceSchema = z
+// Workspace records written before the environment pin was removed still carry
+// `environmentDigest`; it is dropped rather than rejected.
+export const WorkspaceInstanceSchema = z.preprocess((value) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const remaining: Record<string, unknown> = { ...(value as Record<string, unknown>) };
+  delete remaining.environmentDigest;
+  return remaining;
+}, z
   .object({
     id: z.string().uuid(),
     ownerKey: z.string().min(16).max(128),
     projectName: AgentXNameSchema,
     projectRevision: z.number().int().positive(),
-    environmentDigest: z.string().regex(OCI_DIGEST_PATTERN),
     runtimeArn: z.string().startsWith("arn:aws:bedrock-agentcore:"),
     endpointQualifier: z.string().min(1).max(64),
     runtimeSessionId: z.string().uuid(),
@@ -49,7 +55,7 @@ export const WorkspaceInstanceSchema = z
         message: "demo-microvm workspaces must not have a capacity provider ARN",
       });
     }
-  });
+  }));
 
 export type WorkspaceInstance = z.infer<typeof WorkspaceInstanceSchema>;
 export type WorkspaceStatus = z.infer<typeof WorkspaceStatusSchema>;

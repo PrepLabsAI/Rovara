@@ -1,0 +1,7 @@
+# The one file that tells the AgentX administration client where this deployment lives.
+# Store it at ~/.agentx/deployment.yaml, or pass --deployment-file.
+controlPlaneUrl: https://agentx.example.test
+auth:
+  issuer: https://identity.example.test
+  clientId: agentx-client
+  audience: agentx-api

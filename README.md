@@ -73,19 +73,33 @@ If you do not want a global link, replace `agentx` in the examples below with
 
 ### 2. Register a project and bind its Slack channel
 
-One shared YAML definition describes each product. Store it as
-`~/.agentx/projects/<project-name>.yaml` and select it with `--project` on each command. It holds
-the control-plane and OIDC metadata, the immutable worker image, repositories, setup steps, and
-readiness checks, and no workspace ID, session ID, token, or repository secret. See
+Two files configure the administration client. One describes the deployment, at
+`~/.agentx/deployment.yaml`, and serves every project:
+
+```yaml
+controlPlaneUrl: https://agentx.example.test
+auth:
+  issuer: https://identity.example.test
+  clientId: agentx-client
+  audience: agentx-api
+```
+
+The other describes a product, at `~/.agentx/projects/<project-name>.yaml`, selected with
+`--project`. It holds the repositories, setup steps, readiness checks, CodeBuild gates and
+orchestrator instructions, and no workspace ID, session ID, token or repository secret. It no
+longer carries `schemaVersion`, `controlPlaneUrl`, `auth` or `environment.image`: the first three
+moved to the deployment file, and the worker image is pinned by the release, not by the project.
+Registering a file that still has them fails with those field names. See
 [project configuration](docs/project-configuration.md) and the illustrative files in
+[`examples/deployment.yaml`](examples/deployment.yaml) and
 [`examples/projects/`](examples/projects/).
 
 Log in as an administrator, register the immutable revision, then bind the project's channel:
 
 ```sh
-agentx --project payments login --callback-port 8765
+agentx login --callback-port 8765
 
-agentx --project payments admin project register \
+agentx admin project register \
   --file "$HOME/.agentx/projects/payments.yaml" \
   --runtime-arn <agentcore-runtime-arn> \
   --deployment-mode instances-ebs \
@@ -102,7 +116,7 @@ login flow and can return `{"message":"Missing Authentication Token"}`; always s
 the client. AWS credentials are needed only for deployment, never for these commands.
 
 Project revisions and runtime bindings are immutable. Increment the YAML `revision` before
-registering a changed image, repository, setup, or readiness definition. The channel binding names
+registering a changed repository, setup or readiness definition. The channel binding names
 only the project, so a newly registered revision reaches every new thread without binding again.
 
 For a private GitHub repository, set its `credentialRef` to the GitHub App credential reference
@@ -112,7 +126,7 @@ contains no private key or installation token.
 An administrator can release a thread workspace's idle compute without losing its files:
 
 ```sh
-agentx --project payments admin workspace stop --workspace <workspace-id>
+agentx admin workspace stop --workspace <workspace-id>
 ```
 
 Run `agentx --help` or `agentx <command> --help` for the complete surface: `login`,

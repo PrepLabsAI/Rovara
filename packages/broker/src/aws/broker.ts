@@ -29,6 +29,7 @@ import {
   PullRequestLifecycleResultSchema,
   PullRequestResultSchema,
   ProjectDefinitionSchema,
+  legacyProjectFields,
   SLACK_THREAD_OWNER_ISSUER,
   SlackChannelBindingSchema,
   SlackChannelIdSchema,
@@ -404,6 +405,10 @@ async function registerProject(
 ): Promise<{ project: Omit<RegisteredProjectRecord, "pk" | "sk">; duplicate: boolean }> {
   if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
   const input = object(value, "project registration");
+  const retired = legacyProjectFields(input.definition);
+  if (retired.length > 0) {
+    throw agentXError("CONFIG_INVALID", `project definition must not contain ${retired.join(", ")}; remove them and register again`);
+  }
   const definition = ProjectDefinitionSchema.parse(input.definition);
   const runtimeBinding = parseRuntimeBinding(input.runtimeBinding);
   const key = projectKey(definition.name, definition.revision);
@@ -515,7 +520,6 @@ async function newWorkspacePreparation(
     ownerKey: targetOwnerKey,
     projectName,
     projectRevision,
-    environmentDigest: project.definition.environment.image,
     runtimeArn: project.runtimeBinding.runtimeArn,
     endpointQualifier: project.runtimeBinding.endpointQualifier,
     runtimeSessionId,
@@ -983,10 +987,10 @@ async function resolveWorkspace(
 ) {
   if (!Number.isInteger(revision) || revision < 1) throw agentXError("CONFIG_INVALID", "revision is required");
   await requireMembership(dependencies, identity.ownerKey, projectName);
-  const project = await requireProject(dependencies, projectName, revision);
+  await requireProject(dependencies, projectName, revision);
   const workspace = await getDefaultWorkspace(dependencies, identity.ownerKey, projectName);
   if (!workspace) throw agentXError("WORKSPACE_NOT_READY", "workspace has not been prepared by an administrator");
-  if (workspace.projectRevision !== revision || workspace.environmentDigest !== project.definition.environment.image) {
+  if (workspace.projectRevision !== revision) {
     throw agentXError("PROJECT_REVISION_MISMATCH", "workspace is pinned to another project revision");
   }
   return publicWorkspace(workspace);

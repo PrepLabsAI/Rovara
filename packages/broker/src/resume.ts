@@ -15,8 +15,8 @@ export class ResumeCoordinator {
     authorizeWorkspace(identity, workspace);
     if (workspace.status !== "STOPPED") throw agentXError("WORKSPACE_BUSY", `workspace is ${workspace.status}`);
     const project = this.dependencies.projects.get(workspace.projectName, workspace.projectRevision);
-    if (!project || project.definition.environment.image !== workspace.environmentDigest) {
-      throw agentXError("PROJECT_REVISION_MISMATCH", "workspace environment pin no longer matches its registered revision");
+    if (!project) {
+      throw agentXError("PROJECT_REVISION_MISMATCH", "workspace's registered project revision no longer exists");
     }
     return this.dependencies.registry.setLifecycleStatus(workspace.id, "RESUMING");
   }

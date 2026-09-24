@@ -7,7 +7,6 @@ export async function verifyWorkspaceResume(input: {
   rootPath: string;
   projectName: string;
   projectRevision: number;
-  environmentDigest: string;
 }): Promise<PreparationManifest> {
   const rootPath = await realpath(resolve(input.rootPath)).catch(() => {
     throw agentXError("RUNTIME_UNAVAILABLE", "persistent workspace mount is unavailable");
@@ -18,10 +17,9 @@ export async function verifyWorkspaceResume(input: {
   if (
     !manifest.complete ||
     manifest.projectName !== input.projectName ||
-    manifest.projectRevision !== input.projectRevision ||
-    manifest.environmentDigest !== input.environmentDigest
+    manifest.projectRevision !== input.projectRevision
   ) {
-    throw agentXError("PROJECT_REVISION_MISMATCH", "persistent workspace manifest does not match the pinned environment");
+    throw agentXError("PROJECT_REVISION_MISMATCH", "persistent workspace manifest does not match its registered revision");
   }
   return manifest;
 }

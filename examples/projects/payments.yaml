@@ -1,14 +1,6 @@
-# Illustrative only: replace URLs, commit IDs, identity settings and digest before registration.
-schemaVersion: 2
+# Illustrative only: replace URLs and commit IDs before registration.
 name: payments
 revision: 1
-controlPlaneUrl: https://agentx.example.test
-auth:
-  issuer: https://identity.example.test
-  clientId: agentx-client
-  audience: agentx-api
-environment:
-  image: 111122223333.dkr.ecr.us-east-1.amazonaws.com/agentx-payments@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 repositories:
   - name: payments-api
     url: https://git.example.test/payments-api.git

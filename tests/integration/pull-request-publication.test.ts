@@ -420,12 +420,8 @@ async function createFixture(checkPasses: boolean | "timeout" = true) {
   const remoteUrl = (await git(checkout, ["remote", "get-url", "origin"])).trim();
   const operationId = crypto.randomUUID();
   const project = {
-    schemaVersion: 2,
     name: "demo",
     revision: 1,
-    controlPlaneUrl: "https://agentx.example.test",
-    auth: { issuer: "https://identity.example.test", clientId: "agentx", audience: "agentx" },
-    environment: { image: `example.test/agentx@sha256:${"a".repeat(64)}` },
     repositories: [{
       name: "demo",
       url: remoteUrl,
@@ -454,7 +450,8 @@ async function createFixture(checkPasses: boolean | "timeout" = true) {
     schemaVersion: 2,
     projectName: "demo",
     projectRevision: 1,
-    environmentDigest: project.environment.image,
+    // A manifest written before the environment pin was removed still carries it.
+    environmentDigest: `registry.example.test/worker@sha256:${"a".repeat(64)}`,
     repositories: [{
       name: "demo",
       path: "repo/demo",

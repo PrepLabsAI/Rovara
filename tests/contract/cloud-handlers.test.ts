@@ -237,12 +237,8 @@ describe("AWS control-plane handlers", () => {
       sk: "REV#000000000001",
       entityType: "PROJECT",
       definition: {
-        schemaVersion: 2,
         name: "demo",
         revision: 1,
-        controlPlaneUrl: "https://agentx.example.test",
-        auth: { issuer: "https://identity.example.test", clientId: "agentx", audience: "agentx" },
-        environment: { image: `example.test/agentx@sha256:${"a".repeat(64)}` },
         repositories: [
           {
             name: "demo",

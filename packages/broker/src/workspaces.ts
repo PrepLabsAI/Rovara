@@ -42,10 +42,7 @@ export class WorkspaceResolver {
       throw agentXError("WORKSPACE_NOT_READY", "workspace has not been prepared by an administrator");
     }
     authorizeWorkspace(identity, workspace);
-    if (
-      workspace.projectRevision !== projectRevision ||
-      workspace.environmentDigest !== project.definition.environment.image
-    ) {
+    if (workspace.projectRevision !== projectRevision) {
       throw agentXError(
         "PROJECT_REVISION_MISMATCH",
         "workspace is pinned to a different registered project revision",
