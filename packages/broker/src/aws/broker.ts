@@ -30,6 +30,7 @@ import {
   PullRequestLifecycleResultSchema,
   PullRequestResultSchema,
   ProjectDefinitionSchema,
+  githubConnectorOf,
   legacyProjectFields,
   SLACK_THREAD_OWNER_ISSUER,
   SlackChannelBindingSchema,
@@ -57,7 +58,8 @@ import {
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { GitHubAppCredentialProvider, privateKeyFromSecret } from "../github-app.js";
-import { discoverGitHubTools, executeGitHubTool, type GitHubMcpDependencies } from "../github-mcp.js";
+import { CatalogCache } from "@agentx/gateway";
+import { discoverGitHubTools, executeGitHubTool, type GitHubMcpCatalog, type GitHubMcpDependencies } from "../github-mcp.js";
 import { DynamoConnectorLedger, GITHUB_LEDGER } from "./connector-ledger.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
 import { RepositoryGrantService } from "../repository-access.js";
@@ -202,6 +204,7 @@ interface AwsBrokerDependencies {
   codeBuild: CodeBuildGateway;
   slack?: SlackServiceConfiguration;
   githubMcp?: GitHubMcpDependencies;
+  catalogs?: CatalogCache<GitHubMcpCatalog>;
 }
 
 interface SlackServiceConfiguration {
@@ -213,6 +216,8 @@ interface SlackServiceConfiguration {
 type TransactItems = NonNullable<TransactWriteCommandInput["TransactItems"]>;
 
 export function createAwsBrokerHandler(dependencies: AwsBrokerDependencies) {
+  // One cache per container: discovery per revision, connector and repository costs one vendor round trip.
+  dependencies = { ...dependencies, catalogs: dependencies.catalogs ?? new CatalogCache<GitHubMcpCatalog>({ ttlMs: 600_000, maxEntries: 256 }) };
   if (Buffer.byteLength(dependencies.callbackSigningKey, "utf8") < 32) {
     throw new Error("CALLBACK_SIGNING_KEY must contain at least 32 bytes");
   }
@@ -316,27 +321,36 @@ async function routeWorkspaceRequest(
     // The policy and the repositories it may address come from the project's latest registered
     // revision, so enabling, narrowing or revoking a tool reaches an existing thread at once.
     const project = await requireLatestProject(dependencies, workspace.projectName);
-    const policy = project.definition.integrations?.githubMcp;
-    if (!policy) throw agentXError("FORBIDDEN", "GitHub MCP is not enabled for this project revision");
+    const github = githubConnectorOf(project.definition);
+    if (!github) throw agentXError("FORBIDDEN", "GitHub MCP is not enabled for this project revision");
     if (!dependencies.githubMcp) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub MCP is not configured");
     const parsed = request.method === "POST" ? GitHubMcpRequestSchema.safeParse(body) : undefined;
     if (parsed && !parsed.success) throw agentXError("CONFIG_INVALID", "invalid GitHub MCP request");
     const repositoryName = parsed?.success ? parsed.data.repository : url.searchParams.get("repository");
-    const repository = project.definition.repositories.find((entry) => entry.name === repositoryName);
+    const repository = github.repositories.find((entry) => entry.name === repositoryName);
     if (!repository) throw agentXError("NOT_FOUND", "registered repository not found");
     const context = {
       workspaceId: workspace.id,
       ownerKey: identity.ownerKey,
       repository,
-      policy,
+      policy: github.policy,
       settingsRevision: project.definition.revision,
       ...requesterOf(identity),
     };
-    if (!parsed?.success) return json({ catalog: await discoverGitHubTools(context, dependencies.githubMcp) }, request.requestId);
+    const cacheKey = JSON.stringify([workspace.projectName, project.definition.revision, github.name, repository.name]);
+    if (!parsed?.success) {
+      const cached = dependencies.catalogs?.get(cacheKey);
+      if (cached) return json({ catalog: cached }, request.requestId);
+      const catalog = await discoverGitHubTools(context, dependencies.githubMcp);
+      dependencies.catalogs?.set(cacheKey, catalog);
+      return json({ catalog }, request.requestId);
+    }
     const result = await executeGitHubTool(parsed.data, context, {
       ...dependencies.githubMcp,
-      store: new DynamoConnectorLedger(dependencies.documentClient, dependencies.tableName, workspace.id, GITHUB_LEDGER, "github"),
+      store: new DynamoConnectorLedger(dependencies.documentClient, dependencies.tableName, workspace.id, GITHUB_LEDGER, github.name),
     });
+    // A failed call may mean the vendor changed the tool; the next discovery must see the change.
+    if (result.status === "FAILED" && !result.replayed) dependencies.catalogs?.delete(cacheKey);
     return json({ result }, request.requestId);
   }
 
@@ -1014,9 +1028,8 @@ async function existingThreadWorkspace(
 }
 
 function threadIntegrations(project: ProjectDefinition): { githubMcpRepositories?: string[] } {
-  return project.integrations?.githubMcp
-    ? { githubMcpRepositories: project.repositories.map((repository) => repository.name) }
-    : {};
+  const github = githubConnectorOf(project);
+  return github ? { githubMcpRepositories: github.repositories.map((repository) => repository.name) } : {};
 }
 
 async function threadWorkspaceLimitRefusal(

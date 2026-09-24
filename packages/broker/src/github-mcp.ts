@@ -18,6 +18,7 @@ import {
 // Feature 007 names, kept while the broker moves to connector routes (feature 013, phase 1b).
 export type GitHubMcpInvocation = Invocation;
 export type GitHubMcpStore = Ledger;
+export interface GitHubMcpCatalog { tools: GitHubMcpTool[] }
 
 export interface GitHubMcpDependencies {
   credentials(repository: { url: string; credentialRef: string }, access: "read" | "write"): Promise<{ owner: string; repo: string; token: string }>;
@@ -33,7 +34,7 @@ export interface GitHubMcpContext {
   settingsRevision?: number;
 }
 
-export async function discoverGitHubTools(context: GitHubMcpContext, dependencies: GitHubMcpDependencies): Promise<{ tools: GitHubMcpTool[] }> {
+export async function discoverGitHubTools(context: GitHubMcpContext, dependencies: GitHubMcpDependencies): Promise<GitHubMcpCatalog> {
   const { tools } = await discoverTools(githubConnector(issuer(dependencies)), connectorContext(context), connectOption(dependencies));
   return { tools: tools.map(toGitHubTool) };
 }
