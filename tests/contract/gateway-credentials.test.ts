@@ -110,4 +110,146 @@ describe("oauth-client-credentials provider", () => {
     await provider.issue(undefined, "read");
     expect([...tokens.items.values()]).toEqual([{ token: "t", expiresAt: 3_600_010 }]);
   });
+
+  // --- fix round 1 -----------------------------------------------------------------------
+
+  it("aborts a token response over the size limit without reading or echoing the body", async () => {
+    const fetchImplementation = vi.fn<typeof fetch>(async () => new Response("x".repeat(70_000), { status: 200 }));
+    const provider = oauthClientCredentialsProvider({ ref: "linear", secretName: "s", secrets: secrets({ s: client }), tokens: memoryCache(), tokenEndpoint: endpoint, fetchImplementation });
+    const error = await provider.issue(undefined, "read").catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(CredentialUnavailable);
+    expect((error as Error).message).toBe("token endpoint response exceeded limit");
+    expect((error as Error).message).not.toContain("x".repeat(100));
+  });
+
+  it("counts UTF-8 bytes rather than UTF-16 length when checking the response size", async () => {
+    // 40,000 UTF-16 units (under the limit) but ~80,000 UTF-8 bytes (over it) — a length check on the
+    // decoded string would miss this.
+    const fetchImplementation = vi.fn<typeof fetch>(async () => new Response("é".repeat(40_000), { status: 200 }));
+    const provider = oauthClientCredentialsProvider({ ref: "linear", secretName: "s", secrets: secrets({ s: client }), tokens: memoryCache(), tokenEndpoint: endpoint, fetchImplementation });
+    const error = await provider.issue(undefined, "read").catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(CredentialUnavailable);
+    expect((error as Error).message).toBe("token endpoint response exceeded limit");
+  });
+
+  it("rejects a response early from a declared content-length, before reading the body", async () => {
+    const fetchImplementation = vi.fn<typeof fetch>(async () => new Response("{}", { status: 200, headers: { "content-length": "999999" } }));
+    const provider = oauthClientCredentialsProvider({ ref: "linear", secretName: "s", secrets: secrets({ s: client }), tokens: memoryCache(), tokenEndpoint: endpoint, fetchImplementation });
+    const error = await provider.issue(undefined, "read").catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(CredentialUnavailable);
+    expect((error as Error).message).toBe("token endpoint response exceeded limit");
+  });
+
+  it("reuses a short-lived token within half its lifetime, even though that is under the fixed refresh margin", async () => {
+    let now = 0;
+    const fetchImplementation = vi.fn<typeof fetch>(async () => tokenResponse({ access_token: "short-token", expires_in: 60 }));
+    const provider = oauthClientCredentialsProvider({ ref: "linear", secretName: "s", secrets: secrets({ s: client }), tokens: memoryCache(), tokenEndpoint: endpoint, fetchImplementation, now: () => now });
+    await provider.issue(undefined, "read");
+    now = 15_000;
+    expect(await provider.issue(undefined, "read")).toEqual({ token: "short-token", bindings: {} });
+    expect(fetchImplementation).toHaveBeenCalledOnce();
+  });
+
+  it("remints a short-lived token once half its lifetime has passed", async () => {
+    let now = 0;
+    const fetchImplementation = vi.fn<typeof fetch>(async () => tokenResponse({ access_token: "short-token", expires_in: 60 }));
+    const provider = oauthClientCredentialsProvider({ ref: "linear", secretName: "s", secrets: secrets({ s: client }), tokens: memoryCache(), tokenEndpoint: endpoint, fetchImplementation, now: () => now });
+    await provider.issue(undefined, "read");
+    now = 31_000; // just past half of the 60s lifetime (30s margin)
+    await provider.issue(undefined, "read");
+    expect(fetchImplementation).toHaveBeenCalledTimes(2);
+  });
+
+  it("coalesces concurrent issue() calls into a single mint", async () => {
+    const fetchImplementation = vi.fn<typeof fetch>(async () => tokenResponse({ access_token: "shared-token", expires_in: 3600 }));
+    const provider = oauthClientCredentialsProvider({ ref: "linear", secretName: "s", secrets: secrets({ s: client }), tokens: memoryCache(), tokenEndpoint: endpoint, fetchImplementation });
+    const [first, second] = await Promise.all([provider.issue(undefined, "read"), provider.issue(undefined, "read")]);
+    expect(first).toEqual({ token: "shared-token", bindings: {} });
+    expect(second).toEqual({ token: "shared-token", bindings: {} });
+    expect(fetchImplementation).toHaveBeenCalledOnce();
+  });
+
+  it("clears the in-flight promise on a failed mint so the next call retries", async () => {
+    let attempt = 0;
+    const fetchImplementation = vi.fn<typeof fetch>(async () => {
+      attempt += 1;
+      if (attempt === 1) throw new Error("network down");
+      return tokenResponse({ access_token: "recovered-token", expires_in: 3600 });
+    });
+    const provider = oauthClientCredentialsProvider({ ref: "linear", secretName: "s", secrets: secrets({ s: client }), tokens: memoryCache(), tokenEndpoint: endpoint, fetchImplementation });
+    await expect(provider.issue(undefined, "read")).rejects.toThrow("network down");
+    await expect(provider.issue(undefined, "read")).resolves.toEqual({ token: "recovered-token", bindings: {} });
+    expect(fetchImplementation).toHaveBeenCalledTimes(2);
+  });
+
+  it("invalidate deletes the shared-cache entry even before any issue on this instance", async () => {
+    const tokens = memoryCache();
+    await tokens.put(scopeKey(["read", "write"]), { token: "preexisting", expiresAt: 999_999_999 });
+    const provider = oauthClientCredentialsProvider({ ref: "linear", secretName: "s", secrets: secrets({ s: client }), tokens, tokenEndpoint: endpoint, fetchImplementation: vi.fn<typeof fetch>() });
+    await provider.invalidate?.(undefined);
+    expect(tokens.items.size).toBe(0);
+  });
+
+  it("invalidate just clears memory, without throwing, when the secret cannot be read", async () => {
+    const tokens = memoryCache();
+    await tokens.put(scopeKey(["read", "write"]), { token: "unrelated", expiresAt: 999_999_999 });
+    const provider = oauthClientCredentialsProvider({ ref: "linear", secretName: "missing", secrets: secrets({}), tokens, tokenEndpoint: endpoint, fetchImplementation: vi.fn<typeof fetch>() });
+    await expect(provider.invalidate?.(undefined)).resolves.toBeUndefined();
+    expect(tokens.items.size).toBe(1); // the key could not be computed, so nothing was deleted
+  });
+
+  it("does not persist a token from a mint that was still in flight when invalidate() ran", async () => {
+    const tokens = memoryCache();
+    let resolveFetch!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => { resolveFetch = resolve; });
+    const fetchImplementation = vi.fn<typeof fetch>(() => pending);
+    const provider = oauthClientCredentialsProvider({ ref: "linear", secretName: "s", secrets: secrets({ s: client }), tokens, tokenEndpoint: endpoint, fetchImplementation, now: () => 0 });
+    const issuing = provider.issue(undefined, "read");
+    await vi.waitFor(() => expect(fetchImplementation).toHaveBeenCalledOnce());
+    await provider.invalidate?.(undefined);
+    resolveFetch(tokenResponse({ access_token: "stale-token", expires_in: 3600 }));
+    await expect(issuing).resolves.toEqual({ token: "stale-token", bindings: {} });
+    expect(tokens.items.size).toBe(0);
+    fetchImplementation.mockImplementation(async () => tokenResponse({ access_token: "fresh-token", expires_in: 3600 }));
+    await expect(provider.issue(undefined, "read")).resolves.toEqual({ token: "fresh-token", bindings: {} });
+    expect(fetchImplementation).toHaveBeenCalledTimes(2);
+  });
+
+  it("drops a refusal error code that fails the safe pattern", async () => {
+    const fetchImplementation = vi.fn<typeof fetch>(async () => tokenResponse({ error: "Invalid Client!" }, 401));
+    const provider = oauthClientCredentialsProvider({ ref: "linear", secretName: "s", secrets: secrets({ s: client }), tokens: memoryCache(), tokenEndpoint: endpoint, fetchImplementation });
+    const error = await provider.issue(undefined, "read").catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(CredentialUnavailable);
+    expect((error as Error).message).toBe("credential linear: the token endpoint refused the client credentials with HTTP 401");
+  });
+
+  it("also raises CredentialUnavailable for HTTP 400 and 403 refusals", async () => {
+    for (const status of [400, 403] as const) {
+      const fetchImplementation = vi.fn<typeof fetch>(async () => tokenResponse({ error: "invalid_scope" }, status));
+      const provider = oauthClientCredentialsProvider({ ref: "linear", secretName: "s", secrets: secrets({ s: client }), tokens: memoryCache(), tokenEndpoint: endpoint, fetchImplementation });
+      const error = await provider.issue(undefined, "read").catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(CredentialUnavailable);
+      expect((error as Error).message).toBe(`credential linear: the token endpoint refused the client credentials with HTTP ${status} (invalid_scope)`);
+    }
+  });
+
+  it("propagates a fetch rejection as a non-CredentialUnavailable error", async () => {
+    const fetchImplementation = vi.fn<typeof fetch>(async () => { throw new Error("network down"); });
+    const provider = oauthClientCredentialsProvider({ ref: "linear", secretName: "s", secrets: secrets({ s: client }), tokens: memoryCache(), tokenEndpoint: endpoint, fetchImplementation });
+    const error = await provider.issue(undefined, "read").catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(CredentialUnavailable);
+    expect((error as Error).message).toBe("network down");
+  });
+
+  it("includes an abort signal on the token request", async () => {
+    const fetchImplementation = vi.fn<typeof fetch>(async () => tokenResponse({ access_token: "token-1", expires_in: 3600 }));
+    const provider = oauthClientCredentialsProvider({ ref: "linear", secretName: "s", secrets: secrets({ s: client }), tokens: memoryCache(), tokenEndpoint: endpoint, fetchImplementation });
+    await provider.issue(undefined, "read");
+    const [, init] = fetchImplementation.mock.calls[0]!;
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
+  });
 });
