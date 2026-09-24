@@ -4,11 +4,11 @@ Each phase is one pull request to `mainline`. Check a task only after its eviden
 
 ## Phase 1a: Extract the gateway (US1)
 
-- [ ] T001 Create `packages/gateway` and wire it into the build, lockfile, Dockerfiles and image-input lists; move `mcp-client.ts` and re-export it from the broker.
-- [ ] T002 Define gateway types and implement generic `approveTools` with binder-driven property removal; test with a non-GitHub fixture connector.
-- [ ] T003 Implement generic `discoverTools` and `executeTool` with credential provider, binder, guards and ledger; test injection, guards, actor, redaction and fingerprint compatibility.
-- [ ] T004 Implement the GitHub connector and turn `packages/broker/src/github-mcp.ts` into a compatibility layer; feature 007 suites pass unchanged; pin schema-hash stability.
-- [ ] T005 Run typecheck, lint, tests and synthesis; open the phase pull request.
+- [X] T001 Create `packages/gateway` and wire it into the build, lockfile, Dockerfiles and image-input lists; move `mcp-client.ts` and re-export it from the broker.
+- [X] T002 Define gateway types and implement generic `approveTools` with binder-driven property removal; test with a non-GitHub fixture connector.
+- [X] T003 Implement generic `discoverTools` and `executeTool` with credential provider, binder, guards and ledger; test injection, guards, actor, redaction and fingerprint compatibility.
+- [X] T004 Implement the GitHub connector and turn `packages/broker/src/github-mcp.ts` into a compatibility layer; feature 007 suites pass unchanged; pin schema-hash stability.
+- [X] T005 Run typecheck, lint, tests and synthesis; open the phase pull request.
 
 ## Phase 1b: Configuration, routes, ledger, schemas (US1, US2 foundation)
 
