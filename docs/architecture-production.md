@@ -1,14 +1,14 @@
 # AgentX production architecture
 
 This is the production target for AgentX. It replaces the demo runtime's temporary managed
-session storage with one isolated, encrypted EBS workspace per developer/project session. The
+session storage with one isolated, encrypted EBS workspace per Slack thread. The
 control plane remains stateless at the request-processing layer; DynamoDB stores durable platform
 state and AgentCore owns compute-session lifecycle.
 
 ```mermaid
 flowchart LR
-  subgraph Developer[Developer machine]
-    Client[AgentX CLI / Pi TUI]
+  subgraph SlackEdge[Slack]
+    Thread[Project channel thread]
   end
 
   subgraph Control[AgentX control plane]
@@ -28,11 +28,11 @@ flowchart LR
   subgraph VPC[Dedicated AgentX production VPC]
     subgraph PrivateA[Private subnet / AZ 1]
       InstanceA[Managed ARM64 EC2 session]
-      EbsA[(Encrypted gp3 EBS\nAlice + project A)]
+      EbsA[(Encrypted gp3 EBS\nthread 1 + project A)]
     end
     subgraph PrivateB[Private subnet / AZ 2]
       InstanceB[Managed ARM64 EC2 session]
-      EbsB[(Encrypted gp3 EBS\nBob + project A)]
+      EbsB[(Encrypted gp3 EBS\nthread 2 + project A)]
     end
     NatA[NAT gateway / AZ 1]
     NatB[NAT gateway / AZ 2]
@@ -42,7 +42,8 @@ flowchart LR
   GitHub[GitHub / package registries / documentation]
   CodeBuild[AWS CodeBuild gates]
 
-  Client -->|OIDC request| API --> Broker
+  Thread -->|signed event| Ingress[Slack ingress + hosted orchestrator]
+  Ingress -->|service identity| API --> Broker
   Broker --> State
   Broker --> Artifacts
   Broker --> Queue --> Dispatcher
@@ -63,11 +64,11 @@ flowchart LR
 
 ## Isolation and persistence
 
-The control plane assigns a distinct AgentCore `runtimeSessionId` to every developer/project
-workspace. AgentCore routes the pair `(capacityProviderArn, runtimeSessionId)` to one managed EC2
-session and one EBS workspace volume. Alice and Bob therefore receive different instances and
-volumes even when they use the same shared project definition. They see each other's work only
-through Git commits and remote branches.
+The control plane assigns a distinct AgentCore `runtimeSessionId` to every thread workspace.
+AgentCore routes the pair `(capacityProviderArn, runtimeSessionId)` to one managed EC2 session and
+one EBS workspace volume. Two threads therefore receive different instances and volumes even when
+they use the same shared project definition, and each thread's members see the other thread's work
+only through Git commits and remote branches.
 
 The instance stops after five idle minutes to bound EC2 cost. A later invocation using the same
 session ID starts managed compute and reattaches the existing EBS volume. The maximum compute
@@ -77,9 +78,10 @@ managed persistent volume.
 
 ## Hosted Slack orchestrator
 
-Slack requests are orchestrated in AWS rather than on a developer machine. Each Slack thread is its
-own workspace owner, so a thread receives its own AgentCore session and EBS volume, exactly like a
-developer/project pair. Every channel member who posts in the thread shares that workspace.
+Slack requests are orchestrated in AWS rather than on a developer machine, and since the
+Slack-only retirement this is the only way coding work reaches AgentX. Each Slack thread is its own
+workspace owner, so a thread receives its own AgentCore session and EBS volume. Every channel
+member who posts in the thread shares that workspace.
 
 ```mermaid
 flowchart LR
@@ -120,15 +122,15 @@ flowchart LR
   from the state table.
 - **Ordering.** The FIFO message group is the thread, so requests in one thread run in order while
   different threads run in parallel. The Slack event ID is the deduplication ID.
-- **Orchestration.** The Fargate service runs the same Pi orchestrator as the CLI, restricted to
-  AgentX orchestration tools. It restores the thread's Pi session from S3 before each turn and
+- **Orchestration.** The Fargate service runs the Pi orchestrator from `@agentx/orchestrator`,
+  restricted to AgentX orchestration tools. It restores the thread's Pi session from S3 before each turn and
   saves it afterward. Tool request IDs derive from the Slack event ID, so a redelivered request
   resumes the operations it already started instead of creating duplicates.
 - **Service identity.** The orchestrator calls the control plane through an `AWS_IAM` route that
   accepts only its task role. The broker derives the workspace owner from the signed Slack thread
-  headers, and requires a bound channel. The resulting owner keys are disjoint from developer
-  logins, so the service identity cannot reach a developer's personal workspace or another
-  thread's workspace. Each operation records the Slack member who requested it.
+  headers, and requires a bound channel. The resulting owner keys are disjoint from administrator
+  logins, so the service identity cannot reach another thread's workspace, and the OIDC entry
+  point serves administration only. Each operation records the Slack member who requested it.
 - **Limits.** Creating a thread workspace checks per-starter and per-organization counters (3 and
   20 by default) in the same DynamoDB transaction that creates the workspace, so concurrent threads
   cannot exceed either limit.

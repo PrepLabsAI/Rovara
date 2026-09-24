@@ -1,8 +1,8 @@
 # AgentX
 
-A software factory with a local pi-based orchestration client and remote pi coding workers
+A software factory with a hosted pi-based orchestrator in Slack and remote pi coding workers
 on Amazon Bedrock AgentCore. Administrators prepare shared product definitions and fixed
-development images. Every developer uses an isolated persistent workspace instance.
+development images. Every Slack thread owns an isolated persistent workspace instance.
 
 ## Current status
 
@@ -25,15 +25,18 @@ directory name `Pi-Bedrock` is retained, but the product is named AgentX.
 ## How AgentX is structured
 
 ```text
-Slack mention -> hosted Pi orchestrator -> AgentX control plane -> remote Pi coding worker
+Slack thread -> hosted Pi orchestrator -> AgentX control plane -> remote Pi coding worker
                                                               -> approved GitHub MCP tools
 ```
 
 The hosted Pi session is an orchestration-only client. It has AgentX control-plane and approved
-MCP tools but no local source, file-editing, or shell tools. The remote Pi session owns the coding loop and exposes
-`read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls` inside the developer's private workspace.
+MCP tools but no source, file-editing, or shell tools. The remote Pi session owns the coding loop
+and exposes `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls` inside that thread's
+workspace.
 AgentX wraps remote Pi only to provide authentication, workspace allocation, operation fencing,
-durable callbacks, and Git/tool-evidence artifacts.
+durable callbacks, and Git/tool-evidence artifacts. The `agentx` executable administers projects;
+it cannot submit coding work, and the control plane refuses developer operations that do not come
+from the orchestrator's service identity.
 
 The remote session runs at the workspace root, above the repositories, so Pi's own context-file
 discovery never reaches them. For each prepared repository the worker loads the first of
@@ -51,7 +54,10 @@ path and the [production architecture](docs/architecture-production.md) for the 
 
 ## Use AgentX
 
-### 1. Build and install the thin client
+### 1. Install the administration client
+
+Developers install nothing: they work in Slack. The `agentx` executable is an administration
+client for registering projects, binding Slack channels, and stopping idle workspaces.
 
 AgentX requires Node.js 22.19 or newer within the Node 22 release line:
 
@@ -65,107 +71,66 @@ agentx --help
 If you do not want a global link, replace `agentx` in the examples below with
 `npm run agentx --`.
 
-### 2. Select a project
+### 2. Register a project and bind its Slack channel
 
-The administrator distributes one shared YAML definition per product. Store it as
-`~/.agentx/projects/<project-name>.yaml`, then select it with `--project` on each invocation. The
-examples below use the deployed project named `agentx`.
+One shared YAML definition describes each product. Store it as
+`~/.agentx/projects/<project-name>.yaml` and select it with `--project` on each command. It holds
+the control-plane and OIDC metadata, the immutable worker image, repositories, setup steps, and
+readiness checks, and no workspace ID, session ID, token, or repository secret. See
+[project configuration](docs/project-configuration.md) and the illustrative files in
+[`examples/projects/`](examples/projects/).
 
-The YAML contains the control-plane and OIDC metadata, immutable worker image, repositories,
-setup steps, and readiness checks. It contains no developer workspace ID, runtime session ID,
-access token, or repository secret. See [project configuration](docs/project-configuration.md) and
-the illustrative files in [`examples/projects/`](examples/projects/).
+Log in as an administrator, register the immutable revision, then bind the project's channel:
 
-Each developer receives a distinct workspace instance. Sharing the project YAML does not share a
-writable checkout; another developer sees changes only after they are published through Git.
+```sh
+agentx --project payments login --callback-port 8765
+
+agentx --project payments admin project register \
+  --file "$HOME/.agentx/projects/payments.yaml" \
+  --runtime-arn <agentcore-runtime-arn> \
+  --deployment-mode instances-ebs \
+  --endpoint-qualifier DEFAULT
+
+agentx --project payments admin slack bind --team T0123456789 --channel C0123456789
+```
+
+`login` performs OIDC Authorization Code + PKCE, opens the managed login page, receives the
+callback at `http://127.0.0.1:8765/callback`, and stores the token in the operating-system
+credential store. It must be an account carrying the configured administrator claim, such as
+membership in the Cognito `agentx-admin` group. Opening the bare Cognito domain directly is not a
+login flow and can return `{"message":"Missing Authentication Token"}`; always start login through
+the client. AWS credentials are needed only for deployment, never for these commands.
+
+Project revisions and runtime bindings are immutable. Increment the YAML `revision` before
+registering a changed image, repository, setup, or readiness definition. The channel binding names
+only the project, so a newly registered revision reaches every new thread without binding again.
+
 For a private GitHub repository, set its `credentialRef` to the GitHub App credential reference
-configured on the control plane (the deployed demo uses `github-agentx-sdlc`). The YAML still
+configured on the control plane (the deployed project uses `github-agentx-sdlc`). The YAML still
 contains no private key or installation token.
 
-### 3. Log in
+An administrator can release a thread workspace's idle compute without losing its files:
 
 ```sh
-agentx --project speckit login --callback-port 8765
+agentx --project payments admin workspace stop --workspace <workspace-id>
 ```
 
-The command performs OIDC Authorization Code + PKCE login, opens the managed login page, receives
-the callback at `http://127.0.0.1:8765/callback`, and stores the token in the operating-system
-credential store. Opening the bare Cognito domain directly is not a login flow and can return
-`{"message":"Missing Authentication Token"}`; always start login through the CLI.
+Run `agentx --help` or `agentx <command> --help` for the complete surface: `login`,
+`admin project register`, `admin workspace stop`, and `admin slack bind|unbind`. There is no
+developer command; coding work happens only in Slack.
 
-Developer operation uses the OIDC token, not local AWS CLI credentials. AWS credentials are needed
-only for infrastructure deployment and administration outside the AgentX API.
+### 3. Work in the project's Slack channel
 
-### 4. Check workspace readiness
+AgentX runs a hosted orchestrator for Slack in the production AWS account, so no developer machine
+has to stay online. Slack calls the AgentX Events API route; an ingress Lambda verifies Slack's
+signature, acknowledges in the thread, and queues the request. An ECS Fargate service runs the Pi
+orchestrator for that thread and posts the result back. It can call AgentX orchestration tools and
+administrator-approved GitHub MCP tools; repository coding work runs in the remote Pi worker.
 
-```sh
-agentx --project speckit status
-```
-
-The workspace must report `READY`. If it has not been prepared, an AgentX administrator must run
-the preparation command described below.
-
-### 5. Submit a remote task
-
-```sh
-agentx --project speckit \
-  --prompt "Inspect repo/spec-kit/README.md and briefly explain what this project does."
-```
-
-Repository paths are relative to the workspace root. For example, a repository configured with
-`path: repo/spec-kit` is available to remote Pi under `/mnt/workspace/repo/spec-kit`.
-
-Without `--json`, the client streams remote Pi and tool events followed by the terminal operation.
-For automation, request a stable JSON envelope containing the terminal operation metadata:
-
-```sh
-agentx --project speckit \
-  --prompt "Inspect repo/spec-kit/README.md without modifying files." \
-  --json
-```
-
-AgentX reuses the current remote conversation across prompts and preserves workspace files. Start a
-new Pi conversation without replacing the workspace files with:
-
-```sh
-agentx --project speckit conversation new
-```
-
-Cancel an active operation using the operation ID printed when it was accepted:
-
-```sh
-agentx --project speckit cancel --operation <operation-id>
-```
-
-### 6. Start the interactive Pi orchestrator
-
-Interactive mode requires a model available to the local Pi installation:
-
-```sh
-export AGENTX_ORCHESTRATOR_PROVIDER=<pi-provider>
-export AGENTX_ORCHESTRATOR_MODEL=<pi-model-id>
-agentx --project speckit
-```
-
-When the local orchestrator uses Amazon Bedrock, the `agentx` process must also inherit an AWS
-credential source. Selecting a profile on an earlier `aws` command does not export it to later
-commands:
-
-```sh
-export AWS_PROFILE=agentx-deployer
-export AWS_REGION=us-east-1
-export AWS_SDK_LOAD_CONFIG=1
-export AGENTX_ORCHESTRATOR_PROVIDER=amazon-bedrock
-export AGENTX_ORCHESTRATOR_MODEL=amazon.nova-pro-v1:0
-agentx --project personal-website
-```
-
-Alternatively, run `/login amazon-bedrock` inside the TUI, choose **AWS profile**, and enter the
-profile name. Pi stores the profile selection, not the underlying IAM secret key.
-
-The local model can call AgentX orchestration tools and explicitly approved, dynamically
-discovered GitHub MCP issue tools. Repository code inspection, editing, shell commands, builds,
-and tests are delegated to the remote Pi worker in AgentCore.
+Each Slack thread has its own workspace. The first mention in a new thread creates a workspace
+for the channel's bound project. Later mentions in that thread, by any channel member, continue
+in the same workspace and Pi conversation. Requests in one thread run in order; different threads
+run in parallel.
 
 #### GitHub MCP through hosted Slack
 
@@ -182,20 +147,7 @@ not included. Existing AgentX coding and validated PR-publication tools remain u
 The hosted Slack service discovers tools from the thread workspace's registered project revision.
 Calls use its IAM service identity and carry the requesting Slack user; tokens remain in the broker.
 Use a new thread after binding the channel to an enabled revision. Existing threads retain their
-workspace revision. Local CLI interaction is not required for users to access this integration.
-
-### 7. Use a project Slack channel
-
-AgentX runs a hosted orchestrator for Slack in the production AWS account, so no developer machine
-has to stay online. Slack calls the AgentX Events API route; an ingress Lambda verifies Slack's
-signature, acknowledges in the thread, and queues the request. An ECS Fargate service runs the Pi
-orchestrator for that thread and posts the result back. It can call AgentX orchestration tools and
-administrator-approved GitHub MCP tools; repository coding work runs in the remote Pi worker.
-
-Each Slack thread has its own workspace. The first mention in a new thread creates a workspace
-for the channel's bound project. Later mentions in that thread, by any channel member, continue
-in the same workspace and Pi conversation. Requests in one thread run in order; different threads
-run in parallel.
+workspace revision.
 
 #### One-time administrator setup
 
@@ -292,30 +244,25 @@ failure and stops. A retry resumes the operations the earlier attempt started in
 new ones. A request that the service could not finish handling five times, for example because it
 restarted each time, moves to the `SlackRequestDeadLetterQueueUrl` queue.
 
-#### Retired local Slack mode
+#### Retired local modes
 
-`agentx slack run`, `slack configure`, and `slack login` are removed. To delete Slack tokens stored
-by the local mode from the OS credential store, run:
+The local Socket Mode bridge (`agentx slack run`, `slack configure`, `slack login`) and, since the
+Slack-only retirement, the whole local development client are removed: `agentx --prompt`, the
+interactive TUI, `status`, `conversation new`, `pr`, `cancel`, and `slack logout` no longer exist.
+Delete any leftover `~/.agentx/state` directory and, if your OS credential store still holds
+`dev.agentx.slack` entries from the bridge, remove them there.
 
-```sh
-agentx --project project-a slack logout
-```
-
-### 8. Validate changes and create a pull request
+### 4. Validate changes and create a pull request
 
 Pull-request creation is explicit; AgentX never publishes automatically after a coding task. The
 registered project's `readiness` commands run inside the AgentCore workspace before a candidate is
 pushed. Optional repository `codeBuildGates` then run remotely against that exact pushed commit.
 AgentX rejects an empty diff, merge conflicts, or any failed/timed-out check before creating a PR.
 
-From the CLI, select the configured repository by its project YAML `name`:
-
-```sh
-agentx --project personal-website pr create \
-  --repository personal-website \
-  --title "Improve homepage navigation" \
-  --body "Summary of the change and validation performed."
-```
+Ask for it in the thread, naming the repository by its project YAML `name`, for example:
+`Create a pull request for the personal-website repository titled "Improve homepage navigation".`
+The orchestrator then calls `agentx_create_pull_request`; ordinary coding requests expose no
+implicit publish step.
 
 AgentX creates `agentx/<operation-id>`, makes an AgentX-authored commit, pushes without force, and
 creates a ready-for-review PR against the repository's configured `defaultBranch`. The terminal
@@ -328,16 +275,9 @@ New publication always captures the intended workspace tree and replays it onto 
 default branch as exactly one commit. Earlier AgentX publication commits left in the persistent
 workspace are not inherited by the new PR. A conflict or effective empty diff stops before push.
 
-Maintain an AgentX-owned PR by repository name and PR number:
-
-```sh
-agentx --project personal-website pr append --repository personal-website --number 12
-agentx --project personal-website pr sync --repository personal-website --number 12
-agentx --project personal-website pr update --repository personal-website --number 12 \
-  --title "Updated review title" --body "Updated context"
-agentx --project personal-website pr close --repository personal-website --number 12
-agentx --project personal-website pr reopen --repository personal-website --number 12
-```
+Maintain an AgentX-owned PR from the same thread by naming the repository and PR number: append
+the workspace's new commits, sync the base branch into it, update its title or body, or close and
+reopen it.
 
 `append` runs readiness checks and accepts only workspace commits that descend from the recorded
 PR head. With CodeBuild gates, append and sync first push an operation-specific validation branch;
@@ -345,31 +285,13 @@ the visible PR branch advances only after every build passes. `sync` merges the 
 branch into the PR branch. Neither action rebases or
 force-pushes published history. Remote Pi may rebase or amend commits that are still unpublished,
 provided the resulting history remains a descendant of the published PR head; once published, use
-another append, or replace the PR with clean history:
-
-```sh
-agentx --project personal-website pr replace \
-  --repository personal-website --number 12 \
-  --title "Clean replacement"
-```
-
-Replacement creates the new PR before closing the original and never changes the original branch.
-For an already merged AgentX PR, create a reviewable revert PR instead of changing the default
-branch directly:
-
-```sh
-agentx --project personal-website pr revert \
-  --repository personal-website --number 12 \
-  --title "Revert unintended changes from #12"
-```
+another append, or ask to replace the PR with clean history. Replacement creates the new PR before closing the original and never changes the original branch.
+For an already merged AgentX PR, ask for a reviewable revert PR instead of changing the default
+branch directly.
 
 Only PRs with durable AgentX ownership evidence are eligible. PRs created by an earlier AgentX
 version are adopted only when their `agentx/<operation-id>` branch matches a successful publication
-operation in the same developer workspace.
-
-In the interactive TUI, ask explicitly, for example: `Create a pull request for the
-personal-website repository titled "Improve homepage navigation".` The local Pi orchestrator then
-uses `agentx_create_pull_request`; ordinary coding requests do not expose an implicit publish step.
+operation in the same thread workspace.
 
 The installed GitHub App must have these repository permissions:
 
@@ -391,8 +313,8 @@ credentialed Git command boundary.
 CodeBuild projects are administrator-owned infrastructure. Create a project with a GitHub source
 (use AWS CodeConnections for private repositories), a service role, compute image, and repository
 `buildspec.yml`. Its name must begin with `agentx-`. Add the approved project to the repository in
-the AgentX project YAML, increment `revision`, register that immutable revision, and re-prepare the
-developer workspace:
+the AgentX project YAML, increment `revision`, and register that immutable revision. New threads
+then use it:
 
 ```yaml
 repositories:
@@ -422,29 +344,10 @@ candidates together and creating multiple PRs as one unit requires a future mult
 change-set workflow; a CodeBuild project may use secondary sources, but AgentX does not yet bind
 multiple candidate commits atomically.
 
-### 9. Administrator workflow
+### 5. Deploy and release
 
-Before a developer can use a project, an administrator registers its immutable revision and
-prepares that developer's private workspace:
-
-```sh
-agentx --project payments admin project register \
-  --file "$HOME/.agentx/projects/payments.yaml" \
-  --runtime-arn <agentcore-runtime-arn> \
-  --deployment-mode <demo-microvm-or-instances-ebs> \
-  --endpoint-qualifier DEFAULT
-
-agentx --project payments admin workspace prepare \
-  --owner <developer-oidc-subject>
-```
-
-The administrator must be logged in with the configured administrator claim, such as membership in
-the Cognito `agentx-admin` group. Project revisions and runtime bindings are immutable. Increment
-the YAML revision before registering a changed image, repository commit, setup, or readiness
-definition.
-
-Run `agentx --help` or `agentx <command> --help` for the complete command surface. A subsequent
-demo release is one command from a clean checkout:
+Registering a project and binding its channel are covered in section 2. Workspaces are created by
+Slack threads, never by an administrator. A demo release is one command from a clean checkout:
 
 ```sh
 npm run release:demo -- --profile agentx-deployer --region us-east-1
@@ -470,10 +373,10 @@ and update only the runtime and control plane:
 npm run release:prod -- --profile agentx-deployer --region us-east-1
 ```
 
-This command does not register a project, prepare a workspace, rewrite a workspace record, stop a
+This command does not register a project, create a workspace, rewrite a workspace record, stop a
 demo session, or migrate data. Those are separate, explicit administrative operations. An
-`instances-ebs` workspace is identified by the stable capacity provider plus its developer/project
-runtime session ID; updating the worker image on the production runtime does not change either
+`instances-ebs` workspace is identified by the stable capacity provider plus its thread's runtime
+session ID; updating the worker image on the production runtime does not change either
 identifier and therefore does not require a workspace refresh.
 
 #### Continuous production releases
@@ -488,7 +391,7 @@ npm run release:prod -- --region "$AWS_REGION" --reuse-unchanged-worker --requir
 
 | A push to `mainline` that changes | Result |
 |---|---|
-| Only docs, specs, top-level `tests/`, CLI source, `scripts/` or `.github` | No pipeline execution |
+| Only docs, specs, top-level `tests/`, `scripts/` or `.github` | No pipeline execution |
 | `packages/broker`, `infra` or other control-plane code, but no worker image input | Checks, then a control-plane deploy. The deployed worker digest is reused and the runtime is unchanged |
 | A worker image input: `packages/worker`, `packages/contracts`, the Dockerfile, `.dockerignore`, root `package.json`, `package-lock.json` or tsconfigs, or a workspace `package.json` | Checks, a new ARM64 image, a runtime update to `READY` on that digest, then a control-plane deploy |
 

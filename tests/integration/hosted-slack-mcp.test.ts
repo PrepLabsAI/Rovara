@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { ControlPlaneApi } from "../../packages/cli/src/control-plane-api.js";
-import { ORCHESTRATION_TOOL_NAMES } from "../../packages/cli/src/orchestration-tools.js";
-import { mcpToolName } from "../../packages/cli/src/mcp-tools.js";
+import { ControlPlaneApi } from "../../packages/orchestrator/src/control-plane-api.js";
+import { ORCHESTRATION_TOOL_NAMES } from "../../packages/orchestrator/src/orchestration-tools.js";
+import { mcpToolName } from "../../packages/orchestrator/src/mcp-tools.js";
 import { GitHubMcpRequestSchema, type GitHubMcpTool } from "../../packages/contracts/src/github-mcp.js";
 import type { SlackRequestMessage } from "../../packages/contracts/src/slack.js";
 import { processSlackRequest, type ProcessorDependencies } from "../../packages/slack-service/src/processor.js";

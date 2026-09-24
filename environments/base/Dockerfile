@@ -8,6 +8,7 @@ COPY package.json package-lock.json tsconfig.json tsconfig.base.json ./
 COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/worker/package.json packages/worker/package.json
 COPY packages/cli/package.json packages/cli/package.json
+COPY packages/orchestrator/package.json packages/orchestrator/package.json
 COPY packages/broker/package.json packages/broker/package.json
 COPY packages/slack-service/package.json packages/slack-service/package.json
 COPY infra/package.json infra/package.json

@@ -3,8 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import { GitHubMcpRequestSchema, type GitHubMcpRequest } from "../../packages/contracts/src/github-mcp.js";
 import { approvedTools, discoverGitHubTools, executeGitHubTool, type GitHubMcpContext, type GitHubMcpInvocation, type GitHubMcpStore } from "../../packages/broker/src/github-mcp.js";
 import type { McpConnection, McpToolResult } from "../../packages/broker/src/mcp-client.js";
-import { createMcpTools, mcpToolName } from "../../packages/cli/src/mcp-tools.js";
-import { assertOrchestrationOnly } from "../../packages/cli/src/orchestration-tools.js";
+import { createMcpTools, mcpToolName } from "../../packages/orchestrator/src/mcp-tools.js";
+import { assertOrchestrationOnly } from "../../packages/orchestrator/src/orchestration-tools.js";
 
 const repository = { name: "app", url: "https://github.com/acme/app.git", credentialRef: "github-app" };
 const result = (value: unknown): McpToolResult => ({ content: [{ type: "text", text: JSON.stringify(value) }] });

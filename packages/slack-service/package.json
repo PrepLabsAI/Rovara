@@ -5,8 +5,8 @@
   "type": "module",
   "main": "./dist/main.js",
   "dependencies": {
-    "@agentx/cli": "0.1.0",
     "@agentx/contracts": "0.1.0",
+    "@agentx/orchestrator": "0.1.0",
     "@aws-crypto/sha256-js": "5.2.0",
     "@aws-sdk/client-dynamodb": "3.1134.0",
     "@aws-sdk/client-s3": "3.1134.0",

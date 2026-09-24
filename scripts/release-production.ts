@@ -45,6 +45,7 @@ export const WORKER_IMAGE_INPUTS = [
   "packages/contracts",
   "packages/worker",
   "packages/cli/package.json",
+  "packages/orchestrator/package.json",
   "packages/broker/package.json",
   "packages/slack-service/package.json",
   "infra/package.json",
@@ -59,8 +60,9 @@ export const SLACK_ORCHESTRATOR_IMAGE_INPUTS = [
   "tsconfig.json",
   "tsconfig.base.json",
   "packages/contracts",
-  "packages/cli",
+  "packages/orchestrator",
   "packages/slack-service",
+  "packages/cli/package.json",
   "packages/worker/package.json",
   "packages/broker/package.json",
   "infra/package.json",
@@ -414,8 +416,8 @@ async function releaseSlackOrchestrator(
 
 async function smokeTestSlackOrchestrator(runner: Runner, image: string): Promise<void> {
   const script = [
-    "await import('@agentx/cli/orchestrator');",
-    "await import('@agentx/cli/control-plane-api');",
+    "await import('@agentx/orchestrator/orchestrator');",
+    "await import('@agentx/orchestrator/control-plane-api');",
     "await import('/opt/agentx/packages/slack-service/dist/consumer.js');",
     "console.log('slack orchestrator modules ok');",
   ].join(" ");

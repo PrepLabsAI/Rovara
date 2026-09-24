@@ -4,7 +4,6 @@ import {
   createAgentSessionFromServices,
   createAgentSessionRuntime,
   createAgentSessionServices,
-  InteractiveMode,
   ModelRuntime,
   SessionManager,
   type AgentSessionRuntime,
@@ -25,7 +24,6 @@ export interface OrchestratorOptions {
   api: OrchestrationApi;
   context: OrchestrationContext;
   model: { provider: string; modelId: string; thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" };
-  initialMessage?: string;
   sessionFile?: string;
   requestId?: () => string;
   githubMcpRepositories?: readonly string[];
@@ -41,7 +39,7 @@ export async function createOrchestratorRuntime(options: OrchestratorOptions): P
   ]);
   const modelRuntime = await ModelRuntime.create({ refreshOnCreate: false });
   const selectedModel = modelRuntime.getModel(options.model.provider, options.model.modelId);
-  if (!selectedModel) throw agentXError("RUNTIME_UNAVAILABLE", "configured local orchestrator model is unavailable");
+  if (!selectedModel) throw agentXError("RUNTIME_UNAVAILABLE", "configured orchestrator model is unavailable");
   const discovered: GitHubMcpTool[] = [];
   for (const repository of options.githubMcpRepositories ?? []) {
     if (!options.api.discoverGitHubTools) throw agentXError("CONFIG_INVALID", "MCP discovery API is missing");
@@ -54,12 +52,12 @@ export async function createOrchestratorRuntime(options: OrchestratorOptions): P
   });
   assertOrchestrationOnly(customTools, discovered);
   const boundaryExtension: InlineExtension = {
-    name: "agentx-local-boundary",
+    name: "agentx-orchestration-boundary",
     hidden: true,
     factory: (pi) => {
       pi.on("user_bash", () => ({
         result: {
-          output: "Local shell execution is disabled. Delegate the work to AgentX.",
+          output: "Shell execution is disabled in the orchestrator. Delegate the work to AgentX.",
           exitCode: 126,
           cancelled: false,
           truncated: false,
@@ -136,23 +134,10 @@ export function lastAssistantText(messages: readonly unknown[]): string {
   return "AgentX completed the request without returning a textual response.";
 }
 
-export async function runOrchestratorInteractive(options: OrchestratorOptions): Promise<void> {
-  const runtime = await createOrchestratorRuntime(options);
-  try {
-    const mode = new InteractiveMode(runtime, {
-      ...(options.initialMessage === undefined ? {} : { initialMessage: options.initialMessage }),
-      startupDiagnostics: [...runtime.diagnostics],
-    });
-    await mode.run();
-  } finally {
-    await runtime.dispose();
-  }
-}
-
 export function orchestratorSystemPrompt(projectInstructions: string): string {
   return [
     "You are the AgentX orchestrator.",
-    "Never inspect, edit, or execute project source locally. Use only AgentX orchestration tools and approved discovered MCP tools.",
+    "Never inspect, edit, or execute project source yourself. Use only AgentX orchestration tools and approved discovered MCP tools.",
     "agentx_submit_task and agentx_follow_up wait for the remote worker and return its final response.",
     "Use agentx_create_pull_request only when the user explicitly asks to create or raise a pull request.",
     "Never publish automatically after a coding task. For ordinary coding requests, call one task tool exactly once; do not poll, resubmit, or ask the worker to read its session file.",
