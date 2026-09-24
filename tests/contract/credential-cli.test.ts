@@ -93,6 +93,19 @@ describe("project registration errors", () => {
     expect(exitCode).not.toBe(0);
     expect(stderr).toContain(`project registration failed with HTTP 400: ${message}`);
   });
+
+  it("classifies an unlabeled server error by its HTTP status instead of always CONFIG_INVALID", async () => {
+    const { exitCodeForError } = await import("../../packages/cli/src/output.js");
+    const context = await administratorContext("agentx-cli-register-unlabeled-");
+    // An HTTP API gateway's own default error shape: no { error: { code, message } } envelope.
+    const fetchImplementation = vi.fn<typeof fetch>(async () => Response.json({ message: "Service Unavailable" }, { status: 503 }));
+    const { exitCode, stderr } = await runRegister(context, fetchImplementation);
+    const parsed = JSON.parse(stderr) as { ok: boolean; error: { code: string; message: string } };
+    expect(parsed.error.code).toBe("RUNTIME_UNAVAILABLE");
+    expect(parsed.error.message).toContain("project registration failed with HTTP 503");
+    expect(exitCode).toBe(exitCodeForError("RUNTIME_UNAVAILABLE"));
+    expect(exitCode).not.toBe(exitCodeForError("CONFIG_INVALID"));
+  });
 });
 
 const deployment = {

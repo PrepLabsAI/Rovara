@@ -46,7 +46,10 @@ export async function registerProject(
     // The server names what to fix (a tool budget, a presented name, a target conflict); pass it on.
     const { code, message } = serverError(body);
     const parsedCode = AgentXErrorCodeSchema.safeParse(code);
-    throw agentXError(parsedCode.success ? parsedCode.data : "CONFIG_INVALID", `project registration failed with HTTP ${status}${message ? `: ${message}` : ""}`);
+    // An unlabeled body (an HTTP API gateway's own error shape, say) is classified by its status:
+    // 5xx is the control plane's own fault, not a problem with what the administrator sent.
+    const fallback = status >= 500 ? "RUNTIME_UNAVAILABLE" : "CONFIG_INVALID";
+    throw agentXError(parsedCode.success ? parsedCode.data : fallback, `project registration failed with HTTP ${status}${message ? `: ${message}` : ""}`);
   }
   if (body === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "control plane returned an invalid response");
   return body;
