@@ -3,6 +3,7 @@ import {
   CredentialRegistrationSchema,
   agentXError,
 } from "@agentx/contracts";
+import { readJsonResponse, serverError } from "./http.js";
 
 interface CredentialAdminInput {
   controlPlaneUrl: string;
@@ -56,26 +57,13 @@ function credentialsUrl(controlPlaneUrl: string): string {
 }
 
 async function parseCredentialResponse(response: Response): Promise<unknown> {
-  const result: unknown = await response.json();
-  if (!response.ok) {
-    const parsedCode = AgentXErrorCodeSchema.safeParse(serverErrorCode(result));
-    const code = parsedCode.success ? parsedCode.data : "RUNTIME_UNAVAILABLE";
-    const message = serverMessage(result) ?? `HTTP ${response.status}`;
-    throw agentXError(code, message);
+  const { ok, status, body } = await readJsonResponse(response);
+  if (!ok) {
+    if (body === undefined) throw agentXError("RUNTIME_UNAVAILABLE", `HTTP ${status}`);
+    const { code, message } = serverError(body);
+    const parsedCode = AgentXErrorCodeSchema.safeParse(code);
+    throw agentXError(parsedCode.success ? parsedCode.data : "RUNTIME_UNAVAILABLE", message ?? `HTTP ${status}`);
   }
-  return result;
-}
-
-function serverErrorCode(value: unknown): unknown {
-  if (!value || typeof value !== "object" || !("error" in value)) return undefined;
-  const error = value.error;
-  if (!error || typeof error !== "object" || !("code" in error)) return undefined;
-  return error.code;
-}
-
-function serverMessage(value: unknown): string | undefined {
-  if (!value || typeof value !== "object" || !("error" in value)) return undefined;
-  const error = value.error;
-  if (!error || typeof error !== "object" || !("message" in error)) return undefined;
-  return typeof error.message === "string" ? error.message : undefined;
+  if (body === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "control plane returned an invalid response");
+  return body;
 }

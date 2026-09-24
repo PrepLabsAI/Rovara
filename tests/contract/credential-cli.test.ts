@@ -25,6 +25,13 @@ describe("credential administration client", () => {
       .rejects.toMatchObject({ code: "CONFIG_INVALID", message: "CONFIG_INVALID: credential linear: secret agentx/connectors/linear was not found" });
   });
 
+  it("surfaces a clean HTTP status when the control plane returns a non-JSON error body", async () => {
+    const fetchImplementation = vi.fn<typeof fetch>(async () =>
+      new Response("<html><body>502 Bad Gateway</body></html>", { status: 502, headers: { "content-type": "text/html" } }));
+    await expect(registerCredential({ controlPlaneUrl: "https://agentx.example.test", accessToken: "t", ref: "linear", type: "static-secret", secretName: "agentx/connectors/linear" }, fetchImplementation))
+      .rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: "RUNTIME_UNAVAILABLE: HTTP 502" });
+  });
+
   it("lists credentials", async () => {
     const credentials = [{ ref: "github-app", type: "github-app", secretName: "arn", builtIn: true, tokenCached: false }];
     const fetchImplementation = vi.fn<typeof fetch>(async () => Response.json({ credentials }));
