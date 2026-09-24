@@ -25,6 +25,7 @@ import { runConsumer, type QueueClient } from "./consumer.js";
 import { processSlackRequest, type ServiceLog, type ThreadServiceApi, type ThreadStore, type TurnInput } from "./processor.js";
 import { createSignedServiceFetch } from "./signing-fetch.js";
 import { createSlackUserNames } from "./user-names.js";
+import { threadWorkspaceRequest } from "./thread-workspace-request.js";
 import { createHostedSlackRuntime } from "./runtime.js";
 
 const MAX_RECEIVE_COUNT = 5;
@@ -99,7 +100,7 @@ function threadApi(message: SlackRequestMessage): ThreadServiceApi {
       const response = await signedFetch(`${controlPlaneUrl}/v1/threads/workspace`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ requestId, includeIntegrations: true, includeSettingsRevision: true, includeConnectors: true, includeRecoverableOperations: true }),
+        body: JSON.stringify(threadWorkspaceRequest(requestId)),
       });
       const body = await response.json() as Record<string, unknown>;
       if (!response.ok) {
