@@ -501,7 +501,7 @@ access to `mainline` is deploy access. To roll back, revert the change on `mainl
   per-session EBS, networking, release, isolation, and migration boundaries.
 - [Contracts](specs/001-agentx-foundation/contracts/): project config, control API and worker protocol.
 - [Validation guide](specs/001-agentx-foundation/quickstart.md).
-- [Constitution](.specify/memory/constitution.md): project principles, version 1.0.0.
+- [Constitution](.specify/memory/constitution.md): project principles, version 2.1.0.
 
 ## GitHub Spec Kit
 
