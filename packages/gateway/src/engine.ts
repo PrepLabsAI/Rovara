@@ -11,46 +11,59 @@ import {
   type ToolRequest,
   type ToolResult,
 } from "./types.js";
+import { flattenSchema } from "./schema.js";
 import { fingerprint, isObject, resultText, withDeadline } from "./util.js";
 
-/** Derive schemas from discovery, narrow by admin policy, and bind routing outside model arguments. */
-export function approveTools<Scope>(
+export interface SkippedTool { tool: string; reason: string }
+
+/** Derive schemas from discovery, narrow by admin policy, bind routing outside model arguments, and say why any approved tool is not offered. */
+export function reviewTools<Scope>(
   connection: Pick<McpConnection, "tools">,
   connector: Pick<ConnectorDefinition<Scope>, "binder">,
   context: ConnectorContext<Scope>,
-): CatalogTool[] {
+): { tools: CatalogTool[]; skipped: SkippedTool[] } {
   const tools: CatalogTool[] = [];
+  const skipped: SkippedTool[] = [];
+  const offered = new Set(connection.tools.map((tool) => tool.name));
+  for (const approval of context.policy.tools) {
+    if (!offered.has(approval.name)) skipped.push({ tool: approval.name, reason: "not offered by the vendor" });
+  }
   for (const upstream of connection.tools) {
     const policy = context.policy.tools.find((entry) => entry.name === upstream.name);
     if (!policy) continue;
     if (JSON.stringify(upstream.inputSchema).length > 32_768) throw new Error("MCP schema exceeded limit");
-    const schema = structuredClone(upstream.inputSchema);
-    // Plain object schemas only. Fail closed on shapes the narrowing cannot reason about.
-    if (schema.type !== "object" || !isObject(schema.properties) || schema.$ref || schema.allOf || schema.anyOf || schema.oneOf || schema.patternProperties) continue;
+    const flattened = flattenSchema(upstream.inputSchema);
+    if ("unsupported" in flattened) { skipped.push({ tool: upstream.name, reason: flattened.unsupported }); continue; }
+    const schema = flattened.schema;
+    if (schema.type !== "object" || !isObject(schema.properties) || schema.anyOf || schema.oneOf || schema.patternProperties) {
+      skipped.push({ tool: upstream.name, reason: "schema is not a plain object" });
+      continue;
+    }
     const properties = schema.properties;
     const required = Array.isArray(schema.required) ? schema.required as string[] : [];
-    const bindable = (name: string) => {
+    const unbindable = connector.binder.properties.find((name) => {
       const property = properties[name];
-      return isObject(property) && property.type === "string" && required.includes(name);
-    };
-    if (!connector.binder.properties.every(bindable)) continue;
+      return !(isObject(property) && property.type === "string" && required.includes(name));
+    });
+    if (unbindable !== undefined) { skipped.push({ tool: upstream.name, reason: `missing server-bound property ${unbindable}` }); continue; }
     for (const name of connector.binder.properties) delete properties[name];
     schema.required = required.filter((name) => !connector.binder.properties.includes(name));
     if (policy.allowedArguments) {
-      if ((schema.required as string[]).some((name) => !policy.allowedArguments!.includes(name))) continue;
+      const outside = (schema.required as string[]).filter((name) => !policy.allowedArguments!.includes(name));
+      if (outside.length) { skipped.push({ tool: upstream.name, reason: `requires arguments outside allowedArguments: ${outside.join(", ")}` }); continue; }
       for (const name of Object.keys(properties)) if (!policy.allowedArguments.includes(name)) delete properties[name];
     }
-    let incompatible = false;
+    let incompatible: string | undefined;
     for (const [name, values] of Object.entries(policy.argumentValues ?? {})) {
       const property = properties[name];
-      if (!isObject(property)) { incompatible = true; break; }
+      if (!isObject(property)) { incompatible = name; break; }
       const upstreamEnum = Array.isArray(property.enum) ? property.enum : undefined;
       const permitted = upstreamEnum ? values.filter((value) => upstreamEnum.includes(value)) : values;
-      if (!permitted.length) { incompatible = true; break; }
+      if (!permitted.length) { incompatible = name; break; }
       properties[name] = { ...property, enum: permitted };
       if (!(schema.required as string[]).includes(name)) (schema.required as string[]).push(name);
     }
-    if (incompatible) continue;
+    if (incompatible !== undefined) { skipped.push({ tool: upstream.name, reason: `argumentValues do not match ${incompatible}` }); continue; }
     schema.additionalProperties = false;
     // Compile during discovery too; schemas we cannot validate must never be advertised.
     new AjvJsonSchemaValidator().getValidator(schema);
@@ -64,7 +77,15 @@ export function approveTools<Scope>(
       access: policy.access,
     });
   }
-  return tools;
+  return { tools, skipped };
+}
+
+export function approveTools<Scope>(
+  connection: Pick<McpConnection, "tools">,
+  connector: Pick<ConnectorDefinition<Scope>, "binder">,
+  context: ConnectorContext<Scope>,
+): CatalogTool[] {
+  return reviewTools(connection, connector, context).tools;
 }
 
 export interface EngineOptions { connect?: typeof connectMcp }
@@ -80,13 +101,13 @@ export async function discoverTools<Scope>(
   connector: ConnectorDefinition<Scope>,
   context: ConnectorContext<Scope>,
   options: EngineOptions = {},
-): Promise<{ tools: CatalogTool[] }> {
+): Promise<{ tools: CatalogTool[]; skipped: SkippedTool[] }> {
   let connection: McpConnection | undefined;
   const signal = AbortSignal.timeout(20_000);
   try {
     const credential = await withDeadline(connector.credentials.issue(context.scope, "read", context.requestedBy), signal);
     connection = await (options.connect ?? connectMcp)({ endpoint: connector.endpoint, token: credential.token, tools: context.policy.tools.map((tool) => tool.name), signal });
-    return { tools: approveTools(connection, connector, context) };
+    return reviewTools(connection, connector, context);
   } catch {
     throw agentXError("RUNTIME_UNAVAILABLE", `${connector.label} MCP discovery failed; check ${connector.permissionsHint} and endpoint availability`);
   } finally { await connection?.close().catch(() => undefined); }

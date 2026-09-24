@@ -4,6 +4,7 @@ import {
   approveTools,
   discoverTools,
   executeTool,
+  reviewTools,
   GuardRejection,
   type ConnectorContext,
   type ConnectorDefinition,
@@ -31,7 +32,8 @@ function fixture(guards: Guard[] = []) {
     { name: "list_items", description: "List items", inputSchema: schema({ state: { type: "string", enum: ["open", "closed", "archived"] } }) },
     { name: "create_item", description: "Create an item", inputSchema: schema({ title: { type: "string" }, priority: { type: "string" } }, ["title"]) },
     { name: "unscoped", description: "No site property", inputSchema: { type: "object", properties: { q: { type: "string" } } } },
-    { name: "composed", description: "Uses allOf", inputSchema: { ...schema({}), allOf: [] } },
+    { name: "composed", description: "Uses allOf", inputSchema: { allOf: [schema({}), { type: "object", properties: { note: { $ref: "#/$defs/Note" } } }], $defs: { Note: { type: "string" } } } },
+    { name: "either", description: "Uses anyOf", inputSchema: { anyOf: [schema({})] } },
     { name: "unapproved", description: "Not in policy", inputSchema: schema({}) },
   ];
   const issue = vi.fn<ConnectorDefinition<TrackerScope>["credentials"]["issue"]>(async () => ({ token: "tracker-secret-token", bindings: {} }));
@@ -50,6 +52,7 @@ function fixture(guards: Guard[] = []) {
       { name: "create_item", access: "write", allowedArguments: ["title"] },
       { name: "unscoped", access: "read" },
       { name: "composed", access: "read" },
+      { name: "either", access: "read" }, { name: "retired", access: "read" },
     ] },
   };
   const records = new Map<string, Invocation>();
@@ -72,7 +75,7 @@ describe("gateway tool approval", () => {
   it("removes bound properties and skips tools it cannot bind or represent", () => {
     const f = fixture();
     const catalog = approveTools({ tools: f.tools }, f.connector, f.context);
-    expect(catalog.map((tool) => tool.name)).toEqual(["list_items", "create_item"]);
+    expect(catalog.map((tool) => tool.name)).toEqual(["list_items", "create_item", "composed"]);
     expect(catalog.every((tool) => tool.scope === "payments")).toBe(true);
     const list = catalog[0]!.inputSchema;
     expect((list.properties as Record<string, unknown>).siteId).toBeUndefined();
@@ -80,6 +83,17 @@ describe("gateway tool approval", () => {
     expect((list.properties as Record<string, { enum: string[] }>).state.enum).toEqual(["open", "closed"]);
     expect((catalog[1]!.inputSchema.properties as Record<string, unknown>).priority).toBeUndefined();
     expect(catalog[1]!.access).toBe("write");
+  });
+
+  it("reports every approved tool it cannot offer, with a reason", () => {
+    const f = fixture();
+    const review = reviewTools({ tools: f.tools }, f.connector, f.context);
+    expect(review.skipped).toEqual([
+      { tool: "retired", reason: "not offered by the vendor" },
+      { tool: "unscoped", reason: "missing server-bound property siteId" },
+      { tool: "either", reason: "schema is not a plain object" },
+    ]);
+    expect((review.tools.find((tool) => tool.name === "composed")!.inputSchema.properties as Record<string, unknown>).note).toEqual({ type: "string" });
   });
 });
 
@@ -160,8 +174,9 @@ describe("gateway execution", () => {
   it("discovers the approved catalog and closes the connection", async () => {
     const f = fixture();
     const catalog = await discoverTools(f.connector, f.context, { connect: f.connect });
-    expect(catalog.tools.map((tool) => tool.name)).toEqual(["list_items", "create_item"]);
-    expect(f.connect).toHaveBeenCalledWith(expect.objectContaining({ tools: ["list_items", "create_item", "unscoped", "composed"] }));
+    expect(catalog.tools.map((tool) => tool.name)).toEqual(["list_items", "create_item", "composed"]);
+    expect(catalog.skipped.map((entry) => entry.tool)).toEqual(["retired", "unscoped", "either"]);
+    expect(f.connect).toHaveBeenCalledWith(expect.objectContaining({ tools: ["list_items", "create_item", "unscoped", "composed", "either", "retired"] }));
     expect(f.close).toHaveBeenCalledOnce();
   });
 });
