@@ -84,13 +84,17 @@ Adds `connector`. Status set unchanged:
 
 ## Workspace resolution additions
 
-The thread workspace response adds, for clients sending `includeIntegrations: true`:
+The thread workspace response adds, for clients sending `includeConnectors: true`:
 
 - `connectors`: `[{ name, type, label, scopes: [alias], connected: boolean }]`, from the latest
   registered revision and the credential registry.
-- `recoverableOperations`: IDs of non-terminal operations started by this thread, at most 5.
+- `repositories`: `[name]`, the project's registered repositories.
 
-`githubMcpRepositories` remains for one release.
+`recoverableOperations` (IDs of non-terminal operations started by this thread, at most 5) ships in
+phase 2b (T038), alongside the conditional recovery tools that consume it.
+
+`includeIntegrations: true` remains, independently, the feature 007 flag that adds
+`githubMcpRepositories` for one release; it does not add `connectors` or `repositories`.
 
 ## Turn record
 
