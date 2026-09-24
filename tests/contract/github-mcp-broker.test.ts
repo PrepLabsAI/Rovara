@@ -4,7 +4,7 @@ import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 import { RepositoryGrantService } from "../../packages/broker/src/repository-access.js";
 import { GitHubMcpCatalogSchema } from "../../packages/contracts/src/github-mcp.js";
 
-describe("authenticated GitHub MCP routes", () => {
+describe("thread-authenticated GitHub MCP routes", () => {
   it("enforces owner, membership, revision policy and repository before discovery, and durably deduplicates writes", async () => {
     Object.assign(process.env, {
       AWS_REGION: "us-east-1", STATE_TABLE_NAME: "unused", ARTIFACT_BUCKET_NAME: "unused",
@@ -14,7 +14,13 @@ describe("authenticated GitHub MCP routes", () => {
     });
     const { createAwsBrokerHandler } = await import("../../packages/broker/src/aws/broker.js");
     const issuer = "https://identity.example.test";
-    const ownerKey = ownerKeyForSubject(issuer, "alice");
+    const teamId = "T0123456789";
+    const channelId = "C0123456789";
+    const thread = `${teamId}/${channelId}/1758240000.000100`;
+    const otherThread = `${teamId}/${channelId}/1758240000.000200`;
+    const orchestratorRoleArn = "arn:aws:iam::111122223333:role/service/AgentXSlackOrchestrator-TaskRole";
+    const orchestratorPrincipal = "arn:aws:sts::111122223333:assumed-role/AgentXSlackOrchestrator-TaskRole/task";
+    const ownerKey = ownerKeyForSubject("slack-thread", thread);
     const workspaceId = randomUUID();
     const now = new Date().toISOString();
     const records = new Map<string, Record<string, unknown>>();
@@ -28,6 +34,9 @@ describe("authenticated GitHub MCP routes", () => {
     });
     const membershipKey = key(`MEMBER#${ownerKey}`, "PROJECT#demo");
     records.set(membershipKey, { ownerKey, projectName: "demo", role: "developer" });
+    records.set(key(`SLACK_BINDING#${teamId}`, `CHANNEL#${channelId}`), {
+      teamId, channelId, projectName: "demo", projectRevision: 2, updatedAt: now,
+    });
     const repository = { name: "demo", url: "https://github.com/example/demo.git", credentialRef: "github-app" };
     const policy = { tools: [{ name: "issue_write", access: "write" }] };
     const definition = { repositories: [repository], integrations: { githubMcp: policy } };
@@ -60,14 +69,25 @@ describe("authenticated GitHub MCP routes", () => {
       issuer, adminClaim: "groups", adminValues: ["admins"], callbackSigningKey: "c".repeat(64),
       repositoryGrants: new RepositoryGrantService({ resolve: async () => ({}) }),
       githubPullRequests: {} as never, codeBuild: {} as never, githubMcp: { credentials, connect },
+      slack: { orchestratorRoleArn, memberWorkspaceLimit: 3, organizationWorkspaceLimit: 20 },
     });
-    const request = (method: string, subject = "alice", body?: unknown, repositoryName = "demo") => handler({
-      version: "2.0", rawPath: `/v1/workspaces/${workspaceId}/github/${method === "GET" ? "tools" : "call"}`,
-      rawQueryString: `repository=${repositoryName}`, headers: {}, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      requestContext: { requestId: randomUUID(), http: { method }, authorizer: { jwt: { claims: { iss: issuer, sub: subject } } } },
+    const request = (method: string, requestingThread = thread, body?: unknown, repositoryName = "demo") => handler({
+      version: "2.0", rawPath: `/v1/service/workspaces/${workspaceId}/github/${method === "GET" ? "tools" : "call"}`,
+      rawQueryString: `repository=${repositoryName}`,
+      headers: { "x-agentx-slack-thread": requestingThread, "x-agentx-slack-user": "U0123456789" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      requestContext: { requestId: randomUUID(), http: { method }, authorizer: { iam: { userArn: orchestratorPrincipal } } },
     });
-    expect((await request("GET", "bob")).statusCode).toBe(404);
-    expect((await request("GET", "alice", undefined, "unknown")).statusCode).toBe(404);
+    expect((await request("GET", otherThread)).statusCode).toBe(404);
+    expect((await request("GET", thread, undefined, "unknown")).statusCode).toBe(404);
+    // The retired OIDC developer path reaches no workspace route at all.
+    const throughOidc = await handler({
+      version: "2.0", rawPath: `/v1/workspaces/${workspaceId}/github/tools`,
+      rawQueryString: "repository=demo", headers: {},
+      requestContext: { requestId: randomUUID(), http: { method: "GET" }, authorizer: { jwt: { claims: { iss: issuer, sub: "alice" } } } },
+    });
+    expect(throughOidc.statusCode).toBe(403);
+    expect(throughOidc.body).toContain("Slack");
     const membership = records.get(membershipKey)!;
     records.delete(membershipKey);
     expect((await request("GET")).statusCode).toBe(404);
@@ -84,12 +104,12 @@ describe("authenticated GitHub MCP routes", () => {
     const catalogEnvelope = JSON.parse(discovered.body) as { catalog: unknown };
     const tool = GitHubMcpCatalogSchema.parse(catalogEnvelope.catalog).tools[0]!;
     const input = { requestId: randomUUID(), repository: "demo", tool: "issue_write", schemaHash: tool.schemaHash, arguments: { method: "create", title: "Native tool" } };
-    const first = await request("POST", "alice", input);
+    const first = await request("POST", thread, input);
     expect(JSON.parse(first.body)).toMatchObject({ result: { requestId: input.requestId, status: "SUCCEEDED", replayed: false } });
-    expect(JSON.parse((await request("POST", "alice", input)).body)).toMatchObject({ result: { requestId: input.requestId, status: "SUCCEEDED", replayed: true } });
-    expect((await request("POST", "alice", { ...input, arguments: { ...input.arguments, title: "Changed" } })).statusCode).toBe(409);
-    expect((await request("POST", "alice", { ...input, arguments: { ...input.arguments, owner: "another" } })).statusCode).toBe(403);
-    expect((await request("POST", "alice", { ...input, token: "caller-controlled" })).statusCode).toBe(400);
+    expect(JSON.parse((await request("POST", thread, input)).body)).toMatchObject({ result: { requestId: input.requestId, status: "SUCCEEDED", replayed: true } });
+    expect((await request("POST", thread, { ...input, arguments: { ...input.arguments, title: "Changed" } })).statusCode).toBe(409);
+    expect((await request("POST", thread, { ...input, arguments: { ...input.arguments, owner: "another" } })).statusCode).toBe(403);
+    expect((await request("POST", thread, { ...input, token: "caller-controlled" })).statusCode).toBe(400);
     expect(call).toHaveBeenCalledExactlyOnceWith("issue_write", { method: "create", title: "Native tool", owner: "example", repo: "demo" });
     expect(credentials).toHaveBeenLastCalledWith(repository, "write");
     expect(JSON.stringify([...records.values()])).not.toContain("server-secret");

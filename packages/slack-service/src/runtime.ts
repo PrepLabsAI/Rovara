@@ -1,4 +1,4 @@
-import { createOrchestratorRuntime, type OrchestratorOptions } from "@agentx/cli/orchestrator";
+import { createOrchestratorRuntime, type OrchestratorOptions } from "@agentx/orchestrator/orchestrator";
 import type { TurnInput } from "./processor.js";
 
 /** Shared production/test boundary: tool routing comes from workspace resolution, never Slack text. */

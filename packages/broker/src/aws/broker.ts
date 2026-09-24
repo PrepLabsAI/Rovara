@@ -267,7 +267,12 @@ export function createAwsBrokerHandler(dependencies: AwsBrokerDependencies) {
         return json({ workspace: await stopWorkspace(dependencies, identity, stop[1]) }, request.requestId, 202);
       }
 
-      return await routeWorkspaceRequest(dependencies, request, url, identity);
+      // Developer workflows run in Slack threads, which reach the same handlers through
+      // /v1/service/*. The OIDC entry point serves administration only.
+      throw agentXError(
+        "FORBIDDEN",
+        "AgentX developer workflows run in the project's Slack channel; this endpoint serves administration only",
+      );
     } catch (error) {
       if (error instanceof AgentXError) {
         return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, request.requestId, error.statusCode);

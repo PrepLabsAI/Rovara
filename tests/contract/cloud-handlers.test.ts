@@ -177,12 +177,19 @@ describe("AWS control-plane handlers", () => {
       GITHUB_APP_INSTALLATION_ID: "456",
     });
     const { createAwsBrokerHandler } = await import("../../packages/broker/src/aws/broker.js");
-    const subject = "alice";
+    // Publication now reaches the control plane only through the hosted Slack orchestrator,
+    // so the workspace is owned by its Slack thread.
+    const teamId = "T0123456789";
+    const channelId = "C0123456789";
+    const threadSubject = `${teamId}/${channelId}/1758240000.000100`;
+    const otherThreadSubject = `${teamId}/${channelId}/1758240000.000200`;
     const ownerKey = createHash("sha256")
-      .update("https://identity.example.test")
+      .update("slack-thread")
       .update("\0")
-      .update(subject)
+      .update(threadSubject)
       .digest("hex");
+    const orchestratorRoleArn = "arn:aws:iam::111122223333:role/service/AgentXSlackOrchestrator-TaskRole";
+    const orchestratorPrincipal = "arn:aws:sts::111122223333:assumed-role/AgentXSlackOrchestrator-TaskRole/task";
     const workspaceId = randomUUID();
     const now = new Date().toISOString();
     const records = new Map<string, Record<string, unknown>>();
@@ -214,6 +221,16 @@ describe("AWS control-plane handlers", () => {
       ownerKey,
       projectName: "demo",
       role: "developer",
+    });
+    records.set(key(`SLACK_BINDING#${teamId}`, `CHANNEL#${channelId}`), {
+      pk: `SLACK_BINDING#${teamId}`,
+      sk: `CHANNEL#${channelId}`,
+      entityType: "SLACK_BINDING",
+      teamId,
+      channelId,
+      projectName: "demo",
+      projectRevision: 1,
+      updatedAt: now,
     });
     records.set(key("PROJECT#demo", "REV#000000000001"), {
       pk: "PROJECT#demo",
@@ -374,21 +391,39 @@ describe("AWS control-plane handlers", () => {
       repositoryGrants: grants,
       githubPullRequests: { reconcilePullRequest, getPullRequest, updatePullRequest },
       codeBuild: { start: codeBuildStart, status: codeBuildStatus },
+      slack: { orchestratorRoleArn, memberWorkspaceLimit: 3, organizationWorkspaceLimit: 20 },
     });
     const requestId = randomUUID();
     const publicationEvent = {
       version: "2.0",
-      rawPath: `/v1/workspaces/${workspaceId}/pull-requests`,
-      headers: {},
+      rawPath: `/v1/service/workspaces/${workspaceId}/pull-requests`,
+      headers: {
+        "x-agentx-slack-thread": threadSubject,
+        "x-agentx-slack-user": "U0123456789",
+      },
       body: JSON.stringify({ requestId, repository: "demo", title: "Publish demo" }),
       requestContext: {
         requestId: "gateway-request",
         http: { method: "POST" },
-        authorizer: { jwt: { claims: { iss: "https://identity.example.test", sub: subject } } },
+        authorizer: { iam: { userArn: orchestratorPrincipal } },
       },
     } as const;
     const response = await handler(publicationEvent);
     expect(response.statusCode).toBe(202);
+
+    // The same publication through the retired OIDC developer path is refused.
+    const throughOidc = await handler({
+      ...publicationEvent,
+      rawPath: `/v1/workspaces/${workspaceId}/pull-requests`,
+      headers: {},
+      requestContext: {
+        requestId: "gateway-request",
+        http: { method: "POST" },
+        authorizer: { jwt: { claims: { iss: "https://identity.example.test", sub: "alice" } } },
+      },
+    });
+    expect(throughOidc.statusCode).toBe(403);
+    expect(throughOidc.body).toContain("Slack");
     const body = JSON.parse(response.body) as { operation: { id: string; kind: string } };
     expect(body.operation.kind).toBe("publish");
     const outbox = written.find((record) => record.entityType === "OUTBOX");
@@ -478,13 +513,18 @@ describe("AWS control-plane handlers", () => {
       headBranch: invocation.payload.headBranch,
       baseBranch: "main",
       title: "Publish demo",
+      // A thread publication carries its Slack attribution into the pull request.
+      body: `Requested in Slack thread https://slack.com/archives/${channelId}/p1758240000000100 by U0123456789.`,
     });
 
     const editRequestId = randomUUID();
     const editEvent = {
       version: "2.0",
-      rawPath: `/v1/workspaces/${workspaceId}/pull-request-actions`,
-      headers: {},
+      rawPath: `/v1/service/workspaces/${workspaceId}/pull-request-actions`,
+      headers: {
+        "x-agentx-slack-thread": threadSubject,
+        "x-agentx-slack-user": "U0123456789",
+      },
       body: JSON.stringify({
         requestId: editRequestId,
         repository: "demo",
@@ -495,7 +535,7 @@ describe("AWS control-plane handlers", () => {
       requestContext: {
         requestId: "edit-request",
         http: { method: "POST" },
-        authorizer: { jwt: { claims: { iss: "https://identity.example.test", sub: subject } } },
+        authorizer: { iam: { userArn: orchestratorPrincipal } },
       },
     } as const;
     const edit = await handler(editEvent);
@@ -524,10 +564,11 @@ describe("AWS control-plane handlers", () => {
     expect(JSON.parse(stale.body)).toMatchObject({ error: { code: "STALE_FENCE" } });
     const unauthorizedLifecycle = await handler({
       ...editEvent,
+      headers: { ...editEvent.headers, "x-agentx-slack-thread": otherThreadSubject },
       requestContext: {
         requestId: "unauthorized-request",
         http: { method: "POST" },
-        authorizer: { jwt: { claims: { iss: "https://identity.example.test", sub: "bob" } } },
+        authorizer: { iam: { userArn: orchestratorPrincipal } },
       },
       body: JSON.stringify({
         requestId: randomUUID(), repository: "demo", pullRequestNumber: 3, action: "close",
@@ -665,10 +706,11 @@ describe("AWS control-plane handlers", () => {
     const unauthorized = await handler({
       ...publicationEvent,
       body: JSON.stringify({ requestId: randomUUID(), repository: "demo", title: "Unauthorized" }),
+      headers: { ...publicationEvent.headers, "x-agentx-slack-thread": otherThreadSubject },
       requestContext: {
         requestId: "unauthorized-request",
         http: { method: "POST" },
-        authorizer: { jwt: { claims: { iss: "https://identity.example.test", sub: "bob" } } },
+        authorizer: { iam: { userArn: orchestratorPrincipal } },
       },
     });
     expect(unauthorized.statusCode).toBe(404);

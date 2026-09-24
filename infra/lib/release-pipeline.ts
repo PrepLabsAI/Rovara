@@ -31,7 +31,7 @@ export const AGENTX_RELEASE_STACKS = [
 export const AGENTX_RELEASE_TRIGGER_PATHS = [
   "environments/**",
   "infra/**",
-  "packages/{broker,cli,contracts,slack-service,worker}/**",
+  "packages/{broker,cli,contracts,orchestrator,slack-service,worker}/**",
   "{package.json,package-lock.json,tsconfig.json,tsconfig.base.json,.dockerignore}",
 ] as const;
 

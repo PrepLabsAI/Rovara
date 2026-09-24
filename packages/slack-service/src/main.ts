@@ -13,9 +13,9 @@ import {
 } from "@aws-sdk/client-sqs";
 import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import { SlackThreadWorkspaceResultSchema, type SlackRequestMessage } from "@agentx/contracts";
-import { ControlPlaneApi } from "@agentx/cli/control-plane-api";
-import { pollOperation } from "@agentx/cli/event-client";
-import { runOrchestratorTurn } from "@agentx/cli/orchestrator";
+import { ControlPlaneApi } from "@agentx/orchestrator/control-plane-api";
+import { pollOperation } from "@agentx/orchestrator/event-client";
+import { runOrchestratorTurn } from "@agentx/orchestrator/orchestrator";
 import { runConsumer, type QueueClient } from "./consumer.js";
 import { processSlackRequest, type ServiceLog, type ThreadServiceApi, type ThreadStore, type TurnInput } from "./processor.js";
 import { createSignedServiceFetch } from "./signing-fetch.js";

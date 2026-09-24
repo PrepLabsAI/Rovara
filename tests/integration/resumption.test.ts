@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type { WorkerInvocation } from "@agentx/contracts";
-import { loadReconnectState, saveReconnectState } from "../../packages/cli/src/client-state.js";
 import { WorkspaceConversationStore } from "../../packages/worker/src/conversations.js";
 import { OperationJournal } from "../../packages/worker/src/journal.js";
 import { openRegisteredWorkspacePiSession, type PiSessionAdapter } from "../../packages/worker/src/pi-session.js";
@@ -16,7 +15,7 @@ import { describe, expect, it } from "vitest";
 const run = promisify(execFile);
 
 describe("workspace and conversation resumption", () => {
-  it("retains tracked edits, untracked files, conversation entries and reconnect state across processes", async () => {
+  it("retains tracked edits, untracked files and conversation entries across processes", async () => {
     const rootPath = await mkdtemp(join(tmpdir(), "agentx-resume-"));
     const repository = join(rootPath, "repo/app");
     await mkdir(repository, { recursive: true });
@@ -47,15 +46,6 @@ describe("workspace and conversation resumption", () => {
     const firstProcess = new WorkspaceConversationStore(rootPath);
     const first = await firstProcess.createSessionFile();
     await appendFile(first.sessionFile, '{"role":"user","text":"first turn"}\n');
-    const stateDirectory = join(rootPath, ".client-state");
-    const reconnectState = {
-      schemaVersion: 1 as const,
-      projectName: "payments",
-      workspaceId: randomUUID(),
-      conversationId: first.conversationId,
-      eventCursor: "cursor-7",
-    };
-    await saveReconnectState(stateDirectory, reconnectState);
 
     const replacementProcess = new WorkspaceConversationStore(rootPath);
     const resolved = await replacementProcess.resolve(first.conversationId);
@@ -75,7 +65,6 @@ describe("workspace and conversation resumption", () => {
     await expect(readFile(join(repository, "tracked.txt"), "utf8")).resolves.toBe("unfinished edit\n");
     await expect(readFile(join(repository, "untracked.txt"), "utf8")).resolves.toBe("private work\n");
     await expect(readFile(first.sessionFile, "utf8")).resolves.toContain("feedback turn");
-    await expect(loadReconnectState(stateDirectory, "payments")).resolves.toEqual(reconnectState);
 
     const second = await replacementProcess.createSessionFile();
     expect(second.conversationId).not.toBe(first.conversationId);

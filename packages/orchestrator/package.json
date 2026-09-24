@@ -1,0 +1,18 @@
+{
+  "name": "@agentx/orchestrator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./control-plane-api": "./dist/control-plane-api.js",
+    "./event-client": "./dist/event-client.js",
+    "./orchestrator": "./dist/orchestrator.js"
+  },
+  "dependencies": {
+    "@agentx/contracts": "0.1.0",
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "typebox": "1.3.7"
+  }
+}

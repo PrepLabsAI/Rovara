@@ -1,4 +1,15 @@
-<!-- Sync impact: 1.2.0 -> 1.3.0. Principle I permits project-approved third-party issue
+<!-- Sync impact: 1.3.0 -> 2.0.0 (retires the local development client; AgentX is Slack-only).
+Principles modified: I. Orchestration-only clients, remote coding -> I. One orchestrator, remote
+coding (the local pi-based client is removed; the hosted Slack orchestrator is the only
+orchestrator, and the remaining client administers projects); II. Administrator-prepared projects
+(a developer selects a project by posting in its bound Slack channel, not with `agentx --project`);
+III. Shared definitions, isolated instances (workspaces are owned by Slack threads only; personal
+workspaces are retired).
+Sections modified: Scope and Operational Constraints (local project configuration now serves
+administration; all orchestration is unattended). Removed sections: none.
+Design and verification are recorded in specs/008-slack-only-workflow/.
+Follow-up TODOs: none. -->
+<!-- Previous: 1.2.0 -> 1.3.0. Principle I permits project-approved third-party issue
 tools through the authenticated control plane. Repository code/file and shell access remains
 worker-only. Design and verification are recorded in specs/007-github-mcp/. -->
 <!-- Sync impact: 1.1.0 -> 1.2.0 (adds a hosted Slack orchestrator with thread-owned workspaces).
@@ -13,37 +24,44 @@ Follow-up TODOs: specify the hosted Slack orchestrator as its own Spec Kit featu
 
 ## Core Principles
 
-### I. Orchestration-only clients, remote coding
+### I. One orchestrator, remote coding
 
-Orchestrators, meaning the local pi-based client and the hosted Slack orchestrator, MUST expose
-only orchestration capabilities and administrator-enabled third-party issue tools mediated by
-the authenticated control plane to their agents. Those issue tools MUST enforce project and
-repository scope, keep credentials out of model context, and deduplicate writes durably.
+The hosted Slack orchestrator is the only orchestrator. It MUST expose only orchestration
+capabilities and administrator-enabled third-party issue tools mediated by the authenticated
+control plane to its agent. Those issue tools MUST enforce project and repository scope, keep
+credentials out of model context, and deduplicate writes durably.
 Repository code inspection, editing, shell execution,
 builds, and tests MUST run in remote coding workers. Tool registration and extension loading MUST
-enforce this boundary; prompts alone are insufficient. Local configuration and client-state I/O
-are permitted. The hosted Slack orchestrator MAY run unattended. It MUST accept only requests that
-Slack has signed and that come from a member of the channel bound to the project. It MUST act
-through a service identity limited to Slack thread workspaces, and MUST record the requesting
-Slack user with every operation.
+enforce this boundary; prompts alone are insufficient. The orchestrator runs unattended. It MUST
+accept only requests that Slack has signed and that come from a member of the channel bound to the
+project. It MUST act through a service identity limited to Slack thread workspaces, and MUST record
+the requesting Slack user with every operation.
+
+No other client may drive coding work. The administration client authenticates an administrator and
+calls administration routes only; the control plane MUST refuse workspace, task, conversation,
+event, and publication requests that do not arrive through the hosted orchestrator's service
+identity.
 
 ### II. Administrator-prepared projects
 
 Administrators MUST define and prepare each product's fixed environment, repository layout,
-and setup procedure before any coding task. Developers select a registered project through
-`agentx --project <name>`. Preparing or resuming an isolated instance of that definition MUST
+and setup procedure before any coding task. A developer selects a registered project by posting in
+the Slack channel bound to it. Preparing or resuming an isolated instance of that definition MUST
 complete before task acceptance. A coding task MUST NOT implicitly define or reconfigure a project.
 
 ### III. Shared definitions, isolated instances
 
 Project configuration and immutable environment images MAY be shared. Writable workspaces,
-uncommitted changes, caches, credentials, and agent histories MUST be isolated by authenticated
-owner and workspace instance. A client-supplied name or session identifier MUST NOT grant
-access. Changes become available to colleagues through explicit repository publication and
-integration, never through a shared writable checkout. The only exception is a Slack thread
-workspace. It is owned by its Slack thread (team, channel, and thread, as verified by Slack's
-signed request) and is intentionally shared by the channel members who post in that thread. It MUST NOT be reachable from any other thread, from a personal workspace, or by a thread
-identifier supplied through any other client.
+uncommitted changes, caches, credentials, and agent histories MUST be isolated by workspace
+instance. A client-supplied name or session identifier MUST NOT grant access. Changes become
+available to colleagues through explicit repository publication and integration, never through a
+shared writable checkout.
+
+Every workspace is owned by its Slack thread (team, channel, and thread, as verified by Slack's
+signed request) and is intentionally shared by the channel members who post in that thread. It
+MUST NOT be reachable from any other thread or by a thread identifier supplied through any other
+client. Personal, per-developer workspaces are retired: the existing ones are stopped and kept,
+and no route creates another.
 
 ### IV. Durable working state, replaceable processes
 
@@ -66,11 +84,12 @@ need; optional features MUST NOT delay the first complete coding workflow.
 ## Scope and Operational Constraints
 
 The production target is pi on Amazon Bedrock AgentCore Instances with persistent EBS-backed
-workspace instances. Use a versioned development image and local AgentX project configuration.
+workspace instances. Use a versioned development image and administrator-held AgentX project
+configuration.
 Dev Container metadata, automatic checkpoints, concurrent writers within one workspace,
 automatic merging, and deployment of generated applications are outside the initial release.
-These may be specified separately. Unattended orchestration after client exit is limited to the
-hosted Slack orchestrator described in Principle I, and is specified as its own feature.
+These may be specified separately. All orchestration is unattended and runs in the hosted Slack
+orchestrator described in Principle I.
 
 A deployment mode named `demo-microvm` MAY use AgentCore microVM compute with public networking
 and managed session storage at `/mnt/workspace` to validate the first live workflow without a
@@ -99,4 +118,4 @@ Amendments MUST identify changed principles and update affected specifications a
 Use semantic versioning: major for incompatible principles, minor for new principles, patch
 for clarifications. Reviewers MUST identify and resolve violations before declaring delivery complete.
 
-**Version**: 1.3.0 | **Ratified**: 2026-09-17 | **Last Amended**: 2026-09-23
+**Version**: 2.0.0 | **Ratified**: 2026-09-17 | **Last Amended**: 2026-09-23

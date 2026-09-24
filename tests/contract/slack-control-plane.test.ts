@@ -202,7 +202,8 @@ describe("hosted Slack GitHub MCP", () => {
     const callsBefore = credentials.mock.calls.length;
     expect((await call(handler, { method: "GET", path: `${path}/tools?repository=demo`, service: { ...service, thread: threadTwo } })).status).toBe(404);
     expect((await call(handler, { method: "GET", path: `${path}/tools?repository=demo`, service: { ...service, principal: `arn:aws:sts::${account}:assumed-role/OtherRole/session` } })).status).toBe(403);
-    expect((await call(handler, { method: "GET", path: `/v1/workspaces/${workspaceId}/github/tools?repository=demo`, user: admin })).status).toBe(404);
+    // An administrator login reaches no workspace route: the OIDC entry point serves administration only.
+    expect((await call(handler, { method: "GET", path: `/v1/workspaces/${workspaceId}/github/tools?repository=demo`, user: admin })).status).toBe(403);
     expect((await call(handler, { method: "POST", path: `${path}/call`, service: { ...service, slackUser: bob }, body: request })).status).toBe(404);
     expect((await call(handler, { method: "GET", path: `${path}/tools?repository=unknown`, service })).status).toBe(404);
     expect((await call(handler, { method: "GET", path: `${path}/tools?repository=demo`, service: { ...service, thread: `${team}/C0999999999/1695500000.000001` } })).status).toBe(403);
@@ -422,8 +423,12 @@ describe("Slack thread isolation and attribution", () => {
     const workspaceId = created.body.workspaceId as string;
     const operationPath = `/workspaces/${workspaceId}/operations/${created.body.operationId as string}`;
 
-    expect((await call(handler, { method: "GET", path: `/v1${operationPath}`, user: { subject: "pratik-oidc-subject" } })).status).toBe(404);
-    expect((await call(handler, { method: "GET", path: `/v1${operationPath}`, user: admin })).status).toBe(404);
+    // The OIDC entry point serves administration only, so neither a personal login nor an
+    // administrator reaches a thread workspace's operations through it.
+    const personal = await call(handler, { method: "GET", path: `/v1${operationPath}`, user: { subject: "pratik-oidc-subject" } });
+    expect(personal.status).toBe(403);
+    expect(JSON.stringify(personal.body)).toContain("Slack");
+    expect((await call(handler, { method: "GET", path: `/v1${operationPath}`, user: admin })).status).toBe(403);
     expect((await call(handler, {
       method: "GET",
       path: `/v1/service${operationPath}`,
