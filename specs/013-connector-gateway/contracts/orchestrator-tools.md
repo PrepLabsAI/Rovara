@@ -145,6 +145,9 @@ Rules:
   absent (never created), so an update that omits it still means "leave it unchanged".
 - The footer is not part of the idempotency fingerprint (`requestFingerprint`), so a retried write
   with a different attribution (different requester or thread) still replays instead of conflicting.
+- The model's arguments are validated against the vendor's schema before signing. If the signed
+  arguments would then fail it (for example a `body` `maxLength`), the unsigned arguments are sent
+  instead: the footer never turns a valid write into a refused one.
 - A value that already ends with that exact footer is left unchanged — no stacked footers on a
   model that echoes a previously signed body back.
 - A connector can turn attribution off entirely with `attribution: false` in its definition; legacy

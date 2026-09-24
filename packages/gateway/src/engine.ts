@@ -192,8 +192,13 @@ export async function executeTool<Scope>(
     if (!validate(request.arguments).valid) throw new PolicyFailure("Arguments do not match the approved MCP tool schema.");
     const bound = connector.binder.bind(context.scope, credential);
     const upstream = connection.tools.find((tool) => tool.name === request.tool)!;
-    const args = withAttribution({ ...request.arguments, ...bound }, write ? options.attribution : undefined, upstream.inputSchema, connector.attributionKeys);
-    if (!new AjvJsonSchemaValidator().getValidator(upstream.inputSchema)(args).valid) throw new PolicyFailure("Arguments do not match the upstream MCP tool schema.");
+    const validateUpstream = new AjvJsonSchemaValidator().getValidator(upstream.inputSchema);
+    const unsigned = { ...request.arguments, ...bound };
+    if (!validateUpstream(unsigned).valid) throw new PolicyFailure("Arguments do not match the upstream MCP tool schema.");
+    // The footer is best effort: when it would break the vendor's schema (a body maxLength, say),
+    // the model's own arguments go through unsigned rather than the write failing.
+    const signed = withAttribution(unsigned, write ? options.attribution : undefined, upstream.inputSchema, connector.attributionKeys);
+    const args = signed === unsigned || validateUpstream(signed).valid ? signed : unsigned;
     for (const guard of connector.guards) await guard.check({ tool: request.tool, arguments: request.arguments, bound, connection });
     signal.throwIfAborted();
     writeAttempted = write;

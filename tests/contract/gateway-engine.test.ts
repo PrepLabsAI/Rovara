@@ -164,6 +164,21 @@ describe("gateway execution", () => {
     expect(f.call).toHaveBeenLastCalledWith("create_item", { title: "Label", description: "Short", siteId: "site-42" });
   });
 
+  it("sends the unsigned body when the footer would break the upstream schema, and still refuses an unsigned body that breaks it", async () => {
+    const f = fixture();
+    f.tools[1]!.inputSchema = schema({ title: { type: "string" }, body: { type: "string", maxLength: 20 } }, ["title"]);
+    f.context.policy.tools[1] = { name: "create_item", access: "write", allowedArguments: ["title", "body"] };
+    const options = { connect: f.connect, ledger: f.ledger, attribution: "Requested by Pratik via AgentX · https://slack.com/archives/C1/p1" };
+    expect(await executeTool(f.request("create_item", { title: "Bug", body: "Steps" }), f.connector, f.context, options)).toMatchObject({ status: "SUCCEEDED" });
+    expect(f.call).toHaveBeenLastCalledWith("create_item", { title: "Bug", body: "Steps", siteId: "site-42" });
+    await executeTool(f.request("create_item", { title: "Bug", body: "Steps" }), f.connector, f.context, { ...options, attribution: "By P" });
+    expect(f.call).toHaveBeenLastCalledWith("create_item", { title: "Bug", body: "Steps\n\n—\nBy P", siteId: "site-42" });
+    expect(f.call).toHaveBeenCalledTimes(2);
+    const tooLong = await executeTool(f.request("create_item", { title: "Bug", body: "x".repeat(21) }), f.connector, f.context, options);
+    expect(tooLong).toMatchObject({ status: "FAILED", reason: "policy_denied" });
+    expect(f.call).toHaveBeenCalledTimes(2);
+  });
+
   it("does not stack a footer the value already ends with", async () => {
     const f = fixture();
     f.tools[1]!.inputSchema = schema({ title: { type: "string" }, body: { type: "string" } }, ["title"]);
