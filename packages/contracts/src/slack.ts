@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ThreadConnectorSchema } from "./connectors.js";
 import { AgentXNameSchema } from "./project.js";
 import { WorkspaceStatusSchema } from "./workspace.js";
 
@@ -47,6 +48,9 @@ export const SlackThreadWorkspaceResultSchema = z.discriminatedUnion("outcome", 
       created: z.boolean(),
       orchestratorInstructions: z.string().min(1).max(32_768),
       githubMcpRepositories: z.array(AgentXNameSchema).max(32).optional(),
+      // Connector metadata for services that send includeConnectors: true (feature 013).
+      connectors: z.array(ThreadConnectorSchema).max(8).optional(),
+      repositories: z.array(AgentXNameSchema).max(32).optional(),
       // The project revision whose settings the broker applied to this turn. Sent only to a
       // service that asked for it, because older deployed services parse this result strictly.
       settingsRevision: z.number().int().positive().optional(),

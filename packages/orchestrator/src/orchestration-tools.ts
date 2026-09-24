@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { GitHubMcpRequest, GitHubMcpTool } from "@agentx/contracts";
-import { createMcpTools, mcpToolName } from "./mcp-tools.js";
+import type { ConnectorCallRequest, ConnectorCatalog } from "@agentx/contracts";
+import { createConnectorTools } from "./connector-tools.js";
 
 export const ORCHESTRATION_TOOL_NAMES = [
   "agentx_submit_task",
@@ -20,8 +20,8 @@ export const ORCHESTRATION_TOOL_NAMES = [
 ] as const;
 
 export interface OrchestrationApi {
-  discoverGitHubTools?(input: { workspaceId: string; repository: string }): Promise<{ tools: GitHubMcpTool[] }>;
-  callGitHubTool?(input: GitHubMcpRequest & { workspaceId: string }): Promise<unknown>;
+  discoverConnectorTools?(input: { workspaceId: string; connector: string }): Promise<ConnectorCatalog>;
+  callConnectorTool?(input: ConnectorCallRequest & { workspaceId: string; connector: string }): Promise<unknown>;
   submitTask(input: {
     workspaceId: string;
     conversationId: string;
@@ -75,7 +75,7 @@ export interface OrchestrationContext {
 export function createOrchestrationTools(
   api: OrchestrationApi,
   context: OrchestrationContext,
-  options: { requestId?: () => string; mcpTools?: readonly GitHubMcpTool[] } = {},
+  options: { requestId?: () => string; connectorCatalogs?: readonly ConnectorCatalog[] } = {},
 ): ToolDefinition[] {
   const nextRequestId = options.requestId ?? randomUUID;
   const promptParameters = Type.Object({ prompt: Type.String({ minLength: 1, maxLength: 65_536 }) });
@@ -235,15 +235,15 @@ export function createOrchestrationTools(
       },
     }));
   }
-  if (options.mcpTools?.length) {
-    if (!api.callGitHubTool) throw new Error("GitHub MCP API is not configured");
-    tools.push(...createMcpTools(options.mcpTools, (input) => api.callGitHubTool!(input), context, options));
+  if (options.connectorCatalogs?.some((catalog) => catalog.tools.length > 0)) {
+    if (!api.callConnectorTool) throw new Error("connector API is not configured");
+    tools.push(...createConnectorTools(options.connectorCatalogs, (input) => api.callConnectorTool!(input), context, options));
   }
   return tools;
 }
 
-export function assertOrchestrationOnly(tools: readonly Pick<ToolDefinition, "name">[], discovered: readonly GitHubMcpTool[] = []): void {
-  const allowed = new Set<string>([...ORCHESTRATION_TOOL_NAMES, ...discovered.map(mcpToolName)]);
+export function assertOrchestrationOnly(tools: readonly Pick<ToolDefinition, "name">[], catalogs: readonly ConnectorCatalog[] = []): void {
+  const allowed = new Set<string>([...ORCHESTRATION_TOOL_NAMES, ...catalogs.flatMap((catalog) => catalog.tools.map((tool) => tool.name))]);
   const forbidden = tools.map(({ name }) => name).filter((name) => !allowed.has(name));
   if (forbidden.length > 0) throw new Error(`local orchestrator exposes forbidden tools: ${forbidden.join(", ")}`);
 }

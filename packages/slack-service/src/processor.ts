@@ -7,6 +7,7 @@ import {
   type SlackThreadWorkspaceResult,
   type SlackWorkspaceCloseCompleteResult,
   type SlackWorkspaceCloseStartResult,
+  type ThreadConnector,
 } from "@agentx/contracts";
 import { deterministicUuid, requestIdSequence } from "./ids.js";
 
@@ -40,7 +41,8 @@ export interface TurnInput {
   workspaceId: string;
   conversationId: string;
   orchestratorInstructions: string;
-  githubMcpRepositories?: string[];
+  connectors?: ThreadConnector[];
+  repositories?: string[];
   requestId: () => string;
 }
 
@@ -156,7 +158,8 @@ export async function processSlackRequest(
         workspaceId: workspace.workspaceId,
         conversationId,
         orchestratorInstructions: workspace.orchestratorInstructions,
-        ...(workspace.githubMcpRepositories === undefined ? {} : { githubMcpRepositories: workspace.githubMcpRepositories }),
+        ...(workspace.connectors === undefined ? {} : { connectors: workspace.connectors }),
+        ...(workspace.repositories === undefined ? {} : { repositories: workspace.repositories }),
         requestId: requestIdSequence(message.eventId),
       });
       log("task.completed", { eventId: message.eventId, responseLength: response.length });

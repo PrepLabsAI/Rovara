@@ -6,6 +6,8 @@ export const ToolApprovalSchema = z.object({
   access: z.enum(["read", "write"]),
   allowedArguments: z.array(z.string().min(1).max(128)).max(64).optional(),
   argumentValues: z.record(z.string().min(1).max(128), z.array(z.union([z.string().max(256), z.number(), z.boolean()])).min(1).max(32)).optional(),
+  description: z.string().min(1).max(1_024).optional(),
+  examples: z.array(z.record(z.string(), z.unknown())).max(3).optional(),
 }).strict();
 export const ToolApprovalListSchema = z.array(ToolApprovalSchema).min(1).max(32)
   .refine((tools) => new Set(tools.map((tool) => tool.name)).size === tools.length, "duplicate MCP tool approval");

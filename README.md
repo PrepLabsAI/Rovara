@@ -156,9 +156,11 @@ run in parallel.
 #### GitHub MCP through hosted Slack
 
 The control plane connects to GitHub's hosted MCP server, discovers its tools with `tools/list`,
-and exposes only tools approved in the registered project revision. The orchestrator registers
-their discovered descriptions and JSON schemas through one generic bridge; no per-tool GitHub
-implementations are needed. Calls go orchestrator → control plane → GitHub MCP, without a worker.
+and exposes only tools approved in the registered project revision. The orchestrator sees each
+approved tool once, as `github__<tool>`, with a `target` argument naming the repository when the
+connector covers several. Its instructions open with a list of what the channel can do and which
+integrations are not connected. Calls go orchestrator → control plane → GitHub MCP, without a
+worker.
 
 See [GitHub MCP setup and policy example](specs/007-github-mcp/quickstart.md). The policy can be
 written as `integrations.githubMcp` or, since feature 013, as a `github` entry in
@@ -305,6 +307,12 @@ components `slack-ingress` and `slack-orchestrator`. They record event IDs, deci
 `event.ignored` with a reason, and failures by error type. Tokens, request text, and response text
 are never logged. `event.ignored reason="channel_not_bound"` means the channel has no binding, and
 `request.rejected reason="invalid_signature"` usually means the stored signing secret is wrong.
+`connector.discovery_failed` means a connector's tools were left out of a turn: `cause="transient"`
+is an outage the next turn may clear, and `cause="setup"` (with its error `code`) needs an
+administrator, for example `FORBIDDEN` when the connector is no longer enabled for the project.
+Failures inside the control plane's own vendor discovery, including a GitHub App that is not
+installed on a scoped repository, still arrive as `RUNTIME_UNAVAILABLE` and are logged as
+`transient`; check the broker's `connector.tools_skipped` and error logs when one persists.
 
 If the orchestrator's turn fails, AgentX posts the failure in the thread. Other failures, such as
 workspace preparation or a Slack API error, are retried; on the fifth attempt AgentX posts the

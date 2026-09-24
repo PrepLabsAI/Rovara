@@ -96,7 +96,7 @@ function threadApi(message: SlackRequestMessage): ThreadServiceApi {
       const response = await signedFetch(`${controlPlaneUrl}/v1/threads/workspace`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ requestId, includeIntegrations: true, includeSettingsRevision: true }),
+        body: JSON.stringify({ requestId, includeIntegrations: true, includeSettingsRevision: true, includeConnectors: true }),
       });
       const body = await response.json() as Record<string, unknown>;
       if (!response.ok) {
@@ -237,6 +237,10 @@ async function runTurn(input: TurnInput): Promise<string> {
       api: new ControlPlaneApi(controlPlaneUrl, "slack-service", input.workspaceId, signedFetch),
       model,
       ...(sessionFile === undefined ? {} : { sessionFile }),
+      // Operators see why a connector was missing from a turn; the message is the control plane's sanitized error.
+      onConnectorUnavailable: (failure) => log("connector.discovery_failed", {
+        eventId: input.message.eventId, connector: failure.connector, cause: failure.cause, code: failure.code, message: failure.message,
+      }),
     });
     try {
       const response = await runOrchestratorTurn(runtime, input.message.text);

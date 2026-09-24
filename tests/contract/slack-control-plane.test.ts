@@ -4,7 +4,8 @@ import { isAssumedRoleOf } from "../../packages/broker/src/aws/lambda.js";
 import { RepositoryGrantService } from "../../packages/broker/src/repository-access.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import type { GitHubMcpDependencies } from "../../packages/broker/src/github-mcp.js";
-import { GitHubMcpCatalogSchema } from "../../packages/contracts/src/github-mcp.js";
+import { GitHubMcpCatalogSchema, GitHubMcpResultSchema } from "../../packages/contracts/src/github-mcp.js";
+import { ConnectorCatalogSchema } from "../../packages/contracts/src/connectors.js";
 
 const issuer = "https://identity.example.test";
 const account = "111122223333";
@@ -423,6 +424,103 @@ describe("hosted Slack GitHub MCP", () => {
     expect(revoked.body.settingsRevision).toBe(3);
     expect((await tools()).status).toBe(403);
     expect(credentials).not.toHaveBeenCalled();
+  });
+
+  it("presents a multi-repository github connector once and calls the chosen target", async () => {
+    const credentials = vi.fn(async (repository: { url: string }) => ({ owner: "example", repo: repository.url.includes("docs") ? "docs" : "demo", token: "installation-secret" }));
+    const invoke = vi.fn(async () => ({ content: [{ type: "text", text: "GitHub result" }] }));
+    const connect = vi.fn(async () => ({
+      tools: [{ name: "list_issues", description: "Native list_issues", inputSchema: {
+        type: "object", properties: { owner: { type: "string" }, repo: { type: "string" } }, required: ["owner", "repo"],
+      } }], call: invoke, close: async () => undefined,
+    }));
+    const { db, handler } = createBroker({ githubMcp: { credentials, connect } });
+    await registerProjectAndBind(handler, { connectors: [{ name: "github", type: "github", scopes: "all-repositories", tools: [{ name: "list_issues", access: "read" }] }] }, ["docs"]);
+    const resolved = await call(handler, { method: "POST", path: "/v1/service/threads/workspace",
+      service: { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik },
+      body: { requestId: randomUUID(), includeIntegrations: true, includeConnectors: true },
+    });
+    expect(resolved.body).toMatchObject({
+      repositories: ["demo", "docs"],
+      connectors: [{ name: "github", type: "github", label: "GitHub issues", scopes: ["demo", "docs"], connected: true }],
+    });
+    const workspaceId = resolved.body.workspaceId as string;
+    markReady(db, workspaceId);
+    const service = { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik };
+    const path = `/v1/service/workspaces/${workspaceId}/connectors/github`;
+    const catalog = ConnectorCatalogSchema.parse((await call(handler, { method: "GET", path: `${path}/tools`, service })).body.catalog);
+    expect(catalog.tools.map((tool) => tool.name)).toEqual(["github__list_issues"]);
+    expect((catalog.tools[0]!.inputSchema.properties as Record<string, { enum: string[] }>).target.enum).toEqual(["demo", "docs"]);
+    const docs = catalog.tools[0]!.scopes.find((scope) => scope.alias === "docs")!;
+    const result = await call(handler, { method: "POST", path: `${path}/call`, service,
+      body: { requestId: randomUUID(), scope: "docs", tool: "list_issues", schemaHash: docs.schemaHash, arguments: {} } });
+    expect(result.body.result).toMatchObject({ status: "SUCCEEDED" });
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("list_issues", { owner: "example", repo: "docs" });
+    expect((await call(handler, { method: "POST", path: `${path}/call`, service,
+      body: { requestId: randomUUID(), scope: "mobile", tool: "list_issues", schemaHash: docs.schemaHash, arguments: {} } })).status).toBe(404);
+    expect((await call(handler, { method: "GET", path: `/v1/service/workspaces/${workspaceId}/connectors/linear/tools`, service })).status).toBe(404);
+  });
+
+  it("answers not connected, without contacting a vendor, when the deployment has no GitHub credential", async () => {
+    const { db, handler } = createBroker();
+    await registerProjectAndBind(handler, { connectors: [{ name: "github", type: "github", scopes: "all-repositories", tools: [{ name: "list_issues", access: "read" }] }] });
+    const resolved = await call(handler, { method: "POST", path: "/v1/service/threads/workspace",
+      service: { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik },
+      body: { requestId: randomUUID(), includeIntegrations: true, includeConnectors: true },
+    });
+    expect(resolved.body.connectors).toEqual([{ name: "github", type: "github", label: "GitHub issues", scopes: ["demo"], connected: false }]);
+    const workspaceId = resolved.body.workspaceId as string;
+    markReady(db, workspaceId);
+    const service = { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik };
+    const path = `/v1/service/workspaces/${workspaceId}/connectors/github`;
+    expect((await call(handler, { method: "GET", path: `${path}/tools`, service })).body.catalog)
+      .toEqual({ connector: "github", notConnected: true, tools: [], skipped: [] });
+    const requestId = randomUUID();
+    expect((await call(handler, { method: "POST", path: `${path}/call`, service,
+      body: { requestId, scope: "demo", tool: "list_issues", schemaHash: "a".repeat(64), arguments: {} } })).body.result).toEqual({
+      requestId, status: "FAILED", reason: "not_connected", truncated: false, replayed: false,
+      text: "GitHub issues is not connected for this project. An administrator must configure its credential.",
+    });
+    // An unknown scope or an unapproved tool is refused the same way whether or not a credential is configured.
+    expect((await call(handler, { method: "POST", path: `${path}/call`, service,
+      body: { requestId: randomUUID(), scope: "mobile", tool: "list_issues", schemaHash: "a".repeat(64), arguments: {} } })).status).toBe(404);
+    expect((await call(handler, { method: "POST", path: `${path}/call`, service,
+      body: { requestId: randomUUID(), scope: "demo", tool: "issue_write", schemaHash: "a".repeat(64), arguments: {} } })).status).toBe(403);
+  });
+
+  it("gives an older Slack service exactly the feature 007 fields", async () => {
+    const { handler } = createBroker({ githubMcp: { credentials: vi.fn(), connect: vi.fn() } });
+    await registerProjectAndBind(handler, true);
+    const resolved = await call(handler, { method: "POST", path: "/v1/service/threads/workspace",
+      service: { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik },
+      body: { requestId: randomUUID(), includeIntegrations: true },
+    });
+    expect(resolved.body.githubMcpRepositories).toEqual(["demo"]);
+    expect(resolved.body).not.toHaveProperty("connectors");
+    expect(resolved.body).not.toHaveProperty("repositories");
+  });
+
+  it("keeps the legacy GitHub route's failed result strict, with no reason, for older Slack services", async () => {
+    const credentials = vi.fn(async () => ({ owner: "example", repo: "demo", token: "installation-secret" }));
+    const invoke = vi.fn(async () => ({ isError: true, content: [{ type: "text", text: "upstream failure" }] }));
+    const connect = vi.fn(async () => ({
+      tools: [{ name: "list_issues", description: "Native list_issues", inputSchema: {
+        type: "object", properties: { owner: { type: "string" }, repo: { type: "string" } }, required: ["owner", "repo"],
+      } }], call: invoke, close: async () => undefined,
+    }));
+    const { db, handler } = createBroker({ githubMcp: { credentials, connect } });
+    await registerProjectAndBind(handler, true);
+    const workspaceId = (await ensureWorkspace(handler, threadOne, pratik)).body.workspaceId as string;
+    markReady(db, workspaceId);
+    const service = { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik };
+    const path = `/v1/service/workspaces/${workspaceId}/github`;
+    const catalog = await call(handler, { method: "GET", path: `${path}/tools?repository=demo`, service });
+    const tool = GitHubMcpCatalogSchema.parse(catalog.body.catalog).tools[0]!;
+    const request = { requestId: randomUUID(), repository: "demo", tool: "list_issues", schemaHash: tool.schemaHash, arguments: {} };
+    const failed = await call(handler, { method: "POST", path: `${path}/call`, service, body: request });
+    expect(failed.body.result).not.toHaveProperty("reason");
+    const result = GitHubMcpResultSchema.parse(failed.body.result);
+    expect(result.status).toBe("FAILED");
   });
 });
 

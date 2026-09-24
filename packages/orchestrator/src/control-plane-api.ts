@@ -1,8 +1,8 @@
 import {
   AgentXErrorCodeSchema,
-  GitHubMcpResultSchema,
-  GitHubMcpCatalogSchema,
-  type GitHubMcpRequest,
+  ConnectorCatalogSchema,
+  ConnectorResultSchema,
+  type ConnectorCallRequest,
   OperationSchema,
   agentXError,
   type Operation,
@@ -38,19 +38,19 @@ export class ControlPlaneApi implements OrchestrationApi, OperationPollingTransp
     return { id: conversation.id, workspaceId: conversation.workspaceId };
   }
 
-  async discoverGitHubTools(input: { workspaceId: string; repository: string }) {
+  async discoverConnectorTools(input: { workspaceId: string; connector: string }) {
     this.assertWorkspace(input.workspaceId);
-    const response = object(await this.request(`/v1/workspaces/${this.workspaceId}/github/tools?repository=${encodeURIComponent(input.repository)}`, { method: "GET" }));
-    return GitHubMcpCatalogSchema.parse(response.catalog);
+    const response = object(await this.request(`/v1/workspaces/${this.workspaceId}/connectors/${encodeURIComponent(input.connector)}/tools`, { method: "GET" }));
+    return ConnectorCatalogSchema.parse(response.catalog);
   }
 
-  async callGitHubTool(input: GitHubMcpRequest & { workspaceId: string }) {
+  async callConnectorTool(input: ConnectorCallRequest & { workspaceId: string; connector: string }) {
     this.assertWorkspace(input.workspaceId);
-    const { workspaceId, ...body } = input;
-    const response = object(await this.request(`/v1/workspaces/${workspaceId}/github/call`, {
+    const { workspaceId, connector, ...body } = input;
+    const response = object(await this.request(`/v1/workspaces/${workspaceId}/connectors/${encodeURIComponent(connector)}/call`, {
       method: "POST", body: JSON.stringify(body),
     }));
-    return GitHubMcpResultSchema.parse(response.result);
+    return ConnectorResultSchema.parse(response.result);
   }
 
   async submitTask(input: {

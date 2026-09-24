@@ -96,6 +96,7 @@ export interface EngineOptions {
 }
 
 class PolicyFailure extends Error {}
+class DefinitionChanged extends PolicyFailure {}
 
 /** Feature 007 fingerprinted requests under the key `repository`; keep it so stored records replay. */
 export function requestFingerprint(request: ToolRequest): string {
@@ -164,7 +165,7 @@ export async function executeTool<Scope>(
     const approved = approveTools(connection, connector, context).find((tool) => tool.name === request.tool);
     if (!approved || approved.schemaHash !== request.schemaHash) {
       options.onDefinitionChanged?.();
-      throw new PolicyFailure("MCP tool definition changed or is unavailable. Refresh tool discovery before submitting a new request.");
+      throw new DefinitionChanged("MCP tool definition changed or is unavailable. Refresh tool discovery before submitting a new request.");
     }
     const validate = new AjvJsonSchemaValidator().getValidator(approved.inputSchema);
     if (!validate(request.arguments).valid) throw new PolicyFailure("Arguments do not match the approved MCP tool schema.");
@@ -179,11 +180,13 @@ export async function executeTool<Scope>(
     if (result.isError) throw new Error("MCP tool reported an error");
     response = publicResult(request, "SUCCEEDED", resultText(result).split(credential.token).join("[REDACTED]"));
   } catch (error) {
-    response = error instanceof PolicyFailure || error instanceof GuardRejection
-      ? publicResult(request, "FAILED", error.message)
-      : publicResult(request, writeAttempted ? "UNKNOWN" : "FAILED", writeAttempted
-        ? `${label} write outcome is unknown. Inspect ${label} before issuing another request. Do not automatically retry.`
-        : `${label} MCP request failed before any write. Check ${connector.permissionsHint} and MCP availability.`);
+    response = error instanceof DefinitionChanged
+      ? publicResult(request, "FAILED", error.message, "schema_changed")
+      : error instanceof PolicyFailure || error instanceof GuardRejection
+        ? publicResult(request, "FAILED", error.message, "policy_denied")
+        : writeAttempted
+          ? publicResult(request, "UNKNOWN", `${label} write outcome is unknown. Inspect ${label} before issuing another request. Do not automatically retry.`)
+          : publicResult(request, "FAILED", `${label} MCP request failed before any write. Check ${connector.permissionsHint} and MCP availability.`, "vendor_error");
   } finally { await connection?.close().catch(() => undefined); }
   if (durable) {
     record = { ...record, updatedAt: new Date().toISOString(), result: response };
@@ -197,6 +200,9 @@ export async function executeTool<Scope>(
   return response;
 }
 
-function publicResult(request: ToolRequest, status: ToolResult["status"], text: string): ToolResult {
-  return { requestId: request.requestId, status, text: text.slice(0, 64_000), truncated: text.length > 64_000, replayed: false };
+function publicResult(request: ToolRequest, status: ToolResult["status"], text: string, reason?: ToolResult["reason"]): ToolResult {
+  return {
+    requestId: request.requestId, status, text: text.slice(0, 64_000), truncated: text.length > 64_000, replayed: false,
+    ...(reason === undefined ? {} : { reason }),
+  };
 }

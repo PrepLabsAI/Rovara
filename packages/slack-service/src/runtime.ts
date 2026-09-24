@@ -2,12 +2,13 @@ import { createOrchestratorRuntime, type OrchestratorOptions } from "@agentx/orc
 import type { TurnInput } from "./processor.js";
 
 /** Shared production/test boundary: tool routing comes from workspace resolution, never Slack text. */
-export function createHostedSlackRuntime(input: TurnInput, options: Pick<OrchestratorOptions, "stateDirectory" | "api" | "model" | "sessionFile">) {
+export function createHostedSlackRuntime(input: TurnInput, options: Pick<OrchestratorOptions, "stateDirectory" | "api" | "model" | "sessionFile" | "onConnectorUnavailable">) {
   return createOrchestratorRuntime({
     ...options,
     projectInstructions: input.orchestratorInstructions,
     context: { workspaceId: input.workspaceId, conversationId: input.conversationId },
     requestId: input.requestId,
-    ...(input.githubMcpRepositories === undefined ? {} : { githubMcpRepositories: input.githubMcpRepositories }),
+    ...(input.connectors === undefined ? {} : { connectors: input.connectors }),
+    ...(input.repositories === undefined ? {} : { repositories: input.repositories }),
   });
 }

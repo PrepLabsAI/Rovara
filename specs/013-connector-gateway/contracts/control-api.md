@@ -11,7 +11,8 @@ membership before any connector work. Policy comes from the project's latest reg
 Returns `{ catalog: { connector, tools: [CatalogEntry], skipped: [{ tool, reason }] }, requestId }`.
 `CatalogEntry` is `{ name, upstreamName, description, inputSchema, schemaHash, access }`.
 Served from the catalog cache when fresh. A connector that is approved but not connected returns
-`{ catalog: { connector, tools: [], notConnected: true } }` with HTTP 200.
+`{ catalog: { connector, notConnected: true, tools: [], skipped: [] } }` with HTTP 200
+(`ConnectorCatalogSchema` requires `skipped` on every catalog, including this one).
 
 ## Call
 
@@ -32,13 +33,20 @@ Errors: disabled or unapproved tool `FORBIDDEN`; unknown workspace, connector or
 
 `GET /v1/workspaces/{id}/github/tools?repository=<alias>` and `POST /v1/workspaces/{id}/github/call`
 are served by the `github` connector. Requests and responses keep the feature 007 shapes (one
-catalog per `repository` query, owner and repo removed from schemas), so an older Slack service keeps
-registering its `github_<tool>_<hash>` names and calling them.
+catalog per `repository` query, owner and repo removed from schemas, no `reason` on the result).
+The `github_<tool>_<hash>` naming belongs only to an older Slack service's own local bridge, which
+hashes a name from that feature 007 catalog the way the retired `mcp-tools.ts` used to; the broker
+never generates or returns that name itself. The new `/connectors/{connector}/tools|call` route
+above returns the already-presented name (for example `github__list_issues`), built server-side by
+`presentCatalog`, and an upgraded Slack service registers that name with the model directly.
 
 ## Workspace resolution
 
-`POST /v1/threads/workspace` with `includeIntegrations: true` adds `connectors` and
-`recoverableOperations` as described in [data-model.md](../data-model.md).
+`POST /v1/threads/workspace` with `includeConnectors: true` adds `connectors` and `repositories` as
+described in [data-model.md](../data-model.md). `includeIntegrations: true` alone (without
+`includeConnectors`) still returns only the feature 007 `githubMcpRepositories` field; the two flags
+are independent, and an older Slack service that only ever sends `includeIntegrations: true` never
+receives `connectors` or `repositories`.
 
 ## Administration
 
