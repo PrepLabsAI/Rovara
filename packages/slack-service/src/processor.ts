@@ -43,6 +43,7 @@ export interface TurnInput {
   orchestratorInstructions: string;
   connectors?: ThreadConnector[];
   repositories?: string[];
+  recoverableOperations?: string[];
   requestId: () => string;
 }
 
@@ -160,6 +161,7 @@ export async function processSlackRequest(
         orchestratorInstructions: workspace.orchestratorInstructions,
         ...(workspace.connectors === undefined ? {} : { connectors: workspace.connectors }),
         ...(workspace.repositories === undefined ? {} : { repositories: workspace.repositories }),
+        ...(workspace.recoverableOperations === undefined ? {} : { recoverableOperations: workspace.recoverableOperations }),
         requestId: requestIdSequence(message.eventId),
       });
       log("task.completed", { eventId: message.eventId, responseLength: response.length });

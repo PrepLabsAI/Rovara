@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { ControlPlaneApi } from "../../packages/orchestrator/src/control-plane-api.js";
-import { ORCHESTRATION_TOOL_NAMES } from "../../packages/orchestrator/src/orchestration-tools.js";
+import { ORCHESTRATION_TOOL_NAMES, RECOVERY_TOOL_NAMES } from "../../packages/orchestrator/src/orchestration-tools.js";
 import { ConnectorCallRequestSchema, type ConnectorCatalog } from "../../packages/contracts/src/index.js";
 import type { SlackRequestMessage } from "../../packages/contracts/src/slack.js";
 import { processSlackRequest, type ProcessorDependencies } from "../../packages/slack-service/src/processor.js";
@@ -65,7 +65,7 @@ describe("hosted Slack processor and MCP runtime", () => {
           model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" },
         });
         try {
-          expect(runtime.session.getActiveToolNames()).toEqual([...ORCHESTRATION_TOOL_NAMES, ...(enabled ? ["github__new_issue_tool"] : [])]);
+          expect(runtime.session.getActiveToolNames()).toEqual([...ORCHESTRATION_TOOL_NAMES.filter((name) => !(RECOVERY_TOOL_NAMES as readonly string[]).includes(name)), ...(enabled ? ["github__new_issue_tool"] : [])]);
           if (!enabled) return "Integration is not enabled.";
           const tool = runtime.session.getToolDefinition("github__new_issue_tool")!;
           expect(tool.parameters).toMatchObject(catalog.tools[0]!.inputSchema);

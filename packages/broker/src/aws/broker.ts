@@ -1068,6 +1068,7 @@ async function ensureThreadWorkspace(
     created: true,
     orchestratorInstructions: project.definition.orchestratorInstructions,
     ...threadIntegrations(project.definition, include),
+    ...(include.connectors ? { recoverableOperations: [] } : {}),
     ...(includeSettingsRevision ? { settingsRevision: project.definition.revision } : {}),
   };
 }
@@ -1088,6 +1089,7 @@ async function existingThreadWorkspace(
   const applied = {
     orchestratorInstructions: settings.definition.orchestratorInstructions,
     ...threadIntegrations(settings.definition, include),
+    ...(include.connectors ? { recoverableOperations: workspace.status === "BUSY" && workspace.activeOperationId ? [workspace.activeOperationId] : [] } : {}),
     ...(includeSettingsRevision ? { settingsRevision: settings.definition.revision } : {}),
   };
   if (workspace.status === "PREPARATION_FAILED" && !workspace.activeOperationId) {

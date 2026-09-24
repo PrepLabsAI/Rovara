@@ -522,6 +522,25 @@ describe("hosted Slack GitHub MCP", () => {
     const result = GitHubMcpResultSchema.parse(failed.body.result);
     expect(result.status).toBe("FAILED");
   });
+
+  it("reports a thread's unfinished operation as recoverable, only to connector-aware services", async () => {
+    const { db, handler } = createBroker({ githubMcp: { credentials: vi.fn(), connect: vi.fn() } });
+    await registerProjectAndBind(handler, true);
+    const service = { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik };
+    const resolve = (includeConnectors: boolean) => call(handler, { method: "POST", path: "/v1/service/threads/workspace", service,
+      body: { requestId: randomUUID(), includeIntegrations: true, ...(includeConnectors ? { includeConnectors: true } : {}) } });
+    const created = await resolve(true);
+    expect(created.body.recoverableOperations).toEqual([]);
+    const workspaceId = created.body.workspaceId as string;
+    markReady(db, workspaceId);
+    expect((await resolve(true)).body.recoverableOperations).toEqual([]);
+    const running = randomUUID();
+    const workspace = db.get(`WORKSPACE#${workspaceId}`, "META")!;
+    workspace.status = "BUSY";
+    workspace.activeOperationId = running;
+    expect((await resolve(true)).body.recoverableOperations).toEqual([running]);
+    expect((await resolve(false)).body).not.toHaveProperty("recoverableOperations");
+  });
 });
 
 describe("Slack service identity", () => {

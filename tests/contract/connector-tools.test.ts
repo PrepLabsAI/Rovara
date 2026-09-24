@@ -134,4 +134,9 @@ describe("capabilities manifest", () => {
     ].join("\n"));
     expect(manifest).not.toContain("Temporarily unavailable");
   });
+
+  it("points the model at an unfinished operation", () => {
+    const manifest = capabilitiesManifest({ repositories: ["demo"], connectors: [], catalogs: [], recoverableOperations: ["55555555-5555-4555-8555-555555555555"] });
+    expect(manifest).toContain("An earlier operation in this thread has not finished: 55555555-5555-4555-8555-555555555555. Check it with agentx_task_status or agentx_task_result before starting new work.");
+  });
 });

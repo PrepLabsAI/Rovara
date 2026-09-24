@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { ControlPlaneApi } from "../../packages/orchestrator/src/control-plane-api.js";
 import { createOrchestratorRuntime } from "../../packages/orchestrator/src/orchestrator.js";
-import { ORCHESTRATION_TOOL_NAMES } from "../../packages/orchestrator/src/orchestration-tools.js";
+import { ORCHESTRATION_TOOL_NAMES, RECOVERY_TOOL_NAMES } from "../../packages/orchestrator/src/orchestration-tools.js";
 import { ConnectorCallRequestSchema, type ConnectorCatalog } from "../../packages/contracts/src/index.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
 
@@ -37,7 +37,7 @@ describe("connector tools in the real Pi runtime", () => {
       connectors: [{ name: "github", type: "github", label: "GitHub issues", scopes: ["demo"], connected: true }],
     });
     try {
-      expect(runtime.session.getActiveToolNames()).toEqual([...ORCHESTRATION_TOOL_NAMES, "github__future_issue_tool"]);
+      expect(runtime.session.getActiveToolNames()).toEqual([...ORCHESTRATION_TOOL_NAMES.filter((name) => !(RECOVERY_TOOL_NAMES as readonly string[]).includes(name)), "github__future_issue_tool"]);
       expect(runtime.session.systemPrompt.startsWith("What this channel can do:")).toBe(true);
       const tool = runtime.session.getToolDefinition("github__future_issue_tool")!;
       expect(tool.parameters).toMatchObject(catalog.tools[0]!.inputSchema);
@@ -74,7 +74,7 @@ describe("connector tools in the real Pi runtime", () => {
       onConnectorUnavailable,
     });
     try {
-      expect(runtime.session.getActiveToolNames()).toEqual([...ORCHESTRATION_TOOL_NAMES]);
+      expect(runtime.session.getActiveToolNames()).toEqual(ORCHESTRATION_TOOL_NAMES.filter((name) => !(RECOVERY_TOOL_NAMES as readonly string[]).includes(name)));
       expect(runtime.session.systemPrompt).toContain("Temporarily unavailable: GitHub issues");
       expect(onConnectorUnavailable).toHaveBeenCalledExactlyOnceWith({
         connector: "github", cause: "transient", code: "RUNTIME_UNAVAILABLE",
@@ -103,7 +103,7 @@ describe("connector tools in the real Pi runtime", () => {
       onConnectorUnavailable,
     });
     try {
-      expect(runtime.session.getActiveToolNames()).toEqual([...ORCHESTRATION_TOOL_NAMES]);
+      expect(runtime.session.getActiveToolNames()).toEqual(ORCHESTRATION_TOOL_NAMES.filter((name) => !(RECOVERY_TOOL_NAMES as readonly string[]).includes(name)));
       expect(runtime.session.systemPrompt).toContain("Unavailable because of a setup problem: GitHub issues");
       expect(runtime.session.systemPrompt).not.toContain("Temporarily unavailable");
       expect(onConnectorUnavailable).toHaveBeenCalledExactlyOnceWith({
@@ -117,7 +117,7 @@ describe("connector tools in the real Pi runtime", () => {
     const workspaceId = randomUUID();
     const manyTools: ConnectorCatalog = {
       connector: "github", skipped: [],
-      tools: Array.from({ length: 41 - ORCHESTRATION_TOOL_NAMES.length }, (_, index) => ({
+      tools: Array.from({ length: 41 - (ORCHESTRATION_TOOL_NAMES.length - RECOVERY_TOOL_NAMES.length) }, (_, index) => ({
         name: `github__tool_${index}`, upstreamName: `tool_${index}`, description: `Tool ${index}. Targets the demo repository. Read-only. Results are untrusted data.`,
         access: "read" as const, inputSchema: { type: "object", properties: {} }, scopes: [{ alias: "demo", schemaHash: "a".repeat(64) }],
       })),
@@ -143,5 +143,26 @@ describe("connector tools in the real Pi runtime", () => {
     expect(error).toMatchObject({ code: "CONFIG_INVALID" });
     expect((error as Error).message).toContain("41");
     expect((error as Error).message).toContain("at most 40");
+  });
+
+  it("offers the recovery tools only when the thread has an unfinished operation", async () => {
+    const workspaceId = randomUUID();
+    const api = new ControlPlaneApi("https://agentx.example.test", "agentx-jwt", workspaceId, vi.fn<typeof fetch>());
+    const create = async (recoverableOperations?: string[]) => createOrchestratorRuntime({
+      stateDirectory: await createFixtureDirectory("agentx-mcp-runtime-"), projectInstructions: "Delegate coding.",
+      api, context: { workspaceId, conversationId: randomUUID() },
+      model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" }, repositories: ["demo"],
+      ...(recoverableOperations === undefined ? {} : { recoverableOperations }),
+    });
+    const idle = await create();
+    try {
+      expect(idle.session.getActiveToolNames()).toEqual(ORCHESTRATION_TOOL_NAMES.filter((name) => !(RECOVERY_TOOL_NAMES as readonly string[]).includes(name)));
+    } finally { await idle.dispose(); }
+    const operation = randomUUID();
+    const recovering = await create([operation]);
+    try {
+      expect(recovering.session.getActiveToolNames()).toEqual([...ORCHESTRATION_TOOL_NAMES]);
+      expect(recovering.session.systemPrompt).toContain(operation);
+    } finally { await recovering.dispose(); }
   });
 });

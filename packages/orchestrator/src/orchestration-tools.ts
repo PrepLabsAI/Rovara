@@ -13,6 +13,8 @@ export const ORCHESTRATION_TOOL_NAMES = [
   "agentx_manage_pull_request",
 ] as const;
 
+export const RECOVERY_TOOL_NAMES = ["agentx_task_status", "agentx_task_result"] as const;
+
 /** Retired in feature 013; kept so the orchestrator can tell the model the new name for one release. */
 export const RETIRED_PULL_REQUEST_TOOLS = {
   agentx_update_pull_request: "edit",
@@ -85,7 +87,7 @@ export interface OrchestrationContext {
 export function createOrchestrationTools(
   api: OrchestrationApi,
   context: OrchestrationContext,
-  options: { requestId?: () => string; connectorCatalogs?: readonly ConnectorCatalog[] } = {},
+  options: { requestId?: () => string; connectorCatalogs?: readonly ConnectorCatalog[]; recovery?: boolean } = {},
 ): ToolDefinition[] {
   const nextRequestId = options.requestId ?? randomUUID;
   const promptParameters = Type.Object({ prompt: Type.String({ minLength: 1, maxLength: 65_536 }) });
@@ -233,6 +235,10 @@ export function createOrchestrationTools(
       ));
     },
   }));
+  if (options.recovery === false) {
+    const recovery = new Set<string>(RECOVERY_TOOL_NAMES);
+    for (let index = tools.length - 1; index >= 0; index -= 1) if (recovery.has(tools[index]!.name)) tools.splice(index, 1);
+  }
   if (options.connectorCatalogs?.some((catalog) => catalog.tools.length > 0)) {
     if (!api.callConnectorTool) throw new Error("connector API is not configured");
     tools.push(...createConnectorTools(options.connectorCatalogs, (input) => api.callConnectorTool!(input), context, options));

@@ -29,6 +29,7 @@ export interface OrchestratorOptions {
   requestId?: () => string;
   connectors?: readonly ThreadConnector[];
   repositories?: readonly string[];
+  recoverableOperations?: readonly string[];
   /** Told about each connector whose discovery failed this turn, so the host can log it. */
   onConnectorUnavailable?: (failure: ConnectorUnavailable) => void;
 }
@@ -73,6 +74,7 @@ export async function createOrchestratorRuntime(options: OrchestratorOptions): P
   }
   const customTools = createOrchestrationTools(options.api, options.context, {
     connectorCatalogs: catalogs,
+    recovery: (options.recoverableOperations?.length ?? 0) > 0,
     ...(options.requestId === undefined ? {} : { requestId: options.requestId }),
   });
   assertOrchestrationOnly(customTools, catalogs);
@@ -85,6 +87,7 @@ export async function createOrchestratorRuntime(options: OrchestratorOptions): P
     catalogs,
     ...(unavailable.length > 0 ? { unavailable } : {}),
     ...(misconfigured.length > 0 ? { misconfigured } : {}),
+    ...(options.recoverableOperations?.length ? { recoverableOperations: options.recoverableOperations } : {}),
   });
   const boundaryExtension: InlineExtension = {
     name: "agentx-orchestration-boundary",
