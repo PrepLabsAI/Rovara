@@ -26,37 +26,43 @@ export function scopeKey(scopes: readonly string[]): string {
   return createHash("sha256").update(JSON.stringify([...scopes].sort())).digest("hex").slice(0, 32);
 }
 
-// This project builds without the "dom" lib, under which undici's ambient `Response.body` type
-// resolves to `any` (its declared type references the DOM `ReadableStream` global, which isn't
-// present). Declared locally and applied with `as` so the stream read below is fully typed.
-interface BytesReader { read(): Promise<{ done: boolean; value?: Uint8Array }>; cancel(): Promise<void> }
-interface BytesStream { getReader(): BytesReader }
-
 /**
  * Reads a response body up to `limit` bytes, rejecting before buffering the rest when the
  * declared content-length or the running byte count (not UTF-16 length) exceeds it. Never
- * includes any of the body in a thrown message.
+ * includes any of the body in a thrown message. Cancels the body and releases the reader on
+ * every exit path (an early content-length rejection, a limit hit mid-stream, or any other
+ * failure), so the underlying connection is never left open.
  */
 async function readLimitedText(response: Response, limit: number): Promise<string> {
+  // undici-types leaves `Body.body` as an unparameterized `ReadableStream` (its generic defaults
+  // to `any`), so it's cast to the real global `ReadableStream<Uint8Array>` — available without
+  // the "dom" lib, just not inferred here — to keep the byte-counting loop below fully typed.
+  const body = response.body as ReadableStream<Uint8Array> | null;
   const declared = response.headers.get("content-length");
   if (declared !== null) {
     const declaredBytes = Number(declared);
-    if (Number.isFinite(declaredBytes) && declaredBytes > limit) throw new Error("token endpoint response exceeded limit");
+    if (Number.isFinite(declaredBytes) && declaredBytes > limit) {
+      await body?.cancel().catch(() => undefined);
+      throw new Error("token endpoint response exceeded limit");
+    }
   }
-  const body = response.body as BytesStream | null;
   if (!body) return "";
   const reader = body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done || !value) break;
-    total += value.byteLength;
-    if (total > limit) {
-      await reader.cancel().catch(() => undefined);
-      throw new Error("token endpoint response exceeded limit");
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done || !value) break;
+      total += value.byteLength;
+      if (total > limit) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error("token endpoint response exceeded limit");
+      }
+      chunks.push(value);
     }
-    chunks.push(value);
+  } finally {
+    reader.releaseLock();
   }
   return Buffer.concat(chunks).toString("utf-8");
 }
@@ -165,6 +171,9 @@ export function oauthClientCredentialsProvider(options: {
         if (generation === generationAtStart) {
           memory = { ...result, key, refreshAt: minted.expiresAt - marginFor(minted.lifetimeMs) };
           await options.tokens.put(key, result);
+          // invalidate() may have run while the put above was in flight; its own delete could
+          // have landed before this write, leaving the now-stale token stored. Compensate.
+          if (generation !== generationAtStart) await options.tokens.delete(key);
         }
         return result;
       })();
@@ -173,12 +182,17 @@ export function oauthClientCredentialsProvider(options: {
         const result = await task;
         return { token: result.token, bindings: {} };
       } finally {
-        inFlight.delete(key);
+        // Only remove this call's own entry: invalidate() may have already cleared it (and a
+        // newer issue() call may have replaced it), and this task must not delete that one.
+        if (inFlight.get(key) === task) inFlight.delete(key);
       }
     },
     async invalidate() {
       generation++;
       memory = undefined;
+      // Drop any mint that started before this invalidate() so a concurrent issue() mints fresh
+      // instead of awaiting (and receiving) that pre-invalidate task's token.
+      inFlight.clear();
       let key = lastKey;
       if (key === undefined) {
         try {

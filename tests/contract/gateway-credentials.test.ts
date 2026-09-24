@@ -252,4 +252,73 @@ describe("oauth-client-credentials provider", () => {
     const [, init] = fetchImplementation.mock.calls[0]!;
     expect(init?.signal).toBeInstanceOf(AbortSignal);
   });
+
+  // --- fix round 2 -----------------------------------------------------------------------
+
+  it("mints fresh for an issue() after invalidate(), even while an earlier mint for the same key is still in flight", async () => {
+    const tokens = memoryCache();
+    let resolveStale!: (response: Response) => void;
+    const pendingStale = new Promise<Response>((resolve) => { resolveStale = resolve; });
+    let callCount = 0;
+    const fetchImplementation = vi.fn<typeof fetch>(() => {
+      callCount += 1;
+      if (callCount === 1) return pendingStale;
+      return Promise.resolve(tokenResponse({ access_token: "new-token", expires_in: 3600 }));
+    });
+    const provider = oauthClientCredentialsProvider({ ref: "linear", secretName: "s", secrets: secrets({ s: client }), tokens, tokenEndpoint: endpoint, fetchImplementation, now: () => 0 });
+
+    const issuingA = provider.issue(undefined, "read");
+    await vi.waitFor(() => expect(fetchImplementation).toHaveBeenCalledOnce());
+    await provider.invalidate?.(undefined);
+
+    const resultB = await provider.issue(undefined, "read");
+    expect(resultB).toEqual({ token: "new-token", bindings: {} });
+    expect(fetchImplementation).toHaveBeenCalledTimes(2);
+
+    resolveStale(tokenResponse({ access_token: "stale-token", expires_in: 3600 }));
+    await expect(issuingA).resolves.toEqual({ token: "stale-token", bindings: {} });
+    expect(tokens.items.get(scopeKey(["read", "write"]))).toEqual({ token: "new-token", expiresAt: 3_600_000 });
+    expect(tokens.items.size).toBe(1);
+
+    // memory must still hold B's token: a third call reuses it rather than minting again.
+    expect(await provider.issue(undefined, "read")).toEqual({ token: "new-token", bindings: {} });
+    expect(fetchImplementation).toHaveBeenCalledTimes(2);
+  });
+
+  it("deletes a token whose shared-cache write was still in flight when invalidate() ran", async () => {
+    const items = new Map<string, CachedToken>();
+    let releasePut!: () => void;
+    const putGate = new Promise<void>((resolve) => { releasePut = resolve; });
+    let putStarted = false;
+    const tokens: TokenCache = {
+      get: async (k) => items.get(k),
+      put: async (k, v) => { putStarted = true; await putGate; items.set(k, v); },
+      delete: async (k) => { items.delete(k); },
+    };
+    const fetchImplementation = vi.fn<typeof fetch>(async () => tokenResponse({ access_token: "token-1", expires_in: 3600 }));
+    const provider = oauthClientCredentialsProvider({ ref: "linear", secretName: "s", secrets: secrets({ s: client }), tokens, tokenEndpoint: endpoint, fetchImplementation, now: () => 0 });
+
+    const issuing = provider.issue(undefined, "read");
+    await vi.waitFor(() => expect(putStarted).toBe(true));
+    await provider.invalidate?.(undefined);
+    releasePut();
+    await issuing;
+    expect(items.size).toBe(0);
+  });
+
+  it("cancels the response body on the early content-length rejection", async () => {
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new TextEncoder().encode("{}")); controller.close(); },
+      cancel() { cancelled = true; },
+    });
+    const response = new Response(stream, { status: 200, headers: { "content-length": "999999" } });
+    const fetchImplementation = vi.fn<typeof fetch>(async () => response);
+    const provider = oauthClientCredentialsProvider({ ref: "linear", secretName: "s", secrets: secrets({ s: client }), tokens: memoryCache(), tokenEndpoint: endpoint, fetchImplementation });
+    const error = await provider.issue(undefined, "read").catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(CredentialUnavailable);
+    expect((error as Error).message).toBe("token endpoint response exceeded limit");
+    expect(cancelled).toBe(true);
+  });
 });
