@@ -31,6 +31,24 @@ describe("pi orchestration boundary", () => {
     expect(prompt).toContain("<project-instructions>");
   });
 
+  it("characterizes the in-house agentx_* tools byte-for-byte with no connector catalogs (regression guard)", () => {
+    const api = {
+      submitTask: vi.fn(),
+      taskStatus: vi.fn(),
+      taskResult: vi.fn(),
+      followUp: vi.fn(),
+      createPullRequest: vi.fn(),
+      pullRequestResult: vi.fn(),
+    };
+    const tools = createOrchestrationTools(api, {
+      workspaceId: crypto.randomUUID(),
+      conversationId: crypto.randomUUID(),
+    });
+    expect(tools.map(({ name }) => name)).toEqual(ORCHESTRATION_TOOL_NAMES);
+    expect(tools.map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters })))
+      .toMatchSnapshot();
+  });
+
   it("submits an interactive task once and waits for its final response", async () => {
     const operationId = "11111111-1111-4111-8111-111111111111";
     const api = {
