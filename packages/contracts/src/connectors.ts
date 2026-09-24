@@ -62,7 +62,7 @@ export const ConnectorResultSchema = GitHubMcpResultSchema.extend({ reason: Conn
 
 export const ThreadConnectorSchema = z.object({
   name: ConnectorNameSchema,
-  type: z.literal("github"),
+  type: ConnectorNameSchema,
   label: z.string().min(1).max(64),
   scopes: z.array(ConnectorAliasSchema).max(32),
   connected: z.boolean(),

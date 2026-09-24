@@ -3,5 +3,8 @@
  * broker withholds from older services, whose strict parse would reject them.
  */
 export function threadWorkspaceRequest(requestId: string) {
-  return { requestId, includeIntegrations: true, includeSettingsRevision: true, includeConnectors: true, includeRecoverableOperations: true } as const;
+  return {
+    requestId, includeIntegrations: true, includeSettingsRevision: true, includeConnectors: true,
+    includeAllConnectorTypes: true, includeRecoverableOperations: true,
+  } as const;
 }

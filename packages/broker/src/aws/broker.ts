@@ -395,11 +395,11 @@ async function routeWorkspaceRequest(
     if (parsed && !parsed.success) throw agentXError("CONFIG_INVALID", "invalid connector request");
     const context = connectorContext(identity, workspace, project);
     if (!parsed?.success) {
-      return json({ catalog: await discoverConnector({ connector, workspace, project, context, catalogs: dependencies.catalogs }) }, request.requestId);
+      return json({ catalog: await discoverConnector({ connector, workspace, context, catalogs: dependencies.catalogs }) }, request.requestId);
     }
     const attribution = attributionText(identity, connector);
     const result = await callConnector({
-      connector, request: parsed.data, workspace, project, context, catalogs: dependencies.catalogs,
+      connector, request: parsed.data, workspace, context, catalogs: dependencies.catalogs,
       ...(attribution === undefined ? {} : { attribution }),
       ledger: new DynamoConnectorLedger(dependencies.documentClient, dependencies.tableName, workspace.id, connector.ledger, connector.name),
     });
@@ -478,8 +478,6 @@ async function routeWorkspaceRequest(
 
   throw agentXError("NOT_FOUND", "route not found");
 }
-
-const GITHUB_LABEL = "GitHub issues";
 
 /** Workspace ownership, channel binding and membership, then the project's latest revision, which configures at least one connector. */
 async function authorizeWorkspaceConnectors(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, workspaceId: string) {
@@ -1075,6 +1073,10 @@ async function ensureThreadWorkspace(
   const includeIntegrations = input.includeIntegrations === true;
   const includeSettingsRevision = input.includeSettingsRevision === true;
   const includeConnectors = input.includeConnectors === true;
+  // A separate opt-in: an older Slack service parses the connectors array with a schema that
+  // still requires type "github", so every other resolved connector type is withheld unless the
+  // service says it can parse them too.
+  const includeAllConnectorTypes = input.includeAllConnectorTypes === true;
   // A separate opt-in: the Slack service released before this field existed already sends
   // includeConnectors: true but parses the WORKSPACE result with a strict schema that lacks
   // recoverableOperations. The control plane deploys first, so gating this on includeConnectors
@@ -1083,8 +1085,8 @@ async function ensureThreadWorkspace(
   const include: IntegrationInclude = {
     integrations: includeIntegrations,
     connectors: includeConnectors,
+    allConnectorTypes: includeAllConnectorTypes,
     recoverableOperations: includeRecoverableOperations,
-    connected: dependencies.githubMcp !== undefined,
   };
   const threadWorkspace = await getThreadWorkspace(dependencies, identity.ownerKey);
   if (threadWorkspace) {
@@ -1155,7 +1157,7 @@ async function ensureThreadWorkspace(
     operationId: preparation.operationId,
     created: true,
     orchestratorInstructions: project.definition.orchestratorInstructions,
-    ...threadIntegrations(project.definition, include),
+    ...await threadIntegrations(project.definition, include, dependencies),
     ...(include.recoverableOperations ? { recoverableOperations: [] } : {}),
     ...(includeSettingsRevision ? { settingsRevision: project.definition.revision } : {}),
   };
@@ -1176,7 +1178,7 @@ async function existingThreadWorkspace(
   const settings = await requireLatestProject(dependencies, workspace.projectName);
   const applied = {
     orchestratorInstructions: settings.definition.orchestratorInstructions,
-    ...threadIntegrations(settings.definition, include),
+    ...await threadIntegrations(settings.definition, include, dependencies),
     ...(include.recoverableOperations ? { recoverableOperations: workspace.status === "BUSY" && workspace.activeOperationId ? [workspace.activeOperationId] : [] } : {}),
     ...(includeSettingsRevision ? { settingsRevision: settings.definition.revision } : {}),
   };
@@ -1201,21 +1203,36 @@ async function existingThreadWorkspace(
   };
 }
 
-interface IntegrationInclude { integrations: boolean; connectors: boolean; recoverableOperations: boolean; connected: boolean }
+interface IntegrationInclude { integrations: boolean; connectors: boolean; allConnectorTypes: boolean; recoverableOperations: boolean }
 
-function threadIntegrations(project: ProjectDefinition, include: IntegrationInclude): {
+/**
+ * Every connector the project's latest revision configures, for services that opt in with
+ * includeConnectors. An older Slack service's schema still requires type "github", so every other
+ * resolved type is withheld unless the service also sends includeAllConnectorTypes.
+ * githubMcpRepositories stays github-only regardless, for feature 007's included integrations.
+ */
+async function threadIntegrations(project: ProjectDefinition, include: IntegrationInclude, dependencies: AwsBrokerDependencies): Promise<{
   githubMcpRepositories?: string[];
   connectors?: ThreadConnector[];
   repositories?: string[];
-} {
+}> {
   const github = githubConnectorOf(project);
   const repositories = github?.repositories.map((repository) => repository.name) ?? [];
+  let connectors: ThreadConnector[] | undefined;
+  if (include.connectors) {
+    const resolved = resolveConnectors(project, connectorTypeContext(dependencies), dependencies.connectorTypes);
+    const visible = include.allConnectorTypes ? resolved : resolved.filter((connector) => connector.type === "github");
+    connectors = await Promise.all(visible.map(async (connector) => ({
+      name: connector.name,
+      type: connector.type,
+      label: connector.label,
+      scopes: connector.scopes.map((scope) => scope.alias),
+      connected: await connector.configured(),
+    })));
+  }
   return {
     ...(include.integrations && github ? { githubMcpRepositories: repositories } : {}),
-    ...(include.connectors ? {
-      repositories: project.repositories.map((repository) => repository.name),
-      connectors: github ? [{ name: github.name, type: "github" as const, label: GITHUB_LABEL, scopes: repositories, connected: include.connected }] : [],
-    } : {}),
+    ...(include.connectors ? { repositories: project.repositories.map((repository) => repository.name), connectors: connectors ?? [] } : {}),
   };
 }
 

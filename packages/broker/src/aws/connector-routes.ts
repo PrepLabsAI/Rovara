@@ -12,7 +12,6 @@ import {
   type ScopeCatalog,
   type SkippedTool,
 } from "@agentx/gateway";
-import type { RegisteredProjectRecord } from "./broker.js";
 import type { ConnectorScope, ResolvedConnector } from "./connector-types.js";
 
 /** One scope's discovered tools and the approved tools it could not offer. */
@@ -72,7 +71,6 @@ export async function discoverCachedScope<Scope>(input: {
 export async function discoverConnector(input: {
   connector: ResolvedConnector;
   workspace: WorkspaceInstance;
-  project: RegisteredProjectRecord;
   context: ConnectorContextBase;
   catalogs: CatalogCache<ScopeDiscovery>;
 }): Promise<ConnectorCatalog> {
@@ -106,7 +104,6 @@ export async function callConnector(input: {
   connector: ResolvedConnector;
   request: ConnectorCallRequest;
   workspace: WorkspaceInstance;
-  project: RegisteredProjectRecord;
   context: ConnectorContextBase;
   attribution?: string;
   ledger: Ledger;

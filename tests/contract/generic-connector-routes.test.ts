@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { githubConnectorType, type ConnectorType } from "../../packages/broker/src/aws/connector-types.js";
 import { ConnectorCatalogSchema } from "../../packages/contracts/src/connectors.js";
+import { SlackThreadWorkspaceResultSchema } from "../../packages/contracts/src/slack.js";
 import type { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { call, createBroker, ensureWorkspace, loadSlackBroker, markReady, orchestratorPrincipal, type Handler } from "../support/slack-broker.js";
 import { TRACKER_ENDPOINT, trackerConnectorType } from "../support/tracker-connector.js";
@@ -206,5 +207,45 @@ describe("generic connector routes", () => {
     const response = await call(handler, { method: "GET", path: `/v1/service/workspaces/${workspaceId}/connectors/linear/tools`, service });
     expect(response.status).toBe(404);
     expect(response.body.error).toMatchObject({ code: "NOT_FOUND", message: "connector not found" });
+  });
+});
+
+describe("thread setup lists every connector, to services that can parse it", () => {
+  /** The broker's json() envelope adds its own requestId to the result's fields; strip it before parsing the strict result schema. */
+  function resultOf(body: Record<string, unknown>) {
+    const { requestId, ...result } = body;
+    expect(typeof requestId).toBe("string");
+    return SlackThreadWorkspaceResultSchema.parse(result);
+  }
+
+  it("returns only the github connector when the service does not opt in to every connector type", async () => {
+    const { handler } = await trackerBroker();
+    const response = await call(handler, { method: "POST", path: "/v1/service/threads/workspace", service, body: { requestId: randomUUID(), includeConnectors: true } });
+    expect(response.status).toBe(200);
+    const result = resultOf(response.body);
+    expect(result.outcome === "WORKSPACE" && result.connectors).toEqual([
+      { name: "github", type: "github", label: "GitHub issues", scopes: ["demo"], connected: true },
+    ]);
+  });
+
+  it("returns every resolved connector, in definition order, once the service opts in to every type; the tracker connects once its credential is registered", async () => {
+    const { handler } = await trackerBroker();
+    const unregistered = await call(handler, { method: "POST", path: "/v1/service/threads/workspace", service,
+      body: { requestId: randomUUID(), includeConnectors: true, includeAllConnectorTypes: true } });
+    expect(unregistered.status).toBe(200);
+    const before = resultOf(unregistered.body);
+    expect(before.outcome === "WORKSPACE" && before.connectors).toEqual([
+      { name: "github", type: "github", label: "GitHub issues", scopes: ["demo"], connected: true },
+      { name: "tracker", type: "tracker", label: "Tracker issues", scopes: ["payments", "billing"], connected: false },
+    ]);
+
+    expect((await registerTrackerKey(handler)).status).toBe(201);
+    const registered = await call(handler, { method: "POST", path: "/v1/service/threads/workspace", service,
+      body: { requestId: randomUUID(), includeConnectors: true, includeAllConnectorTypes: true } });
+    const after = resultOf(registered.body);
+    expect(after.outcome === "WORKSPACE" && after.connectors).toEqual([
+      { name: "github", type: "github", label: "GitHub issues", scopes: ["demo"], connected: true },
+      { name: "tracker", type: "tracker", label: "Tracker issues", scopes: ["payments", "billing"], connected: true },
+    ]);
   });
 });

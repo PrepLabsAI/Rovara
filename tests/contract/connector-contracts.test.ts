@@ -4,6 +4,7 @@ import {
   ConnectorCatalogSchema,
   ConnectorResultSchema,
   SlackThreadWorkspaceResultSchema,
+  ThreadConnectorSchema,
   ToolApprovalSchema,
 } from "../../packages/contracts/src/index.js";
 
@@ -39,5 +40,10 @@ describe("connector contracts", () => {
       connectors: [{ name: "github", type: "github", label: "GitHub issues", scopes: ["demo"], connected: true }],
     });
     expect(result.outcome === "WORKSPACE" && result.connectors?.[0]?.label).toBe("GitHub issues");
+  });
+
+  it("widens a thread connector's type to any connector-name pattern, not only github", () => {
+    expect(ThreadConnectorSchema.safeParse({ name: "issues", type: "linear", label: "Linear", scopes: ["team-a"], connected: true }).success).toBe(true);
+    expect(ThreadConnectorSchema.safeParse({ name: "issues", type: "Bad Type", label: "Linear", scopes: ["team-a"], connected: true }).success).toBe(false);
   });
 });
