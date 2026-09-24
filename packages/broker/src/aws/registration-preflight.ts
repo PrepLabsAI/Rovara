@@ -31,7 +31,15 @@ async function preflightConnector(
   definition: ProjectDefinition,
   ownerKey: string,
 ): Promise<{ entry: ConnectorPreflight; refusals: string[] }> {
-  const resolved = await connector.definition();
+  let resolved: Awaited<ReturnType<ResolvedConnector["definition"]>>;
+  try {
+    resolved = await connector.definition();
+  } catch (error) {
+    // definition() is vendor-owned code (it may mint a client or read a registry); a throw there
+    // is a vendor or credential failure like any other, never a reason to fail the whole registration.
+    const message = error instanceof AgentXError ? stripCode(error.message, error.code) : `${connector.vendor} MCP discovery failed`;
+    return { entry: { name: connector.name, status: "unavailable", problem: message.slice(0, MAX_PROBLEM), offered: [], skipped: [] }, refusals: [] };
+  }
   if ("notConnected" in resolved) {
     return { entry: { name: connector.name, status: "not_connected", problem: resolved.notConnected, offered: [], skipped: [] }, refusals: [] };
   }

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { IN_HOUSE_TOOL_COUNT, ProjectDefinitionSchema, TOOL_LIMIT, TOOL_WARNING_THRESHOLD } from "@agentx/contracts";
 import { TARGET_CONFLICT_REASON } from "@agentx/gateway";
 import { describe, expect, it, vi } from "vitest";
-import { resolveConnectors } from "../../packages/broker/src/aws/connector-types.js";
+import { resolveConnectors, type ResolvedConnector } from "../../packages/broker/src/aws/connector-types.js";
 import { CredentialRegistry } from "../../packages/broker/src/aws/credentials.js";
 import { preflightConnectors } from "../../packages/broker/src/aws/registration-preflight.js";
 import type { GitHubMcpDependencies } from "../../packages/broker/src/github-mcp.js";
@@ -181,6 +181,26 @@ describe("registration preflight across connector types", () => {
       { name: "tracker", status: "connected", offered: ["tracker__list_items"], skipped: [] },
     ]);
     expect(connect).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a connector unavailable when its definition() rejects, without failing the whole preflight", async () => {
+    const project = ProjectDefinitionSchema.parse(definition(githubConnector(["list_issues"])));
+    const [github] = resolveConnectors(project, { githubMcp: vendor([plainTool("list_issues")]) });
+    const broken: ResolvedConnector = {
+      name: "broken", type: "broken", label: "Broken connector", vendor: "Broken",
+      scopeNoun: "scope", scopes: [{ alias: "only", scope: {} }],
+      policy: { tools: [] }, approvals: [], attribution: false,
+      ledger: { prefix: "CONNECTOR#broken#", entityType: "CONNECTOR_INVOCATION" },
+      configured: async () => true,
+      definition: () => Promise.reject(new Error("boom")),
+    };
+
+    const result = await preflightConnectors([github!, broken], project, "owner-key");
+    expect(result.refusals).toEqual([]);
+    expect(result.report.connectors).toEqual([
+      { name: "github", status: "connected", offered: ["github__list_issues"], skipped: [] },
+      { name: "broken", status: "unavailable", problem: "Broken MCP discovery failed", offered: [], skipped: [] },
+    ]);
   });
 });
 
