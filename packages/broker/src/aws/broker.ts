@@ -341,7 +341,13 @@ async function routeWorkspaceRequest(
     if (!parsed?.success) {
       const cached = dependencies.catalogs?.get(cacheKey);
       if (cached) return json({ catalog: cached }, request.requestId);
-      const catalog = await discoverGitHubTools(context, dependencies.githubMcp);
+      const { skipped, ...catalog } = await discoverGitHubTools(context, dependencies.githubMcp);
+      if (skipped.length > 0) {
+        console.log(JSON.stringify({
+          component: "broker", event: "connector.tools_skipped", project: workspace.projectName,
+          revision: project.definition.revision, connector: github.name, scope: repository.name, skipped,
+        }));
+      }
       dependencies.catalogs?.set(cacheKey, catalog);
       return json({ catalog }, request.requestId);
     }

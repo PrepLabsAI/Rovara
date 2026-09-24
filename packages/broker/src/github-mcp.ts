@@ -11,6 +11,7 @@ import {
   type GitHubRepositoryScope,
   type Invocation,
   type Ledger,
+  type SkippedTool,
   type McpConnection,
   type connectMcp,
 } from "@agentx/gateway";
@@ -19,6 +20,8 @@ import {
 export type GitHubMcpInvocation = Invocation;
 export type GitHubMcpStore = Ledger;
 export interface GitHubMcpCatalog { tools: GitHubMcpTool[] }
+/** A catalog plus the approved tools that could not be offered, which the caller reports. */
+export interface GitHubMcpDiscovery extends GitHubMcpCatalog { skipped: SkippedTool[] }
 
 export interface GitHubMcpDependencies {
   credentials(repository: { url: string; credentialRef: string }, access: "read" | "write"): Promise<{ owner: string; repo: string; token: string }>;
@@ -34,9 +37,9 @@ export interface GitHubMcpContext {
   settingsRevision?: number;
 }
 
-export async function discoverGitHubTools(context: GitHubMcpContext, dependencies: GitHubMcpDependencies): Promise<GitHubMcpCatalog> {
-  const { tools } = await discoverTools(githubConnector(issuer(dependencies)), connectorContext(context), connectOption(dependencies));
-  return { tools: tools.map(toGitHubTool) };
+export async function discoverGitHubTools(context: GitHubMcpContext, dependencies: GitHubMcpDependencies): Promise<GitHubMcpDiscovery> {
+  const { tools, skipped } = await discoverTools(githubConnector(issuer(dependencies)), connectorContext(context), connectOption(dependencies));
+  return { tools: tools.map(toGitHubTool), skipped };
 }
 
 export function approvedTools(connection: Pick<McpConnection, "tools">, context: GitHubMcpContext): GitHubMcpTool[] {

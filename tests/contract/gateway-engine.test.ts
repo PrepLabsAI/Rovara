@@ -85,6 +85,20 @@ describe("gateway tool approval", () => {
     expect(catalog[1]!.access).toBe("write");
   });
 
+  it("skips an oversized or uncompilable vendor schema instead of failing discovery", () => {
+    const f = fixture();
+    const tools: McpConnection["tools"] = [
+      { name: "list_items", description: "Huge", inputSchema: schema({ state: { type: "string", description: "x".repeat(40_000) } }) },
+      { name: "create_item", description: "Broken", inputSchema: schema({ title: { type: "nonsense" } }, ["title"]) },
+    ];
+    const review = reviewTools({ tools }, f.connector, f.context);
+    expect(review.tools).toEqual([]);
+    expect(review.skipped).toEqual(expect.arrayContaining([
+      { tool: "list_items", reason: "schema exceeds 32768 characters" },
+      { tool: "create_item", reason: "schema does not compile" },
+    ]));
+  });
+
   it("reports every approved tool it cannot offer, with a reason", () => {
     const f = fixture();
     const review = reviewTools({ tools: f.tools }, f.connector, f.context);

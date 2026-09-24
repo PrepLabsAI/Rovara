@@ -19,7 +19,7 @@ Each phase is one pull request to `mainline`. Check a task only after its eviden
 
 ## Phase 2: Presentation (US4)
 
-- [ ] T007 Add `/v1/workspaces/{id}/connectors/{name}/tools|call` in `packages/broker/src/aws/connectors.ts`; serve `/github/...` as aliases with feature 007 shapes. (moved from phase 1b)
+- [ ] T007 Add `/v1/workspaces/{id}/connectors/{name}/tools|call` in `packages/broker/src/aws/connectors.ts`; serve `/github/...` as aliases with feature 007 shapes. (moved from phase 1b). The tools route honours `refresh=1` to bypass the per-container catalog cache, and the orchestrator sends it after a "definition changed" failure.
 - [ ] T011 Add `connectors` and `recoverableOperations` to thread workspace resolution; keep `githubMcpRepositories`. (moved from phase 1b)
 - [ ] T012 Present connector tools as `<connector>__<tool>`, one per tool, with a `target` enum for multiple scopes; refuse names over 64 characters and `target` collisions.
 - [ ] T013 Assemble descriptions from override or vendor text, target line, access line and examples; cap at 2,048 characters.

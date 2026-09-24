@@ -50,6 +50,20 @@ describe("vendor schema flattening", () => {
       .toEqual({ unsupported: "conflicting type" });
   });
 
+  it("refuses a malformed reference instead of throwing", () => {
+    expect(flattenSchema({ type: "object", properties: { a: { $ref: "#/$defs/100%" } }, $defs: { "100%": { type: "string" } } }))
+      .toEqual({ unsupported: "malformed reference #/$defs/100%" });
+  });
+
+  it("drops identifiers that would repeat once a definition is inlined twice", () => {
+    const result = flattenSchema({
+      type: "object",
+      properties: { a: { $ref: "#/$defs/T" }, b: { $ref: "#/$defs/T" } },
+      $defs: { T: { $id: "https://vendor.test/T", $anchor: "t", type: "string" } },
+    });
+    expect(result).toEqual({ schema: { type: "object", properties: { a: { type: "string" }, b: { type: "string" } } } });
+  });
+
   it("refuses a reference graph that expands beyond the size bound", () => {
     const $defs: Record<string, unknown> = { L0: { type: "string", description: "x".repeat(64) } };
     for (let level = 1; level <= 16; level += 1) {

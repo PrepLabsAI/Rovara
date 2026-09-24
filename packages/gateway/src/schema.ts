@@ -7,6 +7,8 @@ const MAX_DEPTH = 64;
 const MAX_NODES = 20_000;
 /** Keywords that describe rather than constrain; the first value wins when parts are merged. */
 const ANNOTATIONS = new Set(["description", "title", "examples", "default", "$comment", "deprecated"]);
+/** Identifiers mean nothing once references are inlined, and repeating one makes the schema invalid. */
+const IDENTIFIERS = new Set(["$id", "$anchor", "$dynamicAnchor"]);
 
 class Unsupported extends Error {}
 
@@ -41,7 +43,7 @@ function resolveNode(node: unknown, root: Record<string, unknown>, stack: readon
   }
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(node)) {
-    if (key === "$defs" || key === "definitions") continue;
+    if (key === "$defs" || key === "definitions" || IDENTIFIERS.has(key)) continue;
     out[key] = key === "properties" && isObject(value)
       ? Object.fromEntries(Object.entries(value).map(([name, schema]) => [name, resolveNode(schema, root, stack, depth + 1, budget)]))
       : resolveNode(value, root, stack, depth + 1, budget);
@@ -56,7 +58,9 @@ function lookup(root: Record<string, unknown>, ref: string): unknown {
   if (!ref.startsWith("#/")) throw new Unsupported(`external reference ${ref}`);
   let node: unknown = root;
   for (const raw of ref.slice(2).split("/")) {
-    const segment = decodeURIComponent(raw).replace(/~1/g, "/").replace(/~0/g, "~");
+    let decoded: string;
+    try { decoded = decodeURIComponent(raw); } catch { throw new Unsupported(`malformed reference ${ref}`); }
+    const segment = decoded.replace(/~1/g, "/").replace(/~0/g, "~");
     if (!isObject(node) || !Object.hasOwn(node, segment)) throw new Unsupported(`unresolvable reference ${ref}`);
     node = node[segment];
   }

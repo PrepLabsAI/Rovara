@@ -31,7 +31,7 @@ export function reviewTools<Scope>(
   for (const upstream of connection.tools) {
     const policy = context.policy.tools.find((entry) => entry.name === upstream.name);
     if (!policy) continue;
-    if (JSON.stringify(upstream.inputSchema).length > 32_768) throw new Error("MCP schema exceeded limit");
+    if (JSON.stringify(upstream.inputSchema).length > 32_768) { skipped.push({ tool: upstream.name, reason: "schema exceeds 32768 characters" }); continue; }
     const flattened = flattenSchema(upstream.inputSchema);
     if ("unsupported" in flattened) { skipped.push({ tool: upstream.name, reason: flattened.unsupported }); continue; }
     const schema = flattened.schema;
@@ -66,7 +66,7 @@ export function reviewTools<Scope>(
     if (incompatible !== undefined) { skipped.push({ tool: upstream.name, reason: `argumentValues do not match ${incompatible}` }); continue; }
     schema.additionalProperties = false;
     // Compile during discovery too; schemas we cannot validate must never be advertised.
-    new AjvJsonSchemaValidator().getValidator(schema);
+    try { new AjvJsonSchemaValidator().getValidator(schema); } catch { skipped.push({ tool: upstream.name, reason: "schema does not compile" }); continue; }
     tools.push({
       name: upstream.name,
       scope: context.scopeAlias,
