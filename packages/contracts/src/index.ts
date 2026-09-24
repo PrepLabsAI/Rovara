@@ -1,4 +1,5 @@
 export * from "./errors.js";
+export * from "./connectors.js";
 export * from "./github-mcp.js";
 export * from "./operation.js";
 export * from "./project.js";

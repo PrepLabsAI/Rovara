@@ -160,7 +160,10 @@ and exposes only tools approved in the registered project revision. The orchestr
 their discovered descriptions and JSON schemas through one generic bridge; no per-tool GitHub
 implementations are needed. Calls go orchestrator → control plane → GitHub MCP, without a worker.
 
-See [GitHub MCP setup and policy example](specs/007-github-mcp/quickstart.md). This release uses
+See [GitHub MCP setup and policy example](specs/007-github-mcp/quickstart.md). The policy can be
+written as `integrations.githubMcp` or, since feature 013, as a `github` entry in
+`integrations.connectors`, which can also limit it to named repositories; a definition may use one
+form, not both. This release uses
 the existing GitHub App installation with repository-scoped **Issues** permissions. Tokens stay
 in the control plane. Existing projects remain disabled until an administrator registers an
 opt-in revision. Arbitrary endpoints, personal OAuth, and other GitHub permission families are

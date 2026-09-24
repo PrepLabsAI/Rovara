@@ -10,17 +10,17 @@ Each phase is one pull request to `mainline`. Check a task only after its eviden
 - [X] T004 Implement the GitHub connector and turn `packages/broker/src/github-mcp.ts` into a compatibility layer; feature 007 suites pass unchanged; pin schema-hash stability.
 - [X] T005 Run typecheck, lint, tests and synthesis; open the phase pull request.
 
-## Phase 1b: Configuration, routes, ledger, schemas (US1, US2 foundation)
+## Phase 1b: Configuration, ledger, schemas, cache (US1, US2 foundation)
 
-- [ ] T006 Add `ConnectorConfigSchema` and `integrations.connectors` to the project contract; read `githubMcp` as a `github` connector through the stored-definition preprocess; refuse both keys.
-- [ ] T007 Add `/v1/workspaces/{id}/connectors/{name}/tools|call` in `packages/broker/src/aws/connectors.ts`; serve `/github/...` as aliases with feature 007 shapes.
-- [ ] T008 Write new ledger records under `CONNECTOR#<name>#<requestId>`; read the legacy key for `github`.
-- [ ] T009 Flatten `$ref`/`$defs` and mergeable `allOf` before narrowing; report unrepresentable tools as skipped.
-- [ ] T010 Cache catalogs per revision and connector for 10 minutes; keep call-time hash comparison.
-- [ ] T011 Add `connectors` and `recoverableOperations` to thread workspace resolution; keep `githubMcpRepositories`.
+- [X] T006 Add `ConnectorConfigSchema` and `integrations.connectors` to the project contract; read `githubMcp` as a `github` connector through `githubConnectorOf`; refuse both keys.
+- [X] T008 Write new connector ledger records under `CONNECTOR#<name>#<requestId>`; the `github` connector keeps `GITHUB_MCP#<requestId>`.
+- [X] T009 Flatten `$ref`/`$defs` and mergeable `allOf` before narrowing; report unrepresentable tools as skipped.
+- [X] T010 Cache catalogs per revision and connector for 10 minutes; keep call-time hash comparison.
 
 ## Phase 2: Presentation (US4)
 
+- [ ] T007 Add `/v1/workspaces/{id}/connectors/{name}/tools|call` in `packages/broker/src/aws/connectors.ts`; serve `/github/...` as aliases with feature 007 shapes. (moved from phase 1b). The tools route honours `refresh=1` to bypass the per-container catalog cache, and the orchestrator sends it after a "definition changed" failure.
+- [ ] T011 Add `connectors` and `recoverableOperations` to thread workspace resolution; keep `githubMcpRepositories`. (moved from phase 1b)
 - [ ] T012 Present connector tools as `<connector>__<tool>`, one per tool, with a `target` enum for multiple scopes; refuse names over 64 characters and `target` collisions.
 - [ ] T013 Assemble descriptions from override or vendor text, target line, access line and examples; cap at 2,048 characters.
 - [ ] T014 Generate the capabilities manifest, including not-connected connectors, the close command and the rename table.

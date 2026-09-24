@@ -113,8 +113,8 @@ async function call(handler: Handler, options: CallOptions): Promise<{ status: n
 
 const admin = { subject: "admin-subject", admin: true };
 
-async function registerProjectAndBind(handler: Handler, githubMcp = false): Promise<void> {
-  await registerRevision(handler, 1, githubMcp);
+async function registerProjectAndBind(handler: Handler, integrations: boolean | Record<string, unknown> = false, extraRepositories: string[] = []): Promise<void> {
+  await registerRevision(handler, 1, integrations, extraRepositories);
   const bound = await call(handler, {
     method: "PUT",
     path: `/v1/admin/slack/bindings/${team}/${channel}`,
@@ -124,7 +124,7 @@ async function registerProjectAndBind(handler: Handler, githubMcp = false): Prom
   expect(bound.status).toBe(200);
 }
 
-async function registerRevision(handler: Handler, revision: number, githubMcp = false): Promise<void> {
+async function registerRevision(handler: Handler, revision: number, integrations: boolean | Record<string, unknown> = false, extraRepositories: string[] = []): Promise<void> {
   const registered = await call(handler, {
     method: "POST",
     path: "/v1/admin/projects",
@@ -135,11 +135,14 @@ async function registerRevision(handler: Handler, revision: number, githubMcp = 
         revision,
         repositories: [
           { name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "github-app" },
+          ...extraRepositories.map((name) => ({ name, url: `https://github.com/example/${name}.git`, path: `repo/${name}`, defaultBranch: "main", credentialRef: "github-app" })),
         ],
         setup: [],
         readiness: [],
         orchestratorInstructions: `Delegate work (revision ${revision}).`,
-        ...(githubMcp ? { integrations: { githubMcp: { tools: [{ name: "issue_write", access: "write" }, { name: "list_issues", access: "read" }] } } } : {}),
+        ...(integrations === true
+          ? { integrations: { githubMcp: { tools: [{ name: "issue_write", access: "write" }, { name: "list_issues", access: "read" }] } } }
+          : integrations ? { integrations } : {}),
       },
       runtimeBinding: {
         runtimeArn: `arn:aws:bedrock-agentcore:us-east-1:${account}:runtime/agentx_production_worker-YVirjlFgvk`,
@@ -213,6 +216,126 @@ function markReady(db: FakeDynamoDb, workspaceId: string): void {
 }
 
 describe("hosted Slack GitHub MCP", () => {
+  it("removes a repository from an existing thread when a revision narrows the connector's scopes", async () => {
+    const credentials = vi.fn(async () => ({ owner: "example", repo: "docs", token: "installation-secret" }));
+    const invoke = vi.fn(async () => ({ content: [{ type: "text", text: "GitHub result" }] }));
+    const connect = vi.fn(async () => ({
+      tools: [{ name: "list_issues", description: "Native list_issues", inputSchema: {
+        type: "object", properties: { owner: { type: "string" }, repo: { type: "string" } }, required: ["owner", "repo"],
+      } }], call: invoke, close: async () => undefined,
+    }));
+    const { db, handler } = createBroker({ githubMcp: { credentials, connect } });
+    const tools = [{ name: "list_issues", access: "read" }];
+    await registerProjectAndBind(handler, { connectors: [{ name: "github", type: "github", scopes: "all-repositories", tools }] }, ["docs"]);
+    const resolved = await ensureWorkspace(handler, threadOne, pratik);
+    expect(resolved.body.githubMcpRepositories).toEqual(["demo", "docs"]);
+    const workspaceId = resolved.body.workspaceId as string;
+    markReady(db, workspaceId);
+    const service = { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik };
+    const path = `/v1/service/workspaces/${workspaceId}/github`;
+    const before = await call(handler, { method: "GET", path: `${path}/tools?repository=docs`, service });
+    expect(before.status).toBe(200);
+    const tool = GitHubMcpCatalogSchema.parse(before.body.catalog).tools[0]!;
+    await registerRevision(handler, 2, { connectors: [{ name: "github", type: "github", scopes: ["demo"], tools }] }, ["docs"]);
+    expect((await ensureWorkspace(handler, threadOne, pratik)).body.githubMcpRepositories).toEqual(["demo"]);
+    expect((await call(handler, { method: "GET", path: `${path}/tools?repository=docs`, service })).status).toBe(404);
+    const removed = { requestId: randomUUID(), repository: "docs", tool: "list_issues", schemaHash: tool.schemaHash, arguments: {} };
+    expect((await call(handler, { method: "POST", path: `${path}/call`, service, body: removed })).status).toBe(404);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("logs the approved tools it cannot offer, without secrets", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      const credentials = vi.fn(async () => ({ owner: "example", repo: "demo", token: "installation-secret" }));
+      const connect = vi.fn(async () => ({
+        tools: [{ name: "list_issues", description: "No routing", inputSchema: { type: "object", properties: {} } }],
+        call: vi.fn(), close: async () => undefined,
+      }));
+      const { db, handler } = createBroker({ githubMcp: { credentials, connect } });
+      await registerProjectAndBind(handler, { connectors: [{ name: "github", type: "github", scopes: "all-repositories", tools: [
+        { name: "list_issues", access: "read" }, { name: "issue_write", access: "write" },
+      ] }] });
+      const workspaceId = (await ensureWorkspace(handler, threadOne, pratik)).body.workspaceId as string;
+      markReady(db, workspaceId);
+      const service = { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik };
+      const catalog = await call(handler, { method: "GET", path: `/v1/service/workspaces/${workspaceId}/github/tools?repository=demo`, service });
+      expect(catalog.status).toBe(200);
+      expect(catalog.body.catalog).toEqual({ tools: [] });
+      const lines = log.mock.calls.map(([line]) => String(line)).filter((line) => line.includes("connector.tools_skipped"));
+      expect(lines).toHaveLength(1);
+      expect(JSON.parse(lines[0]!)).toEqual({
+        component: "broker", event: "connector.tools_skipped", project: "payments", revision: 1, connector: "github", scope: "demo",
+        skipped: [{ tool: "issue_write", reason: "not offered by the vendor" }, { tool: "list_issues", reason: "missing server-bound property owner" }],
+      });
+      expect(lines[0]).not.toContain("installation-secret");
+    } finally { log.mockRestore(); }
+  });
+
+  it("serves a github connector declared in integrations.connectors", async () => {
+    const credentials = vi.fn(async () => ({ owner: "example", repo: "demo", token: "installation-secret" }));
+    const invoke = vi.fn(async () => ({ content: [{ type: "text", text: "GitHub result" }] }));
+    const connect = vi.fn(async () => ({
+      tools: [{ name: "list_issues", description: "Native list_issues", inputSchema: {
+        type: "object", properties: { owner: { type: "string" }, repo: { type: "string" } }, required: ["owner", "repo"],
+      } }], call: invoke, close: async () => undefined,
+    }));
+    const { db, handler } = createBroker({ githubMcp: { credentials, connect } });
+    await registerProjectAndBind(handler, { connectors: [{ name: "github", type: "github", scopes: ["demo"], tools: [{ name: "list_issues", access: "read" }] }] });
+    const resolved = await ensureWorkspace(handler, threadOne, pratik);
+    expect(resolved.body.githubMcpRepositories).toEqual(["demo"]);
+    const workspaceId = resolved.body.workspaceId as string;
+    markReady(db, workspaceId);
+    const service = { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik };
+    const path = `/v1/service/workspaces/${workspaceId}/github`;
+    const catalog = await call(handler, { method: "GET", path: `${path}/tools?repository=demo`, service });
+    const tool = GitHubMcpCatalogSchema.parse(catalog.body.catalog).tools[0]!;
+    const request = { requestId: randomUUID(), repository: "demo", tool: "list_issues", schemaHash: tool.schemaHash, arguments: {} };
+    expect((await call(handler, { method: "POST", path: `${path}/call`, service, body: request })).body.result).toMatchObject({ status: "SUCCEEDED" });
+    expect(db.get(`WORKSPACE#${workspaceId}`, `GITHUB_MCP#${request.requestId}`)).toMatchObject({ connector: "github" });
+  });
+
+  it("reuses a revision's discovered catalog and rediscovers after a new revision or a vendor schema change", async () => {
+    const credentials = vi.fn(async () => ({ owner: "example", repo: "demo", token: "installation-secret" }));
+    const invoke = vi.fn(async () => ({ content: [{ type: "text", text: "GitHub result" }] }));
+    let description = "Native list_issues";
+    const connect = vi.fn(async () => ({
+      tools: [{ name: "list_issues", description, inputSchema: {
+        type: "object", properties: { owner: { type: "string" }, repo: { type: "string" } }, required: ["owner", "repo"],
+      } }], call: invoke, close: async () => undefined,
+    }));
+    const { db, handler } = createBroker({ githubMcp: { credentials, connect } });
+    const integrations = { connectors: [{ name: "github", type: "github", scopes: "all-repositories", tools: [{ name: "list_issues", access: "read" }] }] };
+    await registerProjectAndBind(handler, integrations);
+    const workspaceId = (await ensureWorkspace(handler, threadOne, pratik)).body.workspaceId as string;
+    markReady(db, workspaceId);
+    const service = { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik };
+    const path = `/v1/service/workspaces/${workspaceId}/github`;
+    const discover = () => call(handler, { method: "GET", path: `${path}/tools?repository=demo`, service });
+    const first = await discover();
+    await discover();
+    expect(connect).toHaveBeenCalledTimes(1);
+    await registerRevision(handler, 2, integrations);
+    await discover();
+    expect(connect).toHaveBeenCalledTimes(2);
+    invoke.mockResolvedValueOnce({ isError: true, content: [{ type: "text", text: "upstream failure" }] } as never);
+    const tool = GitHubMcpCatalogSchema.parse(first.body.catalog).tools[0]!;
+    const failed = await call(handler, { method: "POST", path: `${path}/call`, service, body: { requestId: randomUUID(), repository: "demo", tool: "list_issues", schemaHash: tool.schemaHash, arguments: {} } });
+    expect(failed.body.result).toMatchObject({ status: "FAILED" });
+    // A vendor error is not a definition change, so the cached catalog stays.
+    const callsAfterFailure = connect.mock.calls.length;
+    await discover();
+    expect(connect).toHaveBeenCalledTimes(callsAfterFailure);
+    // A changed vendor definition fails the call and forces the next discovery to the vendor.
+    description = "Changed list_issues";
+    const changed = await call(handler, { method: "POST", path: `${path}/call`, service, body: { requestId: randomUUID(), repository: "demo", tool: "list_issues", schemaHash: tool.schemaHash, arguments: {} } });
+    expect(changed.body.result).toMatchObject({ status: "FAILED" });
+    expect((changed.body.result as { text: string }).text).toContain("definition changed");
+    const callsAfterChange = connect.mock.calls.length;
+    await discover();
+    expect(connect).toHaveBeenCalledTimes(callsAfterChange + 1);
+  });
+
   it("discovers and executes within the thread, audits the requester and never repeats a write", async () => {
     const credentials = vi.fn(async () => ({ owner: "example", repo: "demo", token: "installation-secret" }));
     const invoke = vi.fn(async () => ({ content: [{ type: "text", text: "GitHub result" }] }));
