@@ -29,8 +29,13 @@ export async function runTaskInvocation(
 
   const events = new EventBatcher(dependencies.eventSink);
   const toolEvidence: unknown[] = [];
+  const contextDiagnostics: string[] = [];
   const session = await createWorkspacePiSession(
-    { rootPath: dependencies.rootPath, model: dependencies.model },
+    {
+      rootPath: dependencies.rootPath,
+      model: dependencies.model,
+      onDiagnostic: (message) => contextDiagnostics.push(message),
+    },
     dependencies.piAdapter,
   );
   const unregisterCancellation = dependencies.cancellationController?.register(invocation.operationId, session);
@@ -40,6 +45,7 @@ export async function runTaskInvocation(
   });
   try {
     await events.append("lifecycle", { status: "RUNNING", conversationId: session.conversationId });
+    for (const message of contextDiagnostics) await events.append("progress", { message });
     await session.prompt(invocation.payload.prompt);
     await publishWorkspaceDiff(dependencies.rootPath, dependencies.artifactSink);
     await dependencies.artifactSink({
