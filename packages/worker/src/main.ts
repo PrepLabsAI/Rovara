@@ -9,6 +9,7 @@ import { maintainPullRequest } from "./maintain-pull-request.js";
 import { WorkerCancellationController } from "./cancel.js";
 import { inspectWorkspaceForClose } from "./close-workspace.js";
 import { createWorkerServerState, startWorkerServer } from "./server.js";
+import { effectiveCacheRetention } from "./usage.js";
 
 const rootPath = process.env.AGENTX_WORKSPACE_ROOT ?? "/mnt/workspace";
 const port = Number.parseInt(process.env.PORT ?? "8080", 10);
@@ -45,6 +46,7 @@ const state = createWorkerServerState(
             provider: requiredEnvironment("AGENTX_MODEL_PROVIDER"),
             modelId: requiredEnvironment("AGENTX_MODEL_ID"),
             thinkingLevel: "medium",
+            cacheRetention: effectiveCacheRetention(process.env.PI_CACHE_RETENTION),
           },
           ...callbacks,
           cancellationController,

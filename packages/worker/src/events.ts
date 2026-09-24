@@ -1,5 +1,5 @@
 export interface WorkerEvent {
-  type: "progress" | "tool_start" | "tool_end" | "result" | "error" | "lifecycle";
+  type: "progress" | "tool_start" | "tool_end" | "result" | "error" | "lifecycle" | "usage";
   timestamp: string;
   payload: unknown;
 }
@@ -48,9 +48,18 @@ export function redactCredentials(value: unknown): unknown {
     return Object.fromEntries(
       Object.entries(value).map(([key, child]) => [
         key,
-        /token|secret|password|authorization|credential/i.test(key) ? "[REDACTED]" : redactCredentials(child),
+        isCredentialKey(key, child) ? "[REDACTED]" : redactCredentials(child),
       ]),
     );
   }
   return value;
+}
+
+function isCredentialKey(key: string, value: unknown): boolean {
+  // `tokens` is safe only for the numeric usage shape; singular and qualified token keys remain secrets.
+  if (
+    key.toLowerCase() === "tokens" && value && typeof value === "object" && !Array.isArray(value) &&
+    Object.values(value).every((entry) => typeof entry === "number" && Number.isFinite(entry))
+  ) return false;
+  return /token|secret|password|authorization|credential/i.test(key);
 }

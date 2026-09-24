@@ -46,6 +46,13 @@ workspace path. The files are read again for every task, so an edited one applie
 task. A file that resolves outside its repository or exceeds 64 KiB is skipped and reported as a
 progress event.
 
+Every remote coding task also publishes a redacted `usage` operation event and private
+`usage.json` artifact. They record the task outcome, actual Pi provider and model, prompt-cache
+retention mode, input/output/cache token counts, cache-read ratio, and Pi's estimated cost. The
+production runtime exposes `PromptCacheRetention` as a CloudFormation parameter with `short` and
+`long` values; it defaults to `long` so Bedrock cache entries can survive normal gaps between
+Slack turns. Demo runtimes retain Pi's `short` fallback.
+
 Both roles currently use `@earendil-works/pi-coding-agent` 0.85.1. GitHub Spec Kit supplies the
 specification workflow and demo repository; it is not the coding-agent runtime.
 

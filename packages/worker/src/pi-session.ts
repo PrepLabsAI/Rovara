@@ -5,6 +5,7 @@ import {
   DefaultResourceLoader,
   ModelRuntime,
   SessionManager,
+  type SessionStats,
 } from "@earendil-works/pi-coding-agent";
 import { amazonBedrockProvider } from "@earendil-works/pi-ai/providers/amazon-bedrock";
 import { agentXError } from "@agentx/contracts";
@@ -14,6 +15,7 @@ import {
   readPreparedRepositories,
   type RepositoryContextFile,
 } from "./repository-context.js";
+import type { PiCacheRetention } from "./usage.js";
 
 export type PiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
@@ -21,6 +23,7 @@ export interface WorkspaceModelConfiguration {
   provider: string;
   modelId: string;
   thinkingLevel?: PiThinkingLevel;
+  cacheRetention?: PiCacheRetention;
 }
 
 export interface PiSessionHandle {
@@ -28,6 +31,8 @@ export interface PiSessionHandle {
   sessionFile: string;
   prompt(text: string): Promise<void>;
   abort(): Promise<void>;
+  getModel(): { provider: string; modelId: string };
+  getSessionStats(): SessionStats;
   subscribe(listener: (event: unknown) => void): () => void;
   dispose(): void;
 }
@@ -159,6 +164,11 @@ async function createDefaultSession(
       sessionFile,
       prompt: async (text) => session.prompt(text, { expandPromptTemplates: false }),
       abort: async () => session.abort(),
+      getModel: () => ({
+        provider: session.model?.provider ?? input.model.provider,
+        modelId: session.model?.id ?? input.model.modelId,
+      }),
+      getSessionStats: () => session.getSessionStats(),
       subscribe: (listener) => session.subscribe((event) => listener(event)),
       dispose: () => session.dispose(),
     };

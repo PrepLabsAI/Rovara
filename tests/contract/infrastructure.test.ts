@@ -290,6 +290,11 @@ describe("AgentCore Instances infrastructure", () => {
     template.resourceCountIs("AWS::BedrockAgentCore::CapacityProvider", 0);
     template.resourceCountIs("AWS::EC2::VPC", 0);
     template.resourceCountIs("AWS::BedrockAgentCore::Runtime", 1);
+    template.hasParameter("PromptCacheRetention", {
+      Type: "String",
+      Default: "long",
+      AllowedValues: ["short", "long"],
+    });
     template.hasResourceProperties("AWS::BedrockAgentCore::Runtime", {
       AgentRuntimeName: "agentx_production_worker",
       CapacityProviderConfiguration: { CapacityProviderArn: { Ref: "CapacityProviderArn" } },
@@ -305,6 +310,7 @@ describe("AgentCore Instances infrastructure", () => {
         AGENTX_CONTROL_PLANE_URL: { Ref: "ControlPlaneUrl" },
         AGENTX_MODEL_PROVIDER: { Ref: "ModelProvider" },
         AGENTX_MODEL_ID: { Ref: "ModelId" },
+        PI_CACHE_RETENTION: { Ref: "PromptCacheRetention" },
       },
       NetworkConfiguration: Match.absent(),
     });
