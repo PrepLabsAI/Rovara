@@ -178,6 +178,36 @@ Calls use its IAM service identity and carry the requesting Slack user; tokens r
 Use a new thread after binding the channel to an enabled revision. Existing threads retain their
 workspace revision.
 
+#### Connector credentials
+
+Connectors other than GitHub read their credential from an AWS Secrets Manager secret named
+`agentx/connectors/<name>`, registered once with the control plane:
+
+```sh
+aws secretsmanager create-secret --name agentx/connectors/linear-payments \
+  --secret-string '{"clientId":"...","clientSecret":"...","scopes":["read","write"]}'
+
+agentx admin credential register --ref linear-payments \
+  --type oauth-client-credentials --secret agentx/connectors/linear-payments
+agentx admin credential list
+```
+
+A secret is one of two shapes: `static-secret` is `{"apiKey": "..."}`; `oauth-client-credentials`
+is `{"clientId", "clientSecret", "scopes": [...]}`. Registration reads the secret and checks its
+shape but never echoes it back, and `list` never prints a secret value, only each reference, its
+type, secret name, whether it is the built-in GitHub App entry, and whether a token is cached. No
+connector type reads a registered credential yet; Linear is the first, in a later release.
+
+Registering a project revision can ask the control plane to check each connector with its vendor
+by sending `preflight: true` in the registration body (the current administration client always
+does). Preflight never blocks registration on that check failing: it reports which approved tools
+the vendor actually offers, which it could not present, and whether the connector is connected.
+It runs only when asked, so an older administration client, or an existing test, never makes a
+vendor call at registration. Separately, and regardless of preflight, a project that could expose
+more than 40 tools to the model (six built-in plus every connector approval) refuses registration;
+above 20 tools it registers with a warning, because the model's tool choice gets less reliable
+past that point.
+
 #### One-time administrator setup
 
 The production release creates the Slack ingress route, queue, and thread storage in
@@ -321,6 +351,10 @@ installed on a scoped repository, still arrive as `RUNTIME_UNAVAILABLE` and are 
 The broker logs `connector.attribution_dropped` (project, revision, connector, scope, tool and
 request ID, never the request's text) when a write went out without its attribution footer because
 the signed arguments would have broken the vendor's schema, for example a `body` length limit.
+`connector.not_connected` means a connector's credential is missing or was rejected by its vendor;
+the connector reports itself not connected instead of failing the call. `connector.token_cache_failed`
+means a shared token-cache read, write or delete failed; it names the operation and the error's
+class name, never the token, and the provider simply mints again.
 
 If the orchestrator's turn fails, AgentX posts the failure in the thread. Other failures, such as
 workspace preparation or a Slack API error, are retried; on the fifth attempt AgentX posts the
