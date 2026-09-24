@@ -6,6 +6,7 @@ import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import type { GitHubMcpDependencies } from "../../packages/broker/src/github-mcp.js";
 import { GitHubMcpCatalogSchema, GitHubMcpResultSchema } from "../../packages/contracts/src/github-mcp.js";
 import { ConnectorCatalogSchema } from "../../packages/contracts/src/connectors.js";
+import { createSignedServiceFetch } from "../../packages/slack-service/src/signing-fetch.js";
 
 const issuer = "https://identity.example.test";
 const account = "111122223333";
@@ -289,6 +290,42 @@ describe("hosted Slack GitHub MCP", () => {
     await call(handler, { method: "POST", path: `${path}/call`, service,
       body: { requestId: randomUUID(), scope: "demo", tool: "issue_write", schemaHash: catalogOff.tools[0]!.scopes[0]!.schemaHash, arguments: { title: "Bug", body: "Steps" } } });
     expect(invoke).toHaveBeenLastCalledWith("issue_write", expect.objectContaining({ body: "Steps" }));
+  });
+
+  it("carries an emoji ZWJ sequence intact from the Slack service's signed header into the footer", async () => {
+    const credentials = vi.fn(async () => ({ owner: "example", repo: "demo", token: "installation-secret" }));
+    const invoke = vi.fn(async () => ({ content: [{ type: "text", text: "created" }] }));
+    const connect = vi.fn(async () => ({
+      tools: [{ name: "issue_write", description: "Create an issue", inputSchema: { type: "object", properties: {
+        owner: { type: "string" }, repo: { type: "string" }, title: { type: "string" }, body: { type: "string" },
+      }, required: ["owner", "repo", "title"] } }], call: invoke, close: async () => undefined,
+    }));
+    const { db, handler } = createBroker({ githubMcp: { credentials, connect } });
+    await registerProjectAndBind(handler, { connectors: [{ name: "github", type: "github", scopes: "all-repositories", tools: [{ name: "issue_write", access: "write" }] }] });
+    const workspaceId = (await ensureWorkspace(handler, threadOne, pratik)).body.workspaceId as string;
+    markReady(db, workspaceId);
+    const service = { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik };
+    const path = `/v1/service/workspaces/${workspaceId}/connectors/github`;
+    const catalog = ConnectorCatalogSchema.parse((await call(handler, { method: "GET", path: `${path}/tools`, service })).body.catalog);
+    const threadUrl = `https://slack.com/archives/${threadOne.split("/")[1]}/p${threadOne.split("/")[2]!.replace(".", "")}`;
+    const [teamId, channelId, threadTs] = threadOne.split("/") as [string, string, string];
+    const sign = async (userName: string) => {
+      const baseFetch = vi.fn<typeof fetch>(async () => Response.json({}));
+      await createSignedServiceFetch({ region: "us-east-1", credentials: { accessKeyId: "k", secretAccessKey: "s" }, thread: { teamId, channelId, threadTs }, userId: pratik, userName, baseFetch })(
+        "https://agentx.example.test/v1/threads/workspace", { method: "POST", body: "{}" });
+      return new Headers(baseFetch.mock.lastCall?.[1]?.headers).get("x-agentx-slack-user-name")!;
+    };
+    const write = async (userName: string) => call(handler, { method: "POST", path: `${path}/call`, service,
+      headers: { "x-agentx-slack-user-name": await sign(userName) },
+      body: { requestId: randomUUID(), scope: "demo", tool: "issue_write", schemaHash: catalog.tools[0]!.scopes[0]!.schemaHash, arguments: { title: "Bug", body: "Steps" } } });
+    const family = "\u{1F468}\u200D\u{1F469}\u200D\u{1F467} Family";
+    await write(family);
+    expect(invoke).toHaveBeenLastCalledWith("issue_write", expect.objectContaining({ body: `Steps\n\n—\nRequested by \`${family}\` via AgentX · ${threadUrl}` }));
+    // The broker applies the same rule to a header that skipped the Slack service's cleanup.
+    await call(handler, { method: "POST", path: `${path}/call`, service,
+      headers: { "x-agentx-slack-user-name": encodeURIComponent(`${family}\u202E\u200Bx`) },
+      body: { requestId: randomUUID(), scope: "demo", tool: "issue_write", schemaHash: catalog.tools[0]!.scopes[0]!.schemaHash, arguments: { title: "Bug", body: "Steps" } } });
+    expect(invoke).toHaveBeenLastCalledWith("issue_write", expect.objectContaining({ body: `Steps\n\n—\nRequested by \`${family} x\` via AgentX · ${threadUrl}` }));
   });
 
   it("ignores a deployment-level attribution when the connector turns attribution off, on both GitHub routes", async () => {

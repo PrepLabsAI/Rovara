@@ -22,6 +22,16 @@ describe("signed service fetch", () => {
     expect(decodeURIComponent(new Headers(baseFetch.mock.calls[0]?.[1]?.headers).get("x-agentx-slack-user-name")!)).toBe("a".repeat(79) + "😀");
   });
 
+  it("keeps an emoji ZWJ sequence intact while still removing bidi and zero-width format characters", async () => {
+    const baseFetch = vi.fn<typeof fetch>(async () => Response.json({}));
+    const send = (userName: string) => createSignedServiceFetch({ region: "us-east-1", credentials, thread, userId: "U0123456789", userName, baseFetch })("https://agentx.example.test/v1/threads/workspace", { method: "POST", body: "{}" });
+    const sent = () => decodeURIComponent(new Headers(baseFetch.mock.lastCall?.[1]?.headers).get("x-agentx-slack-user-name")!);
+    await send("\u{1F468}\u200D\u{1F469}\u200D\u{1F467} Family");
+    expect(sent()).toBe("\u{1F468}\u200D\u{1F469}\u200D\u{1F467} Family");
+    await send("a\u200Bb\u200Ec\u200Fd\u202Ae\u202Ef\u2066g\u2069h\uFEFFi");
+    expect(sent()).toBe("a b c d e f g h i");
+  });
+
   it("omits the display name instead of failing when it cannot be encoded", async () => {
     const baseFetch = vi.fn<typeof fetch>(async () => Response.json({}));
     const response = await createSignedServiceFetch({ region: "us-east-1", credentials, thread, userId: "U0123456789", userName: "bad\uD800name", baseFetch })("https://agentx.example.test/v1/threads/workspace", { method: "POST", body: "{}" });
