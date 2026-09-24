@@ -16,6 +16,8 @@ export const ORCHESTRATION_TOOL_NAMES = [
 export const RECOVERY_TOOL_NAMES = ["agentx_task_status", "agentx_task_result"] as const;
 
 /** Retired in feature 013; kept so the orchestrator can tell the model the new name for one release. */
+// TODO(2026-09-24): remove this map and the retired-names prompt line in orchestrator.ts one release
+// after feature 013 ships.
 export const RETIRED_PULL_REQUEST_TOOLS = {
   agentx_update_pull_request: "edit",
   agentx_append_pull_request: "append",

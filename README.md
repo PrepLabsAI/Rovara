@@ -165,9 +165,10 @@ worker.
 See [GitHub MCP setup and policy example](specs/007-github-mcp/quickstart.md). The policy can be
 written as `integrations.githubMcp` or, since feature 013, as a `github` entry in
 `integrations.connectors`, which can also limit it to named repositories; a definition may use one
-form, not both. Every GitHub write signs its `body` with a footer naming the requesting Slack
-member and thread; set `attribution: false` on the connector entry to turn it off (the legacy
-`githubMcp` form always signs). This release uses
+form, not both. Every GitHub write signs the `body` the model supplies (an update without a body
+stays unsigned) with a footer naming the requesting Slack member and thread; set
+`attribution: false` on the connector entry to turn it off (the legacy `githubMcp` form always
+signs). This release uses
 the existing GitHub App installation with repository-scoped **Issues** permissions. Tokens stay
 in the control plane. Existing projects remain disabled until an administrator registers an
 opt-in revision. Arbitrary endpoints, personal OAuth, and other GitHub permission families are
