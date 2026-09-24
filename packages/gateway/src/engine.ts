@@ -99,9 +99,13 @@ export interface EngineOptions {
   onAttributionDropped?: (tool: string) => void;
 }
 
-/** Signs a write without ever creating a body: an absent body on an update means "leave it unchanged". */
+/**
+ * Signs a write without ever creating a body: an absent body on an update means "leave it unchanged".
+ * Only a value the model wrote is signed; one the binder supplied is left as the server set it.
+ */
 function withAttribution(
   args: Record<string, unknown>,
+  modelArgs: Record<string, unknown>,
   attribution: string | undefined,
   schema: Record<string, unknown>,
   keys: readonly string[] = ["body", "description"],
@@ -111,7 +115,7 @@ function withAttribution(
   const footer = `\n\n—\n${attribution}`;
   for (const key of keys) {
     const value = args[key];
-    if (typeof value !== "string" || !Object.hasOwn(properties, key)) continue;
+    if (typeof value !== "string" || !Object.hasOwn(properties, key) || modelArgs[key] !== value) continue;
     // A model that echoes a previously signed body must not stack a second identical footer.
     return value.endsWith(footer) ? args : { ...args, [key]: `${value}${footer}` };
   }
@@ -199,7 +203,7 @@ export async function executeTool<Scope>(
     if (!validateUpstream(unsigned).valid) throw new PolicyFailure("Arguments do not match the upstream MCP tool schema.");
     // The footer is best effort: when it would break the vendor's schema (a body maxLength, say),
     // the model's own arguments go through unsigned rather than the write failing.
-    const signed = withAttribution(unsigned, write ? options.attribution : undefined, upstream.inputSchema, connector.attributionKeys);
+    const signed = withAttribution(unsigned, request.arguments, write ? options.attribution : undefined, upstream.inputSchema, connector.attributionKeys);
     const dropped = signed !== unsigned && !validateUpstream(signed).valid;
     const args = dropped ? unsigned : signed;
     for (const guard of connector.guards) await guard.check({ tool: request.tool, arguments: request.arguments, bound, connection });

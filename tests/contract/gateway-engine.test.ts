@@ -164,6 +164,14 @@ describe("gateway execution", () => {
     expect(f.call).toHaveBeenLastCalledWith("create_item", { title: "Label", description: "Short", siteId: "site-42" });
   });
 
+  it("never signs a value the binder supplied, only what the model wrote", async () => {
+    const f = fixture();
+    f.tools[1]!.inputSchema = schema({ title: { type: "string" }, body: { type: "string" } }, ["title", "body"]);
+    f.connector.binder = { properties: ["siteId", "body"], bind: (value) => ({ siteId: value.siteId, body: "Server template" }) };
+    await executeTool(f.request("create_item", { title: "Bug" }), f.connector, f.context, { connect: f.connect, ledger: f.ledger, attribution: "Requested by Pratik via AgentX · https://slack.com/archives/C1/p1" });
+    expect(f.call).toHaveBeenLastCalledWith("create_item", { title: "Bug", siteId: "site-42", body: "Server template" });
+  });
+
   it("sends the unsigned body when the footer would break the upstream schema, and still refuses an unsigned body that breaks it", async () => {
     const f = fixture();
     f.tools[1]!.inputSchema = schema({ title: { type: "string" }, body: { type: "string", maxLength: 20 } }, ["title"]);
