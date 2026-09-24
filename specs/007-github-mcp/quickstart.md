@@ -23,6 +23,21 @@ integrations:
         access: write
 ```
 
+The same policy can be declared as a connector (feature 013), which can also limit it to some
+repositories. Use one form or the other; a definition with both is refused.
+
+```yaml
+integrations:
+  connectors:
+    - name: github
+      type: github
+      scopes: all-repositories      # or a list of registered repository names, e.g. [personal-website]
+      tools:
+        - name: list_issues
+          access: read
+        # …the same approvals as above
+```
+
 3. Enabled repositories must use the deployment's GitHub App credentialRef/account. The installed
    app needs Issues read/write access. Approve expanded installation permissions if needed.
 4. Merge the correction and wait for the automatic production release to update both the broker

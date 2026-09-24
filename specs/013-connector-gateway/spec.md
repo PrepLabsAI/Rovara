@@ -210,12 +210,16 @@ turn with the fields below; inject schema drift and verify the metric and alarm 
   preflight; it MUST NOT be skipped silently.
 - **FR-008**: Discovery results MUST be cached per project revision and connector for 10 minutes.
   Execution MUST still compare the schema hash against the definition fetched on the connection
-  used for the call.
+  used for the call. The cache is held in memory per broker container, and a failed call
+  invalidates its entry.
 
 **Configuration and credentials**
 
 - **FR-009**: The project definition MUST accept `integrations.connectors`, a list of connectors
-  each with a unique `name`, a `type`, a `credentialRef`, `scopes` and approved `tools`.
+  each with a unique `name`, a `type`, a `credentialRef`, `scopes` and approved `tools`. A `github`
+  connector has no `credentialRef`; it uses each scoped repository's GitHub App reference, and its
+  scopes are `all-repositories` or repository names. Types other than `github` are refused until
+  their phases add them.
 - **FR-010**: A stored or submitted definition carrying `integrations.githubMcp` MUST be read as a
   single `github` connector over all registered repositories. A definition carrying both keys MUST
   be refused.
@@ -283,8 +287,9 @@ turn with the fields below; inject schema drift and verify the metric and alarm 
 - **FR-030**: `/v1/workspaces/{id}/github/tools` and `/github/call` MUST remain as aliases of the
   `github` connector routes for one release. The thread workspace response MUST keep
   `githubMcpRepositories` for clients that request it and add `connectors`.
-- **FR-031**: The feature 007 ledger records MUST remain readable; new records use
-  `CONNECTOR#<name>#<requestId>`, and the `github` connector MUST also look up the legacy key.
+- **FR-031**: The GitHub connector MUST keep writing feature 007 ledger records under
+  `GITHUB_MCP#<requestId>`; other connector types write `CONNECTOR#<name>#<requestId>`. Keeping the
+  GitHub key avoids a cross-key race with a broker from before the release.
 - **FR-032**: The repository MUST contain a deterministic presentation snapshot test and a model
   replay evaluation (`npm run eval`) with committed cases and baseline, described in
   [contracts/evaluation.md](contracts/evaluation.md).
@@ -338,6 +343,9 @@ turn with the fields below; inject schema drift and verify the metric and alarm 
 - **Turn records keep request text, response text and arguments for 30 days.** They are the raw
   material for evaluation cases. This supersedes the README statement that request and response
   text are never logged; CloudWatch logs still never carry them. Decided 2026-09-24.
+- **Connector routes and workspace-resolution fields ship with the presentation in phase 2**, their
+  only consumer. Phase 1b generalizes configuration, schemas, ledger and caching behind the existing
+  `/github/` routes. Decided 2026-09-24.
 - **Asana is deferred.** Its hosted MCP server documents interactive OAuth only. It will arrive as
   an `oauth-refresh-token` provider for an administrator-authorized bot user, or with per-user
   identity. Decided 2026-09-24.

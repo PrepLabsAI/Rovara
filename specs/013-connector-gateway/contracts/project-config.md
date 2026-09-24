@@ -18,9 +18,8 @@ orchestratorInstructions: Delegate every repository read, edit, build and test t
 integrations:
   connectors:
     - name: github
-      type: github
-      credentialRef: github-agentx-sdlc
-      scopes: all-repositories
+      type: github                 # uses each repository's GitHub App credentialRef
+      scopes: all-repositories     # or a list of registered repository names
       tools:
         - name: list_issues
           access: read
@@ -60,6 +59,8 @@ integrations:
 | Condition | Result |
 |---|---|
 | Both `githubMcp` and `connectors` | Refused, naming both keys |
+| Connector type other than `github` (until phases 5–6) | Refused |
+| GitHub scope naming an unregistered repository | Refused, naming it |
 | Unknown `type` or `identity` other than `service` | Refused |
 | `credentialRef` not in the registry | Refused, naming the reference |
 | Presented name longer than 64 characters | Refused, naming the tool |

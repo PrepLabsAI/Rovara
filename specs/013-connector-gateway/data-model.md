@@ -7,8 +7,8 @@ Part of the immutable registered revision under `integrations.connectors` (1..8 
 | Field | Type | Rules |
 |---|---|---|
 | `name` | string | `^[a-z][a-z0-9-]{0,19}$`, unique in the project; becomes the tool prefix |
-| `type` | enum | `github`, `linear`, `jira`; unknown types refuse registration |
-| `credentialRef` | string | Resolves through the credential registry |
+| `type` | enum | `github` (phase 1b), `linear` (phase 5), `jira` (phase 6); others refuse registration |
+| `credentialRef` | string | Resolves through the credential registry; absent for `github`, which uses each repository's GitHub App reference |
 | `identity` | enum | `service` (default, only value accepted in v1) |
 | `attribution` | boolean | Default `true` |
 | `scopes` | list or `all-repositories` | 1..32 scopes; `all-repositories` only for `github` |
@@ -17,8 +17,8 @@ Part of the immutable registered revision under `integrations.connectors` (1..8 
 **Scope** — `{ alias, ...bindings }`. `alias` follows the AgentX name pattern and is unique per
 connector. Bindings by type:
 
-- `github`: `repository` (a registered repository name). `all-repositories` expands to one scope per
-  registered repository, aliased by repository name.
+- `github`: `scopes` is `all-repositories` or a list of registered repository names; each
+  repository is a scope aliased by its name. A name that is not registered refuses registration.
 - `linear`: `teamId` (Linear team UUID).
 - `jira`: `cloudId` (Atlassian site UUID), `projectKey` (optional, `^[A-Z][A-Z0-9_]{1,9}$`).
 
@@ -34,7 +34,8 @@ connector. Bindings by type:
 | `examples` | object[] | Optional, at most 3, each valid against the narrowed schema |
 
 **Legacy** — `integrations.githubMcp` reads as
-`{ name: "github", type: "github", credentialRef: <the repositories' GitHub App ref>, scopes: "all-repositories", tools: <policy tools> }`.
+`{ name: "github", type: "github", scopes: "all-repositories", tools: <policy tools> }` (resolved by
+`githubConnectorOf`).
 Both keys together refuse registration.
 
 ## Credential record (control-plane state)
@@ -59,7 +60,8 @@ The built-in `github-app` entry is synthesized from the existing `GitHubApp*` st
 
 ## Catalog entry (cached, not durable)
 
-`pk = CATALOG#<project>#<revision>`, `sk = CONNECTOR#<name>`, TTL 10 minutes.
+Held in memory per broker container, keyed by project, revision, connector and scope; 10-minute
+time-to-live, at most 256 entries; a failed call deletes its entry.
 
 | Field | Notes |
 |---|---|
@@ -73,11 +75,12 @@ The built-in `github-app` entry is synthesized from the existing `GitHubApp*` st
 
 ## Invocation (ledger)
 
-Feature 007 record, generalized. New key `pk = WORKSPACE#<workspaceId>`,
-`sk = CONNECTOR#<name>#<requestId>`. Adds `connector` and `connectorType`. Status set unchanged:
+Feature 007 record, generalized. Key `pk = WORKSPACE#<workspaceId>`,
+`sk = CONNECTOR#<name>#<requestId>` (`entityType` `CONNECTOR_INVOCATION`), except the `github`
+connector, which keeps `sk = GITHUB_MCP#<requestId>` and `entityType` `GITHUB_MCP_INVOCATION`.
+Adds `connector`. Status set unchanged:
 `IN_PROGRESS`, `SUCCEEDED`, `FAILED`, `UNKNOWN`. `FAILED` results may carry
-`reason: not_connected | policy_denied | schema_changed | vendor_error`. The `github` connector
-reads `GITHUB_MCP#<requestId>` when the new key is absent.
+`reason: not_connected | policy_denied | schema_changed | vendor_error`.
 
 ## Workspace resolution additions
 
