@@ -476,15 +476,22 @@ async function authorizeGitHubConnector(dependencies: AwsBrokerDependencies, ide
 type GitHubConnector = NonNullable<ReturnType<typeof githubConnectorOf>>;
 type GitHubRepository = GitHubConnector["repositories"][number];
 
-/** A name that cannot mention anyone or form a Markdown link or code span in the vendor's renderer. */
+/**
+ * Text as a GFM code span, which GitHub renders literally: no mention, link, autolink, HTML or
+ * issue reference. Per CommonMark the fence is one backtick longer than the text's longest
+ * backtick run, padded with a space when the text starts or ends with a backtick.
+ */
 function inertName(name: string): string {
-  return name.replace(/@/g, "@\u200B").replace(/[[\]`]/g, (character) => `\\${character}`);
+  const longestRun = Math.max(0, ...(name.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = "`".repeat(longestRun + 1);
+  const pad = name.startsWith("`") || name.endsWith("`") ? " " : "";
+  return `${fence}${pad}${name}${pad}${fence}`;
 }
 
 function attributionText(identity: AuthenticatedIdentity, github: GitHubConnector): string | undefined {
   if (!github.attribution || !identity.slack) return undefined;
   const name = identity.slack.requesterName;
-  const who = name === undefined ? `Slack member ${identity.slack.requester.userId}` : inertName(name);
+  const who = inertName(name ?? `Slack member ${identity.slack.requester.userId}`);
   return `Requested by ${who} via AgentX · ${slackThreadUrl(identity.slack.thread)}`;
 }
 

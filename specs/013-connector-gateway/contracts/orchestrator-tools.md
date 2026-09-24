@@ -136,7 +136,7 @@ present as a string in the model's arguments, and only for write tools:
 ```text
 
 —
-Requested by Pratik Singhal via AgentX · https://slack.com/archives/C…/p…
+Requested by `Pratik Singhal` via AgentX · https://slack.com/archives/C…/p…
 ```
 
 Rules:
@@ -151,13 +151,14 @@ Rules:
   `githubMcp`-form projects default to on and cannot turn it off.
 - The requester name comes from Slack `users.info` (optional `users:read` bot scope), looked up
   with a 2-second timeout and cached 1 hour on success / 5 minutes on failure. When the name is
-  unavailable (no scope, timeout, or lookup failure) the footer reads `Requested by Slack member
-  <user ID> via AgentX · …` instead.
+  unavailable (no scope, timeout, or lookup failure) the footer reads ``Requested by `Slack member
+  <user ID>` via AgentX · …`` instead.
 - The name is sanitized before it reaches the footer: percent-decoded, control/format characters
   turned into spaces, whitespace collapsed and trimmed, truncated to 80 Unicode code points without
-  splitting a surrogate pair, and — as a last defense against the footer authoring a mention or
-  Markdown — every `@` is followed by a zero-width space and every `[`, `]` and `` ` `` is
-  backslash-escaped.
+  splitting a surrogate pair. The name (or the member-ID fallback) is then rendered as a GFM code
+  span, so GitHub shows it literally — no mention, link, bare-URL autolink, HTML or `#1`/`GH-2`
+  issue reference. Per CommonMark the fence is one backtick longer than the longest backtick run
+  in the name, padded with a space when the name starts or ends with a backtick.
 
 ### Known limitation: connector-level attribution keys
 

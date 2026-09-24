@@ -217,7 +217,7 @@ function markReady(db: FakeDynamoDb, workspaceId: string): void {
 }
 
 describe("hosted Slack GitHub MCP", () => {
-  it("keeps long non-Latin names, defuses mentions and links, and never signs a GitHub description", async () => {
+  it("keeps long non-Latin names, renders every name as an inert code span, and never signs a GitHub description", async () => {
     const credentials = vi.fn(async () => ({ owner: "example", repo: "demo", token: "installation-secret" }));
     const invoke = vi.fn(async () => ({ content: [{ type: "text", text: "created" }] }));
     const connect = vi.fn(async () => ({
@@ -238,9 +238,22 @@ describe("hosted Slack GitHub MCP", () => {
       body: { requestId: randomUUID(), scope: "demo", tool: "issue_write", schemaHash, arguments: args } });
     const threadUrl = `https://slack.com/archives/${threadOne.split("/")[1]}/p${threadOne.split("/")[2]!.replace(".", "")}`;
     await write({ title: "Bug", body: "Steps" }, "क".repeat(80));
-    expect(invoke).toHaveBeenLastCalledWith("issue_write", expect.objectContaining({ body: `Steps\n\n—\nRequested by ${"क".repeat(80)} via AgentX · ${threadUrl}` }));
-    await write({ title: "Bug", body: "Steps" }, "@org/security [x](https://e.test) `code`");
-    expect(invoke).toHaveBeenLastCalledWith("issue_write", expect.objectContaining({ body: `Steps\n\n—\nRequested by @\u200Borg/security \\[x\\](https://e.test) \\\`code\\\` via AgentX · ${threadUrl}` }));
+    expect(invoke).toHaveBeenLastCalledWith("issue_write", expect.objectContaining({ body: `Steps\n\n—\nRequested by \`${"क".repeat(80)}\` via AgentX · ${threadUrl}` }));
+    // Each name is rendered only inside a code span, so GitHub shows it literally: no mention,
+    // link, autolink, HTML or issue reference. The fence is one backtick longer than the name's
+    // longest backtick run, padded with a space when the name starts or ends with a backtick.
+    const signed: Array<[string, string]> = [
+      ["@org/security [x](https://e.test) `code`", "`` @org/security [x](https://e.test) `code` ``"],
+      ["https://evil.example/login www.evil.example", "`https://evil.example/login www.evil.example`"],
+      ["fixes #1 and GH-2", "`fixes #1 and GH-2`"],
+      ["<img src=\"https://t.example/p.gif\"> Bob", "`<img src=\"https://t.example/p.gif\"> Bob`"],
+      ["a``b`c", "```a``b`c```"],
+      ["`lead", "`` `lead ``"],
+    ];
+    for (const [name, span] of signed) {
+      await write({ title: "Bug", body: "Steps" }, name);
+      expect(invoke).toHaveBeenLastCalledWith("issue_write", expect.objectContaining({ body: `Steps\n\n—\nRequested by ${span} via AgentX · ${threadUrl}` }));
+    }
     await write({ title: "Label", description: "Short" }, "Pratik Singhal");
     expect(invoke).toHaveBeenLastCalledWith("issue_write", { owner: "example", repo: "demo", title: "Label", description: "Short" });
   });
@@ -266,11 +279,11 @@ describe("hosted Slack GitHub MCP", () => {
       body: { requestId: randomUUID(), scope: "demo", tool: "issue_write", schemaHash, arguments: { title: "Bug", body: "Steps" } } });
     const threadUrl = `https://slack.com/archives/${threadOne.split("/")[1]}/p${threadOne.split("/")[2]!.replace(".", "")}`;
     await write({ "x-agentx-slack-user-name": encodeURIComponent("Pratik Singhal") });
-    expect(invoke).toHaveBeenLastCalledWith("issue_write", expect.objectContaining({ body: `Steps\n\n—\nRequested by Pratik Singhal via AgentX · ${threadUrl}` }));
+    expect(invoke).toHaveBeenLastCalledWith("issue_write", expect.objectContaining({ body: `Steps\n\n—\nRequested by \`Pratik Singhal\` via AgentX · ${threadUrl}` }));
     await write();
-    expect(invoke).toHaveBeenLastCalledWith("issue_write", expect.objectContaining({ body: `Steps\n\n—\nRequested by Slack member ${pratik} via AgentX · ${threadUrl}` }));
+    expect(invoke).toHaveBeenLastCalledWith("issue_write", expect.objectContaining({ body: `Steps\n\n—\nRequested by \`Slack member ${pratik}\` via AgentX · ${threadUrl}` }));
     await write({ "x-agentx-slack-user-name": encodeURIComponent("Evil\u0007Name") });
-    expect(invoke).toHaveBeenLastCalledWith("issue_write", expect.objectContaining({ body: `Steps\n\n—\nRequested by Evil Name via AgentX · ${threadUrl}` }));
+    expect(invoke).toHaveBeenLastCalledWith("issue_write", expect.objectContaining({ body: `Steps\n\n—\nRequested by \`Evil Name\` via AgentX · ${threadUrl}` }));
     await registerRevision(handler, 2, { connectors: [{ ...connector, attribution: false }] });
     const catalogOff = ConnectorCatalogSchema.parse((await call(handler, { method: "GET", path: `${path}/tools`, service })).body.catalog);
     await call(handler, { method: "POST", path: `${path}/call`, service,
