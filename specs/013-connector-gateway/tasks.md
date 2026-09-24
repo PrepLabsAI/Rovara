@@ -25,11 +25,11 @@ Each phase is one pull request to `mainline`. Check a task only after its eviden
 - [X] T013 Assemble descriptions from override or vendor text, target line, access line and examples; cap at 2,048 characters.
 - [X] T014 Generate the capabilities manifest, including not-connected connectors, the close command and the rename table.
 - [X] T015 Return `reason: not_connected` for approved connectors without a working credential.
-- [ ] T016 Replace the seven lifecycle tools with `agentx_manage_pull_request`; update `assertOrchestrationOnly` and feature 002/003 documents.
-- [ ] T017 Offer recovery tools only when `recoverableOperations` is non-empty.
+- [X] T016 Replace the seven lifecycle tools with `agentx_manage_pull_request`; update `assertOrchestrationOnly` and feature 002/003 documents.
+- [X] T017 Offer recovery tools only when `recoverableOperations` is non-empty.
 - [X] T018 Enforce the 20/40 tool budget and ordering; add the presentation snapshot test.
-- [ ] T019 Append the attribution footer to write tools' body or description; add the Slack `users:read` scope and display-name cache.
-- [ ] T038 Report non-terminal thread operations as `recoverableOperations` (phase 2b, with T017)
+- [X] T019 Append the attribution footer to write tools' body or description; add the Slack `users:read` scope and display-name cache.
+- [X] T038 Report non-terminal thread operations as `recoverableOperations` (phase 2b, with T017)
 
 ## Phase 3: Credentials (US2, US3 foundation)
 
