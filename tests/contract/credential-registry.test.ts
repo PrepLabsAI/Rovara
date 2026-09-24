@@ -86,6 +86,67 @@ describe("Secrets Manager source and token cache", () => {
       const lines = log.mock.calls.map(([line]) => String(line));
       expect(lines.some((line) => line.includes("connector.token_cache_failed"))).toBe(true);
       expect(lines.join("\n")).not.toContain("secret-token");
+      const failures = lines.map((line) => JSON.parse(line) as Record<string, unknown>).filter((line) => line.event === "connector.token_cache_failed");
+      expect(failures.map((line) => [line.operation, line.error])).toEqual([["put", "Error"], ["get", "Error"]]);
+      expect(lines.join("\n")).not.toContain("throttled");
+    } finally { log.mockRestore(); }
+  });
+});
+
+describe("registry failure modes", () => {
+  const register = (handler: Parameters<typeof adminCall>[0], ref: string, type: string, secretName: string) =>
+    adminCall(handler, { method: "POST", path: "/v1/admin/credentials", body: { ref, type, secretName } });
+
+  it("answers RUNTIME_UNAVAILABLE naming only the secret when Secrets Manager fails transiently during registration", async () => {
+    const throttling = { read: vi.fn(async () => { throw Object.assign(new Error("Rate exceeded for aws-internal-detail"), { name: "ThrottlingException" }); }) };
+    const { handler } = await createAdminBroker({ connectorCredentials: { secrets: throttling, githubApp } });
+    const response = await register(handler, "jira-sa", "static-secret", "agentx/connectors/jira-sa");
+    expect(response.status).toBe(503);
+    expect(response.body).toMatchObject({ error: { code: "RUNTIME_UNAVAILABLE", message: "could not read secret agentx/connectors/jira-sa from Secrets Manager; try again" } });
+    expect(JSON.stringify(response.body)).not.toMatch(/Rate exceeded|aws-internal-detail/);
+  });
+
+  it("keeps a transient Secrets Manager error a plain error on the provider path", async () => {
+    let failing = false;
+    const flaky = { read: vi.fn(async (name: string) => {
+      if (failing) throw Object.assign(new Error("Rate exceeded"), { name: "ThrottlingException" });
+      return secretValues[name];
+    }) };
+    const { handler, registry } = await createAdminBroker({ connectorCredentials: { secrets: flaky, githubApp } });
+    expect((await register(handler, "jira-sa", "static-secret", "agentx/connectors/jira-sa")).status).toBe(201);
+    failing = true;
+    const error = await registry!.provider("jira-sa").issue(undefined, "read").catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(CredentialUnavailable);
+  });
+
+  it("refuses an oauth-client-credentials registration whose secret has the static shape", async () => {
+    const { handler } = await createAdminBroker({ connectorCredentials: { secrets, githubApp } });
+    expect((await register(handler, "jira-oauth", "oauth-client-credentials", "agentx/connectors/jira-sa")).body).toMatchObject({
+      error: { code: "CONFIG_INVALID", message: 'credential jira-oauth: secret agentx/connectors/jira-sa must be JSON {"clientId": "...", "clientSecret": "...", "scopes": ["..."]}' },
+    });
+  });
+
+  it("makes the same provider object return the new secret after re-registration with another secret name", async () => {
+    const rotating = { read: vi.fn(async (name: string) => ({ ...secretValues, "agentx/connectors/jira-sa-2": JSON.stringify({ apiKey: "jira-key-2" }) })[name]) };
+    const { handler, registry } = await createAdminBroker({ connectorCredentials: { secrets: rotating, githubApp } });
+    await register(handler, "jira-sa", "static-secret", "agentx/connectors/jira-sa");
+    const provider = registry!.provider("jira-sa");
+    expect((await provider.issue(undefined, "read")).token).toBe("jira-key-value");
+    expect((await register(handler, "jira-sa", "static-secret", "agentx/connectors/jira-sa-2")).body).toMatchObject({ replaced: true });
+    expect((await provider.issue(undefined, "read")).token).toBe("jira-key-2");
+  });
+
+  it("treats a malformed stored record as unregistered and skips it in the list with a log line", async () => {
+    const { db, handler, registry } = await createAdminBroker({ connectorCredentials: { secrets, githubApp } });
+    db.set({ pk: "CREDENTIALS", sk: "REF#broken", entityType: "CREDENTIAL", ref: "broken", type: "static-secret" });
+    await expect(registry!.provider("broken").issue(undefined, "read")).rejects.toThrow(new CredentialUnavailable("credential broken is not registered; run agentx admin credential register"));
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      const listed = await adminCall(handler, { method: "GET", path: "/v1/admin/credentials" });
+      expect((listed.body.credentials as Array<{ ref: string }>).map((entry) => entry.ref)).toEqual(["github-app"]);
+      const lines = log.mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>);
+      expect(lines).toContainEqual({ component: "broker", event: "connector.credential_record_invalid", credential: "broken" });
     } finally { log.mockRestore(); }
   });
 });

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  CredentialUnavailable, oauthClientCredentialsProvider, scopeKey, staticSecretProvider,
+  CredentialUnavailable, oauthClientCredentialsProvider, parseConnectorSecret, scopeKey, staticSecretProvider,
   type CachedToken, type SecretSource, type TokenCache,
 } from "../../packages/gateway/src/credentials.js";
 
@@ -38,6 +38,17 @@ describe("static-secret provider", () => {
     expect(error).toBeInstanceOf(CredentialUnavailable);
     expect((error as Error).message).toBe('credential jira: secret agentx/connectors/jira must be JSON {"apiKey": "..."}');
     expect((error as Error).message).not.toContain("leaky-value");
+  });
+});
+
+describe("parseConnectorSecret", () => {
+  it("parses each type's shape and names only the secret when it is missing or malformed", () => {
+    expect(parseConnectorSecret("static-secret", JSON.stringify({ apiKey: "k" }), "jira", "agentx/connectors/jira")).toEqual({ apiKey: "k" });
+    expect(parseConnectorSecret("oauth-client-credentials", client, "linear", "agentx/connectors/linear")).toEqual({ clientId: "client-id", clientSecret: "client-secret-value", scopes: ["write", "read"] });
+    expect(() => parseConnectorSecret("static-secret", undefined, "jira", "agentx/connectors/jira")).toThrow(new CredentialUnavailable("credential jira: secret agentx/connectors/jira was not found"));
+    expect(() => parseConnectorSecret("oauth-client-credentials", JSON.stringify({ apiKey: "leaky-value" }), "linear", "agentx/connectors/linear"))
+      .toThrow(new CredentialUnavailable('credential linear: secret agentx/connectors/linear must be JSON {"clientId": "...", "clientSecret": "...", "scopes": ["..."]}'));
+    expect(() => parseConnectorSecret("static-secret", "not json leaky-value", "jira", "agentx/connectors/jira")).toThrow('credential jira: secret agentx/connectors/jira must be JSON {"apiKey": "..."}');
   });
 });
 

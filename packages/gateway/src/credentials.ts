@@ -67,18 +67,35 @@ async function readLimitedText(response: Response, limit: number): Promise<strin
   return Buffer.concat(chunks).toString("utf-8");
 }
 
+const SECRET_SHAPES = {
+  "static-secret": { schema: StaticSecretSchema, shape: '{"apiKey": "..."}' },
+  "oauth-client-credentials": { schema: OAuthClientCredentialsSecretSchema, shape: '{"clientId": "...", "clientSecret": "...", "scopes": ["..."]}' },
+} as const;
+
+/**
+ * Parses a raw connector secret for its credential type. A missing or malformed secret throws
+ * CredentialUnavailable naming only the reference and the secret, never any of its content.
+ */
+export function parseConnectorSecret(type: "static-secret", raw: string | undefined, ref: string, secretName: string): StaticSecret;
+export function parseConnectorSecret(type: "oauth-client-credentials", raw: string | undefined, ref: string, secretName: string): OAuthClientCredentialsSecret;
+export function parseConnectorSecret(type: keyof typeof SECRET_SHAPES, raw: string | undefined, ref: string, secretName: string): StaticSecret | OAuthClientCredentialsSecret;
+export function parseConnectorSecret(type: keyof typeof SECRET_SHAPES, raw: string | undefined, ref: string, secretName: string): StaticSecret | OAuthClientCredentialsSecret {
+  if (raw === undefined) throw new CredentialUnavailable(`credential ${ref}: secret ${secretName} was not found`);
+  let json: unknown;
+  try { json = JSON.parse(raw); } catch { json = undefined; }
+  const { schema, shape } = SECRET_SHAPES[type];
+  const parsed = schema.safeParse(json);
+  if (!parsed.success) throw new CredentialUnavailable(`credential ${ref}: secret ${secretName} must be JSON ${shape}`);
+  return parsed.data;
+}
+
 /** Reads and parses a secret, caching it in memory for five minutes. */
-function cachedSecret<T>(options: { ref: string; secretName: string; secrets: SecretSource; now: () => number }, parse: (value: unknown) => T | undefined, shape: string) {
+function cachedSecret<T>(options: { ref: string; secretName: string; secrets: SecretSource; now: () => number }, parse: (raw: string | undefined) => T) {
   let cached: { value: T; readAt: number } | undefined;
   return {
     async get(): Promise<T> {
       if (cached && options.now() - cached.readAt < SECRET_TTL_MS) return cached.value;
-      const raw = await options.secrets.read(options.secretName);
-      if (raw === undefined) throw new CredentialUnavailable(`credential ${options.ref}: secret ${options.secretName} was not found`);
-      let json: unknown;
-      try { json = JSON.parse(raw); } catch { json = undefined; }
-      const value = parse(json);
-      if (value === undefined) throw new CredentialUnavailable(`credential ${options.ref}: secret ${options.secretName} must be JSON ${shape}`);
+      const value = parse(await options.secrets.read(options.secretName));
       cached = { value, readAt: options.now() };
       return value;
     },
@@ -87,10 +104,8 @@ function cachedSecret<T>(options: { ref: string; secretName: string; secrets: Se
 }
 
 export function staticSecretProvider(options: { ref: string; secretName: string; secrets: SecretSource; now?: () => number }): CredentialProvider<unknown> {
-  const secret = cachedSecret<StaticSecret>({ ...options, now: options.now ?? Date.now }, (value) => {
-    const parsed = StaticSecretSchema.safeParse(value);
-    return parsed.success ? parsed.data : undefined;
-  }, '{"apiKey": "..."}');
+  const secret = cachedSecret<StaticSecret>({ ...options, now: options.now ?? Date.now },
+    (raw) => parseConnectorSecret("static-secret", raw, options.ref, options.secretName));
   return {
     async issue() { return { token: (await secret.get()).apiKey, bindings: {} }; },
     async invalidate() { secret.clear(); },
@@ -103,10 +118,8 @@ export function oauthClientCredentialsProvider(options: {
 }): CredentialProvider<unknown> {
   const now = options.now ?? Date.now;
   const fetchImplementation = options.fetchImplementation ?? fetch;
-  const secret = cachedSecret<OAuthClientCredentialsSecret>({ ...options, now }, (value) => {
-    const parsed = OAuthClientCredentialsSecretSchema.safeParse(value);
-    return parsed.success ? parsed.data : undefined;
-  }, '{"clientId": "...", "clientSecret": "...", "scopes": ["..."]}');
+  const secret = cachedSecret<OAuthClientCredentialsSecret>({ ...options, now },
+    (raw) => parseConnectorSecret("oauth-client-credentials", raw, options.ref, options.secretName));
 
   /** The token this instance minted or last read, and the moment it should be refreshed by. */
   let memory: (CachedToken & { key: string; refreshAt: number }) | undefined;
