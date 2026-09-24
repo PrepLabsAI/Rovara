@@ -6,6 +6,7 @@ import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import type { GitHubMcpDependencies } from "../../packages/broker/src/github-mcp.js";
 import { GitHubMcpCatalogSchema, GitHubMcpResultSchema } from "../../packages/contracts/src/github-mcp.js";
 import { ConnectorCatalogSchema } from "../../packages/contracts/src/connectors.js";
+import { createSignedServiceFetch } from "../../packages/slack-service/src/signing-fetch.js";
 
 const issuer = "https://identity.example.test";
 const account = "111122223333";
@@ -217,6 +218,150 @@ function markReady(db: FakeDynamoDb, workspaceId: string): void {
 }
 
 describe("hosted Slack GitHub MCP", () => {
+  it("keeps long non-Latin names, renders every name as an inert code span, and never signs a GitHub description", async () => {
+    const credentials = vi.fn(async () => ({ owner: "example", repo: "demo", token: "installation-secret" }));
+    const invoke = vi.fn(async () => ({ content: [{ type: "text", text: "created" }] }));
+    const connect = vi.fn(async () => ({
+      tools: [{ name: "issue_write", description: "Create an issue", inputSchema: { type: "object", properties: {
+        owner: { type: "string" }, repo: { type: "string" }, title: { type: "string" }, body: { type: "string" }, description: { type: "string" },
+      }, required: ["owner", "repo", "title"] } }], call: invoke, close: async () => undefined,
+    }));
+    const { db, handler } = createBroker({ githubMcp: { credentials, connect } });
+    await registerProjectAndBind(handler, { connectors: [{ name: "github", type: "github", scopes: "all-repositories", tools: [{ name: "issue_write", access: "write" }] }] });
+    const workspaceId = (await ensureWorkspace(handler, threadOne, pratik)).body.workspaceId as string;
+    markReady(db, workspaceId);
+    const service = { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik };
+    const path = `/v1/service/workspaces/${workspaceId}/connectors/github`;
+    const catalog = ConnectorCatalogSchema.parse((await call(handler, { method: "GET", path: `${path}/tools`, service })).body.catalog);
+    const schemaHash = catalog.tools[0]!.scopes[0]!.schemaHash;
+    const write = (args: Record<string, unknown>, name: string) => call(handler, { method: "POST", path: `${path}/call`, service,
+      headers: { "x-agentx-slack-user-name": encodeURIComponent(name) },
+      body: { requestId: randomUUID(), scope: "demo", tool: "issue_write", schemaHash, arguments: args } });
+    const threadUrl = `https://slack.com/archives/${threadOne.split("/")[1]}/p${threadOne.split("/")[2]!.replace(".", "")}`;
+    await write({ title: "Bug", body: "Steps" }, "क".repeat(80));
+    expect(invoke).toHaveBeenLastCalledWith("issue_write", expect.objectContaining({ body: `Steps\n\n—\nRequested by \`${"क".repeat(80)}\` via AgentX · ${threadUrl}` }));
+    // Each name is rendered only inside a code span, so GitHub shows it literally: no mention,
+    // link, autolink, HTML or issue reference. The fence is one backtick longer than the name's
+    // longest backtick run, padded with a space when the name starts or ends with a backtick.
+    const signed: Array<[string, string]> = [
+      ["@org/security [x](https://e.test) `code`", "`` @org/security [x](https://e.test) `code` ``"],
+      ["https://evil.example/login www.evil.example", "`https://evil.example/login www.evil.example`"],
+      ["fixes #1 and GH-2", "`fixes #1 and GH-2`"],
+      ["<img src=\"https://t.example/p.gif\"> Bob", "`<img src=\"https://t.example/p.gif\"> Bob`"],
+      ["a``b`c", "```a``b`c```"],
+      ["`lead", "`` `lead ``"],
+    ];
+    for (const [name, span] of signed) {
+      await write({ title: "Bug", body: "Steps" }, name);
+      expect(invoke).toHaveBeenLastCalledWith("issue_write", expect.objectContaining({ body: `Steps\n\n—\nRequested by ${span} via AgentX · ${threadUrl}` }));
+    }
+    await write({ title: "Label", description: "Short" }, "Pratik Singhal");
+    expect(invoke).toHaveBeenLastCalledWith("issue_write", { owner: "example", repo: "demo", title: "Label", description: "Short" });
+  });
+
+  it("signs connector writes with the requesting member and thread, unless the connector turns it off", async () => {
+    const credentials = vi.fn(async () => ({ owner: "example", repo: "demo", token: "installation-secret" }));
+    const invoke = vi.fn(async () => ({ content: [{ type: "text", text: "created" }] }));
+    const connect = vi.fn(async () => ({
+      tools: [{ name: "issue_write", description: "Create an issue", inputSchema: { type: "object", properties: {
+        owner: { type: "string" }, repo: { type: "string" }, title: { type: "string" }, body: { type: "string" },
+      }, required: ["owner", "repo", "title"] } }], call: invoke, close: async () => undefined,
+    }));
+    const { db, handler } = createBroker({ githubMcp: { credentials, connect } });
+    const connector = { name: "github", type: "github", scopes: "all-repositories", tools: [{ name: "issue_write", access: "write" }] };
+    await registerProjectAndBind(handler, { connectors: [connector] });
+    const workspaceId = (await ensureWorkspace(handler, threadOne, pratik)).body.workspaceId as string;
+    markReady(db, workspaceId);
+    const service = { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik };
+    const path = `/v1/service/workspaces/${workspaceId}/connectors/github`;
+    const catalog = ConnectorCatalogSchema.parse((await call(handler, { method: "GET", path: `${path}/tools`, service })).body.catalog);
+    const schemaHash = catalog.tools[0]!.scopes[0]!.schemaHash;
+    const write = (headers: Record<string, string> = {}) => call(handler, { method: "POST", path: `${path}/call`, service, headers,
+      body: { requestId: randomUUID(), scope: "demo", tool: "issue_write", schemaHash, arguments: { title: "Bug", body: "Steps" } } });
+    const threadUrl = `https://slack.com/archives/${threadOne.split("/")[1]}/p${threadOne.split("/")[2]!.replace(".", "")}`;
+    await write({ "x-agentx-slack-user-name": encodeURIComponent("Pratik Singhal") });
+    expect(invoke).toHaveBeenLastCalledWith("issue_write", expect.objectContaining({ body: `Steps\n\n—\nRequested by \`Pratik Singhal\` via AgentX · ${threadUrl}` }));
+    await write();
+    expect(invoke).toHaveBeenLastCalledWith("issue_write", expect.objectContaining({ body: `Steps\n\n—\nRequested by \`Slack member ${pratik}\` via AgentX · ${threadUrl}` }));
+    await write({ "x-agentx-slack-user-name": encodeURIComponent("Evil\u0007Name") });
+    expect(invoke).toHaveBeenLastCalledWith("issue_write", expect.objectContaining({ body: `Steps\n\n—\nRequested by \`Evil Name\` via AgentX · ${threadUrl}` }));
+    // A header that is not valid percent-encoding is ignored, not rejected: the footer names the member ID.
+    await write({ "x-agentx-slack-user-name": "%E0%A4" });
+    expect(invoke).toHaveBeenLastCalledWith("issue_write", expect.objectContaining({ body: `Steps\n\n—\nRequested by \`Slack member ${pratik}\` via AgentX · ${threadUrl}` }));
+    await registerRevision(handler, 2, { connectors: [{ ...connector, attribution: false }] });
+    const catalogOff = ConnectorCatalogSchema.parse((await call(handler, { method: "GET", path: `${path}/tools`, service })).body.catalog);
+    await call(handler, { method: "POST", path: `${path}/call`, service,
+      body: { requestId: randomUUID(), scope: "demo", tool: "issue_write", schemaHash: catalogOff.tools[0]!.scopes[0]!.schemaHash, arguments: { title: "Bug", body: "Steps" } } });
+    expect(invoke).toHaveBeenLastCalledWith("issue_write", expect.objectContaining({ body: "Steps" }));
+  });
+
+  it("carries an emoji ZWJ sequence intact from the Slack service's signed header into the footer", async () => {
+    const credentials = vi.fn(async () => ({ owner: "example", repo: "demo", token: "installation-secret" }));
+    const invoke = vi.fn(async () => ({ content: [{ type: "text", text: "created" }] }));
+    const connect = vi.fn(async () => ({
+      tools: [{ name: "issue_write", description: "Create an issue", inputSchema: { type: "object", properties: {
+        owner: { type: "string" }, repo: { type: "string" }, title: { type: "string" }, body: { type: "string" },
+      }, required: ["owner", "repo", "title"] } }], call: invoke, close: async () => undefined,
+    }));
+    const { db, handler } = createBroker({ githubMcp: { credentials, connect } });
+    await registerProjectAndBind(handler, { connectors: [{ name: "github", type: "github", scopes: "all-repositories", tools: [{ name: "issue_write", access: "write" }] }] });
+    const workspaceId = (await ensureWorkspace(handler, threadOne, pratik)).body.workspaceId as string;
+    markReady(db, workspaceId);
+    const service = { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik };
+    const path = `/v1/service/workspaces/${workspaceId}/connectors/github`;
+    const catalog = ConnectorCatalogSchema.parse((await call(handler, { method: "GET", path: `${path}/tools`, service })).body.catalog);
+    const threadUrl = `https://slack.com/archives/${threadOne.split("/")[1]}/p${threadOne.split("/")[2]!.replace(".", "")}`;
+    const [teamId, channelId, threadTs] = threadOne.split("/") as [string, string, string];
+    const sign = async (userName: string) => {
+      const baseFetch = vi.fn<typeof fetch>(async () => Response.json({}));
+      await createSignedServiceFetch({ region: "us-east-1", credentials: { accessKeyId: "k", secretAccessKey: "s" }, thread: { teamId, channelId, threadTs }, userId: pratik, userName, baseFetch })(
+        "https://agentx.example.test/v1/threads/workspace", { method: "POST", body: "{}" });
+      return new Headers(baseFetch.mock.lastCall?.[1]?.headers).get("x-agentx-slack-user-name")!;
+    };
+    const write = async (userName: string) => call(handler, { method: "POST", path: `${path}/call`, service,
+      headers: { "x-agentx-slack-user-name": await sign(userName) },
+      body: { requestId: randomUUID(), scope: "demo", tool: "issue_write", schemaHash: catalog.tools[0]!.scopes[0]!.schemaHash, arguments: { title: "Bug", body: "Steps" } } });
+    const family = "\u{1F468}\u200D\u{1F469}\u200D\u{1F467} Family";
+    await write(family);
+    expect(invoke).toHaveBeenLastCalledWith("issue_write", expect.objectContaining({ body: `Steps\n\n—\nRequested by \`${family}\` via AgentX · ${threadUrl}` }));
+    // The broker applies the same rule to a header that skipped the Slack service's cleanup.
+    await call(handler, { method: "POST", path: `${path}/call`, service,
+      headers: { "x-agentx-slack-user-name": encodeURIComponent(`${family}\u202E\u200Bx`) },
+      body: { requestId: randomUUID(), scope: "demo", tool: "issue_write", schemaHash: catalog.tools[0]!.scopes[0]!.schemaHash, arguments: { title: "Bug", body: "Steps" } } });
+    expect(invoke).toHaveBeenLastCalledWith("issue_write", expect.objectContaining({ body: `Steps\n\n—\nRequested by \`${family} x\` via AgentX · ${threadUrl}` }));
+    await call(handler, { method: "POST", path: `${path}/call`, service,
+      headers: { "x-agentx-slack-user-name": encodeURIComponent("a\u061Cb\u2060c\u200Cd") },
+      body: { requestId: randomUUID(), scope: "demo", tool: "issue_write", schemaHash: catalog.tools[0]!.scopes[0]!.schemaHash, arguments: { title: "Bug", body: "Steps" } } });
+    expect(invoke).toHaveBeenLastCalledWith("issue_write", expect.objectContaining({ body: `Steps\n\n—\nRequested by \`a b c\u200Cd\` via AgentX · ${threadUrl}` }));
+  });
+
+  it("ignores a deployment-level attribution when the connector turns attribution off, on both GitHub routes", async () => {
+    const credentials = vi.fn(async () => ({ owner: "example", repo: "demo", token: "installation-secret" }));
+    const invoke = vi.fn(async () => ({ content: [{ type: "text", text: "created" }] }));
+    const connect = vi.fn(async () => ({
+      tools: [{ name: "issue_write", description: "Create an issue", inputSchema: { type: "object", properties: {
+        owner: { type: "string" }, repo: { type: "string" }, title: { type: "string" }, body: { type: "string" },
+      }, required: ["owner", "repo", "title"] } }], call: invoke, close: async () => undefined,
+    }));
+    const { db, handler } = createBroker({ githubMcp: { credentials, connect, attribution: "deployment text" } });
+    await registerProjectAndBind(handler, { connectors: [{ name: "github", type: "github", scopes: "all-repositories", attribution: false, tools: [{ name: "issue_write", access: "write" }] }] });
+    const workspaceId = (await ensureWorkspace(handler, threadOne, pratik)).body.workspaceId as string;
+    markReady(db, workspaceId);
+    const service = { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik };
+    const headers = { "x-agentx-slack-user-name": encodeURIComponent("Pratik Singhal") };
+    const connectorPath = `/v1/service/workspaces/${workspaceId}/connectors/github`;
+    const catalog = ConnectorCatalogSchema.parse((await call(handler, { method: "GET", path: `${connectorPath}/tools`, service })).body.catalog);
+    await call(handler, { method: "POST", path: `${connectorPath}/call`, service, headers,
+      body: { requestId: randomUUID(), scope: "demo", tool: "issue_write", schemaHash: catalog.tools[0]!.scopes[0]!.schemaHash, arguments: { title: "Bug", body: "Steps" } } });
+    expect(invoke).toHaveBeenLastCalledWith("issue_write", { owner: "example", repo: "demo", title: "Bug", body: "Steps" });
+    const legacyPath = `/v1/service/workspaces/${workspaceId}/github`;
+    const legacy = GitHubMcpCatalogSchema.parse((await call(handler, { method: "GET", path: `${legacyPath}/tools?repository=demo`, service })).body.catalog);
+    await call(handler, { method: "POST", path: `${legacyPath}/call`, service, headers,
+      body: { requestId: randomUUID(), repository: "demo", tool: "issue_write", schemaHash: legacy.tools[0]!.schemaHash, arguments: { title: "Bug", body: "Steps" } } });
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(invoke).toHaveBeenLastCalledWith("issue_write", { owner: "example", repo: "demo", title: "Bug", body: "Steps" });
+  });
+
   it("removes a repository from an existing thread when a revision narrows the connector's scopes", async () => {
     const credentials = vi.fn(async () => ({ owner: "example", repo: "docs", token: "installation-secret" }));
     const invoke = vi.fn(async () => ({ content: [{ type: "text", text: "GitHub result" }] }));
@@ -270,6 +415,71 @@ describe("hosted Slack GitHub MCP", () => {
         skipped: [{ tool: "issue_write", reason: "not offered by the vendor" }, { tool: "list_issues", reason: "missing server-bound property owner" }],
       });
       expect(lines[0]).not.toContain("installation-secret");
+    } finally { log.mockRestore(); }
+  });
+
+  it("logs a write sent without its footer because the vendor schema has no room, without request text", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      const credentials = vi.fn(async () => ({ owner: "example", repo: "demo", token: "installation-secret" }));
+      const invoke = vi.fn(async () => ({ content: [{ type: "text", text: "created" }] }));
+      const connect = vi.fn(async () => ({
+        tools: [{ name: "issue_write", description: "Create an issue", inputSchema: { type: "object", properties: {
+          owner: { type: "string" }, repo: { type: "string" }, title: { type: "string" }, body: { type: "string", maxLength: 20 },
+        }, required: ["owner", "repo", "title"] } }], call: invoke, close: async () => undefined,
+      }));
+      const { db, handler } = createBroker({ githubMcp: { credentials, connect } });
+      await registerProjectAndBind(handler, { connectors: [{ name: "github", type: "github", scopes: "all-repositories", tools: [{ name: "issue_write", access: "write" }] }] });
+      const workspaceId = (await ensureWorkspace(handler, threadOne, pratik)).body.workspaceId as string;
+      markReady(db, workspaceId);
+      const service = { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik };
+      const path = `/v1/service/workspaces/${workspaceId}/connectors/github`;
+      const catalog = ConnectorCatalogSchema.parse((await call(handler, { method: "GET", path: `${path}/tools`, service })).body.catalog);
+      const requestId = randomUUID();
+      const response = await call(handler, { method: "POST", path: `${path}/call`, service,
+        headers: { "x-agentx-slack-user-name": encodeURIComponent("Pratik Singhal") },
+        body: { requestId, scope: "demo", tool: "issue_write", schemaHash: catalog.tools[0]!.scopes[0]!.schemaHash, arguments: { title: "Secret title", body: "Private steps" } } });
+      expect(response.body.result).toMatchObject({ status: "SUCCEEDED" });
+      expect(invoke).toHaveBeenLastCalledWith("issue_write", { owner: "example", repo: "demo", title: "Secret title", body: "Private steps" });
+      const lines = log.mock.calls.map(([line]) => String(line)).filter((line) => line.includes("connector.attribution_dropped"));
+      expect(lines).toHaveLength(1);
+      expect(JSON.parse(lines[0]!)).toEqual({
+        component: "broker", event: "connector.attribution_dropped", project: "payments", revision: 1, connector: "github", scope: "demo", tool: "issue_write", requestId,
+      });
+      expect(lines[0]).not.toContain("Private steps");
+      expect(lines[0]).not.toContain("Secret title");
+    } finally { log.mockRestore(); }
+  });
+
+  it("logs a footer dropped on the legacy GitHub route too, without request text", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      const credentials = vi.fn(async () => ({ owner: "example", repo: "demo", token: "installation-secret" }));
+      const invoke = vi.fn(async () => ({ content: [{ type: "text", text: "created" }] }));
+      const connect = vi.fn(async () => ({
+        tools: [{ name: "issue_write", description: "Create an issue", inputSchema: { type: "object", properties: {
+          owner: { type: "string" }, repo: { type: "string" }, title: { type: "string" }, body: { type: "string", maxLength: 20 },
+        }, required: ["owner", "repo", "title"] } }], call: invoke, close: async () => undefined,
+      }));
+      const { db, handler } = createBroker({ githubMcp: { credentials, connect } });
+      await registerProjectAndBind(handler, { connectors: [{ name: "github", type: "github", scopes: "all-repositories", tools: [{ name: "issue_write", access: "write" }] }] });
+      const workspaceId = (await ensureWorkspace(handler, threadOne, pratik)).body.workspaceId as string;
+      markReady(db, workspaceId);
+      const service = { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik };
+      const path = `/v1/service/workspaces/${workspaceId}/github`;
+      const catalog = GitHubMcpCatalogSchema.parse((await call(handler, { method: "GET", path: `${path}/tools?repository=demo`, service })).body.catalog);
+      const requestId = randomUUID();
+      const response = await call(handler, { method: "POST", path: `${path}/call`, service,
+        headers: { "x-agentx-slack-user-name": encodeURIComponent("Pratik Singhal") },
+        body: { requestId, repository: "demo", tool: "issue_write", schemaHash: catalog.tools[0]!.schemaHash, arguments: { title: "Secret title", body: "Private steps" } } });
+      expect(response.body.result).toMatchObject({ status: "SUCCEEDED" });
+      expect(invoke).toHaveBeenLastCalledWith("issue_write", { owner: "example", repo: "demo", title: "Secret title", body: "Private steps" });
+      const lines = log.mock.calls.map(([line]) => String(line)).filter((line) => line.includes("connector.attribution_dropped"));
+      expect(lines).toHaveLength(1);
+      expect(JSON.parse(lines[0]!)).toEqual({
+        component: "broker", event: "connector.attribution_dropped", project: "payments", revision: 1, connector: "github", scope: "demo", tool: "issue_write", requestId,
+      });
+      expect(lines[0]).not.toContain("Private steps");
     } finally { log.mockRestore(); }
   });
 
@@ -521,6 +731,44 @@ describe("hosted Slack GitHub MCP", () => {
     expect(failed.body.result).not.toHaveProperty("reason");
     const result = GitHubMcpResultSchema.parse(failed.body.result);
     expect(result.status).toBe("FAILED");
+  });
+
+  it("reports a thread's unfinished operation as recoverable, only to services that opt in to recoverable operations", async () => {
+    const { db, handler } = createBroker({ githubMcp: { credentials: vi.fn(), connect: vi.fn() } });
+    await registerProjectAndBind(handler, true);
+    const service = { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik };
+    // "connectors" is the Slack service deployed before this flag existed; "recoverable" is the current one.
+    const resolve = (client: "legacy" | "connectors" | "recoverable") => call(handler, { method: "POST", path: "/v1/service/threads/workspace", service,
+      body: {
+        requestId: randomUUID(), includeIntegrations: true,
+        ...(client === "legacy" ? {} : { includeConnectors: true }),
+        ...(client === "recoverable" ? { includeRecoverableOperations: true } : {}),
+      } });
+    const created = await resolve("recoverable");
+    expect(created.body.recoverableOperations).toEqual([]);
+    const workspaceId = created.body.workspaceId as string;
+    markReady(db, workspaceId);
+    expect((await resolve("recoverable")).body.recoverableOperations).toEqual([]);
+    const running = randomUUID();
+    const workspace = db.get(`WORKSPACE#${workspaceId}`, "META")!;
+    workspace.status = "BUSY";
+    workspace.activeOperationId = running;
+    expect((await resolve("recoverable")).body.recoverableOperations).toEqual([running]);
+    expect((await resolve("legacy")).body).not.toHaveProperty("recoverableOperations");
+    const deployed = await resolve("connectors");
+    expect(deployed.body).toHaveProperty("connectors");
+    expect(deployed.body).not.toHaveProperty("recoverableOperations");
+  });
+
+  it("does not send recoverable operations for a new workspace to a service that sends only includeConnectors", async () => {
+    const { handler } = createBroker({ githubMcp: { credentials: vi.fn(), connect: vi.fn() } });
+    await registerProjectAndBind(handler, true);
+    const service = { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik };
+    const created = await call(handler, { method: "POST", path: "/v1/service/threads/workspace", service,
+      body: { requestId: randomUUID(), includeIntegrations: true, includeSettingsRevision: true, includeConnectors: true } });
+    expect(created.body.created).toBe(true);
+    expect(created.body).toHaveProperty("connectors");
+    expect(created.body).not.toHaveProperty("recoverableOperations");
   });
 });
 

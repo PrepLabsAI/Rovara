@@ -23,4 +23,6 @@ All commands accept global `--json`, use generated request IDs, and wait for the
 - `agentx_replace_pull_request`: create a clean replacement then close the original.
 - `agentx_revert_pull_request`: create a revert PR for an eligible merged PR.
 
+(feature 013 consolidates these, together with the later `agentx_append_pull_request` that pushed new workspace commits to an open AgentX PR, into `agentx_manage_pull_request` with an `action` argument)
+
 Descriptions explicitly state that rebasing/amending published branches and force pushing are unavailable. Local Pi receives no raw Git, shell, filesystem, or GitHub credential tool.

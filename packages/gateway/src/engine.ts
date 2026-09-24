@@ -93,6 +93,33 @@ export interface EngineOptions {
   connect?: typeof connectMcp;
   /** Called when the vendor's definition no longer matches the one the model was given. */
   onDefinitionChanged?: () => void;
+  /** Footer appended to a write's body or description when the model supplied one. */
+  attribution?: string;
+  /** Called when a write is sent unsigned because the signed arguments failed the upstream schema. */
+  onAttributionDropped?: (tool: string) => void;
+}
+
+/**
+ * Signs a write without ever creating a body: an absent body on an update means "leave it unchanged".
+ * Only a value the model wrote is signed; one the binder supplied is left as the server set it.
+ */
+function withAttribution(
+  args: Record<string, unknown>,
+  modelArgs: Record<string, unknown>,
+  attribution: string | undefined,
+  schema: Record<string, unknown>,
+  keys: readonly string[] = ["body", "description"],
+): Record<string, unknown> {
+  if (!attribution) return args;
+  const properties = isObject(schema.properties) ? schema.properties : {};
+  const footer = `\n\n—\n${attribution}`;
+  for (const key of keys) {
+    const value = args[key];
+    if (typeof value !== "string" || !Object.hasOwn(properties, key) || modelArgs[key] !== value) continue;
+    // A model that echoes a previously signed body must not stack a second identical footer.
+    return value.endsWith(footer) ? args : { ...args, [key]: `${value}${footer}` };
+  }
+  return args;
 }
 
 class PolicyFailure extends Error {}
@@ -170,12 +197,19 @@ export async function executeTool<Scope>(
     const validate = new AjvJsonSchemaValidator().getValidator(approved.inputSchema);
     if (!validate(request.arguments).valid) throw new PolicyFailure("Arguments do not match the approved MCP tool schema.");
     const bound = connector.binder.bind(context.scope, credential);
-    const args = { ...request.arguments, ...bound };
     const upstream = connection.tools.find((tool) => tool.name === request.tool)!;
-    if (!new AjvJsonSchemaValidator().getValidator(upstream.inputSchema)(args).valid) throw new PolicyFailure("Arguments do not match the upstream MCP tool schema.");
+    const validateUpstream = new AjvJsonSchemaValidator().getValidator(upstream.inputSchema);
+    const unsigned = { ...request.arguments, ...bound };
+    if (!validateUpstream(unsigned).valid) throw new PolicyFailure("Arguments do not match the upstream MCP tool schema.");
+    // The footer is best effort: when it would break the vendor's schema (a body maxLength, say),
+    // the model's own arguments go through unsigned rather than the write failing.
+    const signed = withAttribution(unsigned, request.arguments, write ? options.attribution : undefined, upstream.inputSchema, connector.attributionKeys);
+    const dropped = signed !== unsigned && !validateUpstream(signed).valid;
+    const args = dropped ? unsigned : signed;
     for (const guard of connector.guards) await guard.check({ tool: request.tool, arguments: request.arguments, bound, connection });
     signal.throwIfAborted();
     writeAttempted = write;
+    if (dropped) options.onAttributionDropped?.(request.tool);
     const result = await connection.call(request.tool, args);
     if (result.isError) throw new Error("MCP tool reported an error");
     response = publicResult(request, "SUCCEEDED", resultText(result).split(credential.token).join("[REDACTED]"));

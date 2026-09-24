@@ -10,5 +10,6 @@ export function createHostedSlackRuntime(input: TurnInput, options: Pick<Orchest
     requestId: input.requestId,
     ...(input.connectors === undefined ? {} : { connectors: input.connectors }),
     ...(input.repositories === undefined ? {} : { repositories: input.repositories }),
+    ...(input.recoverableOperations === undefined ? {} : { recoverableOperations: input.recoverableOperations }),
   });
 }

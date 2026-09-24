@@ -1,8 +1,16 @@
 import { Sha256 } from "@aws-crypto/sha256-js";
 import { SignatureV4 } from "@smithy/signature-v4";
-import { slackThreadSubject, type SlackThread } from "@agentx/contracts";
+import { cleanDisplayName, slackThreadSubject, type SlackThread } from "@agentx/contracts";
 
 type Credentials = ConstructorParameters<typeof SignatureV4>[0]["credentials"];
+
+/** A name that is empty after cleaning, or cannot be encoded, is omitted. */
+function encodedDisplayName(name: string): string | undefined {
+  try {
+    const clean = cleanDisplayName(name);
+    return clean === undefined ? undefined : encodeURIComponent(clean);
+  } catch { return undefined; }
+}
 
 // Sends the control-plane API client's /v1 requests to the IAM-authorized /v1/service routes as the orchestrator role.
 export function createSignedServiceFetch(options: {
@@ -10,6 +18,7 @@ export function createSignedServiceFetch(options: {
   credentials: Credentials;
   thread: SlackThread;
   userId: string;
+  userName?: string;
   baseFetch?: typeof fetch;
 }): typeof fetch {
   const signer = new SignatureV4({ service: "execute-api", region: options.region, credentials: options.credentials, sha256: Sha256 });
@@ -24,6 +33,8 @@ export function createSignedServiceFetch(options: {
     });
     headers["x-agentx-slack-thread"] = slackThreadSubject(options.thread);
     headers["x-agentx-slack-user"] = options.userId;
+    const userName = options.userName ? encodedDisplayName(options.userName) : undefined;
+    if (userName) headers["x-agentx-slack-user-name"] = userName;
     const body = typeof init?.body === "string" ? init.body : undefined;
     if (init?.body !== undefined && init.body !== null && body === undefined) {
       throw new Error("control-plane service requests must use string bodies");

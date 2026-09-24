@@ -28,6 +28,8 @@ export interface GitHubMcpDependencies {
   credentials(repository: { url: string; credentialRef: string }, access: "read" | "write"): Promise<{ owner: string; repo: string; token: string }>;
   connect?: typeof connectMcp;
   onDefinitionChanged?: () => void;
+  attribution?: string;
+  onAttributionDropped?: (tool: string) => void;
 }
 
 export interface GitHubMcpContext {
@@ -61,6 +63,8 @@ export async function executeGitHubConnectorTool(
     {
       ...connectOption(dependencies),
       ...(dependencies.onDefinitionChanged === undefined ? {} : { onDefinitionChanged: dependencies.onDefinitionChanged }),
+      ...(dependencies.attribution === undefined ? {} : { attribution: dependencies.attribution }),
+      ...(dependencies.onAttributionDropped === undefined ? {} : { onAttributionDropped: dependencies.onAttributionDropped }),
       ledger: dependencies.store,
     },
   );

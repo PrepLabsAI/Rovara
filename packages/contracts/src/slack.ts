@@ -51,6 +51,8 @@ export const SlackThreadWorkspaceResultSchema = z.discriminatedUnion("outcome", 
       // Connector metadata for services that send includeConnectors: true (feature 013).
       connectors: z.array(ThreadConnectorSchema).max(8).optional(),
       repositories: z.array(AgentXNameSchema).max(32).optional(),
+      // Sent only to services that send includeRecoverableOperations: true (see the broker).
+      recoverableOperations: z.array(z.string().uuid()).max(5).optional(),
       // The project revision whose settings the broker applied to this turn. Sent only to a
       // service that asked for it, because older deployed services parse this result strictly.
       settingsRevision: z.number().int().positive().optional(),
@@ -114,6 +116,10 @@ export const SlackRequestMessageSchema = z
 export function slackThreadSubject(thread: SlackThread): string {
   const parsed = SlackThreadSchema.parse(thread);
   return `${parsed.teamId}/${parsed.channelId}/${parsed.threadTs}`;
+}
+
+export function slackThreadUrl(thread: SlackThread): string {
+  return `https://slack.com/archives/${thread.channelId}/p${thread.threadTs.replace(".", "")}`;
 }
 
 export function parseSlackThreadSubject(subject: string): SlackThread {

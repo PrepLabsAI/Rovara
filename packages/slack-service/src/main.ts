@@ -24,6 +24,8 @@ import { runOrchestratorTurn } from "@agentx/orchestrator/orchestrator";
 import { runConsumer, type QueueClient } from "./consumer.js";
 import { processSlackRequest, type ServiceLog, type ThreadServiceApi, type ThreadStore, type TurnInput } from "./processor.js";
 import { createSignedServiceFetch } from "./signing-fetch.js";
+import { createSlackUserNames } from "./user-names.js";
+import { threadWorkspaceRequest } from "./thread-workspace-request.js";
 import { createHostedSlackRuntime } from "./runtime.js";
 
 const MAX_RECEIVE_COUNT = 5;
@@ -78,6 +80,8 @@ function slackBotToken(): Promise<string> {
   return botToken.value;
 }
 
+const slackUserName = createSlackUserNames({ token: slackBotToken });
+
 async function postToSlack(channel: string, threadTs: string, text: string): Promise<void> {
   const response = await fetch("https://slack.com/api/chat.postMessage", {
     method: "POST",
@@ -96,7 +100,7 @@ function threadApi(message: SlackRequestMessage): ThreadServiceApi {
       const response = await signedFetch(`${controlPlaneUrl}/v1/threads/workspace`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ requestId, includeIntegrations: true, includeSettingsRevision: true, includeConnectors: true }),
+        body: JSON.stringify(threadWorkspaceRequest(requestId)),
       });
       const body = await response.json() as Record<string, unknown>;
       if (!response.ok) {
@@ -231,7 +235,8 @@ async function runTurn(input: TurnInput): Promise<string> {
     const saved = await loadSession(input.subject);
     const sessionFile = saved === undefined ? undefined : join(sessions, "thread.jsonl");
     if (sessionFile !== undefined && saved !== undefined) await writeFile(sessionFile, saved, { mode: 0o600 });
-    const signedFetch = createSignedServiceFetch({ region, credentials, thread: input.message.thread, userId: input.message.userId });
+    const userName = await slackUserName(input.message.userId);
+    const signedFetch = createSignedServiceFetch({ region, credentials, thread: input.message.thread, userId: input.message.userId, ...(userName === undefined ? {} : { userName }) });
     const runtime = await createHostedSlackRuntime(input, {
       stateDirectory: directory,
       api: new ControlPlaneApi(controlPlaneUrl, "slack-service", input.workspaceId, signedFetch),

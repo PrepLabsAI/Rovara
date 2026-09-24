@@ -96,10 +96,22 @@ exports[`pi orchestration boundary > characterizes the in-house agentx_* tools b
     },
   },
   {
-    "description": "Edit the title or body of an AgentX-owned pull request. Call only when the user explicitly requests this pull request action.",
-    "name": "agentx_update_pull_request",
+    "description": "Change an existing AgentX-owned pull request. Actions: edit its title or body; append new workspace commits with a normal fast-forward push; sync by merging the latest base branch into it; close it; reopen a closed, unmerged one; replace it with clean history (the new pull request is created before the original is closed); revert a merged one with a reviewable revert pull request. History is never rebased or force-pushed. Title and body apply only to edit, replace and revert. Call only for the action the user explicitly asked for.",
+    "name": "agentx_manage_pull_request",
     "parameters": {
       "properties": {
+        "action": {
+          "enum": [
+            "edit",
+            "append",
+            "sync",
+            "close",
+            "reopen",
+            "replace",
+            "revert",
+          ],
+          "type": "string",
+        },
         "body": {
           "maxLength": 32768,
           "type": "string",
@@ -122,110 +134,43 @@ exports[`pi orchestration boundary > characterizes the in-house agentx_* tools b
       "required": [
         "repository",
         "pullRequestNumber",
+        "action",
       ],
       "type": "object",
     },
   },
+]
+`;
+
+exports[`pi orchestration boundary > keeps the five tools outside the pull-request lifecycle byte-for-byte (regression guard) 1`] = `
+[
   {
-    "description": "Run checks and append workspace changes with a normal fast-forward push; force push is prohibited. Call only when the user explicitly requests this pull request action.",
-    "name": "agentx_append_pull_request",
+    "description": "Run repository inspection, editing, build, or test work on the remote AgentX worker. This waits for completion and returns the worker's final response; do not poll or resubmit the task.",
+    "label": "Delegate coding task",
+    "name": "agentx_submit_task",
     "parameters": {
       "properties": {
-        "pullRequestNumber": {
-          "minimum": 1,
-          "type": "integer",
-        },
-        "repository": {
-          "maxLength": 63,
+        "prompt": {
+          "maxLength": 65536,
           "minLength": 1,
           "type": "string",
         },
       },
       "required": [
-        "repository",
-        "pullRequestNumber",
+        "prompt",
       ],
       "type": "object",
     },
   },
   {
-    "description": "Merge the latest base branch into an open pull request; history is never rebased or force-pushed. Call only when the user explicitly requests this pull request action.",
-    "name": "agentx_sync_pull_request",
-    "parameters": {
-      "properties": {
-        "pullRequestNumber": {
-          "minimum": 1,
-          "type": "integer",
-        },
-        "repository": {
-          "maxLength": 63,
-          "minLength": 1,
-          "type": "string",
-        },
-      },
-      "required": [
-        "repository",
-        "pullRequestNumber",
-      ],
-      "type": "object",
-    },
-  },
-  {
-    "description": "Close an open AgentX-owned pull request. Call only when the user explicitly requests this pull request action.",
-    "name": "agentx_close_pull_request",
-    "parameters": {
-      "properties": {
-        "pullRequestNumber": {
-          "minimum": 1,
-          "type": "integer",
-        },
-        "repository": {
-          "maxLength": 63,
-          "minLength": 1,
-          "type": "string",
-        },
-      },
-      "required": [
-        "repository",
-        "pullRequestNumber",
-      ],
-      "type": "object",
-    },
-  },
-  {
-    "description": "Reopen a closed, unmerged AgentX-owned pull request. Call only when the user explicitly requests this pull request action.",
-    "name": "agentx_reopen_pull_request",
-    "parameters": {
-      "properties": {
-        "pullRequestNumber": {
-          "minimum": 1,
-          "type": "integer",
-        },
-        "repository": {
-          "maxLength": 63,
-          "minLength": 1,
-          "type": "string",
-        },
-      },
-      "required": [
-        "repository",
-        "pullRequestNumber",
-      ],
-      "type": "object",
-    },
-  },
-  {
-    "description": "Create a clean replacement pull request before closing the original; never rewrite the old branch. Call only when the user explicitly requests this pull request action.",
-    "name": "agentx_replace_pull_request",
+    "description": "Explicitly validate and publish one changed registered repository as a ready-for-review pull request. Call this only when the user clearly asks to create or raise a pull request.",
+    "label": "Create pull request",
+    "name": "agentx_create_pull_request",
     "parameters": {
       "properties": {
         "body": {
           "maxLength": 32768,
           "type": "string",
-        },
-        "pullRequestNumber": {
-          "minimum": 1,
-          "type": "integer",
         },
         "repository": {
           "maxLength": 63,
@@ -240,38 +185,59 @@ exports[`pi orchestration boundary > characterizes the in-house agentx_* tools b
       },
       "required": [
         "repository",
-        "pullRequestNumber",
+        "title",
       ],
       "type": "object",
     },
   },
   {
-    "description": "Create a reviewable revert pull request for a merged AgentX-owned pull request. Call only when the user explicitly requests this pull request action.",
-    "name": "agentx_revert_pull_request",
+    "description": "Recovery only: read durable status for a previously interrupted AgentX operation.",
+    "label": "Remote task status",
+    "name": "agentx_task_status",
     "parameters": {
       "properties": {
-        "body": {
-          "maxLength": 32768,
+        "operationId": {
+          "format": "uuid",
           "type": "string",
         },
-        "pullRequestNumber": {
-          "minimum": 1,
-          "type": "integer",
-        },
-        "repository": {
-          "maxLength": 63,
-          "minLength": 1,
+      },
+      "required": [
+        "operationId",
+      ],
+      "type": "object",
+    },
+  },
+  {
+    "description": "Recovery only: wait for a previously interrupted operation and retrieve its final remote assistant response.",
+    "label": "Remote task result",
+    "name": "agentx_task_result",
+    "parameters": {
+      "properties": {
+        "operationId": {
+          "format": "uuid",
           "type": "string",
         },
-        "title": {
-          "maxLength": 256,
+      },
+      "required": [
+        "operationId",
+      ],
+      "type": "object",
+    },
+  },
+  {
+    "description": "Run a follow-up on the same remote workspace and conversation. This waits for completion and returns the worker's final response; do not poll or resubmit it.",
+    "label": "Remote follow-up",
+    "name": "agentx_follow_up",
+    "parameters": {
+      "properties": {
+        "prompt": {
+          "maxLength": 65536,
           "minLength": 1,
           "type": "string",
         },
       },
       "required": [
-        "repository",
-        "pullRequestNumber",
+        "prompt",
       ],
       "type": "object",
     },

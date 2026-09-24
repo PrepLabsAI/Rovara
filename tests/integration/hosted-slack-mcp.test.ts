@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { ControlPlaneApi } from "../../packages/orchestrator/src/control-plane-api.js";
-import { ORCHESTRATION_TOOL_NAMES } from "../../packages/orchestrator/src/orchestration-tools.js";
+import { ORCHESTRATION_TOOL_NAMES, RECOVERY_TOOL_NAMES } from "../../packages/orchestrator/src/orchestration-tools.js";
 import { ConnectorCallRequestSchema, type ConnectorCatalog } from "../../packages/contracts/src/index.js";
-import type { SlackRequestMessage } from "../../packages/contracts/src/slack.js";
+import { SlackThreadWorkspaceResultSchema, type SlackRequestMessage } from "../../packages/contracts/src/slack.js";
 import { processSlackRequest, type ProcessorDependencies } from "../../packages/slack-service/src/processor.js";
 import { createHostedSlackRuntime } from "../../packages/slack-service/src/runtime.js";
 import { createSignedServiceFetch } from "../../packages/slack-service/src/signing-fetch.js";
@@ -65,7 +65,7 @@ describe("hosted Slack processor and MCP runtime", () => {
           model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" },
         });
         try {
-          expect(runtime.session.getActiveToolNames()).toEqual([...ORCHESTRATION_TOOL_NAMES, ...(enabled ? ["github__new_issue_tool"] : [])]);
+          expect(runtime.session.getActiveToolNames()).toEqual([...ORCHESTRATION_TOOL_NAMES.filter((name) => !(RECOVERY_TOOL_NAMES as readonly string[]).includes(name)), ...(enabled ? ["github__new_issue_tool"] : [])]);
           if (!enabled) return "Integration is not enabled.";
           const tool = runtime.session.getToolDefinition("github__new_issue_tool")!;
           expect(tool.parameters).toMatchObject(catalog.tools[0]!.inputSchema);
@@ -87,5 +87,45 @@ describe("hosted Slack processor and MCP runtime", () => {
       expect(new Set(invocationIds).size).toBe(2);
     } else expect(baseFetch).not.toHaveBeenCalled();
     expect(post).toHaveBeenLastCalledWith(message.thread, enabled ? "Issue created." : "Integration is not enabled.");
+  });
+
+  it("activates the recovery tools and names the operation when the thread workspace reports one as recoverable", async () => {
+    const message: SlackRequestMessage = {
+      version: 1, eventId: "EvMCP000003", receivedAt: new Date().toISOString(), userId: "U0123456789",
+      thread: { teamId: "T0123456789", channelId: "C0123456789", threadTs: "1695500000.000001" },
+      text: "Is the earlier task done?",
+    };
+    const workspaceId = randomUUID();
+    const operation = randomUUID();
+    const api = new ControlPlaneApi("https://agentx.example.test", "slack-service", workspaceId, vi.fn<typeof fetch>());
+    const post = vi.fn(async () => undefined);
+    let observed: { tools: string[]; prompt: string } | undefined;
+    const dependencies: ProcessorDependencies = {
+      api: () => ({
+        // Parsed with the contract schema, as the production Slack service parses the broker's reply.
+        ensureWorkspace: async () => SlackThreadWorkspaceResultSchema.parse({
+          outcome: "WORKSPACE", workspaceId, status: "BUSY", operationId: operation, created: false,
+          orchestratorInstructions: "Delegate coding.", repositories: ["demo"], connectors: [], recoverableOperations: [operation],
+        }),
+        createConversation: async () => randomUUID(), waitForOperation: vi.fn(),
+      }),
+      threads: { load: async () => ({ workspaceId, conversationId: "11111111-1111-4111-8111-111111111111" }), saveConversation: vi.fn(), finish: vi.fn() },
+      runTurn: async (input) => {
+        const runtime = await createHostedSlackRuntime(input, {
+          stateDirectory: await createFixtureDirectory("agentx-slack-recovery-"), api,
+          model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" },
+        });
+        try {
+          observed = { tools: runtime.session.getActiveToolNames(), prompt: runtime.session.systemPrompt };
+          return "Checked.";
+        } finally { await runtime.dispose(); }
+      },
+      post,
+    };
+    await processSlackRequest(message, dependencies, { finalAttempt: false });
+    expect(observed?.tools).toEqual([...ORCHESTRATION_TOOL_NAMES]);
+    for (const name of RECOVERY_TOOL_NAMES) expect(observed?.tools).toContain(name);
+    expect(observed?.prompt).toContain(operation);
+    expect(post).toHaveBeenLastCalledWith(message.thread, "Checked.");
   });
 });

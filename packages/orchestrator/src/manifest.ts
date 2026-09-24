@@ -16,6 +16,7 @@ export function capabilitiesManifest(input: {
   unavailable?: readonly string[];
   /** Connector names whose discovery failed for an authorization, configuration or malformed-response reason. */
   misconfigured?: readonly string[];
+  recoverableOperations?: readonly string[];
 }): string {
   const repositories = input.repositories.join(", ");
   const misconfiguredNames = new Set(input.misconfigured ?? []);
@@ -26,7 +27,7 @@ export function capabilitiesManifest(input: {
   const lines = [
     "What this channel can do:",
     `- Repository code and files (${repositories}): agentx_submit_task, agentx_follow_up`,
-    `- Pull requests (${repositories}): agentx_create_pull_request and the pull-request tools`,
+    `- Pull requests (${repositories}): agentx_create_pull_request, agentx_manage_pull_request`,
     ...usable.map((connector) => `- ${connector.label} (${connector.scopes.join(", ")}): ${connector.name}__* tools`),
   ];
   const transientLabels = input.connectors
@@ -45,6 +46,9 @@ export function capabilitiesManifest(input: {
   ];
   if (unusable.length > 0) {
     lines.push(`Not connected for this channel: ${unusable.join(", ")}. If asked about something that is not connected, say it is not connected for this channel and do not attempt a workaround.`);
+  }
+  if (input.recoverableOperations?.length) {
+    lines.push(`An earlier operation in this thread has not finished: ${input.recoverableOperations.join(", ")}. Check it with agentx_task_status or agentx_task_result before starting new work.`);
   }
   lines.push("Closing this thread's workspace is a command, not a tool: the user writes \"close this workspace\".");
   return lines.join("\n");

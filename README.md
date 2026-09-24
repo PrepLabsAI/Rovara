@@ -165,7 +165,10 @@ worker.
 See [GitHub MCP setup and policy example](specs/007-github-mcp/quickstart.md). The policy can be
 written as `integrations.githubMcp` or, since feature 013, as a `github` entry in
 `integrations.connectors`, which can also limit it to named repositories; a definition may use one
-form, not both. This release uses
+form, not both. Every GitHub write signs the `body` the model supplies (an update without a body
+stays unsigned) with a footer naming the requesting Slack member and thread; set
+`attribution: false` on the connector entry to turn it off (the legacy `githubMcp` form always
+signs). This release uses
 the existing GitHub App installation with repository-scoped **Issues** permissions. Tokens stay
 in the control plane. Existing projects remain disabled until an administrator registers an
 opt-in revision. Arbitrary endpoints, personal OAuth, and other GitHub permission families are
@@ -217,7 +220,9 @@ Then configure the Slack app:
 - Under **Event Subscriptions**, enable events and set the request URL to the `SlackEventsUrl`
   output. Slack verifies the URL immediately, which succeeds only after the secret is stored.
 - Subscribe to the bot event `app_mention`.
-- Bot token scopes: `app_mentions:read` and `chat:write`. Reinstall the app after changing scopes.
+- Bot token scopes: `app_mentions:read` and `chat:write`, plus the optional `users:read`, used to
+  show the requester's name in connector write footers; without it the footer shows the Slack
+  member ID. Reinstall the app after changing scopes.
 - Invite the app to the project channel with `/invite @AgentX`.
 
 Finally, bind the channel to the project. Binding requires an administrator login:
@@ -313,6 +318,9 @@ administrator, for example `FORBIDDEN` when the connector is no longer enabled f
 Failures inside the control plane's own vendor discovery, including a GitHub App that is not
 installed on a scoped repository, still arrive as `RUNTIME_UNAVAILABLE` and are logged as
 `transient`; check the broker's `connector.tools_skipped` and error logs when one persists.
+The broker logs `connector.attribution_dropped` (project, revision, connector, scope, tool and
+request ID, never the request's text) when a write went out without its attribution footer because
+the signed arguments would have broken the vendor's schema, for example a `body` length limit.
 
 If the orchestrator's turn fails, AgentX posts the failure in the thread. Other failures, such as
 workspace preparation or a Slack API error, are retried; on the fifth attempt AgentX posts the
@@ -353,7 +361,9 @@ workspace are not inherited by the new PR. A conflict or effective empty diff st
 
 Maintain an AgentX-owned PR from the same thread by naming the repository and PR number: append
 the workspace's new commits, sync the base branch into it, update its title or body, or close and
-reopen it.
+reopen it. The orchestrator makes all of these changes — append, sync, edit title/body, close,
+reopen, replace, and revert — through one tool, `agentx_manage_pull_request`, choosing the action
+that matches the request.
 
 `append` runs readiness checks and accepts only workspace commits that descend from the recorded
 PR head. With CodeBuild gates, append and sync first push an operation-specific validation branch;

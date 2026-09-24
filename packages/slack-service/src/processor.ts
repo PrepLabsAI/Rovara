@@ -1,5 +1,6 @@
 import {
   slackThreadSubject,
+  slackThreadUrl,
   splitSlackMessage,
   WorkspaceClosePreflightResultSchema,
   type SlackRequestMessage,
@@ -43,6 +44,7 @@ export interface TurnInput {
   orchestratorInstructions: string;
   connectors?: ThreadConnector[];
   repositories?: string[];
+  recoverableOperations?: string[];
   requestId: () => string;
 }
 
@@ -160,6 +162,7 @@ export async function processSlackRequest(
         orchestratorInstructions: workspace.orchestratorInstructions,
         ...(workspace.connectors === undefined ? {} : { connectors: workspace.connectors }),
         ...(workspace.repositories === undefined ? {} : { repositories: workspace.repositories }),
+        ...(workspace.recoverableOperations === undefined ? {} : { recoverableOperations: workspace.recoverableOperations }),
         requestId: requestIdSequence(message.eventId),
       });
       log("task.completed", { eventId: message.eventId, responseLength: response.length });
@@ -207,9 +210,7 @@ function closeBlockedMessage(result: ReturnType<typeof WorkspaceClosePreflightRe
   ].join("\n");
 }
 
-export function slackThreadUrl(thread: SlackThread): string {
-  return `https://slack.com/archives/${thread.channelId}/p${thread.threadTs.replace(".", "")}`;
-}
+export { slackThreadUrl } from "@agentx/contracts";
 
 function limitMessage(result: Extract<SlackThreadWorkspaceResult, { outcome: "LIMIT_REACHED" }>): string {
   if (result.limit === "ORGANIZATION") {

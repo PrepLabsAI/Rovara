@@ -15,6 +15,7 @@ export const GitHubConnectorSchema = z.object({
     z.array(RepositoryNameSchema).min(1).max(32).refine((names) => new Set(names).size === names.length, "connector scopes must be unique"),
   ]),
   tools: ToolApprovalListSchema,
+  attribution: z.boolean().optional(),
 }).strict();
 
 export const ConnectorConfigSchema = z.discriminatedUnion("type", [GitHubConnectorSchema]);

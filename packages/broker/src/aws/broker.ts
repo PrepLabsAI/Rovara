@@ -43,6 +43,7 @@ import {
   agentXError,
   parseSlackThreadSubject,
   slackThreadSubject,
+  slackThreadUrl,
   type Operation,
   type OperationStatus,
   type CodeBuildCheckResult,
@@ -57,6 +58,8 @@ import {
   type ThreadConnector,
   type WorkerInvocation,
   type WorkspaceInstance,
+  cleanDisplayName,
+  DISPLAY_NAME_MAX_ENCODED_LENGTH,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { GitHubAppCredentialProvider, privateKeyFromSecret } from "../github-app.js";
@@ -331,8 +334,11 @@ async function routeWorkspaceRequest(
     if (!parsed?.success) {
       return json({ catalog: await discoverGitHubScope(dependencies, identity, workspace, project, github, repository) }, request.requestId);
     }
+    const attribution = attributionText(identity, github);
     const result = await executeGitHubTool(parsed.data, gitHubContext(identity, workspace, project, github, repository), {
-      ...dependencies.githubMcp,
+      ...withoutDeploymentAttribution(dependencies.githubMcp),
+      ...(attribution === undefined ? {} : { attribution }),
+      onAttributionDropped: attributionDroppedLog(workspace, project, github, repository, parsed.data.requestId),
       store: new DynamoConnectorLedger(dependencies.documentClient, dependencies.tableName, workspace.id, GITHUB_LEDGER, github.name),
       onDefinitionChanged: () => dependencies.catalogs.delete(catalogKey(workspace, project, github, repository)),
     });
@@ -368,11 +374,14 @@ async function routeWorkspaceRequest(
         text: `${GITHUB_LABEL} is not connected for this project. An administrator must configure its credential.`,
       } }, request.requestId);
     }
+    const attribution = attributionText(identity, github);
     const result = await executeGitHubConnectorTool(
       { requestId: parsed.data.requestId, repository: repository.name, tool: parsed.data.tool, schemaHash: parsed.data.schemaHash, arguments: parsed.data.arguments },
       gitHubContext(identity, workspace, project, github, repository),
       {
-        ...dependencies.githubMcp,
+        ...withoutDeploymentAttribution(dependencies.githubMcp),
+        ...(attribution === undefined ? {} : { attribution }),
+        onAttributionDropped: attributionDroppedLog(workspace, project, github, repository, parsed.data.requestId),
         store: new DynamoConnectorLedger(dependencies.documentClient, dependencies.tableName, workspace.id, GITHUB_LEDGER, github.name),
         onDefinitionChanged: () => dependencies.catalogs.delete(catalogKey(workspace, project, github, repository)),
       },
@@ -470,6 +479,40 @@ async function authorizeGitHubConnector(dependencies: AwsBrokerDependencies, ide
 
 type GitHubConnector = NonNullable<ReturnType<typeof githubConnectorOf>>;
 type GitHubRepository = GitHubConnector["repositories"][number];
+
+/** One diagnostic line when a write went out without its footer; never the request's text. */
+function attributionDroppedLog(workspace: WorkspaceInstance, project: RegisteredProjectRecord, github: GitHubConnector, repository: GitHubRepository, requestId: string) {
+  return (tool: string) => console.log(JSON.stringify({
+    component: "broker", event: "connector.attribution_dropped", project: workspace.projectName,
+    revision: project.definition.revision, connector: github.name, scope: repository.name, tool, requestId,
+  }));
+}
+
+/** Only the connector decides attribution: a deployment-level value must not survive attribution: false. */
+function withoutDeploymentAttribution(dependencies: GitHubMcpDependencies): Omit<GitHubMcpDependencies, "attribution"> {
+  const rest = { ...dependencies };
+  delete rest.attribution;
+  return rest;
+}
+
+/**
+ * Text as a GFM code span, which GitHub renders literally: no mention, link, autolink, HTML or
+ * issue reference. Per CommonMark the fence is one backtick longer than the text's longest
+ * backtick run, padded with a space when the text starts or ends with a backtick.
+ */
+function inertName(name: string): string {
+  const longestRun = Math.max(0, ...(name.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = "`".repeat(longestRun + 1);
+  const pad = name.startsWith("`") || name.endsWith("`") ? " " : "";
+  return `${fence}${pad}${name}${pad}${fence}`;
+}
+
+function attributionText(identity: AuthenticatedIdentity, github: GitHubConnector): string | undefined {
+  if (!github.attribution || !identity.slack) return undefined;
+  const name = identity.slack.requesterName;
+  const who = inertName(name ?? `Slack member ${identity.slack.requester.userId}`);
+  return `Requested by ${who} via AgentX · ${slackThreadUrl(identity.slack.thread)}`;
+}
 
 function gitHubContext(identity: AuthenticatedIdentity, workspace: WorkspaceInstance, project: RegisteredProjectRecord, github: GitHubConnector, repository: GitHubRepository) {
   return {
@@ -721,10 +764,19 @@ function parseSlackHeaders(headers: Record<string, string | undefined>): Omit<No
   try {
     const thread = parseSlackThreadSubject(headers["x-agentx-slack-thread"] ?? "");
     const requester = SlackRequesterSchema.parse({ teamId: thread.teamId, userId: headers["x-agentx-slack-user"] });
-    return { thread, requester };
+    const requesterName = displayName(headers["x-agentx-slack-user-name"]);
+    return { thread, requester, ...(requesterName === undefined ? {} : { requesterName }) };
   } catch {
     throw agentXError("CONFIG_INVALID", "valid x-agentx-slack-thread and x-agentx-slack-user headers are required");
   }
+}
+
+/** A Slack display name from the orchestrator, percent-encoded, cleaned by the same rules the Slack service used. */
+function displayName(value: string | undefined): string | undefined {
+  if (!value || value.length > DISPLAY_NAME_MAX_ENCODED_LENGTH) return undefined;
+  try {
+    return cleanDisplayName(decodeURIComponent(value));
+  } catch { return undefined; }
 }
 
 async function putSlackBinding(
@@ -997,7 +1049,17 @@ async function ensureThreadWorkspace(
   const includeIntegrations = input.includeIntegrations === true;
   const includeSettingsRevision = input.includeSettingsRevision === true;
   const includeConnectors = input.includeConnectors === true;
-  const include: IntegrationInclude = { integrations: includeIntegrations, connectors: includeConnectors, connected: dependencies.githubMcp !== undefined };
+  // A separate opt-in: the Slack service released before this field existed already sends
+  // includeConnectors: true but parses the WORKSPACE result with a strict schema that lacks
+  // recoverableOperations. The control plane deploys first, so gating this on includeConnectors
+  // would fail every turn until the Slack service caught up.
+  const includeRecoverableOperations = input.includeRecoverableOperations === true;
+  const include: IntegrationInclude = {
+    integrations: includeIntegrations,
+    connectors: includeConnectors,
+    recoverableOperations: includeRecoverableOperations,
+    connected: dependencies.githubMcp !== undefined,
+  };
   const threadWorkspace = await getThreadWorkspace(dependencies, identity.ownerKey);
   if (threadWorkspace) {
     if (threadWorkspace.status === "CLOSED" && threadWorkspace.closedAt) {
@@ -1068,6 +1130,7 @@ async function ensureThreadWorkspace(
     created: true,
     orchestratorInstructions: project.definition.orchestratorInstructions,
     ...threadIntegrations(project.definition, include),
+    ...(include.recoverableOperations ? { recoverableOperations: [] } : {}),
     ...(includeSettingsRevision ? { settingsRevision: project.definition.revision } : {}),
   };
 }
@@ -1088,6 +1151,7 @@ async function existingThreadWorkspace(
   const applied = {
     orchestratorInstructions: settings.definition.orchestratorInstructions,
     ...threadIntegrations(settings.definition, include),
+    ...(include.recoverableOperations ? { recoverableOperations: workspace.status === "BUSY" && workspace.activeOperationId ? [workspace.activeOperationId] : [] } : {}),
     ...(includeSettingsRevision ? { settingsRevision: settings.definition.revision } : {}),
   };
   if (workspace.status === "PREPARATION_FAILED" && !workspace.activeOperationId) {
@@ -1111,7 +1175,7 @@ async function existingThreadWorkspace(
   };
 }
 
-interface IntegrationInclude { integrations: boolean; connectors: boolean; connected: boolean }
+interface IntegrationInclude { integrations: boolean; connectors: boolean; recoverableOperations: boolean; connected: boolean }
 
 function threadIntegrations(project: ProjectDefinition, include: IntegrationInclude): {
   githubMcpRepositories?: string[];

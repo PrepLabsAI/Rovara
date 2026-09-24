@@ -130,6 +130,86 @@ const legacyFingerprint = (value: unknown): string => {
 };
 
 describe("gateway execution", () => {
+  it("appends the attribution to a body the model supplied on a write, and to nothing else", async () => {
+    const f = fixture();
+    f.tools[1]!.inputSchema = schema({ title: { type: "string" }, body: { type: "string" } }, ["title"]);
+    f.context.policy.tools[1] = { name: "create_item", access: "write", allowedArguments: ["title", "body"] };
+    const options = { connect: f.connect, ledger: f.ledger, attribution: "Requested by Pratik via AgentX · https://slack.com/archives/C1/p1" };
+    await executeTool(f.request("create_item", { title: "Bug", body: "Steps" }), f.connector, f.context, options);
+    expect(f.call).toHaveBeenLastCalledWith("create_item", { title: "Bug", body: "Steps\n\n—\nRequested by Pratik via AgentX · https://slack.com/archives/C1/p1", siteId: "site-42" });
+    await executeTool(f.request("create_item", { title: "No body" }), f.connector, f.context, options);
+    expect(f.call).toHaveBeenLastCalledWith("create_item", { title: "No body", siteId: "site-42" });
+    await executeTool(f.request("list_items", { state: "open" }), f.connector, f.context, options);
+    expect(f.call).toHaveBeenLastCalledWith("list_items", { state: "open", siteId: "site-42" });
+  });
+
+  it("replays an attributed write from the ledger instead of conflicting", async () => {
+    const f = fixture();
+    f.tools[1]!.inputSchema = schema({ title: { type: "string" }, body: { type: "string" } }, ["title"]);
+    f.context.policy.tools[1] = { name: "create_item", access: "write", allowedArguments: ["title", "body"] };
+    const request = f.request("create_item", { title: "Bug", body: "Steps" });
+    const options = { connect: f.connect, ledger: f.ledger, attribution: "Requested by Pratik via AgentX · https://slack.com/archives/C1/p1" };
+    await executeTool(request, f.connector, f.context, options);
+    const retried = { ...options, attribution: "Requested by Slack member U2 via AgentX · https://slack.com/archives/C2/p2" };
+    expect(await executeTool(request, f.connector, f.context, retried)).toMatchObject({ status: "SUCCEEDED", replayed: true });
+    expect(f.call).toHaveBeenCalledOnce();
+  });
+
+  it("signs only the connector's attribution keys, leaving a short description alone", async () => {
+    const f = fixture();
+    f.tools[1]!.inputSchema = schema({ title: { type: "string" }, description: { type: "string" } }, ["title"]);
+    f.context.policy.tools[1] = { name: "create_item", access: "write", allowedArguments: ["title", "description"] };
+    const connector = { ...f.connector, attributionKeys: ["body"] };
+    await executeTool(f.request("create_item", { title: "Label", description: "Short" }), connector, f.context, { connect: f.connect, ledger: f.ledger, attribution: "Requested by Pratik via AgentX · https://slack.com/archives/C1/p1" });
+    expect(f.call).toHaveBeenLastCalledWith("create_item", { title: "Label", description: "Short", siteId: "site-42" });
+  });
+
+  it("never signs a value the binder supplied, only what the model wrote", async () => {
+    const f = fixture();
+    f.tools[1]!.inputSchema = schema({ title: { type: "string" }, body: { type: "string" } }, ["title", "body"]);
+    f.connector.binder = { properties: ["siteId", "body"], bind: (value) => ({ siteId: value.siteId, body: "Server template" }) };
+    await executeTool(f.request("create_item", { title: "Bug" }), f.connector, f.context, { connect: f.connect, ledger: f.ledger, attribution: "Requested by Pratik via AgentX · https://slack.com/archives/C1/p1" });
+    expect(f.call).toHaveBeenLastCalledWith("create_item", { title: "Bug", siteId: "site-42", body: "Server template" });
+  });
+
+  it("sends the unsigned body when the footer would break the upstream schema, and still refuses an unsigned body that breaks it", async () => {
+    const f = fixture();
+    f.tools[1]!.inputSchema = schema({ title: { type: "string" }, body: { type: "string", maxLength: 20 } }, ["title"]);
+    f.context.policy.tools[1] = { name: "create_item", access: "write", allowedArguments: ["title", "body"] };
+    const options = { connect: f.connect, ledger: f.ledger, attribution: "Requested by Pratik via AgentX · https://slack.com/archives/C1/p1" };
+    expect(await executeTool(f.request("create_item", { title: "Bug", body: "Steps" }), f.connector, f.context, options)).toMatchObject({ status: "SUCCEEDED" });
+    expect(f.call).toHaveBeenLastCalledWith("create_item", { title: "Bug", body: "Steps", siteId: "site-42" });
+    await executeTool(f.request("create_item", { title: "Bug", body: "Steps" }), f.connector, f.context, { ...options, attribution: "By P" });
+    expect(f.call).toHaveBeenLastCalledWith("create_item", { title: "Bug", body: "Steps\n\n—\nBy P", siteId: "site-42" });
+    expect(f.call).toHaveBeenCalledTimes(2);
+    const tooLong = await executeTool(f.request("create_item", { title: "Bug", body: "x".repeat(21) }), f.connector, f.context, options);
+    expect(tooLong).toMatchObject({ status: "FAILED", reason: "policy_denied" });
+    expect(f.call).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports a write sent without its footer exactly once, and never a signed one", async () => {
+    const f = fixture();
+    f.tools[1]!.inputSchema = schema({ title: { type: "string" }, body: { type: "string", maxLength: 20 } }, ["title"]);
+    f.context.policy.tools[1] = { name: "create_item", access: "write", allowedArguments: ["title", "body"] };
+    const onAttributionDropped = vi.fn<(tool: string) => void>();
+    const options = { connect: f.connect, ledger: f.ledger, onAttributionDropped };
+    await executeTool(f.request("create_item", { title: "Bug", body: "Steps" }), f.connector, f.context, { ...options, attribution: "By P" });
+    expect(onAttributionDropped).not.toHaveBeenCalled();
+    await executeTool(f.request("create_item", { title: "Bug", body: "Steps" }), f.connector, f.context, { ...options, attribution: "Requested by Pratik via AgentX · https://slack.com/archives/C1/p1" });
+    expect(onAttributionDropped).toHaveBeenCalledOnce();
+    expect(onAttributionDropped).toHaveBeenCalledWith("create_item");
+  });
+
+  it("does not stack a footer the value already ends with", async () => {
+    const f = fixture();
+    f.tools[1]!.inputSchema = schema({ title: { type: "string" }, body: { type: "string" } }, ["title"]);
+    f.context.policy.tools[1] = { name: "create_item", access: "write", allowedArguments: ["title", "body"] };
+    const attribution = "Requested by Pratik via AgentX · https://slack.com/archives/C1/p1";
+    const signed = `Steps\n\n—\n${attribution}`;
+    await executeTool(f.request("create_item", { title: "Bug", body: signed }), f.connector, f.context, { connect: f.connect, ledger: f.ledger, attribution });
+    expect(f.call).toHaveBeenLastCalledWith("create_item", { title: "Bug", body: signed, siteId: "site-42" });
+  });
+
   it("injects bound values from the scope and passes the requester to the credential provider", async () => {
     const f = fixture();
     const context = { ...f.context, requestedBy: { teamId: "T1", userId: "U1" } };
