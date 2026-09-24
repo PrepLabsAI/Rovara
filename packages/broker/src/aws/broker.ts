@@ -69,9 +69,11 @@ import {
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { GitHubAppCredentialProvider, privateKeyFromSecret } from "../github-app.js";
-import { CatalogCache, ConnectorNotConnected, presentCatalog, type ScopeCatalog } from "@agentx/gateway";
-import { discoverGitHubTools, executeGitHubConnectorTool, executeGitHubTool, type GitHubMcpCatalog, type GitHubMcpDependencies } from "../github-mcp.js";
+import { CatalogCache } from "@agentx/gateway";
+import { executeGitHubTool, toGitHubCatalog, type GitHubMcpDependencies } from "../github-mcp.js";
 import { DynamoConnectorLedger, GITHUB_LEDGER } from "./connector-ledger.js";
+import { attributionDroppedLog, callConnector, connectorCatalogKey, discoverCachedScope, discoverConnector, type ConnectorContextBase, type ScopeDiscovery } from "./connector-routes.js";
+import { resolveConnectors, type ConnectorType, type ConnectorTypeContext, type ResolvedConnector } from "./connector-types.js";
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
 import { preflightConnectors, registrationWarnings } from "./registration-preflight.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
@@ -94,7 +96,7 @@ const TERMINAL = new Set<OperationStatus>(["SUCCEEDED", "FAILED", "CANCELLED", "
 const MAX_ARTIFACT_BYTES = 5_000_000;
 const EVENT_TRANSACTION_CHUNK = 80;
 
-interface RegisteredProjectRecord {
+export interface RegisteredProjectRecord {
   pk: string;
   sk: string;
   entityType: "PROJECT";
@@ -217,8 +219,10 @@ interface AwsBrokerDependencies {
   codeBuild: CodeBuildGateway;
   slack?: SlackServiceConfiguration;
   githubMcp?: GitHubMcpDependencies;
-  catalogs: CatalogCache<GitHubMcpCatalog>;
+  catalogs: CatalogCache<ScopeDiscovery>;
   credentialRegistry?: CredentialRegistry;
+  /** Connector types this deployment serves; the built-in types when absent. */
+  connectorTypes?: Record<string, ConnectorType>;
 }
 
 /**
@@ -226,7 +230,7 @@ interface AwsBrokerDependencies {
  * the credential registry from `connectorCredentials` unless one is injected.
  */
 export type AwsBrokerInput = Omit<AwsBrokerDependencies, "catalogs"> & {
-  catalogs?: CatalogCache<GitHubMcpCatalog>;
+  catalogs?: CatalogCache<ScopeDiscovery>;
   connectorCredentials?: ConnectorCredentialsConfiguration;
 };
 
@@ -246,7 +250,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
     : undefined);
   const dependencies: AwsBrokerDependencies = {
     ...rest,
-    catalogs: input.catalogs ?? new CatalogCache<GitHubMcpCatalog>({ ttlMs: 600_000, maxEntries: 256 }),
+    catalogs: input.catalogs ?? new CatalogCache<ScopeDiscovery>({ ttlMs: 600_000, maxEntries: 256 }),
     ...(credentialRegistry ? { credentialRegistry } : {}),
   };
   if (Buffer.byteLength(dependencies.callbackSigningKey, "utf8") < 32) {
@@ -361,72 +365,49 @@ async function routeWorkspaceRequest(
     const repositoryName = parsed?.success ? parsed.data.repository : url.searchParams.get("repository");
     const repository = github.repositories.find((entry) => entry.name === repositoryName);
     if (!repository) throw agentXError("NOT_FOUND", "registered repository not found");
+    const revision = project.definition.revision;
     if (!parsed?.success) {
-      return json({ catalog: await discoverGitHubScope(dependencies, identity, workspace, project, github, repository) }, request.requestId);
+      // The connector route's cache, under the same key, so either route's discovery serves both.
+      const connector = resolveConnectors(project.definition, connectorTypeContext(dependencies), dependencies.connectorTypes)
+        .find((entry) => entry.type === "github" && entry.name === github.name);
+      const scope = connector?.scopes.find((entry) => entry.alias === repository.name);
+      if (!connector || !scope) throw agentXError("FORBIDDEN", "GitHub MCP is not enabled for this project revision");
+      const definition = await connector.definition();
+      if ("notConnected" in definition) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub MCP is not configured");
+      const discovery = await discoverCachedScope({
+        connector, definition, scope, projectName: workspace.projectName, context: connectorContext(identity, workspace, project), catalogs: dependencies.catalogs,
+      });
+      return json({ catalog: toGitHubCatalog(discovery) }, request.requestId);
     }
     const attribution = attributionText(identity, github);
     const result = await executeGitHubTool(parsed.data, gitHubContext(identity, workspace, project, github, repository), {
       ...withoutDeploymentAttribution(dependencies.githubMcp),
       ...(attribution === undefined ? {} : { attribution }),
-      onAttributionDropped: attributionDroppedLog(workspace, project, github, repository, parsed.data.requestId),
+      onAttributionDropped: attributionDroppedLog(workspace.projectName, revision, github.name, repository.name, parsed.data.requestId),
       store: new DynamoConnectorLedger(dependencies.documentClient, dependencies.tableName, workspace.id, GITHUB_LEDGER, github.name),
-      onDefinitionChanged: () => dependencies.catalogs.delete(catalogKey(workspace, project, github, repository)),
+      onDefinitionChanged: () => dependencies.catalogs.delete(connectorCatalogKey(workspace.projectName, revision, github.name, repository.name)),
     });
     return json({ result }, request.requestId);
   }
 
   const connectorRoute = /^\/v1\/workspaces\/([0-9a-f-]+)\/connectors\/([a-z][a-z0-9-]{0,19})\/(tools|call)$/.exec(url.pathname);
   if (connectorRoute?.[1] && connectorRoute[2] && ((request.method === "GET" && connectorRoute[3] === "tools") || (request.method === "POST" && connectorRoute[3] === "call"))) {
-    const { workspace, project, github } = await authorizeGitHubConnector(dependencies, identity, connectorRoute[1]);
-    if (github.name !== connectorRoute[2]) throw agentXError("NOT_FOUND", "connector not found");
+    const { workspace, project } = await authorizeWorkspaceConnectors(dependencies, identity, connectorRoute[1]);
+    const connector = resolveConnectors(project.definition, connectorTypeContext(dependencies), dependencies.connectorTypes)
+      .find((entry) => entry.name === connectorRoute[2]);
+    if (!connector) throw agentXError("NOT_FOUND", "connector not found");
     const parsed = request.method === "POST" ? ConnectorCallRequestSchema.safeParse(body) : undefined;
     if (parsed && !parsed.success) throw agentXError("CONFIG_INVALID", "invalid connector request");
+    const context = connectorContext(identity, workspace, project);
     if (!parsed?.success) {
-      if (!dependencies.githubMcp) return json({ catalog: { connector: github.name, notConnected: true, tools: [], skipped: [] } }, request.requestId);
-      const scopes: ScopeCatalog[] = [];
-      for (const repository of github.repositories) {
-        let discovered: GitHubMcpCatalog;
-        try {
-          discovered = await discoverGitHubScope(dependencies, identity, workspace, project, github, repository);
-        } catch (error) {
-          if (!(error instanceof ConnectorNotConnected)) throw error;
-          console.log(JSON.stringify({
-            component: "broker", event: "connector.not_connected", project: workspace.projectName,
-            revision: project.definition.revision, connector: github.name, scope: repository.name,
-            message: stripCode(error.message, error.code),
-          }));
-          return json({ catalog: { connector: github.name, notConnected: true, tools: [], skipped: [] } }, request.requestId);
-        }
-        scopes.push({ alias: repository.name, tools: discovered.tools.map(({ repository: scope, ...tool }) => ({ ...tool, scope })) });
-      }
-      const presented = presentCatalog({ connector: github.name, label: "GitHub", scopeNoun: "repository", approvals: github.policy.tools, scopes });
-      return json({ catalog: { connector: github.name, tools: presented.tools, skipped: presented.skipped } }, request.requestId);
+      return json({ catalog: await discoverConnector({ connector, workspace, project, context, catalogs: dependencies.catalogs }) }, request.requestId);
     }
-    // A malformed request (unknown scope or unapproved tool) is refused the same way regardless of
-    // whether this deployment has a GitHub credential configured.
-    const repository = github.repositories.find((entry) => entry.name === parsed.data.scope);
-    if (!repository) throw agentXError("NOT_FOUND", "connector scope not found");
-    if (!github.policy.tools.some((tool) => tool.name === parsed.data.tool)) {
-      throw agentXError("FORBIDDEN", "GitHub MCP tool is not approved for this project");
-    }
-    if (!dependencies.githubMcp) {
-      return json({ result: {
-        requestId: parsed.data.requestId, status: "FAILED", reason: "not_connected", truncated: false, replayed: false,
-        text: `${GITHUB_LABEL} is not connected for this project. An administrator must configure its credential.`,
-      } }, request.requestId);
-    }
-    const attribution = attributionText(identity, github);
-    const result = await executeGitHubConnectorTool(
-      { requestId: parsed.data.requestId, repository: repository.name, tool: parsed.data.tool, schemaHash: parsed.data.schemaHash, arguments: parsed.data.arguments },
-      gitHubContext(identity, workspace, project, github, repository),
-      {
-        ...withoutDeploymentAttribution(dependencies.githubMcp),
-        ...(attribution === undefined ? {} : { attribution }),
-        onAttributionDropped: attributionDroppedLog(workspace, project, github, repository, parsed.data.requestId),
-        store: new DynamoConnectorLedger(dependencies.documentClient, dependencies.tableName, workspace.id, GITHUB_LEDGER, github.name),
-        onDefinitionChanged: () => dependencies.catalogs.delete(catalogKey(workspace, project, github, repository)),
-      },
-    );
+    const attribution = attributionText(identity, connector);
+    const result = await callConnector({
+      connector, request: parsed.data, workspace, project, context, catalogs: dependencies.catalogs,
+      ...(attribution === undefined ? {} : { attribution }),
+      ledger: new DynamoConnectorLedger(dependencies.documentClient, dependencies.tableName, workspace.id, connector.ledger, connector.name),
+    });
     return json({ result }, request.requestId);
   }
 
@@ -505,29 +486,40 @@ async function routeWorkspaceRequest(
 
 const GITHUB_LABEL = "GitHub issues";
 
-/** Workspace ownership, channel binding and membership, then the latest revision's GitHub connector. */
-async function authorizeGitHubConnector(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, workspaceId: string) {
+/** Workspace ownership, channel binding and membership, then the project's latest revision, which configures at least one connector. */
+async function authorizeWorkspaceConnectors(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, workspaceId: string) {
   const workspace = await requireOwnedWorkspace(dependencies, identity, workspaceId);
   if (identity.slack && identity.slack.binding.projectName !== workspace.projectName) throw agentXError("FORBIDDEN", "Slack channel is no longer bound to this project");
   await requireMembership(dependencies, identity.ownerKey, workspace.projectName);
-  // The policy and the repositories it may address come from the project's latest registered
-  // revision, so enabling, narrowing or revoking a tool reaches an existing thread at once.
+  // The policy and the scopes it may address come from the project's latest registered revision,
+  // so enabling, narrowing or revoking a tool reaches an existing thread at once.
   const project = await requireLatestProject(dependencies, workspace.projectName);
+  const integrations = project.definition.integrations;
+  if (!integrations?.githubMcp && !integrations?.connectors?.length) throw agentXError("FORBIDDEN", "GitHub MCP is not enabled for this project revision");
+  return { workspace, project };
+}
+
+/** The workspace and latest revision, then that revision's GitHub connector. */
+async function authorizeGitHubConnector(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, workspaceId: string) {
+  const { workspace, project } = await authorizeWorkspaceConnectors(dependencies, identity, workspaceId);
   const github = githubConnectorOf(project.definition);
   if (!github) throw agentXError("FORBIDDEN", "GitHub MCP is not enabled for this project revision");
   return { workspace, project, github };
 }
 
+function connectorTypeContext(dependencies: AwsBrokerDependencies): ConnectorTypeContext {
+  return {
+    ...(dependencies.githubMcp ? { githubMcp: dependencies.githubMcp } : {}),
+    ...(dependencies.credentialRegistry ? { credentialRegistry: dependencies.credentialRegistry } : {}),
+  };
+}
+
+function connectorContext(identity: AuthenticatedIdentity, workspace: WorkspaceInstance, project: RegisteredProjectRecord): ConnectorContextBase {
+  return { workspaceId: workspace.id, ownerKey: identity.ownerKey, settingsRevision: project.definition.revision, ...requesterOf(identity) };
+}
+
 type GitHubConnector = NonNullable<ReturnType<typeof githubConnectorOf>>;
 type GitHubRepository = GitHubConnector["repositories"][number];
-
-/** One diagnostic line when a write went out without its footer; never the request's text. */
-function attributionDroppedLog(workspace: WorkspaceInstance, project: RegisteredProjectRecord, github: GitHubConnector, repository: GitHubRepository, requestId: string) {
-  return (tool: string) => console.log(JSON.stringify({
-    component: "broker", event: "connector.attribution_dropped", project: workspace.projectName,
-    revision: project.definition.revision, connector: github.name, scope: repository.name, tool, requestId,
-  }));
-}
 
 /** Only the connector decides attribution: a deployment-level value must not survive attribution: false. */
 function withoutDeploymentAttribution(dependencies: GitHubMcpDependencies): Omit<GitHubMcpDependencies, "attribution"> {
@@ -548,8 +540,8 @@ function inertName(name: string): string {
   return `${fence}${pad}${name}${pad}${fence}`;
 }
 
-function attributionText(identity: AuthenticatedIdentity, github: GitHubConnector): string | undefined {
-  if (!github.attribution || !identity.slack) return undefined;
+function attributionText(identity: AuthenticatedIdentity, connector: Pick<ResolvedConnector, "attribution">): string | undefined {
+  if (!connector.attribution || !identity.slack) return undefined;
   const name = identity.slack.requesterName;
   const who = inertName(name ?? `Slack member ${identity.slack.requester.userId}`);
   return `Requested by ${who} via AgentX · ${slackThreadUrl(identity.slack.thread)}`;
@@ -564,33 +556,6 @@ function gitHubContext(identity: AuthenticatedIdentity, workspace: WorkspaceInst
     settingsRevision: project.definition.revision,
     ...requesterOf(identity),
   };
-}
-
-function catalogKey(workspace: WorkspaceInstance, project: RegisteredProjectRecord, github: GitHubConnector, repository: GitHubRepository): string {
-  return JSON.stringify([workspace.projectName, project.definition.revision, github.name, repository.name]);
-}
-
-async function discoverGitHubScope(
-  dependencies: AwsBrokerDependencies,
-  identity: AuthenticatedIdentity,
-  workspace: WorkspaceInstance,
-  project: RegisteredProjectRecord,
-  github: GitHubConnector,
-  repository: GitHubRepository,
-): Promise<GitHubMcpCatalog> {
-  if (!dependencies.githubMcp) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub MCP is not configured");
-  const key = catalogKey(workspace, project, github, repository);
-  const cached = dependencies.catalogs.get(key);
-  if (cached) return cached;
-  const { skipped, ...catalog } = await discoverGitHubTools(gitHubContext(identity, workspace, project, github, repository), dependencies.githubMcp);
-  if (skipped.length > 0) {
-    console.log(JSON.stringify({
-      component: "broker", event: "connector.tools_skipped", project: workspace.projectName,
-      revision: project.definition.revision, connector: github.name, scope: repository.name, skipped,
-    }));
-  }
-  dependencies.catalogs.set(key, catalog);
-  return catalog;
 }
 
 async function registerProject(

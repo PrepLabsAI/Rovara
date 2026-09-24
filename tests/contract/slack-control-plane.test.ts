@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { isAssumedRoleOf } from "../../packages/broker/src/aws/lambda.js";
-import { RepositoryGrantService } from "../../packages/broker/src/repository-access.js";
-import { FakeDynamoDb } from "../support/fake-dynamodb.js";
-import type { GitHubMcpDependencies } from "../../packages/broker/src/github-mcp.js";
+import type { FakeDynamoDb } from "../support/fake-dynamodb.js";
+import {
+  account, call, createBroker, ensureWorkspace, issuer, loadSlackBroker, markReady, orchestratorPrincipal, orchestratorRoleArn,
+  type Handler, type SlackBrokerModule,
+} from "../support/slack-broker.js";
 import { GitHubMcpCatalogSchema, GitHubMcpResultSchema } from "../../packages/contracts/src/github-mcp.js";
 import { ConnectorCatalogSchema } from "../../packages/contracts/src/connectors.js";
 import { createSignedServiceFetch } from "../../packages/slack-service/src/signing-fetch.js";
@@ -12,10 +14,6 @@ import { createSignedServiceFetch } from "../../packages/slack-service/src/signi
 // through, so `instanceof McpUnauthorized` holds inside the engine.
 import { McpUnauthorized } from "@agentx/gateway";
 
-const issuer = "https://identity.example.test";
-const account = "111122223333";
-const orchestratorRoleArn = `arn:aws:iam::${account}:role/AgentXSlackOrchestrator-TaskRole`;
-const orchestratorPrincipal = `arn:aws:sts::${account}:assumed-role/AgentXSlackOrchestrator-TaskRole/ecs-task-1`;
 const team = "T0BSHLLUGBD";
 const channel = "C0123456789";
 const threadOne = `${team}/${channel}/1695500000.000001`;
@@ -25,97 +23,11 @@ const pratik = "U0123456789";
 const bob = "U0456789012";
 const carol = "U0789012345";
 
-type Handler = (event: unknown) => Promise<{ statusCode: number; body: string }>;
-let createAwsBrokerHandler: (dependencies: never) => Handler;
-let deleteCapacityProviderWorkspaceSession: (
-  client: { send(command: unknown): Promise<unknown> },
-  input: { capacityProviderArn: string; runtimeSessionId: string },
-) => Promise<void>;
+let deleteCapacityProviderWorkspaceSession: SlackBrokerModule["deleteCapacityProviderWorkspaceSession"];
 
 beforeAll(async () => {
-  Object.assign(process.env, {
-    AWS_REGION: "us-east-1",
-    STATE_TABLE_NAME: "unused",
-    ARTIFACT_BUCKET_NAME: "unused",
-    OIDC_ISSUER: issuer,
-    CALLBACK_SIGNING_KEY: "c".repeat(64),
-    GITHUB_APP_PRIVATE_KEY_SECRET_ARN: `arn:aws:secretsmanager:us-east-1:${account}:secret:test`,
-    GITHUB_APP_CREDENTIAL_REF: "github-app",
-    GITHUB_APP_ACCOUNT: "example",
-    GITHUB_APP_ID: "123",
-    GITHUB_APP_INSTALLATION_ID: "456",
-  });
-  ({ createAwsBrokerHandler, deleteCapacityProviderWorkspaceSession } = await import("../../packages/broker/src/aws/broker.js") as unknown as {
-    createAwsBrokerHandler: typeof createAwsBrokerHandler;
-    deleteCapacityProviderWorkspaceSession: typeof deleteCapacityProviderWorkspaceSession;
-  });
+  ({ deleteCapacityProviderWorkspaceSession } = await loadSlackBroker());
 });
-
-function createBroker(options: {
-  memberLimit?: number;
-  organizationLimit?: number;
-  slack?: boolean;
-  githubMcp?: GitHubMcpDependencies;
-  deleteWorkspaceSession?: () => Promise<void>;
-} = {}) {
-  const db = new FakeDynamoDb();
-  const deleteWorkspaceSession = vi.fn(options.deleteWorkspaceSession ?? (async () => undefined));
-  const handler = createAwsBrokerHandler({
-    documentClient: db,
-    s3: { send: vi.fn() },
-    stopRuntimeSession: vi.fn(),
-    deleteWorkspaceSession,
-    tableName: "state",
-    artifactBucketName: "artifacts",
-    issuer,
-    adminClaim: "groups",
-    adminValues: ["admins"],
-    callbackSigningKey: "c".repeat(64),
-    repositoryGrants: new RepositoryGrantService(Buffer.alloc(32, 4), async () => ({ token: "unused" })),
-    githubPullRequests: { reconcilePullRequest: vi.fn(), getPullRequest: vi.fn(), updatePullRequest: vi.fn() },
-    codeBuild: { start: vi.fn(), status: vi.fn() },
-    ...(options.githubMcp ? { githubMcp: options.githubMcp } : {}),
-    ...(options.slack === false
-      ? {}
-      : {
-          slack: {
-            orchestratorRoleArn,
-            memberWorkspaceLimit: options.memberLimit ?? 3,
-            organizationWorkspaceLimit: options.organizationLimit ?? 20,
-          },
-        }),
-  } as never);
-  return { db, handler, deleteWorkspaceSession };
-}
-
-interface CallOptions {
-  method: string;
-  path: string;
-  body?: unknown;
-  user?: { subject: string; admin?: boolean };
-  service?: { principal?: string; thread?: string; slackUser?: string };
-  headers?: Record<string, string>;
-}
-
-async function call(handler: Handler, options: CallOptions): Promise<{ status: number; body: Record<string, unknown> }> {
-  const headers: Record<string, string> = { ...options.headers };
-  if (options.service?.thread !== undefined) headers["x-agentx-slack-thread"] = options.service.thread;
-  if (options.service?.slackUser !== undefined) headers["x-agentx-slack-user"] = options.service.slackUser;
-  const authorizer = options.user
-    ? { jwt: { claims: { iss: issuer, sub: options.user.subject, groups: options.user.admin ? ["admins"] : [] } } }
-    : options.service?.principal
-      ? { iam: { userArn: options.service.principal } }
-      : undefined;
-  const response = await handler({
-    version: "2.0",
-    rawPath: options.path.split("?")[0],
-    rawQueryString: options.path.split("?")[1] ?? "",
-    headers,
-    ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
-    requestContext: { requestId: randomUUID(), http: { method: options.method }, ...(authorizer ? { authorizer } : {}) },
-  });
-  return { status: response.statusCode, body: JSON.parse(response.body) as Record<string, unknown> };
-}
 
 const admin = { subject: "admin-subject", admin: true };
 
@@ -161,15 +73,6 @@ async function registerRevision(handler: Handler, revision: number, integrations
   expect(registered.status).toBe(201);
 }
 
-function ensureWorkspace(handler: Handler, thread: string, slackUser: string, requestId = randomUUID()) {
-  return call(handler, {
-    method: "POST",
-    path: "/v1/service/threads/workspace",
-    service: { principal: orchestratorPrincipal, thread, slackUser },
-    body: { requestId, includeIntegrations: true, includeSettingsRevision: true },
-  });
-}
-
 function startClose(handler: Handler, thread: string, slackUser: string, requestId = randomUUID()) {
   return call(handler, {
     method: "POST",
@@ -211,14 +114,6 @@ function invocationOf(db: FakeDynamoDb, operationId: string) {
   const outbox = db.find((item) => item.entityType === "OUTBOX" && item.operationId === operationId)[0];
   if (!outbox) throw new Error("outbox record is missing");
   return outbox.invocation as { callbackCapability: string; payload: Record<string, unknown> };
-}
-
-function markReady(db: FakeDynamoDb, workspaceId: string): void {
-  const workspace = db.get(`WORKSPACE#${workspaceId}`, "META");
-  if (!workspace) throw new Error("workspace record is missing");
-  // Mirrors the broker's terminal transition, which removes activeOperationId rather than nulling it.
-  workspace.status = "READY";
-  delete workspace.activeOperationId;
 }
 
 describe("hosted Slack GitHub MCP", () => {
