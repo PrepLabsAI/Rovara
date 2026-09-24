@@ -318,6 +318,9 @@ administrator, for example `FORBIDDEN` when the connector is no longer enabled f
 Failures inside the control plane's own vendor discovery, including a GitHub App that is not
 installed on a scoped repository, still arrive as `RUNTIME_UNAVAILABLE` and are logged as
 `transient`; check the broker's `connector.tools_skipped` and error logs when one persists.
+The broker logs `connector.attribution_dropped` (project, revision, connector, scope, tool and
+request ID, never the request's text) when a write went out without its attribution footer because
+the signed arguments would have broken the vendor's schema, for example a `body` length limit.
 
 If the orchestrator's turn fails, AgentX posts the failure in the thread. Other failures, such as
 workspace preparation or a Slack API error, are retried; on the fifth attempt AgentX posts the

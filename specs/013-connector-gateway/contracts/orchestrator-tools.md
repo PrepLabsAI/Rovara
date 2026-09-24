@@ -147,7 +147,8 @@ Rules:
   with a different attribution (different requester or thread) still replays instead of conflicting.
 - The model's arguments are validated against the vendor's schema before signing. If the signed
   arguments would then fail it (for example a `body` `maxLength`), the unsigned arguments are sent
-  instead: the footer never turns a valid write into a refused one.
+  instead: the footer never turns a valid write into a refused one. The broker logs each such write
+  as `connector.attribution_dropped`.
 - A value that already ends with that exact footer is left unchanged — no stacked footers on a
   model that echoes a previously signed body back.
 - A connector can turn attribution off entirely with `attribution: false` in its definition; legacy

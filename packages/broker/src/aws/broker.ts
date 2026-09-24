@@ -336,6 +336,7 @@ async function routeWorkspaceRequest(
     const result = await executeGitHubTool(parsed.data, gitHubContext(identity, workspace, project, github, repository), {
       ...withoutDeploymentAttribution(dependencies.githubMcp),
       ...(attribution === undefined ? {} : { attribution }),
+      onAttributionDropped: attributionDroppedLog(workspace, project, github, repository, parsed.data.requestId),
       store: new DynamoConnectorLedger(dependencies.documentClient, dependencies.tableName, workspace.id, GITHUB_LEDGER, github.name),
       onDefinitionChanged: () => dependencies.catalogs.delete(catalogKey(workspace, project, github, repository)),
     });
@@ -378,6 +379,7 @@ async function routeWorkspaceRequest(
       {
         ...withoutDeploymentAttribution(dependencies.githubMcp),
         ...(attribution === undefined ? {} : { attribution }),
+        onAttributionDropped: attributionDroppedLog(workspace, project, github, repository, parsed.data.requestId),
         store: new DynamoConnectorLedger(dependencies.documentClient, dependencies.tableName, workspace.id, GITHUB_LEDGER, github.name),
         onDefinitionChanged: () => dependencies.catalogs.delete(catalogKey(workspace, project, github, repository)),
       },
@@ -475,6 +477,14 @@ async function authorizeGitHubConnector(dependencies: AwsBrokerDependencies, ide
 
 type GitHubConnector = NonNullable<ReturnType<typeof githubConnectorOf>>;
 type GitHubRepository = GitHubConnector["repositories"][number];
+
+/** One diagnostic line when a write went out without its footer; never the request's text. */
+function attributionDroppedLog(workspace: WorkspaceInstance, project: RegisteredProjectRecord, github: GitHubConnector, repository: GitHubRepository, requestId: string) {
+  return (tool: string) => console.log(JSON.stringify({
+    component: "broker", event: "connector.attribution_dropped", project: workspace.projectName,
+    revision: project.definition.revision, connector: github.name, scope: repository.name, tool, requestId,
+  }));
+}
 
 /** Only the connector decides attribution: a deployment-level value must not survive attribution: false. */
 function withoutDeploymentAttribution(dependencies: GitHubMcpDependencies): Omit<GitHubMcpDependencies, "attribution"> {

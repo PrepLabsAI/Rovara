@@ -179,6 +179,19 @@ describe("gateway execution", () => {
     expect(f.call).toHaveBeenCalledTimes(2);
   });
 
+  it("reports a write sent without its footer exactly once, and never a signed one", async () => {
+    const f = fixture();
+    f.tools[1]!.inputSchema = schema({ title: { type: "string" }, body: { type: "string", maxLength: 20 } }, ["title"]);
+    f.context.policy.tools[1] = { name: "create_item", access: "write", allowedArguments: ["title", "body"] };
+    const onAttributionDropped = vi.fn<(tool: string) => void>();
+    const options = { connect: f.connect, ledger: f.ledger, onAttributionDropped };
+    await executeTool(f.request("create_item", { title: "Bug", body: "Steps" }), f.connector, f.context, { ...options, attribution: "By P" });
+    expect(onAttributionDropped).not.toHaveBeenCalled();
+    await executeTool(f.request("create_item", { title: "Bug", body: "Steps" }), f.connector, f.context, { ...options, attribution: "Requested by Pratik via AgentX · https://slack.com/archives/C1/p1" });
+    expect(onAttributionDropped).toHaveBeenCalledOnce();
+    expect(onAttributionDropped).toHaveBeenCalledWith("create_item");
+  });
+
   it("does not stack a footer the value already ends with", async () => {
     const f = fixture();
     f.tools[1]!.inputSchema = schema({ title: { type: "string" }, body: { type: "string" } }, ["title"]);

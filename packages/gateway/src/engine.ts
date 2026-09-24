@@ -95,6 +95,8 @@ export interface EngineOptions {
   onDefinitionChanged?: () => void;
   /** Footer appended to a write's body or description when the model supplied one. */
   attribution?: string;
+  /** Called when a write is sent unsigned because the signed arguments failed the upstream schema. */
+  onAttributionDropped?: (tool: string) => void;
 }
 
 /** Signs a write without ever creating a body: an absent body on an update means "leave it unchanged". */
@@ -198,10 +200,12 @@ export async function executeTool<Scope>(
     // The footer is best effort: when it would break the vendor's schema (a body maxLength, say),
     // the model's own arguments go through unsigned rather than the write failing.
     const signed = withAttribution(unsigned, write ? options.attribution : undefined, upstream.inputSchema, connector.attributionKeys);
-    const args = signed === unsigned || validateUpstream(signed).valid ? signed : unsigned;
+    const dropped = signed !== unsigned && !validateUpstream(signed).valid;
+    const args = dropped ? unsigned : signed;
     for (const guard of connector.guards) await guard.check({ tool: request.tool, arguments: request.arguments, bound, connection });
     signal.throwIfAborted();
     writeAttempted = write;
+    if (dropped) options.onAttributionDropped?.(request.tool);
     const result = await connection.call(request.tool, args);
     if (result.isError) throw new Error("MCP tool reported an error");
     response = publicResult(request, "SUCCEEDED", resultText(result).split(credential.token).join("[REDACTED]"));
