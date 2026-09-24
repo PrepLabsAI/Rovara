@@ -291,6 +291,33 @@ describe("hosted Slack GitHub MCP", () => {
     expect(invoke).toHaveBeenLastCalledWith("issue_write", expect.objectContaining({ body: "Steps" }));
   });
 
+  it("ignores a deployment-level attribution when the connector turns attribution off, on both GitHub routes", async () => {
+    const credentials = vi.fn(async () => ({ owner: "example", repo: "demo", token: "installation-secret" }));
+    const invoke = vi.fn(async () => ({ content: [{ type: "text", text: "created" }] }));
+    const connect = vi.fn(async () => ({
+      tools: [{ name: "issue_write", description: "Create an issue", inputSchema: { type: "object", properties: {
+        owner: { type: "string" }, repo: { type: "string" }, title: { type: "string" }, body: { type: "string" },
+      }, required: ["owner", "repo", "title"] } }], call: invoke, close: async () => undefined,
+    }));
+    const { db, handler } = createBroker({ githubMcp: { credentials, connect, attribution: "deployment text" } });
+    await registerProjectAndBind(handler, { connectors: [{ name: "github", type: "github", scopes: "all-repositories", attribution: false, tools: [{ name: "issue_write", access: "write" }] }] });
+    const workspaceId = (await ensureWorkspace(handler, threadOne, pratik)).body.workspaceId as string;
+    markReady(db, workspaceId);
+    const service = { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik };
+    const headers = { "x-agentx-slack-user-name": encodeURIComponent("Pratik Singhal") };
+    const connectorPath = `/v1/service/workspaces/${workspaceId}/connectors/github`;
+    const catalog = ConnectorCatalogSchema.parse((await call(handler, { method: "GET", path: `${connectorPath}/tools`, service })).body.catalog);
+    await call(handler, { method: "POST", path: `${connectorPath}/call`, service, headers,
+      body: { requestId: randomUUID(), scope: "demo", tool: "issue_write", schemaHash: catalog.tools[0]!.scopes[0]!.schemaHash, arguments: { title: "Bug", body: "Steps" } } });
+    expect(invoke).toHaveBeenLastCalledWith("issue_write", { owner: "example", repo: "demo", title: "Bug", body: "Steps" });
+    const legacyPath = `/v1/service/workspaces/${workspaceId}/github`;
+    const legacy = GitHubMcpCatalogSchema.parse((await call(handler, { method: "GET", path: `${legacyPath}/tools?repository=demo`, service })).body.catalog);
+    await call(handler, { method: "POST", path: `${legacyPath}/call`, service, headers,
+      body: { requestId: randomUUID(), repository: "demo", tool: "issue_write", schemaHash: legacy.tools[0]!.schemaHash, arguments: { title: "Bug", body: "Steps" } } });
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(invoke).toHaveBeenLastCalledWith("issue_write", { owner: "example", repo: "demo", title: "Bug", body: "Steps" });
+  });
+
   it("removes a repository from an existing thread when a revision narrows the connector's scopes", async () => {
     const credentials = vi.fn(async () => ({ owner: "example", repo: "docs", token: "installation-secret" }));
     const invoke = vi.fn(async () => ({ content: [{ type: "text", text: "GitHub result" }] }));

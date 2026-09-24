@@ -334,7 +334,7 @@ async function routeWorkspaceRequest(
     }
     const attribution = attributionText(identity, github);
     const result = await executeGitHubTool(parsed.data, gitHubContext(identity, workspace, project, github, repository), {
-      ...dependencies.githubMcp,
+      ...withoutDeploymentAttribution(dependencies.githubMcp),
       ...(attribution === undefined ? {} : { attribution }),
       store: new DynamoConnectorLedger(dependencies.documentClient, dependencies.tableName, workspace.id, GITHUB_LEDGER, github.name),
       onDefinitionChanged: () => dependencies.catalogs.delete(catalogKey(workspace, project, github, repository)),
@@ -376,7 +376,7 @@ async function routeWorkspaceRequest(
       { requestId: parsed.data.requestId, repository: repository.name, tool: parsed.data.tool, schemaHash: parsed.data.schemaHash, arguments: parsed.data.arguments },
       gitHubContext(identity, workspace, project, github, repository),
       {
-        ...dependencies.githubMcp,
+        ...withoutDeploymentAttribution(dependencies.githubMcp),
         ...(attribution === undefined ? {} : { attribution }),
         store: new DynamoConnectorLedger(dependencies.documentClient, dependencies.tableName, workspace.id, GITHUB_LEDGER, github.name),
         onDefinitionChanged: () => dependencies.catalogs.delete(catalogKey(workspace, project, github, repository)),
@@ -475,6 +475,13 @@ async function authorizeGitHubConnector(dependencies: AwsBrokerDependencies, ide
 
 type GitHubConnector = NonNullable<ReturnType<typeof githubConnectorOf>>;
 type GitHubRepository = GitHubConnector["repositories"][number];
+
+/** Only the connector decides attribution: a deployment-level value must not survive attribution: false. */
+function withoutDeploymentAttribution(dependencies: GitHubMcpDependencies): Omit<GitHubMcpDependencies, "attribution"> {
+  const rest = { ...dependencies };
+  delete rest.attribution;
+  return rest;
+}
 
 /**
  * Text as a GFM code span, which GitHub renders literally: no mention, link, autolink, HTML or
