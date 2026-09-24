@@ -143,14 +143,21 @@ async function openConnection<Scope>(
   connector: ConnectorDefinition<Scope>, context: ConnectorContext<Scope>, access: Access,
   tools: string[], signal: AbortSignal, options: EngineOptions,
 ): Promise<{ credential: IssuedCredential; connection: McpConnection }> {
+  // Tracked so a second rejection can tell the administrator the cache never got a chance to hold
+  // a fresh credential; the invalidate error's own text never surfaces (it could carry secrets).
+  let invalidateFailed = false;
   for (let attempt = 0; ; attempt += 1) {
     const credential = await withDeadline(connector.credentials.issue(context.scope, access, context.requestedBy), signal);
     try {
       return { credential, connection: await (options.connect ?? connectMcp)({ endpoint: connector.endpoint, token: credential.token, tools, signal }) };
     } catch (error) {
       if (!(error instanceof McpUnauthorized)) throw error;
-      if (attempt > 0) throw new CredentialUnavailable(`${connector.label} rejected the credential twice; check ${connector.permissionsHint}`);
-      await connector.credentials.invalidate?.(context.scope).catch(() => undefined);
+      if (attempt > 0) {
+        throw new CredentialUnavailable(invalidateFailed
+          ? `${connector.label} rejected the credential twice (clearing the cached credential also failed); check ${connector.permissionsHint}`
+          : `${connector.label} rejected the credential twice; check ${connector.permissionsHint}`);
+      }
+      await connector.credentials.invalidate?.(context.scope).catch(() => { invalidateFailed = true; });
     }
   }
 }
@@ -239,7 +246,7 @@ export async function executeTool<Scope>(
     if (result.isError) throw new Error("MCP tool reported an error");
     response = publicResult(request, "SUCCEEDED", resultText(result).split(credential.token).join("[REDACTED]"));
   } catch (error) {
-    response = error instanceof CredentialUnavailable
+    response = !writeAttempted && error instanceof CredentialUnavailable
       ? publicResult(request, "FAILED", `${label} is not connected for this project: ${error.message}. An administrator must fix its credential.`, "not_connected")
       : error instanceof DefinitionChanged
         ? publicResult(request, "FAILED", error.message, "schema_changed")

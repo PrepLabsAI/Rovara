@@ -324,9 +324,16 @@ describe("credentials that are missing or rejected", () => {
     const result = await executeTool(f.request("create_item", { title: "Bug" }), f.connector, f.context, { connect: f.connect, ledger: f.ledger });
     expect(result).toMatchObject({ status: "FAILED", reason: "not_connected" });
     expect(result.text).toContain("Tracker is not connected");
+    // The invalidate failure is reported (so an admin doesn't see a stale-credential retry as a
+    // clean "rejected twice"), but never the invalidate error's own text, which could carry secrets.
+    expect(result.text).toContain("clearing the cached credential also failed");
+    expect(result.text).not.toContain("cache down");
     expect(f.issue).toHaveBeenCalledTimes(2);
     expect(f.connect).toHaveBeenCalledTimes(2);
     expect(f.call).not.toHaveBeenCalled();
+    const stored = f.records.get(result.requestId);
+    expect(stored?.result).toMatchObject({ status: "FAILED", reason: "not_connected" });
+    expect(JSON.stringify(stored)).not.toContain("tracker-secret-token");
   });
 
   it("reports a missing credential as not connected with the administrator-facing reason", async () => {
@@ -336,6 +343,19 @@ describe("credentials that are missing or rejected", () => {
     expect(result).toMatchObject({ status: "FAILED", reason: "not_connected" });
     expect(result.text).toContain("credential tracker-key is not registered");
     expect(f.connect).not.toHaveBeenCalled();
+    const stored = f.records.get(result.requestId);
+    expect(stored?.result).toMatchObject({ status: "FAILED", reason: "not_connected" });
+    expect(JSON.stringify(stored)).not.toContain("tracker-secret-token");
+  });
+
+  it("treats a CredentialUnavailable raised after a write attempt as UNKNOWN, not not_connected", async () => {
+    const f = fixture();
+    // Not reachable through openConnection today (it only throws CredentialUnavailable before any
+    // write is attempted), but the classification is explicit so it stays correct if that changes.
+    f.call.mockRejectedValueOnce(new CredentialUnavailable("credential expired mid-call"));
+    const result = await executeTool(f.request("create_item", { title: "Bug" }), f.connector, f.context, { connect: f.connect, ledger: f.ledger });
+    expect(result.status).toBe("UNKNOWN");
+    expect(result.reason).toBeUndefined();
   });
 
   it("raises ConnectorNotConnected from discovery, which keeps the RUNTIME_UNAVAILABLE code", async () => {

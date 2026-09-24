@@ -720,7 +720,7 @@ describe("hosted Slack GitHub MCP", () => {
       expect(lines).toHaveLength(1);
       const parsed = JSON.parse(lines[0]!) as Record<string, unknown>;
       expect(parsed).toMatchObject({ component: "broker", event: "connector.not_connected", project: "payments", revision: 1, connector: "github", scope: "demo" });
-      expect(typeof parsed.message).toBe("string");
+      expect(parsed.message).toEqual(expect.stringContaining("not connected"));
       expect(lines[0]).not.toContain("installation-secret");
     } finally { log.mockRestore(); }
   });
