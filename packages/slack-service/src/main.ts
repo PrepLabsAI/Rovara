@@ -24,6 +24,7 @@ import { runOrchestratorTurn } from "@agentx/orchestrator/orchestrator";
 import { runConsumer, type QueueClient } from "./consumer.js";
 import { processSlackRequest, type ServiceLog, type ThreadServiceApi, type ThreadStore, type TurnInput } from "./processor.js";
 import { createSignedServiceFetch } from "./signing-fetch.js";
+import { createSlackUserNames } from "./user-names.js";
 import { createHostedSlackRuntime } from "./runtime.js";
 
 const MAX_RECEIVE_COUNT = 5;
@@ -78,20 +79,7 @@ function slackBotToken(): Promise<string> {
   return botToken.value;
 }
 
-const userNames = new Map<string, { name: string | undefined; at: number }>();
-/** Display name for footers; needs the optional users:read scope and falls back to undefined. */
-async function slackUserName(userId: string): Promise<string | undefined> {
-  const cached = userNames.get(userId);
-  if (cached && Date.now() - cached.at < 60 * 60 * 1_000) return cached.name;
-  let name: string | undefined;
-  try {
-    const response = await fetch(`https://slack.com/api/users.info?user=${encodeURIComponent(userId)}`, { headers: { authorization: `Bearer ${await slackBotToken()}` } });
-    const body = await response.json() as { ok?: boolean; user?: { name?: string; real_name?: string; profile?: { display_name?: string; real_name?: string } } };
-    if (body.ok) name = body.user?.profile?.display_name || body.user?.profile?.real_name || body.user?.real_name || body.user?.name || undefined;
-  } catch { name = undefined; }
-  userNames.set(userId, { name, at: Date.now() });
-  return name;
-}
+const slackUserName = createSlackUserNames({ token: slackBotToken });
 
 async function postToSlack(channel: string, threadTs: string, text: string): Promise<void> {
   const response = await fetch("https://slack.com/api/chat.postMessage", {

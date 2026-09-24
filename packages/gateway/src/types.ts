@@ -57,6 +57,8 @@ export interface ConnectorDefinition<Scope> {
   credentials: CredentialProvider<Scope>;
   binder: Binder<Scope>;
   guards: readonly Guard[];
+  /** Long-form text arguments a write's attribution is appended to; defaults to body and description. */
+  attributionKeys?: readonly string[];
 }
 
 export interface ConnectorContext<Scope> {

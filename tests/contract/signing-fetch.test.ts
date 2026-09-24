@@ -14,4 +14,18 @@ describe("signed service fetch", () => {
     await createSignedServiceFetch({ region: "us-east-1", credentials, thread, userId: "U0123456789", baseFetch })("https://agentx.example.test/v1/threads/workspace", { method: "POST", body: "{}" });
     expect(new Headers(baseFetch.mock.calls[1]?.[1]?.headers).has("x-agentx-slack-user-name")).toBe(false);
   });
+
+  it("truncates a display name by characters, never splitting an emoji", async () => {
+    const baseFetch = vi.fn<typeof fetch>(async () => Response.json({}));
+    const response = await createSignedServiceFetch({ region: "us-east-1", credentials, thread, userId: "U0123456789", userName: "a".repeat(79) + "😀x", baseFetch })("https://agentx.example.test/v1/threads/workspace", { method: "POST", body: "{}" });
+    expect(response.ok).toBe(true);
+    expect(decodeURIComponent(new Headers(baseFetch.mock.calls[0]?.[1]?.headers).get("x-agentx-slack-user-name")!)).toBe("a".repeat(79) + "😀");
+  });
+
+  it("omits the display name instead of failing when it cannot be encoded", async () => {
+    const baseFetch = vi.fn<typeof fetch>(async () => Response.json({}));
+    const response = await createSignedServiceFetch({ region: "us-east-1", credentials, thread, userId: "U0123456789", userName: "bad\uD800name", baseFetch })("https://agentx.example.test/v1/threads/workspace", { method: "POST", body: "{}" });
+    expect(response.ok).toBe(true);
+    expect(new Headers(baseFetch.mock.calls[0]?.[1]?.headers).has("x-agentx-slack-user-name")).toBe(false);
+  });
 });

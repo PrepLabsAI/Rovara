@@ -4,6 +4,14 @@ import { slackThreadSubject, type SlackThread } from "@agentx/contracts";
 
 type Credentials = ConstructorParameters<typeof SignatureV4>[0]["credentials"];
 
+/** At most 80 characters (code points, so an emoji is never split); a name that cannot be encoded is omitted. */
+function encodedDisplayName(name: string): string | undefined {
+  const clean = name.replace(/[\p{Cc}\p{Cf}]+/gu, " ").replace(/\s+/g, " ").trim();
+  try {
+    return encodeURIComponent(Array.from(clean).slice(0, 80).join("")) || undefined;
+  } catch { return undefined; }
+}
+
 // Sends the control-plane API client's /v1 requests to the IAM-authorized /v1/service routes as the orchestrator role.
 export function createSignedServiceFetch(options: {
   region: string;
@@ -25,7 +33,8 @@ export function createSignedServiceFetch(options: {
     });
     headers["x-agentx-slack-thread"] = slackThreadSubject(options.thread);
     headers["x-agentx-slack-user"] = options.userId;
-    if (options.userName) headers["x-agentx-slack-user-name"] = encodeURIComponent(options.userName.replace(/[\p{Cc}\p{Cf}]+/gu, " ").replace(/\s+/g, " ").trim().slice(0, 80));
+    const userName = options.userName ? encodedDisplayName(options.userName) : undefined;
+    if (userName) headers["x-agentx-slack-user-name"] = userName;
     const body = typeof init?.body === "string" ? init.body : undefined;
     if (init?.body !== undefined && init.body !== null && body === undefined) {
       throw new Error("control-plane service requests must use string bodies");

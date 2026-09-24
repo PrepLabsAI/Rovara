@@ -217,6 +217,34 @@ function markReady(db: FakeDynamoDb, workspaceId: string): void {
 }
 
 describe("hosted Slack GitHub MCP", () => {
+  it("keeps long non-Latin names, defuses mentions and links, and never signs a GitHub description", async () => {
+    const credentials = vi.fn(async () => ({ owner: "example", repo: "demo", token: "installation-secret" }));
+    const invoke = vi.fn(async () => ({ content: [{ type: "text", text: "created" }] }));
+    const connect = vi.fn(async () => ({
+      tools: [{ name: "issue_write", description: "Create an issue", inputSchema: { type: "object", properties: {
+        owner: { type: "string" }, repo: { type: "string" }, title: { type: "string" }, body: { type: "string" }, description: { type: "string" },
+      }, required: ["owner", "repo", "title"] } }], call: invoke, close: async () => undefined,
+    }));
+    const { db, handler } = createBroker({ githubMcp: { credentials, connect } });
+    await registerProjectAndBind(handler, { connectors: [{ name: "github", type: "github", scopes: "all-repositories", tools: [{ name: "issue_write", access: "write" }] }] });
+    const workspaceId = (await ensureWorkspace(handler, threadOne, pratik)).body.workspaceId as string;
+    markReady(db, workspaceId);
+    const service = { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik };
+    const path = `/v1/service/workspaces/${workspaceId}/connectors/github`;
+    const catalog = ConnectorCatalogSchema.parse((await call(handler, { method: "GET", path: `${path}/tools`, service })).body.catalog);
+    const schemaHash = catalog.tools[0]!.scopes[0]!.schemaHash;
+    const write = (args: Record<string, unknown>, name: string) => call(handler, { method: "POST", path: `${path}/call`, service,
+      headers: { "x-agentx-slack-user-name": encodeURIComponent(name) },
+      body: { requestId: randomUUID(), scope: "demo", tool: "issue_write", schemaHash, arguments: args } });
+    const threadUrl = `https://slack.com/archives/${threadOne.split("/")[1]}/p${threadOne.split("/")[2]!.replace(".", "")}`;
+    await write({ title: "Bug", body: "Steps" }, "क".repeat(80));
+    expect(invoke).toHaveBeenLastCalledWith("issue_write", expect.objectContaining({ body: `Steps\n\n—\nRequested by ${"क".repeat(80)} via AgentX · ${threadUrl}` }));
+    await write({ title: "Bug", body: "Steps" }, "@org/security [x](https://e.test) `code`");
+    expect(invoke).toHaveBeenLastCalledWith("issue_write", expect.objectContaining({ body: `Steps\n\n—\nRequested by @\u200Borg/security \\[x\\](https://e.test) \\\`code\\\` via AgentX · ${threadUrl}` }));
+    await write({ title: "Label", description: "Short" }, "Pratik Singhal");
+    expect(invoke).toHaveBeenLastCalledWith("issue_write", { owner: "example", repo: "demo", title: "Label", description: "Short" });
+  });
+
   it("signs connector writes with the requesting member and thread, unless the connector turns it off", async () => {
     const credentials = vi.fn(async () => ({ owner: "example", repo: "demo", token: "installation-secret" }));
     const invoke = vi.fn(async () => ({ content: [{ type: "text", text: "created" }] }));

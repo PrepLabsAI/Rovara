@@ -98,12 +98,20 @@ export interface EngineOptions {
 }
 
 /** Signs a write without ever creating a body: an absent body on an update means "leave it unchanged". */
-function withAttribution(args: Record<string, unknown>, attribution: string | undefined, schema: Record<string, unknown>): Record<string, unknown> {
+function withAttribution(
+  args: Record<string, unknown>,
+  attribution: string | undefined,
+  schema: Record<string, unknown>,
+  keys: readonly string[] = ["body", "description"],
+): Record<string, unknown> {
   if (!attribution) return args;
   const properties = isObject(schema.properties) ? schema.properties : {};
-  for (const key of ["body", "description"]) {
+  const footer = `\n\n—\n${attribution}`;
+  for (const key of keys) {
     const value = args[key];
-    if (typeof value === "string" && Object.hasOwn(properties, key)) return { ...args, [key]: `${value}\n\n—\n${attribution}` };
+    if (typeof value !== "string" || !Object.hasOwn(properties, key)) continue;
+    // A model that echoes a previously signed body must not stack a second identical footer.
+    return value.endsWith(footer) ? args : { ...args, [key]: `${value}${footer}` };
   }
   return args;
 }
@@ -184,7 +192,7 @@ export async function executeTool<Scope>(
     if (!validate(request.arguments).valid) throw new PolicyFailure("Arguments do not match the approved MCP tool schema.");
     const bound = connector.binder.bind(context.scope, credential);
     const upstream = connection.tools.find((tool) => tool.name === request.tool)!;
-    const args = withAttribution({ ...request.arguments, ...bound }, write ? options.attribution : undefined, upstream.inputSchema);
+    const args = withAttribution({ ...request.arguments, ...bound }, write ? options.attribution : undefined, upstream.inputSchema, connector.attributionKeys);
     if (!new AjvJsonSchemaValidator().getValidator(upstream.inputSchema)(args).valid) throw new PolicyFailure("Arguments do not match the upstream MCP tool schema.");
     for (const guard of connector.guards) await guard.check({ tool: request.tool, arguments: request.arguments, bound, connection });
     signal.throwIfAborted();

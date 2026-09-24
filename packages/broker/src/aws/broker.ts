@@ -476,9 +476,15 @@ async function authorizeGitHubConnector(dependencies: AwsBrokerDependencies, ide
 type GitHubConnector = NonNullable<ReturnType<typeof githubConnectorOf>>;
 type GitHubRepository = GitHubConnector["repositories"][number];
 
+/** A name that cannot mention anyone or form a Markdown link or code span in the vendor's renderer. */
+function inertName(name: string): string {
+  return name.replace(/@/g, "@\u200B").replace(/[[\]`]/g, (character) => `\\${character}`);
+}
+
 function attributionText(identity: AuthenticatedIdentity, github: GitHubConnector): string | undefined {
   if (!github.attribution || !identity.slack) return undefined;
-  const who = identity.slack.requesterName ?? `Slack member ${identity.slack.requester.userId}`;
+  const name = identity.slack.requesterName;
+  const who = name === undefined ? `Slack member ${identity.slack.requester.userId}` : inertName(name);
   return `Requested by ${who} via AgentX · ${slackThreadUrl(identity.slack.thread)}`;
 }
 
@@ -741,9 +747,9 @@ function parseSlackHeaders(headers: Record<string, string | undefined>): Omit<No
 
 /** A Slack display name from the orchestrator, percent-encoded; control characters become spaces. */
 function displayName(value: string | undefined): string | undefined {
-  if (!value || value.length > 512) return undefined;
+  if (!value || value.length > 1024) return undefined;
   try {
-    const name = decodeURIComponent(value).replace(/[\p{Cc}\p{Cf}]+/gu, " ").replace(/\s+/g, " ").trim().slice(0, 80);
+    const name = Array.from(decodeURIComponent(value).replace(/[\p{Cc}\p{Cf}]+/gu, " ").replace(/\s+/g, " ").trim()).slice(0, 80).join("");
     return name.length > 0 ? name : undefined;
   } catch { return undefined; }
 }

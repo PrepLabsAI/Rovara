@@ -150,8 +150,28 @@ describe("gateway execution", () => {
     const request = f.request("create_item", { title: "Bug", body: "Steps" });
     const options = { connect: f.connect, ledger: f.ledger, attribution: "Requested by Pratik via AgentX · https://slack.com/archives/C1/p1" };
     await executeTool(request, f.connector, f.context, options);
-    expect(await executeTool(request, f.connector, f.context, options)).toMatchObject({ status: "SUCCEEDED", replayed: true });
+    const retried = { ...options, attribution: "Requested by Slack member U2 via AgentX · https://slack.com/archives/C2/p2" };
+    expect(await executeTool(request, f.connector, f.context, retried)).toMatchObject({ status: "SUCCEEDED", replayed: true });
     expect(f.call).toHaveBeenCalledOnce();
+  });
+
+  it("signs only the connector's attribution keys, leaving a short description alone", async () => {
+    const f = fixture();
+    f.tools[1]!.inputSchema = schema({ title: { type: "string" }, description: { type: "string" } }, ["title"]);
+    f.context.policy.tools[1] = { name: "create_item", access: "write", allowedArguments: ["title", "description"] };
+    const connector = { ...f.connector, attributionKeys: ["body"] };
+    await executeTool(f.request("create_item", { title: "Label", description: "Short" }), connector, f.context, { connect: f.connect, ledger: f.ledger, attribution: "Requested by Pratik via AgentX · https://slack.com/archives/C1/p1" });
+    expect(f.call).toHaveBeenLastCalledWith("create_item", { title: "Label", description: "Short", siteId: "site-42" });
+  });
+
+  it("does not stack a footer the value already ends with", async () => {
+    const f = fixture();
+    f.tools[1]!.inputSchema = schema({ title: { type: "string" }, body: { type: "string" } }, ["title"]);
+    f.context.policy.tools[1] = { name: "create_item", access: "write", allowedArguments: ["title", "body"] };
+    const attribution = "Requested by Pratik via AgentX · https://slack.com/archives/C1/p1";
+    const signed = `Steps\n\n—\n${attribution}`;
+    await executeTool(f.request("create_item", { title: "Bug", body: signed }), f.connector, f.context, { connect: f.connect, ledger: f.ledger, attribution });
+    expect(f.call).toHaveBeenLastCalledWith("create_item", { title: "Bug", body: signed, siteId: "site-42" });
   });
 
   it("injects bound values from the scope and passes the requester to the credential provider", async () => {
