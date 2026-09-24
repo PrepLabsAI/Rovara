@@ -197,6 +197,8 @@ describe("control-plane infrastructure", () => {
     expect(json).toContain("codebuild:BatchGetBuilds");
     expect(json).toContain(":codebuild:");
     expect(json).toContain("project/agentx-*");
+    expect(json).toContain("bedrock-agentcore:DeleteCapacityProviderSession");
+    expect(json).toContain(":capacity-provider/*");
   });
 
   it("retains each Lambda log group for 30 days and removes it with the demo stack", () => {

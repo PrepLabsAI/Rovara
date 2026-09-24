@@ -7,6 +7,7 @@ import { runTaskInvocation } from "./run-task.js";
 import { publishWorkspace } from "./publish.js";
 import { maintainPullRequest } from "./maintain-pull-request.js";
 import { WorkerCancellationController } from "./cancel.js";
+import { inspectWorkspaceForClose } from "./close-workspace.js";
 import { createWorkerServerState, startWorkerServer } from "./server.js";
 
 const rootPath = process.env.AGENTX_WORKSPACE_ROOT ?? "/mnt/workspace";
@@ -81,6 +82,9 @@ const state = createWorkerServerState(
             : "cancellation could not confirm all processes stopped",
         );
         return result;
+      }
+      if (invocation.kind === "close") {
+        return inspectWorkspaceForClose(rootPath);
       }
       throw new Error(`worker operation ${invocation.kind} is not implemented in this delivery slice`);
     },

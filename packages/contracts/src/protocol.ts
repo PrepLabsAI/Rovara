@@ -78,6 +78,7 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
     payload: z.object({ targetOperationId: z.string().uuid() }).strict(),
   }).strict(),
   InvocationBaseSchema.extend({ kind: z.literal("resume"), payload: z.object({}).strict() }).strict(),
+  InvocationBaseSchema.extend({ kind: z.literal("close"), payload: z.object({}).strict() }).strict(),
 ]);
 
 export const WorkerAcknowledgementSchema = z

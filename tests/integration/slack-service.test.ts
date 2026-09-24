@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import type { SlackRequestMessage, SlackThreadWorkspaceResult } from "../../packages/contracts/src/index.js";
+import type {
+  SlackRequestMessage,
+  SlackThreadWorkspaceResult,
+  SlackWorkspaceCloseStartResult,
+} from "../../packages/contracts/src/index.js";
 import { processGroup, runConsumer, type QueueClient, type QueueMessage } from "../../packages/slack-service/src/consumer.js";
 import { deterministicUuid, requestIdSequence } from "../../packages/slack-service/src/ids.js";
 import {
@@ -45,11 +49,14 @@ function processorHarness(options: {
   state?: ThreadState;
   turn?: (input: TurnInput) => Promise<string>;
   ensureError?: Error;
+  closeStart?: SlackWorkspaceCloseStartResult;
+  closeOperation?: { status: string; error?: string; result?: unknown };
 } = {}) {
   const posts: string[] = [];
   const turns: TurnInput[] = [];
   const saved: Array<{ workspaceId: string; conversationId: string }> = [];
   const savedRevisions: number[] = [];
+  const closed: Array<{ workspaceId: string; closedAt: string }> = [];
   const finished: string[] = [];
   const createConversation = vi.fn(async () => "33333333-3333-4333-8333-333333333333");
   const ensureWorkspace = vi.fn(async () => {
@@ -59,7 +66,15 @@ function processorHarness(options: {
   const dependencies: ProcessorDependencies = {
     api: () => ({
       ensureWorkspace,
-      waitForOperation: async () => ({ status: options.preparation ?? "SUCCEEDED" }),
+      startClose: async () => options.closeStart ?? { outcome: "NOT_FOUND" },
+      completeClose: async (_requestId, operationId) => ({
+        outcome: "CLOSED",
+        workspaceId,
+        operationId,
+        closedAt: "2026-09-24T08:00:00.000Z",
+        storageReleased: true,
+      }),
+      waitForOperation: async () => options.closeOperation ?? { status: options.preparation ?? "SUCCEEDED" },
       createConversation,
     }),
     threads: {
@@ -69,6 +84,9 @@ function processorHarness(options: {
       },
       saveSettingsRevision: async (_subject, revision) => {
         savedRevisions.push(revision);
+      },
+      close: async (_subject, state) => {
+        closed.push(state);
       },
       finish: async (subject) => {
         finished.push(subject);
@@ -82,7 +100,7 @@ function processorHarness(options: {
       posts.push(text);
     },
   };
-  return { dependencies, posts, turns, saved, savedRevisions, finished, createConversation, ensureWorkspace };
+  return { dependencies, posts, turns, saved, savedRevisions, closed, finished, createConversation, ensureWorkspace };
 }
 
 describe("deterministic request IDs", () => {
@@ -125,6 +143,52 @@ describe("signed control-plane service requests", () => {
 });
 
 describe("Slack request processing", () => {
+  it("closes a clean workspace before ensuring one or running a model turn", async () => {
+    const operationId = "55555555-5555-4555-8555-555555555555";
+    const harness = processorHarness({
+      closeStart: { outcome: "PREFLIGHT", workspaceId, operationId, status: "ACCEPTED" },
+      closeOperation: { status: "SUCCEEDED", result: { safeToClose: true, repositories: [] } },
+    });
+    await processSlackRequest(slackMessage({ text: "<@UAGENTX> Close this workspace." }), harness.dependencies, { finalAttempt: false });
+    expect(harness.ensureWorkspace).not.toHaveBeenCalled();
+    expect(harness.turns).toHaveLength(0);
+    expect(harness.posts).toEqual([
+      "Checking this workspace for unpublished work before closing it.",
+      "Workspace closed. Its runtime session and persistent workspace storage have been released.",
+    ]);
+    expect(harness.closed).toEqual([{ workspaceId, closedAt: "2026-09-24T08:00:00.000Z" }]);
+  });
+
+  it("does not create a workspace for a close request in an empty thread", async () => {
+    const harness = processorHarness({ closeStart: { outcome: "NOT_FOUND" } });
+    await processSlackRequest(slackMessage({ text: "close workspace" }), harness.dependencies, { finalAttempt: false });
+    expect(harness.ensureWorkspace).not.toHaveBeenCalled();
+    expect(harness.posts).toEqual(["This thread does not have a workspace to close."]);
+  });
+
+  it("keeps unpublished work and identifies affected repositories", async () => {
+    const operationId = "55555555-5555-4555-8555-555555555555";
+    const harness = processorHarness({
+      closeStart: { outcome: "PREFLIGHT", workspaceId, operationId, status: "RUNNING" },
+      closeOperation: {
+        status: "SUCCEEDED",
+        result: { safeToClose: false, repositories: [{ name: "demo", reasons: ["untracked_files", "unpushed_head"] }] },
+      },
+    });
+    await processSlackRequest(slackMessage({ text: "close this workspace" }), harness.dependencies, { finalAttempt: false });
+    expect(harness.posts.at(-1)).toContain("demo: untracked files, an unpushed current commit");
+    expect(harness.closed).toHaveLength(0);
+  });
+
+  it("does not run a model turn for a later message in a closed thread", async () => {
+    const harness = processorHarness({
+      workspace: { outcome: "CLOSED", workspaceId, closedAt: "2026-09-24T08:00:00.000Z" },
+    });
+    await processSlackRequest(slackMessage(), harness.dependencies, { finalAttempt: false });
+    expect(harness.turns).toHaveLength(0);
+    expect(harness.posts).toEqual(["This thread's workspace is closed. Start a new Slack thread to create a fresh workspace."]);
+  });
+
   it("sets up a new thread's workspace, then runs the request with the project instructions", async () => {
     const harness = processorHarness({
       workspace: workspaceResult({ status: "PREPARING", operationId: prepareOperationId, created: true }),

@@ -104,6 +104,10 @@ export class ControlPlaneStack extends Stack {
       resources: [runtimeArn(this)],
     }));
     broker.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["bedrock-agentcore:DeleteCapacityProviderSession"],
+      resources: [this.formatArn({ service: "bedrock-agentcore", resource: "capacity-provider", resourceName: "*" })],
+    }));
+    broker.addToRolePolicy(new iam.PolicyStatement({
       actions: ["secretsmanager:GetSecretValue"],
       resources: [githubAppPrivateKeySecretArn.valueAsString],
     }));

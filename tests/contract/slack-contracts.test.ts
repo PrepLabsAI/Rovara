@@ -5,6 +5,11 @@ import {
   SlackRequesterSchema,
   SlackThreadSchema,
   SlackThreadWorkspaceResultSchema,
+  SlackWorkspaceCloseCompleteResultSchema,
+  SlackWorkspaceCloseStartResultSchema,
+  WorkspaceClosePreflightResultSchema,
+  WorkspaceInstanceSchema,
+  WorkerInvocationSchema,
   parseSlackThreadSubject,
   slackThreadSubject,
 } from "../../packages/contracts/src/index.js";
@@ -58,6 +63,74 @@ describe("Slack contracts", () => {
     }).outcome).toBe("LIMIT_REACHED");
     expect(() => SlackThreadWorkspaceResultSchema.parse({ outcome: "LIMIT_REACHED", limit: "TEAM", maximum: 3, starterThreads: [] }))
       .toThrow();
+    expect(SlackThreadWorkspaceResultSchema.parse({
+      outcome: "CLOSED",
+      workspaceId: "11111111-1111-4111-8111-111111111111",
+      closedAt: "2026-09-24T08:00:00.000Z",
+    }).outcome).toBe("CLOSED");
+  });
+
+  it("strictly validates close lifecycle results", () => {
+    expect(SlackWorkspaceCloseStartResultSchema.parse({ outcome: "NOT_FOUND" })).toEqual({ outcome: "NOT_FOUND" });
+    expect(SlackWorkspaceCloseStartResultSchema.parse({
+      outcome: "PREFLIGHT",
+      workspaceId: "11111111-1111-4111-8111-111111111111",
+      operationId: "22222222-2222-4222-8222-222222222222",
+      status: "RUNNING",
+    }).status).toBe("RUNNING");
+    expect(SlackWorkspaceCloseCompleteResultSchema.parse({
+      outcome: "CLOSED",
+      workspaceId: "11111111-1111-4111-8111-111111111111",
+      operationId: "22222222-2222-4222-8222-222222222222",
+      closedAt: "2026-09-24T08:00:00.000Z",
+      storageReleased: true,
+    }).storageReleased).toBe(true);
+    expect(() => SlackWorkspaceCloseStartResultSchema.parse({ outcome: "NOT_FOUND", workspaceId: "extra" })).toThrow();
+  });
+
+  it("validates bounded, internally consistent close preflight results", () => {
+    expect(WorkspaceClosePreflightResultSchema.parse({ safeToClose: true, repositories: [] })).toEqual({
+      safeToClose: true,
+      repositories: [],
+    });
+    expect(WorkspaceClosePreflightResultSchema.parse({
+      safeToClose: false,
+      repositories: [{ name: "demo", reasons: ["untracked_files", "unpushed_head"] }],
+    }).safeToClose).toBe(false);
+    expect(() => WorkspaceClosePreflightResultSchema.parse({ safeToClose: true, repositories: [{ name: "demo", reasons: ["untracked_files"] }] })).toThrow();
+    expect(() => WorkspaceClosePreflightResultSchema.parse({ safeToClose: false, repositories: [{ name: "demo", reasons: ["untracked_files", "untracked_files"] }] })).toThrow();
+  });
+
+  it("accepts close worker invocations and requires closedAt on closed workspaces", () => {
+    expect(WorkerInvocationSchema.parse({
+      protocolVersion: 1,
+      kind: "close",
+      operationId: "22222222-2222-4222-8222-222222222222",
+      workspaceId: "11111111-1111-4111-8111-111111111111",
+      fence: 2,
+      projectRevision: 1,
+      callbackCapability: "c".repeat(32),
+      payload: {},
+    }).kind).toBe("close");
+    const workspace = {
+      id: "11111111-1111-4111-8111-111111111111",
+      ownerKey: "o".repeat(32),
+      projectName: "payments",
+      projectRevision: 1,
+      runtimeArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/example",
+      endpointQualifier: "DEFAULT",
+      runtimeSessionId: "33333333-3333-4333-8333-333333333333",
+      deploymentMode: "instances-ebs",
+      capacityProviderArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:capacity-provider/example",
+      rootPath: "/mnt/workspace",
+      status: "CLOSED",
+      fence: 2,
+      createdAt: "2026-09-24T07:00:00.000Z",
+      updatedAt: "2026-09-24T08:00:00.000Z",
+    };
+    expect(() => WorkspaceInstanceSchema.parse(workspace)).toThrow(/closedAt/);
+    expect(WorkspaceInstanceSchema.parse({ ...workspace, closedAt: "2026-09-24T08:00:00.000Z" }).status).toBe("CLOSED");
+    expect(WorkspaceInstanceSchema.parse({ ...workspace, status: "READY", environmentDigest: `sha256:${"a".repeat(64)}` })).not.toHaveProperty("environmentDigest");
   });
 
   it("records the requesting Slack user on operations", () => {
