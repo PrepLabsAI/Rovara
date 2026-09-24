@@ -14,7 +14,7 @@ export function capabilitiesManifest(input: {
   catalogs: readonly ConnectorCatalog[];
   /** Connector names whose discovery failed transiently this turn; listed on their own line, not as "not connected". */
   unavailable?: readonly string[];
-  /** Connector names whose discovery failed for an authorization or configuration reason. */
+  /** Connector names whose discovery failed for an authorization, configuration or malformed-response reason. */
   misconfigured?: readonly string[];
 }): string {
   const repositories = input.repositories.join(", ");

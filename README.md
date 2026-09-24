@@ -309,7 +309,10 @@ are never logged. `event.ignored reason="channel_not_bound"` means the channel h
 `request.rejected reason="invalid_signature"` usually means the stored signing secret is wrong.
 `connector.discovery_failed` means a connector's tools were left out of a turn: `cause="transient"`
 is an outage the next turn may clear, and `cause="setup"` (with its error `code`) needs an
-administrator, for example a missing GitHub App installation or a withdrawn approval.
+administrator, for example `FORBIDDEN` when the connector is no longer enabled for the project.
+Failures inside the control plane's own vendor discovery, including a GitHub App that is not
+installed on a scoped repository, still arrive as `RUNTIME_UNAVAILABLE` and are logged as
+`transient`; check the broker's `connector.tools_skipped` and error logs when one persists.
 
 If the orchestrator's turn fails, AgentX posts the failure in the thread. Other failures, such as
 workspace preparation or a Slack API error, are retried; on the fifth attempt AgentX posts the
