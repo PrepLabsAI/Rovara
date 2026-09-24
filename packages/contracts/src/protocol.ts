@@ -19,7 +19,14 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
   }).strict(),
   InvocationBaseSchema.extend({
     kind: z.literal("task"),
-    payload: z.object({ conversationId: z.string().uuid(), prompt: z.string().min(1).max(65_536) }).strict(),
+    payload: z
+      .object({
+        conversationId: z.string().uuid(),
+        prompt: z.string().min(1).max(65_536),
+        /** The control plane's record that this conversation already owns a saved session. */
+        conversationStarted: z.boolean().optional(),
+      })
+      .strict(),
   }).strict(),
   InvocationBaseSchema.extend({
     kind: z.literal("publish"),

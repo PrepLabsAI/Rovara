@@ -228,6 +228,8 @@ export async function releaseDemo(options: ReleaseOptions): Promise<ReleaseManif
       modelProvider,
       modelId,
     );
+    // Runtime first, then the control plane: a strictly parsed invocation field must reach a worker
+    // that already knows it. Creating both for the first time has no old worker, so it may differ.
     deployControlPlane(runner, options, true);
     const updatedUrl = stackOutput(describeStack(runner, options.region, CONTROL_PLANE_STACK), "ApiEndpoint");
     if (updatedUrl !== controlPlaneUrl) {

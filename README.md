@@ -277,6 +277,24 @@ removes the hosted orchestrator conversation session and releases the organizati
 starter's workspace quota. Later mentions in the closed thread do not create another workspace;
 start a new Slack thread for fresh work.
 
+#### What a thread remembers
+
+Each Slack thread owns one conversation, and every request in it continues that conversation. The
+transcript lives on the thread's workspace volume next to its files, so a follow-up sees both the
+earlier discussion and the earlier edits. It survives a client disconnect and reconnect, and the
+replacement of the worker process, because neither touches the volume.
+
+It does not survive losing the volume. If the workspace is replaced, the next request in the thread
+fails with `CONVERSATION_STATE_LOST` rather than starting the thread over on top of files it has no
+memory of. Start a new thread to continue. There is no promised retention period beyond the life of
+the workspace, and the storage mode a thread runs on is what bounds it: the demo deployment's
+microVM storage is time-limited and is not production-durable.
+
+A conversation that was created before AgentX recorded this state has no transcript to reopen, so
+its next request starts one. If the deployed model changes between turns, the thread keeps its
+transcript and AgentX says which model it continues on. Closing a thread's workspace ends its
+conversation with it.
+
 #### Diagnostics
 
 The ingress Lambda and the orchestrator service write JSON log lines to CloudWatch Logs, with the
@@ -471,6 +489,8 @@ access to `mainline` is deploy access. To roll back, revert the change on `mainl
   append/sync, replacement, and revert progress.
 - [Pull-request specification](specs/002-create-pull-request/spec.md): publication behavior,
   safety, and retry requirements.
+- [Conversation continuity task list](specs/012-conversation-continuity/tasks.md): reopening a
+  thread's saved session, and what is verified locally rather than on a deployment.
 - [Task list](specs/001-agentx-foundation/tasks.md): 50 dependency-ordered implementation tasks.
 - [Specification](specs/001-agentx-foundation/spec.md): agreed workflows and acceptance criteria.
 - [Plan](specs/001-agentx-foundation/plan.md): architecture, boundaries and delivery sequence.

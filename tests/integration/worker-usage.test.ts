@@ -33,7 +33,10 @@ describe("worker usage telemetry", () => {
       artifactSink: async (artifact) => { artifacts.push(artifact); },
     });
 
-    if (outcome === "SUCCEEDED") await expect(execution).resolves.toMatchObject({ conversationId: "usage-session" });
+    // The result carries the broker's conversation ID, never Pi's internal session ID.
+    if (outcome === "SUCCEEDED") {
+      await expect(execution).resolves.toMatchObject({ conversationId: invocation.payload.conversationId });
+    }
     if (outcome === "FAILED") await expect(execution).rejects.toThrow("fixture task failed");
     if (outcome === "CANCELLED") await expect(execution).rejects.toBeInstanceOf(WorkerOperationCancelledError);
 

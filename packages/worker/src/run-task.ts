@@ -2,14 +2,28 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { WorkerInvocationSchema, agentXError, type WorkerInvocation } from "@agentx/contracts";
 import { publishWorkspaceDiff, type ArtifactSink } from "./artifacts.js";
+import { WorkspaceConversationStore, type ConversationRecord } from "./conversations.js";
 import { EventBatcher, redactCredentials, type EventBatchSink } from "./events.js";
-import { createWorkspacePiSession, type PiSessionAdapter, type WorkspaceModelConfiguration } from "./pi-session.js";
+import {
+  createWorkspacePiSession,
+  openRegisteredWorkspacePiSession,
+  type PiSessionAdapter,
+  type PiSessionHandle,
+  type WorkspaceModelConfiguration,
+} from "./pi-session.js";
 import type { PreparationManifest } from "./prepare.js";
 import { WorkerOperationCancelledError, type WorkerCancellationController } from "./cancel.js";
 import {
   createTaskUsageTelemetry,
   type TaskUsageOutcome,
 } from "./usage.js";
+
+export interface TaskInvocationResult {
+  /** The broker-issued conversation ID, which stays the same for every turn of one conversation. */
+  conversationId: string;
+  /** False on the turn that created the saved session, true on every turn that reopened it. */
+  reopened: boolean;
+}
 
 export async function runTaskInvocation(
   untrustedInvocation: WorkerInvocation,
@@ -21,7 +35,7 @@ export async function runTaskInvocation(
     piAdapter?: PiSessionAdapter;
     cancellationController?: WorkerCancellationController;
   },
-): Promise<{ conversationId: string; sessionFile: string }> {
+): Promise<TaskInvocationResult> {
   const invocation = WorkerInvocationSchema.parse(untrustedInvocation);
   if (invocation.kind !== "task") throw agentXError("CONFIG_INVALID", "runTaskInvocation requires a task");
   const manifest = JSON.parse(
@@ -31,17 +45,51 @@ export async function runTaskInvocation(
     throw agentXError("WORKSPACE_NOT_READY", "workspace manifest is incomplete or revision-mismatched");
   }
 
+  const conversationId = invocation.payload.conversationId;
+  const conversations = new WorkspaceConversationStore(dependencies.rootPath);
+  const registered = await conversations.tryResolve(conversationId);
+  if (!registered && invocation.payload.conversationStarted === true) {
+    throw agentXError(
+      "CONVERSATION_STATE_LOST",
+      "this conversation already started, but its saved session is not in this workspace",
+    );
+  }
+
   const events = new EventBatcher(dependencies.eventSink);
   const toolEvidence: unknown[] = [];
   const contextDiagnostics: string[] = [];
-  const session = await createWorkspacePiSession(
-    {
-      rootPath: dependencies.rootPath,
-      model: dependencies.model,
-      onDiagnostic: (message) => contextDiagnostics.push(message),
-    },
-    dependencies.piAdapter,
-  );
+  const onDiagnostic = (message: string): void => {
+    contextDiagnostics.push(message);
+  };
+  for (const message of modelChangeDiagnostics(registered, dependencies.model)) onDiagnostic(message);
+
+  let session: PiSessionHandle;
+  if (registered) {
+    session = await openRegisteredWorkspacePiSession(
+      {
+        rootPath: dependencies.rootPath,
+        model: dependencies.model,
+        conversationId,
+        sessionFile: registered.sessionFile,
+        onDiagnostic,
+      },
+      dependencies.piAdapter,
+    );
+  } else {
+    session = await createWorkspacePiSession(
+      { rootPath: dependencies.rootPath, model: dependencies.model, conversationId, onDiagnostic },
+      dependencies.piAdapter,
+    );
+  }
+  try {
+    // Written before the prompt, so a crash mid-turn orphans an empty session rather than the transcript.
+    if (registered) await conversations.recordTurn(conversationId, dependencies.model);
+    else await conversations.register(session.sessionFile, conversationId, dependencies.model);
+  } catch (error) {
+    session.dispose();
+    throw error;
+  }
+
   const unregisterCancellation = dependencies.cancellationController?.register(invocation.operationId, session);
   const unsubscribe = session.subscribe((event) => {
     if (eventType(event) === "tool_end") toolEvidence.push(redactCredentials(event));
@@ -49,11 +97,15 @@ export async function runTaskInvocation(
   });
   try {
     let outcome: TaskUsageOutcome = "FAILED";
-    let taskResult: { conversationId: string; sessionFile: string } | undefined;
+    let taskResult: TaskInvocationResult | undefined;
     let taskFailure: Error | undefined;
     let evidenceFailure: unknown;
     try {
-      await events.append("lifecycle", { status: "RUNNING", conversationId: session.conversationId });
+      await events.append("lifecycle", {
+        status: "RUNNING",
+        conversationId,
+        conversation: { started: true, reopened: registered !== undefined },
+      });
       for (const message of contextDiagnostics) await events.append("progress", { message });
       await session.prompt(invocation.payload.prompt);
       await publishWorkspaceDiff(dependencies.rootPath, dependencies.artifactSink);
@@ -63,14 +115,18 @@ export async function runTaskInvocation(
         content: JSON.stringify(toolEvidence, null, 2),
       });
       outcome = "SUCCEEDED";
-      await events.append("result", { status: "SUCCEEDED", sessionFile: "agent-sessions/[server-generated]" });
-      taskResult = { conversationId: session.conversationId, sessionFile: session.sessionFile };
+      await events.append("result", {
+        status: "SUCCEEDED",
+        conversationId,
+        sessionFile: "agent-sessions/[server-generated]",
+      });
+      taskResult = { conversationId, reopened: registered !== undefined };
     } catch (error) {
       if (dependencies.cancellationController?.isCancelled(invocation.operationId)) {
         outcome = "CANCELLED";
         taskFailure = new WorkerOperationCancelledError(invocation.operationId);
         try {
-          await events.append("lifecycle", { status: "CANCELLED" });
+          await events.append("lifecycle", { status: "CANCELLED", conversationId });
         } catch (reportingError) {
           evidenceFailure = reportingError;
         }
@@ -121,6 +177,22 @@ export async function runTaskInvocation(
 
 function asError(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value));
+}
+
+/**
+ * The deployed model wins, because a stack update may move live conversations. The stored value
+ * exists to report the change: a transcript continued on another model re-reads no prompt cache.
+ */
+function modelChangeDiagnostics(
+  registered: ConversationRecord | undefined,
+  model: WorkspaceModelConfiguration,
+): string[] {
+  const previous = registered?.model;
+  if (!previous || (previous.provider === model.provider && previous.modelId === model.modelId)) return [];
+  return [
+    `this conversation was built on ${previous.provider}/${previous.modelId} and continues on ` +
+      `${model.provider}/${model.modelId}`,
+  ];
 }
 
 function eventType(event: unknown): "progress" | "tool_start" | "tool_end" {

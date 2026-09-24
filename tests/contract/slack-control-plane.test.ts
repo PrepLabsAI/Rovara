@@ -198,6 +198,12 @@ async function finishClosePreflight(
   expect(response.status).toBe(200);
 }
 
+function invocationOf(db: FakeDynamoDb, operationId: string) {
+  const outbox = db.find((item) => item.entityType === "OUTBOX" && item.operationId === operationId)[0];
+  if (!outbox) throw new Error("outbox record is missing");
+  return outbox.invocation as { callbackCapability: string; payload: Record<string, unknown> };
+}
+
 function markReady(db: FakeDynamoDb, workspaceId: string): void {
   const workspace = db.get(`WORKSPACE#${workspaceId}`, "META");
   if (!workspace) throw new Error("workspace record is missing");
@@ -720,5 +726,64 @@ describe("Slack thread isolation and attribution", () => {
     expect(publication.body).toBe(
       `Fixes the menu.\n\n---\nRequested in Slack thread https://slack.com/archives/${channel}/p1695500000000001 by ${[bob, pratik].sort().join(", ")}.`,
     );
+  });
+
+  it("records that a conversation owns a session once, and tells its next task to reopen", async () => {
+    const { db, handler } = createBroker();
+    await registerProjectAndBind(handler);
+    const created = await ensureWorkspace(handler, threadOne, pratik);
+    const workspaceId = created.body.workspaceId as string;
+    markReady(db, workspaceId);
+    const service = { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik };
+    const conversation = await call(handler, {
+      method: "POST",
+      path: `/v1/service/workspaces/${workspaceId}/conversations`,
+      service,
+    });
+    const conversationId = (conversation.body.conversation as { id: string }).id;
+    const conversationKey = [`WORKSPACE#${workspaceId}`, `CONVERSATION#${conversationId}`] as const;
+
+    const first = await call(handler, {
+      method: "POST",
+      path: `/v1/service/workspaces/${workspaceId}/tasks`,
+      service,
+      body: { requestId: randomUUID(), conversationId, prompt: "Use the existing button style." },
+    });
+    expect(first.status).toBe(202);
+    const firstOperationId = (first.body.operation as { id: string }).id;
+    const firstInvocation = invocationOf(db, firstOperationId);
+    expect(firstInvocation.payload).toMatchObject({ conversationId, conversationStarted: false });
+    expect(db.get(...conversationKey)?.startedAt).toBeUndefined();
+
+    const lifecycle = {
+      events: [
+        {
+          type: "lifecycle",
+          timestamp: new Date().toISOString(),
+          payload: { status: "RUNNING", conversationId, conversation: { started: true, reopened: false } },
+        },
+      ],
+    };
+    const callbackPath = `/v1/internal/workspaces/${workspaceId}/operations/${firstOperationId}/events`;
+    expect((await call(handler, { method: "POST", path: callbackPath, headers: { "x-agentx-callback-capability": firstInvocation.callbackCapability }, body: lifecycle })).status).toBe(200);
+    const startedAt = db.get(...conversationKey)?.startedAt;
+    expect(typeof startedAt).toBe("string");
+
+    // A redelivered batch must not move the record, which is what makes it a first-use marker.
+    await call(handler, { method: "POST", path: callbackPath, headers: { "x-agentx-callback-capability": firstInvocation.callbackCapability }, body: lifecycle });
+    expect(db.get(...conversationKey)?.startedAt).toBe(startedAt);
+
+    markReady(db, workspaceId);
+    const second = await call(handler, {
+      method: "POST",
+      path: `/v1/service/workspaces/${workspaceId}/tasks`,
+      service,
+      body: { requestId: randomUUID(), conversationId, prompt: "Now add the Done filter." },
+    });
+    expect(second.status).toBe(202);
+    expect(invocationOf(db, (second.body.operation as { id: string }).id).payload).toMatchObject({
+      conversationId,
+      conversationStarted: true,
+    });
   });
 });
