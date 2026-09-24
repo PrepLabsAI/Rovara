@@ -8,13 +8,10 @@ interface SlackChannelInput {
 }
 
 export async function bindSlackChannel(
-  input: SlackChannelInput & { projectName: string; projectRevision: number },
+  input: SlackChannelInput & { projectName: string },
   fetchImplementation: typeof fetch = fetch,
 ): Promise<unknown> {
-  return sendBindingRequest(input, "PUT", fetchImplementation, JSON.stringify({
-    projectName: input.projectName,
-    projectRevision: input.projectRevision,
-  }));
+  return sendBindingRequest(input, "PUT", fetchImplementation, JSON.stringify({ projectName: input.projectName }));
 }
 
 export async function unbindSlackChannel(

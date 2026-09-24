@@ -129,7 +129,7 @@ An administrator binds a Slack channel to one registered project and can remove 
 **Threads and workspaces**
 
 - **FR-005**: A thread MUST be identified by the Slack team, the channel, and the thread's root message timestamp.
-- **FR-006**: The first accepted mention in a thread MUST create a new workspace for that thread, using the project and revision named in the channel's binding, subject to FR-011 through FR-014.
+- **FR-006**: The first accepted mention in a thread MUST create a new workspace for that thread, using the channel's bound project at its latest registered revision, subject to FR-011 through FR-014.
 - **FR-007**: Later mentions in the same thread, from any channel member, MUST use that thread's workspace and conversation.
 - **FR-008**: Requests within a thread MUST run one at a time in arrival order. Requests in different threads MUST NOT wait for each other.
 - **FR-009**: A thread workspace MUST be accessible only through the hosted orchestrator for Slack-signed events in that thread. Personal logins, other threads, and other clients MUST NOT access it.
@@ -167,7 +167,7 @@ An administrator binds a Slack channel to one registered project and can remove 
 
 **Administration**
 
-- **FR-029**: Administrators MUST be able to bind a channel to exactly one registered project revision, re-bind it to a newer revision, and remove the binding. Only administrators may change bindings. Existing thread workspaces keep the revision they were created with.
+- **FR-029**: Administrators MUST be able to bind a channel to exactly one registered project and remove the binding. Only administrators may change bindings. A binding names the project, not a revision: new thread workspaces use the project's latest registered revision, so registering a revision needs no re-binding. Existing thread workspaces keep the revision they were created with (updating them is tracked in issue #12). *(Amended 2026-09-23, issue #13: bindings previously named an exact revision.)*
 - **FR-030**: Binding changes MUST take effect for the next mention without a redeployment.
 
 **Retiring local Slack mode**

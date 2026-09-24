@@ -149,6 +149,32 @@
 - [ ] T029 Live: with temporarily lowered limits, a new thread over the limit is declined with the correct message
 - [ ] T030 Live: restarting the orchestrator mid-task creates no duplicate operation, and the result is posted
 
+## Follow-up: Bind Channels to Projects (issue #13)
+
+- [X] T031 Bind channels to a project instead of a revision.
+  - Drop `projectRevision` from `SlackChannelBindingSchema`.
+  - Ignore it in stored bindings and in requests from older CLIs.
+  - Create new thread workspaces from the project's latest registered revision (`requireLatestProject` in `packages/broker/src/aws/broker.ts`).
+- [X] T032 `agentx admin slack bind` sends only the project name. The bind response reports the latest revision.
+- [X] T033 Tests and docs.
+  - Tests cover:
+    - a new thread uses the latest revision, with revision 10 sorting after revision 2
+    - an existing thread keeps its revision
+    - a stored binding that still names a revision
+    - an older client that sends a revision
+    - binding to an unknown project
+  - Updated the README, FR-006, FR-029 and the plan.
+
+### Follow-up evidence (local only)
+
+- **Query:** the broker finds the latest revision with one consistent `Query` on `PROJECT#<name>`, reading sort keys that begin with `REV#` in descending order, with limit 1. The broker role's existing `grantReadWriteData` already allows `Query`, so no infrastructure changes.
+- **Test fake:** `tests/support/fake-dynamodb.ts` supports only this key condition, and orders sort keys by code point, as DynamoDB does.
+- **Regression check:** the new test fails when the query returns the oldest revision, and passes once the query is restored.
+- **Rebase onto PR #15:** the branch is rebased onto PR #15, which adds GitHub MCP to hosted turns. That PR's policy test used to simulate a newer binding revision. It now registers revision 2 with a policy, and asserts two things:
+  - The existing thread still gets no GitHub tools.
+  - A new thread gets them without re-binding.
+- **Checks:** typecheck, lint, and the full suite (42 files, 227 tests) pass, with git identity auto-detection disabled.
+
 ## Dependencies
 
 - T001 precedes all other tasks.

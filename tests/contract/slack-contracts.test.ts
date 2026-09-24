@@ -29,16 +29,15 @@ describe("Slack contracts", () => {
     expect(() => parseSlackThreadSubject("T0BSHLLUGBD/D0123456789/1695500000.123456")).toThrow();
   });
 
-  it("requires a project revision on channel bindings", () => {
+  it("binds a channel to a project rather than to a revision", () => {
     const binding = {
       teamId: thread.teamId,
       channelId: thread.channelId,
       projectName: "payments",
-      projectRevision: 2,
       updatedAt: "2026-09-23T21:00:00.000Z",
     };
     expect(SlackChannelBindingSchema.parse(binding)).toEqual(binding);
-    expect(() => SlackChannelBindingSchema.parse({ ...binding, projectRevision: 0 })).toThrow();
+    expect(() => SlackChannelBindingSchema.parse({ ...binding, projectRevision: 2 })).toThrow();
     expect(() => SlackChannelBindingSchema.parse({ ...binding, projectName: "Payments" })).toThrow();
   });
 

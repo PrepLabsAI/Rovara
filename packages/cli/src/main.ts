@@ -430,7 +430,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
   const adminSlack = admin.command("slack").description("bind Slack channels to this project for the hosted orchestrator");
   adminSlack
     .command("bind")
-    .description("bind a Slack channel to this project revision; channel members can then start thread workspaces")
+    .description("bind a Slack channel to this project; new threads use its latest registered revision")
     .requiredOption("--team <team-id>", "Slack team ID, for example T0123456789")
     .requiredOption("--channel <channel-id>", "Slack channel ID, for example C0123456789")
     .action(async (options: { team: string; channel: string }, command: Command) => {
@@ -442,7 +442,6 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         teamId: options.team,
         channelId: options.channel,
         projectName: authenticated.definition.name,
-        projectRevision: authenticated.definition.revision,
       }, services.fetchImplementation);
       services.stdout.write(formatSuccess(result, globals.json));
     });

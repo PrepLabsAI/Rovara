@@ -242,17 +242,17 @@ Then configure the Slack app:
 - Bot token scopes: `app_mentions:read` and `chat:write`. Reinstall the app after changing scopes.
 - Invite the app to the project channel with `/invite @AgentX`.
 
-Finally, bind the channel to the project. Binding requires an administrator login, and uses the
-revision in your local project YAML:
+Finally, bind the channel to the project. Binding requires an administrator login:
 
 ```sh
 agentx --project project-a admin slack bind --team T0123456789 --channel C0123456789
 ```
 
-A channel is bound to exactly one project revision. After registering a new revision, run `bind`
-again; existing thread workspaces keep the revision they were created with. `admin slack unbind`
-removes the binding, so new mentions in that channel are ignored, but it keeps existing thread
-workspaces.
+A channel is bound to one project, not to a revision. Each new thread uses the project's latest
+registered revision at the moment its workspace is created, so registering a revision publishes it
+to every bound channel without binding again. Existing thread workspaces keep the revision they
+were created with. `admin slack unbind` removes the binding, so new mentions in that channel are
+ignored, but it keeps existing thread workspaces.
 
 #### Working in a thread
 

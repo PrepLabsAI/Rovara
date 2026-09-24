@@ -25,12 +25,12 @@ export const SlackRequesterSchema = z
   })
   .strict();
 
+// A channel binds to a project, not a revision: new thread workspaces use the latest registered revision.
 export const SlackChannelBindingSchema = z
   .object({
     teamId: SlackTeamIdSchema,
     channelId: SlackChannelIdSchema,
     projectName: AgentXNameSchema,
-    projectRevision: z.number().int().positive(),
     updatedAt: z.string().datetime(),
   })
   .strict();
