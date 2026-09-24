@@ -21,6 +21,7 @@ import {
 } from "@aws-sdk/client-secrets-manager";
 import {
   AgentXError,
+  GitHubMcpRequestSchema,
   OperationRequestSchema,
   OperationSchema,
   PullRequestRequestSchema,
@@ -51,6 +52,8 @@ import {
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { GitHubAppCredentialProvider, privateKeyFromSecret } from "../github-app.js";
+import { discoverGitHubTools, executeGitHubTool, type GitHubMcpDependencies } from "../github-mcp.js";
+import { DynamoGitHubMcpStore } from "./github-mcp.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
 import { RepositoryGrantService } from "../repository-access.js";
 import { publicWorkspace } from "../workspaces.js";
@@ -186,6 +189,7 @@ interface AwsBrokerDependencies {
   githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest">;
   codeBuild: CodeBuildGateway;
   slack?: SlackServiceConfiguration;
+  githubMcp?: GitHubMcpDependencies;
 }
 
 interface SlackServiceConfiguration {
@@ -244,6 +248,28 @@ export function createAwsBrokerHandler(dependencies: AwsBrokerDependencies) {
         adminValues: dependencies.adminValues,
       });
       const body = parseBody(request.body);
+
+      const githubMcp = /^\/v1\/workspaces\/([0-9a-f-]+)\/github\/(tools|call)$/.exec(url.pathname);
+      if (githubMcp?.[1] && ((request.method === "GET" && githubMcp[2] === "tools") || (request.method === "POST" && githubMcp[2] === "call"))) {
+        const workspace = await requireOwnedWorkspace(dependencies, identity, githubMcp[1]);
+        await requireMembership(dependencies, identity.ownerKey, workspace.projectName);
+        const project = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
+        const policy = project.definition.integrations?.githubMcp;
+        if (!policy) throw agentXError("FORBIDDEN", "GitHub MCP is not enabled for this project revision");
+        if (!dependencies.githubMcp) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub MCP is not configured");
+        const parsed = request.method === "POST" ? GitHubMcpRequestSchema.safeParse(body) : undefined;
+        if (parsed && !parsed.success) throw agentXError("CONFIG_INVALID", "invalid GitHub MCP request");
+        const repositoryName = parsed?.success ? parsed.data.repository : url.searchParams.get("repository");
+        const repository = project.definition.repositories.find((entry) => entry.name === repositoryName);
+        if (!repository) throw agentXError("NOT_FOUND", "registered repository not found");
+        const context = { workspaceId: workspace.id, ownerKey: identity.ownerKey, repository, policy };
+        if (!parsed?.success) return json({ catalog: await discoverGitHubTools(context, dependencies.githubMcp) }, request.requestId);
+        const result = await executeGitHubTool(parsed.data, context, {
+          ...dependencies.githubMcp,
+          store: new DynamoGitHubMcpStore(dependencies.documentClient, dependencies.tableName, workspace.id),
+        });
+        return json({ result }, request.requestId);
+      }
 
       if (request.method === "POST" && url.pathname === "/v1/admin/projects") {
         return json(await registerProject(dependencies, identity, body), request.requestId, 201);
@@ -2612,6 +2638,7 @@ export const handler = createAwsBrokerHandler({
   callbackSigningKey: requiredEnvironment("CALLBACK_SIGNING_KEY"),
   repositoryGrants,
   githubPullRequests: githubCredentials,
+  githubMcp: { credentials: (repository, access) => githubCredentials.issueCredentials(repository, access) },
   codeBuild,
   ...(process.env.SLACK_ORCHESTRATOR_ROLE_ARN
     ? {

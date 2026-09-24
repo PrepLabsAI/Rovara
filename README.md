@@ -163,8 +163,23 @@ agentx --project personal-website
 Alternatively, run `/login amazon-bedrock` inside the TUI, choose **AWS profile**, and enter the
 profile name. Pi stores the profile selection, not the underlying IAM secret key.
 
-The local model can call only AgentX orchestration tools. Repository inspection, editing, shell
-commands, builds, and tests are delegated to the remote Pi worker in AgentCore.
+The local model can call AgentX orchestration tools and explicitly approved, dynamically
+discovered GitHub MCP issue tools. Repository code inspection, editing, shell commands, builds,
+and tests are delegated to the remote Pi worker in AgentCore.
+
+#### Optional GitHub MCP integration
+
+The control plane connects to GitHub's hosted MCP server, discovers its tools with `tools/list`,
+and exposes only tools approved in the registered project revision. The orchestrator registers
+their discovered descriptions and JSON schemas through one generic bridge; no per-tool GitHub
+implementations are needed. Calls go orchestrator → control plane → GitHub MCP, without a worker.
+
+See [GitHub MCP setup and policy example](specs/007-github-mcp/quickstart.md). This release uses
+the existing GitHub App installation with repository-scoped **Issues** permissions. Tokens stay
+in the control plane. Existing projects remain disabled until an administrator registers an
+opt-in revision. Arbitrary endpoints, personal OAuth, and other GitHub permission families are
+not included. Existing AgentX coding and validated PR-publication tools remain unchanged.
+This increment enables the interactive CLI; the hosted Slack service is not wired to MCP discovery yet.
 
 ### 7. Use a project Slack channel
 

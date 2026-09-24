@@ -7,6 +7,27 @@ import {
 } from "../../packages/broker/src/github-app.js";
 
 describe("GitHub App repository credentials", () => {
+  it("mints fresh issue-only tokens for the selected repository and rejects unregistered credentials", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const getPrivateKey = vi.fn(async () => privateKey.export({ type: "pkcs8", format: "pem" }).toString());
+    const fetchImplementation = vi.fn(async () => new Response(JSON.stringify({ token: "issue-token" }), { status: 201 }));
+    const provider = new GitHubAppCredentialProvider({
+      credentialRef: "github-app", account: "example", appId: "123", installationId: "456",
+      getPrivateKey, fetchImplementation,
+    });
+    const repository = { credentialRef: "github-app", url: "https://github.com/example/demo.git" };
+    for (const access of ["read", "write"] as const) {
+      await expect(provider.issueCredentials(repository, access)).resolves.toEqual({ owner: "example", repo: "demo", token: "issue-token" });
+      expect(fetchImplementation).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({
+        body: JSON.stringify({ repositories: ["demo"], permissions: { issues: access } }), redirect: "error",
+      }));
+    }
+    await expect(provider.issueCredentials({ ...repository, credentialRef: "unregistered" }, "write")).rejects.toThrow();
+    await expect(provider.issueCredentials({ ...repository, url: "https://github.com/another/demo" }, "read")).rejects.toThrow();
+    expect(fetchImplementation).toHaveBeenCalledTimes(2);
+    expect(getPrivateKey).toHaveBeenCalledTimes(2);
+  });
+
   it("mints a repository-scoped installation token", async () => {
     const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();

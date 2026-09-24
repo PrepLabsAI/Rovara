@@ -128,6 +128,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       }
       await services.runInteractive({
         stateDirectory: resolve(options.stateDir, authenticated.definition.name),
+        ...(authenticated.definition.integrations?.githubMcp ? { githubMcpRepositories: authenticated.definition.repositories.map((repository) => repository.name) } : {}),
         projectInstructions: authenticated.definition.orchestratorInstructions,
         api,
         context: { workspaceId: workspace.id, conversationId: connection.conversationId },
