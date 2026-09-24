@@ -15,10 +15,11 @@ import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import { SlackThreadWorkspaceResultSchema, type SlackRequestMessage } from "@agentx/contracts";
 import { ControlPlaneApi } from "@agentx/cli/control-plane-api";
 import { pollOperation } from "@agentx/cli/event-client";
-import { createOrchestratorRuntime, runOrchestratorTurn } from "@agentx/cli/orchestrator";
+import { runOrchestratorTurn } from "@agentx/cli/orchestrator";
 import { runConsumer, type QueueClient } from "./consumer.js";
 import { processSlackRequest, type ServiceLog, type ThreadServiceApi, type ThreadStore, type TurnInput } from "./processor.js";
 import { createSignedServiceFetch } from "./signing-fetch.js";
+import { createHostedSlackRuntime } from "./runtime.js";
 
 const MAX_RECEIVE_COUNT = 5;
 const VISIBILITY_SECONDS = 15 * 60;
@@ -90,7 +91,7 @@ function threadApi(message: SlackRequestMessage): ThreadServiceApi {
       const response = await signedFetch(`${controlPlaneUrl}/v1/threads/workspace`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ requestId }),
+        body: JSON.stringify({ requestId, includeIntegrations: true }),
       });
       const body = await response.json() as Record<string, unknown>;
       if (!response.ok) {
@@ -170,13 +171,10 @@ async function runTurn(input: TurnInput): Promise<string> {
     const sessionFile = saved === undefined ? undefined : join(sessions, "thread.jsonl");
     if (sessionFile !== undefined && saved !== undefined) await writeFile(sessionFile, saved, { mode: 0o600 });
     const signedFetch = createSignedServiceFetch({ region, credentials, thread: input.message.thread, userId: input.message.userId });
-    const runtime = await createOrchestratorRuntime({
+    const runtime = await createHostedSlackRuntime(input, {
       stateDirectory: directory,
-      projectInstructions: input.orchestratorInstructions,
       api: new ControlPlaneApi(controlPlaneUrl, "slack-service", input.workspaceId, signedFetch),
-      context: { workspaceId: input.workspaceId, conversationId: input.conversationId },
       model,
-      requestId: input.requestId,
       ...(sessionFile === undefined ? {} : { sessionFile }),
     });
     try {

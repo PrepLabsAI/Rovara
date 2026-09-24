@@ -1,5 +1,5 @@
 # Hosted Slack orchestrator for ECS Fargate (linux/arm64). It consumes the Slack request queue and runs the
-# Pi orchestrator with AgentX orchestration tools only; coding still runs in the AgentCore worker.
+# Pi orchestrator with AgentX tools and approved MCP tools; coding still runs in the AgentCore worker.
 # Base images come from ECR Public by digest: CodeBuild's shared IPs hit Docker Hub pull limits.
 FROM public.ecr.aws/docker/library/node:22.23.2-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS build
 

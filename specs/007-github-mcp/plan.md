@@ -49,3 +49,18 @@ issue endpoints also accept PR numbers. This scope guard is not an issue action 
 Claim writes before execution; scope durable records to workspace/owner/request ID. Never replay
 ambiguous writes. Forward native assignment semantics unchanged: the model reads existing assignees
 when asked to add someone and verifies the result. No custom assignment wrapper.
+
+## Hosted Slack correction
+
+Return optional enabled repository aliases from thread-workspace resolution, sourced from its pinned
+project revision. Carry those through processor TurnInput into a testable hosted runtime factory.
+Move MCP routing into the common authenticated workspace router so existing SigV4 service requests
+reach the same policy enforcement. Check bound project in addition to thread ownership and membership.
+No new IAM permissions or public unauthenticated endpoints are required.
+The service opts into response metadata with includeIntegrations:true so older strict clients
+continue to work while the broker-first deployment replaces the ECS service.
+
+Use the Slack event-derived request-ID sequence for MCP tools, retaining call-ID memoization within
+a turn. Persist requesting Slack user for every tool invocation (including reads); reject replay under
+a different requester. Test signed transport, real Pi registration, thread-scoped routes, disabled
+policy, redelivery and native execution. Update the smoke-test guide to use Slack only.

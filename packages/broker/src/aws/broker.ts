@@ -249,28 +249,6 @@ export function createAwsBrokerHandler(dependencies: AwsBrokerDependencies) {
       });
       const body = parseBody(request.body);
 
-      const githubMcp = /^\/v1\/workspaces\/([0-9a-f-]+)\/github\/(tools|call)$/.exec(url.pathname);
-      if (githubMcp?.[1] && ((request.method === "GET" && githubMcp[2] === "tools") || (request.method === "POST" && githubMcp[2] === "call"))) {
-        const workspace = await requireOwnedWorkspace(dependencies, identity, githubMcp[1]);
-        await requireMembership(dependencies, identity.ownerKey, workspace.projectName);
-        const project = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
-        const policy = project.definition.integrations?.githubMcp;
-        if (!policy) throw agentXError("FORBIDDEN", "GitHub MCP is not enabled for this project revision");
-        if (!dependencies.githubMcp) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub MCP is not configured");
-        const parsed = request.method === "POST" ? GitHubMcpRequestSchema.safeParse(body) : undefined;
-        if (parsed && !parsed.success) throw agentXError("CONFIG_INVALID", "invalid GitHub MCP request");
-        const repositoryName = parsed?.success ? parsed.data.repository : url.searchParams.get("repository");
-        const repository = project.definition.repositories.find((entry) => entry.name === repositoryName);
-        if (!repository) throw agentXError("NOT_FOUND", "registered repository not found");
-        const context = { workspaceId: workspace.id, ownerKey: identity.ownerKey, repository, policy };
-        if (!parsed?.success) return json({ catalog: await discoverGitHubTools(context, dependencies.githubMcp) }, request.requestId);
-        const result = await executeGitHubTool(parsed.data, context, {
-          ...dependencies.githubMcp,
-          store: new DynamoGitHubMcpStore(dependencies.documentClient, dependencies.tableName, workspace.id),
-        });
-        return json({ result }, request.requestId);
-      }
-
       if (request.method === "POST" && url.pathname === "/v1/admin/projects") {
         return json(await registerProject(dependencies, identity, body), request.requestId, 201);
       }
@@ -310,6 +288,29 @@ async function routeWorkspaceRequest(
   identity: AuthenticatedIdentity,
 ): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> {
   const body = parseBody(request.body);
+  const githubMcp = /^\/v1\/workspaces\/([0-9a-f-]+)\/github\/(tools|call)$/.exec(url.pathname);
+  if (githubMcp?.[1] && ((request.method === "GET" && githubMcp[2] === "tools") || (request.method === "POST" && githubMcp[2] === "call"))) {
+    const workspace = await requireOwnedWorkspace(dependencies, identity, githubMcp[1]);
+    if (identity.slack && identity.slack.binding.projectName !== workspace.projectName) throw agentXError("FORBIDDEN", "Slack channel is no longer bound to this project");
+    await requireMembership(dependencies, identity.ownerKey, workspace.projectName);
+    const project = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
+    const policy = project.definition.integrations?.githubMcp;
+    if (!policy) throw agentXError("FORBIDDEN", "GitHub MCP is not enabled for this project revision");
+    if (!dependencies.githubMcp) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub MCP is not configured");
+    const parsed = request.method === "POST" ? GitHubMcpRequestSchema.safeParse(body) : undefined;
+    if (parsed && !parsed.success) throw agentXError("CONFIG_INVALID", "invalid GitHub MCP request");
+    const repositoryName = parsed?.success ? parsed.data.repository : url.searchParams.get("repository");
+    const repository = project.definition.repositories.find((entry) => entry.name === repositoryName);
+    if (!repository) throw agentXError("NOT_FOUND", "registered repository not found");
+    const context = { workspaceId: workspace.id, ownerKey: identity.ownerKey, repository, policy, ...requesterOf(identity) };
+    if (!parsed?.success) return json({ catalog: await discoverGitHubTools(context, dependencies.githubMcp) }, request.requestId);
+    const result = await executeGitHubTool(parsed.data, context, {
+      ...dependencies.githubMcp,
+      store: new DynamoGitHubMcpStore(dependencies.documentClient, dependencies.tableName, workspace.id),
+    });
+    return json({ result }, request.requestId);
+  }
+
   const resolve = /^\/v1\/projects\/([^/]+)\/workspace$/.exec(url.pathname);
   if (request.method === "GET" && resolve?.[1]) {
     const revision = Number.parseInt(url.searchParams.get("revision") ?? "", 10);
@@ -668,9 +669,12 @@ async function ensureThreadWorkspace(
   const slack = identity.slack;
   const limits = dependencies.slack;
   if (!slack || !limits) throw agentXError("FORBIDDEN", "a Slack thread identity is required");
-  const requestId = uuid(object(value, "thread workspace request").requestId, "requestId");
+  const input = object(value, "thread workspace request");
+  const requestId = uuid(input.requestId, "requestId");
+  // Older deployed Slack services parse a strict response; add discovery metadata only on opt-in.
+  const includeIntegrations = input.includeIntegrations === true;
   const existing = await getDefaultWorkspace(dependencies, identity.ownerKey, slack.binding.projectName);
-  if (existing) return existingThreadWorkspace(dependencies, identity, requestId, existing);
+  if (existing) return existingThreadWorkspace(dependencies, identity, requestId, existing, includeIntegrations);
 
   const project = await requireProject(dependencies, slack.binding.projectName, slack.binding.projectRevision);
   const preparation = await newWorkspacePreparation(dependencies, identity, project, identity.ownerKey, requestId);
@@ -710,7 +714,7 @@ async function ensureThreadWorkspace(
   } catch (error) {
     if (!isConditional(error)) throw error;
     const concurrent = await getDefaultWorkspace(dependencies, identity.ownerKey, slack.binding.projectName);
-    if (concurrent) return existingThreadWorkspace(dependencies, identity, requestId, concurrent);
+    if (concurrent) return existingThreadWorkspace(dependencies, identity, requestId, concurrent, includeIntegrations);
     return threadWorkspaceLimitRefusal(dependencies, teamId, userId, limits);
   }
   await recordThreadRequester(dependencies, identity, preparation.workspace.id, true);
@@ -721,6 +725,7 @@ async function ensureThreadWorkspace(
     operationId: preparation.operationId,
     created: true,
     orchestratorInstructions: project.definition.orchestratorInstructions,
+    ...(includeIntegrations ? threadIntegrations(project.definition) : {}),
   };
 }
 
@@ -729,6 +734,7 @@ async function existingThreadWorkspace(
   identity: AuthenticatedIdentity,
   requestId: string,
   workspace: WorkspaceInstance,
+  includeIntegrations: boolean,
 ): Promise<SlackThreadWorkspaceResult> {
   await recordThreadRequester(dependencies, identity, workspace.id, false);
   const project = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
@@ -742,6 +748,7 @@ async function existingThreadWorkspace(
       operationId: retried.operationId,
       created: false,
       orchestratorInstructions,
+      ...(includeIntegrations ? threadIntegrations(project.definition) : {}),
     };
   }
   return {
@@ -751,7 +758,14 @@ async function existingThreadWorkspace(
     operationId: workspace.activeOperationId,
     created: false,
     orchestratorInstructions,
+    ...(includeIntegrations ? threadIntegrations(project.definition) : {}),
   };
+}
+
+function threadIntegrations(project: ProjectDefinition): { githubMcpRepositories?: string[] } {
+  return project.integrations?.githubMcp
+    ? { githubMcpRepositories: project.repositories.map((repository) => repository.name) }
+    : {};
 }
 
 async function threadWorkspaceLimitRefusal(

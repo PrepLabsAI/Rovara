@@ -25,12 +25,12 @@ directory name `Pi-Bedrock` is retained, but the product is named AgentX.
 ## How AgentX is structured
 
 ```text
-local Pi TUI/CLI -> AgentX control plane -> AgentCore Runtime -> remote Pi coding agent
-                                                               └── /mnt/workspace
+Slack mention -> hosted Pi orchestrator -> AgentX control plane -> remote Pi coding worker
+                                                              -> approved GitHub MCP tools
 ```
 
-The local Pi session is an orchestration-only client. It has AgentX control-plane tools but no
-local source, file-editing, or shell tools. The remote Pi session owns the coding loop and exposes
+The hosted Pi session is an orchestration-only client. It has AgentX control-plane and approved
+MCP tools but no local source, file-editing, or shell tools. The remote Pi session owns the coding loop and exposes
 `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls` inside the developer's private workspace.
 AgentX wraps remote Pi only to provide authentication, workspace allocation, operation fencing,
 durable callbacks, and Git/tool-evidence artifacts.
@@ -167,7 +167,7 @@ The local model can call AgentX orchestration tools and explicitly approved, dyn
 discovered GitHub MCP issue tools. Repository code inspection, editing, shell commands, builds,
 and tests are delegated to the remote Pi worker in AgentCore.
 
-#### Optional GitHub MCP integration
+#### GitHub MCP through hosted Slack
 
 The control plane connects to GitHub's hosted MCP server, discovers its tools with `tools/list`,
 and exposes only tools approved in the registered project revision. The orchestrator registers
@@ -179,15 +179,18 @@ the existing GitHub App installation with repository-scoped **Issues** permissio
 in the control plane. Existing projects remain disabled until an administrator registers an
 opt-in revision. Arbitrary endpoints, personal OAuth, and other GitHub permission families are
 not included. Existing AgentX coding and validated PR-publication tools remain unchanged.
-This increment enables the interactive CLI; the hosted Slack service is not wired to MCP discovery yet.
+The hosted Slack service discovers tools from the thread workspace's registered project revision.
+Calls use its IAM service identity and carry the requesting Slack user; tokens remain in the broker.
+Use a new thread after binding the channel to an enabled revision. Existing threads retain their
+workspace revision. Local CLI interaction is not required for users to access this integration.
 
 ### 7. Use a project Slack channel
 
 AgentX runs a hosted orchestrator for Slack in the production AWS account, so no developer machine
 has to stay online. Slack calls the AgentX Events API route; an ingress Lambda verifies Slack's
 signature, acknowledges in the thread, and queues the request. An ECS Fargate service runs the Pi
-orchestrator for that thread and posts the result back. Like the local orchestrator, it can call
-only AgentX orchestration tools; all repository work runs in the remote Pi worker.
+orchestrator for that thread and posts the result back. It can call AgentX orchestration tools and
+administrator-approved GitHub MCP tools; repository coding work runs in the remote Pi worker.
 
 Each Slack thread has its own workspace. The first mention in a new thread creates a workspace
 for the channel's bound project. Later mentions in that thread, by any channel member, continue

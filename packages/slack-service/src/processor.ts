@@ -30,6 +30,7 @@ export interface TurnInput {
   workspaceId: string;
   conversationId: string;
   orchestratorInstructions: string;
+  githubMcpRepositories?: string[];
   requestId: () => string;
 }
 
@@ -98,6 +99,7 @@ export async function processSlackRequest(
         workspaceId: workspace.workspaceId,
         conversationId,
         orchestratorInstructions: workspace.orchestratorInstructions,
+        ...(workspace.githubMcpRepositories === undefined ? {} : { githubMcpRepositories: workspace.githubMcpRepositories }),
         requestId: requestIdSequence(message.eventId),
       });
       log("task.completed", { eventId: message.eventId, responseLength: response.length });
