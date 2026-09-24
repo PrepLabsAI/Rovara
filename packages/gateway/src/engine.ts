@@ -139,7 +139,7 @@ export class ConnectorNotConnected extends AgentXError {
 }
 
 /** Issues a credential and connects; after a 401, invalidates and tries exactly once more. */
-async function openConnection<Scope>(
+export async function openConnection<Scope>(
   connector: ConnectorDefinition<Scope>, context: ConnectorContext<Scope>, access: Access,
   tools: string[], signal: AbortSignal, options: EngineOptions,
 ): Promise<{ credential: IssuedCredential; connection: McpConnection }> {
@@ -157,7 +157,9 @@ async function openConnection<Scope>(
           ? `${connector.label} rejected the credential twice (clearing the cached credential also failed); check ${connector.permissionsHint}`
           : `${connector.label} rejected the credential twice; check ${connector.permissionsHint}`);
       }
-      await connector.credentials.invalidate?.(context.scope).catch(() => { invalidateFailed = true; });
+      try {
+        await withDeadline(Promise.resolve().then(() => connector.credentials.invalidate?.(context.scope)), signal);
+      } catch { invalidateFailed = true; }
     }
   }
 }

@@ -4,7 +4,9 @@ import {
   approveTools,
   discoverTools,
   executeTool,
+  openConnection,
   reviewTools,
+  staticSecretProvider,
   GuardRejection,
   McpUnauthorized,
   CredentialUnavailable,
@@ -372,5 +374,51 @@ describe("credentials that are missing or rejected", () => {
     f.issue.mockRejectedValueOnce(new Error("app not installed"));
     const result = await executeTool(f.request("create_item", { title: "Bug" }), f.connector, f.context, { connect: f.connect, ledger: f.ledger });
     expect(result).toMatchObject({ status: "FAILED", reason: "vendor_error" });
+  });
+
+  it("still retries when invalidate throws synchronously instead of returning a rejected promise", async () => {
+    const f = fixture();
+    // Not an async function: throws immediately while being called, before any .catch could attach.
+    f.connector.credentials.invalidate = vi.fn((): Promise<void> => { throw new Error("boom"); });
+    f.issue.mockResolvedValueOnce({ token: "stale", bindings: {} }).mockResolvedValueOnce({ token: "fresh", bindings: {} });
+    f.connect.mockRejectedValueOnce(new McpUnauthorized());
+    const result = await executeTool(f.request("list_items", { state: "open" }), f.connector, f.context, { connect: f.connect, ledger: f.ledger });
+    expect(result.status).toBe("SUCCEEDED");
+    expect(f.connect.mock.calls.map(([options]) => options.token)).toEqual(["stale", "fresh"]);
+  });
+
+  it("bounds a hung invalidate by the deadline instead of waiting on it forever", async () => {
+    const f = fixture();
+    // Never settles: only the deadline can end the wait for it.
+    f.connector.credentials.invalidate = vi.fn(() => new Promise<void>(() => undefined));
+    f.connect.mockRejectedValueOnce(new McpUnauthorized());
+    const controller = new AbortController();
+    const opening = openConnection(f.connector, f.context, "read", ["list_items"], controller.signal, { connect: f.connect });
+    // Give issue() and the rejected connect() their microtasks, then trip the deadline while
+    // invalidate() is (forever) in flight.
+    await new Promise((resolve) => setImmediate(resolve));
+    controller.abort();
+    // Only the deadline (tripped above) can settle this; a real, short timer proves it does not
+    // hang past it waiting on the invalidate() that never resolves.
+    const settled = await Promise.race([
+      opening.then(() => "settled" as const, () => "settled" as const),
+      new Promise<"still-pending">((resolve) => setTimeout(() => resolve("still-pending"), 200)),
+    ]);
+    expect(settled).toBe("settled");
+  }, 2000);
+
+  it("re-reads a rotated secret from a real static-secret provider after a 401, and the retry succeeds with it", async () => {
+    const f = fixture();
+    const values: Record<string, string> = { "agentx/connectors/tracker": JSON.stringify({ apiKey: "key-1" }) };
+    const secrets = { read: vi.fn(async (name: string) => values[name]) };
+    f.connector.credentials = staticSecretProvider({ ref: "tracker", secretName: "agentx/connectors/tracker", secrets });
+    f.connect.mockRejectedValueOnce(new McpUnauthorized());
+    f.connect.mockImplementationOnce(async () => ({ tools: f.tools, call: f.call, close: f.close }));
+    const opening = openConnection(f.connector, f.context, "read", ["list_items"], AbortSignal.timeout(20_000), { connect: f.connect });
+    // Rotated between the rejected first attempt and the retry, as an administrator might.
+    values["agentx/connectors/tracker"] = JSON.stringify({ apiKey: "key-2" });
+    const result = await opening;
+    expect(result.credential.token).toBe("key-2");
+    expect(f.connect.mock.calls.map(([options]) => options.token)).toEqual(["key-1", "key-2"]);
   });
 });
