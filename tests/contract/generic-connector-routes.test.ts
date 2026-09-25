@@ -351,3 +351,19 @@ describe("thread setup lists every connector, to services that can parse it", ()
     });
   });
 });
+
+describe("vendor tool annotations on the connector route (feature 014)", () => {
+  const annotated = { name: "close_item", description: "Close an item", annotations: { title: "Close item", readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    inputSchema: { type: "object", properties: { siteId: { type: "string" }, id: { type: "string" } }, required: ["siteId", "id"] } };
+  const annotatedConfig = { ...trackerConfig, scopes: [{ alias: "payments", siteId: "site-payments-1" }],
+    tools: [{ name: "list_items", access: "read" }, { name: "create_item", access: "write" }, { name: "close_item", access: "write" }] };
+
+  it("serves each tool with exactly the six fields an older Slack service parses, and a hash that already covers the annotations (characterization)", async () => {
+    const { handler, path } = await trackerBroker({ extraTools: [annotated], config: annotatedConfig });
+    expect((await registerTrackerKey(handler)).status).toBe(201);
+    const discovered = await call(handler, { method: "GET", path: `${path}/tools`, service });
+    const catalog = ConnectorCatalogSchema.parse(discovered.body.catalog);
+    expect(catalog.tools.map((tool) => Object.keys(tool).sort())).toEqual(Array(3).fill(["access", "description", "inputSchema", "name", "scopes", "upstreamName"]));
+    expect(catalog.tools.find((tool) => tool.name === "tracker__close_item")!.scopes).toEqual([{ alias: "payments", schemaHash: "c5c4fb16e67e06a1fda262e7262e6b5a64b59f5bd85beef35923851dcdb16728" }]);
+  });
+});
