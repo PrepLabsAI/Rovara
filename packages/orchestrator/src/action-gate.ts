@@ -56,9 +56,18 @@ export interface ActionGateOptions {
   facts: ReadonlyMap<string, ToolFacts>;
   /** The thread's lazy worker (spec 014 phase 14b), present only while the thread has no prepared compute. */
   worker?: WorkerAccess | undefined;
+  /**
+   * The host's positive signal that this thread's compute is already prepared (spec 014 D5): then
+   * agentx_submit_task and agentx_follow_up run as reads. Absent with no worker, they fail closed as
+   * a change.
+   */
+  computePrepared?: boolean | undefined;
   onDecision?: ((decision: GateDecision) => void) | undefined;
   maxClassifierCalls?: number | undefined;
 }
+
+/** Stands in for the worker when the host says the thread's compute is already prepared. */
+const PREPARED_COMPUTE = { prepared: () => true };
 
 /** Bounds the classifier's cost and delay per turn; later unsettled writes ask. */
 export const MAX_CLASSIFIER_CALLS_PER_TURN = 8;
@@ -186,7 +195,8 @@ export class ActionGate {
     const { session } = this.options;
     const facts = this.options.facts.get(call.toolName);
     const hash = argumentsHash(call.toolName, call.input);
-    const evaluation = evaluatePolicy({ name: call.toolName, args: call.input, facts, policy: this.options.policy, worker: this.options.worker });
+    const evaluation = evaluatePolicy({ name: call.toolName, args: call.input, facts, policy: this.options.policy,
+      worker: this.options.computePrepared === true ? PREPARED_COMPUTE : this.options.worker });
     const base = {
       toolCallId: call.toolCallId, tool: call.toolName, ...(facts === undefined ? {} : { connector: facts.connector }),
       actionClass: evaluation.actionClass, argumentsHash: hash, ...(evaluation.classRule === undefined ? {} : { rule: evaluation.classRule }),

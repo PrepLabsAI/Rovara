@@ -181,6 +181,20 @@ describe("confirmations through the Slack processor", () => {
   });
 });
 
+describe("the compute signal the processor gives the gate (I1/D5)", () => {
+  it("says compute is prepared for a READY workspace, and passes a lazy worker without that signal for an UNPREPARED one", async () => {
+    let state: "READY" | "UNPREPARED" = "READY";
+    const { turns, dependencies } = harness(async () => "Done.", () => state as "READY");
+    await processSlackRequest(slackMessage("EvGATE000301", "run the tests"), dependencies, { finalAttempt: false });
+    expect(turns[0]!.computePrepared).toBe(true);
+    expect(turns[0]!.worker).toBeUndefined();
+    state = "UNPREPARED";
+    await processSlackRequest(slackMessage("EvGATE000302", "run the tests"), dependencies, { finalAttempt: false });
+    expect(turns[1]!.computePrepared).toBeUndefined();
+    expect(turns[1]!.worker?.prepared()).toBe(false);
+  });
+});
+
 describe("a redelivered request that asked for a confirmation", () => {
   it("tells a redelivered yes that its earlier attempt already used the confirmation, and runs nothing again", async () => {
     const connectorCall = vi.fn();
@@ -320,6 +334,58 @@ describe("the hosted Slack runtime", () => {
     } finally { await runtime.dispose(); }
     expect(callConnectorTool).not.toHaveBeenCalled();
     expect(decisions).toMatchObject([{ tool: "tracker__close_item", outcome: "ask", kind: "destructive" }]);
+  });
+
+  /** One hosted turn whose model submits coding work and follows it up; returns the gate's decisions and the classifier's calls. */
+  async function codingTurn(extra: Partial<TurnInput>) {
+    const { modelRuntime, faux } = await fauxModelRuntime();
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("agentx_submit_task", { prompt: "now run the tests" }), fauxToolCall("agentx_follow_up", { prompt: "and fix any failure" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("Started."),
+    ]);
+    const api = { discoverConnectorTools: vi.fn(), callConnectorTool: vi.fn(), submitTask: vi.fn(async () => { throw new Error("no worker in this test"); }), taskStatus: vi.fn(), taskResult: vi.fn(),
+      followUp: vi.fn(async () => { throw new Error("no worker in this test"); }), createPullRequest: vi.fn(), managePullRequest: vi.fn(), pullRequestResult: vi.fn() } satisfies OrchestrationApi;
+    const classifier = vi.fn(async () => ({ decision: "ask" as const, reason: "unsure" }));
+    const decisions: Array<{ tool: string; outcome: string; actionClass: string; source: string }> = [];
+    const runtime = await createHostedSlackRuntime({
+      message: slackMessage("EvGATE000051", "now run the tests"), subject, workspaceId, conversationId: "33333333-3333-4333-8333-333333333333",
+      orchestratorInstructions: "Delegate.", requestId: () => "55555555-5555-4555-8555-555555555555", ...extra,
+    }, { stateDirectory: await createFixtureDirectory("agentx-hosted-coding-"), api, model: FAUX_MODEL, modelRuntime, classifier,
+      onGateDecision: (decision) => decisions.push(decision) });
+    try {
+      await runOrchestratorTurn(runtime, "now run the tests");
+    } finally { await runtime.dispose(); }
+    return { decisions, classifier, api };
+  }
+
+  it("I1/D5: runs coding work in a thread whose compute is prepared without a classifier call", async () => {
+    const { decisions, classifier, api } = await codingTurn({ computePrepared: true });
+    expect(classifier).not.toHaveBeenCalled();
+    expect(decisions).toMatchObject([
+      { tool: "agentx_submit_task", outcome: "allow", actionClass: "read" },
+      { tool: "agentx_follow_up", outcome: "allow", actionClass: "read" },
+    ]);
+    expect(api.submitTask).toHaveBeenCalledOnce();
+    expect(api.followUp).toHaveBeenCalledOnce();
+  });
+
+  it("I1/D5: gates starting coding work once, as a write, in a thread whose compute is not prepared yet", async () => {
+    const { decisions, classifier, api } = await codingTurn({ worker: { prepared: () => false, ensureReady: async () => undefined } });
+    expect(classifier).toHaveBeenCalledOnce();
+    expect(decisions).toMatchObject([
+      { tool: "agentx_submit_task", outcome: "ask", actionClass: "change", source: "classifier" },
+      { tool: "agentx_follow_up", outcome: "allow", actionClass: "read" },
+    ]);
+    expect(api.submitTask).not.toHaveBeenCalled();
+  });
+
+  it("I1/M3: fails closed as a change when the host gives no compute signal", async () => {
+    const { decisions, classifier } = await codingTurn({});
+    expect(classifier).toHaveBeenCalledTimes(2);
+    expect(decisions).toMatchObject([
+      { tool: "agentx_submit_task", outcome: "ask", actionClass: "change" },
+      { tool: "agentx_follow_up", outcome: "ask", actionClass: "change" },
+    ]);
   });
 
   it("asks the control plane for the action gate's fields with a header an older control plane ignores", async () => {

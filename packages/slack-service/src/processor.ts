@@ -65,6 +65,8 @@ export interface TurnInput {
   recoverableOperations?: string[];
   /** Spec 014: present only when the thread's compute is not prepared yet. */
   worker?: WorkerAccess;
+  /** Spec 014 D5: true only when the thread's compute is already prepared, so coding work runs ungated. */
+  computePrepared?: boolean;
   /** Spec 014: this turn's action gate state: the requester, confirmed calls and "yes to all". */
   gate?: GateSession;
   actionPolicy?: ActionPolicy;
@@ -262,7 +264,9 @@ export async function processSlackRequest(
         ...(workspace.connectors === undefined ? {} : { connectors: workspace.connectors }),
         ...(workspace.repositories === undefined ? {} : { repositories: workspace.repositories }),
         ...(workspace.recoverableOperations === undefined ? {} : { recoverableOperations: workspace.recoverableOperations }),
-        ...(worker === undefined ? {} : { worker }),
+        // Every status that reaches here other than UNPREPARED has prepared compute (READY, STOPPED,
+        // BUSY, or PREPARING that this turn waited out).
+        ...(worker === undefined ? { computePrepared: true } : { worker }),
         ...(confirmation === undefined ? {} : { gate: confirmation.session }),
         ...(workspace.actionPolicy === undefined ? {} : { actionPolicy: workspace.actionPolicy }),
         requestId: requestIdSequence(message.eventId),

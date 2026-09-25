@@ -209,8 +209,8 @@ export function itemReference(facts: ToolFacts | undefined, args: Record<string,
  * - In-house tools are classified here in code: agentx_submit_task is a change only while the
  *   thread has no prepared compute (D5); the other task tools read; publishing is a change; closing,
  *   replacing or reverting a pull request is destructive. Any other unknown tool is a change unless
- *   its name says it destroys. Without a worker, agentx_submit_task and agentx_follow_up fail
- *   closed as a change.
+ *   its name says it destroys. Without a worker (the gate passes a prepared one when the host says
+ *   the thread's compute is prepared), agentx_submit_task and agentx_follow_up fail closed as a change.
  * - Arguments that are not a plain object make any call but a read-approved tool a change, so the
  *   classifier decides (fail closed).
  */

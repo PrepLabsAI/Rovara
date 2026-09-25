@@ -410,8 +410,9 @@ confirmation": the calls may already have run, so ask it to check.
 renew it. If a question of yours is pending, it also approves that question. Destructive actions,
 large changes and administrator rules still ask.
 
-Coding work in a thread that has no workspace yet is checked the same way before AgentX prepares
-one. A confirmed request to create a pull request in such a thread still answers that there are no
+Coding work in a thread that has no workspace yet is checked the same way, once, before AgentX
+prepares one. In a thread whose workspace is already prepared, starting or following up coding work
+runs without a check and without a model call. A confirmed request to create a pull request in such a thread still answers that there are no
 changes to publish: approval does not create a workspace.
 
 Administrators add rules to the project file under `actionPolicy`:
