@@ -21,7 +21,7 @@ import { processSlackRequest, type ServiceLog, type ThreadServiceApi, type Threa
 import { createSignedServiceFetch } from "./signing-fetch.js";
 import { createSlackUserNames } from "./user-names.js";
 import { createThreadApi } from "./thread-api.js";
-import { classifierTimeoutMs, createHostedClassifier, createHostedSlackRuntime } from "./runtime.js";
+import { classifierTimeoutMs, createHostedClassifier, createHostedSlackRuntime, gateDecisionLogFields } from "./runtime.js";
 import { DynamoTurnRecordWriter } from "./turn-records.js";
 
 const MAX_RECEIVE_COUNT = 5;
@@ -214,15 +214,7 @@ async function runTurn(input: TurnInput): Promise<string> {
       }),
       classifier,
       // One line per gate decision until turn records carry them; never the call's arguments.
-      onGateDecision: (decision) => log("gate.decision", {
-        eventId: input.message.eventId, tool: decision.tool, actionClass: decision.actionClass, outcome: decision.outcome, source: decision.source,
-        reason: decision.reason, argumentsHash: decision.argumentsHash.slice(0, 16),
-        ...(decision.connector === undefined ? {} : { connector: decision.connector }),
-        ...(decision.kind === undefined ? {} : { kind: decision.kind }),
-        ...(decision.rule === undefined ? {} : { rule: decision.rule }),
-        ...(decision.classifierMs === undefined ? {} : { classifierMs: decision.classifierMs }),
-        ...(decision.usage === undefined ? {} : { classifierInputTokens: decision.usage.input, classifierOutputTokens: decision.usage.output, classifierCost: decision.usage.cost }),
-      }),
+      onGateDecision: (decision) => log("gate.decision", gateDecisionLogFields(input.message.eventId, decision)),
     });
     try {
       const response = await runOrchestratorTurn(runtime, input.message.text, input.recorder);

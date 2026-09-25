@@ -16,7 +16,7 @@ import { runOrchestratorTurn } from "../../packages/orchestrator/src/orchestrato
 import { createDynamoConfirmationStore } from "../../packages/slack-service/src/confirmation-store.js";
 import { UNPOSTED_MARK } from "../../packages/slack-service/src/confirmations.js";
 import { processSlackRequest, type ProcessorDependencies, type TurnInput } from "../../packages/slack-service/src/processor.js";
-import { classifierTimeoutMs, createHostedClassifier, createHostedSlackRuntime } from "../../packages/slack-service/src/runtime.js";
+import { classifierTimeoutMs, createHostedClassifier, createHostedSlackRuntime, gateDecisionLogFields } from "../../packages/slack-service/src/runtime.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
@@ -482,5 +482,23 @@ describe("the hosted classifier at startup", () => {
     expect(classifierTimeoutMs(undefined)).toBe(8_000);
     for (const value of ["", "abc", "NaN", "0", "-5", "1.5", "12abc", " 12"]) expect(classifierTimeoutMs(value)).toBe(8_000);
     expect(classifierTimeoutMs("12000")).toBe(12_000);
+  });
+});
+
+describe("the gate.decision log line (M1)", () => {
+  const base = { toolCallId: "c1", tool: "tracker__save_item", connector: "tracker", actionClass: "change" as const, argumentsHash: "b".repeat(64) };
+
+  it("never logs the classifier's own reason, which can echo argument values", () => {
+    const fields = gateDecisionLogFields("EvGATE000401", { ...base, outcome: "ask", source: "classifier", kind: "classifier", reason: "renames TRK-5 to Secret launch plan" });
+    expect(fields).toEqual({ eventId: "EvGATE000401", tool: "tracker__save_item", connector: "tracker", actionClass: "change", outcome: "ask", source: "classifier", kind: "classifier",
+      argumentsHash: "b".repeat(16) });
+    expect(JSON.stringify(fields)).not.toContain("Secret launch plan");
+  });
+
+  it("logs AgentX's and administrators' reasons redacted and capped", () => {
+    const fields = gateDecisionLogFields("EvGATE000402", { ...base, outcome: "deny", source: "rule", kind: "admin", rule: 1, reason: `token xoxb-123456789012-abcdefghijkl ${"x".repeat(400)}` });
+    expect(String(fields.reason)).not.toContain("xoxb-123456789012");
+    expect(String(fields.reason).length).toBeLessThanOrEqual(200);
+    expect(fields).toMatchObject({ source: "rule", rule: 1, kind: "admin" });
   });
 });

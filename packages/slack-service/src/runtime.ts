@@ -1,6 +1,7 @@
 import { CLASSIFIER_TIMEOUT_MS, ClassifierError, createModelClassifier } from "@agentx/orchestrator/action-classifier";
 import { createGateSession, type ActionClassifier, type GateDecision } from "@agentx/orchestrator/action-gate";
 import { createOrchestratorRuntime, type OrchestratorOptions } from "@agentx/orchestrator/orchestrator";
+import { TURN_GATE_REASON_LIMIT, redactAndCap } from "@agentx/contracts";
 import type { ServiceLog, TurnInput } from "./processor.js";
 
 export interface HostedRuntimeOptions extends Pick<OrchestratorOptions, "stateDirectory" | "api" | "model" | "sessionFile" | "onConnectorUnavailable" | "modelRuntime"> {
@@ -73,4 +74,23 @@ export async function createHostedClassifier(options: {
 export function classifierTimeoutMs(value: string | undefined): number {
   const parsed = value !== undefined && /^[0-9]+$/u.test(value) ? Number.parseInt(value, 10) : Number.NaN;
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : CLASSIFIER_TIMEOUT_MS;
+}
+
+/**
+ * The fields of one `gate.decision` log line: never the call's arguments. A classifier's own reason
+ * can echo an argument value (a new title, say), so it is never logged; the turn record keeps it with
+ * argument values taken out. Other reasons are AgentX's or an administrator's, logged redacted and
+ * capped like a turn record's.
+ */
+export function gateDecisionLogFields(eventId: string, decision: GateDecision): Record<string, string | number | boolean> {
+  return {
+    eventId, tool: decision.tool, actionClass: decision.actionClass, outcome: decision.outcome, source: decision.source,
+    ...(decision.source === "classifier" ? {} : { reason: redactAndCap(decision.reason, TURN_GATE_REASON_LIMIT).text }),
+    argumentsHash: decision.argumentsHash.slice(0, 16),
+    ...(decision.connector === undefined ? {} : { connector: decision.connector }),
+    ...(decision.kind === undefined ? {} : { kind: decision.kind }),
+    ...(decision.rule === undefined ? {} : { rule: decision.rule }),
+    ...(decision.classifierMs === undefined ? {} : { classifierMs: decision.classifierMs }),
+    ...(decision.usage === undefined ? {} : { classifierInputTokens: decision.usage.input, classifierOutputTokens: decision.usage.output, classifierCost: decision.usage.cost }),
+  };
 }
