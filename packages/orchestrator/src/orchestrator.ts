@@ -21,7 +21,7 @@ import {
   type WorkerAccess,
 } from "./orchestration-tools.js";
 import { capabilitiesManifest } from "./manifest.js";
-import { actionGateExtension, connectorToolFacts, type ActionGateOptions } from "./action-gate.js";
+import { actionGateExtension, connectorToolFacts, type ActionGateOptions, type GateDecision } from "./action-gate.js";
 import type { TurnRecorder } from "./turn-recorder.js";
 
 export interface OrchestratorOptions {
@@ -147,6 +147,16 @@ export async function createOrchestratorRuntime(options: OrchestratorOptions): P
     ...options.actionGate,
     facts: connectorToolFacts(catalogs),
     ...(options.worker === undefined ? {} : { worker: options.worker }),
+    // Spec 014 FR-021: each decision also goes into this turn's record, after the host's own log line.
+    ...(recorder === undefined ? {} : {
+      onDecision: (decision: GateDecision) => {
+        try {
+          options.actionGate?.onDecision?.(decision);
+        } finally {
+          recorder.gateDecided(decision);
+        }
+      },
+    }),
   });
   return createPiSessionRuntime({
     stateDirectory: options.stateDirectory,

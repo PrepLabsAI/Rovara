@@ -136,7 +136,7 @@ flight never gets a partial record.
 | `eventId`, `subject`, `requestedBy`, `settingsRevision`, `workspaceId`, `conversationId` | Identity and routing |
 | `project` | Added at export from the workspace record; not stored |
 | `receivedAt` | The time AgentX's Slack ingress received the event (ISO). Part of the sort key, so a redelivery of the same event maps to the same record |
-| `disposition` | `answered`, `failed`, `abandoned`, `workspace_close`, `workspace_limit`, `workspace_closed`, `workspace_unavailable` |
+| `disposition` | `answered`, `failed`, `abandoned`, `workspace_close`, `workspace_limit`, `workspace_closed`, `workspace_unavailable`, `confirmation_refused` (spec 014: the message answered a confirmation that could not be used, so nothing ran; older records never have it) |
 | `model` | `{ provider, modelId }` |
 | `startedAt`, `finishedAt`, `durationMs` | Timing |
 | `manifestHash` | SHA-256 of the capabilities manifest |
@@ -144,7 +144,7 @@ flight never gets a partial record.
 | `requestText` | At most 40,000 characters |
 | `responseText` | At most 40,000 characters |
 | `textTruncated` | Present and `true` when `requestText` or `responseText` was cut to fit |
-| `calls` | `[{ name, connector?, arguments, argumentsFingerprint, validation, outcome, reason?, durationMs, requestId?, operationId? }]`, at most 50. `arguments` is redacted JSON text of the call's arguments, capped at 2,048 characters; `argumentsFingerprint` is the first 32 hex characters of a SHA-256 over the same redacted JSON text, uncapped |
+| `calls` | `[{ name, connector?, arguments, argumentsFingerprint, validation, outcome, reason?, durationMs, requestId?, operationId?, gate? }]`, at most 50. `gate` (spec 014 FR-021) is the action gate's decision: `{ outcome, source, kind?, rule?, reason }`, with `rule` the 1-based policy rule as text and a `reason` of at most 200 characters that carries no argument value; records written before the gate have none. `arguments` is redacted JSON text of the call's arguments, capped at 2,048 characters; `argumentsFingerprint` is the first 32 hex characters of a SHA-256 over the same redacted JSON text, uncapped |
 | `callsTruncated` | Present and `true` when the turn made more than 50 calls and only the first 50 were kept |
 | `argumentsOmitted` | Present and `true` when every call's `arguments` was replaced with `[omitted]` to fit the record's storage budget. Optional: records written before this field existed do not carry it |
 | `validation` | `ok`, `schema_error`, `policy_denied`, `unknown_tool` |

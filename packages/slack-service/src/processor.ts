@@ -168,6 +168,8 @@ export async function processSlackRequest(
       // late runs nothing and needs no workspace. Nothing is claimed until the turn is about to run.
       const check = await checkConfirmation({ message, subject, store: dependencies.confirmations, post, log, now: now() });
       if (!check.run) {
+        // Spec 014 FR-021: a refused confirmation answer is recorded as such, not as abandoned.
+        if (check.refused !== undefined) draft.disposition = "confirmation_refused";
         finished = true;
         return;
       }
@@ -236,6 +238,7 @@ export async function processSlackRequest(
       const current = await dependencies.confirmations.load(subject);
       const expired = current?.confirmationId === confirmation.claim.confirmationId && current.retiredAt === undefined && now() >= Date.parse(current.expiresAt);
       log("gate.confirmation_refused", { eventId: message.eventId, reason: expired ? "expired" : "already_used" });
+      draft.disposition = "confirmation_refused";
       await post(expired ? EXPIRED_TEXT : "That confirmation was already used, so nothing was run. Ask me again if you still want it.");
       finished = true;
       return;

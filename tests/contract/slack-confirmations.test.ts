@@ -154,7 +154,7 @@ describe("checking a message against the thread's confirmation", () => {
     const { store, check, posts } = harness();
     await store.save(subject, pending);
     expect(await check("yes", { eventId: confirmationClickEventId(pending.confirmationId, "approve") })).toMatchObject({ run: true, claim: { confirmationId: pending.confirmationId } });
-    expect(await check("yes", { eventId: confirmationClickEventId("66666666-6666-5666-8666-666666666666", "approve") })).toEqual({ run: false });
+    expect(await check("yes", { eventId: confirmationClickEventId("66666666-6666-5666-8666-666666666666", "approve") })).toEqual({ run: false, refused: "not_pending" });
     expect(await check("cancel", { eventId: confirmationClickEventId(pending.confirmationId, "cancel") })).toEqual({ run: false });
     expect(posts).toEqual([NO_LONGER_PENDING_TEXT, CANCELLED_TEXT]);
     expect((await store.load(subject))?.usedBy).toBe(confirmationClickEventId(pending.confirmationId, "cancel"));
@@ -163,7 +163,7 @@ describe("checking a message against the thread's confirmation", () => {
   it("runs nothing for a yes from a different member, and says who can confirm", async () => {
     const { store, check, posts, log } = harness();
     await store.save(subject, pending);
-    expect(await check("yes", { userId: other })).toEqual({ run: false });
+    expect(await check("yes", { userId: other })).toEqual({ run: false, refused: "other_member" });
     expect(posts).toEqual([`Only <@${requester}> can confirm what they asked for. Nothing was run.`]);
     expect(log).toHaveBeenCalledWith("gate.confirmation_refused", { eventId: "EvYES0000001", reason: "other_member" });
     expect(await store.load(subject)).toEqual(pending);
@@ -179,11 +179,11 @@ describe("checking a message against the thread's confirmation", () => {
     // The same event again hears that its earlier attempt used it (fix round 1, I1: the call may
     // already have run); a redelivered cancel, or one received before the tombstone was left,
     // hears that it is no longer pending.
-    expect(await check("yes", { eventId: "EvYES0000001" })).toEqual({ run: false });
-    expect(await check("cancel", { eventId: "EvYES0000001" })).toEqual({ run: false });
-    expect(await check("yes", { eventId: "EvYES0000004" })).toEqual({ run: false });
+    expect(await check("yes", { eventId: "EvYES0000001" })).toEqual({ run: false, refused: "already_used_by_this_request" });
+    expect(await check("cancel", { eventId: "EvYES0000001" })).toEqual({ run: false, refused: "not_pending" });
+    expect(await check("yes", { eventId: "EvYES0000004" })).toEqual({ run: false, refused: "not_pending" });
     // A click can only mean that confirmation: even from a new event after the tombstone, it runs no ordinary turn.
-    expect(await check("yes", { eventId: confirmationClickEventId(pending.confirmationId, "approve"), receivedAt: new Date(postedAt + 180_000).toISOString() })).toEqual({ run: false });
+    expect(await check("yes", { eventId: confirmationClickEventId(pending.confirmationId, "approve"), receivedAt: new Date(postedAt + 180_000).toISOString() })).toEqual({ run: false, refused: "not_pending" });
     expect(posts).toEqual([ALREADY_USED_BY_THIS_REQUEST_TEXT, NO_LONGER_PENDING_TEXT, NO_LONGER_PENDING_TEXT, NO_LONGER_PENDING_TEXT]);
   });
 
@@ -198,11 +198,11 @@ describe("checking a message against the thread's confirmation", () => {
   it("does not count a yes sent before the question was posted, and retires one after it expired", async () => {
     const early = harness();
     await early.store.save(subject, pending);
-    expect(await early.check("yes", { receivedAt: new Date(postedAt - 1_000).toISOString() })).toEqual({ run: false });
+    expect(await early.check("yes", { receivedAt: new Date(postedAt - 1_000).toISOString() })).toEqual({ run: false, refused: "before_request" });
     expect(early.posts[0]).toContain("arrived before I asked for confirmation");
     const late = harness(postedAt + CONFIRMATION_TTL_MS);
     await late.store.save(subject, pending);
-    expect(await late.check("yes", { receivedAt: new Date(postedAt + CONFIRMATION_TTL_MS).toISOString() })).toEqual({ run: false });
+    expect(await late.check("yes", { receivedAt: new Date(postedAt + CONFIRMATION_TTL_MS).toISOString() })).toEqual({ run: false, refused: "expired" });
     expect(late.posts).toEqual(["That confirmation request expired after 24 hours, so nothing was run. Ask me again if you still want it."]);
     expect((await late.store.load(subject))?.retiredAt).toBeDefined();
   });
@@ -259,7 +259,7 @@ describe("tombstones, expiry and yes to all", () => {
     expect(await check("yes")).toMatchObject({ run: true, claim: { confirmationId: pending.confirmationId } });
     expect(await store.claim(subject, pending.confirmationId, "EvYES0000001")).toBe(true);
     expect(await store.claim(subject, pending.confirmationId, "EvYES0000001")).toBe(false);
-    expect(await check("yes")).toEqual({ run: false });
+    expect(await check("yes")).toEqual({ run: false, refused: "already_used_by_this_request" });
     expect(posts).toEqual([ALREADY_USED_BY_THIS_REQUEST_TEXT]);
     const session = createGateSession(requester, { approvals: pending.calls });
     await settleConfirmations({ check: { run: true, session, claim: { confirmationId: pending.confirmationId } }, message: message("yes"), subject, store, postConfirmation: vi.fn(), log: vi.fn(), now: postedAt + 120_000 });
@@ -271,9 +271,9 @@ describe("tombstones, expiry and yes to all", () => {
     const { store, check, posts } = harness(now);
     await store.save(subject, pending);
     const receivedAt = new Date(now).toISOString();
-    expect(await check("yes", { userId: other, receivedAt })).toEqual({ run: false });
+    expect(await check("yes", { userId: other, receivedAt })).toEqual({ run: false, refused: "expired" });
     expect((await store.load(subject))?.usedBy).toBe("expired");
-    expect(await check("yes", { eventId: "EvYES0000002", receivedAt })).toEqual({ run: false });
+    expect(await check("yes", { eventId: "EvYES0000002", receivedAt })).toEqual({ run: false, refused: "expired" });
     expect(posts).toEqual([EXPIRED_TEXT, EXPIRED_TEXT]);
   });
 
@@ -286,7 +286,7 @@ describe("tombstones, expiry and yes to all", () => {
       await store.retire(subject, pending.confirmationId, "expired");
       const result = await check("yes", { eventId: "EvYES0000005", receivedAt: new Date(now).toISOString() });
       if (expected === "expired") {
-        expect(result).toEqual({ run: false });
+        expect(result).toEqual({ run: false, refused: "expired" });
         expect(posts).toEqual([EXPIRED_TEXT]);
       } else {
         expect(result).toEqual({ run: true, session: createGateSession(requester) });
@@ -299,7 +299,7 @@ describe("tombstones, expiry and yes to all", () => {
     const expiry = Date.parse(pending.expiresAt);
     const soon = harness(expiry + 2 * 60 * 60 * 1_000);
     await soon.store.save(subject, pending);
-    expect(await soon.check("yes", { receivedAt: new Date(expiry + 2 * 60 * 60 * 1_000).toISOString() })).toEqual({ run: false });
+    expect(await soon.check("yes", { receivedAt: new Date(expiry + 2 * 60 * 60 * 1_000).toISOString() })).toEqual({ run: false, refused: "expired" });
     expect(soon.posts).toEqual([EXPIRED_TEXT]);
     expect(await soon.store.load(subject)).toMatchObject({ usedBy: "expired" });
     const late = harness(expiry + 30 * 60 * 60 * 1_000);
@@ -317,7 +317,7 @@ describe("tombstones, expiry and yes to all", () => {
     expect(posts).toEqual([YES_TO_ALL_TEXT]);
     expect(await store.yesToAll(subject, requester)).toBe(true);
     expect(await store.load(subject)).toMatchObject({ usedBy: "expired" });
-    expect(await check("yes", { eventId: "EvYES0000002", receivedAt })).toEqual({ run: false });
+    expect(await check("yes", { eventId: "EvYES0000002", receivedAt })).toEqual({ run: false, refused: "expired" });
     expect(posts).toEqual([YES_TO_ALL_TEXT, EXPIRED_TEXT]);
   });
 
@@ -336,7 +336,7 @@ describe("tombstones, expiry and yes to all", () => {
     const session = createGateSession(other);
     session.asks.push({ toolCallId: "1", tool: "tracker__close_item", argumentsHash: "d".repeat(64), summary: "tracker__close_item: id=TRK-2", kind: "destructive" });
     await settleConfirmations({ check: { run: true, session }, message: message("close TRK-2", { eventId: "EvOTHER00001", userId: other }), subject, store, postConfirmation: vi.fn(), log: vi.fn(), now: postedAt + 60_000 });
-    expect(await check("yes")).toEqual({ run: false });
+    expect(await check("yes")).toEqual({ run: false, refused: "replaced" });
     expect(posts).toEqual([`The pending confirmation is <@${other}>'s; yours was replaced. Nothing was run.`]);
   });
 });

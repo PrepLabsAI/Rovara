@@ -77,7 +77,8 @@ export function confirmationIdFor(eventId: string): string {
 }
 
 export type ConfirmationCheck =
-  | { run: false }
+  /** `refused` names why a confirmation answer could not be used; a cancel or a lone "yes to all" has none. */
+  | { run: false; refused?: string }
   | { run: true; session: GateSession; claim?: { confirmationId: string }; superseded?: string };
 
 /**
@@ -120,7 +121,7 @@ export async function checkConfirmation(input: {
   const refuse = async (reason: string, text: string): Promise<ConfirmationCheck> => {
     log("gate.confirmation_refused", { eventId: message.eventId, reason });
     await post(text);
-    return { run: false };
+    return { run: false, refused: reason };
   };
   if (reply === undefined) {
     // The requester moved on: their pending confirmation no longer applies after this turn. A
