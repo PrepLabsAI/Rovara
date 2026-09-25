@@ -98,7 +98,7 @@ describe("Jira connector definition", () => {
     const f = jira(kan, { "KAN-1": issueWithKey("KAN-1"), "OPS-3": issueWithKey("OPS-3") });
     expect(await f.run("addOrEditJiraIssueComment", { issueIdOrKey: "KAN-1", commentBody: "Deployed." }, "Requested by Pratik")).toMatchObject({ status: "SUCCEEDED" });
     expect(vendorCalls(f.call)).toEqual([
-      { name: "getJiraIssue", args: { cloudId: CLOUD, issueIdOrKey: "KAN-1" } },
+      { name: "getJiraIssue", args: { cloudId: CLOUD, issueIdOrKey: "KAN-1", fields: ["summary"] } },
       { name: "addOrEditJiraIssueComment", args: { issueIdOrKey: "KAN-1", commentBody: "Deployed.\n\n—\nRequested by Pratik", cloudId: CLOUD } },
     ]);
     expect(f.connect).toHaveBeenLastCalledWith(expect.objectContaining({ tools: ["addOrEditJiraIssueComment", "getJiraIssue"] }));
@@ -312,11 +312,17 @@ describe("Jira connector definition", () => {
 
   it("binds and limits by the chosen scope when two scopes share a site", async () => {
     const ops: JiraScope = { alias: "ops", cloudId: CLOUD, projectKey: "OPS" };
-    const f = jira(ops, { "OPS-1": issueWithKey("OPS-1") });
+    const f = jira(ops, { "OPS-1": issueWithKey("OPS-1"), "KAN-1": issueWithKey("KAN-1") });
     await f.run("searchJiraIssuesUsingJql", { jql: "status = Open" });
     expect(f.call).toHaveBeenLastCalledWith("searchJiraIssuesUsingJql", { jql: 'project = "OPS" AND (status = Open)', cloudId: CLOUD });
     await f.run("createJiraIssue", { summary: "s", issueType: "Task" });
     expect(f.call).toHaveBeenLastCalledWith("createJiraIssue", { summary: "s", issueType: "Task", cloudId: CLOUD, projectKey: "OPS" });
+    f.call.mockClear();
+    expect(await f.run("addOrEditJiraIssueComment", { issueIdOrKey: "KAN-1", commentBody: "x" }))
+      .toMatchObject({ status: "FAILED", reason: "policy_denied", text: "Jira issue KAN-1 is not in project OPS. This connector works only in OPS." });
+    expect(vendorCalls(f.call).map((entry) => entry.name)).toEqual(["getJiraIssue"]);
+    expect(await f.run("addOrEditJiraIssueComment", { issueIdOrKey: "OPS-1", commentBody: "x" })).toMatchObject({ status: "SUCCEEDED" });
+    expect(f.call).toHaveBeenLastCalledWith("addOrEditJiraIssueComment", { issueIdOrKey: "OPS-1", commentBody: "x", cloudId: CLOUD });
   });
 
   it("does not look up or rewrite anything when the connector is not project scoped", async () => {

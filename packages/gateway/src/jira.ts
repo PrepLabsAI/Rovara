@@ -222,12 +222,14 @@ export const jiraProjectGuard: Guard = {
     if (!Object.hasOwn(JIRA_PROJECT_TOOL_ACCESS, tool)) {
       throw new GuardRejection(`${tool} cannot be limited to Jira project ${projectKey}, so this connector does not run it.`);
     }
-    // The binder sets projectKey on a project-scoped create; this also covers a scope and connector that disagree.
+    // Belt and braces: the binder sets projectKey on a project-scoped create and the engine refuses a
+    // model-supplied bound name before any guard runs, so this only matters if a scope and connector disagree.
     if (tool === "createJiraIssue" && args.projectKey !== undefined && args.projectKey !== projectKey) {
       throw new GuardRejection(`This connector works only in Jira project ${projectKey}.`);
     }
     for (const ref of issueReferences(tool, args, projectKey)) {
-      const result = await connection.call("getJiraIssue", { cloudId: jira.cloudId, issueIdOrKey: ref });
+      // A minimal fields list keeps the reply small; data.key still arrives with it (verified live 2026-09-24).
+      const result = await connection.call("getJiraIssue", { cloudId: jira.cloudId, issueIdOrKey: ref, fields: ["summary"] });
       if (result.isError) throw new GuardRejection(`Could not read Jira issue ${ref} to check its project. It may not exist, or AgentX's Jira account cannot see it.`);
       const key = issueKeyOf(result);
       if (key === undefined) throw new GuardRejection(`Could not confirm which project Jira issue ${ref} is in, so AgentX did not run this call.`);

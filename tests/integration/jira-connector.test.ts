@@ -206,7 +206,7 @@ describe("jira connector, end to end against a fake Atlassian MCP server", () =>
     const refused = await call(handler, { method: "POST", path: `${path}/call`, service,
       body: { requestId: randomUUID(), scope: "kan", tool: "addOrEditJiraIssueComment", schemaHash, arguments: { issueIdOrKey: "OPS-1", commentBody: "Deploying now." } } });
     expect(refused.body.result).toMatchObject({ status: "FAILED", reason: "policy_denied" });
-    expect(fake.calls.slice(before)).toEqual([{ name: "getJiraIssue", arguments: { cloudId: CLOUD, issueIdOrKey: "OPS-1" } }]);
+    expect(fake.calls.slice(before)).toEqual([{ name: "getJiraIssue", arguments: { cloudId: CLOUD, issueIdOrKey: "OPS-1", fields: ["summary"] } }]);
 
     const accepted = await call(handler, { method: "POST", path: `${path}/call`, service,
       body: { requestId: randomUUID(), scope: "kan", tool: "addOrEditJiraIssueComment", schemaHash, arguments: { issueIdOrKey: "KAN-1", commentBody: "Deploying now." } } });
