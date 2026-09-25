@@ -18,3 +18,6 @@ Thumbs.db
 .codex/
 *.tsbuildinfo
 # Keep .agents/skills/ versioned; it contains Spec Kit instructions, not credentials.
+
+# Evaluation results stay local; only baselines are committed.
+tests/eval/results/

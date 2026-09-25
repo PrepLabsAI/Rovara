@@ -1,0 +1,26 @@
+[
+  { "name": "list_issues", "access": "read",
+    "description": "List issues in a GitHub repository. For pagination, use the 'endCursor' from the previous response's 'pageInfo' in the 'after' parameter.",
+    "inputSchema": { "type": "object", "properties": {
+      "state": { "type": "string", "enum": ["OPEN", "CLOSED"], "description": "Filter by state, by default both open and closed issues are returned when not provided" },
+      "labels": { "type": "array", "items": { "type": "string" }, "description": "Filter by labels" },
+      "after": { "type": "string", "description": "Cursor for pagination" } }, "required": [], "additionalProperties": false } },
+  { "name": "issue_read", "access": "read",
+    "description": "Get information about a specific issue in a GitHub repository.",
+    "inputSchema": { "type": "object", "properties": {
+      "method": { "type": "string", "enum": ["get", "get_comments", "get_sub_issues", "get_labels"] },
+      "issue_number": { "type": "number", "description": "The number of the issue" } }, "required": ["method", "issue_number"], "additionalProperties": false } },
+  { "name": "issue_write", "access": "write",
+    "description": "Create a new or update an existing issue in a GitHub repository.",
+    "inputSchema": { "type": "object", "properties": {
+      "method": { "type": "string", "enum": ["create", "update"] },
+      "issue_number": { "type": "number", "description": "Issue number to update" },
+      "title": { "type": "string" }, "body": { "type": "string" },
+      "state": { "type": "string", "enum": ["open", "closed"] },
+      "assignees": { "type": "array", "items": { "type": "string" } } }, "required": ["method"], "additionalProperties": false } },
+  { "name": "add_issue_comment", "access": "write",
+    "description": "Add a comment to a specific issue in a GitHub repository. Use this tool to add comments to pull requests as well (in this case pass pull request number as issue_number), but only if user is not asking specifically to add review comments.",
+    "inputSchema": { "type": "object", "properties": {
+      "issue_number": { "type": "number", "description": "Issue number to comment on" },
+      "body": { "type": "string", "description": "Comment content" } }, "required": ["issue_number", "body"], "additionalProperties": false } }
+]

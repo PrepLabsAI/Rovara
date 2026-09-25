@@ -1,0 +1,19 @@
+name: demo
+revision: 1
+repositories:
+  - name: demo
+    url: https://github.com/example/demo.git
+    path: repo/demo
+    defaultBranch: main
+    credentialRef: github-agentx-sdlc
+setup: []
+readiness: []
+orchestratorInstructions: Delegate every repository read, edit, build and test to the worker.
+integrations:
+  connectors:
+    - name: github
+      type: github
+      scopes: [demo]
+      tools:
+        - { name: list_issues, access: read }
+        - { name: issue_write, access: write }

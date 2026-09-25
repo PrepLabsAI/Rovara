@@ -1,0 +1,29 @@
+# A project definition in the registered format, as the Linear and Jira evaluation fixtures use.
+name: payments
+revision: 1
+repositories:
+  - name: payments-api
+    url: https://github.com/example/payments-api.git
+    path: repo/payments-api
+    defaultBranch: main
+    credentialRef: github-agentx-sdlc
+  - name: payments-web
+    url: https://github.com/example/payments-web.git
+    path: repo/payments-web
+    defaultBranch: main
+    credentialRef: github-agentx-sdlc
+setup: []
+readiness: []
+orchestratorInstructions: Delegate every repository read, edit, build and test to the worker.
+integrations:
+  connectors:
+    - name: github
+      type: github
+      scopes: [payments-api, payments-web]
+      tools:
+        - { name: list_issues, access: read }
+        - { name: issue_read, access: read }
+        - name: issue_write
+          access: write
+          description: Create or update a GitHub issue. Not for pull requests (agentx_create_pull_request).
+        - { name: add_issue_comment, access: write }
