@@ -10,7 +10,9 @@ import {
   type SlackWorkspaceCloseStartResult,
   type ThreadConnector,
 } from "@agentx/contracts";
+import { TurnRecorder } from "@agentx/orchestrator/turn-recorder";
 import { deterministicUuid, requestIdSequence } from "./ids.js";
+import { buildTurnRecord, type TurnDraft, type TurnRecordSink } from "./turn-records.js";
 
 export interface ThreadServiceApi {
   ensureWorkspace(requestId: string): Promise<SlackThreadWorkspaceResult>;
@@ -46,6 +48,8 @@ export interface TurnInput {
   repositories?: string[];
   recoverableOperations?: string[];
   requestId: () => string;
+  /** Collects this turn's record; the processor writes it once the event is finished. */
+  recorder?: TurnRecorder;
 }
 
 export type ServiceLog = (event: string, fields: Readonly<Record<string, string | number | boolean>>) => void;
@@ -56,6 +60,8 @@ export interface ProcessorDependencies {
   runTurn: (input: TurnInput) => Promise<string>;
   post: (thread: SlackThread, text: string) => Promise<void>;
   log?: ServiceLog;
+  /** Where one hidden record per finished Slack event goes; without it nothing is recorded. */
+  turnRecords?: TurnRecordSink;
 }
 
 const RUNNABLE_STATUSES = new Set(["READY", "STOPPED", "BUSY"]);
@@ -67,17 +73,27 @@ export async function processSlackRequest(
 ): Promise<void> {
   const subject = slackThreadSubject(message.thread);
   const log: ServiceLog = dependencies.log ?? (() => undefined);
-  const post = (text: string) => dependencies.post(message.thread, text);
+  const startedAt = new Date();
+  // Only a configured sink gets a recorder, so a service without one runs the turn exactly as before.
+  const recorder = dependencies.turnRecords === undefined ? undefined : new TurnRecorder();
+  const draft: TurnDraft = { disposition: "abandoned" };
+  let lastPosted = "";
+  const post = (text: string) => {
+    lastPosted = text;
+    return dependencies.post(message.thread, text);
+  };
   const api = dependencies.api(message);
   let finished = false;
   try {
     if (isCloseWorkspaceRequest(message.text)) {
+      draft.disposition = "workspace_close";
       const started = await api.startClose(deterministicUuid(`${message.eventId}:close`));
       if (started.outcome === "NOT_FOUND") {
         await post("This thread does not have a workspace to close.");
         finished = true;
         return;
       }
+      draft.workspaceId = started.workspaceId;
       if (started.outcome === "CLOSED") {
         await dependencies.threads.close(subject, { workspaceId: started.workspaceId, closedAt: started.closedAt });
         await post("This thread's workspace is already closed and its workspace resources have been released.");
@@ -107,28 +123,34 @@ export async function processSlackRequest(
     }
     const workspace = await api.ensureWorkspace(deterministicUuid(`${message.eventId}:workspace`));
     if (workspace.outcome === "LIMIT_REACHED") {
+      draft.disposition = "workspace_limit";
       log("request.limit_reached", { eventId: message.eventId, limit: workspace.limit, maximum: workspace.maximum });
       await post(limitMessage(workspace));
       finished = true;
       return;
     }
+    draft.workspaceId = workspace.workspaceId;
     if (workspace.outcome === "CLOSED") {
+      draft.disposition = "workspace_closed";
       await post("This thread's workspace is closed. Start a new Slack thread to create a fresh workspace.");
       finished = true;
       return;
     }
+    if (workspace.settingsRevision !== undefined) draft.settingsRevision = workspace.settingsRevision;
     if (workspace.status === "PREPARING" && workspace.operationId) {
       await post(workspace.created
         ? "Setting up a new workspace for this thread. The first request takes a few minutes."
         : "This thread's workspace is still being set up. I'll start as soon as it's ready.");
       const prepared = await api.waitForOperation(workspace.workspaceId, workspace.operationId);
       if (prepared.status !== "SUCCEEDED") {
+        draft.disposition = "workspace_unavailable";
         log("workspace.preparation_failed", { eventId: message.eventId, status: prepared.status });
         await post(`AgentX could not set up this thread's workspace (${prepared.status}). Mention me again in this thread to retry.`);
         finished = true;
         return;
       }
     } else if (!RUNNABLE_STATUSES.has(workspace.status)) {
+      draft.disposition = "workspace_unavailable";
       log("workspace.unavailable", { eventId: message.eventId, status: workspace.status });
       await post(`This thread's workspace is not available right now (${workspace.status}). Mention me again later to retry.`);
       finished = true;
@@ -141,6 +163,7 @@ export async function processSlackRequest(
       conversationId = await api.createConversation(workspace.workspaceId);
       await dependencies.threads.saveConversation(subject, { workspaceId: workspace.workspaceId, conversationId });
     }
+    draft.conversationId = conversationId;
 
     // Settings follow the project's latest revision, so say so the first time a thread moves.
     if (workspace.settingsRevision !== undefined && workspace.settingsRevision !== state.settingsRevision) {
@@ -164,23 +187,67 @@ export async function processSlackRequest(
         ...(workspace.repositories === undefined ? {} : { repositories: workspace.repositories }),
         ...(workspace.recoverableOperations === undefined ? {} : { recoverableOperations: workspace.recoverableOperations }),
         requestId: requestIdSequence(message.eventId),
+        ...(recorder === undefined ? {} : { recorder }),
       });
+      draft.disposition = "answered";
       log("task.completed", { eventId: message.eventId, responseLength: response.length });
     } catch (error) {
+      draft.disposition = "failed";
+      draft.error = errorSummary(error);
       log("task.failed", { eventId: message.eventId, errorName: errorName(error) });
       response = `AgentX could not complete the request: ${safeMessage(error)}`;
     }
+    draft.responseText = response;
     for (const chunk of splitSlackMessage(response)) await post(chunk);
     finished = true;
   } catch (error) {
     // Redelivery resumes the same operations because every request ID derives from the Slack event ID.
     if (!options.finalAttempt) throw error;
+    draft.disposition = "abandoned";
+    draft.error = errorSummary(error);
+    // The member sees the abandonment notice, so the record keeps that rather than an unposted answer.
+    delete draft.responseText;
     log("request.abandoned", { eventId: message.eventId, errorName: errorName(error) });
     await post(`AgentX could not process this request: ${safeMessage(error)}`).catch(() => undefined);
     finished = true;
   } finally {
-    if (finished) await dependencies.threads.finish(subject);
+    if (finished) {
+      // Only a finished event is recorded: an attempt that throws for redelivery leaves the one
+      // record to the attempt that finishes (SC-006).
+      if (dependencies.turnRecords !== undefined && recorder !== undefined) {
+        await recordTurn(dependencies.turnRecords, log, recorder, { message, subject, startedAt, finishedAt: new Date(), draft, lastPosted });
+      }
+      await dependencies.threads.finish(subject);
+    }
   }
+}
+
+/**
+ * Builds, validates, fits and writes the record inside one try: any failure, including a record
+ * that fails its schema, is logged by event ID and error class with a metric, and never reaches the
+ * member, who already has their reply. Record contents are never logged.
+ */
+async function recordTurn(
+  sink: TurnRecordSink,
+  log: ServiceLog,
+  recorder: TurnRecorder,
+  input: Omit<Parameters<typeof buildTurnRecord>[0], "observation">,
+): Promise<void> {
+  try {
+    const written = await sink.write(buildTurnRecord({ ...input, observation: recorder.observation() }));
+    if (written === "duplicate") log("turn_record.duplicate", { eventId: input.message.eventId });
+  } catch (error) {
+    log("turn_record.write_failed", { eventId: input.message.eventId, errorName: errorName(error) });
+    log("metric", { metric: "TurnRecordWriteFailed", count: 1 });
+  }
+}
+
+function errorSummary(error: unknown): { name: string; code?: string } {
+  const code = (error as { code?: unknown } | null)?.code;
+  return {
+    name: errorName(error).slice(0, 128),
+    ...(typeof code === "string" ? { code: code.slice(0, 64) } : {}),
+  };
 }
 
 export function isCloseWorkspaceRequest(text: string): boolean {

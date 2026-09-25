@@ -27,6 +27,7 @@ import { createSignedServiceFetch } from "./signing-fetch.js";
 import { createSlackUserNames } from "./user-names.js";
 import { threadWorkspaceRequest } from "./thread-workspace-request.js";
 import { createHostedSlackRuntime } from "./runtime.js";
+import { DynamoTurnRecordWriter } from "./turn-records.js";
 
 const MAX_RECEIVE_COUNT = 5;
 const VISIBILITY_SECONDS = 15 * 60;
@@ -43,6 +44,7 @@ const threadsTableName = required("SLACK_THREADS_TABLE_NAME");
 const sessionBucketName = required("THREAD_SESSION_BUCKET_NAME");
 const controlPlaneUrl = required("CONTROL_PLANE_URL").replace(/\/$/, "");
 const slackSecretArn = required("SLACK_SECRET_ARN");
+const turnRecordsTableName = required("TURN_RECORDS_TABLE_NAME");
 const stateDirectory = process.env.STATE_DIRECTORY ?? "/tmp/agentx-slack";
 const concurrency = Number.parseInt(process.env.SLACK_CONCURRENCY ?? "4", 10);
 const model = {
@@ -248,7 +250,7 @@ async function runTurn(input: TurnInput): Promise<string> {
       }),
     });
     try {
-      const response = await runOrchestratorTurn(runtime, input.message.text);
+      const response = await runOrchestratorTurn(runtime, input.message.text, input.recorder);
       const written = runtime.session.sessionManager.getSessionFile();
       if (written !== undefined && await exists(written)) {
         await s3.send(new PutObjectCommand({
@@ -315,6 +317,7 @@ await runConsumer(queue, (message, context) => processSlackRequest(message, {
   runTurn,
   post: (thread, text) => postToSlack(thread.channelId, thread.threadTs, text),
   log,
+  turnRecords: new DynamoTurnRecordWriter(documentClient, turnRecordsTableName),
 }, context), {
   concurrency,
   maxReceiveCount: MAX_RECEIVE_COUNT,
