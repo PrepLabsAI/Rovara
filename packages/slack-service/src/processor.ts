@@ -25,7 +25,7 @@ export interface ThreadServiceApi {
   prepareWorkspace?(requestId: string): Promise<SlackThreadPrepareResult>;
   startClose(requestId: string): Promise<SlackWorkspaceCloseStartResult>;
   completeClose(requestId: string, operationId: string): Promise<SlackWorkspaceCloseCompleteResult>;
-  waitForOperation(workspaceId: string, operationId: string): Promise<{ status: string; error?: string | undefined; result?: unknown }>;
+  waitForOperation(workspaceId: string, operationId: string, signal?: AbortSignal): Promise<{ status: string; error?: string | undefined; result?: unknown }>;
   createConversation(workspaceId: string): Promise<string>;
 }
 

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SlackRequestMessage, SlackThreadPrepareResult, SlackThreadWorkspaceResult, TurnRecord } from "../../packages/contracts/src/index.js";
 import { deterministicUuid } from "../../packages/slack-service/src/ids.js";
-import { LIMIT_REFUSAL, createLazyWorker, unavailableRefusal } from "../../packages/slack-service/src/lazy-worker.js";
+import { LIMIT_REFUSAL, ORGANIZATION_LIMIT_REFUSAL, createLazyWorker, unavailableRefusal } from "../../packages/slack-service/src/lazy-worker.js";
 import { processSlackRequest, type ProcessorDependencies, type TurnInput } from "../../packages/slack-service/src/processor.js";
 import { createHostedSlackRuntime } from "../../packages/slack-service/src/runtime.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
@@ -29,6 +29,7 @@ function lazyHarness(
 ) {
   const posts: string[] = [];
   const logs: string[] = [];
+  const logFields: Array<Readonly<Record<string, string | number | boolean>>> = [];
   const prepareWorkspace = vi.fn(async () => {
     if (prepare instanceof Error) throw prepare;
     return prepare;
@@ -39,13 +40,14 @@ function lazyHarness(
     post: async (text) => {
       posts.push(text);
     },
-    log: (event) => {
+    log: (event, fields) => {
       logs.push(event);
+      logFields.push(fields);
     },
     eventId: "Ev0000000001",
     ...(options.waitDeadlineMilliseconds === undefined ? {} : { waitDeadlineMilliseconds: options.waitDeadlineMilliseconds }),
   });
-  return { worker, posts, logs, prepareWorkspace, waitForOperation };
+  return { worker, posts, logs, logFields, prepareWorkspace, waitForOperation };
 }
 
 describe("the lazy worker", () => {
@@ -54,7 +56,8 @@ describe("the lazy worker", () => {
     expect(h.worker.prepared()).toBe(false);
     expect(await Promise.all([h.worker.ensureReady(), h.worker.ensureReady()])).toEqual([undefined, undefined]);
     expect(h.prepareWorkspace).toHaveBeenCalledExactlyOnceWith(deterministicUuid("Ev0000000001:prepare"));
-    expect(h.waitForOperation).toHaveBeenCalledExactlyOnceWith(workspaceId, operationId);
+    expect(h.waitForOperation).toHaveBeenCalledExactlyOnceWith(workspaceId, operationId, expect.any(AbortSignal));
+    expect((h.waitForOperation.mock.calls[0]?.[2] as AbortSignal).aborted).toBe(false);
     expect(h.posts).toEqual([SETTING_UP]);
     expect(h.worker.prepared()).toBe(true);
     expect(await h.worker.ensureReady()).toBeUndefined();
@@ -87,6 +90,22 @@ describe("the lazy worker", () => {
     expect(h.logs).toEqual(["request.limit_reached"]);
   });
 
+  it("posts the organization limit and refuses with text that links no threads", async () => {
+    const h = lazyHarness({ outcome: "LIMIT_REACHED", limit: "ORGANIZATION", maximum: 20, starterThreads: [] });
+    expect(await h.worker.ensureReady()).toEqual(ORGANIZATION_LIMIT_REFUSAL);
+    expect(ORGANIZATION_LIMIT_REFUSAL.message).not.toMatch(/linked/);
+    expect(ORGANIZATION_LIMIT_REFUSAL.message).not.toEqual(LIMIT_REFUSAL.message);
+    expect(ORGANIZATION_LIMIT_REFUSAL.message).toMatch(/Do not retry/);
+    expect(h.posts).toEqual([
+      "This organization already has 20 AgentX workspaces, the most allowed, so I can't start a new one. " +
+        "Continue in an existing thread, or ask an administrator to raise the limit.",
+    ]);
+    expect(await h.worker.ensureReady()).toEqual(ORGANIZATION_LIMIT_REFUSAL);
+    expect(h.prepareWorkspace).toHaveBeenCalledOnce();
+    expect(h.worker.prepared()).toBe(false);
+    expect(h.logs).toEqual(["request.limit_reached"]);
+  });
+
   it("reports a failed setup in the thread and refuses the worker for the rest of the turn", async () => {
     const h = lazyHarness(started, "FAILED");
     expect(await h.worker.ensureReady()).toEqual(unavailableRefusal("workspace setup failed"));
@@ -103,7 +122,7 @@ describe("the lazy worker", () => {
     const refusal = unavailableRefusal("workspace setup could not be confirmed");
     expect(await h.worker.ensureReady()).toEqual(refusal);
     expect(refusal.message).toMatch(/Do not retry this tool in this turn/);
-    expect(h.posts).toEqual([SETTING_UP, "AgentX could not set up this thread's workspace (UNCONFIRMED). Mention me again in this thread to retry."]);
+    expect(h.posts).toEqual([SETTING_UP, "AgentX could not confirm this thread's workspace setup. Mention me again in this thread in a few minutes."]);
     expect(await h.worker.ensureReady()).toEqual(refusal);
     expect(h.prepareWorkspace).toHaveBeenCalledOnce();
     expect(h.waitForOperation).toHaveBeenCalledOnce();
@@ -120,6 +139,7 @@ describe("the lazy worker", () => {
     expect(h.prepareWorkspace).toHaveBeenCalledOnce();
     expect(h.logs).toEqual(["workspace.preparation_slow"]);
     expect(h.worker.prepared()).toBe(false);
+    expect((h.waitForOperation.mock.calls[0]?.[2] as AbortSignal).aborted).toBe(true);
   });
 
   it("refuses without posting when the thread's workspace is closed", async () => {
@@ -133,11 +153,31 @@ describe("the lazy worker", () => {
     await expect(h.worker.ensureReady()).rejects.toThrow(/503/);
     await expect(h.worker.ensureReady()).rejects.toThrow(/503/);
     expect(h.prepareWorkspace).toHaveBeenCalledOnce();
+    expect(h.logs).toEqual(["workspace.preparation_failed"]);
+    expect(h.logFields[0]).toEqual({ eventId: "Ev0000000001", errorName: "Error" });
+  });
+
+  it("logs and refuses when this Slack service cannot prepare workspaces", async () => {
+    const posts: string[] = [];
+    const logs: string[] = [];
+    const worker = createLazyWorker({
+      api: { waitForOperation: vi.fn() },
+      post: async (text) => {
+        posts.push(text);
+      },
+      log: (event) => {
+        logs.push(event);
+      },
+      eventId: "Ev0000000001",
+    });
+    expect(await worker.ensureReady()).toEqual(unavailableRefusal("this Slack service cannot prepare workspaces"));
+    expect(logs).toEqual(["workspace.unavailable"]);
+    expect(posts).toEqual([]);
   });
 });
 
 function message(): SlackRequestMessage {
-  return { version: 1, eventId: "Ev0000000001", thread, userId: "U0123456789", text: "what's open in Linear?", receivedAt: "2026-09-25T10:00:00.000Z" };
+  return { version: 1, eventId: "Ev0000000001", thread, userId: "U0123456789", text: "what's open in the tracker?", receivedAt: "2026-09-25T10:00:00.000Z" };
 }
 
 function workspaceResult(overrides: Record<string, unknown>): SlackThreadWorkspaceResult {

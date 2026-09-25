@@ -6,6 +6,9 @@ export const STILL_PREPARING_MESSAGE = "This thread's workspace is still being s
 export const PREPARATION_SLOW_MESSAGE = "This thread's workspace is taking longer than expected to set up. " +
   "It continues in the background; mention me again in this thread in a few minutes.";
 
+export const WORKSPACE_UNCONFIRMED_MESSAGE =
+  "AgentX could not confirm this thread's workspace setup. Mention me again in this thread in a few minutes.";
+
 export function preparationFailedMessage(status: string): string {
   return `AgentX could not set up this thread's workspace (${status}). Mention me again in this thread to retry.`;
 }

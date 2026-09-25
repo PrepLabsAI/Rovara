@@ -44,8 +44,11 @@ export function createThreadApi(options: { controlPlaneUrl: string; signedFetch:
         await servicePost("/v1/threads/workspace/close/complete", { requestId, operationId }, "workspace close completion failed"),
       );
     },
-    async waitForOperation(workspaceId, operationId) {
-      const { operation } = await pollOperation(operationId, client(workspaceId), { intervalMilliseconds: options.pollIntervalMilliseconds ?? 5_000 });
+    async waitForOperation(workspaceId, operationId, signal) {
+      const { operation } = await pollOperation(operationId, client(workspaceId), {
+        intervalMilliseconds: options.pollIntervalMilliseconds ?? 5_000,
+        ...(signal === undefined ? {} : { signal }),
+      });
       return {
         status: operation.status,
         ...(operation.error === undefined ? {} : { error: operation.error }),
