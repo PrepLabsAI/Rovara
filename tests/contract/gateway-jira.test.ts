@@ -205,6 +205,25 @@ describe("Jira connector definition", () => {
     expect((await f.run("editJiraIssue", { issueIdOrKey: "KAN-1", additional_fields: { "Project ": "OPS" } })).text).toBe("This connector cannot change an issue's project.");
   });
 
+  it("ignores numeric ids outside relation fields, so priority, components and versions edit freely", async () => {
+    const f = jira(kan);
+    expect(await f.run("editJiraIssue", { issueIdOrKey: "KAN-1", fields: { priority: { id: "3" }, components: [{ id: "10000" }], fixVersions: [{ id: "10001" }] } })).toMatchObject({ status: "SUCCEEDED" });
+    expect(vendorCalls(f.call).map((entry) => [entry.name, entry.args.issueIdOrKey])).toEqual([["getJiraIssue", "KAN-1"], ["editJiraIssue", "KAN-1"]]);
+  });
+
+  it("verifies numeric ids under relation fields and key-shaped values under any field", async () => {
+    const f = jira(kan, { "KAN-1": issueWithKey("KAN-1"), "KAN-2": issueWithKey("KAN-2"), "OPS-1": issueWithKey("OPS-1"), "10002": issueWithKey("OPS-9") });
+    const outside = "Jira issue 10002 is not in project KAN. This connector works only in KAN.";
+    expect((await f.run("editJiraIssue", { issueIdOrKey: "KAN-1", additional_fields: { "Epic Link": "10002" } })).text).toBe(outside);
+    expect((await f.run("editJiraIssue", { issueIdOrKey: "KAN-1", fields: { parent: { id: "10002" } } })).text).toBe(outside);
+    expect((await f.run("editJiraIssue", { issueIdOrKey: "KAN-1", additional_fields: { "Linked Issues": [{ outwardIssue: { id: "10002" } }] } })).text).toBe(outside);
+    expect((await f.run("editJiraIssue", { issueIdOrKey: "KAN-1", fields: { customfield_10200: { value: "OPS-1" } } })).text).toBe("Jira issue OPS-1 is not in project KAN. This connector works only in KAN.");
+    expect(vendorCalls(f.call).map((entry) => entry.name)).not.toContain("editJiraIssue");
+    f.call.mockClear();
+    expect(await f.run("editJiraIssue", { issueIdOrKey: "KAN-1", fields: { customfield_10200: { value: "KAN-2" } } })).toMatchObject({ status: "SUCCEEDED" });
+    expect(vendorCalls(f.call).map((entry) => entry.args.issueIdOrKey)).toEqual(["KAN-1", "KAN-2", "KAN-1"]);
+  });
+
   it("binds and limits by the chosen scope when two scopes share a site", async () => {
     const ops: JiraScope = { alias: "ops", cloudId: CLOUD, projectKey: "OPS" };
     const f = jira(ops, { "OPS-1": issueWithKey("OPS-1") });

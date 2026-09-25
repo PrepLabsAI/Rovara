@@ -9,7 +9,9 @@ export const JIRA_MCP_ENDPOINT = new URL("https://mcp.atlassian.com/v2/mcp");
 
 export interface JiraScope { alias: string; cloudId: string; projectKey?: string | undefined }
 
-const ISSUE_REF = /^(?:[A-Z][A-Z0-9_]{1,9}-[1-9][0-9]{0,9}|[1-9][0-9]{0,17})$/;
+const ISSUE_KEY = /^[A-Z][A-Z0-9_]{1,9}-[1-9][0-9]{0,9}$/;
+const NUMERIC_ID = /^[1-9][0-9]{0,17}$/;
+const ISSUE_REF = new RegExp(`${ISSUE_KEY.source}|${NUMERIC_ID.source}`);
 const KEYED_TOOLS = new Set(["getJiraIssue", "editJiraIssue", "transitionJiraIssue", "addOrEditJiraIssueComment"]);
 /** Free-form field objects a tool accepts, where a project or parent could hide. */
 const FIELD_OBJECTS: Readonly<Record<string, readonly string[]>> = {
@@ -58,19 +60,33 @@ const TEXT_FIELDS = new Set(["description", "environment", "comment", "commentbo
 const MAX_REFERENCES = 10;
 const MAX_DEPTH = 12;
 
+/** Words that mark a field as naming another issue, so a bare numeric id under it is an issue id. */
+const RELATION_WORDS = new Set([
+  "parent", "parents", "epic", "link", "links", "linked", "issuelinks", "issue", "issues", "blocks",
+  "relates", "duplicate", "duplicates", "clone", "clones", "cloned", "subtask", "subtasks",
+]);
+
+/** "Linked Issues", "outwardIssue" and "parent_link" are relation names; "issuetype" and "priority" are not. */
+function isRelationName(name: string): boolean {
+  return name.trim().replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z0-9]+/).some((word) => RELATION_WORDS.has(word));
+}
+
 /**
- * Every value inside a field object that is exactly an issue reference, whatever its field is
- * called (issue links, Epic Link, custom fields): a key- or id-shaped string, or a numeric key/id.
+ * Every value inside a field object that is exactly an issue reference. A key-shaped string counts
+ * wherever it is. A numeric id counts only under a relation-named field or ancestor, so priority,
+ * component and version ids are not taken for issues.
  */
-function nestedReferences(value: unknown, refs: string[], depth = 0, name = ""): void {
+function nestedReferences(value: unknown, refs: string[], relation = false, depth = 0): void {
   if (depth > MAX_DEPTH) throw new GuardRejection("These Jira fields are nested too deeply to check.");
-  if (typeof value === "string") { if (ISSUE_REF.test(value)) refs.push(value); return; }
-  if (typeof value === "number") { if ((name === "id" || name === "key") && ISSUE_REF.test(String(value))) refs.push(String(value)); return; }
-  if (Array.isArray(value)) { for (const item of value) nestedReferences(item, refs, depth + 1); return; }
+  if (typeof value === "string") {
+    if (ISSUE_KEY.test(value) || (relation && NUMERIC_ID.test(value))) refs.push(value);
+    return;
+  }
+  if (typeof value === "number") { if (relation && NUMERIC_ID.test(String(value))) refs.push(String(value)); return; }
+  if (Array.isArray(value)) { for (const item of value) nestedReferences(item, refs, relation, depth + 1); return; }
   if (!isObject(value)) return;
   for (const [key, item] of Object.entries(value)) {
-    const lower = key.trim().toLowerCase();
-    if (!TEXT_FIELDS.has(lower)) nestedReferences(item, refs, depth + 1, lower);
+    if (!TEXT_FIELDS.has(key.trim().toLowerCase())) nestedReferences(item, refs, relation || isRelationName(key), depth + 1);
   }
 }
 
