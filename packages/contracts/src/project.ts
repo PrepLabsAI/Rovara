@@ -1,5 +1,6 @@
 import { posix } from "node:path";
 import { z } from "zod";
+import { ActionPolicySchema, actionPolicyProblems } from "./action-policy.js";
 import { GitHubMcpPolicySchema } from "./github-mcp.js";
 import { ConnectorsSchema, StoredConnectorsSchema } from "./connectors.js";
 import type { GitHubConnectorConfig } from "./connectors.js";
@@ -146,6 +147,7 @@ function projectDefinitionObject<Connectors extends z.ZodTypeAny>(connectorsSche
         githubMcp: GitHubMcpPolicySchema.optional(),
         connectors: connectorsSchema.optional(),
       }).strict().optional(),
+      actionPolicy: ActionPolicySchema.optional(),
     })
     .strict();
 }
@@ -200,7 +202,12 @@ function checkProjectDefinition(
   }
 }
 
-export const ProjectDefinitionSchema = projectDefinitionObject(ConnectorsSchema).superRefine(checkProjectDefinition);
+export const ProjectDefinitionSchema = projectDefinitionObject(ConnectorsSchema)
+  .superRefine(checkProjectDefinition)
+  // Only registration checks that each rule can apply; a stored revision was checked when registered.
+  .superRefine((project, context) => {
+    for (const message of actionPolicyProblems(project)) context.addIssue({ code: "custom", path: ["actionPolicy"], message });
+  });
 
 /**
  * A project definition already on record: an `integrations.connectors` entry of a type this
