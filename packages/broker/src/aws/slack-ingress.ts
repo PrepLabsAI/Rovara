@@ -107,7 +107,13 @@ export function createSlackIngressHandler(dependencies: SlackIngressDependencies
     if (!binding) return ignore(log, "channel_not_bound", { channelId: thread.channelId });
     let memberCheckError: string | undefined;
     if (mention.appPosted && dependencies.appPosted) {
-      const member = await dependencies.appPosted.checkMember(mention.userId);
+      let member: SlackMemberCheck;
+      try {
+        member = await dependencies.appPosted.checkMember(mention.userId);
+      } catch {
+        // A check that throws is a check that failed: fail closed, and never log the error text.
+        member = { outcome: "failed", error: "check_threw" };
+      }
       if (member.outcome === "not_person") return ignore(log, "not_a_person");
       if (member.outcome === "failed") memberCheckError = member.error;
     }
@@ -118,7 +124,7 @@ export function createSlackIngressHandler(dependencies: SlackIngressDependencies
     if (memberCheckError !== undefined) {
       // Fail closed: an unconfirmed sender is never run, but the person is told rather than left in silence.
       log("event.ignored", { reason: "member_check_failed", slackError: memberCheckError });
-      await post(dependencies, log, thread, UNVERIFIED_MEMBER_NOTICE);
+      await post(dependencies, log, thread, UNVERIFIED_MEMBER_NOTICE, "member_check.notice_failed");
       return respond(200, { ok: true });
     }
 
@@ -177,9 +183,15 @@ function parseMention(payload: Record<string, unknown>): Mention | { reason: str
   const botUserId = Array.isArray(payload.authorizations)
     ? asRecord(payload.authorizations[0]).user_id
     : undefined;
-  const eventAppId = event.app_id ?? asRecord(event.bot_profile).app_id;
-  const ownBotUser = typeof botUserId === "string" && event.user === botUserId;
-  const ownApp = typeof payload.api_app_id === "string" && eventAppId === payload.api_app_id;
+  // AgentX's own bot user under any of the event's authorizations, and AgentX's app named in either app field.
+  const ownBotUsers = new Set(
+    (Array.isArray(payload.authorizations) ? payload.authorizations : [])
+      .map((authorization) => asRecord(authorization).user_id)
+      .filter((userId): userId is string => typeof userId === "string" && userId.length > 0),
+  );
+  const ownBotUser = typeof event.user === "string" && ownBotUsers.has(event.user);
+  const ownApp = typeof payload.api_app_id === "string"
+    && (event.app_id === payload.api_app_id || asRecord(event.bot_profile).app_id === payload.api_app_id);
   if (ownBotUser || ownApp) return { reason: "own_message" };
   if (typeof event.user !== "string" || event.user.length === 0) return { reason: "no_user" };
   const teamId = SlackTeamIdSchema.safeParse(payload.team_id);
@@ -197,16 +209,23 @@ function parseMention(payload: Record<string, unknown>): Mention | { reason: str
     userId: userId.data,
     text: event.text,
     ...(typeof botUserId === "string" ? { botUserId } : {}),
-    appPosted: event.bot_id !== undefined || eventAppId !== undefined,
+    // Any app field present, even null, marks the event as app-posted so it gets the member check.
+    appPosted: "bot_id" in event || "app_id" in event || "bot_profile" in event,
   };
 }
 
-async function post(dependencies: SlackIngressDependencies, log: SlackIngressLog, thread: SlackThread, text: string) {
+async function post(
+  dependencies: SlackIngressDependencies,
+  log: SlackIngressLog,
+  thread: SlackThread,
+  text: string,
+  failureEvent = "acknowledgement.failed",
+) {
   try {
     await dependencies.postMessage({ channel: thread.channelId, threadTs: thread.threadTs, text });
   } catch (error) {
-    // The request is already queued; a failed acknowledgement must not make Slack retry it.
-    log("acknowledgement.failed", { errorName: error instanceof Error ? error.name : "unknown" });
+    // The event is already claimed and handled; a failed thread post must not make Slack retry it.
+    log(failureEvent, { errorName: error instanceof Error ? error.name : "unknown" });
   }
 }
 

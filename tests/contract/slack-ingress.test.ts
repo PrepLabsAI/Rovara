@@ -18,7 +18,8 @@ const nowSeconds = 1_758_657_600;
 function harness(options: {
   bound?: boolean;
   failEnqueue?: number;
-  appPosted?: { accept: boolean; members?: Record<string, SlackMemberCheck> };
+  appPosted?: { accept: boolean; members?: Record<string, SlackMemberCheck>; checkThrows?: boolean };
+  failPost?: boolean;
 } = {}) {
   const memberChecks: string[] = [];
   const claimed = new Set<string>();
@@ -54,6 +55,7 @@ function harness(options: {
       queue.push({ message, groupId });
     },
     postMessage: async (input: { channel: string; threadTs: string; text: string }) => {
+      if (options.failPost) throw new Error("Slack unavailable");
       posts.push(input);
     },
     now: () => nowSeconds * 1_000,
@@ -63,6 +65,7 @@ function harness(options: {
         accept: options.appPosted.accept,
         checkMember: async (userId: string): Promise<SlackMemberCheck> => {
           memberChecks.push(userId);
+          if (options.appPosted?.checkThrows) throw new Error("users.info exploded");
           return options.appPosted?.members?.[userId] ?? { outcome: "failed", error: "user_not_found" };
         },
       },
@@ -279,6 +282,54 @@ describe("messages a person posts through another app (spec 014 US2)", () => {
     expect(posts).toHaveLength(0);
     expect(memberChecks).toEqual([]);
     expect(logs.map((entry) => entry.fields.reason)).toEqual(["own_message", "own_message", "own_message"]);
+  });
+
+  it("ignores AgentX's bot user named in any authorization, not only the first", async () => {
+    const { handler, queue, posts, logs, memberChecks } = harness({ appPosted: { accept: true, members } });
+    await send(handler, signedEvent({
+      ...mention({ event: { user: bot } }),
+      authorizations: [{ team_id: team, user_id: "U0INSTALLER1", is_bot: false }, { team_id: team, user_id: bot, is_bot: true }],
+    }));
+    expect(queue).toHaveLength(0);
+    expect(posts).toHaveLength(0);
+    expect(memberChecks).toEqual([]);
+    expect(logs.at(-1)).toMatchObject({ event: "event.ignored", fields: { reason: "own_message" } });
+  });
+
+  it.each([
+    ["a null app_id", { bot_id: undefined, app_id: null, bot_profile: undefined }],
+    ["only a bot_profile", { bot_id: undefined, app_id: undefined, bot_profile: { name: "claude" } }],
+    ["a null bot_id", { bot_id: null, app_id: undefined, bot_profile: undefined }],
+  ])("treats a message with %s as app-posted and checks the sender", async (_name, event) => {
+    const { handler, queue, memberChecks } = harness({ appPosted: { accept: true, members } });
+    await send(handler, signedEvent(appPostedMention(event)));
+    expect(memberChecks).toEqual([pratik]);
+    expect(queue).toHaveLength(1);
+  });
+
+  it("ignores a message whose bot_profile names AgentX's app even when app_id names another app", async () => {
+    const { handler, queue, logs, memberChecks } = harness({ appPosted: { accept: true, members } });
+    await send(handler, signedEvent(appPostedMention({ app_id: "A0CLAUDE001", bot_profile: { app_id: agentxApp } })));
+    expect(queue).toHaveLength(0);
+    expect(memberChecks).toEqual([]);
+    expect(logs.at(-1)).toMatchObject({ event: "event.ignored", fields: { reason: "own_message" } });
+  });
+
+  it("fails closed with the notice when the member check throws", async () => {
+    const { handler, queue, posts, logs } = harness({ appPosted: { accept: true, members, checkThrows: true } });
+    expect((await send(handler, signedEvent(appPostedMention()))).status).toBe(200);
+    expect(queue).toHaveLength(0);
+    expect(posts).toEqual([{ channel, threadTs: "1695500000.000001", text: "I couldn't confirm that this message came from a person, so I didn't act on it. Try again, or type the request in Slack." }]);
+    expect(logs).toContainEqual({ event: "event.ignored", fields: { reason: "member_check_failed", slackError: "check_threw" } });
+    expect(JSON.stringify(logs)).not.toMatch(/exploded/);
+  });
+
+  it("logs a failed fail-closed notice as its own event, not as an acknowledgement", async () => {
+    const { handler, queue, logs } = harness({ appPosted: { accept: true, members: { [pratik]: { outcome: "failed", error: "timeout" } } }, failPost: true });
+    expect((await send(handler, signedEvent(appPostedMention()))).status).toBe(200);
+    expect(queue).toHaveLength(0);
+    expect(logs.at(-1)).toEqual({ event: "member_check.notice_failed", fields: { errorName: "Error" } });
+    expect(logs.some((entry) => entry.event === "acknowledgement.failed")).toBe(false);
   });
 
   it("ignores a bot that claims in its text to speak for a person", async () => {
