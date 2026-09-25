@@ -283,9 +283,13 @@ export async function processSlackRequest(
       log("task.failed", { eventId: message.eventId, errorName: errorName(error) });
       response = `AgentX could not complete the request: ${safeMessage(error)}`;
     }
-    // Formatted before anything is posted (spec 014 FR-022): the turn record keeps exactly the text
-    // the member sees, and post() remembers each formatted chunk as lastPosted.
+    // Formatted before anything is posted (spec 014 FR-022): the turn record keeps the formatted
+    // text, and post() remembers each formatted chunk as lastPosted. When a confirmation stands as
+    // the whole reply, the member sees only the confirmation, but the record still keeps this text.
     draft.responseText = slackReplyText(response);
+    // A turn that posted a confirmation and did nothing else lets the confirmation be its reply: the
+    // model's own words would only restate it. Its text is still recorded as the turn's response.
+    let quiet = false;
     if (confirmation && dependencies.confirmations) {
       let settled: Awaited<ReturnType<typeof settleConfirmations>> | undefined;
       try {
@@ -297,13 +301,21 @@ export async function processSlackRequest(
         log("gate.confirmation_failed", { eventId: message.eventId, errorName: errorName(error) });
         await post("I couldn't save the confirmation request, so nothing it would list will run. Ask me again.");
       }
-      if (settled?.outcome === "already_answered") {
+      if (settled?.outcome === "posted") draft.confirmationPosted = true;
+      // Withheld only when nothing but asks happened (no call ran, none was refused or failed the
+      // gate), or when the model said nothing at all; otherwise the member must hear the rest.
+      const onlyAsked = confirmation.session.ran === 0
+        && !confirmation.session.decisions.some((decision) => decision.outcome === "deny" || decision.source === "gate_error");
+      if (settled?.outcome === "posted" && draft.disposition === "answered" && (onlyAsked || draft.responseText.trim().length === 0)) {
+        quiet = true;
+        log("gate.reply_withheld", { eventId: message.eventId, ran: confirmation.session.ran });
+      } else if (settled?.outcome === "already_answered") {
         await post("This request was retried after an interruption, and I had already asked you to confirm it and had my answer, so I didn't ask again. Ask me again if you still want it.");
       } else if (settled?.outcome === "already_pending" && settled.differs) {
         await post(`I didn't ask again: the pending confirmation still lists ${shortList(settled.pendingSummaries)}. Ask me again for anything else.`);
       }
     }
-    for (const chunk of splitSlackMessage(slackReplyText(response))) await post(chunk);
+    if (!quiet) for (const chunk of splitSlackMessage(slackReplyText(response))) await post(chunk);
     if (recorder !== undefined) await rememberRefresh(dependencies, log, subject, message.eventId, state.refreshConnectors ?? [], recorder);
     finished = true;
   } catch (error) {

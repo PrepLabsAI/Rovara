@@ -1,6 +1,8 @@
 import {
   CONFIRMATION_TTL_MS,
   parseConfirmationClickEventId,
+  parseConfirmationReply,
+  type ConfirmationReply,
   type PendingConfirmation,
   type SlackRequestMessage,
 } from "@agentx/contracts";
@@ -8,8 +10,6 @@ import { createGateSession, type GateApproval, type GateSession } from "@agentx/
 import { deterministicUuid } from "./ids.js";
 import type { ServiceLog } from "./processor.js";
 import { escapeText } from "./slack-format.js";
-
-export type ConfirmationReply = "yes" | "yes_to_all" | "cancel";
 
 export interface ConfirmationStore {
   /** The thread's confirmation, a tombstone included. */
@@ -24,16 +24,6 @@ export interface ConfirmationStore {
   yesToAll(subject: string, userId: string): Promise<boolean>;
   /** Grants or renews "yes to all" for 24 hours. */
   grantYesToAll(subject: string, userId: string): Promise<void>;
-}
-
-/** "yes" and plain synonyms, "yes to all in this thread", or "cancel"; anything else is an ordinary request. */
-export function parseConfirmationReply(text: string): ConfirmationReply | undefined {
-  // The whole message must be the answer; a leading mention, with or without its label, is dropped.
-  const normalized = text.replace(/^\s*<@[A-Z0-9]+(?:\|[^>]*)?>\s*/iu, "").trim().toLowerCase().replace(/[.!\s]+$/u, "");
-  if (/^yes,?\s+to\s+all(\s+in\s+this\s+thread)?$/u.test(normalized)) return "yes_to_all";
-  if (/^(yes|y|yep|yes,? please|ok|okay|sure|do it|confirm|confirmed|go ahead|approve)$/u.test(normalized)) return "yes";
-  if (/^(cancel|no|nope|no,? thanks|don't|do not)$/u.test(normalized)) return "cancel";
-  return undefined;
 }
 
 const KIND_NOTES: Readonly<Record<PendingConfirmation["calls"][number]["kind"], string>> = {

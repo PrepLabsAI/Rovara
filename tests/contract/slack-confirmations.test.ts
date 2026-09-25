@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { CONFIRMATION_TTL_MS, answeredConfirmationBlocks, confirmationBlocks, confirmationClickEventId, parseConfirmationClickEventId, type PendingConfirmation, type SlackRequestMessage } from "../../packages/contracts/src/index.js";
+import { CONFIRMATION_TTL_MS, answeredConfirmationBlocks, confirmationBlocks, confirmationClickEventId, parseConfirmationClickEventId, parseConfirmationReply, type PendingConfirmation, type SlackRequestMessage } from "../../packages/contracts/src/index.js";
 import { createGateSession } from "../../packages/orchestrator/src/action-gate.js";
 import { createDynamoConfirmationStore } from "../../packages/slack-service/src/confirmation-store.js";
 import {
@@ -9,7 +9,6 @@ import {
   YES_TO_ALL_TEXT,
   checkConfirmation,
   confirmationMessage,
-  parseConfirmationReply,
   settleConfirmations,
 } from "../../packages/slack-service/src/confirmations.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";

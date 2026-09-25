@@ -24,6 +24,8 @@ export interface TurnDraft {
   /** The orchestrator's answer or failure text; otherwise the last message posted is used. */
   responseText?: string;
   error?: { name: string; code?: string };
+  /** This turn posted a confirmation; its reply is then the confirmation, never an empty response. */
+  confirmationPosted?: boolean;
 }
 
 export interface TurnRecordSink {
@@ -49,6 +51,8 @@ export function buildTurnRecord(input: {
   const response = redactAndCap(draft.responseText ?? input.lastPosted, TURN_TEXT_LIMIT);
   return TurnRecordSchema.parse({
     ...input.observation,
+    // A turn whose confirmation was its reply said something; it is not a silent answer.
+    emptyResponse: input.observation.emptyResponse && draft.confirmationPosted !== true,
     eventId: message.eventId,
     subject: input.subject,
     receivedAt: message.receivedAt,
