@@ -4,6 +4,7 @@ export * from "./catalog.js";
 export * from "./credentials.js";
 export * from "./engine.js";
 export * from "./github.js";
+export * from "./linear.js";
 export * from "./mcp-client.js";
 export * from "./schema.js";
 export * from "./types.js";

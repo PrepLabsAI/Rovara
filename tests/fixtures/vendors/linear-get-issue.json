@@ -1,0 +1,41 @@
+{
+  "id": "CHA-3",
+  "uuid": "f3d8bbc5-2101-4493-b123-21b1177a9900",
+  "title": "Fixture issue",
+  "description": "Fixture description.",
+  "priority": {
+    "value": 0,
+    "name": "No priority"
+  },
+  "url": "https://linear.app/example/issue/CHA-3/fixture-issue",
+  "gitBranchName": "example/cha-3-fixture-issue",
+  "createdAt": "2026-09-24T21:24:26.082Z",
+  "updatedAt": "2026-09-24T21:24:26.082Z",
+  "archivedAt": null,
+  "completedAt": null,
+  "startedAt": null,
+  "canceledAt": null,
+  "dueDate": null,
+  "slaStartedAt": null,
+  "slaMediumRiskAt": null,
+  "slaHighRiskAt": null,
+  "slaBreachesAt": null,
+  "status": "Todo",
+  "statusType": "unstarted",
+  "labels": [],
+  "attachments": [],
+  "documents": [],
+  "stateHistory": [
+    {
+      "state": {
+        "id": "bdddf410-f9ea-4b14-9aaa-4f5ad303ae96",
+        "name": "Todo",
+        "type": "unstarted"
+      },
+      "startedAt": "2026-09-24T21:24:26.082Z",
+      "endedAt": null
+    }
+  ],
+  "team": "CharterArc",
+  "teamId": "c408e946-78aa-4db8-923e-f78053dd954f"
+}

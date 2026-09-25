@@ -797,5 +797,168 @@
         "linear.app<https://linear.app/>"
       ]
     }
+  },
+  {
+    "name": "list_comments",
+    "title": "List comments",
+    "description": "List comments on a Linear issue, project, initiative, document, project milestone, or project/initiative status update. Provide exactly one of `issueId`, `projectId`, `initiativeId`, `documentId`, `milestoneId`, or `statusUpdateId`. For issues, projects, and initiatives this returns both top-level discussion threads and inline description comments. Inline (anchored) comments carry a non-null `quotedText` set to the snippet of description text they reference. Returned comments include `author` and nullable `onBehalfOf`; when set, `onBehalfOf` identifies the user the agent author acted for. Files uploaded in comment bodies are returned in `attachments` with titles and download URLs, not issue attachment IDs. Signed upload URLs expire after five minutes; call list_comments again to refresh them. Download documents using these URLs and process them with your own file tools.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "default": 50,
+          "description": "Max results (default 50, max 250)",
+          "type": "number",
+          "maximum": 250
+        },
+        "cursor": {
+          "description": "Next page cursor",
+          "type": "string"
+        },
+        "orderBy": {
+          "default": "updatedAt",
+          "description": "Sort: createdAt | updatedAt",
+          "type": "string",
+          "enum": [
+            "createdAt",
+            "updatedAt"
+          ]
+        },
+        "issueId": {
+          "description": "Issue ID or identifier (e.g., LIN-123). P-prefixed identifiers (e.g., P-ENG-123) are projects, not issues (provide exactly one parent)",
+          "type": "string"
+        },
+        "projectId": {
+          "description": "Project name, ID, identifier (e.g., P-ENG-123), or slug (provide exactly one parent)",
+          "type": "string"
+        },
+        "initiativeId": {
+          "description": "Initiative name, ID, identifier (e.g., I-123), or slug (provide exactly one parent)",
+          "type": "string"
+        },
+        "documentId": {
+          "description": "Document ID or slug (provide exactly one parent)",
+          "type": "string"
+        },
+        "milestoneId": {
+          "description": "Milestone UUID (provide exactly one parent). Resolve milestone names via `list_milestones` first.",
+          "type": "string"
+        },
+        "statusUpdateId": {
+          "description": "Status update UUID (provide exactly one parent). Resolve status updates via `get_status_updates` first.",
+          "type": "string"
+        },
+        "statusUpdateType": {
+          "description": "Type of status update named by `statusUpdateId`, as returned by `get_status_updates`. Only valid together with `statusUpdateId`; omit to check both project and initiative status updates.",
+          "type": "string",
+          "enum": [
+            "project",
+            "initiative"
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "microsoft/allowedDomains": [
+        "linear.app<https://linear.app/>"
+      ]
+    }
+  },
+  {
+    "name": "list_teams",
+    "title": "List teams",
+    "description": "List teams in the user's Linear workspace",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "default": 50,
+          "description": "Max results (default 50, max 250)",
+          "type": "number",
+          "maximum": 250
+        },
+        "cursor": {
+          "description": "Next page cursor",
+          "type": "string"
+        },
+        "orderBy": {
+          "default": "updatedAt",
+          "description": "Sort: createdAt | updatedAt",
+          "type": "string",
+          "enum": [
+            "createdAt",
+            "updatedAt"
+          ]
+        },
+        "query": {
+          "description": "Search query",
+          "type": "string"
+        },
+        "includeArchived": {
+          "default": false,
+          "description": "Include archived items",
+          "type": "boolean"
+        },
+        "createdAt": {
+          "description": "Created after: ISO-8601 date/duration (e.g., -P1D)",
+          "type": "string"
+        },
+        "updatedAt": {
+          "description": "Updated after: ISO-8601 date/duration (e.g., -P1D)",
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "microsoft/allowedDomains": [
+        "linear.app<https://linear.app/>"
+      ]
+    }
+  },
+  {
+    "name": "delete_comment",
+    "title": "Delete comment",
+    "description": "Delete a Linear comment. Inline description comments (those with non-null `quotedText`) anchor a mark in the editor, so their root cannot be deleted — delete the replies individually or resolve the thread instead.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Comment ID"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "_meta": {
+      "microsoft/allowedDomains": [
+        "linear.app<https://linear.app/>"
+      ]
+    }
   }
 ]
