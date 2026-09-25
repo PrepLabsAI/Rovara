@@ -8,7 +8,7 @@ that, end to end, for one Jira Cloud site and one project.
 ## What you get
 
 AgentX can search, read, create and comment on Jira issues from Slack. It acts as one Atlassian
-service account. Each write ends with a footer naming the Slack member who asked. You must limit
+service account. Each create and comment ends with a footer naming the Slack member who asked. You must limit
 the service account to the project in Jira (Step 4) and prove it (Step 8). That limit is the one
 that counts. AgentX also holds the connector to the project you name, as a second line.
 
@@ -25,18 +25,18 @@ You need:
 ## Step 1: Allow API token authentication for the Rovo MCP server
 
 In Atlassian Administration (admin.atlassian.com), open your organization. Open **Apps**, then
-**AI settings**, then **Rovo MCP server** (verify). Open **Authentication** and turn on **Allow
+**AI settings**, then **Rovo MCP server** (menu names may differ). Open **Authentication** and turn on **Allow
 API token authentication**. Without this, Atlassian rejects every AgentX call and preflight
 reports the connector as not connected.
 
 ## Step 2: Create a service account
 
 In Atlassian Administration open **Directory**, then **Service accounts**, then **Create service
-account** (verify). Name it, for example, `AgentX`.
+account** (menu names may differ). Name it, for example, `AgentX`.
 
 ## Step 3: Give it Jira access with the User role
 
-On the service account, open app access and give **Jira** the **User** role (verify). Do not give
+On the service account, open app access and give **Jira** the **User** role (menu names may differ). Do not give
 it Confluence, Loom or admin roles.
 
 ## Step 4: Restrict it to the intended projects (mandatory)
@@ -50,7 +50,7 @@ the result.
 - Check every other project: the permission scheme must not grant **Browse projects** to **Any
   logged in user**, to a group the service account is in, or to the Jira application role. Fix
   any scheme that does.
-- Spot check: in Jira, **Settings**, **System**, **Permission helper** (verify). Pick the service
+- Spot check: in Jira, **Settings**, **System**, **Permission helper** (menu names may differ). Pick the service
   account, a project it must not see, and **Browse projects**. The answer must be no. Step 8 then
   checks every project at once.
 
@@ -91,8 +91,10 @@ aws secretsmanager get-secret-value --secret-id agentx/connectors/jira-agentx-sa
 
 The name must start with `agentx/connectors/`. Use the default `aws/secretsmanager` key, or grant
 the broker role `kms:Decrypt` on your own key. If you keep the token in the macOS Keychain, add it
-with `security add-generic-password -a agentx -s jira-agentx-sa -w "$(pbpaste)"`. Never use the
-interactive `-w` prompt: it keeps only the first 128 characters. Some other tools cut a stored
+with `security add-generic-password -a agentx -s jira-agentx-sa -w "$(pbpaste)"`, then clear the
+clipboard with `pbcopy </dev/null`. While that command runs, the token is briefly visible in the
+process list to other users of the same Mac. Never use the interactive `-w` prompt: it keeps only
+the first 128 characters. Some other tools cut a stored
 secret the same way; whatever you use to store the token, check the stored length against the
 number Step 5 gave you.
 
@@ -168,7 +170,10 @@ integrations:
 `editJiraIssue` and `transitionJiraIssue` may be added too (access `write`). Edits are not signed
 with the footer, because Jira takes the description inside `fields`.
 
-Use your own project key in the `description` override, in place of `PAY` above. AgentX refuses a
+Use your own project key in the `description` override, in place of `PAY` above. Without an
+override, AgentX adds "AgentX limits every search to project PAY; send only the rest of the query."
+to the search tool's description itself. With an override, AgentX shows your text as written, so
+keep the project sentence in it. AgentX refuses a
 `projectKey` longer than 10 characters. That fails closed: if your key is longer, shorten it or
 split the project, because registration is refused rather than left to run unchecked.
 
@@ -178,7 +183,9 @@ still include the key, summary and status of linked issues, the parent, the epic
 the service account can see an issue in another project, that issue's summary can appear in the
 reply. Step 4 is what stops this: a service account that sees only your project gets only your
 project's issues back. `searchJiraIssuesUsingJql` only returns issues in your project, because
-AgentX rewrites the query.
+AgentX rewrites the query. The same caveat applies to its replies: a search that asks for the
+`issuelinks`, `parent` or `subtasks` fields can return the summaries of issues in other projects
+the service account can see. Step 4 is the control there too.
 
 ## Step 11: Register the project and read the preflight
 
@@ -213,9 +220,11 @@ The guard's checks are narrow on purpose. In plain words:
 
 - It restricts JQL to the project: every search runs inside `project = "<KEY>" AND (...)`, not
   whatever the model wrote.
-- It checks every issue a write refers to, not only the one named first. For example, creating a
-  sub-task with a `parent` checks the parent issue too, and a comment or edit checks the issue it
-  targets.
+- It checks every issue key it can recognise in a write, not only the one named first. For
+  example, creating a sub-task with a `parent` checks the parent issue too, and a comment or edit
+  checks the issue it targets.
+- It refuses an `issuelinks` field outright, in `fields`, `additional_fields` or `update`, because a
+  link can reach an issue in another project.
 - Lowercase keys are normalised to uppercase only inside link-shaped fields, such as `epic` or
   `Linked Issues`. A `parent` needs an exact uppercase key or a numeric ID; a lowercase `parent`
   key is refused, not normalised. Outside those fields, only an exact uppercase key (for example
@@ -223,6 +232,14 @@ The guard's checks are narrow on purpose. In plain words:
 - Update-verb syntax for a parent or a link, such as `{"parent": [{"set": {"key": "PAY-1"}}]}`, is
   refused outright, not rewritten or checked. Use the plain field form instead (for example
   `{"parent": {"key": "PAY-1"}}`).
+
+Not covered by the guard, so only Step 4 holds these to the project:
+
+- Numeric ids and lowercase keys inside custom fields named by id, for example the Epic Link field
+  `customfield_10014`. Only exact uppercase keys are checked there.
+- Sprint and board ids (`sprintId`, `boardId`, `assignToSprint`).
+- Comment ids (`commentId`).
+- Reply contents. The guard checks requests, not responses.
 
 ## Troubleshooting
 
