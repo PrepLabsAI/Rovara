@@ -124,9 +124,12 @@ The secret must be in the control plane's AWS region. Add `--region <region>` if
 default AWS region. The command prints:
 
 ```text
-Sign in as the connector's bot user (the Asana app's redirect URL must be exactly http://localhost:8765/callback). If no browser opened, or it is signed in as someone else, open this URL in a private window signed in as the bot user:
+Sign in as the connector's bot user (the Asana app's redirect URL must be exactly http://localhost:8765/callback). Open this URL in a private window signed in as the bot user:
 https://app.asana.com/-/oauth_authorize?...
 ```
+
+(Without `--no-browser` the command also opens your default browser, and the prompt starts "If no
+browser opened, or it is signed in as someone else, open this URL ...".)
 
 Copy the URL into a private (incognito) window, sign in there as the bot user and approve access
 within five minutes. After five minutes the
@@ -339,8 +342,10 @@ settings, then delete the secret.
   Then, signed in as yourself, remove the AgentX app from your own authorized apps in Asana's
   settings.
 - **"the sign-in was for ..., not ...; nothing was stored or registered".** `--expect-account`
-  refused a sign-in by another account (or by one Asana did not name). Nothing changed. Run Step 4
-  again with `--no-browser` and open the URL in a private window signed in only as the bot user.
+  refused a sign-in by another account (or by one Asana did not name). AgentX stored and registered
+  nothing, but that account has now authorized the app at Asana. Signed in to Asana as that
+  account, remove the AgentX app from its authorized apps (Settings → Apps). Then run Step 4 again
+  with `--no-browser` and open the URL in a private window signed in only as the bot user.
 - **"Signed in to Asana as" names you, or anyone other than the bot user.** The browser was
   signed in to your own account. Run Step 4 again with the sign-in URL opened in a private window
   signed in as the bot user; the new sign-in replaces the stored one. Then, signed in as yourself,

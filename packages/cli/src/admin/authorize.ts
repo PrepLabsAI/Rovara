@@ -91,6 +91,7 @@ export function secretsManagerAuthorizeSecrets(client: Pick<SecretsManagerClient
  * the authorization code or the client secret.
  */
 export async function authorizeCredential(input: AuthorizeInput): Promise<unknown> {
+  const expectedEmail = expectedAccountEmail(input.expectAccount);
   const registration = CredentialRegistrationSchema.safeParse({ ref: input.ref, type: "oauth-refresh-token", secretName: input.secretName });
   if (!registration.success) throw agentXError("CONFIG_INVALID", `invalid credential registration: ${registration.error.issues[0]?.message}`);
   const profile = oauthProfile(input.provider);
@@ -103,8 +104,6 @@ export async function authorizeCredential(input: AuthorizeInput): Promise<unknow
   const app = OAuthAppSecretSchema.safeParse(json);
   if (!app.success) throw agentXError("CONFIG_INVALID", `secret ${input.secretName} must be JSON ${APP_SECRET_SHAPE}`);
   const { clientId, clientSecret } = app.data;
-  const expectedEmail = input.expectAccount?.trim();
-  if (expectedEmail === "") throw agentXError("CONFIG_INVALID", "--expect-account must be the bot user's email");
 
   const vendor = `${input.provider.charAt(0).toUpperCase()}${input.provider.slice(1)}`;
   const redirectRequirement = `(the ${vendor} app's redirect URL must be exactly ${profile.redirectUri})`;
@@ -142,6 +141,7 @@ export async function authorizeCredential(input: AuthorizeInput): Promise<unknow
   const shown = account?.shown;
   input.showAccount?.(`${shown === undefined ? `Signed in to ${vendor} (the account could not be shown)` : `Signed in to ${vendor} as ${shown}`}. This must be the connector's bot user; if it is not, run the command again with the sign-in URL opened in a private window signed in as the bot user.`);
   if (expectedEmail !== undefined && account?.email?.toLowerCase() !== expectedEmail.toLowerCase()) {
+    // Compared on the raw email, so a hidden character or text past the shown 128 cannot match.
     throw agentXError("AUTH_REQUIRED", `the sign-in was for ${shown ?? "an account that could not be shown"}, not ${expectedEmail}; nothing was stored or registered. `
       + `Run the command again with --no-browser and open the sign-in URL in a private window signed in as ${expectedEmail}`);
   }
@@ -207,7 +207,21 @@ async function exchangeCode(input: {
   return { refreshToken: record.refresh_token, account: accountOf(record.data) };
 }
 
-/** The signed-in account: `shown` is "Name <email>", "Name" or "email"; `email` only when present. */
+/**
+ * `--expect-account` trimmed, or undefined when not given. Throws CONFIG_INVALID when it is blank,
+ * so the CLI can check it before logging in or reading any secret.
+ */
+export function expectedAccountEmail(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const trimmed = value.trim();
+  if (trimmed === "") throw agentXError("CONFIG_INVALID", "--expect-account must be the bot user's email");
+  return trimmed;
+}
+
+/**
+ * The signed-in account: `shown` is "Name <email>", "Name" or "email", printable and shortened, for
+ * the terminal; `email` is the raw email, trimmed, for comparison only, never printed.
+ */
 interface Account { shown: string; email: string | undefined }
 
 /**
@@ -223,7 +237,7 @@ function accountOf(data: unknown): Account | undefined {
   const { name, email } = data as Record<string, unknown>;
   const shownName = printable(name);
   const shownEmail = printable(email);
-  const signedInEmail = shownEmail || undefined;
+  const signedInEmail = typeof email === "string" && email.trim() !== "" ? email.trim() : undefined;
   if (shownName && shownEmail) return { shown: `${shownName} <${shownEmail}>`, email: signedInEmail };
   const shown = shownName || shownEmail;
   return shown ? { shown, email: signedInEmail } : undefined;
