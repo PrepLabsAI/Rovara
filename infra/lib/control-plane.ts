@@ -119,6 +119,13 @@ export class ControlPlaneStack extends Stack {
       actions: ["secretsmanager:GetSecretValue"],
       resources: [this.formatArn({ service: "secretsmanager", resource: "secret", resourceName: "agentx/connectors/*", arnFormat: ArnFormat.COLON_RESOURCE_NAME })],
     }));
+    // A rotated OAuth refresh token is written back to its own secret. Only secrets that
+    // `agentx admin credential authorize` tagged for it are writable, never other connector secrets.
+    broker.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["secretsmanager:PutSecretValue"],
+      resources: [this.formatArn({ service: "secretsmanager", resource: "secret", resourceName: "agentx/connectors/*", arnFormat: ArnFormat.COLON_RESOURCE_NAME })],
+      conditions: { StringEquals: { "secretsmanager:ResourceTag/agentx-writable": "refresh-token" } },
+    }));
     broker.addToRolePolicy(new iam.PolicyStatement({
       actions: ["codebuild:StartBuild", "codebuild:BatchGetBuilds"],
       resources: [this.formatArn({ service: "codebuild", resource: "project", resourceName: "agentx-*" })],

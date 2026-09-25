@@ -47,6 +47,7 @@ packages/gateway/                 new: @agentx/gateway
   src/catalog.ts                  phase 1b: presented names, target enum, descriptions, cache
   src/credentials/*.ts            phase 3: registry, static-secret, oauth-client-credentials
   src/linear.ts, src/jira.ts      phases 5–6
+  src/asana.ts, src/refresh-token.ts  phase 7
 packages/broker/src/github-mcp.ts phase 1a: feature 007 names delegating to the gateway
 packages/broker/src/mcp-client.ts phase 1a: re-export from the gateway
 packages/broker/src/aws/connectors.ts   phase 1b: connector routes and aliases
@@ -76,6 +77,7 @@ tests/eval/                       phase 4: cases, runner, baselines
 | 5b | Shared binder: bind a property on every tool or only where present; guards get the scope and can rewrite arguments | 5a | [plans/phase-5b-binder.md](plans/phase-5b-binder.md) |
 | 5 | Linear connector | 5b | [plans/phase-5-linear.md](plans/phase-5-linear.md) |
 | 6 | Jira connector (live check gated on Atlassian administrator) | 5b | [plans/phase-6-jira.md](plans/phase-6-jira.md) |
+| 7 | Asana connector: `oauth-refresh-token` provider, `agentx admin credential authorize`, project guard (spec Amendment 1) | 5b | [plans/phase-7-asana.md](plans/phase-7-asana.md) |
 
 Detailed plans are written per phase, immediately before it starts, because each phase ships and is
 reviewed on its own and later phases build on names that review may change. The task list in

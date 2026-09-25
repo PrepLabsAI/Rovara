@@ -12,7 +12,7 @@ describe("AgentX executable command surface", () => {
     expect(subcommands(admin, "project")).toEqual(["register"]);
     expect(subcommands(admin, "workspace")).toEqual(["stop"]);
     expect(subcommands(admin, "slack")).toEqual(["bind", "unbind"]);
-    expect(subcommands(admin, "credential")).toEqual(["register", "list"]);
+    expect(subcommands(admin, "credential")).toEqual(["register", "authorize", "list"]);
     expect(subcommands(admin, "turns")).toEqual(["export"]);
   });
 

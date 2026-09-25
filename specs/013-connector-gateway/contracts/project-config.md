@@ -63,7 +63,7 @@ integrations:
 | Condition | Result |
 |---|---|
 | Both `githubMcp` and `connectors` | Refused, naming both keys |
-| Connector type other than `github`, `linear` or `jira` | Refused |
+| Connector type other than `github`, `linear`, `jira` or `asana` | Refused |
 | GitHub scope naming an unregistered repository | Refused, naming it |
 | Unknown `type` or `identity` other than `service` | Refused |
 | `credentialRef` not in the registry | Refused, naming the reference |
@@ -78,6 +78,9 @@ integrations:
 | Jira tool AgentX cannot limit, with `projectKey` | Refused, naming the tool |
 | Jira guarded tool with the wrong `access` | Refused, naming the tool |
 | Jira credential reference of another type | Refused, naming the type |
+| Asana tool other than the eight guarded tools, or with the wrong `access` | Refused, naming the tool (phase 7) |
+| Asana scopes with a repeated alias or project GID | Refused (phase 7) |
+| Asana credential reference that is not `oauth-refresh-token` | Refused, naming the type (phase 7) |
 
 ## Credential registration
 
@@ -90,8 +93,18 @@ agentx admin credential register --ref linear-payments \
 agentx admin credential list
 ```
 
+An Asana credential is created by a browser sign-in instead (phase 7; see
+[docs/connectors/asana.md](../../../docs/connectors/asana.md)):
+
+```sh
+agentx admin credential authorize --ref asana-bot \
+  --secret agentx/connectors/asana-bot --provider asana   # secret first holds {"clientId","clientSecret"}
+```
+
 The secret must use the default `aws/secretsmanager` key. If the administrator uses a
-customer-managed KMS key instead, they must grant the broker role `kms:Decrypt` on that key.
+customer-managed KMS key instead, they must grant the broker role `kms:Decrypt` on that key. An `oauth-refresh-token` secret is also written back when a refresh token rotates, so on a
+customer-managed key the broker role also needs `kms:GenerateDataKey` (and `kms:Encrypt` if the key
+policy requires it).
 
 `list` prints each credential's reference, type, secret name, whether it is the built-in GitHub App
 entry (which always lists first), and whether a token is cached; a registered entry also carries
@@ -104,3 +117,4 @@ who registered it and when. It never prints a secret or token value.
 | `github` | App installed only on approved repositories; Issues permission only for issue tools |
 | `linear` | API key with team access limited to the intended teams and the smallest permission set; client-credentials tokens are refused because they reach all public teams |
 | `jira` | API-token authentication enabled for the Rovo MCP server; service account restricted to the intended projects, and proven by the setup guide's Step 8: a search outside them returns zero issues |
+| `asana` | A dedicated bot user that is a guest (a member only if it must be) of only the intended projects, proven by the setup guide's Step 6; an Asana MCP app owned by the organisation (phase 7) |

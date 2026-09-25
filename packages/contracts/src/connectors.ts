@@ -16,6 +16,21 @@ export const JIRA_PROJECT_TOOL_ACCESS = {
   addOrEditJiraIssueComment: "write",
 } as const satisfies Record<string, "read" | "write">;
 
+/**
+ * The Asana tools AgentX can hold to one project, and the access each must be approved with.
+ * An Asana connector may approve only these.
+ */
+export const ASANA_PROJECT_TOOL_ACCESS = {
+  get_task: "read",
+  get_task_stories: "read",
+  get_tasks: "read",
+  search_tasks: "read",
+  get_project: "read",
+  create_tasks: "write",
+  update_tasks: "write",
+  add_comment: "write",
+} as const satisfies Record<string, "read" | "write">;
+
 const RepositoryNameSchema = z.string().regex(AGENTX_NAME_PATTERN);
 
 /** A scope alias such as a repository name. */
@@ -98,7 +113,37 @@ export const LinearConnectorSchema = z.object({
   attribution: z.boolean().optional(),
 }).strict();
 
-export const ConnectorConfigSchema = z.discriminatedUnion("type", [GitHubConnectorSchema, LinearConnectorSchema, JiraConnectorSchema]);
+/** An Asana project GID: the long number in the project's URL. */
+const AsanaGidSchema = z.string().regex(/^[1-9][0-9]{0,19}$/, "projectGid must be an Asana project GID, the long number in the project's URL");
+
+export const AsanaScopeSchema = z.object({ alias: ConnectorAliasSchema, projectGid: AsanaGidSchema }).strict();
+
+/**
+ * Asana reads an oauth-refresh-token credential (a bot user signed in once) through the credential
+ * registry. Each scope is one Asana project, and only the tools the project guard can hold to a
+ * project may be approved, each with its pinned access.
+ */
+export const AsanaConnectorSchema = z.object({
+  name: ConnectorNameSchema,
+  type: z.literal("asana"),
+  credentialRef: z.string().regex(AGENTX_NAME_PATTERN),
+  identity: z.literal("service").optional(),
+  scopes: z.array(AsanaScopeSchema).min(1).max(32),
+  tools: ToolApprovalListSchema,
+  attribution: z.boolean().optional(),
+}).strict().superRefine((connector, context) => {
+  const issue = (message: string) => context.addIssue({ code: "custom", message: `connector ${connector.name}: ${message}` });
+  if (new Set(connector.scopes.map((scope) => scope.alias)).size !== connector.scopes.length) issue("scope aliases must be unique");
+  if (new Set(connector.scopes.map((scope) => scope.projectGid)).size !== connector.scopes.length) issue("scopes must name different Asana projects");
+  const guarded = Object.keys(ASANA_PROJECT_TOOL_ACCESS);
+  for (const tool of connector.tools) {
+    const pinned = Object.hasOwn(ASANA_PROJECT_TOOL_ACCESS, tool.name) ? (ASANA_PROJECT_TOOL_ACCESS as Record<string, "read" | "write">)[tool.name] : undefined;
+    if (pinned === undefined) issue(`tool ${tool.name} cannot be limited to an Asana project; approve only ${guarded.join(", ")}`);
+    else if (tool.access !== pinned) issue(`tool ${tool.name} must be approved with access: ${pinned}`);
+  }
+});
+
+export const ConnectorConfigSchema = z.discriminatedUnion("type", [GitHubConnectorSchema, LinearConnectorSchema, JiraConnectorSchema, AsanaConnectorSchema]);
 
 const KNOWN_CONNECTOR_TYPES = new Set(ConnectorConfigSchema.options.map((option) => option.shape.type.value as string));
 
@@ -203,6 +248,7 @@ export type ThreadConnector = z.infer<typeof ThreadConnectorSchema>;
 export type GitHubConnectorConfig = z.infer<typeof GitHubConnectorSchema>;
 export type JiraConnectorConfig = z.infer<typeof JiraConnectorSchema>;
 export type LinearConnectorConfig = z.infer<typeof LinearConnectorSchema>;
+export type AsanaConnectorConfig = z.infer<typeof AsanaConnectorSchema>;
 export type ConnectorConfig = z.infer<typeof ConnectorConfigSchema>;
 
 /** Six in-house tools when recovery tools are shown; kept equal to ORCHESTRATION_TOOL_NAMES by a test. */

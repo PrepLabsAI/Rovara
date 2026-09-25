@@ -14,7 +14,7 @@ describe("credential registration input", () => {
   });
 
   it("refuses reserved and built-in types, other secret prefixes and extra fields", () => {
-    for (const type of ["github-app", "oauth-refresh-token", "per-user", "basic"]) {
+    for (const type of ["github-app", "per-user", "basic"]) {
       expect(CredentialRegistrationSchema.safeParse({ ref: "x", type, secretName: "agentx/connectors/x" }).success).toBe(false);
     }
     expect(CredentialRegistrationSchema.safeParse({ ref: "x", type: "static-secret", secretName: "prod/db-password" }).success).toBe(false);

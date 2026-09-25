@@ -205,15 +205,21 @@ agentx admin credential list
 ```
 
 The secret must use the default `aws/secretsmanager` key. If you encrypt it with a
-customer-managed KMS key instead, grant the broker role `kms:Decrypt` on that key.
+customer-managed KMS key instead, grant the broker role `kms:Decrypt` on that key. An `oauth-refresh-token` secret is also written back when a refresh token rotates, so on a
+customer-managed key the broker role also needs `kms:GenerateDataKey` (and `kms:Encrypt` if the key
+policy requires it).
 
-A secret is one of two shapes: `static-secret` is `{"apiKey": "..."}`; `oauth-client-credentials`
-is `{"clientId", "clientSecret", "scopes": [...]}`. Registration reads the secret and checks its
+A secret is one of three shapes: `static-secret` is `{"apiKey": "..."}`; `oauth-client-credentials`
+is `{"clientId", "clientSecret", "scopes": [...]}`; `oauth-refresh-token` is
+`{"clientId", "clientSecret", "refreshToken"}`, written by `agentx admin credential authorize` after a
+bot user signs in once in a browser. The broker may write a rotated refresh token back only to a
+secret tagged `agentx-writable: refresh-token`. Registration reads the secret and checks its
 shape but never echoes it back, and `list` never prints a secret value, only each reference, its
 type, secret name, whether it is the built-in GitHub App entry, whether a token is cached, and (for
 a registered entry) who registered it and when. Linear reads a registered `static-secret` API
 key; see [docs/connectors/linear.md](docs/connectors/linear.md). Jira reads a registered
-`static-secret` API token; see [docs/connectors/jira.md](docs/connectors/jira.md). Registering a
+`static-secret` API token; see [docs/connectors/jira.md](docs/connectors/jira.md). Asana reads an
+`oauth-refresh-token` credential for a bot user; see [docs/connectors/asana.md](docs/connectors/asana.md). Registering a
 revision refuses a connector whose `credentialRef` is not registered or has a type the connector
 does not accept.
 

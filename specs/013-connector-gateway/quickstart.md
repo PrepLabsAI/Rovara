@@ -39,6 +39,39 @@ Caveat: this service account sees only `KAN`, so the results alone cannot show t
 
 Part B, after the production release (T037): not yet run.
 
+## Asana (US6)
+
+Part A, before the PR: the real `agentx admin credential authorize` code and the broker from this branch against real Asana (`tests/live/asana-live.test.ts`).
+
+- Date: 2026-09-25, 11:42 (US Eastern), run locally from branch `feat/013-phase-7-asana`. This was run 3; the earlier runs' problems are in the findings below.
+- Endpoints: `https://mcp.asana.com/v2/mcp`; token endpoint `https://app.asana.com/-/oauth_token`.
+- App: the reference organisation's Asana MCP app, client ID and secret from the Keychain; redirect `http://localhost:8765/callback`; Manage Distribution set to **Any workspace**.
+- Bot user: `AgentX`, a guest of one test project only, `AgentX Test` (`1218845281733826`), in a workspace on an Asana Advanced trial. The outside task for step 7 was a real task GID in another project of the same workspace.
+- Result: 1 test passed. The nine evidence lines, as printed (they carry no token; the bot user's address is elided here):
+  1. `step 1 Signed in to Asana as AgentX <bot user's email>. This must be the connector's bot user; ...; refresh token stored (68 characters)`
+  2. `step 2 preflight connected, offered asana__search_tasks, asana__get_tasks, asana__get_task, asana__create_tasks, asana__add_comment`
+  3. `step 3 get_tasks SUCCEEDED; search_tasks SUCCEEDED`
+  4. `step 4 create_tasks SUCCEEDED, task 1218872613581716`
+  5. `step 5 get_task SUCCEEDED`
+  6. `step 6 add_comment SUCCEEDED`
+  7. `step 7 outside task FAILED policy_denied`
+  8. `step 8 refreshed from a second broker SUCCEEDED; refresh token rotated: no`
+  9. `step 9 revoked sign-in not_connected`
+- Refresh token rotated on refresh: no (step 8).
+- `get_task` shape: matched Ruling 13. The captured answer has `data.gid`, `data.projects[].gid`, `data.memberships[].project.gid` (each membership also carries a `section`) and `data.parent: null`, the fields the guard reads. `tests/fixtures/vendors/asana-get-task.json` is now that capture with names, notes and GIDs replaced; a contract test feeds it to the guard unchanged.
+- Created task: `1218872613581716` (left in place, with its comment).
+
+Findings from the three runs:
+
+- (a) Run 1 opened the default browser, which was signed in to Asana as the operator, and Asana approved the sign-in silently as the operator, not the bot user. The live test now never opens a browser: it prints the sign-in URL for a private window and stops unless `AGENTX_LIVE_ASANA_BOT_EMAIL` is set and the signed-in account's email matches it.
+- (b) The guest bot user's sign-in was refused with "invalid_request: This app is not available to your Asana workspace or organization. If you are the app owner, adjust settings under "Manage Distribution" in the Asana developer console." until the app owner set Manage Distribution to **Any workspace**. The guide's Step 2 and Troubleshooting now cover it.
+- (c) Asana's token response carries `data.name` and `data.email`, so the "Signed in to Asana as <name> <email>" line printed the bot user. The guide's account line is confirmed.
+- (d) `search_tasks` succeeded because the workspace is on an Advanced trial; on a free workspace it answers a vendor error (guide Step 7).
+- (e) Asana did not rotate the refresh token on refresh.
+- (f) The sign-in must be approved within five minutes. A late approval ended on `ERR_CONNECTION_REFUSED` for `localhost:8765`, because the command had stopped waiting and closed its listener. The guide's Step 4 and Troubleshooting now say to run it again.
+
+Part B, after the production release (T045): not yet run.
+
 ## SC-004: tool selection before and after (phase 4)
 
 Measured with `npm run eval -- --live --repeat 3` on 2026-09-25. The model was `amazon.nova-pro-v1:0` on `amazon-bedrock` in `us-east-1`.
