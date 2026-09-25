@@ -14,7 +14,7 @@ import {
   type ToolRequest,
   type ToolResult,
 } from "./types.js";
-import { removeBoundProperties } from "./binding.js";
+import { boundNames, removeBoundProperties } from "./binding.js";
 import { flattenSchema } from "./schema.js";
 import { fingerprint, isObject, resultText, withDeadline } from "./util.js";
 
@@ -133,6 +133,23 @@ function withAttribution(
 class PolicyFailure extends Error {}
 class DefinitionChanged extends PolicyFailure {}
 
+/**
+ * The bound values a call sends: those its tool has. A required binding's missing value fails the
+ * upstream schema; a when-present one may be optional there, so its absence is refused here instead
+ * of silently sending an unrestricted call.
+ */
+function injectedValues<Scope>(names: readonly string[], bound: Readonly<Record<string, unknown>>, connector: Pick<ConnectorDefinition<Scope>, "binder" | "label">): Record<string, unknown> {
+  const injected: Record<string, unknown> = {};
+  for (const name of names) {
+    const value = bound[name];
+    if (!connector.binder.properties.includes(name) && (typeof value !== "string" || value === "")) {
+      throw new PolicyFailure(`${connector.label} has no server-bound value for ${name}. An administrator must fix the connector configuration.`);
+    }
+    injected[name] = value;
+  }
+  return injected;
+}
+
 /** Feature 007 fingerprinted requests under the key `repository`; keep it so stored records replay. */
 export function requestFingerprint(request: ToolRequest): string {
   return fingerprint({ requestId: request.requestId, repository: request.scope, tool: request.tool, schemaHash: request.schemaHash, arguments: request.arguments });
@@ -197,7 +214,7 @@ export async function executeTool<Scope>(
   const label = connector.label;
   const policy = context.policy.tools.find((tool) => tool.name === request.tool);
   if (!policy) throw agentXError("FORBIDDEN", `${label} MCP tool is not approved for this project`);
-  if (connector.binder.properties.some((name) => Object.hasOwn(request.arguments, name))) {
+  if (boundNames(connector.binder).some((name) => Object.hasOwn(request.arguments, name))) {
     throw agentXError("FORBIDDEN", `${label} routing arguments are server controlled`);
   }
   const write = policy.access === "write";
@@ -231,24 +248,26 @@ export async function executeTool<Scope>(
       for (const name of guard.requiredTools(request.tool, request.arguments)) if (!tools.includes(name)) tools.push(name);
     }
     ({ credential, connection } = await openConnection(connector, context, policy.access, tools, signal, options));
-    const approved = approveTools(connection, connector, context).find((tool) => tool.name === request.tool);
-    if (!approved || approved.schemaHash !== request.schemaHash) {
+    const reviewed = review(connection, connector, context).tools.find(({ tool }) => tool.name === request.tool);
+    if (!reviewed || reviewed.tool.schemaHash !== request.schemaHash) {
       options.onDefinitionChanged?.();
       throw new DefinitionChanged("MCP tool definition changed or is unavailable. Refresh tool discovery before submitting a new request.");
     }
+    const approved = reviewed.tool;
     const validate = new AjvJsonSchemaValidator().getValidator(approved.inputSchema);
     if (!validate(request.arguments).valid) throw new PolicyFailure("Arguments do not match the approved MCP tool schema.");
     const bound = connector.binder.bind(context.scope, credential);
+    const injected = injectedValues(reviewed.bound, bound, connector);
     const upstream = connection.tools.find((tool) => tool.name === request.tool)!;
     const validateUpstream = new AjvJsonSchemaValidator().getValidator(upstream.inputSchema);
-    const unsigned = { ...request.arguments, ...bound };
+    const unsigned = { ...request.arguments, ...injected };
     if (!validateUpstream(unsigned).valid) throw new PolicyFailure("Arguments do not match the upstream MCP tool schema.");
     // The footer is best effort: when it would break the vendor's schema (a body maxLength, say),
     // the model's own arguments go through unsigned rather than the write failing.
     const signed = withAttribution(unsigned, request.arguments, write ? options.attribution : undefined, upstream.inputSchema, connector.attributionKeys);
     const dropped = signed !== unsigned && !validateUpstream(signed).valid;
     const args = dropped ? unsigned : signed;
-    for (const guard of connector.guards) await guard.check({ tool: request.tool, arguments: request.arguments, bound, connection });
+    for (const guard of connector.guards) await guard.check({ tool: request.tool, arguments: request.arguments, bound, scope: context.scope, connection });
     signal.throwIfAborted();
     writeAttempted = write;
     if (dropped) options.onAttributionDropped?.(request.tool);

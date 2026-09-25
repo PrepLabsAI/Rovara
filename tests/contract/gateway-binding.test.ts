@@ -1,12 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   approveTools,
+  boundNames,
   executeTool,
   githubBinder,
   reviewTools,
   type Binder,
   type ConnectorContext,
   type ConnectorDefinition,
+  type Guard,
   type GitHubRepositoryScope,
   type Invocation,
   type Ledger,
@@ -188,5 +190,90 @@ describe("when-present properties the gateway cannot bind", () => {
     expect(bound.schemaHash).toBe(unbound.schemaHash);
     expect(propertiesOf(bound)).toEqual(["q"]);
     expect(propertiesOf(unbound)).toEqual(["team", "q"]);
+  });
+});
+
+function vendorRig<Scope extends { alias: string }>(vendor: "linear" | "jira", binder: Binder<Scope>, scope: Scope, names: readonly string[], guards: Guard[] = []) {
+  const tools = vendorTools(vendor);
+  const call = vi.fn<(name: string, args: Record<string, unknown>) => Promise<McpToolResult>>(async () => ok);
+  const connect = vi.fn<typeof connectMcp>(async () => ({ tools, call, close: async () => undefined }));
+  const issue = vi.fn(async () => ({ token: `${vendor}-secret`, bindings: {} }));
+  const connector: ConnectorDefinition<Scope> = {
+    label: vendor === "linear" ? "Linear" : "Jira", endpoint: new URL(`https://mcp.${vendor}.test/mcp`), permissionsHint: "API key permissions",
+    credentials: { issue },
+    binder, guards,
+  };
+  const context = contextFor(scope, names, ["createJiraIssue", "save_issue"]);
+  const ledger = memoryLedger();
+  let sequence = 0;
+  const request = (tool: string, args: Record<string, unknown>) => {
+    sequence += 1;
+    const schemaHash = approveTools({ tools }, connector, context).find((entry) => entry.name === tool)!.schemaHash;
+    return { requestId: `r-${sequence}`, scope: scope.alias, tool, schemaHash, arguments: args };
+  };
+  const send = (built: ReturnType<typeof request>) => executeTool(built, connector, context, { connect, ledger });
+  const run = (tool: string, args: Record<string, unknown>) => send(request(tool, args));
+  return { call, connect, connector, issue, request, send, run };
+}
+
+describe("when-present binding at call time", () => {
+  it("sends the team only to Linear tools that have it, under the name each tool uses", async () => {
+    const rig = vendorRig("linear", linearBinder, linearScope, LINEAR_TOOLS);
+    const team = linearScope.teamId;
+    expect(await rig.run("list_issues", { query: "login" })).toMatchObject({ status: "SUCCEEDED" });
+    expect(rig.call).toHaveBeenLastCalledWith("list_issues", { query: "login", team });
+    expect(await rig.run("list_issue_statuses", {})).toMatchObject({ status: "SUCCEEDED" });
+    expect(rig.call).toHaveBeenLastCalledWith("list_issue_statuses", { team });
+    expect(await rig.run("list_documents", {})).toMatchObject({ status: "SUCCEEDED" });
+    expect(rig.call).toHaveBeenLastCalledWith("list_documents", { teamId: team });
+    expect(await rig.run("get_issue", { id: "CHA-1" })).toMatchObject({ status: "SUCCEEDED" });
+    expect(rig.call).toHaveBeenLastCalledWith("get_issue", { id: "CHA-1" });
+  });
+
+  it("sends cloudId on every Jira call and projectKey only on createJiraIssue", async () => {
+    const rig = vendorRig("jira", jiraBinder, jiraScope, JIRA_TOOLS);
+    expect(await rig.run("createJiraIssue", { summary: "Bug", issueType: "Task" })).toMatchObject({ status: "SUCCEEDED" });
+    expect(rig.call).toHaveBeenLastCalledWith("createJiraIssue", { summary: "Bug", issueType: "Task", cloudId: jiraScope.cloudId, projectKey: "KAN" });
+    expect(await rig.run("getJiraIssue", { issueIdOrKey: "KAN-1" })).toMatchObject({ status: "SUCCEEDED" });
+    expect(rig.call).toHaveBeenLastCalledWith("getJiraIssue", { issueIdOrKey: "KAN-1", cloudId: jiraScope.cloudId });
+  });
+
+  it("gives guards every bound value, including one the called tool does not have", async () => {
+    const check = vi.fn<Guard["check"]>(async () => undefined);
+    const rig = vendorRig("jira", jiraBinder, jiraScope, JIRA_TOOLS, [{ requiredTools: () => [], check }]);
+    await rig.run("searchJiraIssuesUsingJql", { jql: "status = Done" });
+    expect(check).toHaveBeenCalledWith(expect.objectContaining({ bound: { cloudId: jiraScope.cloudId, projectKey: "KAN" }, scope: jiraScope }));
+    expect(rig.call).toHaveBeenLastCalledWith("searchJiraIssuesUsingJql", { jql: "status = Done", cloudId: jiraScope.cloudId });
+  });
+
+  it("refuses a model-supplied when-present property, on a tool that has it and on one that does not, before issuing a credential", async () => {
+    const rig = vendorRig("linear", linearBinder, linearScope, LINEAR_TOOLS);
+    await expect(rig.run("list_issues", { team: "Other team" })).rejects.toThrow(/Linear routing arguments are server controlled/);
+    await expect(rig.run("get_issue", { id: "CHA-1", teamId: "other" })).rejects.toThrow(/Linear routing arguments are server controlled/);
+    expect(rig.issue).not.toHaveBeenCalled();
+    expect(rig.connect).not.toHaveBeenCalled();
+  });
+
+  it("fails closed, without calling the vendor, when the binder has no value for a when-present property the tool has", async () => {
+    const binder: Binder<LinearScope> = { properties: [], optionalProperties: ["team"], bind: () => ({}) };
+    const rig = vendorRig("linear", binder, linearScope, LINEAR_TOOLS);
+    expect(await rig.run("list_issues", {})).toEqual({
+      requestId: "r-1", status: "FAILED", reason: "policy_denied", truncated: false, replayed: false,
+      text: "Linear has no server-bound value for team. An administrator must fix the connector configuration.",
+    });
+    expect(await rig.run("get_issue", { id: "CHA-1" })).toMatchObject({ status: "SUCCEEDED" });
+    expect(rig.call).toHaveBeenCalledExactlyOnceWith("get_issue", { id: "CHA-1" });
+  });
+
+  it("treats a name listed as both required and when-present as required only, and binds it once", async () => {
+    const binder: Binder<JiraScope> = { properties: ["cloudId"], optionalProperties: ["cloudId", "projectKey"], bind: (scope) => ({ cloudId: scope.cloudId, projectKey: scope.projectKey }) };
+    expect(boundNames(binder)).toEqual(["cloudId", "projectKey"]);
+    const context = contextFor(jiraScope, JIRA_TOOLS);
+    const review = reviewTools({ tools: vendorTools("jira") }, { binder }, context);
+    expect(review.skipped).toEqual(reviewTools({ tools: vendorTools("jira") }, { binder: jiraBinder }, context).skipped);
+    const rig = vendorRig("jira", binder, jiraScope, JIRA_TOOLS);
+    expect(await rig.run("getJiraIssue", { issueIdOrKey: "KAN-1" })).toMatchObject({ status: "SUCCEEDED" });
+    expect(rig.call).toHaveBeenLastCalledWith("getJiraIssue", { issueIdOrKey: "KAN-1", cloudId: jiraScope.cloudId });
+    expect(Object.keys(rig.call.mock.lastCall![1])).toEqual(["issueIdOrKey", "cloudId"]);
   });
 });

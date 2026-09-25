@@ -49,6 +49,8 @@ export interface GuardInput {
   tool: string;
   arguments: Readonly<Record<string, unknown>>;
   bound: Readonly<Record<string, unknown>>;
+  /** The call's scope, such as the Linear team or Jira project, for tools whose schema carries no bound property. */
+  scope: unknown;
   connection: Pick<McpConnection, "call">;
 }
 
