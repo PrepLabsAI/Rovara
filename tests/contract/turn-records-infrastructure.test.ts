@@ -2,9 +2,8 @@ import { readFileSync } from "node:fs";
 import { App } from "aws-cdk-lib";
 import { Match, Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
-import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
+import { ControlPlaneStack, TURN_DETAILS_READ_ATTRIBUTES } from "../../infra/lib/control-plane.js";
 import { SlackOrchestratorStack } from "../../infra/lib/slack-orchestrator.js";
-import { TURN_DETAILS_READ_ATTRIBUTES } from "../../infra/lib/control-plane.js";
 import { TURN_DETAILS_ATTRIBUTES } from "../../packages/contracts/src/index.js";
 
 interface Statement { Action: string | string[]; Resource: unknown }
@@ -219,6 +218,8 @@ describe("Details view access to turn records (spec 014 FR-024)", () => {
         "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["THREAD#*"] },
         "ForAllValues:StringEquals": { "dynamodb:Attributes": TURN_DETAILS_READ_ATTRIBUTES },
         StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        // ForAllValues passes on a missing key: a GetItem without a ProjectionExpression must be refused.
+        Null: { "dynamodb:Attributes": "false" },
       },
     });
   });

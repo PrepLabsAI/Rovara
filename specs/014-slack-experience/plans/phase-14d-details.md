@@ -174,6 +174,8 @@ every anchor the later tasks edit, before any change.
     - `ForAllValues:StringEquals` `dynamodb:Attributes` = `TURN_DETAILS_READ_ATTRIBUTES`, which is
       the table and index keys plus the 17 attributes in `TURN_DETAILS_ATTRIBUTES`.
     - `StringEqualsIfExists` `dynamodb:Select` `SPECIFIC_ATTRIBUTES`.
+    - `Null` `dynamodb:Attributes` `false`, because `ForAllValues` passes when the key is absent and
+      a `GetItem` without a projection returns every attribute.
   - `requestText`, `responseText`, `textTruncated`, `workspaceId`, `conversationId`,
     `settingsRevision`, `manifestHash`, `workerOperations`, `startedAt`, `finishedAt` and
     `stopReason` are unreadable to it.
@@ -250,6 +252,19 @@ every anchor the later tasks edit, before any change.
      --context-entries "ContextKeyName=dynamodb:LeadingKeys,ContextKeyValues=THREAD#x,ContextKeyType=stringList" \
        "ContextKeyName=dynamodb:Attributes,ContextKeyValues=pk,sk,requestText,ContextKeyType=stringList" \
      --query 'EvaluationResults[0].EvalDecision'    # "implicitDeny"
+   # No dynamodb:Attributes at all (a GetItem without a ProjectionExpression): the Null condition refuses it.
+   aws iam simulate-principal-policy --policy-source-arn "$ROLE" --action-names dynamodb:GetItem --resource-arns "$TABLE" \
+     --context-entries "ContextKeyName=dynamodb:LeadingKeys,ContextKeyValues=THREAD#x,ContextKeyType=stringList" \
+     --query 'EvaluationResults[0].EvalDecision'    # "implicitDeny"
+   ```
+
+   Then confirm it live, as the ingress role (assume it with a session that has its permissions, for
+   example from a break-glass admin allowed to `sts:AssumeRole` it, or run the call from a test
+   invocation of the Lambda). A read with no projection must be refused:
+
+   ```bash
+   aws dynamodb get-item --table-name <TurnRecordsTableName output> \
+     --key '{"pk":{"S":"THREAD#x"},"sk":{"S":"TURN#x"}}'    # AccessDeniedException
    ```
 
 3. **Slack app.** No change. 14c part 2 already turned Interactivity on, with the Request URL set
@@ -1621,6 +1636,8 @@ describe("Details view access to turn records (spec 014 FR-024)", () => {
         "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["THREAD#*"] },
         "ForAllValues:StringEquals": { "dynamodb:Attributes": TURN_DETAILS_READ_ATTRIBUTES },
         StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        // ForAllValues passes on a missing key: a GetItem without a ProjectionExpression must be refused.
+        Null: { "dynamodb:Attributes": "false" },
       },
     });
   });
@@ -1654,9 +1671,11 @@ access" still fails until the grant exists, because there are only two roles.
 After `export const SLACK_MAX_RECEIVE_COUNT = 5;`:
 
 ```ts
-// What the ingress Lambda may read of a turn record for the Details view (spec 014 FR-024): the
-// table and index keys plus TURN_DETAILS_ATTRIBUTES in packages/contracts/src/slack-details.ts.
-// A contract test keeps the two equal; infra does not depend on @agentx/contracts.
+// What the ingress Lambda may read of a turn record for the Details view (spec 014 FR-024):
+// TURN_DETAILS_ATTRIBUTES in packages/contracts/src/slack-details.ts plus the table keys pk and sk
+// (required). The byTime index keys exportPk and exportSk are not needed by this policy and carry no
+// new data; they stay listed so a later projection that names them is not refused.
+// A contract test keeps the two lists equal; infra does not depend on @agentx/contracts.
 export const TURN_DETAILS_READ_ATTRIBUTES = [
   "pk", "sk", "exportPk", "exportSk",
   "eventId", "subject", "receivedAt", "requestedBy", "disposition", "durationMs", "model", "offeredTools", "calls",
@@ -1693,6 +1712,9 @@ After `slackSecret.grantRead(slackIngress);`:
         "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["THREAD#*"] },
         "ForAllValues:StringEquals": { "dynamodb:Attributes": TURN_DETAILS_READ_ATTRIBUTES },
         StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        // ForAllValues passes when dynamodb:Attributes is absent, and GetItem has no Select, so a read
+        // without a ProjectionExpression (which returns every attribute) must be refused outright.
+        Null: { "dynamodb:Attributes": "false" },
       },
     }));
     slackIngress.addEnvironment("TURN_RECORDS_TABLE_NAME", turnRecords.tableName);
@@ -2049,8 +2071,12 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
    broker-served read. That needs a loading modal (`views.open`, then `views.update`), a new
    service caller on the broker's `/v1/service` routes, and a second Lambda hop.
 3. **IAM attribute conditions.** AWS requires `dynamodb:Attributes` to list the key attributes. The
-   plan lists the table and index keys. The rollout's `simulate-principal-policy` check confirms
-   it before any button ships.
+   table keys `pk` and `sk` are required. The byTime index keys `exportPk` and `exportSk` are not
+   required by this policy and carry no new data; they stay listed for future-proofing. Because
+   `ForAllValues` passes when the key is absent and `GetItem` has no `Select`, the statement also
+   carries `Null: { "dynamodb:Attributes": "false" }`, so a read without a projection is refused.
+   The rollout's `simulate-principal-policy` checks and the live `get-item` check confirm it before
+   any button ships.
 4. **Gate decision shape (R6). Resolved by 14c part 2:** `TurnGateSchema` records `{ outcome, source,
    kind?, rule?, reason }`, the shape this plan assumed. `DetailsGateSchema` stays lenient so a
    later gate's new enum values still open, with a line saying the decision cannot be shown only

@@ -25,9 +25,11 @@ import type { Construct } from "constructs";
 const MAX_DISPATCH_ATTEMPTS = 5;
 // Matches MAX_RECEIVE_COUNT in packages/slack-service, which reports the final attempt in the thread.
 export const SLACK_MAX_RECEIVE_COUNT = 5;
-// What the ingress Lambda may read of a turn record for the Details view (spec 014 FR-024): the
-// table and index keys plus TURN_DETAILS_ATTRIBUTES in packages/contracts/src/slack-details.ts.
-// A contract test keeps the two equal; infra does not depend on @agentx/contracts.
+// What the ingress Lambda may read of a turn record for the Details view (spec 014 FR-024):
+// TURN_DETAILS_ATTRIBUTES in packages/contracts/src/slack-details.ts plus the table keys pk and sk
+// (required). The byTime index keys exportPk and exportSk are not needed by this policy and carry no
+// new data; they stay listed so a later projection that names them is not refused.
+// A contract test keeps the two lists equal; infra does not depend on @agentx/contracts.
 export const TURN_DETAILS_READ_ATTRIBUTES = [
   "pk", "sk", "exportPk", "exportSk",
   "eventId", "subject", "receivedAt", "requestedBy", "disposition", "durationMs", "model", "offeredTools", "calls",
@@ -423,6 +425,9 @@ export class ControlPlaneStack extends Stack {
         "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["THREAD#*"] },
         "ForAllValues:StringEquals": { "dynamodb:Attributes": TURN_DETAILS_READ_ATTRIBUTES },
         StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        // ForAllValues passes when dynamodb:Attributes is absent, and GetItem has no Select, so a read
+        // without a ProjectionExpression (which returns every attribute) must be refused outright.
+        Null: { "dynamodb:Attributes": "false" },
       },
     }));
     slackIngress.addEnvironment("TURN_RECORDS_TABLE_NAME", turnRecords.tableName);
