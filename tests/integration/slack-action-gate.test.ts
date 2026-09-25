@@ -513,6 +513,9 @@ describe("the hosted classifier at startup", () => {
     expect(classifierTimeoutMs(undefined)).toBe(8_000);
     for (const value of ["", "abc", "NaN", "0", "-5", "1.5", "12abc", " 12"]) expect(classifierTimeoutMs(value)).toBe(8_000);
     expect(classifierTimeoutMs("12000")).toBe(12_000);
+    // At most 60 seconds: Node truncates a timer above 2^31-1 ms to 1 ms, which would ask at once.
+    expect(classifierTimeoutMs("60000")).toBe(60_000);
+    for (const value of ["60001", "2147483648", "3000000000"]) expect(classifierTimeoutMs(value), value).toBe(8_000);
   });
 });
 

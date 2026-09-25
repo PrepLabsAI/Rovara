@@ -1,4 +1,4 @@
-import { CLASSIFIER_TIMEOUT_MS, ClassifierError, createModelClassifier } from "@agentx/orchestrator/action-classifier";
+import { ClassifierError, createModelClassifier, usableClassifierTimeout } from "@agentx/orchestrator/action-classifier";
 import { createGateSession, type ActionClassifier, type GateDecision } from "@agentx/orchestrator/action-gate";
 import { createOrchestratorRuntime, type OrchestratorOptions } from "@agentx/orchestrator/orchestrator";
 import { TURN_GATE_REASON_LIMIT, redactAndCap } from "@agentx/contracts";
@@ -73,10 +73,10 @@ export async function createHostedClassifier(options: {
   }
 }
 
-/** The classifier's timeout setting: a positive whole number of milliseconds, else 8 seconds. */
+/** The classifier's timeout setting: a whole number of milliseconds from 1 to 60,000, else 8 seconds. */
 export function classifierTimeoutMs(value: string | undefined): number {
   const parsed = value !== undefined && /^[0-9]+$/u.test(value) ? Number.parseInt(value, 10) : Number.NaN;
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : CLASSIFIER_TIMEOUT_MS;
+  return usableClassifierTimeout(Number.isNaN(parsed) ? undefined : parsed);
 }
 
 /**

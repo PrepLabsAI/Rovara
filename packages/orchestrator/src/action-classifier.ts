@@ -36,6 +36,13 @@ export class ClassifierError extends Error {
 export type ActionClassifier = (input: ClassifierInput) => Promise<ClassifierVerdict>;
 
 export const CLASSIFIER_TIMEOUT_MS = 8_000;
+/** Longest classifier timeout accepted; Node truncates a timer above 2^31-1 ms to 1 ms. */
+export const CLASSIFIER_TIMEOUT_MAX_MS = 60_000;
+
+/** A configured classifier timeout if it is a whole number of milliseconds from 1 to 60,000, else 8 seconds. */
+export function usableClassifierTimeout(value: number | undefined): number {
+  return value !== undefined && Number.isSafeInteger(value) && value > 0 && value <= CLASSIFIER_TIMEOUT_MAX_MS ? value : CLASSIFIER_TIMEOUT_MS;
+}
 const MESSAGE_LIMIT = 12;
 const MESSAGE_CHARACTERS = 2_000;
 const TRANSCRIPT_CHARACTERS = 8_000;
@@ -133,7 +140,7 @@ export async function createModelClassifier(options: {
   const runtime = options.modelRuntime ?? await ModelRuntime.create({ refreshOnCreate: false });
   const model = runtime.getModel(options.model.provider, options.model.modelId);
   if (!model && options.failOnUnknownModel === true) throw new ClassifierError("the classifier model is unavailable");
-  const timeoutMs = options.timeoutMs ?? CLASSIFIER_TIMEOUT_MS;
+  const timeoutMs = usableClassifierTimeout(options.timeoutMs);
   return async (input) => {
     if (!model) throw new ClassifierError("the classifier model is unavailable");
     const controller = new AbortController();

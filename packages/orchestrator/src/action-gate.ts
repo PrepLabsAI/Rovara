@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import type { ActionPolicy, ConnectorCatalog } from "@agentx/contracts";
-import { CLASSIFIER_TIMEOUT_MS, ClassifierError, type ActionClassifier, type ClassifierUsage, type ClassifierVerdict } from "./action-classifier.js";
+import { ClassifierError, usableClassifierTimeout, type ActionClassifier, type ClassifierUsage, type ClassifierVerdict } from "./action-classifier.js";
 
 export type { ActionClassifier } from "./action-classifier.js";
 import { evaluatePolicy, itemReference, type ActionClass, type SettledAction, type ToolFacts } from "./action-policy.js";
@@ -58,8 +58,8 @@ export interface ActionGateOptions {
   worker?: WorkerAccess | undefined;
   /**
    * The host's positive signal that this thread's compute is already prepared (spec 014 D5): then
-   * agentx_submit_task and agentx_follow_up run as reads. Absent with no worker, they fail closed as
-   * a change.
+   * agentx_submit_task and agentx_follow_up run as reads. Used only when no worker is given (a
+   * worker's own prepared() wins); absent with no worker, they fail closed as a change.
    */
   computePrepared?: boolean | undefined;
   onDecision?: ((decision: GateDecision) => void) | undefined;
@@ -198,7 +198,8 @@ export class ActionGate {
     const facts = this.options.facts.get(call.toolName);
     const hash = argumentsHash(call.toolName, call.input);
     const evaluation = evaluatePolicy({ name: call.toolName, args: call.input, facts, policy: this.options.policy,
-      worker: this.options.computePrepared === true ? PREPARED_COMPUTE : this.options.worker });
+      // Fail closed: a present worker always decides; computePrepared applies only without one.
+      worker: this.options.worker ?? (this.options.computePrepared === true ? PREPARED_COMPUTE : undefined) });
     const base = {
       toolCallId: call.toolCallId, tool: call.toolName, ...(facts === undefined ? {} : { connector: facts.connector }),
       actionClass: evaluation.actionClass, argumentsHash: hash, ...(evaluation.classRule === undefined ? {} : { rule: evaluation.classRule }),
@@ -262,8 +263,7 @@ export class ActionGate {
     this.classifierCalls += 1;
     const started = this.now();
     // The gate keeps its own deadline and honours the turn's cancellation, whatever the classifier does.
-    const timeout = this.options.classifierTimeoutMs;
-    const deadlineMs = timeout !== undefined && Number.isSafeInteger(timeout) && timeout > 0 ? timeout : CLASSIFIER_TIMEOUT_MS;
+    const deadlineMs = usableClassifierTimeout(this.options.classifierTimeoutMs);
     const controller = new AbortController();
     const signal = context.signal === undefined ? controller.signal : AbortSignal.any([context.signal, controller.signal]);
     let timer: ReturnType<typeof setTimeout> | undefined;

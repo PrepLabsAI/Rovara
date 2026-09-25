@@ -31,7 +31,7 @@ const messages = () => ["set TRK-5 to high priority"];
 let calls = 0;
 const call = (toolName: string, input: Record<string, unknown>) => ({ toolCallId: `call-${++calls}`, toolName, input });
 
-function gate(options: { session?: GateSession; classifier?: ActionClassifier; policy?: ActionPolicy; onDecision?: (decision: GateDecision) => void; maxClassifierCalls?: number; classifierTimeoutMs?: number; worker?: { prepared(): boolean; ensureReady(): Promise<undefined> } } = {}) {
+function gate(options: { session?: GateSession; classifier?: ActionClassifier; policy?: ActionPolicy; onDecision?: (decision: GateDecision) => void; maxClassifierCalls?: number; classifierTimeoutMs?: number; computePrepared?: boolean; worker?: { prepared(): boolean; ensureReady(): Promise<undefined> } } = {}) {
   const session = options.session ?? createGateSession(member);
   return { session, gate: new ActionGate({ session, facts, ...options }, () => 1_000) };
 }
@@ -102,6 +102,25 @@ describe("the action gate's decisions", () => {
     await vi.advanceTimersByTimeAsync(8_000);
     expect(await pending).toMatchObject({ outcome: "ask", source: "classifier_unavailable", kind: "classifier", reason: "the classifier could not decide: it did not answer within 8000 ms" });
     expect(session.asks).toHaveLength(1);
+  });
+
+  it("fails closed: a present worker decides over computePrepared, which applies only without a worker", async () => {
+    const classifier = vi.fn(allow);
+    const unprepared = gate({ classifier, computePrepared: true, worker: { prepared: () => false, ensureReady: async () => undefined } });
+    expect(await unprepared.gate.decide(call("agentx_submit_task", { prompt: "run the tests" }), { memberMessages: messages })).toMatchObject({ actionClass: "change", source: "classifier" });
+    const noWorker = gate({ classifier, computePrepared: true });
+    expect(await noWorker.gate.decide(call("agentx_submit_task", { prompt: "run the tests" }), { memberMessages: messages })).toMatchObject({ actionClass: "read", outcome: "allow" });
+    expect(classifier).toHaveBeenCalledOnce();
+  });
+
+  it("M4: allows a configured gate deadline up to 60 seconds, and falls back to 8 seconds above it", async () => {
+    vi.useFakeTimers();
+    for (const [classifierTimeoutMs, expected] of [[60_000, 60_000], [60_001, 8_000], [3_000_000_000, 8_000]] as const) {
+      const { gate: g } = gate({ classifier: () => new Promise(() => undefined), classifierTimeoutMs });
+      const pending = g.decide(call("tracker__save_item", { id: "A" }), { memberMessages: messages });
+      await vi.advanceTimersByTimeAsync(expected);
+      expect(await pending, String(classifierTimeoutMs)).toMatchObject({ reason: `the classifier could not decide: it did not answer within ${expected} ms` });
+    }
   });
 
   it("M4: follows the configured classifier timeout rather than a fixed 8 seconds", async () => {
