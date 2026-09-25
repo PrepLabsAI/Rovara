@@ -48,6 +48,10 @@ to 6) applied first. With this part's four tasks applied, `npm run build`, `npm 
 removed besides the one named below. Spec 013 phase 4 added a `refresh` option to connector
 discovery; Task 3 keeps it.
 
+**Re-checked 2026-09-25 on mainline `8076e1e`** (14a #51, 14b PR A #52 and this amendment #53
+merged): every file each task modifies exists and every anchor still matches. The unimplemented tree
+passes 1,367 tests with one skip, so the 1,336 above is history, not a target.
+
 ## Global Constraints
 
 - **No regressions.** Every existing test passes with its assertions unchanged, with one exception:
@@ -1239,8 +1243,8 @@ Run:
 
 ```bash
 npm run typecheck && npm run lint && npm run build && npm test
-git diff mainline -- tests | grep '^-[^-]'
-git diff mainline --stat -- tests/contract/__snapshots__
+git diff "$(git merge-base HEAD origin/mainline)" -- tests | grep '^-[^-]'
+git diff "$(git merge-base HEAD origin/mainline)" --stat -- tests/contract/__snapshots__
 ```
 
 Expected: all pass; the first `git diff` prints exactly the old
