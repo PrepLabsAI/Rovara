@@ -26,9 +26,9 @@ const HEADING = /^[ \t]{0,3}#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$/gmu;
 const BOLD = /\*\*(?=\S)([^*\n]+?)(?<=\S)\*\*/gu;
 // Tried in this order at each position: a Markdown link (label, URL), a link or mention already
 // in Slack format, a bare URL. A raw "<" or ">" is not a URL character, so it ends a URL.
-// The markdown link label allows one level of nested brackets.
+// The markdown link label allows one level of nested brackets, bounded to prevent regex backtracking.
 const TOKEN = new RegExp([
-  String.raw`\[((?:[^\[\]\n]|\[[^\]]*\])*)\]\(\s*<?((?:https?:\/\/|mailto:)[^\s<>()]*(?:\([^\s<>()]*\)[^\s<>()]*)*)>?(?:\s+"[^"\n]*")?\s*\)`,
+  String.raw`\[((?:[^\[\]\n]|\[[^\]]{0,1000}\]){0,1000})\]\(\s*<?((?:https?:\/\/|mailto:)[^\s<>()]*(?:\([^\s<>()]*\)[^\s<>()]*)*)>?(?:\s+"[^"\n]*")?\s*\)`,
   String.raw`<(?:(?:https?:\/\/|mailto:)[^\s<>|]+(?:\|[^<>\n]*)?|[@#][UWC][A-Z0-9]{2,31}(?:\|[^<>\n]*)?)>`,
   String.raw`https?:\/\/[^\s<>]+`,
 ].join("|"), "gu");

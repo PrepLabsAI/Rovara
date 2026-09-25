@@ -67,4 +67,34 @@ describe("Slack reply formatting", () => {
     expect(slackReplyText("> quoted line\nnot > quoted")).toBe("> quoted line\nnot &gt; quoted");
     expect(slackReplyText("**https://example.com/x**")).toBe("*<https://example.com/x>*");
   });
+
+  it("bounds markdown link label parsing to prevent quadratic regex backtracking", () => {
+    const unclosedBrackets = "[".repeat(100000) + "x";
+    const result = slackReplyText(unclosedBrackets);
+    expect(result).toContain("x");
+  });
+
+  it("bounds nested bracket parsing to prevent quadratic regex backtracking", () => {
+    const nestedBrackets = "[a [b ".repeat(40000);
+    const result = slackReplyText(nestedBrackets);
+    expect(result).toContain("[");
+  });
+
+  it("handles long heading lines efficiently", () => {
+    const longHeading = "# " + "a".repeat(100000);
+    const result = slackReplyText(longHeading);
+    expect(result).toContain("*");
+  });
+
+  it("handles long lines with many bold markers efficiently", () => {
+    const manyBold = "**a**".repeat(40000);
+    const result = slackReplyText(manyBold);
+    expect(result).toContain("*");
+  });
+
+  it("handles bare URLs with many slashes efficiently", () => {
+    const longUrl = "https://" + "a/".repeat(50000);
+    const result = slackReplyText(longUrl);
+    expect(result).toContain("<https");
+  });
 });
