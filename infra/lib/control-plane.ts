@@ -25,6 +25,14 @@ import type { Construct } from "constructs";
 const MAX_DISPATCH_ATTEMPTS = 5;
 // Matches MAX_RECEIVE_COUNT in packages/slack-service, which reports the final attempt in the thread.
 export const SLACK_MAX_RECEIVE_COUNT = 5;
+// What the ingress Lambda may read of a turn record for the Details view (spec 014 FR-024): the
+// table and index keys plus TURN_DETAILS_ATTRIBUTES in packages/contracts/src/slack-details.ts.
+// A contract test keeps the two equal; infra does not depend on @agentx/contracts.
+export const TURN_DETAILS_READ_ATTRIBUTES = [
+  "pk", "sk", "exportPk", "exportSk",
+  "eventId", "subject", "receivedAt", "requestedBy", "disposition", "durationMs", "model", "offeredTools", "calls",
+  "callsTruncated", "emptyResponse", "usage", "usageError", "recordingErrors", "argumentsOmitted", "error", "expiresAt",
+];
 
 export class ControlPlaneStack extends Stack {
   constructor(scope: Construct, id: string, props?: StackProps) {
@@ -245,7 +253,8 @@ export class ControlPlaneStack extends Stack {
       ],
     }));
     // One record per Slack event, kept 30 days for diagnosis and evaluation cases (feature 013 FR-025).
-    // Admin-only: the broker reads it for the admin export and nothing else can.
+    // The broker reads it for the admin export. The ingress Lambda reads one record's non-text fields
+    // for the Details view (spec 014), granted below. Nothing else can read it.
     const turnRecords = new dynamodb.Table(this, "TurnRecords", {
       partitionKey: { name: "pk", type: dynamodb.AttributeType.STRING },
       sortKey: { name: "sk", type: dynamodb.AttributeType.STRING },
@@ -403,6 +412,20 @@ export class ControlPlaneStack extends Stack {
     slackThreads.grantReadWriteData(slackIngress);
     slackRequestQueue.grantSendMessages(slackIngress);
     slackSecret.grantRead(slackIngress);
+    // The Details view (spec 014 FR-024): Slack's interactivity request runs on this Lambda and must
+    // open the modal within 3 seconds, so it reads the one turn record the clicked button names, by
+    // key. It may read only the attributes the view shows: never the request or response text, the
+    // workspace or the worker operations. No Query or Scan, and no index.
+    slackIngress.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["dynamodb:GetItem"],
+      resources: [turnRecords.tableArn],
+      conditions: {
+        "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["THREAD#*"] },
+        "ForAllValues:StringEquals": { "dynamodb:Attributes": TURN_DETAILS_READ_ATTRIBUTES },
+        StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+      },
+    }));
+    slackIngress.addEnvironment("TURN_RECORDS_TABLE_NAME", turnRecords.tableName);
 
     const api = new apigwv2.CfnApi(this, "HttpApi", {
       name: "agentx-control-plane",

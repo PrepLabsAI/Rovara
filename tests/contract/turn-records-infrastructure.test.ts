@@ -4,6 +4,8 @@ import { Match, Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import { SlackOrchestratorStack } from "../../infra/lib/slack-orchestrator.js";
+import { TURN_DETAILS_READ_ATTRIBUTES } from "../../infra/lib/control-plane.js";
+import { TURN_DETAILS_ATTRIBUTES } from "../../packages/contracts/src/index.js";
 
 interface Statement { Action: string | string[]; Resource: unknown }
 
@@ -59,8 +61,9 @@ describe("turn record and alarm infrastructure", () => {
     const roles = policies
       .filter((policy) => policy.Properties.PolicyDocument.Statement.some(onTurnRecords))
       .flatMap((policy) => policy.Properties.Roles.map((role) => role.Ref ?? ""));
-    expect(roles.every((role) => role.startsWith("SlackOrchestratorTaskRole") || role.startsWith("BrokerServiceRole"))).toBe(true);
-    expect(roles.length).toBeGreaterThanOrEqual(2);
+    // Spec 014 FR-024 admits exactly one more role: the ingress Lambda, for one record's Details fields (pinned below).
+    expect(roles.every((role) => role.startsWith("SlackOrchestratorTaskRole") || role.startsWith("BrokerServiceRole") || role.startsWith("SlackIngressServiceRole"))).toBe(true);
+    expect(roles.length).toBeGreaterThanOrEqual(3);
   });
 
   it("ships the operator topic with no subscription and both alarms notifying it", () => {
@@ -200,5 +203,39 @@ describe("Slack service turn records and metric filters", () => {
       MetricTransformations: [{ MetricNamespace: "AgentX", MetricName: "TurnMetricsEmitFailed", MetricValue: "1" }],
     });
     template.resourceCountIs("AWS::Logs::MetricFilter", 6);
+  });
+});
+
+describe("Details view access to turn records (spec 014 FR-024)", () => {
+  const template = Template.fromStack(new ControlPlaneStack(new App(), "TurnDetailsControlPlane"));
+
+  it("lets the ingress Lambda get one turn record by key, with only the attributes the Details view shows", () => {
+    const statements = statementsForRole(template, "SlackIngressServiceRole").filter(onTurnRecords);
+    expect(statements).toHaveLength(1);
+    expect([statements[0]!.Action].flat()).toEqual(["dynamodb:GetItem"]);
+    expect(JSON.stringify(statements[0]!.Resource)).not.toContain("index");
+    expect(statements[0]).toMatchObject({
+      Condition: {
+        "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["THREAD#*"] },
+        "ForAllValues:StringEquals": { "dynamodb:Attributes": TURN_DETAILS_READ_ATTRIBUTES },
+        StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+      },
+    });
+  });
+
+  it("keeps the IAM attribute list equal to the keys plus what the Details reader asks for, never the request or response text", () => {
+    expect([...TURN_DETAILS_READ_ATTRIBUTES].sort()).toEqual(["pk", "sk", "exportPk", "exportSk", ...TURN_DETAILS_ATTRIBUTES].sort());
+    for (const name of ["requestText", "responseText", "textTruncated", "workspaceId", "conversationId", "workerOperations", "manifestHash"]) {
+      expect(TURN_DETAILS_READ_ATTRIBUTES).not.toContain(name);
+    }
+  });
+
+  it("passes the turn record table name to the ingress Lambda", () => {
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Environment: { Variables: Match.objectLike({
+        SLACK_REQUEST_QUEUE_URL: Match.anyValue(),
+        TURN_RECORDS_TABLE_NAME: { Ref: Match.stringLikeRegexp("^TurnRecords") },
+      }) },
+    });
   });
 });
