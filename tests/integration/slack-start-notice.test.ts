@@ -89,6 +89,18 @@ describe("the start notice only when the member was told to wait", () => {
     expect(h.posts).toEqual([WORKING, "2 issues are open."]);
   });
 
+  it("is posted when nothing was queued ahead but SQS redelivered the request", async () => {
+    const h = harness(workspace());
+    await processSlackRequest(message(), h.dependencies, { finalAttempt: false, queuedBehind: 0, redelivered: true });
+    expect(h.posts).toEqual([WORKING, "2 issues are open."]);
+  });
+
+  it("is not posted when nothing was queued ahead and the request was not redelivered", async () => {
+    const h = harness(workspace());
+    await processSlackRequest(message(), h.dependencies, { finalAttempt: false, queuedBehind: 0, redelivered: false });
+    expect(h.posts).toEqual(["2 issues are open."]);
+  });
+
   it.each([
     [true, SETTING_UP],
     [false, STILL],
@@ -109,7 +121,24 @@ describe("the start notice only when the member was told to wait", () => {
     await processGroup(queue, async (_message, context) => {
       contexts.push(context);
     }, [queueEntry({ queuedBehind: 0 }), queueEntry({ receiptHandle: "receipt-2", queuedBehind: 3, receiveCount: 5 })], groupOptions, () => undefined);
-    expect(contexts).toEqual([{ finalAttempt: false, queuedBehind: 0 }, { finalAttempt: true, queuedBehind: 3 }]);
+    expect(contexts).toEqual([
+      { finalAttempt: false, queuedBehind: 0 },
+      { finalAttempt: true, queuedBehind: 3, redelivered: true },
+    ]);
+  });
+
+  it("marks a message redelivered from its receive count, so a retry can still announce it started", async () => {
+    const contexts: unknown[] = [];
+    await processGroup(queue, async (_message, context) => {
+      contexts.push(context);
+    }, [
+      queueEntry({ queuedBehind: 0, receiveCount: 1 }),
+      queueEntry({ receiptHandle: "receipt-2", queuedBehind: 0, receiveCount: 2 }),
+    ], groupOptions, () => undefined);
+    expect(contexts).toEqual([
+      { finalAttempt: false, queuedBehind: 0 },
+      { finalAttempt: false, queuedBehind: 0, redelivered: true },
+    ]);
   });
 });
 

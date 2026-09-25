@@ -89,6 +89,8 @@ export async function processSlackRequest(
     finalAttempt: boolean;
     /** How many earlier requests the ingress told the member this one waits behind; absent from an older ingress. */
     queuedBehind?: number;
+    /** Set when SQS's ApproximateReceiveCount shows this attempt was redelivered after an earlier one threw. */
+    redelivered?: boolean;
   },
 ): Promise<void> {
   const subject = slackThreadSubject(message.thread);
@@ -203,8 +205,11 @@ export async function processSlackRequest(
       ? createLazyWorker({ api, post, log, eventId: message.eventId })
       : undefined;
     // Spec 014 FR-026: the ingress has already said "I'm on it". Say work has started only when the
-    // member was told to wait, behind earlier requests or for setup. An older ingress sends no count.
-    const announceStart = options.queuedBehind === undefined || options.queuedBehind > 0 || waitedForSetup;
+    // member was told to wait, behind earlier requests, for setup, or because SQS redelivered this
+    // request after an earlier attempt threw: that attempt's own "Working on it now" is 15 minutes
+    // stale by the time the retry runs, so this one says it again rather than restarting silently. An
+    // older ingress sends no count, and a missing receive count is treated as not redelivered.
+    const announceStart = options.queuedBehind === undefined || options.queuedBehind > 0 || waitedForSetup || options.redelivered === true;
     if (announceStart) await post("Working on it now. I'll post the result in this thread when it's done.");
     log("task.started", { eventId: message.eventId });
     let response: string;

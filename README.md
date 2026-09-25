@@ -310,13 +310,13 @@ create a pull request.
 
 AgentX replies within a few seconds. If earlier requests in the thread are still running, it says
 how many are ahead, and says "Working on it now" when it starts on the request. A request with
-nothing ahead gets only that first reply before its answer. A new thread gets a coding workspace
-only when a request first needs the
-remote worker, for example to read or change repository files or to run commands. Questions that
-connectors answer, such as issue tracker questions, need no workspace. The first request that needs
-the worker prepares the workspace in the same turn, which takes a few minutes, and AgentX says so in
-the thread. Messages without a mention, edits, bot messages, AgentX's own messages, direct
-messages, and users from other Slack organizations are ignored.
+nothing ahead gets no separate "Working on it now" notice, unless it waits for workspace setup. A
+new thread gets a coding workspace only when a request first needs the remote worker, for example to
+read or change repository files or to run commands. Questions that connectors answer, such as issue
+tracker questions, need no workspace. The first request that needs the worker prepares the workspace
+in the same turn, which takes a few minutes, and AgentX says so in the thread. Messages without a
+mention, edits, bot messages, AgentX's own messages, direct messages, and users from other Slack
+organizations are ignored.
 
 A person can also mention AgentX through another tool that posts with their own Slack user token,
 such as Claude Code's Slack access or a script. AgentX checks with Slack that the sender is a
@@ -365,10 +365,9 @@ cancellation also blocks closure until it finishes.
 For a clean production workspace, AgentX deletes its AgentCore capacity-provider session, which
 releases the persistent EBS volume, and then confirms completion in the same Slack thread. It
 retains the workspace and operation records as a closed tombstone for audit and retry safety, but
-removes the hosted orchestrator conversation session and releases the organization's quota and
-that of the member who prepared the workspace. Later mentions in the closed thread do not create
-another workspace;
-start a new Slack thread for fresh work.
+removes the hosted orchestrator conversation session and releases the organization's quota and that
+of the member who prepared the workspace. Later mentions in the closed thread do not create another
+workspace; start a new Slack thread for fresh work.
 
 #### What a thread remembers
 
