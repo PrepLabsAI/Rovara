@@ -47,6 +47,8 @@ export const RunScoreSchema = z.object({
   phraseOk: z.boolean().nullable(),
   refusalOk: z.boolean().nullable(),
   containsOk: z.boolean().nullable(),
+  /** The run hit its timeout and then stopped: model behaviour, a failed run, not an error that blocks the baseline. */
+  timedOut: z.literal(true).optional(),
   error: z.string().optional(),
 }).strict();
 /** `caseHash` identifies the case definition that was scored (see caseHash); SC-004 refuses baselines whose shared cases differ. */
@@ -69,7 +71,10 @@ export const EvalReportSchema = z.object({
   summary: z.object({
     cases: z.number().int().nonnegative(),
     passed: z.number().int().nonnegative(),
+    /** Cases with a run that errored for any reason other than a timeout; these block a baseline. */
     errors: z.number().int().nonnegative(),
+    /** Cases with a timed-out run (present only when there are any); they fail but never block a baseline. */
+    timeouts: z.number().int().nonnegative().optional(),
     notApplicable: z.number().int().nonnegative().optional(),
     toolAccuracy: z.number(),
     refusalCases: z.number().int().nonnegative(),
@@ -81,7 +86,7 @@ export type CaseResult = z.infer<typeof CaseResultSchema>;
 export type EvalReport = z.infer<typeof EvalReportSchema>;
 
 /** `stuck` marks a timed-out run whose work did not stop within the grace period. */
-interface RunOutcome { tool: string | null; offered?: false; args: Record<string, unknown>; response: string; error?: string; stuck?: true }
+interface RunOutcome { tool: string | null; offered?: false; args: Record<string, unknown>; response: string; error?: string; timedOut?: true; stuck?: true }
 
 const DONE = "Done. (evaluation run: nothing was executed)";
 const DEFAULT_TIMEOUT_MS = 180_000;
@@ -210,7 +215,7 @@ async function runOnce(evalCase: EvalCase, run: number, catalogCache: Map<string
   const unoffered = first !== undefined && !offered.has(first.name);
   return {
     tool: call?.tool ?? null, ...(unoffered ? { offered: false as const } : {}), args: call?.args ?? {}, response,
-    ...(error === undefined ? {} : { error }), ...(stuck ? { stuck: true as const } : {}),
+    ...(error === undefined ? {} : { error }), ...(stuck ? { stuck: true as const } : timedOut ? { timedOut: true as const } : {}),
   };
 }
 
@@ -243,7 +248,10 @@ export function scoreRun(evalCase: EvalCase, run: RunOutcome): RunScore {
   const refusalOk = group(evalCase.expect.refusal);
   const containsOk = group(evalCase.expect.contains);
   const phraseOk = refusalOk === null && containsOk === null ? null : refusalOk !== false && containsOk !== false;
-  return { tool: run.tool, ...(run.offered === false ? { offered: false as const } : {}), toolOk, argsOk, phraseOk, refusalOk, containsOk, ...(run.error === undefined ? {} : { error: run.error }) };
+  return {
+    tool: run.tool, ...(run.offered === false ? { offered: false as const } : {}), toolOk, argsOk, phraseOk, refusalOk, containsOk,
+    ...(run.timedOut === true ? { timedOut: true as const } : {}), ...(run.error === undefined ? {} : { error: run.error }),
+  };
 }
 
 export async function runEvaluation(cases: readonly EvalCase[], options: EvalOptions): Promise<EvalReport> {
@@ -296,6 +304,7 @@ export async function runEvaluation(cases: readonly EvalCase[], options: EvalOpt
     }
   }
   const skipped = new Set(notApplicable.map((entry) => entry.id));
+  const timeouts = results.filter((result) => result.runs.some((run) => run.timedOut === true)).length;
   const refusalCases = cases.filter((evalCase) => evalCase.expect.refusal !== undefined && !skipped.has(evalCase.id)).map((evalCase) => evalCase.id);
   const refusalPassed = results.filter((result) => refusalCases.includes(result.id) && result.runs.every((run) => run.toolOk && run.refusalOk === true)).length;
   return {
@@ -311,7 +320,8 @@ export async function runEvaluation(cases: readonly EvalCase[], options: EvalOpt
     summary: {
       cases: results.length,
       passed: results.filter((result) => result.passed).length,
-      errors: results.filter((result) => result.runs.some((run) => run.error !== undefined)).length,
+      errors: results.filter((result) => result.runs.some((run) => run.error !== undefined && run.timedOut !== true)).length,
+      ...(timeouts === 0 ? {} : { timeouts }),
       ...(notApplicable.length === 0 ? {} : { notApplicable: notApplicable.length }),
       toolAccuracy: results.length === 0 ? 0 : results.filter((result) => result.runs.every((run) => run.toolOk)).length / results.length,
       refusalCases: refusalCases.length,

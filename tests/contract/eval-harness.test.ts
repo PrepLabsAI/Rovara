@@ -227,6 +227,9 @@ describe("evaluation harness, offline", () => {
     expect(report.cases.map((result) => [result.id, result.passed])).toEqual([["files-not-pr", false]]);
     expect(report.cases[0]?.runs[0]).toMatchObject({ toolOk: false, error: `timed out after 50 ms; ${stopped}` });
     expect(report.summary).toMatchObject({ cases: 1, passed: 0, errors: 1 });
+    // A run that did not stop is an infrastructure fault, not a model timeout.
+    expect(report.cases[0]?.runs[0]?.timedOut).toBeUndefined();
+    expect(report.summary.timeouts).toBeUndefined();
     const root = await temporaryDirectory();
     try {
       expect(await recordLiveReport({ ...report, provider: "amazon-bedrock", model: "amazon.nova-pro-v1:0" }, { updateBaseline: true, root })).toMatchObject({ exitCode: 1 });
@@ -241,6 +244,60 @@ describe("evaluation harness, offline", () => {
     const stuck = () => new Promise<void>((resolve) => setTimeout(resolve, 1_500));
     const report = await runEvaluation(cases, { model: FAUX_MODEL, modelRuntime, presentation: "new", repeat: 1, timeoutMs: 50, beforeRun: stuck });
     expect(report.cases[0]).toMatchObject({ passed: false, runs: [{ toolOk: false, error: "timed out after 50 ms" }] });
+  }, 30_000);
+
+  it("counts a timed-out run as a failed run and a timeout, not as an error that blocks the baseline", async () => {
+    const { modelRuntime, faux } = await fauxModelRuntime();
+    const cases = (await loadCases()).filter((entry) => ["files-not-pr", "append-pr"].includes(entry.id));
+    const script = oracle(faux, expected);
+    const beforeRun = (evalCase: EvalCase) => {
+      if (evalCase.id === "files-not-pr") faux.setResponses([async () => { await new Promise((resolve) => setTimeout(resolve, 1_500)); return fauxAssistantMessage("late"); }]);
+      else script(evalCase);
+    };
+    const report = await runEvaluation(cases, { model: FAUX_MODEL, modelRuntime, presentation: "new", repeat: 1, timeoutMs: 1_000, beforeRun });
+    expect(report.cases.map((result) => [result.id, result.passed])).toEqual([["files-not-pr", false], ["append-pr", true]]);
+    expect(report.cases[0]?.runs[0]).toMatchObject({ tool: null, toolOk: false, timedOut: true, error: "timed out after 1000 ms" });
+    expect(report.cases[1]?.runs[0]?.timedOut).toBeUndefined();
+    expect(report.summary).toMatchObject({ cases: 2, passed: 1, errors: 0, timeouts: 1, toolAccuracy: 0.5 });
+    expect(report.stopped).toBeUndefined();
+    const root = await temporaryDirectory();
+    try {
+      const live = { ...report, provider: "amazon-bedrock", model: "amazon.nova-pro-v1:0" };
+      expect(await recordLiveReport(live, { updateBaseline: false, root })).toMatchObject({ exitCode: 0 });
+      expect(await recordLiveReport(live, { updateBaseline: true, root })).toEqual({ exitCode: 0, lines: [`Baseline written: ${reportPath("baseline", "amazon.nova-pro-v1:0", "new", root)}`] });
+      expect(JSON.parse(await readFile(reportPath("baseline", "amazon.nova-pro-v1:0", "new", root), "utf8"))).toMatchObject({ summary: { errors: 0, timeouts: 1 } });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("still blocks the baseline on an infrastructure error or a fixture error alongside timeouts", async () => {
+    const timedOut = { tool: null, toolOk: false, argsOk: true, phraseOk: null, refusalOk: null, containsOk: null, timedOut: true as const, error: "timed out after 180000 ms" };
+    const infrastructure = { tool: null, toolOk: false, argsOk: true, phraseOk: null, refusalOk: null, containsOk: null, error: "RUNTIME_UNAVAILABLE: AccessDeniedException" };
+    const root = await temporaryDirectory();
+    try {
+      const report = liveReport({
+        cases: [{ id: "files-not-pr", passed: false, runs: [timedOut] }, { id: "append-pr", passed: false, runs: [infrastructure] }],
+        summary: { cases: 2, passed: 0, errors: 1, timeouts: 1, toolAccuracy: 0, refusalCases: 0, refusalAccuracy: 1 },
+      });
+      const outcome = await recordLiveReport(report, { updateBaseline: true, root });
+      expect(outcome).toEqual({ exitCode: 1, lines: ["Baseline not written: 1 case errored. Rerun once the errors are resolved."] });
+      await expect(readFile(reportPath("baseline", "amazon.nova-pro-v1:0", "new", root), "utf8")).rejects.toThrow(/ENOENT/);
+      expect((await recordLiveReport(report, { updateBaseline: false, root })).exitCode).toBe(1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+    const { modelRuntime, faux } = await fauxModelRuntime();
+    const directory = await temporaryDirectory();
+    try {
+      await writeFile(join(directory, "broken.jsonl"), `${JSON.stringify({ id: "broken-fixture", project: "fixtures/missing-project.yaml", prompt: "list files", expect: { tool: "agentx_submit_task" } })}\n`);
+      const broken = await runEvaluation(await loadCases(directory), { model: FAUX_MODEL, modelRuntime, presentation: "new", repeat: 1, beforeRun: oracle(faux, expected) });
+      expect(broken.cases[0]?.runs[0]?.timedOut).toBeUndefined();
+      expect(broken.summary).toMatchObject({ errors: 1 });
+      expect(broken.summary.timeouts).toBeUndefined();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   }, 30_000);
 
   it("counts a turn that runs past the timeout as an error", async () => {
@@ -372,6 +429,10 @@ describe("SC-004 comparison", () => {
     expect(() => compareSc004(fresh, { ...legacy, notApplicable: [] })).toThrow(/different cases: linear/);
     expect(() => compareSc004({ ...fresh, summary: { ...fresh.summary, errors: 1 } }, legacy)).toThrow(/new report has errors/);
     expect(() => compareSc004(fresh, { ...legacy, stopped: "stuck", notRun: [] })).toThrow(/legacy report has errors or stopped early/);
+    // Timeouts are model behaviour: a baseline with them is compared, and each counts as a failed run.
+    const timedOut = { ...legacy, cases: legacy.cases.map((result) => result.id === "refuse" ? scored("refuse", { tool: null, toolOk: false, refusalOk: false, phraseOk: false, timedOut: true, error: "timed out after 180000 ms" }) : result),
+      summary: { ...legacy.summary, timeouts: 1 } };
+    expect(compareSc004(fresh, timedOut)).toMatchObject({ legacy: { passed: 0, toolAccuracy: 0, refusalAccuracy: 0 }, met: true });
     const edited = { ...legacy, cases: legacy.cases.map((result) => result.id === "issues" ? { ...result, caseHash: "issues-edited" } : result) };
     expect(() => compareSc004(fresh, edited)).toThrow(/case definitions differ between the two baselines: issues/);
     const unhashed = { ...legacy, cases: legacy.cases.map((result) => result.id === "files" ? { id: result.id, passed: result.passed, runs: result.runs } : result) };
@@ -494,6 +555,7 @@ describe("evaluation command, live safety", () => {
       expect(written.summary).toEqual(outcome.report.summary);
       await expect(readFile(join(root, "baseline", "scripted.json"), "utf8")).rejects.toThrow(/ENOENT/);
       expect(outcome.lines[0]).toMatch(/^Offline run on the faux provider/);
+      expect(outcome.lines[0]).toContain("; 0 cases errored; 0 cases timed out. Results: ");
       // The legacy presentation (commit 63f78f6) offers only GitHub and cannot receive an unfinished
       // operation's ID, so cases that need a Linear or Jira tool, or a recoverable operation, are
       // reported as not applicable: listed and counted, never scored or dropped.

@@ -46,7 +46,9 @@ executes nothing. For each case it records the first tool call, or none. Scores:
 Each case runs `--repeat` times; a case passes when every run passes. Results are written to
 `tests/eval/results/<model>.json` and compared with `tests/eval/baseline/<model>.json`; the command
 exits non-zero on a regression of more than one case.
-A live run also exits non-zero when any case errors. `--update-baseline` refuses to write a
+A live run also exits non-zero when any case errors. A run that reaches its timeout and then stops is
+model behaviour: it fails its case and is counted in `summary.timeouts`, but it is not an error and
+does not block a baseline. A run that does not stop within the grace period is an error. `--update-baseline` refuses to write a
 baseline from a run with errors, and a malformed baseline, or one for another model, provider or
 presentation, is an error.
 

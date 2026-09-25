@@ -93,7 +93,7 @@ export async function runEvalCommand(argv: readonly string[], options: { root?: 
   const notApplicable = report.notApplicable ?? [];
   const lines = [
     `${scope}: ${summary.passed}/${summary.cases} cases passed; tool accuracy ${(summary.toolAccuracy * 100).toFixed(1)}%; ` +
-      `refusal accuracy ${(summary.refusalAccuracy * 100).toFixed(1)}% over ${summary.refusalCases} cases; ${summary.errors} cases errored. Results: ${results}`,
+      `refusal accuracy ${(summary.refusalAccuracy * 100).toFixed(1)}% over ${summary.refusalCases} cases; ${summary.errors} cases errored; ${summary.timeouts ?? 0} cases timed out. Results: ${results}`,
     ...(notApplicable.length === 0 ? [] : [`Not applicable to the legacy presentation: ${notApplicable.length} cases, not scored ` +
       `(they need what it cannot offer): ${notApplicable.map((entry) => entry.id).join(", ")}`]),
     ...report.cases.filter((entry) => !entry.passed).map((result) =>
