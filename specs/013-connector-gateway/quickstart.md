@@ -2,9 +2,48 @@
 
 ## Linear (US2)
 
-No Part A: unlike Jira and Asana, no live test ran against a real Linear workspace before this PR;
-only fixtures (T032) and the setup guide (T033) exist. T034 stays open pending that, even though
-Part B below passed.
+Part A, before release sign-off: the broker from branch `test/linear-live` (off `mainline` at
+`3d9f768`) against real Linear (`tests/live/linear-live.test.ts`).
+
+- Date: 2026-09-25, run locally.
+- Endpoint: `https://mcp.linear.app/mcp`. A Linear personal API key, registered as a
+  `static-secret` `{apiKey}` credential and sent as a Bearer token (the value is never recorded).
+- Team: `charterarc` (`c408e946-78aa-4db8-923e-f78053dd954f`), the dedicated test team. Tools
+  approved: `list_issues`, `get_issue`, `save_issue`, `save_comment`, `list_comments`.
+- First run: steps 1 to 3 passed and created `CHA-7` (with the `Bug` label); step 4 failed on the
+  test's own assumption. Linear stores markdown and reads the footer's bare thread URL back as an
+  autolink, `[url](<url>)`. The test now accepts either form; no product change. `CHA-7` has no
+  comment.
+- Second run: passed. Evidence lines as printed:
+
+  ```
+  linear live check: step 1 connected offered=5
+  linear live check: step 2 SUCCEEDED
+  linear live check: step 3 SUCCEEDED CHA-8 labels=Bug
+  linear live check: step 4 SUCCEEDED CHA-8 team=scoped footer=yes
+  linear live check: step 5 SUCCEEDED CHA-8 footer=yes
+  linear live check: step 6 403:FORBIDDEN model-supplied team/teamId (random uuid)
+  linear live check: step 7 FAILED:policy_denied ZZZNOPE-1 (not found)
+  linear live check: step 8 not_connected
+  ```
+
+  1. Register the credential and the project with preflight: `connected`, five offered tools, none
+     skipped; no discovered tool exposes `team` or `teamId`.
+  2. `list_issues` in the team: `SUCCEEDED`.
+  3. `save_issue` `AgentX Linear live check <ISO time>` with `labels: ["Bug"]` (the test first
+     confirms, read-only through Linear's GraphQL API, that a `Bug` label is usable in the team):
+     `SUCCEEDED`, `CHA-8`.
+  4. `get_issue` `CHA-8`: `SUCCEEDED`; same title, `teamId` is the scoped team, the description
+     ends with the AgentX footer, and the `Bug` label is present.
+  5. `save_comment` on `CHA-8`: `SUCCEEDED`; `list_comments` reads it back with the footer.
+  6. A model-supplied `team` or `teamId` on `save_issue`, and `team` on `list_issues`: `403`
+     "Linear routing arguments are server controlled", before Linear is contacted. No other
+     team's UUID was supplied (`AGENTX_LIVE_LINEAR_OTHER_TEAM` unset), so a random UUID stood in.
+  7. `get_issue` and `save_comment` on `ZZZNOPE-1`: `FAILED`, `policy_denied`, before any write
+     (`AGENTX_LIVE_LINEAR_OUTSIDE_ISSUE` unset, so a missing issue stood in for an outside one).
+  8. A second credential holding the key minus its last character: preflight `not_connected`,
+     "Linear rejected the credential twice".
+- Created issues: `CHA-7` (first run) and `CHA-8` with one comment (left in place).
 
 Part B, after the production release (T034): passed on 2026-09-25, in production, from the bound
 Slack channel `#agentx-connectors`, project `connectors-check` at revision 2, model
