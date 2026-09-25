@@ -53,6 +53,29 @@ const REFUSED_ARGUMENTS: Readonly<Record<string, readonly ArgumentPath[]>> = {
   update_tasks: [["tasks", "*", "add_projects"], ["tasks", "*", "remove_projects"], ["tasks", "*", "assignee_section"]],
 };
 
+/**
+ * The keys a create_tasks or update_tasks `tasks[]` item may carry: exactly the ones Asana's
+ * recorded items schema lists (tests pin them to tests/fixtures/vendors/asana-tools.json). The
+ * gateway's schema check closes only the top level, so the guard refuses every other item key.
+ */
+export const ASANA_CREATE_TASK_ITEM_KEYS = [
+  "name", "project_id", "parent", "html_notes", "notes", "assignee", "due_on", "due_at", "resource_subtype", "completed",
+  "approval_status", "section_id", "assignee_section", "followers", "start_on", "start_at", "custom_fields",
+] as const;
+export const ASANA_UPDATE_TASK_ITEM_KEYS = [
+  "task", "name", "assignee", "assignee_section", "due_on", "start_on", "notes", "html_notes", "completed", "approval_status",
+  "parent", "add_projects", "remove_projects", "add_dependencies", "remove_dependencies", "add_dependents", "remove_dependents",
+  "add_followers", "remove_followers", "custom_fields",
+] as const;
+const TASK_ITEM_KEYS: Readonly<Record<string, readonly string[]>> = { create_tasks: ASANA_CREATE_TASK_ITEM_KEYS, update_tasks: ASANA_UPDATE_TASK_ITEM_KEYS };
+/** update_tasks item keys whose value is a list of strings (task, user or project identifiers). */
+const STRING_LIST_ITEM_KEYS: ReadonlySet<string> = new Set(["remove_projects", "add_dependencies", "remove_dependencies", "add_dependents", "remove_dependents", "add_followers", "remove_followers"]);
+/** The keys a date custom field value may carry. */
+const DATE_VALUE_KEYS: ReadonlySet<string> = new Set(["date", "date_time"]);
+/** search_tasks custom_fields keys: a custom field GID and a search operator. */
+const SEARCH_CUSTOM_FIELD_KEY = /^[1-9][0-9]{0,19}\.[a-z_]+$/;
+const HTML_COMMENT_REFUSED = "This Asana connector posts comments as plain text only. Pass text instead of html_text.";
+
 const GID = /^[1-9][0-9]{0,19}$/;
 /** The most get_task reads one call may cost, parents included. */
 const MAX_LOOKUPS = 10;
@@ -81,6 +104,81 @@ function valuesAt(value: unknown, path: ArgumentPath, at: string[] = []): Array<
   }
   if (!isObject(value)) return [{ value, at: at.join(".") }];
   return valuesAt(value[head!], rest, [...at, head!]);
+}
+
+/** A plain object's own keys, symbols and non-enumerable keys included; undefined for anything else. */
+function ownKeys(value: unknown): string[] | undefined {
+  if (!isObject(value)) return undefined;
+  const prototype = Object.getPrototypeOf(value) as unknown;
+  if (prototype !== Object.prototype && prototype !== null) return undefined;
+  return Reflect.ownKeys(value).map(String);
+}
+
+const isPlain = (value: unknown) => value === null || ["string", "number", "boolean"].includes(typeof value);
+
+/** Parses a JSON-string argument into a plain object, or refuses. */
+function jsonObject(text: unknown, at: string, tool: string): Record<string, unknown> {
+  let parsed: unknown;
+  try { parsed = typeof text === "string" ? JSON.parse(text) : undefined; } catch { parsed = undefined; }
+  if (ownKeys(parsed) === undefined) throw new GuardRejection(`${at} on ${tool} must be a JSON object, so the request was not sent.`);
+  return parsed as Record<string, unknown>;
+}
+
+/** A task custom field map: custom field GID keys; string, number, null, string-list or date values. */
+function checkTaskCustomFields(fields: unknown, at: string, tool: string): void {
+  const keys = ownKeys(fields);
+  if (keys === undefined) throw new GuardRejection(`${at} on ${tool} must map custom field GIDs to values.`);
+  for (const key of keys) {
+    if (!GID.test(key)) throw new GuardRejection(`${at}.${key.slice(0, 64)} is not allowed on ${tool}: custom field keys are custom field GIDs.`);
+    const value = (fields as Record<string, unknown>)[key];
+    if (isPlain(value) && typeof value !== "boolean") continue;
+    if (Array.isArray(value) && value.every((item) => typeof item === "string")) continue;
+    const valueKeys = ownKeys(value);
+    if (valueKeys !== undefined && valueKeys.every((name) => DATE_VALUE_KEYS.has(name) && typeof (value as Record<string, unknown>)[name] === "string")) continue;
+    throw new GuardRejection(`${at}.${key} on ${tool} is not a custom field value this connector allows, so it is not allowed.`);
+  }
+}
+
+/**
+ * Refuses any structure the guard cannot reason about. Top-level values are plain except `tasks`
+ * on create_tasks and update_tasks; each task item carries only the catalog's keys, with plain
+ * values except the string lists, add_projects (refused elsewhere) and custom fields. JSON-string
+ * custom_fields are parsed and checked the same way.
+ */
+function checkShape(tool: string, args: Readonly<Record<string, unknown>>): void {
+  if (tool === "add_comment" && args.html_text !== undefined) throw new GuardRejection(HTML_COMMENT_REFUSED);
+  const itemKeys = TASK_ITEM_KEYS[tool];
+  for (const key of ownKeys(args) ?? []) {
+    const value = args[key];
+    if (itemKeys !== undefined && key === "tasks") continue;
+    if (!isPlain(value)) throw new GuardRejection(`${key.slice(0, 64)} is not allowed on ${tool}: this connector accepts only plain values there.`);
+  }
+  if (tool === "search_tasks" && args.custom_fields !== undefined) {
+    const fields = jsonObject(args.custom_fields, "custom_fields", tool);
+    for (const key of ownKeys(fields)!) {
+      if (!SEARCH_CUSTOM_FIELD_KEY.test(key) || !isPlain(fields[key]) || fields[key] === null) {
+        throw new GuardRejection(`custom_fields.${key.slice(0, 64)} is not allowed on search_tasks: use a custom field GID and an operator, such as 1200456789012345.value, with a plain value.`);
+      }
+    }
+  }
+  if (itemKeys === undefined || args.tasks === undefined) return;
+  if (!Array.isArray(args.tasks)) throw new GuardRejection(`tasks is not allowed on ${tool} unless it is a list of tasks.`);
+  args.tasks.forEach((item: unknown, index) => {
+    const at = `tasks.${index}`;
+    const keys = ownKeys(item);
+    if (keys === undefined) throw new GuardRejection(`${at} is not allowed on ${tool} unless it is a task object.`);
+    for (const key of keys) {
+      if (!itemKeys.includes(key)) throw new GuardRejection(`${at}.${key.slice(0, 64)} is not allowed on ${tool}.`);
+      const value = (item as Record<string, unknown>)[key];
+      if (key === "custom_fields") {
+        if (value !== null) checkTaskCustomFields(typeof value === "string" ? jsonObject(value, `${at}.custom_fields`, tool) : value, `${at}.custom_fields`, tool);
+      } else if (STRING_LIST_ITEM_KEYS.has(key)) {
+        if (!Array.isArray(value) || !value.every((entry) => typeof entry === "string")) throw new GuardRejection(`${at}.${key} is not allowed on ${tool} unless it is a list of IDs.`);
+      } else if (key !== "add_projects" && !isPlain(value)) {
+        throw new GuardRejection(`${at}.${key} is not allowed on ${tool}: this connector accepts only plain values there.`);
+      }
+    }
+  });
 }
 
 /** The task GIDs the call names, after refusing arguments that could leave the project. */
@@ -124,29 +222,52 @@ function taskOf(text: string): { gid: string; projects: string[]; parent: string
     for (const entry of data.memberships) if (isObject(entry) && isObject(entry.project) && typeof entry.project.gid === "string") projects.add(entry.project.gid);
   }
   if (!listed) return undefined;
-  const parent = isObject(data.parent) && typeof data.parent.gid === "string" ? data.parent.gid : undefined;
+  if (data.parent !== undefined && data.parent !== null && !(isObject(data.parent) && typeof data.parent.gid === "string" && GID.test(data.parent.gid))) return undefined;
+  const parent = isObject(data.parent) ? data.parent.gid as string : undefined;
   return { gid: data.gid, projects: [...projects], parent };
 }
+
+type AsanaTask = NonNullable<ReturnType<typeof taskOf>>;
+
+/** One check's get_task reads: the lookup budget, and every task already read, so a shared parent chain costs one read. */
+interface Lookups { left: number; read: Map<string, AsanaTask> }
 
 /**
  * Reads the task with get_task and refuses unless it, or a parent up to three levels up, is in the
  * scope's project. Subtasks are often in no project themselves; Asana shows them to whoever can
- * see the parent. Fails closed on an error, an unreadable result or a different task.
+ * see the parent. With `direct`, the task itself must be in the project, because the call removes
+ * its parent. Fails closed on an error, an unreadable result or a different task.
  */
-async function confirmInProject(connection: GuardInput["connection"], gid: string, project: AsanaProjectScope, budget: { left: number }): Promise<void> {
+async function confirmInProject(connection: GuardInput["connection"], gid: string, project: AsanaProjectScope, lookups: Lookups, direct: boolean): Promise<void> {
   let current = gid;
   for (let depth = 0; depth <= MAX_PARENT_DEPTH; depth += 1) {
-    if (budget.left <= 0) throw new GuardRejection(`This Asana request needs more than ${MAX_LOOKUPS} task checks. Split it into smaller requests.`);
-    budget.left -= 1;
-    const result = await connection.call("get_task", { task_id: current, include_subtasks: false, include_comments: false });
-    if (result.isError) throw new GuardRejection(`Asana task ${gid} was not found or this connector cannot see it.`);
-    const task = taskOf(resultText(result));
-    if (task === undefined || task.gid !== current) throw new GuardRejection(`Could not confirm that Asana task ${gid} is in the ${project.alias} project, so the request was not sent.`);
-    if (task.projects.includes(project.projectGid)) return;
+    let task = lookups.read.get(current);
+    if (task === undefined) {
+      if (lookups.left <= 0) throw new GuardRejection(`This Asana request needs more than ${MAX_LOOKUPS} task checks. Split it into smaller requests.`);
+      lookups.left -= 1;
+      const result = await connection.call("get_task", { task_id: current, include_subtasks: false, include_comments: false });
+      if (result.isError) throw new GuardRejection(`Asana task ${gid} was not found or this connector cannot see it.`);
+      const read = taskOf(resultText(result));
+      if (read === undefined || read.gid !== current) throw new GuardRejection(`Could not confirm that Asana task ${gid} is in the ${project.alias} project, so the request was not sent.`);
+      lookups.read.set(current, read);
+      task = read;
+    }
+    if (task.projects.includes(project.projectGid)) {
+      if (direct && depth > 0) throw new GuardRejection(`Asana task ${gid} is in the ${project.alias} project only through its parent, so this connector does not remove its parent.`);
+      return;
+    }
     if (task.parent === undefined) break;
     current = task.parent;
   }
   throw new GuardRejection(`Asana task ${gid} is not in the ${project.alias} project this connector may use.`);
+}
+
+/** update_tasks items that set parent to null: those tasks must be in the project themselves. */
+function parentRemoved(tool: string, args: Readonly<Record<string, unknown>>): Set<string> {
+  const removed = new Set<string>();
+  if (tool !== "update_tasks" || !Array.isArray(args.tasks)) return removed;
+  for (const item of args.tasks) if (isObject(item) && Object.hasOwn(item, "parent") && item.parent === null && typeof item.task === "string") removed.add(item.task);
+  return removed;
 }
 
 /**
@@ -159,8 +280,11 @@ export const asanaProjectGuard: Guard = {
   async check({ tool, arguments: args, connection, scope }) {
     const project = scopeOf(scope);
     if (!Object.hasOwn(ASANA_PROJECT_TOOL_ACCESS, tool)) throw new GuardRejection(`${tool} cannot be limited to an Asana project, so this connector does not run it.`);
-    const budget = { left: MAX_LOOKUPS };
-    for (const gid of taskReferences(tool, args, project)) await confirmInProject(connection, gid, project, budget);
+    checkShape(tool, args);
+    const references = taskReferences(tool, args, project);
+    const removed = parentRemoved(tool, args);
+    const lookups: Lookups = { left: MAX_LOOKUPS, read: new Map() };
+    for (const gid of references) await confirmInProject(connection, gid, project, lookups, removed.has(gid));
   },
 };
 

@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { ASANA_PROJECT_TOOL_ACCESS } from "../../packages/contracts/src/index.js";
 import {
-  ASANA_ITEM_ARGUMENTS, ASANA_MCP_ENDPOINT, ASANA_TASK_REFERENCES, ASANA_TOKEN_ENDPOINT, asanaBinder, asanaConnector, asanaProjectGuard, executeTool, GuardRejection, reviewTools,
+  ASANA_CREATE_TASK_ITEM_KEYS, ASANA_ITEM_ARGUMENTS, ASANA_MCP_ENDPOINT, ASANA_TASK_REFERENCES, ASANA_TOKEN_ENDPOINT, ASANA_UPDATE_TASK_ITEM_KEYS, asanaBinder, asanaConnector, asanaProjectGuard, executeTool, GuardRejection, reviewTools,
   type AsanaProjectScope, type ConnectorContext, type Invocation, type Ledger, type McpToolResult, type ToolApproval,
 } from "../../packages/gateway/src/index.js";
 import { vendorTools } from "../support/vendor-fixtures.js";
@@ -34,6 +34,10 @@ const TASKS: Record<string, { projects: string[]; parent?: string }> = {
   "1210000000000301": { projects: [], parent: "1210000000000101" },
   "1210000000000302": { projects: [], parent: "1210000000000301" },
   "1210000000000401": { projects: [], parent: "1210000000000201" },
+  "1210000000000303": { projects: [], parent: "1210000000000301" },
+  "1210000000000304": { projects: [], parent: "1210000000000301" },
+  "1210000000000305": { projects: [], parent: "1210000000000301" },
+  "1210000000000306": { projects: [], parent: "1210000000000301" },
 };
 
 function harness(options: { policy?: ToolApproval[]; getTask?: (gid: string) => McpToolResult } = {}) {
@@ -233,5 +237,96 @@ describe("Asana project guard", () => {
     await expect(check("add_comment", { task_id: 1210000000000201 })).rejects.toThrow("Pass the Asana task ID");
     await expect(check("create_tasks", { tasks: [7] })).rejects.toThrow("not allowed on create_tasks");
     expect(connection.call).not.toHaveBeenCalled();
+  });
+
+  it("allows exactly the task item keys the recorded Asana catalog lists for create_tasks and update_tasks", () => {
+    const itemKeys = (tool: string) => {
+      const properties = vendorTools("asana").find((entry) => entry.name === tool)!.inputSchema.properties as Record<string, { items: { properties: Record<string, unknown> } }>;
+      return Object.keys(properties.tasks!.items.properties).sort();
+    };
+    expect([...ASANA_CREATE_TASK_ITEM_KEYS].sort()).toEqual(itemKeys("create_tasks"));
+    expect([...ASANA_UPDATE_TASK_ITEM_KEYS].sort()).toEqual(itemKeys("update_tasks"));
+  });
+
+  it("refuses task item keys the catalog does not list, including own __proto__ and constructor keys, and writes nothing", async () => {
+    const { run, writes } = harness();
+    const refused: Array<[string, Record<string, unknown>]> = [
+      ["create_tasks", { tasks: [{ name: "a", projects: [OTHER_PROJECT] }] }],
+      ["create_tasks", { tasks: [{ name: "a", workspace: "1", memberships: [{ project: OTHER_PROJECT }] }] }],
+      ["create_tasks", { tasks: [{ name: "a", workspace: "1210000000000001" }] }],
+      ["update_tasks", { tasks: [{ task: "1210000000000101", task_id: "1210000000000201", name: "x" }] }],
+      ["update_tasks", { tasks: [{ task: "1210000000000101", gid: "1210000000000201", name: "x" }] }],
+      ["update_tasks", { tasks: [{ task: "1210000000000101", projects: [OTHER_PROJECT] }] }],
+      ["update_tasks", { tasks: [{ task: "1210000000000101", memberships: [{ project: OTHER_PROJECT }] }] }],
+      ["update_tasks", { tasks: [{ task: "1210000000000101", constructor: "1210000000000201" }] }],
+      ["update_tasks", JSON.parse('{"tasks":[{"task":"1210000000000101","__proto__":{"task":"1210000000000201"}}]}') as Record<string, unknown>],
+    ];
+    for (const [tool, args] of refused) {
+      const result = await run(tool, args);
+      expect(result).toMatchObject({ status: "FAILED", reason: "policy_denied" });
+      expect(result.text).toContain("is not allowed");
+    }
+    expect(writes()).toEqual([]);
+  });
+
+  it("allows task custom fields keyed by field GID only", async () => {
+    const { run, writes } = harness();
+    expect(await run("update_tasks", { tasks: [{ task: "1210000000000101", custom_fields: { "1200456789012345": "1200123456789012", "1200456789012349": { date: "2025-06-15" }, "1200456789012348": ["1200111111111111"] } }] })).toMatchObject({ status: "SUCCEEDED" });
+    expect(await run("create_tasks", { tasks: [{ name: "a", custom_fields: '{"1200456789012346":12.5}' }] })).toMatchObject({ status: "SUCCEEDED" });
+    const refused: Array<[string, Record<string, unknown>]> = [
+      ["update_tasks", { tasks: [{ task: "1210000000000101", custom_fields: { projects: OTHER_PROJECT } }] }],
+      ["update_tasks", { tasks: [{ task: "1210000000000101", custom_fields: { "1200456789012349": { project: OTHER_PROJECT } } }] }],
+      ["create_tasks", { tasks: [{ name: "a", custom_fields: "not json" }] }],
+      ["create_tasks", { tasks: [{ name: "a", custom_fields: '{"memberships":[{"project":"1210000000000020"}]}' }] }],
+    ];
+    for (const [tool, args] of refused) expect(await run(tool, args)).toMatchObject({ status: "FAILED", reason: "policy_denied" });
+    expect(writes()).toHaveLength(2);
+  });
+
+  it("refuses removing the parent of a task that is in the project only through that parent", async () => {
+    const { run, writes } = harness();
+    const result = await run("update_tasks", { tasks: [{ task: "1210000000000301", parent: null }] });
+    expect(result).toMatchObject({ status: "FAILED", reason: "policy_denied", text: "Asana task 1210000000000301 is in the payments project only through its parent, so this connector does not remove its parent." });
+    expect(writes()).toEqual([]);
+    expect(await run("update_tasks", { tasks: [{ task: "1210000000000101", parent: null }] })).toMatchObject({ status: "SUCCEEDED" });
+  });
+
+  it("fails closed when Asana returns a malformed parent GID", async () => {
+    for (const parent of [{ gid: "not-a-gid" }, { gid: 1210000000000101 }, "1210000000000101"]) {
+      const { run, writes } = harness({ getTask: (gid) => {
+        const result = taskResult(gid, []);
+        const body = JSON.parse(result.content![0]!.text!) as { data: Record<string, unknown> };
+        body.data.parent = parent;
+        return { content: [{ type: "text", text: JSON.stringify(body) }] };
+      } });
+      expect(await run("add_comment", { task_id: "1210000000000301", text: "x" })).toMatchObject({ status: "FAILED", reason: "policy_denied", text: "Could not confirm that Asana task 1210000000000301 is in the payments project, so the request was not sent." });
+      expect(writes()).toEqual([]);
+    }
+  });
+
+  it("reads a shared parent chain once, so sibling subtasks do not exhaust the lookup cap", async () => {
+    const { run, calls } = harness();
+    const siblings = ["1210000000000303", "1210000000000304", "1210000000000305", "1210000000000306"];
+    expect(await run("update_tasks", { tasks: siblings.map((task) => ({ task, completed: true })) })).toMatchObject({ status: "SUCCEEDED" });
+    const lookups = calls.filter((entry) => entry.name === "get_task").map((entry) => entry.arguments.task_id);
+    expect(lookups.length).toBeLessThanOrEqual(2 + siblings.length);
+    expect(new Set(lookups).size).toBe(lookups.length);
+  });
+
+  it("checks search_tasks custom_fields: GID.operator keys with plain values only", async () => {
+    const { run, calls } = harness();
+    expect(await run("search_tasks", { custom_fields: '{"4578152156.value":"1200123456789012","1200999999999999.is_set":true}' })).toMatchObject({ status: "SUCCEEDED" });
+    for (const custom_fields of ['{"projects.any":"1210000000000020"}', "not json", "[]", '"x"', '{"4578152156":"x"}', '{"4578152156.value":{"a":1}}', '{"4578152156.value":["a"]}', '{"__proto__":{"a":1}}']) {
+      expect(await run("search_tasks", { custom_fields })).toMatchObject({ status: "FAILED", reason: "policy_denied" });
+    }
+    expect(calls.map((entry) => entry.name)).toEqual(["search_tasks"]);
+  });
+
+  it("refuses html_text on add_comment, so every comment carries the plain-text attribution", async () => {
+    const { run, calls } = harness();
+    expect(await run("add_comment", { task_id: "1210000000000101", html_text: "<body>Fixed</body>" })).toMatchObject({
+      status: "FAILED", reason: "policy_denied", text: "This Asana connector posts comments as plain text only. Pass text instead of html_text.",
+    });
+    expect(calls).toEqual([]);
   });
 });
