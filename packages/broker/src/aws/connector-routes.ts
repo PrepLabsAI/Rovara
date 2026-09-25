@@ -73,6 +73,7 @@ export async function discoverConnector(input: {
   workspace: WorkspaceInstance;
   context: ConnectorContextBase;
   catalogs: CatalogCache<ScopeDiscovery>;
+  refresh?: boolean;
 }): Promise<ConnectorCatalog> {
   const { connector, workspace, context, catalogs } = input;
   const notConnected = (message: string, scope?: string): ConnectorCatalog => {
@@ -84,6 +85,13 @@ export async function discoverConnector(input: {
   };
   const definition = await connector.definition();
   if ("notConnected" in definition) return notConnected(definition.notConnected);
+  // Sent by the Slack service after a turn saw schema_changed: another container may still hold the
+  // stale catalog, so this request skips the cache and stores what the vendor returns now.
+  if (input.refresh === true) {
+    for (const scope of connector.scopes) {
+      catalogs.delete(connectorCatalogKey(workspace.projectName, context.settingsRevision, connector.name, scope.alias));
+    }
+  }
   const scopes: ScopeCatalog[] = [];
   for (const scope of connector.scopes) {
     let discovery: ScopeDiscovery;

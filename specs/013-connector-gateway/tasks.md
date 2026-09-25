@@ -48,7 +48,7 @@ Each phase is one pull request to `mainline`. Check a task only after its eviden
 - [ ] T029 Add the admin turn export route and `agentx admin turns export`.
 - [ ] T030 Add `npm run eval` with seed cases, legacy presentation mode and baselines; record SC-004.
 - [ ] T031 Update the README diagnostics paragraph for turn-record retention.
-- [ ] T039 Send `refresh=1` for connector discovery after a turn recorded a definition-changed failure; the tools route bypasses the per-container catalog cache for it.
+- [X] T039 Send `refresh=1` for connector discovery after a turn recorded a definition-changed failure; the tools route bypasses the per-container catalog cache for it.
 
 ## Phase 5b: Shared binder (before 5 and 6)
 

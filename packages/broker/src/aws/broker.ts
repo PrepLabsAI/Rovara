@@ -415,7 +415,7 @@ async function routeWorkspaceRequest(
     if (parsed && !parsed.success) throw agentXError("CONFIG_INVALID", "invalid connector request");
     const context = connectorContext(identity, workspace, project);
     if (!parsed?.success) {
-      return json({ catalog: await discoverConnector({ connector, workspace, context, catalogs: dependencies.catalogs }) }, request.requestId);
+      return json({ catalog: await discoverConnector({ connector, workspace, context, catalogs: dependencies.catalogs, refresh: url.searchParams.get("refresh") === "1" }) }, request.requestId);
     }
     const attribution = attributionText(identity, connector);
     const result = await callConnector({
