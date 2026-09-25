@@ -23,7 +23,7 @@ import {
   type SlackThread,
 } from "@agentx/contracts";
 import { requiredEnvironment, type HttpApiV2Event } from "./lambda.js";
-import type { SlackMemberCheck } from "./slack-members.js";
+import { createSlackMemberCheck, type SlackMemberCheck } from "./slack-members.js";
 
 const SIGNATURE_WINDOW_SECONDS = 300;
 const EVENT_RETENTION_SECONDS = 14 * 24 * 60 * 60;
@@ -286,6 +286,24 @@ export async function postSlackMessage(
   }
 }
 
+export interface SlackIngressSettings {
+  acceptAppPosted: boolean;
+  turnsPerMinute: number;
+}
+
+/** Reads the deployment's Slack ingress switches (spec 014 FR-011, FR-012); a bad value stops the cold start. */
+export function slackIngressSettings(environment: Readonly<Record<string, string | undefined>>): SlackIngressSettings {
+  const appPosted = environment.SLACK_APP_POSTED_MESSAGES ?? "accept";
+  if (appPosted !== "accept" && appPosted !== "ignore") {
+    throw new Error("SLACK_APP_POSTED_MESSAGES must be accept or ignore");
+  }
+  const turns = environment.SLACK_THREAD_TURNS_PER_MINUTE ?? "6";
+  if (!/^\d{1,2}$/u.test(turns) || Number(turns) < 1 || Number(turns) > 60) {
+    throw new Error("SLACK_THREAD_TURNS_PER_MINUTE must be a whole number from 1 to 60");
+  }
+  return { acceptAppPosted: appPosted === "accept", turnsPerMinute: Number(turns) };
+}
+
 export function parseSlackSecrets(secretString: string): SlackSecrets {
   const value = asRecord(JSON.parse(secretString));
   if (typeof value.signingSecret !== "string" || value.signingSecret.length < 16) {
@@ -308,6 +326,7 @@ function createAwsSlackIngressHandler() {
   const threadsTableName = requiredEnvironment("SLACK_THREADS_TABLE_NAME");
   const queueUrl = requiredEnvironment("SLACK_REQUEST_QUEUE_URL");
   const secretArn = requiredEnvironment("SLACK_SECRET_ARN");
+  const settings = slackIngressSettings(process.env);
   let cached: { secrets: Promise<SlackSecrets>; loadedAt: number } | undefined;
   const secrets = (): Promise<SlackSecrets> => {
     if (!cached || Date.now() - cached.loadedAt > SECRET_CACHE_MILLISECONDS) {
@@ -322,8 +341,23 @@ function createAwsSlackIngressHandler() {
     }
     return cached.secrets;
   };
+  const checkMember = createSlackMemberCheck({ token: async () => (await secrets()).botToken });
   return createSlackIngressHandler({
     secrets,
+    appPosted: { accept: settings.acceptAppPosted, checkMember },
+    turnLimit: {
+      perMinute: settings.turnsPerMinute,
+      async countTurn(threadSubject, windowStartSeconds, expiresAtSeconds) {
+        const response = await documentClient.send(new UpdateCommand({
+          TableName: threadsTableName,
+          Key: { pk: `THREAD#${threadSubject}`, sk: `TURNS#${windowStartSeconds}` },
+          UpdateExpression: "ADD turns :one SET expiresAt = :expiresAt",
+          ExpressionAttributeValues: { ":one": 1, ":expiresAt": expiresAtSeconds },
+          ReturnValues: "UPDATED_NEW",
+        }));
+        return Number(response.Attributes?.turns ?? 0);
+      },
+    },
     async getBinding(teamId, channelId) {
       const response = await documentClient.send(new GetCommand({
         TableName: stateTableName,

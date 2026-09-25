@@ -358,6 +358,19 @@ export class ControlPlaneStack extends Stack {
     broker.addEnvironment("SLACK_MEMBER_WORKSPACE_LIMIT", memberWorkspaceLimit.valueAsString);
     broker.addEnvironment("SLACK_ORGANIZATION_WORKSPACE_LIMIT", organizationWorkspaceLimit.valueAsString);
 
+    const appPostedMessages = new CfnParameter(this, "SlackAppPostedMessages", {
+      type: "String",
+      default: "accept",
+      allowedValues: ["accept", "ignore"],
+      description: "accept: answer mentions a person posts through another app with their own Slack token; ignore: answer only typed mentions",
+    });
+    const threadTurnsPerMinute = new CfnParameter(this, "SlackThreadTurnsPerMinute", {
+      type: "Number",
+      default: 6,
+      minValue: 1,
+      maxValue: 60,
+      description: "Most requests one Slack thread may start in a minute; further requests pause the thread with one notice",
+    });
     const slackIngress = packagedFunction(
       this,
       "SlackIngress",
@@ -367,6 +380,8 @@ export class ControlPlaneStack extends Stack {
         SLACK_THREADS_TABLE_NAME: slackThreads.tableName,
         SLACK_REQUEST_QUEUE_URL: slackRequestQueue.queueUrl,
         SLACK_SECRET_ARN: slackSecret.secretArn,
+        SLACK_APP_POSTED_MESSAGES: appPostedMessages.valueAsString,
+        SLACK_THREAD_TURNS_PER_MINUTE: threadTurnsPerMinute.valueAsString,
       },
       Duration.seconds(10),
     );

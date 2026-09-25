@@ -4,6 +4,7 @@ import { SlackRequestMessageSchema, type SlackRequestMessage } from "../../packa
 import {
   createSlackIngressHandler,
   parseSlackSecrets,
+  slackIngressSettings,
   validSignature,
 } from "../../packages/broker/src/aws/slack-ingress.js";
 import type { SlackMemberCheck } from "../../packages/broker/src/aws/slack-members.js";
@@ -491,5 +492,26 @@ describe("per-thread turn limit (spec 014 FR-011)", () => {
     }
     expect(queue).toHaveLength(6);
     expect(logs.filter((entry) => entry.event === "thread_paused.notice_failed")).toHaveLength(1);
+  });
+});
+
+describe("Slack ingress deployment settings (spec 014 FR-011, FR-012)", () => {
+  it("accepts app-posted messages and allows six turns a minute by default", () => {
+    expect(slackIngressSettings({})).toEqual({ acceptAppPosted: true, turnsPerMinute: 6 });
+  });
+
+  it("reads the deployment's switch and limit", () => {
+    expect(slackIngressSettings({ SLACK_APP_POSTED_MESSAGES: "ignore", SLACK_THREAD_TURNS_PER_MINUTE: "12" }))
+      .toEqual({ acceptAppPosted: false, turnsPerMinute: 12 });
+  });
+
+  it.each([
+    [{ SLACK_APP_POSTED_MESSAGES: "yes" }, /accept or ignore/],
+    [{ SLACK_THREAD_TURNS_PER_MINUTE: "0" }, /1 to 60/],
+    [{ SLACK_THREAD_TURNS_PER_MINUTE: "61" }, /1 to 60/],
+    [{ SLACK_THREAD_TURNS_PER_MINUTE: "6.5" }, /1 to 60/],
+    [{ SLACK_THREAD_TURNS_PER_MINUTE: "" }, /1 to 60/],
+  ])("refuses %j", (environment, message) => {
+    expect(() => slackIngressSettings(environment)).toThrow(message);
   });
 });
