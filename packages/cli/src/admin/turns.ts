@@ -21,10 +21,11 @@ export function parseSince(value: string, now = Date.now()): string {
 export async function exportTurns(
   input: { controlPlaneUrl: string; accessToken: string; since: string; write: (line: string) => void | Promise<void> },
   fetchImplementation: typeof fetch = fetch,
-): Promise<{ exported: number; since: string }> {
+): Promise<{ exported: number; skipped?: number; since: string }> {
   const seen = new Set<string>();
   let cursor: string | undefined;
   let exported = 0;
+  let skipped = 0;
   let pages = 0;
   do {
     pages += 1;
@@ -37,8 +38,11 @@ export async function exportTurns(
     const page = await adminResponseBody(await fetchImplementation(url.toString(), {
       method: "GET",
       headers: { authorization: `Bearer ${input.accessToken}` },
-    })) as { turns?: unknown; cursor?: unknown };
-    if (!Array.isArray(page.turns) || (page.cursor !== undefined && typeof page.cursor !== "string")) {
+    })) as { turns?: unknown; cursor?: unknown; skipped?: unknown };
+    if (
+      !Array.isArray(page.turns) || (page.cursor !== undefined && typeof page.cursor !== "string")
+      || (page.skipped !== undefined && (typeof page.skipped !== "number" || !Number.isInteger(page.skipped) || page.skipped < 0))
+    ) {
       throw agentXError("RUNTIME_UNAVAILABLE", "control plane returned an invalid turn page");
     }
     // A page can come back short or empty and still carry a cursor: expired items are filtered
@@ -47,11 +51,13 @@ export async function exportTurns(
       await input.write(`${JSON.stringify(turn)}\n`);
       exported += 1;
     }
+    // Malformed records the control plane left out; the control plane log names their keys.
+    if (typeof page.skipped === "number") skipped += page.skipped;
     cursor = page.cursor;
     if (cursor !== undefined) {
       if (seen.has(cursor)) throw agentXError("RUNTIME_UNAVAILABLE", "control plane repeated a turn page cursor; export stopped");
       seen.add(cursor);
     }
   } while (cursor !== undefined);
-  return { exported, since: input.since };
+  return { exported, ...(skipped > 0 ? { skipped } : {}), since: input.since };
 }

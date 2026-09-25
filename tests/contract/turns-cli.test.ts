@@ -37,6 +37,13 @@ describe("turn export client", () => {
     expect(new Headers(fetchImplementation.mock.calls[0]?.[1]?.headers).get("authorization")).toBe("Bearer t");
   });
 
+  it("adds up the malformed records the control plane skipped", async () => {
+    const pages = [{ turns: [{ eventId: "EvA00001" }], cursor: "c1", skipped: 2 }, { turns: [], skipped: 1 }];
+    const fetchImplementation = vi.fn<typeof fetch>(async () => Response.json(pages.shift()));
+    const result = await exportTurns({ controlPlaneUrl: "https://agentx.example.test", accessToken: "t", since: "2026-09-17T12:00:00.000Z", write: () => undefined }, fetchImplementation);
+    expect(result).toEqual({ exported: 1, skipped: 3, since: "2026-09-17T12:00:00.000Z" });
+  });
+
   it("stops on a repeated cursor instead of looping forever", async () => {
     const fetchImplementation = vi.fn<typeof fetch>(async () => Response.json({ turns: [], cursor: "same" }));
     await expect(exportTurns({ controlPlaneUrl: "https://agentx.example.test", accessToken: "t", since: "2026-09-17T12:00:00.000Z", write: () => undefined }, fetchImplementation))
@@ -81,6 +88,31 @@ describe("agentx admin turns export", () => {
     expect(exitCode).toBe(0);
     expect(stdout).toBe(`${JSON.stringify({ eventId: "EvA00001" })}\n`);
     expect(JSON.parse(stderr)).toMatchObject({ ok: true, data: { exported: 1 } });
+  });
+
+  it("prints the total skipped malformed records on stderr", async () => {
+    const { tokens, globals } = await context();
+    const fetchImplementation = vi.fn<typeof fetch>(async () => Response.json({ turns: [{ eventId: "EvA00001" }], skipped: 2 }));
+    const { exitCode, stdout, stderr } = await run([...globals, "--json", "admin", "turns", "export", "--since", "7d"], tokens, fetchImplementation);
+    expect(exitCode).toBe(0);
+    expect(stdout).toBe(`${JSON.stringify({ eventId: "EvA00001" })}\n`);
+    expect(JSON.parse(stderr)).toMatchObject({ ok: true, data: { exported: 1, skipped: 2 } });
+  });
+
+  it("names the count when a stdout export fails partway, keeping the error code", async () => {
+    const { tokens, globals } = await context();
+    const pages = [{ turns: [{ eventId: "EvA00001" }, { eventId: "EvA00002" }], cursor: "c1" }];
+    const fetchImplementation = vi.fn<typeof fetch>(async () => {
+      if (pages.length > 0) return Response.json(pages.shift());
+      return Response.json({ error: { code: "FORBIDDEN", message: "administrator claim is required" } }, { status: 403 });
+    });
+    const { exitCode, stdout, stderr } = await run([...globals, "--json", "admin", "turns", "export", "--since", "12h"], tokens, fetchImplementation);
+    expect(exitCode).toBe(4);
+    expect(stdout.trim().split("\n")).toHaveLength(2);
+    expect(JSON.parse(stderr)).toMatchObject({
+      ok: false,
+      error: { code: "FORBIDDEN", message: "turn export failed after 2 records: FORBIDDEN: administrator claim is required" },
+    });
   });
 
   it("writes to an owner-only file with --output", async () => {

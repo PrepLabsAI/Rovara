@@ -204,12 +204,21 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       const since = parseSince(options.since);
       const { settings, accessToken } = await authenticate(globals, services.tokenStore);
       if (options.output === undefined) {
-        const result = await exportTurns({
-          controlPlaneUrl: settings.controlPlaneUrl,
-          accessToken,
-          since,
-          write: (line) => { services.stdout.write(line); },
-        }, services.fetchImplementation);
+        let printed = 0;
+        let result: Awaited<ReturnType<typeof exportTurns>>;
+        try {
+          result = await exportTurns({
+            controlPlaneUrl: settings.controlPlaneUrl,
+            accessToken,
+            since,
+            write: (line) => {
+              services.stdout.write(line);
+              printed += 1;
+            },
+          }, services.fetchImplementation);
+        } catch (error) {
+          throw exportFailure(error, printed, "stdout");
+        }
         // stdout carries only JSON Lines, so the summary goes to stderr.
         services.stderr.write(formatSuccess(result, globals.json));
         return;
@@ -239,7 +248,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       } catch (error) {
         await file.close().catch(() => undefined);
         await rm(partialPath, { force: true });
-        throw exportFailure(error, written);
+        throw exportFailure(error, written, "file");
       }
     });
 
@@ -277,9 +286,12 @@ async function authenticate(
  * before it happened, so a caller never mistakes a stopped export for a complete one. Keeps the
  * original error's class and, for an AgentXError, its code, so the exit-code mapping is unchanged.
  */
-function exportFailure(error: unknown, written: number): unknown {
+function exportFailure(error: unknown, written: number, target: "file" | "stdout"): unknown {
   const cause = error instanceof Error ? error.message : String(error);
-  const message = `turn export failed after ${written} records; no file was written: ${cause}`;
+  // Records already printed to stdout stay printed; only a file export can promise nothing was written.
+  const message = target === "file"
+    ? `turn export failed after ${written} records; no file was written: ${cause}`
+    : `turn export failed after ${written} records: ${cause}`;
   if (error instanceof AgentXError) return agentXError(error.code, message);
   if (error instanceof Error) {
     error.message = message;
