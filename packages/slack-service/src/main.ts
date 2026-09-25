@@ -12,15 +12,16 @@ import {
   SQSClient,
 } from "@aws-sdk/client-sqs";
 import { defaultProvider } from "@aws-sdk/credential-provider-node";
-import { SLACK_QUEUED_BEHIND_ATTRIBUTE, queuedBehindOf, type SlackRequestMessage } from "@agentx/contracts";
+import { SLACK_QUEUED_BEHIND_ATTRIBUTE, confirmationBlocks, queuedBehindOf, type SlackRequestMessage } from "@agentx/contracts";
 import { ControlPlaneApi } from "@agentx/orchestrator/control-plane-api";
 import { runOrchestratorTurn } from "@agentx/orchestrator/orchestrator";
+import { createDynamoConfirmationStore } from "./confirmation-store.js";
 import { runConsumer, type QueueClient } from "./consumer.js";
 import { processSlackRequest, type ServiceLog, type ThreadServiceApi, type ThreadStore, type TurnInput } from "./processor.js";
 import { createSignedServiceFetch } from "./signing-fetch.js";
 import { createSlackUserNames } from "./user-names.js";
 import { createThreadApi } from "./thread-api.js";
-import { createHostedSlackRuntime } from "./runtime.js";
+import { createHostedClassifier, createHostedSlackRuntime } from "./runtime.js";
 import { DynamoTurnRecordWriter } from "./turn-records.js";
 
 const MAX_RECEIVE_COUNT = 5;
@@ -58,6 +59,17 @@ const log: ServiceLog = (event, fields) => {
   console.log(JSON.stringify({ component: "slack-orchestrator", event, ...fields }));
 };
 
+// The action gate's classifier (spec 014): a small model chosen per deployment through the
+// AgentXSlackOrchestrator parameter GateClassifierModelId. A classifier that cannot be made, or an
+// unknown model, makes every change no rule settles ask, so the service still starts and says so.
+const classifierModel = {
+  provider: process.env.AGENTX_GATE_CLASSIFIER_PROVIDER ?? "amazon-bedrock",
+  modelId: process.env.AGENTX_GATE_CLASSIFIER_MODEL ?? "amazon.nova-lite-v1:0",
+};
+const classifierTimeoutMs = Number.parseInt(process.env.AGENTX_GATE_CLASSIFIER_TIMEOUT_MS ?? "8000", 10);
+const { classifier, available: classifierAvailable } = await createHostedClassifier({ model: classifierModel, timeoutMs: classifierTimeoutMs, log });
+const confirmations = createDynamoConfirmationStore(documentClient, threadsTableName, Date.now, log);
+
 let botToken: { value: Promise<string>; loadedAt: number } | undefined;
 function slackBotToken(): Promise<string> {
   if (!botToken || Date.now() - botToken.loadedAt > 5 * 60 * 1_000) {
@@ -78,11 +90,11 @@ function slackBotToken(): Promise<string> {
 
 const slackUserName = createSlackUserNames({ token: slackBotToken });
 
-async function postToSlack(channel: string, threadTs: string, text: string): Promise<void> {
+async function postToSlack(channel: string, threadTs: string, text: string, blocks?: unknown[]): Promise<void> {
   const response = await fetch("https://slack.com/api/chat.postMessage", {
     method: "POST",
     headers: { authorization: `Bearer ${await slackBotToken()}`, "content-type": "application/json; charset=utf-8" },
-    body: JSON.stringify({ channel, thread_ts: threadTs, text, unfurl_links: false }),
+    body: JSON.stringify({ channel, thread_ts: threadTs, text, unfurl_links: false, ...(blocks === undefined ? {} : { blocks }) }),
   });
   const result = await response.json() as { ok?: boolean; error?: string };
   if (!response.ok || result.ok !== true) throw new Error(`Slack chat.postMessage failed: ${result.error ?? `HTTP ${response.status}`}`);
@@ -198,6 +210,17 @@ async function runTurn(input: TurnInput): Promise<string> {
       onConnectorUnavailable: (failure) => log("connector.discovery_failed", {
         eventId: input.message.eventId, connector: failure.connector, cause: failure.cause, code: failure.code, message: failure.message,
       }),
+      classifier,
+      // One line per gate decision until turn records carry them; never the call's arguments.
+      onGateDecision: (decision) => log("gate.decision", {
+        eventId: input.message.eventId, tool: decision.tool, actionClass: decision.actionClass, outcome: decision.outcome, source: decision.source,
+        reason: decision.reason, argumentsHash: decision.argumentsHash.slice(0, 16),
+        ...(decision.connector === undefined ? {} : { connector: decision.connector }),
+        ...(decision.kind === undefined ? {} : { kind: decision.kind }),
+        ...(decision.rule === undefined ? {} : { rule: decision.rule }),
+        ...(decision.classifierMs === undefined ? {} : { classifierMs: decision.classifierMs }),
+        ...(decision.usage === undefined ? {} : { classifierInputTokens: decision.usage.input, classifierOutputTokens: decision.usage.output, classifierCost: decision.usage.cost }),
+      }),
     });
     try {
       const response = await runOrchestratorTurn(runtime, input.message.text, input.recorder);
@@ -265,13 +288,18 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
   });
 }
 
-log("service.started", { concurrency, provider: model.provider, model: model.modelId });
+log("service.started", {
+  concurrency, provider: model.provider, model: model.modelId,
+  classifierProvider: classifierModel.provider, classifierModel: classifierModel.modelId, classifierAvailable,
+});
 await runConsumer(queue, (message, context) => processSlackRequest(message, {
   api: threadApi,
   threads,
   runTurn,
   post: (thread, text) => postToSlack(thread.channelId, thread.threadTs, text),
   log,
+  confirmations,
+  postConfirmation: (thread, confirmation, text) => postToSlack(thread.channelId, thread.threadTs, text, confirmationBlocks(text, confirmation.confirmationId)),
   turnRecords: new DynamoTurnRecordWriter(documentClient, turnRecordsTableName),
 }, context), {
   concurrency,

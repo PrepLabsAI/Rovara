@@ -67,6 +67,14 @@ export const EXPIRED_ANSWER_MS = CONFIRMATION_TTL_MS;
 /** `usedBy` of a confirmation saved closed and not yet posted (or never posted): nobody can answer it. */
 export const UNPOSTED_MARK = "unposted";
 
+/**
+ * The id of the confirmation a turn for this Slack event posts. It derives from the event, so a
+ * redelivered event names the same confirmation: settling sees it and never reopens or re-posts it.
+ */
+export function confirmationIdFor(eventId: string): string {
+  return deterministicUuid(`${eventId}:confirmation`);
+}
+
 export type ConfirmationCheck =
   | { run: false }
   | { run: true; session: GateSession; claim?: { confirmationId: string }; superseded?: string };
@@ -114,8 +122,12 @@ export async function checkConfirmation(input: {
     return { run: false };
   };
   if (reply === undefined) {
-    // The requester moved on: their pending confirmation no longer applies after this turn.
-    return { run: true, session: session(), ...(live && pending?.requesterId === message.userId ? { superseded: pending.confirmationId } : {}) };
+    // The requester moved on: their pending confirmation no longer applies after this turn. A
+    // redelivery of the event that posted it has not moved on, so it leaves it pending.
+    const superseded = live && pending?.requesterId === message.userId && pending.confirmationId !== confirmationIdFor(message.eventId)
+      ? pending.confirmationId
+      : undefined;
+    return { run: true, session: session(), ...(superseded === undefined ? {} : { superseded }) };
   }
   if (click !== undefined && pending?.confirmationId !== click.confirmationId) return refuse("not_pending", NO_LONGER_PENDING_TEXT);
   if (reply === "yes_to_all" && !live) {
@@ -157,6 +169,13 @@ export async function checkConfirmation(input: {
 export const MAX_CONFIRMATION_CALLS = 20;
 
 /**
+ * What settling did: nothing to ask; posted a confirmation; or, for a redelivered event whose
+ * earlier attempt already posted its confirmation, left that one as it is: still pending, or
+ * already answered (used, cancelled or expired), which is never reopened or re-posted.
+ */
+export type SettleOutcome = "none" | "posted" | "already_pending" | "already_answered";
+
+/**
  * After a turn: leaves a tombstone on the confirmation it used or superseded, then stores and
  * posts one confirmation listing every call the turn blocked.
  */
@@ -168,20 +187,28 @@ export async function settleConfirmations(input: {
   postConfirmation: (confirmation: PendingConfirmation, text: string) => Promise<void>;
   log: ServiceLog;
   now: number;
-}): Promise<void> {
+}): Promise<SettleOutcome> {
   const { check, message, subject, store } = input;
   const retired = check.claim?.confirmationId ?? check.superseded;
   // A claimed confirmation is already a tombstone; retiring it again changes nothing.
   if (retired !== undefined) await store.retire(subject, retired, message.eventId);
   const calls = [...new Map(check.session.asks.map((ask) => [ask.argumentsHash, { tool: ask.tool, argumentsHash: ask.argumentsHash, summary: ask.summary, kind: ask.kind }])).values()]
     .slice(0, MAX_CONFIRMATION_CALLS);
-  if (calls.length === 0) return;
+  if (calls.length === 0) return "none";
   const previous = await store.load(subject);
+  const confirmationId = confirmationIdFor(message.eventId);
+  if (previous?.confirmationId === confirmationId && previous.usedBy !== UNPOSTED_MARK) {
+    // A redelivery of the event that already posted this confirmation (spec 014): overwriting it
+    // would reopen an answered one, so a confirmed call could run twice. It stays as it is.
+    const outcome = previous.retiredAt === undefined ? "already_pending" : "already_answered";
+    input.log("gate.confirmation_kept", { eventId: message.eventId, outcome });
+    return outcome;
+  }
   const replaced = previous !== undefined && previous.retiredAt === undefined && input.now < Date.parse(previous.expiresAt) && previous.requesterId !== check.session.requesterId
     ? previous.requesterId
     : undefined;
   const confirmation: PendingConfirmation = {
-    confirmationId: deterministicUuid(`${message.eventId}:confirmation`),
+    confirmationId,
     requesterId: check.session.requesterId,
     calls,
     postedAt: new Date(input.now).toISOString(),
@@ -204,4 +231,5 @@ export async function settleConfirmations(input: {
     throw error;
   }
   input.log("gate.confirmation_requested", { eventId: message.eventId, calls: calls.length, kinds: [...new Set(calls.map((call) => call.kind))].join(",") });
+  return "posted";
 }

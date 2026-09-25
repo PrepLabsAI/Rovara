@@ -42,7 +42,10 @@ export class ControlPlaneApi implements OrchestrationApi, OperationPollingTransp
     this.assertWorkspace(input.workspaceId);
     // refresh=1 asks the broker to skip its per-container catalog cache; an older broker ignores it.
     const query = input.refresh === true ? "?refresh=1" : "";
-    const response = object(await this.request(`/v1/workspaces/${this.workspaceId}/connectors/${encodeURIComponent(input.connector)}/tools${query}`, { method: "GET" }));
+    // Asks for the action gate's fields (spec 014); an older control plane ignores the header.
+    const response = object(await this.request(`/v1/workspaces/${this.workspaceId}/connectors/${encodeURIComponent(input.connector)}/tools${query}`, {
+      method: "GET", headers: { "x-agentx-include": "gate" },
+    }));
     return ConnectorCatalogSchema.parse(response.catalog);
   }
 

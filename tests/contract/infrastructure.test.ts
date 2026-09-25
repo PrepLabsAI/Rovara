@@ -549,3 +549,15 @@ describe("Slack interactivity infrastructure (spec 014)", () => {
     template.resourceCountIs("AWS::Lambda::Function", 4);
   });
 });
+
+describe("action gate classifier setting (spec 014)", () => {
+  it("passes the configured classifier model to the Slack service, defaulting to Amazon Nova Lite", () => {
+    const template = Template.fromStack(new SlackOrchestratorStack(new App(), "TestSlackOrchestratorGate", { env: { region: "us-east-1" } }));
+    template.hasParameter("GateClassifierModelId", { Type: "String", Default: "amazon.nova-lite-v1:0" });
+    template.hasResourceProperties("AWS::ECS::TaskDefinition", {
+      ContainerDefinitions: [Match.objectLike({
+        Environment: Match.arrayWith([{ Name: "AGENTX_GATE_CLASSIFIER_MODEL", Value: { Ref: "GateClassifierModelId" } }]),
+      })],
+    });
+  });
+});

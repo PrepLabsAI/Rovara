@@ -9,10 +9,14 @@ import {
   type SlackWorkspaceCloseCompleteResult,
   type SlackWorkspaceCloseStartResult,
   type ThreadConnector,
+  type ActionPolicy,
+  type PendingConfirmation,
   type TurnObservation,
   type TurnRecord,
 } from "@agentx/contracts";
 import type { WorkerAccess } from "@agentx/orchestrator";
+import type { GateSession } from "@agentx/orchestrator/action-gate";
+import { EXPIRED_TEXT, checkConfirmation, settleConfirmations, type ConfirmationCheck, type ConfirmationStore } from "./confirmations.js";
 import { TurnRecorder } from "@agentx/orchestrator/turn-recorder";
 import { deterministicUuid, requestIdSequence } from "./ids.js";
 import { createLazyWorker } from "./lazy-worker.js";
@@ -61,6 +65,9 @@ export interface TurnInput {
   recoverableOperations?: string[];
   /** Spec 014: present only when the thread's compute is not prepared yet. */
   worker?: WorkerAccess;
+  /** Spec 014: this turn's action gate state: the requester, confirmed calls and "yes to all". */
+  gate?: GateSession;
+  actionPolicy?: ActionPolicy;
   requestId: () => string;
   /** Collects this turn's record; the processor writes it once the event is finished. */
   recorder?: TurnRecorder;
@@ -76,6 +83,11 @@ export interface ProcessorDependencies {
   runTurn: (input: TurnInput) => Promise<string>;
   post: (thread: SlackThread, text: string) => Promise<void>;
   log?: ServiceLog;
+  /** Pending confirmations for the action gate (spec 014). The hosted service always sets it. */
+  confirmations?: ConfirmationStore;
+  /** Posts a confirmation with its Approve and Cancel buttons; without it, the text alone is posted. */
+  postConfirmation?: (thread: SlackThread, confirmation: PendingConfirmation, text: string) => Promise<void>;
+  now?: () => number;
   /** Where one hidden record per finished Slack event goes; without it nothing is recorded. */
   turnRecords?: TurnRecordSink;
 }
@@ -149,6 +161,18 @@ export async function processSlackRequest(
       finished = true;
       return;
     }
+    const now = dependencies.now ?? Date.now;
+    let confirmation: Extract<ConfirmationCheck, { run: true }> | undefined;
+    if (dependencies.confirmations) {
+      // A "yes" from someone else, for a confirmation that is no longer pending, too early or too
+      // late runs nothing and needs no workspace. Nothing is claimed until the turn is about to run.
+      const check = await checkConfirmation({ message, subject, store: dependencies.confirmations, post, log, now: now() });
+      if (!check.run) {
+        finished = true;
+        return;
+      }
+      confirmation = check;
+    }
     const workspace = await api.ensureWorkspace(deterministicUuid(`${message.eventId}:workspace`));
     if (workspace.outcome === "LIMIT_REACHED") {
       draft.disposition = "workspace_limit";
@@ -204,6 +228,18 @@ export async function processSlackRequest(
     const worker = workspace.status === "UNPREPARED"
       ? createLazyWorker({ api, post, log, eventId: message.eventId })
       : undefined;
+    // Spec 014 C5: claim the confirmation only now, after every early return above, so a turn that
+    // never ran leaves it pending for the next "yes". A refused claim (used by another event, or
+    // expired since the check) is always told to the member; nothing runs.
+    if (confirmation?.claim && dependencies.confirmations
+      && !await dependencies.confirmations.claim(subject, confirmation.claim.confirmationId, message.eventId)) {
+      const current = await dependencies.confirmations.load(subject);
+      const expired = current?.confirmationId === confirmation.claim.confirmationId && current.retiredAt === undefined && now() >= Date.parse(current.expiresAt);
+      log("gate.confirmation_refused", { eventId: message.eventId, reason: expired ? "expired" : "already_used" });
+      await post(expired ? EXPIRED_TEXT : "That confirmation was already used, so nothing was run. Ask me again if you still want it.");
+      finished = true;
+      return;
+    }
     // Spec 014 FR-026: the ingress has already said "I'm on it". Say work has started only when the
     // member was told to wait, behind earlier requests, for setup, or because SQS redelivered this
     // request after an earlier attempt threw: that attempt's own "Working on it now" is 15 minutes
@@ -224,6 +260,8 @@ export async function processSlackRequest(
         ...(workspace.repositories === undefined ? {} : { repositories: workspace.repositories }),
         ...(workspace.recoverableOperations === undefined ? {} : { recoverableOperations: workspace.recoverableOperations }),
         ...(worker === undefined ? {} : { worker }),
+        ...(confirmation === undefined ? {} : { gate: confirmation.session }),
+        ...(workspace.actionPolicy === undefined ? {} : { actionPolicy: workspace.actionPolicy }),
         requestId: requestIdSequence(message.eventId),
         ...(recorder === undefined ? {} : { recorder }),
         ...(state.refreshConnectors?.length ? { refreshConnectors: state.refreshConnectors } : {}),
@@ -239,6 +277,21 @@ export async function processSlackRequest(
     // Formatted before anything is posted (spec 014 FR-022): the turn record keeps exactly the text
     // the member sees, and post() remembers each formatted chunk as lastPosted.
     draft.responseText = slackReplyText(response);
+    if (confirmation && dependencies.confirmations) {
+      let settled: Awaited<ReturnType<typeof settleConfirmations>> | undefined;
+      try {
+        settled = await settleConfirmations({
+          check: confirmation, message, subject, store: dependencies.confirmations, log, now: now(),
+          postConfirmation: (pending, text) => dependencies.postConfirmation ? dependencies.postConfirmation(message.thread, pending, text) : post(text),
+        });
+      } catch (error) {
+        log("gate.confirmation_failed", { eventId: message.eventId, errorName: errorName(error) });
+        await post("I couldn't save the confirmation request, so nothing it would list will run. Ask me again.");
+      }
+      if (settled === "already_answered") {
+        await post("This request was retried after an interruption, and I had already asked you to confirm it and had my answer, so I didn't ask again. Ask me again if you still want it.");
+      }
+    }
     for (const chunk of splitSlackMessage(slackReplyText(response))) await post(chunk);
     if (recorder !== undefined) await rememberRefresh(dependencies, log, subject, message.eventId, state.refreshConnectors ?? [], recorder);
     finished = true;

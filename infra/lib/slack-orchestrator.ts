@@ -49,6 +49,11 @@ export class SlackOrchestratorStack extends Stack {
     });
     const modelProvider = new CfnParameter(this, "ModelProvider", { type: "String", default: "amazon-bedrock" });
     const modelId = new CfnParameter(this, "ModelId", { type: "String", default: "amazon.nova-pro-v1:0" });
+    const gateClassifierModelId = new CfnParameter(this, "GateClassifierModelId", {
+      type: "String",
+      default: "amazon.nova-lite-v1:0",
+      description: "Small Bedrock model the action gate asks whether a member asked for a change",
+    });
 
     const securityGroup = new ec2.CfnSecurityGroup(this, "SecurityGroup", {
       groupDescription: "AgentX Slack orchestrator: no ingress and HTTPS-only egress",
@@ -138,6 +143,7 @@ export class SlackOrchestratorStack extends Stack {
           { name: "SLACK_SECRET_ARN", value: secretArn.valueAsString },
           { name: "AGENTX_ORCHESTRATOR_PROVIDER", value: modelProvider.valueAsString },
           { name: "AGENTX_ORCHESTRATOR_MODEL", value: modelId.valueAsString },
+          { name: "AGENTX_GATE_CLASSIFIER_MODEL", value: gateClassifierModelId.valueAsString },
         ],
         logConfiguration: {
           logDriver: "awslogs",
