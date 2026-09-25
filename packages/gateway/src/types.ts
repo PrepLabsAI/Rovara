@@ -47,6 +47,7 @@ export interface Binder<Scope> {
 
 export interface GuardInput {
   tool: string;
+  /** The model's arguments, after every guard's rewrite. */
   arguments: Readonly<Record<string, unknown>>;
   bound: Readonly<Record<string, unknown>>;
   /** The call's scope, such as the Linear team or Jira project, for tools whose schema carries no bound property. */
@@ -65,7 +66,10 @@ export interface RewriteInput {
 }
 
 export interface Guard {
-  /** Upstream tools the check needs on the call's connection besides the called tool. */
+  /**
+   * Upstream tools the check needs on the call's connection besides the called tool. Receives the
+   * model's own arguments, from before any guard's rewrite.
+   */
   requiredTools(tool: string, args: Readonly<Record<string, unknown>>): readonly string[];
   /**
    * Optional. Returns the model's arguments narrowed to the scope, such as a search limited to the
