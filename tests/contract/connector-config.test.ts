@@ -104,6 +104,8 @@ describe("jira connectors", () => {
 
   it.each([
     ["a cloudId that is not a UUID", { scopes: [{ alias: "pay", cloudId: "abhishek2551996.atlassian.net", projectKey: "PAY" }] }],
+    ["an uppercase cloudId", { scopes: [{ alias: "pay", cloudId: CLOUD.toUpperCase(), projectKey: "PAY" }] }],
+    ["the nil cloudId", { scopes: [{ alias: "pay", cloudId: "00000000-0000-0000-0000-000000000000", projectKey: "PAY" }] }],
     ["a lowercase project key", { scopes: [{ alias: "pay", cloudId: CLOUD, projectKey: "pay" }] }],
     ["a project key longer than 10 characters", { scopes: [{ alias: "pay", cloudId: CLOUD, projectKey: "PAYMENTSOPS" }] }],
     ["no credentialRef", { credentialRef: undefined }],

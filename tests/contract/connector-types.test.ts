@@ -165,7 +165,23 @@ describe("connector resolution", () => {
     try {
       expect(resolveConnectors(project({ connectors: [{ name: "jira", type: "jira", credentialRef: "jira-sa", scopes: [{ alias: "kan", cloudId: "1437bb04-4c88-4efd-9d38-658e8febfeba", projectKey: "KAN" }], tools: [{ name: "executeWrite", access: "write" }] }] }), {})).toEqual([]);
       const line = log.mock.calls.map(([entry]) => String(entry)).find((entry) => entry.includes("connector.unusable"));
-      expect(JSON.parse(line!)).toMatchObject({ event: "connector.unusable", connector: "jira", type: "jira", reason: "invalid jira connector configuration: entry" });
+      expect(JSON.parse(line!)).toMatchObject({ event: "connector.unusable", connector: "jira", type: "jira", reason: "invalid jira connector configuration: entry; connector jira: tool executeWrite cannot be limited to a Jira project; approve only getJiraIssue, searchJiraIssuesUsingJql, createJiraIssue, editJiraIssue, transitionJiraIssue, addOrEditJiraIssueComment, or remove projectKey from every scope" });
+    } finally { log.mockRestore(); }
+  });
+
+  it("caps the logged reason for a stored jira connector that breaks several rules at 300 characters", () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      const cloudId = "1437bb04-4c88-4efd-9d38-658e8febfeba";
+      expect(resolveConnectors(project({ connectors: [{
+        name: "jira", type: "jira", credentialRef: "jira-sa",
+        scopes: [{ alias: "a", cloudId, projectKey: "KAN" }, { alias: "b", cloudId }, { alias: "c", cloudId }],
+        tools: [{ name: "executeWrite", access: "write" }, { name: "executeRead", access: "read" }],
+      }] }), {})).toEqual([]);
+      const line = log.mock.calls.map(([entry]) => String(entry)).find((entry) => entry.includes("connector.unusable"));
+      const reason = (JSON.parse(line!) as { reason: string }).reason;
+      expect(reason.startsWith("invalid jira connector configuration: entry; connector jira: scopes b and c address the same Jira site and project; connector jira: set projectKey on every scope or on none")).toBe(true);
+      expect(reason).toHaveLength(300);
     } finally { log.mockRestore(); }
   });
 

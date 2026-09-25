@@ -5,6 +5,7 @@ import type { ConnectorType, ResolvedConnector } from "./connector-types.js";
 
 const ACCEPTS: readonly CredentialType[] = ["static-secret"];
 const NOT_CONFIGURED = "connector credentials are not configured in this deployment";
+const MAX_REASON = 300;
 
 /** Jira through Atlassian's Rovo MCP server, with a service-account API token (static secret). */
 export const jiraConnectorType: ConnectorType = {
@@ -14,7 +15,10 @@ export const jiraConnectorType: ConnectorType = {
     const parsed = JiraConnectorSchema.safeParse(config);
     if (!parsed.success) {
       const fields = [...new Set(parsed.error.issues.map((issue) => issue.path[0] === undefined ? "entry" : String(issue.path[0])))];
-      return { unusable: `invalid jira connector configuration: ${fields.join(", ")}` };
+      // Rule messages name only the connector, its scopes and its tools, never a credential value.
+      const rules = parsed.error.issues.filter((issue) => issue.code === "custom").map((issue) => issue.message);
+      const reason = [`invalid jira connector configuration: ${fields.join(", ")}`, ...rules].join("; ");
+      return { unusable: reason.slice(0, MAX_REASON) };
     }
     const jira = parsed.data;
     const registry = context.credentialRegistry;

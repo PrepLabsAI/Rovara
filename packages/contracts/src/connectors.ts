@@ -35,7 +35,9 @@ export const GitHubConnectorSchema = z.object({
 const JiraScopeSchema = z.object({
   alias: ConnectorAliasSchema,
   /** Atlassian site UUID, from https://<site>.atlassian.net/_edge/tenant_info. */
-  cloudId: z.guid(),
+  cloudId: z.guid()
+    .regex(/^[0-9a-f-]+$/, "cloudId must be lowercase")
+    .refine((id) => id !== "00000000-0000-0000-0000-000000000000", "cloudId must not be the nil UUID"),
   /** Jira project keys are 2 to 10 characters; a longer key is refused. */
   projectKey: z.string().regex(/^[A-Z][A-Z0-9_]{1,9}$/).optional(),
 }).strict();
