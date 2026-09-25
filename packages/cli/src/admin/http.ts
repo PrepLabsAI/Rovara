@@ -1,3 +1,5 @@
+import { AgentXErrorCodeSchema, agentXError } from "@agentx/contracts";
+
 /** A response body parsed defensively: `body` is `undefined` when the text is empty or is not valid JSON. */
 export interface JsonResponse {
   ok: boolean;
@@ -38,4 +40,21 @@ export function serverError(body: unknown): ServerError {
     code: "code" in record ? record.code : undefined,
     message: typeof record.message === "string" ? record.message : undefined,
   };
+}
+
+/**
+ * An administration route's JSON body, or the AgentX error it carries. An unlabeled body is
+ * classified by status: 5xx is the control plane's fault, anything else is what the caller sent.
+ */
+export async function adminResponseBody(response: Response): Promise<unknown> {
+  const { ok, status, body } = await readJsonResponse(response);
+  if (!ok) {
+    if (body === undefined) throw agentXError("RUNTIME_UNAVAILABLE", `HTTP ${status}`);
+    const { code, message } = serverError(body);
+    const parsedCode = AgentXErrorCodeSchema.safeParse(code);
+    const fallback = status >= 500 ? "RUNTIME_UNAVAILABLE" : "CONFIG_INVALID";
+    throw agentXError(parsedCode.success ? parsedCode.data : fallback, message ?? `HTTP ${status}`);
+  }
+  if (body === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "control plane returned an invalid response");
+  return body;
 }

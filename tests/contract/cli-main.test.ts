@@ -8,11 +8,12 @@ describe("AgentX executable command surface", () => {
     expect(program.commands.map((command) => command.name())).toEqual(["login", "admin"]);
 
     const admin = program.commands.find((command) => command.name() === "admin");
-    expect(admin?.commands.map((command) => command.name())).toEqual(["project", "workspace", "slack", "credential"]);
+    expect(admin?.commands.map((command) => command.name())).toEqual(["project", "workspace", "slack", "credential", "turns"]);
     expect(subcommands(admin, "project")).toEqual(["register"]);
     expect(subcommands(admin, "workspace")).toEqual(["stop"]);
     expect(subcommands(admin, "slack")).toEqual(["bind", "unbind"]);
     expect(subcommands(admin, "credential")).toEqual(["register", "list"]);
+    expect(subcommands(admin, "turns")).toEqual(["export"]);
   });
 
   it("keeps no developer workflow or runtime routing option", () => {

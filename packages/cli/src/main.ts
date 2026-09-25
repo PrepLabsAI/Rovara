@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { realpathSync } from "node:fs";
+import { open } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -14,6 +15,7 @@ import { listCredentials, registerCredential } from "./admin/credential.js";
 import { registerProject } from "./admin/register.js";
 import { bindSlackChannel, unbindSlackChannel } from "./admin/slack.js";
 import { stopWorkspace } from "./admin/stop.js";
+import { exportTurns, parseSince } from "./admin/turns.js";
 import { loginWithPkce, tokenStoreKey } from "./auth.js";
 import { loadProjectConfig } from "./config.js";
 import { loadDeploymentSettings, type DeploymentSettings } from "./deployment.js";
@@ -188,6 +190,36 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       const globals = globalOptions(command);
       const { settings, accessToken } = await authenticate(globals, services.tokenStore);
       services.stdout.write(formatSuccess(await listCredentials({ controlPlaneUrl: settings.controlPlaneUrl, accessToken }, services.fetchImplementation), globals.json));
+    });
+
+  const adminTurns = admin.command("turns").description("export turn records: what each Slack turn was offered, asked, chose and answered (kept 30 days)");
+  adminTurns
+    .command("export")
+    .description("write turn records as JSON Lines, newest first; they hold request and response text, so keep the output private")
+    .requiredOption("--since <duration>", "how far back to export, such as 30m, 12h or 7d (at most 30d)")
+    .option("--output <file>", "write to this file with owner-only permissions instead of stdout")
+    .action(async (options: { since: string; output?: string }, command: Command) => {
+      const globals = globalOptions(command);
+      const since = parseSince(options.since);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      const file = options.output === undefined ? undefined : await open(resolve(options.output), "w", 0o600);
+      try {
+        // open() applies the mode only to a new file; tighten an existing one too.
+        await file?.chmod(0o600);
+        const result = await exportTurns({
+          controlPlaneUrl: settings.controlPlaneUrl,
+          accessToken,
+          since,
+          write: async (line) => {
+            if (file) await file.write(line);
+            else services.stdout.write(line);
+          },
+        }, services.fetchImplementation);
+        // stdout carries only JSON Lines, so the summary goes to stderr.
+        services.stderr.write(formatSuccess(result, globals.json));
+      } finally {
+        await file?.close();
+      }
     });
 
   return program;
