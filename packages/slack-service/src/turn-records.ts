@@ -12,6 +12,8 @@ import {
 
 /** DynamoDB's item limit is 400 KB; this leaves room for keys and attribute overhead. */
 export const TURN_ITEM_BYTE_BUDGET = 350_000;
+/** A record write gives up after this long, so a hung request cannot hold the thread. */
+export const TURN_WRITE_TIMEOUT_MS = 5_000;
 
 export interface TurnDraft {
   disposition: TurnDisposition;
@@ -90,6 +92,7 @@ export class DynamoTurnRecordWriter implements TurnRecordSink {
   constructor(
     private readonly client: Pick<DynamoDBDocumentClient, "send">,
     private readonly tableName: string,
+    private readonly timeoutMs = TURN_WRITE_TIMEOUT_MS,
   ) {}
 
   async write(record: TurnRecord): Promise<"written" | "duplicate"> {
@@ -101,7 +104,7 @@ export class DynamoTurnRecordWriter implements TurnRecordSink {
         Item: { ...turnRecordKeys(record), ...stored },
         // The key derives from the Slack event, so a redelivered event finds its first record here.
         ConditionExpression: "attribute_not_exists(pk)",
-      }));
+      }), { abortSignal: AbortSignal.timeout(this.timeoutMs) });
       return "written";
     } catch (error) {
       if (error instanceof Error && error.name === "ConditionalCheckFailedException") return "duplicate";

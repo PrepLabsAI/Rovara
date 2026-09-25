@@ -171,6 +171,35 @@ describe("turn record failures and pass-through", () => {
     expect(String(stored()[0]?.responseText)).toContain("AgentX could not process this request");
   });
 
+  it("records only a notice that was posted when the abandonment notice also fails to post", async () => {
+    const { dependencies, stored } = harness();
+    const post = dependencies.post;
+    dependencies.post = async (thread, text) => {
+      if (text === "No open issues." || text.startsWith("AgentX could not process")) throw Object.assign(new Error("slack down"), { name: "SlackPostError" });
+      await post(thread, text);
+    };
+    await processSlackRequest(message, dependencies, { finalAttempt: true });
+    expect(stored()[0]).toMatchObject({ disposition: "abandoned" });
+    expect(String(stored()[0]?.responseText)).not.toContain("AgentX could not process");
+    expect(stored()[0]?.responseText).toBe("Working on it now. I'll post the result in this thread when it's done.");
+  });
+
+  it("gives up on a write that never finishes, reports it and still finishes the thread", async () => {
+    const { dependencies, posts, logs } = harness();
+    const finish = vi.fn(async () => undefined);
+    dependencies.threads = { ...dependencies.threads, finish };
+    // A client that only settles when its abort signal fires, like a hung DynamoDB request.
+    const hung = { send: (_command: unknown, options?: { abortSignal?: AbortSignal }) => new Promise((_resolve, reject) => {
+      options?.abortSignal?.addEventListener("abort", () => { reject(options.abortSignal?.reason as Error); });
+    }) };
+    dependencies.turnRecords = new DynamoTurnRecordWriter(hung as never, "turns", 20);
+    await processSlackRequest(message, dependencies, { finalAttempt: false });
+    expect(posts.at(-1)).toBe("No open issues.");
+    expect(logs).toContain(JSON.stringify({ event: "turn_record.write_failed", eventId: "EvTURN00001", errorName: "TimeoutError" }));
+    expect(logs).toContain(JSON.stringify({ event: "metric", metric: "TurnRecordWriteFailed", count: 1 }));
+    expect(finish).toHaveBeenCalledOnce();
+  });
+
   it("gives runTurn no recorder when no turn-record sink is configured", async () => {
     const inputs: TurnInput[] = [];
     const { dependencies, posts } = harness({ runTurn: async (input) => { inputs.push(input); return "No open issues."; } });

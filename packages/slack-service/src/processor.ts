@@ -78,9 +78,10 @@ export async function processSlackRequest(
   const recorder = dependencies.turnRecords === undefined ? undefined : new TurnRecorder();
   const draft: TurnDraft = { disposition: "abandoned" };
   let lastPosted = "";
-  const post = (text: string) => {
+  // Remembers only what reached Slack, so the record never claims a message the member did not see.
+  const post = async (text: string) => {
+    await dependencies.post(message.thread, text);
     lastPosted = text;
-    return dependencies.post(message.thread, text);
   };
   const api = dependencies.api(message);
   let finished = false;
