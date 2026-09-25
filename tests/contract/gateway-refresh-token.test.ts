@@ -25,6 +25,20 @@ function setup(options: { rotate?: boolean; expiresIn?: number } = {}) {
   return { clock, tokens, lease, secrets, endpoint, unsaved, container };
 }
 
+/** A standalone provider (its own clock, cache, lease and secret) over a caller-supplied fetch, for tests that need to control the token response or the secret store directly. */
+function directSetup(fetchImplementation: typeof fetch, secretValue: Record<string, unknown> = { ...CLIENT, refreshToken: REFRESH }) {
+  const clock = fakeClock();
+  const tokens = memoryTokenCache();
+  const lease = memoryLease(clock);
+  const secrets = memorySecretStore({ [SECRET]: JSON.stringify(secretValue) });
+  const unsaved: string[] = [];
+  const provider = oauthRefreshTokenProvider({
+    ref: "asana-bot", secretName: SECRET, secrets, tokens, lease, tokenEndpoint: endpointUrl,
+    fetchImplementation, now: clock.now, sleep: clock.sleep, onRotationUnsaved: (name) => unsaved.push(name),
+  });
+  return { clock, tokens, lease, secrets, unsaved, provider };
+}
+
 describe("parseConnectorSecret for oauth-refresh-token", () => {
   it("parses the client and refresh token, and names only the secret when malformed", () => {
     const raw = JSON.stringify({ ...CLIENT, refreshToken: REFRESH });
@@ -41,7 +55,7 @@ describe("oauth-refresh-token provider", () => {
     const fetchSpy = vi.fn(endpoint.fetch);
     const provider = oauthRefreshTokenProvider({
       ref: "asana-bot", secretName: SECRET, secrets: memorySecretStore({ [SECRET]: JSON.stringify({ ...CLIENT, refreshToken: REFRESH }) }),
-      tokens, lease: memoryLease({ now: Date.now }), tokenEndpoint: endpointUrl, fetchImplementation: fetchSpy,
+      tokens, lease: memoryLease({ now: Date.now }), tokenEndpoint: endpointUrl, fetchImplementation: fetchSpy, onRotationUnsaved: () => {},
     });
     const issued = await provider.issue(undefined, "read");
     expect(issued).toEqual({ token: endpoint.accessTokens[0], bindings: {} });
@@ -105,6 +119,23 @@ describe("oauth-refresh-token provider", () => {
     await provider.issue(undefined, "read");
     expect(endpoint.presented).toEqual([REFRESH, "refresh-token-rotated-1"]);
     expect(JSON.parse(secrets.values[SECRET]!)).toEqual({ ...CLIENT, refreshToken: "refresh-token-rotated-2" });
+  });
+
+  it("still retries saving a rotated token it could not write even when a later refresh does not rotate again", async () => {
+    const { secrets, endpoint, clock, unsaved, container } = setup({ rotate: true });
+    secrets.failWrites = 2;
+    const provider = container();
+    await provider.issue(undefined, "read");
+    expect(unsaved).toEqual(["AccessDeniedException"]);
+    expect(JSON.parse(secrets.values[SECRET]!)).toEqual({ ...CLIENT, refreshToken: REFRESH });
+    // The next refresh does not rotate: the vendor echoes back the same refresh token it was
+    // presented. That token (refresh-token-rotated-1) was never itself saved, so it still must be.
+    endpoint.rotate = false;
+    clock.advance(56 * 60_000);
+    await provider.issue(undefined, "read");
+    expect(endpoint.presented).toEqual([REFRESH, "refresh-token-rotated-1"]);
+    expect(JSON.parse(secrets.values[SECRET]!)).toEqual({ ...CLIENT, refreshToken: "refresh-token-rotated-1" });
+    expect(unsaved).toEqual(["AccessDeniedException"]);
   });
 
   it("reports a refused refresh token as not connected with the re-authorize command, never echoing the body or a token", async () => {
@@ -178,7 +209,7 @@ describe("oauth-refresh-token provider", () => {
     secrets.read = async () => (reads++ === 0 ? original : saved);
     const late = oauthRefreshTokenProvider({
       ref: "asana-bot", secretName: SECRET, secrets, tokens: memoryTokenCache(), lease: memoryLease({ now: Date.now }),
-      tokenEndpoint: endpointUrl, fetchImplementation: endpoint.fetch,
+      tokenEndpoint: endpointUrl, fetchImplementation: endpoint.fetch, onRotationUnsaved: () => {},
     });
     const issued = await late.issue(undefined, "read");
     expect(issued.token).toBe(endpoint.accessTokens[1]);
@@ -225,5 +256,144 @@ describe("oauth-refresh-token provider", () => {
     endpoint.release();
     await pending;
     expect(tokens.items.has(REFRESH_TOKEN_CACHE_KEY)).toBe(false);
+  });
+
+  it("gives each refresh its own lease owner, so a refresh started after invalidate() waits for the earlier one's lease instead of running under its abandoned owner", async () => {
+    const { endpoint, lease, container } = setup({ rotate: true });
+    const provider = container();
+    endpoint.hold = true;
+    const first = provider.issue(undefined, "read");
+    await vi.waitFor(() => expect(lease.holder()).toBeDefined());
+    await provider.invalidate!(undefined);
+    const second = provider.issue(undefined, "read");
+    // The refresh started after invalidate() must be refused the lease (a fresh owner of its own,
+    // not the first refresh's still-held one) rather than acquiring it and exchanging concurrently.
+    await lease.firstRefusal;
+    expect(endpoint.requested).toBe(1);
+    endpoint.hold = false;
+    endpoint.release();
+    await Promise.all([first, second]);
+    // Two sequential refreshes, each presenting the refresh token that was actually current when it
+    // ran: never the same token presented twice, which is what racing under one shared owner would
+    // do (and did, before each refresh got its own owner: this scenario then timed out, because the
+    // second refresh's same-owner acquire never gets refused, so lease.firstRefusal never resolves).
+    expect(endpoint.presented).toEqual([REFRESH, "refresh-token-rotated-1"]);
+    expect(lease.holder()).toBeUndefined();
+  });
+
+  it("adopts a short-lived token's shared cache entry using half its lifetime as the margin, not the fixed five minutes", async () => {
+    const { endpoint, container } = setup({ expiresIn: 240 });
+    const first = await container().issue(undefined, "read");
+    const second = await container().issue(undefined, "read");
+    expect(second.token).toBe(first.token);
+    expect(endpoint.presented).toEqual([REFRESH]);
+  });
+
+  it("skips the write-back once the lease is nearly spent, keeping the rotated token in memory instead of risking a race with a new holder", async () => {
+    const { clock, secrets, unsaved, provider } = directSetup(async (_url, init) => {
+      // Simulate the exchange itself consuming almost the whole lease TTL.
+      clock.advance(REFRESH_LEASE_TTL_MS - 500);
+      const form = new URLSearchParams(init?.body as string);
+      expect(form.get("refresh_token")).toBe(REFRESH);
+      return Response.json({ access_token: "access-token-slow", token_type: "bearer", expires_in: 3_600, refresh_token: "refresh-token-rotated-1" });
+    });
+    const issued = await provider.issue(undefined, "read");
+    expect(issued.token).toBe("access-token-slow");
+    expect(secrets.writes).toEqual([]);
+    expect(unsaved).toEqual(["LeaseDeadlineExceeded"]);
+    expect(JSON.parse(secrets.values[SECRET]!)).toEqual({ ...CLIENT, refreshToken: REFRESH });
+  });
+
+  it("gives up rather than risk a second exchange once the lease is nearly spent, even when a peer's newer refresh token is available", async () => {
+    let calls = 0;
+    const { clock, secrets, provider } = directSetup(async () => {
+      calls += 1;
+      // While this (doomed) attempt was in flight, a peer rotated and saved, and the lease's budget ran out.
+      secrets.values[SECRET] = JSON.stringify({ ...CLIENT, refreshToken: "refresh-token-rotated-1" });
+      clock.advance(REFRESH_LEASE_TTL_MS - 500);
+      return Response.json({ error: "invalid_grant" }, { status: 400 });
+    });
+    await expect(provider.issue(undefined, "read")).rejects.toThrow(CredentialUnavailable);
+    expect(calls).toBe(1);
+  });
+
+  it("falls back to a short 300 s lifetime when expires_in is missing, rather than a full hour", async () => {
+    let presented = 0;
+    const { clock, provider } = directSetup(async (_url, init) => {
+      presented += 1;
+      const form = new URLSearchParams(init?.body as string);
+      expect(form.get("refresh_token")).toBe(REFRESH);
+      return Response.json({ access_token: `access-${presented}`, token_type: "bearer" });
+    });
+    const first = await provider.issue(undefined, "read");
+    clock.advance(140_000);
+    expect(await provider.issue(undefined, "read")).toEqual(first);
+    expect(presented).toBe(1);
+    clock.advance(20_000);
+    const second = await provider.issue(undefined, "read");
+    expect(second.token).not.toBe(first.token);
+    expect(presented).toBe(2);
+  });
+
+  it("accepts a numeric-string expires_in", async () => {
+    let calls = 0;
+    const { clock, provider } = directSetup(async () => Response.json({ access_token: `access-${++calls}`, token_type: "bearer", expires_in: "1200" }));
+    const first = await provider.issue(undefined, "read");
+    clock.advance(899_000);
+    expect(await provider.issue(undefined, "read")).toEqual(first);
+    clock.advance(2_000);
+    const second = await provider.issue(undefined, "read");
+    expect(second.token).not.toBe(first.token);
+  });
+
+  it("clamps an implausibly long expires_in to 24 hours", async () => {
+    let calls = 0;
+    const { clock, provider } = directSetup(async () => Response.json({ access_token: `access-${++calls}`, token_type: "bearer", expires_in: 99_999_999 }));
+    const first = await provider.issue(undefined, "read");
+    clock.advance(86_099_000);
+    expect(await provider.issue(undefined, "read")).toEqual(first);
+    clock.advance(2_000);
+    const second = await provider.issue(undefined, "read");
+    expect(second.token).not.toBe(first.token);
+  });
+
+  it("clamps a non-positive expires_in to the short fallback rather than treating it as usable", async () => {
+    let calls = 0;
+    const { clock, provider } = directSetup(async () => Response.json({ access_token: `access-${++calls}`, token_type: "bearer", expires_in: -5 }));
+    const first = await provider.issue(undefined, "read");
+    clock.advance(140_000);
+    expect(await provider.issue(undefined, "read")).toEqual(first);
+    clock.advance(20_000);
+    const second = await provider.issue(undefined, "read");
+    expect(second.token).not.toBe(first.token);
+  });
+
+  it("clamps a too-small positive expires_in up to one minute, rather than the short fallback", async () => {
+    let calls = 0;
+    const { clock, provider } = directSetup(async () => Response.json({ access_token: `access-${++calls}`, token_type: "bearer", expires_in: 10 }));
+    // 10 s clamped to 60 s; margin = min(300 s, 30 s) = 30 s, so the refresh cutoff is 30 s in, not 150 s (the 300 s fallback's cutoff).
+    const first = await provider.issue(undefined, "read");
+    clock.advance(29_000);
+    expect(await provider.issue(undefined, "read")).toEqual(first);
+    clock.advance(2_000);
+    const second = await provider.issue(undefined, "read");
+    expect(second.token).not.toBe(first.token);
+  });
+
+  it("re-reads the secret immediately before writing a rotated token back, so a concurrent admin change to the client survives", async () => {
+    const endpoint = fakeTokenEndpoint({ ...CLIENT, refreshToken: REFRESH });
+    endpoint.rotate = true;
+    const { secrets, provider } = directSetup(endpoint.fetch);
+    let reads = 0;
+    secrets.read = async (name: string) => {
+      reads += 1;
+      if (reads === 2) {
+        // Between the exchange-triggering read and the write-back's re-read, an admin rotated the client secret.
+        secrets.values[SECRET] = JSON.stringify({ ...CLIENT, clientSecret: "admin-rotated-secret-value", refreshToken: REFRESH });
+      }
+      return secrets.values[name];
+    };
+    await provider.issue(undefined, "read");
+    expect(JSON.parse(secrets.values[SECRET]!)).toEqual({ ...CLIENT, clientSecret: "admin-rotated-secret-value", refreshToken: "refresh-token-rotated-1" });
   });
 });
