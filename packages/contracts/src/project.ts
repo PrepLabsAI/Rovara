@@ -2,6 +2,7 @@ import { posix } from "node:path";
 import { z } from "zod";
 import { GitHubMcpPolicySchema } from "./github-mcp.js";
 import { ConnectorsSchema, StoredConnectorsSchema } from "./connectors.js";
+import type { GitHubConnectorConfig } from "./connectors.js";
 import type { GitHubMcpPolicy } from "./github-mcp.js";
 
 import { AGENTX_NAME_PATTERN } from "./names.js";
@@ -253,7 +254,7 @@ export interface ResolvedGitHubConnector {
 export function githubConnectorOf(project: Pick<ProjectDefinition, "repositories" | "integrations">): ResolvedGitHubConnector | undefined {
   const legacy = project.integrations?.githubMcp;
   if (legacy) return { name: "github", repositories: project.repositories, policy: legacy, attribution: true };
-  const connector = project.integrations?.connectors?.find((entry) => entry.type === "github");
+  const connector = project.integrations?.connectors?.find((entry): entry is GitHubConnectorConfig => entry.type === "github");
   if (!connector) return undefined;
   const scopes = connector.scopes;
   const repositories = scopes === "all-repositories"

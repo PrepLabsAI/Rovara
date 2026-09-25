@@ -138,8 +138,8 @@ describe("workspace preparation", () => {
         connectors: [
           {
             name: "tracker",
-            type: "linear",
-            credentialRef: "linear-key",
+            type: "future-vendor",
+            credentialRef: "future-vendor-key",
             scopes: ["rolled-back"],
             tools: [{ name: "list_items", access: "read" }],
           },

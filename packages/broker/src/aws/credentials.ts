@@ -7,6 +7,7 @@ import {
   type CredentialListEntry,
   type CredentialRecord,
   type CredentialRegistration,
+  type CredentialType,
 } from "@agentx/contracts";
 import {
   CredentialUnavailable,
@@ -177,6 +178,12 @@ export class CredentialRegistry {
   /** Whether a valid record is registered under this reference; a malformed record counts as absent. */
   async has(ref: string): Promise<boolean> {
     return await this.readRecord(ref) !== undefined;
+  }
+
+  /** The provider type behind a reference: the built-in GitHub App, a valid stored record's type, or undefined. */
+  async typeOf(ref: string): Promise<CredentialType | undefined> {
+    if (ref === this.options.githubApp.ref) return "github-app";
+    return (await this.readRecord(ref))?.type;
   }
 
   /** Phase 5 entry point: a provider that resolves the record on each issue, so re-registration takes effect. */
