@@ -4,7 +4,7 @@ import {
   GetSecretValueCommand, PutSecretValueCommand, TagResourceCommand, type SecretsManagerClient,
 } from "@aws-sdk/client-secrets-manager";
 import {
-  CredentialRegistrationSchema, OAUTH_AUTHORIZATION_PROFILES, OAuthAppSecretSchema, agentXError, oauthProfile,
+  AgentXError, CredentialRegistrationSchema, OAUTH_AUTHORIZATION_PROFILES, OAuthAppSecretSchema, agentXError, oauthProfile,
 } from "@agentx/contracts";
 import { createPkceParameters } from "../auth.js";
 import { registerCredential } from "./credential.js";
@@ -33,8 +33,11 @@ export interface AuthorizeInput {
   provider: string;
   secrets: AuthorizeSecrets;
   openBrowser: (url: string) => Promise<void>;
-  /** Told the sign-in URL, so an administrator without a local browser can open it elsewhere. */
-  showUrl: (url: string) => void;
+  /**
+   * Told the sign-in URL, so an administrator without a local browser can open it elsewhere, and
+   * the redirect URL the vendor app must be registered with, as "(the Asana app's redirect URL must be exactly ...)".
+   */
+  showUrl: (url: string, redirectRequirement: string) => void;
   fetchImplementation?: typeof fetch;
   timeoutMilliseconds?: number;
   /** Tests only: listen on this port instead of the redirect URI's, and report the port bound. */
@@ -83,9 +86,11 @@ export async function authorizeCredential(input: AuthorizeInput): Promise<unknow
   if (!app.success) throw agentXError("CONFIG_INVALID", `secret ${input.secretName} must be JSON ${APP_SECRET_SHAPE}`);
   const { clientId, clientSecret } = app.data;
 
+  const redirectRequirement = `(the ${input.provider.charAt(0).toUpperCase()}${input.provider.slice(1)} app's redirect URL must be exactly ${profile.redirectUri})`;
   const pkce = createPkceParameters();
   const callback = await listenForCallback({
     redirectUri: new URL(profile.redirectUri),
+    redirectRequirement,
     state: pkce.state,
     timeoutMilliseconds: input.timeoutMilliseconds ?? SIGN_IN_TIMEOUT_MS,
     ...(input.listenPort === undefined ? {} : { port: input.listenPort }),
@@ -101,7 +106,7 @@ export async function authorizeCredential(input: AuthorizeInput): Promise<unknow
     authorize.searchParams.set("code_challenge", pkce.challenge);
     authorize.searchParams.set("code_challenge_method", "S256");
     if (profile.resource !== undefined) authorize.searchParams.set("resource", profile.resource);
-    input.showUrl(authorize.href);
+    input.showUrl(authorize.href, redirectRequirement);
     // The printed URL still works when no browser can be opened here.
     await input.openBrowser(authorize.href).catch(() => undefined);
     code = await callback.code;
@@ -119,7 +124,26 @@ export async function authorizeCredential(input: AuthorizeInput): Promise<unknow
   await input.secrets.tag(input.secretName).catch((error: unknown) => {
     throw agentXError("CONFIG_INVALID", `stored the refresh token in secret ${input.secretName} but could not tag it ${WRITABLE_TAG.Key}=${WRITABLE_TAG.Value} with your AWS credentials (${errorName(error)}); nothing was registered, run the command again`);
   });
-  return registerCredential({ controlPlaneUrl: input.controlPlaneUrl, accessToken: input.accessToken, ref: input.ref, type: "oauth-refresh-token", secretName: input.secretName }, input.fetchImplementation);
+  try {
+    return await registerCredential({ controlPlaneUrl: input.controlPlaneUrl, accessToken: input.accessToken, ref: input.ref, type: "oauth-refresh-token", secretName: input.secretName }, input.fetchImplementation);
+  } catch (error) {
+    // The sign-in already succeeded: say how to finish without signing in again.
+    throw withRecovery(error, `the refresh token is stored and tagged in secret ${input.secretName}; finish with \`agentx admin credential register --ref ${input.ref} --type oauth-refresh-token --secret ${input.secretName}\` (no new sign-in needed)`);
+  }
+}
+
+/**
+ * A registration failure with the recovery appended: an AgentX error keeps its code and message; any
+ * other error becomes a plain one (INTERNAL_ERROR at the CLI) naming only its class, and deliberately
+ * carries no `cause`, since its message can echo request data.
+ */
+function withRecovery(error: unknown, recovery: string): Error {
+  if (error instanceof AgentXError) {
+    const prefix = `${error.code}: `;
+    const message = error.message.startsWith(prefix) ? error.message.slice(prefix.length) : error.message;
+    return agentXError(error.code, `${message}; ${recovery}`);
+  }
+  return new Error(`could not register the credential (${errorName(error)}); ${recovery}`);
 }
 
 async function exchangeCode(input: {
@@ -155,7 +179,7 @@ async function exchangeCode(input: {
  * answered and ignored, so a stale tab or another page cannot end or take over the sign-in. Binds
  * 127.0.0.1 only. Rejects on an `error` redirect with the right state, or after the timeout.
  */
-async function listenForCallback(options: { redirectUri: URL; state: string; timeoutMilliseconds: number; port?: number }): Promise<{ port: number; code: Promise<string>; close: () => void }> {
+async function listenForCallback(options: { redirectUri: URL; redirectRequirement: string; state: string; timeoutMilliseconds: number; port?: number }): Promise<{ port: number; code: Promise<string>; close: () => void }> {
   const { redirectUri } = options;
   if (redirectUri.protocol !== "http:" || !["localhost", "127.0.0.1"].includes(redirectUri.hostname) || redirectUri.port === "") {
     throw agentXError("CONFIG_INVALID", "the provider's redirect URI must be http://localhost:<port>/<path>");
@@ -206,7 +230,7 @@ async function listenForCallback(options: { redirectUri: URL; state: string; tim
   });
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("sign-in listener did not bind TCP");
-  const timer = setTimeout(() => finish({ error: agentXError("AUTH_REQUIRED", `no sign-in arrived within ${Math.round(options.timeoutMilliseconds / 1000)} seconds; nothing was stored`) }), options.timeoutMilliseconds);
+  const timer = setTimeout(() => finish({ error: agentXError("AUTH_REQUIRED", `no sign-in arrived within ${Math.round(options.timeoutMilliseconds / 1000)} seconds ${options.redirectRequirement}; nothing was stored`) }), options.timeoutMilliseconds);
   timer.unref();
   return {
     port: address.port,

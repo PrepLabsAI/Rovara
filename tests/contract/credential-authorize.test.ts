@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 import { mkdtemp, writeFile } from "node:fs/promises";
+import { Server } from "node:net";
 import { networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
 import { GetSecretValueCommand, PutSecretValueCommand, TagResourceCommand } from "@aws-sdk/client-secrets-manager";
+import { OAUTH_AUTHORIZATION_PROFILES } from "@agentx/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { authorizeCredential, secretsManagerAuthorizeSecrets, type AuthorizeSecrets } from "../../packages/cli/src/admin/authorize.js";
 import { tokenStoreKey } from "../../packages/cli/src/auth.js";
@@ -15,6 +17,7 @@ const REFRESH = "refresh-token-from-sign-in";
 const ACCESS = "access-token-from-sign-in";
 const CODE = "authorization-code-value";
 const CONTROL_PLANE = "https://agentx.example.test";
+const EXTERNAL_IPV4 = Object.values(networkInterfaces()).flat().find((entry) => entry && entry.family === "IPv4" && !entry.internal);
 
 function secretsWith(value: string | undefined): AuthorizeSecrets & { writes: Array<[string, string]>; tags: string[] } {
   const store = {
@@ -28,7 +31,7 @@ function secretsWith(value: string | undefined): AuthorizeSecrets & { writes: Ar
 }
 
 /** The vendor's token endpoint and the control plane, behind one fetch. */
-function vendorAndControlPlane(options: { tokenStatus?: number; tokenBody?: Record<string, unknown> } = {}) {
+function vendorAndControlPlane(options: { tokenStatus?: number; tokenBody?: Record<string, unknown>; registration?: Response | Error } = {}) {
   const exchanges: Array<Record<string, string>> = [];
   const registrations: unknown[] = [];
   const fetchImplementation = vi.fn<typeof fetch>(async (url, init) => {
@@ -40,6 +43,8 @@ function vendorAndControlPlane(options: { tokenStatus?: number; tokenBody?: Reco
     }
     if (href === `${CONTROL_PLANE}/v1/admin/credentials`) {
       registrations.push(JSON.parse(init?.body as string));
+      if (options.registration instanceof Error) throw options.registration;
+      if (options.registration) return options.registration;
       return Response.json({ credential: { ref: "asana-bot", type: "oauth-refresh-token", builtIn: false, tokenCached: false }, replaced: false }, { status: 201 });
     }
     throw new Error(`unexpected fetch ${href}`);
@@ -122,6 +127,7 @@ describe("agentx admin credential authorize", () => {
     const { fetchImplementation } = vendorAndControlPlane();
     const play = browser(() => []);
     await expect(authorizeCredential({ ...base(secrets, fetchImplementation, play), timeoutMilliseconds: 50 })).rejects.toMatchObject({ code: "AUTH_REQUIRED", message: expect.stringContaining("no sign-in arrived") as unknown });
+    await expect(authorizeCredential({ ...base(secrets, fetchImplementation, play), timeoutMilliseconds: 50 })).rejects.toThrow("(the Asana app's redirect URL must be exactly http://localhost:8765/callback); nothing was stored");
     expect(secrets.writes).toEqual([]);
   });
 
@@ -197,6 +203,7 @@ describe("agentx admin credential authorize", () => {
     expect(exitCode).toBe(0);
     expect(registrations).toHaveLength(1);
     expect(stderr).toContain("https://app.asana.com/-/oauth_authorize?");
+    expect(stderr).toContain("(the Asana app's redirect URL must be exactly http://localhost:8765/callback)");
     expect(stderr).toContain(`Stored the refresh token in ${SECRET} and registered asana-bot as oauth-refresh-token.`);
     expect(JSON.parse(stdout)).toMatchObject({ credential: { ref: "asana-bot", type: "oauth-refresh-token" } });
     expect(`${stdout}${stderr}`).not.toMatch(new RegExp(`${REFRESH}|${ACCESS}|${CODE}|${CLIENT.clientSecret}`));
@@ -229,8 +236,27 @@ describe("agentx admin credential authorize", () => {
     }
   });
 
-  it("listens on the loopback interface only", async () => {
-    const external = Object.values(networkInterfaces()).flat().find((entry) => entry && entry.family === "IPv4" && !entry.internal);
+  it("listens on the redirect URI's port on 127.0.0.1 only", async () => {
+    const original = Object.getOwnPropertyDescriptor(Server.prototype, "listen")!.value as (...rest: unknown[]) => Server;
+    // Bind an ephemeral port instead of the real one, so a local process on 8765 cannot break the test.
+    const listen = vi.spyOn(Server.prototype, "listen").mockImplementation(function (this: Server, ...args: unknown[]) {
+      return original.call(this, 0, ...args.slice(1));
+    });
+    try {
+      const { fetchImplementation } = vendorAndControlPlane();
+      const play = browser((authorize) => [{ code: CODE, state: authorize.searchParams.get("state")! }]);
+      const { listenPort, ...defaults } = base(secretsWith(JSON.stringify(CLIENT)), fetchImplementation, play);
+      void listenPort; // the default port path is the one under test
+      await authorizeCredential(defaults);
+      expect(play.answers).toEqual([200]);
+      expect(listen).toHaveBeenCalledTimes(1);
+      expect(listen.mock.calls[0]!.slice(0, 2)).toEqual([Number(new URL(OAUTH_AUTHORIZATION_PROFILES.asana.redirectUri).port), "127.0.0.1"]);
+    } finally {
+      listen.mockRestore();
+    }
+  });
+
+  it.skipIf(!EXTERNAL_IPV4)("cannot be reached on the host's external interface", async () => {
     const { fetchImplementation } = vendorAndControlPlane();
     let reachedExternally: boolean | undefined;
     const play = browser((authorize) => [{ code: CODE, state: authorize.searchParams.get("state")! }]);
@@ -239,11 +265,11 @@ describe("agentx admin credential authorize", () => {
       ...base(secretsWith(JSON.stringify(CLIENT)), fetchImplementation, play),
       onListening: (bound: number) => { port = bound; play.onListening(bound); },
       openBrowser: async (url: string) => {
-        if (external) reachedExternally = await fetch(`http://${external.address}:${port}/callback`).then(() => true, () => false);
+        reachedExternally = await fetch(`http://${EXTERNAL_IPV4!.address}:${port}/callback`).then(() => true, () => false);
         await play.openBrowser(url);
       },
     });
-    if (external) expect(reachedExternally).toBe(false);
+    expect(reachedExternally).toBe(false);
     expect(play.answers).toEqual([200]);
   });
 
@@ -294,5 +320,50 @@ describe("agentx admin credential authorize", () => {
     expect(exitCode).toBe(3);
     expect(output).toContain("(invalid_grant); nothing was stored");
     expect(output).not.toMatch(new RegExp(`${REFRESH}|${ACCESS}|${CODE}|${CLIENT.clientSecret}|bad code`));
+  });
+
+  it("keeps the stored token and prints the register command when registration fails after the secret was written and tagged", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "agentx-authorize-"));
+    const deploymentFile = join(directory, "deployment.yaml");
+    await writeFile(deploymentFile, `controlPlaneUrl: ${CONTROL_PLANE}\nauth:\n  issuer: https://identity.example.test\n  clientId: cli\n  audience: agentx\n`);
+    const tokenStore = new InMemoryTokenStore();
+    await tokenStore.set(tokenStoreKey({ issuer: "https://identity.example.test", clientId: "cli", audience: "agentx" }), { accessToken: "admin-token", expiresAt: Date.now() + 3_600_000 });
+    const cases = [
+      { status: 401, code: "AUTH_REQUIRED", message: "sign in again", exitCode: 3 },
+      { status: 403, code: "FORBIDDEN", message: "administrator role required", exitCode: 4 },
+    ];
+    for (const failure of cases) {
+      const secrets = secretsWith(JSON.stringify(CLIENT));
+      const { fetchImplementation, registrations } = vendorAndControlPlane({
+        registration: Response.json({ error: { code: failure.code, message: failure.message } }, { status: failure.status }),
+      });
+      const play = browser((authorize) => [{ code: CODE, state: authorize.searchParams.get("state")! }]);
+      let stdout = "";
+      let stderr = "";
+      const exitCode = await executeCli(
+        ["--deployment-file", deploymentFile, "admin", "credential", "authorize", "--ref", "asana-bot", "--secret", SECRET, "--provider", "asana"],
+        {
+          fetchImplementation, tokenStore,
+          stdout: { write: (text: string) => { stdout += text; } }, stderr: { write: (text: string) => { stderr += text; } },
+          authorize: { secrets, openBrowser: play.openBrowser, listenPort: 0, onListening: play.onListening },
+        },
+      );
+      expect(exitCode).toBe(failure.exitCode);
+      expect(registrations).toHaveLength(1);
+      expect(secrets.writes).toHaveLength(1);
+      expect(secrets.tags).toEqual([SECRET]);
+      expect(stderr).toContain(`AgentX error [${failure.code}]: ${failure.message}; the refresh token is stored and tagged in secret ${SECRET}; finish with \`agentx admin credential register --ref asana-bot --type oauth-refresh-token --secret ${SECRET}\` (no new sign-in needed)`);
+      expect(stderr).not.toContain("Stored the refresh token in");
+      expect(`${stdout}${stderr}`).not.toMatch(new RegExp(`${REFRESH}|${ACCESS}|${CODE}|${CLIENT.clientSecret}`));
+    }
+  });
+
+  it("reports a registration that fails outside AgentX by the error's class name only, with the same recovery hint", async () => {
+    const secrets = secretsWith(JSON.stringify(CLIENT));
+    const { fetchImplementation } = vendorAndControlPlane({ registration: Object.assign(new Error(`socket closed after ${REFRESH}`), { name: "TypeError" }) });
+    const play = browser((authorize) => [{ code: CODE, state: authorize.searchParams.get("state")! }]);
+    const failure = await authorizeCredential(base(secrets, fetchImplementation, play)).catch((error: unknown) => error) as Error;
+    expect(failure).not.toHaveProperty("code");
+    expect(failure.message).toBe(`could not register the credential (TypeError); the refresh token is stored and tagged in secret ${SECRET}; finish with \`agentx admin credential register --ref asana-bot --type oauth-refresh-token --secret ${SECRET}\` (no new sign-in needed)`);
   });
 });

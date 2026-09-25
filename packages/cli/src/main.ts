@@ -212,7 +212,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         provider: options.provider,
         secrets: overrides.secrets ?? secretsManagerAuthorizeSecrets(new SecretsManagerClient(options.region ? { region: options.region } : {})),
         openBrowser: overrides.openBrowser ?? openSystemBrowser,
-        showUrl: (url) => { services.stderr.write(`Sign in as the connector's bot user. If no browser opened, open this URL:\n${url}\n`); },
+        showUrl: (url, redirectRequirement) => { services.stderr.write(`Sign in as the connector's bot user ${redirectRequirement}. If no browser opened, open this URL:\n${url}\n`); },
         fetchImplementation: services.fetchImplementation,
         ...(overrides.listenPort === undefined ? {} : { listenPort: overrides.listenPort }),
         ...(overrides.onListening ? { onListening: overrides.onListening } : {}),
