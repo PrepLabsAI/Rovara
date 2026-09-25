@@ -536,3 +536,16 @@ describe("hosted Slack ingress switches (spec 014)", () => {
     });
   });
 });
+
+describe("Slack interactivity infrastructure (spec 014)", () => {
+  it("routes Slack's interactivity requests, unauthenticated at the gateway, to the ingress Lambda that verifies them", () => {
+    const template = Template.fromStack(new ControlPlaneStack(new App(), "SlackInteractivityControlPlane"));
+    template.hasResourceProperties("AWS::ApiGatewayV2::Route", {
+      RouteKey: "POST /v1/slack/interactions",
+      AuthorizationType: "NONE",
+      Target: { "Fn::Join": ["", ["integrations/", { Ref: Match.stringLikeRegexp("^SlackIngressIntegration") }]] },
+    });
+    template.hasOutput("SlackInteractivityUrl", {});
+    template.resourceCountIs("AWS::Lambda::Function", 4);
+  });
+});

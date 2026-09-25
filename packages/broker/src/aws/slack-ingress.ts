@@ -25,6 +25,7 @@ import {
 } from "@agentx/contracts";
 import { requiredEnvironment, type HttpApiV2Event } from "./lambda.js";
 import { createSlackMemberCheck, type SlackMemberCheck } from "./slack-members.js";
+import { createAwsSlackInteractivityHandler } from "./slack-interactivity.js";
 
 const SIGNATURE_WINDOW_SECONDS = 300;
 const EVENT_RETENTION_SECONDS = 14 * 24 * 60 * 60;
@@ -476,9 +477,18 @@ function createAwsSlackIngressHandler() {
   });
 }
 
-let awsHandler: ReturnType<typeof createSlackIngressHandler> | undefined;
+/** Slack's interactivity request URL path (spec 014): button presses, and 14d's Details view. */
+export const SLACK_INTERACTIONS_PATH = "/v1/slack/interactions";
 
+let awsHandler: ReturnType<typeof createSlackIngressHandler> | undefined;
+let awsInteractivityHandler: ReturnType<typeof createAwsSlackInteractivityHandler> | undefined;
+
+/** The Events API and, since spec 014, Slack's interactivity request URL share this Lambda. */
 export const handler = (event: HttpApiV2Event): Promise<HttpResponse> => {
+  if (event.rawPath === SLACK_INTERACTIONS_PATH) {
+    awsInteractivityHandler ??= createAwsSlackInteractivityHandler();
+    return awsInteractivityHandler(event);
+  }
   awsHandler ??= createAwsSlackIngressHandler();
   return awsHandler(event);
 };

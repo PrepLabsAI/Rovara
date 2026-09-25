@@ -62,6 +62,18 @@ describe("confirmation replies and clicks", () => {
     expect(parseConfirmationClickEventId(confirmationClickEventId(pending.confirmationId, "cancel"))).toEqual({ click: "cancel", confirmationId: pending.confirmationId });
     expect(parseConfirmationClickEventId("Ev0000000001")).toBeUndefined();
   });
+
+  it("gives a click on a re-posted confirmation (same ID, later postedAt) its own event ID, still a valid Slack event ID that reads back", () => {
+    const first = confirmationClickEventId(pending.confirmationId, "approve", "2025-09-23T20:00:00.000Z");
+    const second = confirmationClickEventId(pending.confirmationId, "approve", "2025-09-23T20:00:30.000Z");
+    expect(first).toBe(`EvAgxApprove44444444444454448444444444444444${Date.parse("2025-09-23T20:00:00.000Z").toString(16)}`);
+    expect(second).not.toBe(first);
+    for (const eventId of [first, second, confirmationClickEventId(pending.confirmationId, "cancel", "2025-09-23T20:00:00.000Z")]) {
+      expect(eventId).toMatch(/^Ev[A-Za-z0-9]{4,64}$/);
+      expect(parseConfirmationClickEventId(eventId)?.confirmationId).toBe(pending.confirmationId);
+    }
+    expect(parseConfirmationClickEventId(`${first}0000000000000000`)).toBeUndefined();
+  });
 });
 
 describe("the confirmation store", () => {

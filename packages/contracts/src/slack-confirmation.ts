@@ -55,14 +55,21 @@ export function pendingConfirmationFromItem(item: Record<string, unknown> | unde
 /**
  * The Slack event ID of a button click, derived from the confirmation, so the queue message keeps
  * today's strict SlackRequestMessageSchema, a repeated click is dropped as a duplicate event, and
- * the Slack service knows which confirmation the click was for.
+ * the Slack service knows which confirmation the click was for. `postedAt` (the stored
+ * confirmation's) is appended as hex epoch milliseconds: a redelivered request re-posts the same
+ * confirmation ID with a later postedAt, and its click must not reuse the earlier click's event ID,
+ * which the ingress's EVENT# claim, the queue's deduplication and the turn's idempotency keys would
+ * all treat as already handled.
  */
-export function confirmationClickEventId(confirmationId: string, click: ConfirmationClick): string {
-  return `EvAgx${click === "approve" ? "Approve" : "Cancel"}${confirmationId.replace(/-/gu, "")}`;
+export function confirmationClickEventId(confirmationId: string, click: ConfirmationClick, postedAt?: string): string {
+  const postedMs = postedAt === undefined ? undefined : Date.parse(postedAt);
+  if (postedMs !== undefined && !(Number.isSafeInteger(postedMs) && postedMs >= 0)) throw new Error("confirmation postedAt is not a valid time");
+  const posted = postedMs === undefined ? "" : postedMs.toString(16);
+  return `EvAgx${click === "approve" ? "Approve" : "Cancel"}${confirmationId.replace(/-/gu, "")}${posted}`;
 }
 
 export function parseConfirmationClickEventId(eventId: string): { click: ConfirmationClick; confirmationId: string } | undefined {
-  const match = /^EvAgx(Approve|Cancel)([0-9a-f]{32})$/u.exec(eventId);
+  const match = /^EvAgx(Approve|Cancel)([0-9a-f]{32})(?:[0-9a-f]{1,12})?$/u.exec(eventId);
   if (!match) return undefined;
   const hex = match[2]!;
   return {
