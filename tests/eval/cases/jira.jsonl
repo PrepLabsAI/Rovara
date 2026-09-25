@@ -1,0 +1,5 @@
+{"id":"jira-list-open","project":"fixtures/payments-jira.yaml","prompt":"what bugs are open in Jira?","expect":{"tool":"jira__searchJiraIssuesUsingJql"},"source":"synthetic"}
+{"id":"jira-read-one","project":"fixtures/payments-jira.yaml","prompt":"what's the status of PAY-7?","expect":{"tool":"jira__getJiraIssue","argsSubset":{"issueIdOrKey":"PAY-7"}},"source":"synthetic"}
+{"id":"jira-create","project":"fixtures/payments-jira.yaml","prompt":"create a Jira bug titled Login test is flaky","expect":{"tool":"jira__createJiraIssue","argsSubset":{"summary":"Login test is flaky","issueType":"Bug"}},"source":"synthetic"}
+{"id":"jira-comment","project":"fixtures/payments-jira.yaml","prompt":"comment on PAY-12 that the fix is deployed","expect":{"tool":"jira__addOrEditJiraIssueComment","argsSubset":{"issueIdOrKey":"PAY-12"}},"source":"synthetic"}
+{"id":"jira-vs-github","project":"fixtures/payments-jira.yaml","prompt":"list the open GitHub issues in payments-api","expect":{"tool":"github__list_issues"},"source":"synthetic"}

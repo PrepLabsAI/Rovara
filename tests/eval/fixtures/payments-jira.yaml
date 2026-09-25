@@ -1,0 +1,29 @@
+# GitHub plus a Jira connector scoped to project PAY, as docs/connectors/jira.md sets up.
+name: payments
+revision: 1
+repositories:
+  - name: payments-api
+    url: https://github.com/example/payments-api.git
+    path: repo/payments-api
+    defaultBranch: main
+    credentialRef: github-agentx-sdlc
+setup: []
+readiness: []
+orchestratorInstructions: Delegate every repository read, edit, build and test to the worker.
+integrations:
+  connectors:
+    - name: github
+      type: github
+      scopes: all-repositories
+      tools:
+        - { name: list_issues, access: read }
+    - name: jira
+      type: jira
+      credentialRef: jira-agentx-sa
+      scopes:
+        - { alias: pay, cloudId: "4b8c2d1e-6f7a-4c3b-9e8d-1a2b3c4d5e6f", projectKey: PAY }
+      tools:
+        - { name: searchJiraIssuesUsingJql, access: read }
+        - { name: getJiraIssue, access: read }
+        - { name: createJiraIssue, access: write }
+        - { name: addOrEditJiraIssueComment, access: write }

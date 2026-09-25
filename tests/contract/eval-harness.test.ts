@@ -4,10 +4,13 @@ import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, type FauxProviderHandle } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import { EVAL_ROOT, EvalProjectSchema, loadCases, loadCatalog, loadProject, type EvalCase } from "../eval/case.js";
-import { parseEvalArguments, recordLiveReport, runEvalCommand } from "../eval/command.js";
+import { parseEvalArguments, recordLiveReport, runEvalCli, runEvalCommand } from "../eval/command.js";
 import { legacyPresentation } from "../eval/legacy-presentation.js";
+import { scriptExpectedAnswers } from "../eval/offline.js";
 import { newPresentation } from "../eval/presentation.js";
-import { compareWithBaseline, reportPath, runEvaluation, type EvalReport } from "../eval/runner.js";
+import { createOrchestrationTools } from "../../packages/orchestrator/src/orchestration-tools.js";
+import { cannedApi, compareWithBaseline, reportPath, runEvaluation, type EvalReport } from "../eval/runner.js";
+import { compareSc004 } from "../eval/sc004.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 
 /** An oracle that answers each case as expected, so the harness itself is what is tested. */
@@ -53,6 +56,23 @@ describe("evaluation cases", () => {
       const offered = newPresentation(project, catalogs).toolNames;
       for (const tool of [evalCase.expect.tool].flat()) {
         if (tool !== null) expect(offered, `${evalCase.id} expects ${tool}`).toContain(tool);
+      }
+    }
+  });
+
+  it("expect only arguments, and enum values, that the offered tool's schema declares", async () => {
+    for (const evalCase of (await loadCases()).filter((entry) => entry.expect.argsSubset !== undefined)) {
+      const project = await loadProject(evalCase.project);
+      const catalogs = new Map(await Promise.all(project.connectors.map(async (connector) => [connector.catalog, await loadCatalog(connector.catalog)] as const)));
+      const presented = newPresentation(project, catalogs);
+      const tools = createOrchestrationTools(cannedApi(presented.catalogs), { workspaceId: "w", conversationId: "c" },
+        { connectorCatalogs: presented.catalogs, recovery: presented.recoverableOperations.length > 0 });
+      const name = [evalCase.expect.tool].flat()[0];
+      const properties = (tools.find((tool) => tool.name === name)?.parameters as { properties?: Record<string, { enum?: unknown[] }> } | undefined)?.properties ?? {};
+      for (const [key, value] of Object.entries(evalCase.expect.argsSubset ?? {})) {
+        expect(Object.keys(properties), `${evalCase.id}: ${name} has no argument ${key}`).toContain(key);
+        const allowed = properties[key]?.enum;
+        if (allowed !== undefined) expect(allowed, `${evalCase.id}: ${key}`).toContain(value);
       }
     }
   });
@@ -168,10 +188,11 @@ describe("evaluation harness, offline", () => {
     const { modelRuntime, faux } = await fauxModelRuntime();
     const cases = (await loadCases()).filter((entry) => ["files-not-pr", "append-pr"].includes(entry.id));
     const events: string[] = [];
+    // The timeout applies to append-pr too, so it is long enough for a normal run on a loaded machine.
     const script = oracle(faux, expected);
     const beforeRun = async (evalCase: EvalCase) => {
       if (evalCase.id === "files-not-pr") {
-        await new Promise((resolve) => setTimeout(resolve, 300));
+        await new Promise((resolve) => setTimeout(resolve, 1_300));
         // The abandoned run touches the shared faux handle after its deadline.
         faux.setResponses([fauxAssistantMessage("Jira is a tool I lack.")]);
         events.push("files-not-pr settled");
@@ -180,10 +201,10 @@ describe("evaluation harness, offline", () => {
       events.push("append-pr started");
       script(evalCase);
     };
-    const report = await runEvaluation(cases, { model: FAUX_MODEL, modelRuntime, presentation: "new", repeat: 1, timeoutMs: 50, graceMs: 2_000, beforeRun });
+    const report = await runEvaluation(cases, { model: FAUX_MODEL, modelRuntime, presentation: "new", repeat: 1, timeoutMs: 1_000, graceMs: 2_000, beforeRun });
     expect(events).toEqual(["files-not-pr settled", "append-pr started"]);
     expect(report.cases.map((result) => [result.id, result.passed])).toEqual([["files-not-pr", false], ["append-pr", true]]);
-    expect(report.cases[0]?.runs[0]).toMatchObject({ error: "timed out after 50 ms" });
+    expect(report.cases[0]?.runs[0]).toMatchObject({ error: "timed out after 1000 ms" });
     expect(report.stopped).toBeUndefined();
   }, 30_000);
 
@@ -248,6 +269,19 @@ describe("evaluation harness, offline", () => {
       .toEqual({ tool: "agentx_append_pull_request", args: { repository: "payments-api", pullRequestNumber: 12 } });
   }, 60_000);
 
+  it("reports a case the legacy presentation cannot express as not applicable, never a failure or a silent drop", async () => {
+    const { modelRuntime, faux } = await fauxModelRuntime();
+    const cases = (await loadCases()).filter((entry) => ["linear-open-issues", "github-not-linear", "files-not-pr", "jira-not-connected"].includes(entry.id));
+    const options = { model: FAUX_MODEL, modelRuntime, repeat: 1, beforeRun: scriptExpectedAnswers(faux) };
+    const legacy = await runEvaluation(cases, { ...options, presentation: "legacy" });
+    expect(legacy.cases.map((result) => [result.id, result.passed])).toEqual([["files-not-pr", true], ["jira-not-connected", true], ["github-not-linear", true]]);
+    expect(legacy.notApplicable).toEqual([{ id: "linear-open-issues", reason: "needs connector linear (type linear), which the legacy presentation cannot offer" }]);
+    expect(legacy.summary).toEqual({ cases: 3, passed: 3, errors: 0, notApplicable: 1, toolAccuracy: 1, refusalCases: 1, refusalAccuracy: 1 });
+    const fresh = await runEvaluation(cases, { ...options, presentation: "new" });
+    expect(fresh.notApplicable).toBeUndefined();
+    expect(fresh.summary).toEqual({ cases: 4, passed: 4, errors: 0, toolAccuracy: 1, refusalCases: 1, refusalAccuracy: 1 });
+  }, 60_000);
+
   it("scores a first call to a tool the presentation does not offer as the wrong tool", async () => {
     const { modelRuntime, faux } = await fauxModelRuntime();
     const cases = (await loadCases()).filter((entry) => entry.id === "append-pr");
@@ -262,6 +296,71 @@ describe("evaluation harness, offline", () => {
   it("keeps results and baselines per model and presentation", () => {
     expect(reportPath("results", "amazon.nova-pro-v1:0", "new")).toBe(`${EVAL_ROOT}/results/amazon.nova-pro-v1_0.json`);
     expect(reportPath("baseline", "amazon.nova-pro-v1:0", "legacy")).toBe(`${EVAL_ROOT}/baseline/amazon.nova-pro-v1_0.legacy.json`);
+  });
+});
+
+function scored(id: string, run: Partial<EvalReport["cases"][number]["runs"][number]>): EvalReport["cases"][number] {
+  const full = { tool: "agentx_submit_task", toolOk: true, argsOk: true, phraseOk: null, refusalOk: null, containsOk: null, ...run };
+  return { id, passed: full.toolOk && full.argsOk && full.phraseOk !== false, runs: [full, full, full] };
+}
+
+function sc004Reports(): { fresh: EvalReport; legacy: EvalReport } {
+  const refusal = { tool: null, phraseOk: true, refusalOk: true };
+  const freshCases = [scored("files", {}), scored("issues", { toolOk: false, tool: "agentx_submit_task" }), scored("refuse", refusal), scored("linear", { tool: "linear__list_issues" })];
+  const legacyCases = [scored("files", { toolOk: false, tool: "agentx_create_pull_request" }), scored("issues", { toolOk: false }), scored("refuse", refusal)];
+  return {
+    fresh: liveReport({ cases: freshCases, summary: { cases: 4, passed: 3, errors: 0, toolAccuracy: 0.75, refusalCases: 1, refusalAccuracy: 1 } }),
+    legacy: liveReport({ presentation: "legacy", cases: legacyCases, notApplicable: [{ id: "linear", reason: "needs connector linear (type linear), which the legacy presentation cannot offer" }],
+      summary: { cases: 3, passed: 1, errors: 0, notApplicable: 1, toolAccuracy: 1 / 3, refusalCases: 1, refusalAccuracy: 1 } }),
+  };
+}
+
+describe("SC-004 comparison", () => {
+  it("compares the presentations only on the cases both can express", () => {
+    const { fresh, legacy } = sc004Reports();
+    // Counting the Linear case would make the new tool accuracy 3/4; on the shared cases it is 2/3.
+    expect(compareSc004(fresh, legacy)).toEqual({
+      model: "amazon.nova-pro-v1:0", cases: 3, notApplicable: ["linear"],
+      new: { passed: 2, toolAccuracy: 2 / 3, refusalCases: 1, refusalAccuracy: 1 },
+      legacy: { passed: 1, toolAccuracy: 1 / 3, refusalCases: 1, refusalAccuracy: 1 },
+      met: true,
+    });
+    const worse = { ...fresh, cases: fresh.cases.map((result) => result.id === "refuse" ? scored("refuse", { tool: null, toolOk: true, phraseOk: false, refusalOk: false }) : result) };
+    expect(compareSc004(worse, legacy)).toMatchObject({ new: { refusalAccuracy: 0 }, met: false });
+    const tied = { ...fresh, cases: fresh.cases.map((result) => result.id === "files" ? scored("files", { toolOk: false }) : result) };
+    expect(compareSc004(tied, legacy)).toMatchObject({ new: { toolAccuracy: 1 / 3 }, met: false });
+  });
+
+  it("refuses reports that differ in model, cover different cases, errored or are swapped", () => {
+    const { fresh, legacy } = sc004Reports();
+    expect(() => compareSc004(legacy, fresh)).toThrow(/new presentation first/);
+    expect(() => compareSc004(fresh, { ...legacy, model: "amazon.nova-lite-v1:0" })).toThrow(/same provider, model and repeat/);
+    expect(() => compareSc004(fresh, { ...legacy, notApplicable: [] })).toThrow(/different cases: linear/);
+    expect(() => compareSc004({ ...fresh, summary: { ...fresh.summary, errors: 1 } }, legacy)).toThrow(/new report has errors/);
+    expect(() => compareSc004(fresh, { ...legacy, stopped: "stuck", notRun: [] })).toThrow(/legacy report has errors or stopped early/);
+  });
+
+  it("reads both committed baselines with npm run eval -- --sc004 and calls no model", async () => {
+    const root = await temporaryDirectory();
+    try {
+      const { fresh, legacy } = sc004Reports();
+      await expect(runEvalCli(["--sc004"], { root, env: {} })).rejects.toThrow(/no baseline .*amazon\.nova-pro-v1_0\.json/);
+      await recordLiveReport(fresh, { updateBaseline: true, root });
+      await recordLiveReport(legacy, { updateBaseline: true, root });
+      const outcome = await runEvalCli(["--sc004"], { root, env: {} });
+      expect(outcome.exitCode).toBe(0);
+      expect(outcome.lines).toEqual([
+        "SC-004 on amazon-bedrock/amazon.nova-pro-v1:0 over 3 cases both presentations express (1 not applicable to legacy: linear):",
+        "  new presentation: 2/3 cases passed; tool accuracy 66.7%; refusal accuracy 100.0% over 1 cases",
+        "  legacy presentation: 1/3 cases passed; tool accuracy 33.3%; refusal accuracy 100.0% over 1 cases",
+        "  Result: met (the new tool accuracy must be higher and the new refusal accuracy at least 90%)",
+      ]);
+      expect(() => parseEvalArguments(["--sc004", "--live"])).toThrow(/--sc004/);
+      expect(() => parseEvalArguments(["--sc004", "--update-baseline"])).toThrow(/--sc004/);
+      expect(parseEvalArguments(["--sc004", "--model", "amazon.nova-lite-v1:0"], {})).toMatchObject({ sc004: true, live: false, model: { provider: "amazon-bedrock", modelId: "amazon.nova-lite-v1:0" } });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 
@@ -354,9 +453,19 @@ describe("evaluation command, live safety", () => {
       expect(written.summary).toEqual(outcome.report.summary);
       await expect(readFile(join(root, "baseline", "scripted.json"), "utf8")).rejects.toThrow(/ENOENT/);
       expect(outcome.lines[0]).toMatch(/^Offline run on the faux provider/);
+      // The legacy presentation (commit 63f78f6) offers only GitHub, so cases that need a Linear or
+      // Jira tool are reported as not applicable: listed and counted, never scored or dropped.
       const legacy = await runEvalCommand(["--presentation", "legacy"], { root, env: {} });
-      expect(legacy.lines).toHaveLength(1);
-      expect(legacy).toMatchObject({ exitCode: 0, report: { presentation: "legacy", summary: { passed: legacy.report.summary.cases, errors: 0 } } });
+      const all = await loadCases();
+      const inexpressible = all.filter((entry) => [entry.expect.tool].flat().some((tool) => tool !== null && !/^(agentx_|github__)/.test(tool))).map((entry) => entry.id);
+      expect(inexpressible.length).toBeGreaterThan(0);
+      expect(legacy.report.notApplicable?.map((entry) => entry.id)).toEqual(inexpressible);
+      expect(legacy.report.summary.cases + inexpressible.length).toBe(all.length);
+      expect(legacy.lines).toEqual([
+        expect.stringMatching(/^Offline run on the faux provider/),
+        `Not applicable to the legacy presentation: ${inexpressible.length} cases, not scored (they need a connector type it cannot offer): ${inexpressible.join(", ")}`,
+      ]);
+      expect(legacy).toMatchObject({ exitCode: 0, report: { presentation: "legacy", summary: { passed: legacy.report.summary.cases, errors: 0, notApplicable: inexpressible.length } } });
     } finally {
       await rm(root, { recursive: true, force: true });
     }

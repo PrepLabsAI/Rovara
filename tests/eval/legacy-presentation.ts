@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { defineTool, type InlineExtension, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { EvalProject, UpstreamTool } from "./case.js";
+import type { EvalCase, EvalProject, UpstreamTool } from "./case.js";
 import { reviewedScopes } from "./presentation.js";
 
 // The presentation before feature 013, kept only to measure SC-004. Remove this file and
@@ -21,6 +21,27 @@ const LIFECYCLE = [
 ] as const;
 
 const DONE = "Done. (evaluation run: nothing was executed)";
+
+/** Only GitHub existed before feature 013; any other connector type had no tools at all then. */
+const LEGACY_CONNECTOR_TYPES: readonly string[] = ["github"];
+
+/**
+ * Why the legacy presentation cannot express a case, or undefined when it can: the case expects a
+ * tool of a connector whose type had no tools before feature 013. Such a case is reported as not
+ * applicable to the legacy presentation, never scored as its failure, and SC-004 compares the two
+ * presentations only on the cases both can express.
+ */
+export function legacyNotApplicable(project: EvalProject, evalCase: EvalCase): string | undefined {
+  for (const tool of [evalCase.expect.tool].flat()) {
+    const separator = tool === null ? -1 : tool.indexOf("__");
+    if (tool === null || separator < 0) continue;
+    const connector = project.connectors.find((entry) => entry.name === tool.slice(0, separator));
+    if (connector !== undefined && !LEGACY_CONNECTOR_TYPES.includes(connector.type)) {
+      return `needs connector ${connector.name} (type ${connector.type}), which the legacy presentation cannot offer`;
+    }
+  }
+  return undefined;
+}
 
 function canned(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value) }], details: {} };
@@ -90,8 +111,7 @@ export function legacyPresentation(project: EvalProject, catalogs: ReadonlyMap<s
   ];
   const connectorTools = new Map<string, { tool: string; target?: string }>();
   const byNew = new Map<string, string>();
-  // Only GitHub existed before feature 013; any other connector type had no tools at all then.
-  for (const connector of project.connectors.filter((entry) => entry.connected && entry.type === "github")) {
+  for (const connector of project.connectors.filter((entry) => entry.connected && LEGACY_CONNECTOR_TYPES.includes(entry.type))) {
     const upstream = catalogs.get(connector.catalog);
     if (upstream === undefined) throw new Error(`no recorded catalog ${connector.catalog} for connector ${connector.name}`);
     // The same narrowed schemas as the new presentation, so only names, descriptions and the prompt differ.

@@ -1,0 +1,22 @@
+# The bound test channel's project (#agentx-project-a): one repository and GitHub issues.
+name: project-a
+revision: 1
+repositories:
+  - name: personal-website
+    url: https://github.com/example/personal-website.git
+    path: repo/personal-website
+    defaultBranch: main
+    credentialRef: github-agentx-sdlc
+setup: []
+readiness: []
+orchestratorInstructions: Delegate every repository read, edit, build and test to the worker.
+integrations:
+  connectors:
+    - name: github
+      type: github
+      scopes: [personal-website]
+      tools:
+        - { name: list_issues, access: read }
+        - { name: issue_read, access: read }
+        - { name: issue_write, access: write }
+        - { name: add_issue_comment, access: write }

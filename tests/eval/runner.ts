@@ -10,7 +10,7 @@ import { createOrchestratorRuntime, createPiSessionRuntime, runOrchestratorTurn 
 import { TurnRecorder } from "../../packages/orchestrator/src/turn-recorder.js";
 import { FAUX_MODEL } from "../support/faux-model.js";
 import { EVAL_ROOT, loadCatalog, loadProject, type EvalCase, type UpstreamTool } from "./case.js";
-import { legacyPresentation } from "./legacy-presentation.js";
+import { legacyNotApplicable, legacyPresentation } from "./legacy-presentation.js";
 import { newPresentation } from "./presentation.js";
 
 export const PresentationSchema = z.enum(["new", "legacy"]);
@@ -61,10 +61,13 @@ export const EvalReportSchema = z.object({
   /** Why the evaluation stopped early, and the cases it therefore never ran. */
   stopped: z.string().optional(),
   notRun: z.array(z.string()).optional(),
+  /** Cases this presentation cannot express (legacy only); listed and counted, never scored. */
+  notApplicable: z.array(z.object({ id: z.string(), reason: z.string() }).strict()).optional(),
   summary: z.object({
     cases: z.number().int().nonnegative(),
     passed: z.number().int().nonnegative(),
     errors: z.number().int().nonnegative(),
+    notApplicable: z.number().int().nonnegative().optional(),
     toolAccuracy: z.number(),
     refusalCases: z.number().int().nonnegative(),
     refusalAccuracy: z.number(),
@@ -242,7 +245,15 @@ export async function runEvaluation(cases: readonly EvalCase[], options: EvalOpt
   const results: CaseResult[] = [];
   let stopped: string | undefined;
   let notRun: string[] = [];
+  const notApplicable: Array<{ id: string; reason: string }> = [];
   for (const [index, evalCase] of cases.entries()) {
+    if (options.presentation === "legacy") {
+      const reason = await legacyReason(evalCase);
+      if (reason !== undefined) {
+        notApplicable.push({ id: evalCase.id, reason });
+        continue;
+      }
+    }
     const runs: RunScore[] = [];
     for (let run = 0; run < options.repeat; run += 1) {
       let outcome: RunOutcome;
@@ -264,7 +275,8 @@ export async function runEvaluation(cases: readonly EvalCase[], options: EvalOpt
       break;
     }
   }
-  const refusalCases = cases.filter((evalCase) => evalCase.expect.refusal !== undefined).map((evalCase) => evalCase.id);
+  const skipped = new Set(notApplicable.map((entry) => entry.id));
+  const refusalCases = cases.filter((evalCase) => evalCase.expect.refusal !== undefined && !skipped.has(evalCase.id)).map((evalCase) => evalCase.id);
   const refusalPassed = results.filter((result) => refusalCases.includes(result.id) && result.runs.every((run) => run.toolOk && run.refusalOk === true)).length;
   return {
     provider: options.model.provider,
@@ -274,15 +286,28 @@ export async function runEvaluation(cases: readonly EvalCase[], options: EvalOpt
     generatedAt: new Date().toISOString(),
     cases: results,
     ...(stopped === undefined ? {} : { stopped, notRun }),
+    ...(notApplicable.length === 0 ? {} : { notApplicable }),
     summary: {
       cases: results.length,
       passed: results.filter((result) => result.passed).length,
       errors: results.filter((result) => result.runs.some((run) => run.error !== undefined)).length,
+      ...(notApplicable.length === 0 ? {} : { notApplicable: notApplicable.length }),
       toolAccuracy: results.length === 0 ? 0 : results.filter((result) => result.runs.every((run) => run.toolOk)).length / results.length,
       refusalCases: refusalCases.length,
       refusalAccuracy: refusalCases.length === 0 ? 1 : refusalPassed / refusalCases.length,
     },
   };
+}
+
+/** Why the legacy presentation cannot express a case. A fixture that does not load is not a reason: runOnce reports it as the case's error. */
+async function legacyReason(evalCase: EvalCase): Promise<string | undefined> {
+  let project: Awaited<ReturnType<typeof loadProject>>;
+  try {
+    project = await loadProject(evalCase.project);
+  } catch {
+    return undefined;
+  }
+  return legacyNotApplicable(project, evalCase);
 }
 
 /** Cases the baseline passed that now fail; more than one fails the command (evaluation.md). */
