@@ -28,21 +28,57 @@ export interface CredentialProvider<Scope> {
 }
 
 export interface Binder<Scope> {
-  /** Required string properties removed from the model's schema and supplied by the server. */
+  /**
+   * String properties every approved tool must require. They are removed from the model's schema and
+   * supplied by the server. A tool without one, or with one optional, is skipped.
+   */
   readonly properties: readonly string[];
+  /**
+   * String properties bound only on the tools that have them, required or optional. They are removed
+   * from those tools' schemas and supplied by the server. Tools without them are offered unchanged.
+   */
+  readonly optionalProperties?: readonly string[] | undefined;
+  /**
+   * Values for the declared properties. Guards see every value; a call sends only the declared
+   * properties its tool has.
+   */
   bind(scope: Scope, credential: IssuedCredential): Record<string, unknown>;
 }
 
 export interface GuardInput {
   tool: string;
+  /** The model's arguments, after every guard's rewrite. */
   arguments: Readonly<Record<string, unknown>>;
   bound: Readonly<Record<string, unknown>>;
+  /** The call's scope, such as the Linear team or Jira project, for tools whose schema carries no bound property. */
+  scope: unknown;
   connection: Pick<McpConnection, "call">;
 }
 
+export interface RewriteInput {
+  tool: string;
+  /** The model's arguments, after any earlier guard rewrote them. */
+  arguments: Readonly<Record<string, unknown>>;
+  /** Every value the binder returned, including ones the called tool does not have. */
+  bound: Readonly<Record<string, unknown>>;
+  /** The call's scope. */
+  scope: unknown;
+}
+
 export interface Guard {
-  /** Upstream tools the check needs on the call's connection besides the called tool. */
+  /**
+   * Upstream tools the check needs on the call's connection besides the called tool. Receives the
+   * model's own arguments, from before any guard's rewrite.
+   */
   requiredTools(tool: string, args: Readonly<Record<string, unknown>>): readonly string[];
+  /**
+   * Optional. Returns the model's arguments narrowed to the scope, such as a search limited to the
+   * bound project. It runs after the model's arguments pass the narrowed schema, and before bound
+   * values are merged, upstream validation, attribution and every check. It must not set a
+   * server-bound property, and throws GuardRejection to refuse. Anything else it throws surfaces as a
+   * vendor_error failure, still before any write. The ledger still fingerprints the model's own arguments.
+   */
+  rewrite?(input: RewriteInput): Record<string, unknown>;
   /** Throws GuardRejection to refuse the call before it executes. */
   check(input: GuardInput): Promise<void>;
 }

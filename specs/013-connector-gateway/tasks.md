@@ -50,6 +50,10 @@ Each phase is one pull request to `mainline`. Check a task only after its eviden
 - [ ] T031 Update the README diagnostics paragraph for turn-record retention.
 - [ ] T039 Send `refresh=1` for connector discovery after a turn recorded a definition-changed failure; the tools route bypasses the per-container catalog cache for it.
 
+## Phase 5b: Shared binder (before 5 and 6)
+
+- [X] T040 Add `Binder.optionalProperties`, `GuardInput.scope` and `Guard.rewrite`; test with recorded Linear and Jira fixtures, the GitHub characterization and the tracker type.
+
 ## Phase 5: Linear (US2)
 
 - [ ] T032 Record Linear `tools/list` fixtures; add the Linear connector type, team binder and fake-server integration test.
@@ -64,4 +68,4 @@ Each phase is one pull request to `mainline`. Check a task only after its eviden
 
 ## Dependencies
 
-1a → 1b → {2, 3}; 2 → 4; 3 → {5, 6}. Phases 5 and 6 can run in parallel.
+1a → 1b → {2, 3}; 2 → 4; 3 → 5a → 5b → {5, 6}. Phases 5 and 6 can run in parallel.

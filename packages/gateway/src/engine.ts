@@ -14,6 +14,7 @@ import {
   type ToolRequest,
   type ToolResult,
 } from "./types.js";
+import { boundNames, removeBoundProperties } from "./binding.js";
 import { flattenSchema } from "./schema.js";
 import { fingerprint, isObject, resultText, withDeadline } from "./util.js";
 
@@ -25,7 +26,17 @@ export function reviewTools<Scope>(
   connector: Pick<ConnectorDefinition<Scope>, "binder">,
   context: ConnectorContext<Scope>,
 ): { tools: CatalogTool[]; skipped: SkippedTool[] } {
-  const tools: CatalogTool[] = [];
+  const { tools, skipped } = review(connection, connector, context);
+  return { tools: tools.map(({ tool }) => tool), skipped };
+}
+
+/** reviewTools, keeping for each offered tool the bound properties a call on it sends. */
+function review<Scope>(
+  connection: Pick<McpConnection, "tools">,
+  connector: Pick<ConnectorDefinition<Scope>, "binder">,
+  context: ConnectorContext<Scope>,
+): { tools: Array<{ tool: CatalogTool; bound: string[] }>; skipped: SkippedTool[] } {
+  const tools: Array<{ tool: CatalogTool; bound: string[] }> = [];
   const skipped: SkippedTool[] = [];
   const offered = new Set(connection.tools.map((tool) => tool.name));
   for (const approval of context.policy.tools) {
@@ -43,14 +54,8 @@ export function reviewTools<Scope>(
       continue;
     }
     const properties = schema.properties;
-    const required = Array.isArray(schema.required) ? schema.required as string[] : [];
-    const unbindable = connector.binder.properties.find((name) => {
-      const property = properties[name];
-      return !(isObject(property) && property.type === "string" && required.includes(name));
-    });
-    if (unbindable !== undefined) { skipped.push({ tool: upstream.name, reason: `missing server-bound property ${unbindable}` }); continue; }
-    for (const name of connector.binder.properties) delete properties[name];
-    schema.required = required.filter((name) => !connector.binder.properties.includes(name));
+    const binding = removeBoundProperties(schema, connector.binder);
+    if ("unbindable" in binding) { skipped.push({ tool: upstream.name, reason: binding.unbindable }); continue; }
     if (policy.allowedArguments) {
       const outside = (schema.required as string[]).filter((name) => !policy.allowedArguments!.includes(name));
       if (outside.length) { skipped.push({ tool: upstream.name, reason: `requires arguments outside allowedArguments: ${outside.join(", ")}` }); continue; }
@@ -71,7 +76,7 @@ export function reviewTools<Scope>(
     if (JSON.stringify(schema).length > 32_768) { skipped.push({ tool: upstream.name, reason: "flattened schema exceeds 32768 characters" }); continue; }
     // Compile during discovery too; schemas we cannot validate must never be advertised.
     try { new AjvJsonSchemaValidator().getValidator(schema); } catch { skipped.push({ tool: upstream.name, reason: "schema does not compile" }); continue; }
-    tools.push({
+    tools.push({ bound: binding.bound, tool: {
       name: upstream.name,
       scope: context.scopeAlias,
       description: (upstream.description ?? upstream.name).slice(0, 16_384),
@@ -79,7 +84,7 @@ export function reviewTools<Scope>(
       // Hashed under the feature 007 key `repository` so hashes survive the release.
       schemaHash: fingerprint({ upstream, policy, repository: context.scope }),
       access: policy.access,
-    });
+    } });
   }
   return { tools, skipped };
 }
@@ -127,6 +132,40 @@ function withAttribution(
 
 class PolicyFailure extends Error {}
 class DefinitionChanged extends PolicyFailure {}
+
+/**
+ * Applies each guard's rewrite in order. Without one, the model's arguments pass through as the same
+ * object. Each rewrite gets its own copy, so one that mutates its input cannot change the caller's
+ * request or make a key it added look model-written.
+ */
+function rewriteArguments<Scope>(request: ToolRequest, bound: Readonly<Record<string, unknown>>, scope: Scope, connector: Pick<ConnectorDefinition<Scope>, "binder" | "guards" | "label">): Record<string, unknown> {
+  let args = request.arguments;
+  const names = boundNames(connector.binder);
+  for (const guard of connector.guards) {
+    if (!guard.rewrite) continue;
+    args = guard.rewrite({ tool: request.tool, arguments: structuredClone(args), bound: structuredClone(bound), scope: structuredClone(scope) });
+    if (!isObject(args) || Object.getPrototypeOf(args) !== Object.prototype) throw new Error("guard rewrite returned a non-object");
+    if (names.some((name) => Object.hasOwn(args, name))) throw new PolicyFailure(`${connector.label} guard set a server-controlled argument.`);
+  }
+  return args;
+}
+
+/**
+ * The bound values a call sends: those its tool has. A required binding's missing value fails the
+ * upstream schema; a when-present one may be optional there, so its absence is refused here instead
+ * of silently sending an unrestricted call.
+ */
+function injectedValues<Scope>(names: readonly string[], bound: Readonly<Record<string, unknown>>, connector: Pick<ConnectorDefinition<Scope>, "binder" | "label">): Record<string, unknown> {
+  const injected: Record<string, unknown> = {};
+  for (const name of names) {
+    const value = bound[name];
+    if (!connector.binder.properties.includes(name) && (typeof value !== "string" || value === "")) {
+      throw new PolicyFailure(`${connector.label} has no server-bound value for ${name}. An administrator must fix the connector configuration.`);
+    }
+    injected[name] = value;
+  }
+  return injected;
+}
 
 /** Feature 007 fingerprinted requests under the key `repository`; keep it so stored records replay. */
 export function requestFingerprint(request: ToolRequest): string {
@@ -192,7 +231,7 @@ export async function executeTool<Scope>(
   const label = connector.label;
   const policy = context.policy.tools.find((tool) => tool.name === request.tool);
   if (!policy) throw agentXError("FORBIDDEN", `${label} MCP tool is not approved for this project`);
-  if (connector.binder.properties.some((name) => Object.hasOwn(request.arguments, name))) {
+  if (boundNames(connector.binder).some((name) => Object.hasOwn(request.arguments, name))) {
     throw agentXError("FORBIDDEN", `${label} routing arguments are server controlled`);
   }
   const write = policy.access === "write";
@@ -226,24 +265,30 @@ export async function executeTool<Scope>(
       for (const name of guard.requiredTools(request.tool, request.arguments)) if (!tools.includes(name)) tools.push(name);
     }
     ({ credential, connection } = await openConnection(connector, context, policy.access, tools, signal, options));
-    const approved = approveTools(connection, connector, context).find((tool) => tool.name === request.tool);
-    if (!approved || approved.schemaHash !== request.schemaHash) {
+    const reviewed = review(connection, connector, context).tools.find(({ tool }) => tool.name === request.tool);
+    if (!reviewed || reviewed.tool.schemaHash !== request.schemaHash) {
       options.onDefinitionChanged?.();
       throw new DefinitionChanged("MCP tool definition changed or is unavailable. Refresh tool discovery before submitting a new request.");
     }
+    const approved = reviewed.tool;
     const validate = new AjvJsonSchemaValidator().getValidator(approved.inputSchema);
     if (!validate(request.arguments).valid) throw new PolicyFailure("Arguments do not match the approved MCP tool schema.");
     const bound = connector.binder.bind(context.scope, credential);
+    const injected = injectedValues(reviewed.bound, bound, connector);
+    const modelKeys = new Set(Object.keys(request.arguments));
+    const modelArgs = rewriteArguments(request, bound, context.scope, connector);
+    // Only keys the model wrote are signed, with the value a rewrite gave them; a key a rewrite added is not.
+    const signable = connector.guards.some((guard) => guard.rewrite !== undefined) ? Object.fromEntries(Object.entries(modelArgs).filter(([key]) => modelKeys.has(key))) : modelArgs;
     const upstream = connection.tools.find((tool) => tool.name === request.tool)!;
     const validateUpstream = new AjvJsonSchemaValidator().getValidator(upstream.inputSchema);
-    const unsigned = { ...request.arguments, ...bound };
+    const unsigned = { ...modelArgs, ...injected };
     if (!validateUpstream(unsigned).valid) throw new PolicyFailure("Arguments do not match the upstream MCP tool schema.");
     // The footer is best effort: when it would break the vendor's schema (a body maxLength, say),
     // the model's own arguments go through unsigned rather than the write failing.
-    const signed = withAttribution(unsigned, request.arguments, write ? options.attribution : undefined, upstream.inputSchema, connector.attributionKeys);
+    const signed = withAttribution(unsigned, signable, write ? options.attribution : undefined, upstream.inputSchema, connector.attributionKeys);
     const dropped = signed !== unsigned && !validateUpstream(signed).valid;
     const args = dropped ? unsigned : signed;
-    for (const guard of connector.guards) await guard.check({ tool: request.tool, arguments: request.arguments, bound, connection });
+    for (const guard of connector.guards) await guard.check({ tool: request.tool, arguments: modelArgs, bound, scope: context.scope, connection });
     signal.throwIfAborted();
     writeAttempted = write;
     if (dropped) options.onAttributionDropped?.(request.tool);

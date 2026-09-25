@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import type { ProjectDefinition } from "@agentx/contracts";
+import type { ProjectDefinition, StoredProjectDefinition } from "@agentx/contracts";
 import { describe, expect, it } from "vitest";
 import { prepareWorkspace, type RepositoryMaterializer } from "../../packages/worker/src/prepare.js";
 import { assertWorkspaceReady, evaluateReadiness } from "../../packages/worker/src/readiness.js";
@@ -145,7 +145,7 @@ describe("workspace preparation", () => {
           },
         ],
       },
-    } as unknown as ProjectDefinition;
+    } satisfies StoredProjectDefinition;
 
     const manifest = await prepareWorkspace({
       rootPath: root,

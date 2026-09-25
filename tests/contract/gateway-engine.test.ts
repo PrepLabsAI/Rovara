@@ -290,6 +290,44 @@ describe("gateway execution", () => {
     expect(f.close).toHaveBeenCalledOnce();
   });
 
+  it("refuses a rewrite that returns an array instead of dropping the model's arguments", async () => {
+    const arrayGuard: Guard = { requiredTools: () => [], rewrite: () => [] as unknown as Record<string, unknown>, check: async () => undefined };
+    const f = fixture([arrayGuard]);
+    const result = await executeTool(f.request("list_items", { state: "open" }), f.connector, f.context, { connect: f.connect, ledger: f.ledger });
+    expect(result).toMatchObject({ status: "FAILED", reason: "vendor_error" });
+    expect(f.call).not.toHaveBeenCalled();
+  });
+
+  it("refuses a rewrite that returns a promise instead of dropping the model's arguments", async () => {
+    const asyncGuard: Guard = { requiredTools: () => [], rewrite: () => Promise.resolve({}) as unknown as Record<string, unknown>, check: async () => undefined };
+    const f = fixture([asyncGuard]);
+    const result = await executeTool(f.request("list_items", { state: "open" }), f.connector, f.context, { connect: f.connect, ledger: f.ledger });
+    expect(result).toMatchObject({ status: "FAILED", reason: "vendor_error" });
+    expect(f.call).not.toHaveBeenCalled();
+  });
+
+  it("gives a rewrite its own copies of bound and scope, so a mutation cannot change what later checks see", async () => {
+    const originalScope: TrackerScope = { alias: "payments", siteId: "site-42" };
+    let seenBound: unknown;
+    let seenScope: unknown;
+    const guard: Guard = {
+      requiredTools: () => [],
+      rewrite: (input) => {
+        (input.bound as Record<string, unknown>).siteId = "mutated-bound";
+        (input.scope as TrackerScope).siteId = "mutated-scope";
+        return { ...input.arguments };
+      },
+      check: async ({ bound, scope }) => { seenBound = bound; seenScope = scope; },
+    };
+    const f = fixture([guard]);
+    const context = { ...f.context, scope: originalScope };
+    const request = f.request("list_items", { state: "open" });
+    expect(await executeTool(request, f.connector, context, { connect: f.connect, ledger: f.ledger })).toMatchObject({ status: "SUCCEEDED" });
+    expect(seenBound).toEqual({ siteId: "site-42" });
+    expect(seenScope).toEqual({ alias: "payments", siteId: "site-42" });
+    expect(originalScope.siteId).toBe("site-42");
+  });
+
   it("gives every failure a reason the model and the broker can act on", async () => {
     const f = fixture();
     const changed = f.request("list_items", { state: "open" });

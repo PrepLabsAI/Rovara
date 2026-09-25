@@ -31,7 +31,7 @@ afterEach(() => { log.mockRestore(); });
 const logLines = () => log.mock.calls.map(([line]) => String(line));
 
 /** A broker serving github and the test-only tracker type, with a project whose latest revision configures both. */
-async function trackerBroker() {
+async function trackerBroker(options: { extraTools?: unknown[]; config?: Record<string, unknown> } = {}) {
   const invoke = vi.fn(async () => ({ content: [{ type: "text", text: "tracker result" }] }));
   const connect = vi.fn<(input: { endpoint: URL; token: string; tools: string[]; signal: AbortSignal }) => Promise<unknown>>(async () => ({
     tools: [
@@ -44,6 +44,7 @@ async function trackerBroker() {
       { name: "delete_item", description: "Delete an item", inputSchema: { type: "object", properties: {
         siteId: { type: "string" }, id: { type: "string" },
       }, required: ["siteId", "id"] } },
+      ...(options.extraTools ?? []),
     ],
     call: invoke,
     close: async () => undefined,
@@ -64,7 +65,7 @@ async function trackerBroker() {
   await registerAndBind(handler);
   const workspaceId = (await ensureWorkspace(handler, thread, pratik)).body.workspaceId as string;
   markReady(db, workspaceId);
-  seedTracker(db);
+  seedTracker(db, options.config ?? trackerConfig);
   return { db, handler, workspaceId, connect, invoke, githubConnect, path: `/v1/service/workspaces/${workspaceId}/connectors/tracker` };
 }
 
@@ -87,11 +88,11 @@ async function registerAndBind(handler: Handler): Promise<void> {
 }
 
 /** No production type accepts `tracker` yet, so the stored revision is edited directly; routes do not re-parse it. */
-function seedTracker(db: FakeDynamoDb): void {
+function seedTracker(db: FakeDynamoDb, config: Record<string, unknown>): void {
   const [revision] = db.find((item) => item.pk === "PROJECT#payments" && String(item.sk).startsWith("REV#"));
   if (!revision) throw new Error("project revision is missing");
   const definition = revision.definition as { integrations: { connectors: unknown[] } };
-  definition.integrations.connectors.push(trackerConfig);
+  definition.integrations.connectors.push(config);
 }
 
 function registerTrackerKey(handler: Handler) {
@@ -216,6 +217,40 @@ describe("generic connector routes", () => {
     expect(JSON.stringify(responses)).not.toContain(TRACKER_KEY);
     expect(logLines().join("\n")).not.toContain(TRACKER_KEY);
     expect(JSON.stringify(db.find((item) => item.entityType === "CONNECTOR_INVOCATION"))).not.toContain(TRACKER_KEY);
+  });
+
+  it("binds a site's board only on tools that have one, through the unchanged routes, and refuses a board the model supplies", async () => {
+    const boardTools = [
+      { name: "move_item", description: "Move an item, optionally on a board", inputSchema: { type: "object", properties: {
+        siteId: { type: "string" }, id: { type: "string" }, boardId: { type: "string" },
+      }, required: ["siteId", "id"], additionalProperties: false } },
+    ];
+    const config = {
+      ...trackerConfig,
+      scopes: [{ alias: "payments", siteId: "site-payments-1", boardId: "board-7" }],
+      tools: [{ name: "list_items", access: "read" }, { name: "move_item", access: "write" }],
+    };
+    const { handler, path, invoke } = await trackerBroker({ extraTools: boardTools, config });
+    expect((await registerTrackerKey(handler)).status).toBe(201);
+    const catalog = ConnectorCatalogSchema.parse((await call(handler, { method: "GET", path: `${path}/tools`, service })).body.catalog);
+    expect(catalog.tools.map((tool) => tool.name)).toEqual(["tracker__list_items", "tracker__move_item"]);
+    expect(JSON.stringify(catalog)).not.toContain("boardId");
+    const hashOf = (name: string) => catalog.tools.find((tool) => tool.name === name)!.scopes[0]!.schemaHash;
+
+    const moved = await call(handler, { method: "POST", path: `${path}/call`, service,
+      body: { requestId: randomUUID(), scope: "payments", tool: "move_item", schemaHash: hashOf("tracker__move_item"), arguments: { id: "item-1" } } });
+    expect(moved.body.result).toMatchObject({ status: "SUCCEEDED" });
+    expect(invoke).toHaveBeenLastCalledWith("move_item", { id: "item-1", siteId: "site-payments-1", boardId: "board-7" });
+    const listed = await call(handler, { method: "POST", path: `${path}/call`, service,
+      body: { requestId: randomUUID(), scope: "payments", tool: "list_items", schemaHash: hashOf("tracker__list_items"), arguments: {} } });
+    expect(listed.body.result).toMatchObject({ status: "SUCCEEDED" });
+    expect(invoke).toHaveBeenLastCalledWith("list_items", { siteId: "site-payments-1" });
+
+    const refused = await call(handler, { method: "POST", path: `${path}/call`, service,
+      body: { requestId: randomUUID(), scope: "payments", tool: "move_item", schemaHash: hashOf("tracker__move_item"), arguments: { id: "item-1", boardId: "board-other" } } });
+    expect(refused.status).toBe(403);
+    expect(refused.body.error).toEqual({ code: "FORBIDDEN", message: "Tracker routing arguments are server controlled" });
+    expect(invoke).toHaveBeenCalledTimes(2);
   });
 
   it("still answers connector not found for a name the project does not configure", async () => {
