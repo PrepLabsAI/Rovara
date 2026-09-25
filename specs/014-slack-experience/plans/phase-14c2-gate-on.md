@@ -9,7 +9,7 @@ and no gate code names a vendor.
 
 **Architecture:** In the orchestrator, a pure module classifies each call with AgentX's own
 vendor-neutral rules (spec 014 D1), using the catalog fields part 1 serves (the vendor's hints and
-the connector's item argument), then applies the project's `actionPolicy` and the built-in
+the connector's item argument paths, R19), then applies the project's `actionPolicy` and the built-in
 defaults. A small Bedrock classifier, chosen per deployment, decides the changes no rule settles
 from the members' own messages only. A hidden Pi extension applies each decision and blocks with a
 reason that tells the model a confirmation was requested. The Slack service stores one
@@ -52,8 +52,8 @@ had nine tasks.)
   and tool descriptions are not edited (R12).
 - **Pratik's in-house tools are characterized before any wiring changes (Task 1).**
   `orchestration-tools.ts` and `connector-tools.ts` are not edited.
-- **FR-013: no gate logic names a vendor.** `packages/contracts/src/action-policy.ts` and
-  `slack-confirmation.ts`, `packages/orchestrator/src/action-*.ts`,
+- **FR-013: no gate logic names a vendor.** `packages/contracts/src/action-policy.ts`,
+  `item-paths.ts` (part 1) and `slack-confirmation.ts`, `packages/orchestrator/src/action-*.ts`,
   `packages/slack-service/src/confirmation*.ts` and `packages/broker/src/aws/slack-interactivity.ts`
   contain no connector vendor name (Task 11 greps).
 - **FR-020: fail closed.** A classifier error, timeout, unknown model or unreadable answer asks;
@@ -122,6 +122,13 @@ had nine tasks.)
 12. **A button this release does not know** (a Details button after a rollback). Expected: the
     clicker hears "This button is no longer available." privately; nothing is queued or posted.
     Test: Task 7, "hands other buttons ... and answers an unknown one privately".
+13. **A tool that names its items inside an array** (such as `tasks[].task`). Expected: a call with
+    any present item in the array is a change for the classifier; an empty array, or objects with
+    no item, is a create; a lifecycle key inside an object that holds an item (`tasks[].completed`)
+    is destructive and asks. Test: Task 2, "reads item arguments inside arrays of objects ...".
+14. **Completing an item.** Expected: a call that sets `completed` (at the top level, inside an
+    object argument, or inside an item object) is destructive and asks, whichever vendor it is.
+    Test: Task 2, "splits tool names into words and finds destructive words and lifecycle keys".
 
 ## File Structure
 
@@ -175,10 +182,13 @@ had nine tasks.)
   - Otherwise it is **destructive** when a word of its name is one of delete, remove, archive,
     close, merge, revert, cancel, destroy, purge, revoke, transition, resolve, trash, or the call
     sets a lifecycle key: state, stateId, status, statusId, resolution, transition, transitionId,
-    transitionName, archived, closed, trashed, duplicateOf (at the top level or inside an object
-    argument such as Jira's `fields`).
-  - Otherwise it is a **change** when it sets the connector's item argument (part 1), and a
-    **create** when it does not.
+    transitionName, archived, closed, completed, trashed, duplicateOf (at the top level, inside an
+    object argument such as Jira's `fields`, or inside an object that holds one of the tool's item
+    argument paths, such as each object of `tasks[]` for `tasks[].task`). `completed` closes a task
+    in some trackers (amended 2026-09-25, R19).
+  - Otherwise it is a **change** when any of the tool's item argument paths (part 1 R1 and R7)
+    resolves to a present value in the call, and a **create** when none does (a missing path, an
+    empty array, or array objects without the item).
   - When the connector declares no item argument, AgentX cannot tell a create from a change: it is a
     change, and `destructiveHint: true` then asks (kind `hint`). That is the only place the hint
     acts; it only tightens.
@@ -206,8 +216,8 @@ had nine tasks.)
   documented as an alternative only; this plan's rollout does not set it. Input (FR-016): the Pi
   session's user messages (the members' mentions in this thread, most recent 12, at most 8,000
   characters), the call's summary and arguments (at most 4,000 characters), and the item the call
-  names (`argument=value`) when the connector declares item arguments. The gate never fetches the
-  item's contents: they are vendor text, which would reopen the injection path the classifier
+  names (`path=value`, several values joined by commas) when the connector declares item
+  arguments. The gate never fetches the item's contents: they are vendor text, which would reopen the injection path the classifier
   closes; the classifier judges the target by the reference in the arguments only. Cost at Nova Lite
   prices ($0.06 and $0.24 per million tokens): at most about 3,600 input and 60 output tokens, so
   about $0.0002 per call and at most $0.002 per turn (8 calls); Haiku 4.5 would be about $0.004 per
@@ -278,6 +288,26 @@ had nine tasks.)
   harness does not have, and the coding-without-compute case needs a free-text required argument;
   Task 5's integration tests cover all three. SC-005's 20 clearly asked writes grow from turn
   exports.
+- **R19. Item argument paths and `completed` (amended 2026-09-25, owner-approved gate fixes).**
+  Spec 013 phase 7 (Asana, branch `feat/013-phase-7-asana`) found two gaps. First, `update_tasks`
+  names its tasks inside an array (`tasks[].task`), so a top-level-only item argument made every
+  update of existing tasks a create that runs unasked. Part 1 now declares item arguments as simple
+  paths (a name, `a.b` or `a[].b`; grammar, resolver and registration check in part 1 R7) and serves
+  each tool the paths its schema offers (`itemArguments`); `baseClass` treats a call as a change
+  when any of them resolves to a present value, and `lifecycleKeySet` also looks inside the objects
+  that hold an item path. Second, Asana closes a task with `completed: true`, so `completed` joins
+  `LIFECYCLE_KEYS` (vendor-neutral: any tracker's "completed" is a lifecycle move). Existing
+  top-level declarations (Linear `id`, Jira `issueIdOrKey`, GitHub `issue_number`, `pullNumber`)
+  classify exactly as before; Task 2's vendor pins are unchanged. Asana declares
+  `itemArguments: ["task_id", "tasks[].task"]`, from phase 7's `ASANA_TASK_REFERENCES` (its
+  `ASANA_ITEM_ARGUMENTS` widened by the array path), once phase 7 merges. The declaration itself is set
+  on `asanaConnector` by whichever of phase 7 and part 1 merges second. Whichever of phase 7 and
+  this part merges second adds Asana's tools to
+  `tests/contract/action-classes-vendors.test.ts` (with `update_tasks` bare `create` and with an item
+  `change`, and `{ tasks: [{ task, completed: true }] }` destructive). `tasks[].parent` and the
+  dependency arrays are not declared: they name another task the call links to, not the task it
+  changes, and phase 7's project guard still checks them. Until the declaration lands an
+  administrator can add `{ connector: asana, tool: update_tasks, treatAs: change }`.
 
 ## Slack App Settings and Rollout
 
@@ -445,19 +475,20 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 - Test: `tests/contract/action-policy.test.ts`, `tests/contract/action-classes-vendors.test.ts`
 
 **Interfaces:**
-- Consumes: `ActionPolicy`, `ActionPolicyRule`, `ToolHints`, `toolPatternMatches` (part 1).
+- Consumes: `ActionPolicy`, `ActionPolicyRule`, `ToolHints`, `toolPatternMatches`, `itemPathHolders`,
+  `itemPathValues`, `schemaHasItemPath` (part 1).
 - Produces:
 
 ```ts
 export type ActionClass = "read" | "create" | "change" | "destructive";
-export interface ToolFacts { connector: string; upstreamName: string; access: "read" | "write"; hints?: ToolHints; itemArgument?: string | null }
+export interface ToolFacts { connector: string; upstreamName: string; access: "read" | "write"; hints?: ToolHints; itemArguments?: readonly string[] }
 export interface SettledAction { outcome: "allow" | "ask" | "deny"; source: "rule" | "default"; kind: "admin" | "destructive" | "bulk" | "hint" | "read" | "create" | "allowed"; reason: string; rule?: number }
 export interface PolicyEvaluation { actionClass: ActionClass; classRule?: number; settled?: SettledAction }
 export const BULK_ITEM_LIMIT = 5;
 export const DESTRUCTIVE_WORDS: ReadonlySet<string>;
-export const LIFECYCLE_KEYS: ReadonlySet<string>;
+export const LIFECYCLE_KEYS: ReadonlySet<string>; // includes "completed" (R19)
 export function nameWords(name: string): string[];
-export function destructiveSignal(toolName: string, args: Record<string, unknown>): string | undefined;
+export function destructiveSignal(toolName: string, args: Record<string, unknown>, itemArguments?: readonly string[]): string | undefined;
 export function itemReference(facts: ToolFacts | undefined, args: Record<string, unknown>): string | undefined;
 export function baseClass(name: string, facts: ToolFacts | undefined, args: Record<string, unknown>, worker?: { prepared(): boolean }): ActionClass;
 export function itemCount(value: unknown, depth?: number): number;
@@ -471,11 +502,11 @@ export function evaluatePolicy(input: { name; args; facts?; policy?; worker? }):
 import { describe, expect, it } from "vitest";
 import { IN_HOUSE_TOOL_NAMES, type ActionPolicy } from "../../packages/contracts/src/index.js";
 import {
-  BULK_ITEM_LIMIT, baseClass, destructiveSignal, evaluatePolicy, itemCount, itemReference, nameWords, type ToolFacts,
+  BULK_ITEM_LIMIT, LIFECYCLE_KEYS, baseClass, destructiveSignal, evaluatePolicy, itemCount, itemReference, nameWords, type ToolFacts,
 } from "../../packages/orchestrator/src/action-policy.js";
 
 const tracker = (upstreamName: string, access: "read" | "write", extra: Partial<ToolFacts> = {}): ToolFacts =>
-  ({ connector: "tracker", upstreamName, access, itemArgument: "id", ...extra });
+  ({ connector: "tracker", upstreamName, access, itemArguments: ["id"], ...extra });
 const prepared = (value: boolean) => ({ prepared: () => value });
 
 describe("action classes (spec 014 D1)", () => {
@@ -487,10 +518,14 @@ describe("action classes (spec 014 D1)", () => {
     expect(destructiveSignal("edit_item", { fields: { resolution: "Fixed" } })).toBe("the call sets \"fields.resolution\"");
     expect(destructiveSignal("save_item", { id: "T-1", state: null, title: "x" })).toBeUndefined();
     expect(destructiveSignal("list_closed_items", {})).toBeUndefined();
+    // Completing an item closes it in some trackers (R19).
+    expect(LIFECYCLE_KEYS.has("completed")).toBe(true);
+    expect(destructiveSignal("save_item", { id: "T-1", completed: true })).toBe("the call sets \"completed\"");
+    expect(destructiveSignal("edit_item", { fields: { completed: false } })).toBe("the call sets \"fields.completed\"");
   });
 
   it("reads a read-approved tool, even one that filters by a lifecycle key", () => {
-    expect(baseClass("tracker__list_items", tracker("list_items", "read", { itemArgument: null }), { state: "open" })).toBe("read");
+    expect(baseClass("tracker__list_items", tracker("list_items", "read", { itemArguments: [] }), { state: "open" })).toBe("read");
     expect(baseClass("tracker__list_items", tracker("list_items", "read", { hints: { readOnlyHint: false } }), {})).toBe("create");
   });
 
@@ -500,11 +535,26 @@ describe("action classes (spec 014 D1)", () => {
     expect(baseClass("tracker__save_item", save, { id: "T-5", priority: 2 })).toBe("change");
     expect(baseClass("tracker__save_item", save, { id: "T-5", state: "Done" })).toBe("destructive");
     expect(baseClass("tracker__delete_item", tracker("delete_item", "write"), { id: "T-5" })).toBe("destructive");
-    expect(baseClass("tracker__add_note", tracker("add_note", "write", { itemArgument: null }), { body: "x" })).toBe("create");
+    expect(baseClass("tracker__add_note", tracker("add_note", "write", { itemArguments: [] }), { body: "x" })).toBe("create");
+  });
+
+  it("reads item arguments inside arrays of objects: a present item changes, none creates, and a lifecycle key in an item object destroys", () => {
+    const update = tracker("update_items", "write", { itemArguments: ["item_id", "items[].item"] });
+    expect(baseClass("tracker__update_items", update, { items: [{ item: "11", title: "Renamed" }] })).toBe("change");
+    expect(baseClass("tracker__update_items", update, { item_id: "11", title: "Renamed" })).toBe("change");
+    expect(baseClass("tracker__update_items", update, { items: [] })).toBe("create");
+    expect(baseClass("tracker__update_items", update, { items: [{ title: "New" }] })).toBe("create");
+    expect(baseClass("tracker__update_items", update, { title: "x" })).toBe("create");
+    expect(baseClass("tracker__update_items", update, { items: [{ item: "11", completed: true }] })).toBe("destructive");
+    expect(destructiveSignal("update_items", { items: [{ item: "11" }, { item: "12", completed: true }] }, ["items[].item"]))
+      .toBe("the call sets \"items[].completed\"");
+    // Only objects that hold one of the tool's item paths are searched, so a create's array is not.
+    expect(baseClass("tracker__create_items", tracker("create_items", "write", { itemArguments: [] }), { items: [{ title: "Done already", completed: true }] })).toBe("create");
+    expect(itemReference(update, { items: [{ item: "11" }, { item: "12" }] })).toBe("items[].item=11,12");
   });
 
   it("treats a tool whose connector declares no item argument as a change, never as destructive without a signal", () => {
-    expect(baseClass("tracker__save_item", tracker("save_item", "write", { itemArgument: undefined }), { title: "x" })).toBe("change");
+    expect(baseClass("tracker__save_item", tracker("save_item", "write", { itemArguments: undefined }), { title: "x" })).toBe("change");
     expect(baseClass("mystery_tool", undefined, { x: 1 })).toBe("change");
     expect(evaluatePolicy({ name: "tracker__save_item", args: { id: "T-5" }, facts: tracker("save_item", "write") })).toEqual({ actionClass: "change" });
   });
@@ -545,10 +595,10 @@ describe("rules and built-in defaults", () => {
   });
 
   it("lets destructiveHint tighten only what AgentX cannot tell: a tool whose connector declares no item argument", () => {
-    const hinted = (itemArgument: string | null | undefined) => tracker("save_item", "write", { itemArgument, hints: { destructiveHint: true } });
+    const hinted = (itemArguments: readonly string[] | undefined) => tracker("save_item", "write", { itemArguments, hints: { destructiveHint: true } });
     expect(evaluatePolicy({ name: "tracker__save_item", args: { title: "x" }, facts: hinted(undefined) }).settled).toMatchObject({ outcome: "ask", kind: "hint" });
-    expect(evaluatePolicy({ name: "tracker__save_item", args: { title: "x" }, facts: hinted("id") }).settled).toMatchObject({ outcome: "allow", kind: "create" });
-    expect(evaluatePolicy({ name: "tracker__save_item", args: { id: "T-5" }, facts: hinted("id") }).settled).toBeUndefined();
+    expect(evaluatePolicy({ name: "tracker__save_item", args: { title: "x" }, facts: hinted(["id"]) }).settled).toMatchObject({ outcome: "allow", kind: "create" });
+    expect(evaluatePolicy({ name: "tracker__save_item", args: { id: "T-5" }, facts: hinted(["id"]) }).settled).toBeUndefined();
   });
 
   it("applies deny, then ask, then allow, whatever order the rules are listed in", () => {
@@ -594,6 +644,7 @@ describe("rules and built-in defaults", () => {
 // Pins the class AgentX gives every tool in the recorded vendor catalogs (spec 014 D1), from the
 // vendor's hints and each connector's declared item arguments, with no vendor name in gate code.
 import { describe, expect, it } from "vitest";
+import { schemaHasItemPath } from "../../packages/contracts/src/index.js";
 import { jiraConnector, linearConnector, type McpConnection } from "../../packages/gateway/src/index.js";
 import { baseClass, type ToolFacts } from "../../packages/orchestrator/src/action-policy.js";
 import { vendorToolsWithAnnotations } from "../support/vendor-fixtures.js";
@@ -602,18 +653,23 @@ const unused = { issue: () => { throw new Error("not used"); } };
 
 function facts(connector: string, tool: McpConnection["tools"][number], itemArguments: readonly string[]): ToolFacts {
   const annotations = tool.annotations ?? {};
-  const properties = (tool.inputSchema.properties ?? {}) as Record<string, unknown>;
   return {
     connector, upstreamName: tool.name, access: annotations.readOnlyHint === true ? "read" : "write",
     hints: { readOnlyHint: annotations.readOnlyHint as boolean, destructiveHint: annotations.destructiveHint as boolean },
-    itemArgument: itemArguments.find((name) => Object.hasOwn(properties, name)) ?? null,
+    itemArguments: itemArguments.filter((path) => schemaHasItemPath(tool.inputSchema, path)),
   };
+}
+
+/** Arguments that set one item argument path to "X-1", such as { tasks: [{ task: "X-1" }] } for tasks[].task. */
+function naming(path: string): Record<string, unknown> {
+  return path.split(".").reduceRight<unknown>((inner, part) => part.endsWith("[]") ? { [part.slice(0, -2)]: [inner] } : { [part]: inner }, "X-1") as Record<string, unknown>;
 }
 
 function classes(connector: string, itemArguments: readonly string[]) {
   return Object.fromEntries(vendorToolsWithAnnotations(connector as "linear" | "jira").map((tool) => {
     const toolFacts = facts(connector, tool, itemArguments);
-    const withItem = typeof toolFacts.itemArgument === "string" ? baseClass(tool.name, toolFacts, { [toolFacts.itemArgument]: "X-1" }) : "no item argument";
+    const first = toolFacts.itemArguments?.[0];
+    const withItem = first === undefined ? "no item argument" : baseClass(tool.name, toolFacts, naming(first));
     return [tool.name, { bare: baseClass(tool.name, toolFacts, {}), withItem }];
   }));
 }
@@ -673,7 +729,7 @@ Expected: FAIL; `packages/orchestrator/src/action-policy.ts` does not exist.
 - [ ] **Step 3: Create `packages/orchestrator/src/action-policy.ts`**
 
 ```ts
-import { toolPatternMatches, type ActionPolicy, type ActionPolicyRule, type ToolHints } from "@agentx/contracts";
+import { itemPathHolders, itemPathValues, toolPatternMatches, type ActionPolicy, type ActionPolicyRule, type ToolHints } from "@agentx/contracts";
 
 /**
  * AgentX's own, vendor-neutral classes (spec 014 D1). A read and a create run; a change runs only
@@ -687,8 +743,11 @@ export interface ToolFacts {
   upstreamName: string;
   access: "read" | "write";
   hints?: ToolHints | undefined;
-  /** The argument that names an existing item; null when the tool has none; absent when the connector declares none. */
-  itemArgument?: string | null | undefined;
+  /**
+   * The connector's item argument paths this tool's schema offers (part 1), such as `id` or
+   * `tasks[].task`: empty when it offers none, absent when the connector declares none.
+   */
+  itemArguments?: readonly string[] | undefined;
 }
 
 /** A decision the rules or the built-in defaults reached without the classifier. */
@@ -717,9 +776,9 @@ export const DESTRUCTIVE_WORDS: ReadonlySet<string> = new Set([
   "delete", "remove", "archive", "close", "merge", "revert", "cancel", "destroy", "purge", "revoke", "transition", "resolve", "trash",
 ]);
 
-/** Arguments that move an item through its lifecycle. A call that sets one is destructive. */
+/** Arguments that move an item through its lifecycle. A call that sets one is destructive. `completed` closes a task in some trackers (R19). */
 export const LIFECYCLE_KEYS: ReadonlySet<string> = new Set([
-  "state", "stateId", "status", "statusId", "resolution", "transition", "transitionId", "transitionName", "archived", "closed", "trashed", "duplicateOf",
+  "state", "stateId", "status", "statusId", "resolution", "transition", "transitionId", "transitionName", "archived", "closed", "completed", "trashed", "duplicateOf",
 ]);
 
 const IN_HOUSE_READS: ReadonlySet<string> = new Set(["agentx_follow_up", "agentx_task_status", "agentx_task_result"]);
@@ -734,8 +793,12 @@ function isSet(value: unknown): boolean {
   return value !== undefined && value !== null && value !== "";
 }
 
-/** The lifecycle keys a call sets, at the top level or inside an object argument (such as `fields`). */
-function lifecycleKeySet(args: Record<string, unknown>): string | undefined {
+/**
+ * The lifecycle key a call sets: at the top level, inside an object argument (such as `fields`), or
+ * inside an object that holds one of the tool's nested item paths (each object of `tasks[]` for
+ * `tasks[].task`, R19). Reads no deeper than those paths' own steps.
+ */
+function lifecycleKeySet(args: Record<string, unknown>, itemArguments: readonly string[] = []): string | undefined {
   for (const [key, value] of Object.entries(args)) {
     if (LIFECYCLE_KEYS.has(key) && isSet(value)) return key;
     if (value !== null && typeof value === "object" && !Array.isArray(value)) {
@@ -744,31 +807,43 @@ function lifecycleKeySet(args: Record<string, unknown>): string | undefined {
       }
     }
   }
+  for (const path of itemArguments) {
+    const cut = path.lastIndexOf(".");
+    // A top-level path's holder is the arguments themselves, already read above.
+    if (cut < 0) continue;
+    for (const holder of itemPathHolders(args, path)) {
+      for (const [key, value] of Object.entries(holder)) {
+        if (LIFECYCLE_KEYS.has(key) && isSet(value)) return `${path.slice(0, cut)}.${key}`;
+      }
+    }
+  }
   return undefined;
 }
 
 /** Why a call is destructive, or undefined: a destructive word in the tool's name, or a lifecycle key it sets. */
-export function destructiveSignal(toolName: string, args: Record<string, unknown>): string | undefined {
+export function destructiveSignal(toolName: string, args: Record<string, unknown>, itemArguments?: readonly string[]): string | undefined {
   const word = nameWords(toolName).find((entry) => DESTRUCTIVE_WORDS.has(entry));
   if (word !== undefined) return `the tool's name says "${word}"`;
-  const key = lifecycleKeySet(args);
+  const key = lifecycleKeySet(args, itemArguments);
   return key === undefined ? undefined : `the call sets "${key}"`;
 }
 
-/** The existing item a call names, as `argument=value`, when the connector declares one. */
+/** The existing items a call names, as `path=value` (several values joined by commas), when the connector declares how. */
 export function itemReference(facts: ToolFacts | undefined, args: Record<string, unknown>): string | undefined {
-  const argument = facts?.itemArgument;
-  if (typeof argument !== "string" || !isSet(args[argument])) return undefined;
-  const value = args[argument];
-  return `${argument}=${(typeof value === "string" ? value : JSON.stringify(value)).slice(0, 80)}`;
+  for (const path of facts?.itemArguments ?? []) {
+    const values = itemPathValues(args, path);
+    if (values.length > 0) return `${path}=${values.map((value) => typeof value === "string" ? value : JSON.stringify(value)).join(",").slice(0, 80)}`;
+  }
+  return undefined;
 }
 
 /**
  * The class before any rule (spec 014 D1).
  * - A connector tool approved for reading is a read, unless the vendor says it writes or destroys.
  * - A destructive word in its name, or a lifecycle key it sets, makes it destructive.
- * - It is a change when it names an existing item through the connector's item argument, and a
- *   create when it names none. When the connector declares no item arguments, it is a change.
+ * - It is a change when any of its item argument paths names a present item (a name, `a.b` or
+ *   `a[].b`, R19), and a create when none does. When the connector declares no item arguments, it
+ *   is a change.
  * - In-house tools are classified here in code: agentx_submit_task is a change only while the
  *   thread has no prepared compute (D5); the other task tools read; publishing is a change; closing,
  *   replacing or reverting a pull request is destructive. Any other unknown tool is a change unless
@@ -783,9 +858,9 @@ export function baseClass(name: string, facts: ToolFacts | undefined, args: Reco
     return destructiveSignal(name, args) === undefined ? "change" : "destructive";
   }
   if (facts.access === "read" && facts.hints?.readOnlyHint !== false && facts.hints?.destructiveHint !== true) return "read";
-  if (destructiveSignal(facts.upstreamName, args) !== undefined) return "destructive";
-  if (typeof facts.itemArgument === "string") return isSet(args[facts.itemArgument]) ? "change" : "create";
-  return facts.itemArgument === null ? "create" : "change";
+  if (destructiveSignal(facts.upstreamName, args, facts.itemArguments) !== undefined) return "destructive";
+  if (facts.itemArguments === undefined) return "change";
+  return facts.itemArguments.some((path) => itemPathValues(args, path).length > 0) ? "change" : "create";
 }
 
 /** The number of items a call touches: the length of its longest array, looking at most two levels into the arguments. */
@@ -835,7 +910,7 @@ export function evaluatePolicy(input: {
   }
   if (actionClass === "read") return { ...evaluation, settled: { outcome: "allow", source: "default", kind: "read", reason: "reads run without asking" } };
   if (actionClass === "destructive") {
-    const signal = destructiveSignal(input.facts?.upstreamName ?? input.name, input.args);
+    const signal = destructiveSignal(input.facts?.upstreamName ?? input.name, input.args, input.facts?.itemArguments);
     return { ...evaluation, settled: { outcome: "ask", source: "default", kind: "destructive", reason: `${signal === undefined ? "this action is destructive" : signal}; destructive actions always ask` } };
   }
   const items = itemCount(input.args);
@@ -843,7 +918,7 @@ export function evaluatePolicy(input: {
     return { ...evaluation, settled: { outcome: "ask", source: "default", kind: "bulk", reason: `this write touches ${items} items; more than ${BULK_ITEM_LIMIT} always asks` } };
   }
   if (actionClass === "create") return { ...evaluation, settled: { outcome: "allow", source: "default", kind: "create", reason: "the call names no existing item, so it creates one" } };
-  if (input.facts !== undefined && input.facts.itemArgument === undefined && input.facts.hints?.destructiveHint === true) {
+  if (input.facts !== undefined && input.facts.itemArguments === undefined && input.facts.hints?.destructiveHint === true) {
     return { ...evaluation, settled: { outcome: "ask", source: "default", kind: "hint", reason: "the vendor marks this tool destructive and AgentX cannot tell what it changes" } };
   }
   return evaluation;
@@ -1198,9 +1273,9 @@ const tool = (name: string, access: "read" | "write", extra: Record<string, unkn
 const catalog = {
   connector: "tracker", skipped: [],
   tools: [
-    tool("list_items", "read", { hints: { readOnlyHint: true }, itemArgument: null }),
-    tool("save_item", "write", { itemArgument: "id" }),
-    tool("close_item", "write", { hints: { destructiveHint: true }, itemArgument: "id" }),
+    tool("list_items", "read", { hints: { readOnlyHint: true }, itemArguments: [] }),
+    tool("save_item", "write", { itemArguments: ["id"] }),
+    tool("close_item", "write", { hints: { destructiveHint: true }, itemArguments: ["id"] }),
   ],
 } as ConnectorCatalog;
 const facts = connectorToolFacts([catalog]);
@@ -1434,7 +1509,7 @@ export function connectorToolFacts(catalogs: readonly ConnectorCatalog[]): Map<s
   return new Map(catalogs.flatMap((catalog) => catalog.tools.map((tool) => [tool.name, {
     connector: catalog.connector, upstreamName: tool.upstreamName, access: tool.access,
     ...(tool.hints === undefined ? {} : { hints: tool.hints }),
-    ...(tool.itemArgument === undefined ? {} : { itemArgument: tool.itemArgument }),
+    ...(tool.itemArguments === undefined ? {} : { itemArguments: tool.itemArguments }),
   }] as const)));
 }
 
@@ -1641,11 +1716,11 @@ const context = { workspaceId: "11111111-1111-4111-8111-111111111111", conversat
 const catalog: ConnectorCatalog = {
   connector: "tracker", skipped: [],
   tools: [
-    { name: "tracker__list_items", upstreamName: "list_items", description: "List items.", access: "read", hints: { readOnlyHint: true, destructiveHint: false }, itemArgument: null,
+    { name: "tracker__list_items", upstreamName: "list_items", description: "List items.", access: "read", hints: { readOnlyHint: true, destructiveHint: false }, itemArguments: [],
       scopes: [{ alias: "payments", schemaHash: "a".repeat(64) }], inputSchema: { type: "object", properties: { status: { type: "string" } }, required: [] } },
-    { name: "tracker__save_item", upstreamName: "save_item", description: "Create or update an item.", access: "write", itemArgument: "id",
+    { name: "tracker__save_item", upstreamName: "save_item", description: "Create or update an item.", access: "write", itemArguments: ["id"],
       scopes: [{ alias: "payments", schemaHash: "b".repeat(64) }], inputSchema: { type: "object", properties: { id: { type: "string" }, title: { type: "string" } }, required: [] } },
-    { name: "tracker__close_item", upstreamName: "close_item", description: "Close an item.", access: "write", hints: { readOnlyHint: false, destructiveHint: true }, itemArgument: "id",
+    { name: "tracker__close_item", upstreamName: "close_item", description: "Close an item.", access: "write", hints: { readOnlyHint: false, destructiveHint: true }, itemArguments: ["id"],
       scopes: [{ alias: "payments", schemaHash: "c".repeat(64) }], inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
   ],
 };
@@ -3272,7 +3347,7 @@ describe("the hosted Slack runtime", () => {
     const { modelRuntime, faux } = await fauxModelRuntime();
     faux.setResponses([fauxAssistantMessage([fauxToolCall("tracker__close_item", { id: "TRK-9" })], { stopReason: "toolUse" }), fauxAssistantMessage("Waiting.")]);
     const catalog: ConnectorCatalog = { connector: "tracker", skipped: [], tools: [{ name: "tracker__close_item", upstreamName: "close_item", description: "Close.", access: "write",
-      itemArgument: "id", scopes: [{ alias: "payments", schemaHash: "c".repeat(64) }], inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } }] };
+      itemArguments: ["id"], scopes: [{ alias: "payments", schemaHash: "c".repeat(64) }], inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } }] };
     const callConnectorTool = vi.fn();
     const api = { discoverConnectorTools: vi.fn(async () => catalog), callConnectorTool, submitTask: vi.fn(), taskStatus: vi.fn(), taskResult: vi.fn(), followUp: vi.fn(),
       createPullRequest: vi.fn(), managePullRequest: vi.fn(), pullRequestResult: vi.fn() } satisfies OrchestrationApi;
@@ -3657,9 +3732,9 @@ describe("gate decisions in turn records (spec 014 FR-021)", () => {
       fauxAssistantMessage("Waiting for your confirmation."),
     ]);
     const catalog: ConnectorCatalog = { connector: "tracker", skipped: [], tools: [
-      { name: "tracker__list_items", upstreamName: "list_items", description: "List items.", access: "read", itemArgument: null,
+      { name: "tracker__list_items", upstreamName: "list_items", description: "List items.", access: "read", itemArguments: [],
         scopes: [{ alias: "payments", schemaHash: "a".repeat(64) }], inputSchema: { type: "object", properties: {}, required: [] } },
-      { name: "tracker__close_item", upstreamName: "close_item", description: "Close an item.", access: "write", itemArgument: "id",
+      { name: "tracker__close_item", upstreamName: "close_item", description: "Close an item.", access: "write", itemArguments: ["id"],
         scopes: [{ alias: "payments", schemaHash: "c".repeat(64) }], inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } },
     ] };
     const callConnectorTool = vi.fn(async () => ({ requestId: "r1", status: "SUCCEEDED", text: "[]", truncated: false, replayed: false }));
@@ -4630,7 +4705,7 @@ Run:
 ```bash
 export PATH=/private/tmp/claude-501/node-v22.20.0-darwin-arm64/bin:$PATH
 npm run typecheck && npm run lint && npm run build && npm test
-grep -niE "linear|jira|github|atlassian" packages/contracts/src/action-policy.ts packages/contracts/src/slack-confirmation.ts packages/orchestrator/src/action-*.ts packages/slack-service/src/confirmation*.ts packages/broker/src/aws/slack-interactivity.ts
+grep -niE "linear|jira|github|atlassian|asana" packages/contracts/src/action-policy.ts packages/contracts/src/item-paths.ts packages/contracts/src/slack-confirmation.ts packages/orchestrator/src/action-*.ts packages/slack-service/src/confirmation*.ts packages/broker/src/aws/slack-interactivity.ts
 git diff mainline --stat -- tests/contract/__snapshots__ packages/orchestrator/src/orchestration-tools.ts packages/orchestrator/src/connector-tools.ts
 git diff mainline -- tests ':(exclude)tests/eval/*.ts' | grep '^-[^-]'
 npm run eval && git status --short tests/eval/baseline
@@ -4656,7 +4731,8 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 ## Self-Review
 
 1. **Spec coverage.** FR-013: Task 5 (hook, every tool, in-house included) and Task 11's grep.
-   FR-014: part 1 and Task 2 (hints, approved access, item arguments; in-house in code, D5). FR-015:
+   FR-014: part 1 and Task 2 (hints, approved access, item argument paths and `completed`, R19;
+   in-house in code, D5). FR-015:
    Task 2 and part 1 (defaults, deny then ask then allow, per connector and pattern). FR-016:
    Tasks 3 to 5 (members' messages, the call and the item reference only). FR-017: Tasks 4 to 8
    (message with buttons, block, exact call on the requester's Approve or "yes", R1, R2). FR-018:

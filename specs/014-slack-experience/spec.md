@@ -201,7 +201,12 @@ listing the `save_issue` call and its result; nothing is posted to the thread.
   `tool_call` hook, for in-house tools and every connector alike. No gate logic may name a vendor.
 - **FR-014**: Each tool MUST be classified as read, write or destructive: from the MCP annotations
   `readOnlyHint` and `destructiveHint` when present; otherwise from the approved access (`read` or
-  `write`); in-house tools are classified in code.
+  `write`); in-house tools are classified in code. A connector declares, as its own data, the
+  argument paths through which its tools name an existing item: a name, `a.b` or `a[].b` (an array
+  of objects), at most four steps, checked at registration. A write in which any declared path
+  resolves to a present value changes an existing item; one in which none does creates. A write
+  that sets a lifecycle key (including `completed`), at the top level, in an object argument or in
+  an object that holds an item path, is destructive. (Amended 2026-09-25.)
 - **FR-015**: Rules MUST be evaluated first, in this order: `deny`, then `ask`, then `allow`. The
   built-in defaults are: reads allow; destructive ask; a write that touches more than 5 items ask.
   Administrators extend the defaults per project, per connector and per tool name pattern, and may
@@ -268,6 +273,11 @@ listing the `save_issue` call and its result; nothing is posted to the thread.
   runs Pi without a UI.
 - **Classification uses the MCP standard hints** (`readOnlyHint`, `destructiveHint`), so a new
   connector needs no gate code.
+- **Item arguments are paths, and `completed` is a lifecycle key** (2026-09-25, owner-approved, found
+  by spec 013 phase 7's Asana review). A connector's item arguments may reach inside an object or an
+  array of objects (`tasks[].task`), so an update that names its items in an array is a change, not
+  a create that runs unasked. Completing an item is destructive, like closing it. Both stay
+  vendor-neutral; the existing top-level declarations classify as before.
 - **The details view is a private modal**, not a thread post, so that looking at details never
   notifies or clutters the thread.
 - **A cheap thread record is created at once, and the expensive compute is prepared lazily.** This

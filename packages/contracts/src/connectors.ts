@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ItemPathSchema } from "./item-paths.js";
 import { GitHubMcpResultSchema, McpToolNameSchema, ToolApprovalListSchema } from "./github-mcp.js";
 import { AGENTX_NAME_PATTERN } from "./names.js";
 
@@ -183,6 +184,15 @@ export const StoredConnectorsSchema = z.array(StoredConnectorConfigSchema).min(1
 
 const SchemaHashSchema = z.string().regex(/^[a-f0-9]{64}$/);
 
+/**
+ * The two MCP tool annotations the action gate reads (feature 014). They come from the vendor, so
+ * the gate lets them make a tool stricter, never looser.
+ */
+export const ToolHintsSchema = z.object({
+  readOnlyHint: z.boolean().optional(),
+  destructiveHint: z.boolean().optional(),
+}).strict();
+
 export const PresentedToolSchema = z.object({
   name: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/),
   upstreamName: McpToolNameSchema,
@@ -190,6 +200,16 @@ export const PresentedToolSchema = z.object({
   inputSchema: z.record(z.string(), z.unknown()),
   access: z.enum(["read", "write"]),
   scopes: z.array(z.object({ alias: ConnectorAliasSchema, schemaHash: SchemaHashSchema }).strict()).min(1).max(32),
+  // The two fields below are sent only to a Slack service that sends x-agentx-include: gate;
+  // older services parse this schema strictly (feature 014).
+  hints: ToolHintsSchema.optional(),
+  /**
+   * The connector's item argument paths (item-paths.ts) that this tool's schema offers, in the
+   * connector's order; a call that sets any of them names an existing item. Empty when the connector
+   * declares paths and this tool offers none (so a call creates), absent when the connector declares
+   * none.
+   */
+  itemArguments: z.array(ItemPathSchema).max(16).optional(),
 }).strict();
 
 export const ConnectorCatalogSchema = z.object({
@@ -218,6 +238,7 @@ export const ThreadConnectorSchema = z.object({
   connected: z.boolean(),
 }).strict();
 
+export type ToolHints = z.infer<typeof ToolHintsSchema>;
 export type PresentedTool = z.infer<typeof PresentedToolSchema>;
 export type ConnectorCatalog = z.infer<typeof ConnectorCatalogSchema>;
 export type ConnectorCallRequest = z.infer<typeof ConnectorCallRequestSchema>;
@@ -255,10 +276,15 @@ export function toolBudget(approved: number): { maximum: number; warning?: strin
   return { maximum };
 }
 
-export function presentedNameProblems(definition: ConnectorApprovals): string[] {
-  const connectors = definition.integrations?.githubMcp
+/** Each connector's name and approved tools. The feature 007 githubMcp policy reads as a connector named github. */
+export function connectorApprovals(definition: ConnectorApprovals): Array<{ name: string; tools: ReadonlyArray<{ name: string }> }> {
+  return definition.integrations?.githubMcp
     ? [{ name: "github", tools: definition.integrations.githubMcp.tools }]
-    : definition.integrations?.connectors ?? [];
+    : [...(definition.integrations?.connectors ?? [])];
+}
+
+export function presentedNameProblems(definition: ConnectorApprovals): string[] {
+  const connectors = connectorApprovals(definition);
   return connectors.flatMap((connector) => connector.tools
     .map((tool) => `${connector.name}__${tool.name}`)
     .filter((presented) => presented.length > 64)

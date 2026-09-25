@@ -5,6 +5,6 @@
 export function threadWorkspaceRequest(requestId: string) {
   return {
     requestId, includeIntegrations: true, includeSettingsRevision: true, includeConnectors: true,
-    includeAllConnectorTypes: true, includeRecoverableOperations: true,
+    includeAllConnectorTypes: true, includeRecoverableOperations: true, includeActionPolicy: true,
   } as const;
 }

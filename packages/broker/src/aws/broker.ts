@@ -58,6 +58,7 @@ import {
   type PullRequestLifecycleResult,
   type SlackChannelBinding,
   type SlackRequester,
+  type SlackThreadPrepareResult,
   type SlackThreadWorkspaceResult,
   type SlackWorkspaceCloseCompleteResult,
   type SlackWorkspaceCloseStartResult,
@@ -304,6 +305,9 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         if (request.method === "POST" && serviceUrl.pathname === "/v1/threads/workspace") {
           return json(await ensureThreadWorkspace(dependencies, identity, parseBody(request.body)), request.requestId);
         }
+        if (request.method === "POST" && serviceUrl.pathname === "/v1/threads/workspace/prepare") {
+          return json(await prepareThreadWorkspace(dependencies, identity, parseBody(request.body)), request.requestId);
+        }
         if (request.method === "POST" && serviceUrl.pathname === "/v1/threads/workspace/close") {
           return json(await startThreadWorkspaceClose(dependencies, identity, parseBody(request.body)), request.requestId, 202);
         }
@@ -415,7 +419,11 @@ async function routeWorkspaceRequest(
     if (parsed && !parsed.success) throw agentXError("CONFIG_INVALID", "invalid connector request");
     const context = connectorContext(identity, workspace, project);
     if (!parsed?.success) {
-      return json({ catalog: await discoverConnector({ connector, workspace, context, catalogs: dependencies.catalogs, refresh: url.searchParams.get("refresh") === "1" }) }, request.requestId);
+      // Only a caller that sends x-agentx-include: gate gets the action gate's fields (feature 014); they are not secret.
+      const includeGateFields = request.headers["x-agentx-include"]?.split(",").map((entry) => entry.trim()).includes("gate") === true;
+      return json({ catalog: await discoverConnector({
+        connector, workspace, context, catalogs: dependencies.catalogs, refresh: url.searchParams.get("refresh") === "1", includeGateFields,
+      }) }, request.requestId);
     }
     const attribution = attributionText(identity, connector);
     const result = await callConnector({
@@ -898,6 +906,8 @@ async function startThreadWorkspaceClose(
   const requestId = uuid(input.requestId, "requestId");
   const workspace = await getThreadWorkspace(dependencies, identity.ownerKey);
   if (!workspace) return { outcome: "NOT_FOUND" };
+  // Spec 014: a thread that never needed the worker has no compute, so there is nothing to close.
+  if (workspace.status === "UNPREPARED") return { outcome: "NOT_FOUND" };
   if (workspace.status === "CLOSED" && workspace.closedAt) {
     return { outcome: "CLOSED", workspaceId: workspace.id, closedAt: workspace.closedAt };
   }
@@ -1105,11 +1115,18 @@ async function ensureThreadWorkspace(
   // recoverableOperations. The control plane deploys first, so gating this on includeConnectors
   // would fail every turn until the Slack service caught up.
   const includeRecoverableOperations = input.includeRecoverableOperations === true;
+  // Spec 014, a separate opt-in: a service that sends lazyPreparation: true parses status
+  // UNPREPARED and prepares compute through POST /v1/threads/workspace/prepare when a tool first
+  // needs the worker. Every other service keeps getting a workspace whose compute is prepared now.
+  const lazyPreparation = input.lazyPreparation === true;
+  // A separate opt-in (feature 014): services released before the action gate parse strictly.
+  const includeActionPolicy = input.includeActionPolicy === true;
   const include: IntegrationInclude = {
     integrations: includeIntegrations,
     connectors: includeConnectors,
     allConnectorTypes: includeAllConnectorTypes,
     recoverableOperations: includeRecoverableOperations,
+    actionPolicy: includeActionPolicy,
   };
   const threadWorkspace = await getThreadWorkspace(dependencies, identity.ownerKey);
   if (threadWorkspace) {
@@ -1125,11 +1142,22 @@ async function ensureThreadWorkspace(
     if (existing.status === "CLOSED" && existing.closedAt) {
       return { outcome: "CLOSED", workspaceId: existing.id, closedAt: existing.closedAt };
     }
+    if (existing.status === "UNPREPARED" && !lazyPreparation) {
+      // An older Slack service cannot parse UNPREPARED and expects compute now: prepare it at once.
+      const prepared = await startThreadPreparation(dependencies, identity, requestId, existing);
+      if (prepared.outcome !== "WORKSPACE") return prepared;
+      const current = await requireWorkspace(dependencies, existing.id);
+      const result = await existingThreadWorkspace(dependencies, identity, requestId, current, include, includeSettingsRevision);
+      return result.outcome === "WORKSPACE" ? { ...result, created: prepared.created } : result;
+    }
     return existingThreadWorkspace(dependencies, identity, requestId, existing, include, includeSettingsRevision);
   }
 
   // New threads use the latest revision; an existing thread keeps the revision its workspace was prepared with.
   const project = await requireLatestProject(dependencies, slack.binding.projectName);
+  if (lazyPreparation) {
+    return createUnpreparedThreadWorkspace(dependencies, identity, requestId, project, include, includeSettingsRevision);
+  }
   const preparation = await newWorkspacePreparation(dependencies, identity, project, identity.ownerKey, requestId);
   const { teamId, userId } = slack.requester;
   try {
@@ -1183,7 +1211,238 @@ async function ensureThreadWorkspace(
     ...await threadIntegrations(project.definition, include, dependencies),
     ...(include.recoverableOperations ? { recoverableOperations: [] } : {}),
     ...(includeSettingsRevision ? { settingsRevision: project.definition.revision } : {}),
+    ...(include.actionPolicy && project.definition.actionPolicy ? { actionPolicy: project.definition.actionPolicy } : {}),
   };
+}
+
+/**
+ * Spec 014: a new thread's record with no compute and no limit charge. The workspace ID exists
+ * from the first message because connector routes, the connector ledger and conversations are keyed
+ * by it. startThreadPreparation prepares compute the first time the thread needs the worker.
+ */
+async function createUnpreparedThreadWorkspace(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  requestId: string,
+  project: RegisteredProjectRecord,
+  include: IntegrationInclude,
+  includeSettingsRevision: boolean,
+): Promise<SlackThreadWorkspaceResult> {
+  const projectName = project.definition.name;
+  const workspace = unpreparedWorkspace(project, identity.ownerKey);
+  const existingMembership = await getMembership(dependencies, identity.ownerKey, projectName);
+  try {
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { Put: { TableName: dependencies.tableName, Item: workspaceItem(workspace), ConditionExpression: "attribute_not_exists(pk)" } },
+      { Put: {
+        TableName: dependencies.tableName,
+        Item: { pk: `OWNER#${identity.ownerKey}`, sk: `PROJECT#${projectName}`, entityType: "DEFAULT_WORKSPACE", workspaceId: workspace.id },
+        ConditionExpression: "attribute_not_exists(pk)",
+      } },
+      { Put: { TableName: dependencies.tableName, Item: membershipRecord(identity.ownerKey, projectName, existingMembership?.role ?? "developer") } },
+      { Put: {
+        TableName: dependencies.tableName,
+        Item: { pk: `IDEMPOTENCY#${identity.ownerKey}#THREAD`, sk: `REQUEST#${requestId}`, entityType: "IDEMPOTENCY", workspaceId: workspace.id },
+        ConditionExpression: "attribute_not_exists(pk)",
+      } },
+    ] }));
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+    // Another first message in this thread created the record.
+    const concurrent = await getDefaultWorkspace(dependencies, identity.ownerKey, projectName);
+    if (concurrent) return existingThreadWorkspace(dependencies, identity, requestId, concurrent, include, includeSettingsRevision);
+    throw agentXError("WORKSPACE_BUSY", "thread workspace creation conflicted with another request; retry");
+  }
+  // The starter is recorded when compute is prepared, because that member is the one charged.
+  await recordThreadRequester(dependencies, identity, workspace.id, false);
+  // Each optional field is its own spread, so a later opt-in (phase 14c's action policy) adds one
+  // more spread line here, after settingsRevision, the same way ensureThreadWorkspace gains it.
+  return {
+    outcome: "WORKSPACE",
+    workspaceId: workspace.id,
+    status: "UNPREPARED",
+    operationId: null,
+    created: true,
+    orchestratorInstructions: project.definition.orchestratorInstructions,
+    ...await threadIntegrations(project.definition, include, dependencies),
+    ...(include.recoverableOperations ? { recoverableOperations: [] } : {}),
+    ...(includeSettingsRevision ? { settingsRevision: project.definition.revision } : {}),
+    ...(include.actionPolicy && project.definition.actionPolicy ? { actionPolicy: project.definition.actionPolicy } : {}),
+  };
+}
+
+/** A workspace record pinned to the thread's starting revision and runtime, with fence 0 and no operation. */
+function unpreparedWorkspace(project: RegisteredProjectRecord, ownerKey: string): WorkspaceInstance {
+  const now = new Date().toISOString();
+  return WorkspaceInstanceSchema.parse({
+    id: randomUUID(),
+    ownerKey,
+    projectName: project.definition.name,
+    projectRevision: project.definition.revision,
+    runtimeArn: project.runtimeBinding.runtimeArn,
+    endpointQualifier: project.runtimeBinding.endpointQualifier,
+    runtimeSessionId: randomUUID(),
+    deploymentMode: project.runtimeBinding.deploymentMode,
+    capacityProviderArn: project.runtimeBinding.capacityProviderArn,
+    rootPath: "/mnt/workspace",
+    status: "UNPREPARED",
+    fence: 0,
+    createdAt: now,
+    updatedAt: now,
+  });
+}
+
+/** POST /v1/threads/workspace/prepare (spec 014): prepares compute for this thread's workspace. */
+async function prepareThreadWorkspace(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  value: unknown,
+): Promise<SlackThreadPrepareResult> {
+  const slack = identity.slack;
+  if (!slack || !dependencies.slack) throw agentXError("FORBIDDEN", "a Slack thread identity is required");
+  const input = object(value, "thread workspace preparation");
+  const requestId = uuid(input.requestId, "requestId");
+  const workspace = await getThreadWorkspace(dependencies, identity.ownerKey)
+    ?? await getDefaultWorkspace(dependencies, identity.ownerKey, slack.binding.projectName);
+  if (!workspace) throw agentXError("NOT_FOUND", "thread workspace not found");
+  if (workspace.status === "CLOSED" && workspace.closedAt) {
+    return { outcome: "CLOSED", workspaceId: workspace.id, closedAt: workspace.closedAt };
+  }
+  if (workspace.projectName !== slack.binding.projectName) {
+    throw agentXError("FORBIDDEN", "this thread's workspace belongs to the channel's previous project binding");
+  }
+  return startThreadPreparation(dependencies, identity, requestId, workspace);
+}
+
+/**
+ * Moves an UNPREPARED thread workspace to PREPARING. The same transaction writes the prepare
+ * operation and outbox item, charges the requesting member and the organization, and records that
+ * member as the thread's starter, whose charge closing releases. So a limit counts only prepared
+ * threads. The disk is built from the revision the thread started with, as
+ * retryWorkspacePreparation does. Any other status is answered as it stands: a racing request
+ * prepared it already.
+ */
+async function startThreadPreparation(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  requestId: string,
+  workspace: WorkspaceInstance,
+): Promise<SlackThreadPrepareResult> {
+  const slack = identity.slack;
+  const limits = dependencies.slack;
+  if (!slack || !limits) throw agentXError("FORBIDDEN", "a Slack thread identity is required");
+  if (workspace.status !== "UNPREPARED") {
+    return { outcome: "WORKSPACE", workspaceId: workspace.id, status: workspace.status, operationId: workspace.activeOperationId, created: false };
+  }
+  const pinned = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
+  const now = new Date().toISOString();
+  const operationId = randomUUID();
+  const fence = workspace.fence + 1;
+  const operation = operationRecord({
+    id: operationId,
+    workspaceId: workspace.id,
+    kind: "prepare",
+    requestId,
+    payloadHash: hashJson({ projectName: workspace.projectName, projectRevision: workspace.projectRevision, targetOwnerKey: identity.ownerKey }),
+    status: "ACCEPTED",
+    fence,
+    createdAt: now,
+    updatedAt: now,
+    ...requesterOf(identity),
+  });
+  const invocation: WorkerInvocation = {
+    protocolVersion: 1,
+    kind: "prepare",
+    operationId,
+    workspaceId: workspace.id,
+    fence,
+    projectRevision: workspace.projectRevision,
+    callbackCapability: issueCapability(dependencies, workspace.id, operationId, fence),
+    payload: {
+      project: pinned.definition,
+      repositoryGrant: issueRepositoryGrant(dependencies, pinned, identity.ownerKey, workspace.id, operationId),
+    },
+  };
+  const updated = WorkspaceInstanceSchema.parse({ ...workspace, status: "PREPARING", activeOperationId: operationId, fence, updatedAt: now });
+  const outbox = outboxRecord(pinned.runtimeBinding, updated, invocation);
+  const { teamId, userId } = slack.requester;
+  try {
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { Update: {
+        TableName: dependencies.tableName,
+        Key: workspaceKey(workspace.id),
+        UpdateExpression: "SET #status = :preparing, activeOperationId = :operation, fence = :nextFence, updatedAt = :now",
+        ConditionExpression: "ownerKey = :owner AND #status = :unprepared AND fence = :currentFence",
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: {
+          ":owner": identity.ownerKey,
+          ":preparing": "PREPARING",
+          ":unprepared": "UNPREPARED",
+          ":operation": operationId,
+          ":nextFence": fence,
+          ":currentFence": workspace.fence,
+          ":now": now,
+        },
+      } },
+      { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
+      { Put: { TableName: dependencies.tableName, Item: outbox, ConditionExpression: "attribute_not_exists(pk)" } },
+      { Update: {
+        TableName: dependencies.tableName,
+        Key: slackOrganizationLimitKey(teamId),
+        UpdateExpression: "SET #count = if_not_exists(#count, :zero) + :one, entityType = :entity",
+        ConditionExpression: "attribute_not_exists(#count) OR #count < :limit",
+        ExpressionAttributeNames: { "#count": "count" },
+        ExpressionAttributeValues: { ":zero": 0, ":one": 1, ":limit": limits.organizationWorkspaceLimit, ":entity": "SLACK_LIMIT" },
+      } },
+      { Update: {
+        TableName: dependencies.tableName,
+        Key: slackMemberLimitKey(teamId, userId),
+        UpdateExpression: "SET #count = if_not_exists(#count, :zero) + :one, #threads = list_append(if_not_exists(#threads, :none), :thread), entityType = :entity",
+        ConditionExpression: "attribute_not_exists(#count) OR #count < :limit",
+        ExpressionAttributeNames: { "#count": "count", "#threads": "threads" },
+        ExpressionAttributeValues: {
+          ":zero": 0,
+          ":one": 1,
+          ":limit": limits.memberWorkspaceLimit,
+          ":none": [],
+          ":thread": [identity.subject],
+          ":entity": "SLACK_LIMIT",
+        },
+      } },
+      { Update: {
+        TableName: dependencies.tableName,
+        Key: slackThreadKey(identity.ownerKey),
+        // The same record recordThreadRequester(..., true) writes, so a missing thread row is
+        // created whole and the charged member is among its requesters.
+        UpdateExpression: "SET #entity = :entity, #thread = if_not_exists(#thread, :thread), #workspace = if_not_exists(#workspace, :workspace), starterUserId = :user ADD #requesters :users",
+        ConditionExpression: "attribute_not_exists(starterUserId)",
+        ExpressionAttributeNames: { "#entity": "entityType", "#thread": "thread", "#workspace": "workspaceId", "#requesters": "requesters" },
+        ExpressionAttributeValues: {
+          ":entity": "SLACK_THREAD",
+          ":thread": identity.subject,
+          ":workspace": workspace.id,
+          ":user": userId,
+          ":users": new Set([userId]),
+        },
+      } },
+    ] }));
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+    const current = await requireWorkspace(dependencies, workspace.id);
+    if (current.status !== "UNPREPARED") {
+      return { outcome: "WORKSPACE", workspaceId: current.id, status: current.status, operationId: current.activeOperationId, created: false };
+    }
+    // threadWorkspaceLimitRefusal throws its own WORKSPACE_BUSY, worded for creation, when no limit
+    // is reached. Answer with this route's wording instead.
+    try {
+      const refusal = await threadWorkspaceLimitRefusal(dependencies, teamId, userId, limits);
+      if (refusal.outcome === "LIMIT_REACHED") return refusal;
+    } catch (refusalError) {
+      if (!(refusalError instanceof AgentXError) || refusalError.code !== "WORKSPACE_BUSY") throw refusalError;
+    }
+    throw agentXError("WORKSPACE_BUSY", "thread workspace preparation conflicted with another request; retry");
+  }
+  return { outcome: "WORKSPACE", workspaceId: workspace.id, status: "PREPARING", operationId, created: true };
 }
 
 async function existingThreadWorkspace(
@@ -1204,6 +1463,7 @@ async function existingThreadWorkspace(
     ...await threadIntegrations(settings.definition, include, dependencies),
     ...(include.recoverableOperations ? { recoverableOperations: workspace.status === "BUSY" && workspace.activeOperationId ? [workspace.activeOperationId] : [] } : {}),
     ...(includeSettingsRevision ? { settingsRevision: settings.definition.revision } : {}),
+    ...(include.actionPolicy && settings.definition.actionPolicy ? { actionPolicy: settings.definition.actionPolicy } : {}),
   };
   if (workspace.status === "PREPARATION_FAILED" && !workspace.activeOperationId) {
     const retried = await retryWorkspacePreparation(dependencies, identity, requestId, identity.ownerKey, pinned, workspace);
@@ -1226,7 +1486,7 @@ async function existingThreadWorkspace(
   };
 }
 
-interface IntegrationInclude { integrations: boolean; connectors: boolean; allConnectorTypes: boolean; recoverableOperations: boolean }
+interface IntegrationInclude { integrations: boolean; connectors: boolean; allConnectorTypes: boolean; recoverableOperations: boolean; actionPolicy: boolean }
 
 /**
  * Every connector the project's latest revision configures, for services that opt in with

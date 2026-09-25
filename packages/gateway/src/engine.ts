@@ -1,6 +1,6 @@
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
-import { AgentXError, agentXError, errorStatus } from "@agentx/contracts";
-import { connectMcp, McpUnauthorized, type McpConnection } from "./mcp-client.js";
+import { AgentXError, agentXError, errorStatus, type ToolHints } from "@agentx/contracts";
+import { connectMcp, McpUnauthorized, type McpConnection, type McpToolAnnotations } from "./mcp-client.js";
 import { CredentialUnavailable } from "./credentials.js";
 import {
   GuardRejection,
@@ -84,9 +84,18 @@ function review<Scope>(
       // Hashed under the feature 007 key `repository` so hashes survive the release.
       schemaHash: fingerprint({ upstream, policy, repository: context.scope }),
       access: policy.access,
+      ...toolHints(upstream.annotations),
     } });
   }
   return { tools, skipped };
+}
+
+/** The two MCP annotations the action gate reads, kept only when the vendor sent them as booleans. */
+function toolHints(annotations: McpToolAnnotations | undefined): { hints: ToolHints } | Record<string, never> {
+  const hints: ToolHints = {};
+  if (typeof annotations?.readOnlyHint === "boolean") hints.readOnlyHint = annotations.readOnlyHint;
+  if (typeof annotations?.destructiveHint === "boolean") hints.destructiveHint = annotations.destructiveHint;
+  return Object.keys(hints).length > 0 ? { hints } : {};
 }
 
 export function approveTools<Scope>(

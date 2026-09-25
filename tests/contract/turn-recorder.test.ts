@@ -60,6 +60,13 @@ describe("turn recorder", () => {
     expect(observation.workerOperations).toEqual([operation]);
   });
 
+  it("records a lazy worker refusal as a failed call", () => {
+    const turn = recorder();
+    turn.toolStarted({ toolCallId: "1", toolName: "agentx_submit_task", args: { prompt: "list files" } });
+    turn.toolEnded({ toolCallId: "1", toolName: "agentx_submit_task", isError: false, result: text({ status: "WORKSPACE_LIMIT_REACHED", message: "No coding work can run." }) });
+    expect(turn.observation().calls.map(({ outcome, validation }) => ({ outcome, validation }))).toEqual([{ outcome: "FAILED", validation: "ok" }]);
+  });
+
   it("redacts and caps arguments, and fingerprints the redacted form", () => {
     const turn = recorder();
     const token = "ghp_0123456789abcdefghijABCDEFGHIJ012345";

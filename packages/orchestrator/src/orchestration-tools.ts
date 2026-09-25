@@ -15,6 +15,33 @@ export const ORCHESTRATION_TOOL_NAMES = [
 
 export const RECOVERY_TOOL_NAMES = ["agentx_task_status", "agentx_task_result"] as const;
 
+/** In-house tools that run on the remote worker, so a thread without compute prepares it first (spec 014). */
+export const WORKER_TOOL_NAMES = ["agentx_submit_task", "agentx_follow_up"] as const;
+
+/** Why a tool that needs the worker cannot run; handed to the model as the tool result. */
+export interface WorkerRefusal {
+  status: "WORKSPACE_LIMIT_REACHED" | "WORKSPACE_UNAVAILABLE";
+  message: string;
+}
+
+/** A thread's worker, prepared on first use. Absent for a thread that already has compute. */
+export interface WorkerAccess {
+  /**
+   * True once this thread has prepared compute in this turn. A plain, externally readable fact,
+   * not just an internal detail of these tools: 14c part 2's confirmation gate reads it to decide
+   * whether agentx_submit_task counts as a write (spec 014 D5).
+   */
+  prepared(): boolean;
+  /** Prepares compute once per turn. Undefined when the worker can take work; otherwise a refusal. */
+  ensureReady(): Promise<WorkerRefusal | undefined>;
+}
+
+/** A thread with no compute has no changes to publish; preparing a fresh clone would not change that. */
+export const NO_WORKSPACE_TO_PUBLISH = {
+  status: "NO_WORKSPACE",
+  message: "This thread has no workspace yet, so it has no changes to publish. Run the coding work with agentx_submit_task first.",
+} as const;
+
 /** Retired in feature 013; kept so the orchestrator can tell the model the new name for one release. */
 // TODO(2026-09-24): remove this map and the retired-names prompt line in orchestrator.ts one release
 // after feature 013 ships.
@@ -94,6 +121,8 @@ export function createOrchestrationTools(
     connectorCatalogs?: readonly ConnectorCatalog[];
     recovery?: boolean;
     onConnectorError?: (toolCallId: string, code: string) => void;
+    /** Spec 014: present only for a thread whose compute is not prepared yet. */
+    worker?: WorkerAccess;
   } = {},
 ): ToolDefinition[] {
   const nextRequestId = options.requestId ?? randomUUID;
@@ -108,6 +137,8 @@ export function createOrchestrationTools(
         "This waits for completion and returns the worker's final response; do not poll or resubmit the task.",
       parameters: promptParameters,
       execute: async (_id, parameters, signal, onUpdate) => {
+        const refusal = await options.worker?.ensureReady();
+        if (refusal) return toolResult(refusal);
         const accepted = await api.submitTask({
           ...context,
           requestId: nextRequestId(),
@@ -136,6 +167,7 @@ export function createOrchestrationTools(
         body: Type.Optional(Type.String({ maxLength: 32_768 })),
       }),
       execute: async (_id, parameters, signal, onUpdate) => {
+        if (options.worker && !options.worker.prepared()) return toolResult(NO_WORKSPACE_TO_PUBLISH);
         const accepted = await api.createPullRequest({
           workspaceId: context.workspaceId,
           requestId: nextRequestId(),
@@ -187,6 +219,8 @@ export function createOrchestrationTools(
         "This waits for completion and returns the worker's final response; do not poll or resubmit it.",
       parameters: promptParameters,
       execute: async (_id, parameters, signal, onUpdate) => {
+        const refusal = await options.worker?.ensureReady();
+        if (refusal) return toolResult(refusal);
         const accepted = await api.followUp({
           ...context,
           requestId: nextRequestId(),

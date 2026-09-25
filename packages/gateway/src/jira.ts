@@ -271,5 +271,6 @@ export function jiraConnector(credentials: CredentialProvider<JiraScope>, option
     binder: jiraBinder(options.projectScoped),
     guards: [jiraProjectGuard],
     attributionKeys: ["description", "commentBody"],
+    itemArguments: ["issueIdOrKey"],
   };
 }
