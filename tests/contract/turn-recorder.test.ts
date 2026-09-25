@@ -80,6 +80,36 @@ describe("turn recorder", () => {
     expect(TurnObservationSchema.parse(turn.observation()).calls[0]?.outcome).toBe("FAILED");
   });
 
+  it("redacts each call's arguments once, however often the observation is read", () => {
+    const turn = recorder();
+    let reads = 0;
+    const args = { get prompt() { reads += 1; return "list files"; } };
+    turn.toolStarted({ toolCallId: "1", toolName: "agentx_submit_task", args });
+    turn.observation();
+    turn.toolEnded({ toolCallId: "1", toolName: "agentx_submit_task", isError: false, result: text({ status: "SUCCEEDED" }) });
+    turn.observation();
+    expect(reads).toBe(1);
+  });
+
+  it("names a call with an empty tool name so the record still validates", () => {
+    const turn = recorder();
+    turn.toolStarted({ toolCallId: "1", toolName: "", args: {} });
+    turn.toolEnded({ toolCallId: "1", toolName: "", isError: true, result: text("Tool  not found") });
+    expect(TurnObservationSchema.parse(turn.observation()).calls[0]).toMatchObject({ name: "[empty]", validation: "unknown_tool" });
+  });
+
+  it("keeps only worker operations the contract accepts as UUIDs", () => {
+    const turn = recorder();
+    const loose = "0f0e0d0c-0b0a-0908-0706-050403020100";
+    turn.toolStarted({ toolCallId: "1", toolName: "agentx_submit_task", args: {} });
+    turn.toolEnded({ toolCallId: "1", toolName: "agentx_submit_task", isError: false, result: text({ operationId: loose, status: "RUNNING" }) });
+    turn.toolStarted({ toolCallId: "2", toolName: "agentx_submit_task", args: {} });
+    turn.toolEnded({ toolCallId: "2", toolName: "agentx_submit_task", isError: false, result: text({ operationId: operation, status: "RUNNING" }) });
+    const observation = TurnObservationSchema.parse(turn.observation());
+    expect(observation.workerOperations).toEqual([operation]);
+    expect(observation.calls[0]?.operationId).toBe(loose);
+  });
+
   it("keeps at most 50 calls and says so", () => {
     const turn = recorder();
     for (let index = 0; index < 55; index += 1) {

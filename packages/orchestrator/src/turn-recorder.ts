@@ -3,6 +3,8 @@ import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import {
   TURN_ARGUMENT_LIMIT,
   TURN_CALL_LIMIT,
+  TurnObservationSchema,
+  capText,
   createTaskUsageTelemetry,
   redactArguments,
   type TaskUsageTelemetry,
@@ -27,7 +29,8 @@ const OUTCOMES: Readonly<Record<string, TurnOutcome>> = {
   RUNNING: "IN_PROGRESS",
   CANCEL_REQUESTED: "IN_PROGRESS",
 };
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** The contract's own check for a worker operation id, so the recorder never keeps one the schema rejects. */
+const WorkerOperationSchema = TurnObservationSchema.shape.workerOperations.element;
 
 /**
  * Collects what one orchestrator turn was offered and chose. It keeps hashes of descriptions and the
@@ -132,7 +135,7 @@ export class TurnRecorder {
       const pending = this.pending.get(id)!;
       return pending.call ?? this.unfinished(pending);
     });
-    const workerOperations = [...new Set(all.flatMap((call) => call.operationId !== undefined && UUID.test(call.operationId) ? [call.operationId] : []))];
+    const workerOperations = [...new Set(all.flatMap((call) => call.operationId !== undefined && WorkerOperationSchema.safeParse(call.operationId).success ? [call.operationId] : []))];
     return {
       ...(this.model === undefined ? {} : { model: this.model }),
       ...(this.manifestHash === undefined ? {} : { manifestHash: this.manifestHash }),
@@ -151,7 +154,7 @@ export class TurnRecorder {
     const connector = this.connectorOf.get(pending.name);
     const recorded = this.recordArguments(pending);
     return {
-      name: pending.name.slice(0, 128),
+      name: pending.name.slice(0, 128) || "[empty]",
       ...(connector === undefined ? {} : { connector }),
       arguments: recorded.text,
       argumentsFingerprint: recorded.fingerprint,
@@ -162,11 +165,8 @@ export class TurnRecorder {
   /** Redacted once per call: the capped text for the record, and a fingerprint of the whole redacted form. */
   private recordArguments(pending: PendingCall): RecordedArguments {
     if (pending.recorded === undefined) {
-      const raw = pending.rawArguments ?? {};
-      pending.recorded = {
-        text: redactArguments(raw, TURN_ARGUMENT_LIMIT),
-        fingerprint: sha256(redactArguments(raw, Number.POSITIVE_INFINITY)).slice(0, 32),
-      };
+      const full = redactArguments(pending.rawArguments ?? {}, Number.POSITIVE_INFINITY);
+      pending.recorded = { text: capText(full, TURN_ARGUMENT_LIMIT).text, fingerprint: sha256(full).slice(0, 32) };
     }
     return pending.recorded;
   }
