@@ -24,6 +24,8 @@ import { requiredEnvironment, type HttpApiV2Event } from "./lambda.js";
 import { parseSlackSecrets, validSignature, type SlackIngressLog, type SlackSecrets } from "./slack-ingress.js";
 
 const EVENT_RETENTION_SECONDS = 14 * 24 * 60 * 60;
+/** Every Slack call made while Slack waits (3 seconds) for this request's answer gives up after this. */
+const SLACK_FETCH_TIMEOUT_MILLISECONDS = 2_000;
 const SECRET_CACHE_MILLISECONDS = 5 * 60 * 1_000;
 
 /** One Block Kit button press, from a signed Slack interactivity request. */
@@ -58,6 +60,12 @@ export interface SlackInteractivityDependencies {
 
 /** What a member hears, privately, for a button this release does not know. */
 export const UNKNOWN_BUTTON_TEXT = "This button is no longer available.";
+/** What a member hears, privately, when a handler fails before it took the click (nothing was queued). */
+export const CLICK_FAILED_TEXT = "I couldn't process that click. Press the button again, or reply `@AgentX yes`.";
+
+function errorName(error: unknown): string {
+  return error instanceof Error ? error.name : "unknown";
+}
 
 interface HttpResponse { statusCode: number; headers: Record<string, string>; body: string }
 
@@ -116,11 +124,29 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
       try {
         await handler.handle(action);
       } catch (error) {
-        log("interaction.failed", { actionId: action.actionId, errorName: error instanceof Error ? error.name : "unknown" });
+        // A handler throws only before it took the click (the confirmation handler guards every step
+        // after its claim), so the member can safely press again.
+        log("interaction.failed", { actionId: action.actionId.slice(0, 64), errorName: errorName(error) });
+        try {
+          await dependencies.respondEphemeral?.(action.responseUrl, CLICK_FAILED_TEXT);
+        } catch (respondError) {
+          log("interaction.respond_failed", { errorName: errorName(respondError) });
+        }
       }
     }
     return respond(200, { ok: true });
   };
+}
+
+/** Only Slack's own response URLs are ever fetched. */
+function isSlackResponseUrl(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.hostname === "hooks.slack.com";
+  } catch {
+    return false;
+  }
 }
 
 function parseBlockActions(payload: Record<string, unknown>): { actions: SlackBlockAction[] } | { reason: string } {
@@ -133,7 +159,7 @@ function parseBlockActions(payload: Record<string, unknown>): { actions: SlackBl
   const messageTs = SlackMessageTimestampSchema.safeParse(container.message_ts ?? message.ts);
   const threadTs = SlackMessageTimestampSchema.safeParse(message.thread_ts ?? container.thread_ts ?? container.message_ts);
   if (!teamId.success || !userId.success || !channelId.success || !messageTs.success || !threadTs.success) return { reason: "malformed_action" };
-  if (typeof payload.response_url !== "string" || !payload.response_url.startsWith("https://hooks.slack.com/")) return { reason: "malformed_action" };
+  if (!isSlackResponseUrl(payload.response_url)) return { reason: "malformed_action" };
   const thread = { teamId: teamId.data, channelId: channelId.data, threadTs: threadTs.data };
   const entries = Array.isArray(payload.actions) ? payload.actions.map(asRecord) : [];
   return {
@@ -163,6 +189,8 @@ export interface ConfirmationClickDependencies {
 }
 
 const NOT_PENDING = "That confirmation is no longer pending, so nothing was run.";
+const RETRY_CLICK = "I couldn't take that click. Press the button again, or reply `@AgentX yes`.";
+const ALREADY_RECEIVED = "Already received. I'm on it.";
 
 /**
  * Approve and Cancel on a confirmation message (spec 014 D2). Only the member who was asked can
@@ -177,6 +205,13 @@ export function confirmationActionHandler(dependencies: ConfirmationClickDepende
   return {
     matches: (actionId) => actionId === CONFIRM_APPROVE_ACTION || actionId === CONFIRM_CANCEL_ACTION,
     async handle(action) {
+      const answer = async (responseUrl: string, text: string): Promise<void> => {
+        try {
+          await dependencies.respondEphemeral(responseUrl, text);
+        } catch (error) {
+          log("interaction.respond_failed", { errorName: errorName(error) });
+        }
+      };
       const click = action.actionId === CONFIRM_APPROVE_ACTION ? "approve" : "cancel";
       const subject = slackThreadSubject(action.thread);
       const pending = await dependencies.loadConfirmation(subject);
@@ -193,24 +228,37 @@ export function confirmationActionHandler(dependencies: ConfirmationClickDepende
       }
       // postedAt keeps a click on a re-posted confirmation (same ID, redelivered request) from reusing an earlier click's event ID.
       const eventId = confirmationClickEventId(pending.confirmationId, click, pending.postedAt);
-      if (!await dependencies.claimEvent(eventId, Math.floor(now() / 1_000) + EVENT_RETENTION_SECONDS)) {
-        log("interaction.ignored", { reason: "duplicate_click" });
-        return;
-      }
+      // Built before the claim, so nothing between the claim and the guarded steps below can throw.
       const message = SlackRequestMessageSchema.parse({
         version: 1, eventId, thread: action.thread, userId: action.userId, text: click === "approve" ? "yes" : "cancel", receivedAt: new Date(now()).toISOString(),
       });
-      // Any failure after the claim releases it, so the member can press again rather than hit a silent duplicate.
+      if (!await dependencies.claimEvent(eventId, Math.floor(now() / 1_000) + EVENT_RETENTION_SECONDS)) {
+        log("interaction.ignored", { reason: "duplicate_click" });
+        await answer(action.responseUrl, ALREADY_RECEIVED);
+        return;
+      }
+      // From here on every step is guarded: any failure releases the claim, so the member can press
+      // again rather than hit a silent duplicate, and the member is always told.
       let raised = false;
       try {
         await dependencies.changePending(subject, 1);
         raised = true;
         await dependencies.enqueue(message, createHash("sha256").update(subject).digest("hex"));
-      } catch {
-        if (raised) await dependencies.changePending(subject, -1);
-        await dependencies.releaseEvent(eventId);
-        log("interaction.enqueue_failed", { eventId });
-        await dependencies.respondEphemeral(action.responseUrl, "I couldn't take that click. Press the button again, or reply `@AgentX yes`.");
+      } catch (error) {
+        log("interaction.enqueue_failed", { eventId, errorName: errorName(error) });
+        if (raised) {
+          try {
+            await dependencies.changePending(subject, -1);
+          } catch (decrementError) {
+            log("interaction.decrement_failed", { eventId, errorName: errorName(decrementError) });
+          }
+        }
+        try {
+          await dependencies.releaseEvent(eventId);
+        } catch (releaseError) {
+          log("interaction.release_failed", { eventId, errorName: errorName(releaseError) });
+        }
+        await answer(action.responseUrl, RETRY_CLICK);
         return;
       }
       log("interaction.accepted", { eventId, click });
@@ -218,16 +266,19 @@ export function confirmationActionHandler(dependencies: ConfirmationClickDepende
       try {
         await dependencies.updateMessage({ channel: action.thread.channelId, ts: action.messageTs, text: `${action.messageText}\n${note}`, blocks: answeredConfirmationBlocks(action.messageText, note) });
       } catch (error) {
-        // The click is queued; a message that keeps its buttons only lets a second click hear "no longer pending".
-        log("interaction.update_failed", { errorName: error instanceof Error ? error.name : "unknown" });
+        // The click is queued; a message that keeps its buttons only lets a second click hear "Already received".
+        log("interaction.update_failed", { errorName: errorName(error) });
       }
     },
   };
 }
 
-async function slackApi(token: string, method: string, body: unknown, fetchImplementation: typeof fetch = fetch): Promise<void> {
+/** A Slack Web API call, bounded so it never outlasts Slack's 3-second wait for this request. */
+export async function slackApi(token: string, method: string, body: unknown, fetchImplementation: typeof fetch = fetch): Promise<void> {
   const response = await fetchImplementation(`https://slack.com/api/${method}`, {
     method: "POST",
+    signal: AbortSignal.timeout(SLACK_FETCH_TIMEOUT_MILLISECONDS),
+    redirect: "error",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json; charset=utf-8" },
     body: JSON.stringify(body),
   });
@@ -239,6 +290,8 @@ async function slackApi(token: string, method: string, body: unknown, fetchImple
 export async function respondEphemeral(responseUrl: string, text: string, fetchImplementation: typeof fetch = fetch): Promise<void> {
   const response = await fetchImplementation(responseUrl, {
     method: "POST",
+    signal: AbortSignal.timeout(SLACK_FETCH_TIMEOUT_MILLISECONDS),
+    redirect: "error",
     headers: { "content-type": "application/json; charset=utf-8" },
     body: JSON.stringify({ response_type: "ephemeral", replace_original: false, text }),
   });

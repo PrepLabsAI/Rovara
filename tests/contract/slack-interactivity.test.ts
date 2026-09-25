@@ -1,6 +1,6 @@
 // tests/contract/slack-interactivity.test.ts
 import { createHmac } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CONFIRMATION_TTL_MS,
   answeredConfirmationBlocks,
@@ -13,6 +13,9 @@ import {
   UNKNOWN_BUTTON_TEXT,
   confirmationActionHandler,
   createSlackInteractivityHandler,
+  respondEphemeral,
+  slackApi,
+  type ConfirmationClickDependencies,
   type SlackActionHandler,
   type SlackBlockAction,
 } from "../../packages/broker/src/aws/slack-interactivity.js";
@@ -233,5 +236,147 @@ describe("Slack interactivity request URL (spec 014 D2)", () => {
     const tampered = { ...good, body: good.body.replace(requester, other) };
     expect((await handler(tampered)).statusCode).toBe(401);
     expect(queue).toHaveLength(0);
+  });
+});
+
+const RETRY_NOTICE = "I couldn't take that click. Press the button again, or reply `@AgentX yes`.";
+const PROCESS_NOTICE = "I couldn't process that click. Press the button again, or reply `@AgentX yes`.";
+
+/** A handler whose confirmation dependencies can each be replaced, recording what it did. */
+function custom(overrides: Partial<ConfirmationClickDependencies> = {}) {
+  const claimed = new Set<string>();
+  const released: string[] = [];
+  const ephemeral: string[] = [];
+  const queue: SlackRequestMessage[] = [];
+  const logs: Array<{ event: string; fields: Record<string, unknown> }> = [];
+  const log = (event: string, fields: Readonly<Record<string, string | number | boolean>>) => { logs.push({ event, fields }); };
+  const handler = createSlackInteractivityHandler({
+    secrets: async () => ({ signingSecret, botToken: "xoxb-test" }),
+    now: () => nowSeconds * 1_000,
+    log,
+    respondEphemeral: async (_url, value) => { ephemeral.push(value); },
+    handlers: [confirmationActionHandler({
+      loadConfirmation: async () => pending,
+      claimEvent: async (eventId) => { if (claimed.has(eventId)) return false; claimed.add(eventId); return true; },
+      releaseEvent: async (eventId) => { released.push(eventId); claimed.delete(eventId); },
+      changePending: async () => 1,
+      enqueue: async (message) => { queue.push(message); },
+      updateMessage: async () => undefined,
+      respondEphemeral: async (_url, value) => { ephemeral.push(value); },
+      now: () => nowSeconds * 1_000,
+      log,
+      ...overrides,
+    })],
+  });
+  return { handler, claimed, released, ephemeral, queue, logs, events: () => logs.map((entry) => entry.event) };
+}
+
+describe("Slack interactivity never loses a click silently (spec 014 D2, review fix round 1)", () => {
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+  const eventId = confirmationClickEventId(pending.confirmationId, "approve", pending.postedAt);
+
+  it("still releases the claim and tells the member when the queue send fails and undoing the pending count fails too", async () => {
+    const h = custom({
+      enqueue: async () => { throw new Error("SQS down"); },
+      changePending: async (_subject, delta) => { if (delta === -1) throw new Error("DynamoDB down"); return 1; },
+    });
+    expect((await h.handler(signed(payload()))).statusCode).toBe(200);
+    expect(h.released).toEqual([eventId]);
+    expect(h.claimed.size).toBe(0);
+    expect(h.ephemeral).toEqual([RETRY_NOTICE]);
+    expect(h.events()).toEqual(expect.arrayContaining(["interaction.decrement_failed", "interaction.enqueue_failed"]));
+    expect(h.events()).not.toContain("interaction.failed");
+  });
+
+  it("still tells the member when releasing the claim fails, and logs it", async () => {
+    const h = custom({
+      enqueue: async () => { throw new Error("SQS down"); },
+      releaseEvent: async () => { throw new Error("DynamoDB down"); },
+    });
+    await h.handler(signed(payload()));
+    expect(h.ephemeral).toEqual([RETRY_NOTICE]);
+    expect(h.events()).toEqual(expect.arrayContaining(["interaction.release_failed", "interaction.enqueue_failed"]));
+  });
+
+  it("logs, and does not throw, when the retry notice itself cannot be sent", async () => {
+    const h = custom({
+      enqueue: async () => { throw new Error("SQS down"); },
+      respondEphemeral: async () => { throw new Error("Slack down"); },
+    });
+    expect((await h.handler(signed(payload()))).statusCode).toBe(200);
+    expect(h.released).toEqual([eventId]);
+    expect(h.events()).toContain("interaction.respond_failed");
+    expect(h.events()).not.toContain("interaction.failed");
+  });
+
+  it("tells the member privately when a click fails before it is claimed (the confirmation cannot be read, or the claim throws)", async () => {
+    for (const overrides of [
+      { loadConfirmation: async () => { throw new Error("DynamoDB down"); } },
+      { claimEvent: async () => { throw new Error("DynamoDB down"); } },
+    ] satisfies Array<Partial<ConfirmationClickDependencies>>) {
+      const h = custom(overrides);
+      expect((await h.handler(signed(payload()))).statusCode).toBe(200);
+      expect(h.ephemeral).toEqual([PROCESS_NOTICE]);
+      expect(h.queue).toHaveLength(0);
+      expect(h.logs.find((entry) => entry.event === "interaction.failed")).toMatchObject({ fields: { actionId: "agentx_confirm_approve" } });
+    }
+  });
+
+  it("tells the member it already has a repeated click", async () => {
+    const h = custom();
+    await h.handler(signed(payload()));
+    await h.handler(signed(payload()));
+    expect(h.queue).toHaveLength(1);
+    expect(h.ephemeral).toEqual(["Already received. I'm on it."]);
+  });
+
+  it("refuses a response URL that is not https://hooks.slack.com", async () => {
+    for (const responseUrl of ["not a url", "http://hooks.slack.com/actions/T/1/abc", "https://hooks.slack.com.evil.example/actions", "https://evil.example/https://hooks.slack.com/"]) {
+      const h = custom();
+      await h.handler(signed({ ...payload(), response_url: responseUrl }));
+      expect(h.logs.at(-1)).toMatchObject({ event: "interaction.ignored", fields: { reason: "malformed_action" } });
+      expect(h.queue).toHaveLength(0);
+    }
+  });
+
+  /** AbortSignal.timeout runs on Node's internal timers, which fake timers do not reach; this one uses setTimeout. */
+  function fakeTimeoutSignals() {
+    vi.useFakeTimers();
+    return vi.spyOn(AbortSignal, "timeout").mockImplementation((milliseconds: number) => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new DOMException("The operation timed out.", "TimeoutError")), milliseconds);
+      return controller.signal;
+    });
+  }
+
+  function hungFetch(seen: RequestInit[]): typeof fetch {
+    return ((_url: string, init: RequestInit) => {
+      seen.push(init);
+      return new Promise((_resolve, reject) => { init.signal?.addEventListener("abort", () => { reject(init.signal?.reason as Error); }); });
+    }) as unknown as typeof fetch;
+  }
+
+  it("gives up on a hung response_url after 2 seconds, refusing redirects", async () => {
+    const timeout = fakeTimeoutSignals();
+    const seen: RequestInit[] = [];
+    const answer = respondEphemeral("https://hooks.slack.com/actions/T/1/abc", "hi", hungFetch(seen));
+    const settled = expect(answer).rejects.toMatchObject({ name: "TimeoutError" });
+    await vi.advanceTimersByTimeAsync(2_000);
+    await settled;
+    expect(timeout).toHaveBeenCalledWith(2_000);
+    expect(seen[0]).toMatchObject({ redirect: "error" });
+  });
+
+  it("gives up on a hung Slack API call after 2 seconds, and the click is still queued", async () => {
+    const timeout = fakeTimeoutSignals();
+    const seen: RequestInit[] = [];
+    const h = custom({ updateMessage: (input) => slackApi("xoxb-test", "chat.update", input, hungFetch(seen)) });
+    const response = h.handler(signed(payload()));
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect((await response).statusCode).toBe(200);
+    expect(h.queue).toHaveLength(1);
+    expect(h.events()).toContain("interaction.update_failed");
+    expect(timeout).toHaveBeenCalledWith(2_000);
+    expect(seen[0]).toMatchObject({ redirect: "error" });
   });
 });
