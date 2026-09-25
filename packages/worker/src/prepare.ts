@@ -13,10 +13,10 @@ import {
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import {
-  ProjectDefinitionSchema,
+  StoredProjectDefinitionSchema,
   agentXError,
   type ProjectCommand,
-  type ProjectDefinition,
+  type StoredProjectDefinition,
 } from "@agentx/contracts";
 import { evaluateReadiness, type CommandResult } from "./readiness.js";
 import { gitSafeEnvironment } from "./git.js";
@@ -59,7 +59,7 @@ export interface PreparationManifest {
 }
 
 export type RepositoryMaterializer = (
-  repository: ProjectDefinition["repositories"][number],
+  repository: StoredProjectDefinition["repositories"][number],
   destination: string,
   credential: RepositoryCloneCredential,
 ) => Promise<void>;
@@ -72,7 +72,9 @@ export type PreparationCommandRunner = (
 
 export interface PrepareWorkspaceOptions {
   rootPath: string;
-  project: ProjectDefinition;
+  /** A definition already on record: its `integrations.connectors`, unused here, may contain an
+   * entry of a type this release does not know (see `StoredProjectDefinitionSchema`). */
+  project: StoredProjectDefinition;
   creationIdentity?: string;
   materializer?: RepositoryMaterializer;
   credentialProvider?: RepositoryCredentialProvider;
@@ -80,7 +82,7 @@ export interface PrepareWorkspaceOptions {
 }
 
 export async function prepareWorkspace(options: PrepareWorkspaceOptions): Promise<PreparationManifest> {
-  const project = ProjectDefinitionSchema.parse(withoutUnknownConnectors(options.project));
+  const project = StoredProjectDefinitionSchema.parse(options.project);
   const rootPath = resolve(options.rootPath);
   await mkdir(rootPath, { recursive: true });
   const canonicalRoot = await realpath(rootPath);
@@ -169,7 +171,7 @@ export async function prepareWorkspace(options: PrepareWorkspaceOptions): Promis
 
 async function loadOrCreateManifest(
   rootPath: string,
-  project: ProjectDefinition,
+  project: StoredProjectDefinition,
   creationIdentity: string,
 ): Promise<PreparationManifest> {
   const path = resolve(rootPath, MANIFEST_PATH);
@@ -216,7 +218,7 @@ async function writeManifest(rootPath: string, manifest: PreparationManifest): P
 }
 
 async function cloneRepository(
-  repository: ProjectDefinition["repositories"][number],
+  repository: StoredProjectDefinition["repositories"][number],
   destination: string,
   credential: RepositoryCloneCredential,
 ): Promise<void> {
@@ -362,33 +364,4 @@ function withoutFailure(manifest: PreparationManifest): PreparationManifest {
   const next = { ...manifest };
   delete next.failure;
   return next;
-}
-
-/**
- * Workspace preparation never reads `integrations.connectors`; it only prepares repositories,
- * setup and readiness. `ProjectDefinitionSchema` accepts only a `github` connector, so a stored
- * revision written by a later control plane, for example a `linear` or `jira` connector, would
- * otherwise fail preparation for every new thread after a rollback. A connector entry of a type
- * this parse does not know is dropped here before the strict parse; a `github` connector, and
- * every other project field, still parses exactly as strictly as before.
- */
-function withoutUnknownConnectors(project: unknown): unknown {
-  if (!project || typeof project !== "object" || Array.isArray(project)) return project;
-  const record = project as Record<string, unknown>;
-  const integrations = record["integrations"];
-  if (!integrations || typeof integrations !== "object" || Array.isArray(integrations)) return project;
-  const integrationsRecord = integrations as Record<string, unknown>;
-  const connectors = integrationsRecord["connectors"];
-  if (!Array.isArray(connectors)) return project;
-  const known = connectors.filter(isGitHubConnectorEntry);
-  const nextIntegrations = { ...integrationsRecord };
-  if (known.length > 0) nextIntegrations["connectors"] = known;
-  else delete nextIntegrations["connectors"];
-  return { ...record, integrations: nextIntegrations };
-}
-
-function isGitHubConnectorEntry(entry: unknown): boolean {
-  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
-  const { type } = entry as { type?: unknown };
-  return type === "github";
 }

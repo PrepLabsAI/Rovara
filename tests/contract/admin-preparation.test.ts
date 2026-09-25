@@ -143,6 +143,54 @@ describe("workspace preparation coordination", () => {
     expect(retry.alreadyReady).toBe(true);
     expect(retry.invocation).toBeUndefined();
   });
+
+  it("builds the prepare invocation for a stored revision with a connector of an unknown type", async () => {
+    const projects = new InMemoryProjectRegistry();
+    projects.register(administrator, projectDefinition(), memberships);
+    // A revision written by a later control plane, before a rollback to this one: requireLatestProject
+    // (mirrored here by the registry's own stored record) does not re-parse a stored definition, so
+    // this is seeded directly rather than through registration, which still refuses this connector type.
+    const [registered] = [...projects.projects.values()];
+    if (!registered) throw new Error("expected a registered project");
+    registered.definition = {
+      ...registered.definition,
+      integrations: {
+        connectors: [
+          { name: "tracker", type: "linear", credentialRef: "linear-key", scopes: ["payments"] },
+        ],
+      },
+    } as ProjectDefinition;
+
+    const registry = new InMemoryRegistry();
+    const coordinator = new PreparationCoordinator({
+      projects,
+      registry,
+      memberships,
+      repositoryGrants: new RepositoryGrantService(Buffer.alloc(32, 9), async (reference) => ({
+        token: `resolved-${reference}`,
+      })),
+      allocateRuntime: async () => ({
+        runtimeArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/agentx",
+        endpointQualifier: "DEFAULT",
+        runtimeSessionId: randomUUID(),
+        deploymentMode: "instances-ebs",
+        capacityProviderArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:capacity-provider/agentx",
+      }),
+      createCallbackCapability: () => "c".repeat(64),
+    });
+
+    const dispatch = await coordinator.prepare(administrator, {
+      requestId: randomUUID(),
+      projectName: "payments",
+      projectRevision: 1,
+      targetOwnerKey: "e".repeat(64),
+    });
+    expect(dispatch.invocation?.kind).toBe("prepare");
+    if (dispatch.invocation?.kind !== "prepare") throw new Error("missing prepare invocation");
+    expect(dispatch.invocation.payload.project.integrations?.connectors).toEqual([
+      { name: "tracker", type: "linear", credentialRef: "linear-key", scopes: ["payments"] },
+    ]);
+  });
 });
 
 function identity(ownerKey: string, isAdministrator: boolean): AuthenticatedIdentity {
