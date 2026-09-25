@@ -9,6 +9,7 @@ import {
   type ConnectorContext,
   type ConnectorDefinition,
   type Ledger,
+  type PresentedCatalogTool,
   type ScopeCatalog,
   type SkippedTool,
 } from "@agentx/gateway";
@@ -74,6 +75,8 @@ export async function discoverConnector(input: {
   context: ConnectorContextBase;
   catalogs: CatalogCache<ScopeDiscovery>;
   refresh?: boolean;
+  /** Only a Slack service that asks gets the action gate's fields; an older one parses each tool strictly. */
+  includeGateFields?: boolean;
 }): Promise<ConnectorCatalog> {
   const { connector, workspace, context, catalogs } = input;
   const notConnected = (message: string, scope?: string): ConnectorCatalog => {
@@ -103,8 +106,18 @@ export async function discoverConnector(input: {
     }
     scopes.push({ alias: scope.alias, tools: discovery.tools });
   }
-  const presented = presentCatalog({ connector: connector.name, label: connector.vendor, scopeNoun: connector.scopeNoun, approvals: connector.approvals, scopes });
-  return { connector: connector.name, tools: presented.tools, skipped: presented.skipped };
+  const presented = presentCatalog({
+    connector: connector.name, label: connector.vendor, scopeNoun: connector.scopeNoun, approvals: connector.approvals, scopes,
+    itemArguments: definition.itemArguments,
+  });
+  return { connector: connector.name, tools: input.includeGateFields === true ? presented.tools : presented.tools.map(withoutGateFields), skipped: presented.skipped };
+}
+
+function withoutGateFields(tool: PresentedCatalogTool): PresentedCatalogTool {
+  const copy = { ...tool };
+  delete copy.hints;
+  delete copy.itemArguments;
+  return copy;
 }
 
 /** Executes one approved tool on one scope through the gateway, with the connector's ledger. */

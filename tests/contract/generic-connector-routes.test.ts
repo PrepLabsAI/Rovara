@@ -366,4 +366,16 @@ describe("vendor tool annotations on the connector route (feature 014)", () => {
     expect(catalog.tools.map((tool) => Object.keys(tool).sort())).toEqual(Array(3).fill(["access", "description", "inputSchema", "name", "scopes", "upstreamName"]));
     expect(catalog.tools.find((tool) => tool.name === "tracker__close_item")!.scopes).toEqual([{ alias: "payments", schemaHash: "c5c4fb16e67e06a1fda262e7262e6b5a64b59f5bd85beef35923851dcdb16728" }]);
   });
+  it("adds the vendor's hints and the item argument only for a service that sends x-agentx-include: gate, and keeps the hash", async () => {
+    const { handler, path } = await trackerBroker({ extraTools: [annotated], config: annotatedConfig });
+    expect((await registerTrackerKey(handler)).status).toBe(201);
+    const catalog = ConnectorCatalogSchema.parse((await call(handler, { method: "GET", path: `${path}/tools`, service, headers: { "x-agentx-include": "gate" } })).body.catalog);
+    const close = catalog.tools.find((tool) => tool.name === "tracker__close_item")!;
+    expect(close.hints).toEqual({ readOnlyHint: false, destructiveHint: true });
+    expect(catalog.tools.map((tool) => [tool.name, tool.itemArguments])).toEqual([["tracker__list_items", []], ["tracker__create_item", []], ["tracker__close_item", ["id"]]]);
+    expect(close.scopes).toEqual([{ alias: "payments", schemaHash: "c5c4fb16e67e06a1fda262e7262e6b5a64b59f5bd85beef35923851dcdb16728" }]);
+    expect(catalog.tools.filter((tool) => tool.hints !== undefined).map((tool) => tool.name)).toEqual(["tracker__close_item"]);
+    const plain = ConnectorCatalogSchema.parse((await call(handler, { method: "GET", path: `${path}/tools?include=gate`, service, headers: { "x-agentx-include": "other" } })).body.catalog);
+    expect(plain.tools.every((tool) => tool.hints === undefined && !("itemArguments" in tool))).toBe(true);
+  });
 });

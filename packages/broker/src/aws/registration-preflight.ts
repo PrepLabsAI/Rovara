@@ -1,4 +1,4 @@
-import { AgentXError, type ConnectorPreflight, type ProjectDefinition, type RegistrationPreflight } from "@agentx/contracts";
+import { AgentXError, itemPathProblems, type ConnectorPreflight, type ProjectDefinition, type RegistrationPreflight } from "@agentx/contracts";
 import { ConnectorNotConnected, presentCatalog, TARGET_CONFLICT_REASON, type SkippedTool } from "@agentx/gateway";
 import { discoverScope, stripCode, type ConnectorContextBase, type ScopeDiscovery } from "./connector-routes.js";
 import type { ResolvedConnector } from "./connector-types.js";
@@ -43,6 +43,15 @@ async function preflightConnector(
   }
   if ("notConnected" in resolved) {
     return { entry: { name: connector.name, status: "not_connected", problem: resolved.notConnected, offered: [], skipped: [] }, refusals: [] };
+  }
+  // Item argument paths are the connector's own data (feature 014, R7). A malformed declaration is
+  // refused here, before any vendor contact; if one were served anyway, it is served as none.
+  const pathProblems = itemPathProblems(resolved.itemArguments);
+  if (pathProblems.length > 0) {
+    return {
+      entry: { name: connector.name, status: "unavailable", problem: `connector ${connector.name} declares unusable item arguments`, offered: [], skipped: [] },
+      refusals: pathProblems.map((problem) => `connector ${connector.name}: ${problem}`),
+    };
   }
   const context: ConnectorContextBase = { workspaceId: "registration", ownerKey, settingsRevision: definition.revision };
   const settled = await Promise.allSettled(connector.scopes.map((scope) => discoverScope(connector, resolved, scope, context)));

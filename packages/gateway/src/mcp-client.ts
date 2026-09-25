@@ -9,8 +9,15 @@ export interface McpToolResult {
   structuredContent?: unknown;
 }
 
+/** MCP tool annotations as a vendor sends them. Only the two hints the action gate reads are typed. */
+export interface McpToolAnnotations {
+  readOnlyHint?: unknown;
+  destructiveHint?: unknown;
+  [key: string]: unknown;
+}
+
 export interface McpConnection {
-  tools: Array<{ name: string; description?: string | undefined; inputSchema: Record<string, unknown> }>;
+  tools: Array<{ name: string; description?: string | undefined; inputSchema: Record<string, unknown>; annotations?: McpToolAnnotations | undefined }>;
   call(name: string, args: Record<string, unknown>): Promise<McpToolResult>;
   close(): Promise<void>;
 }

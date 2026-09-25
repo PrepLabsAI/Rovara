@@ -13,3 +13,11 @@ export function vendorTools(vendor: VendorFixture): McpConnection["tools"] {
   }>;
   return raw.map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
 }
+
+/** The same tools with the vendor's MCP annotations kept, as the SDK's listTools returns them (feature 014). */
+export function vendorToolsWithAnnotations(vendor: VendorFixture): McpConnection["tools"] {
+  const raw = JSON.parse(readFileSync(new URL(`../fixtures/vendors/${vendor}-tools.json`, import.meta.url), "utf8")) as Array<{
+    name: string; description?: string; inputSchema: Record<string, unknown>; annotations?: Record<string, unknown>;
+  }>;
+  return raw.map(({ name, description, inputSchema, annotations }) => ({ name, description, inputSchema, ...(annotations === undefined ? {} : { annotations }) }));
+}

@@ -49,5 +49,6 @@ export function githubConnector(issue: GitHubIssuer): ConnectorDefinition<GitHub
     guards: [issueNotPullRequestGuard],
     // description is a short metadata field on some GitHub writes (labels, repositories); sign only body.
     attributionKeys: ["body"],
+    itemArguments: ["issue_number", "pull_number"],
   };
 }
