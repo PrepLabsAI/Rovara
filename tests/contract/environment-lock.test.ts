@@ -72,4 +72,76 @@ describe("environment lock", () => {
     await expect(withEnvironmentLock({ ...base, store, now: () => t0 }, async () => 1))
       .rejects.toThrow("ssm unavailable");
   });
+
+  it("two commands racing to take over the same stale lock: exactly one wins", async () => {
+    const store = new MemoryParameterStore();
+    const stale = { holder: "bob", command: "upgrade", acquiredAt: new Date(t0 - STALE_LOCK_MS - 1).toISOString() };
+    store.values.set("/agentx/staging/lock", JSON.stringify(stale));
+
+    // The second command's work starts only once it has actually re-acquired the lock (deleted the
+    // stale one and put its own with createOnly). The first command's confirmTakeover doesn't resolve
+    // until that has happened, so the first command's re-check is guaranteed to see the second's lock.
+    let resolveSecondAcquired!: () => void;
+    const secondAcquired = new Promise<void>((resolve) => { resolveSecondAcquired = resolve; });
+    let resolveSecondWork!: (value: string) => void;
+    const secondWorkDone = new Promise<string>((resolve) => { resolveSecondWork = resolve; });
+
+    const firstWork = vi.fn(async () => "first");
+    const secondWork = vi.fn(async () => {
+      resolveSecondAcquired();
+      return secondWorkDone;
+    });
+
+    const firstPromise = withEnvironmentLock(
+      {
+        env: "staging",
+        holder: "alice",
+        command: "env adopt",
+        store,
+        now: () => t0,
+        confirmTakeover: async () => {
+          await secondAcquired;
+          return true;
+        },
+      },
+      firstWork,
+    );
+    const secondPromise = withEnvironmentLock(
+      { env: "staging", holder: "carol", command: "env upgrade", store, now: () => t0, confirmTakeover: async () => true },
+      secondWork,
+    );
+
+    await expect(firstPromise).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("carol") as unknown });
+    expect(firstWork).not.toHaveBeenCalled();
+
+    resolveSecondWork("second");
+    await expect(secondPromise).resolves.toBe("second");
+    expect(store.values.has("/agentx/staging/lock")).toBe(false);
+  });
+
+  it("reports a takeover that happened during the work, and leaves the new holder's lock alone", async () => {
+    const store = new MemoryParameterStore();
+    const otherLock = JSON.stringify({ holder: "carol", command: "env upgrade", acquiredAt: new Date(t0).toISOString() });
+    await expect(
+      withEnvironmentLock({ ...base, store, now: () => t0 }, async () => {
+        // Simulate another command taking over the lock (e.g. a confirmed stale takeover
+        // elsewhere) while this command's work is still running.
+        store.values.set(lockParameterName("staging"), otherLock);
+        return 1;
+      }),
+    ).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("carol") as unknown });
+    expect(store.values.get(lockParameterName("staging"))).toBe(otherLock);
+  });
+
+  it("keeps rethrowing the work's error when the lock was replaced during a failing work, and leaves the other lock in place", async () => {
+    const store = new MemoryParameterStore();
+    const otherLock = JSON.stringify({ holder: "carol", command: "env upgrade", acquiredAt: new Date(t0).toISOString() });
+    await expect(
+      withEnvironmentLock({ ...base, store, now: () => t0 }, async () => {
+        store.values.set(lockParameterName("staging"), otherLock);
+        throw new Error("boom");
+      }),
+    ).rejects.toThrow("boom");
+    expect(store.values.get(lockParameterName("staging"))).toBe(otherLock);
+  });
 });
