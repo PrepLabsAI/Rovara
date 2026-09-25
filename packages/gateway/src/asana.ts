@@ -73,7 +73,7 @@ const STRING_LIST_ITEM_KEYS: ReadonlySet<string> = new Set(["remove_projects", "
 /** The keys a date custom field value may carry. */
 const DATE_VALUE_KEYS: ReadonlySet<string> = new Set(["date", "date_time"]);
 /** search_tasks custom_fields keys: a custom field GID and a search operator. */
-const SEARCH_CUSTOM_FIELD_KEY = /^[1-9][0-9]{0,19}\.[a-z_]+$/;
+const SEARCH_CUSTOM_FIELD_KEY = /^[1-9][0-9]{0,19}\.(?:value|is_set|not_value|starts_with|ends_with|contains|less_than|greater_than|before|after)$/;
 const HTML_COMMENT_REFUSED = "This Asana connector posts comments as plain text only. Pass text instead of html_text.";
 
 const GID = /^[1-9][0-9]{0,19}$/;
@@ -90,20 +90,22 @@ function scopeOf(scope: unknown): AsanaProjectScope {
 }
 
 /**
- * Every value at a path, with the concrete path it was found at. Absent, null and [] are skipped.
+ * Every value at a path, with the concrete path it was found at. Absent, null and [] are skipped,
+ * except that with `keepNull` an explicit null at the end of the path is returned.
  * Where the path expects an array or an object and finds anything else, that value is returned
  * instead, so the caller refuses it rather than missing what it holds.
  */
-function valuesAt(value: unknown, path: ArgumentPath, at: string[] = []): Array<{ value: unknown; at: string }> {
+function valuesAt(value: unknown, path: ArgumentPath, at: string[] = [], keepNull = false): Array<{ value: unknown; at: string }> {
+  if (value === null && keepNull && path.length === 0) return [{ value, at: at.join(".") }];
   if (value === undefined || value === null) return [];
   if (path.length === 0) return Array.isArray(value) && value.length === 0 ? [] : [{ value, at: at.join(".") }];
   const [head, ...rest] = path;
   if (head === "*") {
     if (!Array.isArray(value)) return [{ value, at: at.join(".") }];
-    return value.flatMap((item, index) => valuesAt(item, rest, [...at, String(index)]));
+    return value.flatMap((item, index) => valuesAt(item, rest, [...at, String(index)], keepNull));
   }
   if (!isObject(value)) return [{ value, at: at.join(".") }];
-  return valuesAt(value[head!], rest, [...at, head!]);
+  return valuesAt(value[head!], rest, [...at, head!], keepNull);
 }
 
 /** A plain object's own keys, symbols and non-enumerable keys included; undefined for anything else. */
@@ -167,6 +169,10 @@ function checkShape(tool: string, args: Readonly<Record<string, unknown>>): void
     const at = `tasks.${index}`;
     const keys = ownKeys(item);
     if (keys === undefined) throw new GuardRejection(`${at} is not allowed on ${tool} unless it is a task object.`);
+    if (tool === "update_tasks") {
+      const task = (item as Record<string, unknown>).task;
+      if (typeof task !== "string" || !GID.test(task)) throw new GuardRejection(INVALID_GID);
+    }
     for (const key of keys) {
       if (!itemKeys.includes(key)) throw new GuardRejection(`${at}.${key.slice(0, 64)} is not allowed on ${tool}.`);
       const value = (item as Record<string, unknown>)[key];
@@ -184,13 +190,13 @@ function checkShape(tool: string, args: Readonly<Record<string, unknown>>): void
 /** The task GIDs the call names, after refusing arguments that could leave the project. */
 function taskReferences(tool: string, args: Readonly<Record<string, unknown>>, project: AsanaProjectScope): string[] {
   for (const path of REFUSED_ARGUMENTS[tool] ?? []) {
-    const found = valuesAt(args, path)[0];
+    const found = valuesAt(args, path, [], true)[0];
     if (found !== undefined) {
       throw new GuardRejection(`This Asana connector works only in the ${project.alias} project, so ${found.at} is not allowed on ${tool}.${tool === "get_tasks" ? " Use search_tasks to filter by assignee." : ""}`);
     }
   }
   if (tool === "create_tasks") {
-    for (const { value } of valuesAt(args, ["tasks", "*", "project_id"])) {
+    for (const { value } of valuesAt(args, ["tasks", "*", "project_id"], [], true)) {
       if (value !== project.projectGid) throw new GuardRejection(`This Asana connector creates tasks only in the ${project.alias} project. Leave project_id out.`);
     }
   }

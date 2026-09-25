@@ -329,4 +329,35 @@ describe("Asana project guard", () => {
     });
     expect(calls).toEqual([]);
   });
+
+  it("refuses an explicit null project_id, section_id or assignee_section on task items", async () => {
+    const { run, writes } = harness();
+    const refused: Array<[string, Record<string, unknown>]> = [
+      ["create_tasks", { tasks: [{ name: "a", project_id: null }] }],
+      ["create_tasks", { tasks: [{ name: "a", section_id: null }] }],
+      ["create_tasks", { tasks: [{ name: "a", assignee_section: null }] }],
+      ["update_tasks", { tasks: [{ task: "1210000000000101", assignee_section: null }] }],
+    ];
+    for (const [tool, args] of refused) expect(await run(tool, args)).toMatchObject({ status: "FAILED", reason: "policy_denied" });
+    expect(writes()).toEqual([]);
+  });
+
+  it("allows only Asana's documented search operators in search_tasks custom_fields", async () => {
+    const { run, calls } = harness();
+    const operators = ["value", "is_set", "not_value", "starts_with", "ends_with", "contains", "less_than", "greater_than", "before", "after"];
+    expect(await run("search_tasks", { custom_fields: JSON.stringify(Object.fromEntries(operators.map((operator) => [`4578152156.${operator}`, "x"]))) })).toMatchObject({ status: "SUCCEEDED" });
+    expect(await run("search_tasks", { custom_fields: '{"123.projects_any":"1210000000000020"}' })).toMatchObject({ status: "FAILED", reason: "policy_denied" });
+    expect(calls.map((entry) => entry.name)).toEqual(["search_tasks"]);
+  });
+
+  it("requires every update_tasks item to name its task by GID", async () => {
+    const { run, calls } = harness();
+    for (const item of [{ name: "x", parent: null }, { task: 1210000000000101, name: "x" }, { task: "Flaky login test", name: "x" }]) {
+      expect(await run("update_tasks", { tasks: [{ task: "1210000000000101", completed: true }, item] })).toMatchObject({ status: "FAILED", reason: "policy_denied" });
+    }
+    expect(calls).toEqual([]);
+    const connection = { call: vi.fn(async (): Promise<McpToolResult> => taskResult("1210000000000101", [PROJECT])) };
+    await expect(asanaProjectGuard.check({ tool: "update_tasks", arguments: { tasks: [{ name: "x", parent: null }] }, bound: {}, scope, connection })).rejects.toThrow("Pass the Asana task ID");
+    expect(connection.call).not.toHaveBeenCalled();
+  });
 });
