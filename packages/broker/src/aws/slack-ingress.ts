@@ -355,7 +355,10 @@ function createAwsSlackIngressHandler() {
           ExpressionAttributeValues: { ":one": 1, ":expiresAt": expiresAtSeconds },
           ReturnValues: "UPDATED_NEW",
         }));
-        return Number(response.Attributes?.turns ?? 0);
+        // A missing count fails closed: the handler answers 500 and Slack retries.
+        const turns = Number(response.Attributes?.turns);
+        if (!Number.isFinite(turns)) throw new Error("turn counter returned no count");
+        return turns;
       },
     },
     async getBinding(teamId, channelId) {
