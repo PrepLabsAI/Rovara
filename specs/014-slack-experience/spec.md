@@ -233,6 +233,9 @@ listing the `save_issue` call and its result; nothing is posted to the thread.
   modal for the clicking member, built from the turn record.
 - **FR-025**: The Slack app MUST gain interactivity with a signed request URL; requests failing
   signature verification MUST be refused.
+- **FR-026**: A request MUST get one acknowledgement before its answer. The Slack service MUST post
+  its "Working on it now" notice only when the request waited: behind earlier requests in the
+  thread, or for workspace setup. (Added 2026-09-25, from the phase 14a live check.)
 
 ### Key Entities
 
@@ -292,6 +295,10 @@ listing the `save_issue` call and its result; nothing is posted to the thread.
   `agentx_create_pull_request` answers that there is nothing to publish; the other in-house tools
   and all connector tools never prepare it. The plan is
   [plans/phase-14b-lazy-workspace.md](plans/phase-14b-lazy-workspace.md).
+- **The ingress passes the queue count as a queue message attribute, not a body field**
+  (2026-09-25, owner-approved, FR-026). An older Slack service parses the body strictly and would
+  discard a message with a new field; it ignores attributes it does not ask for. A message with no
+  count, from an older ingress, keeps the "Working on it now" notice.
 
 ## Assumptions and Scope
 

@@ -31,4 +31,4 @@ For comparison, the same thread's pre-14a reply at 05:12:51 (thread 1790313106.8
 - *Mention posted with the AgentX bot token.* The operator has no bot token locally. AgentX's own replies in the turn-limit thread are the practical evidence that bot-authored messages don't start turns.
 - *Matching `slack-ingress` log lines.* The operator's IAM user lacks `logs:FilterLogEvents`.
 
-**Finding.** Each request posts two acknowledgements back to back: "Got it. I'm on it…" from the ingress, and "Working on it now…" from the Slack service less than a second later. Only one is needed when nothing is queued ahead.
+**Finding.** Each request posts two acknowledgements back to back: "Got it. I'm on it…" from the ingress, and "Working on it now…" from the Slack service less than a second later. Only one is needed when nothing is queued ahead. Resolved by FR-026 in phase 14b PR B.

@@ -146,6 +146,23 @@ export const SlackRequestMessageSchema = z
   })
   .strict();
 
+/**
+ * Spec 014 FR-026: the queue message attribute through which the ingress tells the Slack service how
+ * many earlier requests in the thread a request was queued behind. It travels outside the body,
+ * because an older Slack service parses the body strictly and would discard a message with a new field.
+ */
+export const SLACK_QUEUED_BEHIND_ATTRIBUTE = "queuedBehind";
+
+export function queuedBehindAttributes(queuedBehind: number): Record<string, { DataType: "Number"; StringValue: string }> {
+  return { [SLACK_QUEUED_BEHIND_ATTRIBUTE]: { DataType: "Number", StringValue: String(queuedBehind) } };
+}
+
+/** The count a received message carries, or undefined when it carries none (an older ingress) or a malformed one. */
+export function queuedBehindOf(attributes: Readonly<Record<string, { StringValue?: string | undefined }>> | undefined): number | undefined {
+  const value = attributes?.[SLACK_QUEUED_BEHIND_ATTRIBUTE]?.StringValue;
+  return value !== undefined && /^\d{1,6}$/.test(value) ? Number(value) : undefined;
+}
+
 export function slackThreadSubject(thread: SlackThread): string {
   const parsed = SlackThreadSchema.parse(thread);
   return `${parsed.teamId}/${parsed.channelId}/${parsed.threadTs}`;

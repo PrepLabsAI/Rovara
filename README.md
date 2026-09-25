@@ -309,7 +309,9 @@ create a pull request.
 ```
 
 AgentX replies within a few seconds. If earlier requests in the thread are still running, it says
-how many are ahead. A new thread gets a coding workspace only when a request first needs the
+how many are ahead, and says "Working on it now" when it starts on the request. A request with
+nothing ahead gets only that first reply before its answer. A new thread gets a coding workspace
+only when a request first needs the
 remote worker, for example to read or change repository files or to run commands. Questions that
 connectors answer, such as issue tracker questions, need no workspace. The first request that needs
 the worker prepares the workspace in the same turn, which takes a few minutes, and AgentX says so in

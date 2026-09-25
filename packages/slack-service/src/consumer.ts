@@ -6,6 +6,8 @@ export interface QueueMessage {
   receiptHandle: string;
   groupId: string;
   receiveCount: number;
+  /** How many earlier requests the ingress queued this one behind; absent from an older ingress. */
+  queuedBehind?: number;
 }
 
 export interface QueueClient {
@@ -23,7 +25,7 @@ export interface ConsumerOptions {
   log?: ServiceLog;
 }
 
-export type RequestHandler = (message: SlackRequestMessage, context: { finalAttempt: boolean }) => Promise<void>;
+export type RequestHandler = (message: SlackRequestMessage, context: { finalAttempt: boolean; queuedBehind?: number }) => Promise<void>;
 
 // Each Slack thread is one FIFO message group: its messages run one at a time, and different threads run in parallel.
 export async function runConsumer(queue: QueueClient, handle: RequestHandler, options: ConsumerOptions): Promise<void> {
@@ -68,7 +70,10 @@ export async function processGroup(
       if (!parsed.success) {
         log("message.discarded", { reason: "invalid_message" });
       } else {
-        await handle(parsed.data, { finalAttempt: entry.receiveCount >= options.maxReceiveCount });
+        await handle(parsed.data, {
+          finalAttempt: entry.receiveCount >= options.maxReceiveCount,
+          ...(entry.queuedBehind === undefined ? {} : { queuedBehind: entry.queuedBehind }),
+        });
       }
       await queue.delete(entry.receiptHandle);
     } catch (error) {
