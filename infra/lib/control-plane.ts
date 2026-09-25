@@ -358,6 +358,22 @@ export class ControlPlaneStack extends Stack {
     broker.addEnvironment("SLACK_MEMBER_WORKSPACE_LIMIT", memberWorkspaceLimit.valueAsString);
     broker.addEnvironment("SLACK_ORGANIZATION_WORKSPACE_LIMIT", organizationWorkspaceLimit.valueAsString);
 
+    const appPostedMessages = new CfnParameter(this, "SlackAppPostedMessages", {
+      type: "String",
+      default: "accept",
+      allowedValues: ["accept", "ignore"],
+      description: "accept: answer mentions a person posts through another app with their own Slack token; ignore: answer only typed mentions",
+    });
+    const threadTurnsPerMinute = new CfnParameter(this, "SlackThreadTurnsPerMinute", {
+      // A CloudFormation Number parameter accepts decimals (e.g. "6.5") within its min/max, which the
+      // Lambda's own whole-number check then refuses at cold start, taking all Slack ingress down
+      // with no alarm. A String with this pattern refuses that value at deploy time instead.
+      type: "String",
+      default: "6",
+      allowedPattern: "^([1-9]|[1-5][0-9]|60)$",
+      constraintDescription: "must be a whole number from 1 to 60",
+      description: "Most requests one Slack thread may start in a minute; further requests pause the thread with one notice",
+    });
     const slackIngress = packagedFunction(
       this,
       "SlackIngress",
@@ -367,6 +383,8 @@ export class ControlPlaneStack extends Stack {
         SLACK_THREADS_TABLE_NAME: slackThreads.tableName,
         SLACK_REQUEST_QUEUE_URL: slackRequestQueue.queueUrl,
         SLACK_SECRET_ARN: slackSecret.secretArn,
+        SLACK_APP_POSTED_MESSAGES: appPostedMessages.valueAsString,
+        SLACK_THREAD_TURNS_PER_MINUTE: threadTurnsPerMinute.valueAsString,
       },
       Duration.seconds(10),
     );
