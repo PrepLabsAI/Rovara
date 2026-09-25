@@ -16,7 +16,6 @@ import { randomUUID } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import { authorizeCredential, type AuthorizeSecrets } from "../../packages/cli/src/admin/authorize.js";
-import { openSystemBrowser } from "../../packages/cli/src/auth.js";
 import { ASANA_MCP_ENDPOINT, ASANA_TOKEN_ENDPOINT, connectMcp, resultText } from "@agentx/gateway";
 import { asanaConnectorType } from "../../packages/broker/src/aws/asana-connector-type.js";
 import { githubConnectorType } from "../../packages/broker/src/aws/connector-types.js";
@@ -30,6 +29,9 @@ const CLIENT_ID = process.env.AGENTX_LIVE_ASANA_CLIENT_ID;
 const CLIENT_SECRET = process.env.AGENTX_LIVE_ASANA_CLIENT_SECRET;
 const PROJECT = process.env.AGENTX_LIVE_ASANA_PROJECT;
 const OUTSIDE_TASK = process.env.AGENTX_LIVE_ASANA_OUTSIDE_TASK ?? "1199999999999999";
+// The bot user's email. The sign-in must be this account, or the check stops before any write:
+// a default browser already signed in to Asana as someone else approves silently as that person.
+const BOT_EMAIL = process.env.AGENTX_LIVE_ASANA_BOT_EMAIL;
 const CAPTURE = process.env.AGENTX_LIVE_ASANA_CAPTURE;
 
 const team = "T0BSHLLUGBD";
@@ -77,7 +79,7 @@ function routedFetch(handler: () => Handler): typeof fetch {
 
 describe.skipIf(!CLIENT_ID)("asana connector, live check against the real project", () => {
   it("signs in once, registers, searches, creates, reads, comments, refuses, refreshes and reports a revoked sign-in", async () => {
-    if (!CLIENT_ID || !CLIENT_SECRET || !PROJECT) throw new Error("AGENTX_LIVE_ASANA_CLIENT_ID, AGENTX_LIVE_ASANA_CLIENT_SECRET and AGENTX_LIVE_ASANA_PROJECT are required");
+    if (!CLIENT_ID || !CLIENT_SECRET || !PROJECT || !BOT_EMAIL) throw new Error("AGENTX_LIVE_ASANA_CLIENT_ID, AGENTX_LIVE_ASANA_CLIENT_SECRET AGENTX_LIVE_ASANA_PROJECT and AGENTX_LIVE_ASANA_BOT_EMAIL are required");
     await loadSlackBroker();
     const secrets = memorySecretStore({
       [SECRET]: JSON.stringify({ clientId: CLIENT_ID, clientSecret: CLIENT_SECRET }),
@@ -97,12 +99,17 @@ describe.skipIf(!CLIENT_ID)("asana connector, live check against the real projec
     let accountLine: string | undefined;
     await authorizeCredential({
       controlPlaneUrl: CONTROL_PLANE, accessToken: "unused", ref: "asana-bot", secretName: SECRET, provider: "asana",
-      secrets: authorizeSecrets, openBrowser: openSystemBrowser,
-      showUrl: (url, redirectRequirement) => { console.log(`ASANA SIGN-IN URL: ${url}`); console.log(redirectRequirement); },
+      secrets: authorizeSecrets, openBrowser: async () => undefined, // never open the default browser; the URL is opened by hand in a private window
+      showUrl: (url, redirectRequirement) => {
+        console.log(`ASANA SIGN-IN URL: ${url}`); console.log(redirectRequirement);
+        // Also written to a file, since test runners may buffer console output until the test ends.
+        if (process.env.AGENTX_LIVE_ASANA_URL_FILE) void writeFile(process.env.AGENTX_LIVE_ASANA_URL_FILE, `${url}\n`);
+      },
       showAccount: (line) => { accountLine = line; },
       fetchImplementation: routedFetch(() => first.handler),
     });
     const refreshToken = (JSON.parse(secrets.values[SECRET]!) as { refreshToken: string }).refreshToken;
+    if (!BOT_EMAIL || !accountLine?.toLowerCase().includes(BOT_EMAIL.toLowerCase())) throw new Error(`the sign-in was not the bot user (${accountLine ?? "account not shown"}); rerun with the URL in a private window signed in as ${BOT_EMAIL ?? "AGENTX_LIVE_ASANA_BOT_EMAIL"}`);
     evidence(`step 1 ${accountLine ?? "signed in to Asana (the account could not be shown)"}; refresh token stored (${refreshToken.length} characters)`);
 
     // Step 2: register the project with preflight.
