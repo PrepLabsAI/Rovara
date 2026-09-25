@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { redactText } from "./redaction.js";
+import { redactSecrets, redactText } from "./redaction.js";
 import { SlackTeamIdSchema, SlackUserIdSchema } from "./slack.js";
 import { TaskUsageTelemetrySchema } from "./usage.js";
 
@@ -84,10 +84,29 @@ export function capText(text: string, limit = TURN_TEXT_LIMIT): { text: string; 
   return { text: text.slice(0, cut), truncated: true };
 }
 
+/** How much raw text redactAndCap looks at, as a multiple of the limit. Redaction can shrink
+ * text (a long secret becomes a short marker), so it reads more than the limit, but never an
+ * unbounded amount. */
+export const REDACTION_CEILING_FACTOR = 4;
+
 /** Redacts before capping, so a secret that would straddle the cut cannot leak a truncated
- * fragment: capping first and redacting afterward can leave a partial credential in the output. */
+ * fragment: capping first and redacting afterward can leave a partial credential in the output.
+ * Raw input past REDACTION_CEILING_FACTOR times the limit is dropped before redacting, and so is
+ * the partial word at that cut, because a secret cut short may no longer match its pattern. */
 export function redactAndCap(text: string, limit = TURN_TEXT_LIMIT): { text: string; truncated: boolean } {
-  return capText(redactText(text), limit);
+  const ceiling = limit * REDACTION_CEILING_FACTOR;
+  if (text.length <= ceiling) return capText(redactText(text), limit);
+  let cut = ceiling;
+  while (cut > 0 && !/\s/.test(text[cut] ?? "")) cut -= 1;
+  const bounded = text.slice(0, cut);
+  return { text: capText(redactText(bounded), limit).text, truncated: true };
+}
+
+/** Tool arguments for a turn record: the parsed object is redacted by key and value with
+ * redactSecrets, then serialized and capped. Callers must use this rather than text-redacting
+ * a JSON string, which cannot see keys and escapes reliably. */
+export function redactArguments(value: unknown, limit = TURN_ARGUMENT_LIMIT): string {
+  return capText(JSON.stringify(redactSecrets(value)) ?? "", limit).text;
 }
 
 export function turnRecordKeys(record: Pick<TurnRecord, "subject" | "receivedAt" | "eventId">) {

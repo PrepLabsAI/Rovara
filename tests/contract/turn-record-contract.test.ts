@@ -9,6 +9,7 @@ import {
   turnRecordKeys,
   type TurnRecord,
 } from "../../packages/contracts/src/turns.js";
+import { TURN_ARGUMENT_LIMIT, redactArguments } from "../../packages/contracts/src/turns.js";
 
 const record: TurnRecord = {
   ...EMPTY_TURN_OBSERVATION,
@@ -227,5 +228,158 @@ describe("capText and redactAndCap", () => {
 
     const result = redactAndCap(text, limit);
     expect(result.text).not.toContain("aaaaa");
+  });
+});
+
+describe("secret redaction, fix round 2", () => {
+  const expectRedacted = (input: string, secret: string) => {
+    const out = redactText(input);
+    expect(out, `${input} -> ${out}`).not.toContain(secret);
+    expect(out).toContain("[REDACTED]");
+  };
+  const expectSame = (input: string) => expect(redactText(input)).toBe(input);
+
+  it.each([
+    ["letters", "a".repeat(160_000)],
+    ["token run", "token".repeat(32_000)],
+    ["eyJ run", "eyJ-".repeat(40_000)],
+    ["authorization then spaces", `authorization:${" ".repeat(159_986)}`],
+    ["scheme-like run", "a+".repeat(80_000)],
+    ["query token run", `?${"token".repeat(31_999)}`],
+    ["user-info run", `a://b:${"c".repeat(159_994)}`],
+    ["repeated user-info", "a://b:".repeat(26_666)],
+    ["password= run", "password=".repeat(17_777)],
+    ["bearer then letters", `bearer ${"a".repeat(159_993)}`],
+    ["private key headers", "-----BEGIN PRIVATE KEY-----".repeat(5_925)],
+    ["mixed", "Authorization: Bearer abc123 password=x postgres://u:p@h ?token=1 eyJabcdefghij.eyJabcdefghij.abcdefghij ".repeat(1_600)],
+  ])("redacts 160,000 characters of %s in linear time", (_name, input) => {
+    const started = performance.now();
+    redactText(input);
+    const elapsed = performance.now() - started;
+    console.log(`redactText ${_name} (${input.length} chars): ${elapsed.toFixed(1)} ms`);
+    expect(elapsed).toBeLessThan(500);
+  });
+
+  it("bounds the work redactAndCap does on a very long input", () => {
+    const input = "a".repeat(1_000_000);
+    const started = performance.now();
+    const result = redactAndCap(input, TURN_TEXT_LIMIT);
+    const elapsed = performance.now() - started;
+    console.log(`redactAndCap 1,000,000 chars: ${elapsed.toFixed(1)} ms`);
+    expect(elapsed).toBeLessThan(500);
+    expect(result.truncated).toBe(true);
+    expect(result.text.length).toBeLessThanOrEqual(TURN_TEXT_LIMIT);
+  });
+
+  it("drops a partial token at the redaction ceiling so a straddling secret cannot leak a prefix", () => {
+    const limit = 100;
+    // The long password value shrinks to a marker, so text near the 4x ceiling survives the cap.
+    const lead = `password=${"v".repeat(300)} `;
+    for (let pad = 0; pad < 60; pad += 1) {
+      const head = lead + "x".repeat(pad) + " ";
+      const token = `ghp_${"0123456789".repeat(4)}`;
+      const dsn = "postgres://user:hunter2secretpw@db/app";
+      for (const secret of [token, dsn]) {
+        const result = redactAndCap(`${head}${secret} tail`, limit);
+        expect(result.text).not.toMatch(/ghp_|hunter2|01234/);
+        expect(result.text.length).toBeLessThanOrEqual(limit);
+      }
+    }
+  });
+
+  it("redacts any value under a credential key, not only strings", () => {
+    expect(redactSecrets({ password: 123456, list: { secret: { value: "hunter2" } }, Authorization: ["Bearer abc"], apiKey: ["k"] })).toEqual({
+      password: "[REDACTED]",
+      list: { secret: "[REDACTED]" },
+      Authorization: "[REDACTED]",
+      apiKey: "[REDACTED]",
+    });
+    expect(redactSecrets({ tokenCount: 5, maxTokens: 9, token_count: 3, output_tokens: 7, usage: { input_tokens: 1 } })).toEqual({
+      tokenCount: 5,
+      maxTokens: 9,
+      token_count: 3,
+      output_tokens: 7,
+      usage: { input_tokens: 1 },
+    });
+  });
+
+  it("does not treat words ending in sk- as API keys", () => {
+    for (const text of ["task-management system", "risk-assessment framework", "desk-reservation-tool", "whisk-together-eggs"]) expectSame(text);
+    expectRedacted("use sk-abcdefghijklmnop now", "abcdefghijklmnop");
+  });
+
+  it.each([
+    ['{"password":"ab\\"cdefghXYZ"}', "cdefghXYZ"],
+    ["password='hunter two words'", "two"],
+    ["password: 'correct horse battery'", "horse"],
+    ["client_secret: 's3cr3t value'", "value"],
+    ["Cookie: session=abc123xyz; csrftoken=def456uvw", "abc123xyz"],
+    ["Cookie: session=abc123xyz; csrftoken=def456uvw", "def456uvw"],
+    ["Cookie: a=1; sessionid=zzzsecretzzz", "zzzsecretzzz"],
+    ["redis://:pa55word@cache:6379/0", "pa55word"],
+    ["postgres://user:ab/cdEFGH@db/app", "cdEFGH"],
+    ["postgres://user:p@ssW0rdQ@db/app", "ssW0rdQ"],
+    ["Authorization: Bearer abcdefg", "abcdefg"],
+  ])("closes the leak in %s", (input, secret) => expectRedacted(input, secret));
+
+  it("keeps the host of a connection string whose password has / or @", () => {
+    expect(redactText("postgres://user:p@ssW0rdQ@db/app")).toBe("postgres://[REDACTED]@db/app");
+    expect(redactText("postgres://user:ab/cdEFGH@db/app")).toBe("postgres://[REDACTED]@db/app");
+    expect(redactText("https://user:pw@host.example/path?email=a@b.com")).toBe("https://[REDACTED]@host.example/path?email=a@b.com");
+  });
+
+  it.each([
+    ["passwd=hunter2abc", "hunter2abc"],
+    ["pass=hunter2abc", "hunter2abc"],
+    ["DB_PASS=hunter2abc", "hunter2abc"],
+    ["PGPASSWORD=hunter2abc psql", "hunter2abc"],
+    ["-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBGsecret\n-----END PGP PRIVATE KEY BLOCK-----", "lQOYBGsecret"],
+    ["-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBGsecret", "lQOYBGsecret"],
+    ["https://acct.blob.core.windows.net/c?sv=2020&sig=AbCdEf%2Bsecret", "AbCdEf"],
+    ["https://x.com/cb?code=oauthcode123&state=x", "oauthcode123"],
+    ["glpat-abcdefghijklmnopqrst", "abcdefghijklmnopqrst"],
+    ["AIzaSyA-abcdefghijklmnopqrstuvwxyz12345", "abcdefghijklmnopqrstuvwxyz"],
+    ["curl -u admin:S3cretPw https://x", "S3cretPw"],
+    ["curl --user admin:S3cretPw https://x", "S3cretPw"],
+    ["bearer: abc123def456", "abc123def456"],
+  ])("redacts the new shape %s", (input, secret) => expectRedacted(input, secret));
+
+  it.each([
+    "https://example.com/?keyword=shoes",
+    "https://example.com/?monkey=1",
+    "https://example.com/?zip_code=12345&promo_code=SPRING",
+    "the author: Jane Doe",
+    "authors: Alice, Bob",
+    "authority: the court",
+    "tokenizer: cl100k",
+    "tokenUsage: high",
+    "secretary: Bob",
+    "cookieConsent: yes",
+    "compass=north",
+    "Basic internationalization",
+    "bearer instrumentalities",
+    "Secret Santa: Bob",
+    "keyboard=qwerty",
+    "set max_tokens=4096",
+    "see redis://cache:6379",
+    "ssh://git@github.com/org/repo",
+    "https://host.example:8080/path?email=a@b.com",
+  ])("leaves the look-alike %s alone", (text) => expectSame(text));
+
+  it("does not redact look-alike object keys", () => {
+    const value = { author: "Jane", authors: ["A"], authority: "court", tokenizer: "cl100k", tokenUsage: "high", secretary: "Bob", cookieConsent: "yes", keyboard: "qwerty" };
+    expect(redactSecrets(value)).toEqual(value);
+  });
+
+  it("redactArguments redacts the parsed object and returns capped JSON", () => {
+    const args = { query: "x", headers: { Authorization: 'Basic "quoted" dXNlcjpwYXNz' }, cfg: 'password="abc def"', password: 42 };
+    const json = redactArguments(args);
+    expect(JSON.parse(json)).toEqual({ query: "x", headers: { Authorization: "[REDACTED]" }, cfg: 'password="[REDACTED]"', password: "[REDACTED]" });
+    for (const secret of ["dXNlcjpwYXNz", "abc def", "42"]) expect(json).not.toContain(secret);
+
+    const long = redactArguments({ body: "b".repeat(5_000) });
+    expect(long.length).toBeLessThanOrEqual(TURN_ARGUMENT_LIMIT);
+    expect(long.startsWith('{"body":"bbb')).toBe(true);
+    expect(redactArguments({ a: "abcdef" }, 5)).toBe('{"a":');
   });
 });
