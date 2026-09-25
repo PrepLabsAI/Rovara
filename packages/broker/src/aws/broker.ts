@@ -72,6 +72,7 @@ import { GitHubAppCredentialProvider, privateKeyFromSecret } from "../github-app
 import { CatalogCache } from "@agentx/gateway";
 import { executeGitHubTool, toGitHubCatalog, type GitHubMcpDependencies } from "../github-mcp.js";
 import { DynamoConnectorLedger, GITHUB_LEDGER } from "./connector-ledger.js";
+import { observeConnectorRoute } from "./connector-metrics.js";
 import { attributionDroppedLog, callConnector, connectorCatalogKey, discoverConnector, discoverLegacyGitHubScope, stripCode, type ConnectorContextBase, type ScopeDiscovery } from "./connector-routes.js";
 import { resolveConnectors, BUILT_IN_CONNECTOR_TYPES, type ConnectorType, type ConnectorTypeContext, type ResolvedConnector } from "./connector-types.js";
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
@@ -297,7 +298,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         if (request.method === "POST" && serviceUrl.pathname === "/v1/threads/workspace/close/complete") {
           return json(await completeThreadWorkspaceClose(dependencies, identity, parseBody(request.body)), request.requestId);
         }
-        return await routeWorkspaceRequest(dependencies, request, serviceUrl, identity);
+        return await observeConnectorRoute(request.method, serviceUrl.pathname, () => routeWorkspaceRequest(dependencies, request, serviceUrl, identity));
       }
 
       const identity = identityFromJwtClaims(request.jwtClaims, {

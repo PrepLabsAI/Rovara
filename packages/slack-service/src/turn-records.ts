@@ -9,6 +9,7 @@ import {
   type TurnObservation,
   type TurnRecord,
 } from "@agentx/contracts";
+import type { ServiceLog } from "./processor.js";
 
 /** DynamoDB's item limit is 400 KB; this leaves room for keys and attribute overhead. */
 export const TURN_ITEM_BYTE_BUDGET = 350_000;
@@ -86,6 +87,27 @@ function halve(text: string): string {
   const code = text.charCodeAt(cut - 1);
   if (code >= 0xd800 && code <= 0xdbff) cut -= 1;
   return text.slice(0, cut);
+}
+
+/**
+ * Metric lines for CloudWatch Logs metric filters (the Fargate awslogs driver does not extract
+ * embedded metric format). Only turns that ran the orchestrator count; a line never carries text.
+ */
+export function emitTurnMetrics(record: TurnRecord, log: ServiceLog): void {
+  if (record.disposition !== "answered" && record.disposition !== "failed") return;
+  log("metric", { metric: "TurnCompleted", count: 1 });
+  if (record.emptyResponse) log("metric", { metric: "TurnEmptyResponse", count: 1 });
+  const schemaErrors = new Map<string, number>();
+  let unknownNames = 0;
+  for (const call of record.calls) {
+    if (call.validation === "schema_error") {
+      const connector = call.connector ?? "agentx";
+      schemaErrors.set(connector, (schemaErrors.get(connector) ?? 0) + 1);
+    }
+    if (call.validation === "unknown_tool") unknownNames += 1;
+  }
+  for (const [connector, count] of schemaErrors) log("metric", { metric: "ToolSchemaError", connector, count });
+  if (unknownNames > 0) log("metric", { metric: "ToolUnknownName", count: unknownNames });
 }
 
 export class DynamoTurnRecordWriter implements TurnRecordSink {

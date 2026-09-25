@@ -244,3 +244,37 @@ describe("turn record size", () => {
     expect(Buffer.byteLength(JSON.stringify(db.find(() => true)[0]))).toBeLessThanOrEqual(TURN_ITEM_BYTE_BUDGET + 512);
   });
 });
+
+describe("turn metrics", () => {
+  it("emits the Slack service metrics once per written record, never for a duplicate", async () => {
+    const { dependencies, logs } = harness({
+      runTurn: async (input) => {
+        input.recorder?.offer({ manifest: "m", tools: [], connectorOf: new Map([["github__list_issues", "github"]]), model: { provider: "p", modelId: "m" } });
+        input.recorder?.toolStarted({ toolCallId: "1", toolName: "github__list_issues", args: {} });
+        input.recorder?.toolEnded({ toolCallId: "1", toolName: "github__list_issues", isError: true, result: { content: [{ type: "text", text: "Validation failed for tool \"github__list_issues\"" }] } });
+        input.recorder?.toolStarted({ toolCallId: "2", toolName: "agentx_submit_task", args: {} });
+        input.recorder?.toolEnded({ toolCallId: "2", toolName: "agentx_submit_task", isError: true, result: { content: [{ type: "text", text: "Validation failed for tool \"agentx_submit_task\"" }] } });
+        input.recorder?.toolStarted({ toolCallId: "3", toolName: "agentx_sync_pull_request", args: {} });
+        input.recorder?.toolEnded({ toolCallId: "3", toolName: "agentx_sync_pull_request", isError: true, result: { content: [{ type: "text", text: "Tool agentx_sync_pull_request not found" }] } });
+        input.recorder?.agentEnded([{ role: "assistant", content: [], stopReason: "stop" }]);
+        return "AgentX completed the request without returning a textual response.";
+      },
+    });
+    await processSlackRequest(message, dependencies, { finalAttempt: false });
+    await processSlackRequest(message, dependencies, { finalAttempt: false });
+    const metricLines = logs.filter((line) => line.includes("\"event\":\"metric\"")).map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(metricLines).toEqual([
+      { event: "metric", metric: "TurnCompleted", count: 1 },
+      { event: "metric", metric: "TurnEmptyResponse", count: 1 },
+      { event: "metric", metric: "ToolSchemaError", connector: "github", count: 1 },
+      { event: "metric", metric: "ToolSchemaError", connector: "agentx", count: 1 },
+      { event: "metric", metric: "ToolUnknownName", count: 1 },
+    ]);
+  });
+
+  it("does not count a workspace command as a completed turn", async () => {
+    const { dependencies, logs } = harness();
+    await processSlackRequest({ ...message, eventId: "EvTURN00004", text: "close this workspace" }, dependencies, { finalAttempt: false });
+    expect(logs.filter((line) => line.includes("\"event\":\"metric\""))).toEqual([]);
+  });
+});

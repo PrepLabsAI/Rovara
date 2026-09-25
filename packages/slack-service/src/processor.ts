@@ -12,7 +12,7 @@ import {
 } from "@agentx/contracts";
 import { TurnRecorder } from "@agentx/orchestrator/turn-recorder";
 import { deterministicUuid, requestIdSequence } from "./ids.js";
-import { buildTurnRecord, type TurnDraft, type TurnRecordSink } from "./turn-records.js";
+import { buildTurnRecord, emitTurnMetrics, type TurnDraft, type TurnRecordSink } from "./turn-records.js";
 
 export interface ThreadServiceApi {
   ensureWorkspace(requestId: string): Promise<SlackThreadWorkspaceResult>;
@@ -235,8 +235,11 @@ async function recordTurn(
   input: Omit<Parameters<typeof buildTurnRecord>[0], "observation">,
 ): Promise<void> {
   try {
-    const written = await sink.write(buildTurnRecord({ ...input, observation: recorder.observation() }));
-    if (written === "duplicate") log("turn_record.duplicate", { eventId: input.message.eventId });
+    const record = buildTurnRecord({ ...input, observation: recorder.observation() });
+    const written = await sink.write(record);
+    // Emitted only for the first write, so a redelivered event is counted once.
+    if (written === "written") emitTurnMetrics(record, log);
+    else log("turn_record.duplicate", { eventId: input.message.eventId });
   } catch (error) {
     log("turn_record.write_failed", { eventId: input.message.eventId, errorName: errorName(error) });
     log("metric", { metric: "TurnRecordWriteFailed", count: 1 });
