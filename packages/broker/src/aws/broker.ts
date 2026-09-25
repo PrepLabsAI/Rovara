@@ -3549,6 +3549,7 @@ export const handler = createAwsBrokerHandler({
   connectorCredentials: {
     secrets: secretsManagerSource(secretsManager),
     githubApp: { ref: requiredEnvironment("GITHUB_APP_CREDENTIAL_REF"), secretName: githubPrivateKeySecretArn },
+    ...(process.env.CONNECTOR_SECRET_PREFIX ? { connectorSecretPrefix: process.env.CONNECTOR_SECRET_PREFIX } : {}),
   },
   codeBuild,
   ...(process.env.TURN_RECORDS_TABLE_NAME ? { turnRecordsTableName: process.env.TURN_RECORDS_TABLE_NAME } : {}),

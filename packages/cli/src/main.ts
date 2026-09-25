@@ -181,13 +181,13 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       services.stdout.write(formatSuccess(result, globals.json));
     });
 
-  const adminCredential = admin.command("credential").description("register connector credentials stored in Secrets Manager under agentx/connectors/");
+  const adminCredential = admin.command("credential").description("register connector credentials stored in Secrets Manager under agentx/connectors/ or agentx/<env>/connectors/");
   adminCredential
     .command("register")
     .description("register or replace a credential reference; the secret must already exist")
     .requiredOption("--ref <reference>", "credential reference used by connectors' credentialRef")
     .requiredOption("--type <type>", "static-secret, oauth-client-credentials or oauth-refresh-token")
-    .requiredOption("--secret <name>", "Secrets Manager secret name, agentx/connectors/<name>")
+    .requiredOption("--secret <name>", "Secrets Manager secret name, agentx/connectors/<name> or agentx/<env>/connectors/<name>")
     .action(async (options: { ref: string; type: string; secret: string }, command: Command) => {
       const globals = globalOptions(command);
       const { settings, accessToken } = await authenticate(globals, services.tokenStore);
@@ -197,7 +197,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .command("authorize")
     .description("sign the connector's bot user in once in a browser, store its refresh token in the secret, and register it as oauth-refresh-token")
     .requiredOption("--ref <reference>", "credential reference used by connectors' credentialRef")
-    .requiredOption("--secret <name>", "Secrets Manager secret holding the app's {\"clientId\", \"clientSecret\"}, agentx/connectors/<name>")
+    .requiredOption("--secret <name>", "Secrets Manager secret holding the app's {\"clientId\", \"clientSecret\"}, agentx/connectors/<name> or agentx/<env>/connectors/<name>")
     .requiredOption("--provider <name>", "whose sign-in page to use: asana")
     .option("--region <region>", "AWS region of the secret; defaults to your AWS configuration")
     .option("--no-browser", "do not open a browser; only print the sign-in URL, to open in a private window signed in as the bot user")

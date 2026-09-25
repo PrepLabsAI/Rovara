@@ -146,6 +146,7 @@ export class ControlPlaneStack extends Stack {
       actions: ["codebuild:StartBuild", "codebuild:BatchGetBuilds"],
       resources: [this.formatArn({ service: "codebuild", resource: "project", resourceName: "agentx-*" })],
     }));
+    if (naming.env !== undefined) broker.addEnvironment("CONNECTOR_SECRET_PREFIX", naming.connectorSecretPrefix);
 
     const outboxPublisher = packagedFunction(
       this,

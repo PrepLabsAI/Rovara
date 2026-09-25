@@ -1,7 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 import { CredentialUnavailable } from "@agentx/gateway";
+import type { AuthenticatedIdentity } from "../../packages/broker/src/index.js";
 import { adminCall, createAdminBroker } from "../support/admin-broker.js";
 
+const administrator: AuthenticatedIdentity = {
+  issuer: "https://identity.example.test",
+  subject: "admin-subject",
+  ownerKey: "admin-subject",
+  isAdministrator: true,
+  claims: {},
+};
 const githubApp = { ref: "github-app", secretName: "arn:aws:secretsmanager:us-east-1:111122223333:secret:github-key" };
 const secretValues: Record<string, string> = {
   "agentx/connectors/jira-sa": JSON.stringify({ apiKey: "jira-key-value" }),
@@ -115,7 +123,7 @@ describe("Secrets Manager source and token cache", () => {
     const failing = { send: vi.fn(async () => { throw Object.assign(new Error("denied"), { name: "AccessDeniedException" }); }) };
     const error = await secretsManagerSource(failing).read("agentx/connectors/x").catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(CredentialUnavailable);
-    expect((error as Error).message).toBe("AgentX cannot read secret agentx/connectors/x; connector secrets must be named agentx/connectors/<name> in this account and region, or its KMS key does not allow the AgentX broker");
+    expect((error as Error).message).toBe("AgentX cannot read secret agentx/connectors/x; connector secrets must be named with this deployment's connector prefix in this account and region, or its KMS key does not allow the AgentX broker");
   });
 
   it("logs and swallows a token cache write failure without the token", async () => {
@@ -213,5 +221,13 @@ describe("registry failure modes", () => {
     const refs = (listed.body.credentials as Array<{ ref: string }>).map((entry) => entry.ref);
     expect(refs).toEqual(["github-app"]);
     expect(listed.body.credentials).toContainEqual({ ref: "github-app", type: "github-app", secretName: githubApp.secretName, builtIn: true, tokenCached: false });
+  });
+
+  it("refuses a secret outside the deployment's own connector prefix", async () => {
+    const { registry } = await createAdminBroker({ connectorCredentials: { secrets, githubApp, connectorSecretPrefix: "agentx/staging/connectors/" } });
+    await expect(registry!.register(administrator, { ref: "linear", type: "static-secret", secretName: "agentx/production/connectors/linear" }))
+      .rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("agentx/staging/connectors/") as unknown });
+    await expect(registry!.register(administrator, { ref: "linear", type: "static-secret", secretName: "agentx/connectors/linear" }))
+      .rejects.toMatchObject({ code: "CONFIG_INVALID" });
   });
 });

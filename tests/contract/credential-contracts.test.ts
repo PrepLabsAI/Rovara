@@ -66,3 +66,19 @@ describe("tool budget at registration", () => {
     expect(presentedNameProblems(definition as never)).toEqual([`connector github tool ${long}: presented name github__${long} exceeds 64 characters`]);
   });
 });
+
+describe("connector secret names per environment", () => {
+  const registration = (secretName: string) => CredentialRegistrationSchema.safeParse({ ref: "linear", type: "static-secret", secretName });
+
+  it("accepts the legacy and the environment forms", () => {
+    expect(registration("agentx/connectors/linear").success).toBe(true);
+    expect(registration("agentx/staging/connectors/linear").success).toBe(true);
+  });
+
+  it.each(["agentx/Staging/connectors/linear", "agentx/staging/linear", "agentx/staging/connectors/", "agentx/a--b/connectors/x", "agentx/staging/connectors/a/b"])(
+    "refuses %s",
+    (secretName) => {
+      expect(registration(secretName).success).toBe(false);
+    },
+  );
+});

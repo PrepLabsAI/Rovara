@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ENVIRONMENT_NAME_PATTERN } from "./environments.js";
 import { AGENTX_NAME_PATTERN } from "./names.js";
 
 /** Every provider type. github-app is built in; per-user is reserved for a later release. */
@@ -12,10 +13,15 @@ function escapeRegExp(literal: string): string {
 }
 
 /** No "/" in the character class (so no path segments) and the name cannot be only dots (so no "." or ".."). */
-const SecretNameSchema = z.string().regex(
-  new RegExp(`^${escapeRegExp(CONNECTOR_SECRET_PREFIX)}(?!\\.+$)[A-Za-z0-9_+=.@-]{1,128}$`),
-  "secret name must be agentx/connectors/<name>",
-);
+const SECRET_LEAF = "(?!\\.+$)[A-Za-z0-9_+=.@-]{1,128}";
+// agentx/connectors/<name> (deployments that predate environments) or agentx/<env>/connectors/<name>.
+const ENVIRONMENT_SEGMENT = ENVIRONMENT_NAME_PATTERN.source.slice(1, -1);
+const SecretNameSchema = z.string()
+  .regex(
+    new RegExp(`^(?:${escapeRegExp(CONNECTOR_SECRET_PREFIX)}|agentx/${ENVIRONMENT_SEGMENT}/connectors/)${SECRET_LEAF}$`),
+    "secret name must be agentx/connectors/<name> or agentx/<environment>/connectors/<name>",
+  )
+  .refine((name) => !name.split("/")[1]?.includes("--"), "secret name must be agentx/connectors/<name> or agentx/<environment>/connectors/<name>");
 
 export const CredentialRegistrationSchema = z.object({
   ref: z.string().regex(AGENTX_NAME_PATTERN),

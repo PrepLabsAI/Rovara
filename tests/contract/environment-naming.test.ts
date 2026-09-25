@@ -141,4 +141,11 @@ describe("environment naming", () => {
       expect(text).not.toContain('"Key":"Environment","Value":"production"');
     }
   }, 120_000);
+
+  it("tells the environment's broker its connector secret prefix, and leaves legacy unchanged", () => {
+    const stagingControl = productionStacks(buildAgentXApp({ agentxEnv: "staging" })).find((stack) => stack.stackName === "agentx-staging-control-plane")!;
+    expect(JSON.stringify(Template.fromStack(stagingControl).toJSON())).toContain("\"CONNECTOR_SECRET_PREFIX\":\"agentx/staging/connectors/\"");
+    const legacyControl = productionStacks(buildAgentXApp()).find((stack) => stack.stackName === "AgentXControlPlane")!;
+    expect(JSON.stringify(Template.fromStack(legacyControl).toJSON())).not.toContain("CONNECTOR_SECRET_PREFIX");
+  }, 240_000);
 });
