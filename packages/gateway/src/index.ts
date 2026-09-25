@@ -4,6 +4,7 @@ export * from "./catalog.js";
 export * from "./credentials.js";
 export * from "./engine.js";
 export * from "./github.js";
+export * from "./jira.js";
 export * from "./jira-jql.js";
 export * from "./mcp-client.js";
 export * from "./schema.js";

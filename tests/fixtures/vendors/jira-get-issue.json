@@ -1,0 +1,16 @@
+{
+  "data": {
+    "appliedContentFormat": "markdown",
+    "id": "10006",
+    "key": "KAN-3",
+    "fields": {
+      "summary": "Fixture issue",
+      "description": "",
+      "status": {
+        "name": "To Do"
+      },
+      "assignee": null,
+      "updated": "2026-09-24T17:35:17.603-0400"
+    }
+  }
+}

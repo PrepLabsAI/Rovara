@@ -4,6 +4,17 @@ import { AGENTX_NAME_PATTERN } from "./names.js";
 
 /** Becomes the tool prefix `<name>__<tool>`, so it is short and lowercase. */
 export const ConnectorNameSchema = z.string().regex(/^[a-z][a-z0-9-]{0,19}$/);
+
+/** The Jira tools AgentX can hold to one project, and the access each must be approved with. */
+export const JIRA_PROJECT_TOOL_ACCESS = {
+  getJiraIssue: "read",
+  searchJiraIssuesUsingJql: "read",
+  createJiraIssue: "write",
+  editJiraIssue: "write",
+  transitionJiraIssue: "write",
+  addOrEditJiraIssueComment: "write",
+} as const satisfies Record<string, "read" | "write">;
+
 const RepositoryNameSchema = z.string().regex(AGENTX_NAME_PATTERN);
 
 /** GitHub uses each scoped repository's own GitHub App credential, as feature 007 does. */
