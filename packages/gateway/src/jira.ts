@@ -1,7 +1,7 @@
 import { JIRA_PROJECT_TOOL_ACCESS } from "@agentx/contracts";
 import { GuardRejection, type Binder, type ConnectorDefinition, type CredentialProvider, type Guard } from "./types.js";
 import { limitJqlToProject } from "./jira-jql.js";
-import { isObject, resultText } from "./util.js";
+import { isObject } from "./util.js";
 import type { McpToolResult } from "./mcp-client.js";
 
 /** v2 is the endpoint that accepts API tokens; v1 ignores them. */
@@ -43,18 +43,42 @@ function issueRef(value: unknown, projectKey: string): string {
   throw new GuardRejection(`Pass the Jira issue key (for example ${projectKey}-123) or its numeric ID, not a URL or other text.`);
 }
 
-function parentRef(value: unknown, projectKey: string): string {
-  if (typeof value === "string") return issueRef(value, projectKey);
-  if (isObject(value) && typeof value.key === "string") return issueRef(value.key, projectKey);
-  if (isObject(value) && typeof value.id === "string") return issueRef(value.id, projectKey);
+/** A parent names an issue by key, id or both; every one given is checked. null clears the parent. */
+function parentRefs(value: unknown, projectKey: string): string[] {
+  if (value === null) return [];
+  if (typeof value === "string") return [issueRef(value, projectKey)];
+  if (isObject(value) && (typeof value.key === "string" || typeof value.id === "string")) {
+    return [value.key, value.id].filter((part) => part !== undefined).map((part) => issueRef(part, projectKey));
+  }
   throw new GuardRejection(`Give the parent as an issue key (for example ${projectKey}-10).`);
+}
+
+/** Free text a field object can carry. A key in it is a mention, not a reference, so it is not walked. */
+const TEXT_FIELDS = new Set(["description", "environment", "comment", "commentbody", "summary"]);
+const MAX_REFERENCES = 10;
+const MAX_DEPTH = 12;
+
+/**
+ * Every value inside a field object that is exactly an issue reference, whatever its field is
+ * called (issue links, Epic Link, custom fields): a key- or id-shaped string, or a numeric key/id.
+ */
+function nestedReferences(value: unknown, refs: string[], depth = 0, name = ""): void {
+  if (depth > MAX_DEPTH) throw new GuardRejection("These Jira fields are nested too deeply to check.");
+  if (typeof value === "string") { if (ISSUE_REF.test(value)) refs.push(value); return; }
+  if (typeof value === "number") { if ((name === "id" || name === "key") && ISSUE_REF.test(String(value))) refs.push(String(value)); return; }
+  if (Array.isArray(value)) { for (const item of value) nestedReferences(item, refs, depth + 1); return; }
+  if (!isObject(value)) return;
+  for (const [key, item] of Object.entries(value)) {
+    const lower = key.trim().toLowerCase();
+    if (!TEXT_FIELDS.has(lower)) nestedReferences(item, refs, depth + 1, lower);
+  }
 }
 
 /** Every issue the call names that must be in the project; throws on a project change. */
 function issueReferences(tool: string, args: Readonly<Record<string, unknown>>, projectKey: string): string[] {
   const refs: string[] = [];
   if (KEYED_TOOLS.has(tool)) refs.push(issueRef(args.issueIdOrKey, projectKey));
-  if (tool === "createJiraIssue" && args.parent !== undefined) refs.push(parentRef(args.parent, projectKey));
+  if (tool === "createJiraIssue" && args.parent !== undefined) refs.push(...parentRefs(args.parent, projectKey));
   if (tool === "editJiraIssue") {
     for (const anchor of RANK_ANCHORS) if (args[anchor] !== undefined) refs.push(issueRef(args[anchor], projectKey));
   }
@@ -62,13 +86,16 @@ function issueReferences(tool: string, args: Readonly<Record<string, unknown>>, 
     const values = args[field];
     if (!isObject(values)) continue;
     for (const [name, value] of Object.entries(values)) {
-      const lower = name.toLowerCase();
+      const lower = name.trim().toLowerCase();
       if (lower === "project" || lower === "pid") throw new GuardRejection("This connector cannot change an issue's project.");
       if (lower === "issuelinks") throw new GuardRejection("This connector cannot link issues, because a link can reach an issue in another project.");
-      if (lower === "parent" || lower === "parent link") refs.push(parentRef(value, projectKey));
+      if (lower === "parent" || lower === "parent link") refs.push(...parentRefs(value, projectKey));
     }
+    nestedReferences(values, refs);
   }
-  return [...new Set(refs)];
+  const unique = [...new Set(refs)];
+  if (unique.length > MAX_REFERENCES) throw new GuardRejection(`This call names more than ${MAX_REFERENCES} Jira issues. Split it into smaller calls.`);
+  return unique;
 }
 
 /** True when `key` is exactly `<projectKey>-<number>`; no pattern is built from configuration. */
@@ -77,11 +104,24 @@ function isKeyInProject(key: string, projectKey: string): boolean {
   return key.startsWith(prefix) && /^[1-9][0-9]*$/.test(key.slice(prefix.length));
 }
 
-/** The live getJiraIssue result (2026-09-24) is `{ data: { id, key, fields } }`. No other shape is trusted. */
-function issueKeyOf(result: McpToolResult): string | undefined {
-  let parsed: unknown;
-  try { parsed = JSON.parse(resultText(result)); } catch { return undefined; }
+function dataKey(parsed: unknown): string | undefined {
   return isObject(parsed) && isObject(parsed.data) && typeof parsed.data.key === "string" ? parsed.data.key : undefined;
+}
+
+/**
+ * The live getJiraIssue result (2026-09-24) is `{ data: { id, key, fields } }`. No other shape is
+ * trusted. When the result carries both structured and text forms, they must name the same key.
+ */
+function issueKeyOf(result: McpToolResult): string | undefined {
+  const text = (result.content ?? []).filter((entry) => entry.type === "text").map((entry) => entry.text ?? "").join("\n");
+  let fromText: string | undefined;
+  if (text !== "") {
+    try { fromText = dataKey(JSON.parse(text)); } catch { return undefined; }
+    if (fromText === undefined) return undefined;
+  }
+  if (result.structuredContent === undefined) return fromText;
+  const fromStructured = dataKey(result.structuredContent);
+  return fromText === undefined || fromText === fromStructured ? fromStructured : undefined;
 }
 
 /**

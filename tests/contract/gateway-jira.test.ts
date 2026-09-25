@@ -164,6 +164,47 @@ describe("Jira connector definition", () => {
     expect((await f.run("getJiraIssue", { issueIdOrKey: "KAN-1" })).text).toBe("Jira issue KAN-1 is not in project KAN. This connector works only in KAN.");
   });
 
+  it("checks both the key and the id of a parent that carries both", async () => {
+    const f = jira(kan, { "KAN-1": issueWithKey("KAN-1"), "KAN-2": issueWithKey("KAN-2"), "10002": issueWithKey("OPS-9") });
+    expect((await f.run("editJiraIssue", { issueIdOrKey: "KAN-1", fields: { parent: { key: "KAN-2", id: "10002" } } })).text)
+      .toBe("Jira issue 10002 is not in project KAN. This connector works only in KAN.");
+    expect(vendorCalls(f.call).map((entry) => entry.name)).not.toContain("editJiraIssue");
+  });
+
+  it.each([
+    ["Linked Issues", "additional_fields", (key: string) => [{ type: { name: "Relates" }, outwardIssue: { key } }]],
+    ["Epic Link", "additional_fields", (key: string) => key],
+    ["customfield_10014", "fields", (key: string) => key],
+  ])("verifies an issue named by the %s field, whatever the field is called", async (name, container, value) => {
+    const f = jira(kan, { "KAN-1": issueWithKey("KAN-1"), "KAN-2": issueWithKey("KAN-2"), "OPS-1": issueWithKey("OPS-1") });
+    const refused = await f.run("editJiraIssue", { issueIdOrKey: "KAN-1", [container]: { [name]: value("OPS-1") } });
+    expect(refused).toMatchObject({ status: "FAILED", reason: "policy_denied", text: "Jira issue OPS-1 is not in project KAN. This connector works only in KAN." });
+    expect(vendorCalls(f.call).map((entry) => entry.name)).not.toContain("editJiraIssue");
+    f.call.mockClear();
+    expect(await f.run("editJiraIssue", { issueIdOrKey: "KAN-1", [container]: { [name]: value("KAN-2") } })).toMatchObject({ status: "SUCCEEDED" });
+    expect(vendorCalls(f.call).map((entry) => entry.args.issueIdOrKey)).toEqual(["KAN-1", "KAN-2", "KAN-1"]);
+  });
+
+  it("does not treat text that only mentions an issue key as a reference", async () => {
+    const f = jira(kan);
+    expect(await f.run("editJiraIssue", { issueIdOrKey: "KAN-1", fields: { summary: "Follow-up to KAN-1 and OPS-1", description: "OPS-1" } })).toMatchObject({ status: "SUCCEEDED" });
+    expect(vendorCalls(f.call).map((entry) => entry.args.issueIdOrKey)).toEqual(["KAN-1", "KAN-1"]);
+  });
+
+  it("refuses a call that names more than 10 issues, before any lookup", async () => {
+    const f = jira(kan);
+    const links = Array.from({ length: 10 }, (_, index) => ({ outwardIssue: { key: `KAN-${index + 2}` } }));
+    expect((await f.run("editJiraIssue", { issueIdOrKey: "KAN-1", additional_fields: { "Linked Issues": links } })).text)
+      .toBe("This call names more than 10 Jira issues. Split it into smaller calls.");
+    expect(f.call).not.toHaveBeenCalled();
+  });
+
+  it("allows clearing a parent and refuses a project field whatever its spacing", async () => {
+    const f = jira(kan);
+    expect(await f.run("editJiraIssue", { issueIdOrKey: "KAN-1", fields: { parent: null } })).toMatchObject({ status: "SUCCEEDED" });
+    expect((await f.run("editJiraIssue", { issueIdOrKey: "KAN-1", additional_fields: { "Project ": "OPS" } })).text).toBe("This connector cannot change an issue's project.");
+  });
+
   it("binds and limits by the chosen scope when two scopes share a site", async () => {
     const ops: JiraScope = { alias: "ops", cloudId: CLOUD, projectKey: "OPS" };
     const f = jira(ops, { "OPS-1": issueWithKey("OPS-1") });
@@ -199,6 +240,14 @@ describe("Jira connector definition", () => {
     await expect(jiraProjectGuard.check({ tool: "getConfluenceContent", arguments: { content_id: "1" }, bound: { cloudId: CLOUD }, scope: { alias: "site", cloudId: CLOUD }, connection: { call } }))
       .resolves.toBeUndefined();
     expect(call).not.toHaveBeenCalled();
+  });
+
+  it("refuses when the structured and text forms of the lookup disagree about the key", async () => {
+    const call = vi.fn(async () => ({ structuredContent: { data: { key: "KAN-1" } }, content: [{ type: "text", text: JSON.stringify({ data: { key: "OPS-1" } }) }] }));
+    await expect(jiraProjectGuard.check({ tool: "getJiraIssue", arguments: { issueIdOrKey: "OPS-1" }, bound: { cloudId: CLOUD }, scope: kan, connection: { call } }))
+      .rejects.toThrow("Could not confirm which project Jira issue OPS-1 is in, so AgentX did not run this call.");
+    call.mockResolvedValueOnce({ structuredContent: { data: { key: "KAN-1" } }, content: [{ type: "text", text: JSON.stringify({ data: { key: "KAN-1" } }) }] });
+    await expect(jiraProjectGuard.check({ tool: "getJiraIssue", arguments: { issueIdOrKey: "KAN-1" }, bound: { cloudId: CLOUD }, scope: kan, connection: { call } })).resolves.toBeUndefined();
   });
 
   it("fails closed when a guard input carries no Jira scope", async () => {
