@@ -10,13 +10,18 @@ import {
   aws_logs as logs,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
+import type { AgentXNaming } from "./naming.js";
 
 export const AGENTX_SLACK_ORCHESTRATOR_REPOSITORY = "agentx-slack-orchestrator";
+
+export interface SlackOrchestratorStackProps extends StackProps {
+  naming?: AgentXNaming;
+}
 
 // The task role and every queue, table, bucket, and secret it uses belong to AgentXControlPlane,
 // which must know the role before this stack exists. This stack only runs the container.
 export class SlackOrchestratorStack extends Stack {
-  constructor(scope: Construct, id: string, props?: StackProps) {
+  constructor(scope: Construct, id: string, props?: SlackOrchestratorStackProps) {
     super(scope, id, props);
 
     const imageUri = new CfnParameter(this, "OrchestratorImageUri", {

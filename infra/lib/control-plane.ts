@@ -21,6 +21,7 @@ import {
   aws_sqs as sqs,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
+import { type AgentXNaming, legacyNaming } from "./naming.js";
 
 const MAX_DISPATCH_ATTEMPTS = 5;
 // Matches MAX_RECEIVE_COUNT in packages/slack-service, which reports the final attempt in the thread.
@@ -36,9 +37,14 @@ export const TURN_DETAILS_READ_ATTRIBUTES = [
   "callsTruncated", "emptyResponse", "usage", "usageError", "recordingErrors", "argumentsOmitted", "error", "expiresAt",
 ];
 
+export interface ControlPlaneStackProps extends StackProps {
+  naming?: AgentXNaming;
+}
+
 export class ControlPlaneStack extends Stack {
-  constructor(scope: Construct, id: string, props?: StackProps) {
+  constructor(scope: Construct, id: string, props?: ControlPlaneStackProps) {
     super(scope, id, props);
+    const naming = props?.naming ?? legacyNaming();
 
     const oidcIssuer = new CfnParameter(this, "OidcIssuer", { type: "String" });
     const oidcAudience = new CfnParameter(this, "OidcAudience", { type: "String" });
@@ -115,7 +121,7 @@ export class ControlPlaneStack extends Stack {
     artifacts.grantReadWrite(broker);
     broker.addToRolePolicy(new iam.PolicyStatement({
       actions: ["bedrock-agentcore:StopRuntimeSession"],
-      resources: [runtimeArn(this)],
+      resources: [runtimeArn(this, naming)],
     }));
     broker.addToRolePolicy(new iam.PolicyStatement({
       actions: ["bedrock-agentcore:DeleteCapacityProviderSession"],
@@ -127,13 +133,13 @@ export class ControlPlaneStack extends Stack {
     }));
     broker.addToRolePolicy(new iam.PolicyStatement({
       actions: ["secretsmanager:GetSecretValue"],
-      resources: [this.formatArn({ service: "secretsmanager", resource: "secret", resourceName: "agentx/connectors/*", arnFormat: ArnFormat.COLON_RESOURCE_NAME })],
+      resources: [this.formatArn({ service: "secretsmanager", resource: "secret", resourceName: `${naming.connectorSecretPrefix}*`, arnFormat: ArnFormat.COLON_RESOURCE_NAME })],
     }));
     // A rotated OAuth refresh token is written back to its own secret. Only secrets that
     // `agentx admin credential authorize` tagged for it are writable, never other connector secrets.
     broker.addToRolePolicy(new iam.PolicyStatement({
       actions: ["secretsmanager:PutSecretValue"],
-      resources: [this.formatArn({ service: "secretsmanager", resource: "secret", resourceName: "agentx/connectors/*", arnFormat: ArnFormat.COLON_RESOURCE_NAME })],
+      resources: [this.formatArn({ service: "secretsmanager", resource: "secret", resourceName: `${naming.connectorSecretPrefix}*`, arnFormat: ArnFormat.COLON_RESOURCE_NAME })],
       conditions: { StringEquals: { "secretsmanager:ResourceTag/agentx-writable": "refresh-token" } },
     }));
     broker.addToRolePolicy(new iam.PolicyStatement({
@@ -176,7 +182,7 @@ export class ControlPlaneStack extends Stack {
     state.grantReadWriteData(dispatcher);
     dispatcher.addToRolePolicy(new iam.PolicyStatement({
       actions: ["bedrock-agentcore:InvokeAgentRuntime"],
-      resources: [runtimeArn(this)],
+      resources: [runtimeArn(this, naming)],
     }));
     new lambda.EventSourceMapping(this, "DispatchQueueMapping", {
       target: dispatcher,
@@ -285,7 +291,7 @@ export class ControlPlaneStack extends Stack {
 
     // No subscription by default: the deployer subscribes an email address or connects AWS Chatbot.
     const operatorAlerts = new sns.Topic(this, "OperatorAlerts", {
-      topicName: "AgentXOperatorAlerts",
+      topicName: naming.alertsTopicName,
       displayName: "AgentX operator alerts",
       enforceSSL: true,
     });
@@ -306,7 +312,7 @@ export class ControlPlaneStack extends Stack {
     const agentxSum = (metricName: string, period: Duration) =>
       new cloudwatch.Metric({ namespace: "AgentX", metricName, statistic: "Sum", period });
     new cloudwatch.Alarm(this, "ConnectorBrokenAlarm", {
-      alarmName: "AgentXConnectorBroken",
+      alarmName: naming.alarmName("ConnectorBroken"),
       alarmDescription: "A connector's discovery failed or a vendor changed an approved tool's schema. Check the broker logs for connector metrics and connector.* events.",
       metric: new cloudwatch.MathExpression({
         expression: "FILL(discovery, 0) + FILL(drift, 0)",
@@ -323,7 +329,7 @@ export class ControlPlaneStack extends Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     }).addAlarmAction(notifyOperator);
     new cloudwatch.Alarm(this, "ConnectorNotConnectedAlarm", {
-      alarmName: "AgentXConnectorNotConnected",
+      alarmName: naming.alarmName("ConnectorNotConnected"),
       alarmDescription: "A connector's vendor credential is missing, revoked or rejected. Check the broker logs for the connector, then reconnect it with agentx connectors.",
       metric: agentxSum("ConnectorNotConnected", Duration.minutes(5)),
       threshold: 1,
@@ -332,7 +338,7 @@ export class ControlPlaneStack extends Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     }).addAlarmAction(notifyOperator);
     new cloudwatch.Alarm(this, "EmptyResponsesAlarm", {
-      alarmName: "AgentXEmptyResponses",
+      alarmName: naming.alarmName("EmptyResponses"),
       alarmDescription: "More than three orchestrator turns in an hour ended without text. Export recent turns with agentx admin turns export.",
       metric: agentxSum("TurnEmptyResponse", Duration.hours(1)),
       threshold: 3,
@@ -341,7 +347,7 @@ export class ControlPlaneStack extends Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     }).addAlarmAction(notifyOperator);
     new cloudwatch.Alarm(this, "RecordingFailuresAlarm", {
-      alarmName: "AgentXRecordingFailures",
+      alarmName: naming.alarmName("RecordingFailures"),
       alarmDescription: "Turn records or turn metrics are being lost: a turn record write failed or the Slack service could not emit turn metrics. Check the Slack orchestrator logs for turn_record.write_failed and turn_metrics.emit_failed. A write that timed out may still have landed, so check the table before assuming the record is lost.",
       metric: new cloudwatch.MathExpression({
         expression: "FILL(write,0) + FILL(emit,0)",
@@ -360,7 +366,7 @@ export class ControlPlaneStack extends Stack {
     // A request that fails its final attempt without reaching the processor's own reporting lands here
     // with no turn record and no other signal.
     new cloudwatch.Alarm(this, "SlackDeadLettersAlarm", {
-      alarmName: "AgentXSlackDeadLetters",
+      alarmName: naming.alarmName("SlackDeadLetters"),
       alarmDescription: "A Slack request exhausted its receives and is in the Slack request dead-letter queue. Check the Slack orchestrator logs for its event ID.",
       metric: slackDeadLetterQueue.metricApproximateNumberOfMessagesVisible({
         statistic: "Maximum",
@@ -433,7 +439,7 @@ export class ControlPlaneStack extends Stack {
     slackIngress.addEnvironment("TURN_RECORDS_TABLE_NAME", turnRecords.tableName);
 
     const api = new apigwv2.CfnApi(this, "HttpApi", {
-      name: "agentx-control-plane",
+      name: naming.apiName,
       protocolType: "HTTP",
     });
     const integration = new apigwv2.CfnIntegration(this, "BrokerIntegration", {
@@ -558,6 +564,8 @@ function packagedFunction(
   });
 }
 
-function runtimeArn(stack: Stack): string {
-  return `arn:${stack.partition}:bedrock-agentcore:${stack.region}:${stack.account}:runtime/*`;
+function runtimeArn(stack: Stack, naming: AgentXNaming): string {
+  // AgentCore appends "-<id>" to the runtime name in the runtime's own ARN.
+  const resourceName = naming.env === undefined ? "*" : `${naming.runtimeName}-*`;
+  return `arn:${stack.partition}:bedrock-agentcore:${stack.region}:${stack.account}:runtime/${resourceName}`;
 }

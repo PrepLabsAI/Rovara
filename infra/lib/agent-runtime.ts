@@ -8,6 +8,7 @@ import {
   aws_iam as iam,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
+import { type AgentXNaming, legacyNaming } from "./naming.js";
 
 export const AGENTX_WORKSPACE_MOUNT = "/mnt/workspace";
 export const AGENTX_WORKSPACE_VOLUME = "workspace";
@@ -33,6 +34,7 @@ export interface AgentRuntimeConfiguration {
 export interface AgentRuntimeStackProps extends StackProps {
   deploymentRegion: string;
   configuration?: Partial<Omit<AgentRuntimeConfiguration, "region">>;
+  naming?: AgentXNaming;
 }
 
 export function validateAgentRuntimeConfiguration(
@@ -60,6 +62,7 @@ export class AgentRuntimeStack extends Stack {
 
   constructor(scope: Construct, id: string, props: AgentRuntimeStackProps) {
     super(scope, id, props);
+    const naming = props.naming ?? legacyNaming();
     const configuration = validateAgentRuntimeConfiguration({
       region: props.deploymentRegion,
       mountPath: props.configuration?.mountPath ?? AGENTX_WORKSPACE_MOUNT,
@@ -166,7 +169,7 @@ export class AgentRuntimeStack extends Stack {
     });
 
     const runtime = new agentcore.CfnRuntime(this, "AgentXRuntime", {
-      agentRuntimeName: "agentx_production_worker",
+      agentRuntimeName: naming.runtimeName,
       description: "AgentX production remote coding worker",
       roleArn: executionRole.roleArn,
       agentRuntimeArtifact: {
