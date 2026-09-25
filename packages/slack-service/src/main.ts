@@ -12,20 +12,14 @@ import {
   SQSClient,
 } from "@aws-sdk/client-sqs";
 import { defaultProvider } from "@aws-sdk/credential-provider-node";
-import {
-  SlackThreadWorkspaceResultSchema,
-  SlackWorkspaceCloseCompleteResultSchema,
-  SlackWorkspaceCloseStartResultSchema,
-  type SlackRequestMessage,
-} from "@agentx/contracts";
+import type { SlackRequestMessage } from "@agentx/contracts";
 import { ControlPlaneApi } from "@agentx/orchestrator/control-plane-api";
-import { pollOperation } from "@agentx/orchestrator/event-client";
 import { runOrchestratorTurn } from "@agentx/orchestrator/orchestrator";
 import { runConsumer, type QueueClient } from "./consumer.js";
 import { processSlackRequest, type ServiceLog, type ThreadServiceApi, type ThreadStore, type TurnInput } from "./processor.js";
 import { createSignedServiceFetch } from "./signing-fetch.js";
 import { createSlackUserNames } from "./user-names.js";
-import { threadWorkspaceRequest } from "./thread-workspace-request.js";
+import { createThreadApi } from "./thread-api.js";
 import { createHostedSlackRuntime } from "./runtime.js";
 import { DynamoTurnRecordWriter } from "./turn-records.js";
 
@@ -96,62 +90,7 @@ async function postToSlack(channel: string, threadTs: string, text: string): Pro
 
 function threadApi(message: SlackRequestMessage): ThreadServiceApi {
   const signedFetch = createSignedServiceFetch({ region, credentials, thread: message.thread, userId: message.userId });
-  const client = (workspaceId: string) => new ControlPlaneApi(controlPlaneUrl, "slack-service", workspaceId, signedFetch);
-  return {
-    async ensureWorkspace(requestId) {
-      const response = await signedFetch(`${controlPlaneUrl}/v1/threads/workspace`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(threadWorkspaceRequest(requestId)),
-      });
-      const body = await response.json() as Record<string, unknown>;
-      if (!response.ok) {
-        const error = body.error as { code?: string; message?: string } | undefined;
-        throw new Error(`thread workspace request failed: ${error?.code ?? response.status} ${error?.message ?? ""}`.trim());
-      }
-      delete body.requestId;
-      return SlackThreadWorkspaceResultSchema.parse(body);
-    },
-    async startClose(requestId) {
-      const response = await signedFetch(`${controlPlaneUrl}/v1/threads/workspace/close`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ requestId }),
-      });
-      const body = await response.json() as Record<string, unknown>;
-      if (!response.ok) {
-        const error = body.error as { code?: string; message?: string } | undefined;
-        throw new Error(`workspace close request failed: ${error?.code ?? response.status} ${error?.message ?? ""}`.trim());
-      }
-      delete body.requestId;
-      return SlackWorkspaceCloseStartResultSchema.parse(body);
-    },
-    async completeClose(requestId, operationId) {
-      const response = await signedFetch(`${controlPlaneUrl}/v1/threads/workspace/close/complete`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ requestId, operationId }),
-      });
-      const body = await response.json() as Record<string, unknown>;
-      if (!response.ok) {
-        const error = body.error as { code?: string; message?: string } | undefined;
-        throw new Error(`workspace close completion failed: ${error?.code ?? response.status} ${error?.message ?? ""}`.trim());
-      }
-      delete body.requestId;
-      return SlackWorkspaceCloseCompleteResultSchema.parse(body);
-    },
-    async waitForOperation(workspaceId, operationId) {
-      const { operation } = await pollOperation(operationId, client(workspaceId), { intervalMilliseconds: 5_000 });
-      return {
-        status: operation.status,
-        ...(operation.error === undefined ? {} : { error: operation.error }),
-        ...(operation.result === undefined ? {} : { result: operation.result }),
-      };
-    },
-    async createConversation(workspaceId) {
-      return (await client(workspaceId).createConversation()).id;
-    },
-  };
+  return createThreadApi({ controlPlaneUrl, signedFetch });
 }
 
 const threads: ThreadStore = {
