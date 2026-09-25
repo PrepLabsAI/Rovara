@@ -295,4 +295,26 @@ describe("turn metrics", () => {
     const parsed = logs.map((line) => JSON.parse(line) as Record<string, unknown>);
     expect(parsed).toContainEqual({ event: "turn_metrics.emit_failed", eventId: "EvTURN00001", errorName: "Error" });
   });
+
+  it("never lets a logging failure inside recordTurn escape processSlackRequest", async () => {
+    // The write fails, and once it does, every subsequent log call also fails (a broken logger
+    // during the same incident): recordTurn must still resolve, so the reply stands and the thread
+    // still finishes, rather than escaping to a redelivery that would post the reply again.
+    let throwFromLog = false;
+    const { dependencies, posts } = harness({
+      write: async () => {
+        throwFromLog = true;
+        throw Object.assign(new Error("slow down"), { name: "ProvisionedThroughputExceededException" });
+      },
+    });
+    const finish = vi.fn(async () => undefined);
+    dependencies.threads = { ...dependencies.threads, finish };
+    dependencies.log = (event, fields) => {
+      if (throwFromLog) throw new Error("logger down");
+      void event; void fields;
+    };
+    await expect(processSlackRequest(message, dependencies, { finalAttempt: false })).resolves.toBeUndefined();
+    expect(posts.filter((text) => text === "No open issues.")).toHaveLength(1);
+    expect(finish).toHaveBeenCalledOnce();
+  });
 });

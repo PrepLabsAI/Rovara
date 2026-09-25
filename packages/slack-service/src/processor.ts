@@ -250,14 +250,29 @@ async function recordTurn(
       log("turn_record.duplicate", { eventId: input.message.eventId });
     }
   } catch (error) {
-    log("turn_record.write_failed", { eventId: input.message.eventId, errorName: errorName(error) });
-    log("metric", { metric: "TurnRecordWriteFailed", count: 1 });
+    // recordTurn must never throw: it runs from processSlackRequest's finally, after the member
+    // already has their reply, so a logging failure here must not skip threads.finish and invite a
+    // redelivery that would post the reply again.
+    try {
+      log("turn_record.write_failed", { eventId: input.message.eventId, errorName: errorName(error) });
+    } catch {
+      // Logging itself failed; nothing left to report to.
+    }
+    try {
+      log("metric", { metric: "TurnRecordWriteFailed", count: 1 });
+    } catch {
+      // Logging itself failed; nothing left to report to.
+    }
   }
   if (record !== undefined && !duplicate) {
     try {
       emitTurnMetrics(record, log);
     } catch (error) {
-      log("turn_metrics.emit_failed", { eventId: input.message.eventId, errorName: errorName(error) });
+      try {
+        log("turn_metrics.emit_failed", { eventId: input.message.eventId, errorName: errorName(error) });
+      } catch {
+        // Logging itself failed; nothing left to report to.
+      }
     }
   }
 }
