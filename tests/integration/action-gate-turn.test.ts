@@ -68,7 +68,9 @@ describe("the action gate in a real Pi turn", () => {
     const { reply, results, callConnectorTool } = await turn({ session, prompt: "close TRK-9",
       script: [toolUse(fauxToolCall("tracker__close_item", { id: "TRK-9" })), fauxAssistantMessage([fauxText("I asked you to confirm closing TRK-9.")])] });
     expect(callConnectorTool).not.toHaveBeenCalled();
-    expect(results).toEqual([{ tool: "tracker__close_item", isError: true, text: expect.stringContaining(`AgentX asked <@${member}> in the Slack thread to confirm tracker__close_item: id=TRK-9.`) as string }]);
+    expect(results).toEqual([{ tool: "tracker__close_item", isError: true, text: expect.stringContaining("AgentX has already posted a confirmation request for this action to the member in the Slack thread") as string }]);
+    expect(results[0]!.text).not.toContain("TRK-9");
+    expect(session.succeeded).toBe(0);
     expect(session.asks).toMatchObject([{ tool: "tracker__close_item", kind: "destructive", summary: "tracker__close_item: id=TRK-9" }]);
     expect(reply).toBe("I asked you to confirm closing TRK-9.");
   });
@@ -90,6 +92,7 @@ describe("the action gate in a real Pi turn", () => {
     expect(results.map((result) => [result.tool, result.isError])).toEqual([["tracker__list_items", false], ["tracker__close_item", true], ["tracker__close_item", true]]);
     expect(session.asks.map((ask) => ask.summary)).toEqual(["tracker__close_item: id=TRK-1", "tracker__close_item: id=TRK-2"]);
     expect(session.decisions.map((decision) => decision.outcome)).toEqual(["allow", "ask", "ask"]);
+    expect(session.succeeded).toBe(1);
   });
 
   it("tells the model what was confirmed, runs exactly that call once, and asks again for a changed or repeated one", async () => {
@@ -189,7 +192,7 @@ describe("the action gate fails closed", () => {
     expect(session.decisions).toMatchObject([{ source: "gate_error", reason: "AgentX could not check this action (sk-live-SECRETNAME)" }]);
     expect(results).toEqual([{ tool: "tracker__list_items", isError: true, text: GATE_FAILURE_REASON }]);
     expect(JSON.stringify(results)).not.toContain("SECRETNAME");
-    expect(blockReason(session.decisions[0]!, session, "x")).toBe(GATE_FAILURE_REASON);
+    expect(blockReason(session.decisions[0]!)).toBe(GATE_FAILURE_REASON);
   });
 
   it("blocks with a fixed reason, and does not throw, when even recording the failure fails", async () => {

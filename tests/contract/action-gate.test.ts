@@ -201,7 +201,21 @@ describe("the action gate's decisions", () => {
     const session = createGateSession(member, { approvals: [{ tool: "tracker__close_item", argumentsHash: argumentsHash("tracker__close_item", { id: "TRK-9" }), summary: "close" }] });
     const decision = await gate({ session, policy }).gate.decide(call("tracker__close_item", { id: "TRK-9" }), { memberMessages: messages });
     expect(decision).toMatchObject({ outcome: "deny", source: "rule", rule: 1, reason: "Closing is frozen for the audit" });
-    expect(blockReason(decision, session, "x")).toBe("Not run: Closing is frozen for the audit. An administrator's rule blocks this action; do not retry it. Tell the member why.");
+    expect(blockReason(decision)).toBe("Not run: Closing is frozen for the audit. An administrator's rule blocks this action; do not retry it. Tell the member why.");
+  });
+
+  it("tells the model the confirmation is already posted, not to restate it, and names no argument values", async () => {
+    const { gate: g } = gate();
+    const decision = await g.decide(call("tracker__close_item", { id: "TRK-9", reason: "duplicate of TRK-4" }), { memberMessages: messages });
+    expect(decision).toMatchObject({ outcome: "ask", kind: "destructive" });
+    const reason = blockReason(decision);
+    expect(reason).toContain("AgentX has already posted a confirmation request for this action to the member in the Slack thread");
+    expect(reason).toContain("Do not restate, summarise or mention this action, its details or the confirmation in your reply");
+    expect(reason).toContain("Report only anything else you did or found in this turn; if there is nothing else, reply with nothing.");
+    expect(reason).toContain("Do not call this tool again or try another way in this turn.");
+    for (const value of ["TRK-9", "duplicate", "TRK-4", "close_item", member, "waiting for their confirmation"]) expect(reason).not.toContain(value);
+    const again = await g.decide(call("tracker__close_item", { id: "TRK-9", reason: "duplicate of TRK-4" }), { memberMessages: messages });
+    expect(blockReason({ ...again, differsFromConfirmation: true })).toContain("Its arguments differ from the call they confirmed, so AgentX asked again.");
   });
 
   it("lets yes to all skip the classifier's asks only, never destructive, administrator, large-write or hint asks", async () => {

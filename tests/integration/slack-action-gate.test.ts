@@ -65,6 +65,8 @@ const closeTurn = async (input: TurnInput) => {
     input.gate!.asks.push({ toolCallId: "c1", tool: close.tool, argumentsHash: argumentsHash(close.tool, close.input), summary: "tracker__close_item: id=TRK-9", kind: "destructive" });
     return "I asked you to confirm closing TRK-9.";
   }
+  // The confirmed call ran and succeeded.
+  input.gate!.succeeded += 1;
   return "Closed TRK-9.";
 };
 
@@ -76,7 +78,9 @@ describe("confirmations through the Slack processor", () => {
     expect(turns[0]!.actionPolicy).toEqual(policy);
     expect(confirmationsPosted).toHaveLength(1);
     expect(confirmationsPosted[0]!.text).toContain("• tracker__close_item: id=TRK-9 (destructive)");
-    expect(posts.at(-1)).toBe("I asked you to confirm closing TRK-9.");
+    // The confirmation is the reply: nothing else ran, so the model's own words are not posted.
+    // (An older ingress sends no queue count, so the start notice is still said.)
+    expect(posts).toEqual(["Working on it now. I'll post the result in this thread when it's done."]);
     const { confirmationId } = confirmationsPosted[0]!.confirmation;
     advance(60_000);
     await processSlackRequest(slackMessage(confirmationClickEventId(confirmationId, "approve"), "yes", { receivedAt: new Date(start + 60_000).toISOString() }), dependencies, { finalAttempt: false });
@@ -181,6 +185,62 @@ describe("confirmations through the Slack processor", () => {
   });
 });
 
+describe("the reply of a turn that posted a confirmation", () => {
+  const save = { tool: "tracker__save_item", input: { id: "TRK-5", title: "Refund" } };
+  const ask = (input: TurnInput) => input.gate!.asks.push({ toolCallId: "c2", tool: save.tool, argumentsHash: argumentsHash(save.tool, save.input), summary: "tracker__save_item: id=TRK-5", kind: "admin" });
+
+  it("posts only the confirmation when the asked call was the turn's only call", async () => {
+    const { posts, confirmationsPosted, dependencies } = harness(async (input) => {
+      ask(input);
+      return "I have asked <@U0123456789> in the Slack thread to confirm saving TRK-5. Please wait for their confirmation.";
+    });
+    await processSlackRequest(slackMessage("EvQUIET00001", "rename TRK-5 to Refund"), dependencies, { finalAttempt: false, queuedBehind: 0 });
+    expect(confirmationsPosted).toHaveLength(1);
+    expect(posts).toEqual([]);
+  });
+
+  it("posts the confirmation and the model's reply when another call in the turn succeeded", async () => {
+    const { posts, confirmationsPosted, dependencies } = harness(async (input) => {
+      input.gate!.succeeded += 1;
+      ask(input);
+      return "TRK-5 is open and assigned to Priya.";
+    });
+    await processSlackRequest(slackMessage("EvQUIET00002", "check TRK-5 and rename it"), dependencies, { finalAttempt: false, queuedBehind: 0 });
+    expect(confirmationsPosted).toHaveLength(1);
+    expect(posts).toEqual(["TRK-5 is open and assigned to Priya."]);
+  });
+
+  it("posts only the confirmation when another call succeeded but the model had nothing else to say", async () => {
+    const { posts, confirmationsPosted, dependencies } = harness(async (input) => {
+      input.gate!.succeeded += 1;
+      ask(input);
+      return "  ";
+    });
+    await processSlackRequest(slackMessage("EvQUIET00003", "rename TRK-5"), dependencies, { finalAttempt: false, queuedBehind: 0 });
+    expect(confirmationsPosted).toHaveLength(1);
+    expect(posts).toEqual([]);
+  });
+
+  it("posts the reply unchanged when nothing asked, even when no call succeeded", async () => {
+    const { posts, confirmationsPosted, dependencies } = harness(async () => "There are no open items.");
+    await processSlackRequest(slackMessage("EvQUIET00004", "any open items?"), dependencies, { finalAttempt: false, queuedBehind: 0 });
+    expect(confirmationsPosted).toEqual([]);
+    expect(posts).toEqual(["There are no open items."]);
+  });
+
+  it("keeps the start notice and posts the failure when the turn failed after asking", async () => {
+    const { posts, confirmationsPosted, dependencies } = harness(async (input) => {
+      ask(input);
+      throw new Error("model unavailable");
+    });
+    await processSlackRequest(slackMessage("EvQUIET00005", "rename TRK-5"), dependencies, { finalAttempt: false, queuedBehind: 2 });
+    expect(confirmationsPosted).toHaveLength(1);
+    expect(posts[0]).toBe("Working on it now. I'll post the result in this thread when it's done.");
+    expect(posts).toHaveLength(2);
+    expect(posts[1]).toContain("AgentX could not complete the request");
+  });
+});
+
 describe("the compute signal the processor gives the gate (I1/D5)", () => {
   it("says compute is prepared for a READY workspace, and passes a lazy worker without that signal for an UNPREPARED one", async () => {
     let state: "READY" | "UNPREPARED" = "READY";
@@ -228,6 +288,7 @@ describe("a redelivered request that asked for a confirmation", () => {
       const { posts, turns, dependencies, advance, confirmationsPosted, confirmations, logs } = harness(async (input) => {
         if (input.gate!.approvals.length === 0) return closeTurn(input);
         connectorCall();
+        input.gate!.succeeded += 1;
         // The confirmed call ran, and the model made another call that asks: settle posts a new confirmation.
         input.gate!.asks.push({ toolCallId: "c2", tool: reopen.tool, argumentsHash: argumentsHash(reopen.tool, reopen.input), summary: "tracker__reopen_item: id=TRK-9", kind: "destructive" });
         return "Closed TRK-9.";

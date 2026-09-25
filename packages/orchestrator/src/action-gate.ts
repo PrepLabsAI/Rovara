@@ -45,6 +45,8 @@ export interface GateSession {
   yesToAll: boolean;
   asks: PendingAsk[];
   decisions: GateDecision[];
+  /** Tool calls this turn that ran and returned without an error; the Slack service stays quiet after a confirmation when none did. */
+  succeeded: number;
 }
 
 export interface ActionGateOptions {
@@ -75,7 +77,7 @@ const PREPARED_COMPUTE = { prepared: () => true };
 export const MAX_CLASSIFIER_CALLS_PER_TURN = 8;
 
 export function createGateSession(requesterId: string, options: { approvals?: readonly GateApproval[]; yesToAll?: boolean } = {}): GateSession {
-  return { requesterId, approvals: [...(options.approvals ?? [])], yesToAll: options.yesToAll ?? false, asks: [], decisions: [] };
+  return { requesterId, approvals: [...(options.approvals ?? [])], yesToAll: options.yesToAll ?? false, asks: [], decisions: [], succeeded: 0 };
 }
 
 // The hash assumes JSON-shaped tool input (what a model's tool call carries): a cycle or a BigInt
@@ -148,15 +150,21 @@ export function describeCall(tool: string, args: Record<string, unknown>): strin
 /** Told to the model when the gate itself could not decide or record a call: fixed words, no error text. */
 export const GATE_FAILURE_REASON = "Not run: AgentX could not check this action. Do not retry it in this turn. Tell the member AgentX could not check it.";
 
-/** What the model is told when a call is not run. A gate failure's recorded reason (with the error's name) stays out of it. */
-export function blockReason(decision: GateDecision, session: GateSession, summary: string): string {
+/**
+ * What the model is told when a call is not run. A gate failure's recorded reason (with the error's
+ * name) stays out of it, and an ask names no tool or argument value: AgentX has already posted the
+ * confirmation to the member, so the model must not restate it (the member would read it twice).
+ */
+export function blockReason(decision: GateDecision): string {
   if (decision.source === "gate_error") return GATE_FAILURE_REASON;
   if (decision.outcome === "deny") {
     return `Not run: ${decision.reason}. An administrator's rule blocks this action; do not retry it. Tell the member why.`;
   }
   const again = decision.differsFromConfirmation ? " Its arguments differ from the call they confirmed, so AgentX asked again." : "";
-  return `Not run yet: AgentX asked <@${session.requesterId}> in the Slack thread to confirm ${summary}.${again} ` +
-    "Do not call this tool again or try another way in this turn. Tell the member you are waiting for their confirmation.";
+  return "Not run yet: AgentX has already posted a confirmation request for this action to the member in the Slack thread, with Approve and Cancel buttons." +
+    `${again} Do not call this tool again or try another way in this turn. ` +
+    "Do not restate, summarise or mention this action, its details or the confirmation in your reply: the member already sees the request. " +
+    "Report only anything else you did or found in this turn; if there is nothing else, reply with nothing.";
 }
 
 /** A failure path must not throw: arguments that are not JSON-shaped get a fixed hash. */
@@ -345,6 +353,10 @@ export function actionGateExtension(options: ActionGateOptions): InlineExtension
         const content = confirmationNote(options.session);
         return content === undefined ? undefined : { message: { customType: GATE_MESSAGE_TYPE, content, display: false } };
       });
+      // A blocked call ends as an error, so only calls that ran and returned cleanly count.
+      pi.on("tool_execution_end", (event) => {
+        if (!event.isError) options.session.succeeded += 1;
+      });
       pi.on("tool_call", async (event, ctx) => {
         try {
           const call = { toolCallId: event.toolCallId, toolName: event.toolName, input: event.input as Record<string, unknown> };
@@ -356,7 +368,7 @@ export function actionGateExtension(options: ActionGateOptions): InlineExtension
           }
           if (decision.outcome === "allow") return undefined;
           if (decision.outcome === "ask" || decision.outcome === "deny") {
-            return { block: true, reason: blockReason(decision, options.session, describeCall(call.toolName, call.input)) };
+            return { block: true, reason: blockReason(decision) };
           }
           return { block: true, reason: GATE_FAILURE_REASON };
         } catch {
