@@ -44,8 +44,12 @@ executes nothing. For each case it records the first tool call, or none. Scores:
   straight ones.
 
 Each case runs `--repeat` times; a case passes when every run passes. Results are written to
-`tests/eval/results/<model>.json` and compared with `tests/eval/baseline/<model>.json`; the command
-exits non-zero on a regression of more than one case.
+`tests/eval/results/<model>.json` and compared with `tests/eval/baseline/<model>.json`, or
+`<model>.legacy.json` under `--presentation legacy`; any character in `<model>` other than a
+letter, digit, `.`, `_` or `-` is replaced with `_`. The command exits non-zero on a regression of
+more than one case. `tests/contract/eval-harness.test.ts` runs the harness offline against Pi's
+faux provider in CI, on every push; a live run against a real model is always on demand, never run
+by CI.
 A live run also exits non-zero when any case errors. A run that reaches its timeout and then stops is
 model behaviour: it fails its case and is counted in `summary.timeouts`, but it is not an error and
 does not block a baseline. A run that does not stop within the grace period is an error. `--update-baseline` refuses to write a
@@ -76,8 +80,11 @@ as [docs/connectors/jira.md](../../../docs/connectors/jira.md) sets up), once
 
 ## Before-and-after measurement
 
-The pre-change presentation is kept as a fixture mode (`--presentation legacy`) until SC-004 is
-recorded in `quickstart.md`, then removed.
+The pre-change presentation is kept as a fixture mode (`--presentation legacy`) until SC-004 is met.
+SC-004 was measured live on 2026-09-25 and recorded in `quickstart.md` as **not met** (refusal
+accuracy missed the 90% bar by one case). The legacy presentation, `--presentation legacy` and its
+baseline stay in the repository until a later live run records SC-004 as met; only then is the
+legacy presentation removed.
 
 The legacy presentation offers only GitHub, as before feature 013, and cannot receive an unfinished
 operation's ID. A case that expects a tool of any other connector type, or whose fixture needs

@@ -117,3 +117,16 @@ try again". Re-registering an existing `ref` replaces its record and deletes its
 entry first. A stored record that fails to parse is left out (logged as
 `connector.credential_record_invalid`) rather than failing the list. See
 [data-model.md](../data-model.md) for the list entry's fields.
+
+`GET /v1/admin/turns?since=<ISO>&cursor=<c>` response: `{ turns: [TurnRecord], cursor?, requestId
+}`, newest first, at most 100 per page. `since` is an ISO 8601 time; the CLI turns a duration such
+as `7d` into one before sending it. `cursor` is opaque: pass back exactly what the previous page
+returned, and treat any other value as invalid. A malformed `since`, or a `cursor` that is not
+well-formed, outside the requested `since` window, or otherwise forged, refuses `CONFIG_INVALID`
+before any read. A deployment with no turn-record table configured, or a page read that fails,
+refuses `RUNTIME_UNAVAILABLE`. Every returned record has had its storage keys removed and gains
+`project`, looked up once per distinct workspace on the page from the workspace record (never
+stored in the table); a failed lookup leaves `project` off that record rather than failing the
+page. A page can come back short, or even empty, and still carry a `cursor`, because expired
+records are filtered out after DynamoDB applies its page limit: keep following `cursor` until it is
+absent, not until a page has turns in it.
