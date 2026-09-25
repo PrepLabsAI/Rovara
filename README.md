@@ -309,8 +309,11 @@ create a pull request.
 ```
 
 AgentX replies within a few seconds. If earlier requests in the thread are still running, it says
-how many are ahead. The first request in a new thread also prepares the workspace, which takes a
-few minutes. Messages without a mention, edits, bot messages, AgentX's own messages, direct
+how many are ahead. A new thread gets a coding workspace only when a request first needs the
+remote worker, for example to read or change repository files or to run commands. Questions that
+connectors answer, such as issue tracker questions, need no workspace. The first request that needs
+the worker prepares the workspace in the same turn, which takes a few minutes, and AgentX says so in
+the thread. Messages without a mention, edits, bot messages, AgentX's own messages, direct
 messages, and users from other Slack organizations are ignored.
 
 A person can also mention AgentX through another tool that posts with their own Slack user token,
@@ -334,17 +337,22 @@ Text such as `<!channel>` in a reply is shown as text and never notifies anyone.
 Pull requests created from a thread end with a link to the thread and the Slack members who made
 requests in it. Every operation records the Slack member who requested it.
 
-Workspaces are limited to protect cost. The member who starts a thread may be the starter of at
-most 3 thread workspaces, and the organization may have at most 20. A new thread over either limit
-creates nothing, and AgentX replies with the limit that was reached; for the member limit, it also
-links to that member's existing threads. An administrator can change the limits with the `AgentXControlPlane`
-parameters `SlackMemberWorkspaceLimit` and `SlackOrganizationWorkspaceLimit`.
+Workspaces are limited to protect cost. Only threads whose workspace has been prepared count. The
+member whose request first prepares a thread's workspace is charged for it. Each member may hold
+at most 3 prepared thread workspaces, and the organization at most 20. When a request needs a
+workspace over either limit, AgentX prepares nothing and says which limit was reached; for the
+member limit, it also links that member's existing threads. It still answers any part of the
+request that connectors can answer. An administrator can change the limits with the
+`AgentXControlPlane` parameters `SlackMemberWorkspaceLimit` and `SlackOrganizationWorkspaceLimit`.
 
 To release a thread workspace, mention AgentX in that thread with an explicit close request:
 
 ```text
 @AgentX close this workspace
 ```
+
+A thread that never needed the worker has no workspace. A close request there says so and changes
+nothing.
 
 AgentX first fences new work and checks every prepared repository. Uncommitted changes, untracked
 files, an unpushed current commit, or commits on a local-only branch block closure; AgentX lists the
@@ -355,8 +363,9 @@ cancellation also blocks closure until it finishes.
 For a clean production workspace, AgentX deletes its AgentCore capacity-provider session, which
 releases the persistent EBS volume, and then confirms completion in the same Slack thread. It
 retains the workspace and operation records as a closed tombstone for audit and retry safety, but
-removes the hosted orchestrator conversation session and releases the organization and original
-starter's workspace quota. Later mentions in the closed thread do not create another workspace;
+removes the hosted orchestrator conversation session and releases the organization's quota and
+that of the member who prepared the workspace. Later mentions in the closed thread do not create
+another workspace;
 start a new Slack thread for fresh work.
 
 #### What a thread remembers
