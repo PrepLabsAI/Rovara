@@ -170,13 +170,13 @@ Use your own project key in the `description` override, in place of `PAY` above.
 `projectKey` longer than 10 characters. That fails closed: if your key is longer, shorten it or
 split the project, because registration is refused rather than left to run unchecked.
 
-This list is also the recommended set. AgentX does not recommend approving a Jira read that can
-return an issue's linked issues, epic or subtasks in the same response as the issue itself. Such a
-read can return issues from other projects, and the guard only checks the issue you asked for, not
-every issue that comes back with it. `getJiraIssue` (one issue, by key) and
-`searchJiraIssuesUsingJql` (many issues, project-filtered) stay inside the project because AgentX
-checks or rewrites the request itself; a read that expands relations is checked on the way in, not
-on the way out, so it is left off this list.
+This list is also the recommended set. The guard checks requests, not responses. `getJiraIssue`
+is checked because AgentX looks up the issue's project before the read runs. But its reply can
+still include the key, summary and status of linked issues, the parent, the epic or subtasks. If
+the service account can see an issue in another project, that issue's summary can appear in the
+reply. Step 4 is what stops this: a service account that sees only your project gets only your
+project's issues back. `searchJiraIssuesUsingJql` only returns issues in your project, because
+AgentX rewrites the query.
 
 ## Step 11: Register the project and read the preflight
 
@@ -214,9 +214,10 @@ The guard's checks are narrow on purpose. In plain words:
 - It checks every issue a write refers to, not only the one named first. For example, creating a
   sub-task with a `parent` checks the parent issue too, and a comment or edit checks the issue it
   targets.
-- Lowercase keys are normalised to uppercase only inside link-shaped fields, such as `parent`,
-  `epic` or `Linked Issues`. Outside those fields, only an exact uppercase key (for example `PAY-7`,
-  not `pay-7`) is recognised and checked as an issue reference.
+- Lowercase keys are normalised to uppercase only inside link-shaped fields, such as `epic` or
+  `Linked Issues`. A `parent` needs an exact uppercase key or a numeric ID; a lowercase `parent`
+  key is refused, not normalised. Outside those fields, only an exact uppercase key (for example
+  `PAY-7`, not `pay-7`) is recognised and checked as an issue reference.
 - Update-verb syntax for a parent or a link, such as `{"parent": [{"set": {"key": "PAY-1"}}]}`, is
   refused outright, not rewritten or checked. Use the plain field form instead (for example
   `{"parent": {"key": "PAY-1"}}`).

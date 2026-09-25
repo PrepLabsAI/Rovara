@@ -54,7 +54,7 @@ requests; each pull-request action; each connector's read and write; a not-conne
 ```
 
 These cases run against a fixture project (GitHub plus a Jira connector scoped to project `PAY`,
-as Step 1 of [docs/connectors/jira.md](../../../docs/connectors/jira.md) sets up), once
+as [docs/connectors/jira.md](../../../docs/connectors/jira.md) sets up), once
 `tests/eval/cases/` exists and the fixture is added at `tests/eval/fixtures/payments-jira.yaml`.
 
 ## Before-and-after measurement
