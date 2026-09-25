@@ -10,6 +10,8 @@ import {
   DETAILS_ACTION,
   TURN_DETAILS_ATTRIBUTES,
   TurnRecordSchema,
+  queuedBehindAttributes,
+  queuedBehindOf,
   turnRecordKeys,
   type TurnRecord,
 } from "../../packages/contracts/src/index.js";
@@ -342,6 +344,19 @@ describe("the Details view (spec 014 FR-024, FR-025)", () => {
     expect(foreign.logs.at(-1)).toMatchObject({ event: "interaction.details_refused", fields: { reason: "mismatch" } });
   });
 
+  it("tells a member of another workspace who finds no record that there are no details, not that saving failed", async () => {
+    // A Grid sibling's click: the enterprise lets it through, but the user's team is not the thread's
+    // team, so a miss says nothing about the host's record writes. Early or late, the answer is the same.
+    for (const now of [repliedAt + 10_000, repliedAt + 3_600_000]) {
+      const { click, views, commands, logs } = harness({ items: [], now });
+      await click(payload({ user: other, userTeam: "T0SIBLING01", enterprise: "E0GRID00001", userEnterprise: "E0GRID00001" }));
+      expect(commands).toHaveLength(1);
+      expect(shown(views[0]!.view)).toContain(DETAILS_NOT_FOUND);
+      expect(shown(views[0]!.view)).not.toContain("turn_record.write_failed");
+      expect(logs.at(-1)).toMatchObject({ event: "interaction.details_refused", fields: { reason: "not_found_foreign_team" } });
+    }
+  });
+
   it("is registered on the ingress Lambda's interactivity endpoint with the turn record table and views.open", () => {
     const source = readFileSync("packages/broker/src/aws/slack-interactivity.ts", "utf8");
     expect(source).toContain("detailsActionHandler({");
@@ -409,7 +424,7 @@ describe("the Details handler on the ingress Lambda's AWS wiring", () => {
     vi.unstubAllGlobals();
   });
 
-  function wire(tableName: string | undefined, readDelayMs = 0) {
+  function wire(tableName: string | undefined, readDelayMs = 0, pendingRequests = 1) {
     process.env.SLACK_THREADS_TABLE_NAME = "threads";
     process.env.SLACK_REQUEST_QUEUE_URL = "https://sqs.us-east-1.amazonaws.com/123456789012/requests.fifo";
     process.env.SLACK_SECRET_ARN = "arn:aws:secretsmanager:us-east-1:123456789012:secret:slack";
@@ -433,7 +448,7 @@ describe("the Details handler on the ingress Lambda's AWS wiring", () => {
       const key = command.input.Key as { sk?: string } | undefined;
       if (key?.sk?.startsWith("TURN#") && readDelayMs > 0) vi.setSystemTime(Date.now() + readDelayMs);
       if (key?.sk === "CONFIRMATION") return { Item: { confirmation } };
-      if (command.input.UpdateExpression !== undefined) return { Attributes: { pendingRequests: 1 } };
+      if (command.input.UpdateExpression !== undefined) return { Attributes: { pendingRequests } };
       return {};
     }) as never);
     // Which timeout each signal was made with, so a Slack call's deadline can be read off its signal.
@@ -467,6 +482,20 @@ describe("the Details handler on the ingress Lambda's AWS wiring", () => {
     expect(JSON.stringify(opened[0]!.body)).toContain(DETAILS_UNAVAILABLE);
     expect(lines).toContainEqual({ component: "slack-interactivity", event: "interaction.details_read_failed", errorName: "DetailsNotConfigured" });
     expect(lines.filter((line) => line.event === "interaction.details_not_configured")).toHaveLength(1);
+  });
+
+  it("queues Approve and Cancel with the queuedBehind attribute the message ingress sends, so a click with nothing ahead gets no extra notice", async () => {
+    for (const [pendingRequests, behind] of [[1, "0"], [3, "2"]] as const) {
+      for (const action of ["agentx_confirm_approve", "agentx_confirm_cancel"]) {
+        const { handler, queued, confirmationId } = wire("turn-records", 0, pendingRequests);
+        const click = { ...payload(), actions: [{ action_id: action, value: confirmationId, block_id: "agentx_confirmation" }] };
+        expect((await handler(signed(click, Date.now()))).statusCode).toBe(200);
+        expect(queued).toHaveLength(1);
+        expect(queued[0]).toMatchObject({ MessageAttributes: queuedBehindAttributes(Number(behind)) });
+        expect(queuedBehindOf((queued[0] as { MessageAttributes: Record<string, { StringValue?: string }> }).MessageAttributes)).toBe(Number(behind));
+        vi.restoreAllMocks();
+      }
+    }
   });
 
   it("reads the turn record table named by TURN_RECORDS_TABLE_NAME when it is set", async () => {

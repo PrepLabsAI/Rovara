@@ -213,7 +213,11 @@ describe("Details view access to turn records (spec 014 FR-024)", () => {
     expect(statements).toHaveLength(1);
     expect([statements[0]!.Action].flat()).toEqual(["dynamodb:GetItem"]);
     expect(JSON.stringify(statements[0]!.Resource)).not.toContain("index");
-    expect(statements[0]).toMatchObject({
+    // The whole statement, exactly: no extra action, resource or condition operator can slip in.
+    expect(statements[0]).toEqual({
+      Effect: "Allow",
+      Action: "dynamodb:GetItem",
+      Resource: { "Fn::GetAtt": [expect.stringMatching(/^TurnRecords/) as string, "Arn"] },
       Condition: {
         "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["THREAD#*"] },
         "ForAllValues:StringEquals": { "dynamodb:Attributes": TURN_DETAILS_READ_ATTRIBUTES },

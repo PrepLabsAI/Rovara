@@ -15,6 +15,7 @@ import {
   confirmationClickEventId,
   confirmationKey,
   pendingConfirmationFromItem,
+  queuedBehindAttributes,
   slackThreadSubject,
   type PendingConfirmation,
   type SlackRequestMessage,
@@ -212,7 +213,8 @@ export interface ConfirmationClickDependencies {
   claimEvent: (eventId: string, expiresAtSeconds: number) => Promise<boolean>;
   releaseEvent: (eventId: string) => Promise<void>;
   changePending: (threadSubject: string, delta: 1 | -1) => Promise<number>;
-  enqueue: (message: SlackRequestMessage, messageGroupId: string) => Promise<void>;
+  /** `queuedBehind` is how many earlier requests in the thread the click waits behind, as the message ingress sends it (spec 014 FR-026). */
+  enqueue: (message: SlackRequestMessage, messageGroupId: string, queuedBehind: number) => Promise<void>;
   updateMessage: (input: { channel: string; ts: string; text: string; blocks: unknown[] }) => Promise<void>;
   respondEphemeral: (responseUrl: string, text: string) => Promise<void>;
   now?: () => number;
@@ -272,9 +274,11 @@ export function confirmationActionHandler(dependencies: ConfirmationClickDepende
       // again rather than hit a silent duplicate, and the member is always told.
       let raised = false;
       try {
-        await dependencies.changePending(subject, 1);
+        const pending = await dependencies.changePending(subject, 1);
         raised = true;
-        await dependencies.enqueue(message, createHash("sha256").update(subject).digest("hex"));
+        // Counted exactly as the message ingress counts a mention: with nothing ahead, the Slack
+        // service says nothing more, since the button already says "Running it now".
+        await dependencies.enqueue(message, createHash("sha256").update(subject).digest("hex"), Math.max(pending - 1, 0));
       } catch (error) {
         log("interaction.enqueue_failed", { eventId, errorName: errorName(error) });
         if (raised) {
@@ -388,8 +392,11 @@ export function createAwsSlackInteractivityHandler() {
         }));
         return Number(response.Attributes?.pendingRequests ?? 0);
       },
-      async enqueue(message, messageGroupId) {
-        await sqs.send(new SendMessageCommand({ QueueUrl: queueUrl, MessageBody: JSON.stringify(message), MessageGroupId: messageGroupId, MessageDeduplicationId: message.eventId }));
+      async enqueue(message, messageGroupId, queuedBehind) {
+        await sqs.send(new SendMessageCommand({
+          QueueUrl: queueUrl, MessageBody: JSON.stringify(message), MessageGroupId: messageGroupId, MessageDeduplicationId: message.eventId,
+          MessageAttributes: queuedBehindAttributes(queuedBehind),
+        }));
       },
       async updateMessage(input) {
         await slackApi((await secrets()).botToken, "chat.update", input);

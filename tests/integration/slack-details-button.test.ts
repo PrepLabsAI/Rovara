@@ -1,6 +1,8 @@
 // tests/integration/slack-details-button.test.ts
 import { describe, expect, it, vi } from "vitest";
 import { DETAILS_ACTION, splitSlackMessage, type SlackRequestMessage, type SlackThreadWorkspaceResult } from "../../packages/contracts/src/index.js";
+import { argumentsHash } from "../../packages/orchestrator/src/action-gate.js";
+import { createDynamoConfirmationStore } from "../../packages/slack-service/src/confirmation-store.js";
 import { processSlackRequest, type ProcessorDependencies, type TurnInput } from "../../packages/slack-service/src/processor.js";
 import { slackReplyText } from "../../packages/slack-service/src/slack-format.js";
 import { DynamoTurnRecordWriter } from "../../packages/slack-service/src/turn-records.js";
@@ -39,10 +41,12 @@ function turnWithoutCalls(response: string) {
   };
 }
 
-function harness(runTurn: (input: TurnInput) => Promise<string>, options: { records?: boolean; postWithBlocks?: ProcessorDependencies["postWithBlocks"] } = {}) {
+function harness(runTurn: (input: TurnInput) => Promise<string>, options: { records?: boolean; postWithBlocks?: ProcessorDependencies["postWithBlocks"]; confirmations?: boolean } = {}) {
   const db = new FakeDynamoDb();
   const posts: Posted[] = [];
   const logs: string[] = [];
+  const confirmationsPosted: string[] = [];
+  const now = Date.parse(message.receivedAt);
   const dependencies: ProcessorDependencies = {
     api: () => ({
       ensureWorkspace: async () => workspace,
@@ -59,9 +63,15 @@ function harness(runTurn: (input: TurnInput) => Promise<string>, options: { reco
     postWithBlocks: options.postWithBlocks ?? (async (_thread, text, blocks) => { posts.push({ text, blocks }); }),
     log: (event, fields) => { logs.push(JSON.stringify({ event, ...fields })); },
     ...(options.records === false ? {} : { turnRecords: new DynamoTurnRecordWriter(db as never, "turns") }),
+    // The hosted service's action gate (spec 014, PR #64): a real confirmation store over the fake table.
+    ...(options.confirmations === true ? {
+      confirmations: createDynamoConfirmationStore(db as never, "threads", () => now),
+      postConfirmation: async (_thread, _confirmation, text) => { confirmationsPosted.push(text); },
+      now: () => now,
+    } : {}),
   };
   const stored = () => db.find((item) => String(item.sk).startsWith("TURN#"));
-  return { dependencies, posts, logs, stored };
+  return { dependencies, posts, logs, stored, confirmationsPosted };
 }
 
 function button(post: Posted | undefined) {
@@ -109,7 +119,7 @@ describe("the Details button on replies (spec 014 FR-024)", () => {
     });
     await processSlackRequest(message, dependencies, { finalAttempt: false });
     expect(posts.at(-1)).toEqual({ text: "Nothing is open." });
-    expect(logs).toContain(JSON.stringify({ event: "reply.details_failed", eventId: "EvDETAILS001", errorName: "Error" }));
+    expect(logs).toContain(JSON.stringify({ event: "reply.details_failed", eventId: "EvDETAILS001", errorName: "Error", slackError: "invalid_blocks" }));
     expect(stored()[0]).toMatchObject({ responseText: "Nothing is open." });
     expect(logs.join("\n")).not.toContain("Nothing is open.");
   });
@@ -119,5 +129,91 @@ describe("the Details button on replies (spec 014 FR-024)", () => {
     await processSlackRequest(message, dependencies, { finalAttempt: false });
     expect(posts.at(-1)?.text).toBe("AgentX could not complete the request: model down");
     expect(button(posts.at(-1))?.value).toBe(value);
+  });
+
+  it("falls back to text for any Slack refusal, and logs its code, such as ratelimited", async () => {
+    const { dependencies, posts, logs } = harness(turnWithCall("Nothing is open."), {
+      postWithBlocks: async () => { throw new Error("Slack chat.postMessage failed: ratelimited"); },
+    });
+    await processSlackRequest(message, dependencies, { finalAttempt: false });
+    expect(posts.at(-1)).toEqual({ text: "Nothing is open." });
+    expect(logs).toContain(JSON.stringify({ event: "reply.details_failed", eventId: "EvDETAILS001", errorName: "Error", slackError: "ratelimited" }));
+  });
+
+  it("does not post the reply again as text after a network failure or unreadable answer, when Slack may already have posted it", async () => {
+    for (const failure of [
+      new TypeError("fetch failed"),
+      new SyntaxError("Unexpected token < in JSON at position 0"),
+      new Error("Slack chat.postMessage failed: HTTP 502"),
+      Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" }),
+    ]) {
+      const { dependencies, posts, logs, stored } = harness(turnWithCall("Nothing is open."), {
+        postWithBlocks: async () => { throw failure; },
+      });
+      // Thrown like any failed post, so SQS redelivers the request (every request ID derives from the event).
+      await expect(processSlackRequest(message, dependencies, { finalAttempt: false })).rejects.toBe(failure);
+      expect(posts.some((post) => post.text === "Nothing is open."), failure.message).toBe(false);
+      expect(logs).toContain(JSON.stringify({ event: "reply.details_failed", eventId: "EvDETAILS001", errorName: failure.name }));
+      expect(stored()).toEqual([]);
+    }
+  });
+
+  it("on the final attempt, treats such a failure as any failed post: the request is abandoned, and the reply is not posted twice", async () => {
+    const { dependencies, posts } = harness(turnWithCall("Nothing is open."), {
+      postWithBlocks: async () => { throw new TypeError("fetch failed"); },
+    });
+    await processSlackRequest(message, dependencies, { finalAttempt: true, queuedBehind: 0 });
+    expect(posts.map((post) => post.text)).toEqual(["AgentX could not process this request: fetch failed"]);
+  });
+});
+
+describe("the Details button on turns through the action gate (spec 014 FR-024 with PR #64's quiet reply)", () => {
+  const save = { tool: "tracker__save_item", input: { id: "TRK-5", title: "Refund" } };
+  const ask = (input: TurnInput) => input.gate!.asks.push({ toolCallId: "c2", tool: save.tool, argumentsHash: argumentsHash(save.tool, save.input), summary: "tracker__save_item: id=TRK-5", kind: "admin" });
+
+  it("posts no reply and so no button when the confirmation stands as the whole reply", async () => {
+    const { dependencies, posts, confirmationsPosted, stored } = harness(async (input) => {
+      await turnWithCall("unused")(input);
+      ask(input);
+      return "I have asked you to confirm saving TRK-5.";
+    }, { confirmations: true });
+    await processSlackRequest(message, dependencies, { finalAttempt: false, queuedBehind: 0 });
+    expect(confirmationsPosted).toHaveLength(1);
+    expect(posts).toEqual([]);
+    // The record is still written; there is just no reply to hang a button on.
+    expect(stored()).toHaveLength(1);
+  });
+
+  it("puts the button on the reply when a call ran and a confirmation was posted too", async () => {
+    const { dependencies, posts, confirmationsPosted } = harness(async (input) => {
+      await turnWithCall("unused")(input);
+      input.gate!.ran += 1;
+      ask(input);
+      return "TRK-5 is open and assigned to Priya.";
+    }, { confirmations: true });
+    await processSlackRequest(message, dependencies, { finalAttempt: false, queuedBehind: 0 });
+    expect(confirmationsPosted).toHaveLength(1);
+    expect(posts).toHaveLength(1);
+    expect(posts[0]!.text).toBe("TRK-5 is open and assigned to Priya.");
+    expect(button(posts[0])).toMatchObject({ action_id: DETAILS_ACTION, value });
+  });
+
+  it("puts the button on a normal reply that followed tool calls, with the gate in place", async () => {
+    const { dependencies, posts, confirmationsPosted } = harness(async (input) => {
+      const reply = await turnWithCall("Nothing is open.")(input);
+      input.gate!.ran += 1;
+      return reply;
+    }, { confirmations: true });
+    await processSlackRequest(message, dependencies, { finalAttempt: false, queuedBehind: 0 });
+    expect(confirmationsPosted).toEqual([]);
+    expect(posts).toHaveLength(1);
+    expect(button(posts[0])).toMatchObject({ action_id: DETAILS_ACTION, value });
+  });
+
+  it("adds no button to a reply without tool calls, with the gate in place", async () => {
+    const { dependencies, posts, confirmationsPosted } = harness(turnWithoutCalls("Hello."), { confirmations: true });
+    await processSlackRequest(message, dependencies, { finalAttempt: false, queuedBehind: 0 });
+    expect(confirmationsPosted).toEqual([]);
+    expect(posts).toEqual([{ text: "Hello." }]);
   });
 });

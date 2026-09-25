@@ -136,13 +136,18 @@ export async function processSlackRequest(
     lastPosted = text;
   };
   // Spec 014 FR-024: the last chunk of a reply that followed tool calls carries a Details button. A
-  // Slack refusal of the blocks never costs the member the reply: the text is posted on its own.
+  // Slack refusal of the blocks (an API error answer such as invalid_blocks, so nothing was posted)
+  // never costs the member the reply: the text is posted on its own. Any other failure (a network
+  // error, a timeout, an unreadable answer) may come after Slack posted the message, so it is thrown
+  // like any failed post rather than risking the reply twice.
   const postWithDetails = async (details: ReplyDetails, text: string) => {
     try {
       await details.postWithBlocks(message.thread, text, detailsReplyBlocks(text, details.value));
       lastPosted = text;
     } catch (error) {
-      log("reply.details_failed", { eventId: message.eventId, errorName: errorName(error) });
+      const refusal = slackRefusal(error);
+      log("reply.details_failed", { eventId: message.eventId, errorName: errorName(error), ...(refusal === undefined ? {} : { slackError: refusal }) });
+      if (refusal === undefined) throw error;
       await post(text);
     }
   };
@@ -531,6 +536,16 @@ function shortList(summaries: readonly string[]): string {
 function safeMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : "unknown error";
   return message.length > 500 ? `${message.slice(0, 500)}…` : message;
+}
+
+/**
+ * Slack's error code when chat.postMessage answered with a refusal ("Slack chat.postMessage failed:
+ * invalid_blocks"), so the message was not posted; undefined for anything else, including an HTTP
+ * status with no error code. Codes are lowercase identifiers and carry no user text.
+ */
+function slackRefusal(error: unknown): string | undefined {
+  const match = error instanceof Error ? /^Slack chat\.postMessage failed: ([a-z_]{1,64})$/.exec(error.message) : null;
+  return match?.[1];
 }
 
 function errorName(error: unknown): string {

@@ -318,7 +318,9 @@ AgentX replies within a few seconds. If earlier requests in the thread are still
 how many are ahead, and says "Working on it now" when it starts on the request. A request with
 nothing ahead gets no separate "Working on it now" notice, unless it waits for workspace setup. A
 message that is only an answer to a confirmation (`yes`, `yes to all`, `cancel` and their plain
-synonyms) gets no "Got it" either, unless requests are queued ahead of it. A
+synonyms) gets no "Got it" either, unless requests are queued ahead of it. An Approve or Cancel
+button press is counted the same way, so with nothing ahead the button's own "Running it now" is
+the only notice. A
 new thread gets a coding workspace only when a request first needs the remote worker, for example to
 read or change repository files or to run commands. Questions that connectors answer, such as issue
 tracker questions, need no workspace. The first request that needs the worker prepares the workspace
@@ -848,8 +850,11 @@ Spec 014 phase 14d adds the **Details** button. Operator notes:
 
 - Only the last part of a reply gets the button, and only when that turn made at least one tool
   call and its turn record will be written. Replies without tool calls, confirmation questions and
-  AgentX's own notices have no button. If Slack refuses the button, the reply is posted as plain
-  text and the Slack service logs `reply.details_failed`.
+  AgentX's own notices have no button. If Slack refuses the button (an API error such as
+  `invalid_blocks`), the reply is posted as plain text and the Slack service logs
+  `reply.details_failed` with Slack's error code as `slackError`. A network error or timeout is
+  logged the same way without a code and is not followed by a text copy, since Slack may already
+  have posted the reply; the request is retried like any failed post.
 - Who can open it: any member who can see the reply, from the thread's own workspace. A member of
   another organization in a Slack Connect channel is told "AgentX couldn't find the details for
   this reply.", and nothing is read. So is a press whose payload carries no workspace team ID. On
@@ -857,7 +862,8 @@ Spec 014 phase 14d adds the **Details** button. Operator notes:
   carries the same grid ID for the workspace and the member; the record's own team must still
   match the thread's. The Grid case has not been checked on a Grid workspace. Every refusal is
   logged as `interaction.details_refused` with a `reason` (for example `external_member`,
-  `expired`, `not_found`) and the viewer's user ID.
+  `expired`, `not_found`) and the viewer's user ID. A sibling-workspace press that finds no record
+  is told the details couldn't be found (`not_found_foreign_team`), never that saving failed.
 - What it shows: a call's arguments are stored redacted and capped at 2,048 characters. The view
   shows at most 2,000 characters of each call's arguments, and less when a turn made many calls.
   Record text is escaped, so it cannot form a link, mention or alert in the view. The request and

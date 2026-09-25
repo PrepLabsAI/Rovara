@@ -106,6 +106,12 @@ export function detailsActionHandler(dependencies: DetailsClickDependencies): Sl
       return;
     }
     if (item === undefined) {
+      // A member of another workspace (a Grid sibling) looked in the thread as their payload names it;
+      // a miss there says nothing about the host's record writes, so never point at write failures.
+      if (action.userTeamId !== action.thread.teamId) {
+        await refuse(action, "not_found_foreign_team", DETAILS_NOT_FOUND);
+        return;
+      }
       // Measured from the reply itself: a long turn posts its reply minutes after receivedAt.
       const repliedAt = Number(action.messageTs) * 1_000;
       if (now() - repliedAt < DETAILS_SAVE_GRACE_MS) await refuse(action, "not_saved_yet", DETAILS_SAVING);
