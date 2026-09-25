@@ -28,6 +28,7 @@ const SAVE_ISSUE_REFERENCE_LISTS = ["relatedTo", "blocks", "blockedBy", "removeR
 const MAX_REFERENCES = 10;
 const NO_TEAM = "The Linear team check could not run, so the request was not sent.";
 const INVALID_ID = "Invalid Linear issue ID.";
+const INCLUDE_RELATIONS_REFUSED = "This Linear connector refuses get_issue with includeRelations: true, because related issues can belong to another team it does not return.";
 
 /** 5b passes the call's scope to every guard. Anything but a Linear team scope refuses the call. */
 function scopeOf(scope: unknown): LinearTeamScope {
@@ -83,6 +84,7 @@ export const issueInTeamGuard: Guard = {
   async check({ tool, arguments: args, connection, scope }) {
     const key = ISSUE_ARGUMENT[tool];
     if (key === undefined) return;
+    if (tool === "get_issue" && args.includeRelations === true) throw new GuardRejection(INCLUDE_RELATIONS_REFUSED);
     const team = scopeOf(scope);
     if (tool === "save_comment" || tool === "list_comments") {
       const other = UNVERIFIABLE_COMMENT_TARGETS.find((name) => args[name] !== undefined);

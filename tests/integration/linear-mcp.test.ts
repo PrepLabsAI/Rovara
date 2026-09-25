@@ -35,8 +35,13 @@ describe("Linear connector over Streamable HTTP", () => {
       expect(requested.every((url) => url.href === "https://mcp.linear.app/mcp")).toBe(true);
       expect(fake.headers.filter((entry) => entry.authorization !== undefined).every((entry) => entry.authorization === `Bearer ${LINEAR_KEY}`)).toBe(true);
 
-      const invoke = (tool: string, args: Record<string, unknown>, requestId: string = randomUUID()) => call(handler, { method: "POST", path: `${path}/call`, service,
-        body: { requestId, scope: "charterarc", tool, schemaHash: byName[`linear__${tool}`]!.scopes[0]!.schemaHash, arguments: args } });
+      const responses: unknown[] = [];
+      const invoke = async (tool: string, args: Record<string, unknown>, requestId: string = randomUUID()) => {
+        const response = await call(handler, { method: "POST", path: `${path}/call`, service,
+          body: { requestId, scope: "charterarc", tool, schemaHash: byName[`linear__${tool}`]!.scopes[0]!.schemaHash, arguments: args } });
+        responses.push(response.body);
+        return response;
+      };
 
       // A read binds the team.
       expect((await invoke("list_issues", { state: "started" })).body.result).toMatchObject({ status: "SUCCEEDED" });
@@ -84,7 +89,7 @@ describe("Linear connector over Streamable HTTP", () => {
       expect(fake.calls.length).toBe(callsBeforeTeam);
 
       // The key appears nowhere AgentX writes.
-      const everything = JSON.stringify([log.mock.calls, db.find(() => true), discovered.body, registered.body]);
+      const everything = JSON.stringify([log.mock.calls, db.find(() => true), discovered.body, registered.body, responses]);
       expect(everything).not.toContain(LINEAR_KEY);
     } finally { await fake.close(); }
   });

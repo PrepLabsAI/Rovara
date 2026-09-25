@@ -76,6 +76,16 @@ describe("issue-in-team guard", () => {
     expect(conn.call).toHaveBeenCalledWith("get_issue", { id: "CHA-1" });
   });
 
+  it("refuses get_issue with includeRelations: true before any Linear call, and leaves includeRelations false or absent unchanged", async () => {
+    const conn = connection(CHARTERARC);
+    await expect(check("get_issue", { id: "CHA-1", includeRelations: true }, conn))
+      .rejects.toThrow(new GuardRejection("This Linear connector refuses get_issue with includeRelations: true, because related issues can belong to another team it does not return."));
+    expect(conn.call).not.toHaveBeenCalled();
+    await expect(check("get_issue", { id: "CHA-1", includeRelations: false }, conn)).resolves.toBeUndefined();
+    await expect(check("get_issue", { id: "CHA-1" }, conn)).resolves.toBeUndefined();
+    expect(conn.call).toHaveBeenCalledTimes(2);
+  });
+
   it("reads the team from the call's scope, on tools without a team property too, and fails closed without one", async () => {
     const conn = connection(CHARTERARC);
     await expect(check("save_comment", { issueId: "CHA-3", body: "x" }, conn)).resolves.toBeUndefined();
@@ -217,9 +227,9 @@ describe("linear through the engine", () => {
   }
   const definition = linearConnector({ issue: async () => ({ token: "lin_api_secret", bindings: {} }) });
 
-  async function hashOf(name: string, connect: ReturnType<typeof fakeConnect>["connect"]) {
+  async function hashOf(name: string, connect: ReturnType<typeof fakeConnect>["connect"], access: "read" | "write" = "write") {
     const connection = await connect();
-    return reviewTools(connection as never, definition, context([[name, "write"]])).tools[0]!.schemaHash;
+    return reviewTools(connection as never, definition, context([[name, access]])).tools[0]!.schemaHash;
   }
 
   it("creates with the team bound and the description signed", async () => {
@@ -288,5 +298,14 @@ describe("linear through the engine", () => {
       definition, context([["save_issue", "write"]]), { ledger: memoryLedger(), connect });
     expect(result).toMatchObject({ status: "FAILED", reason: "policy_denied" });
     expect(calls.map((call) => call.name)).toEqual(["get_issue"]);
+  });
+
+  it("never calls Linear for get_issue with includeRelations: true", async () => {
+    const { connect, calls } = fakeConnect({ "CHA-1": CHARTERARC });
+    const schemaHash = await hashOf("get_issue", connect, "read");
+    const result = await executeTool({ requestId: "88888888-8888-4888-8888-888888888888", scope: "charterarc", tool: "get_issue", schemaHash, arguments: { id: "CHA-1", includeRelations: true } },
+      definition, context([["get_issue", "read"]]), { ledger: memoryLedger(), connect });
+    expect(result).toMatchObject({ status: "FAILED", reason: "policy_denied" });
+    expect(calls).toEqual([]);
   });
 });
