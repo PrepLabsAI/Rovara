@@ -37,6 +37,7 @@ export const TurnObservationSchema = z.object({
   manifestHash: Hex64.optional(),
   offeredTools: z.array(z.object({ name: z.string().min(1).max(128), descriptionHash: Hex64 }).strict()).max(64),
   calls: z.array(TurnCallSchema).max(TURN_CALL_LIMIT),
+  /** Present and true when the turn made more than TURN_CALL_LIMIT calls and only the first were kept. */
   callsTruncated: z.boolean().optional(),
   stopReason: z.string().max(32).optional(),
   emptyResponse: z.boolean(),
@@ -68,6 +69,8 @@ export const TurnRecordSchema = TurnObservationSchema.extend({
   requestText: z.string().max(TURN_TEXT_LIMIT),
   responseText: z.string().max(TURN_TEXT_LIMIT),
   textTruncated: z.boolean().optional(),
+  /** Present and true when every call's arguments became "[omitted]" to fit the storage budget. Optional, so older records still parse. */
+  argumentsOmitted: z.boolean().optional(),
   error: z.object({ name: z.string().max(128), code: z.string().max(64).optional() }).strict().optional(),
 }).strict();
 

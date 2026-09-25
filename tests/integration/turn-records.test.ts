@@ -318,3 +318,32 @@ describe("turn metrics", () => {
     expect(finish).toHaveBeenCalledOnce();
   });
 });
+
+describe("turn record fitting flags", () => {
+  it("marks omitted call arguments with argumentsOmitted and keeps callsTruncated for more than 50 calls only", () => {
+    const call = { name: "agentx_submit_task", arguments: "€".repeat(2_048), argumentsFingerprint: "b".repeat(32), validation: "ok" as const, outcome: "SUCCEEDED" as const, durationMs: 1 };
+    const record: TurnRecord = {
+      offeredTools: [], calls: Array.from({ length: 50 }, () => call), emptyResponse: false, workerOperations: [],
+      eventId: "EvTURN00004", subject: "T0123456789/C0123456789/1695500000.000001", receivedAt: "2026-09-24T10:00:00.000Z",
+      requestedBy: { teamId: "T0123456789", userId: "U0123456789" }, disposition: "answered",
+      startedAt: "2026-09-24T10:00:00.000Z", finishedAt: "2026-09-24T10:00:01.000Z", durationMs: 1_000,
+      requestText: "list issues", responseText: "none",
+    };
+    const fitted = fitTurnRecord(record, 100_000);
+    expect(fitted.calls.every((fittedCall) => fittedCall.arguments === "[omitted]")).toBe(true);
+    expect(fitted.argumentsOmitted).toBe(true);
+    expect(fitted).not.toHaveProperty("callsTruncated");
+    expect(TurnRecordSchema.safeParse(fitted).success).toBe(true);
+  });
+
+  it("still reads an older record that has no argumentsOmitted field", () => {
+    const older = {
+      offeredTools: [], calls: [], callsTruncated: true, emptyResponse: false, workerOperations: [],
+      eventId: "EvTURN00005", subject: "T0123456789/C0123456789/1695500000.000001", receivedAt: "2026-09-24T10:00:00.000Z",
+      requestedBy: { teamId: "T0123456789", userId: "U0123456789" }, disposition: "answered",
+      startedAt: "2026-09-24T10:00:00.000Z", finishedAt: "2026-09-24T10:00:01.000Z", durationMs: 1_000,
+      requestText: "list issues", responseText: "none",
+    };
+    expect(TurnRecordSchema.safeParse(older).success).toBe(true);
+  });
+});

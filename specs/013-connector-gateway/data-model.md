@@ -135,7 +135,7 @@ record for an event still in flight.
 |---|---|
 | `eventId`, `subject`, `requestedBy`, `settingsRevision`, `workspaceId`, `conversationId` | Identity and routing |
 | `project` | Added at export from the workspace record; not stored |
-| `receivedAt` | Slack's receive time (ISO). Part of the sort key, so a redelivery of the same event maps to the same record |
+| `receivedAt` | The time AgentX's Slack ingress received the event (ISO). Part of the sort key, so a redelivery of the same event maps to the same record |
 | `disposition` | `answered`, `failed`, `abandoned`, `workspace_close`, `workspace_limit`, `workspace_closed`, `workspace_unavailable` |
 | `model` | `{ provider, modelId }` |
 | `startedAt`, `finishedAt`, `durationMs` | Timing |
@@ -145,7 +145,8 @@ record for an event still in flight.
 | `responseText` | At most 40,000 characters |
 | `textTruncated` | Present and `true` when `requestText` or `responseText` was cut to fit |
 | `calls` | `[{ name, connector?, arguments, argumentsFingerprint, validation, outcome, reason?, durationMs, requestId?, operationId? }]`, at most 50. `arguments` is redacted JSON text of the call's arguments, capped at 2,048 characters; `argumentsFingerprint` is the first 32 hex characters of a SHA-256 over the same redacted JSON text, uncapped |
-| `callsTruncated` | Present and `true` when a call's `arguments` was replaced with `[omitted]` to fit the record's storage budget |
+| `callsTruncated` | Present and `true` when the turn made more than 50 calls and only the first 50 were kept |
+| `argumentsOmitted` | Present and `true` when every call's `arguments` was replaced with `[omitted]` to fit the record's storage budget. Optional: records written before this field existed do not carry it |
 | `validation` | `ok`, `schema_error`, `policy_denied`, `unknown_tool` |
 | `outcome` | `SUCCEEDED`, `FAILED`, `UNKNOWN`, `IN_PROGRESS` |
 | `stopReason`, `emptyResponse` | From the final assistant message |

@@ -76,7 +76,7 @@ export function fitTurnRecord(record: TurnRecord, budget = TURN_ITEM_BYTE_BUDGET
     fitted = { ...fitted, [key]: halve(fitted[key]), textTruncated: true };
   }
   if (size() > budget) {
-    fitted = { ...fitted, calls: fitted.calls.map((call) => ({ ...call, arguments: "[omitted]" })), callsTruncated: true };
+    fitted = { ...fitted, calls: fitted.calls.map((call) => ({ ...call, arguments: "[omitted]" })), argumentsOmitted: true };
   }
   return fitted;
 }
