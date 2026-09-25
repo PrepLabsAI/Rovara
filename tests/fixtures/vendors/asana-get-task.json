@@ -1,17 +1,174 @@
 {
   "data": {
     "gid": "1210000000000101",
-    "name": "Flaky login test",
-    "resource_type": "task",
-    "completed": false,
+    "actual_time_minutes": null,
     "assignee": null,
-    "due_on": null,
-    "notes": "Fails about one run in five.",
-    "parent": null,
-    "projects": [{ "gid": "1210000000000010", "name": "Payments", "resource_type": "project" }],
-    "memberships": [
-      { "project": { "gid": "1210000000000010", "name": "Payments" }, "section": { "gid": "1210000000000011", "name": "To do" } }
+    "assignee_status": "upcoming",
+    "completed": false,
+    "completed_at": null,
+    "created_at": "2026-09-25T15:42:21.045Z",
+    "custom_fields": [
+      {
+        "gid": "1210000000000301",
+        "enabled": true,
+        "enum_options": [
+          {
+            "gid": "1210000000000302",
+            "color": "red",
+            "enabled": true,
+            "name": "Critical",
+            "resource_type": "enum_option"
+          },
+          {
+            "gid": "1210000000000303",
+            "color": "orange",
+            "enabled": true,
+            "name": "High",
+            "resource_type": "enum_option"
+          },
+          {
+            "gid": "1210000000000304",
+            "color": "yellow",
+            "enabled": true,
+            "name": "Medium",
+            "resource_type": "enum_option"
+          },
+          {
+            "gid": "1210000000000305",
+            "color": "blue",
+            "enabled": true,
+            "name": "Low",
+            "resource_type": "enum_option"
+          }
+        ],
+        "enum_value": null,
+        "name": "Priority",
+        "description": "",
+        "created_by": {
+          "gid": "1210000000000201",
+          "name": "Example admin",
+          "resource_type": "user"
+        },
+        "display_value": null,
+        "resource_subtype": "enum",
+        "resource_type": "custom_field",
+        "is_formula_field": false,
+        "is_value_read_only": false,
+        "type": "enum"
+      },
+      {
+        "gid": "1210000000000306",
+        "enabled": true,
+        "name": "Effort estimate",
+        "description": "",
+        "number_value": null,
+        "precision": 0,
+        "created_by": {
+          "gid": "1210000000000201",
+          "name": "Example admin",
+          "resource_type": "user"
+        },
+        "display_value": null,
+        "resource_subtype": "number",
+        "resource_type": "custom_field",
+        "is_formula_field": false,
+        "is_value_read_only": false,
+        "type": "number"
+      },
+      {
+        "gid": "1210000000000307",
+        "enabled": true,
+        "enum_options": [
+          {
+            "gid": "1210000000000308",
+            "color": "green",
+            "enabled": true,
+            "name": "Customer",
+            "resource_type": "enum_option"
+          },
+          {
+            "gid": "1210000000000309",
+            "color": "purple",
+            "enabled": true,
+            "name": "Internal",
+            "resource_type": "enum_option"
+          },
+          {
+            "gid": "1210000000000310",
+            "color": "aqua",
+            "enabled": true,
+            "name": "Market research",
+            "resource_type": "enum_option"
+          }
+        ],
+        "enum_value": null,
+        "name": "Request source",
+        "description": "",
+        "created_by": {
+          "gid": "1210000000000201",
+          "name": "Example admin",
+          "resource_type": "user"
+        },
+        "display_value": null,
+        "resource_subtype": "enum",
+        "resource_type": "custom_field",
+        "is_formula_field": false,
+        "is_value_read_only": false,
+        "type": "enum"
+      }
     ],
-    "workspace": { "gid": "1210000000000001", "name": "Example workspace", "resource_type": "workspace" }
+    "due_at": null,
+    "due_on": null,
+    "followers": [
+      {
+        "gid": "1210000000000202",
+        "name": "Example bot",
+        "resource_type": "user"
+      }
+    ],
+    "hearted": false,
+    "hearts": [],
+    "liked": false,
+    "likes": [],
+    "memberships": [
+      {
+        "project": {
+          "gid": "1210000000000010",
+          "resource_subtype": "default_project",
+          "name": "Payments",
+          "resource_type": "project"
+        },
+        "section": {
+          "gid": "1210000000000011",
+          "name": "To do",
+          "resource_type": "section"
+        }
+      }
+    ],
+    "modified_at": "2026-09-25T15:42:21.277Z",
+    "name": "Example task",
+    "notes": "Example notes.",
+    "num_hearts": 0,
+    "num_likes": 0,
+    "parent": null,
+    "permalink_url": "https://app.asana.com/1/1210000000000001/project/1210000000000010/task/1210000000000101",
+    "projects": [
+      {
+        "gid": "1210000000000010",
+        "resource_subtype": "default_project",
+        "name": "Payments",
+        "resource_type": "project"
+      }
+    ],
+    "resource_type": "task",
+    "start_at": null,
+    "start_on": null,
+    "tags": [],
+    "resource_subtype": "default_task",
+    "workspace": {
+      "gid": "1210000000000001",
+      "name": "Example workspace",
+      "resource_type": "workspace"
+    }
   }
 }

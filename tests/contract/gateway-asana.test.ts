@@ -106,6 +106,13 @@ describe("Asana connector definition", () => {
 });
 
 describe("Asana project guard", () => {
+  it("accepts Asana's get_task answer exactly as the live check captured it (vendors/asana-get-task.json)", async () => {
+    const raw = readFileSync(new URL("../fixtures/vendors/asana-get-task.json", import.meta.url), "utf8");
+    const { run, writes } = harness({ getTask: (gid) => gid === GET_TASK.data.gid ? { content: [{ type: "text", text: raw }] } : { isError: true, content: [{ type: "text", text: "Not found" }] } });
+    expect(await run("add_comment", { task_id: GET_TASK.data.gid, text: "Seen." })).toMatchObject({ status: "SUCCEEDED" });
+    expect(writes()).toHaveLength(1);
+  });
+
   it("binds the project on lists, searches and project reads", async () => {
     const { run, calls } = harness();
     expect(await run("get_tasks", { completed_since: "2026-09-01T00:00:00Z" })).toMatchObject({ status: "SUCCEEDED" });

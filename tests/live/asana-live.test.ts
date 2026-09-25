@@ -79,7 +79,7 @@ function routedFetch(handler: () => Handler): typeof fetch {
 
 describe.skipIf(!CLIENT_ID)("asana connector, live check against the real project", () => {
   it("signs in once, registers, searches, creates, reads, comments, refuses, refreshes and reports a revoked sign-in", async () => {
-    if (!CLIENT_ID || !CLIENT_SECRET || !PROJECT || !BOT_EMAIL) throw new Error("AGENTX_LIVE_ASANA_CLIENT_ID, AGENTX_LIVE_ASANA_CLIENT_SECRET AGENTX_LIVE_ASANA_PROJECT and AGENTX_LIVE_ASANA_BOT_EMAIL are required");
+    if (!CLIENT_ID || !CLIENT_SECRET || !PROJECT || !BOT_EMAIL) throw new Error("AGENTX_LIVE_ASANA_CLIENT_ID, AGENTX_LIVE_ASANA_CLIENT_SECRET, AGENTX_LIVE_ASANA_PROJECT and AGENTX_LIVE_ASANA_BOT_EMAIL are required");
     await loadSlackBroker();
     const secrets = memorySecretStore({
       [SECRET]: JSON.stringify({ clientId: CLIENT_ID, clientSecret: CLIENT_SECRET }),
