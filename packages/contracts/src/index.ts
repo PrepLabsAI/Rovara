@@ -11,6 +11,7 @@ export * from "./project.js";
 export * from "./protocol.js";
 export * from "./redaction.js";
 export * from "./slack.js";
+export * from "./slack-details.js";
 export * from "./slack-confirmation.js";
 export * from "./turns.js";
 export * from "./usage.js";

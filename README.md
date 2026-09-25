@@ -318,7 +318,9 @@ AgentX replies within a few seconds. If earlier requests in the thread are still
 how many are ahead, and says "Working on it now" when it starts on the request. A request with
 nothing ahead gets no separate "Working on it now" notice, unless it waits for workspace setup. A
 message that is only an answer to a confirmation (`yes`, `yes to all`, `cancel` and their plain
-synonyms) gets no "Got it" either, unless requests are queued ahead of it. A
+synonyms) gets no "Got it" either, unless requests are queued ahead of it. An Approve or Cancel
+button press is counted the same way, so with nothing ahead the button's own "Running it now" is
+the only notice. A
 new thread gets a coding workspace only when a request first needs the remote worker, for example to
 read or change repository files or to run commands. Questions that connectors answer, such as issue
 tracker questions, need no workspace. The first request that needs the worker prepares the workspace
@@ -569,6 +571,20 @@ exported, plus `skipped` when the control plane left out stored records that fai
 schema. `turn_record.write_failed` means a record
 was lost (the member still got the reply), and `turn_record.duplicate` means SQS redelivered a
 request that was already recorded.
+
+A reply that follows tool calls carries a **Details** button. It opens a Slack view that only the
+member who clicked can see. The view is built from that turn's record: who asked and when, the
+outcome, the model, how many tools were offered, each call's tool, redacted arguments, outcome and
+reason, any action gate decision, and token usage. Any member who can see the reply can open it,
+and each opening is logged as `interaction.details_opened` with the viewer's Slack user ID. The
+view never shows the request or response text, which are already in the thread. The ingress
+Lambda's IAM grant cannot read them: it may `GetItem` one record by key, and only the attributes
+the view shows. Nothing is posted to the thread. If the record is more than 30 days old, was never
+saved, is still being saved, or cannot be read, the view says so. If the view cannot open in time,
+AgentX tells the member privately. Long arguments are cut to fit Slack's limits and end with
+`… [cut to fit]`; `agentx admin turns export` has the full record. The button needs Slack
+Interactivity, which the action gate's confirmation buttons already turned on; it needs no new
+scope.
 
 Connector and turn metrics go to the `AgentX` CloudWatch namespace; see
 [contracts/metrics.md](specs/013-connector-gateway/contracts/metrics.md) for the full list. Five
@@ -829,6 +845,88 @@ Spec 014 phase 14c part 2 turns the action gate on. Operator notes:
   confirmation; the turn record still keeps the model's text.
   `gate.confirmation_failed` means a question could not be saved or posted; the member is told
   that nothing it would list will run.
+
+Spec 014 phase 14d adds the **Details** button. Operator notes:
+
+- Only the last part of a reply gets the button, and only when that turn made at least one tool
+  call and its turn record will be written. Replies without tool calls, confirmation questions and
+  AgentX's own notices have no button. If Slack refuses the button (an API error such as
+  `invalid_blocks`), the reply is posted as plain text and the Slack service logs
+  `reply.details_failed` with Slack's error code as `slackError`. A network error or timeout is
+  logged the same way without a code and is not followed by a text copy, since Slack may already
+  have posted the reply; the request is retried like any failed post.
+- Who can open it: any member who can see the reply, from the thread's own workspace. A member of
+  another organization in a Slack Connect channel is told "AgentX couldn't find the details for
+  this reply.", and nothing is read. So is a press whose payload carries no workspace team ID. On
+  Enterprise Grid, a member of a sibling workspace in the same grid may open it when the press
+  carries the same grid ID for the workspace and the member; the record's own team must still
+  match the thread's. The Grid case has not been checked on a Grid workspace. Every refusal is
+  logged as `interaction.details_refused` with a `reason` (for example `external_member`,
+  `expired`, `not_found`) and the viewer's user ID. A sibling-workspace press that finds no record
+  is told the details couldn't be found (`not_found_foreign_team`), never that saving failed.
+- What it shows: a call's arguments are stored redacted and capped at 2,048 characters. The view
+  shows at most 2,000 characters of each call's arguments, and less when a turn made many calls.
+  Record text is escaped, so it cannot form a link, mention or alert in the view. The request and
+  response text, the workspace and the worker operations are never read.
+- Turn records are kept 30 days. After that the view says "AgentX keeps turn details for 30 days.
+  The details for this reply, from <date>, are no longer kept." It says so from the button alone,
+  without a read, and also for a record DynamoDB has not deleted yet.
+- A press within 60 seconds of the reply, before the record is saved, says the details are still
+  being saved. A record that was never saved points to `turn_record.write_failed`. A record that
+  fails its schema (`interaction.details_invalid`) points to `agentx admin turns export`. A read
+  that fails or takes more than 1 second (`interaction.details_read_failed`) says to press
+  Details again. If the view cannot open (`interaction.details_open_failed`), the member gets
+  "I couldn't open the details in time. Press Details again." privately.
+- The control plane sets `TURN_RECORDS_TABLE_NAME` on the ingress Lambda. It is optional. Without
+  it, the Lambda logs `interaction.details_not_configured` at the first button press after it
+  starts, and every Details press says the details couldn't be loaded. Approve and Cancel keep working.
+- The ingress Lambda's role gains one statement: `dynamodb:GetItem` on the `TurnRecords` table,
+  not its index, and no Query or Scan. The partition key must start with `THREAD#`. The read must
+  name only the attributes the view shows, plus the keys `pk`, `sk`, `exportPk` and `exportSk`
+  (`TURN_DETAILS_READ_ATTRIBUTES` in `infra/lib/control-plane.ts`). A `Null` condition refuses a
+  read that names no attributes, which would otherwise return the whole record, request text
+  included. The Slack service still only puts turn records, and the broker still only queries them.
+- Release in this order: runtime, then control plane, then Slack service. The control plane's
+  Details handler stays dormant until the Slack service posts buttons. After the control plane
+  deploys, and before the Slack service does, check the grant with the IAM policy simulator:
+
+  ```bash
+  FUNCTION=$(aws cloudformation describe-stack-resources --stack-name AgentXControlPlane \
+    --query "StackResources[?ResourceType=='AWS::Lambda::Function' && starts_with(LogicalResourceId, 'SlackIngress')].PhysicalResourceId" --output text)
+  ROLE=$(aws lambda get-function-configuration --function-name "$FUNCTION" --query Role --output text)
+  TURNS=$(aws cloudformation describe-stacks --stack-name AgentXControlPlane \
+    --query "Stacks[0].Outputs[?OutputKey=='TurnRecordsTableName'].OutputValue" --output text)
+  TABLE=$(aws dynamodb describe-table --table-name "$TURNS" --query Table.TableArn --output text)
+  # The Details attributes: "allowed".
+  aws iam simulate-principal-policy --policy-source-arn "$ROLE" --action-names dynamodb:GetItem --resource-arns "$TABLE" \
+    --context-entries "ContextKeyName=dynamodb:LeadingKeys,ContextKeyValues=THREAD#x,ContextKeyType=stringList" \
+      "ContextKeyName=dynamodb:Attributes,ContextKeyValues=pk,sk,eventId,calls,ContextKeyType=stringList" \
+    --query 'EvaluationResults[0].EvalDecision'
+  # The request text: "implicitDeny".
+  aws iam simulate-principal-policy --policy-source-arn "$ROLE" --action-names dynamodb:GetItem --resource-arns "$TABLE" \
+    --context-entries "ContextKeyName=dynamodb:LeadingKeys,ContextKeyValues=THREAD#x,ContextKeyType=stringList" \
+      "ContextKeyName=dynamodb:Attributes,ContextKeyValues=pk,sk,requestText,ContextKeyType=stringList" \
+    --query 'EvaluationResults[0].EvalDecision'
+  # No attributes named at all: "implicitDeny".
+  aws iam simulate-principal-policy --policy-source-arn "$ROLE" --action-names dynamodb:GetItem --resource-arns "$TABLE" \
+    --context-entries "ContextKeyName=dynamodb:LeadingKeys,ContextKeyValues=THREAD#x,ContextKeyType=stringList" \
+    --query 'EvaluationResults[0].EvalDecision'
+  ```
+
+  Then confirm it live, with the ingress role's permissions (for example from a break-glass admin
+  allowed to assume the role). A read with no projection must fail with `AccessDeniedException`:
+
+  ```bash
+  aws dynamodb get-item --table-name "$TURNS" --key '{"pk":{"S":"THREAD#x"},"sk":{"S":"TURN#x"}}'
+  ```
+
+  Then deploy the Slack service. In a bound channel, ask for something that calls a tool, and
+  press **Details** as yourself and as a second member. Both see the view, and nothing new appears
+  in the thread.
+- Roll back the Slack service first: new replies lose the button, and buttons already posted keep
+  working. Do not roll the control plane back below this release while replies with buttons are
+  less than 30 days old. If you do, an old button tells the member "This button is no longer
+  available." (`interaction.ignored`), and no longer opens anything.
 
 ## Implementation documents
 

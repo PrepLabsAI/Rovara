@@ -53,7 +53,8 @@ function signed(body: unknown, options: { timestamp?: number; signature?: string
   return { rawPath: "/v1/slack/interactions", body: raw, headers: { "X-Slack-Request-Timestamp": timestamp, "X-Slack-Signature": signature, "content-type": "application/x-www-form-urlencoded" } };
 }
 
-function harness(options: { confirmation?: PendingConfirmation | undefined; failEnqueue?: boolean; extra?: SlackActionHandler[] } = {}) {
+function harness(options: { confirmation?: PendingConfirmation | undefined; failEnqueue?: boolean; extra?: SlackActionHandler[]; pendingAfter?: number } = {}) {
+  const behind: number[] = [];
   const claimed = new Set<string>();
   const pendingCounts: number[] = [];
   const queue: Array<{ message: SlackRequestMessage; groupId: string }> = [];
@@ -72,15 +73,15 @@ function harness(options: { confirmation?: PendingConfirmation | undefined; fail
       loadConfirmation: async (key) => key === subject ? confirmation : undefined,
       claimEvent: async (eventId) => { if (claimed.has(eventId)) return false; claimed.add(eventId); return true; },
       releaseEvent: async (eventId) => { released.push(eventId); claimed.delete(eventId); },
-      changePending: async (_subject, delta) => { pendingCounts.push(delta); return 1; },
-      enqueue: async (message, groupId) => { if (options.failEnqueue) throw new Error("SQS down"); queue.push({ message, groupId }); },
+      changePending: async (_subject, delta) => { pendingCounts.push(delta); return delta === 1 ? options.pendingAfter ?? 1 : 0; },
+      enqueue: async (message, groupId, queuedBehind) => { if (options.failEnqueue) throw new Error("SQS down"); queue.push({ message, groupId }); behind.push(queuedBehind); },
       updateMessage: async (input) => { updates.push(input); },
       respondEphemeral: async (_url, value) => { ephemeral.push(value); },
       now: () => nowSeconds * 1_000,
       log,
     }), ...(options.extra ?? [])],
   });
-  return { handler, queue, updates, ephemeral, logs, pendingCounts, released };
+  return { handler, queue, updates, ephemeral, logs, pendingCounts, released, behind };
 }
 
 describe("Slack interactivity request URL (spec 014 D2)", () => {
@@ -108,6 +109,17 @@ describe("Slack interactivity request URL (spec 014 D2)", () => {
     const note = `Approved by <@${requester}>. Running it now.`;
     expect(updates).toEqual([{ channel: thread.channelId, ts: "1695500001.000002", text: `${text}\n${note}`, blocks: answeredConfirmationBlocks(text, note) }]);
     expect(ephemeral).toEqual([]);
+  });
+
+  it("tells the queue how many earlier requests a click waits behind, as the message ingress does (spec 014 FR-026)", async () => {
+    // Nothing ahead: the Slack service adds no "Working on it now" under the button's "Running it now".
+    for (const [pendingAfter, expected] of [[1, 0], [3, 2], [0, 0]] as const) {
+      for (const actionId of ["agentx_confirm_approve", "agentx_confirm_cancel"]) {
+        const { handler, behind } = harness({ pendingAfter });
+        await handler(signed(payload({ actionId })));
+        expect(behind, `${actionId} with ${pendingAfter} pending`).toEqual([expected]);
+      }
+    }
   });
 
   it("queues the requester's Cancel as a cancel", async () => {
@@ -156,7 +168,7 @@ describe("Slack interactivity request URL (spec 014 D2)", () => {
     const details: SlackActionHandler = { matches: (id) => id === "agentx_details", handle: async (action) => { seen.push(action); } };
     const { handler, logs, ephemeral, queue } = harness({ extra: [details] });
     await handler(signed(payload({ actionId: "agentx_details", value: "turn-1" })));
-    expect(seen).toEqual([{ actionId: "agentx_details", value: "turn-1", userId: requester, thread, messageTs: "1695500001.000002", messageText: text, responseUrl: "https://hooks.slack.com/actions/T0BSHLLUGBD/1/abc", triggerId: "1.2.3" }]);
+    expect(seen).toEqual([{ actionId: "agentx_details", value: "turn-1", userId: requester, userTeamId: thread.teamId, workspaceTeamId: thread.teamId, enterpriseId: "", userEnterpriseId: "", requestStartedAt: nowSeconds * 1_000, thread, messageTs: "1695500001.000002", messageText: text, responseUrl: "https://hooks.slack.com/actions/T0BSHLLUGBD/1/abc", triggerId: "1.2.3" }]);
     expect(ephemeral).toEqual([]);
     // An old button after a rollback, or one from a later release: the clicker hears it, the thread does not.
     expect((await handler(signed(payload({ actionId: "something_else" })))).statusCode).toBe(200);
