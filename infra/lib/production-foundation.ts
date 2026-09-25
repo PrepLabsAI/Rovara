@@ -230,8 +230,8 @@ export class ProductionFoundationStack extends Stack {
     });
 
     const workspaceKey = new kms.Key(this, "WorkspaceKey", {
-      alias: "alias/agentx/production-workspaces",
-      description: "Encrypts AgentX production root and per-session workspace EBS volumes",
+      alias: naming.workspaceKeyAlias,
+      description: `Encrypts AgentX ${naming.environmentTagValue} root and per-session workspace EBS volumes`,
       enableKeyRotation: true,
       removalPolicy: RemovalPolicy.RETAIN,
     });

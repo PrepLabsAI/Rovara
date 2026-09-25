@@ -13,7 +13,7 @@ describe("environment names", () => {
     expect(EnvironmentNameSchema.safeParse(name).success).toBe(true);
   });
 
-  it.each(["", "Prod", "prod-", "-prod", "1prod", "pro_d", "pro.d", "a--b", "abcdefghijklmnopqrstu", "prod/x"])(
+  it.each(["", "Prod", "prod-", "-prod", "1prod", "pro_d", "pro.d", "a--b", "abcdefghijklmnopqrstu", "prod/x", "connectors"])(
     "refuses %j",
     (name) => {
       expect(EnvironmentNameSchema.safeParse(name).success).toBe(false);

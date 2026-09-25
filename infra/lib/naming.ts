@@ -16,12 +16,14 @@ export interface AgentXNaming {
   readonly resourcePrefix: string;
   readonly runtimeName: string;
   readonly capacityProviderName: string;
+  readonly workspaceKeyAlias: string;
   readonly alertsTopicName: string;
   alarmName(suffix: string): string;
   readonly connectorSecretPrefix: string;
   readonly metricsNamespace: string;
   /** The value of the resource `Environment` tag used by the foundation stack. */
   readonly environmentTagValue: string;
+  readonly taskFamily: string;
 }
 
 export const LEGACY_STACK_NAMES: Record<StackPart, string> = {
@@ -41,11 +43,13 @@ export function legacyNaming(): AgentXNaming {
     resourcePrefix: "agentx-production",
     runtimeName: "agentx_production_worker",
     capacityProviderName: "agentx_production_capacity_v3",
+    workspaceKeyAlias: "alias/agentx/production-workspaces",
     alertsTopicName: "AgentXOperatorAlerts",
     alarmName: (suffix) => `AgentX${suffix}`,
     connectorSecretPrefix: "agentx/connectors/",
     metricsNamespace: "AgentX",
     environmentTagValue: "production",
+    taskFamily: "agentx-slack-orchestrator",
   };
 }
 
@@ -60,11 +64,13 @@ export function environmentNaming(env: string): AgentXNaming {
     // AgentCore runtime and capacity-provider names allow letters, digits and underscores only.
     runtimeName: `agentx_${name.replaceAll("-", "_")}_worker`,
     capacityProviderName: `agentx_${name.replaceAll("-", "_")}_capacity`,
+    workspaceKeyAlias: `alias/agentx/${name}/workspaces`,
     alertsTopicName: `agentx-${name}-alerts`,
     alarmName: (suffix) => `agentx-${name}-${suffix}`,
     connectorSecretPrefix: environmentConnectorSecretPrefix(name),
     metricsNamespace: `AgentX/${name}`,
     environmentTagValue: name,
+    taskFamily: `agentx-${name}-slack-orchestrator`,
   };
 }
 

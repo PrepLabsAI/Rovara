@@ -6,7 +6,11 @@ export const ENVIRONMENT_NAME_PATTERN = /^[a-z](?:[a-z0-9-]{0,18}[a-z0-9])?$/;
 export const EnvironmentNameSchema = z
   .string()
   .regex(ENVIRONMENT_NAME_PATTERN, "environment name must be lowercase letters, digits and hyphens, start with a letter, and be at most 20 characters")
-  .refine((name) => !name.includes("--"), "environment name must not contain a doubled hyphen");
+  .refine((name) => !name.includes("--"), "environment name must not contain a doubled hyphen")
+  .refine(
+    (name) => name !== "connectors",
+    'environment name must not be "connectors" (reserved: its connector-secret prefix agentx/connectors/connectors/ would fall under the legacy connector secrets grant agentx/connectors/*)',
+  );
 
 export const DEFAULT_ENVIRONMENT = "production";
 

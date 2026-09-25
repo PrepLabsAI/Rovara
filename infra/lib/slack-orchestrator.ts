@@ -10,7 +10,7 @@ import {
   aws_logs as logs,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
-import type { AgentXNaming } from "./naming.js";
+import { type AgentXNaming, legacyNaming } from "./naming.js";
 
 export const AGENTX_SLACK_ORCHESTRATOR_REPOSITORY = "agentx-slack-orchestrator";
 
@@ -23,6 +23,7 @@ export interface SlackOrchestratorStackProps extends StackProps {
 export class SlackOrchestratorStack extends Stack {
   constructor(scope: Construct, id: string, props?: SlackOrchestratorStackProps) {
     super(scope, id, props);
+    const naming = props?.naming ?? legacyNaming();
 
     const imageUri = new CfnParameter(this, "OrchestratorImageUri", {
       type: "String",
@@ -125,7 +126,7 @@ export class SlackOrchestratorStack extends Stack {
       tags: [{ key: "Application", value: "AgentX" }],
     });
     const taskDefinition = new ecs.CfnTaskDefinition(this, "TaskDefinition", {
-      family: "agentx-slack-orchestrator",
+      family: naming.taskFamily,
       requiresCompatibilities: ["FARGATE"],
       networkMode: "awsvpc",
       cpu: "512",

@@ -11,7 +11,7 @@ function productionStacks(app: App): Stack[] {
 
 // Names AWS requires to be unique in an account and region. Resource "Name" keys (API names,
 // authorizer names) are checked separately: they are not unique-constrained, but must still differ.
-const PHYSICAL_NAME_KEYS = ["GroupName", "AgentRuntimeName", "TopicName", "AlarmName", "RoleName", "QueueName", "TableName", "BucketName", "LogGroupName"];
+const PHYSICAL_NAME_KEYS = ["GroupName", "AgentRuntimeName", "TopicName", "AlarmName", "RoleName", "QueueName", "TableName", "BucketName", "LogGroupName", "AliasName", "Family"];
 
 // AWS::BedrockAgentCore::CapacityProvider and AWS::ApiGatewayV2::Api both use the generic "Name"
 // key, which most other resource types also carry for unrelated purposes (e.g. a tag's own "Name"
@@ -24,6 +24,14 @@ function physicalNames(stack: Stack): string[] {
     ...PHYSICAL_NAME_KEYS.map((key) => resource.Properties?.[key]),
     NAME_PROPERTY_BY_TYPE.has(resource.Type) ? resource.Properties?.Name : undefined,
   ].filter((value): value is string => typeof value === "string"));
+}
+
+// CloudFormation export names are account-and-region unique, like physical names.
+function exportNames(stack: Stack): string[] {
+  const outputs = Template.fromStack(stack).toJSON().Outputs as Record<string, { Export?: { Name?: unknown } }> | undefined;
+  return Object.values(outputs ?? {})
+    .map((output) => output.Export?.Name)
+    .filter((value): value is string => typeof value === "string");
 }
 
 describe("legacy naming", () => {
@@ -39,11 +47,13 @@ describe("legacy naming", () => {
     expect(naming.resourcePrefix).toBe("agentx-production");
     expect(naming.runtimeName).toBe("agentx_production_worker");
     expect(naming.capacityProviderName).toBe("agentx_production_capacity_v3");
+    expect(naming.workspaceKeyAlias).toBe("alias/agentx/production-workspaces");
     expect(naming.alertsTopicName).toBe("AgentXOperatorAlerts");
     expect(naming.alarmName("ConnectorBroken")).toBe("AgentXConnectorBroken");
     expect(naming.connectorSecretPrefix).toBe("agentx/connectors/");
     expect(naming.metricsNamespace).toBe("AgentX");
     expect(naming.environmentTagValue).toBe("production");
+    expect(naming.taskFamily).toBe("agentx-slack-orchestrator");
   });
 
   it("is used when the agentxEnv context is absent", () => {
@@ -61,11 +71,13 @@ describe("environment naming", () => {
     expect(naming.resourcePrefix).toBe("agentx-dev-2");
     expect(naming.runtimeName).toBe("agentx_dev_2_worker");
     expect(naming.capacityProviderName).toBe("agentx_dev_2_capacity");
+    expect(naming.workspaceKeyAlias).toBe("alias/agentx/dev-2/workspaces");
     expect(naming.alertsTopicName).toBe("agentx-dev-2-alerts");
     expect(naming.alarmName("ConnectorBroken")).toBe("agentx-dev-2-ConnectorBroken");
     expect(naming.connectorSecretPrefix).toBe("agentx/dev-2/connectors/");
     expect(naming.metricsNamespace).toBe("AgentX/dev-2");
     expect(naming.environmentTagValue).toBe("dev-2");
+    expect(naming.taskFamily).toBe("agentx-dev-2-slack-orchestrator");
   });
 
   it("refuses an invalid environment from context", () => {
@@ -81,12 +93,29 @@ describe("environment naming", () => {
     const productionNames = new Set(production.flatMap(physicalNames));
     const shared = staging.flatMap(physicalNames).filter((name) => productionNames.has(name));
     expect(shared).toEqual([]);
+    const productionExports = new Set(production.flatMap(exportNames));
+    const sharedExports = staging.flatMap(exportNames).filter((name) => productionExports.has(name));
+    expect(sharedExports).toEqual([]);
   }, 240_000);
 
   it("tags every stack's resources with agentx:env", () => {
     const staging = productionStacks(buildAgentXApp({ agentxEnv: "staging" }));
+    const foundation = staging.find((stack) => stack.stackName === "agentx-staging-foundation")!;
+    const runtime = staging.find((stack) => stack.stackName === "agentx-staging-runtime")!;
     const control = staging.find((stack) => stack.stackName === "agentx-staging-control-plane")!;
+    const slack = staging.find((stack) => stack.stackName === "agentx-staging-slack")!;
+
+    Template.fromStack(foundation).hasResourceProperties("AWS::EC2::SecurityGroup", {
+      Tags: Match.arrayWith([{ Key: "agentx:env", Value: "staging" }]),
+    });
+    // CfnRuntime is tagged with a plain string map, not the {Key,Value} array most other resources use.
+    Template.fromStack(runtime).hasResourceProperties("AWS::BedrockAgentCore::Runtime", {
+      Tags: Match.objectLike({ "agentx:env": "staging" }),
+    });
     Template.fromStack(control).hasResourceProperties("AWS::DynamoDB::Table", {
+      Tags: Match.arrayWith([{ Key: "agentx:env", Value: "staging" }]),
+    });
+    Template.fromStack(slack).hasResourceProperties("AWS::ECS::Cluster", {
       Tags: Match.arrayWith([{ Key: "agentx:env", Value: "staging" }]),
     });
   }, 120_000);
