@@ -73,6 +73,7 @@ tests/eval/                       phase 4: cases, runner, baselines
 | 3 | Credential registry, providers, admin commands, registration preflight | 1b | [plans/phase-3-credentials.md](plans/phase-3-credentials.md) |
 | 4 | Turn records, shared usage contract, metrics, alarms, export, evaluation tiers | 2 | written after 2 merges |
 | 5a | Generic connector types and routes; registration preflight and thread setup cover every configured type | 3 | [plans/phase-5a-generic-connectors.md](plans/phase-5a-generic-connectors.md) |
+| 5b | Shared binder: bind a property on every tool or only where present; guards get the scope and can rewrite arguments | 5a | [plans/phase-5b-binder.md](plans/phase-5b-binder.md) |
 | 5 | Linear connector | 3 | written after 3 merges |
 | 6 | Jira connector (live check gated on Atlassian administrator) | 3 | written after 3 merges |
 

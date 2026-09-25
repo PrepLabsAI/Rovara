@@ -187,6 +187,11 @@ Each connector type is one definition in the control plane. A new type is added 
 schema and to the built-in type map. It supplies its scopes, its credential and its binder; the
 routes, catalog cache, ledger and registration checks then work for it without further change.
 
+A binder names the arguments the server fills in and the model never sees. Some are bound on
+every tool, such as GitHub's owner and repository; a tool without them is not offered. Others
+are bound only on the tools that have them, such as a Linear team; other tools are offered
+unchanged. A request that supplies a bound argument itself is refused.
+
 Connectors other than GitHub read their credential from an AWS Secrets Manager secret named
 `agentx/connectors/<name>`, registered once with the control plane:
 
