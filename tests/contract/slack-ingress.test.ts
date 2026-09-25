@@ -35,7 +35,7 @@ function harness(options: {
   let decrementFailures = options.failDecrement ?? 0;
   const claimed = new Set<string>();
   const pending = new Map<string, number>();
-  const queue: Array<{ message: SlackRequestMessage; groupId: string }> = [];
+  const queue: Array<{ message: SlackRequestMessage; groupId: string; queuedBehind?: number }> = [];
   const posts: Array<{ channel: string; threadTs: string; text: string }> = [];
   const logs: Array<{ event: string; fields: Record<string, unknown> }> = [];
   let enqueueFailures = options.failEnqueue ?? 0;
@@ -63,12 +63,12 @@ function harness(options: {
       pending.set(subject, next);
       return next;
     },
-    enqueue: async (message, groupId) => {
+    enqueue: async (message, groupId, queuedBehind) => {
       if (enqueueFailures > 0) {
         enqueueFailures -= 1;
         throw new Error("SQS unavailable");
       }
-      queue.push({ message, groupId });
+      queue.push({ message, groupId, queuedBehind });
     },
     postMessage: async (input: { channel: string; threadTs: string; text: string }) => {
       if (options.failPost) throw new Error("Slack unavailable");
@@ -214,6 +214,16 @@ describe("Slack mention ingress", () => {
       threadTs: "1695500000.000001",
       text: "Got it. This is queued behind 1 earlier request in this thread.",
     });
+  });
+
+  it("tells the Slack service how many earlier requests each one was queued behind (spec 014 FR-026)", async () => {
+    const { handler, queue } = harness();
+    await send(handler, signedEvent(mention()));
+    await send(handler, signedEvent(mention({
+      eventId: "Ev0000000002",
+      event: { user: "U0456789012", ts: "1695500100.000002", thread_ts: "1695500000.000001", text: `<@${bot}> also add tests` },
+    })));
+    expect(queue.map((entry) => entry.queuedBehind)).toEqual([0, 1]);
   });
 
   it("processes a repeated Slack event only once", async () => {

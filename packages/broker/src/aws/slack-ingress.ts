@@ -16,6 +16,7 @@ import {
   SlackRequestMessageSchema,
   SlackTeamIdSchema,
   SlackUserIdSchema,
+  queuedBehindAttributes,
   slackRequestText,
   slackThreadSubject,
   type SlackChannelBinding,
@@ -42,7 +43,8 @@ export interface SlackIngressDependencies {
   claimEvent: (eventId: string, expiresAtSeconds: number) => Promise<boolean>;
   releaseEvent: (eventId: string) => Promise<void>;
   changePending: (threadSubject: string, delta: 1 | -1) => Promise<number>;
-  enqueue: (message: SlackRequestMessage, messageGroupId: string) => Promise<void>;
+  /** `queuedBehind` is how many earlier requests in the thread this one waits behind (spec 014 FR-026). */
+  enqueue: (message: SlackRequestMessage, messageGroupId: string, queuedBehind: number) => Promise<void>;
   postMessage: (input: { channel: string; threadTs: string; text: string }) => Promise<void>;
   now?: () => number;
   log?: SlackIngressLog;
@@ -182,8 +184,9 @@ export function createSlackIngressHandler(dependencies: SlackIngressDependencies
       receivedAt: new Date(now()).toISOString(),
     });
     const pending = await dependencies.changePending(subject, 1);
+    const ahead = pending - 1;
     try {
-      await dependencies.enqueue(message, createHash("sha256").update(subject).digest("hex"));
+      await dependencies.enqueue(message, createHash("sha256").update(subject).digest("hex"), Math.max(ahead, 0));
     } catch {
       // Undo all records so Slack's retry of this event is processed as new.
       await dependencies.changePending(subject, -1);
@@ -201,7 +204,6 @@ export function createSlackIngressHandler(dependencies: SlackIngressDependencies
       return respond(500, { error: "request could not be queued" });
     }
     log("mention.accepted", { eventId: mention.eventId, pendingInThread: pending });
-    const ahead = pending - 1;
     await post(dependencies, log, thread, ahead > 0
       ? `Got it. This is queued behind ${ahead} earlier request${ahead === 1 ? "" : "s"} in this thread.`
       : "Got it. I'm on it and will reply in this thread.");
@@ -456,12 +458,13 @@ function createAwsSlackIngressHandler() {
       }));
       return Number(response.Attributes?.pendingRequests ?? 0);
     },
-    async enqueue(message, messageGroupId) {
+    async enqueue(message, messageGroupId, queuedBehind) {
       await sqs.send(new SendMessageCommand({
         QueueUrl: queueUrl,
         MessageBody: JSON.stringify(message),
         MessageGroupId: messageGroupId,
         MessageDeduplicationId: message.eventId,
+        MessageAttributes: queuedBehindAttributes(queuedBehind),
       }));
     },
     async postMessage(input) {

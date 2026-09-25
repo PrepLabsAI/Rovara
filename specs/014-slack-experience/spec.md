@@ -233,11 +233,17 @@ listing the `save_issue` call and its result; nothing is posted to the thread.
   modal for the clicking member, built from the turn record.
 - **FR-025**: The Slack app MUST gain interactivity with a signed request URL; requests failing
   signature verification MUST be refused.
+- **FR-026**: A request MUST get one acknowledgement before its answer. The Slack service MUST post
+  its "Working on it now" notice only when the request waited: behind earlier requests in the
+  thread, or for workspace setup. (Added 2026-09-25, from the phase 14a live check.)
 
 ### Key Entities
 
-- **Thread record**: exists from the first message. Holds the project, revision, connectors,
-  conversation and, once prepared, the workspace.
+- **Thread record**: exists from the first message. Holds the project, the revision the thread
+  started with, connectors, conversation and a workspace record. The workspace record's status is
+  UNPREPARED until a tool first needs the worker; only then is compute prepared and the limit
+  charged. Connector routes, the connector ledger and conversations use the workspace ID from the
+  first message.
 - **Action policy**: the built-in defaults plus a project's rules. Each rule has a tool name
   pattern, an optional connector, and an outcome of `allow`, `ask` or `deny`.
 - **Pending confirmation**: the thread, the requesting member, the exact call (tool plus a hash of
@@ -283,6 +289,16 @@ listing the `save_issue` call and its result; nothing is posted to the thread.
 - **A cheap thread record is created at once, and the expensive compute is prepared lazily.** This
   keeps the thread and conversation model intact, instead of inventing a second path for
   connector-only threads.
+- **Lazy workspaces are an opt-in on the thread workspace request** (`lazyPreparation: true`), so a
+  Slack service that cannot parse `UNPREPARED` never sees it. The member whose request prepares
+  compute is charged. `agentx_submit_task` and `agentx_follow_up` prepare compute;
+  `agentx_create_pull_request` answers that there is nothing to publish; the other in-house tools
+  and all connector tools never prepare it. The plan is
+  [plans/phase-14b-lazy-workspace.md](plans/phase-14b-lazy-workspace.md).
+- **The ingress passes the queue count as a queue message attribute, not a body field**
+  (2026-09-25, owner-approved, FR-026). An older Slack service parses the body strictly and would
+  discard a message with a new field; it ignores attributes it does not ask for. A message with no
+  count, from an older ingress, keeps the "Working on it now" notice.
 
 ## Assumptions and Scope
 

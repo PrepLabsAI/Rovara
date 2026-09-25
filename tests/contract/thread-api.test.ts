@@ -51,17 +51,18 @@ describe("the Slack service's thread client", () => {
     await expect(threadApi(handler).prepareWorkspace!(randomUUID())).rejects.toThrow(/^thread workspace preparation failed: FORBIDDEN /);
   });
 
-  it("PR A: the ensure body does not opt into lazy preparation, so compute is prepared as before (replaced when PR B opts in)", async () => {
-    const { handler } = createBroker();
+  it("opts into lazy preparation, so a new thread gets a record without compute", async () => {
+    const { handler, db } = createBroker();
     await registerSlackProject(handler);
     const sent: unknown[] = [];
     const requestId = randomUUID();
     const result = await threadApi(handler, sent).ensureWorkspace(requestId);
     expect(sent).toEqual([{
       requestId, includeIntegrations: true, includeSettingsRevision: true, includeConnectors: true,
-      includeAllConnectorTypes: true, includeRecoverableOperations: true,
+      includeAllConnectorTypes: true, includeRecoverableOperations: true, lazyPreparation: true,
       includeActionPolicy: true,
     }]);
-    expect(result).toMatchObject({ outcome: "WORKSPACE", status: "PREPARING", created: true });
+    expect(result).toMatchObject({ outcome: "WORKSPACE", status: "UNPREPARED", operationId: null, created: true });
+    expect(db.find((item) => item.entityType === "OPERATION")).toHaveLength(0);
   });
 });

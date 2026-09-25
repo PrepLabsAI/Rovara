@@ -35,18 +35,22 @@ needs the worker while the project's latest revision has changed".
 (dormant classifier and gate scaffolding), then this phase's PR B. Each part below is written
 against mainline plus every phase that ships before it in that order. Tasks 1 to 6 are PR A on its
 own branch, `feat/014b-lazy-workspace-a`, cut from `mainline` once phase 14a has merged and
-released. Tasks 7 and 8 are PR B on its own branch, `feat/014b-lazy-workspace-b`, cut from
-`mainline` once PR A and phase 14c part 1 have both merged and released.
+released. Tasks 7, 8 and 8b are PR B on its own branch, `feat/014b-lazy-workspace-b`, cut from
+`mainline` once PR A and phase 14c part 1 have both merged and released. Task 8b (one
+acknowledgement unless the request waited) was folded into PR B on 2026-09-25.
 
 ## Global Constraints
 
 - **Characterization first.** Task 1 adds tests that pin today's behaviour of `processor.ts`, the
   broker thread workspace routes and the `agentx_*` tools. No production file changes in Task 1,
   and no later task edits those files until Task 1 is committed with its tests passing.
-- **No regressions.** Every existing test passes with its assertions unchanged, with one named
-  exception: in `tests/contract/thread-workspace-request.test.ts` the expected request body gains
-  `lazyPreparation: true`, inserted before `includeActionPolicy: true` (which phase 14c part 1 adds
-  before this task runs) (Task 7). That assertion stays an exact `toEqual`.
+- **No regressions.** Every existing test passes with its assertions unchanged, with two named
+  exceptions, both in Task 7: in `tests/contract/thread-workspace-request.test.ts` the expected
+  request body gains `lazyPreparation: true`, inserted before `includeActionPolicy: true` (which
+  phase 14c part 1 adds before this task runs); and in `tests/contract/thread-api.test.ts` the PR A
+  test named "PR A: the ensure body does not opt into lazy preparation, ... (replaced when PR B
+  opts in)", added in PR A's review, is replaced by its PR B counterpart. Both stay exact
+  `toEqual` assertions on the body.
 - **Golden files are append-only.** Nothing under `tests/contract/__snapshots__/` changes. So the
   `agentx_*` tool names, labels, descriptions and parameters, and `orchestratorSystemPrompt`, stay
   byte-identical. The lazy behaviour lives in the tools' `execute` functions only.
@@ -97,6 +101,10 @@ released. Tasks 7 and 8 are PR B on its own branch, `feat/014b-lazy-workspace-b`
    records. Tests: Task 1 (the broker ignores unknown request fields, which is what an older
    control plane does with `lazyPreparation`), Task 4 (older-service path), Task 6 (eager result
    gives no worker handle). The rollout rules are below.
+6. **One acknowledgement per request (Task 8b).** Expected: a request with nothing ahead gets the
+   ingress's "I'm on it" and then its answer; a queued request, or one that waited for setup up
+   front, also gets "Working on it now"; a message with no count (older ingress) keeps today's
+   notice; an older Slack service is not broken by the count. Tests: Task 8b.
 
 ## Delivery and rollout
 
@@ -111,7 +119,7 @@ be reverted on its own. Cross-plan order: 14a, then PR A, then 14c part 1, then 
 | PR | Branch | Ships after | Tasks | What ships | User-visible change |
 |---|---|---|---|---|---|
 | A | `feat/014b-lazy-workspace-a` | 14a | 1 to 6 | Contracts; broker support for `UNPREPARED` and the prepare route; orchestrator worker handle; Slack service support, dormant | None. No service opts in, so no `UNPREPARED` record is ever created |
-| B | `feat/014b-lazy-workspace-b` | 14c part 1 | 7 and 8 | The Slack service sends `lazyPreparation: true`; end-to-end tests; docs | Lazy workspaces |
+| B | `feat/014b-lazy-workspace-b` | 14c part 1 | 7, 8 and 8b | The Slack service sends `lazyPreparation: true`; end-to-end tests; docs; the ingress sends a queue count and the service posts "Working on it now" only after a wait | Lazy workspaces; one acknowledgement per request unless it waited |
 
 Component mixes:
 
@@ -120,6 +128,11 @@ Component mixes:
 | Before A | A | The old request body has no opt-in, so new threads prepare at once as today. If a thread is `UNPREPARED` (only possible after PR B ran and was reverted), the broker prepares it at once, charges the limit and returns `PREPARING` with `created: true`. Task 4 tests this |
 | A or B | Before A | The old broker ignores `lazyPreparation` and returns today's result. The processor then builds no worker handle. Tasks 1 and 6 test this |
 | B | A | Lazy workspaces |
+
+Task 8b's queue count crosses the same boundary: the ingress is part of the control plane. An
+older ingress sends no count, so a PR B Slack service posts "Working on it now" as today. An older
+Slack service does not ask for the count's message attribute, so it ignores it and posts as today.
+The count is never in the message body, which older services parse strictly.
 
 Rollback rules:
 
@@ -145,6 +158,8 @@ Rollback rules:
 | `packages/slack-service/src/runtime.ts` | Passes `input.worker` to the orchestrator |
 | `packages/slack-service/src/main.ts` | Uses `createThreadApi` |
 | `packages/slack-service/src/thread-workspace-request.ts` | `lazyPreparation: true` (PR B) |
+| `packages/contracts/src/slack.ts`, `packages/broker/src/aws/slack-ingress.ts`, `packages/slack-service/src/consumer.ts`, `packages/slack-service/src/main.ts`, `packages/slack-service/src/processor.ts` | Task 8b (PR B): the `queuedBehind` queue message attribute, sent by the ingress and passed to the processor, which posts "Working on it now" only after a wait |
+| `tests/integration/slack-start-notice.test.ts` (new) | Task 8b: start notice characterization and new behaviour, consumer and attribute helpers |
 | `tests/support/slack-broker.ts` | New helpers: `registerSlackProject`, `serviceCall`, `finishOperation`, `fakeGitHubMcp`, `lazyEnsureWorkspace`, `prepareThread` |
 | `tests/contract/slack-thread-characterization.test.ts` (new) | Broker characterization |
 | `tests/integration/slack-processor-characterization.test.ts` (new) | Processor characterization |
@@ -2428,7 +2443,8 @@ Start PR B's branch from `mainline`, once PR A and phase 14c part 1 have both me
 
 **Files:**
 - Modify: `packages/slack-service/src/thread-workspace-request.ts`
-- Modify: `tests/contract/thread-workspace-request.test.ts` (the one allowed assertion change)
+- Modify: `tests/contract/thread-workspace-request.test.ts` and `tests/contract/thread-api.test.ts`
+  (the two allowed assertion changes)
 - Test: `tests/integration/hosted-lazy-workspace.test.ts` (new)
 
 **Interfaces:**
@@ -2449,6 +2465,44 @@ In `tests/contract/thread-workspace-request.test.ts`, the expected object become
       requestId: "request-1", includeIntegrations: true, includeSettingsRevision: true, includeConnectors: true,
       includeAllConnectorTypes: true, includeRecoverableOperations: true, lazyPreparation: true, includeActionPolicy: true,
     });
+```
+
+PR A's review added a dormancy pin to `tests/contract/thread-api.test.ts` that names its own
+replacement. Replace
+
+```ts
+  it("PR A: the ensure body does not opt into lazy preparation, so compute is prepared as before (replaced when PR B opts in)", async () => {
+    const { handler } = createBroker();
+    await registerSlackProject(handler);
+    const sent: unknown[] = [];
+    const requestId = randomUUID();
+    const result = await threadApi(handler, sent).ensureWorkspace(requestId);
+    expect(sent).toEqual([{
+      requestId, includeIntegrations: true, includeSettingsRevision: true, includeConnectors: true,
+      includeAllConnectorTypes: true, includeRecoverableOperations: true,
+      includeActionPolicy: true,
+    }]);
+    expect(result).toMatchObject({ outcome: "WORKSPACE", status: "PREPARING", created: true });
+  });
+```
+
+with
+
+```ts
+  it("opts into lazy preparation, so a new thread gets a record without compute", async () => {
+    const { handler, db } = createBroker();
+    await registerSlackProject(handler);
+    const sent: unknown[] = [];
+    const requestId = randomUUID();
+    const result = await threadApi(handler, sent).ensureWorkspace(requestId);
+    expect(sent).toEqual([{
+      requestId, includeIntegrations: true, includeSettingsRevision: true, includeConnectors: true,
+      includeAllConnectorTypes: true, includeRecoverableOperations: true, lazyPreparation: true,
+      includeActionPolicy: true,
+    }]);
+    expect(result).toMatchObject({ outcome: "WORKSPACE", status: "UNPREPARED", operationId: null, created: true });
+    expect(db.find((item) => item.entityType === "OPERATION")).toHaveLength(0);
+  });
 ```
 
 - [ ] **Step 2: Write the failing end-to-end tests**
@@ -2657,7 +2711,8 @@ describe("workspace only when needed, end to end", () => {
 
 Run: `npm run build && npx vitest run tests/contract/thread-workspace-request.test.ts tests/integration/hosted-lazy-workspace.test.ts`
 Expected: FAIL. The body lacks `lazyPreparation`, and every first message posts the setup message
-and charges the limit.
+and charges the limit. Also run `npx vitest run tests/contract/thread-api.test.ts`: the replaced
+test fails the same way (no `lazyPreparation`, status `PREPARING`).
 
 - [ ] **Step 4: Opt in**
 
@@ -2689,7 +2744,7 @@ Expected: PASS.
 Run: `npm run typecheck && npm run lint && npm run build && npm test`. Expected: all pass.
 
 ```bash
-git add packages/slack-service/src/thread-workspace-request.ts tests/contract/thread-workspace-request.test.ts tests/integration/hosted-lazy-workspace.test.ts
+git add packages/slack-service/src/thread-workspace-request.ts tests/contract/thread-workspace-request.test.ts tests/contract/thread-api.test.ts tests/integration/hosted-lazy-workspace.test.ts
 git commit -m "feat(slack-service): opt in to workspaces prepared only when needed
 
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
@@ -2831,15 +2886,16 @@ git diff mainline..HEAD -- tests | grep '^-' | grep -v '^---'
 git diff --stat mainline..HEAD -- tests/contract/__snapshots__
 ```
 
-Expected: the first command prints only the old `includeAllConnectorTypes: true,
-includeRecoverableOperations: true, includeActionPolicy: true,` line of
-`thread-workspace-request.test.ts` (the line as phase 14c part 1 left it, before this task inserted
-`lazyPreparation: true`); the second prints nothing.
+Expected: the first command prints only the removed lines of Task 7's two named assertion changes:
+the old `includeAllConnectorTypes: true, includeRecoverableOperations: true, includeActionPolicy:
+true,` line of `thread-workspace-request.test.ts` (the line as phase 14c part 1 left it), and the
+replaced PR A test's name, `const { handler } = createBroker();`, body line and result line in
+`thread-api.test.ts`. The second prints nothing. Task 8b repeats this check with its own lines.
 
 Search the new documents for em-dashes: `grep -n "—" README.md specs/014-slack-experience/spec.md specs/014-slack-experience/plans/phase-14b-lazy-workspace.md`
 Expected: no line added by this phase.
 
-- [ ] **Step 4: Commit and open PR B**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add README.md specs/014-slack-experience/spec.md
@@ -2848,9 +2904,639 @@ git commit -m "docs(014): workspaces prepared only when needed, limits and closi
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 ```
 
-Push `feat/014b-lazy-workspace-b` and open PR B against `mainline` once PR A and phase 14c part 1
-are both merged and released. Its description repeats the rollback rules and ends with
-`🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
+PR B opens after Task 8b.
+
+---
+
+### Task 8b: One acknowledgement unless the request waited (PR B)
+
+Owner decision, 2026-09-25, from the phase 14a live check (`quickstart.md`, "Finding"): today every
+request gets "Got it. I'm on it and will reply in this thread." from the ingress and, less than a
+second later, "Working on it now. I'll post the result in this thread when it's done." from the
+Slack service (`processor.ts`, directly after the lazy `worker`). The service now posts its notice
+only when the member was told to wait: the ingress said "queued behind N", or the turn waited for
+workspace setup up front (after "Setting up a new workspace" or "still being set up").
+
+**The signal.** The ingress already knows the count: `ahead = pending - 1` is what it puts in
+"queued behind N". It now also sends that count with the queue message, as the SQS message
+attribute `queuedBehind`, and the service reads it. FIFO order makes it exact: a request the
+ingress queued behind N others starts only after they finish. Other signals were rejected: the
+thread's `pendingRequests` at dequeue counts requests behind this one, not ahead of it; comparing
+`receivedAt` with the start time is a guess that depends on clocks and queue latency. The count is
+an attribute, not a body field, because `SlackRequestMessageSchema` is `.strict()` and an older
+Slack service's consumer discards and deletes a message with an unknown field
+(`message.discarded`, `invalid_message`). An older service does not ask for the attribute, so it
+ignores it. A message with no attribute (an older ingress) keeps today's notice.
+
+The lazy worker is unchanged: mid-turn setup posts "Setting up a new workspace" as before, and the
+turn's reply follows it; no start notice is added after mid-turn setup.
+
+**Files:**
+- Modify: `packages/contracts/src/slack.ts` (after `SlackRequestMessageSchema`)
+- Modify: `packages/broker/src/aws/slack-ingress.ts` (`enqueue` dependency, the enqueue call, the
+  AWS `enqueue`)
+- Modify: `packages/slack-service/src/consumer.ts`, `packages/slack-service/src/main.ts` (the
+  queue's `receive`), `packages/slack-service/src/processor.ts`
+- Modify: `tests/contract/slack-ingress.test.ts` (the harness records the count; one new test)
+- Test: `tests/integration/slack-start-notice.test.ts` (new)
+- Modify: `README.md` ("Working in a thread"), `specs/014-slack-experience/spec.md` (FR-026,
+  Decisions), `specs/014-slack-experience/quickstart.md` (the finding)
+
+**Interfaces:**
+- Consumes: Task 8's README text for "Working in a thread"; Task 8's spec Decisions bullet on lazy
+  workspaces; Task 6's processor (`waitForOperation` preparation block, lazy `worker`).
+- Produces:
+  - `@agentx/contracts`: `SLACK_QUEUED_BEHIND_ATTRIBUTE = "queuedBehind"`,
+    `queuedBehindAttributes(queuedBehind: number): Record<string, { DataType: "Number"; StringValue: string }>`,
+    `queuedBehindOf(attributes: Readonly<Record<string, { StringValue?: string | undefined }>> | undefined): number | undefined`;
+  - `SlackIngressDependencies.enqueue(message, messageGroupId, queuedBehind: number)`;
+  - `QueueMessage.queuedBehind?: number`; `RequestHandler`'s context
+    `{ finalAttempt: boolean; queuedBehind?: number }`;
+  - `processSlackRequest(message, dependencies, options: { finalAttempt: boolean; queuedBehind?: number })`.
+- No existing assertion changes. Existing callers pass no `queuedBehind` and keep today's notice,
+  so Task 7's end-to-end expectations (`[WORKING, ...]`) hold unchanged.
+
+- [ ] **Step 1: Pin today's start notice (characterization)**
+
+These pass before any production change and keep passing after it.
+
+```ts
+// tests/integration/slack-start-notice.test.ts
+// Spec 014 FR-026: when the Slack service says it has started, next to the ingress's own acknowledgement.
+import { describe, expect, it, vi } from "vitest";
+import type { SlackRequestMessage, SlackThreadWorkspaceResult } from "../../packages/contracts/src/index.js";
+import { processGroup, type QueueClient, type QueueMessage } from "../../packages/slack-service/src/consumer.js";
+import { processSlackRequest, type ProcessorDependencies } from "../../packages/slack-service/src/processor.js";
+
+const thread = { teamId: "T0BSHLLUGBD", channelId: "C0123456789", threadTs: "1695500000.000001" };
+const workspaceId = "11111111-1111-4111-8111-111111111111";
+const operationId = "22222222-2222-4222-8222-222222222222";
+const WORKING = "Working on it now. I'll post the result in this thread when it's done.";
+const SETTING_UP = "Setting up a new workspace for this thread. The first request takes a few minutes.";
+const STILL = "This thread's workspace is still being set up. I'll start as soon as it's ready.";
+
+function message(): SlackRequestMessage {
+  return { version: 1, eventId: "Ev0000000001", thread, userId: "U0123456789", text: "what's open?", receivedAt: "2026-09-25T10:00:00.000Z" };
+}
+
+function workspace(overrides: Record<string, unknown> = {}): SlackThreadWorkspaceResult {
+  return { outcome: "WORKSPACE", workspaceId, status: "READY", operationId: null, created: false, orchestratorInstructions: "Delegate work.", ...overrides };
+}
+
+function harness(result: SlackThreadWorkspaceResult, preparation = "SUCCEEDED") {
+  const posts: string[] = [];
+  const dependencies: ProcessorDependencies = {
+    api: () => ({
+      ensureWorkspace: async () => result,
+      startClose: async () => ({ outcome: "NOT_FOUND" as const }),
+      completeClose: vi.fn(),
+      waitForOperation: async () => ({ status: preparation }),
+      createConversation: async () => "33333333-3333-4333-8333-333333333333",
+    }),
+    threads: {
+      load: async () => ({}),
+      saveConversation: async () => undefined,
+      saveSettingsRevision: async () => undefined,
+      close: async () => undefined,
+      finish: async () => undefined,
+    },
+    runTurn: async () => "2 issues are open.",
+    post: async (_thread, text) => {
+      posts.push(text);
+    },
+  };
+  return { dependencies, posts };
+}
+
+function queueEntry(extra: Partial<QueueMessage> = {}): QueueMessage {
+  return { body: JSON.stringify(message()), receiptHandle: "receipt-1", groupId: "thread-a", receiveCount: 1, ...extra };
+}
+
+const queue: QueueClient = { receive: async () => [], delete: async () => undefined, extendVisibility: async () => undefined };
+const groupOptions = { maxReceiveCount: 5, visibilitySeconds: 900, heartbeatMilliseconds: 60_000 };
+
+describe("the start notice today (characterization)", () => {
+  it.each(["READY", "UNPREPARED"] as const)("posts it before the reply in a %s thread when the request carries no queue count", async (status) => {
+    const h = harness(workspace({ status }));
+    await processSlackRequest(message(), h.dependencies, { finalAttempt: false });
+    expect(h.posts).toEqual([WORKING, "2 issues are open."]);
+  });
+
+  it("posts it after an up-front setup wait", async () => {
+    const h = harness(workspace({ status: "PREPARING", operationId, created: true }));
+    await processSlackRequest(message(), h.dependencies, { finalAttempt: false });
+    expect(h.posts).toEqual([SETTING_UP, WORKING, "2 issues are open."]);
+  });
+
+  it("hands a queue message with no count to the processor with the final-attempt flag alone", async () => {
+    const contexts: unknown[] = [];
+    await processGroup(queue, async (_message, context) => {
+      contexts.push(context);
+    }, [queueEntry()], groupOptions, () => undefined);
+    expect(contexts).toEqual([{ finalAttempt: false }]);
+  });
+});
+```
+
+Run: `npm run build && npx vitest run tests/integration/slack-start-notice.test.ts`
+Expected: PASS, 4 tests.
+
+- [ ] **Step 2: Write the failing tests for the new behaviour**
+
+In `tests/integration/slack-start-notice.test.ts`, replace the contracts import
+
+```ts
+import type { SlackRequestMessage, SlackThreadWorkspaceResult } from "../../packages/contracts/src/index.js";
+```
+
+with
+
+```ts
+import {
+  SLACK_QUEUED_BEHIND_ATTRIBUTE, queuedBehindAttributes, queuedBehindOf, type SlackRequestMessage, type SlackThreadWorkspaceResult,
+} from "../../packages/contracts/src/index.js";
+```
+
+and append:
+
+```ts
+describe("the start notice only when the member was told to wait", () => {
+  it.each(["READY", "UNPREPARED"] as const)("is not posted in a %s thread when nothing was queued ahead", async (status) => {
+    const h = harness(workspace({ status }));
+    await processSlackRequest(message(), h.dependencies, { finalAttempt: false, queuedBehind: 0 });
+    expect(h.posts).toEqual(["2 issues are open."]);
+  });
+
+  it("is posted when the request waited behind earlier requests in the thread", async () => {
+    const h = harness(workspace());
+    await processSlackRequest(message(), h.dependencies, { finalAttempt: false, queuedBehind: 2 });
+    expect(h.posts).toEqual([WORKING, "2 issues are open."]);
+  });
+
+  it.each([
+    [true, SETTING_UP],
+    [false, STILL],
+  ])("is posted after an up-front setup wait even when nothing was queued ahead (created: %s)", async (created, notice) => {
+    const h = harness(workspace({ status: "PREPARING", operationId, created }));
+    await processSlackRequest(message(), h.dependencies, { finalAttempt: false, queuedBehind: 0 });
+    expect(h.posts).toEqual([notice, WORKING, "2 issues are open."]);
+  });
+
+  it("is not posted when setup fails, as today", async () => {
+    const h = harness(workspace({ status: "PREPARING", operationId, created: true }), "FAILED");
+    await processSlackRequest(message(), h.dependencies, { finalAttempt: false, queuedBehind: 0 });
+    expect(h.posts).toEqual([SETTING_UP, "AgentX could not set up this thread's workspace (FAILED). Mention me again in this thread to retry."]);
+  });
+
+  it("hands the queue count to the processor", async () => {
+    const contexts: unknown[] = [];
+    await processGroup(queue, async (_message, context) => {
+      contexts.push(context);
+    }, [queueEntry({ queuedBehind: 0 }), queueEntry({ receiptHandle: "receipt-2", queuedBehind: 3, receiveCount: 5 })], groupOptions, () => undefined);
+    expect(contexts).toEqual([{ finalAttempt: false, queuedBehind: 0 }, { finalAttempt: true, queuedBehind: 3 }]);
+  });
+});
+
+describe("the queue count attribute", () => {
+  it("round-trips through the queue attributes the ingress sends", () => {
+    expect(queuedBehindAttributes(3)).toEqual({ [SLACK_QUEUED_BEHIND_ATTRIBUTE]: { DataType: "Number", StringValue: "3" } });
+    expect(queuedBehindOf(queuedBehindAttributes(0))).toBe(0);
+    expect(queuedBehindOf(queuedBehindAttributes(3))).toBe(3);
+  });
+
+  it.each([
+    ["no attributes", undefined],
+    ["another attribute only", { other: { StringValue: "1" } }],
+    ["a negative count", { [SLACK_QUEUED_BEHIND_ATTRIBUTE]: { StringValue: "-1" } }],
+    ["a fraction", { [SLACK_QUEUED_BEHIND_ATTRIBUTE]: { StringValue: "1.5" } }],
+    ["text", { [SLACK_QUEUED_BEHIND_ATTRIBUTE]: { StringValue: "two" } }],
+    ["no value", { [SLACK_QUEUED_BEHIND_ATTRIBUTE]: {} }],
+  ])("reads %s as no count, so the processor keeps today's notice", (_name, attributes) => {
+    expect(queuedBehindOf(attributes)).toBeUndefined();
+  });
+});
+```
+
+In `tests/contract/slack-ingress.test.ts`, let the harness record the count. Replace
+
+```ts
+  const queue: Array<{ message: SlackRequestMessage; groupId: string }> = [];
+```
+
+with
+
+```ts
+  const queue: Array<{ message: SlackRequestMessage; groupId: string; queuedBehind?: number }> = [];
+```
+
+replace
+
+```ts
+    enqueue: async (message, groupId) => {
+```
+
+with
+
+```ts
+    enqueue: async (message, groupId, queuedBehind) => {
+```
+
+and replace
+
+```ts
+      queue.push({ message, groupId });
+```
+
+with
+
+```ts
+      queue.push({ message, groupId, queuedBehind });
+```
+
+Then add this test directly before `it("processes a repeated Slack event only once", ...)`:
+
+```ts
+  it("tells the Slack service how many earlier requests each one was queued behind (spec 014 FR-026)", async () => {
+    const { handler, queue } = harness();
+    await send(handler, signedEvent(mention()));
+    await send(handler, signedEvent(mention({
+      eventId: "Ev0000000002",
+      event: { user: "U0456789012", ts: "1695500100.000002", thread_ts: "1695500000.000001", text: `<@${bot}> also add tests` },
+    })));
+    expect(queue.map((entry) => entry.queuedBehind)).toEqual([0, 1]);
+  });
+```
+
+- [ ] **Step 3: Run the tests and watch them fail**
+
+Run: `npm run build && npx vitest run tests/integration/slack-start-notice.test.ts tests/contract/slack-ingress.test.ts`
+Expected: FAIL, 11 tests: the ingress sends no count (`[undefined, undefined]`), the processor
+still posts the notice with `queuedBehind: 0`, the consumer drops the count, and
+`queuedBehindAttributes` and `queuedBehindOf` do not exist yet. The 4 characterization tests and
+every existing ingress test still pass.
+
+- [ ] **Step 4: Add the attribute helpers to the contracts**
+
+In `packages/contracts/src/slack.ts`, directly after `SlackRequestMessageSchema` (the block ending
+`receivedAt: z.string().datetime(),` / `})` / `.strict();`), add:
+
+```ts
+/**
+ * Spec 014 FR-026: the queue message attribute through which the ingress tells the Slack service how
+ * many earlier requests in the thread a request was queued behind. It travels outside the body,
+ * because an older Slack service parses the body strictly and would discard a message with a new field.
+ */
+export const SLACK_QUEUED_BEHIND_ATTRIBUTE = "queuedBehind";
+
+export function queuedBehindAttributes(queuedBehind: number): Record<string, { DataType: "Number"; StringValue: string }> {
+  return { [SLACK_QUEUED_BEHIND_ATTRIBUTE]: { DataType: "Number", StringValue: String(queuedBehind) } };
+}
+
+/** The count a received message carries, or undefined when it carries none (an older ingress) or a malformed one. */
+export function queuedBehindOf(attributes: Readonly<Record<string, { StringValue?: string | undefined }>> | undefined): number | undefined {
+  const value = attributes?.[SLACK_QUEUED_BEHIND_ATTRIBUTE]?.StringValue;
+  return value !== undefined && /^\d{1,6}$/.test(value) ? Number(value) : undefined;
+}
+```
+
+`packages/contracts/src/index.ts` already re-exports `./slack.js`.
+
+- [ ] **Step 5: The ingress sends the count**
+
+In `packages/broker/src/aws/slack-ingress.ts`, add `queuedBehindAttributes,` to the
+`@agentx/contracts` import, between `SlackUserIdSchema,` and `slackRequestText,`.
+
+In `SlackIngressDependencies`, replace
+
+```ts
+  enqueue: (message: SlackRequestMessage, messageGroupId: string) => Promise<void>;
+```
+
+with
+
+```ts
+  /** `queuedBehind` is how many earlier requests in the thread this one waits behind (spec 014 FR-026). */
+  enqueue: (message: SlackRequestMessage, messageGroupId: string, queuedBehind: number) => Promise<void>;
+```
+
+Compute `ahead` before the enqueue, so the queue message and the thread notice use the same count.
+Replace
+
+```ts
+    const pending = await dependencies.changePending(subject, 1);
+    try {
+      await dependencies.enqueue(message, createHash("sha256").update(subject).digest("hex"));
+```
+
+with
+
+```ts
+    const pending = await dependencies.changePending(subject, 1);
+    const ahead = pending - 1;
+    try {
+      await dependencies.enqueue(message, createHash("sha256").update(subject).digest("hex"), Math.max(ahead, 0));
+```
+
+and delete the later `const ahead = pending - 1;`, directly after
+`log("mention.accepted", { eventId: mention.eventId, pendingInThread: pending });`. The notice
+text and its `ahead > 0` test are unchanged.
+
+In `createAwsSlackIngressHandler`, replace the AWS `enqueue`
+
+```ts
+    async enqueue(message, messageGroupId) {
+      await sqs.send(new SendMessageCommand({
+        QueueUrl: queueUrl,
+        MessageBody: JSON.stringify(message),
+        MessageGroupId: messageGroupId,
+        MessageDeduplicationId: message.eventId,
+      }));
+```
+
+with
+
+```ts
+    async enqueue(message, messageGroupId, queuedBehind) {
+      await sqs.send(new SendMessageCommand({
+        QueueUrl: queueUrl,
+        MessageBody: JSON.stringify(message),
+        MessageGroupId: messageGroupId,
+        MessageDeduplicationId: message.eventId,
+        MessageAttributes: queuedBehindAttributes(queuedBehind),
+      }));
+```
+
+`sqs:SendMessage` covers message attributes, so no IAM or queue change is needed.
+
+- [ ] **Step 6: The consumer passes the count on**
+
+In `packages/slack-service/src/consumer.ts`, replace
+
+```ts
+  groupId: string;
+  receiveCount: number;
+}
+```
+
+with
+
+```ts
+  groupId: string;
+  receiveCount: number;
+  /** How many earlier requests the ingress queued this one behind; absent from an older ingress. */
+  queuedBehind?: number;
+}
+```
+
+replace
+
+```ts
+export type RequestHandler = (message: SlackRequestMessage, context: { finalAttempt: boolean }) => Promise<void>;
+```
+
+with
+
+```ts
+export type RequestHandler = (message: SlackRequestMessage, context: { finalAttempt: boolean; queuedBehind?: number }) => Promise<void>;
+```
+
+and in `processGroup` replace
+
+```ts
+        await handle(parsed.data, { finalAttempt: entry.receiveCount >= options.maxReceiveCount });
+```
+
+with
+
+```ts
+        await handle(parsed.data, {
+          finalAttempt: entry.receiveCount >= options.maxReceiveCount,
+          ...(entry.queuedBehind === undefined ? {} : { queuedBehind: entry.queuedBehind }),
+        });
+```
+
+In `packages/slack-service/src/main.ts`, replace
+
+```ts
+import type { SlackRequestMessage } from "@agentx/contracts";
+```
+
+with
+
+```ts
+import { SLACK_QUEUED_BEHIND_ATTRIBUTE, queuedBehindOf, type SlackRequestMessage } from "@agentx/contracts";
+```
+
+and in the queue's `receive` replace
+
+```ts
+      MessageSystemAttributeNames: ["MessageGroupId", "ApproximateReceiveCount"],
+    }));
+    return (response.Messages ?? []).map((message) => ({
+      body: message.Body ?? "",
+      receiptHandle: message.ReceiptHandle ?? "",
+      groupId: message.Attributes?.MessageGroupId ?? "",
+      receiveCount: Number.parseInt(message.Attributes?.ApproximateReceiveCount ?? "1", 10),
+    }));
+```
+
+with
+
+```ts
+      MessageSystemAttributeNames: ["MessageGroupId", "ApproximateReceiveCount"],
+      MessageAttributeNames: [SLACK_QUEUED_BEHIND_ATTRIBUTE],
+    }));
+    return (response.Messages ?? []).map((message) => {
+      const queuedBehind = queuedBehindOf(message.MessageAttributes);
+      return {
+        body: message.Body ?? "",
+        receiptHandle: message.ReceiptHandle ?? "",
+        groupId: message.Attributes?.MessageGroupId ?? "",
+        receiveCount: Number.parseInt(message.Attributes?.ApproximateReceiveCount ?? "1", 10),
+        ...(queuedBehind === undefined ? {} : { queuedBehind }),
+      };
+    });
+```
+
+`main.ts` already passes the consumer's `context` straight to `processSlackRequest`, so that call
+does not change.
+
+- [ ] **Step 7: The processor posts the notice only after a wait**
+
+In `packages/slack-service/src/processor.ts`, replace the options parameter
+
+```ts
+  options: { finalAttempt: boolean },
+): Promise<void> {
+```
+
+with
+
+```ts
+  options: {
+    finalAttempt: boolean;
+    /** How many earlier requests the ingress told the member this one waits behind; absent from an older ingress. */
+    queuedBehind?: number;
+  },
+): Promise<void> {
+```
+
+Directly after `let finished = false;` add
+
+```ts
+  // Set when this turn waited for workspace setup up front, which the member was told about.
+  let waitedForSetup = false;
+```
+
+In the preparation block, after the failed-preparation early return, replace
+
+```ts
+        await post(preparationFailedMessage(prepared.status));
+        finished = true;
+        return;
+      }
+    } else if (workspace.status !== "UNPREPARED" && !RUNNABLE_STATUSES.has(workspace.status)) {
+```
+
+with
+
+```ts
+        await post(preparationFailedMessage(prepared.status));
+        finished = true;
+        return;
+      }
+      waitedForSetup = true;
+    } else if (workspace.status !== "UNPREPARED" && !RUNNABLE_STATUSES.has(workspace.status)) {
+```
+
+Then replace
+
+```ts
+    await post("Working on it now. I'll post the result in this thread when it's done.");
+    log("task.started", { eventId: message.eventId });
+```
+
+with
+
+```ts
+    // Spec 014 FR-026: the ingress has already said "I'm on it". Say work has started only when the
+    // member was told to wait, behind earlier requests or for setup. An older ingress sends no count.
+    const announceStart = options.queuedBehind === undefined || options.queuedBehind > 0 || waitedForSetup;
+    if (announceStart) await post("Working on it now. I'll post the result in this thread when it's done.");
+    log("task.started", { eventId: message.eventId });
+```
+
+The notice text is unchanged, and the post stays on one line starting with `await post("Working on
+it now.` after `if (announceStart)`. Phase 14c part 2 inserts its confirmation claim "directly
+before" that post; it goes before the new comment block, so the claim still runs before the notice.
+
+- [ ] **Step 8: Run the tests and watch them pass**
+
+Run: `npm run build && npx vitest run tests/integration/slack-start-notice.test.ts tests/contract/slack-ingress.test.ts tests/integration/slack-service.test.ts tests/integration/slack-processor-characterization.test.ts tests/integration/slack-lazy-worker.test.ts tests/integration/hosted-lazy-workspace.test.ts tests/integration/turn-records.test.ts`
+Expected: PASS.
+
+- [ ] **Step 9: Update the README, spec and live-check record**
+
+In `README.md`, "Working in a thread", replace (the text as Task 8 left it)
+
+```markdown
+AgentX replies within a few seconds. If earlier requests in the thread are still running, it says
+how many are ahead. A new thread gets a coding workspace only when a request first needs the
+```
+
+with
+
+```markdown
+AgentX replies within a few seconds. If earlier requests in the thread are still running, it says
+how many are ahead, and says "Working on it now" when it starts on the request. A request with
+nothing ahead gets only that first reply before its answer. A new thread gets a coding workspace
+only when a request first needs the
+```
+
+In `specs/014-slack-experience/spec.md`, after FR-025
+
+```markdown
+- **FR-025**: The Slack app MUST gain interactivity with a signed request URL; requests failing
+  signature verification MUST be refused.
+```
+
+add
+
+```markdown
+- **FR-026**: A request MUST get one acknowledgement before its answer. The Slack service MUST post
+  its "Working on it now" notice only when the request waited: behind earlier requests in the
+  thread, or for workspace setup. (Added 2026-09-25, from the phase 14a live check.)
+```
+
+and in "Decisions", after the lazy workspaces bullet Task 8 added, which ends
+
+```markdown
+  and all connector tools never prepare it. The plan is
+  [plans/phase-14b-lazy-workspace.md](plans/phase-14b-lazy-workspace.md).
+```
+
+add
+
+```markdown
+- **The ingress passes the queue count as a queue message attribute, not a body field**
+  (2026-09-25, owner-approved, FR-026). An older Slack service parses the body strictly and would
+  discard a message with a new field; it ignores attributes it does not ask for. A message with no
+  count, from an older ingress, keeps the "Working on it now" notice.
+```
+
+In `specs/014-slack-experience/quickstart.md`, at the end of the "Finding" paragraph, replace
+
+```markdown
+Only one is needed when nothing is queued ahead.
+```
+
+with
+
+```markdown
+Only one is needed when nothing is queued ahead. Resolved by FR-026 in phase 14b PR B.
+```
+
+- [ ] **Step 10: Verify PR B**
+
+Run: `npm run typecheck && npm run lint && npm run build && npm test && npm run infra:synth`.
+Expected: all pass.
+
+Confirm the only removed test lines are the two named request body assertions (Task 7) and the
+three ingress harness lines this task widened, and that no golden file changed:
+
+```bash
+git diff mainline..HEAD -- tests | grep '^-' | grep -v '^---'
+git diff --stat mainline..HEAD -- tests/contract/__snapshots__
+```
+
+Expected: the first command prints exactly these lines, and the second prints nothing:
+
+```text
+-  const queue: Array<{ message: SlackRequestMessage; groupId: string }> = [];
+-    enqueue: async (message, groupId) => {
+-      queue.push({ message, groupId });
+-  it("PR A: the ensure body does not opt into lazy preparation, so compute is prepared as before (replaced when PR B opts in)", async () => {
+-    const { handler } = createBroker();
+-      includeAllConnectorTypes: true, includeRecoverableOperations: true,
+-    expect(result).toMatchObject({ outcome: "WORKSPACE", status: "PREPARING", created: true });
+-      includeAllConnectorTypes: true, includeRecoverableOperations: true, includeActionPolicy: true,
+```
+
+Search the new documents for em-dashes: `grep -n "—" README.md specs/014-slack-experience/spec.md specs/014-slack-experience/quickstart.md specs/014-slack-experience/plans/phase-14b-lazy-workspace.md`
+Expected: no line added by this phase.
+
+- [ ] **Step 11: Commit and open PR B**
+
+```bash
+git add packages/contracts/src/slack.ts packages/broker/src/aws/slack-ingress.ts packages/slack-service/src/consumer.ts packages/slack-service/src/main.ts packages/slack-service/src/processor.ts tests/integration/slack-start-notice.test.ts tests/contract/slack-ingress.test.ts README.md specs/014-slack-experience/spec.md specs/014-slack-experience/quickstart.md
+git commit -m "feat(slack-service): say work has started only when a request waited
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
+```
+
+Push `feat/014b-lazy-workspace-b` and open PR B against `mainline`. Its description repeats the
+rollback rules, notes that either ingress and Slack service version mix keeps today's start notice,
+and ends with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
 
 ---
 
@@ -2865,9 +3551,16 @@ are both merged and released. Its description repeats the rollback rules and end
   the processor's preparation block (`draft.disposition`). Four test blocks were made lint-clean
   (`expect.any(String) as string`, no needless assertions, a worker double with plain properties).
 
+- **Re-verified for PR B, 2026-09-25.** Tasks 7, 8 and 8b were applied to a scratch copy of
+  mainline `d819d58` (14a, PR A #52, plan amendments #53 and 14c part 1 #56 merged). Every Task 7
+  and 8 anchor matched; the one gap was PR A's review-added dormancy pin in `thread-api.test.ts`,
+  now replaced in Task 7 Step 1. Task 8b's characterization tests pass on the base, its 11 new
+  tests fail there and pass after Steps 4 to 7. `npm run typecheck`, `npm run lint`, `npm run
+  build`, `npm test` and `npm run infra:synth` pass: 1,423 tests with one existing skip.
+
 - **Spec coverage.** FR-001: Task 3. FR-002: Tasks 1, 3, 5 and 7. FR-003: Tasks 4, 5, 6 and 7.
   FR-004: Tasks 3 and 4. FR-005: Tasks 1, 4 (retry and prepared threads) and 6 (no worker handle).
-  FR-006: Tasks 6 and 7. US1 acceptance scenarios 1 to 4: Tasks 3, 6, 7 and 4. SC-002: Task 3.
+  FR-006: Tasks 6 and 7. FR-026: Task 8b. US1 acceptance scenarios 1 to 4: Tasks 3, 6, 7 and 4. SC-002: Task 3.
   Edge cases: close of a thread with no workspace (Tasks 3 and 7); a later revision change (Task 4).
   SC-001's latency target is met by removing preparation from connector-only turns; it has no unit
   test and is checked live after PR B.

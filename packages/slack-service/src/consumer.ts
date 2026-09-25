@@ -6,6 +6,8 @@ export interface QueueMessage {
   receiptHandle: string;
   groupId: string;
   receiveCount: number;
+  /** How many earlier requests the ingress queued this one behind; absent from an older ingress. */
+  queuedBehind?: number;
 }
 
 export interface QueueClient {
@@ -23,7 +25,7 @@ export interface ConsumerOptions {
   log?: ServiceLog;
 }
 
-export type RequestHandler = (message: SlackRequestMessage, context: { finalAttempt: boolean }) => Promise<void>;
+export type RequestHandler = (message: SlackRequestMessage, context: { finalAttempt: boolean; queuedBehind?: number; redelivered?: boolean }) => Promise<void>;
 
 // Each Slack thread is one FIFO message group: its messages run one at a time, and different threads run in parallel.
 export async function runConsumer(queue: QueueClient, handle: RequestHandler, options: ConsumerOptions): Promise<void> {
@@ -68,7 +70,14 @@ export async function processGroup(
       if (!parsed.success) {
         log("message.discarded", { reason: "invalid_message" });
       } else {
-        await handle(parsed.data, { finalAttempt: entry.receiveCount >= options.maxReceiveCount });
+        await handle(parsed.data, {
+          finalAttempt: entry.receiveCount >= options.maxReceiveCount,
+          ...(entry.queuedBehind === undefined ? {} : { queuedBehind: entry.queuedBehind }),
+          // SQS redelivers after the visibility timeout expires on an earlier, non-final attempt; the
+          // member was told "Working on it now" for that attempt, so a fresh one says so again rather
+          // than restarting silently.
+          ...(entry.receiveCount > 1 ? { redelivered: true } : {}),
+        });
       }
       await queue.delete(entry.receiptHandle);
     } catch (error) {

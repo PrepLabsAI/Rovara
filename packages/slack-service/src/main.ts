@@ -12,7 +12,7 @@ import {
   SQSClient,
 } from "@aws-sdk/client-sqs";
 import { defaultProvider } from "@aws-sdk/credential-provider-node";
-import type { SlackRequestMessage } from "@agentx/contracts";
+import { SLACK_QUEUED_BEHIND_ATTRIBUTE, queuedBehindOf, type SlackRequestMessage } from "@agentx/contracts";
 import { ControlPlaneApi } from "@agentx/orchestrator/control-plane-api";
 import { runOrchestratorTurn } from "@agentx/orchestrator/orchestrator";
 import { runConsumer, type QueueClient } from "./consumer.js";
@@ -236,13 +236,18 @@ const queue: QueueClient = {
       WaitTimeSeconds: 20,
       VisibilityTimeout: VISIBILITY_SECONDS,
       MessageSystemAttributeNames: ["MessageGroupId", "ApproximateReceiveCount"],
+      MessageAttributeNames: [SLACK_QUEUED_BEHIND_ATTRIBUTE],
     }));
-    return (response.Messages ?? []).map((message) => ({
-      body: message.Body ?? "",
-      receiptHandle: message.ReceiptHandle ?? "",
-      groupId: message.Attributes?.MessageGroupId ?? "",
-      receiveCount: Number.parseInt(message.Attributes?.ApproximateReceiveCount ?? "1", 10),
-    }));
+    return (response.Messages ?? []).map((message) => {
+      const queuedBehind = queuedBehindOf(message.MessageAttributes);
+      return {
+        body: message.Body ?? "",
+        receiptHandle: message.ReceiptHandle ?? "",
+        groupId: message.Attributes?.MessageGroupId ?? "",
+        receiveCount: Number.parseInt(message.Attributes?.ApproximateReceiveCount ?? "1", 10),
+        ...(queuedBehind === undefined ? {} : { queuedBehind }),
+      };
+    });
   },
   async delete(receiptHandle) {
     await sqs.send(new DeleteMessageCommand({ QueueUrl: queueUrl, ReceiptHandle: receiptHandle }));

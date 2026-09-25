@@ -85,7 +85,13 @@ const RUNNABLE_STATUSES = new Set(["READY", "STOPPED", "BUSY"]);
 export async function processSlackRequest(
   message: SlackRequestMessage,
   dependencies: ProcessorDependencies,
-  options: { finalAttempt: boolean },
+  options: {
+    finalAttempt: boolean;
+    /** How many earlier requests the ingress told the member this one waits behind; absent from an older ingress. */
+    queuedBehind?: number;
+    /** Set when SQS's ApproximateReceiveCount shows this attempt was redelivered after an earlier one threw. */
+    redelivered?: boolean;
+  },
 ): Promise<void> {
   const subject = slackThreadSubject(message.thread);
   const log: ServiceLog = dependencies.log ?? (() => undefined);
@@ -104,6 +110,8 @@ export async function processSlackRequest(
   };
   const api = dependencies.api(message);
   let finished = false;
+  // Set when this turn waited for workspace setup up front, which the member was told about.
+  let waitedForSetup = false;
   try {
     if (isCloseWorkspaceRequest(message.text)) {
       draft.disposition = "workspace_close";
@@ -167,6 +175,7 @@ export async function processSlackRequest(
         finished = true;
         return;
       }
+      waitedForSetup = true;
     } else if (workspace.status !== "UNPREPARED" && !RUNNABLE_STATUSES.has(workspace.status)) {
       draft.disposition = "workspace_unavailable";
       log("workspace.unavailable", { eventId: message.eventId, status: workspace.status });
@@ -195,7 +204,13 @@ export async function processSlackRequest(
     const worker = workspace.status === "UNPREPARED"
       ? createLazyWorker({ api, post, log, eventId: message.eventId })
       : undefined;
-    await post("Working on it now. I'll post the result in this thread when it's done.");
+    // Spec 014 FR-026: the ingress has already said "I'm on it". Say work has started only when the
+    // member was told to wait, behind earlier requests, for setup, or because SQS redelivered this
+    // request after an earlier attempt threw: that attempt's own "Working on it now" is 15 minutes
+    // stale by the time the retry runs, so this one says it again rather than restarting silently. An
+    // older ingress sends no count, and a missing receive count is treated as not redelivered.
+    const announceStart = options.queuedBehind === undefined || options.queuedBehind > 0 || waitedForSetup || options.redelivered === true;
+    if (announceStart) await post("Working on it now. I'll post the result in this thread when it's done.");
     log("task.started", { eventId: message.eventId });
     let response: string;
     try {
