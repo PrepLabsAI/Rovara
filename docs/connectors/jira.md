@@ -239,6 +239,7 @@ Not covered by the guard, so only Step 4 holds these to the project:
   `customfield_10014`. Only exact uppercase keys are checked there.
 - Sprint and board ids (`sprintId`, `boardId`, `assignToSprint`).
 - Comment ids (`commentId`).
+- Attachment references (`inlineFileId`, `inlineFileCollection`, `inlineFileName`).
 - Reply contents. The guard checks requests, not responses.
 
 ## Troubleshooting

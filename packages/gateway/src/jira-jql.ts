@@ -58,7 +58,7 @@ function isFieldList(clause: string): boolean {
  * parentheses. Tracks quotes (with backslash escapes inside them) and parenthesis depth so model
  * text can never close the group early. Refuses rather than guesses on anything it cannot track:
  * control characters, Unicode look-alikes of `( ) " ' \`, comment markers, a quote touching anything
- * but whitespace, a bracket, a comma or an operator (fail closed), and any ORDER BY clause that is
+ * but whitespace, a parenthesis, a comma or an operator (fail closed), and any ORDER BY clause that is
  * more than a list of fields.
  */
 export function limitJqlToProject(jql: string, projectKey: string): JqlLimit {
