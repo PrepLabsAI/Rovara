@@ -59,7 +59,7 @@ describe("thread workspaces before lazy preparation (characterization)", () => {
     await ensureWorkspace(handler, thread, pratik);
     const close = await serviceCall(handler, thread, pratik, "POST", "/v1/service/threads/workspace/close", { requestId: randomUUID() });
     expect(close.status).toBe(409);
-    expect(close.body.error).toMatchObject({ code: "WORKSPACE_BUSY" });
+    expect(close.body.error).toEqual({ code: "WORKSPACE_BUSY", message: "workspace is PREPARING; wait for active work before closing it" });
   });
 
   it("serves connector discovery and calls whatever the workspace status", async () => {
