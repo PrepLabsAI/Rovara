@@ -156,7 +156,7 @@ describe("workspace preparation coordination", () => {
       ...registered.definition,
       integrations: {
         connectors: [
-          { name: "tracker", type: "linear", credentialRef: "linear-key", scopes: ["payments"] },
+          { name: "tracker", type: "future-vendor", credentialRef: "future-vendor-key", scopes: ["payments"] },
         ],
       },
     } as ProjectDefinition;
@@ -188,7 +188,7 @@ describe("workspace preparation coordination", () => {
     expect(dispatch.invocation?.kind).toBe("prepare");
     if (dispatch.invocation?.kind !== "prepare") throw new Error("missing prepare invocation");
     expect(dispatch.invocation.payload.project.integrations?.connectors).toEqual([
-      { name: "tracker", type: "linear", credentialRef: "linear-key", scopes: ["payments"] },
+      { name: "tracker", type: "future-vendor", credentialRef: "future-vendor-key", scopes: ["payments"] },
     ]);
   });
 });

@@ -56,8 +56,8 @@ Each phase is one pull request to `mainline`. Check a task only after its eviden
 
 ## Phase 5: Linear (US2)
 
-- [ ] T032 Record Linear `tools/list` fixtures; add the Linear connector type, team binder and fake-server integration test.
-- [ ] T033 Write the Linear setup guide with the mandatory vendor-side restriction; add Linear evaluation cases.
+- [X] T032 Record Linear `tools/list` fixtures; add the Linear connector type, team binder and fake-server integration test.
+- [X] T033 Write the Linear setup guide with the mandatory vendor-side restriction; add Linear evaluation cases.
 - [ ] T034 Live check against a Linear workspace; record evidence in `quickstart.md`.
 
 ## Phase 6: Jira (US3)

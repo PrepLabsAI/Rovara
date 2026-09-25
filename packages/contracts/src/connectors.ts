@@ -79,7 +79,25 @@ export const JiraConnectorSchema = z.object({
   }
 });
 
-export const ConnectorConfigSchema = z.discriminatedUnion("type", [GitHubConnectorSchema, JiraConnectorSchema]);
+
+/** A Linear team UUID, in any case; resolvers lowercase it. */
+const LinearTeamIdSchema = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, "teamId must be a Linear team UUID");
+
+export const LinearScopeSchema = z.object({ alias: ConnectorAliasSchema, teamId: LinearTeamIdSchema }).strict();
+
+/** Linear reads a static-secret API key through the credential registry; each scope is one team. */
+export const LinearConnectorSchema = z.object({
+  name: ConnectorNameSchema,
+  type: z.literal("linear"),
+  credentialRef: z.string().regex(AGENTX_NAME_PATTERN),
+  scopes: z.array(LinearScopeSchema).min(1).max(32)
+    .refine((scopes) => new Set(scopes.map((scope) => scope.alias)).size === scopes.length, "connector scope aliases must be unique")
+    .refine((scopes) => new Set(scopes.map((scope) => scope.teamId.toLowerCase())).size === scopes.length, "connector scopes must name different teams"),
+  tools: ToolApprovalListSchema,
+  attribution: z.boolean().optional(),
+}).strict();
+
+export const ConnectorConfigSchema = z.discriminatedUnion("type", [GitHubConnectorSchema, LinearConnectorSchema, JiraConnectorSchema]);
 
 const KNOWN_CONNECTOR_TYPES = new Set(ConnectorConfigSchema.options.map((option) => option.shape.type.value as string));
 
@@ -163,6 +181,7 @@ export type ThreadConnector = z.infer<typeof ThreadConnectorSchema>;
 
 export type GitHubConnectorConfig = z.infer<typeof GitHubConnectorSchema>;
 export type JiraConnectorConfig = z.infer<typeof JiraConnectorSchema>;
+export type LinearConnectorConfig = z.infer<typeof LinearConnectorSchema>;
 export type ConnectorConfig = z.infer<typeof ConnectorConfigSchema>;
 
 /** Six in-house tools when recovery tools are shown; kept equal to ORCHESTRATION_TOOL_NAMES by a test. */

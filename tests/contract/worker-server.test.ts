@@ -132,7 +132,7 @@ function prepareInvocationWithUnknownConnector(): WorkerInvocation {
         orchestratorInstructions: "Delegate coding to the remote worker.",
         integrations: {
           connectors: [
-            { name: "tracker", type: "linear", credentialRef: "linear-key", scopes: ["api"] },
+            { name: "tracker", type: "future-vendor", credentialRef: "future-vendor-key", scopes: ["api"] },
           ],
         },
       },
