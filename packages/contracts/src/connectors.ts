@@ -238,9 +238,7 @@ export function connectorApprovals(definition: ConnectorApprovals): Array<{ name
 }
 
 export function presentedNameProblems(definition: ConnectorApprovals): string[] {
-  const connectors = definition.integrations?.githubMcp
-    ? [{ name: "github", tools: definition.integrations.githubMcp.tools }]
-    : definition.integrations?.connectors ?? [];
+  const connectors = connectorApprovals(definition);
   return connectors.flatMap((connector) => connector.tools
     .map((tool) => `${connector.name}__${tool.name}`)
     .filter((presented) => presented.length > 64)

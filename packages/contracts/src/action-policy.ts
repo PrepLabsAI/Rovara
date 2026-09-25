@@ -14,8 +14,10 @@ export const IN_HOUSE_TOOL_NAMES = [
   "agentx_manage_pull_request",
 ] as const;
 
-/** A tool name in which `*` stands for any run of characters, such as `delete_*`. */
-export const ToolPatternSchema = z.string().regex(/^[A-Za-z0-9_*-]{1,64}$/);
+/** A tool name in which `*` stands for any run of characters, such as `delete_*`. At most 4 `*`,
+ * so a pattern's segments stay few enough to match in a bounded number of scans. */
+export const ToolPatternSchema = z.string().regex(/^[A-Za-z0-9_*-]{1,64}$/)
+  .refine((pattern) => (pattern.match(/\*/g)?.length ?? 0) <= 4, "a tool pattern may contain at most 4 *");
 
 /**
  * One administrator rule. With `connector`, `tool` matches that connector's own tool names
@@ -38,10 +40,32 @@ export const ActionPolicySchema = z.object({
   rules: z.array(ActionPolicyRuleSchema).min(1).max(64),
 }).strict();
 
-/** Whether a tool name matches a rule's pattern, where `*` is any run of characters. */
+/**
+ * Whether a tool name matches a rule's pattern, where `*` is any run of characters and every other
+ * character matches itself literally. A linear-time glob match (no regular expression): the
+ * segments between `*`s are located with `String.prototype.indexOf` in order, left to right, so an
+ * adversarial pattern with many `*` cannot cause catastrophic backtracking, and a name that
+ * contains regular-expression metacharacters (`.`, `(`, ...) never changes what it matches.
+ */
 export function toolPatternMatches(pattern: string, name: string): boolean {
-  // The pattern alphabet has no regular-expression metacharacters besides `*`.
-  return new RegExp(`^${pattern.split("*").join(".*")}$`, "u").test(name);
+  const segments = pattern.split("*");
+  if (segments.length === 1) return pattern === name;
+
+  const first = segments[0] ?? "";
+  const last = segments[segments.length - 1] ?? "";
+  if (!name.startsWith(first) || !name.endsWith(last)) return false;
+
+  let position = first.length;
+  const suffixStart = name.length - last.length;
+  if (position > suffixStart) return false; // the prefix and suffix would have to overlap
+
+  for (const middle of segments.slice(1, -1)) {
+    if (middle === "") continue; // adjacent `*`s add no constraint
+    const index = name.indexOf(middle, position);
+    if (index === -1 || index + middle.length > suffixStart) return false;
+    position = index + middle.length;
+  }
+  return true;
 }
 
 type PolicyProject = Parameters<typeof connectorApprovals>[0] & { actionPolicy?: ActionPolicy | undefined };

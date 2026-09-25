@@ -6,6 +6,7 @@ import {
   ProjectDefinitionSchema,
   SlackThreadWorkspaceResultSchema,
   StoredProjectDefinitionSchema,
+  ToolPatternSchema,
   toolPatternMatches,
 } from "../../packages/contracts/src/index.js";
 import { ORCHESTRATION_TOOL_NAMES } from "../../packages/orchestrator/src/orchestration-tools.js";
@@ -32,6 +33,30 @@ describe("action policy contracts", () => {
     expect(toolPatternMatches("*__save_*", "linear__save_issue")).toBe(true);
     expect(toolPatternMatches("*", "anything")).toBe(true);
     expect(toolPatternMatches("save-issue", "save_issue")).toBe(false);
+  });
+
+  it("matches a pattern's literal characters literally, never as a regular expression", () => {
+    expect(toolPatternMatches("a.b", "axb")).toBe(false);
+    expect(toolPatternMatches("a.b", "a.b")).toBe(true);
+    expect(toolPatternMatches("(", "(")).toBe(true);
+    expect(toolPatternMatches("(", "a")).toBe(false);
+    expect(() => toolPatternMatches("(", "(")).not.toThrow();
+  });
+
+  it("matches a many-star pattern in linear time, with no catastrophic backtracking", () => {
+    const pattern = "*a".repeat(8);
+    const name = `${"a".repeat(63)}b`;
+    const start = performance.now();
+    const result = toolPatternMatches(pattern, name);
+    const elapsed = performance.now() - start;
+    expect(result).toBe(false);
+    expect(elapsed).toBeLessThan(200);
+  });
+
+  it("limits a tool pattern to at most 4 *", () => {
+    expect(ToolPatternSchema.safeParse("a*b*c*d*e").success).toBe(true);
+    expect(ToolPatternSchema.safeParse("a*b*c*d*e*f").success).toBe(false);
+    expect(ToolPatternSchema.safeParse("*").success).toBe(true);
   });
 
   it("requires exactly one of outcome and treatAs, and refuses unknown fields and bad patterns", () => {

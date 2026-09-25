@@ -49,7 +49,7 @@ function isPresent(value: unknown): boolean {
  */
 export function itemPathHolders(args: Record<string, unknown>, path: string): Array<Record<string, unknown>> {
   const steps = parseItemPath(path);
-  if (steps === undefined) return [];
+  if (steps === undefined || !isPlainObject(args)) return [];
   let holders: Array<Record<string, unknown>> = [args];
   for (const step of steps.slice(0, -1)) {
     holders = holders.flatMap((holder) => {

@@ -38,6 +38,18 @@ describe("item argument paths (spec 014)", () => {
     expect(itemPathHolders(deep, "a[].b.c[].e.f")).toEqual([]);
   });
 
+  it("finds nothing, and never throws, when the arguments themselves are not a plain object", () => {
+    expect(itemPathValues(null as unknown as Record<string, unknown>, "id")).toEqual([]);
+    expect(itemPathValues("hello" as unknown as Record<string, unknown>, "id")).toEqual([]);
+    expect(itemPathValues(["a"] as unknown as Record<string, unknown>, "id")).toEqual([]);
+    expect(itemPathValues(42 as unknown as Record<string, unknown>, "id")).toEqual([]);
+    expect(itemPathHolders(null as unknown as Record<string, unknown>, "id")).toEqual([]);
+    expect(itemPathHolders("hello" as unknown as Record<string, unknown>, "id")).toEqual([]);
+    expect(itemPathHolders(["a"] as unknown as Record<string, unknown>, "id")).toEqual([]);
+    expect(itemPathHolders(42 as unknown as Record<string, unknown>, "id")).toEqual([]);
+    expect(() => itemPathValues(null as unknown as Record<string, unknown>, "id")).not.toThrow();
+  });
+
   it("reports a malformed, duplicated or empty declaration", () => {
     expect(itemPathProblems(undefined)).toEqual([]);
     expect(itemPathProblems(["id"])).toEqual([]);
