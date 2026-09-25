@@ -324,7 +324,7 @@ export class ControlPlaneStack extends Stack {
     }).addAlarmAction(notifyOperator);
     new cloudwatch.Alarm(this, "RecordingFailuresAlarm", {
       alarmName: "AgentXRecordingFailures",
-      alarmDescription: "Turn records or turn metrics are being lost: a turn record write failed or the Slack service could not emit turn metrics. Check the Slack orchestrator logs for turn_record.write_failed and turn_metrics.emit_failed.",
+      alarmDescription: "Turn records or turn metrics are being lost: a turn record write failed or the Slack service could not emit turn metrics. Check the Slack orchestrator logs for turn_record.write_failed and turn_metrics.emit_failed. A write that timed out may still have landed, so check the table before assuming the record is lost.",
       metric: new cloudwatch.MathExpression({
         expression: "FILL(write,0) + FILL(emit,0)",
         usingMetrics: {

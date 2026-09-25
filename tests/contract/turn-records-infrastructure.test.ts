@@ -125,6 +125,13 @@ describe("turn record and alarm infrastructure", () => {
     });
   });
 
+  it("warns in the recording-failures alarm that a timed-out write may still have landed", () => {
+    template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+      AlarmName: "AgentXRecordingFailures",
+      AlarmDescription: Match.stringLikeRegexp("timed out may still have landed"),
+    });
+  });
+
   it("pages the operator when a vendor credential is not connected on any connector", () => {
     template.hasResourceProperties("AWS::CloudWatch::Alarm", {
       AlarmName: "AgentXConnectorNotConnected",
