@@ -136,3 +136,102 @@ export function markReady(db: FakeDynamoDb, workspaceId: string): void {
   workspace.status = "READY";
   delete workspace.activeOperationId;
 }
+
+export const SLACK_TEAM = "T0BSHLLUGBD";
+export const SLACK_CHANNEL = "C0123456789";
+const projectAdministrator = { subject: "admin-subject", admin: true };
+
+/** Registers project "payments" at a revision and, unless told not to, binds the test channel to it. */
+export async function registerSlackProject(
+  handler: Handler,
+  options: { revision?: number; connectors?: unknown[]; bind?: boolean } = {},
+): Promise<void> {
+  const revision = options.revision ?? 1;
+  const registered = await call(handler, {
+    method: "POST",
+    path: "/v1/admin/projects",
+    user: projectAdministrator,
+    body: {
+      definition: {
+        name: "payments",
+        revision,
+        repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "github-app" }],
+        setup: [],
+        readiness: [],
+        orchestratorInstructions: `Delegate work (revision ${revision}).`,
+        ...(options.connectors ? { integrations: { connectors: options.connectors } } : {}),
+      },
+      runtimeBinding: {
+        runtimeArn: `arn:aws:bedrock-agentcore:us-east-1:${account}:runtime/agentx_production_worker-YVirjlFgvk`,
+        endpointQualifier: "DEFAULT",
+        deploymentMode: "instances-ebs",
+        capacityProviderArn: `arn:aws:bedrock-agentcore:us-east-1:${account}:capacity-provider/agentx_production_capacity_v3-VwkM93EABZ`,
+      },
+    },
+  });
+  if (registered.status !== 201) throw new Error(`project registration failed: ${JSON.stringify(registered.body)}`);
+  if (options.bind === false) return;
+  const bound = await call(handler, {
+    method: "PUT",
+    path: `/v1/admin/slack/bindings/${SLACK_TEAM}/${SLACK_CHANNEL}`,
+    user: projectAdministrator,
+    body: { projectName: "payments" },
+  });
+  if (bound.status !== 200) throw new Error(`channel binding failed: ${JSON.stringify(bound.body)}`);
+}
+
+/** A request from the hosted Slack orchestrator, acting for one thread and one member. */
+export function serviceCall(handler: Handler, thread: string, slackUser: string, method: string, path: string, body?: unknown) {
+  return call(handler, {
+    method,
+    path,
+    service: { principal: orchestratorPrincipal, thread, slackUser },
+    ...(body === undefined ? {} : { body }),
+  });
+}
+
+/** Completes an operation through the worker's terminal-result callback, as the runtime does. */
+export async function finishOperation(
+  handler: Handler,
+  db: FakeDynamoDb,
+  workspaceId: string,
+  operationId: string,
+  status: "SUCCEEDED" | "FAILED",
+  result?: unknown,
+): Promise<void> {
+  const outbox = db.find((item) => item.entityType === "OUTBOX" && item.operationId === operationId)[0];
+  const capability = (outbox?.invocation as { callbackCapability?: string } | undefined)?.callbackCapability;
+  if (!capability) throw new Error("callback capability is missing");
+  const response = await call(handler, {
+    method: "POST",
+    path: `/v1/internal/workspaces/${workspaceId}/operations/${operationId}/result`,
+    headers: { "x-agentx-callback-capability": capability },
+    body: {
+      operationId,
+      status,
+      ...(result === undefined ? {} : { result }),
+      ...(status === "FAILED" ? { error: "clone failed" } : {}),
+    },
+  });
+  if (response.status !== 200) throw new Error(`terminal callback failed: ${JSON.stringify(response.body)}`);
+}
+
+/** A GitHub MCP double offering one read tool, list_issues. */
+export function fakeGitHubMcp() {
+  const invoke = vi.fn(async () => ({ content: [{ type: "text", text: "2 open issues" }] }));
+  const credentials = vi.fn(async () => ({ owner: "example", repo: "demo", token: "installation-secret" }));
+  const connect = vi.fn(async () => ({
+    tools: [{
+      name: "list_issues",
+      description: "List issues",
+      inputSchema: { type: "object", properties: { owner: { type: "string" }, repo: { type: "string" }, state: { type: "string" } }, required: ["owner", "repo"] },
+    }],
+    call: invoke,
+    close: async () => undefined,
+  }));
+  return { githubMcp: { credentials, connect } as unknown as GitHubMcpDependencies, invoke };
+}
+
+export const GITHUB_LIST_ISSUES = [
+  { name: "github", type: "github", scopes: "all-repositories", tools: [{ name: "list_issues", access: "read" }] },
+];
