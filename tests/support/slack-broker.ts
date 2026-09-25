@@ -248,3 +248,13 @@ export function lazyEnsureWorkspace(handler: Handler, thread: string, slackUser:
     },
   });
 }
+
+/** Asks the broker to prepare this thread's compute, as the lazy worker does (spec 014). */
+export function prepareThread(handler: Handler, thread: string, slackUser: string, requestId = randomUUID()) {
+  return call(handler, {
+    method: "POST",
+    path: "/v1/service/threads/workspace/prepare",
+    service: { principal: orchestratorPrincipal, thread, slackUser },
+    body: { requestId },
+  });
+}

@@ -58,6 +58,7 @@ import {
   type PullRequestLifecycleResult,
   type SlackChannelBinding,
   type SlackRequester,
+  type SlackThreadPrepareResult,
   type SlackThreadWorkspaceResult,
   type SlackWorkspaceCloseCompleteResult,
   type SlackWorkspaceCloseStartResult,
@@ -303,6 +304,9 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         const serviceUrl = new URL(`/v1${url.pathname.slice("/v1/service".length)}${url.search}`, "https://agentx.invalid");
         if (request.method === "POST" && serviceUrl.pathname === "/v1/threads/workspace") {
           return json(await ensureThreadWorkspace(dependencies, identity, parseBody(request.body)), request.requestId);
+        }
+        if (request.method === "POST" && serviceUrl.pathname === "/v1/threads/workspace/prepare") {
+          return json(await prepareThreadWorkspace(dependencies, identity, parseBody(request.body)), request.requestId);
         }
         if (request.method === "POST" && serviceUrl.pathname === "/v1/threads/workspace/close") {
           return json(await startThreadWorkspaceClose(dependencies, identity, parseBody(request.body)), request.requestId, 202);
@@ -1131,6 +1135,14 @@ async function ensureThreadWorkspace(
     if (existing.status === "CLOSED" && existing.closedAt) {
       return { outcome: "CLOSED", workspaceId: existing.id, closedAt: existing.closedAt };
     }
+    if (existing.status === "UNPREPARED" && !lazyPreparation) {
+      // An older Slack service cannot parse UNPREPARED and expects compute now: prepare it at once.
+      const prepared = await startThreadPreparation(dependencies, identity, requestId, existing);
+      if (prepared.outcome !== "WORKSPACE") return prepared;
+      const current = await requireWorkspace(dependencies, existing.id);
+      const result = await existingThreadWorkspace(dependencies, identity, requestId, current, include, includeSettingsRevision);
+      return result.outcome === "WORKSPACE" ? { ...result, created: prepared.created } : result;
+    }
     return existingThreadWorkspace(dependencies, identity, requestId, existing, include, includeSettingsRevision);
   }
 
@@ -1269,6 +1281,146 @@ function unpreparedWorkspace(project: RegisteredProjectRecord, ownerKey: string)
     createdAt: now,
     updatedAt: now,
   });
+}
+
+/** POST /v1/threads/workspace/prepare (spec 014): prepares compute for this thread's workspace. */
+async function prepareThreadWorkspace(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  value: unknown,
+): Promise<SlackThreadPrepareResult> {
+  const slack = identity.slack;
+  if (!slack || !dependencies.slack) throw agentXError("FORBIDDEN", "a Slack thread identity is required");
+  const input = object(value, "thread workspace preparation");
+  const requestId = uuid(input.requestId, "requestId");
+  const workspace = await getThreadWorkspace(dependencies, identity.ownerKey)
+    ?? await getDefaultWorkspace(dependencies, identity.ownerKey, slack.binding.projectName);
+  if (!workspace) throw agentXError("NOT_FOUND", "thread workspace not found");
+  if (workspace.status === "CLOSED" && workspace.closedAt) {
+    return { outcome: "CLOSED", workspaceId: workspace.id, closedAt: workspace.closedAt };
+  }
+  if (workspace.projectName !== slack.binding.projectName) {
+    throw agentXError("FORBIDDEN", "this thread's workspace belongs to the channel's previous project binding");
+  }
+  return startThreadPreparation(dependencies, identity, requestId, workspace);
+}
+
+/**
+ * Moves an UNPREPARED thread workspace to PREPARING. The same transaction writes the prepare
+ * operation and outbox item, charges the requesting member and the organization, and records that
+ * member as the thread's starter, whose charge closing releases. So a limit counts only prepared
+ * threads. The disk is built from the revision the thread started with, as
+ * retryWorkspacePreparation does. Any other status is answered as it stands: a racing request
+ * prepared it already.
+ */
+async function startThreadPreparation(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  requestId: string,
+  workspace: WorkspaceInstance,
+): Promise<SlackThreadPrepareResult> {
+  const slack = identity.slack;
+  const limits = dependencies.slack;
+  if (!slack || !limits) throw agentXError("FORBIDDEN", "a Slack thread identity is required");
+  if (workspace.status !== "UNPREPARED") {
+    return { outcome: "WORKSPACE", workspaceId: workspace.id, status: workspace.status, operationId: workspace.activeOperationId, created: false };
+  }
+  const pinned = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
+  const now = new Date().toISOString();
+  const operationId = randomUUID();
+  const fence = workspace.fence + 1;
+  const operation = operationRecord({
+    id: operationId,
+    workspaceId: workspace.id,
+    kind: "prepare",
+    requestId,
+    payloadHash: hashJson({ projectName: workspace.projectName, projectRevision: workspace.projectRevision, targetOwnerKey: identity.ownerKey }),
+    status: "ACCEPTED",
+    fence,
+    createdAt: now,
+    updatedAt: now,
+    ...requesterOf(identity),
+  });
+  const invocation: WorkerInvocation = {
+    protocolVersion: 1,
+    kind: "prepare",
+    operationId,
+    workspaceId: workspace.id,
+    fence,
+    projectRevision: workspace.projectRevision,
+    callbackCapability: issueCapability(dependencies, workspace.id, operationId, fence),
+    payload: {
+      project: pinned.definition,
+      repositoryGrant: issueRepositoryGrant(dependencies, pinned, identity.ownerKey, workspace.id, operationId),
+    },
+  };
+  const updated = WorkspaceInstanceSchema.parse({ ...workspace, status: "PREPARING", activeOperationId: operationId, fence, updatedAt: now });
+  const outbox = outboxRecord(pinned.runtimeBinding, updated, invocation);
+  const { teamId, userId } = slack.requester;
+  try {
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { Update: {
+        TableName: dependencies.tableName,
+        Key: workspaceKey(workspace.id),
+        UpdateExpression: "SET #status = :preparing, activeOperationId = :operation, fence = :nextFence, updatedAt = :now",
+        ConditionExpression: "ownerKey = :owner AND #status = :unprepared AND fence = :currentFence",
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: {
+          ":owner": identity.ownerKey,
+          ":preparing": "PREPARING",
+          ":unprepared": "UNPREPARED",
+          ":operation": operationId,
+          ":nextFence": fence,
+          ":currentFence": workspace.fence,
+          ":now": now,
+        },
+      } },
+      { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
+      { Put: { TableName: dependencies.tableName, Item: outbox, ConditionExpression: "attribute_not_exists(pk)" } },
+      { Update: {
+        TableName: dependencies.tableName,
+        Key: slackOrganizationLimitKey(teamId),
+        UpdateExpression: "SET #count = if_not_exists(#count, :zero) + :one, entityType = :entity",
+        ConditionExpression: "attribute_not_exists(#count) OR #count < :limit",
+        ExpressionAttributeNames: { "#count": "count" },
+        ExpressionAttributeValues: { ":zero": 0, ":one": 1, ":limit": limits.organizationWorkspaceLimit, ":entity": "SLACK_LIMIT" },
+      } },
+      { Update: {
+        TableName: dependencies.tableName,
+        Key: slackMemberLimitKey(teamId, userId),
+        UpdateExpression: "SET #count = if_not_exists(#count, :zero) + :one, #threads = list_append(if_not_exists(#threads, :none), :thread), entityType = :entity",
+        ConditionExpression: "attribute_not_exists(#count) OR #count < :limit",
+        ExpressionAttributeNames: { "#count": "count", "#threads": "threads" },
+        ExpressionAttributeValues: {
+          ":zero": 0,
+          ":one": 1,
+          ":limit": limits.memberWorkspaceLimit,
+          ":none": [],
+          ":thread": [identity.subject],
+          ":entity": "SLACK_LIMIT",
+        },
+      } },
+      { Update: {
+        TableName: dependencies.tableName,
+        Key: slackThreadKey(identity.ownerKey),
+        UpdateExpression: "SET starterUserId = :user",
+        ConditionExpression: "attribute_not_exists(starterUserId)",
+        ExpressionAttributeValues: { ":user": userId },
+      } },
+    ] }));
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+    const current = await requireWorkspace(dependencies, workspace.id);
+    if (current.status !== "UNPREPARED") {
+      return { outcome: "WORKSPACE", workspaceId: current.id, status: current.status, operationId: current.activeOperationId, created: false };
+    }
+    const refusal = await threadWorkspaceLimitRefusal(dependencies, teamId, userId, limits);
+    if (refusal.outcome !== "LIMIT_REACHED") {
+      throw agentXError("WORKSPACE_BUSY", "thread workspace preparation conflicted with another request; retry");
+    }
+    return refusal;
+  }
+  return { outcome: "WORKSPACE", workspaceId: workspace.id, status: "PREPARING", operationId, created: true };
 }
 
 async function existingThreadWorkspace(
