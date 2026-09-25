@@ -27,6 +27,7 @@ import { createSignedServiceFetch } from "./signing-fetch.js";
 import { createSlackUserNames } from "./user-names.js";
 import { threadWorkspaceRequest } from "./thread-workspace-request.js";
 import { createHostedSlackRuntime } from "./runtime.js";
+import { DynamoTurnRecordWriter } from "./turn-records.js";
 
 const MAX_RECEIVE_COUNT = 5;
 const VISIBILITY_SECONDS = 15 * 60;
@@ -43,6 +44,7 @@ const threadsTableName = required("SLACK_THREADS_TABLE_NAME");
 const sessionBucketName = required("THREAD_SESSION_BUCKET_NAME");
 const controlPlaneUrl = required("CONTROL_PLANE_URL").replace(/\/$/, "");
 const slackSecretArn = required("SLACK_SECRET_ARN");
+const turnRecordsTableName = required("TURN_RECORDS_TABLE_NAME");
 const stateDirectory = process.env.STATE_DIRECTORY ?? "/tmp/agentx-slack";
 const concurrency = Number.parseInt(process.env.SLACK_CONCURRENCY ?? "4", 10);
 const model = {
@@ -164,12 +166,14 @@ const threads: ThreadStore = {
       conversationId?: string;
       settingsRevision?: number;
       closedAt?: string;
+      refreshConnectors?: unknown;
     } | undefined;
     return {
       ...(item?.workspaceId === undefined ? {} : { workspaceId: item.workspaceId }),
       ...(item?.conversationId === undefined ? {} : { conversationId: item.conversationId }),
       ...(item?.settingsRevision === undefined ? {} : { settingsRevision: item.settingsRevision }),
       ...(item?.closedAt === undefined ? {} : { closedAt: item.closedAt }),
+      ...(Array.isArray(item?.refreshConnectors) ? { refreshConnectors: item.refreshConnectors.filter((name): name is string => typeof name === "string") } : {}),
     };
   },
   async saveConversation(subject, state) {
@@ -192,10 +196,19 @@ const threads: ThreadStore = {
     await documentClient.send(new UpdateCommand({
       TableName: threadsTableName,
       Key: { pk: `THREAD#${subject}`, sk: "META" },
-      UpdateExpression: "SET workspaceId = :workspace, closedAt = :closedAt REMOVE conversationId, settingsRevision",
+      UpdateExpression: "SET workspaceId = :workspace, closedAt = :closedAt REMOVE conversationId, settingsRevision, refreshConnectors",
       ExpressionAttributeValues: { ":workspace": state.workspaceId, ":closedAt": state.closedAt },
     }));
     await s3.send(new DeleteObjectCommand({ Bucket: sessionBucketName, Key: sessionKey(subject) }));
+  },
+  async saveRefreshConnectors(subject, connectors) {
+    await documentClient.send(new UpdateCommand({
+      TableName: threadsTableName,
+      Key: { pk: `THREAD#${subject}`, sk: "META" },
+      ...(connectors.length === 0
+        ? { UpdateExpression: "REMOVE refreshConnectors" }
+        : { UpdateExpression: "SET refreshConnectors = :connectors", ExpressionAttributeValues: { ":connectors": connectors } }),
+    }), { abortSignal: AbortSignal.timeout(5000) });
   },
   async finish(subject) {
     try {
@@ -205,7 +218,7 @@ const threads: ThreadStore = {
         UpdateExpression: "ADD pendingRequests :minusOne",
         ConditionExpression: "pendingRequests > :zero",
         ExpressionAttributeValues: { ":minusOne": -1, ":zero": 0 },
-      }));
+      }), { abortSignal: AbortSignal.timeout(5000) });
     } catch (error) {
       if (!(error instanceof Error && error.name === "ConditionalCheckFailedException")) throw error;
     }
@@ -248,7 +261,7 @@ async function runTurn(input: TurnInput): Promise<string> {
       }),
     });
     try {
-      const response = await runOrchestratorTurn(runtime, input.message.text);
+      const response = await runOrchestratorTurn(runtime, input.message.text, input.recorder);
       const written = runtime.session.sessionManager.getSessionFile();
       if (written !== undefined && await exists(written)) {
         await s3.send(new PutObjectCommand({
@@ -315,6 +328,7 @@ await runConsumer(queue, (message, context) => processSlackRequest(message, {
   runTurn,
   post: (thread, text) => postToSlack(thread.channelId, thread.threadTs, text),
   log,
+  turnRecords: new DynamoTurnRecordWriter(documentClient, turnRecordsTableName),
 }, context), {
   concurrency,
   maxReceiveCount: MAX_RECEIVE_COUNT,

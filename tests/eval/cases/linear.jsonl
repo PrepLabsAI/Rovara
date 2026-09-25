@@ -5,4 +5,4 @@
 {"id":"linear-read-issue","project":"fixtures/linear-payments.yaml","prompt":"show me Linear issue PAY-7","expect":{"tool":"linear__get_issue","argsSubset":{"id":"PAY-7"}}}
 {"id":"github-not-linear","project":"fixtures/linear-payments.yaml","prompt":"list the open GitHub issues in payments-api","expect":{"tool":"github__list_issues"}}
 {"id":"files-not-linear","project":"fixtures/linear-payments.yaml","prompt":"list the top-level files in the payments-api repository","expect":{"tool":"agentx_submit_task"}}
-{"id":"linear-not-connected","project":"fixtures/linear-absent.yaml","prompt":"what's open in Linear?","expect":{"tool":null,"refusal":"not connected"}}
+{"id":"linear-not-connected","project":"fixtures/linear-absent.yaml","prompt":"what's open in Linear?","expect":{"tool":null,"refusal":["not connected","n't connected","not been connected","n't been connected"]}}

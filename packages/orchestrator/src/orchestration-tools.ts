@@ -34,7 +34,7 @@ type PullRequestAction = (typeof PULL_REQUEST_ACTIONS)[number];
 const TITLED_ACTIONS = new Set<PullRequestAction>(["edit", "replace", "revert"]);
 
 export interface OrchestrationApi {
-  discoverConnectorTools?(input: { workspaceId: string; connector: string }): Promise<ConnectorCatalog>;
+  discoverConnectorTools?(input: { workspaceId: string; connector: string; refresh?: boolean }): Promise<ConnectorCatalog>;
   callConnectorTool?(input: ConnectorCallRequest & { workspaceId: string; connector: string }): Promise<unknown>;
   submitTask(input: {
     workspaceId: string;
@@ -89,7 +89,12 @@ export interface OrchestrationContext {
 export function createOrchestrationTools(
   api: OrchestrationApi,
   context: OrchestrationContext,
-  options: { requestId?: () => string; connectorCatalogs?: readonly ConnectorCatalog[]; recovery?: boolean } = {},
+  options: {
+    requestId?: () => string;
+    connectorCatalogs?: readonly ConnectorCatalog[];
+    recovery?: boolean;
+    onConnectorError?: (toolCallId: string, code: string) => void;
+  } = {},
 ): ToolDefinition[] {
   const nextRequestId = options.requestId ?? randomUUID;
   const promptParameters = Type.Object({ prompt: Type.String({ minLength: 1, maxLength: 65_536 }) });

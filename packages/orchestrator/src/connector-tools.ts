@@ -8,7 +8,7 @@ export function createConnectorTools(
   catalogs: readonly ConnectorCatalog[],
   invoke: (input: ConnectorCallRequest & { workspaceId: string; connector: string }) => Promise<unknown>,
   context: { workspaceId: string; conversationId: string },
-  options: { requestId?: () => string } = {},
+  options: { requestId?: () => string; onConnectorError?: (toolCallId: string, code: string) => void } = {},
 ): ToolDefinition[] {
   const requestIds = new Map<string, string>();
   return catalogs.flatMap((catalog) => catalog.tools.map((tool) => {
@@ -32,10 +32,21 @@ export function createConnectorTools(
         const requestId = requestIds.get(key) ?? options.requestId?.()
           ?? `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(13, 16)}-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
         requestIds.set(key, requestId);
-        return text(await invoke({
-          workspaceId: context.workspaceId, connector: catalog.connector, requestId,
-          scope: scope.alias, tool: tool.upstreamName, schemaHash: scope.schemaHash, arguments: args,
-        }));
+        try {
+          return text(await invoke({
+            workspaceId: context.workspaceId, connector: catalog.connector, requestId,
+            scope: scope.alias, tool: tool.upstreamName, schemaHash: scope.schemaHash, arguments: args,
+          }));
+        } catch (error) {
+          // Pi turns a thrown error into plain text; the recorder still needs the AgentX code.
+          const code = (error as { code?: unknown } | null)?.code;
+          if (typeof code === "string") {
+            // An observer failure must never replace the call's own error. Unreachable today:
+            // TurnRecorder.connectorFailed guards itself. Kept as a backstop for other observers.
+            try { options.onConnectorError?.(callId, code); } catch { /* the record then lacks the code; the call is unchanged */ }
+          }
+          throw error;
+        }
       },
     });
   }));

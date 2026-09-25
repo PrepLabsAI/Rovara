@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 import { realpathSync } from "node:fs";
+import { open, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
+  AgentXError,
   AgentXNameSchema,
   WorkspaceDeploymentModeSchema,
   agentXError,
@@ -14,6 +16,7 @@ import { listCredentials, registerCredential } from "./admin/credential.js";
 import { registerProject } from "./admin/register.js";
 import { bindSlackChannel, unbindSlackChannel } from "./admin/slack.js";
 import { stopWorkspace } from "./admin/stop.js";
+import { exportTurns, parseSince } from "./admin/turns.js";
 import { loginWithPkce, tokenStoreKey } from "./auth.js";
 import { loadProjectConfig } from "./config.js";
 import { loadDeploymentSettings, type DeploymentSettings } from "./deployment.js";
@@ -190,6 +193,65 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       services.stdout.write(formatSuccess(await listCredentials({ controlPlaneUrl: settings.controlPlaneUrl, accessToken }, services.fetchImplementation), globals.json));
     });
 
+  const adminTurns = admin.command("turns").description("export turn records: what each Slack turn was offered, asked, chose and answered (kept 30 days)");
+  adminTurns
+    .command("export")
+    .description("write turn records as JSON Lines, newest first; they hold request and response text, so keep the output private")
+    .requiredOption("--since <duration>", "how far back to export, such as 30m, 12h or 7d (at most 30d)")
+    .option("--output <file>", "write to this file with owner-only permissions instead of stdout")
+    .action(async (options: { since: string; output?: string }, command: Command) => {
+      const globals = globalOptions(command);
+      const since = parseSince(options.since);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      if (options.output === undefined) {
+        let printed = 0;
+        let result: Awaited<ReturnType<typeof exportTurns>>;
+        try {
+          result = await exportTurns({
+            controlPlaneUrl: settings.controlPlaneUrl,
+            accessToken,
+            since,
+            write: (line) => {
+              services.stdout.write(line);
+              printed += 1;
+            },
+          }, services.fetchImplementation);
+        } catch (error) {
+          throw exportFailure(error, printed, "stdout");
+        }
+        // stdout carries only JSON Lines, so the summary goes to stderr.
+        services.stderr.write(formatSuccess(result, globals.json));
+        return;
+      }
+      // Write beside the target first, so a failure partway never leaves the target itself
+      // half-written; only a completed export is ever renamed over it.
+      const outputPath = resolve(options.output);
+      const partialPath = `${outputPath}.partial`;
+      const file = await open(partialPath, "w", 0o600);
+      let written = 0;
+      try {
+        // open() applies the mode only to a new file; tighten an existing one too.
+        await file.chmod(0o600);
+        const result = await exportTurns({
+          controlPlaneUrl: settings.controlPlaneUrl,
+          accessToken,
+          since,
+          write: async (line) => {
+            await file.write(line);
+            written += 1;
+          },
+        }, services.fetchImplementation);
+        await file.close();
+        await rename(partialPath, outputPath);
+        // stdout carries only JSON Lines, so the summary goes to stderr.
+        services.stderr.write(formatSuccess(result, globals.json));
+      } catch (error) {
+        await file.close().catch(() => undefined);
+        await rm(partialPath, { force: true });
+        throw exportFailure(error, written, "file");
+      }
+    });
+
   return program;
 }
 
@@ -217,6 +279,25 @@ async function authenticate(
   const tokens = await tokenStore.get(tokenStoreKey(settings.auth));
   if (!tokens || tokens.expiresAt <= Date.now()) throw agentXError("AUTH_REQUIRED", "run agentx login");
   return { settings, accessToken: tokens.accessToken };
+}
+
+/**
+ * Turns a failure partway through a file export into one naming how many records were written
+ * before it happened, so a caller never mistakes a stopped export for a complete one. Keeps the
+ * original error's class and, for an AgentXError, its code, so the exit-code mapping is unchanged.
+ */
+function exportFailure(error: unknown, written: number, target: "file" | "stdout"): unknown {
+  const cause = error instanceof Error ? error.message : String(error);
+  // Records already printed to stdout stay printed; only a file export can promise nothing was written.
+  const message = target === "file"
+    ? `turn export failed after ${written} records; no file was written: ${cause}`
+    : `turn export failed after ${written} records: ${cause}`;
+  if (error instanceof AgentXError) return agentXError(error.code, message);
+  if (error instanceof Error) {
+    error.message = message;
+    return error;
+  }
+  return new Error(message);
 }
 
 /** The server's warnings, plus a note when a control plane too old to run preflight answered. */

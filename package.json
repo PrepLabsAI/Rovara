@@ -16,6 +16,7 @@
     "lint": "eslint .",
     "agentx": "node packages/cli/dist/main.js",
     "preflight": "tsx scripts/preflight.ts",
+    "eval": "tsx scripts/eval.ts",
     "test": "vitest run",
     "test:contract": "vitest run tests/contract",
     "test:integration": "vitest run tests/integration",

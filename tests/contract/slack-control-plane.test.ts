@@ -1340,3 +1340,23 @@ describe("Slack thread isolation and attribution", () => {
     });
   });
 });
+
+describe("connector metrics through the service routes", () => {
+  it("emits ConnectorNotConnected for a rejected credential's catalog, with no secret in the line", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      const credentials = vi.fn(async () => ({ owner: "example", repo: "demo", token: "installation-secret" }));
+      const connect = vi.fn(async () => { throw new McpUnauthorized(); });
+      const { db, handler } = createBroker({ githubMcp: { credentials, connect } });
+      await registerProjectAndBind(handler, { connectors: [{ name: "github", type: "github", scopes: "all-repositories", tools: [{ name: "list_issues", access: "read" }] }] });
+      const workspaceId = (await ensureWorkspace(handler, threadOne, pratik)).body.workspaceId as string;
+      markReady(db, workspaceId);
+      await call(handler, { method: "GET", path: `/v1/service/workspaces/${workspaceId}/connectors/github/tools`,
+        service: { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik } });
+      const lines = log.mock.calls.map(([line]) => String(line)).filter((line) => line.includes("\"event\":\"metric\""));
+      expect(lines).toHaveLength(1);
+      expect(JSON.parse(lines[0]!)).toMatchObject({ component: "broker", connector: "github", ConnectorNotConnected: 1 });
+      expect(lines[0]).not.toContain("installation-secret");
+    } finally { log.mockRestore(); }
+  });
+});

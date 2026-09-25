@@ -9,8 +9,12 @@ import {
   type SlackWorkspaceCloseCompleteResult,
   type SlackWorkspaceCloseStartResult,
   type ThreadConnector,
+  type TurnObservation,
+  type TurnRecord,
 } from "@agentx/contracts";
+import { TurnRecorder } from "@agentx/orchestrator/turn-recorder";
 import { deterministicUuid, requestIdSequence } from "./ids.js";
+import { buildTurnRecord, emitTurnMetrics, type TurnDraft, type TurnRecordSink } from "./turn-records.js";
 
 export interface ThreadServiceApi {
   ensureWorkspace(requestId: string): Promise<SlackThreadWorkspaceResult>;
@@ -26,6 +30,8 @@ export interface ThreadState {
   /** The settings revision this thread was last told about, so a change is announced once. */
   settingsRevision?: number;
   closedAt?: string;
+  /** Connectors whose last turn failed with schema_changed; the next discovery asks for a refresh. */
+  refreshConnectors?: string[];
 }
 
 export interface ThreadStore {
@@ -34,6 +40,8 @@ export interface ThreadStore {
   saveSettingsRevision(subject: string, revision: number): Promise<void>;
   close(subject: string, state: { workspaceId: string; closedAt: string }): Promise<void>;
   finish(subject: string): Promise<void>;
+  /** Remembers the connectors whose next discovery should ask for a refresh; an empty list clears them. */
+  saveRefreshConnectors?(subject: string, connectors: string[]): Promise<void>;
 }
 
 export interface TurnInput {
@@ -46,6 +54,10 @@ export interface TurnInput {
   repositories?: string[];
   recoverableOperations?: string[];
   requestId: () => string;
+  /** Collects this turn's record; the processor writes it once the event is finished. */
+  recorder?: TurnRecorder;
+  /** Connectors whose discovery this turn should bypass the broker's catalog cache. */
+  refreshConnectors?: string[];
 }
 
 export type ServiceLog = (event: string, fields: Readonly<Record<string, string | number | boolean>>) => void;
@@ -56,6 +68,8 @@ export interface ProcessorDependencies {
   runTurn: (input: TurnInput) => Promise<string>;
   post: (thread: SlackThread, text: string) => Promise<void>;
   log?: ServiceLog;
+  /** Where one hidden record per finished Slack event goes; without it nothing is recorded. */
+  turnRecords?: TurnRecordSink;
 }
 
 const RUNNABLE_STATUSES = new Set(["READY", "STOPPED", "BUSY"]);
@@ -67,17 +81,31 @@ export async function processSlackRequest(
 ): Promise<void> {
   const subject = slackThreadSubject(message.thread);
   const log: ServiceLog = dependencies.log ?? (() => undefined);
-  const post = (text: string) => dependencies.post(message.thread, text);
+  const startedAt = new Date();
+  // Only a configured sink or refresh store gets a recorder, so a service without either runs the
+  // turn exactly as before.
+  const recorder = dependencies.turnRecords === undefined && dependencies.threads.saveRefreshConnectors === undefined
+    ? undefined
+    : new TurnRecorder();
+  const draft: TurnDraft = { disposition: "abandoned" };
+  let lastPosted = "";
+  // Remembers only what reached Slack, so the record never claims a message the member did not see.
+  const post = async (text: string) => {
+    await dependencies.post(message.thread, text);
+    lastPosted = text;
+  };
   const api = dependencies.api(message);
   let finished = false;
   try {
     if (isCloseWorkspaceRequest(message.text)) {
+      draft.disposition = "workspace_close";
       const started = await api.startClose(deterministicUuid(`${message.eventId}:close`));
       if (started.outcome === "NOT_FOUND") {
         await post("This thread does not have a workspace to close.");
         finished = true;
         return;
       }
+      draft.workspaceId = started.workspaceId;
       if (started.outcome === "CLOSED") {
         await dependencies.threads.close(subject, { workspaceId: started.workspaceId, closedAt: started.closedAt });
         await post("This thread's workspace is already closed and its workspace resources have been released.");
@@ -107,28 +135,34 @@ export async function processSlackRequest(
     }
     const workspace = await api.ensureWorkspace(deterministicUuid(`${message.eventId}:workspace`));
     if (workspace.outcome === "LIMIT_REACHED") {
+      draft.disposition = "workspace_limit";
       log("request.limit_reached", { eventId: message.eventId, limit: workspace.limit, maximum: workspace.maximum });
       await post(limitMessage(workspace));
       finished = true;
       return;
     }
+    draft.workspaceId = workspace.workspaceId;
     if (workspace.outcome === "CLOSED") {
+      draft.disposition = "workspace_closed";
       await post("This thread's workspace is closed. Start a new Slack thread to create a fresh workspace.");
       finished = true;
       return;
     }
+    if (workspace.settingsRevision !== undefined) draft.settingsRevision = workspace.settingsRevision;
     if (workspace.status === "PREPARING" && workspace.operationId) {
       await post(workspace.created
         ? "Setting up a new workspace for this thread. The first request takes a few minutes."
         : "This thread's workspace is still being set up. I'll start as soon as it's ready.");
       const prepared = await api.waitForOperation(workspace.workspaceId, workspace.operationId);
       if (prepared.status !== "SUCCEEDED") {
+        draft.disposition = "workspace_unavailable";
         log("workspace.preparation_failed", { eventId: message.eventId, status: prepared.status });
         await post(`AgentX could not set up this thread's workspace (${prepared.status}). Mention me again in this thread to retry.`);
         finished = true;
         return;
       }
     } else if (!RUNNABLE_STATUSES.has(workspace.status)) {
+      draft.disposition = "workspace_unavailable";
       log("workspace.unavailable", { eventId: message.eventId, status: workspace.status });
       await post(`This thread's workspace is not available right now (${workspace.status}). Mention me again later to retry.`);
       finished = true;
@@ -141,6 +175,7 @@ export async function processSlackRequest(
       conversationId = await api.createConversation(workspace.workspaceId);
       await dependencies.threads.saveConversation(subject, { workspaceId: workspace.workspaceId, conversationId });
     }
+    draft.conversationId = conversationId;
 
     // Settings follow the project's latest revision, so say so the first time a thread moves.
     if (workspace.settingsRevision !== undefined && workspace.settingsRevision !== state.settingsRevision) {
@@ -164,23 +199,143 @@ export async function processSlackRequest(
         ...(workspace.repositories === undefined ? {} : { repositories: workspace.repositories }),
         ...(workspace.recoverableOperations === undefined ? {} : { recoverableOperations: workspace.recoverableOperations }),
         requestId: requestIdSequence(message.eventId),
+        ...(recorder === undefined ? {} : { recorder }),
+        ...(state.refreshConnectors?.length ? { refreshConnectors: state.refreshConnectors } : {}),
       });
+      draft.disposition = "answered";
       log("task.completed", { eventId: message.eventId, responseLength: response.length });
     } catch (error) {
+      draft.disposition = "failed";
+      draft.error = errorSummary(error);
       log("task.failed", { eventId: message.eventId, errorName: errorName(error) });
       response = `AgentX could not complete the request: ${safeMessage(error)}`;
     }
+    draft.responseText = response;
     for (const chunk of splitSlackMessage(response)) await post(chunk);
+    if (recorder !== undefined) await rememberRefresh(dependencies, log, subject, message.eventId, state.refreshConnectors ?? [], recorder);
     finished = true;
   } catch (error) {
     // Redelivery resumes the same operations because every request ID derives from the Slack event ID.
     if (!options.finalAttempt) throw error;
+    draft.disposition = "abandoned";
+    draft.error = errorSummary(error);
+    // The member sees the abandonment notice, so the record keeps that rather than an unposted answer.
+    delete draft.responseText;
     log("request.abandoned", { eventId: message.eventId, errorName: errorName(error) });
     await post(`AgentX could not process this request: ${safeMessage(error)}`).catch(() => undefined);
     finished = true;
   } finally {
-    if (finished) await dependencies.threads.finish(subject);
+    if (finished) {
+      // Only a finished event is recorded: an attempt that throws for redelivery leaves the one
+      // record to the attempt that finishes (SC-006).
+      if (dependencies.turnRecords !== undefined && recorder !== undefined) {
+        await recordTurn(dependencies.turnRecords, log, recorder, { message, subject, startedAt, finishedAt: new Date(), draft, lastPosted });
+      }
+      await dependencies.threads.finish(subject);
+    }
   }
+}
+
+/**
+ * Builds, validates, fits and writes the record inside one try: any failure, including a record
+ * that fails its schema, is logged by event ID and error class with a metric, and never reaches the
+ * member, who already has their reply. Record contents are never logged.
+ *
+ * Turn metrics are emitted in their own try, separate from the write: a turn that ran the
+ * orchestrator is counted whether or not its record could be written (including a write that throws
+ * or times out), but a turn whose record never built has nothing to derive metrics from. A failure
+ * while emitting metrics is reported on its own event, never mislabelled as a write failure.
+ */
+async function recordTurn(
+  sink: TurnRecordSink,
+  log: ServiceLog,
+  recorder: TurnRecorder,
+  input: Omit<Parameters<typeof buildTurnRecord>[0], "observation">,
+): Promise<void> {
+  let record: TurnRecord | undefined;
+  let duplicate = false;
+  try {
+    record = buildTurnRecord({ ...input, observation: recorder.observation() });
+    duplicate = await sink.write(record) === "duplicate";
+  } catch (error) {
+    // recordTurn must never throw: it runs from processSlackRequest's finally, after the member
+    // already has their reply, so a logging failure here must not skip threads.finish and invite a
+    // redelivery that would post the reply again.
+    try {
+      log("turn_record.write_failed", { eventId: input.message.eventId, errorName: errorName(error) });
+    } catch {
+      // Logging itself failed; nothing left to report to.
+    }
+    try {
+      log("metric", { metric: "TurnRecordWriteFailed", count: 1 });
+    } catch {
+      // Logging itself failed; nothing left to report to.
+    }
+  }
+  if (duplicate) {
+    // Outside the write try, so a logging failure here is never reported as a write failure.
+    try {
+      log("turn_record.duplicate", { eventId: input.message.eventId });
+    } catch {
+      // Logging itself failed; nothing left to report to.
+    }
+  }
+  if (record !== undefined && !duplicate) {
+    try {
+      emitTurnMetrics(record, log);
+    } catch (error) {
+      try {
+        log("turn_metrics.emit_failed", { eventId: input.message.eventId, errorName: errorName(error) });
+      } catch {
+        // Logging itself failed; nothing left to report to.
+      }
+    }
+  }
+}
+
+/**
+ * Remembers which connectors saw a changed definition this turn, writing only when the set changes.
+ * It never throws: the member already has their reply, and a throw here would invite a redelivery
+ * that posts it again. The cost of a lost write is one turn served from a stale catalog cache, which
+ * the call-time schema check still refuses.
+ *
+ * The list clears even when the refreshed discovery itself failed. That heals itself: the refresh
+ * already evicted the connector's cache entry, so the next turn discovers afresh, and the call-time
+ * schema check catches any drift again and puts the connector back on the list.
+ */
+async function rememberRefresh(
+  dependencies: ProcessorDependencies,
+  log: ServiceLog,
+  subject: string,
+  eventId: string,
+  previous: readonly string[],
+  recorder: TurnRecorder,
+): Promise<void> {
+  const save = dependencies.threads.saveRefreshConnectors?.bind(dependencies.threads);
+  if (save === undefined) return;
+  try {
+    const observation: TurnObservation = recorder.observation();
+    // A turn that never reached its tool offer never finished discovery, so it neither used the
+    // remembered refresh nor learned anything new: keep the list for the next turn.
+    if (observation.manifestHash === undefined) return;
+    const next = [...new Set(observation.calls.flatMap((call) => call.reason === "schema_changed" && call.connector !== undefined ? [call.connector] : []))].sort();
+    if (JSON.stringify(next) === JSON.stringify([...previous].sort())) return;
+    await save(subject, next);
+  } catch (error) {
+    try {
+      log("thread.refresh_save_failed", { eventId, errorName: errorName(error) });
+    } catch {
+      // Logging itself failed; nothing left to report to.
+    }
+  }
+}
+
+function errorSummary(error: unknown): { name: string; code?: string } {
+  const code = (error as { code?: unknown } | null)?.code;
+  return {
+    name: errorName(error).slice(0, 128),
+    ...(typeof code === "string" ? { code: code.slice(0, 64) } : {}),
+  };
 }
 
 export function isCloseWorkspaceRequest(text: string): boolean {

@@ -1,0 +1,12 @@
+# A project with no connectors: GitHub issues are not configured at all.
+name: demo
+revision: 1
+repositories:
+  - name: demo
+    url: https://github.com/example/demo.git
+    path: repo/demo
+    defaultBranch: main
+    credentialRef: github-agentx-sdlc
+setup: []
+readiness: []
+orchestratorInstructions: Delegate every repository read, edit, build and test to the worker.

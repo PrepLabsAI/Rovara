@@ -259,6 +259,19 @@ describe("generic connector routes", () => {
     expect(response.status).toBe(404);
     expect(response.body.error).toMatchObject({ code: "NOT_FOUND", message: "connector not found" });
   });
+
+  it("asks the vendor again for refresh=1 and caches the fresh catalog", async () => {
+    const { handler, connect, path } = await trackerBroker();
+    expect((await registerTrackerKey(handler)).status).toBe(201);
+    expect((await call(handler, { method: "GET", path: `${path}/tools`, service })).status).toBe(200);
+    const afterFirst = connect.mock.calls.length;
+    await call(handler, { method: "GET", path: `${path}/tools`, service });
+    expect(connect.mock.calls.length).toBe(afterFirst);
+    expect((await call(handler, { method: "GET", path: `${path}/tools?refresh=1`, service })).status).toBe(200);
+    expect(connect.mock.calls.length).toBe(afterFirst * 2);
+    await call(handler, { method: "GET", path: `${path}/tools`, service });
+    expect(connect.mock.calls.length).toBe(afterFirst * 2);
+  });
 });
 
 describe("thread setup lists every connector, to services that can parse it", () => {

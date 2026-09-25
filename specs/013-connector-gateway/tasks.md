@@ -41,14 +41,14 @@ Each phase is one pull request to `mainline`. Check a task only after its eviden
 
 ## Phase 4: Turn records, metrics, evaluation (US5)
 
-- [ ] T025 Move `TaskUsageTelemetry` to `@agentx/contracts`; the worker imports it unchanged.
-- [ ] T026 Add the hidden turn-recorder extension and the `TurnRecords` writer; one record per Slack event.
-- [ ] T027 Add `TurnRecords`, the SNS topic and the two alarms to `AgentXControlPlane`; grant the Slack service write and the broker read.
-- [ ] T028 Emit the metrics in `contracts/metrics.md` from broker and Slack service.
-- [ ] T029 Add the admin turn export route and `agentx admin turns export`.
-- [ ] T030 Add `npm run eval` with seed cases, legacy presentation mode and baselines; record SC-004.
-- [ ] T031 Update the README diagnostics paragraph for turn-record retention.
-- [ ] T039 Send `refresh=1` for connector discovery after a turn recorded a definition-changed failure; the tools route bypasses the per-container catalog cache for it.
+- [X] T025 Move `TaskUsageTelemetry` to `@agentx/contracts`; the worker imports it unchanged.
+- [X] T026 Add the hidden turn-recorder extension and the `TurnRecords` writer; one record per Slack event.
+- [X] T027 Add `TurnRecords`, the SNS topic and the alarms to `AgentXControlPlane`; grant the Slack service write and the broker read.
+- [X] T028 Emit the metrics in `contracts/metrics.md` from broker and Slack service.
+- [X] T029 Add the admin turn export route and `agentx admin turns export`.
+- [X] T030 Add `npm run eval` with seed cases, legacy presentation mode and baselines; record SC-004.
+- [X] T031 Update the README diagnostics paragraph for turn-record retention.
+- [X] T039 Send `refresh=1` for connector discovery after a turn recorded a definition-changed failure; the tools route bypasses the per-container catalog cache for it.
 
 ## Phase 5b: Shared binder (before 5 and 6)
 

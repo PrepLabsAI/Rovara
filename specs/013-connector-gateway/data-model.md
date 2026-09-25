@@ -127,23 +127,36 @@ phase 2b (T038), alongside the conditional recovery tools that consume it.
 
 ## Turn record
 
-Table `TurnRecords` in `AgentXControlPlane`. `pk = THREAD#<subject>`,
-`sk = TURN#<ISO time>#<eventId>`, TTL 30 days. Written once per Slack event with a condition on
-absence.
+Table `TurnRecords` in `AgentXControlPlane`, TTL 30 days (the `expiresAt` attribute). Written once
+per Slack event, with a condition on absence, only when the event is finished. An event still in
+flight never gets a partial record.
 
 | Field | Notes |
 |---|---|
-| `eventId`, `requestedBy`, `project`, `settingsRevision`, `workspaceId`, `conversationId` | Identity and routing |
+| `eventId`, `subject`, `requestedBy`, `settingsRevision`, `workspaceId`, `conversationId` | Identity and routing |
+| `project` | Added at export from the workspace record; not stored |
+| `receivedAt` | The time AgentX's Slack ingress received the event (ISO). Part of the sort key, so a redelivery of the same event maps to the same record |
+| `disposition` | `answered`, `failed`, `abandoned`, `workspace_close`, `workspace_limit`, `workspace_closed`, `workspace_unavailable` |
 | `model` | `{ provider, modelId }` |
 | `startedAt`, `finishedAt`, `durationMs` | Timing |
 | `manifestHash` | SHA-256 of the capabilities manifest |
 | `offeredTools` | `[{ name, descriptionHash }]` in presentation order |
 | `requestText` | At most 40,000 characters |
 | `responseText` | At most 40,000 characters |
-| `calls` | `[{ name, connector?, arguments, argumentsFingerprint, validation, outcome, reason?, durationMs, requestId?, operationId? }]`; `arguments` redacted and capped at 2,048 characters each |
+| `textTruncated` | Present and `true` when `requestText` or `responseText` was cut to fit |
+| `calls` | `[{ name, connector?, arguments, argumentsFingerprint, validation, outcome, reason?, durationMs, requestId?, operationId? }]`, at most 50. `arguments` is redacted JSON text of the call's arguments, capped at 2,048 characters; `argumentsFingerprint` is the first 32 hex characters of a SHA-256 over the same redacted JSON text, uncapped |
+| `callsTruncated` | Present and `true` when the turn made more than 50 calls and only the first 50 were kept |
+| `argumentsOmitted` | Present and `true` when every call's `arguments` was replaced with `[omitted]` to fit the record's storage budget. Optional: records written before this field existed do not carry it |
 | `validation` | `ok`, `schema_error`, `policy_denied`, `unknown_tool` |
 | `outcome` | `SUCCEEDED`, `FAILED`, `UNKNOWN`, `IN_PROGRESS` |
 | `stopReason`, `emptyResponse` | From the final assistant message |
 | `usage` | `TaskUsageTelemetry` (feature 011 shape) for the orchestrator's own session |
-| `workerOperations` | Operation IDs started by the turn, joinable to worker `usage` events |
+| `usageError` | Present instead of `usage` when the orchestrator could not measure it; a fixed category string, never raw error text |
+| `recordingErrors` | At most 8 fixed category strings naming a recorder failure (for example `handler_failed:tool_execution_end`), never raw error text. When more categories failed than fit, the last entry is `overflow`; the turn's own answer to the member is unaffected either way |
+| `workerOperations` | Operation IDs started by the turn, joinable to worker `usage` events; at most 50 |
 | `error` | `{ name, code? }` when the turn failed |
+
+Storage-only attributes, added when the item is written and stripped from every record the export
+route returns: `pk = THREAD#<subject>`, `sk = TURN#<receivedAt>#<eventId>`, `exportPk = "TURNS"`,
+`exportSk = <receivedAt>#<eventId>` (read through the `byTime` index for export, newest first), and
+`expiresAt` (the DynamoDB TTL attribute, `receivedAt` plus 30 days in epoch seconds).

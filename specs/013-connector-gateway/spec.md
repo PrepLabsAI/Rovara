@@ -273,15 +273,20 @@ turn with the fields below; inject schema drift and verify the metric and alarm 
 
 - **FR-025**: The Slack service MUST write one turn record per Slack event to a `TurnRecords`
   table with a 30-day time-to-live, containing the fields in [data-model.md](data-model.md).
-- **FR-026**: Request text, response text and tool arguments MAY be stored in turn records, capped
-  as specified, and MUST NOT appear in CloudWatch logs. Credentials MUST NOT appear anywhere.
+- **FR-026**: Turn records keep request text, response text and tool arguments, capped as
+  specified. Before a record is written, known credential shapes (API keys, bearer tokens,
+  passwords, connection strings and similar) MUST be replaced with `[REDACTED]`; this is
+  best-effort pattern redaction, not a guarantee that no secret can appear. Request text, response
+  text and tool arguments MUST NOT appear in CloudWatch logs. Turn records MUST be readable only
+  through the administrator-only export route, MUST be stored encrypted at rest, and expire after
+  30 days.
 - **FR-027**: Orchestrator usage in a turn record MUST use the feature 011 `TaskUsageTelemetry`
   shape, moved to `@agentx/contracts` and shared with the worker.
 - **FR-028**: The administration client MUST provide `agentx admin turns export --since <duration>`
   writing JSON Lines, served by an administrator-only route.
 - **FR-029**: The broker and Slack service MUST emit the metrics listed in
   [contracts/metrics.md](contracts/metrics.md) with a `connector` dimension where applicable. The
-  control-plane stack MUST ship the two alarms listed there, notifying an SNS topic.
+  control-plane stack MUST ship the alarms listed there, notifying an SNS topic.
 
 **Compatibility and verification**
 

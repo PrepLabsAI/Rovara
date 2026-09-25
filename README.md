@@ -231,8 +231,11 @@ past that point.
 
 The production release creates the Slack ingress route, queue, and thread storage in
 `AgentXControlPlane`. Create the orchestrator service once with the release command's
-`--create-slack-orchestrator` flag; the release pipeline updates it after that. Read the Slack
-outputs from the control plane stack:
+`--create-slack-orchestrator` flag; the release pipeline updates it after that. Every release
+deploys the production runtime first, then the control plane, then the Slack orchestrator service,
+so the control plane's `TurnRecordsTableName` output always exists before the service that writes
+to it starts. The release script reads that output and passes it to the orchestrator service as
+`TURN_RECORDS_TABLE_NAME`. Read the Slack outputs from the control plane stack:
 
 ```sh
 AWS_PROFILE=agentx-deployer AWS_REGION=us-east-1 aws cloudformation describe-stacks \
@@ -359,8 +362,9 @@ conversation with it.
 The ingress Lambda and the orchestrator service write JSON log lines to CloudWatch Logs, with the
 components `slack-ingress` and `slack-orchestrator`. They record event IDs, decisions such as
 `event.ignored` with a reason, and failures by error type. Tokens, request text, and response text
-are never logged. `event.ignored reason="channel_not_bound"` means the channel has no binding, and
-`request.rejected reason="invalid_signature"` usually means the stored signing secret is wrong.
+are never written to CloudWatch Logs. `event.ignored reason="channel_not_bound"` means the channel
+has no binding, and `request.rejected reason="invalid_signature"` usually means the stored signing
+secret is wrong.
 `connector.discovery_failed` means a connector's tools were left out of a turn: `cause="transient"`
 is an outage the next turn may clear, and `cause="setup"` (with its error `code`) needs an
 administrator, for example `FORBIDDEN` when the connector is no longer enabled for the project.
@@ -378,6 +382,49 @@ class name, never the token, and the provider simply mints again.
 example a newer type left over after a rollback; it is skipped, not served. `connector.unusable`
 means a stored connector's configuration failed to parse for its own type; it is skipped too, and
 the log line names the reason. Both name the project, revision, connector and type, never a secret.
+
+Each Slack request that reaches the orchestrator service leaves one turn record in the
+`TurnRecords` table for 30 days, once it finishes. That covers every `disposition`: `answered` and
+`failed` turns that ran the orchestrator, `abandoned` requests whose final attempt failed, and
+requests the service settled without running the orchestrator: a close command
+(`workspace_close`), the workspace limit (`workspace_limit`), a closed workspace
+(`workspace_closed`), and a workspace that could not be set up or is not runnable
+(`workspace_unavailable`). An attempt that fails and is retried leaves no record; the attempt that
+finishes writes the one record. A record holds the request and response text (each at most 40,000 characters), the tools the
+orchestrator was offered, each tool call with its redacted arguments, validation result and
+outcome, the stop reason, the orchestrator's token usage, and the worker operations it started.
+Known credential shapes are replaced with `[REDACTED]` before a record is written; this is
+best-effort pattern redaction, not a guarantee that no secret survives, and tool results are never
+stored. A mention with no text after `@AgentX` is answered by the ingress Lambda directly and never
+reaches the orchestrator, so it leaves no turn record. `recordingErrors` on a record lists fixed
+category strings, never message text, when part of the recording itself failed, for example
+`handler_failed:tool_execution_end`; the turn's own answer to the member is unaffected either way.
+An administrator exports records with `agentx admin turns export --since <duration> [--output
+<file>]`, for example `agentx admin turns export --since 7d --output turns.jsonl`; with `--output`
+the file is written at mode `0600` through a `.partial` file renamed into place only on success,
+and the output holds request text, so keep it private. The summary on stderr gives the count
+exported, plus `skipped` when the control plane left out stored records that failed the record
+schema. `turn_record.write_failed` means a record
+was lost (the member still got the reply), and `turn_record.duplicate` means SQS redelivered a
+request that was already recorded.
+
+Connector and turn metrics go to the `AgentX` CloudWatch namespace; see
+[contracts/metrics.md](specs/013-connector-gateway/contracts/metrics.md) for the full list. Five
+alarms ship in `AgentXControlPlane`: `AgentXConnectorBroken` (a connector's discovery failed or a
+vendor changed an approved tool's schema), `AgentXConnectorNotConnected` (a connector's vendor
+credential is missing, revoked or rejected), `AgentXEmptyResponses` (more than three turns in an
+hour ended without text), `AgentXRecordingFailures` (a turn record or a turn's own metrics were
+lost), and `AgentXSlackDeadLetters` (a Slack request exhausted its receives and landed in the
+dead-letter queue). All five notify the SNS topic `AgentXOperatorAlerts`, which has no subscription
+by default; subscribe an address after the first deploy, for example:
+`aws sns subscribe --topic-arn <OperatorAlertsTopicArn output> --protocol email
+--notification-endpoint you@example.com`. Confirm the subscription actually pages you with a smoke
+test right after that first deploy: `aws cloudwatch set-alarm-state --alarm-name
+AgentXConnectorBroken --state-value ALARM --state-reason test`, then clear it with the same command
+and `--state-value OK`. If an alarm stays red, act on what it is telling you: purge the
+`SlackRequestDeadLetterQueueUrl` queue once you have handled its requests to clear
+`AgentXSlackDeadLetters`, and reconnect or disable the connector named in the broker logs to clear
+`AgentXConnectorNotConnected` or a persistent `AgentXConnectorBroken`.
 
 If the orchestrator's turn fails, AgentX posts the failure in the thread. Other failures, such as
 workspace preparation or a Slack API error, are retried; on the fifth attempt AgentX posts the

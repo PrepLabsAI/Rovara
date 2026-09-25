@@ -409,6 +409,7 @@ async function releaseSlackOrchestrator(
     ...parameter("ControlPlaneUrl", stackOutput(controlPlane, "ApiEndpoint")),
     ...parameter("SlackRequestQueueUrl", stackOutput(controlPlane, "SlackRequestQueueUrl")),
     ...parameter("SlackThreadsTableName", stackOutput(controlPlane, "SlackThreadsTableName")),
+    ...parameter("TurnRecordsTableName", stackOutput(controlPlane, "TurnRecordsTableName")),
     ...parameter("ThreadSessionBucketName", stackOutput(controlPlane, "SlackThreadSessionBucketName")),
     ...parameter("SlackSecretArn", stackOutput(controlPlane, "SlackSecretArn")),
     ...parameter("VpcId", stackOutput(foundation, "VpcId")),

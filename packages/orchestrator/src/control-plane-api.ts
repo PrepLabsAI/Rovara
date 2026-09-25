@@ -38,9 +38,11 @@ export class ControlPlaneApi implements OrchestrationApi, OperationPollingTransp
     return { id: conversation.id, workspaceId: conversation.workspaceId };
   }
 
-  async discoverConnectorTools(input: { workspaceId: string; connector: string }) {
+  async discoverConnectorTools(input: { workspaceId: string; connector: string; refresh?: boolean }) {
     this.assertWorkspace(input.workspaceId);
-    const response = object(await this.request(`/v1/workspaces/${this.workspaceId}/connectors/${encodeURIComponent(input.connector)}/tools`, { method: "GET" }));
+    // refresh=1 asks the broker to skip its per-container catalog cache; an older broker ignores it.
+    const query = input.refresh === true ? "?refresh=1" : "";
+    const response = object(await this.request(`/v1/workspaces/${this.workspaceId}/connectors/${encodeURIComponent(input.connector)}/tools${query}`, { method: "GET" }));
     return ConnectorCatalogSchema.parse(response.catalog);
   }
 

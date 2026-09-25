@@ -8,7 +8,8 @@
     ".": "./dist/index.js",
     "./control-plane-api": "./dist/control-plane-api.js",
     "./event-client": "./dist/event-client.js",
-    "./orchestrator": "./dist/orchestrator.js"
+    "./orchestrator": "./dist/orchestrator.js",
+    "./turn-recorder": "./dist/turn-recorder.js"
   },
   "dependencies": {
     "@agentx/contracts": "0.1.0",
