@@ -3,6 +3,7 @@ import { CONFIRMATION_TTL_MS, answeredConfirmationBlocks, confirmationBlocks, co
 import { createGateSession } from "../../packages/orchestrator/src/action-gate.js";
 import { createDynamoConfirmationStore } from "../../packages/slack-service/src/confirmation-store.js";
 import {
+  ALREADY_USED_BY_THIS_REQUEST_TEXT,
   CANCELLED_TEXT,
   NO_LONGER_PENDING_TEXT,
   YES_TO_ALL_TEXT,
@@ -175,12 +176,15 @@ describe("checking a message against the thread's confirmation", () => {
     // A fresh message after the tombstone is an ordinary request, whoever sends it.
     expect(await check("yes", { eventId: "EvYES0000002", receivedAt: new Date(postedAt + 180_000).toISOString() })).toEqual({ run: true, session: createGateSession(requester) });
     expect(await check("yes", { eventId: "EvYES0000003", userId: other, receivedAt: new Date(postedAt + 180_000).toISOString() })).toEqual({ run: true, session: createGateSession(other) });
-    // The same event again, or one received before the tombstone was left, hears that it is no longer pending.
+    // The same event again hears that its earlier attempt used it (fix round 1, I1: the call may
+    // already have run); a redelivered cancel, or one received before the tombstone was left,
+    // hears that it is no longer pending.
     expect(await check("yes", { eventId: "EvYES0000001" })).toEqual({ run: false });
+    expect(await check("cancel", { eventId: "EvYES0000001" })).toEqual({ run: false });
     expect(await check("yes", { eventId: "EvYES0000004" })).toEqual({ run: false });
     // A click can only mean that confirmation: even from a new event after the tombstone, it runs no ordinary turn.
     expect(await check("yes", { eventId: confirmationClickEventId(pending.confirmationId, "approve"), receivedAt: new Date(postedAt + 180_000).toISOString() })).toEqual({ run: false });
-    expect(posts).toEqual([NO_LONGER_PENDING_TEXT, NO_LONGER_PENDING_TEXT, NO_LONGER_PENDING_TEXT]);
+    expect(posts).toEqual([ALREADY_USED_BY_THIS_REQUEST_TEXT, NO_LONGER_PENDING_TEXT, NO_LONGER_PENDING_TEXT, NO_LONGER_PENDING_TEXT]);
   });
 
   it("treats a fresh ok two minutes after a claim as an ordinary request", async () => {
@@ -256,7 +260,7 @@ describe("tombstones, expiry and yes to all", () => {
     expect(await store.claim(subject, pending.confirmationId, "EvYES0000001")).toBe(true);
     expect(await store.claim(subject, pending.confirmationId, "EvYES0000001")).toBe(false);
     expect(await check("yes")).toEqual({ run: false });
-    expect(posts).toEqual([NO_LONGER_PENDING_TEXT]);
+    expect(posts).toEqual([ALREADY_USED_BY_THIS_REQUEST_TEXT]);
     const session = createGateSession(requester, { approvals: pending.calls });
     await settleConfirmations({ check: { run: true, session, claim: { confirmationId: pending.confirmationId } }, message: message("yes"), subject, store, postConfirmation: vi.fn(), log: vi.fn(), now: postedAt + 120_000 });
     expect((await store.load(subject))?.usedBy).toBe("EvYES0000001");

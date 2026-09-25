@@ -57,6 +57,7 @@ export function confirmationMessage(confirmation: PendingConfirmation): string {
 
 export const YES_TO_ALL_TEXT = "OK. For the next 24 hours in this thread I'll stop asking you when I'm unsure you asked for something. I'll still ask before destructive actions, large changes and anything an administrator requires.";
 export const NO_LONGER_PENDING_TEXT = "That confirmation is no longer pending, so nothing was run.";
+export const ALREADY_USED_BY_THIS_REQUEST_TEXT = "An earlier attempt of this request already used that confirmation, so I didn't run anything again. It may already have run; ask me to check, or ask again.";
 export const CANCELLED_TEXT = "Cancelled. Nothing was run.";
 export const EXPIRED_TEXT = "That confirmation request expired after 24 hours, so nothing was run. Ask me again if you still want it.";
 
@@ -140,6 +141,9 @@ export async function checkConfirmation(input: {
   if (!pending) return { run: true, session: session() };
   if (!live) {
     if (pending.usedBy === EXPIRED_MARK) return refuse("expired", EXPIRED_TEXT);
+    // A redelivery of the "yes" or click that claimed it: the confirmed call may already have run
+    // (the attempt threw after it, before the reply was posted), so never say nothing ran.
+    if (pending.usedBy === message.eventId && reply !== "cancel") return refuse("already_used_by_this_request", ALREADY_USED_BY_THIS_REQUEST_TEXT);
     // Only a click on it, or a redelivery of the event that left the tombstone (or one received
     // before it), hears "no longer pending"; any later message is an ordinary request.
     const redelivery = pending.usedBy === message.eventId || (pending.retiredAt !== undefined && Date.parse(message.receivedAt) <= Date.parse(pending.retiredAt));
@@ -173,7 +177,10 @@ export const MAX_CONFIRMATION_CALLS = 20;
  * earlier attempt already posted its confirmation, left that one as it is: still pending, or
  * already answered (used, cancelled or expired), which is never reopened or re-posted.
  */
-export type SettleOutcome = "none" | "posted" | "already_pending" | "already_answered";
+export type SettleOutcome =
+  | { outcome: "none" | "posted" | "already_answered" }
+  /** `differs`: the re-run blocked other calls than the pending confirmation lists, which are `pendingSummaries`. */
+  | { outcome: "already_pending"; differs: boolean; pendingSummaries: string[] };
 
 /**
  * After a turn: leaves a tombstone on the confirmation it used or superseded, then stores and
@@ -194,15 +201,20 @@ export async function settleConfirmations(input: {
   if (retired !== undefined) await store.retire(subject, retired, message.eventId);
   const calls = [...new Map(check.session.asks.map((ask) => [ask.argumentsHash, { tool: ask.tool, argumentsHash: ask.argumentsHash, summary: ask.summary, kind: ask.kind }])).values()]
     .slice(0, MAX_CONFIRMATION_CALLS);
-  if (calls.length === 0) return "none";
+  if (calls.length === 0) return { outcome: "none" };
   const previous = await store.load(subject);
   const confirmationId = confirmationIdFor(message.eventId);
   if (previous?.confirmationId === confirmationId && previous.usedBy !== UNPOSTED_MARK) {
     // A redelivery of the event that already posted this confirmation (spec 014): overwriting it
     // would reopen an answered one, so a confirmed call could run twice. It stays as it is.
-    const outcome = previous.retiredAt === undefined ? "already_pending" : "already_answered";
-    input.log("gate.confirmation_kept", { eventId: message.eventId, outcome });
-    return outcome;
+    if (previous.retiredAt !== undefined) {
+      input.log("gate.confirmation_kept", { eventId: message.eventId, outcome: "already_answered" });
+      return { outcome: "already_answered" };
+    }
+    const listed = new Set(previous.calls.map((call) => call.argumentsHash));
+    const differs = calls.length !== listed.size || calls.some((call) => !listed.has(call.argumentsHash));
+    input.log("gate.confirmation_kept", { eventId: message.eventId, outcome: "already_pending", differs });
+    return { outcome: "already_pending", differs, pendingSummaries: previous.calls.map((call) => call.summary) };
   }
   const replaced = previous !== undefined && previous.retiredAt === undefined && input.now < Date.parse(previous.expiresAt) && previous.requesterId !== check.session.requesterId
     ? previous.requesterId
@@ -231,5 +243,5 @@ export async function settleConfirmations(input: {
     throw error;
   }
   input.log("gate.confirmation_requested", { eventId: message.eventId, calls: calls.length, kinds: [...new Set(calls.map((call) => call.kind))].join(",") });
-  return "posted";
+  return { outcome: "posted" };
 }

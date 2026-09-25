@@ -16,7 +16,7 @@ import { runOrchestratorTurn } from "../../packages/orchestrator/src/orchestrato
 import { createDynamoConfirmationStore } from "../../packages/slack-service/src/confirmation-store.js";
 import { UNPOSTED_MARK } from "../../packages/slack-service/src/confirmations.js";
 import { processSlackRequest, type ProcessorDependencies, type TurnInput } from "../../packages/slack-service/src/processor.js";
-import { createHostedClassifier, createHostedSlackRuntime } from "../../packages/slack-service/src/runtime.js";
+import { classifierTimeoutMs, createHostedClassifier, createHostedSlackRuntime } from "../../packages/slack-service/src/runtime.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
@@ -182,6 +182,57 @@ describe("confirmations through the Slack processor", () => {
 });
 
 describe("a redelivered request that asked for a confirmation", () => {
+  it("tells a redelivered yes that its earlier attempt already used the confirmation, and runs nothing again", async () => {
+    const connectorCall = vi.fn();
+    const { posts, dependencies, advance, confirmationsPosted, logs } = harness(async (input) => {
+      if (input.gate!.approvals.length > 0) connectorCall();
+      return closeTurn(input);
+    });
+    await processSlackRequest(slackMessage("EvGATE000101", "close TRK-9"), dependencies, { finalAttempt: false });
+    expect(confirmationsPosted).toHaveLength(1);
+    const post = dependencies.post;
+    dependencies.post = async (thread, text) => {
+      if (text === "Closed TRK-9.") throw new Error("Slack chat.postMessage failed: HTTP 500");
+      return post(thread, text);
+    };
+    advance(60_000);
+    const yes = slackMessage("EvGATE000102", "yes", { receivedAt: new Date(start + 60_000).toISOString() });
+    await expect(processSlackRequest(yes, dependencies, { finalAttempt: false })).rejects.toThrow("HTTP 500");
+    expect(connectorCall).toHaveBeenCalledOnce();
+    dependencies.post = post;
+    advance(60_000);
+    await processSlackRequest(yes, dependencies, { finalAttempt: false, redelivered: true });
+    expect(connectorCall).toHaveBeenCalledOnce();
+    expect(posts.at(-1)).toBe("An earlier attempt of this request already used that confirmation, so I didn't run anything again. It may already have run; ask me to check, or ask again.");
+    expect(logs).toContainEqual({ event: "gate.confirmation_refused", fields: { eventId: "EvGATE000102", reason: "already_used_by_this_request" } });
+  });
+
+  it("says which calls the still-pending confirmation lists when the redelivered turn asked for different ones", async () => {
+    let target = "TRK-9";
+    const { posts, dependencies, advance, confirmationsPosted } = harness(async (input) => {
+      const args = { id: target };
+      input.gate!.asks.push({ toolCallId: "c1", tool: close.tool, argumentsHash: argumentsHash(close.tool, args), summary: `tracker__close_item: id=${target}`, kind: "destructive" });
+      return "Waiting.";
+    });
+    const original = slackMessage("EvGATE000111", "close the old one");
+    await processSlackRequest(original, dependencies, { finalAttempt: false });
+    target = "<!channel>";
+    advance(30_000);
+    await processSlackRequest(original, dependencies, { finalAttempt: false, redelivered: true });
+    expect(confirmationsPosted).toHaveLength(1);
+    expect(posts).toContain("I didn't ask again: the pending confirmation still lists tracker__close_item: id=TRK-9. Ask me again for anything else.");
+    expect(posts.join("\n")).not.toContain("<!channel>");
+  });
+
+  it("says nothing extra when the redelivered turn asked for the same calls", async () => {
+    const { posts, dependencies, advance } = harness(closeTurn);
+    const original = slackMessage("EvGATE000121", "close TRK-9");
+    await processSlackRequest(original, dependencies, { finalAttempt: false });
+    advance(30_000);
+    await processSlackRequest(original, dependencies, { finalAttempt: false, redelivered: true });
+    expect(posts.filter((text) => text.startsWith("I didn't ask again"))).toEqual([]);
+  });
+
   it("does not reopen or re-post a confirmation that was already approved, and says why it did not ask again", async () => {
     const { posts, turns, dependencies, advance, confirmations, confirmationsPosted } = harness(closeTurn);
     const original = slackMessage("EvGATE000061", "close TRK-9");
@@ -198,10 +249,10 @@ describe("a redelivered request that asked for a confirmation", () => {
     expect(confirmationsPosted).toHaveLength(1);
     expect(await confirmations.load(subject)).toMatchObject({ confirmationId, usedBy: approve });
     expect(posts).toContain("This request was retried after an interruption, and I had already asked you to confirm it and had my answer, so I didn't ask again. Ask me again if you still want it.");
-    // The approval cannot be used a second time.
-    await processSlackRequest(slackMessage(approve, "yes", { receivedAt: new Date(start + 180_000).toISOString() }), dependencies, { finalAttempt: false });
+    // The approval cannot be used a second time: a redelivery of the click that claimed it runs nothing.
+    await processSlackRequest(slackMessage(approve, "yes", { receivedAt: new Date(start + 180_000).toISOString() }), dependencies, { finalAttempt: false, redelivered: true });
     expect(turns).toHaveLength(3);
-    expect(posts.at(-1)).toBe("That confirmation is no longer pending, so nothing was run.");
+    expect(posts.at(-1)).toBe("An earlier attempt of this request already used that confirmation, so I didn't run anything again. It may already have run; ask me to check, or ask again.");
   });
 
   it("does not reopen a confirmation that was cancelled", async () => {
@@ -289,7 +340,7 @@ describe("the hosted classifier at startup", () => {
     const create = vi.fn(async () => classifier);
     const logs: string[] = [];
     const hosted = await createHostedClassifier({ model, timeoutMs: 8_000, log: (event) => logs.push(event), create });
-    expect(create).toHaveBeenCalledWith({ model, timeoutMs: 8_000 });
+    expect(create).toHaveBeenCalledWith({ model, timeoutMs: 8_000, failOnUnknownModel: true });
     expect(hosted.available).toBe(true);
     expect(hosted.classifier).toBe(classifier);
     expect(logs).toEqual([]);
@@ -305,5 +356,28 @@ describe("the hosted classifier at startup", () => {
     // The runtime module is built, so its ClassifierError is the built class: compare by name.
     await expect(hosted.classifier(input)).rejects.toMatchObject({ name: new ClassifierError("x").name, message: "the classifier is unavailable" });
     expect(logs).toEqual([{ event: "gate.classifier_unavailable", fields: { provider: "amazon-bedrock", model: "amazon.nova-lite-v1:0", errorName: "CredentialsProviderError" } }]);
+  });
+
+  it("treats a model the runtime does not know as unavailable at startup", async () => {
+    const { modelRuntime } = await fauxModelRuntime();
+    const logs: Array<{ event: string; fields: Readonly<Record<string, string | number | boolean>> }> = [];
+    const hosted = await createHostedClassifier({ model: { provider: FAUX_MODEL.provider, modelId: "no-such-model" }, timeoutMs: 8_000, modelRuntime, log: (event, fields) => logs.push({ event, fields }) });
+    expect(hosted.available).toBe(false);
+    await expect(hosted.classifier(input)).rejects.toMatchObject({ message: "the classifier is unavailable" });
+    expect(logs).toEqual([{ event: "gate.classifier_unavailable", fields: { provider: FAUX_MODEL.provider, model: "no-such-model", errorName: "ClassifierError" } }]);
+  });
+
+  it("is available for a model the runtime knows", async () => {
+    const { modelRuntime } = await fauxModelRuntime();
+    const logs: string[] = [];
+    const hosted = await createHostedClassifier({ model: FAUX_MODEL, timeoutMs: 8_000, modelRuntime, log: (event) => logs.push(event) });
+    expect(hosted.available).toBe(true);
+    expect(logs).toEqual([]);
+  });
+
+  it("uses an 8 second timeout unless the setting is a positive whole number of milliseconds", () => {
+    expect(classifierTimeoutMs(undefined)).toBe(8_000);
+    for (const value of ["", "abc", "NaN", "0", "-5", "1.5", "12abc", " 12"]) expect(classifierTimeoutMs(value)).toBe(8_000);
+    expect(classifierTimeoutMs("12000")).toBe(12_000);
   });
 });

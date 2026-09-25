@@ -127,9 +127,12 @@ export async function createModelClassifier(options: {
   model: { provider: string; modelId: string };
   timeoutMs?: number;
   modelRuntime?: ModelRuntime;
+  /** Throw here, rather than on every call, when the runtime does not know the model. */
+  failOnUnknownModel?: boolean;
 }): Promise<ActionClassifier> {
   const runtime = options.modelRuntime ?? await ModelRuntime.create({ refreshOnCreate: false });
   const model = runtime.getModel(options.model.provider, options.model.modelId);
+  if (!model && options.failOnUnknownModel === true) throw new ClassifierError("the classifier model is unavailable");
   const timeoutMs = options.timeoutMs ?? CLASSIFIER_TIMEOUT_MS;
   return async (input) => {
     if (!model) throw new ClassifierError("the classifier model is unavailable");

@@ -21,7 +21,7 @@ import { processSlackRequest, type ServiceLog, type ThreadServiceApi, type Threa
 import { createSignedServiceFetch } from "./signing-fetch.js";
 import { createSlackUserNames } from "./user-names.js";
 import { createThreadApi } from "./thread-api.js";
-import { createHostedClassifier, createHostedSlackRuntime } from "./runtime.js";
+import { classifierTimeoutMs, createHostedClassifier, createHostedSlackRuntime } from "./runtime.js";
 import { DynamoTurnRecordWriter } from "./turn-records.js";
 
 const MAX_RECEIVE_COUNT = 5;
@@ -60,14 +60,16 @@ const log: ServiceLog = (event, fields) => {
 };
 
 // The action gate's classifier (spec 014): a small model chosen per deployment through the
-// AgentXSlackOrchestrator parameter GateClassifierModelId. A classifier that cannot be made, or an
-// unknown model, makes every change no rule settles ask, so the service still starts and says so.
+// AgentXSlackOrchestrator parameter GateClassifierModelId. If it cannot be made, including a model
+// the runtime does not know, the service still starts, logs gate.classifier_unavailable and says
+// classifierAvailable: false in its start log, and every change no rule settles asks.
 const classifierModel = {
   provider: process.env.AGENTX_GATE_CLASSIFIER_PROVIDER ?? "amazon-bedrock",
   modelId: process.env.AGENTX_GATE_CLASSIFIER_MODEL ?? "amazon.nova-lite-v1:0",
 };
-const classifierTimeoutMs = Number.parseInt(process.env.AGENTX_GATE_CLASSIFIER_TIMEOUT_MS ?? "8000", 10);
-const { classifier, available: classifierAvailable } = await createHostedClassifier({ model: classifierModel, timeoutMs: classifierTimeoutMs, log });
+const { classifier, available: classifierAvailable } = await createHostedClassifier({
+  model: classifierModel, timeoutMs: classifierTimeoutMs(process.env.AGENTX_GATE_CLASSIFIER_TIMEOUT_MS), log,
+});
 const confirmations = createDynamoConfirmationStore(documentClient, threadsTableName, Date.now, log);
 
 let botToken: { value: Promise<string>; loadedAt: number } | undefined;

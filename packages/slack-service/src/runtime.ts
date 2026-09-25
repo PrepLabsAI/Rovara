@@ -1,4 +1,4 @@
-import { ClassifierError, createModelClassifier } from "@agentx/orchestrator/action-classifier";
+import { CLASSIFIER_TIMEOUT_MS, ClassifierError, createModelClassifier } from "@agentx/orchestrator/action-classifier";
 import { createGateSession, type ActionClassifier, type GateDecision } from "@agentx/orchestrator/action-gate";
 import { createOrchestratorRuntime, type OrchestratorOptions } from "@agentx/orchestrator/orchestrator";
 import type { ServiceLog, TurnInput } from "./processor.js";
@@ -46,15 +46,30 @@ export async function createHostedClassifier(options: {
   model: { provider: string; modelId: string };
   timeoutMs: number;
   log: ServiceLog;
+  /** Tests register Pi's faux provider here; production creates its own. */
+  modelRuntime?: Parameters<typeof createModelClassifier>[0]["modelRuntime"];
   create?: typeof createModelClassifier;
 }): Promise<{ classifier: ActionClassifier; available: boolean }> {
   const create = options.create ?? createModelClassifier;
   try {
-    return { classifier: await create({ model: options.model, timeoutMs: options.timeoutMs }), available: true };
+    // A model the runtime does not know is a startup failure too, so the start log says unavailable.
+    return {
+      classifier: await create({
+        model: options.model, timeoutMs: options.timeoutMs, failOnUnknownModel: true,
+        ...(options.modelRuntime === undefined ? {} : { modelRuntime: options.modelRuntime }),
+      }),
+      available: true,
+    };
   } catch (error) {
     options.log("gate.classifier_unavailable", {
       provider: options.model.provider, model: options.model.modelId, errorName: error instanceof Error ? error.name : "unknown",
     });
     return { classifier: async () => { throw new ClassifierError("the classifier is unavailable"); }, available: false };
   }
+}
+
+/** The classifier's timeout setting: a positive whole number of milliseconds, else 8 seconds. */
+export function classifierTimeoutMs(value: string | undefined): number {
+  const parsed = value !== undefined && /^[0-9]+$/u.test(value) ? Number.parseInt(value, 10) : Number.NaN;
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : CLASSIFIER_TIMEOUT_MS;
 }

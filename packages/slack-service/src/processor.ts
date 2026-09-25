@@ -288,8 +288,10 @@ export async function processSlackRequest(
         log("gate.confirmation_failed", { eventId: message.eventId, errorName: errorName(error) });
         await post("I couldn't save the confirmation request, so nothing it would list will run. Ask me again.");
       }
-      if (settled === "already_answered") {
+      if (settled?.outcome === "already_answered") {
         await post("This request was retried after an interruption, and I had already asked you to confirm it and had my answer, so I didn't ask again. Ask me again if you still want it.");
+      } else if (settled?.outcome === "already_pending" && settled.differs) {
+        await post(`I didn't ask again: the pending confirmation still lists ${shortList(settled.pendingSummaries)}. Ask me again for anything else.`);
       }
     }
     for (const chunk of splitSlackMessage(slackReplyText(response))) await post(chunk);
@@ -447,6 +449,12 @@ function closeBlockedMessage(result: ReturnType<typeof WorkspaceClosePreflightRe
 }
 
 export { slackThreadUrl } from "@agentx/contracts";
+
+/** At most three Slack-escaped summaries of at most 80 characters each, then how many more. */
+function shortList(summaries: readonly string[]): string {
+  const shown = summaries.slice(0, 3).map((summary) => escapeText(summary.length > 80 ? `${summary.slice(0, 79)}…` : summary));
+  return summaries.length > 3 ? `${shown.join("; ")} and ${summaries.length - 3} more` : shown.join("; ");
+}
 
 function safeMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : "unknown error";
