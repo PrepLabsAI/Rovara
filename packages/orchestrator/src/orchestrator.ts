@@ -103,7 +103,8 @@ export async function createOrchestratorRuntime(options: OrchestratorOptions): P
         model: options.model,
       });
     } catch {
-      // Recording never breaks a turn. Without an offer, measure() records "model was not offered".
+      // Recording never breaks a turn. Without an offer, measure() also records "model was not offered".
+      recorder.recordingFailed("offer_failed");
     }
   }
   const boundaryExtension: InlineExtension = {
@@ -224,8 +225,8 @@ export async function runOrchestratorTurn(runtime: AgentSessionRuntime, prompt: 
     if (before !== undefined && after !== undefined) {
       try {
         recorder.measure(before, after, outcome);
-      } catch (error) {
-        recorder.usageFailed(`usage measurement failed: ${errorMessage(error)}`);
+      } catch {
+        recorder.usageFailed("usage_measurement_failed");
       }
     }
   }
@@ -234,14 +235,10 @@ export async function runOrchestratorTurn(runtime: AgentSessionRuntime, prompt: 
 function sessionStats(runtime: AgentSessionRuntime, recorder: TurnRecorder): UsageStats | undefined {
   try {
     return runtime.session.getSessionStats();
-  } catch (error) {
-    recorder.usageFailed(`session stats unavailable: ${errorMessage(error)}`);
+  } catch {
+    recorder.usageFailed("session_stats_unavailable");
     return undefined;
   }
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "unknown error";
 }
 
 export function lastAssistantText(messages: readonly unknown[]): string {

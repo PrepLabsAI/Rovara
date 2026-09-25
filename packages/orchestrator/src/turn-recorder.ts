@@ -3,6 +3,7 @@ import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import {
   TURN_ARGUMENT_LIMIT,
   TURN_CALL_LIMIT,
+  TURN_RECORDING_ERROR_LIMIT,
   TurnObservationSchema,
   capText,
   createTaskUsageTelemetry,
@@ -49,6 +50,7 @@ export class TurnRecorder {
   private emptyResponse = false;
   private usage: TaskUsageTelemetry | undefined;
   private usageError: string | undefined;
+  private readonly recordingErrors = new Set<string>();
 
   constructor(private readonly now: () => number = Date.now) {}
 
@@ -69,9 +71,10 @@ export class TurnRecorder {
       name: "agentx-turn-recorder",
       hidden: true,
       factory: (pi) => {
-        pi.on("tool_execution_start", (event) => { this.toolStarted(event); });
-        pi.on("tool_execution_end", (event) => { this.toolEnded(event); });
-        pi.on("agent_end", (event) => { this.agentEnded(event.messages); });
+        // Each handler is guarded: a recorder failure is named in the record and never reaches Pi.
+        pi.on("tool_execution_start", (event) => { this.guarded("tool_execution_start", () => { this.toolStarted(event); }); });
+        pi.on("tool_execution_end", (event) => { this.guarded("tool_execution_end", () => { this.toolEnded(event); }); });
+        pi.on("agent_end", (event) => { this.guarded("agent_end", () => { this.agentEnded(event.messages); }); });
       },
     };
   }
@@ -84,7 +87,17 @@ export class TurnRecorder {
 
   /** Told by the connector bridge when a call threw an AgentX error, so FORBIDDEN reads as a policy denial. */
   connectorFailed(toolCallId: string, code: string): void {
-    this.errorCodes.set(toolCallId, code);
+    try {
+      this.errorCodes.set(toolCallId, code);
+    } catch {
+      this.recordingFailed("observer_failed");
+    }
+  }
+
+  /** Names a recording failure by a fixed category (never a raw error message); each category is kept once. */
+  recordingFailed(category: string): void {
+    if (this.recordingErrors.size >= TURN_RECORDING_ERROR_LIMIT) return;
+    this.recordingErrors.add(category.slice(0, 64) || "unknown");
   }
 
   toolEnded(event: { toolCallId: string; toolName: string; result: unknown; isError: boolean }): void {
@@ -124,9 +137,17 @@ export class TurnRecorder {
     }
   }
 
-  /** Told by the orchestrator when it could not measure usage, so the record says why it has none. */
+  /** Told by the orchestrator when it could not measure usage, as a fixed category, so the record says why it has none. */
   usageFailed(reason: string): void {
     this.usageError = reason.slice(0, 200);
+  }
+
+  private guarded(event: string, run: () => void): void {
+    try {
+      run();
+    } catch {
+      this.recordingFailed(`handler_failed:${event}`);
+    }
   }
 
   firstToolCall(): { name: string; arguments: unknown } | undefined {
@@ -151,6 +172,7 @@ export class TurnRecorder {
       emptyResponse: this.emptyResponse,
       ...(this.usage === undefined ? {} : { usage: this.usage }),
       ...(this.usageError === undefined ? {} : { usageError: this.usageError }),
+      ...(this.recordingErrors.size === 0 ? {} : { recordingErrors: [...this.recordingErrors] }),
       workerOperations: workerOperations.slice(0, TURN_CALL_LIMIT),
     };
   }

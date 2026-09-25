@@ -9,6 +9,8 @@ export const TURN_CALL_LIMIT = 50;
 export const TURN_RETENTION_DAYS = 30;
 export const TURN_EXPORT_PAGE = 100;
 export const TURN_EXPORT_PARTITION = "TURNS";
+/** At most this many distinct recording-failure categories per turn. */
+export const TURN_RECORDING_ERROR_LIMIT = 8;
 
 const Hex64 = z.string().regex(/^[a-f0-9]{64}$/);
 
@@ -40,6 +42,8 @@ export const TurnObservationSchema = z.object({
   emptyResponse: z.boolean(),
   usage: TaskUsageTelemetrySchema.optional(),
   usageError: z.string().max(200).optional(),
+  /** Fixed category strings naming recorder failures (never raw error messages), so a broken recorder is not silent. */
+  recordingErrors: z.array(z.string().min(1).max(64)).max(TURN_RECORDING_ERROR_LIMIT).optional(),
   workerOperations: z.array(z.string().uuid()).max(TURN_CALL_LIMIT),
 }).strict();
 

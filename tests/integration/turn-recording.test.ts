@@ -106,6 +106,38 @@ describe("turn recording is best effort", () => {
       expect(await runOrchestratorTurn(runtime, "hi", recorder)).toBe("Hello.");
     } finally { await runtime.dispose(); }
     expect(recorder.observation().usageError).toBe("model was not offered");
+    expect(recorder.observation().recordingErrors).toEqual(["offer_failed"]);
+  });
+
+  it("names a failed offer even when the model was already set, and still measures usage", async () => {
+    const recorder = new TurnRecorder();
+    const offer = recorder.offer.bind(recorder);
+    vi.spyOn(recorder, "offer").mockImplementation((input) => { offer(input); throw new Error("offer broke late"); });
+    const { runtime, faux } = await runtimeFor(api(), recorder);
+    faux.setResponses([fauxAssistantMessage("Hello.")]);
+    try {
+      expect(await runOrchestratorTurn(runtime, "hi", recorder)).toBe("Hello.");
+    } finally { await runtime.dispose(); }
+    const observation = TurnObservationSchema.parse(recorder.observation());
+    expect(observation.recordingErrors).toEqual(["offer_failed"]);
+    expect(observation.usageError).toBeUndefined();
+    expect(observation.usage?.outcome).toBe("SUCCEEDED");
+  });
+
+  it("names a failing recorder handler in a real turn and keeps the user's answer", async () => {
+    const recorder = new TurnRecorder();
+    vi.spyOn(recorder, "toolEnded").mockImplementation(() => { throw new Error("end broke"); });
+    const { runtime, faux } = await runtimeFor(api(), recorder);
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("github__list_issues", { state: "OPEN" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("No open issues."),
+    ]);
+    try {
+      expect(await runOrchestratorTurn(runtime, "list issues", recorder)).toBe("No open issues.");
+    } finally { await runtime.dispose(); }
+    const observation = TurnObservationSchema.parse(recorder.observation());
+    expect(observation.recordingErrors).toEqual(["handler_failed:tool_execution_end"]);
+    expect(observation.calls[0]).toMatchObject({ name: "github__list_issues", outcome: "IN_PROGRESS" });
   });
 
   it("keeps the turn's answer when session stats cannot be read, and says so in usageError", async () => {
@@ -116,7 +148,7 @@ describe("turn recording is best effort", () => {
     try {
       expect(await runOrchestratorTurn(runtime, "hi", recorder)).toBe("Hello.");
     } finally { await runtime.dispose(); }
-    expect(recorder.observation()).toMatchObject({ usageError: "session stats unavailable: stats broke" });
+    expect(recorder.observation()).toMatchObject({ usageError: "session_stats_unavailable" });
     expect(recorder.observation().usage).toBeUndefined();
   });
 
@@ -128,7 +160,7 @@ describe("turn recording is best effort", () => {
     try {
       await expect(runOrchestratorTurn(runtime, "hello", recorder)).rejects.toThrow("the request was malformed");
     } finally { await runtime.dispose(); }
-    expect(recorder.observation().usageError).toBe("usage measurement failed: measure broke");
+    expect(recorder.observation().usageError).toBe("usage_measurement_failed");
   });
 
   it("keeps a connector call's error when the error observer throws", async () => {
@@ -145,6 +177,24 @@ describe("turn recording is best effort", () => {
     } finally { await runtime.dispose(); }
     const toolResult = runtime.session.messages.find((message) => (message as { role?: string }).role === "toolResult");
     expect(JSON.stringify(toolResult)).toContain("GitHub MCP tool is not approved for this project");
+    expect(recorder.observation().calls[0]).toMatchObject({ validation: "ok", outcome: "FAILED" });
+  });
+
+  it("names a connector observer that fails inside the recorder, and keeps the call's error", async () => {
+    const recorder = new TurnRecorder();
+    const broken = new Map<string, string>();
+    vi.spyOn(broken, "set").mockImplementation(() => { throw new Error("map broke"); });
+    Object.defineProperty(recorder, "errorCodes", { value: broken });
+    const refusing = api({ callConnectorTool: async () => { throw agentXError("FORBIDDEN", "GitHub MCP tool is not approved for this project"); } });
+    const { runtime, faux } = await runtimeFor(refusing, recorder);
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("github__list_issues", {})], { stopReason: "toolUse" }),
+      fauxAssistantMessage("GitHub refused that."),
+    ]);
+    try {
+      expect(await runOrchestratorTurn(runtime, "list issues", recorder)).toBe("GitHub refused that.");
+    } finally { await runtime.dispose(); }
+    expect(recorder.observation().recordingErrors).toEqual(["observer_failed"]);
     expect(recorder.observation().calls[0]).toMatchObject({ validation: "ok", outcome: "FAILED" });
   });
 });
