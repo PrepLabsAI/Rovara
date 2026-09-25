@@ -164,6 +164,56 @@ describe("evaluation harness, offline", () => {
     }
   }, 60_000);
 
+  it("waits for a timed-out run to stop before the next case starts on the shared model runtime", async () => {
+    const { modelRuntime, faux } = await fauxModelRuntime();
+    const cases = (await loadCases()).filter((entry) => ["files-not-pr", "append-pr"].includes(entry.id));
+    const events: string[] = [];
+    const script = oracle(faux, expected);
+    const beforeRun = async (evalCase: EvalCase) => {
+      if (evalCase.id === "files-not-pr") {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        // The abandoned run touches the shared faux handle after its deadline.
+        faux.setResponses([fauxAssistantMessage("Jira is a tool I lack.")]);
+        events.push("files-not-pr settled");
+        return;
+      }
+      events.push("append-pr started");
+      script(evalCase);
+    };
+    const report = await runEvaluation(cases, { model: FAUX_MODEL, modelRuntime, presentation: "new", repeat: 1, timeoutMs: 50, graceMs: 2_000, beforeRun });
+    expect(events).toEqual(["files-not-pr settled", "append-pr started"]);
+    expect(report.cases.map((result) => [result.id, result.passed])).toEqual([["files-not-pr", false], ["append-pr", true]]);
+    expect(report.cases[0]?.runs[0]).toMatchObject({ error: "timed out after 50 ms" });
+    expect(report.stopped).toBeUndefined();
+  }, 30_000);
+
+  it("stops the evaluation when a timed-out run does not stop within the grace period", async () => {
+    const { modelRuntime, faux } = await fauxModelRuntime();
+    const cases = (await loadCases()).filter((entry) => ["files-not-pr", "append-pr"].includes(entry.id));
+    const started: string[] = [];
+    const script = oracle(faux, expected);
+    const beforeRun = (evalCase: EvalCase) => {
+      started.push(evalCase.id);
+      if (evalCase.id === "files-not-pr") return new Promise<void>(() => undefined);
+      script(evalCase);
+      return undefined;
+    };
+    const report = await runEvaluation(cases, { model: FAUX_MODEL, modelRuntime, presentation: "new", repeat: 1, timeoutMs: 50, graceMs: 100, beforeRun });
+    const stopped = "case files-not-pr did not stop after its timeout; the evaluation was stopped so later cases do not share its state";
+    expect(started).toEqual(["files-not-pr"]);
+    expect(report.stopped).toBe(stopped);
+    expect(report.notRun).toEqual(["append-pr"]);
+    expect(report.cases.map((result) => [result.id, result.passed])).toEqual([["files-not-pr", false]]);
+    expect(report.cases[0]?.runs[0]).toMatchObject({ toolOk: false, error: `timed out after 50 ms; ${stopped}` });
+    expect(report.summary).toMatchObject({ cases: 1, passed: 0, errors: 1 });
+    const root = await temporaryDirectory();
+    try {
+      expect(await recordLiveReport({ ...report, provider: "amazon-bedrock", model: "amazon.nova-pro-v1:0" }, { updateBaseline: true, root })).toMatchObject({ exitCode: 1 });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it("times out the whole run, including the steps before the turn", async () => {
     const { modelRuntime } = await fauxModelRuntime();
     const cases = (await loadCases()).filter((entry) => entry.id === "files-not-pr");

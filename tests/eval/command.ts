@@ -80,6 +80,7 @@ export async function runEvalCommand(argv: readonly string[], options: { root?: 
     ...report.cases.filter((entry) => !entry.passed).map((result) =>
       `  failed ${result.id}: ${result.runs.map((run) => run.error === undefined ? run.tool ?? "no tool" : `error: ${run.error}`).join(", ")}`),
   ];
+  if (report.stopped !== undefined) lines.push(`Stopped: ${report.stopped}. Not run: ${report.notRun?.join(", ") || "none"}.`);
   if (!parsed.live) {
     // The oracle answers every case correctly, so any failure here is a harness or fixture fault.
     return { report, exitCode: summary.passed === summary.cases ? 0 : 1, lines };
@@ -95,7 +96,8 @@ export async function runEvalCommand(argv: readonly string[], options: { root?: 
 export async function recordLiveReport(report: EvalReport, options: { updateBaseline: boolean; root?: string }): Promise<{ exitCode: number; lines: string[] }> {
   const root = options.root ?? EVAL_ROOT;
   const lines: string[] = [];
-  const errored = report.summary.errors;
+  // A stopped run always has an errored case (the one that did not stop), so it fails below too.
+  const errored = Math.max(report.summary.errors, report.stopped === undefined ? 0 : 1);
   const erroredText = `${errored} case${errored === 1 ? "" : "s"} errored`;
   const baselinePath = reportPath("baseline", report.model, report.presentation, root);
   if (options.updateBaseline) {

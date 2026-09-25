@@ -30,6 +30,8 @@ export interface EvalOptions {
    */
   beforeRun?: (evalCase: EvalCase, run: number, present: (tool: string, args: Record<string, unknown>) => { tool: string; args: Record<string, unknown> }) => void | Promise<void>;
   timeoutMs?: number;
+  /** How long a timed-out run may take to stop before the whole evaluation stops; default 10 s. */
+  graceMs?: number;
 }
 
 /**
@@ -56,6 +58,9 @@ export const EvalReportSchema = z.object({
   repeat: z.number().int().positive(),
   generatedAt: z.string(),
   cases: z.array(CaseResultSchema),
+  /** Why the evaluation stopped early, and the cases it therefore never ran. */
+  stopped: z.string().optional(),
+  notRun: z.array(z.string()).optional(),
   summary: z.object({
     cases: z.number().int().nonnegative(),
     passed: z.number().int().nonnegative(),
@@ -69,10 +74,12 @@ export type RunScore = z.infer<typeof RunScoreSchema>;
 export type CaseResult = z.infer<typeof CaseResultSchema>;
 export type EvalReport = z.infer<typeof EvalReportSchema>;
 
-interface RunOutcome { tool: string | null; offered?: false; args: Record<string, unknown>; response: string; error?: string }
+/** `stuck` marks a timed-out run whose work did not stop within the grace period. */
+interface RunOutcome { tool: string | null; offered?: false; args: Record<string, unknown>; response: string; error?: string; stuck?: true }
 
 const DONE = "Done. (evaluation run: nothing was executed)";
 const DEFAULT_TIMEOUT_MS = 180_000;
+const DEFAULT_GRACE_MS = 10_000;
 
 /** Canned control-plane answers: every accepted operation succeeds at once and nothing executes. */
 export function cannedApi(catalogs: readonly ConnectorCatalog[]): OrchestrationApi {
@@ -169,9 +176,20 @@ async function runOnce(evalCase: EvalCase, run: number, catalogCache: Map<string
   } finally {
     clearTimeout(timer);
   }
+  let stuck = false;
   if (timedOut) {
-    // The abandoned work still cleans up after itself; its late failure is already reported as the timeout.
-    work.catch(() => undefined);
+    // The next case shares the model runtime, so it waits until this run's work has stopped.
+    let graceTimer: NodeJS.Timeout | undefined;
+    const settled = await Promise.race([
+      work.then(() => true, () => true),
+      new Promise<false>((resolve) => { graceTimer = setTimeout(() => resolve(false), options.graceMs ?? DEFAULT_GRACE_MS); }),
+    ]);
+    clearTimeout(graceTimer);
+    // Its late failure is already reported as the timeout.
+    if (!settled) {
+      work.catch(() => undefined);
+      stuck = true;
+    }
   } else {
     error ??= cleanupError;
   }
@@ -184,7 +202,10 @@ async function runOnce(evalCase: EvalCase, run: number, catalogCache: Map<string
   const first = recorder.firstToolCall();
   const call = first === undefined ? undefined : canonical(first.name, asRecord(first.arguments));
   const unoffered = first !== undefined && !offered.has(first.name);
-  return { tool: call?.tool ?? null, ...(unoffered ? { offered: false as const } : {}), args: call?.args ?? {}, response, ...(error === undefined ? {} : { error }) };
+  return {
+    tool: call?.tool ?? null, ...(unoffered ? { offered: false as const } : {}), args: call?.args ?? {}, response,
+    ...(error === undefined ? {} : { error }), ...(stuck ? { stuck: true as const } : {}),
+  };
 }
 
 /** An errored run, or a call to a tool that was not offered, never counts as the correct tool. */
@@ -219,7 +240,9 @@ export async function runEvaluation(cases: readonly EvalCase[], options: EvalOpt
   }
   const catalogCache = new Map<string, UpstreamTool[]>();
   const results: CaseResult[] = [];
-  for (const evalCase of cases) {
+  let stopped: string | undefined;
+  let notRun: string[] = [];
+  for (const [index, evalCase] of cases.entries()) {
     const runs: RunScore[] = [];
     for (let run = 0; run < options.repeat; run += 1) {
       let outcome: RunOutcome;
@@ -228,9 +251,18 @@ export async function runEvaluation(cases: readonly EvalCase[], options: EvalOpt
       } catch (caught) {
         outcome = { tool: null, args: {}, response: "", error: message(caught) };
       }
+      if (outcome.stuck === true) {
+        stopped = `case ${evalCase.id} did not stop after its timeout; the evaluation was stopped so later cases do not share its state`;
+        outcome = { ...outcome, error: `${outcome.error ?? "timed out"}; ${stopped}` };
+      }
       runs.push(scoreRun(evalCase, outcome));
+      if (stopped !== undefined) break;
     }
     results.push({ id: evalCase.id, passed: runs.every((run) => run.toolOk && run.argsOk && run.phraseOk !== false && run.error === undefined), runs });
+    if (stopped !== undefined) {
+      notRun = cases.slice(index + 1).map((entry) => entry.id);
+      break;
+    }
   }
   const refusalCases = cases.filter((evalCase) => evalCase.expect.refusal !== undefined).map((evalCase) => evalCase.id);
   const refusalPassed = results.filter((result) => refusalCases.includes(result.id) && result.runs.every((run) => run.toolOk && run.refusalOk === true)).length;
@@ -241,6 +273,7 @@ export async function runEvaluation(cases: readonly EvalCase[], options: EvalOpt
     repeat: options.repeat,
     generatedAt: new Date().toISOString(),
     cases: results,
+    ...(stopped === undefined ? {} : { stopped, notRun }),
     summary: {
       cases: results.length,
       passed: results.filter((result) => result.passed).length,
