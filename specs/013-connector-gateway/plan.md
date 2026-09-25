@@ -75,7 +75,7 @@ tests/eval/                       phase 4: cases, runner, baselines
 | 5a | Generic connector types and routes; registration preflight and thread setup cover every configured type | 3 | [plans/phase-5a-generic-connectors.md](plans/phase-5a-generic-connectors.md) |
 | 5b | Shared binder: bind a property on every tool or only where present; guards get the scope and can rewrite arguments | 5a | [plans/phase-5b-binder.md](plans/phase-5b-binder.md) |
 | 5 | Linear connector | 5b | written after 3 merges |
-| 6 | Jira connector (live check gated on Atlassian administrator) | 5b | written after 3 merges |
+| 6 | Jira connector (live check gated on Atlassian administrator) | 5b | [plans/phase-6-jira.md](plans/phase-6-jira.md) |
 
 Detailed plans are written per phase, immediately before it starts, because each phase ships and is
 reviewed on its own and later phases build on names that review may change. The task list in

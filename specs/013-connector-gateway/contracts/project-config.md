@@ -50,7 +50,11 @@ integrations:
       tools:
         - name: searchJiraIssuesUsingJql
           access: read
+        - name: getJiraIssue
+          access: read
         - name: createJiraIssue
+          access: write
+        - name: addOrEditJiraIssueComment
           access: write
 ```
 
@@ -69,6 +73,10 @@ integrations:
 | Visible tools over 20 | Registered, with a warning |
 | Vendor authentication fails | Registered, with the connector reported as not connected |
 | Approved tool not found upstream or not representable | Registered, with the tool reported as skipped |
+| Jira `projectKey` on some scopes only | Refused |
+| Jira tool AgentX cannot limit, with `projectKey` | Refused, naming the tool |
+| Jira guarded tool with the wrong `access` | Refused, naming the tool |
+| Jira credential reference of another type | Refused, naming the type |
 
 ## Credential registration
 
@@ -94,4 +102,4 @@ who registered it and when. It never prints a secret or token value.
 |---|---|
 | `github` | App installed only on approved repositories; Issues permission only for issue tools |
 | `linear` | OAuth application or API key limited to the intended teams; one scope set per application |
-| `jira` | API-token authentication enabled for the Rovo MCP server; service account granted only the intended projects |
+| `jira` | API-token authentication enabled for the Rovo MCP server; service account restricted to the intended projects, and proven by the setup guide's Step 8: a search outside them returns zero issues |
