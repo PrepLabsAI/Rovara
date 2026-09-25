@@ -81,10 +81,15 @@ export function oauthRefreshTokenProvider(options: {
   let generation = 0;
   let inFlight: Promise<CachedToken> | undefined;
 
-  /** The margin-adjusted cutoff a stored token is usable until: its own, when known, else the fixed margin. */
+  /**
+   * The margin-adjusted cutoff a stored token is usable until: its own, when it is a finite number,
+   * clamped to never exceed the token's real expiry (a corrupt or hostile refreshAt past expiresAt
+   * must never extend a token's usable life); else the fixed margin.
+   */
   function usableUntil(token: CachedToken): number {
     const refreshAt = (token as StoredToken).refreshAt;
-    return typeof refreshAt === "number" ? refreshAt : token.expiresAt - REFRESH_MARGIN_MS;
+    if (typeof refreshAt === "number" && Number.isFinite(refreshAt)) return Math.min(refreshAt, token.expiresAt);
+    return token.expiresAt - REFRESH_MARGIN_MS;
   }
   const storedUsable = (token: CachedToken | undefined): token is CachedToken => token !== undefined && usableUntil(token) > now();
 
@@ -127,14 +132,22 @@ export function oauthRefreshTokenProvider(options: {
   }
 
   /**
-   * Writes a rotated refresh token back, trying twice. Re-reads the secret immediately before each
-   * write and replaces only the refreshToken field, so a concurrent admin change to the client
-   * survives. On failure this container keeps the token in memory and reports the error's class
-   * name only, never the token.
+   * Writes a rotated refresh token back, trying up to twice. Re-reads the secret immediately before
+   * each write and replaces only the refreshToken field, so a concurrent admin change to the client
+   * survives. Checked before each attempt, not only once before the first: `deadline` bounds the
+   * whole retry loop, since a first attempt's own Secrets Manager round trips can themselves run the
+   * lease's budget out before a second attempt would start. Past it, this container keeps the token
+   * in memory and reports the deadline reason rather than attempting a further write. Any other
+   * failure of both attempts instead reports the error's class name only, never the token.
    */
-  async function saveRotated(refreshToken: string): Promise<void> {
+  async function saveRotated(refreshToken: string, deadline: number): Promise<void> {
     let failure: unknown;
     for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (now() >= deadline) {
+        unsaved = refreshToken;
+        options.onRotationUnsaved(LEASE_DEADLINE_UNSAVED_REASON);
+        return;
+      }
       try {
         const fresh = await readClient();
         const value = JSON.stringify({ clientId: fresh.clientId, clientSecret: fresh.clientSecret, refreshToken });
@@ -158,8 +171,9 @@ export function oauthRefreshTokenProvider(options: {
       await sleep(LEASE_POLL_MS);
     }
     // Past this point, a new holder can take the lease over once REFRESH_LEASE_TTL_MS elapses; stop
-    // retrying, and stop trying to write, with margin to spare before that happens.
-    const refreshDeadline = now() + REFRESH_LEASE_TTL_MS - LEASE_DEADLINE_SAFETY_MS;
+    // retrying, and stop trying to write, with margin to spare before that happens. Reset (pushed
+    // forward) below if a merely slow refresh renews the lease rather than losing it to a new holder.
+    let refreshDeadline = now() + REFRESH_LEASE_TTL_MS - LEASE_DEADLINE_SAFETY_MS;
     try {
       // Another container may have refreshed between the read above and taking the lease.
       const stored = await options.tokens.get(REFRESH_TOKEN_CACHE_KEY);
@@ -190,12 +204,19 @@ export function oauthRefreshTokenProvider(options: {
       const toKeep = refreshed.refreshToken ?? current;
       if (toKeep !== client.refreshToken) {
         if (now() >= refreshDeadline) {
-          // Writing now could race a new holder that has already taken the lease over and could
-          // write its own rotation first. Keep it in memory; the next refresh retries the write.
+          // A merely slow refresh that nobody else is waiting on need not strand its rotation:
+          // try to renew the lease under this same owner first. A real DynamoRefreshLease renews
+          // a still-current owner's own lease; it refuses only once someone else holds it.
+          const renewed = await options.lease.acquire(owner, REFRESH_LEASE_TTL_MS).catch(() => false);
+          if (renewed) refreshDeadline = now() + REFRESH_LEASE_TTL_MS - LEASE_DEADLINE_SAFETY_MS;
+        }
+        if (now() < refreshDeadline) {
+          await saveRotated(toKeep, refreshDeadline);
+        } else {
+          // Renewal was refused (a new holder has already taken the lease over) or threw: writing
+          // now could race that holder's own write. Keep it in memory; the next refresh retries.
           unsaved = toKeep;
           options.onRotationUnsaved(LEASE_DEADLINE_UNSAVED_REASON);
-        } else {
-          await saveRotated(toKeep);
         }
       }
       const refreshAt = refreshed.expiresAt - Math.min(REFRESH_MARGIN_MS, refreshed.lifetimeMs / 2);

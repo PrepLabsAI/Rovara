@@ -289,9 +289,21 @@ describe("oauth-refresh-token provider", () => {
     expect(endpoint.presented).toEqual([REFRESH]);
   });
 
-  it("skips the write-back once the lease is nearly spent, keeping the rotated token in memory instead of risking a race with a new holder", async () => {
+  it("clamps a corrupt refreshAt from the shared cache to the token's real expiry, never trusting it past that", async () => {
+    const { endpoint, tokens, clock, container } = setup();
+    const injectedAt = clock.now();
+    // A corrupt (or hostile) cache entry: refreshAt claims the token is usable long after it really expires.
+    tokens.items.set(REFRESH_TOKEN_CACHE_KEY, { token: "stale-token", expiresAt: injectedAt + 10_000, refreshAt: injectedAt + 1_000_000 });
+    clock.advance(20_000); // past the token's real expiry, though well before the corrupt refreshAt
+    const issued = await container().issue(undefined, "read");
+    expect(issued.token).toBe(endpoint.accessTokens[0]);
+    expect(endpoint.presented).toEqual([REFRESH]);
+  });
+
+  it("renews the lease under the same owner and still writes back a rotated token when merely slow, with nobody else contesting the lease", async () => {
     const { clock, secrets, unsaved, provider } = directSetup(async (_url, init) => {
-      // Simulate the exchange itself consuming almost the whole lease TTL.
+      // Simulate the exchange itself consuming almost the whole lease TTL, with no one else waiting
+      // for it: renewing under the same owner must succeed, so the write-back must not be stranded.
       clock.advance(REFRESH_LEASE_TTL_MS - 500);
       const form = new URLSearchParams(init?.body as string);
       expect(form.get("refresh_token")).toBe(REFRESH);
@@ -299,9 +311,54 @@ describe("oauth-refresh-token provider", () => {
     });
     const issued = await provider.issue(undefined, "read");
     expect(issued.token).toBe("access-token-slow");
+    expect(secrets.writes).toHaveLength(1);
+    expect(unsaved).toEqual([]);
+    expect(JSON.parse(secrets.values[SECRET]!)).toEqual({ ...CLIENT, refreshToken: "refresh-token-rotated-1" });
+  });
+
+  it("keeps the rotated token in memory instead of writing when renewing the lease is refused because another container has since taken it over", async () => {
+    const clock = fakeClock();
+    const tokens = memoryTokenCache();
+    const lease = memoryLease(clock);
+    const secrets = memorySecretStore({ [SECRET]: JSON.stringify({ ...CLIENT, refreshToken: REFRESH }) });
+    const unsaved: string[] = [];
+    const fetchImplementation: typeof fetch = async (_url, init) => {
+      // The exchange itself runs past both our internal deadline and the lease's real TTL; while it
+      // was in flight, a new container legitimately took the (by-then-expired) lease over.
+      clock.advance(REFRESH_LEASE_TTL_MS + 1_000);
+      await lease.acquire("another-container", REFRESH_LEASE_TTL_MS);
+      const form = new URLSearchParams(init?.body as string);
+      expect(form.get("refresh_token")).toBe(REFRESH);
+      return Response.json({ access_token: "access-token-slow", token_type: "bearer", expires_in: 3_600, refresh_token: "refresh-token-rotated-1" });
+    };
+    const provider = oauthRefreshTokenProvider({
+      ref: "asana-bot", secretName: SECRET, secrets, tokens, lease, tokenEndpoint: endpointUrl,
+      fetchImplementation, now: clock.now, sleep: clock.sleep, onRotationUnsaved: (name) => unsaved.push(name),
+    });
+    const issued = await provider.issue(undefined, "read");
+    expect(issued.token).toBe("access-token-slow");
     expect(secrets.writes).toEqual([]);
     expect(unsaved).toEqual(["LeaseDeadlineExceeded"]);
     expect(JSON.parse(secrets.values[SECRET]!)).toEqual({ ...CLIENT, refreshToken: REFRESH });
+    expect(lease.holder()).toBe("another-container");
+  });
+
+  it("checks the lease deadline before each write attempt inside saveRotated, not only once before it, and reports the deadline reason rather than the write failure when it runs out between attempts", async () => {
+    const endpoint = fakeTokenEndpoint({ ...CLIENT, refreshToken: REFRESH });
+    endpoint.rotate = true;
+    const { clock, secrets, unsaved, provider } = directSetup(endpoint.fetch);
+    let writes = 0;
+    secrets.write = async () => {
+      writes += 1;
+      // The first write attempt fails, and while it was in flight the lease's budget ran out.
+      clock.advance(REFRESH_LEASE_TTL_MS);
+      const error = new Error("simulated write failure");
+      error.name = "AccessDeniedException";
+      throw error;
+    };
+    await provider.issue(undefined, "read");
+    expect(writes).toBe(1);
+    expect(unsaved).toEqual(["LeaseDeadlineExceeded"]);
   });
 
   it("gives up rather than risk a second exchange once the lease is nearly spent, even when a peer's newer refresh token is available", async () => {
