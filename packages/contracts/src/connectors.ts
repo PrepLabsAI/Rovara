@@ -6,6 +6,9 @@ import { AGENTX_NAME_PATTERN } from "./names.js";
 export const ConnectorNameSchema = z.string().regex(/^[a-z][a-z0-9-]{0,19}$/);
 const RepositoryNameSchema = z.string().regex(AGENTX_NAME_PATTERN);
 
+/** A scope alias such as a repository name. */
+export const ConnectorAliasSchema = z.string().regex(AGENTX_NAME_PATTERN);
+
 /** GitHub uses each scoped repository's own GitHub App credential, as feature 007 does. */
 export const GitHubConnectorSchema = z.object({
   name: ConnectorNameSchema,
@@ -18,7 +21,24 @@ export const GitHubConnectorSchema = z.object({
   attribution: z.boolean().optional(),
 }).strict();
 
-export const ConnectorConfigSchema = z.discriminatedUnion("type", [GitHubConnectorSchema]);
+/** A Linear team UUID, in any case; resolvers lowercase it. */
+const LinearTeamIdSchema = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, "teamId must be a Linear team UUID");
+
+export const LinearScopeSchema = z.object({ alias: ConnectorAliasSchema, teamId: LinearTeamIdSchema }).strict();
+
+/** Linear reads a static-secret API key through the credential registry; each scope is one team. */
+export const LinearConnectorSchema = z.object({
+  name: ConnectorNameSchema,
+  type: z.literal("linear"),
+  credentialRef: z.string().regex(AGENTX_NAME_PATTERN),
+  scopes: z.array(LinearScopeSchema).min(1).max(32)
+    .refine((scopes) => new Set(scopes.map((scope) => scope.alias)).size === scopes.length, "connector scope aliases must be unique")
+    .refine((scopes) => new Set(scopes.map((scope) => scope.teamId.toLowerCase())).size === scopes.length, "connector scopes must name different teams"),
+  tools: ToolApprovalListSchema,
+  attribution: z.boolean().optional(),
+}).strict();
+
+export const ConnectorConfigSchema = z.discriminatedUnion("type", [GitHubConnectorSchema, LinearConnectorSchema]);
 
 const KNOWN_CONNECTOR_TYPES = new Set(ConnectorConfigSchema.options.map((option) => option.shape.type.value as string));
 
@@ -57,8 +77,6 @@ function connectorArrayChecks(connectors: ReadonlyArray<{ name: string; type: st
 export const ConnectorsSchema = z.array(ConnectorConfigSchema).min(1).max(8).superRefine(connectorArrayChecks);
 export const StoredConnectorsSchema = z.array(StoredConnectorConfigSchema).min(1).max(8).superRefine(connectorArrayChecks);
 
-/** A scope alias such as a repository name. */
-export const ConnectorAliasSchema = z.string().regex(AGENTX_NAME_PATTERN);
 const SchemaHashSchema = z.string().regex(/^[a-f0-9]{64}$/);
 
 export const PresentedToolSchema = z.object({
@@ -103,6 +121,7 @@ export type ConnectorResult = z.infer<typeof ConnectorResultSchema>;
 export type ThreadConnector = z.infer<typeof ThreadConnectorSchema>;
 
 export type GitHubConnectorConfig = z.infer<typeof GitHubConnectorSchema>;
+export type LinearConnectorConfig = z.infer<typeof LinearConnectorSchema>;
 export type ConnectorConfig = z.infer<typeof ConnectorConfigSchema>;
 
 /** Six in-house tools when recovery tools are shown; kept equal to ORCHESTRATION_TOOL_NAMES by a test. */

@@ -12,6 +12,9 @@ AgentX credentials; each connector's live check is in `quickstart.md`.
 | Atlassian (Jira) | `https://mcp.atlassian.com/v2/mcp` | Service-account API key as `Authorization: Bearer` | "Authentication via API token must be enabled by your organization admin"; code-search and Teams tools require OAuth 2.1; calls need `cloudId` |
 | Asana (deferred) | `https://mcp.asana.com/v2/mcp` | None documented; "you'll be prompted to authorize the application" | OAuth access tokens last about an hour; refresh tokens last while the user keeps the authorization |
 
+Checked 2026-09-24: client-credentials tokens are app actor tokens with access to all public
+teams; AgentX uses a team-restricted API key.
+
 Sources: [Linear MCP](https://linear.app/docs/mcp),
 [Linear OAuth](https://linear.app/developers/oauth-2-0-authentication),
 [Atlassian API-token guide](https://developer.atlassian.com/cloud/rovo-mcp/guides/configuring-authentication-via-api-token/),

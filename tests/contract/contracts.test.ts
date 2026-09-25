@@ -65,7 +65,7 @@ describe("strict contracts", () => {
       integrations: {
         connectors: [
           { name: "gh", type: "github", scopes: "all-repositories", tools: [{ name: "list_issues", access: "read" }] },
-          { name: "tracker", type: "linear", credentialRef: "linear-key", scopes: ["payments"] },
+          { name: "tracker", type: "future-vendor", credentialRef: "future-vendor-key", scopes: ["payments"] },
         ],
       },
     };
@@ -99,7 +99,7 @@ describe("strict contracts", () => {
           ...projectDefinition(),
           integrations: {
             connectors: [
-              { name: "tracker", type: "linear", credentialRef: "linear-key", scopes: ["payments"] },
+              { name: "tracker", type: "future-vendor", credentialRef: "future-vendor-key", scopes: ["payments"] },
             ],
           },
         },
@@ -108,7 +108,7 @@ describe("strict contracts", () => {
     });
     if (invocation.kind !== "prepare") throw new Error("expected a prepare invocation");
     expect(invocation.payload.project.integrations?.connectors).toEqual([
-      { name: "tracker", type: "linear", credentialRef: "linear-key", scopes: ["payments"] },
+      { name: "tracker", type: "future-vendor", credentialRef: "future-vendor-key", scopes: ["payments"] },
     ]);
   });
 

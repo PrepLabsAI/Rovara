@@ -29,4 +29,24 @@ describe("what the orchestrator sees", () => {
     expect(orchestratorSystemPrompt("Delegate every repository read, edit, build and test to the worker.", manifest)).toMatchSnapshot();
     expect(presented.tools.every((tool) => tool.description.length <= 2_048 && /^[a-zA-Z0-9_-]{1,64}$/.test(tool.name))).toBe(true);
   });
+
+  it("for a one-team project with Linear issues", async () => {
+    const { linearBinder, reviewTools } = await import("../../packages/gateway/src/index.js");
+    const { vendorTools } = await import("../support/vendor-fixtures.js");
+    const tools = vendorTools("linear");
+    const approvals = [{ name: "list_issues", access: "read" as const }, { name: "get_issue", access: "read" as const }, { name: "save_issue", access: "write" as const }, { name: "save_comment", access: "write" as const }];
+    const reviewed = reviewTools({ tools }, { binder: linearBinder }, {
+      workspaceId: "w", ownerKey: "o", scopeAlias: "charterarc", scope: { alias: "charterarc", teamId: "c408e946-78aa-4db8-923e-f78053dd954f" }, policy: { tools: approvals },
+    });
+    const presented = presentCatalog({ connector: "linear", label: "Linear", scopeNoun: "team", approvals, scopes: [{ alias: "charterarc", tools: reviewed.tools }] });
+    const catalog: ConnectorCatalog = { connector: "linear", tools: presented.tools, skipped: presented.skipped };
+    const manifest = capabilitiesManifest({
+      repositories: ["api"],
+      connectors: [{ name: "linear", type: "linear", label: "Linear issues", scopes: ["charterarc"], connected: true }],
+      catalogs: [catalog],
+    });
+    expect({ tools: presented.tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })), skipped: presented.skipped }).toMatchSnapshot();
+    expect(orchestratorSystemPrompt("Delegate every repository read, edit, build and test to the worker.", manifest)).toMatchSnapshot();
+    expect(presented.tools.every((tool) => tool.description.length <= 2_048 && /^[a-zA-Z0-9_-]{1,64}$/.test(tool.name))).toBe(true);
+  });
 });
