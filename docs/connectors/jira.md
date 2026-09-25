@@ -54,11 +54,13 @@ the result.
   account, a project it must not see, and **Browse projects**. The answer must be no. Step 8 then
   checks every project at once.
 
-## Step 5: Create an API token with five scopes
+## Step 5: Create an API token with six scopes
 
 On the service account, open **Credentials**, then create an **API token** (verify). Set an
 expiry. Choose these scopes: `read:jira-work`, `write:jira-work`, `read:jira-user`,
-`read:jira:agent-interface`, `search:jira:agent-interface`. Copy the token now; Atlassian shows it
+`read:jira:agent-interface`, `write:jira:agent-interface`, `search:jira:agent-interface`. Without
+`write:jira:agent-interface`, searches and reads work but every create or comment is refused with
+"Insufficient scopes". Copy the token now; Atlassian shows it
 once. It is long (about 192 characters).
 
 Do not create OAuth 2.0 credentials instead. Atlassian's MCP server refuses service-account OAuth
@@ -226,7 +228,11 @@ The guard's checks are narrow on purpose. In plain words:
 
 - **Every call fails as not connected, "rejected the credential twice".** Check, in order: API
   token authentication is on (Step 1); the token is complete (Step 7 length check); the token has
-  not expired; the scopes are the five in Step 5.
+  not expired; the scopes are the six in Step 5.
+- **Searches and reads work, but every create or comment ends with an unknown outcome.** The token
+  is missing `write:jira:agent-interface` (Step 5). Atlassian refuses the write with "Insufficient
+  scopes"; AgentX reports the outcome as unknown because it cannot prove nothing changed. Check Jira,
+  then issue a token with all six scopes and rotate it (below).
 - **You used `https://mcp.atlassian.com/v1/...` in another tool and it worked with OAuth but not
   with the token.** v1 ignores API tokens. AgentX always uses `https://mcp.atlassian.com/v2/mcp`.
 - **"Cloud id isn't explicitly granted".** You gave AgentX an OAuth token. Use an API token
