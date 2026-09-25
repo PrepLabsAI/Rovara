@@ -17,6 +17,8 @@ export interface ConfirmationStore {
   save(subject: string, confirmation: PendingConfirmation): Promise<void>;
   /** Uses a live, unexpired confirmation once: leaves its tombstone with this event. False when it is retired or expired. */
   claim(subject: string, confirmationId: string, eventId: string): Promise<boolean>;
+  /** Opens a confirmation saved closed (usedBy "unposted") once it is posted. Throws, leaving it closed, otherwise. */
+  open(subject: string, confirmationId: string): Promise<void>;
   /** Leaves a tombstone (retiredAt, usedBy) if the thread's confirmation is still this one. */
   retire(subject: string, confirmationId: string, eventId: string): Promise<void>;
   yesToAll(subject: string, userId: string): Promise<boolean>;
@@ -62,8 +64,8 @@ export const EXPIRED_TEXT = "That confirmation request expired after 24 hours, s
 export const EXPIRED_MARK = "expired";
 /** How long after its expiry an expired confirmation still answers "expired". */
 export const EXPIRED_ANSWER_MS = CONFIRMATION_TTL_MS;
-/** `usedBy` of a confirmation retired because posting it failed: nobody saw it. */
-export const POST_FAILED_MARK = "post_failed";
+/** `usedBy` of a confirmation saved closed and not yet posted (or never posted): nobody can answer it. */
+export const UNPOSTED_MARK = "unposted";
 
 export type ConfirmationCheck =
   | { run: false }
@@ -92,13 +94,19 @@ export async function checkConfirmation(input: {
   const session = (approvals: readonly GateApproval[] = [], all = yesToAll) => createGateSession(message.userId, { approvals, yesToAll: all });
   const stored = await store.load(subject);
   const expired = (confirmation: PendingConfirmation) => input.now >= Date.parse(confirmation.expiresAt);
-  // A used, cancelled or superseded confirmation's tombstone lasts the rest of its 24 hours, then the
-  // thread has nothing pending. An expired one answers "expired" for 24 hours more, then is gone too,
+  // An unposted confirmation was never seen, so it is never answerable. A used, cancelled or
+  // superseded one's tombstone lasts the rest of its 24 hours; a never-answered or expired one
+  // answers "expired" for 24 hours after its expiry. After that the thread has nothing pending,
   // so a later "yes" to another question is never swallowed.
   const forgotten = (confirmation: PendingConfirmation) =>
-    confirmation.retiredAt !== undefined
-    && input.now >= Date.parse(confirmation.expiresAt) + (confirmation.usedBy === EXPIRED_MARK ? EXPIRED_ANSWER_MS : 0);
-  const pending = stored !== undefined && forgotten(stored) ? undefined : stored;
+    confirmation.usedBy === UNPOSTED_MARK
+    || input.now >= Date.parse(confirmation.expiresAt) + (confirmation.retiredAt === undefined || confirmation.usedBy === EXPIRED_MARK ? EXPIRED_ANSWER_MS : 0);
+  let pending = stored !== undefined && forgotten(stored) ? undefined : stored;
+  if (pending !== undefined && pending.retiredAt === undefined && expired(pending)) {
+    // Expiry first: a live confirmation past its 24 hours is retired as expired before anything else.
+    await store.retire(subject, pending.confirmationId, EXPIRED_MARK);
+    pending = { ...pending, retiredAt: new Date(input.now).toISOString(), usedBy: EXPIRED_MARK };
+  }
   const live = pending !== undefined && pending.retiredAt === undefined;
   const refuse = async (reason: string, text: string): Promise<ConfirmationCheck> => {
     log("gate.confirmation_refused", { eventId: message.eventId, reason });
@@ -107,7 +115,7 @@ export async function checkConfirmation(input: {
   };
   if (reply === undefined) {
     // The requester moved on: their pending confirmation no longer applies after this turn.
-    return { run: true, session: session(), ...(live && pending.requesterId === message.userId ? { superseded: pending.confirmationId } : {}) };
+    return { run: true, session: session(), ...(live && pending?.requesterId === message.userId ? { superseded: pending.confirmationId } : {}) };
   }
   if (click !== undefined && pending?.confirmationId !== click.confirmationId) return refuse("not_pending", NO_LONGER_PENDING_TEXT);
   if (reply === "yes_to_all" && !live) {
@@ -118,11 +126,12 @@ export async function checkConfirmation(input: {
     return { run: false };
   }
   if (!pending) return { run: true, session: session() };
-  if (!live) return pending.usedBy === EXPIRED_MARK ? refuse("expired", EXPIRED_TEXT) : refuse("not_pending", NO_LONGER_PENDING_TEXT);
-  if (expired(pending)) {
-    // Before the requester check, so every later "yes", anyone's, hears the same thing.
-    await store.retire(subject, pending.confirmationId, EXPIRED_MARK);
-    return refuse("expired", EXPIRED_TEXT);
+  if (!live) {
+    if (pending.usedBy === EXPIRED_MARK) return refuse("expired", EXPIRED_TEXT);
+    // Only a click on it, or a redelivery of the event that left the tombstone (or one received
+    // before it), hears "no longer pending"; any later message is an ordinary request.
+    const redelivery = pending.usedBy === message.eventId || (pending.retiredAt !== undefined && Date.parse(message.receivedAt) <= Date.parse(pending.retiredAt));
+    return click !== undefined || redelivery ? refuse("not_pending", NO_LONGER_PENDING_TEXT) : { run: true, session: session() };
   }
   if (pending.requesterId !== message.userId) {
     return pending.replacedRequesterId === message.userId
@@ -179,13 +188,19 @@ export async function settleConfirmations(input: {
     expiresAt: new Date(input.now + CONFIRMATION_TTL_MS).toISOString(),
     ...(replaced === undefined ? {} : { replacedRequesterId: replaced }),
   };
-  await store.save(subject, confirmation);
+  // Saved closed, and opened only once Slack has shown it: any failure leaves it closed, never
+  // answerable, and the caller tells the member.
+  await store.save(subject, { ...confirmation, retiredAt: confirmation.postedAt, usedBy: UNPOSTED_MARK });
   try {
     await input.postConfirmation(confirmation, confirmationMessage(confirmation));
   } catch (error) {
-    // Nobody saw it, so nobody may confirm it: leave it retired and let the caller tell the member.
-    await store.retire(subject, confirmation.confirmationId, POST_FAILED_MARK);
     input.log("gate.confirmation_post_failed", { eventId: message.eventId });
+    throw error;
+  }
+  try {
+    await store.open(subject, confirmation.confirmationId);
+  } catch (error) {
+    input.log("gate.confirmation_open_failed", { eventId: message.eventId });
     throw error;
   }
   input.log("gate.confirmation_requested", { eventId: message.eventId, calls: calls.length, kinds: [...new Set(calls.map((call) => call.kind))].join(",") });

@@ -1,6 +1,6 @@
 import { GetCommand, PutCommand, UpdateCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { PendingConfirmationSchema, confirmationKey, pendingConfirmationFromItem } from "@agentx/contracts";
-import type { ConfirmationStore } from "./confirmations.js";
+import { UNPOSTED_MARK, type ConfirmationStore } from "./confirmations.js";
 import type { ServiceLog } from "./processor.js";
 
 /** The table keeps a confirmation item a week past its expiry; it answers "expired" only for the first 24 hours of that. */
@@ -30,9 +30,12 @@ export function createDynamoConfirmationStore(
     },
     async save(subject, input) {
       // An invalid confirmation throws here, so the caller can tell the member, rather than being stored unreadable.
-      const confirmation = PendingConfirmationSchema.parse(input);
+      const { retiredAt, usedBy, ...confirmation } = PendingConfirmationSchema.parse(input);
       await documentClient.send(new PutCommand({ TableName: tableName, Item: {
         ...confirmationKey(subject), confirmationId: confirmation.confirmationId, confirmation,
+        // The tombstone fields live beside the confirmation, where claim's condition reads them.
+        ...(retiredAt === undefined ? {} : { retiredAt }),
+        ...(usedBy === undefined ? {} : { usedBy }),
         // Epoch milliseconds, so a claim can refuse an expired confirmation in its condition.
         validUntil: Date.parse(confirmation.expiresAt),
         expiresAt: Math.floor(Date.parse(confirmation.expiresAt) / 1_000) + RETAIN_AFTER_EXPIRY_SECONDS,
@@ -52,6 +55,15 @@ export function createDynamoConfirmationStore(
         if (isConditionalFailure(error)) return false;
         throw error;
       }
+    },
+    async open(subject, confirmationId) {
+      // Throws when the item is not this closed, unposted confirmation: it then stays closed.
+      await documentClient.send(new UpdateCommand({
+        TableName: tableName, Key: confirmationKey(subject),
+        UpdateExpression: "REMOVE retiredAt, usedBy",
+        ConditionExpression: "confirmationId = :id AND usedBy = :unposted",
+        ExpressionAttributeValues: { ":id": confirmationId, ":unposted": UNPOSTED_MARK },
+      }));
     },
     async retire(subject, confirmationId, eventId) {
       try {

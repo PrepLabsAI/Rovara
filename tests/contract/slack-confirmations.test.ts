@@ -139,13 +139,25 @@ describe("checking a message against the thread's confirmation", () => {
     expect(await store.load(subject)).toEqual(pending);
   });
 
-  it("answers any yes for a used, cancelled or superseded confirmation with no longer pending, for the rest of its 24 hours", async () => {
+  it("answers only a redelivery of the event that used, cancelled or superseded a confirmation with no longer pending", async () => {
     const { store, check, posts } = harness();
     await store.save(subject, pending);
     await store.retire(subject, pending.confirmationId, "EvYES0000001");
-    expect(await check("yes", { eventId: "EvYES0000002" })).toEqual({ run: false });
+    // A fresh message after the tombstone is an ordinary request, whoever sends it.
+    expect(await check("yes", { eventId: "EvYES0000002", receivedAt: new Date(postedAt + 180_000).toISOString() })).toEqual({ run: true, session: createGateSession(requester) });
+    expect(await check("yes", { eventId: "EvYES0000003", userId: other, receivedAt: new Date(postedAt + 180_000).toISOString() })).toEqual({ run: true, session: createGateSession(other) });
+    // The same event again, or one received before the tombstone was left, hears that it is no longer pending.
     expect(await check("yes", { eventId: "EvYES0000001" })).toEqual({ run: false });
+    expect(await check("yes", { eventId: "EvYES0000004" })).toEqual({ run: false });
     expect(posts).toEqual([NO_LONGER_PENDING_TEXT, NO_LONGER_PENDING_TEXT]);
+  });
+
+  it("treats a fresh ok two minutes after a claim as an ordinary request", async () => {
+    const { store, check, posts } = harness();
+    await store.save(subject, pending);
+    expect(await store.claim(subject, pending.confirmationId, "EvYES0000001")).toBe(true);
+    expect(await check("ok", { eventId: "EvYES0000002", receivedAt: new Date(postedAt + 240_000).toISOString() })).toEqual({ run: true, session: createGateSession(requester) });
+    expect(posts).toEqual([]);
   });
 
   it("does not count a yes sent before the question was posted, and retires one after it expired", async () => {
@@ -248,6 +260,32 @@ describe("tombstones, expiry and yes to all", () => {
     }
   });
 
+  it("forgets a never-answered confirmation 24 hours after its expiry, and answers expired before that", async () => {
+    const expiry = Date.parse(pending.expiresAt);
+    const soon = harness(expiry + 2 * 60 * 60 * 1_000);
+    await soon.store.save(subject, pending);
+    expect(await soon.check("yes", { receivedAt: new Date(expiry + 2 * 60 * 60 * 1_000).toISOString() })).toEqual({ run: false });
+    expect(soon.posts).toEqual([EXPIRED_TEXT]);
+    expect(await soon.store.load(subject)).toMatchObject({ usedBy: "expired" });
+    const late = harness(expiry + 30 * 60 * 60 * 1_000);
+    await late.store.save(subject, pending);
+    expect(await late.check("yes", { receivedAt: new Date(expiry + 30 * 60 * 60 * 1_000).toISOString() })).toEqual({ run: true, session: createGateSession(requester) });
+    expect(late.posts).toEqual([]);
+  });
+
+  it("retires a live confirmation that expired first, so yes to all grants at once and a plain yes hears expired", async () => {
+    const now = Date.parse(pending.expiresAt) + 60 * 60 * 1_000;
+    const { store, check, posts } = harness(now);
+    await store.save(subject, pending);
+    const receivedAt = new Date(now).toISOString();
+    expect(await check("yes to all", { receivedAt })).toEqual({ run: false });
+    expect(posts).toEqual([YES_TO_ALL_TEXT]);
+    expect(await store.yesToAll(subject, requester)).toBe(true);
+    expect(await store.load(subject)).toMatchObject({ usedBy: "expired" });
+    expect(await check("yes", { eventId: "EvYES0000002", receivedAt })).toEqual({ run: false });
+    expect(posts).toEqual([YES_TO_ALL_TEXT, EXPIRED_TEXT]);
+  });
+
   it("tells a member whose confirmation another member's replaced that it was replaced", async () => {
     const { store, check, posts } = harness();
     await store.save(subject, pending);
@@ -326,5 +364,36 @@ describe("settling a turn's confirmations", () => {
     expect(saved?.calls[0]?.argumentsHash).toBe("b".repeat(64));
     expect(saved?.retiredAt).toBeDefined();
     expect(log).toHaveBeenCalledWith("gate.confirmation_post_failed", { eventId: "EvYES0000001" });
+    expect(await store.claim(subject, saved!.confirmationId, "EvYES0000002")).toBe(false);
+    const posts: string[] = [];
+    const answer = await checkConfirmation({ message: message("ok", { eventId: "EvYES0000002", receivedAt: new Date(postedAt + 60_000).toISOString() }), subject, store, post: async (value) => { posts.push(value); }, log, now: postedAt + 60_000 });
+    expect(answer).toEqual({ run: true, session: createGateSession(requester) });
+    expect(posts).toEqual([]);
+  });
+
+  it("saves a confirmation closed and opens it only once it is posted", async () => {
+    const session = () => {
+      const value = createGateSession(requester);
+      value.asks.push({ toolCallId: "1", tool: "tracker__close_item", argumentsHash: "b".repeat(64), summary: "tracker__close_item: id=TRK-1", kind: "destructive" });
+      return value;
+    };
+    // Normal path: closed while posting, answerable after.
+    const normal = harness();
+    let whilePosting: PendingConfirmation | undefined;
+    await settleConfirmations({ check: { run: true, session: session() }, message: message("close TRK-1"), subject, store: normal.store,
+      postConfirmation: async () => { whilePosting = await normal.store.load(subject); }, log: normal.log, now: postedAt });
+    expect(whilePosting).toMatchObject({ usedBy: "unposted" });
+    expect(whilePosting?.retiredAt).toBeDefined();
+    const opened = await normal.store.load(subject);
+    expect(opened?.retiredAt).toBeUndefined();
+    expect(opened?.usedBy).toBeUndefined();
+    expect(await normal.store.claim(subject, opened!.confirmationId, "EvYES0000002")).toBe(true);
+    // Posted, but opening fails: it stays closed, and the open's error is thrown.
+    const failing = harness();
+    const store = { ...failing.store, open: async () => { throw new Error("throttled"); } };
+    await expect(settleConfirmations({ check: { run: true, session: session() }, message: message("close TRK-1"), subject, store,
+      postConfirmation: async () => undefined, log: failing.log, now: postedAt })).rejects.toThrow("throttled");
+    expect(await failing.store.load(subject)).toMatchObject({ usedBy: "unposted" });
+    expect(failing.log).toHaveBeenCalledWith("gate.confirmation_open_failed", { eventId: "EvYES0000001" });
   });
 });
