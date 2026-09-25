@@ -11,13 +11,15 @@ import {
   agentXError,
   type ProjectDefinition,
 } from "@agentx/contracts";
+import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { Command } from "commander";
+import { authorizeCredential, secretsManagerAuthorizeSecrets, type AuthorizeSecrets } from "./admin/authorize.js";
 import { listCredentials, registerCredential } from "./admin/credential.js";
 import { registerProject } from "./admin/register.js";
 import { bindSlackChannel, unbindSlackChannel } from "./admin/slack.js";
 import { stopWorkspace } from "./admin/stop.js";
 import { exportTurns, parseSince } from "./admin/turns.js";
-import { loginWithPkce, tokenStoreKey } from "./auth.js";
+import { loginWithPkce, openSystemBrowser, tokenStoreKey } from "./auth.js";
 import { loadProjectConfig } from "./config.js";
 import { loadDeploymentSettings, type DeploymentSettings } from "./deployment.js";
 import { formatError, formatSuccess } from "./output.js";
@@ -40,6 +42,13 @@ export interface CliDependencies {
   tokenStore?: TokenStore;
   stdout?: TextWriter;
   stderr?: TextWriter;
+  /** `admin credential authorize` overrides, for tests. */
+  authorize?: {
+    secrets?: AuthorizeSecrets;
+    openBrowser?: (url: string) => Promise<void>;
+    listenPort?: number;
+    onListening?: (port: number) => void;
+  };
 }
 
 interface AuthenticatedDeployment {
@@ -177,12 +186,39 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .command("register")
     .description("register or replace a credential reference; the secret must already exist")
     .requiredOption("--ref <reference>", "credential reference used by connectors' credentialRef")
-    .requiredOption("--type <type>", "static-secret or oauth-client-credentials")
+    .requiredOption("--type <type>", "static-secret, oauth-client-credentials or oauth-refresh-token")
     .requiredOption("--secret <name>", "Secrets Manager secret name, agentx/connectors/<name>")
     .action(async (options: { ref: string; type: string; secret: string }, command: Command) => {
       const globals = globalOptions(command);
       const { settings, accessToken } = await authenticate(globals, services.tokenStore);
       services.stdout.write(formatSuccess(await registerCredential({ controlPlaneUrl: settings.controlPlaneUrl, accessToken, ref: options.ref, type: options.type, secretName: options.secret }, services.fetchImplementation), globals.json));
+    });
+  adminCredential
+    .command("authorize")
+    .description("sign the connector's bot user in once in a browser, store its refresh token in the secret, and register it as oauth-refresh-token")
+    .requiredOption("--ref <reference>", "credential reference used by connectors' credentialRef")
+    .requiredOption("--secret <name>", "Secrets Manager secret holding the app's {\"clientId\", \"clientSecret\"}, agentx/connectors/<name>")
+    .requiredOption("--provider <name>", "whose sign-in page to use: asana")
+    .option("--region <region>", "AWS region of the secret; defaults to your AWS configuration")
+    .action(async (options: { ref: string; secret: string; provider: string; region?: string }, command: Command) => {
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      const overrides = dependencies.authorize ?? {};
+      const result = await authorizeCredential({
+        controlPlaneUrl: settings.controlPlaneUrl,
+        accessToken,
+        ref: options.ref,
+        secretName: options.secret,
+        provider: options.provider,
+        secrets: overrides.secrets ?? secretsManagerAuthorizeSecrets(new SecretsManagerClient(options.region ? { region: options.region } : {})),
+        openBrowser: overrides.openBrowser ?? openSystemBrowser,
+        showUrl: (url) => { services.stderr.write(`Sign in as the connector's bot user. If no browser opened, open this URL:\n${url}\n`); },
+        fetchImplementation: services.fetchImplementation,
+        ...(overrides.listenPort === undefined ? {} : { listenPort: overrides.listenPort }),
+        ...(overrides.onListening ? { onListening: overrides.onListening } : {}),
+      });
+      services.stderr.write(`Stored the refresh token in ${options.secret} and registered ${options.ref} as oauth-refresh-token.\n`);
+      services.stdout.write(formatSuccess(result, globals.json));
     });
   adminCredential
     .command("list")
