@@ -4,3 +4,4 @@ export * from "./event-client.js";
 export * from "./manifest.js";
 export * from "./orchestration-tools.js";
 export * from "./orchestrator.js";
+export * from "./turn-recorder.js";
