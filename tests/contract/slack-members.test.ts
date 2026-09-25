@@ -99,4 +99,21 @@ describe("Slack member check", () => {
     const { lookup } = check([{ ok: false, error: "invalid_auth" }]);
     expect(JSON.stringify(await lookup("U0123456789"))).not.toContain("xoxb");
   });
+
+  it("bounds the whole lookup, including a slow token source, to the 1.5 s deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchFn = vi.fn<typeof fetch>();
+      const lookup = createSlackMemberCheck({
+        token: () => new Promise<string>(() => undefined), // never resolves
+        fetch: fetchFn,
+      });
+      const pending = lookup("U0123456789");
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(await pending).toEqual({ outcome: "failed", error: "timeout" });
+      expect(fetchFn).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
