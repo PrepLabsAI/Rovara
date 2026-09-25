@@ -7,13 +7,14 @@
  * "<!channel>" is shown and never notifies anyone.
  */
 export function slackReplyText(text: string): string {
+  const hasRealNewline = text.includes("\n");
   let result = "";
   let last = 0;
   for (const match of text.matchAll(CODE)) {
-    result += prose(text.slice(last, match.index), atLineStart(text, last)) + code(match[0]);
+    result += prose(text.slice(last, match.index), atLineStart(text, last), hasRealNewline) + code(match[0]);
     last = match.index + match[0].length;
   }
-  return result + prose(text.slice(last), atLineStart(text, last));
+  return result + prose(text.slice(last), atLineStart(text, last), hasRealNewline);
 }
 
 // A fenced block runs to its closing fence, or to the end of the text when it is never closed.
@@ -25,8 +26,9 @@ const HEADING = /^[ \t]{0,3}#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$/gmu;
 const BOLD = /\*\*(?=\S)([^*\n]+?)(?<=\S)\*\*/gu;
 // Tried in this order at each position: a Markdown link (label, URL), a link or mention already
 // in Slack format, a bare URL. A raw "<" or ">" is not a URL character, so it ends a URL.
+// The markdown link label allows one level of nested brackets.
 const TOKEN = new RegExp([
-  String.raw`\[([^\]\n]*)\]\(\s*<?((?:https?:\/\/|mailto:)[^\s<>()]*(?:\([^\s<>()]*\)[^\s<>()]*)*)>?(?:\s+"[^"\n]*")?\s*\)`,
+  String.raw`\[((?:[^\[\]\n]|\[[^\]]*\])*)\]\(\s*<?((?:https?:\/\/|mailto:)[^\s<>()]*(?:\([^\s<>()]*\)[^\s<>()]*)*)>?(?:\s+"[^"\n]*")?\s*\)`,
   String.raw`<(?:(?:https?:\/\/|mailto:)[^\s<>|]+(?:\|[^<>\n]*)?|[@#][UWC][A-Z0-9]{2,31}(?:\|[^<>\n]*)?)>`,
   String.raw`https?:\/\/[^\s<>]+`,
 ].join("|"), "gu");
@@ -35,9 +37,12 @@ function atLineStart(text: string, index: number): boolean {
   return index === 0 || text[index - 1] === "\n";
 }
 
-function prose(text: string, startsLine: boolean): string {
-  const shaped = text
-    .replace(LITERAL_LINE_BREAK, "\n")
+function prose(text: string, startsLine: boolean, hasRealNewline: boolean): string {
+  let shaped = text;
+  if (!hasRealNewline) {
+    shaped = shaped.replace(LITERAL_LINE_BREAK, "\n");
+  }
+  shaped = shaped
     .replace(HEADING, (_line, title: string) => `*${title.replace(/\*\*/gu, "")}*`)
     .replace(BOLD, "*$1*");
   let result = "";
@@ -78,12 +83,21 @@ function link(url: string, label: string): string {
 
 /** Drops trailing punctuation from a bare URL, keeping a closing parenthesis the URL opened. */
 function trimUrl(url: string): string {
+  // Count parentheses once to track balance as we decrement
+  let openCount = 0;
+  let closeCount = 0;
+  for (const char of url) {
+    if (char === "(") openCount++;
+    else if (char === ")") closeCount++;
+  }
+
   let end = url.length;
   while (end > 0) {
     const character = url[end - 1]!;
-    const unbalancedParenthesis = character === ")" &&
-      url.slice(0, end).split("(").length < url.slice(0, end).split(")").length;
+    const unbalancedParenthesis = character === ")" && openCount < closeCount;
     if (!".,;:!?'\"]*_".includes(character) && !unbalancedParenthesis) break;
+    if (character === "(") openCount--;
+    else if (character === ")") closeCount--;
     end -= 1;
   }
   return url.slice(0, end);

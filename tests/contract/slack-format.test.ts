@@ -7,9 +7,11 @@ describe("Slack reply formatting", () => {
     expect(slackReplyText("Line one\nLine two")).toBe("Line one\nLine two");
   });
 
-  it("turns literal \\n sequences into line breaks, but not an escaped backslash", () => {
+  it("turns literal \\n sequences into line breaks only when there are no real newlines", () => {
     expect(slackReplyText("Created CHA-6.\\nAssigned to Pratik.\\r\\nDone.")).toBe("Created CHA-6.\nAssigned to Pratik.\nDone.");
     expect(slackReplyText("Use \\\\n to split lines.")).toBe("Use \\\\n to split lines.");
+    expect(slackReplyText("Open C:\\Users\\nick\\notes.txt\nNext line")).toBe("Open C:\\Users\\nick\\notes.txt\nNext line");
+    expect(slackReplyText("line one\\nline two")).toBe("line one\nline two");
   });
 
   it("shows each link once, in Slack format", () => {
@@ -19,6 +21,10 @@ describe("Slack reply formatting", () => {
     expect(slackReplyText("See https://github.com/acme/app/pull/12.")).toBe("See <https://github.com/acme/app/pull/12>.");
     expect(slackReplyText("(see https://en.wikipedia.org/wiki/Fish_(disambiguation))")).toBe("(see <https://en.wikipedia.org/wiki/Fish_(disambiguation)>)");
     expect(slackReplyText("[Email us](mailto:team@example.com)")).toBe("<mailto:team@example.com|Email us>");
+  });
+
+  it("allows one level of nested brackets in markdown link labels", () => {
+    expect(slackReplyText("[a [b] c](https://example.com)")).toBe("<https://example.com|a [b] c>");
   });
 
   it("keeps links and mentions that are already in Slack format", () => {
@@ -32,6 +38,11 @@ describe("Slack reply formatting", () => {
     expect(slackReplyText("https://example.com/a|b")).toBe("<https://example.com/a%7Cb>");
     expect(slackReplyText("https://example.com/a>b")).toBe("<https://example.com/a>&gt;b");
     expect(slackReplyText("[a > b | c](https://example.com/)")).toBe("<https://example.com/|a &gt; b | c>");
+  });
+
+  it("handles very long URLs with many trailing parentheses efficiently", () => {
+    const result = slackReplyText("See https://example.com/status" + ")".repeat(200000) + " ok");
+    expect(result).toBe("See <https://example.com/status>" + ")".repeat(200000) + " ok");
   });
 
   it("never lets reply text notify a channel, and escapes stray control characters", () => {
