@@ -137,7 +137,7 @@ export class TurnRecordExport {
     const turns: TurnRecord[] = [];
     let skipped = invalid;
     let bytes = PAGE_ENVELOPE_BYTES;
-    for (const [index, { record, key }] of records.entries()) {
+    for (const [index, { record }] of records.entries()) {
       const project = record.workspaceId === undefined ? undefined : projects.get(record.workspaceId);
       const turn = project === undefined ? record : { ...record, project };
       bytes += Buffer.byteLength(JSON.stringify(turn)) + 1;
