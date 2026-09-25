@@ -298,6 +298,10 @@ async function recordTurn(
  * It never throws: the member already has their reply, and a throw here would invite a redelivery
  * that posts it again. The cost of a lost write is one turn served from a stale catalog cache, which
  * the call-time schema check still refuses.
+ *
+ * The list clears even when the refreshed discovery itself failed. That heals itself: the refresh
+ * already evicted the connector's cache entry, so the next turn discovers afresh, and the call-time
+ * schema check catches any drift again and puts the connector back on the list.
  */
 async function rememberRefresh(
   dependencies: ProcessorDependencies,

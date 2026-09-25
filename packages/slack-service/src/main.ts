@@ -196,7 +196,7 @@ const threads: ThreadStore = {
     await documentClient.send(new UpdateCommand({
       TableName: threadsTableName,
       Key: { pk: `THREAD#${subject}`, sk: "META" },
-      UpdateExpression: "SET workspaceId = :workspace, closedAt = :closedAt REMOVE conversationId, settingsRevision",
+      UpdateExpression: "SET workspaceId = :workspace, closedAt = :closedAt REMOVE conversationId, settingsRevision, refreshConnectors",
       ExpressionAttributeValues: { ":workspace": state.workspaceId, ":closedAt": state.closedAt },
     }));
     await s3.send(new DeleteObjectCommand({ Bucket: sessionBucketName, Key: sessionKey(subject) }));
@@ -208,7 +208,7 @@ const threads: ThreadStore = {
       ...(connectors.length === 0
         ? { UpdateExpression: "REMOVE refreshConnectors" }
         : { UpdateExpression: "SET refreshConnectors = :connectors", ExpressionAttributeValues: { ":connectors": connectors } }),
-    }));
+    }), { abortSignal: AbortSignal.timeout(5000) });
   },
   async finish(subject) {
     try {
@@ -218,7 +218,7 @@ const threads: ThreadStore = {
         UpdateExpression: "ADD pendingRequests :minusOne",
         ConditionExpression: "pendingRequests > :zero",
         ExpressionAttributeValues: { ":minusOne": -1, ":zero": 0 },
-      }));
+      }), { abortSignal: AbortSignal.timeout(5000) });
     } catch (error) {
       if (!(error instanceof Error && error.name === "ConditionalCheckFailedException")) throw error;
     }
