@@ -1,0 +1,28 @@
+name: payments
+revision: 1
+repositories:
+  - name: payments-api
+    url: https://github.com/example/payments-api.git
+    path: repo/payments-api
+    defaultBranch: main
+    credentialRef: github-agentx-sdlc
+setup: []
+readiness: []
+orchestratorInstructions: Delegate every repository read, edit, build and test to the worker.
+integrations:
+  connectors:
+    - name: github
+      type: github
+      scopes: all-repositories
+      tools:
+        - { name: list_issues, access: read }
+    - name: linear
+      type: linear
+      credentialRef: linear-payments
+      scopes:
+        - { alias: payments, teamId: "00000000-0000-4000-8000-000000000000" }
+      tools:
+        - { name: list_issues, access: read }
+        - { name: get_issue, access: read }
+        - { name: save_issue, access: write }
+        - { name: save_comment, access: write, allowedArguments: [issueId, body] }

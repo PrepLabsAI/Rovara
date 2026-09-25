@@ -84,8 +84,9 @@ scope binding, credential minting, execution, attribution and ledger records.
 
 1. **Given** an approved Linear read tool, **When** a member asks for open issues, **Then** the
    orchestrator calls `linear__<tool>` and never starts a coding worker.
-2. **Given** an OAuth client-credentials secret, **When** the first call needs a token, **Then**
-   the gateway mints one, caches it until shortly before expiry, and never logs or returns it.
+2. **Given** a static-secret Linear API key restricted to the team, **When** the first call needs
+   a credential, **Then** the gateway reads it from Secrets Manager, sends it only as the Bearer
+   header, and never logs or returns it.
 3. **Given** an approved write tool with a description argument, **When** it executes, **Then** the
    description ends with the attribution footer for the requesting member.
 4. **Given** a vendor schema that uses `$ref`/`$defs`, **When** it is discovered, **Then** the tool
@@ -171,7 +172,7 @@ turn with the fields below; inject schema drift and verify the metric and alarm 
 - Two connectors of the same type (two Linear workspaces); names differ and both are offered.
 - A connector name plus tool name exceeds 64 characters; registration refuses it.
 - The visible tool count exceeds 20 (warning) or 40 (registration refused).
-- A Linear client-credentials token is revoked because another process requested different scopes;
+- An OAuth client-credentials token is revoked because another process requested different scopes;
   the next call re-mints once, and a second rejection is reported as not connected.
 - A Jira service-account key expires; calls fail as not connected until the secret is replaced.
 - A turn is redelivered; its turn record is written once per Slack event.
@@ -351,6 +352,9 @@ turn with the fields below; inject schema drift and verify the metric and alarm 
   identity. Decided 2026-09-24.
 - **Retired tool names are handled by a prompt mapping, not a hook.** Pi's agent loop rejects an
   unknown tool before `tool_call` handlers run.
+- **Linear uses a team-restricted API key, not client credentials.** Linear's client-credentials
+  tokens act as the application with access to all public teams and cannot meet the mandatory
+  vendor-side restriction. Decided 2026-09-24.
 
 ## Assumptions and Scope
 

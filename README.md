@@ -196,11 +196,11 @@ Connectors other than GitHub read their credential from an AWS Secrets Manager s
 `agentx/connectors/<name>`, registered once with the control plane:
 
 ```sh
-aws secretsmanager create-secret --name agentx/connectors/linear-payments \
-  --secret-string '{"clientId":"...","clientSecret":"...","scopes":["read","write"]}'
+pbpaste | tr -d '\n' | jq -Rc '{apiKey: .}' | aws secretsmanager create-secret \
+  --name agentx/connectors/linear-payments --secret-string file:///dev/stdin
 
 agentx admin credential register --ref linear-payments \
-  --type oauth-client-credentials --secret agentx/connectors/linear-payments
+  --type static-secret --secret agentx/connectors/linear-payments
 agentx admin credential list
 ```
 
@@ -211,8 +211,9 @@ A secret is one of two shapes: `static-secret` is `{"apiKey": "..."}`; `oauth-cl
 is `{"clientId", "clientSecret", "scopes": [...]}`. Registration reads the secret and checks its
 shape but never echoes it back, and `list` never prints a secret value, only each reference, its
 type, secret name, whether it is the built-in GitHub App entry, whether a token is cached, and (for
-a registered entry) who registered it and when. No connector type reads a registered credential
-yet; Linear is the first, in a later release.
+a registered entry) who registered it and when. Linear reads a registered `static-secret` API
+key; see [docs/connectors/linear.md](docs/connectors/linear.md). Registering a revision refuses a
+connector whose `credentialRef` is not registered or has a type the connector does not accept.
 
 Registering a project revision can ask the control plane to check each connector with its vendor
 by sending `preflight: true` in the registration body (the current administration client always
