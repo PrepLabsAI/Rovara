@@ -80,7 +80,7 @@ export interface PrepareWorkspaceOptions {
 }
 
 export async function prepareWorkspace(options: PrepareWorkspaceOptions): Promise<PreparationManifest> {
-  const project = ProjectDefinitionSchema.parse(options.project);
+  const project = ProjectDefinitionSchema.parse(withoutUnknownConnectors(options.project));
   const rootPath = resolve(options.rootPath);
   await mkdir(rootPath, { recursive: true });
   const canonicalRoot = await realpath(rootPath);
@@ -362,4 +362,33 @@ function withoutFailure(manifest: PreparationManifest): PreparationManifest {
   const next = { ...manifest };
   delete next.failure;
   return next;
+}
+
+/**
+ * Workspace preparation never reads `integrations.connectors`; it only prepares repositories,
+ * setup and readiness. `ProjectDefinitionSchema` accepts only a `github` connector, so a stored
+ * revision written by a later control plane, for example a `linear` or `jira` connector, would
+ * otherwise fail preparation for every new thread after a rollback. A connector entry of a type
+ * this parse does not know is dropped here before the strict parse; a `github` connector, and
+ * every other project field, still parses exactly as strictly as before.
+ */
+function withoutUnknownConnectors(project: unknown): unknown {
+  if (!project || typeof project !== "object" || Array.isArray(project)) return project;
+  const record = project as Record<string, unknown>;
+  const integrations = record["integrations"];
+  if (!integrations || typeof integrations !== "object" || Array.isArray(integrations)) return project;
+  const integrationsRecord = integrations as Record<string, unknown>;
+  const connectors = integrationsRecord["connectors"];
+  if (!Array.isArray(connectors)) return project;
+  const known = connectors.filter(isGitHubConnectorEntry);
+  const nextIntegrations = { ...integrationsRecord };
+  if (known.length > 0) nextIntegrations["connectors"] = known;
+  else delete nextIntegrations["connectors"];
+  return { ...record, integrations: nextIntegrations };
+}
+
+function isGitHubConnectorEntry(entry: unknown): boolean {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+  const { type } = entry as { type?: unknown };
+  return type === "github";
 }
