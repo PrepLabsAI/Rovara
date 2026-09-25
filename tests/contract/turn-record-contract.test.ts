@@ -383,3 +383,179 @@ describe("secret redaction, fix round 2", () => {
     expect(redactArguments({ a: "abcdef" }, 5)).toBe('{"a":');
   });
 });
+
+describe("secret redaction, fix round 3", () => {
+  const leaks = (input: string, secret: string) => {
+    const out = redactText(input);
+    expect(out, `${JSON.stringify(input)} -> ${JSON.stringify(out)}`).not.toContain(secret);
+  };
+
+  it.each([
+    ["DB_PASSWORD_PROD=hunter2abc", "hunter2abc"],
+    ["SECRET_KEY_BASE=abcdef0123456789abcdef", "abcdef0123456789"],
+    ["API_KEY_PRODUCTION=hunter2abc", "hunter2abc"],
+    ["client_secret_value=hunter2abc", "hunter2abc"],
+    ["secret_token_value=hunter2abc", "hunter2abc"],
+    ["password_confirmation: hunter2abc", "hunter2abc"],
+    ["passwordConfirm=hunter2abc", "hunter2abc"],
+    ["session_id=hunter2abcsess", "hunter2abcsess"],
+    ["A_VERY_LONG_ENVIRONMENT_VARIABLE_PREFIX_FOR_SOME_SERVICE_INTEGRATION_PASSWORD=hunter2abc", "hunter2abc"],
+    ["app.integrations.salesforce.production.oauth2.client.credentials.secret=hunter2abc", "hunter2abc"],
+  ])("redacts the suffixed credential name %s", leaks);
+
+  it("redacts suffixed credential object keys and keeps metadata keys", () => {
+    expect(redactSecrets({ DB_PASSWORD_PROD: "hunter2abc", passwordConfirmation: "hunter2abc", secretKeyBase: "abc123", AccountKey: "abc123+/==", SharedAccessKey: "abc" })).toEqual({
+      DB_PASSWORD_PROD: "[REDACTED]",
+      passwordConfirmation: "[REDACTED]",
+      secretKeyBase: "[REDACTED]",
+      AccountKey: "[REDACTED]",
+      SharedAccessKey: "[REDACTED]",
+    });
+    const metadata = { accessTokenExpiry: "2026-10-01", tokenType: "bearer", secretName: "prod/db", passwordPolicy: "12 chars", passwordResetUrl: "https://x", tokenizer: "bpe", SharedAccessKeyName: "Root", api_key_id: "AKID" };
+    expect(redactSecrets(metadata)).toEqual(metadata);
+  });
+
+  it.each([
+    ["password         = hunter2abc", "hunter2abc"],
+    ["password\t\t\t\t\t\t\t\t\t= hunter2abc", "hunter2abc"],
+    ["password         : hunter2abc", "hunter2abc"],
+    ["password:\n  hunter2abcdef\n", "hunter2abcdef"],
+    ["Authorization:\n  Bearer abcdefghijk123", "abcdefghijk123"],
+    ["password: |\n  hunter2abcdef\n  second line\n", "hunter2abcdef"],
+    ["password: |\n  hunter2abcdef\n  second line\n", "second line"],
+    ["password: >-\n  hunter2abcdef\n", "hunter2abcdef"],
+    ["Bearer abcdefghijklmnopqrstuvwxyzABCDEF", "abcdefghijklmnopqrstuvwxyz"],
+    ["bearer: abcdefghijklmnop", "abcdefghijklmnop"],
+    ["Basic dXNlcjpwYXNz", "dXNlcjpwYXNz"],
+    ["curl -H 'X-Custom: Basic dXNlcjpwYXNz' https://x", "dXNlcjpwYXNz"],
+    ['{"auth_header":"Basic dXNlcjpwYXNz"}', "dXNlcjpwYXNz"],
+    ["https://dXNlcjpwYXNz@example.com/x", "dXNlcjpwYXNz"],
+    ["'password' => 'hunter2abc',", "hunter2abc"],
+    [":password => \"hunter2abc\"", "hunter2abc"],
+    ['password := "hunter2abc"', "hunter2abc"],
+  ])("closes the regression %s", leaks);
+
+  it("keeps the structure around => and := separators", () => {
+    expect(redactText("'password' => 'hunter2abc',")).toBe("'password' => '[REDACTED]',");
+    expect(redactText('password := "hunter2abc"')).toBe('password := "[REDACTED]"');
+  });
+
+  it.each([
+    ["use sk_live_51Habcdefghijklmnopqrstuvwxyz0123 for stripe", "51Habcdefghijklmno"],
+    ["rk_live_51Habcdefghijklmnopqrstuvwxyz0123", "51Habcdefghijklmno"],
+    ["sk_test_51Habcdefghijklmnopqrstuvwxyz0123", "51Habcdefghijklmno"],
+    ["npm_abcdefghijklmnopqrstuvwxyz0123456789", "abcdefghijklmnopqrstuvwxyz0123"],
+    ["SG.abcdefghijklmnopqrstuv.abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG", "abcdefghijklmnopqrstuvwxyz0123456789"],
+    ["hf_abcdefghijklmnopqrstuvwxyz0123456", "abcdefghijklmnopqrstuvwxyz"],
+    ["xoxe-1-abcdefghijklmnopqrstuvwxyz0123456789", "abcdefghijklmnopqrstuvwxyz0123"],
+    ["here is the session token FwoGZXIvYXdzEBYaDHqa0AP1nvGbGbRSHyKsARabcdefghijk", "FwoGZXIvYXdzEBYa"],
+    ["IQoJb3JpZ2luX2VjEJr//////////wEaCXVzLWVhc3QtMSJHMEUCIQ", "IQoJb3JpZ2luX2Vj"],
+    ["twilio SK0123456789abcdef0123456789abcdef auth 0123456789abcdef0123456789abcdef", "0123456789abcdef0123456789abcdef"],
+    ["DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=abcDEF123+/xyz==;EndpointSuffix=core.windows.net", "abcDEF123"],
+    ["Endpoint=sb://x.servicebus.windows.net/;SharedAccessKeyName=Root;SharedAccessKey=abcDEF123+/xyz=", "abcDEF123"],
+    ["<password>hunter2abc</password>", "hunter2abc"],
+    ['<add key="ApiKey" value="hunter2abc"/>', "hunter2abc"],
+    ["<add name='DbPassword' value='hunter2abc' />", "hunter2abc"],
+    ["mysql -uroot -phunter2abc db", "hunter2abc"],
+    ["mysql -u root -p hunter2abc db", "hunter2abc"],
+    ["psql --password hunter2abc", "hunter2abc"],
+    ["docker login -u me -p hunter2abc", "hunter2abc"],
+    ["gh auth login --token abcdef123456", "abcdef123456"],
+    ["tool --api-key=abcdef123456", "abcdef123456"],
+    ["redis-cli -a hunter2abc ping", "hunter2abc"],
+    ["password=abc,hunter2tail", "hunter2tail"],
+    ["password=abc&hunter2tail", "hunter2tail"],
+    ["password=abc}hunter2tail", "hunter2tail"],
+    ["password=correct horse", "horse"],
+    ["-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,AB12\n\nMIIEpAIBAAKCAQEAsecretbody\n", "MIIEpAIBAAKCAQEAsecretbody"],
+    ['{"password ":"hunter2abc"}', "hunter2abc"],
+    ['"{\\\\\\"password\\\\\\":\\\\\\"hunter2abc\\\\\\"}"', "hunter2abc"],
+    ["postgres://user:pa?ss1word@db.example.com/x", "ss1word"],
+    ["postgres://user:pa#ss1word@db.example.com/x", "ss1word"],
+    ["postgres://user:pass word@db.example.com/x", "word"],
+    ["user:hunter2abc@db.example.com:5432", "hunter2abc"],
+    ["| password | hunter2abc |", "hunter2abc"],
+    ["password: `hunter2abc`", "hunter2abc"],
+    ["Cookie:\tsid=zzzsecretzzz", "zzzsecretzzz"],
+  ])("redacts the new shape %s", leaks);
+
+  it("keeps URL context values separate and a host after a query @", () => {
+    expect(redactText("https://x.test/a?token=abc&page=2")).toBe("https://x.test/a?token=[REDACTED]&page=2");
+    expect(redactText("https://user:pw@host.example/path?email=a@b.com")).toBe("https://[REDACTED]@host.example/path?email=a@b.com");
+  });
+
+  it.each([
+    "the task-management board", "keyword=foo&monkey=bar", "author: Jane", "authority: FAA", "tokenizer: bpe", "tokenUsage: 12",
+    "secretary: Bob", "cookieConsent: yes", "a basic understanding of bearer bonds", "max_tokens=1024", "input_tokens: 512",
+    "compass: north", "bypass: true", "risk-adjusted returns", "ask-me-anything-thread", "https://github.com/org/repo/blob/main/src/auth.ts",
+    "promo_code=SAVE10", "zip_code=94107", "passage: the book", "passport: US", "pwdless", "keyboard=us",
+    "Our ARR grew; see https://example.com/report?quarter=q3&id=12", "sk-learn-is-not-a-thing", "token budget: 4000", "tokens: 4000",
+    "the secret sauce: great people", "Bearer bonds 2024 issue", "basic 101 course", "user@example.com:8080", "https://example.com:8443/path",
+    "ssh git@github.com:org/repo.git", "https://user@example.com/path", "mailto:a@b.com", "http://localhost:3000/api@v2",
+    "docker run -p 8080:80 nginx", "psql -h db -p 5432 app", "cat password | grep x", "tokenExpiry: 3600", "password_policy: strict",
+  ])("leaves %s alone", (text) => expect(redactText(text)).toBe(text));
+
+  it("redactArguments redacts name/value pairs, header tuples and argv arrays", () => {
+    const cases: Array<[unknown, string]> = [
+      [{ env: [{ name: "DB_PASSWORD", value: "hunter2abc" }] }, "hunter2abc"],
+      [{ headers: [{ name: "Authorization", value: "Basic dXNlcjpwYXNz" }] }, "dXNlcjpwYXNz"],
+      [{ headers: [["Authorization", "Bearer abcdefghijk123"]] }, "abcdefghijk123"],
+      [{ args: ["--password", "hunter2abc"] }, "hunter2abc"],
+      [{ args: ["mysql", "-p", "hunter2abc"] }, "hunter2abc"],
+      [{ "password ": "hunter2abc" }, "hunter2abc"],
+      [{ tokens: { ghp_abcdefghijklmnopqrstuvwxyz0123: 1 } }, "abcdefghijklmnop"],
+      [{ AccountKey: "abc123+/==" }, "abc123"],
+    ];
+    for (const [value, secret] of cases) expect(redactArguments(value), JSON.stringify(value)).not.toContain(secret);
+    expect(JSON.parse(redactArguments({ env: [{ name: "REGION", value: "us-east-1" }], args: ["docker", "run", "-p", "8080:80"] }))).toEqual({
+      env: [{ name: "REGION", value: "us-east-1" }],
+      args: ["docker", "run", "-p", "8080:80"],
+    });
+  });
+
+  it("redactArguments returns a fixed marker instead of throwing on unserializable values", () => {
+    const circular: Record<string, unknown> = { a: 1 };
+    circular.self = circular;
+    expect(redactArguments(circular)).toBe("[unrecordable arguments]");
+    let deep: unknown = "x";
+    for (let i = 0; i < 100_000; i += 1) deep = [deep];
+    expect(redactArguments(deep)).toBe("[unrecordable arguments]");
+  });
+
+  it("redactArguments handles a long argv array and many keys in linear time", () => {
+    const started = performance.now();
+    redactArguments(Array.from({ length: 50_000 }, () => "-p"));
+    redactArguments(Object.fromEntries(Array.from({ length: 20_000 }, (_, i) => [`key${i}`, `password=x${i}`])));
+    const elapsed = performance.now() - started;
+    console.log(`redactArguments 50,000-item argv and 20,000 keys: ${elapsed.toFixed(1)} ms`);
+    expect(elapsed).toBeLessThan(1_000);
+  });
+
+  it("redactAndCap keeps content when the text past the ceiling has no whitespace", () => {
+    const cjk = "秘密のない普通の文章です。".repeat(2_000);
+    const result = redactAndCap(cjk, 1_000);
+    expect(result.truncated).toBe(true);
+    expect(result.text.length).toBe(1_000);
+    const b64 = `${"QUJD".repeat(50)},${"QUJD".repeat(300)}`;
+    expect(redactAndCap(b64, 100).text.length).toBe(100);
+  });
+
+  it.each([
+    ["password: newline run", "password:\n".repeat(16_000)],
+    ["indented block", `password: |\n${"  x\n".repeat(40_000)}`],
+    ["xml tags", "<a key='x' ".repeat(14_545)],
+    ["long flags", "--password ".repeat(14_545)],
+    ["client flags", "mysql -p ".repeat(17_777)],
+    ["basic base64", "Basic QUJD ".repeat(14_545)],
+    ["sk dashes", "sk-".repeat(53_333)],
+    ["bare user-info", "user:pass@".repeat(16_000)],
+    ["colon runs", "a:".repeat(80_000)],
+    ["keys then spaces", `password${" ".repeat(159_990)}`],
+  ])("redacts 160,000 characters of %s in linear time", (name, input) => {
+    const started = performance.now();
+    redactText(input);
+    const elapsed = performance.now() - started;
+    console.log(`redactText ${name} (${input.length} chars): ${elapsed.toFixed(1)} ms`);
+    expect(elapsed).toBeLessThan(500);
+  });
+});

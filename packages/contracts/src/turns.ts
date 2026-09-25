@@ -92,21 +92,32 @@ export const REDACTION_CEILING_FACTOR = 4;
 /** Redacts before capping, so a secret that would straddle the cut cannot leak a truncated
  * fragment: capping first and redacting afterward can leave a partial credential in the output.
  * Raw input past REDACTION_CEILING_FACTOR times the limit is dropped before redacting, and so is
- * the partial word at that cut, because a secret cut short may no longer match its pattern. */
+ * the partial token at that cut (back to the last character outside the token alphabet), because
+ * a secret cut short may no longer match its pattern. Text made only of token characters up to the
+ * ceiling is dropped whole. */
 export function redactAndCap(text: string, limit = TURN_TEXT_LIMIT): { text: string; truncated: boolean } {
   const ceiling = limit * REDACTION_CEILING_FACTOR;
   if (text.length <= ceiling) return capText(redactText(text), limit);
   let cut = ceiling;
-  while (cut > 0 && !/\s/.test(text[cut] ?? "")) cut -= 1;
+  while (cut > 0 && TOKEN_ALPHABET.test(text[cut] ?? "")) cut -= 1;
   const bounded = text.slice(0, cut);
   return { text: capText(redactText(bounded), limit).text, truncated: true };
 }
 
+const TOKEN_ALPHABET = /[A-Za-z0-9+/=_.~%:@-]/;
+export const UNRECORDABLE_ARGUMENTS = "[unrecordable arguments]";
+
 /** Tool arguments for a turn record: the parsed object is redacted by key and value with
  * redactSecrets, then serialized and capped. Callers must use this rather than text-redacting
- * a JSON string, which cannot see keys and escapes reliably. */
+ * a JSON string, which cannot see keys and escapes reliably. A value that cannot be redacted or
+ * serialized (circular, too deeply nested, BigInt) gives UNRECORDABLE_ARGUMENTS instead of
+ * throwing, so the turn record is still written. */
 export function redactArguments(value: unknown, limit = TURN_ARGUMENT_LIMIT): string {
-  return capText(JSON.stringify(redactSecrets(value)) ?? "", limit).text;
+  try {
+    return capText(JSON.stringify(redactSecrets(value)) ?? "", limit).text;
+  } catch {
+    return UNRECORDABLE_ARGUMENTS.slice(0, limit);
+  }
 }
 
 export function turnRecordKeys(record: Pick<TurnRecord, "subject" | "receivedAt" | "eventId">) {
