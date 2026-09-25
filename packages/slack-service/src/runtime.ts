@@ -6,6 +6,7 @@ export function createHostedSlackRuntime(input: TurnInput, options: Pick<Orchest
   return createOrchestratorRuntime({
     ...options,
     projectInstructions: input.orchestratorInstructions,
+    replySurface: "slack",
     context: { workspaceId: input.workspaceId, conversationId: input.conversationId },
     requestId: input.requestId,
     ...(input.connectors === undefined ? {} : { connectors: input.connectors }),
