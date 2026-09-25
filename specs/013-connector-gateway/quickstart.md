@@ -70,7 +70,16 @@ Findings from the three runs:
 - (e) Asana did not rotate the refresh token on refresh.
 - (f) The sign-in must be approved within five minutes. A late approval ended on `ERR_CONNECTION_REFUSED` for `localhost:8765`, because the command had stopped waiting and closed its listener. The guide's Step 4 and Troubleshooting now say to run it again.
 
-Part B, after the production release (T045): not yet run.
+Part B, after the production release (T045): passed on 2026-09-25, in production, from the bound Slack channel `#agentx-connectors`, project `connectors-check` at revision 2.
+
+- Secret: the tagged secret `agentx/connectors/asana-bot` was created with the app's client (Step 3).
+- Sign-in, run 1: `agentx admin credential authorize` opened the default browser, which was signed in to Asana as the app's owner; Asana approved the owner's own app silently within a second, and the command stored the owner's sign-in (it printed the owner on the "Signed in to Asana as" line, but still stored and registered). Rerun with the browser suppressed and the URL opened in a private window as the bot user: the bot user's sign-in was stored and the registration answered `"replaced": true`. This is why the command gained `--no-browser` and `--expect-account <email>` (the latter refuses, storing and registering nothing, any other account), and why the guide's Step 4 now uses both.
+- Registration preflight: `asana` connected, offering `asana__search_tasks`, `asana__get_tasks`, `asana__get_task`, `asana__create_tasks`, `asana__update_tasks`, `asana__add_comment`; `linear` and `jira` connected too.
+- Slack, thread `1790312954.766639`:
+  1. Listing open tasks succeeded: `search_tasks` with `completed: false` answered 9 tasks, all from the project.
+  2. `create_tasks` succeeded ("AgentX Slack check (T045)"), and `add_comment` succeeded on that task.
+  3. `add_comment` on a task in another project FAILED before any write; the reply said the task was "not found or this connector cannot see it".
+- Model behaviour (`amazon.nova-pro-v1:0`), not connector defects: it twice called `get_tasks` with assignee `"me"`, which the project guard refused (`policy_denied`), and once answered a create-and-comment request without creating anything.
 
 ## SC-004: tool selection before and after (phase 4)
 
