@@ -24,9 +24,8 @@ type needs only a provider, an optional binder and guard, fixtures and a guide),
 tests unchanged). It argues from [../plan.md](../plan.md) ("Project Structure": `types.ts`,
 `engine.ts`). Its predecessor is [phase-5a-generic-connectors.md](phase-5a-generic-connectors.md).
 
-**Branch:** `feat/013-binder`, created from the current head of `feat/013-generic-connectors`
-(phase 5a). It is opened as a PR that depends on the phase 5a PR, and is rebased if phase 5a's
-review changes it. Phases 5 (Linear) and 6 (Jira) branch from this one.
+**Branch:** `feat/013-phase-5b-binder`, cut from mainline after PR #40 merged phase 5a
+(`feat/013-generic-connectors`). Phases 5 (Linear) and 6 (Jira) branch from this one.
 
 **Verified:** Every code block in this plan was applied to a scratch copy of
 `feat/013-generic-connectors` at `ad05989`. With all five tasks applied, `npm run typecheck`,
