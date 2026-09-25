@@ -72,14 +72,15 @@ const RELATED_ISSUE_SHAPE = "Give each related Jira issue as its key (for exampl
 type FieldKind = "type" | "relation" | "other";
 
 /**
- * "Linked Issues", "outwardIssue", "Sub-tasks" and "epiclink" are relation names. Any name holding
- * "type" (issuetype, "Issue Type", a link's type) is not; see typeReferences for what under it is.
+ * "Linked Issues", "outwardIssue", "Sub-tasks" and "epiclink" are relation names. A name with the
+ * word "type" or ending in "type" (issuetype, "Issue Type", a link's type) is a type field; a name
+ * that only contains it ("Prototype Issue") is not. See typeReferences for what under one is checked.
  */
 function fieldKind(name: string): FieldKind {
   const compact = name.toLowerCase().replace(/[^a-z0-9]/g, "");
-  if (compact.includes("type")) return "type";
-  if (RELATION_COMPOUNDS.has(compact)) return "relation";
   const words = name.trim().replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z0-9]+/);
+  if (words.includes("type") || compact.endsWith("type")) return "type";
+  if (RELATION_COMPOUNDS.has(compact)) return "relation";
   return words.some((word) => RELATION_WORDS.has(word)) ? "relation" : "other";
 }
 

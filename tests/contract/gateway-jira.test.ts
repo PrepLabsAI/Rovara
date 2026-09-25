@@ -290,6 +290,17 @@ describe("Jira connector definition", () => {
   });
 
   it.each([
+    ["a lowercase key", "ops-1", "OPS-1"],
+    ["a numeric id", "10002", "10002"],
+    ["a lowercase key object", { key: "ops-1" }, "OPS-1"],
+  ])("does not treat a name that only contains \"type\" as a type field: %s", async (_label, value, ref) => {
+    const f = jira(kan, { "KAN-1": issueWithKey("KAN-1"), "OPS-1": issueWithKey("OPS-1"), "10002": issueWithKey("OPS-9") });
+    expect((await f.run("editJiraIssue", { issueIdOrKey: "KAN-1", additional_fields: { "Prototype Issue": value } })).text)
+      .toBe(`Jira issue ${ref} is not in project KAN. This connector works only in KAN.`);
+    expect(vendorCalls(f.call).map((entry) => entry.name)).not.toContain("editJiraIssue");
+  });
+
+  it.each([
     ["Sub-tasks", [{ id: "10002" }]],
     ["epiclink", "10002"],
   ])("treats %s as a relation field", async (name, value) => {
