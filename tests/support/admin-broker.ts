@@ -1,9 +1,10 @@
-// An administration-only broker harness: a fake DynamoDB, no Slack, and optional GitHub MCP and
-// connector credential dependencies. It mirrors createBroker in slack-control-plane.test.ts.
+// An administration-only broker harness: a fake DynamoDB, no Slack, and optional GitHub MCP,
+// connector credential and turn record export dependencies. It mirrors createBroker in slack-control-plane.test.ts.
 import { randomUUID } from "node:crypto";
 import { vi } from "vitest";
 import type { GitHubMcpDependencies } from "../../packages/broker/src/github-mcp.js";
 import type { ConnectorCredentialsConfiguration, CredentialRegistry } from "../../packages/broker/src/aws/credentials.js";
+import type { TurnRecordExport } from "../../packages/broker/src/aws/turns.js";
 import { RepositoryGrantService } from "../../packages/broker/src/repository-access.js";
 import { FakeDynamoDb } from "./fake-dynamodb.js";
 
@@ -47,6 +48,7 @@ function loadBroker(): Promise<BrokerModules> {
 export async function createAdminBroker(options: {
   githubMcp?: GitHubMcpDependencies;
   connectorCredentials?: ConnectorCredentialsConfiguration;
+  turnRecords?: TurnRecordExport;
 } = {}): Promise<{ db: FakeDynamoDb; handler: AdminHandler; registry: CredentialRegistry | undefined }> {
   const { createAwsBrokerHandler, CredentialRegistry: Registry } = await loadBroker();
   const db = new FakeDynamoDb();
@@ -70,6 +72,7 @@ export async function createAdminBroker(options: {
     ...(options.githubMcp ? { githubMcp: options.githubMcp } : {}),
     ...(options.connectorCredentials ? { connectorCredentials: options.connectorCredentials } : {}),
     ...(registry ? { credentialRegistry: registry } : {}),
+    ...(options.turnRecords ? { turnRecords: options.turnRecords } : {}),
   } as never);
   return { db, handler, registry };
 }

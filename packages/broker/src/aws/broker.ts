@@ -77,6 +77,7 @@ import { attributionDroppedLog, callConnector, connectorCatalogKey, discoverConn
 import { resolveConnectors, BUILT_IN_CONNECTOR_TYPES, type ConnectorType, type ConnectorTypeContext, type ResolvedConnector } from "./connector-types.js";
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
 import { preflightConnectors, registrationWarnings } from "./registration-preflight.js";
+import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
 import { RepositoryGrantService } from "../repository-access.js";
 import { publicWorkspace } from "../workspaces.js";
@@ -222,17 +223,21 @@ interface AwsBrokerDependencies {
   githubMcp?: GitHubMcpDependencies;
   catalogs: CatalogCache<ScopeDiscovery>;
   credentialRegistry?: CredentialRegistry;
+  /** The administrator turn record export; absent when the deployment has no TurnRecords table. */
+  turnRecords?: TurnRecordExport;
   /** Connector types this deployment serves; the built-in types when absent. */
   connectorTypes?: Record<string, ConnectorType>;
 }
 
 /**
  * What callers supply; the handler creates the per-container catalog cache when none is given, and
- * the credential registry from `connectorCredentials` unless one is injected.
+ * the credential registry from `connectorCredentials` unless one is injected, and the turn record
+ * export from `turnRecordsTableName` unless one is injected.
  */
 export type AwsBrokerInput = Omit<AwsBrokerDependencies, "catalogs"> & {
   catalogs?: CatalogCache<ScopeDiscovery>;
   connectorCredentials?: ConnectorCredentialsConfiguration;
+  turnRecordsTableName?: string;
 };
 
 interface SlackServiceConfiguration {
@@ -245,14 +250,21 @@ type TransactItems = NonNullable<TransactWriteCommandInput["TransactItems"]>;
 
 export function createAwsBrokerHandler(input: AwsBrokerInput) {
   // One cache per container: discovery per revision, connector and repository costs one vendor round trip.
-  const { connectorCredentials, ...rest } = input;
+  const { connectorCredentials, turnRecordsTableName, ...rest } = input;
   const credentialRegistry = input.credentialRegistry ?? (connectorCredentials
     ? new CredentialRegistry({ ...connectorCredentials, documentClient: input.documentClient, tableName: input.tableName })
+    : undefined);
+  const turnRecords = input.turnRecords ?? (turnRecordsTableName
+    ? new TurnRecordExport({
+        source: dynamoTurnRecordSource(input.documentClient, turnRecordsTableName),
+        projectOf: workspaceProjectReader(input.documentClient, input.tableName),
+      })
     : undefined);
   const dependencies: AwsBrokerDependencies = {
     ...rest,
     catalogs: input.catalogs ?? new CatalogCache<ScopeDiscovery>({ ttlMs: 600_000, maxEntries: 256 }),
     ...(credentialRegistry ? { credentialRegistry } : {}),
+    ...(turnRecords ? { turnRecords } : {}),
   };
   if (Buffer.byteLength(dependencies.callbackSigningKey, "utf8") < 32) {
     throw new Error("CALLBACK_SIGNING_KEY must contain at least 32 bytes");
@@ -317,6 +329,11 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         return request.method === "POST"
           ? json(await dependencies.credentialRegistry.register(identity, body), request.requestId, 201)
           : json(await dependencies.credentialRegistry.list(identity), request.requestId);
+      }
+      if (request.method === "GET" && url.pathname === "/v1/admin/turns") {
+        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+        if (!dependencies.turnRecords) throw agentXError("RUNTIME_UNAVAILABLE", "turn records are not configured in this deployment");
+        return json(await dependencies.turnRecords.page(url.searchParams), request.requestId);
       }
       if (request.method === "POST" && url.pathname === "/v1/admin/workspaces/prepare") {
         return json(await prepareWorkspace(dependencies, identity, body), request.requestId, 202);
@@ -3272,6 +3289,7 @@ export const handler = createAwsBrokerHandler({
     githubApp: { ref: requiredEnvironment("GITHUB_APP_CREDENTIAL_REF"), secretName: githubPrivateKeySecretArn },
   },
   codeBuild,
+  ...(process.env.TURN_RECORDS_TABLE_NAME ? { turnRecordsTableName: process.env.TURN_RECORDS_TABLE_NAME } : {}),
   ...(process.env.SLACK_ORCHESTRATOR_ROLE_ARN
     ? {
         slack: {
