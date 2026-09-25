@@ -2,8 +2,16 @@ import { describe, expect, it, vi } from "vitest";
 import type { SlackRequestMessage, SlackThreadPrepareResult, SlackThreadWorkspaceResult, TurnRecord } from "../../packages/contracts/src/index.js";
 import { deterministicUuid } from "../../packages/slack-service/src/ids.js";
 import { LIMIT_REFUSAL, ORGANIZATION_LIMIT_REFUSAL, createLazyWorker, unavailableRefusal } from "../../packages/slack-service/src/lazy-worker.js";
+import {
+  NEW_WORKSPACE_MESSAGE,
+  PREPARATION_SLOW_MESSAGE,
+  STILL_PREPARING_MESSAGE,
+  WORKSPACE_UNCONFIRMED_MESSAGE,
+  limitMessage,
+} from "../../packages/slack-service/src/messages.js";
 import { processSlackRequest, type ProcessorDependencies, type TurnInput } from "../../packages/slack-service/src/processor.js";
 import { createHostedSlackRuntime } from "../../packages/slack-service/src/runtime.js";
+import { escapeText, slackReplyText } from "../../packages/slack-service/src/slack-format.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
 
 const thread = { teamId: "T0BSHLLUGBD", channelId: "C0123456789", threadTs: "1695500000.000001" };
@@ -294,5 +302,58 @@ describe("the hosted runtime and the lazy worker", () => {
     } finally {
       await runtime.dispose();
     }
+  });
+});
+
+describe("Slack formatting of the lazy worker's thread notices (spec 014 FR-022)", () => {
+  const HERE = "<!here>";
+  const ESCAPED = "&lt;!here&gt;";
+
+  it("posts each static notice byte-identical to its text, which is already Slack-safe", async () => {
+    for (const notice of [NEW_WORKSPACE_MESSAGE, STILL_PREPARING_MESSAGE, PREPARATION_SLOW_MESSAGE, WORKSPACE_UNCONFIRMED_MESSAGE]) {
+      expect(escapeText(notice)).toBe(notice);
+      expect(slackReplyText(notice)).toBe(notice);
+    }
+    expect([NEW_WORKSPACE_MESSAGE, STILL_PREPARING_MESSAGE, PREPARATION_SLOW_MESSAGE, WORKSPACE_UNCONFIRMED_MESSAGE])
+      .toEqual([SETTING_UP, STILL, SLOW, "AgentX could not confirm this thread's workspace setup. Mention me again in this thread in a few minutes."]);
+    const created = lazyHarness(started);
+    await created.worker.ensureReady();
+    const again = lazyHarness({ ...started, created: false });
+    await again.worker.ensureReady();
+    expect([...created.posts, ...again.posts]).toEqual([SETTING_UP, STILL]);
+  });
+
+  it("posts the limit notices unchanged when their dynamic parts are Slack-safe", () => {
+    expect(limitMessage({ limit: "MEMBER", maximum: 3, starterThreads: [thread, otherThread] })).toBe(MEMBER_LIMIT);
+    expect(limitMessage({ limit: "ORGANIZATION", maximum: 20, starterThreads: [] })).toBe(
+      "This organization already has 20 AgentX workspaces, the most allowed, so I can't start a new one. " +
+        "Continue in an existing thread, or ask an administrator to raise the limit.",
+    );
+  });
+
+  it("escapes a mid-turn setup failure's status, so it cannot notify the channel", async () => {
+    const h = lazyHarness(started, HERE);
+    await h.worker.ensureReady();
+    expect(h.posts).toEqual([SETTING_UP, `AgentX could not set up this thread's workspace (${ESCAPED}). Mention me again in this thread to retry.`]);
+  });
+
+  it("escapes a starter thread's link target in the member limit notice", async () => {
+    const hostile = { ...thread, channelId: `C${HERE}` };
+    const h = lazyHarness({ outcome: "LIMIT_REACHED", limit: "MEMBER", maximum: 3, starterThreads: [hostile] });
+    await h.worker.ensureReady();
+    expect(h.posts).toHaveLength(1);
+    expect(h.posts[0]).not.toContain(HERE);
+    expect(h.posts[0]).toContain(`• <https://slack.com/archives/C${ESCAPED}/p1695500000000001|Thread 1>`);
+  });
+
+  it("escapes the status in the processor's setup failure and unavailable notices", async () => {
+    const failed = processorHarness(workspaceResult({ status: "PREPARING", operationId, created: true }), async () => "done");
+    failed.waitForOperation.mockResolvedValueOnce({ status: HERE });
+    await processSlackRequest(message(), failed.dependencies, { finalAttempt: false });
+    expect(failed.posts).toEqual([SETTING_UP, `AgentX could not set up this thread's workspace (${ESCAPED}). Mention me again in this thread to retry.`]);
+
+    const unavailable = processorHarness(workspaceResult({ status: HERE }), async () => "done");
+    await processSlackRequest(message(), unavailable.dependencies, { finalAttempt: false });
+    expect(unavailable.posts).toEqual([`This thread's workspace is not available right now (${ESCAPED}). Mention me again later to retry.`]);
   });
 });

@@ -170,7 +170,7 @@ export async function processSlackRequest(
     } else if (workspace.status !== "UNPREPARED" && !RUNNABLE_STATUSES.has(workspace.status)) {
       draft.disposition = "workspace_unavailable";
       log("workspace.unavailable", { eventId: message.eventId, status: workspace.status });
-      await post(`This thread's workspace is not available right now (${workspace.status}). Mention me again later to retry.`);
+      await post(`This thread's workspace is not available right now (${escapeText(workspace.status)}). Mention me again later to retry.`);
       finished = true;
       return;
     }
