@@ -25,6 +25,7 @@ describe("Slack member check", () => {
     ["a bot user", { ...human, is_bot: true }],
     ["a deactivated user", { ...human, deleted: true }],
     ["a profile with no is_bot field", { id: "U0123456789" }],
+    ["a string \"false\" for is_bot", { ...human, is_bot: "false" }],
   ])("does not treat %s as a person", async (_name, user) => {
     const { lookup } = check([{ ok: true, user }]);
     expect(await lookup("U0123456789")).toEqual({ outcome: "not_person" });
@@ -46,6 +47,9 @@ describe("Slack member check", () => {
     ["a profile for another user", [{ ok: true, user: { ...human, id: "U0999999999" } }], "unexpected_response"],
     ["a network failure", [new TypeError("fetch failed")], "request_failed"],
     ["a timeout", [new DOMException("timed out", "TimeoutError")], "timeout"],
+    ["a rate limit", [{ ok: false, error: "ratelimited" }], "ratelimited"],
+    ["a null response body", [null], "unexpected_response"],
+    ["a non-object response body", [5], "unexpected_response"],
   ])("fails closed on %s and asks again next time", async (_name, responses, error) => {
     const { fetchFn, lookup } = check([...responses, { ok: true, user: human }]);
     expect(await lookup("U0123456789")).toEqual({ outcome: "failed", error });
@@ -63,6 +67,32 @@ describe("Slack member check", () => {
     now = 60 * 60 * 1_000;
     expect(await lookup("U0123456789")).toEqual({ outcome: "not_person" });
     expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it("caps the cache at 5,000 entries and evicts the oldest once full", async () => {
+    const CAP = 5_000;
+    const responses: unknown[] = [];
+    for (let i = 0; i <= CAP; i++) {
+      responses.push({ ok: true, user: { id: `U${i}`, is_bot: false, deleted: false } });
+    }
+    // A re-fetch for the oldest entry, expected to have been evicted.
+    responses.push({ ok: true, user: { id: "U0", is_bot: false, deleted: false } });
+    const { fetchFn, lookup } = check(responses);
+
+    for (let i = 0; i <= CAP; i++) {
+      await lookup(`U${i}`);
+    }
+    expect(fetchFn).toHaveBeenCalledTimes(CAP + 1);
+
+    // The entry inserted right after the oldest is still cached: the cache stayed at (not
+    // below) the cap, so only the single oldest entry was evicted, not the whole cache.
+    expect(await lookup("U1")).toEqual({ outcome: "person" });
+    expect(fetchFn).toHaveBeenCalledTimes(CAP + 1);
+
+    // The oldest entry (U0) was evicted to keep the cache at the cap: looking it up again
+    // requires a fresh fetch.
+    expect(await lookup("U0")).toEqual({ outcome: "person" });
+    expect(fetchFn).toHaveBeenCalledTimes(CAP + 2);
   });
 
   it("never returns the token in a failure", async () => {
