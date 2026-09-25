@@ -520,7 +520,11 @@ describe("hosted Slack ingress switches (spec 014)", () => {
 
   it("lets an administrator turn off app-posted messages and change the per-thread turn limit", () => {
     template.hasParameter("SlackAppPostedMessages", { Type: "String", Default: "accept", AllowedValues: ["accept", "ignore"] });
-    template.hasParameter("SlackThreadTurnsPerMinute", { Type: "Number", Default: 6, MinValue: 1, MaxValue: 60 });
+    template.hasParameter("SlackThreadTurnsPerMinute", {
+      Type: "String",
+      Default: "6",
+      AllowedPattern: "^([1-9]|[1-5][0-9]|60)$",
+    });
     template.hasResourceProperties("AWS::Lambda::Function", {
       Environment: {
         Variables: Match.objectLike({
