@@ -75,7 +75,7 @@ describe("connector secret names per environment", () => {
     expect(registration("agentx/staging/connectors/linear").success).toBe(true);
   });
 
-  it.each(["agentx/Staging/connectors/linear", "agentx/staging/linear", "agentx/staging/connectors/", "agentx/a--b/connectors/x", "agentx/staging/connectors/a/b"])(
+  it.each(["agentx/Staging/connectors/linear", "agentx/staging/linear", "agentx/staging/connectors/", "agentx/a--b/connectors/x", "agentx/staging/connectors/a/b", "agentx/connectors/connectors/x"])(
     "refuses %s",
     (secretName) => {
       expect(registration(secretName).success).toBe(false);

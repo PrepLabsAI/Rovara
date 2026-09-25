@@ -9,7 +9,7 @@ type Write = (line: string) => void;
 const stdout: Write = (line) => console.log(line);
 
 function metricsNamespace(): string {
-  return process.env.AGENTX_METRICS_NAMESPACE ?? "AgentX";
+  return process.env.AGENTX_METRICS_NAMESPACE || "AgentX";
 }
 
 // The connector routes and their feature 007 github aliases; the query string is not part of the path.

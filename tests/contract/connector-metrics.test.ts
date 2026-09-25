@@ -137,4 +137,18 @@ describe("broker connector metrics", () => {
     const parsed = JSON.parse(lines[0]!) as Record<string, unknown>;
     expect(parsed._aws).toMatchObject({ CloudWatchMetrics: [{ Namespace: "AgentX" }] });
   });
+
+  it("treats an empty AGENTX_METRICS_NAMESPACE as unset", () => {
+    const original = process.env.AGENTX_METRICS_NAMESPACE;
+    process.env.AGENTX_METRICS_NAMESPACE = "";
+    try {
+      const lines: string[] = [];
+      emitConnectorMetric("ConnectorNotConnected", "linear", 1, (line) => lines.push(line));
+      const parsed = JSON.parse(lines[0]!) as Record<string, unknown>;
+      expect(parsed._aws).toMatchObject({ CloudWatchMetrics: [{ Namespace: "AgentX" }] });
+    } finally {
+      if (original === undefined) delete process.env.AGENTX_METRICS_NAMESPACE;
+      else process.env.AGENTX_METRICS_NAMESPACE = original;
+    }
+  });
 });
