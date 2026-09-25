@@ -68,10 +68,10 @@ Each phase is one pull request to `mainline`. Check a task only after its eviden
 
 ## Phase 7: Asana (US6, spec Amendment 1)
 
-- [ ] T041 Add the `oauth-refresh-token` provider with shared cache, cross-container lease and rotated-token write-back; register it; grant tag-limited `PutSecretValue`.
-- [ ] T042 Add `agentx admin credential authorize` (PKCE, state, loopback callback, secret write and tag, registration).
-- [ ] T043 Record Asana fixtures; add the Asana connector type, project binder and guard, and the fake-Asana flow test.
-- [ ] T044 Write the Asana setup guide with the mandatory bot-user restriction; add evaluation cases and the presentation snapshot.
+- [x] T041 Add the `oauth-refresh-token` provider with shared cache, cross-container lease and rotated-token write-back; register it; grant tag-limited `PutSecretValue`.
+- [x] T042 Add `agentx admin credential authorize` (PKCE, state, loopback callback, secret write and tag, registration).
+- [x] T043 Record Asana fixtures; add the Asana connector type, project binder and guard, and the fake-Asana flow test.
+- [x] T044 Write the Asana setup guide with the mandatory bot-user restriction; add evaluation cases and the presentation snapshot.
 - [ ] T045 Live check against a real Asana project with a one-time bot-user sign-in; record evidence in `quickstart.md`.
 
 ## Dependencies

@@ -1,0 +1,30 @@
+# GitHub plus an Asana connector scoped to one project, as docs/connectors/asana.md sets up.
+name: payments
+revision: 1
+repositories:
+  - name: payments-api
+    url: https://github.com/example/payments-api.git
+    path: repo/payments-api
+    defaultBranch: main
+    credentialRef: github-agentx-sdlc
+setup: []
+readiness: []
+orchestratorInstructions: Delegate every repository read, edit, build and test to the worker.
+integrations:
+  connectors:
+    - name: github
+      type: github
+      scopes: all-repositories
+      tools:
+        - { name: list_issues, access: read }
+    - name: asana
+      type: asana
+      credentialRef: asana-bot
+      scopes:
+        - { alias: payments, projectGid: "1210000000000010" }
+      tools:
+        - { name: search_tasks, access: read }
+        - { name: get_task, access: read }
+        - { name: create_tasks, access: write }
+        - { name: update_tasks, access: write }
+        - { name: add_comment, access: write }
