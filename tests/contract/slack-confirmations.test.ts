@@ -81,6 +81,23 @@ describe("the confirmation store", () => {
     expect((await store.load(subject))?.usedBy).toBe("EvYES0000001");
   });
 
+  it("opens only the unposted confirmation it names, and leaves any other item unchanged", async () => {
+    const newer = { ...pending, confirmationId: "77777777-7777-5777-8777-777777777777" };
+    const cases: Array<[string, (store: ReturnType<typeof createDynamoConfirmationStore>) => Promise<void>]> = [
+      ["claimed", async (store) => { await store.save(subject, pending); await store.claim(subject, pending.confirmationId, "EvYES0000001"); }],
+      ["cancelled", async (store) => { await store.save(subject, pending); await store.retire(subject, pending.confirmationId, "EvCANCEL0001"); }],
+      ["replaced by a newer live one", async (store) => { await store.save(subject, newer); }],
+      ["replaced by a newer unposted one", async (store) => { await store.save(subject, { ...newer, retiredAt: newer.postedAt, usedBy: "unposted" }); }],
+    ];
+    for (const [name, arrange] of cases) {
+      const { db, store } = harness();
+      await arrange(store);
+      const before = structuredClone(db.get(`THREAD#${subject}`, "CONFIRMATION"));
+      await expect(store.open(subject, pending.confirmationId), name).rejects.toMatchObject({ name: "ConditionalCheckFailedException" });
+      expect(db.get(`THREAD#${subject}`, "CONFIRMATION"), name).toEqual(before);
+    }
+  });
+
   it("refuses a claim once the confirmation expired", async () => {
     const { store } = harness(Date.parse(pending.expiresAt) + 10 * 60_000);
     await store.save(subject, pending);
@@ -149,7 +166,9 @@ describe("checking a message against the thread's confirmation", () => {
     // The same event again, or one received before the tombstone was left, hears that it is no longer pending.
     expect(await check("yes", { eventId: "EvYES0000001" })).toEqual({ run: false });
     expect(await check("yes", { eventId: "EvYES0000004" })).toEqual({ run: false });
-    expect(posts).toEqual([NO_LONGER_PENDING_TEXT, NO_LONGER_PENDING_TEXT]);
+    // A click can only mean that confirmation: even from a new event after the tombstone, it runs no ordinary turn.
+    expect(await check("yes", { eventId: confirmationClickEventId(pending.confirmationId, "approve"), receivedAt: new Date(postedAt + 180_000).toISOString() })).toEqual({ run: false });
+    expect(posts).toEqual([NO_LONGER_PENDING_TEXT, NO_LONGER_PENDING_TEXT, NO_LONGER_PENDING_TEXT]);
   });
 
   it("treats a fresh ok two minutes after a claim as an ordinary request", async () => {
@@ -284,6 +303,15 @@ describe("tombstones, expiry and yes to all", () => {
     expect(await store.load(subject)).toMatchObject({ usedBy: "expired" });
     expect(await check("yes", { eventId: "EvYES0000002", receivedAt })).toEqual({ run: false });
     expect(posts).toEqual([YES_TO_ALL_TEXT, EXPIRED_TEXT]);
+  });
+
+  it("retires a live, expired confirmation as expired on the requester's plain message, rather than superseding it", async () => {
+    const now = Date.parse(pending.expiresAt) + 60 * 60 * 1_000;
+    const { store, check, posts } = harness(now);
+    await store.save(subject, pending);
+    expect(await check("what's open?", { receivedAt: new Date(now).toISOString() })).toEqual({ run: true, session: createGateSession(requester) });
+    expect(await store.load(subject)).toMatchObject({ usedBy: "expired" });
+    expect(posts).toEqual([]);
   });
 
   it("tells a member whose confirmation another member's replaced that it was replaced", async () => {
