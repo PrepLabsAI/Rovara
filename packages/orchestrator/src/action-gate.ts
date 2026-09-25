@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import type { ActionPolicy, ConnectorCatalog } from "@agentx/contracts";
 import { CLASSIFIER_TIMEOUT_MS, ClassifierError, type ActionClassifier, type ClassifierUsage, type ClassifierVerdict } from "./action-classifier.js";
 
@@ -135,6 +136,9 @@ export function describeCall(tool: string, args: Record<string, unknown>): strin
 
 /** What the model is told when a call is not run. */
 export function blockReason(decision: GateDecision, session: GateSession, summary: string): string {
+  if (decision.outcome === "deny" && decision.source === "gate_error") {
+    return `Not run: ${decision.reason}. Do not retry it in this turn. Tell the member AgentX could not check it.`;
+  }
   if (decision.outcome === "deny") {
     return `Not run: ${decision.reason}. An administrator's rule blocks this action; do not retry it. Tell the member why.`;
   }
@@ -295,4 +299,58 @@ export class ActionGate {
       stop.catch(() => undefined);
     }
   }
+}
+
+/** The custom message type of the gate's note to the model. */
+export const GATE_MESSAGE_TYPE = "agentx-action-gate";
+
+/** Told to the model when the gate itself could not decide or record a call: fixed words, no error text. */
+export const GATE_FAILURE_REASON = "Not run: AgentX could not check this action. Do not retry it in this turn. Tell the member AgentX could not check it.";
+
+/** Told to the model at the start of a turn in which the requester confirmed calls. */
+export function confirmationNote(session: GateSession): string | undefined {
+  if (session.approvals.length === 0) return undefined;
+  return [
+    `<@${session.requesterId}> confirmed the action${session.approvals.length === 1 ? "" : "s"} AgentX asked about:`,
+    ...session.approvals.map((approval, index) => `${index + 1}. ${approval.summary}`),
+    "Call each confirmed tool again now with exactly the same arguments as before. AgentX runs only an exact match, once; any other call is checked afresh.",
+  ].join("\n");
+}
+
+/**
+ * The gate as a hidden Pi extension. Pi runs `tool_call` for every tool call, in-house or
+ * connector, before the tool executes; sibling calls in one assistant message are checked one
+ * after another. A handler that throws also blocks the call, but Pi then shows the model the
+ * error's message, so this handler never throws: every failure blocks with fixed words.
+ */
+export function actionGateExtension(options: ActionGateOptions): InlineExtension {
+  const gate = new ActionGate(options);
+  return {
+    name: "agentx-action-gate",
+    hidden: true,
+    factory: (pi) => {
+      pi.on("before_agent_start", () => {
+        const content = confirmationNote(options.session);
+        return content === undefined ? undefined : { message: { customType: GATE_MESSAGE_TYPE, content, display: false } };
+      });
+      pi.on("tool_call", async (event, ctx) => {
+        try {
+          const call = { toolCallId: event.toolCallId, toolName: event.toolName, input: event.input as Record<string, unknown> };
+          let decision: GateDecision;
+          try {
+            decision = await gate.decide(call, { memberMessages: () => memberMessages(ctx.sessionManager.getBranch()), signal: ctx.signal });
+          } catch (error) {
+            decision = gate.failed(call, error);
+          }
+          if (decision.outcome === "allow") return undefined;
+          if (decision.outcome === "ask" || decision.outcome === "deny") {
+            return { block: true, reason: blockReason(decision, options.session, describeCall(call.toolName, call.input)) };
+          }
+          return { block: true, reason: GATE_FAILURE_REASON };
+        } catch {
+          return { block: true, reason: GATE_FAILURE_REASON };
+        }
+      });
+    },
+  };
 }

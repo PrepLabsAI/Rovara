@@ -6,6 +6,8 @@
   "main": "./dist/index.js",
   "exports": {
     ".": "./dist/index.js",
+    "./action-classifier": "./dist/action-classifier.js",
+    "./action-gate": "./dist/action-gate.js",
     "./control-plane-api": "./dist/control-plane-api.js",
     "./event-client": "./dist/event-client.js",
     "./orchestrator": "./dist/orchestrator.js",

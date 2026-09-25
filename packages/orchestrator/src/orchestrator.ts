@@ -21,6 +21,7 @@ import {
   type WorkerAccess,
 } from "./orchestration-tools.js";
 import { capabilitiesManifest } from "./manifest.js";
+import { actionGateExtension, connectorToolFacts, type ActionGateOptions } from "./action-gate.js";
 import type { TurnRecorder } from "./turn-recorder.js";
 
 export interface OrchestratorOptions {
@@ -42,6 +43,8 @@ export interface OrchestratorOptions {
   replySurface?: ReplySurface;
   /** Spec 014: present only for a thread whose compute is not prepared yet. */
   worker?: WorkerAccess;
+  /** Runs every tool call this turn through the action gate (spec 014). The Slack service always sets it. */
+  actionGate?: Omit<ActionGateOptions, "facts" | "worker">;
   /** Collects this turn's record; the Slack service owns writing it. */
   turnRecorder?: TurnRecorder;
   /** Tests and the offline evaluation register Pi's faux provider here; production creates its own. */
@@ -140,6 +143,11 @@ export async function createOrchestratorRuntime(options: OrchestratorOptions): P
       }));
     },
   };
+  const gate = options.actionGate === undefined ? undefined : actionGateExtension({
+    ...options.actionGate,
+    facts: connectorToolFacts(catalogs),
+    ...(options.worker === undefined ? {} : { worker: options.worker }),
+  });
   return createPiSessionRuntime({
     stateDirectory: options.stateDirectory,
     ...(options.sessionFile === undefined ? {} : { sessionFile: options.sessionFile }),
@@ -147,7 +155,7 @@ export async function createOrchestratorRuntime(options: OrchestratorOptions): P
     model: options.model,
     systemPrompt: orchestratorSystemPrompt(options.projectInstructions, manifest, options.replySurface),
     customTools,
-    extensions: recorder === undefined ? [boundaryExtension] : [boundaryExtension, recorder.extension()],
+    extensions: [boundaryExtension, ...(gate === undefined ? [] : [gate]), ...(recorder === undefined ? [] : [recorder.extension()])],
   });
 }
 
