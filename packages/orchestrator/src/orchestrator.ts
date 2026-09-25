@@ -9,8 +9,9 @@ import {
   type AgentSessionRuntime,
   type CreateAgentSessionRuntimeFactory,
   type InlineExtension,
+  type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { AgentXError, agentXError, type ConnectorCatalog, type ThreadConnector } from "@agentx/contracts";
+import { AgentXError, agentXError, type ConnectorCatalog, type ThreadConnector, type UsageStats } from "@agentx/contracts";
 import {
   RETIRED_PULL_REQUEST_TOOLS,
   assertOrchestrationOnly,
@@ -19,6 +20,7 @@ import {
   type OrchestrationContext,
 } from "./orchestration-tools.js";
 import { capabilitiesManifest } from "./manifest.js";
+import type { TurnRecorder } from "./turn-recorder.js";
 
 export interface OrchestratorOptions {
   stateDirectory: string;
@@ -33,6 +35,10 @@ export interface OrchestratorOptions {
   recoverableOperations?: readonly string[];
   /** Told about each connector whose discovery failed this turn, so the host can log it. */
   onConnectorUnavailable?: (failure: ConnectorUnavailable) => void;
+  /** Collects this turn's record; the Slack service owns writing it. */
+  turnRecorder?: TurnRecorder;
+  /** Tests and the offline evaluation register Pi's faux provider here; production creates its own. */
+  modelRuntime?: ModelRuntime;
 }
 
 export interface ConnectorUnavailable {
@@ -46,16 +52,12 @@ export interface ConnectorUnavailable {
 export const MAX_VISIBLE_TOOLS = 40;
 
 export async function createOrchestratorRuntime(options: OrchestratorOptions): Promise<AgentSessionRuntime> {
-  const cwd = resolve(options.stateDirectory);
-  const agentDirectory = resolve(cwd, "pi");
-  const sessions = resolve(cwd, "sessions");
-  await Promise.all([
-    mkdir(agentDirectory, { recursive: true, mode: 0o700 }),
-    mkdir(sessions, { recursive: true, mode: 0o700 }),
-  ]);
-  const modelRuntime = await ModelRuntime.create({ refreshOnCreate: false });
-  const selectedModel = modelRuntime.getModel(options.model.provider, options.model.modelId);
-  if (!selectedModel) throw agentXError("RUNTIME_UNAVAILABLE", "configured orchestrator model is unavailable");
+  // Directories first, then the model check, then discovery: the order this function always had.
+  await stateDirectories(options.stateDirectory);
+  const modelRuntime = options.modelRuntime ?? await ModelRuntime.create({ refreshOnCreate: false });
+  if (!modelRuntime.getModel(options.model.provider, options.model.modelId)) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "configured orchestrator model is unavailable");
+  }
   const catalogs: ConnectorCatalog[] = [];
   const unavailable: string[] = [];
   const misconfigured: string[] = [];
@@ -73,10 +75,12 @@ export async function createOrchestratorRuntime(options: OrchestratorOptions): P
       options.onConnectorUnavailable?.(failure);
     }
   }
+  const recorder = options.turnRecorder;
   const customTools = createOrchestrationTools(options.api, options.context, {
     connectorCatalogs: catalogs,
     recovery: (options.recoverableOperations?.length ?? 0) > 0,
     ...(options.requestId === undefined ? {} : { requestId: options.requestId }),
+    ...(recorder === undefined ? {} : { onConnectorError: (toolCallId: string, code: string) => recorder.connectorFailed(toolCallId, code) }),
   });
   assertOrchestrationOnly(customTools, catalogs);
   if (customTools.length > MAX_VISIBLE_TOOLS) {
@@ -90,6 +94,18 @@ export async function createOrchestratorRuntime(options: OrchestratorOptions): P
     ...(misconfigured.length > 0 ? { misconfigured } : {}),
     ...(options.recoverableOperations?.length ? { recoverableOperations: options.recoverableOperations } : {}),
   });
+  if (recorder !== undefined) {
+    try {
+      recorder.offer({
+        manifest,
+        tools: customTools.map(({ name, description }) => ({ name, description })),
+        connectorOf: new Map(catalogs.flatMap((catalog) => catalog.tools.map((tool) => [tool.name, catalog.connector] as const))),
+        model: options.model,
+      });
+    } catch {
+      // Recording never breaks a turn. Without an offer, measure() records "model was not offered".
+    }
+  }
   const boundaryExtension: InlineExtension = {
     name: "agentx-orchestration-boundary",
     hidden: true,
@@ -104,19 +120,56 @@ export async function createOrchestratorRuntime(options: OrchestratorOptions): P
       }));
     },
   };
+  return createPiSessionRuntime({
+    stateDirectory: options.stateDirectory,
+    ...(options.sessionFile === undefined ? {} : { sessionFile: options.sessionFile }),
+    modelRuntime,
+    model: options.model,
+    systemPrompt: orchestratorSystemPrompt(options.projectInstructions, manifest),
+    customTools,
+    extensions: recorder === undefined ? [boundaryExtension] : [boundaryExtension, recorder.extension()],
+  });
+}
+
+export interface PiSessionOptions {
+  stateDirectory: string;
+  sessionFile?: string;
+  modelRuntime: ModelRuntime;
+  model: OrchestratorOptions["model"];
+  systemPrompt: string;
+  customTools: ToolDefinition[];
+  extensions: readonly InlineExtension[];
+}
+
+async function stateDirectories(stateDirectory: string): Promise<{ cwd: string; agentDirectory: string; sessions: string }> {
+  const cwd = resolve(stateDirectory);
+  const agentDirectory = resolve(cwd, "pi");
+  const sessions = resolve(cwd, "sessions");
+  await Promise.all([
+    mkdir(agentDirectory, { recursive: true, mode: 0o700 }),
+    mkdir(sessions, { recursive: true, mode: 0o700 }),
+  ]);
+  return { cwd, agentDirectory, sessions };
+}
+
+/** The Pi session every orchestrator runs in: only the given tools, no project resources, no shell. */
+export async function createPiSessionRuntime(options: PiSessionOptions): Promise<AgentSessionRuntime> {
+  const { cwd, agentDirectory, sessions } = await stateDirectories(options.stateDirectory);
+  const selectedModel = options.modelRuntime.getModel(options.model.provider, options.model.modelId);
+  if (!selectedModel) throw agentXError("RUNTIME_UNAVAILABLE", "configured orchestrator model is unavailable");
   const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd: sessionCwd, sessionManager, sessionStartEvent }) => {
     const services = await createAgentSessionServices({
       cwd: sessionCwd,
       agentDir: agentDirectory,
-      modelRuntime,
+      modelRuntime: options.modelRuntime,
       resourceLoaderOptions: {
         noExtensions: true,
         noSkills: true,
         noPromptTemplates: true,
         noThemes: true,
         noContextFiles: true,
-        extensionFactories: [boundaryExtension],
-        systemPrompt: orchestratorSystemPrompt(options.projectInstructions, manifest),
+        extensionFactories: [...options.extensions],
+        systemPrompt: options.systemPrompt,
       },
     });
     return {
@@ -127,8 +180,8 @@ export async function createOrchestratorRuntime(options: OrchestratorOptions): P
         model: selectedModel,
         thinkingLevel: options.model.thinkingLevel ?? "medium",
         noTools: "all",
-        tools: customTools.map(({ name }) => name),
-        customTools,
+        tools: options.customTools.map(({ name }) => name),
+        customTools: options.customTools,
       })),
       services,
       diagnostics: services.diagnostics,
@@ -150,10 +203,45 @@ function connectorFailure(connector: string, error: unknown): ConnectorUnavailab
   return { connector, cause: code === "RUNTIME_UNAVAILABLE" ? "transient" : "setup", code, message };
 }
 
-export async function runOrchestratorTurn(runtime: AgentSessionRuntime, prompt: string): Promise<string> {
-  await runtime.session.prompt(prompt, { expandPromptTemplates: false });
-  await runtime.session.waitForIdle();
-  return lastAssistantText(runtime.session.messages);
+export async function runOrchestratorTurn(runtime: AgentSessionRuntime, prompt: string, recorder?: TurnRecorder): Promise<string> {
+  if (recorder === undefined) {
+    await runtime.session.prompt(prompt, { expandPromptTemplates: false });
+    await runtime.session.waitForIdle();
+    return lastAssistantText(runtime.session.messages);
+  }
+  // The session is reloaded each turn, so its totals are cumulative; the recorder keeps the difference.
+  const before = sessionStats(runtime, recorder);
+  let outcome: "SUCCEEDED" | "FAILED" = "FAILED";
+  try {
+    await runtime.session.prompt(prompt, { expandPromptTemplates: false });
+    await runtime.session.waitForIdle();
+    const text = lastAssistantText(runtime.session.messages);
+    outcome = "SUCCEEDED";
+    return text;
+  } finally {
+    // Measuring is best effort: it never replaces the turn's answer or its error.
+    const after = before === undefined ? undefined : sessionStats(runtime, recorder);
+    if (before !== undefined && after !== undefined) {
+      try {
+        recorder.measure(before, after, outcome);
+      } catch (error) {
+        recorder.usageFailed(`usage measurement failed: ${errorMessage(error)}`);
+      }
+    }
+  }
+}
+
+function sessionStats(runtime: AgentSessionRuntime, recorder: TurnRecorder): UsageStats | undefined {
+  try {
+    return runtime.session.getSessionStats();
+  } catch (error) {
+    recorder.usageFailed(`session stats unavailable: ${errorMessage(error)}`);
+    return undefined;
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "unknown error";
 }
 
 export function lastAssistantText(messages: readonly unknown[]): string {

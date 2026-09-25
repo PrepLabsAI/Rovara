@@ -124,6 +124,11 @@ export class TurnRecorder {
     }
   }
 
+  /** Told by the orchestrator when it could not measure usage, so the record says why it has none. */
+  usageFailed(reason: string): void {
+    this.usageError = reason.slice(0, 200);
+  }
+
   firstToolCall(): { name: string; arguments: unknown } | undefined {
     const id = this.order[0];
     const first = id === undefined ? undefined : this.pending.get(id);

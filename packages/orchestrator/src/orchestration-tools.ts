@@ -89,7 +89,12 @@ export interface OrchestrationContext {
 export function createOrchestrationTools(
   api: OrchestrationApi,
   context: OrchestrationContext,
-  options: { requestId?: () => string; connectorCatalogs?: readonly ConnectorCatalog[]; recovery?: boolean } = {},
+  options: {
+    requestId?: () => string;
+    connectorCatalogs?: readonly ConnectorCatalog[];
+    recovery?: boolean;
+    onConnectorError?: (toolCallId: string, code: string) => void;
+  } = {},
 ): ToolDefinition[] {
   const nextRequestId = options.requestId ?? randomUUID;
   const promptParameters = Type.Object({ prompt: Type.String({ minLength: 1, maxLength: 65_536 }) });
