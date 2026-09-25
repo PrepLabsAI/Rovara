@@ -14,7 +14,7 @@ import {
 } from "@agentx/contracts";
 import { TurnRecorder } from "@agentx/orchestrator/turn-recorder";
 import { deterministicUuid, requestIdSequence } from "./ids.js";
-import { slackReplyText } from "./slack-format.js";
+import { escapeText, slackReplyText } from "./slack-format.js";
 import { buildTurnRecord, emitTurnMetrics, type TurnDraft, type TurnRecordSink } from "./turn-records.js";
 
 export interface ThreadServiceApi {
@@ -116,7 +116,7 @@ export async function processSlackRequest(
       await post("Checking this workspace for unpublished work before closing it.");
       const preflight = await api.waitForOperation(started.workspaceId, started.operationId);
       if (preflight.status !== "SUCCEEDED") {
-        await post(`I couldn't close this workspace because its safety check ${preflight.status.toLowerCase()}${preflight.error ? `: ${preflight.error}` : "."}`);
+        await post(`I couldn't close this workspace because its safety check ${preflight.status.toLowerCase()}${preflight.error ? `: ${escapeText(preflight.error)}` : "."}`);
         finished = true;
         return;
       }
@@ -225,7 +225,7 @@ export async function processSlackRequest(
     // The member sees the abandonment notice, so the record keeps that rather than an unposted answer.
     delete draft.responseText;
     log("request.abandoned", { eventId: message.eventId, errorName: errorName(error) });
-    await post(`AgentX could not process this request: ${safeMessage(error)}`).catch(() => undefined);
+    await post(`AgentX could not process this request: ${escapeText(safeMessage(error))}`).catch(() => undefined);
     finished = true;
   } finally {
     if (finished) {

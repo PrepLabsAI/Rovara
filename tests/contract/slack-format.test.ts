@@ -27,10 +27,28 @@ describe("Slack reply formatting", () => {
     expect(slackReplyText("[a [b] c](https://example.com)")).toBe("<https://example.com|a [b] c>");
   });
 
+  it("does not let a nested bracket in a link label span a real newline (M6)", () => {
+    // Slack does not render a link token that spans lines, so a newline inside the nested brackets
+    // must stop the label from being recognised as a single Markdown link: the brackets stay literal
+    // text (with the real newline they had) and the bare URL is linked on its own.
+    expect(slackReplyText("[a [b\nc] d](https://x.com)")).toBe("[a [b\nc] d](<https://x.com>)");
+  });
+
   it("keeps links and mentions that are already in Slack format", () => {
     const text = "Thanks <@U0123456789>, see <https://slack.com/archives/C0123456789/p1|the thread> in <#C0123456789|agentx>.";
     expect(slackReplyText(text)).toBe(text);
     expect(slackReplyText("<https://example.com/a>")).toBe("<https://example.com/a>");
+  });
+
+  it("rebuilds an already-Slack-formatted URL token through link() so & is encoded consistently (M7)", () => {
+    expect(slackReplyText("<https://a.com?x=1&y=2|lbl & co>")).toBe("<https://a.com?x=1&amp;y=2|lbl &amp; co>");
+    expect(slackReplyText("<https://a.com?x=1&y=2>")).toBe("<https://a.com?x=1&amp;y=2>");
+    // Non-URL tokens (user/channel mentions) are kept exactly as they were, not rebuilt.
+    expect(slackReplyText("<@U0123456789>")).toBe("<@U0123456789>");
+    expect(slackReplyText("<#C0123456789|agentx>")).toBe("<#C0123456789|agentx>");
+    // <!channel> and <!here> are not a recognised token, so they are still escaped, never sent live.
+    expect(slackReplyText("<!channel>")).toBe("&lt;!channel&gt;");
+    expect(slackReplyText("<!here|here>")).toBe("&lt;!here|here&gt;");
   });
 
   it("encodes | and ends a URL at a raw > so a link cannot be split or closed early", () => {

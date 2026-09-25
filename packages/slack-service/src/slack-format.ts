@@ -24,12 +24,14 @@ const CODE = /```[\s\S]*?(?:```|$)|`[^`\n]+`/gu;
 const LITERAL_LINE_BREAK = /(?<!\\)(?:\\r)?\\n/gu;
 const HEADING = /^[ \t]{0,3}#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$/gmu;
 const BOLD = /\*\*(?=\S)([^*\n]+?)(?<=\S)\*\*/gu;
-// Tried in this order at each position: a Markdown link (label, URL), a link or mention already
-// in Slack format, a bare URL. A raw "<" or ">" is not a URL character, so it ends a URL.
-// The markdown link label allows one level of nested brackets, bounded to prevent regex backtracking.
+// Tried in this order at each position: a Markdown link (label, URL), a URL already in Slack format,
+// a mention already in Slack format, a bare URL. A raw "<" or ">" is not a URL character, so it ends
+// a URL. The markdown link label allows one level of nested brackets, bounded to prevent regex
+// backtracking.
 const TOKEN = new RegExp([
-  String.raw`\[((?:[^\[\]\n]|\[[^\]]{0,1000}\]){0,1000})\]\(\s*<?((?:https?:\/\/|mailto:)[^\s<>()]*(?:\([^\s<>()]*\)[^\s<>()]*)*)>?(?:\s+"[^"\n]*")?\s*\)`,
-  String.raw`<(?:(?:https?:\/\/|mailto:)[^\s<>|]+(?:\|[^<>\n]*)?|[@#][UWC][A-Z0-9]{2,31}(?:\|[^<>\n]*)?)>`,
+  String.raw`\[((?:[^\[\]\n]|\[[^\]\n]{0,1000}\]){0,1000})\]\(\s*<?((?:https?:\/\/|mailto:)[^\s<>()]*(?:\([^\s<>()]*\)[^\s<>()]*)*)>?(?:\s+"[^"\n]*")?\s*\)`,
+  String.raw`<((?:https?:\/\/|mailto:)[^\s<>|]+)(?:\|([^<>\n]*))?>`,
+  String.raw`<[@#][UWC][A-Z0-9]{2,31}(?:\|[^<>\n]*)?>`,
   String.raw`https?:\/\/[^\s<>]+`,
 ].join("|"), "gu");
 
@@ -48,12 +50,17 @@ function prose(text: string, startsLine: boolean, hasRealNewline: boolean): stri
   let result = "";
   let last = 0;
   for (const match of shaped.matchAll(TOKEN)) {
-    const [whole, label, markdownUrl] = match;
+    const [whole, label, markdownUrl, slackUrl, slackUrlLabel] = match;
     let consumed = whole;
     let replacement: string;
     if (markdownUrl !== undefined) {
       replacement = link(markdownUrl, (label ?? "").trim().replace(/^<(.*)>$/u, "$1").trim());
+    } else if (slackUrl !== undefined) {
+      // Rebuilt through link(), the same as any other URL, so "&" (and any other Slack control
+      // character) is encoded consistently whether the model wrote Markdown or Slack's own format.
+      replacement = link(slackUrl, slackUrlLabel ?? "");
     } else if (whole.startsWith("<")) {
+      // A mention already in Slack format (<@U…>, <#C…>): kept exactly as it was, never rebuilt.
       replacement = whole;
     } else {
       consumed = trimUrl(whole);
@@ -104,7 +111,7 @@ function trimUrl(url: string): string {
 }
 
 /** Escapes Slack's control characters, leaving an existing &amp;, &lt; or &gt; as it is. */
-function escapeText(text: string): string {
+export function escapeText(text: string): string {
   return text
     .replace(/&(?!(?:amp|lt|gt);)/gu, "&amp;")
     .replace(/</gu, "&lt;")
