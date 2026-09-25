@@ -152,7 +152,7 @@ record for an event still in flight.
 | `stopReason`, `emptyResponse` | From the final assistant message |
 | `usage` | `TaskUsageTelemetry` (feature 011 shape) for the orchestrator's own session |
 | `usageError` | Present instead of `usage` when the orchestrator could not measure it; a fixed category string, never raw error text |
-| `recordingErrors` | At most 8 fixed category strings naming a recorder failure (for example `handler_failed:tool_execution_end`), never raw error text; the turn's own answer to the member is unaffected either way |
+| `recordingErrors` | At most 8 fixed category strings naming a recorder failure (for example `handler_failed:tool_execution_end`), never raw error text. When more categories failed than fit, the last entry is `overflow`; the turn's own answer to the member is unaffected either way |
 | `workerOperations` | Operation IDs started by the turn, joinable to worker `usage` events; at most 50 |
 | `error` | `{ name, code? }` when the turn failed |
 

@@ -51,6 +51,8 @@ export class TurnRecorder {
   private usage: TaskUsageTelemetry | undefined;
   private usageError: string | undefined;
   private readonly recordingErrors = new Set<string>();
+  /** Set when a new category arrived after all slots were full; the last slot then reads "overflow". */
+  private recordingErrorsOverflowed = false;
 
   constructor(private readonly now: () => number = Date.now) {}
 
@@ -94,10 +96,18 @@ export class TurnRecorder {
     }
   }
 
-  /** Names a recording failure by a fixed category (never a raw error message); each category is kept once. */
+  /**
+   * Names a recording failure by a fixed category (never a raw error message); each category is
+   * kept once. Past the limit, the last slot becomes "overflow" so a dropped category still shows.
+   */
   recordingFailed(category: string): void {
-    if (this.recordingErrors.size >= TURN_RECORDING_ERROR_LIMIT) return;
-    this.recordingErrors.add(category.slice(0, 64) || "unknown");
+    const name = category.slice(0, 64) || "unknown";
+    if (this.recordingErrors.has(name)) return;
+    if (this.recordingErrors.size >= TURN_RECORDING_ERROR_LIMIT) {
+      this.recordingErrorsOverflowed = true;
+      return;
+    }
+    this.recordingErrors.add(name);
   }
 
   toolEnded(event: { toolCallId: string; toolName: string; result: unknown; isError: boolean }): void {
@@ -172,7 +182,11 @@ export class TurnRecorder {
       emptyResponse: this.emptyResponse,
       ...(this.usage === undefined ? {} : { usage: this.usage }),
       ...(this.usageError === undefined ? {} : { usageError: this.usageError }),
-      ...(this.recordingErrors.size === 0 ? {} : { recordingErrors: [...this.recordingErrors] }),
+      ...(this.recordingErrors.size === 0 ? {} : {
+        recordingErrors: this.recordingErrorsOverflowed
+          ? [...[...this.recordingErrors].slice(0, TURN_RECORDING_ERROR_LIMIT - 1), "overflow"]
+          : [...this.recordingErrors],
+      }),
       workerOperations: workerOperations.slice(0, TURN_CALL_LIMIT),
     };
   }

@@ -43,6 +43,17 @@ describe("TurnRecorder.recordingFailed", () => {
     expect(new Set(observation.recordingErrors).size).toBe(8);
   });
 
+  it("spends the last of the 8 slots on overflow once a further category is dropped", () => {
+    const full = new TurnRecorder();
+    for (let index = 0; index < 8; index += 1) full.recordingFailed(`category_${index}`);
+    full.recordingFailed("category_0");
+    expect(full.observation().recordingErrors).toEqual(Array.from({ length: 8 }, (_, index) => `category_${index}`));
+    const over = new TurnRecorder();
+    for (let index = 0; index < 12; index += 1) over.recordingFailed(`category_${index}`);
+    const observation = TurnObservationSchema.parse(over.observation());
+    expect(observation.recordingErrors).toEqual([...Array.from({ length: 7 }, (_, index) => `category_${index}`), "overflow"]);
+  });
+
   it("names a failing Pi handler by its event instead of throwing into Pi", () => {
     const recorder = new TurnRecorder();
     const handlers = handlersOf(recorder);
