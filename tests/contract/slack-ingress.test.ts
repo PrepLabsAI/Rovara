@@ -23,18 +23,23 @@ function harness(options: {
   failPost?: boolean;
   turnsPerMinute?: number;
   failCount?: number;
+  failRelease?: number;
+  failDecrement?: number;
 } = {}) {
   const memberChecks: string[] = [];
   const clock = { seconds: nowSeconds };
   const turnWindows: Array<{ subject: string; windowStart: number; expiresAt: number }> = [];
+  const turnReleases: Array<{ subject: string; windowStart: number }> = [];
   const turnCounts = new Map<string, number>();
   let countFailures = options.failCount ?? 0;
+  let decrementFailures = options.failDecrement ?? 0;
   const claimed = new Set<string>();
   const pending = new Map<string, number>();
   const queue: Array<{ message: SlackRequestMessage; groupId: string }> = [];
   const posts: Array<{ channel: string; threadTs: string; text: string }> = [];
   const logs: Array<{ event: string; fields: Record<string, unknown> }> = [];
   let enqueueFailures = options.failEnqueue ?? 0;
+  let releaseFailures = options.failRelease ?? 0;
   const handler = createSlackIngressHandler({
     secrets: async () => ({ signingSecret, botToken: "xoxb-test" }),
     getBinding: async (teamId, channelId) =>
@@ -47,6 +52,10 @@ function harness(options: {
       return true;
     },
     releaseEvent: async (eventId) => {
+      if (releaseFailures > 0) {
+        releaseFailures -= 1;
+        throw new Error("DynamoDB unavailable");
+      }
       claimed.delete(eventId);
     },
     changePending: async (subject, delta) => {
@@ -80,6 +89,15 @@ function harness(options: {
           turnCounts.set(key, (turnCounts.get(key) ?? 0) + 1);
           return turnCounts.get(key)!;
         },
+        releaseTurn: async (subject: string, windowStart: number) => {
+          turnReleases.push({ subject, windowStart });
+          if (decrementFailures > 0) {
+            decrementFailures -= 1;
+            throw new Error("DynamoDB unavailable");
+          }
+          const key = `${subject}#${windowStart}`;
+          turnCounts.set(key, (turnCounts.get(key) ?? 0) - 1);
+        },
       },
     }),
     ...(options.appPosted === undefined ? {} : {
@@ -93,7 +111,7 @@ function harness(options: {
       },
     }),
   });
-  return { handler, queue, posts, pending, logs, memberChecks, clock, turnWindows };
+  return { handler, queue, posts, pending, logs, memberChecks, clock, turnWindows, turnReleases };
 }
 
 function signedEvent(payload: unknown, options: { timestamp?: number; signature?: string; base64?: boolean } = {}) {
@@ -318,6 +336,18 @@ describe("messages a person posts through another app (spec 014 US2)", () => {
     expect(logs.at(-1)).toMatchObject({ event: "event.ignored", fields: { reason: "own_message" } });
   });
 
+  it("accepts a typed mention when a non-bot authorization names the same user", async () => {
+    const { handler, queue, posts, memberChecks } = harness();
+    await send(handler, signedEvent({
+      ...mention({ event: { user: "U0INSTALLER1" } }),
+      authorizations: [{ team_id: team, user_id: bot, is_bot: true }, { team_id: team, user_id: "U0INSTALLER1", is_bot: false }],
+    }));
+    expect(queue).toHaveLength(1);
+    expect(queue[0]?.message).toMatchObject({ userId: "U0INSTALLER1", text: "fix the navigation bug" });
+    expect(posts).toHaveLength(1);
+    expect(memberChecks).toEqual([]);
+  });
+
   it.each([
     ["a null app_id", { bot_id: undefined, app_id: null, bot_profile: undefined }],
     ["only a bot_profile", { bot_id: undefined, app_id: undefined, bot_profile: { name: "claude" } }],
@@ -483,6 +513,41 @@ describe("per-thread turn limit (spec 014 FR-011)", () => {
     expect(logs.at(-1)).toMatchObject({ event: "turn_limit.failed" });
     expect((await send(handler, signedEvent(inThread(1)))).status).toBe(200);
     expect(queue).toHaveLength(1);
+  });
+
+  it("still answers 500 and logs the release failure when the count fails and the release also fails", async () => {
+    const { handler, queue, logs } = harness({ turnsPerMinute: 6, failCount: 1, failRelease: 1 });
+    expect((await send(handler, signedEvent(inThread(1)))).status).toBe(500);
+    expect(queue).toHaveLength(0);
+    expect(logs).toContainEqual({ event: "turn_limit.release_failed", fields: { eventId: "Ev0000000001", errorName: "Error" } });
+    expect(logs.at(-1)).toMatchObject({ event: "turn_limit.failed" });
+  });
+
+  it("decrements the turn count when enqueue fails, so a retried event is not double-counted", async () => {
+    const { handler, queue, posts, turnReleases } = harness({ turnsPerMinute: 1, failEnqueue: 1 });
+    const event = inThread(1);
+    expect((await send(handler, signedEvent(event))).status).toBe(500);
+    expect(queue).toHaveLength(0);
+    expect(turnReleases).toHaveLength(1);
+    expect((await send(handler, signedEvent(event))).status).toBe(200);
+    expect(queue).toHaveLength(1);
+    expect(posts.some((entry) => entry.text.startsWith("I'm pausing this thread"))).toBe(false);
+  });
+
+  it("logs, rather than throws, when the turn-count decrement itself fails", async () => {
+    const { handler, queue, logs } = harness({ turnsPerMinute: 6, failEnqueue: 1, failDecrement: 1 });
+    expect((await send(handler, signedEvent(inThread(1)))).status).toBe(500);
+    expect(queue).toHaveLength(0);
+    expect(logs).toContainEqual({ event: "turn_limit.decrement_failed", fields: { eventId: "Ev0000000001", errorName: "Error" } });
+    expect(logs.at(-1)).toMatchObject({ event: "mention.enqueue_failed" });
+  });
+
+  it("still answers 500 and logs the release failure when enqueue fails and the release also fails", async () => {
+    const { handler, queue, logs } = harness({ failEnqueue: 1, failRelease: 1 });
+    expect((await send(handler, signedEvent(mention()))).status).toBe(500);
+    expect(queue).toHaveLength(0);
+    expect(logs).toContainEqual({ event: "enqueue.release_failed", fields: { eventId: "Ev0000000001", errorName: "Error" } });
+    expect(logs.at(-1)).toMatchObject({ event: "mention.enqueue_failed" });
   });
 
   it("still answers 200 and logs its own event when the pause notice cannot be posted", async () => {
