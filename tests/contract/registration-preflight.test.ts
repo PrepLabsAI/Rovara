@@ -204,6 +204,59 @@ describe("registration preflight across connector types", () => {
   });
 });
 
+describe("registering a project with a jira connector", () => {
+  const CLOUD = "1437bb04-4c88-4efd-9d38-658e8febfeba";
+  const jira = (overrides: Record<string, unknown> = {}) => ({
+    name: "jira", type: "jira", credentialRef: "jira-sa",
+    scopes: [{ alias: "pay", cloudId: CLOUD, projectKey: "PAY" }],
+    tools: [{ name: "searchJiraIssuesUsingJql", access: "read" }, { name: "createJiraIssue", access: "write" }],
+    ...overrides,
+  });
+  const withJira = (overrides: Record<string, unknown> = {}): Overrides => ({ integrations: { connectors: [
+    { name: "github", type: "github", scopes: "all-repositories", tools: [{ name: "list_issues", access: "read" }] },
+    jira(overrides),
+  ] } });
+  const jiraSecrets = { read: vi.fn(async (name: string) => (name === "agentx/connectors/jira-sa" ? JSON.stringify({ apiKey: "jira-api-token-value" }) : JSON.stringify({ clientId: "id", clientSecret: "s", scopes: ["read"] }))) };
+  const connectorCredentials = { secrets: jiraSecrets, githubApp: { ref: "github-app", secretName: "agentx/connectors/github-app" } };
+
+  it("refuses an unregistered credential reference and stores nothing", async () => {
+    const { handler, db } = await createAdminBroker({ connectorCredentials });
+    const refused = await register(handler, withJira());
+    expect(refused.status).toBe(400);
+    expect(refused.body).toMatchObject({ error: { code: "CONFIG_INVALID", message: "connector jira: credential jira-sa is not registered; run agentx admin credential register first" } });
+    expect(db.get("PROJECT#payments", "REV#000000000001")).toBeUndefined();
+  });
+
+  it("refuses a credential of a type a Jira connector cannot use", async () => {
+    const { handler } = await createAdminBroker({ connectorCredentials });
+    expect((await adminCall(handler, { method: "POST", path: "/v1/admin/credentials", body: { ref: "jira-oauth", type: "oauth-client-credentials", secretName: "agentx/connectors/jira-oauth" } })).status).toBe(201);
+    const refused = await register(handler, withJira({ credentialRef: "jira-oauth" }));
+    expect(refused.status).toBe(400);
+    expect(refused.body).toMatchObject({ error: { code: "CONFIG_INVALID", message: "connector jira: credential jira-oauth is oauth-client-credentials; a Jira connector needs static-secret" } });
+  });
+
+  it("registers once the static-secret credential exists, never returning the token", async () => {
+    const { handler } = await createAdminBroker({ connectorCredentials });
+    expect((await adminCall(handler, { method: "POST", path: "/v1/admin/credentials", body: { ref: "jira-sa", type: "static-secret", secretName: "agentx/connectors/jira-sa" } })).status).toBe(201);
+    const registered = await register(handler, withJira());
+    expect(registered.status).toBe(201);
+    expect(JSON.stringify(registered.body)).not.toContain("jira-api-token-value");
+  });
+
+  it("refuses a jira connector in a deployment without connector credentials", async () => {
+    const { handler } = await createAdminBroker({});
+    const refused = await register(handler, withJira());
+    expect(refused.status).toBe(400);
+    expect(refused.body).toMatchObject({ error: { code: "CONFIG_INVALID", message: "connector jira: connector credentials are not configured in this deployment" } });
+  });
+
+  it("re-accepts an identical revision registered before the credential check existed", async () => {
+    const { handler, db } = await createAdminBroker({ connectorCredentials });
+    seedRegisteredRevision(db, withJira());
+    expect((await register(handler, withJira())).body).toMatchObject({ duplicate: true });
+  });
+});
+
 type Overrides = Record<string, unknown>;
 
 function githubConnector(names: string[]): Overrides {

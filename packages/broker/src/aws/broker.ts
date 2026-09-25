@@ -75,7 +75,7 @@ import { DynamoConnectorLedger, GITHUB_LEDGER } from "./connector-ledger.js";
 import { attributionDroppedLog, callConnector, connectorCatalogKey, discoverConnector, discoverLegacyGitHubScope, stripCode, type ConnectorContextBase, type ScopeDiscovery } from "./connector-routes.js";
 import { resolveConnectors, BUILT_IN_CONNECTOR_TYPES, type ConnectorType, type ConnectorTypeContext, type ResolvedConnector } from "./connector-types.js";
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
-import { preflightConnectors, registrationWarnings } from "./registration-preflight.js";
+import { credentialRefusals, preflightConnectors, registrationWarnings } from "./registration-preflight.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
 import { RepositoryGrantService } from "../repository-access.js";
 import { publicWorkspace } from "../workspaces.js";
@@ -596,6 +596,8 @@ async function registerProject(
   const nameProblems = presentedNameProblems(definition);
   if (nameProblems.length > 0) throw agentXError("CONFIG_INVALID", nameProblems.join("; "));
   if (budget.refusal) throw agentXError("CONFIG_INVALID", budget.refusal);
+  const credentialProblems = await credentialRefusals(connectors(), dependencies.credentialRegistry);
+  if (credentialProblems.length > 0) throw agentXError("CONFIG_INVALID", credentialProblems.join("; "));
   let preflight: RegistrationPreflight | undefined;
   if (wantsPreflight) {
     const result = await preflightConnectors(connectors(), definition, identity.ownerKey);

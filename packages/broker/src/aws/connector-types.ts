@@ -1,8 +1,9 @@
-import { GitHubConnectorSchema, githubConnectorOf, type ProjectDefinition, type RepositoryDefinition } from "@agentx/contracts";
+import { GitHubConnectorSchema, githubConnectorOf, type CredentialType, type ProjectDefinition, type RepositoryDefinition } from "@agentx/contracts";
 import { githubConnector, type ConnectorDefinition, type ConnectorPolicy, type PresentationApproval, type connectMcp } from "@agentx/gateway";
 import type { GitHubMcpDependencies } from "../github-mcp.js";
 import { GITHUB_LEDGER } from "./connector-ledger.js";
 import type { CredentialRegistry } from "./credentials.js";
+import { jiraConnectorType } from "./jira-connector-type.js";
 
 export interface ConnectorScope<Scope> { alias: string; scope: Scope }
 
@@ -19,6 +20,8 @@ export interface ResolvedConnector<Scope = unknown> {
   approvals: readonly PresentationApproval[];
   attribution: boolean;
   ledger: { prefix: string; entityType: string };
+  /** The registry credential this connector reads and the provider types it accepts; absent for github. */
+  credential?: { ref: string; accepts: readonly CredentialType[] };
   /** Whether this deployment can reach the connector at all; cheap, used at thread setup. */
   configured(): Promise<boolean>;
   /** The engine definition, or why the connector is not connected in this deployment. */
@@ -86,7 +89,7 @@ export const githubConnectorType: ConnectorType = {
  * name its own map. A type added to `ConnectorConfigSchema` without an entry here would resolve
  * as unknown and be silently dropped; a contract test checks every schema option has one.
  */
-export const BUILT_IN_CONNECTOR_TYPES: Readonly<Record<string, ConnectorType>> = { github: githubConnectorType };
+export const BUILT_IN_CONNECTOR_TYPES: Readonly<Record<string, ConnectorType>> = { github: githubConnectorType, jira: jiraConnectorType };
 
 /**
  * Every connector the project configures that this broker can serve, in definition order. The

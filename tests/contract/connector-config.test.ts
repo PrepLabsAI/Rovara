@@ -66,3 +66,63 @@ describe("connector configuration", () => {
     expect(issues(project({ connectors: [{ ...github, name: "GitHub" }] })).length).toBeGreaterThan(0);
   });
 });
+
+describe("jira connectors", () => {
+  const CLOUD = "1437bb04-4c88-4efd-9d38-658e8febfeba";
+  const jira = (overrides: Record<string, unknown> = {}) => ({
+    name: "jira", type: "jira", credentialRef: "jira-agentx-sa",
+    scopes: [{ alias: "pay", cloudId: CLOUD, projectKey: "PAY" }],
+    tools: [{ name: "searchJiraIssuesUsingJql", access: "read" }, { name: "createJiraIssue", access: "write" }],
+    ...overrides,
+  });
+
+  it("parses the contract's jira example beside github", () => {
+    const definition = ProjectDefinitionSchema.parse(project({ connectors: [{ name: "github", type: "github", scopes: "all-repositories", tools }, jira()] }));
+    expect(definition.integrations?.connectors?.[1]).toMatchObject({ type: "jira", scopes: [{ alias: "pay", cloudId: CLOUD, projectKey: "PAY" }] });
+  });
+
+  it("accepts a site-wide connector with no projectKey and any tool", () => {
+    expect(issues(project({ connectors: [jira({ scopes: [{ alias: "site", cloudId: CLOUD }], tools: [{ name: "executeRead", access: "read" }] })] }))).toEqual([]);
+  });
+
+  it.each([
+    ["projectKey on some scopes only", { scopes: [{ alias: "pay", cloudId: CLOUD, projectKey: "PAY" }, { alias: "site", cloudId: CLOUD }] },
+      "connector jira: set projectKey on every scope or on none"],
+    ["a tool AgentX cannot hold to a project", { tools: [{ name: "executeWrite", access: "write" }] },
+      "connector jira: tool executeWrite cannot be limited to a Jira project; approve only getJiraIssue, searchJiraIssuesUsingJql, createJiraIssue, editJiraIssue, transitionJiraIssue, addOrEditJiraIssueComment, or remove projectKey from every scope"],
+    ["a tool named like an object prototype member", { tools: [{ name: "toString", access: "read" }] },
+      "connector jira: tool toString cannot be limited to a Jira project; approve only getJiraIssue, searchJiraIssuesUsingJql, createJiraIssue, editJiraIssue, transitionJiraIssue, addOrEditJiraIssueComment, or remove projectKey from every scope"],
+    ["a write approved as read", { tools: [{ name: "createJiraIssue", access: "read" }] },
+      "connector jira: tool createJiraIssue must be approved with access: write"],
+    ["the same site and project twice", { scopes: [{ alias: "a", cloudId: CLOUD, projectKey: "PAY" }, { alias: "b", cloudId: CLOUD, projectKey: "PAY" }] },
+      "connector jira: scopes a and b address the same Jira site and project"],
+    ["a duplicate alias", { scopes: [{ alias: "a", cloudId: CLOUD, projectKey: "PAY" }, { alias: "a", cloudId: CLOUD, projectKey: "OPS" }] },
+      "connector jira: scope aliases must be unique"],
+  ])("refuses %s", (_label, overrides, message) => {
+    expect(issues(project({ connectors: [jira(overrides)] }))).toContain(message);
+  });
+
+  it.each([
+    ["a cloudId that is not a UUID", { scopes: [{ alias: "pay", cloudId: "abhishek2551996.atlassian.net", projectKey: "PAY" }] }],
+    ["a lowercase project key", { scopes: [{ alias: "pay", cloudId: CLOUD, projectKey: "pay" }] }],
+    ["a project key longer than 10 characters", { scopes: [{ alias: "pay", cloudId: CLOUD, projectKey: "PAYMENTSOPS" }] }],
+    ["no credentialRef", { credentialRef: undefined }],
+    ["identity user", { identity: "user" }],
+  ])("refuses %s", (_label, overrides) => {
+    expect(issues(project({ connectors: [jira(overrides)] })).length).toBeGreaterThan(0);
+  });
+
+  it("accepts a 10-character project key", () => {
+    expect(issues(project({ connectors: [jira({ scopes: [{ alias: "pay", cloudId: CLOUD, projectKey: "PAYMENTSOP" }] })] }))).toEqual([]);
+  });
+
+  it("requires projectKey on every scope of a project-scoped connector, because the guard does nothing for a scope without one", () => {
+    const mixed = jira({ scopes: [{ alias: "a", cloudId: CLOUD, projectKey: "PAY" }, { alias: "b", cloudId: CLOUD }, { alias: "c", cloudId: CLOUD, projectKey: "OPS" }] });
+    expect(issues(project({ connectors: [mixed] }))).toContain("connector jira: set projectKey on every scope or on none");
+    expect(issues(project({ connectors: [jira({ scopes: [{ alias: "a", cloudId: CLOUD, projectKey: "PAY" }, { alias: "c", cloudId: CLOUD, projectKey: "OPS" }] })] }))).toEqual([]);
+  });
+
+  it("does not treat jira scopes as repository names", () => {
+    expect(issues(project({ connectors: [jira()] })).some((issue) => issue.includes("unregistered repository"))).toBe(false);
+  });
+});

@@ -55,6 +55,14 @@ describe("credential registry routes", () => {
 });
 
 describe("registry providers", () => {
+  it("names the provider type behind a reference, and nothing for an unknown one", async () => {
+    const { handler, registry } = await createAdminBroker({ connectorCredentials: { secrets, githubApp } });
+    await adminCall(handler, { method: "POST", path: "/v1/admin/credentials", body: { ref: "jira-oauth", type: "oauth-client-credentials", secretName: "agentx/connectors/linear" } });
+    expect(await registry!.typeOf(githubApp.ref)).toBe("github-app");
+    expect(await registry!.typeOf("jira-oauth")).toBe("oauth-client-credentials");
+    expect(await registry!.typeOf("missing")).toBeUndefined();
+  });
+
   it("resolves the record on each issue and reports unregistered or unusable references as unavailable", async () => {
     const { handler, registry } = await createAdminBroker({ connectorCredentials: { secrets, githubApp } });
     const provider = registry!.provider("jira-sa");

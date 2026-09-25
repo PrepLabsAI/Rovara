@@ -99,9 +99,79 @@ describe("connector resolution", () => {
     expect(await credentialRegistry.has("broken")).toBe(false);
   });
 
+  it("resolves a jira connector with its presentation strings, ledger and credential reference", async () => {
+    const db = new FakeDynamoDb();
+    const credentialRegistry = new CredentialRegistry({
+      documentClient: db as never, tableName: "state",
+      secrets: { read: vi.fn(async () => JSON.stringify({ apiKey: "jira-token-value" })) }, githubApp: { ref: "github-app", secretName: "agentx/connectors/github-app" },
+    });
+    const resolve = (scopes: unknown) => resolveConnectors(project({ connectors: [
+      { name: "jira", type: "jira", credentialRef: "jira-sa", scopes, tools: [{ name: "getJiraIssue", access: "read" }] },
+    ] }), { credentialRegistry })[0]!;
+    const projectScoped = resolve([{ alias: "kan", cloudId: "1437bb04-4c88-4efd-9d38-658e8febfeba", projectKey: "KAN" }]);
+    expect(projectScoped).toMatchObject({
+      name: "jira", type: "jira", label: "Jira issues", vendor: "Jira", scopeNoun: "Jira project", attribution: true,
+      credential: { ref: "jira-sa", accepts: ["static-secret"] }, ledger: { prefix: "CONNECTOR#jira#", entityType: "CONNECTOR_INVOCATION" },
+    });
+    expect(resolve([{ alias: "site", cloudId: "1437bb04-4c88-4efd-9d38-658e8febfeba" }]).scopeNoun).toBe("Jira site");
+    expect(await projectScoped.configured()).toBe(false);
+    expect(await projectScoped.definition()).toEqual({ notConnected: "credential jira-sa is not registered" });
+
+    db.set({ pk: "CREDENTIALS", sk: "REF#jira-sa", entityType: "CREDENTIAL", ref: "jira-sa", type: "static-secret", secretName: "agentx/connectors/jira-sa", registeredBy: "admin", registeredAt: "2026-09-01T00:00:00.000Z" });
+    expect(await projectScoped.configured()).toBe(true);
+    const definition = await projectScoped.definition();
+    if ("notConnected" in definition) throw new Error("expected a definition");
+    expect(definition.endpoint.href).toBe("https://mcp.atlassian.com/v2/mcp");
+    expect(await definition.credentials.issue(projectScoped.scopes[0]!.scope, "read")).toEqual({ token: "jira-token-value", bindings: {} });
+
+    // Re-registered later with another type: not connected with a reason, never a throw.
+    db.set({ pk: "CREDENTIALS", sk: "REF#jira-sa", entityType: "CREDENTIAL", ref: "jira-sa", type: "oauth-client-credentials", secretName: "agentx/connectors/jira-sa", registeredBy: "admin", registeredAt: "2026-09-02T00:00:00.000Z" });
+    expect(await projectScoped.configured()).toBe(false);
+    expect(await projectScoped.definition()).toEqual({ notConnected: "credential jira-sa is oauth-client-credentials; a Jira connector needs a static-secret API token" });
+  });
+
+  it("binds projectKey only for a project-scoped jira connector, and reports no registry as not connected", async () => {
+    const db = new FakeDynamoDb();
+    db.set({ pk: "CREDENTIALS", sk: "REF#jira-sa", entityType: "CREDENTIAL", ref: "jira-sa", type: "static-secret", secretName: "agentx/connectors/jira-sa", registeredBy: "admin", registeredAt: "2026-09-01T00:00:00.000Z" });
+    const credentialRegistry = new CredentialRegistry({
+      documentClient: db as never, tableName: "state",
+      secrets: { read: vi.fn(async () => JSON.stringify({ apiKey: "jira-token-value" })) }, githubApp: { ref: "github-app", secretName: "agentx/connectors/github-app" },
+    });
+    const resolve = (scopes: unknown, context: Parameters<typeof resolveConnectors>[1]) => resolveConnectors(project({ connectors: [
+      { name: "jira", type: "jira", credentialRef: "jira-sa", scopes, tools: [{ name: "getJiraIssue", access: "read" }] },
+    ] }), context)[0]!;
+    const keyed = await resolve([{ alias: "kan", cloudId: "1437bb04-4c88-4efd-9d38-658e8febfeba", projectKey: "KAN" }], { credentialRegistry }).definition();
+    const site = await resolve([{ alias: "site", cloudId: "1437bb04-4c88-4efd-9d38-658e8febfeba" }], { credentialRegistry }).definition();
+    if ("notConnected" in keyed || "notConnected" in site) throw new Error("expected definitions");
+    expect(keyed.binder.optionalProperties).toEqual(["projectKey"]);
+    expect(site.binder.optionalProperties).toBeUndefined();
+
+    const unregistered = resolve([{ alias: "kan", cloudId: "1437bb04-4c88-4efd-9d38-658e8febfeba", projectKey: "KAN" }], {});
+    expect(await unregistered.configured()).toBe(false);
+    expect(await unregistered.definition()).toEqual({ notConnected: "connector credentials are not configured in this deployment" });
+  });
+
+  it("skips, with a log line, a stored jira connector that fails its schema", () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      expect(resolveConnectors(project({ connectors: [{ name: "jira", type: "jira", scopes: [], tools: [] }] }), {})).toEqual([]);
+      const line = log.mock.calls.map(([entry]) => String(entry)).find((entry) => entry.includes("connector.unusable"));
+      expect(JSON.parse(line!)).toMatchObject({ event: "connector.unusable", connector: "jira", type: "jira", reason: "invalid jira connector configuration: credentialRef, scopes, tools" });
+    } finally { log.mockRestore(); }
+  });
+
+  it("skips a stored project-scoped jira connector that approves a tool its guard cannot hold to the project", () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      expect(resolveConnectors(project({ connectors: [{ name: "jira", type: "jira", credentialRef: "jira-sa", scopes: [{ alias: "kan", cloudId: "1437bb04-4c88-4efd-9d38-658e8febfeba", projectKey: "KAN" }], tools: [{ name: "executeWrite", access: "write" }] }] }), {})).toEqual([]);
+      const line = log.mock.calls.map(([entry]) => String(entry)).find((entry) => entry.includes("connector.unusable"));
+      expect(JSON.parse(line!)).toMatchObject({ event: "connector.unusable", connector: "jira", type: "jira", reason: "invalid jira connector configuration: entry" });
+    } finally { log.mockRestore(); }
+  });
+
   it("has a built-in entry for every type ConnectorConfigSchema accepts, so none is silently dropped", () => {
     const schemaTypes = ConnectorConfigSchema.options.map((option) => option.shape.type.value as string);
-    expect(schemaTypes).toEqual(["github"]);
+    expect(schemaTypes).toEqual(["github", "jira"]);
     for (const type of schemaTypes) {
       expect(Object.hasOwn(BUILT_IN_CONNECTOR_TYPES, type)).toBe(true);
     }

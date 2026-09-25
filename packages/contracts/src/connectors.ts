@@ -17,6 +17,9 @@ export const JIRA_PROJECT_TOOL_ACCESS = {
 
 const RepositoryNameSchema = z.string().regex(AGENTX_NAME_PATTERN);
 
+/** A scope alias such as a repository name. */
+export const ConnectorAliasSchema = z.string().regex(AGENTX_NAME_PATTERN);
+
 /** GitHub uses each scoped repository's own GitHub App credential, as feature 007 does. */
 export const GitHubConnectorSchema = z.object({
   name: ConnectorNameSchema,
@@ -29,7 +32,52 @@ export const GitHubConnectorSchema = z.object({
   attribution: z.boolean().optional(),
 }).strict();
 
-export const ConnectorConfigSchema = z.discriminatedUnion("type", [GitHubConnectorSchema]);
+const JiraScopeSchema = z.object({
+  alias: ConnectorAliasSchema,
+  /** Atlassian site UUID, from https://<site>.atlassian.net/_edge/tenant_info. */
+  cloudId: z.guid(),
+  /** Jira project keys are 2 to 10 characters; a longer key is refused. */
+  projectKey: z.string().regex(/^[A-Z][A-Z0-9_]{1,9}$/).optional(),
+}).strict();
+
+/**
+ * Jira reads a static-secret service-account API token through the credential registry. Each
+ * scope is one Atlassian site, optionally held to one project. The project guard does nothing
+ * for a scope without a projectKey, so a project-scoped connector sets it on every scope and
+ * approves only the tools the guard can hold to the project.
+ */
+export const JiraConnectorSchema = z.object({
+  name: ConnectorNameSchema,
+  type: z.literal("jira"),
+  credentialRef: z.string().regex(AGENTX_NAME_PATTERN),
+  identity: z.literal("service").optional(),
+  scopes: z.array(JiraScopeSchema).min(1).max(32),
+  tools: ToolApprovalListSchema,
+  attribution: z.boolean().optional(),
+}).strict().superRefine((connector, context) => {
+  const issue = (message: string) => context.addIssue({ code: "custom", message: `connector ${connector.name}: ${message}` });
+  const aliases = connector.scopes.map((scope) => scope.alias);
+  if (new Set(aliases).size !== aliases.length) issue("scope aliases must be unique");
+  const seen = new Map<string, string>();
+  for (const scope of connector.scopes) {
+    const key = `${scope.cloudId.toLowerCase()}/${scope.projectKey ?? ""}`;
+    const earlier = seen.get(key);
+    if (earlier !== undefined) issue(`scopes ${earlier} and ${scope.alias} address the same Jira site and project`);
+    else seen.set(key, scope.alias);
+  }
+  const keyed = connector.scopes.filter((scope) => scope.projectKey !== undefined).length;
+  if (keyed !== 0 && keyed !== connector.scopes.length) issue("set projectKey on every scope or on none");
+  const guarded = Object.keys(JIRA_PROJECT_TOOL_ACCESS);
+  for (const tool of connector.tools) {
+    const pinned = Object.hasOwn(JIRA_PROJECT_TOOL_ACCESS, tool.name) ? (JIRA_PROJECT_TOOL_ACCESS as Record<string, "read" | "write">)[tool.name] : undefined;
+    if (pinned !== undefined && tool.access !== pinned) issue(`tool ${tool.name} must be approved with access: ${pinned}`);
+    if (keyed > 0 && pinned === undefined) {
+      issue(`tool ${tool.name} cannot be limited to a Jira project; approve only ${guarded.join(", ")}, or remove projectKey from every scope`);
+    }
+  }
+});
+
+export const ConnectorConfigSchema = z.discriminatedUnion("type", [GitHubConnectorSchema, JiraConnectorSchema]);
 
 const KNOWN_CONNECTOR_TYPES = new Set(ConnectorConfigSchema.options.map((option) => option.shape.type.value as string));
 
@@ -68,8 +116,6 @@ function connectorArrayChecks(connectors: ReadonlyArray<{ name: string; type: st
 export const ConnectorsSchema = z.array(ConnectorConfigSchema).min(1).max(8).superRefine(connectorArrayChecks);
 export const StoredConnectorsSchema = z.array(StoredConnectorConfigSchema).min(1).max(8).superRefine(connectorArrayChecks);
 
-/** A scope alias such as a repository name. */
-export const ConnectorAliasSchema = z.string().regex(AGENTX_NAME_PATTERN);
 const SchemaHashSchema = z.string().regex(/^[a-f0-9]{64}$/);
 
 export const PresentedToolSchema = z.object({
@@ -114,6 +160,7 @@ export type ConnectorResult = z.infer<typeof ConnectorResultSchema>;
 export type ThreadConnector = z.infer<typeof ThreadConnectorSchema>;
 
 export type GitHubConnectorConfig = z.infer<typeof GitHubConnectorSchema>;
+export type JiraConnectorConfig = z.infer<typeof JiraConnectorSchema>;
 export type ConnectorConfig = z.infer<typeof ConnectorConfigSchema>;
 
 /** Six in-house tools when recovery tools are shown; kept equal to ORCHESTRATION_TOOL_NAMES by a test. */
