@@ -5,8 +5,8 @@ AgentX deployment. You create the Linear credential in your own Linear workspace
 
 ## How access works
 
-AgentX calls Linear's hosted MCP server, `https://mcp.linear.app/mcp`, with a Linear API key.
-The key acts as the Linear user who created it. Every issue or comment AgentX writes shows that
+AgentX calls Linear's hosted MCP server, `https://mcp.linear.app/mcp`, with a Linear API key,
+sent as a Bearer token. The key acts as the Linear user who created it. Every issue or comment AgentX writes shows that
 user as the author, and ends with a footer naming the Slack member who asked and linking the
 thread.
 
@@ -167,10 +167,10 @@ What the other results mean:
 
 | Output | Meaning and fix |
 |---|---|
-| Refused: `credential linear-payments is not registered` | Run step 4 first. |
-| Refused: `credential linear-payments is oauth-client-credentials` | Register a `static-secret` API key instead. |
-| Refused: `connector credentials are not configured in this deployment` | The control plane was deployed without connector credentials. Redeploy with them. |
-| `Warning: connector linear: Linear is not connected: Linear rejected the credential twice` | The key is wrong, revoked or lacks permissions. Check steps 1 to 3. |
+| Refused: `connector linear: credential linear-payments is not registered; run agentx admin credential register first` | Run step 4 first. |
+| Refused: `connector linear: credential linear-payments is oauth-client-credentials; a linear connector needs static-secret` | Register a `static-secret` API key instead. |
+| Refused: `connector linear: connector credentials are not configured in this deployment` | The control plane was deployed without connector credentials. Redeploy with them. |
+| `Warning: connector linear: Linear rejected the credential twice; check the Linear API key's permissions and team access` | The key is wrong, revoked or lacks permissions. Check steps 1 to 3. |
 | `Warning: connector linear: tool X skipped: not offered by the vendor` | The tool name is wrong or Linear renamed it. Check the name. |
 | `Warning: connector linear: tool X skipped: requires arguments outside allowedArguments` | Add the named arguments to `allowedArguments`. |
 
