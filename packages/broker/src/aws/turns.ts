@@ -20,6 +20,13 @@ const KEY_PART_LIMIT = 256;
 /** How many malformed keys and field names one log line lists; the count is always exact. */
 const LOGGED_KEY_LIMIT = 10;
 const CURSOR_INVALID = "cursor is invalid; start the export again without it";
+/**
+ * The most JSON one export page carries. Lambda refuses a synchronous response over 6 MB, so a
+ * page of 100 large records would fail every time; stop well short and hand out a cursor.
+ */
+export const TURN_EXPORT_PAGE_BYTES = 4_000_000;
+/** Room for the response envelope around the turns: braces, the cursor and the request id. */
+const PAGE_ENVELOPE_BYTES = 4_096;
 
 export function dynamoTurnRecordSource(client: Client, tableName: string): TurnRecordSource {
   return {
@@ -93,7 +100,7 @@ export class TurnRecordExport {
         throw agentXError("RUNTIME_UNAVAILABLE", "could not continue the turn record export; try again");
       }
     }
-    const records: TurnRecord[] = [];
+    const records: { record: TurnRecord; key: TurnRecordStartKey | undefined }[] = [];
     const invalidKeys: string[] = [];
     const invalidFields = new Set<string>();
     let invalid = 0;
@@ -111,13 +118,13 @@ export class TurnRecordExport {
         }
         continue;
       }
-      records.push(parsed.data);
+      records.push({ record: parsed.data, key: startKey(Object.fromEntries(KEY_NAMES.map((name) => [name, item[name]]))) });
     }
     if (invalid > 0) {
       log(JSON.stringify({ component: "broker", event: "turn_record.invalid", count: invalid, keys: invalidKeys, fields: [...invalidFields] }));
     }
     // One lookup per distinct workspace on the page, all at once.
-    const workspaceIds = [...new Set(records.flatMap((record) => record.workspaceId === undefined ? [] : [record.workspaceId]))];
+    const workspaceIds = [...new Set(records.flatMap(({ record }) => record.workspaceId === undefined ? [] : [record.workspaceId]))];
     const projects = new Map(await Promise.all(workspaceIds.map(async (workspaceId) => [
       workspaceId,
       await this.options.projectOf(workspaceId).catch((error: unknown) => {
@@ -125,10 +132,25 @@ export class TurnRecordExport {
         return undefined;
       }),
     ] as const)));
-    const turns = records.map((record) => {
+    const turns: TurnRecord[] = [];
+    let bytes = PAGE_ENVELOPE_BYTES;
+    for (const [index, { record, key }] of records.entries()) {
       const project = record.workspaceId === undefined ? undefined : projects.get(record.workspaceId);
-      return project === undefined ? record : { ...record, project };
-    });
+      const turn = project === undefined ? record : { ...record, project };
+      bytes += Buffer.byteLength(JSON.stringify(turn)) + 1;
+      // Always carry at least one record, so a page can never come back empty and stuck.
+      if (bytes > TURN_EXPORT_PAGE_BYTES && turns.length > 0) {
+        // Resume after the last record this page carries; the records left out come next time.
+        const last = records[index - 1]?.key;
+        next = last === undefined ? undefined : Buffer.from(JSON.stringify(last)).toString("base64url");
+        if (next === undefined || !acceptableCursor(next, since)) {
+          log(JSON.stringify({ component: "broker", event: "turn_record.cursor_unusable" }));
+          throw agentXError("RUNTIME_UNAVAILABLE", "could not continue the turn record export; try again");
+        }
+        break;
+      }
+      turns.push(turn);
+    }
     return { turns, ...(next === undefined ? {} : { cursor: next }) };
   }
 }

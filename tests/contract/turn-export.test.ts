@@ -286,3 +286,45 @@ describe("GET /v1/admin/turns", () => {
     expect(response.body.error).toMatchObject({ code: "FORBIDDEN" });
   });
 });
+
+describe("turn record export page size", () => {
+  /** A fake byTime index: newest first, Limit items after the start key, then a last key. */
+  function fakeIndex(items: ReturnType<typeof stored>[]): TurnRecordSource {
+    const ordered = [...items].sort((left, right) => right.exportSk.localeCompare(left.exportSk));
+    return {
+      async page(input) {
+        const start = input.exclusiveStartKey === undefined ? 0 : ordered.findIndex((item) => item.exportSk === input.exclusiveStartKey?.exportSk) + 1;
+        const slice = ordered.slice(start, start + input.limit);
+        const last = slice.at(-1);
+        return start + input.limit < ordered.length && last !== undefined ? { items: slice, lastEvaluatedKey: keyOf(last) } : { items: slice };
+      },
+    };
+  }
+
+  it("stops a page before about 4 MB and hands out a cursor that resumes after the last included record", async () => {
+    // About 300 KB of JSON each: a control character escapes to six bytes, a euro sign is three.
+    const items = Array.from({ length: 100 }, (_, index) => stored(
+      `EvBIG${String(index).padStart(5, "0")}`,
+      new Date(now - (index + 1) * 60_000).toISOString(),
+      { requestText: "\u0001".repeat(40_000), responseText: "€".repeat(20_000) },
+    ));
+    expect(Buffer.byteLength(JSON.stringify(items[0]))).toBeGreaterThan(290_000);
+    const { exporter: turns } = exporter(fakeIndex(items));
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let pages = 0;
+    do {
+      const result = await turns.page(new URLSearchParams({ since: "2026-09-17T00:00:00Z", ...(cursor === undefined ? {} : { cursor }) }));
+      expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(4_000_000);
+      expect(result.turns.length).toBeGreaterThan(0);
+      seen.push(...result.turns.map((turn) => turn.eventId));
+      cursor = result.cursor;
+      pages += 1;
+      expect(pages).toBeLessThan(50);
+    } while (cursor !== undefined);
+    expect(pages).toBeGreaterThan(1);
+    expect(seen).toHaveLength(100);
+    expect(new Set(seen).size).toBe(100);
+    expect([...seen].sort()).toEqual(items.map((item) => item.eventId).sort());
+  });
+});
