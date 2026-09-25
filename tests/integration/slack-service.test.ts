@@ -410,3 +410,19 @@ describe("thread-ordered queue consumer", () => {
     expect(new Set(extended)).toEqual(new Set(["receipt-Ev000000A1"]));
   });
 });
+
+describe("Slack reply formatting in the processor", () => {
+  it("posts the turn's reply in Slack formatting", async () => {
+    const harness = processorHarness({
+      turn: async () => "Created [<https://linear.app/x/issue/CHA-6>](<https://linear.app/x/issue/CHA-6>).\\nNothing else changed.",
+    });
+    await processSlackRequest(slackMessage(), harness.dependencies, { finalAttempt: false });
+    expect(harness.posts.at(-1)).toBe("Created <https://linear.app/x/issue/CHA-6>.\nNothing else changed.");
+  });
+
+  it("formats a failed turn's message too, so an error cannot notify the channel", async () => {
+    const harness = processorHarness({ turn: async () => { throw new Error("vendor said <!channel>"); } });
+    await processSlackRequest(slackMessage(), harness.dependencies, { finalAttempt: false });
+    expect(harness.posts.at(-1)).toBe("AgentX could not complete the request: vendor said &lt;!channel&gt;");
+  });
+});

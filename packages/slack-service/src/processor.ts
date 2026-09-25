@@ -14,6 +14,7 @@ import {
 } from "@agentx/contracts";
 import { TurnRecorder } from "@agentx/orchestrator/turn-recorder";
 import { deterministicUuid, requestIdSequence } from "./ids.js";
+import { slackReplyText } from "./slack-format.js";
 import { buildTurnRecord, emitTurnMetrics, type TurnDraft, type TurnRecordSink } from "./turn-records.js";
 
 export interface ThreadServiceApi {
@@ -210,8 +211,10 @@ export async function processSlackRequest(
       log("task.failed", { eventId: message.eventId, errorName: errorName(error) });
       response = `AgentX could not complete the request: ${safeMessage(error)}`;
     }
-    draft.responseText = response;
-    for (const chunk of splitSlackMessage(response)) await post(chunk);
+    // Formatted before anything is posted (spec 014 FR-022): the turn record keeps exactly the text
+    // the member sees, and post() remembers each formatted chunk as lastPosted.
+    draft.responseText = slackReplyText(response);
+    for (const chunk of splitSlackMessage(slackReplyText(response))) await post(chunk);
     if (recorder !== undefined) await rememberRefresh(dependencies, log, subject, message.eventId, state.refreshConnectors ?? [], recorder);
     finished = true;
   } catch (error) {

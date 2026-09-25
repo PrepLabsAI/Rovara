@@ -365,3 +365,29 @@ describe("turn record duplicate log", () => {
     expect(finish).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("turn records keep the reply as posted in Slack formatting (spec 014 FR-022)", () => {
+  it("records the formatted reply the member saw, not the model's Markdown", async () => {
+    const { dependencies, posts, stored } = harness({ runTurn: async () => "Created [CHA-6](https://linear.app/x/issue/CHA-6).\\nNothing else changed." });
+    await processSlackRequest(message, dependencies, { finalAttempt: false });
+    expect(posts.at(-1)).toBe("Created <https://linear.app/x/issue/CHA-6|CHA-6>.\nNothing else changed.");
+    expect(stored()[0]?.responseText).toBe(posts.at(-1));
+  });
+
+  it("records the last formatted chunk that reached Slack when a later post fails on the final attempt", async () => {
+    const { dependencies, stored } = harness({ runTurn: async () => "**Step** done.\\n".repeat(400) });
+    const post = dependencies.post;
+    let replies = 0;
+    dependencies.post = async (thread, text) => {
+      if (text.startsWith("*Step*") && ++replies > 1) throw Object.assign(new Error("slack down"), { name: "SlackPostError" });
+      if (text.startsWith("AgentX could not process")) throw Object.assign(new Error("slack down"), { name: "SlackPostError" });
+      await post(thread, text);
+    };
+    await processSlackRequest(message, dependencies, { finalAttempt: true });
+    const recorded = String(stored()[0]?.responseText);
+    expect(stored()[0]).toMatchObject({ disposition: "abandoned" });
+    expect(recorded.startsWith("*Step* done.\n*Step* done.")).toBe(true);
+    expect(recorded).not.toContain("**");
+    expect(recorded).not.toContain("\\n");
+  });
+});
