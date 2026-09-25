@@ -1,4 +1,4 @@
-import { GuardRejection, type Binder, type ConnectorDefinition, type CredentialProvider, type Guard } from "./types.js";
+import { GuardRejection, type Binder, type ConnectorDefinition, type CredentialProvider, type Guard, type GuardInput } from "./types.js";
 import { isObject, resultText } from "./util.js";
 
 /** A Linear team a connector may address, by the alias the model sees and the team's UUID. */
@@ -20,17 +20,54 @@ export const linearBinder: Binder<LinearTeamScope> = {
 const ISSUE_ARGUMENT: Readonly<Record<string, string>> = { get_issue: "id", save_issue: "id", list_comments: "issueId", save_comment: "issueId" };
 /** Comment targets whose team cannot be proven with a Linear tool. */
 const UNVERIFIABLE_COMMENT_TARGETS = ["id", "parentId", "projectId", "initiativeId", "documentId", "milestoneId", "statusUpdateId", "statusUpdateType"] as const;
+/** Other issues save_issue can point at, one per field (null removes the link). */
+const SAVE_ISSUE_REFERENCES = ["parentId", "duplicateOf"] as const;
+/** Lists of other issues save_issue can link or unlink. */
+const SAVE_ISSUE_REFERENCE_LISTS = ["relatedTo", "blocks", "blockedBy", "removeRelatedTo", "removeBlocks", "removeBlockedBy"] as const;
+/** The most issues one call may address, each costing one get_issue before the call is sent. */
+const MAX_REFERENCES = 10;
 const NO_TEAM = "The Linear team check could not run, so the request was not sent.";
+const INVALID_ID = "Invalid Linear issue ID.";
 
 /** 5b passes the call's scope to every guard. Anything but a Linear team scope refuses the call. */
 function scopeOf(scope: unknown): LinearTeamScope {
-  if (!isObject(scope) || typeof scope.alias !== "string" || typeof scope.teamId !== "string" || scope.teamId === "") throw new GuardRejection(NO_TEAM);
+  if (!isObject(scope) || typeof scope.alias !== "string" || scope.alias === "" || typeof scope.teamId !== "string" || scope.teamId === "") throw new GuardRejection(NO_TEAM);
   return { alias: scope.alias, teamId: scope.teamId };
 }
 
 /** The live get_issue result carries the team UUID as top-level `teamId` (`team` is the name). */
 function teamIdOf(issue: unknown): string | undefined {
   return isObject(issue) && typeof issue.teamId === "string" ? issue.teamId : undefined;
+}
+
+/** Whether save_issue names another issue in any field other than id. Empty lists and nulls do not. */
+function referencesOtherIssues(args: Record<string, unknown>): boolean {
+  return SAVE_ISSUE_REFERENCES.some((name) => args[name] !== undefined && args[name] !== null)
+    || SAVE_ISSUE_REFERENCE_LISTS.some((name) => args[name] !== undefined && !(Array.isArray(args[name]) && args[name].length === 0));
+}
+
+/**
+ * Every issue the call addresses: the issue argument, then for save_issue each referenced issue.
+ * Anything that is not an issue id refuses the call. Repeats, ignoring case, count once.
+ */
+function issuesOf(tool: string, key: string, args: Record<string, unknown>): string[] {
+  const found = new Map<string, string>();
+  const add = (id: unknown) => {
+    if (typeof id !== "string" || id.length === 0 || id.length > 128) throw new GuardRejection(INVALID_ID);
+    if (!found.has(id.toLowerCase())) found.set(id.toLowerCase(), id);
+  };
+  if (args[key] !== undefined) add(args[key]); // save_issue without id creates, and the binder sets its team.
+  if (tool === "save_issue") {
+    for (const name of SAVE_ISSUE_REFERENCES) if (args[name] !== undefined && args[name] !== null) add(args[name]);
+    for (const name of SAVE_ISSUE_REFERENCE_LISTS) {
+      const list = args[name];
+      if (list === undefined) continue;
+      if (!Array.isArray(list)) throw new GuardRejection(INVALID_ID);
+      list.forEach(add);
+    }
+  }
+  if (found.size > MAX_REFERENCES) throw new GuardRejection(`This Linear request references more than ${MAX_REFERENCES} issues, so it was not sent.`);
+  return [...found.values()];
 }
 
 /**
@@ -40,7 +77,8 @@ function teamIdOf(issue: unknown): string | undefined {
 export const issueInTeamGuard: Guard = {
   requiredTools(tool, args) {
     const key = ISSUE_ARGUMENT[tool];
-    return key !== undefined && typeof args[key] === "string" ? ["get_issue"] : [];
+    if (key === undefined) return [];
+    return typeof args[key] === "string" || (tool === "save_issue" && referencesOtherIssues(args)) ? ["get_issue"] : [];
   },
   async check({ tool, arguments: args, connection, scope }) {
     const key = ISSUE_ARGUMENT[tool];
@@ -51,19 +89,21 @@ export const issueInTeamGuard: Guard = {
       if (other !== undefined) throw new GuardRejection(`This Linear connector only works with comments on issues in the ${team.alias} team, so ${other} is not allowed. Pass issueId.`);
       if (args.issueId === undefined) throw new GuardRejection(`Pass issueId: this Linear connector only works with comments on issues in the ${team.alias} team.`);
     }
-    const id = args[key];
-    if (id === undefined) return; // save_issue without id creates, and the binder sets its team.
-    if (typeof id !== "string" || id.length === 0 || id.length > 128) throw new GuardRejection("Invalid Linear issue ID.");
-    const shown = JSON.stringify(id.slice(0, 64));
-    const result = await connection.call("get_issue", { id });
-    if (result.isError) throw new GuardRejection(`Linear issue ${shown} was not found or this connector cannot see it.`);
-    let issue: unknown;
-    try { issue = JSON.parse(resultText(result)); } catch { issue = undefined; }
-    const teamId = teamIdOf(issue);
-    if (teamId === undefined) throw new GuardRejection(`Could not confirm that Linear issue ${shown} is in the ${team.alias} team, so the request was not sent.`);
-    if (teamId.toLowerCase() !== team.teamId.toLowerCase()) throw new GuardRejection(`Linear issue ${shown} is not in the ${team.alias} team this connector may use.`);
+    for (const id of issuesOf(tool, key, args)) await confirmInTeam(connection, id, team);
   },
 };
+
+/** Read one issue with get_issue and refuse unless its team is the scope's team. Fails closed. */
+async function confirmInTeam(connection: GuardInput["connection"], id: string, team: LinearTeamScope): Promise<void> {
+  const shown = JSON.stringify(id.slice(0, 64));
+  const result = await connection.call("get_issue", { id });
+  if (result.isError) throw new GuardRejection(`Linear issue ${shown} was not found or this connector cannot see it.`);
+  let issue: unknown;
+  try { issue = JSON.parse(resultText(result)); } catch { issue = undefined; }
+  const teamId = teamIdOf(issue);
+  if (teamId === undefined) throw new GuardRejection(`Could not confirm that Linear issue ${shown} is in the ${team.alias} team, so the request was not sent.`);
+  if (teamId.toLowerCase() !== team.teamId.toLowerCase()) throw new GuardRejection(`Linear issue ${shown} is not in the ${team.alias} team this connector may use.`);
+}
 
 export function linearConnector(credentials: CredentialProvider<LinearTeamScope>): ConnectorDefinition<LinearTeamScope> {
   return {

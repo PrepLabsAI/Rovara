@@ -106,6 +106,91 @@ describe("issue-in-team guard", () => {
   });
 });
 
+describe("issue-in-team guard: issues referenced by save_issue", () => {
+  const NOT_IN_TEAM = (id: string) => new GuardRejection(`Linear issue "${id}" is not in the charterarc team this connector may use.`);
+  /** get_issue answers with the team in `teamOf`, "garbage" for an unreadable answer, and an error otherwise. */
+  const teams = (teamOf: Record<string, string>) => ({
+    call: vi.fn(async (_name: string, args: Record<string, unknown>) => {
+      const team = teamOf[String(args.id)];
+      if (team === undefined) return { isError: true, content: [{ type: "text", text: "Entity not found" }] };
+      return team === "garbage" ? { content: [{ type: "text", text: "not json" }] } : text(issueIn(team));
+    }),
+  });
+  const check = (args: Record<string, unknown>, conn: ReturnType<typeof teams>) =>
+    issueInTeamGuard.check({ tool: "save_issue", arguments: args, bound, scope, connection: conn });
+
+  it("asks for get_issue whenever save_issue references an issue", () => {
+    expect(issueInTeamGuard.requiredTools("save_issue", { title: "new", parentId: "CHA-2" })).toEqual(["get_issue"]);
+    expect(issueInTeamGuard.requiredTools("save_issue", { title: "new", duplicateOf: "CHA-2" })).toEqual(["get_issue"]);
+    expect(issueInTeamGuard.requiredTools("save_issue", { title: "new", removeBlockedBy: ["CHA-2"] })).toEqual(["get_issue"]);
+    expect(issueInTeamGuard.requiredTools("save_issue", { title: "new", parentId: null, duplicateOf: null, relatedTo: [] })).toEqual([]);
+  });
+
+  it("allows a parent in the scope's team", async () => {
+    const conn = teams({ "CHA-2": CHARTERARC });
+    await expect(check({ title: "new", parentId: "CHA-2" }, conn)).resolves.toBeUndefined();
+    expect(conn.call.mock.calls).toEqual([["get_issue", { id: "CHA-2" }]]);
+  });
+
+  it.each([
+    ["parentId", { title: "new", parentId: "OTH-9" }],
+    ["duplicateOf", { id: "CHA-1", duplicateOf: "OTH-9" }],
+    ["relatedTo", { id: "CHA-1", relatedTo: ["OTH-9"] }],
+    ["blocks", { id: "CHA-1", blocks: ["OTH-9"] }],
+    ["blockedBy", { id: "CHA-1", blockedBy: ["OTH-9"] }],
+    ["removeRelatedTo", { id: "CHA-1", removeRelatedTo: ["OTH-9"] }],
+    ["removeBlocks", { id: "CHA-1", removeBlocks: ["OTH-9"] }],
+    ["removeBlockedBy", { id: "CHA-1", removeBlockedBy: ["OTH-9"] }],
+  ])("refuses an issue in another team referenced by %s", async (_field, args) => {
+    await expect(check(args, teams({ "CHA-1": CHARTERARC, "OTH-9": OTHER }))).rejects.toThrow(NOT_IN_TEAM("OTH-9"));
+  });
+
+  it("refuses a mix of in-team and out-of-team references", async () => {
+    await expect(check({ id: "CHA-1", relatedTo: ["CHA-2", "OTH-9"], blocks: ["CHA-3"] }, teams({ "CHA-1": CHARTERARC, "CHA-2": CHARTERARC, "CHA-3": CHARTERARC, "OTH-9": OTHER })))
+      .rejects.toThrow(NOT_IN_TEAM("OTH-9"));
+  });
+
+  it("fails closed when a referenced issue is missing or its answer is unreadable", async () => {
+    await expect(check({ title: "new", parentId: "CHA-404" }, teams({}))).rejects.toThrow(new GuardRejection('Linear issue "CHA-404" was not found or this connector cannot see it.'));
+    await expect(check({ id: "CHA-1", blockedBy: ["CHA-5"] }, teams({ "CHA-1": CHARTERARC, "CHA-5": "garbage" })))
+      .rejects.toThrow(new GuardRejection('Could not confirm that Linear issue "CHA-5" is in the charterarc team, so the request was not sent.'));
+  });
+
+  it("refuses more than 10 distinct references, counting case-insensitive repeats once", async () => {
+    const ids = Array.from({ length: 10 }, (_, index) => `CHA-${index + 1}`);
+    const teamOf = Object.fromEntries([...ids, "CHA-11"].map((id) => [id, CHARTERARC]));
+    const many = teams(teamOf);
+    await expect(check({ id: "CHA-1", relatedTo: [...ids.slice(1), "CHA-11"] }, many)).rejects.toThrow(new GuardRejection("This Linear request references more than 10 issues, so it was not sent."));
+    expect(many.call).not.toHaveBeenCalled();
+    const repeated = teams(teamOf);
+    await expect(check({ id: "CHA-1", relatedTo: [...ids.slice(1), "cha-1"], blocks: ["Cha-2"] }, repeated)).resolves.toBeUndefined();
+    expect(repeated.call).toHaveBeenCalledTimes(10);
+  });
+
+  it("accepts the empty lists and null references save_issue allows", async () => {
+    const conn = teams({ "CHA-1": CHARTERARC });
+    await expect(check({ id: "CHA-1", relatedTo: [], blocks: [], blockedBy: [], removeRelatedTo: [], removeBlocks: [], removeBlockedBy: [], parentId: null, duplicateOf: null }, conn)).resolves.toBeUndefined();
+    expect(conn.call.mock.calls).toEqual([["get_issue", { id: "CHA-1" }]]);
+    await expect(check({ title: "new", parentId: null, relatedTo: [] }, conn)).resolves.toBeUndefined();
+    expect(conn.call).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed on a reference that is not an issue id", async () => {
+    const conn = teams({ "CHA-1": CHARTERARC, "CHA-2": CHARTERARC });
+    await expect(check({ id: "CHA-1", blocks: ["CHA-2", 7] }, conn)).rejects.toThrow(new GuardRejection("Invalid Linear issue ID."));
+    await expect(check({ id: "CHA-1", relatedTo: "CHA-2" }, conn)).rejects.toThrow(new GuardRejection("Invalid Linear issue ID."));
+    await expect(check({ title: "new", parentId: "" }, conn)).rejects.toThrow(new GuardRejection("Invalid Linear issue ID."));
+    expect(conn.call).not.toHaveBeenCalled();
+  });
+
+  it("refuses a scope with an empty alias", async () => {
+    const conn = teams({ "CHA-1": CHARTERARC });
+    await expect(issueInTeamGuard.check({ tool: "get_issue", arguments: { id: "CHA-1" }, bound, scope: { alias: "", teamId: CHARTERARC }, connection: conn }))
+      .rejects.toThrow(new GuardRejection("The Linear team check could not run, so the request was not sent."));
+    expect(conn.call).not.toHaveBeenCalled();
+  });
+});
+
 describe("linear through the engine", () => {
   function memoryLedger(): Ledger & { records: Map<string, Invocation> } {
     const records = new Map<string, Invocation>();
@@ -122,6 +207,7 @@ describe("linear through the engine", () => {
       tools,
       call: vi.fn(async (name: string, args: Record<string, unknown>) => {
         calls.push({ name, args });
+        if (name === "get_issue" && teamOf[String(args.id)] === "garbage") return { content: [{ type: "text", text: "not json" }] };
         if (name === "get_issue") return teamOf[String(args.id)] ? text(issueIn(teamOf[String(args.id)]!)) : { isError: true, content: [] };
         return text({ ok: true });
       }),
@@ -168,5 +254,39 @@ describe("linear through the engine", () => {
     await expect(executeTool({ requestId: "44444444-4444-4444-8444-444444444444", scope: "charterarc", tool: "save_issue", schemaHash: "0".repeat(64), arguments: { title: "x", team: OTHER } },
       definition, context([["save_issue", "write"]]), { ledger: memoryLedger(), connect })).rejects.toThrow("Linear routing arguments are server controlled");
     expect(connect).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["parentId", { title: "new", parentId: "OTH-9" }],
+    ["duplicateOf", { id: "CHA-1", duplicateOf: "OTH-9" }],
+    ["relatedTo", { id: "CHA-1", relatedTo: ["CHA-2", "OTH-9"] }],
+  ])("never sends save_issue when %s names an issue in another team", async (_field, args) => {
+    const { connect, calls } = fakeConnect({ "CHA-1": CHARTERARC, "CHA-2": CHARTERARC, "OTH-9": OTHER });
+    const schemaHash = await hashOf("save_issue", connect);
+    const result = await executeTool({ requestId: "55555555-5555-4555-8555-555555555555", scope: "charterarc", tool: "save_issue", schemaHash, arguments: args },
+      definition, context([["save_issue", "write"]]), { ledger: memoryLedger(), connect });
+    expect(result).toMatchObject({ status: "FAILED", reason: "policy_denied" });
+    expect(calls.map((call) => call.name)).not.toContain("save_issue");
+  });
+
+  it.each([
+    ["list_documents", "teamId", "declares"],
+    ["save_issue", "team", "declares"],
+    ["save_issue", "teamId", "lacks"],
+    ["save_comment", "team", "lacks"],
+  ])("refuses a model-supplied %s %s (the tool %s it) before connecting", async (tool, property) => {
+    const { connect } = fakeConnect({});
+    await expect(executeTool({ requestId: "66666666-6666-4666-8666-666666666666", scope: "charterarc", tool, schemaHash: "0".repeat(64), arguments: { [property]: OTHER } },
+      definition, context([[tool, "write"]]), { ledger: memoryLedger(), connect })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(connect).not.toHaveBeenCalled();
+  });
+
+  it.each([["an error", {}], ["an unreadable answer", { "CHA-1": "garbage" }]])("denies the write when get_issue returns %s", async (_case, teamOf) => {
+    const { connect, calls } = fakeConnect(teamOf);
+    const schemaHash = await hashOf("save_issue", connect);
+    const result = await executeTool({ requestId: "77777777-7777-4777-8777-777777777777", scope: "charterarc", tool: "save_issue", schemaHash, arguments: { id: "CHA-1", priority: 1 } },
+      definition, context([["save_issue", "write"]]), { ledger: memoryLedger(), connect });
+    expect(result).toMatchObject({ status: "FAILED", reason: "policy_denied" });
+    expect(calls.map((call) => call.name)).toEqual(["get_issue"]);
   });
 });
