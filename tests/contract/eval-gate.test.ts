@@ -1,7 +1,7 @@
 // tests/contract/eval-gate.test.ts
 import { describe, expect, it } from "vitest";
 import { EvalCaseSchema, loadCases, loadProject, type EvalCase } from "../eval/case.js";
-import { gateClassifierModel } from "../eval/command.js";
+import { gateClassifierModel, liveGateClassifier } from "../eval/command.js";
 import { scriptExpectedAnswers } from "../eval/offline.js";
 import { runEvaluation, scoreRun } from "../eval/runner.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
@@ -69,5 +69,13 @@ describe("gate evaluation cases (spec 014 SC-004, SC-005)", () => {
     expect(gateClassifierModel({})).toEqual({ provider: "amazon-bedrock", modelId: "amazon.nova-lite-v1:0" });
     expect(gateClassifierModel({ AGENTX_GATE_CLASSIFIER_MODEL: "us.anthropic.claude-haiku-4-5-20251001-v1:0", AGENTX_GATE_CLASSIFIER_PROVIDER: "amazon-bedrock" }))
       .toEqual({ provider: "amazon-bedrock", modelId: "us.anthropic.claude-haiku-4-5-20251001-v1:0" });
+  });
+
+  it("stops a live run at startup when its classifier model is unavailable, naming the model, and calls no model", async () => {
+    const { modelRuntime } = await fauxModelRuntime();
+    await expect(liveGateClassifier({ AGENTX_GATE_CLASSIFIER_PROVIDER: FAUX_MODEL.provider, AGENTX_GATE_CLASSIFIER_MODEL: "no-such-model" }, modelRuntime))
+      .rejects.toThrow(`the gate classifier model ${FAUX_MODEL.provider}/no-such-model is not available; set AGENTX_GATE_CLASSIFIER_PROVIDER and AGENTX_GATE_CLASSIFIER_MODEL to a model this runtime offers`);
+    await expect(liveGateClassifier({ AGENTX_GATE_CLASSIFIER_PROVIDER: FAUX_MODEL.provider, AGENTX_GATE_CLASSIFIER_MODEL: FAUX_MODEL.modelId }, modelRuntime))
+      .resolves.toBeTypeOf("function");
   });
 });
