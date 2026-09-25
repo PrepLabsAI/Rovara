@@ -43,7 +43,7 @@ Each phase is one pull request to `mainline`. Check a task only after its eviden
 
 - [X] T025 Move `TaskUsageTelemetry` to `@agentx/contracts`; the worker imports it unchanged.
 - [X] T026 Add the hidden turn-recorder extension and the `TurnRecords` writer; one record per Slack event.
-- [X] T027 Add `TurnRecords`, the SNS topic and the two alarms to `AgentXControlPlane`; grant the Slack service write and the broker read.
+- [X] T027 Add `TurnRecords`, the SNS topic and the alarms to `AgentXControlPlane`; grant the Slack service write and the broker read.
 - [X] T028 Emit the metrics in `contracts/metrics.md` from broker and Slack service.
 - [X] T029 Add the admin turn export route and `agentx admin turns export`.
 - [X] T030 Add `npm run eval` with seed cases, legacy presentation mode and baselines; record SC-004.

@@ -44,7 +44,7 @@ Part B, after the production release (T037): not yet run.
 Measured with `npm run eval -- --live --repeat 3` on 2026-09-25. The model was `amazon.nova-pro-v1:0` on `amazon-bedrock` in `us-east-1`.
 
 - The new presentation ran on commit `fa33bb5`.
-- The legacy presentation ran on commit `04b57c6`. That commit only adds the harness's timeout rule, which scores a timed-out run as a failed run instead of an error. The cases and fixtures are the same, and the case-definition hashes of the shared cases match: `npm run eval -- --sc004` checks them.
+- The legacy run used commit `04b57c6`, on this branch. `--presentation legacy` reproduces the pre-013 presentation, which is what `main` offered at commit `63f78f6`, before feature 013's connector tools. Commit `04b57c6` only adds the harness's timeout rule, which scores a timed-out run as a failed run instead of an error. The cases and fixtures are the same, and the case-definition hashes of the shared cases match: `npm run eval -- --sc004` checks them.
 
 There are 47 committed cases:
 
@@ -54,7 +54,7 @@ There are 47 committed cases:
 - 3 core cases
 - 8 real prompts from the bound test channel
 
-Each case runs three times, and a case passes only when all three runs pass. SC-004 compares the two presentations on the 37 cases both can express. The legacy presentation (commit 63f78f6) offers only GitHub and cannot receive an unfinished operation's ID. So 10 cases are not applicable to it. They are listed in its report and not scored:
+Each case runs three times, and a case passes only when all three runs pass. SC-004 compares the two presentations on the 37 cases both can express. The legacy presentation (the pre-013 presentation of commit 63f78f6) offers only GitHub and cannot receive an unfinished operation's ID. So 10 cases are not applicable to it. They are listed in its report and not scored:
 
 - `jira-list-open`, `jira-read-one`, `jira-create`, `jira-comment`
 - `linear-open-issues`, `linear-create-issue`, `linear-update-issue`, `linear-comment`, `linear-read-issue`
@@ -62,7 +62,7 @@ Each case runs three times, and a case passes only when all three runs pass. SC-
 
 | Presentation | Cases passed | Tool accuracy | Refusal accuracy (7 not-connected cases) |
 |---|---|---|---|
-| Before feature 013 (`--presentation legacy`, commit 63f78f6) | 24/37 | 73.0% | 0.0% (0/7) |
+| Before feature 013 (`--presentation legacy`, reproducing commit 63f78f6; run on 04b57c6) | 24/37 | 73.0% | 0.0% (0/7) |
 | After (phase 2 presentation) | 33/37 | 94.6% | 85.7% (6/7) |
 
 Over all 47 cases, the new presentation passed 43/47, with 95.7% tool accuracy and 85.7% refusal accuracy. Neither run had errored or timed-out cases.
