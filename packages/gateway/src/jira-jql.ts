@@ -11,7 +11,10 @@ function isControl(char: string): boolean {
   const code = char.charCodeAt(0);
   return code <= 0x1f || (code >= 0x7f && code <= 0x9f) || FORMAT.test(char);
 }
-const WORD = /[\p{L}\p{N}_.\]]/u;
+/** The only characters an opening quote may follow: ASCII whitespace, `(`, `,` and operator characters. */
+const BEFORE_QUOTE = /[ \t\r\n(,=~!<>]/;
+/** The only characters a closing quote may precede: ASCII whitespace, `)`, `,` and operator characters. */
+const AFTER_QUOTE = /[ \t\r\n),=~!<>]/;
 const ORDER_FIELD = /^[\p{L}\p{N}_.[\]]+/u;
 const RESERVED = new Set(["and", "or", "not", "order", "by", "asc", "desc", "in", "is", "was", "changed", "empty", "null"]);
 
@@ -54,8 +57,9 @@ function isFieldList(clause: string): boolean {
  * Wraps JQL as `project = "KEY" AND (<jql>)`, keeping a trailing top-level ORDER BY outside the
  * parentheses. Tracks quotes (with backslash escapes inside them) and parenthesis depth so model
  * text can never close the group early. Refuses rather than guesses on anything it cannot track:
- * control characters, Unicode look-alikes of `( ) " ' \`, comment markers, quotes glued to words,
- * and any ORDER BY clause that is more than a list of fields.
+ * control characters, Unicode look-alikes of `( ) " ' \`, comment markers, a quote touching anything
+ * but whitespace, a bracket, a comma or an operator (fail closed), and any ORDER BY clause that is
+ * more than a list of fields.
  */
 export function limitJqlToProject(jql: string, projectKey: string): JqlLimit {
   if (!PROJECT_KEY.test(projectKey)) return { refused: "invalid project key" };
@@ -79,12 +83,12 @@ export function limitJqlToProject(jql: string, projectKey: string): JqlLimit {
       if (char === quote) {
         quote = undefined;
         const after = jql[index + 1];
-        if (after !== undefined && WORD.test(after)) return { refused: "a quote joined to a word" };
+        if (after !== undefined && !AFTER_QUOTE.test(after)) return { refused: "a quote joined to a word" };
       }
       continue;
     }
     if (char === '"' || char === "'") {
-      if (index > 0 && WORD.test(jql[index - 1]!)) return { refused: "a quote joined to a word" };
+      if (index > 0 && !BEFORE_QUOTE.test(jql[index - 1]!)) return { refused: "a quote joined to a word" };
       quote = char;
       continue;
     }
