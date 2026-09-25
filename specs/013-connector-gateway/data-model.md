@@ -22,7 +22,8 @@ connector. Bindings by type:
 - `linear`: `teamId` (Linear team UUID).
 - `jira`: `cloudId` (Atlassian site UUID), `projectKey` optional (`^[A-Z][A-Z0-9_]{1,9}$`), on
   every scope of a connector or on none; with `projectKey`, only the six project-guarded Jira tools
-  may be approved.
+  may be approved. The Jira project guard checks requests, not responses: reply contents (for
+  example linked, parent or subtask summaries from other projects) are not filtered.
 
 **Tool approval** — feature 007 fields plus presentation fields:
 

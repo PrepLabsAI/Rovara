@@ -8,9 +8,9 @@ Part A, before the PR: the broker from this branch against real Atlassian (`test
 - Endpoint: `https://mcp.atlassian.com/v2/mcp`. Service-account API token sent as a Bearer token.
 - Token: 192 characters (checked after storing; the value is never recorded).
 - Site: the reference Atlassian site, project `KAN`.
-- Vendor-side restriction (guide Step 8): before the fix the service account saw other projects (`project != KAN` returned 5 issues). After restricting its project access: `inside` 3, `outside` 0. Checked again before each run.
+- Vendor-side restriction (guide Step 8): before the fix the service account saw other projects (`project != KAN` returned 5 issues). After restricting its project access: `inside` 3, `outside` 0. Checked again before each run. The restriction came from moving the other project, `SAM1`, to the trash; no permission-scheme grant was changed, so the guide's Step 4 scheme checks were not exercised on this site.
 - First run: steps 1 and 2 passed, step 3 (create) ended `UNKNOWN`. Nothing was created. Atlassian refused the write with "Insufficient scopes for createJiraIssue. Required: [read:jira:agent-interface, write:jira:agent-interface, search:jira:agent-interface]". The token had been created with five scopes, without `write:jira:agent-interface`. The guide now lists six scopes (Step 5) and has a troubleshooting entry for this.
-- Second run, with a six-scope token: the test passed. Its eight steps:
+- Second run, with a six-scope token: the test passed. Its eight steps are assertions in the test. The runner hides stdout for a passing test, so the test's evidence lines were not printed; the created issue and its comment below were confirmed afterwards by read-only reads. The steps:
   1. Register the credential and the project with preflight: `connected`, four offered tools, none skipped.
   2. Search `status != Done ORDER BY created DESC`: `SUCCEEDED`.
   3. Create `AgentX live check 2026-09-25T03:44:09.985Z` (type Task): `SUCCEEDED`, issue `KAN-4`.
