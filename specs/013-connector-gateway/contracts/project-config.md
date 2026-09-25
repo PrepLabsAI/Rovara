@@ -50,7 +50,11 @@ integrations:
       tools:
         - name: searchJiraIssuesUsingJql
           access: read
+        - name: getJiraIssue
+          access: read
         - name: createJiraIssue
+          access: write
+        - name: addOrEditJiraIssueComment
           access: write
 ```
 
@@ -59,7 +63,7 @@ integrations:
 | Condition | Result |
 |---|---|
 | Both `githubMcp` and `connectors` | Refused, naming both keys |
-| Connector type other than `github` or `linear` | Refused |
+| Connector type other than `github`, `linear` or `jira` | Refused |
 | GitHub scope naming an unregistered repository | Refused, naming it |
 | Unknown `type` or `identity` other than `service` | Refused |
 | `credentialRef` not in the registry | Refused, naming the reference |
@@ -70,6 +74,10 @@ integrations:
 | Visible tools over 20 | Registered, with a warning |
 | Vendor authentication fails | Registered, with the connector reported as not connected |
 | Approved tool not found upstream or not representable | Registered, with the tool reported as skipped |
+| Jira `projectKey` on some scopes only | Refused |
+| Jira tool AgentX cannot limit, with `projectKey` | Refused, naming the tool |
+| Jira guarded tool with the wrong `access` | Refused, naming the tool |
+| Jira credential reference of another type | Refused, naming the type |
 
 ## Credential registration
 
@@ -95,4 +103,4 @@ who registered it and when. It never prints a secret or token value.
 |---|---|
 | `github` | App installed only on approved repositories; Issues permission only for issue tools |
 | `linear` | API key with team access limited to the intended teams and the smallest permission set; client-credentials tokens are refused because they reach all public teams |
-| `jira` | API-token authentication enabled for the Rovo MCP server; service account granted only the intended projects |
+| `jira` | API-token authentication enabled for the Rovo MCP server; service account restricted to the intended projects, and proven by the setup guide's Step 8: a search outside them returns zero issues |

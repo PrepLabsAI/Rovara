@@ -62,8 +62,8 @@ Each phase is one pull request to `mainline`. Check a task only after its eviden
 
 ## Phase 6: Jira (US3)
 
-- [ ] T035 Record Atlassian fixtures; add the Jira connector type, `cloudId`/project binder and fake-server integration test.
-- [ ] T036 Write the Jira setup guide including API-token enablement and service-account limits; add evaluation cases.
+- [x] T035 Record Atlassian fixtures; add the Jira connector type, `cloudId`/project binder and fake-server integration test.
+- [x] T036 Write the Jira setup guide including API-token enablement and service-account limits; add evaluation cases.
 - [ ] T037 Live check once an Atlassian administrator enables API-token authentication; record evidence.
 
 ## Dependencies

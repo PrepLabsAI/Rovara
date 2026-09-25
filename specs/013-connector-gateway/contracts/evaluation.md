@@ -43,6 +43,20 @@ requests; each pull-request action; each connector's read and write; a not-conne
 "close this issue" versus workspace closure; and an out-of-scope request. New cases come from
 `agentx admin turns export`.
 
+## Jira seed cases
+
+```json
+{ "id": "jira-list-open", "project": "fixtures/payments-jira.yaml", "prompt": "what bugs are open in Jira?", "expect": { "tool": "jira__searchJiraIssuesUsingJql" } }
+{ "id": "jira-read-one", "project": "fixtures/payments-jira.yaml", "prompt": "what's the status of PAY-7?", "expect": { "tool": "jira__getJiraIssue", "argsSubset": { "issueIdOrKey": "PAY-7" } } }
+{ "id": "jira-create", "project": "fixtures/payments-jira.yaml", "prompt": "create a Jira bug titled Login test is flaky", "expect": { "tool": "jira__createJiraIssue", "argsSubset": { "summary": "Login test is flaky", "issueType": "Bug" } } }
+{ "id": "jira-comment", "project": "fixtures/payments-jira.yaml", "prompt": "comment on PAY-12 that the fix is deployed", "expect": { "tool": "jira__addOrEditJiraIssueComment", "argsSubset": { "issueIdOrKey": "PAY-12" } } }
+{ "id": "jira-vs-github", "project": "fixtures/payments-jira.yaml", "prompt": "list the open GitHub issues in payments-api", "expect": { "tool": "github__list_issues" } }
+```
+
+These cases run against a fixture project (GitHub plus a Jira connector scoped to project `PAY`,
+as [docs/connectors/jira.md](../../../docs/connectors/jira.md) sets up), once
+`tests/eval/cases/` exists and the fixture is added at `tests/eval/fixtures/payments-jira.yaml`.
+
 ## Before-and-after measurement
 
 The pre-change presentation is kept as a fixture mode (`--presentation legacy`) until SC-004 is
