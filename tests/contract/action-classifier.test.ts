@@ -1,0 +1,75 @@
+// tests/contract/action-classifier.test.ts
+import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { describe, expect, it } from "vitest";
+import { CLASSIFIER_SYSTEM_PROMPT, classifierContext, createModelClassifier, parseVerdict } from "../../packages/orchestrator/src/action-classifier.js";
+import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
+
+const call = { tool: "linear__save_issue", summary: "linear__save_issue: id=CHA-5, priority=2", arguments: { id: "CHA-5", priority: 2 } };
+const model = { provider: FAUX_MODEL.provider, modelId: FAUX_MODEL.modelId };
+/** The single user message classifierContext builds, as text. */
+const promptText = (context: ReturnType<typeof classifierContext>): string => {
+  const content = context.messages[0]?.content;
+  return typeof content === "string" ? content : "";
+};
+
+describe("the action classifier, offline with Pi's faux model", () => {
+  it("returns the model's allow verdict and usage, from a request holding only the members' messages and the call", async () => {
+    const { modelRuntime, faux } = await fauxModelRuntime();
+    const seen: unknown[] = [];
+    faux.setResponses([(context) => {
+      seen.push(context);
+      return fauxAssistantMessage("{\"decision\":\"allow\",\"reason\":\"The member asked to raise this issue's priority.\"}");
+    }]);
+    const classify = await createModelClassifier({ model, modelRuntime });
+    const verdict = await classify({ memberMessages: ["what's open?", "set CHA-5 to high priority"], call });
+    expect(verdict).toMatchObject({ decision: "allow", reason: "The member asked to raise this issue's priority." });
+    expect(verdict.usage).toEqual({ input: expect.any(Number) as number, output: expect.any(Number) as number, cost: 0 });
+    expect(seen).toEqual([expect.objectContaining(classifierContext({ memberMessages: ["what's open?", "set CHA-5 to high priority"], call }))]);
+  });
+
+  it("returns ask with the model's reason", async () => {
+    const { modelRuntime, faux } = await fauxModelRuntime();
+    faux.setResponses([fauxAssistantMessage("Verdict: {\"decision\":\"ask\",\"reason\":\"The target is a placeholder.\"}")]);
+    const classify = await createModelClassifier({ model, modelRuntime });
+    expect(await classify({ memberMessages: ["set <the new issue id, e.g. CHA-5> to high priority"], call })).toMatchObject({ decision: "ask", reason: "The target is a placeholder." });
+  });
+
+  it("throws, so the gate asks, when the answer is not a verdict, the model errors, the model is unknown or the deadline passes", async () => {
+    const { modelRuntime, faux } = await fauxModelRuntime();
+    faux.setResponses([fauxAssistantMessage("Sure, go ahead."), fauxAssistantMessage("", { stopReason: "error", errorMessage: "throttled" })]);
+    const classify = await createModelClassifier({ model, modelRuntime });
+    await expect(classify({ memberMessages: ["x"], call })).rejects.toThrow("the classifier's answer was not a verdict");
+    await expect(classify({ memberMessages: ["x"], call })).rejects.toThrow("throttled");
+    const unknown = await createModelClassifier({ model: { provider: "agentx-faux", modelId: "missing" }, modelRuntime });
+    await expect(unknown({ memberMessages: ["x"], call })).rejects.toThrow("the classifier model is unavailable");
+    faux.setResponses([() => new Promise(() => undefined)]);
+    const slow = await createModelClassifier({ model, modelRuntime, timeoutMs: 50 });
+    await expect(slow({ memberMessages: ["x"], call })).rejects.toThrow("the classifier did not answer within 50 ms");
+  });
+
+  it("keeps the most recent member messages within its budget and caps the arguments", () => {
+    const messages = Array.from({ length: 20 }, (_, index) => `message ${index}`);
+    const text = promptText(classifierContext({ memberMessages: messages, call }));
+    expect(text).toContain("[1] message 8");
+    expect(text).toContain("[12] message 19");
+    expect(text).not.toContain("message 7\n");
+    const long = promptText(classifierContext({ memberMessages: ["x".repeat(9_000)], call: { ...call, arguments: { body: "y".repeat(5_000) } } }));
+    expect(long).toContain(`[1] ${"x".repeat(2_000)}…`);
+    expect(long.length).toBeLessThan(7_000);
+    expect(classifierContext({ memberMessages: [], call }).systemPrompt).toBe(CLASSIFIER_SYSTEM_PROMPT);
+  });
+
+  it("names the existing item the call changes, or says none is named, and never shows its contents", () => {
+    expect(promptText(classifierContext({ memberMessages: [], call: { ...call, item: "id=CHA-5" } }))).toContain("item: id=CHA-5 (an existing item; its contents are not shown)");
+    expect(promptText(classifierContext({ memberMessages: [], call }))).toContain("item: none named in the arguments");
+  });
+
+  it("reads only a well-formed verdict", () => {
+    expect(parseVerdict("{\"decision\":\"allow\",\"reason\":\"asked\"}")).toEqual({ decision: "allow", reason: "asked" });
+    expect(parseVerdict("{\"decision\":\"deny\",\"reason\":\"no\"}")).toBeUndefined();
+    expect(parseVerdict("{\"decision\":\"allow\"}")).toBeUndefined();
+    expect(parseVerdict("{\"decision\":\"allow\",\"reason\":\"   \"}")).toBeUndefined();
+    expect(parseVerdict("not json {")).toBeUndefined();
+    expect(parseVerdict(`{"decision":"ask","reason":"${"r".repeat(300)}"}`)?.reason).toHaveLength(201);
+  });
+});
