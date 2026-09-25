@@ -445,4 +445,120 @@ describe("agentx admin credential authorize", () => {
     expect(failure).not.toHaveProperty("code");
     expect(failure.message).toBe(`could not register the credential (TypeError); the refresh token is stored and tagged in secret ${SECRET}; finish with \`agentx admin credential register --ref asana-bot --type oauth-refresh-token --secret ${SECRET}\` (no new sign-in needed)`);
   });
+
+  describe("--expect-account and --no-browser", () => {
+    const BOT = { id: 1210000000000555, gid: "1210000000000555", name: "AgentX Bot", email: "agentx-bot@example.test" };
+    const OWNER = { name: "App Owner", email: "owner@example.test" };
+    const withUser = (data: unknown) => vendorAndControlPlane({ tokenBody: {
+      access_token: ACCESS, refresh_token: REFRESH, expires_in: 3600, token_type: "bearer", ...(data === undefined ? {} : { data }),
+    } });
+    const mismatch = (account: string) => `the sign-in was for ${account}, not ${BOT.email}; nothing was stored or registered. `
+      + `Run the command again with --no-browser and open the sign-in URL in a private window signed in as ${BOT.email}`;
+
+    it("stores and registers when the signed-in email matches, ignoring case and surrounding spaces", async () => {
+      const secrets = secretsWith(JSON.stringify(CLIENT));
+      const { fetchImplementation, registrations } = withUser({ ...BOT, email: " AgentX-Bot@Example.TEST " });
+      const play = browser((authorize) => [{ code: CODE, state: authorize.searchParams.get("state")! }]);
+      await authorizeCredential({ ...base(secrets, fetchImplementation, play), expectAccount: "  agentx-bot@EXAMPLE.test " });
+      expect(secrets.writes).toHaveLength(1);
+      expect(secrets.tags).toEqual([SECRET]);
+      expect(registrations).toHaveLength(1);
+    });
+
+    it("stores, tags and registers nothing when another account signed in, naming it", async () => {
+      const secrets = secretsWith(JSON.stringify(CLIENT));
+      const { fetchImplementation, registrations } = withUser(OWNER);
+      const play = browser((authorize) => [{ code: CODE, state: authorize.searchParams.get("state")! }]);
+      const failure = await authorizeCredential({ ...base(secrets, fetchImplementation, play), expectAccount: BOT.email }).catch((error: unknown) => error) as Error & { code?: string };
+      expect(failure.code).toBe("AUTH_REQUIRED");
+      expect(failure.message).toBe(`AUTH_REQUIRED: ${mismatch("App Owner <owner@example.test>")}`);
+      expect(failure.message).not.toMatch(new RegExp(`${REFRESH}|${ACCESS}|${CODE}|${CLIENT.clientSecret}`));
+      expect(secrets.writes).toEqual([]);
+      expect(secrets.tags).toEqual([]);
+      expect(registrations).toEqual([]);
+    });
+
+    it("refuses when the signed-in account cannot be shown or has no email", async () => {
+      for (const data of [undefined, { id: 1 }, { name: "AgentX Bot" }]) {
+        const secrets = secretsWith(JSON.stringify(CLIENT));
+        const { fetchImplementation, registrations } = withUser(data);
+        const play = browser((authorize) => [{ code: CODE, state: authorize.searchParams.get("state")! }]);
+        const failure = await authorizeCredential({ ...base(secrets, fetchImplementation, play), expectAccount: BOT.email }).catch((error: unknown) => error) as Error & { code?: string };
+        expect(failure.code).toBe("AUTH_REQUIRED");
+        const shown = data && "name" in data ? "AgentX Bot" : "an account that could not be shown";
+        expect(failure.message).toBe(`AUTH_REQUIRED: ${mismatch(shown)}`);
+        expect(secrets.writes).toEqual([]);
+        expect(secrets.tags).toEqual([]);
+        expect(registrations).toEqual([]);
+      }
+    });
+
+    it("refuses an empty --expect-account before signing in", async () => {
+      const { fetchImplementation } = vendorAndControlPlane();
+      const play = browser(() => []);
+      await expect(authorizeCredential({ ...base(secretsWith(JSON.stringify(CLIENT)), fetchImplementation, play), expectAccount: "   " }))
+        .rejects.toMatchObject({ code: "CONFIG_INVALID" });
+      expect(play.seen).toEqual([]);
+      expect(fetchImplementation).not.toHaveBeenCalled();
+    });
+
+    async function cli(args: string[], data: unknown) {
+      const directory = await mkdtemp(join(tmpdir(), "agentx-authorize-"));
+      const deploymentFile = join(directory, "deployment.yaml");
+      await writeFile(deploymentFile, `controlPlaneUrl: ${CONTROL_PLANE}\nauth:\n  issuer: https://identity.example.test\n  clientId: cli\n  audience: agentx\n`);
+      const tokenStore = new InMemoryTokenStore();
+      await tokenStore.set(tokenStoreKey({ issuer: "https://identity.example.test", clientId: "cli", audience: "agentx" }), { accessToken: "admin-token", expiresAt: Date.now() + 3_600_000 });
+      const secrets = secretsWith(JSON.stringify(CLIENT));
+      const { fetchImplementation, registrations } = withUser(data);
+      const play = browser((authorize) => [{ code: CODE, state: authorize.searchParams.get("state")! }]);
+      const openBrowser = vi.fn(play.openBrowser);
+      let stdout = "";
+      let stderr = "";
+      // Plays the administrator opening the printed URL by hand, in a private window.
+      let visited = false;
+      const visit = (text: string) => {
+        const printed = /https:\/\/app\.asana\.com\/-\/oauth_authorize\?\S+/.exec(text);
+        if (!printed || visited || openBrowser.mock.calls.length > 0) return;
+        visited = true;
+        setTimeout(() => { void play.openBrowser(printed[0]); }, 20);
+      };
+      const exitCode = await executeCli(
+        ["--deployment-file", deploymentFile, "admin", "credential", "authorize", "--ref", "asana-bot", "--secret", SECRET, "--provider", "asana", ...args],
+        {
+          fetchImplementation, tokenStore,
+          stdout: { write: (text: string) => { stdout += text; } },
+          stderr: { write: (text: string) => { stderr += text; if (args.includes("--no-browser")) visit(text); } },
+          authorize: { secrets, openBrowser, listenPort: 0, onListening: play.onListening },
+        },
+      );
+      return { exitCode, stdout, stderr, secrets, registrations, openBrowser };
+    }
+
+    it("never opens a browser with --no-browser, only printing the sign-in URL", async () => {
+      const run = await cli(["--no-browser", "--expect-account", BOT.email], BOT);
+      expect(run.openBrowser).not.toHaveBeenCalled();
+      expect(run.stderr).toContain("https://app.asana.com/-/oauth_authorize?");
+      expect(run.stderr).toContain("open this URL in a private window signed in as the bot user");
+      expect(run.exitCode).toBe(0);
+      expect(run.registrations).toHaveLength(1);
+      expect(`${run.stdout}${run.stderr}`).not.toMatch(new RegExp(`${REFRESH}|${ACCESS}|${CODE}|${CLIENT.clientSecret}`));
+    });
+
+    it("still opens the browser when --no-browser is absent", async () => {
+      const run = await cli([], BOT);
+      expect(run.openBrowser).toHaveBeenCalledTimes(1);
+      expect(run.exitCode).toBe(0);
+    });
+
+    it("exits AUTH_REQUIRED from the command line on a mismatch, storing and registering nothing and printing no secret", async () => {
+      const run = await cli(["--no-browser", "--expect-account", BOT.email], OWNER);
+      expect(run.exitCode).toBe(3);
+      expect(run.stderr).toContain(`AgentX error [AUTH_REQUIRED]: ${mismatch("App Owner <owner@example.test>")}`);
+      expect(run.stderr).not.toContain("Stored the refresh token in");
+      expect(run.secrets.writes).toEqual([]);
+      expect(run.secrets.tags).toEqual([]);
+      expect(run.registrations).toEqual([]);
+      expect(`${run.stdout}${run.stderr}`).not.toMatch(new RegExp(`${REFRESH}|${ACCESS}|${CODE}|${CLIENT.clientSecret}`));
+    });
+  });
 });

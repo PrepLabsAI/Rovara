@@ -33,7 +33,8 @@ export interface AuthorizeInput {
   /** A key of OAUTH_AUTHORIZATION_PROFILES, such as "asana". */
   provider: string;
   secrets: AuthorizeSecrets;
-  openBrowser: (url: string) => Promise<void>;
+  /** Opens the sign-in URL in a browser; when absent (`--no-browser`), the URL is only shown. */
+  openBrowser?: (url: string) => Promise<void>;
   /**
    * Told the sign-in URL, so an administrator without a local browser can open it elsewhere, and
    * the redirect URL the vendor app must be registered with, as "(the Asana app's redirect URL must be exactly ...)".
@@ -45,6 +46,12 @@ export interface AuthorizeInput {
    * only the account's name and email from the token response, never a token.
    */
   showAccount?: (line: string) => void;
+  /**
+   * The bot user's email (`--expect-account`). When set, a sign-in by any other account, or by one
+   * whose email the token response does not carry, is refused after the code exchange and before
+   * anything is stored, tagged or registered. Compared trimmed and case-insensitively.
+   */
+  expectAccount?: string;
   fetchImplementation?: typeof fetch;
   timeoutMilliseconds?: number;
   /** Tests only: listen on this port instead of the redirect URI's, and report the port bound. */
@@ -96,6 +103,8 @@ export async function authorizeCredential(input: AuthorizeInput): Promise<unknow
   const app = OAuthAppSecretSchema.safeParse(json);
   if (!app.success) throw agentXError("CONFIG_INVALID", `secret ${input.secretName} must be JSON ${APP_SECRET_SHAPE}`);
   const { clientId, clientSecret } = app.data;
+  const expectedEmail = input.expectAccount?.trim();
+  if (expectedEmail === "") throw agentXError("CONFIG_INVALID", "--expect-account must be the bot user's email");
 
   const vendor = `${input.provider.charAt(0).toUpperCase()}${input.provider.slice(1)}`;
   const redirectRequirement = `(the ${vendor} app's redirect URL must be exactly ${profile.redirectUri})`;
@@ -120,7 +129,7 @@ export async function authorizeCredential(input: AuthorizeInput): Promise<unknow
     if (profile.resource !== undefined) authorize.searchParams.set("resource", profile.resource);
     input.showUrl(authorize.href, redirectRequirement);
     // The printed URL still works when no browser can be opened here.
-    await input.openBrowser(authorize.href).catch(() => undefined);
+    await input.openBrowser?.(authorize.href).catch(() => undefined);
     code = await callback.code;
   } finally {
     callback.close();
@@ -130,7 +139,12 @@ export async function authorizeCredential(input: AuthorizeInput): Promise<unknow
     tokenUrl: new URL(profile.tokenUrl), code, verifier: pkce.verifier, redirectUri: profile.redirectUri, clientId, clientSecret,
     fetchImplementation: input.fetchImplementation ?? fetch,
   });
-  input.showAccount?.(`${account === undefined ? `Signed in to ${vendor} (the account could not be shown)` : `Signed in to ${vendor} as ${account}`}. This must be the connector's bot user; if it is not, run the command again with the sign-in URL opened in a private window signed in as the bot user.`);
+  const shown = account?.shown;
+  input.showAccount?.(`${shown === undefined ? `Signed in to ${vendor} (the account could not be shown)` : `Signed in to ${vendor} as ${shown}`}. This must be the connector's bot user; if it is not, run the command again with the sign-in URL opened in a private window signed in as the bot user.`);
+  if (expectedEmail !== undefined && account?.email?.toLowerCase() !== expectedEmail.toLowerCase()) {
+    throw agentXError("AUTH_REQUIRED", `the sign-in was for ${shown ?? "an account that could not be shown"}, not ${expectedEmail}; nothing was stored or registered. `
+      + `Run the command again with --no-browser and open the sign-in URL in a private window signed in as ${expectedEmail}`);
+  }
   await input.secrets.write(input.secretName, JSON.stringify({ clientId, clientSecret, refreshToken })).catch((error: unknown) => {
     throw agentXError("CONFIG_INVALID", `could not store the refresh token in secret ${input.secretName} with your AWS credentials (${errorName(error)}); nothing was registered, run the command again`);
   });
@@ -167,7 +181,7 @@ function withRecovery(error: unknown, recovery: string): Error {
 
 async function exchangeCode(input: {
   tokenUrl: URL; code: string; verifier: string; redirectUri: string; clientId: string; clientSecret: string; fetchImplementation: typeof fetch;
-}): Promise<{ refreshToken: string; account: string | undefined }> {
+}): Promise<{ refreshToken: string; account: Account | undefined }> {
   const response = await input.fetchImplementation(input.tokenUrl, {
     method: "POST",
     redirect: "error",
@@ -193,12 +207,15 @@ async function exchangeCode(input: {
   return { refreshToken: record.refresh_token, account: accountOf(record.data) };
 }
 
+/** The signed-in account: `shown` is "Name <email>", "Name" or "email"; `email` only when present. */
+interface Account { shown: string; email: string | undefined }
+
 /**
- * "Name <email>", "Name" or "email" from the token response's user object (Asana's `data`), or
- * undefined when neither is usable. Both are shown on a terminal, so each keeps printable
- * characters only and at most 128 of them.
+ * The account from the token response's user object (Asana's `data`), or undefined when neither
+ * name nor email is usable. Both are shown on a terminal, so each keeps printable characters only
+ * and at most 128 of them.
  */
-function accountOf(data: unknown): string | undefined {
+function accountOf(data: unknown): Account | undefined {
   if (!data || typeof data !== "object") return undefined;
   const printable = (value: unknown) => typeof value === "string"
     ? Array.from(value.replace(/[\p{C}]/gu, "")).slice(0, MAX_ACCOUNT_FIELD).join("").trim()
@@ -206,8 +223,10 @@ function accountOf(data: unknown): string | undefined {
   const { name, email } = data as Record<string, unknown>;
   const shownName = printable(name);
   const shownEmail = printable(email);
-  if (shownName && shownEmail) return `${shownName} <${shownEmail}>`;
-  return shownName || shownEmail || undefined;
+  const signedInEmail = shownEmail || undefined;
+  if (shownName && shownEmail) return { shown: `${shownName} <${shownEmail}>`, email: signedInEmail };
+  const shown = shownName || shownEmail;
+  return shown ? { shown, email: signedInEmail } : undefined;
 }
 
 /**
