@@ -23,6 +23,7 @@ import {
   type SlackThread,
 } from "@agentx/contracts";
 import { requiredEnvironment, type HttpApiV2Event } from "./lambda.js";
+import { createSlackMemberCheck, type SlackMemberCheck } from "./slack-members.js";
 
 const SIGNATURE_WINDOW_SECONDS = 300;
 const EVENT_RETENTION_SECONDS = 14 * 24 * 60 * 60;
@@ -45,6 +46,23 @@ export interface SlackIngressDependencies {
   postMessage: (input: { channel: string; threadTs: string; text: string }) => Promise<void>;
   now?: () => number;
   log?: SlackIngressLog;
+  /**
+   * Messages a person posts through an app with their own token (spec 014 US2). They carry bot_id or
+   * app_id and are accepted only when `accept` is true and Slack confirms `user` is a person.
+   * Absent: every app-posted message is ignored, as before feature 014.
+   */
+  appPosted?: { accept: boolean; checkMember: (userId: string) => Promise<SlackMemberCheck> };
+  /**
+   * Per-thread brake (spec 014 FR-011). Absent: no limit. `countTurn` must increment atomically and
+   * return the new count; the single pause notice relies on exactly one caller seeing perMinute + 1.
+   * `releaseTurn` must decrement the same counter atomically; it undoes a `countTurn` whose event was
+   * then released because enqueueing failed, so a Slack retry of that event is not double-counted.
+   */
+  turnLimit?: {
+    perMinute: number;
+    countTurn: (threadSubject: string, windowStartSeconds: number, expiresAtSeconds: number) => Promise<number>;
+    releaseTurn: (threadSubject: string, windowStartSeconds: number) => Promise<void>;
+  };
 }
 
 interface HttpResponse {
@@ -59,7 +77,15 @@ interface Mention {
   userId: string;
   text: string;
   botUserId?: string;
+  /** The event carries bot_id, app_id or bot_profile: a person's own token through an app, or a bot. */
+  appPosted: boolean;
 }
+
+const TURN_WINDOW_SECONDS = 60;
+// A window's counter outlives the window by one more, so a late event still finds it.
+const TURN_COUNTER_TTL_SECONDS = 2 * TURN_WINDOW_SECONDS;
+
+const UNVERIFIED_MEMBER_NOTICE = "I couldn't confirm that this message came from a person, so I didn't act on it. Try again, or type the request in Slack.";
 
 export function createSlackIngressHandler(dependencies: SlackIngressDependencies) {
   const now = dependencies.now ?? Date.now;
@@ -89,11 +115,56 @@ export function createSlackIngressHandler(dependencies: SlackIngressDependencies
 
     const mention = parseMention(payload);
     if ("reason" in mention) return ignore(log, mention.reason);
+    if (mention.appPosted && !dependencies.appPosted) return ignore(log, "bot_or_edited_message");
+    if (mention.appPosted && !dependencies.appPosted?.accept) return ignore(log, "app_posted_disabled");
     const { thread } = mention;
     const binding = await dependencies.getBinding(thread.teamId, thread.channelId);
     if (!binding) return ignore(log, "channel_not_bound", { channelId: thread.channelId });
-    if (!await dependencies.claimEvent(mention.eventId, Math.floor(now() / 1_000) + EVENT_RETENTION_SECONDS)) {
+    let memberCheckError: string | undefined;
+    if (mention.appPosted && dependencies.appPosted) {
+      let member: SlackMemberCheck;
+      try {
+        member = await dependencies.appPosted.checkMember(mention.userId);
+      } catch {
+        // A check that throws is a check that failed: fail closed, and never log the error text.
+        member = { outcome: "failed", error: "check_threw" };
+      }
+      if (member.outcome === "not_person") return ignore(log, "not_a_person");
+      if (member.outcome === "failed") memberCheckError = member.error;
+    }
+    const nowSeconds = Math.floor(now() / 1_000);
+    if (!await dependencies.claimEvent(mention.eventId, nowSeconds + EVENT_RETENTION_SECONDS)) {
       return ignore(log, "duplicate_event", { eventId: mention.eventId });
+    }
+    const subject = slackThreadSubject(thread);
+    // Set only when a turn was actually counted, so the enqueue-failure path knows whether (and at
+    // which window) to undo it.
+    let countedWindowStart: number | undefined;
+    if (dependencies.turnLimit) {
+      const { perMinute, countTurn } = dependencies.turnLimit;
+      const windowStart = nowSeconds - (nowSeconds % TURN_WINDOW_SECONDS);
+      let turns: number;
+      try {
+        turns = await countTurn(subject, windowStart, windowStart + TURN_COUNTER_TTL_SECONDS);
+      } catch {
+        await releaseQuietly(dependencies, log, mention.eventId, "turn_limit.release_failed");
+        log("turn_limit.failed", { eventId: mention.eventId });
+        return respond(500, { error: "request could not be counted" });
+      }
+      countedWindowStart = windowStart;
+      if (turns > perMinute) {
+        log("thread.paused", { eventId: mention.eventId, turnsThisMinute: turns });
+        if (turns === perMinute + 1) {
+          await post(dependencies, log, thread, `I'm pausing this thread: it sent me more than ${perMinute} requests in a minute. Mention me again in a minute to continue. Anything waiting for your confirmation is still waiting; confirm again after a minute.`, "thread_paused.notice_failed");
+        }
+        return respond(200, { ok: true });
+      }
+    }
+    if (memberCheckError !== undefined) {
+      // Fail closed: an unconfirmed sender is never run, but the person is told rather than left in silence.
+      log("event.ignored", { reason: "member_check_failed", slackError: memberCheckError });
+      await post(dependencies, log, thread, UNVERIFIED_MEMBER_NOTICE, "member_check.notice_failed");
+      return respond(200, { ok: true });
     }
 
     const text = slackRequestText(mention.text, mention.botUserId);
@@ -110,14 +181,22 @@ export function createSlackIngressHandler(dependencies: SlackIngressDependencies
       text,
       receivedAt: new Date(now()).toISOString(),
     });
-    const subject = slackThreadSubject(thread);
     const pending = await dependencies.changePending(subject, 1);
     try {
       await dependencies.enqueue(message, createHash("sha256").update(subject).digest("hex"));
     } catch {
-      // Undo both records so Slack's retry of this event is processed as new.
+      // Undo all records so Slack's retry of this event is processed as new.
       await dependencies.changePending(subject, -1);
-      await dependencies.releaseEvent(mention.eventId);
+      if (dependencies.turnLimit && countedWindowStart !== undefined) {
+        try {
+          await dependencies.turnLimit.releaseTurn(subject, countedWindowStart);
+        } catch (error) {
+          // A missed decrement only means a retried event's turn is briefly over-counted; log it,
+          // do not throw, and still release the claim so Slack's retry is processed as new.
+          log("turn_limit.decrement_failed", { eventId: mention.eventId, errorName: errorName(error) });
+        }
+      }
+      await releaseQuietly(dependencies, log, mention.eventId, "enqueue.release_failed");
       log("mention.enqueue_failed", { eventId: mention.eventId });
       return respond(500, { error: "request could not be queued" });
     }
@@ -147,7 +226,24 @@ export function validSignature(
 function parseMention(payload: Record<string, unknown>): Mention | { reason: string } {
   const event = asRecord(payload.event);
   if (event.type !== "app_mention") return { reason: "not_app_mention" };
-  if (event.bot_id !== undefined || event.subtype !== undefined) return { reason: "bot_or_edited_message" };
+  if (event.subtype !== undefined) return { reason: "bot_or_edited_message" };
+  const botUserId = Array.isArray(payload.authorizations)
+    ? asRecord(payload.authorizations[0]).user_id
+    : undefined;
+  // AgentX's own bot user under any of the event's authorizations, and AgentX's app named in either app field.
+  // Only a bot authorization (is_bot === true) counts: a user-token installation's authorization can
+  // name a person, and that person's own typed mention must not be dropped as AgentX's own message.
+  const ownBotUsers = new Set(
+    (Array.isArray(payload.authorizations) ? payload.authorizations : [])
+      .filter((authorization) => asRecord(authorization).is_bot === true)
+      .map((authorization) => asRecord(authorization).user_id)
+      .filter((userId): userId is string => typeof userId === "string" && userId.length > 0),
+  );
+  const ownBotUser = typeof event.user === "string" && ownBotUsers.has(event.user);
+  const ownApp = typeof payload.api_app_id === "string"
+    && (event.app_id === payload.api_app_id || asRecord(event.bot_profile).app_id === payload.api_app_id);
+  if (ownBotUser || ownApp) return { reason: "own_message" };
+  if (typeof event.user !== "string" || event.user.length === 0) return { reason: "no_user" };
   const teamId = SlackTeamIdSchema.safeParse(payload.team_id);
   const channelId = SlackChannelIdSchema.safeParse(event.channel);
   const userId = SlackUserIdSchema.safeParse(event.user);
@@ -157,25 +253,52 @@ function parseMention(payload: Record<string, unknown>): Mention | { reason: str
   const userTeam = event.user_team ?? event.team;
   if (userTeam !== undefined && userTeam !== teamId.data) return { reason: "external_organization_user" };
   if (typeof payload.event_id !== "string" || typeof event.text !== "string") return { reason: "malformed_event" };
-  const botUserId = Array.isArray(payload.authorizations)
-    ? asRecord(payload.authorizations[0]).user_id
-    : undefined;
   return {
     eventId: payload.event_id,
     thread: { teamId: teamId.data, channelId: channelId.data, threadTs: ts.data },
     userId: userId.data,
     text: event.text,
     ...(typeof botUserId === "string" ? { botUserId } : {}),
+    // Any app field present, even null, marks the event as app-posted so it gets the member check.
+    appPosted: "bot_id" in event || "app_id" in event || "bot_profile" in event,
   };
 }
 
-async function post(dependencies: SlackIngressDependencies, log: SlackIngressLog, thread: SlackThread, text: string) {
+async function post(
+  dependencies: SlackIngressDependencies,
+  log: SlackIngressLog,
+  thread: SlackThread,
+  text: string,
+  failureEvent = "acknowledgement.failed",
+) {
   try {
     await dependencies.postMessage({ channel: thread.channelId, threadTs: thread.threadTs, text });
   } catch (error) {
-    // The request is already queued; a failed acknowledgement must not make Slack retry it.
-    log("acknowledgement.failed", { errorName: error instanceof Error ? error.name : "unknown" });
+    // The event is already claimed and handled; a failed thread post must not make Slack retry it.
+    log(failureEvent, { errorName: errorName(error) });
   }
+}
+
+/**
+ * Releases a claimed event, logging rather than throwing if that itself fails. The caller has
+ * already decided to answer 500 (so Slack retries); a release failure must not change that
+ * decision or crash the handler, only leave the claim in place until it expires (M2).
+ */
+async function releaseQuietly(
+  dependencies: SlackIngressDependencies,
+  log: SlackIngressLog,
+  eventId: string,
+  failureEvent: string,
+): Promise<void> {
+  try {
+    await dependencies.releaseEvent(eventId);
+  } catch (error) {
+    log(failureEvent, { eventId, errorName: errorName(error) });
+  }
+}
+
+function errorName(error: unknown): string {
+  return error instanceof Error ? error.name : "unknown";
 }
 
 function ignore(log: SlackIngressLog, reason: string, fields: Record<string, string> = {}): HttpResponse {
@@ -207,6 +330,24 @@ export async function postSlackMessage(
   }
 }
 
+export interface SlackIngressSettings {
+  acceptAppPosted: boolean;
+  turnsPerMinute: number;
+}
+
+/** Reads the deployment's Slack ingress switches (spec 014 FR-011, FR-012); a bad value stops the cold start. */
+export function slackIngressSettings(environment: Readonly<Record<string, string | undefined>>): SlackIngressSettings {
+  const appPosted = environment.SLACK_APP_POSTED_MESSAGES ?? "accept";
+  if (appPosted !== "accept" && appPosted !== "ignore") {
+    throw new Error("SLACK_APP_POSTED_MESSAGES must be accept or ignore");
+  }
+  const turns = environment.SLACK_THREAD_TURNS_PER_MINUTE ?? "6";
+  if (!/^\d{1,2}$/u.test(turns) || Number(turns) < 1 || Number(turns) > 60) {
+    throw new Error("SLACK_THREAD_TURNS_PER_MINUTE must be a whole number from 1 to 60");
+  }
+  return { acceptAppPosted: appPosted === "accept", turnsPerMinute: Number(turns) };
+}
+
 export function parseSlackSecrets(secretString: string): SlackSecrets {
   const value = asRecord(JSON.parse(secretString));
   if (typeof value.signingSecret !== "string" || value.signingSecret.length < 16) {
@@ -229,6 +370,7 @@ function createAwsSlackIngressHandler() {
   const threadsTableName = requiredEnvironment("SLACK_THREADS_TABLE_NAME");
   const queueUrl = requiredEnvironment("SLACK_REQUEST_QUEUE_URL");
   const secretArn = requiredEnvironment("SLACK_SECRET_ARN");
+  const settings = slackIngressSettings(process.env);
   let cached: { secrets: Promise<SlackSecrets>; loadedAt: number } | undefined;
   const secrets = (): Promise<SlackSecrets> => {
     if (!cached || Date.now() - cached.loadedAt > SECRET_CACHE_MILLISECONDS) {
@@ -243,8 +385,36 @@ function createAwsSlackIngressHandler() {
     }
     return cached.secrets;
   };
+  const checkMember = createSlackMemberCheck({ token: async () => (await secrets()).botToken });
   return createSlackIngressHandler({
     secrets,
+    appPosted: { accept: settings.acceptAppPosted, checkMember },
+    turnLimit: {
+      perMinute: settings.turnsPerMinute,
+      async countTurn(threadSubject, windowStartSeconds, expiresAtSeconds) {
+        const response = await documentClient.send(new UpdateCommand({
+          TableName: threadsTableName,
+          Key: { pk: `THREAD#${threadSubject}`, sk: `TURNS#${windowStartSeconds}` },
+          UpdateExpression: "ADD turns :one SET expiresAt = :expiresAt",
+          ExpressionAttributeValues: { ":one": 1, ":expiresAt": expiresAtSeconds },
+          ReturnValues: "UPDATED_NEW",
+        }));
+        // A missing count fails closed: the handler answers 500 and Slack retries.
+        const turns = Number(response.Attributes?.turns);
+        if (!Number.isFinite(turns)) throw new Error("turn counter returned no count");
+        return turns;
+      },
+      async releaseTurn(threadSubject, windowStartSeconds) {
+        // Undoes a countTurn whose event was then released because enqueueing failed (M3). Does not
+        // touch expiresAt: the row already has one from the countTurn that this undoes.
+        await documentClient.send(new UpdateCommand({
+          TableName: threadsTableName,
+          Key: { pk: `THREAD#${threadSubject}`, sk: `TURNS#${windowStartSeconds}` },
+          UpdateExpression: "ADD turns :minusOne",
+          ExpressionAttributeValues: { ":minusOne": -1 },
+        }));
+      },
+    },
     async getBinding(teamId, channelId) {
       const response = await documentClient.send(new GetCommand({
         TableName: stateTableName,

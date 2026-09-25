@@ -42,6 +42,9 @@ executes nothing. For each case it records the first tool call, or none. Scores:
 - **Phrase match**: `refusal` and `contains` are scored separately and both must match; refusal
   accuracy counts only `refusal`. Matching ignores case, and curly apostrophes and quotes count as
   straight ones.
+- **Reply length** (spec 014 SC-006): a case may set `maxLines`. The run then uses the Slack reply
+  style, and passes only when the reply, formatted as Slack shows it, has at most that many
+  non-empty lines. Reply-length cases are in `tests/eval/cases/replies.jsonl`.
 
 Each case runs `--repeat` times; a case passes when every run passes. Results are written to
 `tests/eval/results/<model>.json` and compared with `tests/eval/baseline/<model>.json`, or

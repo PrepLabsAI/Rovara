@@ -180,6 +180,16 @@ describe("Slack request processing", () => {
     expect(harness.closed).toHaveLength(0);
   });
 
+  it("escapes Slack control characters in the preflight failure notice (M5)", async () => {
+    const operationId = "55555555-5555-4555-8555-555555555555";
+    const harness = processorHarness({
+      closeStart: { outcome: "PREFLIGHT", workspaceId, operationId, status: "RUNNING" },
+      closeOperation: { status: "FAILED", error: "<!here> repo check failed" },
+    });
+    await processSlackRequest(slackMessage({ text: "close this workspace" }), harness.dependencies, { finalAttempt: false });
+    expect(harness.posts.at(-1)).toBe("I couldn't close this workspace because its safety check failed: &lt;!here&gt; repo check failed");
+  });
+
   it("does not run a model turn for a later message in a closed thread", async () => {
     const harness = processorHarness({
       workspace: { outcome: "CLOSED", workspaceId, closedAt: "2026-09-24T08:00:00.000Z" },
@@ -304,6 +314,13 @@ describe("Slack request processing", () => {
     expect(final.finished).toHaveLength(1);
   });
 
+  it("escapes Slack control characters in the abandonment notice (M5)", async () => {
+    const final = processorHarness({ ensureError: new Error("<!here> control plane unavailable") });
+    await processSlackRequest(slackMessage(), final.dependencies, { finalAttempt: true });
+    expect(final.posts).toEqual(["AgentX could not process this request: &lt;!here&gt; control plane unavailable"]);
+    expect(final.finished).toHaveLength(1);
+  });
+
   it("reuses the same tool request IDs when a Slack event is processed again after a crash", async () => {
     const turnIds: string[][] = [];
     const turn = async (input: TurnInput) => {
@@ -408,5 +425,21 @@ describe("thread-ordered queue consumer", () => {
     }, [queueMessage("Ev000000A1", "thread-a")], { ...groupOptions, heartbeatMilliseconds: 10 }, () => undefined);
     expect(extended.length).toBeGreaterThanOrEqual(2);
     expect(new Set(extended)).toEqual(new Set(["receipt-Ev000000A1"]));
+  });
+});
+
+describe("Slack reply formatting in the processor", () => {
+  it("posts the turn's reply in Slack formatting", async () => {
+    const harness = processorHarness({
+      turn: async () => "Created [<https://linear.app/x/issue/CHA-6>](<https://linear.app/x/issue/CHA-6>).\\nNothing else changed.",
+    });
+    await processSlackRequest(slackMessage(), harness.dependencies, { finalAttempt: false });
+    expect(harness.posts.at(-1)).toBe("Created <https://linear.app/x/issue/CHA-6>.\nNothing else changed.");
+  });
+
+  it("formats a failed turn's message too, so an error cannot notify the channel", async () => {
+    const harness = processorHarness({ turn: async () => { throw new Error("vendor said <!channel>"); } });
+    await processSlackRequest(slackMessage(), harness.dependencies, { finalAttempt: false });
+    expect(harness.posts.at(-1)).toBe("AgentX could not complete the request: vendor said &lt;!channel&gt;");
   });
 });

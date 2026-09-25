@@ -7,7 +7,7 @@ import {
 } from "../../packages/orchestrator/src/orchestration-tools.js";
 import { lastAssistantResponse } from "../../packages/orchestrator/src/control-plane-api.js";
 import { pollOperation } from "../../packages/orchestrator/src/event-client.js";
-import { orchestratorSystemPrompt } from "../../packages/orchestrator/src/orchestrator.js";
+import { SLACK_REPLY_INSTRUCTIONS, orchestratorSystemPrompt } from "../../packages/orchestrator/src/orchestrator.js";
 
 describe("pi orchestration boundary", () => {
   it("exposes only remote delegation tools and treats project instructions as data", () => {
@@ -194,5 +194,19 @@ describe("pi orchestration boundary", () => {
     const { MAX_VISIBLE_TOOLS } = await import("../../packages/orchestrator/src/orchestrator.js");
     expect(ORCHESTRATION_TOOL_NAMES).toHaveLength(IN_HOUSE_TOOL_COUNT);
     expect(MAX_VISIBLE_TOOLS).toBe(TOOL_LIMIT);
+  });
+});
+
+describe("Slack reply style (spec 014 FR-023)", () => {
+  it("adds the Slack reply style only for the Slack surface, before the untrusted project instructions", () => {
+    const plain = orchestratorSystemPrompt("Delegate.");
+    const slack = orchestratorSystemPrompt("Delegate.", undefined, "slack");
+    for (const line of SLACK_REPLY_INSTRUCTIONS) {
+      expect(plain).not.toContain(line);
+      expect(slack).toContain(line);
+    }
+    expect(slack.indexOf(SLACK_REPLY_INSTRUCTIONS[0]!)).toBeLessThan(slack.indexOf("<project-instructions>"));
+    expect(slack.replace(`${SLACK_REPLY_INSTRUCTIONS.join("\n")}\n`, "")).toBe(plain);
+    expect(slack).toContain("never write the two characters \\n.");
   });
 });

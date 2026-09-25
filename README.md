@@ -272,9 +272,11 @@ Then configure the Slack app:
 - Under **Event Subscriptions**, enable events and set the request URL to the `SlackEventsUrl`
   output. Slack verifies the URL immediately, which succeeds only after the secret is stored.
 - Subscribe to the bot event `app_mention`.
-- Bot token scopes: `app_mentions:read` and `chat:write`, plus the optional `users:read`, used to
-  show the requester's name in connector write footers; without it the footer shows the Slack
-  member ID. Reinstall the app after changing scopes.
+- Bot token scopes: `app_mentions:read`, `chat:write` and `users:read`. AgentX uses `users:read`
+  to confirm that a mention posted through another app came from a person, and to show the
+  requester's name in connector write footers. Without it, AgentX does not run mentions posted
+  through other apps (it says it could not confirm the sender), and footers show the Slack member
+  ID. Reinstall the app after changing scopes.
 - Invite the app to the project channel with `/invite @AgentX`.
 
 Finally, bind the channel to the project. Binding requires an administrator login:
@@ -308,8 +310,26 @@ create a pull request.
 
 AgentX replies within a few seconds. If earlier requests in the thread are still running, it says
 how many are ahead. The first request in a new thread also prepares the workspace, which takes a
-few minutes. Messages without a mention, edits, bot messages, direct messages, and users from other
-Slack organizations are ignored.
+few minutes. Messages without a mention, edits, bot messages, AgentX's own messages, direct
+messages, and users from other Slack organizations are ignored.
+
+A person can also mention AgentX through another tool that posts with their own Slack user token,
+such as Claude Code's Slack access or a script. AgentX checks with Slack that the sender is a
+person, then treats the message exactly as if they had typed it. A message posted with a bot token
+is ignored. To answer only typed mentions, set the `AgentXControlPlane` parameter
+`SlackAppPostedMessages` to `ignore`. This also means a person's own tool posting "@AgentX yes"
+counts as that person's confirmation, the same as typing it. This lasts until confirmation buttons
+ship in phase 14c part 2.
+
+A thread that sends AgentX more than 6 requests in a minute is paused: AgentX posts one notice and
+runs nothing more in that thread until the next minute. This stops a tool that answers AgentX's
+replies from looping. The `AgentXControlPlane` parameter `SlackThreadTurnsPerMinute` changes the
+limit. A request that AgentX could not queue is not counted, so Slack's retry of it is not held
+against the thread; in the rare case where that happens during a burst at the limit, the thread
+can get a second pause notice in the same minute.
+
+AgentX posts its replies in Slack formatting, with real line breaks and one Slack link per URL.
+Text such as `<!channel>` in a reply is shown as text and never notifies anyone.
 
 Pull requests created from a thread end with a link to the thread and the Slack members who made
 requests in it. Every operation records the Slack member who requested it.
@@ -365,6 +385,21 @@ components `slack-ingress` and `slack-orchestrator`. They record event IDs, deci
 are never written to CloudWatch Logs. `event.ignored reason="channel_not_bound"` means the channel
 has no binding, and `request.rejected reason="invalid_signature"` usually means the stored signing
 secret is wrong.
+`event.ignored reason="member_check_failed"` with `slackError="missing_scope"` means the bot token
+lacks `users:read`. `reason="not_a_person"` means a bot posted the mention, `reason="own_message"`
+that AgentX did, and `reason="app_posted_disabled"` that `SlackAppPostedMessages` is `ignore`.
+`reason="no_user"` means the event named no Slack user; every other unparseable event still logs
+`reason="malformed_event"`. A bot's mention used to log `reason="bot_or_edited_message"` no matter
+what; now that reason only covers an edited message, or app-posted messages that are off or not
+configured, and a bot's mention is checked like any other app-posted message, logging
+`reason="not_a_person"` instead. `thread.paused` records each request the per-thread limit refused.
+`turn_limit.failed` is a 500 that Slack retries, logged when the turn itself could not be counted.
+`member_check.notice_failed` and `thread_paused.notice_failed` mean the fail-closed notice or the
+pause notice could not be posted; the event is still handled and Slack is not asked to retry it.
+`turn_limit.release_failed` and `enqueue.release_failed` mean the claimed event's release itself
+failed, after a turn-count or enqueue failure that had already answered 500; `turn_limit.decrement_failed`
+means the turn count's own undo, on the enqueue-failure path, failed. All three are logged, not
+thrown, and only leave the retried event's claim, or its turn count, briefly stale, not lost.
 `connector.discovery_failed` means a connector's tools were left out of a turn: `cause="transient"`
 is an outage the next turn may clear, and `cause="setup"` (with its error `code`) needs an
 administrator, for example `FORBIDDEN` when the connector is no longer enabled for the project.

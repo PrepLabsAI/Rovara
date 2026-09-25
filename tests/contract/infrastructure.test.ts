@@ -514,3 +514,25 @@ describe("AgentCore VPC-free microVM demo infrastructure", () => {
     ).toThrow(/idle/i);
   });
 });
+
+describe("hosted Slack ingress switches (spec 014)", () => {
+  const template = Template.fromStack(new ControlPlaneStack(new App(), "SlackIngressSwitches"));
+
+  it("lets an administrator turn off app-posted messages and change the per-thread turn limit", () => {
+    template.hasParameter("SlackAppPostedMessages", { Type: "String", Default: "accept", AllowedValues: ["accept", "ignore"] });
+    template.hasParameter("SlackThreadTurnsPerMinute", {
+      Type: "String",
+      Default: "6",
+      AllowedPattern: "^([1-9]|[1-5][0-9]|60)$",
+    });
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Environment: {
+        Variables: Match.objectLike({
+          SLACK_SECRET_ARN: Match.anyValue(),
+          SLACK_APP_POSTED_MESSAGES: { Ref: "SlackAppPostedMessages" },
+          SLACK_THREAD_TURNS_PER_MINUTE: { Ref: "SlackThreadTurnsPerMinute" },
+        }),
+      },
+    });
+  });
+});
