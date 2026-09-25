@@ -1,5 +1,5 @@
 // tests/contract/action-gate.test.ts
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ActionPolicy, ConnectorCatalog } from "../../packages/contracts/src/index.js";
 import { ClassifierError, type ActionClassifier } from "../../packages/orchestrator/src/action-classifier.js";
 import {
@@ -38,6 +38,7 @@ function gate(options: { session?: GateSession; classifier?: ActionClassifier; p
 const allow: ActionClassifier = async () => ({ decision: "allow", reason: "The member asked for this change.", usage: { input: 900, output: 20, cost: 0.0001 } });
 
 describe("the action gate's decisions", () => {
+  afterEach(() => { vi.useRealTimers(); });
   it("runs reads and creates without the classifier, and asks for a destructive action without it", async () => {
     const classifier = vi.fn(allow);
     const { gate: g, session } = gate({ classifier });
@@ -61,7 +62,7 @@ describe("the action gate's decisions", () => {
   });
 
   it("asks when the classifier throws, is missing or has used this turn's checks, and asks the classifier once per identical call", async () => {
-    const failing = gate({ classifier: async () => { throw new Error("the classifier did not answer within 8000 ms"); } });
+    const failing = gate({ classifier: async () => { throw new ClassifierError("the classifier did not answer within 8000 ms"); } });
     expect(await failing.gate.decide(call("tracker__save_item", { id: "A" }), { memberMessages: messages }))
       .toMatchObject({ outcome: "ask", source: "classifier_unavailable", kind: "classifier", reason: "the classifier could not decide: the classifier did not answer within 8000 ms" });
     expect(await gate().gate.decide(call("tracker__save_item", { id: "A" }), { memberMessages: messages })).toMatchObject({ outcome: "ask", source: "classifier_unavailable", reason: "no classifier is configured" });
@@ -78,6 +79,70 @@ describe("the action gate's decisions", () => {
       .toMatchObject({ outcome: "ask", source: "classifier_unavailable", kind: "classifier", classifierMs: 0, usage: { input: 700, output: 12, cost: 0.00005 },
         reason: "the classifier could not decide: the classifier's answer was not a verdict" });
     expect(failing.session.decisions[0]?.usage).toEqual({ input: 700, output: 12, cost: 0.00005 });
+  });
+
+  it("asks, without caching, when the classifier's verdict is neither allow nor ask", async () => {
+    for (const decision of ["deny", "maybe"]) {
+      const classifier = vi.fn(async () => ({ decision, reason: "odd" }) as unknown as Awaited<ReturnType<ActionClassifier>>);
+      const { gate: g, session } = gate({ classifier });
+      for (let round = 0; round < 2; round += 1) {
+        expect(await g.decide(call("tracker__save_item", { id: "A" }), { memberMessages: messages }))
+          .toMatchObject({ outcome: "ask", source: "classifier_unavailable", kind: "classifier", reason: "the classifier could not decide: its verdict was not allow or ask" });
+      }
+      expect(classifier).toHaveBeenCalledTimes(2);
+      expect(session.asks).toHaveLength(2);
+      expect(session.asks[0]).toMatchObject({ tool: "tracker__save_item", kind: "classifier" });
+    }
+  });
+
+  it("asks when the classifier does not answer within the gate's own deadline", async () => {
+    vi.useFakeTimers();
+    const { gate: g, session } = gate({ classifier: () => new Promise(() => undefined) });
+    const pending = g.decide(call("tracker__save_item", { id: "A" }), { memberMessages: messages });
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(await pending).toMatchObject({ outcome: "ask", source: "classifier_unavailable", kind: "classifier", reason: "the classifier could not decide: it did not answer within 8000 ms" });
+    expect(session.asks).toHaveLength(1);
+  });
+
+  it("asks when the turn is cancelled while the classifier works", async () => {
+    const controller = new AbortController();
+    let seen: AbortSignal | undefined;
+    const { gate: g } = gate({ classifier: (input) => { seen = input.signal; return new Promise(() => undefined); } });
+    const pending = g.decide(call("tracker__save_item", { id: "A" }), { memberMessages: messages, signal: controller.signal });
+    controller.abort();
+    expect(await pending).toMatchObject({ outcome: "ask", source: "classifier_unavailable", reason: "the classifier could not decide: the turn was cancelled" });
+    expect(seen?.aborted).toBe(true);
+    const early = gate({ classifier: vi.fn(allow) });
+    expect(await early.gate.decide(call("tracker__save_item", { id: "A" }), { memberMessages: messages, signal: AbortSignal.abort() }))
+      .toMatchObject({ outcome: "ask", source: "classifier_unavailable", reason: "the classifier could not decide: the turn was cancelled" });
+  });
+
+  it("uses the default classifier limit when the configured one is not a whole number of zero or more", async () => {
+    for (const maxClassifierCalls of [Number.NaN, -1, 1.5]) {
+      const classifier = vi.fn(allow);
+      const { gate: g } = gate({ classifier, maxClassifierCalls });
+      for (let id = 0; id < 8; id += 1) expect((await g.decide(call("tracker__save_item", { id: String(id) }), { memberMessages: messages })).outcome).toBe("allow");
+      expect(await g.decide(call("tracker__save_item", { id: "last" }), { memberMessages: messages })).toMatchObject({ reason: "this turn already used its 8 classifier checks" });
+      expect(classifier).toHaveBeenCalledTimes(8);
+    }
+    const none = gate({ classifier: vi.fn(allow), maxClassifierCalls: 0 });
+    expect(await none.gate.decide(call("tracker__save_item", { id: "A" }), { memberMessages: messages })).toMatchObject({ reason: "this turn already used its 0 classifier checks" });
+  });
+
+  it("keeps a thrown error's own message out of the decision unless it is the classifier's", async () => {
+    const { gate: g, session } = gate({ classifier: async () => { throw new TypeError("token=sk-live-x"); } });
+    expect(await g.decide(call("tracker__save_item", { id: "A" }), { memberMessages: messages }))
+      .toMatchObject({ outcome: "ask", source: "classifier_unavailable", reason: "the classifier could not decide (TypeError)" });
+    expect(JSON.stringify(session.decisions)).not.toContain("sk-live-x");
+  });
+
+  it("records a gate failure even when the call's arguments cannot be hashed", () => {
+    const { gate: g, session } = gate();
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    expect(g.failed(call("tracker__save_item", circular), new Error("x"))).toMatchObject({ outcome: "deny", source: "gate_error", argumentsHash: "unhashable" });
+    expect(g.failed(call("tracker__save_item", { n: 1n }), new Error("x"))).toMatchObject({ outcome: "deny", argumentsHash: "unhashable" });
+    expect(session.decisions).toHaveLength(2);
   });
 
   it("runs a confirmed call once with exactly its arguments, and evaluates a changed or repeated call afresh", async () => {

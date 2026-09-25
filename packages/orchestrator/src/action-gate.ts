@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ActionPolicy, ConnectorCatalog } from "@agentx/contracts";
-import { ClassifierError, type ActionClassifier, type ClassifierUsage } from "./action-classifier.js";
+import { CLASSIFIER_TIMEOUT_MS, ClassifierError, type ActionClassifier, type ClassifierUsage, type ClassifierVerdict } from "./action-classifier.js";
 
 export type { ActionClassifier } from "./action-classifier.js";
 import { evaluatePolicy, itemReference, type ActionClass, type SettledAction, type ToolFacts } from "./action-policy.js";
@@ -66,6 +66,8 @@ export function createGateSession(requesterId: string, options: { approvals?: re
   return { requesterId, approvals: [...(options.approvals ?? [])], yesToAll: options.yesToAll ?? false, asks: [], decisions: [] };
 }
 
+// The hash assumes JSON-shaped tool input (what a model's tool call carries): a cycle or a BigInt
+// throws, and values JSON cannot represent (functions, symbols) are dropped or become null.
 function sortedKeys(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortedKeys);
   if (value === null || typeof value !== "object") return value;
@@ -141,6 +143,26 @@ export function blockReason(decision: GateDecision, session: GateSession, summar
     "Do not call this tool again or try another way in this turn. Tell the member you are waiting for their confirmation.";
 }
 
+/** A failure path must not throw: arguments that are not JSON-shaped get a fixed hash. */
+function safeHash(tool: string, args: Record<string, unknown>): string {
+  try {
+    return argumentsHash(tool, args);
+  } catch {
+    return "unhashable";
+  }
+}
+
+/** Why the gate stopped waiting for the classifier: its own deadline or the turn's cancellation. */
+class GateWaitError extends Error {}
+
+/** A usable verdict: exactly "allow" or "ask", with a reason. Anything else is treated as a failure. */
+function usableVerdict(verdict: unknown): ClassifierVerdict | undefined {
+  if (!verdict || typeof verdict !== "object") return undefined;
+  const { decision, reason } = verdict as { decision?: unknown; reason?: unknown };
+  if ((decision !== "allow" && decision !== "ask") || typeof reason !== "string") return undefined;
+  return verdict as ClassifierVerdict;
+}
+
 /** One turn's gate: rules, then defaults, then the classifier; confirmations and "yes to all" from the session. */
 export class ActionGate {
   private classifierCalls = 0;
@@ -191,7 +213,7 @@ export class ActionGate {
   failed(call: { toolCallId: string; toolName: string; input: Record<string, unknown> }, error: unknown): GateDecision {
     const decision: GateDecision = {
       toolCallId: call.toolCallId, tool: call.toolName, actionClass: "change", outcome: "deny", source: "gate_error",
-      reason: `AgentX could not check this action (${error instanceof Error ? error.name : "unknown error"})`, argumentsHash: argumentsHash(call.toolName, call.input),
+      reason: `AgentX could not check this action (${error instanceof Error ? error.name : "unknown error"})`, argumentsHash: safeHash(call.toolName, call.input),
     };
     this.record(decision);
     return decision;
@@ -217,16 +239,41 @@ export class ActionGate {
     const unavailable = (reason: string) => ({ outcome: "ask" as const, source: "classifier_unavailable" as const, kind: "classifier" as const, reason });
     const classifier = this.options.classifier;
     if (!classifier) return unavailable("no classifier is configured");
-    const limit = this.options.maxClassifierCalls ?? MAX_CLASSIFIER_CALLS_PER_TURN;
+    const configured = this.options.maxClassifierCalls;
+    const limit = configured !== undefined && Number.isInteger(configured) && configured >= 0 ? configured : MAX_CLASSIFIER_CALLS_PER_TURN;
     if (this.classifierCalls >= limit) return unavailable(`this turn already used its ${limit} classifier checks`);
     this.classifierCalls += 1;
     const started = this.now();
+    // The gate keeps its own deadline and honours the turn's cancellation, whatever the classifier does.
+    const controller = new AbortController();
+    const signal = context.signal === undefined ? controller.signal : AbortSignal.any([context.signal, controller.signal]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+    const stop = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new GateWaitError(`it did not answer within ${CLASSIFIER_TIMEOUT_MS} ms`));
+      }, CLASSIFIER_TIMEOUT_MS);
+      onAbort = () => {
+        controller.abort();
+        reject(new GateWaitError("the turn was cancelled"));
+      };
+      if (context.signal?.aborted) onAbort();
+      else context.signal?.addEventListener("abort", onAbort, { once: true });
+    });
     try {
-      const verdict = await classifier({
+      if (context.signal?.aborted) await stop;
+      const answer = await Promise.race([classifier({
         memberMessages: context.memberMessages(),
         call: { tool: call.toolName, summary: describeCall(call.toolName, call.input), arguments: call.input, ...(item === undefined ? {} : { item }) },
-        ...(context.signal === undefined ? {} : { signal: context.signal }),
-      });
+        // Without a turn signal the input carries none, as before; the gate's deadline still bounds the wait.
+        ...(context.signal === undefined ? {} : { signal }),
+      }), stop]);
+      const verdict = usableVerdict(answer);
+      if (!verdict) {
+        const usage = (answer as { usage?: ClassifierUsage } | undefined)?.usage;
+        return { ...unavailable("the classifier could not decide: its verdict was not allow or ask"), classifierMs: this.now() - started, ...(usage === undefined ? {} : { usage }) };
+      }
       const result = {
         outcome: verdict.decision, source: "classifier" as const, ...(verdict.decision === "ask" ? { kind: "classifier" as const } : {}),
         reason: verdict.reason, classifierMs: this.now() - started, ...(verdict.usage === undefined ? {} : { usage: verdict.usage }),
@@ -234,9 +281,18 @@ export class ActionGate {
       this.verdicts.set(hash, { outcome: result.outcome, source: result.source, ...(result.kind === undefined ? {} : { kind: result.kind }), reason: result.reason });
       return result;
     } catch (error) {
-      // A model that answered unusably still cost something; record it with the decision.
+      // A model that answered unusably still cost something; record it with the decision. Only the
+      // classifier's own messages are shown: another error's message could carry anything.
       const usage = error instanceof ClassifierError && error.usage !== undefined ? { usage: error.usage } : {};
-      return { ...unavailable(`the classifier could not decide: ${error instanceof Error ? error.message.slice(0, 120) : "unknown error"}`), classifierMs: this.now() - started, ...usage };
+      const reason = error instanceof ClassifierError || error instanceof GateWaitError
+        ? `the classifier could not decide: ${error.message.slice(0, 120)}`
+        : `the classifier could not decide (${error instanceof Error ? error.name : "unknown error"})`;
+      return { ...unavailable(reason), classifierMs: this.now() - started, ...usage };
+    } finally {
+      clearTimeout(timer);
+      if (onAbort) context.signal?.removeEventListener("abort", onAbort);
+      // The stop promise may reject after the race is settled; that rejection is expected.
+      stop.catch(() => undefined);
     }
   }
 }
