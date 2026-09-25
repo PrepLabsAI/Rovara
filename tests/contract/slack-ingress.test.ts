@@ -226,6 +226,32 @@ describe("Slack mention ingress", () => {
     expect(queue.map((entry) => entry.queuedBehind)).toEqual([0, 1]);
   });
 
+  it("does not say Got it for a message that is only a confirmation answer, and still queues it", async () => {
+    for (const [index, text] of ["yes", "Yes, to all in this thread.", "cancel", "ok", "sure", "nope"].entries()) {
+      const { handler, queue, posts, logs } = harness();
+      const response = await send(handler, signedEvent(mention({ eventId: `Ev00000001${index}`, event: { text: `<@${bot}> ${text}` } })));
+      expect(response.status, text).toBe(200);
+      expect(queue.map((entry) => [entry.message.text, entry.queuedBehind]), text).toEqual([[text, 0]]);
+      expect(posts, text).toEqual([]);
+      expect(logs.at(-1), text).toMatchObject({ event: "mention.accepted", fields: { eventId: `Ev00000001${index}`, pendingInThread: 1 } });
+    }
+  });
+
+  it("says Got it for a confirmation word followed by a request", async () => {
+    const { handler, queue, posts } = harness();
+    await send(handler, signedEvent(mention({ event: { text: `<@${bot}> yes please close CHA-1` } })));
+    expect(queue).toHaveLength(1);
+    expect(posts).toEqual([{ channel, threadTs: "1695500000.000001", text: "Got it. I'm on it and will reply in this thread." }]);
+  });
+
+  it("still says how many requests a confirmation answer is queued behind", async () => {
+    const { handler, queue, posts } = harness();
+    await send(handler, signedEvent(mention()));
+    await send(handler, signedEvent(mention({ eventId: "Ev0000000002", event: { ts: "1695500100.000002", thread_ts: "1695500000.000001", text: `<@${bot}> yes` } })));
+    expect(queue.map((entry) => entry.queuedBehind)).toEqual([0, 1]);
+    expect(posts.map((entry) => entry.text)).toEqual(["Got it. I'm on it and will reply in this thread.", "Got it. This is queued behind 1 earlier request in this thread."]);
+  });
+
   it("processes a repeated Slack event only once", async () => {
     const { handler, queue, posts, logs } = harness();
     await send(handler, signedEvent(mention()));

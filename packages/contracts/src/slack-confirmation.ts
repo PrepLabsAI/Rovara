@@ -8,6 +8,22 @@ export const CONFIRM_CANCEL_ACTION = "agentx_confirm_cancel";
 /** A pending confirmation answers for 24 hours; after that a "yes" hears that it expired. */
 export const CONFIRMATION_TTL_MS = 24 * 60 * 60 * 1_000;
 
+/** A member's typed answer to a confirmation (feature 014). */
+export type ConfirmationReply = "yes" | "yes_to_all" | "cancel";
+
+/**
+ * "yes" and plain synonyms, "yes to all in this thread", or "cancel"; anything else is an ordinary
+ * request. The Slack ingress and the Slack service both use it, so they agree on what an answer is.
+ */
+export function parseConfirmationReply(text: string): ConfirmationReply | undefined {
+  // The whole message must be the answer; a leading mention, with or without its label, is dropped.
+  const normalized = text.replace(/^\s*<@[A-Z0-9]+(?:\|[^>]*)?>\s*/iu, "").trim().toLowerCase().replace(/[.!\s]+$/u, "");
+  if (/^yes,?\s+to\s+all(\s+in\s+this\s+thread)?$/u.test(normalized)) return "yes_to_all";
+  if (/^(yes|y|yep|yes,? please|ok|okay|sure|do it|confirm|confirmed|go ahead|approve)$/u.test(normalized)) return "yes";
+  if (/^(cancel|no|nope|no,? thanks|don't|do not)$/u.test(normalized)) return "cancel";
+  return undefined;
+}
+
 export const ConfirmationCallSchema = z.object({
   tool: z.string().min(1).max(128),
   argumentsHash: z.string().regex(/^[a-f0-9]{64}$/),

@@ -317,6 +317,8 @@ create a pull request.
 AgentX replies within a few seconds. If earlier requests in the thread are still running, it says
 how many are ahead, and says "Working on it now" when it starts on the request. A request with
 nothing ahead gets no separate "Working on it now" notice, unless it waits for workspace setup. A
+message that is only an answer to a confirmation (`yes`, `yes to all`, `cancel` and their plain
+synonyms) gets no "Got it" either, unless requests are queued ahead of it. A
 new thread gets a coding workspace only when a request first needs the remote worker, for example to
 read or change repository files or to run commands. Questions that connectors answer, such as issue
 tracker questions, need no workspace. The first request that needs the worker prepares the workspace
@@ -393,7 +395,9 @@ AgentX's own rules, the same for every connector:
 - A write whose arguments hold a list of more than 5 entries, such as 6 tasks, asks.
 
 When AgentX asks, it posts one message listing every action it held back, with **Approve** and
-**Cancel** buttons. Only the member who made the request can press them; anyone else is told so
+**Cancel** buttons. That message is the reply: AgentX adds its own answer only when something else
+happened in that turn (a call ran, even if it failed, or an action was refused or could not be
+checked), and that answer does not repeat the question. Only the member who made the request can press them; anyone else is told so
 privately. You can also reply `@AgentX yes` or `@AgentX cancel`. A confirmation counts once, only
 after the question, and for 24 hours. AgentX then runs exactly the listed calls; a call with any
 other arguments is checked afresh, as a new call. Any other message from you replaces the question.
@@ -821,7 +825,8 @@ Spec 014 phase 14c part 2 turns the action gate on. Operator notes:
   metrics. The
   service logs `gate.decision` for each call, and `gate.confirmation_requested`,
   `gate.confirmation_approved`, `gate.confirmation_cancelled`, `gate.confirmation_refused` and
-  `gate.yes_to_all` for answers.
+  `gate.yes_to_all` for answers. `gate.reply_withheld` means a turn's only reply was its
+  confirmation; the turn record still keeps the model's text.
   `gate.confirmation_failed` means a question could not be saved or posted; the member is told
   that nothing it would list will run.
 

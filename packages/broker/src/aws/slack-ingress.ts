@@ -16,6 +16,7 @@ import {
   SlackRequestMessageSchema,
   SlackTeamIdSchema,
   SlackUserIdSchema,
+  parseConfirmationReply,
   queuedBehindAttributes,
   slackRequestText,
   slackThreadSubject,
@@ -205,9 +206,13 @@ export function createSlackIngressHandler(dependencies: SlackIngressDependencies
       return respond(500, { error: "request could not be queued" });
     }
     log("mention.accepted", { eventId: mention.eventId, pendingInThread: pending });
-    await post(dependencies, log, thread, ahead > 0
-      ? `Got it. This is queued behind ${ahead} earlier request${ahead === 1 ? "" : "s"} in this thread.`
-      : "Got it. I'm on it and will reply in this thread.");
+    // A message that is only a confirmation answer is answered by the confirmation itself (or the
+    // turn it runs), so "Got it" would be noise. Waiting behind earlier requests is still said.
+    if (ahead > 0) {
+      await post(dependencies, log, thread, `Got it. This is queued behind ${ahead} earlier request${ahead === 1 ? "" : "s"} in this thread.`);
+    } else if (parseConfirmationReply(text) === undefined) {
+      await post(dependencies, log, thread, "Got it. I'm on it and will reply in this thread.");
+    }
     return respond(200, { ok: true });
   };
 }
