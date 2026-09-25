@@ -2,9 +2,9 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
-import { ASANA_PROJECT_TOOL_ACCESS } from "../../packages/contracts/src/index.js";
+import { ASANA_PROJECT_TOOL_ACCESS, itemPathProblems } from "../../packages/contracts/src/index.js";
 import {
-  ASANA_CREATE_TASK_ITEM_KEYS, ASANA_ITEM_ARGUMENTS, ASANA_MCP_ENDPOINT, ASANA_TASK_REFERENCES, ASANA_TOKEN_ENDPOINT, ASANA_UPDATE_TASK_ITEM_KEYS, asanaBinder, asanaConnector, asanaProjectGuard, executeTool, GuardRejection, reviewTools,
+  ASANA_CREATE_TASK_ITEM_KEYS, ASANA_ITEM_ARGUMENTS, ASANA_MCP_ENDPOINT, ASANA_TASK_REFERENCES, ASANA_TOKEN_ENDPOINT, ASANA_UPDATE_TASK_ITEM_KEYS, asanaBinder, asanaConnector, asanaProjectGuard, executeTool, GuardRejection, presentCatalog, reviewTools,
   type AsanaProjectScope, type ConnectorContext, type Invocation, type Ledger, type McpToolResult, type ToolApproval,
 } from "../../packages/gateway/src/index.js";
 import { vendorTools } from "../support/vendor-fixtures.js";
@@ -98,10 +98,30 @@ describe("Asana connector definition", () => {
     expect(asanaBinder.properties).toEqual([]);
   });
 
-  it("declares task_id as the item argument for spec 014, and every top-level task reference uses it", () => {
-    expect(ASANA_ITEM_ARGUMENTS).toEqual(["task_id"]);
+  it("declares task_id and tasks[].task as the item arguments for spec 014, each a path the guard also checks", () => {
+    // task_id names the task of get_task, get_task_stories and add_comment; tasks[].task names the
+    // task of each update_tasks item. Parents and dependencies are guarded but are not item
+    // arguments: they are other tasks the call points at, not the item it acts on.
+    expect(ASANA_ITEM_ARGUMENTS).toEqual(["task_id", "tasks[].task"]);
+    expect(itemPathProblems(ASANA_ITEM_ARGUMENTS)).toEqual([]);
+    expect(asanaConnector({ issue: vi.fn() }).itemArguments).toEqual(ASANA_ITEM_ARGUMENTS);
+    const guarded = new Set(Object.values(ASANA_TASK_REFERENCES).flat().map((path) => path.join(".").replaceAll(".*", "[]")));
+    for (const path of ASANA_ITEM_ARGUMENTS) expect(guarded).toContain(path);
     const topLevel = Object.values(ASANA_TASK_REFERENCES).flat().filter((path) => path.length === 1).map((path) => path[0]);
-    expect(new Set(topLevel)).toEqual(new Set(ASANA_ITEM_ARGUMENTS));
+    expect(new Set(topLevel)).toEqual(new Set(["task_id"]));
+  });
+
+  it("presents each tool with the item arguments its schema offers: tasks[].task on update_tasks, task_id on get_task and add_comment, none on create_tasks", () => {
+    const { reviewed } = harness();
+    const presented = presentCatalog({
+      connector: "asana", label: "Asana", scopeNoun: "project", approvals: approvals.map(({ name }) => ({ name })),
+      scopes: [{ alias: "payments", tools: reviewed.tools }], itemArguments: asanaConnector({ issue: vi.fn() }).itemArguments,
+    });
+    expect(presented.skipped).toEqual([]);
+    expect(Object.fromEntries(presented.tools.map((tool) => [tool.upstreamName, tool.itemArguments]))).toEqual({
+      get_task: ["task_id"], get_task_stories: ["task_id"], add_comment: ["task_id"], update_tasks: ["tasks[].task"],
+      create_tasks: [], get_tasks: [], search_tasks: [], get_project: [],
+    });
   });
 });
 

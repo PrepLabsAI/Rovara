@@ -1,7 +1,7 @@
 // tests/contract/gateway-hints.test.ts
 import { describe, expect, it } from "vitest";
 import { itemPathProblems } from "../../packages/contracts/src/index.js";
-import { githubConnector, jiraConnector, linearBinder, linearConnector, presentCatalog, reviewTools, type CatalogTool } from "../../packages/gateway/src/index.js";
+import { asanaConnector, githubConnector, jiraConnector, linearBinder, linearConnector, presentCatalog, reviewTools, type CatalogTool } from "../../packages/gateway/src/index.js";
 import { vendorTools, vendorToolsWithAnnotations } from "../support/vendor-fixtures.js";
 
 const scope = { alias: "charterarc", teamId: "c408e946-78aa-4db8-923e-f78053dd954f" };
@@ -80,7 +80,7 @@ describe("vendor hints through discovery", () => {
   it("declares only well-formed item argument paths for every built-in connector", () => {
     const unused = { issue: () => { throw new Error("not used"); } };
     const github = githubConnector(() => { throw new Error("not used"); });
-    for (const declared of [github.itemArguments, linearConnector(unused).itemArguments, jiraConnector(unused, { projectScoped: true }).itemArguments]) {
+    for (const declared of [github.itemArguments, linearConnector(unused).itemArguments, jiraConnector(unused, { projectScoped: true }).itemArguments, asanaConnector(unused).itemArguments]) {
       expect(declared).toBeDefined();
       expect(itemPathProblems(declared)).toEqual([]);
     }

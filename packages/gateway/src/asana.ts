@@ -10,11 +10,13 @@ export const ASANA_TOKEN_ENDPOINT = new URL(OAUTH_AUTHORIZATION_PROFILES.asana.t
 export interface AsanaProjectScope { alias: string; projectGid: string }
 
 /**
- * The argument through which an Asana tool names one existing task, for spec 014's action gate
- * (`ConnectorDefinition.itemArguments`, most specific first). update_tasks names its tasks inside
- * `tasks[].task`; see ASANA_TASK_REFERENCES.
+ * The argument paths through which an Asana tool names an existing task, for spec 014's action
+ * gate (`ConnectorDefinition.itemArguments`): `task_id` (get_task, get_task_stories, add_comment)
+ * and `tasks[].task`, the task each update_tasks item names. Parents and dependencies are not item
+ * arguments: they are other tasks a call points at, which the project guard checks (see
+ * ASANA_TASK_REFERENCES).
  */
-export const ASANA_ITEM_ARGUMENTS = ["task_id"] as const;
+export const ASANA_ITEM_ARGUMENTS = ["task_id", "tasks[].task"] as const;
 
 /**
  * Asana names the project `project` (get_tasks), `project_id` (get_project), `default_project`
@@ -303,5 +305,6 @@ export function asanaConnector(credentials: CredentialProvider<AsanaProjectScope
     binder: asanaBinder,
     guards: [asanaProjectGuard],
     attributionKeys: ["text"],
+    itemArguments: ASANA_ITEM_ARGUMENTS,
   };
 }

@@ -143,6 +143,16 @@ describe("asana connector, end to end against a fake Asana", () => {
     for (const authorization of fake.authorizations) expect(authorization).toMatch(/^Bearer asana-access-1-/);
   });
 
+  it("serves Asana's item arguments and hints only to a service that asks for the gate fields, with unchanged hashes", async () => {
+    const { handler, path, catalog } = await readyBroker();
+    expect(catalog.tools.every((tool) => !("itemArguments" in tool) && tool.hints === undefined)).toBe(true);
+    const gated = ConnectorCatalogSchema.parse((await call(handler, { method: "GET", path: `${path}/tools`, service, headers: { "x-agentx-include": "gate" } })).body.catalog);
+    expect(Object.fromEntries(gated.tools.map((tool) => [tool.upstreamName, tool.itemArguments]))).toEqual({
+      search_tasks: [], get_task: ["task_id"], get_tasks: [], create_tasks: [], add_comment: ["task_id"],
+    });
+    expect(gated.tools.map((tool) => tool.scopes)).toEqual(catalog.tools.map((tool) => tool.scopes));
+  });
+
   it("hides the project arguments, binds the registered project, and signs a comment", async () => {
     const { fake, db, workspaceId, catalog, run } = await readyBroker();
     const properties = (tool: string) => Object.keys(catalog.tools.find((entry) => entry.name === `asana__${tool}`)!.inputSchema.properties as Record<string, unknown>);
