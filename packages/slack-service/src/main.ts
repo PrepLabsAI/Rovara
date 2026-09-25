@@ -297,6 +297,7 @@ await runConsumer(queue, (message, context) => processSlackRequest(message, {
   log,
   confirmations,
   postConfirmation: (thread, confirmation, text) => postToSlack(thread.channelId, thread.threadTs, text, confirmationBlocks(text, confirmation.confirmationId)),
+  postWithBlocks: (thread, text, blocks) => postToSlack(thread.channelId, thread.threadTs, text, blocks),
   turnRecords: new DynamoTurnRecordWriter(documentClient, turnRecordsTableName),
 }, context), {
   concurrency,

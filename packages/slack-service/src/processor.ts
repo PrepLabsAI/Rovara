@@ -1,4 +1,6 @@
 import {
+  detailsButtonValue,
+  detailsReplyBlocks,
   slackThreadSubject,
   splitSlackMessage,
   WorkspaceClosePreflightResultSchema,
@@ -92,6 +94,17 @@ export interface ProcessorDependencies {
   now?: () => number;
   /** Where one hidden record per finished Slack event goes; without it nothing is recorded. */
   turnRecords?: TurnRecordSink;
+  /**
+   * Posts a message with Block Kit blocks. The reply's Details button needs it (spec 014 FR-024);
+   * without it, replies are text only, exactly as before.
+   */
+  postWithBlocks?: (thread: SlackThread, text: string, blocks: unknown[]) => Promise<void>;
+}
+
+/** Where a reply's Details button points, and how to post it. */
+interface ReplyDetails {
+  value: string;
+  postWithBlocks: (thread: SlackThread, text: string, blocks: unknown[]) => Promise<void>;
 }
 
 const RUNNABLE_STATUSES = new Set(["READY", "STOPPED", "BUSY"]);
@@ -121,6 +134,17 @@ export async function processSlackRequest(
   const post = async (text: string) => {
     await dependencies.post(message.thread, text);
     lastPosted = text;
+  };
+  // Spec 014 FR-024: the last chunk of a reply that followed tool calls carries a Details button. A
+  // Slack refusal of the blocks never costs the member the reply: the text is posted on its own.
+  const postWithDetails = async (details: ReplyDetails, text: string) => {
+    try {
+      await details.postWithBlocks(message.thread, text, detailsReplyBlocks(text, details.value));
+      lastPosted = text;
+    } catch (error) {
+      log("reply.details_failed", { eventId: message.eventId, errorName: errorName(error) });
+      await post(text);
+    }
   };
   const api = dependencies.api(message);
   let finished = false;
@@ -303,7 +327,12 @@ export async function processSlackRequest(
         await post(`I didn't ask again: the pending confirmation still lists ${shortList(settled.pendingSummaries)}. Ask me again for anything else.`);
       }
     }
-    for (const chunk of splitSlackMessage(slackReplyText(response))) await post(chunk);
+    const chunks = splitSlackMessage(slackReplyText(response));
+    const details = replyDetails(dependencies, recorder, message);
+    for (const [index, chunk] of chunks.entries()) {
+      if (details !== undefined && index === chunks.length - 1) await postWithDetails(details, chunk);
+      else await post(chunk);
+    }
     if (recorder !== undefined) await rememberRefresh(dependencies, log, subject, message.eventId, state.refreshConnectors ?? [], recorder);
     finished = true;
   } catch (error) {
@@ -326,6 +355,26 @@ export async function processSlackRequest(
       await dependencies.threads.finish(subject);
     }
   }
+}
+
+/**
+ * The Details button's target, when the reply should carry one: the turn called at least one tool,
+ * and its record will be written (a sink and a recorder exist), so the button always names a record
+ * the service tries to save. The value derives from the Slack event, as the record's key does.
+ */
+function replyDetails(dependencies: ProcessorDependencies, recorder: TurnRecorder | undefined, message: SlackRequestMessage): ReplyDetails | undefined {
+  const postWithBlocks = dependencies.postWithBlocks;
+  if (postWithBlocks === undefined || dependencies.turnRecords === undefined || recorder === undefined) return undefined;
+  let calls: number;
+  try {
+    calls = recorder.observation().calls.length;
+  } catch {
+    // The record's own write reports a broken recorder; the reply just goes without a button.
+    return undefined;
+  }
+  if (calls === 0) return undefined;
+  const value = detailsButtonValue(message);
+  return value === undefined ? undefined : { value, postWithBlocks };
 }
 
 /**
