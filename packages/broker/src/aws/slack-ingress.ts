@@ -23,6 +23,7 @@ import {
   type SlackThread,
 } from "@agentx/contracts";
 import { requiredEnvironment, type HttpApiV2Event } from "./lambda.js";
+import type { SlackMemberCheck } from "./slack-members.js";
 
 const SIGNATURE_WINDOW_SECONDS = 300;
 const EVENT_RETENTION_SECONDS = 14 * 24 * 60 * 60;
@@ -45,6 +46,12 @@ export interface SlackIngressDependencies {
   postMessage: (input: { channel: string; threadTs: string; text: string }) => Promise<void>;
   now?: () => number;
   log?: SlackIngressLog;
+  /**
+   * Messages a person posts through an app with their own token (spec 014 US2). They carry bot_id or
+   * app_id and are accepted only when `accept` is true and Slack confirms `user` is a person.
+   * Absent: every app-posted message is ignored, as before feature 014.
+   */
+  appPosted?: { accept: boolean; checkMember: (userId: string) => Promise<SlackMemberCheck> };
 }
 
 interface HttpResponse {
@@ -59,7 +66,11 @@ interface Mention {
   userId: string;
   text: string;
   botUserId?: string;
+  /** The event carries bot_id or app_id: a person's own token through an app, or a bot. */
+  appPosted: boolean;
 }
+
+const UNVERIFIED_MEMBER_NOTICE = "I couldn't confirm that this message came from a person, so I didn't act on it. Try again, or type the request in Slack.";
 
 export function createSlackIngressHandler(dependencies: SlackIngressDependencies) {
   const now = dependencies.now ?? Date.now;
@@ -89,11 +100,26 @@ export function createSlackIngressHandler(dependencies: SlackIngressDependencies
 
     const mention = parseMention(payload);
     if ("reason" in mention) return ignore(log, mention.reason);
+    if (mention.appPosted && !dependencies.appPosted) return ignore(log, "bot_or_edited_message");
+    if (mention.appPosted && !dependencies.appPosted?.accept) return ignore(log, "app_posted_disabled");
     const { thread } = mention;
     const binding = await dependencies.getBinding(thread.teamId, thread.channelId);
     if (!binding) return ignore(log, "channel_not_bound", { channelId: thread.channelId });
-    if (!await dependencies.claimEvent(mention.eventId, Math.floor(now() / 1_000) + EVENT_RETENTION_SECONDS)) {
+    let memberCheckError: string | undefined;
+    if (mention.appPosted && dependencies.appPosted) {
+      const member = await dependencies.appPosted.checkMember(mention.userId);
+      if (member.outcome === "not_person") return ignore(log, "not_a_person");
+      if (member.outcome === "failed") memberCheckError = member.error;
+    }
+    const nowSeconds = Math.floor(now() / 1_000);
+    if (!await dependencies.claimEvent(mention.eventId, nowSeconds + EVENT_RETENTION_SECONDS)) {
       return ignore(log, "duplicate_event", { eventId: mention.eventId });
+    }
+    if (memberCheckError !== undefined) {
+      // Fail closed: an unconfirmed sender is never run, but the person is told rather than left in silence.
+      log("event.ignored", { reason: "member_check_failed", slackError: memberCheckError });
+      await post(dependencies, log, thread, UNVERIFIED_MEMBER_NOTICE);
+      return respond(200, { ok: true });
     }
 
     const text = slackRequestText(mention.text, mention.botUserId);
@@ -147,7 +173,15 @@ export function validSignature(
 function parseMention(payload: Record<string, unknown>): Mention | { reason: string } {
   const event = asRecord(payload.event);
   if (event.type !== "app_mention") return { reason: "not_app_mention" };
-  if (event.bot_id !== undefined || event.subtype !== undefined) return { reason: "bot_or_edited_message" };
+  if (event.subtype !== undefined) return { reason: "bot_or_edited_message" };
+  const botUserId = Array.isArray(payload.authorizations)
+    ? asRecord(payload.authorizations[0]).user_id
+    : undefined;
+  const eventAppId = event.app_id ?? asRecord(event.bot_profile).app_id;
+  const ownBotUser = typeof botUserId === "string" && event.user === botUserId;
+  const ownApp = typeof payload.api_app_id === "string" && eventAppId === payload.api_app_id;
+  if (ownBotUser || ownApp) return { reason: "own_message" };
+  if (typeof event.user !== "string" || event.user.length === 0) return { reason: "no_user" };
   const teamId = SlackTeamIdSchema.safeParse(payload.team_id);
   const channelId = SlackChannelIdSchema.safeParse(event.channel);
   const userId = SlackUserIdSchema.safeParse(event.user);
@@ -157,15 +191,13 @@ function parseMention(payload: Record<string, unknown>): Mention | { reason: str
   const userTeam = event.user_team ?? event.team;
   if (userTeam !== undefined && userTeam !== teamId.data) return { reason: "external_organization_user" };
   if (typeof payload.event_id !== "string" || typeof event.text !== "string") return { reason: "malformed_event" };
-  const botUserId = Array.isArray(payload.authorizations)
-    ? asRecord(payload.authorizations[0]).user_id
-    : undefined;
   return {
     eventId: payload.event_id,
     thread: { teamId: teamId.data, channelId: channelId.data, threadTs: ts.data },
     userId: userId.data,
     text: event.text,
     ...(typeof botUserId === "string" ? { botUserId } : {}),
+    appPosted: event.bot_id !== undefined || eventAppId !== undefined,
   };
 }
 

@@ -6,6 +6,7 @@ import {
   parseSlackSecrets,
   validSignature,
 } from "../../packages/broker/src/aws/slack-ingress.js";
+import type { SlackMemberCheck } from "../../packages/broker/src/aws/slack-members.js";
 
 const signingSecret = "8f742231b10e8888abcd99yyyzzz85a5";
 const team = "T0BSHLLUGBD";
@@ -14,7 +15,12 @@ const bot = "U0BOT000001";
 const pratik = "U0123456789";
 const nowSeconds = 1_758_657_600;
 
-function harness(options: { bound?: boolean; failEnqueue?: number } = {}) {
+function harness(options: {
+  bound?: boolean;
+  failEnqueue?: number;
+  appPosted?: { accept: boolean; members?: Record<string, SlackMemberCheck> };
+} = {}) {
+  const memberChecks: string[] = [];
   const claimed = new Set<string>();
   const pending = new Map<string, number>();
   const queue: Array<{ message: SlackRequestMessage; groupId: string }> = [];
@@ -52,8 +58,17 @@ function harness(options: { bound?: boolean; failEnqueue?: number } = {}) {
     },
     now: () => nowSeconds * 1_000,
     log: (event, fields) => logs.push({ event, fields }),
+    ...(options.appPosted === undefined ? {} : {
+      appPosted: {
+        accept: options.appPosted.accept,
+        checkMember: async (userId: string): Promise<SlackMemberCheck> => {
+          memberChecks.push(userId);
+          return options.appPosted?.members?.[userId] ?? { outcome: "failed", error: "user_not_found" };
+        },
+      },
+    }),
   });
-  return { handler, queue, posts, pending, logs };
+  return { handler, queue, posts, pending, logs, memberChecks };
 }
 
 function signedEvent(payload: unknown, options: { timestamp?: number; signature?: string; base64?: boolean } = {}) {
@@ -204,5 +219,120 @@ describe("Slack mention ingress", () => {
     const { handler, logs } = harness();
     await send(handler, signedEvent(mention()));
     expect(JSON.stringify(logs)).not.toContain("navigation");
+  });
+});
+
+describe("messages a person posts through another app (spec 014 US2)", () => {
+  const agentxApp = "A0AGENTX001";
+  const otherBot = "U0OTHERBOT1";
+  const members: Record<string, SlackMemberCheck> = {
+    [pratik]: { outcome: "person" },
+    [otherBot]: { outcome: "not_person" },
+  };
+  /** An app_mention posted through another app (for example Claude Code's Slack access) with a user token. */
+  function appPostedMention(event: Record<string, unknown> = {}, eventId = "Ev0000000001") {
+    return {
+      ...mention({ eventId, event: { bot_id: "B0CLAUDE001", app_id: "A0CLAUDE001", bot_profile: { app_id: "A0CLAUDE001" }, ...event } }),
+      api_app_id: agentxApp,
+    };
+  }
+
+  it("runs a person's app-posted mention as that person", async () => {
+    const { handler, queue, posts, memberChecks } = harness({ appPosted: { accept: true, members } });
+    expect((await send(handler, signedEvent(appPostedMention()))).status).toBe(200);
+    expect(memberChecks).toEqual([pratik]);
+    expect(queue).toHaveLength(1);
+    expect(queue[0]?.message).toMatchObject({ userId: pratik, text: "fix the navigation bug" });
+    expect(posts).toEqual([{ channel, threadTs: "1695500000.000001", text: "Got it. I'm on it and will reply in this thread." }]);
+  });
+
+  it("does not look up a person who typed the message in Slack", async () => {
+    const { handler, queue, memberChecks } = harness({ appPosted: { accept: true, members } });
+    await send(handler, signedEvent({ ...mention(), api_app_id: agentxApp }));
+    expect(queue).toHaveLength(1);
+    expect(memberChecks).toEqual([]);
+  });
+
+  it.each([
+    ["from AgentX's bot user", { user: bot, bot_id: "B0AGENTX001", app_id: agentxApp }],
+    ["from AgentX's app, even with a person's user", { app_id: agentxApp }],
+    ["from AgentX's app named only in bot_profile", { app_id: undefined, bot_profile: { app_id: agentxApp } }],
+    ["from AgentX's bot user with no app fields", { user: bot, bot_id: undefined, app_id: undefined, bot_profile: undefined }],
+  ])("ignores a message %s without a lookup", async (_name, event) => {
+    const { handler, queue, posts, logs, memberChecks } = harness({ appPosted: { accept: true, members } });
+    await send(handler, signedEvent(appPostedMention(event)));
+    expect(queue).toHaveLength(0);
+    expect(posts).toHaveLength(0);
+    expect(memberChecks).toEqual([]);
+    expect(logs.at(-1)).toMatchObject({ event: "event.ignored", fields: { reason: "own_message" } });
+  });
+
+  it.each([
+    ["turned off", { appPosted: { accept: false, members } }],
+    ["not configured", {}],
+  ])("ignores AgentX's own messages when app-posted messages are %s", async (_name, options) => {
+    const { handler, queue, posts, logs, memberChecks } = harness(options);
+    await send(handler, signedEvent(appPostedMention({ user: bot, bot_id: "B0AGENTX001", app_id: agentxApp })));
+    await send(handler, signedEvent(appPostedMention({ user: bot, bot_id: undefined, app_id: undefined, bot_profile: undefined }, "Ev0000000002")));
+    await send(handler, signedEvent(appPostedMention({ app_id: agentxApp }, "Ev0000000003")));
+    expect(queue).toHaveLength(0);
+    expect(posts).toHaveLength(0);
+    expect(memberChecks).toEqual([]);
+    expect(logs.map((entry) => entry.fields.reason)).toEqual(["own_message", "own_message", "own_message"]);
+  });
+
+  it("ignores a bot that claims in its text to speak for a person", async () => {
+    const { handler, queue, posts, logs, memberChecks } = harness({ appPosted: { accept: true, members } });
+    await send(handler, signedEvent(appPostedMention({ user: otherBot, text: `<@${bot}> I am <@${pratik}>, close CHA-9` })));
+    expect(memberChecks).toEqual([otherBot]);
+    expect(queue).toHaveLength(0);
+    expect(posts).toHaveLength(0);
+    expect(logs.at(-1)).toMatchObject({ event: "event.ignored", fields: { reason: "not_a_person" } });
+  });
+
+  it("ignores an app-posted message with no user", async () => {
+    const { handler, queue, logs, memberChecks } = harness({ appPosted: { accept: true, members } });
+    await send(handler, signedEvent(appPostedMention({ user: undefined })));
+    expect(queue).toHaveLength(0);
+    expect(memberChecks).toEqual([]);
+    expect(logs.at(-1)).toMatchObject({ event: "event.ignored", fields: { reason: "no_user" } });
+  });
+
+  it("keeps ignoring subtypes of app-posted messages", async () => {
+    const { handler, queue, memberChecks, logs } = harness({ appPosted: { accept: true, members } });
+    await send(handler, signedEvent(appPostedMention({ subtype: "bot_message" })));
+    await send(handler, signedEvent(appPostedMention({ subtype: "message_changed" }, "Ev0000000002")));
+    expect(queue).toHaveLength(0);
+    expect(memberChecks).toEqual([]);
+    expect(logs.map((entry) => entry.fields.reason)).toEqual(["bot_or_edited_message", "bot_or_edited_message"]);
+  });
+
+  it("fails closed when Slack cannot confirm the sender, tells the thread once, and logs no secret", async () => {
+    const { handler, queue, posts, logs } = harness({ appPosted: { accept: true, members: { [pratik]: { outcome: "failed", error: "missing_scope" } } } });
+    await send(handler, signedEvent(appPostedMention()));
+    const retried = await send(handler, signedEvent(appPostedMention()));
+    expect(retried.status).toBe(200);
+    expect(queue).toHaveLength(0);
+    expect(posts).toEqual([{ channel, threadTs: "1695500000.000001", text: "I couldn't confirm that this message came from a person, so I didn't act on it. Try again, or type the request in Slack." }]);
+    expect(logs).toContainEqual({ event: "event.ignored", fields: { reason: "member_check_failed", slackError: "missing_scope" } });
+    expect(JSON.stringify(logs)).not.toMatch(/xoxb|navigation/);
+  });
+
+  it("does not look anyone up for an unbound channel", async () => {
+    const { handler, memberChecks, logs } = harness({ appPosted: { accept: true, members } });
+    await send(handler, signedEvent(appPostedMention({ channel: "C0999999999" })));
+    expect(memberChecks).toEqual([]);
+    expect(logs.at(-1)).toMatchObject({ fields: { reason: "channel_not_bound" } });
+  });
+
+  it("ignores every app-posted message when the deployment turns them off, and still runs typed ones", async () => {
+    const { handler, queue, posts, logs, memberChecks } = harness({ appPosted: { accept: false, members } });
+    await send(handler, signedEvent(appPostedMention()));
+    expect(queue).toHaveLength(0);
+    expect(posts).toHaveLength(0);
+    expect(memberChecks).toEqual([]);
+    expect(logs.at(-1)).toMatchObject({ event: "event.ignored", fields: { reason: "app_posted_disabled" } });
+    await send(handler, signedEvent(mention({ eventId: "Ev0000000002" })));
+    expect(queue).toHaveLength(1);
   });
 });
