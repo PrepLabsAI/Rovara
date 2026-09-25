@@ -39,6 +39,14 @@ export interface SlackBlockAction {
    * team for a Slack Connect member from another organization. Empty when Slack sent none.
    */
   userTeamId: string;
+  /** The payload's team.id: the workspace Slack says the click came through. Empty when Slack sent none. */
+  workspaceTeamId: string;
+  /** The payload's Enterprise Grid (enterprise.id, else team.enterprise_id). Empty outside a grid. */
+  enterpriseId: string;
+  /** The clicking member's own grid (user.enterprise_id). Empty when Slack sent none. */
+  userEnterpriseId: string;
+  /** When this request reached the endpoint (epoch ms), for handlers racing Slack's 3-second trigger window. */
+  requestStartedAt: number;
   thread: SlackThread;
   /** The message that carries the button. */
   messageTs: string;
@@ -93,6 +101,7 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
   const now = dependencies.now ?? Date.now;
   const log: SlackIngressLog = dependencies.log ?? (() => undefined);
   return async (event: HttpApiV2Event): Promise<HttpResponse> => {
+    const requestStartedAt = now();
     const rawBody = event.body === undefined ? "" : event.isBase64Encoded ? Buffer.from(event.body, "base64").toString("utf8") : event.body;
     const headers = Object.fromEntries(Object.entries(event.headers ?? {}).map(([key, value]) => [key.toLowerCase(), value]));
     const secrets = await dependencies.secrets();
@@ -111,7 +120,7 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
       log("interaction.ignored", { reason: "not_block_actions" });
       return respond(200, { ok: true });
     }
-    const actions = parseBlockActions(payload);
+    const actions = parseBlockActions(payload, requestStartedAt);
     if ("reason" in actions) {
       log("interaction.ignored", { reason: actions.reason });
       return respond(200, { ok: true });
@@ -155,11 +164,21 @@ function isSlackResponseUrl(value: unknown): value is string {
   }
 }
 
-function parseBlockActions(payload: Record<string, unknown>): { actions: SlackBlockAction[] } | { reason: string } {
+const ENTERPRISE_ID = /^E[A-Z0-9]{2,31}$/;
+
+function enterpriseIdOf(value: unknown): string {
+  return typeof value === "string" && ENTERPRISE_ID.test(value) ? value : "";
+}
+
+function parseBlockActions(payload: Record<string, unknown>, requestStartedAt: number): { actions: SlackBlockAction[] } | { reason: string } {
   const user = asRecord(payload.user);
+  const team = asRecord(payload.team);
   const container = asRecord(payload.container);
   const message = asRecord(payload.message);
-  const teamId = SlackTeamIdSchema.safeParse(asRecord(payload.team).id ?? user.team_id);
+  const teamId = SlackTeamIdSchema.safeParse(team.id ?? user.team_id);
+  const workspaceTeamId = SlackTeamIdSchema.safeParse(team.id);
+  const enterpriseId = enterpriseIdOf(asRecord(payload.enterprise).id ?? team.enterprise_id);
+  const userEnterpriseId = enterpriseIdOf(user.enterprise_id);
   const userId = SlackUserIdSchema.safeParse(user.id);
   const userTeamId = SlackTeamIdSchema.safeParse(user.team_id);
   const channelId = SlackChannelIdSchema.safeParse(container.channel_id ?? asRecord(payload.channel).id);
@@ -175,6 +194,10 @@ function parseBlockActions(payload: Record<string, unknown>): { actions: SlackBl
       value: entry.value,
       userId: userId.data,
       userTeamId: userTeamId.success ? userTeamId.data : "",
+      workspaceTeamId: workspaceTeamId.success ? workspaceTeamId.data : "",
+      enterpriseId,
+      userEnterpriseId,
+      requestStartedAt,
       thread,
       messageTs: messageTs.data,
       messageText: typeof message.text === "string" ? message.text : "",
@@ -281,11 +304,16 @@ export function confirmationActionHandler(dependencies: ConfirmationClickDepende
   };
 }
 
-/** A Slack Web API call, bounded so it never outlasts Slack's 3-second wait for this request. */
-export async function slackApi(token: string, method: string, body: unknown, fetchImplementation: typeof fetch = fetch): Promise<void> {
+/**
+ * A Slack Web API call, bounded so it never outlasts Slack's 3-second wait for this request. A caller
+ * that already spent part of that wait passes what is left as timeoutMs.
+ */
+export async function slackApi(
+  token: string, method: string, body: unknown, fetchImplementation: typeof fetch = fetch, timeoutMs = SLACK_FETCH_TIMEOUT_MILLISECONDS,
+): Promise<void> {
   const response = await fetchImplementation(`https://slack.com/api/${method}`, {
     method: "POST",
-    signal: AbortSignal.timeout(SLACK_FETCH_TIMEOUT_MILLISECONDS),
+    signal: AbortSignal.timeout(timeoutMs),
     redirect: "error",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json; charset=utf-8" },
     body: JSON.stringify(body),
@@ -315,7 +343,8 @@ export function createAwsSlackInteractivityHandler() {
   const threadsTableName = requiredEnvironment("SLACK_THREADS_TABLE_NAME");
   const queueUrl = requiredEnvironment("SLACK_REQUEST_QUEUE_URL");
   const secretArn = requiredEnvironment("SLACK_SECRET_ARN");
-  const turnRecordsTableName = requiredEnvironment("TURN_RECORDS_TABLE_NAME");
+  // Optional: only the Details button reads it, so a missing variable must not break Approve/Cancel.
+  const turnRecordsTableName = process.env.TURN_RECORDS_TABLE_NAME;
   let cached: { secrets: Promise<SlackSecrets>; loadedAt: number } | undefined;
   const secrets = (): Promise<SlackSecrets> => {
     if (!cached || Date.now() - cached.loadedAt > SECRET_CACHE_MILLISECONDS) {
@@ -329,6 +358,7 @@ export function createAwsSlackInteractivityHandler() {
     return cached.secrets;
   };
   const log: SlackIngressLog = (event, fields) => console.log(JSON.stringify({ component: "slack-interactivity", event, ...fields }));
+  if (!turnRecordsTableName) log("interaction.details_not_configured", { variable: "TURN_RECORDS_TABLE_NAME" });
   return createSlackInteractivityHandler({
     secrets,
     log,
@@ -368,10 +398,18 @@ export function createAwsSlackInteractivityHandler() {
       log,
     }), detailsActionHandler({
       // Spec 014 FR-024: the Details view reads one turn record's non-text fields and opens a modal.
-      readDetails: dynamoTurnDetailsReader(documentClient, turnRecordsTableName),
-      openView: async (triggerId, view) => slackApi((await secrets()).botToken, "views.open", { trigger_id: triggerId, view }),
+      readDetails: turnRecordsTableName ? dynamoTurnDetailsReader(documentClient, turnRecordsTableName) : detailsNotConfigured,
+      openView: async (triggerId, view, timeoutMs) => {
+        const token = (await secrets()).botToken;
+        await slackApi(token, "views.open", { trigger_id: triggerId, view }, fetch, timeoutMs);
+      },
       respondEphemeral: (responseUrl, text) => respondEphemeral(responseUrl, text),
       log,
     })],
   });
+}
+
+/** The Details reader when TURN_RECORDS_TABLE_NAME is unset: every click hears DETAILS_UNAVAILABLE. */
+async function detailsNotConfigured(): Promise<never> {
+  throw Object.assign(new Error("TURN_RECORDS_TABLE_NAME is not set"), { name: "DetailsNotConfigured" });
 }

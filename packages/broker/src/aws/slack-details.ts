@@ -17,6 +17,10 @@ import type { SlackActionHandler, SlackBlockAction } from "./slack-interactivity
 export const DETAILS_READ_TIMEOUT_MS = 1_000;
 /** The Slack service writes the record just after it posts the reply; a click this soon may beat the write. */
 export const DETAILS_SAVE_GRACE_MS = 60_000;
+/** Slack accepts a trigger_id for this long after the click reaches it. */
+export const DETAILS_TRIGGER_WINDOW_MS = 3_000;
+/** views.open is never given less than this, even when the window looks spent. */
+export const DETAILS_OPEN_FLOOR_MS = 500;
 
 export const DETAILS_NOT_FOUND = "AgentX couldn't find the details for this reply.";
 export const DETAILS_SAVING = "The details for this reply are still being saved. Close this and press Details again in a moment.";
@@ -33,7 +37,8 @@ export function detailsExpiredText(receivedAt: string): string {
 export interface DetailsClickDependencies {
   /** One record by key, projected to TURN_DETAILS_ATTRIBUTES; undefined when there is none. */
   readDetails: (key: { pk: string; sk: string }) => Promise<Record<string, unknown> | undefined>;
-  openView: (triggerId: string, view: SlackModalView) => Promise<void>;
+  /** timeoutMs is what is left of Slack's trigger window since the request arrived (never below DETAILS_OPEN_FLOOR_MS). */
+  openView: (triggerId: string, view: SlackModalView, timeoutMs: number) => Promise<void>;
   respondEphemeral: (responseUrl: string, text: string) => Promise<void>;
   now?: () => number;
   log?: SlackIngressLog;
@@ -53,7 +58,8 @@ export function detailsActionHandler(dependencies: DetailsClickDependencies): Sl
 
   const open = async (action: SlackBlockAction, view: SlackModalView): Promise<void> => {
     try {
-      await dependencies.openView(action.triggerId, view);
+      const left = DETAILS_TRIGGER_WINDOW_MS - (now() - action.requestStartedAt);
+      await dependencies.openView(action.triggerId, view, Math.max(DETAILS_OPEN_FLOOR_MS, left));
     } catch (error) {
       log("interaction.details_open_failed", { errorName: errorName(error), slackError: slackError(error) });
       // Guarded like 14c part 2's confirmation handler: a throw here would make the endpoint send its
@@ -74,7 +80,7 @@ export function detailsActionHandler(dependencies: DetailsClickDependencies): Sl
   const show = async (action: SlackBlockAction): Promise<void> => {
     // Slack Connect (the plan's ruling): a member from another workspace is told privately that there
     // are no details, and nothing is read. The team comes from the signed payload's user, never the button.
-    if (action.userTeamId !== action.thread.teamId) {
+    if (!fromHostWorkspace(action)) {
       await refuse(action, "external_member", DETAILS_NOT_FOUND);
       return;
     }
@@ -159,6 +165,17 @@ export function dynamoTurnDetailsReader(client: Pick<DynamoDBDocumentClient, "se
     }), { abortSignal: AbortSignal.timeout(timeoutMs) });
     return response.Item as Record<string, unknown> | undefined;
   };
+}
+
+/**
+ * Whether the member clicked from the thread's own workspace. A payload without team.id (the thread's
+ * team fell back to the user's) is not trusted as the host. A member of a sibling workspace in the same
+ * Enterprise Grid is (both grid IDs present and equal); the record's team is still checked after the read.
+ */
+function fromHostWorkspace(action: SlackBlockAction): boolean {
+  if (action.workspaceTeamId === "") return false;
+  if (action.userTeamId === action.thread.teamId) return true;
+  return action.enterpriseId !== "" && action.enterpriseId === action.userEnterpriseId;
 }
 
 function errorName(error: unknown): string {

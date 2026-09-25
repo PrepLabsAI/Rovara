@@ -1,8 +1,12 @@
 // tests/contract/slack-details.test.ts
 import { createHmac } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
+import { SQSClient } from "@aws-sdk/client-sqs";
 import {
+  CONFIRMATION_TTL_MS,
   DETAILS_ACTION,
   TURN_DETAILS_ATTRIBUTES,
   TurnRecordSchema,
@@ -13,6 +17,8 @@ import {
   DETAILS_NOT_FOUND,
   DETAILS_NOT_SAVED,
   DETAILS_OPEN_FAILED,
+  DETAILS_OPEN_FLOOR_MS,
+  DETAILS_TRIGGER_WINDOW_MS,
   DETAILS_SAVING,
   DETAILS_UNAVAILABLE,
   DETAILS_UNREADABLE,
@@ -21,7 +27,7 @@ import {
   dynamoTurnDetailsReader,
 } from "../../packages/broker/src/aws/slack-details.js";
 import type { SlackModalView } from "../../packages/broker/src/aws/slack-details-view.js";
-import { CLICK_FAILED_TEXT, createSlackInteractivityHandler } from "../../packages/broker/src/aws/slack-interactivity.js";
+import { CLICK_FAILED_TEXT, createAwsSlackInteractivityHandler, createSlackInteractivityHandler, slackApi } from "../../packages/broker/src/aws/slack-interactivity.js";
 
 const signingSecret = "8f742231b10e8888abcd99yyyzzz85a5";
 const requester = "U0123456789";
@@ -51,11 +57,15 @@ function stored(record: TurnRecord, extra: Record<string, unknown> = {}): Record
   return { ...turnRecordKeys(record), ...record, ...extra };
 }
 
-function payload(options: { user?: string; value?: string; userTeam?: string } = {}) {
+function payload(options: { user?: string; value?: string; userTeam?: string; team?: string | null; enterprise?: string; userEnterprise?: string } = {}) {
   return {
     type: "block_actions",
-    team: { id: thread.teamId },
-    user: { id: options.user ?? requester, team_id: options.userTeam ?? thread.teamId },
+    ...(options.team === null ? {} : { team: { id: options.team ?? thread.teamId } }),
+    ...(options.enterprise === undefined ? {} : { enterprise: { id: options.enterprise } }),
+    user: {
+      id: options.user ?? requester, team_id: options.userTeam ?? thread.teamId,
+      ...(options.userEnterprise === undefined ? {} : { enterprise_id: options.userEnterprise }),
+    },
     container: { type: "message", message_ts: replyTs, channel_id: thread.channelId, thread_ts: thread.threadTs },
     message: { ts: replyTs, thread_ts: thread.threadTs, text: "Closed TRK-9." },
     response_url: "https://hooks.slack.com/actions/T0BSHLLUGBD/1/abc",
@@ -290,10 +300,165 @@ describe("the Details view (spec 014 FR-024, FR-025)", () => {
     expect(JSON.stringify(logs)).not.toContain("poisoned record");
   });
 
+  it("treats a click without the payload's team as not from the host workspace, without reading", async () => {
+    const { click, views, commands, logs } = harness();
+    await click(payload({ team: null }));
+    expect(commands).toHaveLength(0);
+    expect(shown(views[0]!.view)).toContain(DETAILS_NOT_FOUND);
+    expect(logs.at(-1)).toMatchObject({ event: "interaction.details_refused", fields: { reason: "external_member" } });
+  });
+
+  it("looks a click whose team and user team are both another workspace up in that workspace's thread, where this turn is not", async () => {
+    // team.id = user.team_id = T_B: the thread subject is T_B's, so the key can never reach the host's
+    // record. The reply is old, so the member hears DETAILS_NOT_SAVED; a record exists under T_B only
+    // when AgentX is bound to T_B, and then this is that workspace's own click.
+    const { click, views, commands, logs } = harness();
+    await click(payload({ team: "T0OTHERTEAM", userTeam: "T0OTHERTEAM" }));
+    expect(commands[0]!.Key).toEqual({ pk: `THREAD#T0OTHERTEAM/${thread.channelId}/${thread.threadTs}`, sk: `TURN#${value}` });
+    expect(shown(views[0]!.view)).toContain(DETAILS_NOT_SAVED);
+    expect(shown(views[0]!.view)).not.toContain("tracker__close_item");
+    expect(logs.at(-1)).toMatchObject({ event: "interaction.details_refused", fields: { reason: "not_found" } });
+  });
+
+  it("lets a member of a sibling workspace in the same Enterprise Grid open it, and refuses one from another enterprise", async () => {
+    const sibling = harness();
+    await sibling.click(payload({ user: other, userTeam: "T0SIBLING01", enterprise: "E0GRID00001", userEnterprise: "E0GRID00001" }));
+    expect(shown(sibling.views[0]!.view)).toContain("tracker__close_item");
+    for (const options of [
+      { userEnterprise: "E0GRID00002", enterprise: "E0GRID00001" },
+      { enterprise: "E0GRID00001" },
+      { userEnterprise: "E0GRID00001" },
+    ]) {
+      const outsider = harness();
+      await outsider.click(payload({ user: other, userTeam: "T0SIBLING01", ...options }));
+      expect(outsider.commands).toHaveLength(0);
+      expect(shown(outsider.views[0]!.view)).toContain(DETAILS_NOT_FOUND);
+      expect(outsider.logs.at(-1)).toMatchObject({ event: "interaction.details_refused", fields: { reason: "external_member" } });
+    }
+    // The enterprise lets the clicker through; the record must still belong to the thread's team.
+    const foreign = harness({ items: [{ ...stored(turn()), requestedBy: { teamId: "T0SIBLING01", userId: requester } }] });
+    await foreign.click(payload({ user: other, userTeam: "T0SIBLING01", enterprise: "E0GRID00001", userEnterprise: "E0GRID00001" }));
+    expect(shown(foreign.views[0]!.view)).toContain(DETAILS_NOT_FOUND);
+    expect(foreign.logs.at(-1)).toMatchObject({ event: "interaction.details_refused", fields: { reason: "mismatch" } });
+  });
+
   it("is registered on the ingress Lambda's interactivity endpoint with the turn record table and views.open", () => {
     const source = readFileSync("packages/broker/src/aws/slack-interactivity.ts", "utf8");
     expect(source).toContain("detailsActionHandler({");
-    expect(source).toContain('requiredEnvironment("TURN_RECORDS_TABLE_NAME")');
+    // Optional (fix round 1): a missing variable must not break Approve/Cancel on the same endpoint.
+    expect(source).not.toContain('requiredEnvironment("TURN_RECORDS_TABLE_NAME")');
+    expect(source).toContain("process.env.TURN_RECORDS_TABLE_NAME");
+    expect(source).toContain('"DetailsNotConfigured"');
     expect(source).toContain('"views.open"');
+  });
+});
+
+describe("the Details modal's time budget (Slack's 3-second trigger window)", () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  async function budgetAfter(readMs: number): Promise<number[]> {
+    vi.useFakeTimers();
+    vi.setSystemTime(repliedAt + 3_600_000);
+    const budgets: number[] = [];
+    const { reader } = table([stored(turn())]);
+    const handler = createSlackInteractivityHandler({
+      secrets: async () => ({ signingSecret, botToken: "xoxb-test" }),
+      handlers: [detailsActionHandler({
+        readDetails: async (key) => { vi.advanceTimersByTime(readMs); return reader(key); },
+        openView: async (_triggerId, _view, timeoutMs) => { budgets.push(timeoutMs); },
+        respondEphemeral: async () => undefined,
+      })],
+    });
+    await handler(signed(payload(), Date.now()));
+    return budgets;
+  }
+
+  it("gives views.open what is left of the window since the request arrived", async () => {
+    expect(await budgetAfter(1_200)).toEqual([DETAILS_TRIGGER_WINDOW_MS - 1_200]);
+    expect(await budgetAfter(0)).toEqual([DETAILS_TRIGGER_WINDOW_MS]);
+  });
+
+  it("never gives it less than the floor", async () => {
+    expect(await budgetAfter(2_900)).toEqual([DETAILS_OPEN_FLOOR_MS]);
+    expect(await budgetAfter(10_000)).toEqual([DETAILS_OPEN_FLOOR_MS]);
+  });
+
+  it("slackApi gives up after the budget it is handed, not its 2-second default", async () => {
+    // Real timers: vitest's fake timers do not drive AbortSignal.timeout.
+    const waiting = (_url: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(init.signal?.reason instanceof Error ? init.signal.reason : new Error("aborted")));
+    });
+    const started = performance.now();
+    await expect(slackApi("xoxb-test", "views.open", {}, waiting as typeof fetch, 50)).rejects.toMatchObject({ name: "TimeoutError" });
+    const elapsed = performance.now() - started;
+    expect(elapsed).toBeGreaterThanOrEqual(40);
+    expect(elapsed).toBeLessThan(1_000);
+  });
+});
+
+describe("the Details handler on the ingress Lambda's AWS wiring", () => {
+  const environment = { ...process.env };
+  afterEach(() => {
+    process.env = { ...environment };
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  function wire(tableName: string | undefined) {
+    process.env.SLACK_THREADS_TABLE_NAME = "threads";
+    process.env.SLACK_REQUEST_QUEUE_URL = "https://sqs.us-east-1.amazonaws.com/123456789012/requests.fifo";
+    process.env.SLACK_SECRET_ARN = "arn:aws:secretsmanager:us-east-1:123456789012:secret:slack";
+    process.env.AWS_REGION = "us-east-1";
+    if (tableName === undefined) delete process.env.TURN_RECORDS_TABLE_NAME;
+    else process.env.TURN_RECORDS_TABLE_NAME = tableName;
+    const lines: Array<Record<string, unknown>> = [];
+    vi.spyOn(console, "log").mockImplementation((line: unknown) => { lines.push(JSON.parse(String(line)) as Record<string, unknown>); });
+    vi.spyOn(SecretsManagerClient.prototype, "send").mockImplementation((async () => ({ SecretString: JSON.stringify({ signingSecret, botToken: "xoxb-test" }) })) as never);
+    const queued: unknown[] = [];
+    vi.spyOn(SQSClient.prototype, "send").mockImplementation((async (command: { input: unknown }) => { queued.push(command.input); return {}; }) as never);
+    const dynamo: Array<Record<string, unknown>> = [];
+    const postedAt = new Date(Date.now() - 60_000).toISOString();
+    const confirmation = {
+      confirmationId: "44444444-4444-5444-8444-444444444444", requesterId: requester,
+      calls: [{ tool: "tracker__close_item", argumentsHash: "a".repeat(64), summary: "tracker__close_item: id=TRK-9", kind: "destructive" }],
+      postedAt, expiresAt: new Date(Date.parse(postedAt) + CONFIRMATION_TTL_MS).toISOString(),
+    };
+    vi.spyOn(DynamoDBDocumentClient.prototype, "send").mockImplementation((async (command: { input: Record<string, unknown> }) => {
+      dynamo.push(command.input);
+      const key = command.input.Key as { sk?: string } | undefined;
+      if (key?.sk === "CONFIRMATION") return { Item: { confirmation } };
+      if (command.input.UpdateExpression !== undefined) return { Attributes: { pendingRequests: 1 } };
+      return {};
+    }) as never);
+    const slack: Array<{ url: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+      slack.push({ url, body: JSON.parse(init.body as string) as Record<string, unknown> });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+    const handler = createAwsSlackInteractivityHandler();
+    return { handler, lines, queued, dynamo, slack, confirmationId: confirmation.confirmationId };
+  }
+
+  it("still queues Approve with TURN_RECORDS_TABLE_NAME unset, says so once at startup, and answers Details that the details are unavailable", async () => {
+    const { handler, lines, queued, slack, confirmationId } = wire(undefined);
+    expect(lines.filter((line) => line.event === "interaction.details_not_configured")).toEqual([
+      { component: "slack-interactivity", event: "interaction.details_not_configured", variable: "TURN_RECORDS_TABLE_NAME" },
+    ]);
+    const approve = { ...payload(), actions: [{ action_id: "agentx_confirm_approve", value: confirmationId, block_id: "agentx_confirmation" }] };
+    expect((await handler(signed(approve, Date.now()))).statusCode).toBe(200);
+    expect(queued).toHaveLength(1);
+    expect((await handler(signed(payload(), Date.now()))).statusCode).toBe(200);
+    const opened = slack.filter((entry) => entry.url === "https://slack.com/api/views.open");
+    expect(opened).toHaveLength(1);
+    expect(JSON.stringify(opened[0]!.body)).toContain(DETAILS_UNAVAILABLE);
+    expect(lines).toContainEqual({ component: "slack-interactivity", event: "interaction.details_read_failed", errorName: "DetailsNotConfigured" });
+    expect(lines.filter((line) => line.event === "interaction.details_not_configured")).toHaveLength(1);
+  });
+
+  it("reads the turn record table named by TURN_RECORDS_TABLE_NAME when it is set", async () => {
+    const { handler, lines, dynamo } = wire("turn-records");
+    expect(lines.map((line) => line.event)).not.toContain("interaction.details_not_configured");
+    await handler(signed(payload(), Date.now()));
+    expect(dynamo).toContainEqual(expect.objectContaining({ TableName: "turn-records", Key: { pk: `THREAD#${subject}`, sk: `TURN#${value}` } }));
   });
 });
