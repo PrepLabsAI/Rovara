@@ -6,8 +6,8 @@ import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import type { ActionPolicy, ConnectorCatalog } from "../../packages/contracts/src/index.js";
 import type { ActionClassifier } from "../../packages/orchestrator/src/action-classifier.js";
-import { ActionGate, actionGateExtension, argumentsHash, createGateSession, GATE_FAILURE_REASON, type GateDecision, type GateSession } from "../../packages/orchestrator/src/action-gate.js";
-import type { OrchestrationApi } from "../../packages/orchestrator/src/orchestration-tools.js";
+import { ActionGate, actionGateExtension, argumentsHash, blockReason, createGateSession, GATE_FAILURE_REASON, type GateDecision, type GateSession } from "../../packages/orchestrator/src/action-gate.js";
+import { assertOrchestrationOnly, type OrchestrationApi } from "../../packages/orchestrator/src/orchestration-tools.js";
 import { createOrchestratorRuntime, createPiSessionRuntime, runOrchestratorTurn } from "../../packages/orchestrator/src/orchestrator.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
@@ -34,10 +34,11 @@ async function turn(options: {
   policy?: ActionPolicy;
   toolText?: string;
   worker?: { prepared(): boolean; ensureReady(): Promise<undefined> };
+  log?: string[];
 }) {
   const { modelRuntime, faux } = await fauxModelRuntime();
   faux.setResponses(options.script);
-  const callConnectorTool = vi.fn(async () => ({ requestId: "33333333-3333-4333-8333-333333333333", status: "SUCCEEDED", text: options.toolText ?? "done", truncated: false, replayed: false }));
+  const callConnectorTool = vi.fn(async (input: { tool: string }) => (options.log?.push(`run:${input.tool}`), { requestId: "33333333-3333-4333-8333-333333333333", status: "SUCCEEDED", text: options.toolText ?? "done", truncated: false, replayed: false }));
   const api = {
     discoverConnectorTools: vi.fn(async () => catalog), callConnectorTool,
     submitTask: vi.fn(), taskStatus: vi.fn(), taskResult: vi.fn(), followUp: vi.fn(), createPullRequest: vi.fn(), managePullRequest: vi.fn(), pullRequestResult: vi.fn(),
@@ -174,9 +175,21 @@ describe("the action gate fails closed", () => {
       script: [toolUse(fauxToolCall("tracker__list_items", {})), fauxAssistantMessage("Could not.")] });
     expect(callConnectorTool).not.toHaveBeenCalled();
     expect(session.decisions).toMatchObject([{ outcome: "deny", source: "gate_error", reason: "AgentX could not check this action (Error)" }]);
-    expect(results).toEqual([{ tool: "tracker__list_items", isError: true,
-      text: "Not run: AgentX could not check this action (Error). Do not retry it in this turn. Tell the member AgentX could not check it." }]);
+    expect(results).toEqual([{ tool: "tracker__list_items", isError: true, text: GATE_FAILURE_REASON }]);
     expect(JSON.stringify(results)).not.toContain("SECRET");
+  });
+
+  it("keeps a thrown error's name out of what the model sees, and only in the recorded decision", async () => {
+    const session = createGateSession(member);
+    const secret = Object.assign(new Error("boom"), { name: "sk-live-SECRETNAME" });
+    const policy = { get rules(): never { throw secret; } } as unknown as ActionPolicy;
+    const { results, callConnectorTool } = await turn({ session, prompt: "list items", policy,
+      script: [toolUse(fauxToolCall("tracker__list_items", {})), fauxAssistantMessage("Could not.")] });
+    expect(callConnectorTool).not.toHaveBeenCalled();
+    expect(session.decisions).toMatchObject([{ source: "gate_error", reason: "AgentX could not check this action (sk-live-SECRETNAME)" }]);
+    expect(results).toEqual([{ tool: "tracker__list_items", isError: true, text: GATE_FAILURE_REASON }]);
+    expect(JSON.stringify(results)).not.toContain("SECRETNAME");
+    expect(blockReason(session.decisions[0]!, session, "x")).toBe(GATE_FAILURE_REASON);
   });
 
   it("blocks with a fixed reason, and does not throw, when even recording the failure fails", async () => {
@@ -209,5 +222,28 @@ describe("the action gate fails closed", () => {
       expect(execute).not.toHaveBeenCalled();
       expect(result?.isError).toBe(true);
     } finally { await runtime.dispose(); }
+  });
+});
+
+describe("the gate decides every sibling call before any runs", () => {
+  it("finishes a slow classifier check on a write before the allowed read beside it runs", async () => {
+    const log: string[] = [];
+    const classifier: ActionClassifier = async () => {
+      log.push("classify:start");
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      log.push("classify:end");
+      return { decision: "ask", reason: "Nobody asked to rename TRK-9." };
+    };
+    const session = createGateSession(member);
+    await turn({ session, prompt: "show me the open items", classifier, log,
+      script: [toolUse(fauxToolCall("tracker__save_item", { id: "TRK-9", title: "x" }), fauxToolCall("tracker__list_items", {})), fauxAssistantMessage("Here.")] });
+    expect(log).toEqual(["classify:start", "classify:end", "run:list_items"]);
+    expect(session.decisions.map((decision) => [decision.tool, decision.outcome])).toEqual([["tracker__save_item", "ask"], ["tracker__list_items", "allow"]]);
+  });
+
+  it("refuses a tool in Pi's sequential mode, where a call could run before its sibling is decided", () => {
+    expect(() => assertOrchestrationOnly([{ name: "agentx_task_status" }, { name: "agentx_submit_task", executionMode: "sequential" }]))
+      .toThrow("orchestrator tools must run in Pi's parallel mode so the action gate decides every call before any runs: agentx_submit_task is sequential");
+    expect(() => assertOrchestrationOnly([{ name: "agentx_submit_task", executionMode: "parallel" }, { name: "agentx_task_status" }])).not.toThrow();
   });
 });

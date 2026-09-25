@@ -134,11 +134,12 @@ export function describeCall(tool: string, args: Record<string, unknown>): strin
   return slackSafe(`${tool}${where}${shown.length > 0 ? `: ${shown.join(", ")}${more}` : ""}`, 300);
 }
 
-/** What the model is told when a call is not run. */
+/** Told to the model when the gate itself could not decide or record a call: fixed words, no error text. */
+export const GATE_FAILURE_REASON = "Not run: AgentX could not check this action. Do not retry it in this turn. Tell the member AgentX could not check it.";
+
+/** What the model is told when a call is not run. A gate failure's recorded reason (with the error's name) stays out of it. */
 export function blockReason(decision: GateDecision, session: GateSession, summary: string): string {
-  if (decision.outcome === "deny" && decision.source === "gate_error") {
-    return `Not run: ${decision.reason}. Do not retry it in this turn. Tell the member AgentX could not check it.`;
-  }
+  if (decision.source === "gate_error") return GATE_FAILURE_REASON;
   if (decision.outcome === "deny") {
     return `Not run: ${decision.reason}. An administrator's rule blocks this action; do not retry it. Tell the member why.`;
   }
@@ -303,9 +304,6 @@ export class ActionGate {
 
 /** The custom message type of the gate's note to the model. */
 export const GATE_MESSAGE_TYPE = "agentx-action-gate";
-
-/** Told to the model when the gate itself could not decide or record a call: fixed words, no error text. */
-export const GATE_FAILURE_REASON = "Not run: AgentX could not check this action. Do not retry it in this turn. Tell the member AgentX could not check it.";
 
 /** Told to the model at the start of a turn in which the requester confirmed calls. */
 export function confirmationNote(session: GateSession): string | undefined {
