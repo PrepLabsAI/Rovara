@@ -199,7 +199,7 @@ export class AgentRuntimeStack extends Stack {
       tags: {
         Application: "AgentX",
         DeploymentMode: "instances-ebs",
-        Environment: "production",
+        Environment: naming.environmentTagValue,
       },
     });
     runtime.node.addDependency(runtimePolicy);

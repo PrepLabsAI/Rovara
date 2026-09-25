@@ -15,6 +15,7 @@ export interface AgentXNaming {
   /** Prefix of the foundation's `Name` tags. */
   readonly resourcePrefix: string;
   readonly runtimeName: string;
+  readonly capacityProviderName: string;
   readonly alertsTopicName: string;
   alarmName(suffix: string): string;
   readonly connectorSecretPrefix: string;
@@ -39,6 +40,7 @@ export function legacyNaming(): AgentXNaming {
     apiName: "agentx-control-plane",
     resourcePrefix: "agentx-production",
     runtimeName: "agentx_production_worker",
+    capacityProviderName: "agentx_production_capacity_v3",
     alertsTopicName: "AgentXOperatorAlerts",
     alarmName: (suffix) => `AgentX${suffix}`,
     connectorSecretPrefix: "agentx/connectors/",
@@ -55,8 +57,9 @@ export function environmentNaming(env: string): AgentXNaming {
     workerSecurityGroupName: `agentx-${name}-workers`,
     apiName: `agentx-${name}-control-plane`,
     resourcePrefix: `agentx-${name}`,
-    // AgentCore runtime names allow letters, digits and underscores only.
+    // AgentCore runtime and capacity-provider names allow letters, digits and underscores only.
     runtimeName: `agentx_${name.replaceAll("-", "_")}_worker`,
+    capacityProviderName: `agentx_${name.replaceAll("-", "_")}_capacity`,
     alertsTopicName: `agentx-${name}-alerts`,
     alarmName: (suffix) => `agentx-${name}-${suffix}`,
     connectorSecretPrefix: environmentConnectorSecretPrefix(name),

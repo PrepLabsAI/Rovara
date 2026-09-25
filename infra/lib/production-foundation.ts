@@ -266,7 +266,7 @@ export class ProductionFoundationStack extends Stack {
       this,
       "AgentXProductionCapacityProvider",
       {
-        name: "agentx_production_capacity_v3",
+        name: naming.capacityProviderName,
         description: "Stable AgentX production compute and per-session EBS workspace boundary",
         permissionsConfiguration: {
           capacityProviderOperatorRoleArn: operatorRole.roleArn,
@@ -283,7 +283,7 @@ export class ProductionFoundationStack extends Stack {
                 propagatedTags: {
                   Application: "AgentX",
                   DeploymentMode: AGENTX_PRODUCTION_DEPLOYMENT_MODE,
-                  Environment: "production",
+                  Environment: naming.environmentTagValue,
                 },
               },
             },
@@ -317,7 +317,7 @@ export class ProductionFoundationStack extends Stack {
         tags: [
           { key: "Application", value: "AgentX" },
           { key: "DeploymentMode", value: AGENTX_PRODUCTION_DEPLOYMENT_MODE },
-          { key: "Environment", value: "production" },
+          { key: "Environment", value: naming.environmentTagValue },
         ],
       },
     );

@@ -13,11 +13,16 @@ function productionStacks(app: App): Stack[] {
 // authorizer names) are checked separately: they are not unique-constrained, but must still differ.
 const PHYSICAL_NAME_KEYS = ["GroupName", "AgentRuntimeName", "TopicName", "AlarmName", "RoleName", "QueueName", "TableName", "BucketName", "LogGroupName"];
 
+// AWS::BedrockAgentCore::CapacityProvider and AWS::ApiGatewayV2::Api both use the generic "Name"
+// key, which most other resource types also carry for unrelated purposes (e.g. a tag's own "Name"
+// entry), so they are checked by resource type rather than added to PHYSICAL_NAME_KEYS.
+const NAME_PROPERTY_BY_TYPE = new Set(["AWS::ApiGatewayV2::Api", "AWS::BedrockAgentCore::CapacityProvider"]);
+
 function physicalNames(stack: Stack): string[] {
   const resources = Template.fromStack(stack).toJSON().Resources as Record<string, { Type: string; Properties?: Record<string, unknown> }>;
   return Object.values(resources).flatMap((resource) => [
     ...PHYSICAL_NAME_KEYS.map((key) => resource.Properties?.[key]),
-    resource.Type === "AWS::ApiGatewayV2::Api" ? resource.Properties?.Name : undefined,
+    NAME_PROPERTY_BY_TYPE.has(resource.Type) ? resource.Properties?.Name : undefined,
   ].filter((value): value is string => typeof value === "string"));
 }
 
@@ -33,6 +38,7 @@ describe("legacy naming", () => {
     expect(naming.apiName).toBe("agentx-control-plane");
     expect(naming.resourcePrefix).toBe("agentx-production");
     expect(naming.runtimeName).toBe("agentx_production_worker");
+    expect(naming.capacityProviderName).toBe("agentx_production_capacity_v3");
     expect(naming.alertsTopicName).toBe("AgentXOperatorAlerts");
     expect(naming.alarmName("ConnectorBroken")).toBe("AgentXConnectorBroken");
     expect(naming.connectorSecretPrefix).toBe("agentx/connectors/");
@@ -54,6 +60,7 @@ describe("environment naming", () => {
     expect(naming.apiName).toBe("agentx-dev-2-control-plane");
     expect(naming.resourcePrefix).toBe("agentx-dev-2");
     expect(naming.runtimeName).toBe("agentx_dev_2_worker");
+    expect(naming.capacityProviderName).toBe("agentx_dev_2_capacity");
     expect(naming.alertsTopicName).toBe("agentx-dev-2-alerts");
     expect(naming.alarmName("ConnectorBroken")).toBe("agentx-dev-2-ConnectorBroken");
     expect(naming.connectorSecretPrefix).toBe("agentx/dev-2/connectors/");
@@ -92,5 +99,17 @@ describe("environment naming", () => {
     expect(text).not.toContain(":runtime/*");
     expect(text).toContain("secret:agentx/staging/connectors/*");
     expect(text).not.toContain("secret:agentx/connectors/*");
+  }, 120_000);
+
+  it("does not leak the legacy production Environment tag onto foundation or runtime resources", () => {
+    const staging = productionStacks(buildAgentXApp({ agentxEnv: "staging" }));
+    const foundation = staging.find((stack) => stack.stackName === "agentx-staging-foundation")!;
+    const runtime = staging.find((stack) => stack.stackName === "agentx-staging-runtime")!;
+    for (const stack of [foundation, runtime]) {
+      const text = JSON.stringify(Template.fromStack(stack).toJSON());
+      expect(text).toContain('"Environment":"staging"');
+      expect(text).not.toContain('"Environment":"production"');
+      expect(text).not.toContain('"Key":"Environment","Value":"production"');
+    }
   }, 120_000);
 });
