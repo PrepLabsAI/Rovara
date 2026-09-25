@@ -33,6 +33,8 @@ export interface OrchestratorOptions {
   connectors?: readonly ThreadConnector[];
   repositories?: readonly string[];
   recoverableOperations?: readonly string[];
+  /** Connectors whose last turn saw a changed tool definition; their discovery bypasses the broker cache. */
+  refreshConnectors?: readonly string[];
   /** Told about each connector whose discovery failed this turn, so the host can log it. */
   onConnectorUnavailable?: (failure: ConnectorUnavailable) => void;
   /** Collects this turn's record; the Slack service owns writing it. */
@@ -68,7 +70,8 @@ export async function createOrchestratorRuntime(options: OrchestratorOptions): P
     // lacks the GitHub App) must not stop the whole turn: skip its tools and keep building the
     // runtime with the in-house tools and every other connector.
     try {
-      catalogs.push(await options.api.discoverConnectorTools({ workspaceId: options.context.workspaceId, connector: connector.name }));
+      const refresh = options.refreshConnectors?.includes(connector.name) === true;
+      catalogs.push(await options.api.discoverConnectorTools({ workspaceId: options.context.workspaceId, connector: connector.name, ...(refresh ? { refresh: true } : {}) }));
     } catch (error) {
       const failure = connectorFailure(connector.name, error);
       (failure.cause === "transient" ? unavailable : misconfigured).push(connector.name);

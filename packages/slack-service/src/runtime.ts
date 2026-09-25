@@ -12,5 +12,6 @@ export function createHostedSlackRuntime(input: TurnInput, options: Pick<Orchest
     ...(input.repositories === undefined ? {} : { repositories: input.repositories }),
     ...(input.recoverableOperations === undefined ? {} : { recoverableOperations: input.recoverableOperations }),
     ...(input.recorder === undefined ? {} : { turnRecorder: input.recorder }),
+    ...(input.refreshConnectors === undefined ? {} : { refreshConnectors: input.refreshConnectors }),
   });
 }

@@ -12,6 +12,10 @@ import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const catalog: ConnectorCatalog = { connector: "github", tools: [], skipped: [] };
+
+function requestUrl(url: string | URL | Request): string {
+  return typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+}
 const message: SlackRequestMessage = {
   version: 1, eventId: "EvCHAR0001", receivedAt: "2026-09-24T10:00:00.000Z", userId: "U0123456789",
   thread: { teamId: "T0123456789", channelId: "C0123456789", threadTs: "1695500000.000001" }, text: "list issues",
@@ -53,7 +57,7 @@ describe("connector discovery and Slack turn wiring before refresh (characteriza
     await api.discoverConnectorTools({ workspaceId, connector: "github" });
     expect(fetchImplementation).toHaveBeenCalledOnce();
     const [url, init] = fetchImplementation.mock.calls[0]!;
-    expect(String(url)).toBe(`https://agentx.example.test/v1/workspaces/${workspaceId}/connectors/github/tools`);
+    expect(requestUrl(url)).toBe(`https://agentx.example.test/v1/workspaces/${workspaceId}/connectors/github/tools`);
     expect(init?.method).toBe("GET");
   });
 

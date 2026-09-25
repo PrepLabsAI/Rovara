@@ -166,12 +166,14 @@ const threads: ThreadStore = {
       conversationId?: string;
       settingsRevision?: number;
       closedAt?: string;
+      refreshConnectors?: unknown;
     } | undefined;
     return {
       ...(item?.workspaceId === undefined ? {} : { workspaceId: item.workspaceId }),
       ...(item?.conversationId === undefined ? {} : { conversationId: item.conversationId }),
       ...(item?.settingsRevision === undefined ? {} : { settingsRevision: item.settingsRevision }),
       ...(item?.closedAt === undefined ? {} : { closedAt: item.closedAt }),
+      ...(Array.isArray(item?.refreshConnectors) ? { refreshConnectors: item.refreshConnectors.filter((name): name is string => typeof name === "string") } : {}),
     };
   },
   async saveConversation(subject, state) {
@@ -198,6 +200,15 @@ const threads: ThreadStore = {
       ExpressionAttributeValues: { ":workspace": state.workspaceId, ":closedAt": state.closedAt },
     }));
     await s3.send(new DeleteObjectCommand({ Bucket: sessionBucketName, Key: sessionKey(subject) }));
+  },
+  async saveRefreshConnectors(subject, connectors) {
+    await documentClient.send(new UpdateCommand({
+      TableName: threadsTableName,
+      Key: { pk: `THREAD#${subject}`, sk: "META" },
+      ...(connectors.length === 0
+        ? { UpdateExpression: "REMOVE refreshConnectors" }
+        : { UpdateExpression: "SET refreshConnectors = :connectors", ExpressionAttributeValues: { ":connectors": connectors } }),
+    }));
   },
   async finish(subject) {
     try {

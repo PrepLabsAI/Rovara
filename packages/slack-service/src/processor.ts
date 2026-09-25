@@ -9,6 +9,7 @@ import {
   type SlackWorkspaceCloseCompleteResult,
   type SlackWorkspaceCloseStartResult,
   type ThreadConnector,
+  type TurnObservation,
   type TurnRecord,
 } from "@agentx/contracts";
 import { TurnRecorder } from "@agentx/orchestrator/turn-recorder";
@@ -29,6 +30,8 @@ export interface ThreadState {
   /** The settings revision this thread was last told about, so a change is announced once. */
   settingsRevision?: number;
   closedAt?: string;
+  /** Connectors whose last turn failed with schema_changed; the next discovery asks for a refresh. */
+  refreshConnectors?: string[];
 }
 
 export interface ThreadStore {
@@ -37,6 +40,8 @@ export interface ThreadStore {
   saveSettingsRevision(subject: string, revision: number): Promise<void>;
   close(subject: string, state: { workspaceId: string; closedAt: string }): Promise<void>;
   finish(subject: string): Promise<void>;
+  /** Remembers the connectors whose next discovery should ask for a refresh; an empty list clears them. */
+  saveRefreshConnectors?(subject: string, connectors: string[]): Promise<void>;
 }
 
 export interface TurnInput {
@@ -51,6 +56,8 @@ export interface TurnInput {
   requestId: () => string;
   /** Collects this turn's record; the processor writes it once the event is finished. */
   recorder?: TurnRecorder;
+  /** Connectors whose discovery this turn should bypass the broker's catalog cache. */
+  refreshConnectors?: string[];
 }
 
 export type ServiceLog = (event: string, fields: Readonly<Record<string, string | number | boolean>>) => void;
@@ -75,8 +82,11 @@ export async function processSlackRequest(
   const subject = slackThreadSubject(message.thread);
   const log: ServiceLog = dependencies.log ?? (() => undefined);
   const startedAt = new Date();
-  // Only a configured sink gets a recorder, so a service without one runs the turn exactly as before.
-  const recorder = dependencies.turnRecords === undefined ? undefined : new TurnRecorder();
+  // Only a configured sink or refresh store gets a recorder, so a service without either runs the
+  // turn exactly as before.
+  const recorder = dependencies.turnRecords === undefined && dependencies.threads.saveRefreshConnectors === undefined
+    ? undefined
+    : new TurnRecorder();
   const draft: TurnDraft = { disposition: "abandoned" };
   let lastPosted = "";
   // Remembers only what reached Slack, so the record never claims a message the member did not see.
@@ -190,6 +200,7 @@ export async function processSlackRequest(
         ...(workspace.recoverableOperations === undefined ? {} : { recoverableOperations: workspace.recoverableOperations }),
         requestId: requestIdSequence(message.eventId),
         ...(recorder === undefined ? {} : { recorder }),
+        ...(state.refreshConnectors?.length ? { refreshConnectors: state.refreshConnectors } : {}),
       });
       draft.disposition = "answered";
       log("task.completed", { eventId: message.eventId, responseLength: response.length });
@@ -201,6 +212,7 @@ export async function processSlackRequest(
     }
     draft.responseText = response;
     for (const chunk of splitSlackMessage(response)) await post(chunk);
+    if (recorder !== undefined) await rememberRefresh(dependencies, log, subject, message.eventId, state.refreshConnectors ?? [], recorder);
     finished = true;
   } catch (error) {
     // Redelivery resumes the same operations because every request ID derives from the Slack event ID.
@@ -273,6 +285,39 @@ async function recordTurn(
       } catch {
         // Logging itself failed; nothing left to report to.
       }
+    }
+  }
+}
+
+/**
+ * Remembers which connectors saw a changed definition this turn, writing only when the set changes.
+ * It never throws: the member already has their reply, and a throw here would invite a redelivery
+ * that posts it again. The cost of a lost write is one turn served from a stale catalog cache, which
+ * the call-time schema check still refuses.
+ */
+async function rememberRefresh(
+  dependencies: ProcessorDependencies,
+  log: ServiceLog,
+  subject: string,
+  eventId: string,
+  previous: readonly string[],
+  recorder: TurnRecorder,
+): Promise<void> {
+  const save = dependencies.threads.saveRefreshConnectors?.bind(dependencies.threads);
+  if (save === undefined) return;
+  try {
+    const observation: TurnObservation = recorder.observation();
+    // A turn that never reached its tool offer never finished discovery, so it neither used the
+    // remembered refresh nor learned anything new: keep the list for the next turn.
+    if (observation.manifestHash === undefined) return;
+    const next = [...new Set(observation.calls.flatMap((call) => call.reason === "schema_changed" && call.connector !== undefined ? [call.connector] : []))].sort();
+    if (JSON.stringify(next) === JSON.stringify([...previous].sort())) return;
+    await save(subject, next);
+  } catch (error) {
+    try {
+      log("thread.refresh_save_failed", { eventId, errorName: errorName(error) });
+    } catch {
+      // Logging itself failed; nothing left to report to.
     }
   }
 }

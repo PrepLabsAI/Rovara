@@ -34,7 +34,7 @@ type PullRequestAction = (typeof PULL_REQUEST_ACTIONS)[number];
 const TITLED_ACTIONS = new Set<PullRequestAction>(["edit", "replace", "revert"]);
 
 export interface OrchestrationApi {
-  discoverConnectorTools?(input: { workspaceId: string; connector: string }): Promise<ConnectorCatalog>;
+  discoverConnectorTools?(input: { workspaceId: string; connector: string; refresh?: boolean }): Promise<ConnectorCatalog>;
   callConnectorTool?(input: ConnectorCallRequest & { workspaceId: string; connector: string }): Promise<unknown>;
   submitTask(input: {
     workspaceId: string;
