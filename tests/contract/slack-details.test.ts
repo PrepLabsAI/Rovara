@@ -374,11 +374,15 @@ describe("the Details modal's time budget (Slack's 3-second trigger window)", ()
   }
 
   it("gives views.open what is left of the window since the request arrived", async () => {
-    expect(await budgetAfter(1_200)).toEqual([DETAILS_TRIGGER_WINDOW_MS - 1_200]);
-    expect(await budgetAfter(0)).toEqual([DETAILS_TRIGGER_WINDOW_MS]);
+    // 2.5 s from handler entry, leaving room for the acknowledgement and API Gateway inside Slack's 3 s.
+    expect(DETAILS_TRIGGER_WINDOW_MS).toBe(2_500);
+    expect(await budgetAfter(1_200)).toEqual([1_300]);
+    expect(await budgetAfter(0)).toEqual([2_500]);
   });
 
   it("never gives it less than the floor", async () => {
+    expect(DETAILS_OPEN_FLOOR_MS).toBe(500);
+    expect(await budgetAfter(2_100)).toEqual([500]);
     expect(await budgetAfter(2_900)).toEqual([DETAILS_OPEN_FLOOR_MS]);
     expect(await budgetAfter(10_000)).toEqual([DETAILS_OPEN_FLOOR_MS]);
   });
@@ -400,11 +404,12 @@ describe("the Details handler on the ingress Lambda's AWS wiring", () => {
   const environment = { ...process.env };
   afterEach(() => {
     process.env = { ...environment };
+    vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 
-  function wire(tableName: string | undefined) {
+  function wire(tableName: string | undefined, readDelayMs = 0) {
     process.env.SLACK_THREADS_TABLE_NAME = "threads";
     process.env.SLACK_REQUEST_QUEUE_URL = "https://sqs.us-east-1.amazonaws.com/123456789012/requests.fifo";
     process.env.SLACK_SECRET_ARN = "arn:aws:secretsmanager:us-east-1:123456789012:secret:slack";
@@ -426,13 +431,22 @@ describe("the Details handler on the ingress Lambda's AWS wiring", () => {
     vi.spyOn(DynamoDBDocumentClient.prototype, "send").mockImplementation((async (command: { input: Record<string, unknown> }) => {
       dynamo.push(command.input);
       const key = command.input.Key as { sk?: string } | undefined;
+      if (key?.sk?.startsWith("TURN#") && readDelayMs > 0) vi.setSystemTime(Date.now() + readDelayMs);
       if (key?.sk === "CONFIRMATION") return { Item: { confirmation } };
       if (command.input.UpdateExpression !== undefined) return { Attributes: { pendingRequests: 1 } };
       return {};
     }) as never);
-    const slack: Array<{ url: string; body: Record<string, unknown> }> = [];
+    // Which timeout each signal was made with, so a Slack call's deadline can be read off its signal.
+    const timeouts = new WeakMap<AbortSignal, number>();
+    const makeTimeout = AbortSignal.timeout.bind(AbortSignal);
+    vi.spyOn(AbortSignal, "timeout").mockImplementation((milliseconds: number) => {
+      const signal = makeTimeout(milliseconds);
+      timeouts.set(signal, milliseconds);
+      return signal;
+    });
+    const slack: Array<{ url: string; body: Record<string, unknown>; timeoutMs: number | undefined }> = [];
     vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
-      slack.push({ url, body: JSON.parse(init.body as string) as Record<string, unknown> });
+      slack.push({ url, body: JSON.parse(init.body as string) as Record<string, unknown>, timeoutMs: init.signal ? timeouts.get(init.signal) : undefined });
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     });
     const handler = createAwsSlackInteractivityHandler();
@@ -460,5 +474,14 @@ describe("the Details handler on the ingress Lambda's AWS wiring", () => {
     expect(lines.map((line) => line.event)).not.toContain("interaction.details_not_configured");
     await handler(signed(payload(), Date.now()));
     expect(dynamo).toContainEqual(expect.objectContaining({ TableName: "turn-records", Key: { pk: `THREAD#${subject}`, sk: `TURN#${value}` } }));
+  });
+
+  it("hands views.open what is left of the window after the record read, not slackApi's 2-second default", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(repliedAt + 3_600_000);
+    const { handler, slack } = wire("turn-records", 700);
+    await handler(signed(payload(), Date.now()));
+    const opened = slack.filter((entry) => entry.url === "https://slack.com/api/views.open");
+    expect(opened.map((entry) => entry.timeoutMs)).toEqual([2_500 - 700]);
   });
 });

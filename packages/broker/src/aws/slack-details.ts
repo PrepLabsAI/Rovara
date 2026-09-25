@@ -17,8 +17,11 @@ import type { SlackActionHandler, SlackBlockAction } from "./slack-interactivity
 export const DETAILS_READ_TIMEOUT_MS = 1_000;
 /** The Slack service writes the record just after it posts the reply; a click this soon may beat the write. */
 export const DETAILS_SAVE_GRACE_MS = 60_000;
-/** Slack accepts a trigger_id for this long after the click reaches it. */
-export const DETAILS_TRIGGER_WINDOW_MS = 3_000;
+/**
+ * How long views.open may run, counted from the endpoint's entry. Slack accepts a trigger_id for 3 s
+ * after the click; 2.5 s leaves margin for the acknowledgement and API Gateway.
+ */
+export const DETAILS_TRIGGER_WINDOW_MS = 2_500;
 /** views.open is never given less than this, even when the window looks spent. */
 export const DETAILS_OPEN_FLOOR_MS = 500;
 
