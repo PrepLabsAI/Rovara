@@ -38,7 +38,7 @@ const MAX_TOKEN_RESPONSE = 65_536;
 const LEASE_DEADLINE_SAFETY_MS = 2_000;
 /** Reported through onRotationUnsaved when a rotated token's write-back was skipped, not failed, because the lease was nearly spent. */
 const LEASE_DEADLINE_UNSAVED_REASON = "LeaseDeadlineExceeded";
-/** Reported through onRotationUnsaved when a rotated token was dropped because the secret's refresh token changed (a new sign-in) meanwhile. */
+/** Reported through onRotationUnsaved when a rotated token was dropped because the secret's refresh token changed since this refresh read it (usually a new sign-in). */
 const SECRET_CHANGED_UNSAVED_REASON = "SecretChanged";
 
 interface Refreshed { token: string; expiresAt: number; lifetimeMs: number; refreshToken?: string | undefined }
@@ -196,8 +196,11 @@ export function oauthRefreshTokenProvider(options: {
       if (storedUsable(stored)) return remember(stored, usableUntil(stored), generationAtStart);
       // Read under the lease, never from a cache, so a token another container rotated and saved is the one used.
       let client = await readClient();
-      if (unsaved !== undefined && unsavedBase !== client.refreshToken) {
-        // A new sign-in replaced the refresh token this container's unsaved one was rotated from.
+      if (unsaved !== undefined && unsaved === client.refreshToken) {
+        // Already saved after all: a write that landed but reported failure, or a peer saved the same rotation.
+        unsaved = undefined;
+      } else if (unsaved !== undefined && unsavedBase !== client.refreshToken) {
+        // The secret's refresh token changed since the unsaved one was rotated from it (usually a new sign-in).
         unsaved = undefined;
         options.onRotationUnsaved(SECRET_CHANGED_UNSAVED_REASON);
       }

@@ -127,7 +127,8 @@ Stored the refresh token in agentx/connectors/asana-bot and registered asana-bot
 Check that the "Signed in to Asana as" line names the bot user. If it names you, AgentX would act
 as you, with everything you can see: run the command again in a private window, which replaces the
 stored sign-in. If Asana's answer carries no account, the line reads "Signed in to Asana (the
-account could not be shown)"; check the account in Step 6 instead.
+account could not be shown)"; nothing then proves whose sign-in was stored, so run the command again
+in a fresh private window where you signed in only as the bot user.
 
 What the command did: it signed in with PKCE and a one-time state value, listened only on
 `127.0.0.1:8765`, exchanged the code for a refresh token, wrote the refresh token into the secret
@@ -160,9 +161,11 @@ Signed in to Asana as the bot user:
 1. The sidebar lists only the project from Step 1, and no teams.
 2. Search for the name of a task you know is in another project of your workspace. Asana finds
    nothing.
-3. Under your profile photo, **Settings > Apps > Authorized apps** lists your AgentX app. This
-   shows the sign-in stored in Step 4 is this bot user's. If it is missing, or the "Signed in to
-   Asana as" line from Step 4 named someone else, run Step 4 again in a private window.
+3. The "Signed in to Asana as" line Step 4 printed named this bot user. That line is what shows
+   whose sign-in was stored. If it named someone else, or could not show the account, run Step 4
+   again in a private window. Under your profile photo, **Settings > Apps > Authorized apps**
+   listing your AgentX app shows only that the bot user has authorized the app, not that its
+   sign-in is the one stored.
 
 Checks 1 and 2 test what the bot user can see; they pass even if Step 4 stored another account's
 sign-in, so check 3 matters.
@@ -330,8 +333,9 @@ settings, then delete the secret.
     Step 3, or run Step 4 again, which tags the secret.
   - `"reason":"LeaseDeadlineExceeded"` means a slow refresh skipped the write; the next refresh
     tries again.
-  - `"reason":"SecretChanged"` means Step 4 was run again while a refresh was under way. AgentX
-    dropped the token from the old sign-in and kept the new one. Nothing to do.
+  - `"reason":"SecretChanged"` means the secret's refresh token changed since this refresh read
+    it (usually a new sign-in, from Step 4 run again). AgentX dropped the token it could not save
+    and kept the secret's. Nothing to do.
 
   Until the new token is saved, the broker keeps it in memory and retries the write on the next
   refresh. If that copy is lost before it is saved and Asana no longer accepts the old token, calls

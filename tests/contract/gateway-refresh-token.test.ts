@@ -491,4 +491,18 @@ describe("oauth-refresh-token provider", () => {
     expect(JSON.parse(secrets.values[SECRET] ?? "")).toEqual({ ...CLIENT, refreshToken: REAUTHORIZED });
     expect(unsaved).toEqual(["AccessDeniedException", "SecretChanged"]);
   });
+  it("clears a rotated token it holds unsaved without reporting it once the secret already holds that same token", async () => {
+    const { secrets, endpoint, clock, unsaved, container } = setup({ rotate: true });
+    secrets.failWrites = 2;
+    const provider = container();
+    await provider.issue(undefined, "read");
+    expect(unsaved).toEqual(["AccessDeniedException"]);
+    // The write landed after all (or a peer saved the same rotation): the secret holds the unsaved token.
+    secrets.values[SECRET] = JSON.stringify({ ...CLIENT, refreshToken: "refresh-token-rotated-1" });
+    clock.advance(56 * 60_000);
+    await provider.issue(undefined, "read");
+    expect(endpoint.presented).toEqual([REFRESH, "refresh-token-rotated-1"]);
+    expect(unsaved).toEqual(["AccessDeniedException"]);
+    expect(JSON.parse(secrets.values[SECRET] ?? "")).toEqual({ ...CLIENT, refreshToken: "refresh-token-rotated-2" });
+  });
 });
