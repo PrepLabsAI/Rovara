@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
-import { OAuthClientCredentialsSecretSchema, StaticSecretSchema, type OAuthClientCredentialsSecret, type StaticSecret } from "@agentx/contracts";
+import {
+  OAuthClientCredentialsSecretSchema, OAuthRefreshTokenSecretSchema, StaticSecretSchema,
+  type OAuthClientCredentialsSecret, type OAuthRefreshTokenSecret, type StaticSecret,
+} from "@agentx/contracts";
 import type { CredentialProvider } from "./types.js";
 import { isObject } from "./util.js";
 
@@ -32,8 +35,9 @@ export function scopeKey(scopes: readonly string[]): string {
  * includes any of the body in a thrown message. Cancels the body and releases the reader on
  * every exit path (an early content-length rejection, a limit hit mid-stream, or any other
  * failure), so the underlying connection is never left open.
+ * @internal Shared with the refresh-token provider; not part of the gateway's public contract.
  */
-async function readLimitedText(response: Response, limit: number): Promise<string> {
+export async function readLimitedText(response: Response, limit: number): Promise<string> {
   // undici-types leaves `Body.body` as an unparameterized `ReadableStream` (its generic defaults
   // to `any`), so it's cast to the real global `ReadableStream<Uint8Array>` — available without
   // the "dom" lib, just not inferred here — to keep the byte-counting loop below fully typed.
@@ -70,6 +74,7 @@ async function readLimitedText(response: Response, limit: number): Promise<strin
 const SECRET_SHAPES = {
   "static-secret": { schema: StaticSecretSchema, shape: '{"apiKey": "..."}' },
   "oauth-client-credentials": { schema: OAuthClientCredentialsSecretSchema, shape: '{"clientId": "...", "clientSecret": "...", "scopes": ["..."]}' },
+  "oauth-refresh-token": { schema: OAuthRefreshTokenSecretSchema, shape: '{"clientId": "...", "clientSecret": "...", "refreshToken": "..."}' },
 } as const;
 
 /**
@@ -78,8 +83,9 @@ const SECRET_SHAPES = {
  */
 export function parseConnectorSecret(type: "static-secret", raw: string | undefined, ref: string, secretName: string): StaticSecret;
 export function parseConnectorSecret(type: "oauth-client-credentials", raw: string | undefined, ref: string, secretName: string): OAuthClientCredentialsSecret;
-export function parseConnectorSecret(type: keyof typeof SECRET_SHAPES, raw: string | undefined, ref: string, secretName: string): StaticSecret | OAuthClientCredentialsSecret;
-export function parseConnectorSecret(type: keyof typeof SECRET_SHAPES, raw: string | undefined, ref: string, secretName: string): StaticSecret | OAuthClientCredentialsSecret {
+export function parseConnectorSecret(type: "oauth-refresh-token", raw: string | undefined, ref: string, secretName: string): OAuthRefreshTokenSecret;
+export function parseConnectorSecret(type: keyof typeof SECRET_SHAPES, raw: string | undefined, ref: string, secretName: string): StaticSecret | OAuthClientCredentialsSecret | OAuthRefreshTokenSecret;
+export function parseConnectorSecret(type: keyof typeof SECRET_SHAPES, raw: string | undefined, ref: string, secretName: string): StaticSecret | OAuthClientCredentialsSecret | OAuthRefreshTokenSecret {
   if (raw === undefined) throw new CredentialUnavailable(`credential ${ref}: secret ${secretName} was not found`);
   let json: unknown;
   try { json = JSON.parse(raw); } catch { json = undefined; }
