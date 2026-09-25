@@ -22,7 +22,7 @@ text, arguments or credentials.
 | `TurnEmptyResponse` | Slack service | — | The final assistant message had no text |
 | `TurnCompleted` | Slack service | — | Denominator for rates |
 | `TurnRecordWriteFailed` | Slack service | — | A turn record was not written (a build, parse or write failure; a redelivered event that already has a record is not a failure and is not counted) |
-| `TurnMetricsEmitFailed` | Slack service | — | A record was written but emitting its own `TurnCompleted`/`TurnEmptyResponse`/`ToolSchemaError`/`ToolUnknownName` metrics then failed |
+| `TurnMetricsEmitFailed` | Slack service | — | Emitting a turn's own `TurnCompleted`/`TurnEmptyResponse`/`ToolSchemaError`/`ToolUnknownName` metrics failed. Turn metrics are emitted whenever the record was built, whether its write succeeded or failed; only a duplicate (a redelivered event that already has a record) skips them |
 
 Every discovery request a turn makes is observed, whether or not the underlying vendor catalog was
 served from the 10-minute cache: `ConnectorNotConnected` and `ConnectorToolSkipped` from discovery,

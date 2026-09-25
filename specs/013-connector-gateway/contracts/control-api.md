@@ -118,8 +118,11 @@ entry first. A stored record that fails to parse is left out (logged as
 `connector.credential_record_invalid`) rather than failing the list. See
 [data-model.md](../data-model.md) for the list entry's fields.
 
-`GET /v1/admin/turns?since=<ISO>&cursor=<c>` response: `{ turns: [TurnRecord], cursor?, requestId
-}`, newest first, at most 100 per page. `since` is an ISO 8601 time; the CLI turns a duration such
+`GET /v1/admin/turns?since=<ISO>&cursor=<c>` response: `{ turns: [TurnRecord], cursor?, skipped?,
+requestId }`, newest first, at most 100 per page and at most about 4,000,000 bytes of JSON per page,
+because Lambda refuses a synchronous response over 6 MB. A page cut short by size carries a `cursor`
+that resumes after its last record. `skipped` is present when the page left out stored items that
+failed the record schema; the control plane logs their keys as `turn_record.invalid`. `since` is an ISO 8601 time; the CLI turns a duration such
 as `7d` into one before sending it. `cursor` is opaque: pass back exactly what the previous page
 returned, and treat any other value as invalid. A malformed `since`, or a `cursor` that is not
 well-formed, outside the requested `since` window, or otherwise forged, refuses `CONFIG_INVALID`

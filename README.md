@@ -233,9 +233,9 @@ The production release creates the Slack ingress route, queue, and thread storag
 `AgentXControlPlane`. Create the orchestrator service once with the release command's
 `--create-slack-orchestrator` flag; the release pipeline updates it after that. Every release
 deploys the production runtime first, then the control plane, then the Slack orchestrator service,
-so the control plane's `TurnRecordsTableName` output — which the release script reads and passes to
-the orchestrator service as `TURN_RECORDS_TABLE_NAME` — always exists before the service that
-writes to it starts. Read the Slack outputs from the control plane stack:
+so the control plane's `TurnRecordsTableName` output always exists before the service that writes
+to it starts. The release script reads that output and passes it to the orchestrator service as
+`TURN_RECORDS_TABLE_NAME`. Read the Slack outputs from the control plane stack:
 
 ```sh
 AWS_PROFILE=agentx-deployer AWS_REGION=us-east-1 aws cloudformation describe-stacks \
@@ -383,8 +383,14 @@ example a newer type left over after a rollback; it is skipped, not served. `con
 means a stored connector's configuration failed to parse for its own type; it is skipped too, and
 the log line names the reason. Both name the project, revision, connector and type, never a secret.
 
-Each Slack request that reaches the orchestrator leaves one turn record in the `TurnRecords` table
-for 30 days: the request and response text (each at most 40,000 characters), the tools the
+Each Slack request that reaches the orchestrator service leaves one turn record in the
+`TurnRecords` table for 30 days, once it finishes. That covers every `disposition`: `answered` and
+`failed` turns that ran the orchestrator, `abandoned` requests whose final attempt failed, and
+requests the service settled without running the orchestrator: a close command
+(`workspace_close`), the workspace limit (`workspace_limit`), a closed workspace
+(`workspace_closed`), and a workspace that could not be set up or is not runnable
+(`workspace_unavailable`). An attempt that fails and is retried leaves no record; the attempt that
+finishes writes the one record. A record holds the request and response text (each at most 40,000 characters), the tools the
 orchestrator was offered, each tool call with its redacted arguments, validation result and
 outcome, the stop reason, the orchestrator's token usage, and the worker operations it started.
 Known credential shapes are replaced with `[REDACTED]` before a record is written; this is
@@ -396,7 +402,9 @@ category strings, never message text, when part of the recording itself failed, 
 An administrator exports records with `agentx admin turns export --since <duration> [--output
 <file>]`, for example `agentx admin turns export --since 7d --output turns.jsonl`; with `--output`
 the file is written at mode `0600` through a `.partial` file renamed into place only on success,
-and the output holds request text, so keep it private. `turn_record.write_failed` means a record
+and the output holds request text, so keep it private. The summary on stderr gives the count
+exported, plus `skipped` when the control plane left out stored records that failed the record
+schema. `turn_record.write_failed` means a record
 was lost (the member still got the reply), and `turn_record.duplicate` means SQS redelivered a
 request that was already recorded.
 

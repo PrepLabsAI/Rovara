@@ -128,8 +128,8 @@ phase 2b (T038), alongside the conditional recovery tools that consume it.
 ## Turn record
 
 Table `TurnRecords` in `AgentXControlPlane`, TTL 30 days (the `expiresAt` attribute). Written once
-per Slack event, with a condition on absence, only when the event is finished — never a partial
-record for an event still in flight.
+per Slack event, with a condition on absence, only when the event is finished. An event still in
+flight never gets a partial record.
 
 | Field | Notes |
 |---|---|
