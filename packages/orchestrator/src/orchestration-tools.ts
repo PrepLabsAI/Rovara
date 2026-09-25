@@ -286,10 +286,16 @@ export function createOrchestrationTools(
   return tools;
 }
 
-export function assertOrchestrationOnly(tools: readonly Pick<ToolDefinition, "name">[], catalogs: readonly ConnectorCatalog[] = []): void {
+export function assertOrchestrationOnly(tools: readonly Pick<ToolDefinition, "name" | "executionMode">[], catalogs: readonly ConnectorCatalog[] = []): void {
   const allowed = new Set<string>([...ORCHESTRATION_TOOL_NAMES, ...catalogs.flatMap((catalog) => catalog.tools.map((tool) => tool.name))]);
   const forbidden = tools.map(({ name }) => name).filter((name) => !allowed.has(name));
   if (forbidden.length > 0) throw new Error(`local orchestrator exposes forbidden tools: ${forbidden.join(", ")}`);
+  // Pi prepares (and so gates) every sibling call before running any only in parallel mode; one
+  // sequential tool switches the whole batch to run each call before the next is decided.
+  const sequential = tools.filter((tool) => tool.executionMode === "sequential").map(({ name }) => name);
+  if (sequential.length > 0) {
+    throw new Error(`orchestrator tools must run in Pi's parallel mode so the action gate decides every call before any runs: ${sequential.join(", ")} ${sequential.length === 1 ? "is" : "are"} sequential`);
+  }
 }
 
 function toolResult(value: unknown) {

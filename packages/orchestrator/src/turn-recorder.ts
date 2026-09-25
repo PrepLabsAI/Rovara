@@ -3,6 +3,10 @@ import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import {
   TURN_ARGUMENT_LIMIT,
   TURN_CALL_LIMIT,
+  TURN_GATE_REASON_LIMIT,
+  TurnGateSchema,
+  redactAndCap,
+  type TurnGate,
   TURN_RECORDING_ERROR_LIMIT,
   TurnObservationSchema,
   capText,
@@ -46,6 +50,8 @@ export class TurnRecorder {
   private readonly pending = new Map<string, PendingCall>();
   private readonly order: string[] = [];
   private readonly errorCodes = new Map<string, string>();
+  /** The action gate's decision on each call, by Pi's toolCallId (spec 014 FR-021). */
+  private readonly gates = new Map<string, TurnGate>();
   private stopReason: string | undefined;
   private emptyResponse = false;
   private usage: TaskUsageTelemetry | undefined;
@@ -94,6 +100,28 @@ export class TurnRecorder {
     } catch {
       this.recordingFailed("observer_failed");
     }
+  }
+
+  /**
+   * Keeps the action gate's decision on a call (spec 014 FR-021). A classifier's reason is model
+   * text, and a classifier failure's is an error message, so every argument value of the call is
+   * taken out of those first; every reason is then redacted and capped. It never throws: a decision
+   * it cannot keep is named in recordingErrors, and a call it never saw start gets no record.
+   */
+  gateDecided(decision: { toolCallId: string; outcome: string; source: string; kind?: string | undefined; rule?: number | undefined; reason: string }): void {
+    this.guarded("gate_decided", () => {
+      const fromOutside = decision.source === "classifier" || decision.source === "classifier_unavailable";
+      const reason = fromOutside ? withoutArgumentValues(decision.reason, this.pending.get(decision.toolCallId)?.rawArguments) : decision.reason;
+      const parsed = TurnGateSchema.safeParse({
+        outcome: decision.outcome,
+        source: decision.source,
+        ...(decision.kind === undefined ? {} : { kind: decision.kind }),
+        ...(decision.rule === undefined ? {} : { rule: String(decision.rule) }),
+        reason: redactAndCap(reason, TURN_GATE_REASON_LIMIT).text,
+      });
+      if (parsed.success) this.gates.set(decision.toolCallId, parsed.data);
+      else this.recordingFailed("gate_invalid");
+    });
   }
 
   /**
@@ -169,7 +197,9 @@ export class TurnRecorder {
   observation(): TurnObservation {
     const all = this.order.map((id) => {
       const pending = this.pending.get(id)!;
-      return pending.call ?? this.unfinished(pending);
+      const call = pending.call ?? this.unfinished(pending);
+      const gate = this.gates.get(id);
+      return gate === undefined ? call : { ...call, gate };
     });
     const workerOperations = [...new Set(all.flatMap((call) => call.operationId !== undefined && WorkerOperationSchema.safeParse(call.operationId).success ? [call.operationId] : []))];
     return {
@@ -239,6 +269,26 @@ export class TurnRecorder {
       ...(operationId === undefined ? {} : { operationId }),
     };
   }
+}
+
+/**
+ * A model-written reason without the call's argument values: each string or number value, matched
+ * as a whole word and ignoring case, becomes "[argument]" (spec 014 FR-021).
+ */
+function withoutArgumentValues(reason: string, args: unknown): string {
+  const values = [...new Set(argumentValues(args))].sort((a, b) => b.length - a.length);
+  return values.reduce((text, value) => text.replace(
+    new RegExp(`(?<![\\p{L}\\p{N}])${value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}(?![\\p{L}\\p{N}])`, "giu"), "[argument]",
+  ), reason);
+}
+
+function argumentValues(value: unknown, depth = 0): string[] {
+  if (depth > 8) return [];
+  if (typeof value === "string") return value.trim().length > 0 ? [value.trim()] : [];
+  if (typeof value === "number") return [String(value)];
+  if (Array.isArray(value)) return value.flatMap((entry) => argumentValues(entry, depth + 1));
+  if (value !== null && typeof value === "object") return Object.values(value).flatMap((entry) => argumentValues(entry, depth + 1));
+  return [];
 }
 
 function sha256(text: string): string {

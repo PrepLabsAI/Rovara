@@ -242,6 +242,21 @@ Not covered by the guard, so only Step 4 holds these to the project:
 - Attachment references (`inlineFileId`, `inlineFileCollection`, `inlineFileName`).
 - Reply contents. The guard checks requests, not responses.
 
+AgentX creates Jira issues without asking, checks a change to an existing issue (a call with
+`issueIdOrKey`, such as `editJiraIssue` or `addOrEditJiraIssueComment`) against what the member
+asked, and always asks before `transitionJiraIssue` and before an edit that sets a status or
+resolution (for example `fields.status`).
+
+Do not approve `executeWrite`: it can run any Atlassian write, and names no issue AgentX can check,
+so the action gate would treat it as a create and run it. With `projectKey` set, registration
+refuses it. If a project without `projectKey` has approved it, deny it until it is removed:
+
+```yaml
+actionPolicy:
+  rules:
+    - { connector: jira, tool: executeWrite, outcome: deny, reason: "Use the dedicated Jira tools." }
+```
+
 ## Troubleshooting
 
 - **Every call fails as not connected, "rejected the credential twice".** Check, in order: API

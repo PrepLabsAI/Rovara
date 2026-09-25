@@ -329,8 +329,9 @@ such as Claude Code's Slack access or a script. AgentX checks with Slack that th
 person, then treats the message exactly as if they had typed it. A message posted with a bot token
 is ignored. To answer only typed mentions, set the `AgentXControlPlane` parameter
 `SlackAppPostedMessages` to `ignore`. This also means a person's own tool posting "@AgentX yes"
-counts as that person's confirmation, the same as typing it. This lasts until confirmation buttons
-ship in phase 14c part 2.
+counts as that person's confirmation, the same as typing it. The **Approve** button can only be
+pressed in Slack, but a typed or tool-posted `@AgentX yes` still counts, so set
+`SlackAppPostedMessages` to `ignore` if only typed confirmations should count.
 
 A thread that sends AgentX more than 6 requests in a minute is paused: AgentX posts one notice and
 runs nothing more in that thread until the next minute. This stops a tool that answers AgentX's
@@ -374,6 +375,109 @@ retains the workspace and operation records as a closed tombstone for audit and 
 removes the hosted orchestrator conversation session and releases the organization's quota and that
 of the member who prepared the workspace. Later mentions in the closed thread do not create another
 workspace; start a new Slack thread for fresh work.
+
+#### Actions that need your confirmation
+
+Before any tool runs, AgentX's action gate decides whether to run it, ask, or refuse. It uses
+AgentX's own rules, the same for every connector:
+
+- Reads run.
+- A call that names no existing item creates one, and runs.
+- A call that closes, deletes, archives, merges, reverts or cancels something, or that sets a
+  status, state or resolution, or marks an item completed (`completed` set to true or false), is
+  destructive and always asks.
+- A call that changes an existing item runs when your messages in the thread clearly asked for
+  that change on that item; otherwise AgentX asks. A small model makes that check. It sees only the
+  members' messages, the call and the item's key, never what a tool returned, so text inside an
+  issue cannot approve a change.
+- A write whose arguments hold a list of more than 5 entries, such as 6 tasks, asks.
+
+When AgentX asks, it posts one message listing every action it held back, with **Approve** and
+**Cancel** buttons. Only the member who made the request can press them; anyone else is told so
+privately. You can also reply `@AgentX yes` or `@AgentX cancel`. A confirmation counts once, only
+after the question, and for 24 hours. AgentX then runs exactly the listed calls; a call with any
+other arguments is checked afresh, as a new call. Any other message from you replaces the question.
+
+After a press, the buttons are replaced by who answered and how ("Approved by ... Running it now."
+or "Cancelled by ..."). A second press while the first is still being taken is answered privately
+with "Already received. I'm on it." A `yes` to a question that has expired is told so for 24 hours after the expiry; after
+that it is an ordinary request. If Slack redelivers an approval that an earlier attempt already
+used, AgentX runs nothing again and says "An earlier attempt of this request already used that
+confirmation": the calls may already have run, so ask it to check.
+
+`@AgentX yes to all in this thread` stops the questions that come only from the model's doubt
+(including when the model could not answer), for you, in that thread, for 24 hours; say it again to
+renew it. If a question of yours is pending, it also approves that question. Destructive actions,
+large changes and administrator rules still ask.
+
+Coding work in a thread that has no workspace yet is checked the same way, once, before AgentX
+prepares one. In a thread whose workspace is already prepared, starting or following up coding work
+runs without a check and without a model call. A confirmed request to create a pull request in such a thread still answers that there are no
+changes to publish: approval does not create a workspace.
+
+Administrators add rules to the project file under `actionPolicy`:
+
+```yaml
+actionPolicy:
+  rules:
+    - { tool: agentx_create_pull_request, outcome: ask, reason: "Pull requests need a person." }
+    - { connector: tracker, tool: "delete_*", outcome: deny, reason: "Deleting is turned off." }
+    - { connector: tracker, tool: save_item, whenArguments: [assignee], treatAs: destructive }
+```
+
+A rule names a `tool`, where `*` matches anything. With `connector`, it is the connector's own tool
+name; without it, the name the model sees, such as `jira__createJiraIssue`. `whenArguments` limits
+the rule to calls that set one of those arguments, by top-level argument name only: a key inside an
+object or a list, such as `fields.status`, does not match. A rule then either decides (`outcome`:
+`allow`, `ask` or `deny`) or reclassifies the action (`treatAs`: `read`, `create`, `change` or
+`destructive`). Deny rules win over ask rules, which win over allow rules. Only a rule that names
+one exact tool, with no `*`, can waive the ask for a destructive or large call, with `outcome:
+allow` or a `treatAs`; a rule with `*` allows or reclassifies reads, creates and changes only. Deny
+and ask rules apply to every call they match, with or without `*`. Registration refuses a rule that
+matches no tool, or names a connector the project does not configure. Register a policy only after
+the control plane and the runtime of this release are both deployed, with this release's
+administration client, and do not roll either back afterwards: older versions refuse a project that
+has one.
+
+What decides that a call is destructive or changes an item, so you can approve tools deliberately:
+
+- A connector declares where its tools name an existing item, such as Linear's `id`, Jira's
+  `issueIdOrKey` or Asana's `tasks[].task`. A call that fills one changes that item; a call that
+  fills none creates.
+- A tool that offers no such argument always runs as a create, whatever it writes. GitHub
+  `push_files` and Jira `executeWrite` are examples. Approve such tools only if you accept that
+  they run without asking, or add an `ask` or `deny` rule for them.
+- For a tool that offers an item argument, AgentX looks for a status, state, resolution,
+  `completed` or similar key anywhere in the arguments, up to level 4. The arguments themselves are
+  level 1, and each object or list inside adds one level, so `tasks[].completed` is at level 3 and
+  found. For a tool that offers none, only top-level arguments and keys directly inside an object
+  argument (such as `fields.status`) are read, so a create of tasks that are already complete stays
+  a create.
+- A vendor's own `destructiveHint` makes a call ask only when the connector declares no item
+  arguments. Vendors mark ordinary edits destructive, so where AgentX can see the item a call names,
+  its own rules decide. The built-in GitHub, Linear, Jira and Asana connectors all declare them.
+
+The model that checks changes is a deployment setting: the `AgentXSlackOrchestrator` parameter
+`GateClassifierModelId`, default Amazon Nova Lite (`amazon.nova-lite-v1:0`). Claude Haiku 4.5
+(`us.anthropic.claude-haiku-4-5-20251001-v1:0`) is an alternative. The installer planned in spec 015
+(`agentx init`) will ask for it during installation. If the model is unavailable, errors, gives an
+answer that is not a plain verdict, or does not answer in time, AgentX asks. The time limit is 8
+seconds unless the service's `AGENTX_GATE_CLASSIFIER_TIMEOUT_MS` is a whole number of milliseconds
+from 1 to 60,000; the gate then waits exactly that long. Any other value, including a larger one,
+means 8 seconds. A model ID the
+runtime does not know is reported at start: the service logs `gate.classifier_unavailable` and its
+start line says `classifierAvailable: false`, and every change then asks. A turn makes at most 8
+model checks; later changes in that turn ask. The model's full prompt holds the members' own words,
+so it is never logged or kept in a turn record.
+
+The buttons need the Slack app's **Interactivity** turned on, with the Request URL set to the
+`AgentXControlPlane` output `SlackInteractivityUrl`. A button this release does not know, for
+example after a rollback, tells the member who pressed it that it is no longer available.
+
+Every decision is logged as `gate.decision` and kept with its call in the turn record: the outcome,
+what decided it (a rule, a default, the model check, a confirmation) and a short reason. The
+reasons AgentX writes name at most an argument, never its value; the model check writes its own
+one-sentence reason and is told not to quote the messages.
 
 #### What a thread remembers
 
@@ -439,11 +543,14 @@ Each Slack request that reaches the orchestrator service leaves one turn record 
 `failed` turns that ran the orchestrator, `abandoned` requests whose final attempt failed, and
 requests the service settled without running the orchestrator: a close command
 (`workspace_close`), the workspace limit (`workspace_limit`), a closed workspace
-(`workspace_closed`), and a workspace that could not be set up or is not runnable
-(`workspace_unavailable`). An attempt that fails and is retried leaves no record; the attempt that
+(`workspace_closed`), a workspace that could not be set up or is not runnable
+(`workspace_unavailable`), and an answer to a confirmation that could not be used because it was
+another member's, no longer pending, expired or already used (`confirmation_refused`), a cancel of a
+pending confirmation (`confirmation_cancelled`), and a "yes to all" that only granted it because no
+confirmation was pending (`yes_to_all_granted`). An attempt that fails and is retried leaves no record; the attempt that
 finishes writes the one record. A record holds the request and response text (each at most 40,000 characters), the tools the
-orchestrator was offered, each tool call with its redacted arguments, validation result and
-outcome, the stop reason, the orchestrator's token usage, and the worker operations it started.
+orchestrator was offered, each tool call with its redacted arguments, validation result,
+outcome and action gate decision (`gate`: outcome, source, kind, rule and a short reason), the stop reason, the orchestrator's token usage, and the worker operations it started.
 Known credential shapes are replaced with `[REDACTED]` before a record is written; this is
 best-effort pattern redaction, not a guarantee that no secret survives, and tool results are never
 stored. A mention with no text after `@AgentX` is answered by the ingress Lambda directly and never
@@ -684,6 +791,39 @@ immutable. Registering a new revision without the field only changes what a new 
 existing thread's non-disk settings, read going forward; a thread whose workspace is still pinned
 to an older revision that carries `actionPolicy` keeps reading that revision, so reverting stays
 unsafe for it until that thread closes or the revision is otherwise no longer live.
+
+Spec 014 phase 14c part 2 turns the action gate on. Operator notes:
+
+- In the Slack app's **Interactivity & Shortcuts** settings, turn Interactivity on and set the
+  Request URL to the `AgentXControlPlane` output `SlackInteractivityUrl`. Without it a button press
+  reaches no one, and members must confirm by replying `@AgentX yes`.
+- On Slack Enterprise Grid, the team ID in a button press may differ from the one in the thread's
+  mention events. A press would then find no pending confirmation and answer that it is no longer
+  pending. This has not been checked on a Grid workspace; there, a typed `@AgentX yes` still works.
+- A confirming `yes` claims its confirmation only after the thread's conversation bookkeeping (the
+  workspace check, the conversation record and any settings notice), just before the turn runs, so
+  a request that stops early leaves the question pending. Two answers racing each other can both do
+  that bookkeeping; only one claims and runs the calls, and the other is told the confirmation was
+  already used.
+- The part 1 rollback floor above still applies.
+- Rolling the control plane back below this release does not break the turn record export, but
+  `agentx admin turns export` then skips every record that has a call `gate` or one of the new
+  dispositions: the older control plane's record schema refuses them, counts them as `skipped` and
+  logs `turn_record.invalid`. The records stay in the table and export again after rolling forward,
+  within their 30 days.
+- Rolling the Slack service back below this release while confirmations are pending turns a
+  button press (the control plane still queues it as "yes" or "cancel") or a typed `@AgentX yes`
+  into an ordinary, ungated turn. The model may then re-issue the call it was holding back, and it
+  runs without asking. Roll back only when no confirmation is pending, or tell members not to
+  answer pending ones.
+- Turn records gain a `gate` object on each call and the dispositions `confirmation_refused`,
+  `confirmation_cancelled` and `yes_to_all_granted`. Only `answered` and `failed` count in turn
+  metrics. The
+  service logs `gate.decision` for each call, and `gate.confirmation_requested`,
+  `gate.confirmation_approved`, `gate.confirmation_cancelled`, `gate.confirmation_refused` and
+  `gate.yes_to_all` for answers.
+  `gate.confirmation_failed` means a question could not be saved or posted; the member is told
+  that nothing it would list will run.
 
 ## Implementation documents
 

@@ -1,6 +1,8 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { parseArgs } from "node:util";
+import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { ClassifierError, createModelClassifier, type ActionClassifier } from "../../packages/orchestrator/src/action-classifier.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 import { EVAL_ROOT, loadCases } from "./case.js";
 import { scriptExpectedAnswers } from "./offline.js";
@@ -68,6 +70,26 @@ export function parseEvalArguments(argv: readonly string[], env: NodeJS.ProcessE
   };
 }
 
+/** The classifier model a live run gives the action gate: the deployment setting's default, Amazon Nova Lite, unless the environment names another (spec 014 R5). */
+export function gateClassifierModel(env: NodeJS.ProcessEnv = process.env): { provider: string; modelId: string } {
+  return { provider: env.AGENTX_GATE_CLASSIFIER_PROVIDER ?? "amazon-bedrock", modelId: env.AGENTX_GATE_CLASSIFIER_MODEL ?? "amazon.nova-lite-v1:0" };
+}
+
+/**
+ * The live run's gate classifier. A model the runtime does not offer stops the run before any case
+ * runs, rather than making every change ask and every allow case fail.
+ */
+export async function liveGateClassifier(env: NodeJS.ProcessEnv = process.env, modelRuntime?: ModelRuntime): Promise<ActionClassifier> {
+  const model = gateClassifierModel(env);
+  try {
+    return await createModelClassifier({ model, failOnUnknownModel: true, ...(modelRuntime === undefined ? {} : { modelRuntime }) });
+  } catch (error) {
+    // Only the unknown-model check is reworded; a runtime that fails to start reports its own error.
+    if (!(error instanceof ClassifierError)) throw error;
+    throw new Error(`the gate classifier model ${model.provider}/${model.modelId} is not available; set AGENTX_GATE_CLASSIFIER_PROVIDER and AGENTX_GATE_CLASSIFIER_MODEL to a model this runtime offers`, { cause: error });
+  }
+}
+
 export interface EvalCommandOutcome { report: EvalReport; exitCode: number; lines: string[] }
 
 /** Runs `npm run eval`. Results always go to <root>/results; a baseline is written only by a clean live run with --update-baseline. */
@@ -78,7 +100,8 @@ export async function runEvalCommand(argv: readonly string[], options: { root?: 
   const cases = await loadCases(parsed.cases);
   let report: EvalReport;
   if (parsed.live) {
-    report = await runEvaluation(cases, { model: parsed.model, presentation: parsed.presentation, repeat: parsed.repeat, live: true });
+    const gateClassifier = await liveGateClassifier(options.env);
+    report = await runEvaluation(cases, { model: parsed.model, presentation: parsed.presentation, repeat: parsed.repeat, live: true, gateClassifier });
   } else {
     const { modelRuntime, faux } = await fauxModelRuntime();
     report = await runEvaluation(cases, { model: parsed.model, modelRuntime, presentation: parsed.presentation, repeat: parsed.repeat, beforeRun: scriptExpectedAnswers(faux) });

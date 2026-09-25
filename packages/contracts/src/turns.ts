@@ -17,6 +17,22 @@ const Hex64 = z.string().regex(/^[a-f0-9]{64}$/);
 export const TurnValidationSchema = z.enum(["ok", "schema_error", "policy_denied", "unknown_tool"]);
 export const TurnOutcomeSchema = z.enum(["SUCCEEDED", "FAILED", "UNKNOWN", "IN_PROGRESS"]);
 
+/** Longest gate reason a turn record keeps (spec 014 FR-021). */
+export const TURN_GATE_REASON_LIMIT = 200;
+
+/**
+ * The action gate's decision on one call (spec 014 FR-021): the outcome, what decided it, why it
+ * asks, the 1-based administrator rule as text, and a short reason that carries no argument value.
+ * Optional on a call, so records written before the gate still parse.
+ */
+export const TurnGateSchema = z.object({
+  outcome: z.enum(["allow", "ask", "deny"]),
+  source: z.enum(["confirmation", "rule", "default", "yes_to_all", "classifier", "classifier_unavailable", "gate_error"]),
+  kind: z.enum(["classifier", "destructive", "admin", "bulk", "hint", "read", "create", "allowed"]).optional(),
+  rule: z.string().regex(/^[1-9][0-9]{0,2}$/).optional(),
+  reason: z.string().max(TURN_GATE_REASON_LIMIT),
+}).strict();
+
 export const TurnCallSchema = z.object({
   name: z.string().min(1).max(128),
   connector: z.string().max(20).optional(),
@@ -29,6 +45,8 @@ export const TurnCallSchema = z.object({
   durationMs: z.number().int().nonnegative(),
   requestId: z.string().max(64).optional(),
   operationId: z.string().max(64).optional(),
+  /** The action gate's decision on this call (spec 014 FR-021); absent in records written before the gate. */
+  gate: TurnGateSchema.optional(),
 }).strict();
 
 /** What the orchestrator saw during one turn; the Slack service adds identity and text. */
@@ -48,8 +66,16 @@ export const TurnObservationSchema = z.object({
   workerOperations: z.array(z.string().uuid()).max(TURN_CALL_LIMIT),
 }).strict();
 
+/**
+ * How a turn ended. `confirmation_refused` (spec 014 FR-021): the message answered a confirmation
+ * that could not be used (another member's, no longer pending, expired, or claimed by another
+ * event), so nothing ran. `confirmation_cancelled`: the requester cancelled a pending confirmation.
+ * `yes_to_all_granted`: a "yes to all" with no pending confirmation only granted it. Like the
+ * workspace dispositions, none of these ran the orchestrator or counts in turn metrics.
+ */
 export const TurnDispositionSchema = z.enum([
   "answered", "failed", "abandoned", "workspace_close", "workspace_limit", "workspace_closed", "workspace_unavailable",
+  "confirmation_refused", "confirmation_cancelled", "yes_to_all_granted",
 ]);
 
 export const TurnRecordSchema = TurnObservationSchema.extend({
@@ -76,6 +102,7 @@ export const TurnRecordSchema = TurnObservationSchema.extend({
 
 export type TurnValidation = z.infer<typeof TurnValidationSchema>;
 export type TurnOutcome = z.infer<typeof TurnOutcomeSchema>;
+export type TurnGate = z.infer<typeof TurnGateSchema>;
 export type TurnCall = z.infer<typeof TurnCallSchema>;
 export type TurnObservation = z.infer<typeof TurnObservationSchema>;
 export type TurnDisposition = z.infer<typeof TurnDispositionSchema>;

@@ -159,6 +159,21 @@ integrations:
   does not return.
 - Leave `attribution` unset to keep the footer.
 
+### Confirmations
+
+AgentX creates Linear issues and comments without asking. It checks a change to an existing issue
+(a `save_issue` or `save_comment` call with an `id`) against what the member asked, and it always
+asks before closing an issue or marking it a duplicate (any call that sets `state` or
+`duplicateOf`, a new issue included) and before `delete_comment`. Linear marks `save_issue`
+destructive; AgentX does not ask for that alone, because it can see the issue each call names. No
+action policy is needed for this. To always ask before a change, add:
+
+```yaml
+actionPolicy:
+  rules:
+    - { connector: linear, tool: save_issue, whenArguments: [id], outcome: ask }
+```
+
 ## 6. Register the project revision
 
 Raise `revision`, then run:

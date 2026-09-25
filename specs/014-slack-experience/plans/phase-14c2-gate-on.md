@@ -30,15 +30,18 @@ D3 as updated by the owner, D4, D5, C2 to C9, tombstones). Pi's hook contract:
 "before_agent_start").
 
 **Order and branch:** 14a, 14b PR A, 14c part 1 ([phase-14c1-gate-contracts.md](phase-14c1-gate-contracts.md)),
-14b PR B, then **this part**, then 14d. Branch `feat/014c2-gate-on`, cut from mainline once all four
-have merged. This plan is written against mainline plus those four.
+14b PR B, then **this part**, then 14d. Branch `feat/014c2-gate-on`, cut from mainline `33d6599`,
+which has all four (#51, #52, #56, #58), the plan amendments (#53) and spec 013 phase 7, Asana (#57).
 
 **Verified:** every code block was applied, task by task, to a scratch copy of mainline `af67c2c`
 (spec 013 phase 4 merged) with every code block and test of 14a, 14b PR A, 14c part 1 and 14b PR B
 applied first. With this part's eleven tasks applied, `npm run build`, `npm run typecheck`,
 `npm run lint` and `npm test` pass (1,429 tests, one existing skip), the offline evaluation passes
 all 59 cases, no snapshot or baseline changes, and no test line is removed. (On `7f399ac` the plan
-had nine tasks.)
+had nine tasks.) Re-verified 2026-09-25 on mainline `33d6599` (all four merged, plus Asana): with the
+eleven tasks applied, build, typecheck, lint, `npm test` (1,650 tests, 1,648 pass, 2 existing skips),
+`npm run infra:synth` and the offline evaluation (65 of 65 cases) pass, with no snapshot, baseline or
+removed test line.
 
 ## Global Constraints
 
@@ -83,12 +86,18 @@ had nine tasks.)
    workspace, and AgentX names who can confirm; clicked, the ingress answers that member privately
    and queues nothing. Tests: Task 6, "runs nothing for a yes from a different member"; Task 7,
    "tells anyone else, privately ..."; Task 8, "runs nothing and prepares no workspace ...".
-3. **A replayed or edited "yes".** Expected: a used, cancelled, superseded or expired confirmation
-   is a tombstone for the rest of its 24 hours, and any "yes" or click for it hears "no longer
-   pending"; a repeated click is one duplicate event; a "yes" received before the question does
-   not count; an edit never reaches the service (the ingress drops `message_changed`). Tests: Task 6,
-   "answers any yes for a used ... confirmation ..." and "does not count a yes sent before ...";
-   Task 7, "queues a repeated click once"; Task 8, the third message of the first test.
+3. **A replayed or edited "yes".** Expected (as amended by ruling N4): a used, cancelled,
+   superseded or expired confirmation is a tombstone for the rest of its 24 hours. Only a click on
+   it, or a redelivery of the event that claimed it (or of one received before it was retired),
+   hears "no longer pending"; a redelivery of the claiming "yes" or click hears that an earlier
+   attempt already used it, as does a redelivered approval whose own turn posted the confirmation
+   now pending. A later typed "yes" from anyone is an ordinary request (the single-use claim already
+   prevents a double run). An expired one answers "expired" for 24 hours after its expiry. A
+   repeated click is one duplicate event; a "yes" received before the question does not count; an
+   edit never reaches the service (the ingress drops `message_changed`). Tests: Task 6, "answers
+   only a redelivery ..." and "does not count a yes sent before ..."; Task 7, "queues a repeated
+   click once"; Task 8, the third message of the first test; final fix pass, "I2: tells a
+   redelivered ...".
 4. **The argument hash differs after the model re-issues the call.** Expected: evaluated afresh
    (a destructive call asks again) and the block reason says the arguments differ; key order alone
    never changes the hash. Tests: Task 4, "runs a confirmed call once ..."; Task 5, "tells the model
@@ -195,7 +204,8 @@ had nine tasks.)
   - Defaults: read and create run; destructive asks; a create or change touching more than 5 items
     asks; a change goes to the classifier. Admin `actionPolicy` rules come first (deny, then ask,
     then allow; `treatAs` reclassifies).
-  - Task 2 pins the class of every tool in `tests/fixtures/vendors/*-tools.json`. Results that
+  - Task 2 pins the class of every tool in `tests/fixtures/vendors/*-tools.json` (for Asana, whose
+    fixture is its whole tools/list, the tools its connector may approve). Results that
     matter: Linear `save_issue` and `save_comment` create without asking and are changes with `id`;
     `state` or `duplicateOf` makes `save_issue` destructive; Jira `transitionJiraIssue` is
     destructive; Jira `executeWrite` names no item AgentX can see and so would run as a create,
@@ -300,14 +310,13 @@ had nine tasks.)
   top-level declarations (Linear `id`, Jira `issueIdOrKey`, GitHub `issue_number`, `pullNumber`)
   classify exactly as before; Task 2's vendor pins are unchanged. Asana declares
   `itemArguments: ["task_id", "tasks[].task"]`, from phase 7's `ASANA_TASK_REFERENCES` (its
-  `ASANA_ITEM_ARGUMENTS` widened by the array path), once phase 7 merges. The declaration itself is set
-  on `asanaConnector` by whichever of phase 7 and part 1 merges second. Whichever of phase 7 and
-  this part merges second adds Asana's tools to
-  `tests/contract/action-classes-vendors.test.ts` (with `update_tasks` bare `create` and with an item
-  `change`, and `{ tasks: [{ task, completed: true }] }` destructive). `tasks[].parent` and the
-  dependency arrays are not declared: they name another task the call links to, not the task it
-  changes, and phase 7's project guard still checks them. Until the declaration lands an
-  administrator can add `{ connector: asana, tool: update_tasks, treatAs: change }`.
+  `ASANA_ITEM_ARGUMENTS` widened by the array path); phase 7 (#57) merged with it set on
+  `asanaConnector`. Phase 7 merged first, so this part adds Asana's tools to
+  `tests/contract/action-classes-vendors.test.ts` (Task 2: the tools `ASANA_PROJECT_TOOL_ACCESS` lets
+  a connector approve, with `update_tasks` bare `create` and with an item `change`, and
+  `{ tasks: [{ task, completed: true }] }` destructive). `tasks[].parent` and the dependency arrays
+  are not declared: they name another task the call links to, not the task it changes, and phase 7's
+  project guard still checks them.
 
 ## Slack App Settings and Rollout
 
@@ -476,7 +485,8 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: `ActionPolicy`, `ActionPolicyRule`, `ToolHints`, `toolPatternMatches`, `itemPathHolders`,
-  `itemPathValues`, `schemaHasItemPath` (part 1).
+  `itemPathValues`, `schemaHasItemPath` (part 1); `asanaConnector`, `ASANA_PROJECT_TOOL_ACCESS`
+  (spec 013 phase 7, tests only).
 - Produces:
 
 ```ts
@@ -644,10 +654,10 @@ describe("rules and built-in defaults", () => {
 // Pins the class AgentX gives every tool in the recorded vendor catalogs (spec 014 D1), from the
 // vendor's hints and each connector's declared item arguments, with no vendor name in gate code.
 import { describe, expect, it } from "vitest";
-import { schemaHasItemPath } from "../../packages/contracts/src/index.js";
-import { jiraConnector, linearConnector, type McpConnection } from "../../packages/gateway/src/index.js";
+import { ASANA_PROJECT_TOOL_ACCESS, schemaHasItemPath } from "../../packages/contracts/src/index.js";
+import { asanaConnector, jiraConnector, linearConnector, type McpConnection } from "../../packages/gateway/src/index.js";
 import { baseClass, type ToolFacts } from "../../packages/orchestrator/src/action-policy.js";
-import { vendorToolsWithAnnotations } from "../support/vendor-fixtures.js";
+import { vendorToolsWithAnnotations, type VendorFixture } from "../support/vendor-fixtures.js";
 
 const unused = { issue: () => { throw new Error("not used"); } };
 
@@ -665,8 +675,10 @@ function naming(path: string): Record<string, unknown> {
   return path.split(".").reduceRight<unknown>((inner, part) => part.endsWith("[]") ? { [part.slice(0, -2)]: [inner] } : { [part]: inner }, "X-1") as Record<string, unknown>;
 }
 
-function classes(connector: string, itemArguments: readonly string[]) {
-  return Object.fromEntries(vendorToolsWithAnnotations(connector as "linear" | "jira").map((tool) => {
+/** Every recorded tool, or only those `approvable` names (Asana's fixture is its whole tools/list). */
+function classes(connector: VendorFixture, itemArguments: readonly string[], approvable?: readonly string[]) {
+  const tools = vendorToolsWithAnnotations(connector).filter((tool) => approvable === undefined || approvable.includes(tool.name));
+  return Object.fromEntries(tools.map((tool) => {
     const toolFacts = facts(connector, tool, itemArguments);
     const first = toolFacts.itemArguments?.[0];
     const withItem = first === undefined ? "no item argument" : baseClass(tool.name, toolFacts, naming(first));
@@ -717,6 +729,26 @@ describe("the class of every recorded vendor tool", () => {
     const edit = facts("jira", vendorToolsWithAnnotations("jira").find((tool) => tool.name === "editJiraIssue")!, ["issueIdOrKey"]);
     expect(baseClass("jira__editJiraIssue", edit, { issueIdOrKey: "PAY-7", fields: { status: "Done" } })).toBe("destructive");
     expect(baseClass("jira__editJiraIssue", edit, { issueIdOrKey: "PAY-7", fields: { summary: "x" } })).toBe("change");
+  });
+
+  // R19: the tools an Asana connector may approve, with its item paths task_id and tasks[].task.
+  it("Asana", () => {
+    expect(classes("asana", asanaConnector(unused).itemArguments!, Object.keys(ASANA_PROJECT_TOOL_ACCESS))).toEqual({
+      get_project: { bare: "read", withItem: "no item argument" },
+      search_tasks: { bare: "read", withItem: "no item argument" },
+      get_task: { bare: "read", withItem: "read" },
+      get_task_stories: { bare: "read", withItem: "read" },
+      create_tasks: { bare: "create", withItem: "no item argument" },
+      update_tasks: { bare: "create", withItem: "change" },
+      add_comment: { bare: "create", withItem: "change" },
+      get_tasks: { bare: "read", withItem: "no item argument" },
+    });
+  });
+
+  it("Asana: completing a task inside update_tasks is destructive", () => {
+    const update = facts("asana", vendorToolsWithAnnotations("asana").find((tool) => tool.name === "update_tasks")!, asanaConnector(unused).itemArguments!);
+    expect(baseClass("asana__update_tasks", update, { tasks: [{ task: "1201", completed: true }] })).toBe("destructive");
+    expect(baseClass("asana__update_tasks", update, { tasks: [{ task: "1201", name: "Renamed" }] })).toBe("change");
   });
 });
 ```
@@ -3442,9 +3474,9 @@ Directly before `const workspace = await api.ensureWorkspace(deterministicUuid(.
     }
 ```
 
-(After 14b PR B Task 8b this post sits inside a comment block and `if (announceStart)`; insert before that comment block, so the check runs whether or not the notice is posted.)
-Directly before `await post("Working on it now. I'll post the result in this thread when it's done.");`
-(after 14b's lazy `worker`):
+Directly before the comment block that starts `// Spec 014 FR-026: the ingress has already said "I'm on it".`
+(after 14b's lazy `worker`; 14b PR B put the "Working on it now" post inside `if (announceStart)`
+under that comment, so the claim runs whether or not the notice is posted):
 
 ```ts
     // Spec 014 C5: claim the confirmation only now, after every early return above, so a turn that
@@ -3550,8 +3582,8 @@ reads `workspace.actionPolicy` with no further change.
 
 - [ ] **Step 6: The classifier, the store and the buttons in `packages/slack-service/src/main.ts`**
 
-Change the `@agentx/contracts` import (after 14b it holds only `type SlackRequestMessage`) to also
-import `confirmationBlocks`, and add:
+Change the `@agentx/contracts` import (after 14b PR B it holds `SLACK_QUEUED_BEHIND_ATTRIBUTE`,
+`queuedBehindOf` and `type SlackRequestMessage`) to also import `confirmationBlocks`, and add:
 
 ```ts
 import { createModelClassifier } from "@agentx/orchestrator/action-classifier";
@@ -4410,13 +4442,15 @@ with
 In `scoreRun`, replace
 
 ```ts
-    ...(replyLines === undefined ? {} : { replyLines, linesOk: replyLines <= evalCase.expect.maxLines! }),
+      replyLines, linesOk: replyLines <= evalCase.expect.maxLines! && !hasLiteralNewlineOutsideCode(formattedReply),
+    }),
 ```
 
 with
 
 ```ts
-    ...(replyLines === undefined ? {} : { replyLines, linesOk: replyLines <= evalCase.expect.maxLines! }),
+      replyLines, linesOk: replyLines <= evalCase.expect.maxLines! && !hasLiteralNewlineOutsideCode(formattedReply),
+    }),
     ...(evalCase.expect.gate === undefined || run.gate === undefined ? {} : { gate: run.gate, gateOk: run.error === undefined && run.gate === evalCase.expect.gate }),
 ```
 
@@ -4607,7 +4641,7 @@ AgentX's own rules, the same for every connector:
 - Reads run.
 - A call that names no existing item creates one, and runs.
 - A call that closes, deletes, archives, merges, reverts or cancels something, or that sets a
-  status, state or resolution, is destructive and always asks.
+  status, state or resolution, or marks an item completed, is destructive and always asks.
 - A call that changes an existing item runs when your messages in the thread clearly asked for
   that change on that item; otherwise AgentX asks. A small model makes that check. It sees only the
   members' messages, the call and the item's key, never what a tool returned, so text inside an
@@ -4707,13 +4741,14 @@ Run:
 export PATH=/private/tmp/claude-501/node-v22.20.0-darwin-arm64/bin:$PATH
 npm run typecheck && npm run lint && npm run build && npm test
 grep -niE "linear|jira|github|atlassian|asana" packages/contracts/src/action-policy.ts packages/contracts/src/item-paths.ts packages/contracts/src/slack-confirmation.ts packages/orchestrator/src/action-*.ts packages/slack-service/src/confirmation*.ts packages/broker/src/aws/slack-interactivity.ts
-git diff mainline --stat -- tests/contract/__snapshots__ packages/orchestrator/src/orchestration-tools.ts packages/orchestrator/src/connector-tools.ts
-git diff mainline -- tests ':(exclude)tests/eval/*.ts' | grep '^-[^-]'
+git diff origin/mainline --stat -- tests/contract/__snapshots__ packages/orchestrator/src/orchestration-tools.ts packages/orchestrator/src/connector-tools.ts
+git diff origin/mainline -- tests ':(exclude)tests/eval/*.ts' | grep '^-[^-]'
 npm run eval && git status --short tests/eval/baseline
 grep -n "—" README.md docs/connectors/linear.md docs/connectors/jira.md
 ```
 
-Expected: typecheck, lint and tests pass; the vendor `grep` prints nothing; the `--stat` prints
+Expected: typecheck, lint and tests pass; the vendor `grep` prints only part 1's
+`action-policy.ts` comment line about "A linear-time glob match" (not a vendor); the `--stat` prints
 nothing; the removed-line check prints nothing (Task 10 replaces lines only in the evaluation
 harness's own code, `tests/eval/*.ts`, never in a test file or a case); the offline evaluation
 passes every case and no baseline changed; the em-dash `grep` prints no line this phase added.

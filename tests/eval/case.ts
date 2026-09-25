@@ -11,6 +11,7 @@ import type { ConnectorPolicy } from "../../packages/gateway/src/index.js";
 import {
   ConnectorNameSchema,
   StoredProjectDefinitionSchema,
+  type ActionPolicy,
   type ProjectDefinition,
 } from "../../packages/contracts/src/index.js";
 
@@ -30,8 +31,11 @@ export const EvalCaseSchema = z.object({
     contains: Phrase.optional(),
     /** Most non-empty lines the reply may have once Slack formatting is applied (spec 014 SC-006); the run uses the Slack reply style. */
     maxLines: z.number().int().min(1).max(20).optional(),
+    /** The action gate's decision on the turn's first call (spec 014 SC-004, SC-005); only the new presentation has the gate. */
+    gate: z.enum(["allow", "ask", "deny"]).optional(),
   }).strict().refine((value) => value.tool !== null || value.refusal !== undefined || value.contains !== undefined,
-    "a case that expects no tool needs a refusal or contains phrase"),
+    "a case that expects no tool needs a refusal or contains phrase")
+    .refine((value) => value.gate === undefined || value.tool !== null, "a gate expectation needs an expected tool"),
   source: z.enum(["synthetic", "channel", "channel-reconstructed", "turn-export"]).optional(),
   note: z.string().max(500).optional(),
 }).strict();
@@ -76,6 +80,8 @@ export interface EvalProject {
   repositories: string[];
   connectors: EvalConnector[];
   recoverableOperations: string[];
+  /** The project's action policy (spec 014), which the gate applies in a gate case. */
+  actionPolicy?: ActionPolicy | undefined;
 }
 
 /**
@@ -130,6 +136,7 @@ export const EvalProjectSchema = z.object({ eval: EvalSettingsSchema.optional() 
     repositories: project.repositories.map((repository) => repository.name),
     connectors,
     recoverableOperations: settings?.recoverableOperations ?? [],
+    ...(project.actionPolicy === undefined ? {} : { actionPolicy: project.actionPolicy }),
   };
 });
 

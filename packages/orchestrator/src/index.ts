@@ -1,3 +1,6 @@
+export * from "./action-classifier.js";
+export * from "./action-gate.js";
+export * from "./action-policy.js";
 export * from "./connector-tools.js";
 export * from "./control-plane-api.js";
 export * from "./event-client.js";

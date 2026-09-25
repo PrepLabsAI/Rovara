@@ -536,3 +536,28 @@ describe("hosted Slack ingress switches (spec 014)", () => {
     });
   });
 });
+
+describe("Slack interactivity infrastructure (spec 014)", () => {
+  it("routes Slack's interactivity requests, unauthenticated at the gateway, to the ingress Lambda that verifies them", () => {
+    const template = Template.fromStack(new ControlPlaneStack(new App(), "SlackInteractivityControlPlane"));
+    template.hasResourceProperties("AWS::ApiGatewayV2::Route", {
+      RouteKey: "POST /v1/slack/interactions",
+      AuthorizationType: "NONE",
+      Target: { "Fn::Join": ["", ["integrations/", { Ref: Match.stringLikeRegexp("^SlackIngressIntegration") }]] },
+    });
+    template.hasOutput("SlackInteractivityUrl", {});
+    template.resourceCountIs("AWS::Lambda::Function", 4);
+  });
+});
+
+describe("action gate classifier setting (spec 014)", () => {
+  it("passes the configured classifier model to the Slack service, defaulting to Amazon Nova Lite", () => {
+    const template = Template.fromStack(new SlackOrchestratorStack(new App(), "TestSlackOrchestratorGate", { env: { region: "us-east-1" } }));
+    template.hasParameter("GateClassifierModelId", { Type: "String", Default: "amazon.nova-lite-v1:0" });
+    template.hasResourceProperties("AWS::ECS::TaskDefinition", {
+      ContainerDefinitions: [Match.objectLike({
+        Environment: Match.arrayWith([{ Name: "AGENTX_GATE_CLASSIFIER_MODEL", Value: { Ref: "GateClassifierModelId" } }]),
+      })],
+    });
+  });
+});

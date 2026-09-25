@@ -459,6 +459,13 @@ export class ControlPlaneStack extends Stack {
       target: `integrations/${slackIntegration.ref}`,
       authorizationType: "NONE",
     });
+    // Slack's interactivity request URL (spec 014): signed button presses, handled by the same Lambda.
+    new apigwv2.CfnRoute(this, "SlackInteractivityRoute", {
+      apiId: api.ref,
+      routeKey: "POST /v1/slack/interactions",
+      target: `integrations/${slackIntegration.ref}`,
+      authorizationType: "NONE",
+    });
     new apigwv2.CfnRoute(this, "SlackServiceRoute", {
       apiId: api.ref,
       routeKey: "ANY /v1/service/{proxy+}",
@@ -468,6 +475,10 @@ export class ControlPlaneStack extends Stack {
     slackIngress.addPermission("ApiInvoke", {
       principal: new iam.ServicePrincipal("apigateway.amazonaws.com"),
       sourceArn: `arn:${this.partition}:execute-api:${this.region}:${this.account}:${api.ref}/*/*/v1/slack/events`,
+    });
+    slackIngress.addPermission("InteractivityInvoke", {
+      principal: new iam.ServicePrincipal("apigateway.amazonaws.com"),
+      sourceArn: `arn:${this.partition}:execute-api:${this.region}:${this.account}:${api.ref}/*/*/v1/slack/interactions`,
     });
     slackOrchestratorRole.addToPolicy(new iam.PolicyStatement({
       actions: ["execute-api:Invoke"],
@@ -479,6 +490,7 @@ export class ControlPlaneStack extends Stack {
     new CfnOutput(this, "ArtifactBucketName", { value: artifacts.bucketName });
     new CfnOutput(this, "DispatchDeadLetterQueueUrl", { value: deadLetterQueue.queueUrl });
     new CfnOutput(this, "SlackEventsUrl", { value: `${api.attrApiEndpoint}/v1/slack/events` });
+    new CfnOutput(this, "SlackInteractivityUrl", { value: `${api.attrApiEndpoint}/v1/slack/interactions` });
     new CfnOutput(this, "SlackSecretArn", { value: slackSecret.secretArn });
     new CfnOutput(this, "SlackRequestQueueUrl", { value: slackRequestQueue.queueUrl });
     new CfnOutput(this, "SlackRequestDeadLetterQueueUrl", { value: slackDeadLetterQueue.queueUrl });

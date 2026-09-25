@@ -85,14 +85,14 @@ describe("connector discovery and Slack turn wiring before refresh (characteriza
   it("runs a turn without a recorder and with the same thread calls when no sink is configured", async () => {
     const { dependencies, turns, calls } = slackDependencies();
     await processSlackRequest(message, dependencies, { finalAttempt: false });
-    expect(Object.keys(turns[0]!).sort()).toStrictEqual(["conversationId", "message", "orchestratorInstructions", "requestId", "subject", "workspaceId"]);
+    expect(Object.keys(turns[0]!).sort()).toStrictEqual(["computePrepared", "conversationId", "message", "orchestratorInstructions", "requestId", "subject", "workspaceId"]);
     expect(calls).toStrictEqual(["load", "finish"]);
   });
 
   it("passes only the recorder when a sink is configured, and touches the thread store the same way", async () => {
     const { dependencies, turns, calls } = slackDependencies({ turnRecords: { write: async () => "written" } });
     await processSlackRequest(message, dependencies, { finalAttempt: false });
-    expect(Object.keys(turns[0]!).sort()).toStrictEqual(["conversationId", "message", "orchestratorInstructions", "recorder", "requestId", "subject", "workspaceId"]);
+    expect(Object.keys(turns[0]!).sort()).toStrictEqual(["computePrepared", "conversationId", "message", "orchestratorInstructions", "recorder", "requestId", "subject", "workspaceId"]);
     expect(calls).toStrictEqual(["load", "finish"]);
   });
 });
