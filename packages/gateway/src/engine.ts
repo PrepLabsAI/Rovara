@@ -143,7 +143,8 @@ function rewriteArguments<Scope>(request: ToolRequest, bound: Readonly<Record<st
   const names = boundNames(connector.binder);
   for (const guard of connector.guards) {
     if (!guard.rewrite) continue;
-    args = guard.rewrite({ tool: request.tool, arguments: structuredClone(args), bound, scope });
+    args = guard.rewrite({ tool: request.tool, arguments: structuredClone(args), bound: structuredClone(bound), scope: structuredClone(scope) });
+    if (!isObject(args) || Object.getPrototypeOf(args) !== Object.prototype) throw new Error("guard rewrite returned a non-object");
     if (names.some((name) => Object.hasOwn(args, name))) throw new PolicyFailure(`${connector.label} guard set a server-controlled argument.`);
   }
   return args;
