@@ -49,10 +49,6 @@ describe("turn record and alarm infrastructure", () => {
     expect(actions(statementsForRole(template, "SlackOrchestratorTaskRole"))).toEqual(["dynamodb:PutItem"]);
     const broker = actions(statementsForRole(template, "BrokerServiceRole"));
     expect(broker).toEqual(["dynamodb:Query"]);
-    expect(broker).not.toContain("dynamodb:PutItem");
-    expect(broker).not.toContain("dynamodb:UpdateItem");
-    expect(broker).not.toContain("dynamodb:DeleteItem");
-    expect(broker).not.toContain("dynamodb:BatchWriteItem");
     expect(JSON.stringify(template.toJSON())).toContain("TURN_RECORDS_TABLE_NAME");
   });
 
@@ -88,6 +84,44 @@ describe("turn record and alarm infrastructure", () => {
       Namespace: "AgentX", MetricName: "TurnEmptyResponse", Statistic: "Sum", Period: 3_600,
       ComparisonOperator: "GreaterThanThreshold", Threshold: 3, TreatMissingData: "notBreaching",
       AlarmActions: [topic],
+    });
+  });
+
+  it("lets CloudWatch alarms in this account publish to the SSL-only topic", () => {
+    template.hasResourceProperties("AWS::SNS::TopicPolicy", {
+      Topics: [topic],
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({ Effect: "Deny", Action: "sns:Publish", Condition: { Bool: { "aws:SecureTransport": "false" } } }),
+          Match.objectLike({
+            Effect: "Allow",
+            Action: "sns:Publish",
+            Principal: { Service: "cloudwatch.amazonaws.com" },
+            Resource: topic,
+            Condition: {
+              StringEquals: { "aws:SourceAccount": { Ref: "AWS::AccountId" } },
+              ArnLike: { "aws:SourceArn": Match.objectLike({ "Fn::Join": Match.arrayWith([Match.arrayWith([":cloudwatch:", ":alarm:*"])]) }) },
+            },
+          }),
+        ]),
+      },
+    });
+  });
+
+  it("pages the operator when turn records or turn metrics are being lost", () => {
+    template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+      AlarmName: "AgentXRecordingFailures",
+      AlarmDescription: Match.stringLikeRegexp("[Tt]urn records or turn metrics are being lost"),
+      ComparisonOperator: "GreaterThanOrEqualToThreshold",
+      Threshold: 1,
+      EvaluationPeriods: 1,
+      TreatMissingData: "notBreaching",
+      AlarmActions: [topic],
+      Metrics: Match.arrayWith([
+        Match.objectLike({ Expression: "FILL(write,0) + FILL(emit,0)" }),
+        Match.objectLike({ Id: "write", MetricStat: Match.objectLike({ Metric: { Namespace: "AgentX", MetricName: "TurnRecordWriteFailed" }, Period: 300, Stat: "Sum" }) }),
+        Match.objectLike({ Id: "emit", MetricStat: Match.objectLike({ Metric: { Namespace: "AgentX", MetricName: "TurnMetricsEmitFailed" }, Period: 300, Stat: "Sum" }) }),
+      ]),
     });
   });
 

@@ -271,6 +271,17 @@ export class ControlPlaneStack extends Stack {
       displayName: "AgentX operator alerts",
       enforceSSL: true,
     });
+    // enforceSSL leaves only a Deny in the topic policy, which replaces SNS's default same-account
+    // Allow, so the alarms need their own grant to publish.
+    operatorAlerts.addToResourcePolicy(new iam.PolicyStatement({
+      principals: [new iam.ServicePrincipal("cloudwatch.amazonaws.com")],
+      actions: ["sns:Publish"],
+      resources: [operatorAlerts.topicArn],
+      conditions: {
+        StringEquals: { "aws:SourceAccount": this.account },
+        ArnLike: { "aws:SourceArn": `arn:${this.partition}:cloudwatch:${this.region}:${this.account}:alarm:*` },
+      },
+    }));
     const notifyOperator = new cloudwatchActions.SnsAction(operatorAlerts);
     // The broker publishes these in embedded metric format with a dimensionless series as well as a
     // per-connector one; the alarms read the dimensionless series, so they cover every connector.
@@ -309,6 +320,23 @@ export class ControlPlaneStack extends Stack {
       threshold: 3,
       evaluationPeriods: 1,
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(notifyOperator);
+    new cloudwatch.Alarm(this, "RecordingFailuresAlarm", {
+      alarmName: "AgentXRecordingFailures",
+      alarmDescription: "Turn records or turn metrics are being lost: a turn record write failed or the Slack service could not emit turn metrics. Check the Slack orchestrator logs for turn_record.write_failed and turn_metrics.emit_failed.",
+      metric: new cloudwatch.MathExpression({
+        expression: "FILL(write,0) + FILL(emit,0)",
+        usingMetrics: {
+          write: agentxSum("TurnRecordWriteFailed", Duration.minutes(5)),
+          emit: agentxSum("TurnMetricsEmitFailed", Duration.minutes(5)),
+        },
+        period: Duration.minutes(5),
+        label: "Turn record write and turn metric emit failures",
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     }).addAlarmAction(notifyOperator);
     // A request that fails its final attempt without reaching the processor's own reporting lands here
