@@ -64,7 +64,8 @@ Each phase is one pull request to `mainline`. Check a task only after its eviden
 
 - [x] T035 Record Atlassian fixtures; add the Jira connector type, `cloudId`/project binder and fake-server integration test.
 - [x] T036 Write the Jira setup guide including API-token enablement and service-account limits; add evaluation cases.
-- [ ] T037 Live check once an Atlassian administrator enables API-token authentication; record evidence.
+- [x] T037 Live check once an Atlassian administrator enables API-token authentication; record evidence.
+  Part A (before the PR) and Part B (in production, from Slack) passed on 2026-09-25 and are recorded under `## Jira (US3)` in `quickstart.md`.
 
 ## Phase 7: Asana (US6, spec Amendment 1)
 

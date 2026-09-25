@@ -1,5 +1,23 @@
 # Connector gateway live evidence
 
+## Linear (US2)
+
+No Part A: unlike Jira and Asana, no live test ran against a real Linear workspace before this PR;
+only fixtures (T032) and the setup guide (T033) exist. T034 stays open pending that, even though
+Part B below passed.
+
+Part B, after the production release (T034): passed on 2026-09-25, in production, from the bound
+Slack channel `#agentx-connectors`, project `connectors-check` at revision 2, model
+`amazon.nova-pro-v1:0`. Mentions were posted through a person's user token, not the app (spec 014
+phase 14a's app-posted path); Slack, a fresh thread `1790354000.643289` that answered without
+preparing a workspace first (spec 014 phase 14b PR B live):
+
+1. "what's open in Linear for charterarc" → `list_issues` (state open) SUCCEEDED: "no open
+   issues" (correct).
+2. Create → `save_issue` SUCCEEDED with `{title: "AgentX Slack check (T034)", labels: ["Bug"]}` →
+   `CHA-6` created with the label (the label check passes).
+3. Comment → `save_comment` SUCCEEDED on `CHA-6`.
+
 ## Jira (US3)
 
 Part A, before the PR: the broker from this branch against real Atlassian (`tests/live/jira-live.test.ts`).
@@ -37,7 +55,20 @@ JQL wrapper check, 2026-09-25: the branch's `limitJqlToProject` wrapped each que
 
 Caveat: this service account sees only `KAN`, so the results alone cannot show the wrapper keeping other projects out. They show that Jira parses the quoting and grouping the way the wrapper assumes.
 
-Part B, after the production release (T037): not yet run.
+Part B, after the production release (T037): passed on 2026-09-25, in production, from the bound
+Slack channel `#agentx-connectors`, project `connectors-check` at revision 2, model
+`amazon.nova-pro-v1:0`. Mentions were posted through a person's user token, not the app (spec 014
+phase 14a's app-posted path):
+
+1. Read, in an earlier thread `1790353613.516979`: `KAN-1` through `KAN-4` listed.
+2. Create, in a fresh thread `1790354000.643289` that answered without preparing a workspace first
+   (spec 014 phase 14b PR B live): `createJiraIssue` SUCCEEDED → `KAN-5` "AgentX Slack check
+   (T037)".
+3. Comment → `addOrEditJiraIssueComment` SUCCEEDED on `KAN-5`.
+
+Finding: the create reply linked an invented site, `your-jira-instance.atlassian.net`, because the
+create result carries no browse URL. Tracked as GitHub issue #61 ("Jira connector: model invents
+the issue URL after a create").
 
 ## Asana (US6)
 
