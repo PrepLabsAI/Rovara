@@ -3,6 +3,7 @@ import {
   ConnectorCallRequestSchema,
   ConnectorCatalogSchema,
   ConnectorResultSchema,
+  JIRA_PROJECT_TOOL_ACCESS,
   SlackThreadWorkspaceResultSchema,
   ThreadConnectorSchema,
   ToolApprovalSchema,
@@ -45,5 +46,12 @@ describe("connector contracts", () => {
   it("widens a thread connector's type to any connector-name pattern, not only github", () => {
     expect(ThreadConnectorSchema.safeParse({ name: "issues", type: "linear", label: "Linear", scopes: ["team-a"], connected: true }).success).toBe(true);
     expect(ThreadConnectorSchema.safeParse({ name: "issues", type: "Bad Type", label: "Linear", scopes: ["team-a"], connected: true }).success).toBe(false);
+  });
+
+  it("lists the Jira tools a project-scoped connector can hold to one project, with their access", () => {
+    expect(JIRA_PROJECT_TOOL_ACCESS).toEqual({
+      getJiraIssue: "read", searchJiraIssuesUsingJql: "read",
+      createJiraIssue: "write", editJiraIssue: "write", transitionJiraIssue: "write", addOrEditJiraIssueComment: "write",
+    });
   });
 });

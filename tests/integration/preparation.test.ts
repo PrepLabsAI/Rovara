@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import type { ProjectDefinition } from "@agentx/contracts";
+import type { ProjectDefinition, StoredProjectDefinition } from "@agentx/contracts";
 import { describe, expect, it } from "vitest";
 import { prepareWorkspace, type RepositoryMaterializer } from "../../packages/worker/src/prepare.js";
 import { assertWorkspaceReady, evaluateReadiness } from "../../packages/worker/src/readiness.js";
@@ -138,14 +138,14 @@ describe("workspace preparation", () => {
         connectors: [
           {
             name: "tracker",
-            type: "linear",
-            credentialRef: "linear-key",
+            type: "future-vendor",
+            credentialRef: "future-vendor-key",
             scopes: ["rolled-back"],
             tools: [{ name: "list_items", access: "read" }],
           },
         ],
       },
-    } as unknown as ProjectDefinition;
+    } satisfies StoredProjectDefinition;
 
     const manifest = await prepareWorkspace({
       rootPath: root,

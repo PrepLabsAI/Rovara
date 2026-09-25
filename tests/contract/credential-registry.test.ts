@@ -5,6 +5,7 @@ import { adminCall, createAdminBroker } from "../support/admin-broker.js";
 const githubApp = { ref: "github-app", secretName: "arn:aws:secretsmanager:us-east-1:111122223333:secret:github-key" };
 const secretValues: Record<string, string> = {
   "agentx/connectors/jira-sa": JSON.stringify({ apiKey: "jira-key-value" }),
+  "agentx/connectors/jira-oauth": JSON.stringify({ clientId: "id", clientSecret: "jira-oauth-secret-value", scopes: ["read"] }),
   "agentx/connectors/linear": JSON.stringify({ clientId: "id", clientSecret: "linear-secret-value", scopes: ["read"] }),
 };
 const secrets = { read: vi.fn(async (name: string) => secretValues[name]) };
@@ -55,6 +56,14 @@ describe("credential registry routes", () => {
 });
 
 describe("registry providers", () => {
+  it("names the provider type behind a reference, and nothing for an unknown one", async () => {
+    const { handler, registry } = await createAdminBroker({ connectorCredentials: { secrets, githubApp } });
+    await adminCall(handler, { method: "POST", path: "/v1/admin/credentials", body: { ref: "jira-oauth", type: "oauth-client-credentials", secretName: "agentx/connectors/jira-oauth" } });
+    expect(await registry!.typeOf(githubApp.ref)).toBe("github-app");
+    expect(await registry!.typeOf("jira-oauth")).toBe("oauth-client-credentials");
+    expect(await registry!.typeOf("missing")).toBeUndefined();
+  });
+
   it("resolves the record on each issue and reports unregistered or unusable references as unavailable", async () => {
     const { handler, registry } = await createAdminBroker({ connectorCredentials: { secrets, githubApp } });
     const provider = registry!.provider("jira-sa");

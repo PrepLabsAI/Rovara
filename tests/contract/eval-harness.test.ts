@@ -83,9 +83,9 @@ describe("evaluation cases", () => {
       name: "payments", revision: 1, setup: [], readiness: [], orchestratorInstructions: "Delegate.",
       repositories: [{ name: "payments-api", url: "https://github.com/example/payments-api.git", path: "repo/payments-api", defaultBranch: "main", credentialRef: "github-agentx-sdlc" }],
     };
-    const linear = EvalProjectSchema.safeParse({ ...base, integrations: { connectors: [{ name: "linear", type: "linear", credentialRef: "linear-payments", scopes: [{ alias: "payments", teamId: "00000000-0000-4000-8000-000000000000" }], tools: [{ name: "list_issues", access: "read" }] }] } });
+    const linear = EvalProjectSchema.safeParse({ ...base, integrations: { connectors: [{ name: "future", type: "future-vendor", credentialRef: "future-key", scopes: [{ alias: "payments" }], tools: [{ name: "list_issues", access: "read" }] }] } });
     expect(linear.success).toBe(false);
-    expect(linear.error?.issues[0]?.message).toContain("connector type linear");
+    expect(linear.error?.issues[0]?.message).toContain("connector type future-vendor");
     const unknownName = EvalProjectSchema.safeParse({ ...base, eval: { notConnected: ["jira"] } });
     expect(unknownName.error?.issues[0]?.message).toContain("jira");
     const project = await loadProject("fixtures/payments.yaml");

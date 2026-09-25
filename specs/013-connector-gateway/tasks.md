@@ -50,18 +50,22 @@ Each phase is one pull request to `mainline`. Check a task only after its eviden
 - [ ] T031 Update the README diagnostics paragraph for turn-record retention.
 - [ ] T039 Send `refresh=1` for connector discovery after a turn recorded a definition-changed failure; the tools route bypasses the per-container catalog cache for it.
 
+## Phase 5b: Shared binder (before 5 and 6)
+
+- [X] T040 Add `Binder.optionalProperties`, `GuardInput.scope` and `Guard.rewrite`; test with recorded Linear and Jira fixtures, the GitHub characterization and the tracker type.
+
 ## Phase 5: Linear (US2)
 
-- [ ] T032 Record Linear `tools/list` fixtures; add the Linear connector type, team binder and fake-server integration test.
-- [ ] T033 Write the Linear setup guide with the mandatory vendor-side restriction; add Linear evaluation cases.
+- [X] T032 Record Linear `tools/list` fixtures; add the Linear connector type, team binder and fake-server integration test.
+- [X] T033 Write the Linear setup guide with the mandatory vendor-side restriction; add Linear evaluation cases.
 - [ ] T034 Live check against a Linear workspace; record evidence in `quickstart.md`.
 
 ## Phase 6: Jira (US3)
 
-- [ ] T035 Record Atlassian fixtures; add the Jira connector type, `cloudId`/project binder and fake-server integration test.
-- [ ] T036 Write the Jira setup guide including API-token enablement and service-account limits; add evaluation cases.
+- [x] T035 Record Atlassian fixtures; add the Jira connector type, `cloudId`/project binder and fake-server integration test.
+- [x] T036 Write the Jira setup guide including API-token enablement and service-account limits; add evaluation cases.
 - [ ] T037 Live check once an Atlassian administrator enables API-token authentication; record evidence.
 
 ## Dependencies
 
-1a → 1b → {2, 3}; 2 → 4; 3 → {5, 6}. Phases 5 and 6 can run in parallel.
+1a → 1b → {2, 3}; 2 → 4; 3 → 5a → 5b → {5, 6}. Phases 5 and 6 can run in parallel.

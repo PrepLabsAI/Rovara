@@ -1,0 +1,8 @@
+{"id":"linear-open-issues","project":"fixtures/linear-payments.yaml","prompt":"what's open for payments in Linear?","expect":{"tool":"linear__list_issues"}}
+{"id":"linear-create-issue","project":"fixtures/linear-payments.yaml","prompt":"create a Linear issue for the flaky login test","expect":{"tool":"linear__save_issue"}}
+{"id":"linear-update-issue","project":"fixtures/linear-payments.yaml","prompt":"set PAY-12 in Linear to high priority","expect":{"tool":"linear__save_issue","argsSubset":{"id":"PAY-12","priority":2}}}
+{"id":"linear-comment","project":"fixtures/linear-payments.yaml","prompt":"comment on PAY-12 in Linear that the fix is deployed","expect":{"tool":"linear__save_comment","argsSubset":{"issueId":"PAY-12"}}}
+{"id":"linear-read-issue","project":"fixtures/linear-payments.yaml","prompt":"show me Linear issue PAY-7","expect":{"tool":"linear__get_issue","argsSubset":{"id":"PAY-7"}}}
+{"id":"github-not-linear","project":"fixtures/linear-payments.yaml","prompt":"list the open GitHub issues in payments-api","expect":{"tool":"github__list_issues"}}
+{"id":"files-not-linear","project":"fixtures/linear-payments.yaml","prompt":"list the top-level files in the payments-api repository","expect":{"tool":"agentx_submit_task"}}
+{"id":"linear-not-connected","project":"fixtures/linear-absent.yaml","prompt":"what's open in Linear?","expect":{"tool":null,"refusal":"not connected"}}

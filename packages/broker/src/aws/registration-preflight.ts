@@ -2,6 +2,7 @@ import { AgentXError, type ConnectorPreflight, type ProjectDefinition, type Regi
 import { ConnectorNotConnected, presentCatalog, TARGET_CONFLICT_REASON, type SkippedTool } from "@agentx/gateway";
 import { discoverScope, stripCode, type ConnectorContextBase, type ScopeDiscovery } from "./connector-routes.js";
 import type { ResolvedConnector } from "./connector-types.js";
+import type { CredentialRegistry } from "./credentials.js";
 
 const MAX_SKIPPED = 64;
 const MAX_PROBLEM = 512;
@@ -78,6 +79,24 @@ export function registrationWarnings(budgetWarning: string | undefined, report: 
     for (const entry of connector.skipped) warnings.push(`connector ${connector.name}: tool ${entry.tool} skipped: ${entry.reason}`);
   }
   return warnings;
+}
+
+/**
+ * A new revision is refused when a connector's credential cannot work in this deployment: no
+ * registry, an unregistered reference, or a provider type the connector does not accept.
+ * Only the reference and type are named, never a secret.
+ */
+export async function credentialRefusals(connectors: readonly ResolvedConnector[], registry: CredentialRegistry | undefined): Promise<string[]> {
+  const refusals: string[] = [];
+  for (const connector of connectors) {
+    const credential = connector.credential;
+    if (!credential) continue;
+    if (!registry) { refusals.push(`connector ${connector.name}: connector credentials are not configured in this deployment`); continue; }
+    const type = await registry.typeOf(credential.ref);
+    if (type === undefined) refusals.push(`connector ${connector.name}: credential ${credential.ref} is not registered; run agentx admin credential register first`);
+    else if (!credential.accepts.includes(type)) refusals.push(`connector ${connector.name}: credential ${credential.ref} is ${type}; a ${connector.vendor} connector needs ${credential.accepts.join(" or ")}`);
+  }
+  return refusals;
 }
 
 /** The first entry for each tool and reason pair, in order, capped at the report's limit. */

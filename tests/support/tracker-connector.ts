@@ -6,12 +6,13 @@ import type { ConnectorType, ResolvedConnector } from "../../packages/broker/src
 
 export const TRACKER_ENDPOINT = "https://mcp.tracker.test/mcp";
 
-export interface TrackerScope { alias: string; siteId: string }
+/** A site, and optionally the board that tools with a `boardId` property are limited to. */
+export interface TrackerScope { alias: string; siteId: string; boardId?: string }
 
 function isTrackerScope(value: unknown): value is TrackerScope {
   if (!value || typeof value !== "object") return false;
   const scope = value as Record<string, unknown>;
-  return typeof scope.alias === "string" && typeof scope.siteId === "string";
+  return typeof scope.alias === "string" && typeof scope.siteId === "string" && (scope.boardId === undefined || typeof scope.boardId === "string");
 }
 
 export const trackerConnectorType: ConnectorType = {
@@ -43,7 +44,11 @@ export const trackerConnectorType: ConnectorType = {
           endpoint: new URL(TRACKER_ENDPOINT),
           permissionsHint: "Tracker API key permissions",
           credentials: registry.provider(credentialRef),
-          binder: { properties: ["siteId"], bind: (scope) => ({ siteId: scope.siteId }) },
+          binder: {
+            properties: ["siteId"],
+            optionalProperties: ["boardId"],
+            bind: (scope) => scope.boardId === undefined ? { siteId: scope.siteId } : { siteId: scope.siteId, boardId: scope.boardId },
+          },
           guards: [],
           attributionKeys: ["body"],
         };

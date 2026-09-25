@@ -20,7 +20,10 @@ connector. Bindings by type:
 - `github`: `scopes` is `all-repositories` or a list of registered repository names; each
   repository is a scope aliased by its name. A name that is not registered refuses registration.
 - `linear`: `teamId` (Linear team UUID).
-- `jira`: `cloudId` (Atlassian site UUID), `projectKey` (optional, `^[A-Z][A-Z0-9_]{1,9}$`).
+- `jira`: `cloudId` (Atlassian site UUID), `projectKey` optional (`^[A-Z][A-Z0-9_]{1,9}$`), on
+  every scope of a connector or on none; with `projectKey`, only the six project-guarded Jira tools
+  may be approved. The Jira project guard checks requests, not responses: reply contents (for
+  example linked, parent or subtask summaries from other projects) are not filtered.
 
 **Tool approval** — feature 007 fields plus presentation fields:
 
