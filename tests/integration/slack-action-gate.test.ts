@@ -395,6 +395,37 @@ describe("the hosted Slack runtime", () => {
     return { decisions, classifier, api };
   }
 
+  it("M4: passes the configured classifier timeout to the gate, so a 12 second setting is not cut at 8 seconds", async () => {
+    const { modelRuntime, faux } = await fauxModelRuntime();
+    faux.setResponses([fauxAssistantMessage([fauxToolCall("tracker__save_item", { id: "TRK-5", priority: 2 })], { stopReason: "toolUse" }), fauxAssistantMessage("Waiting.")]);
+    const catalog: ConnectorCatalog = { connector: "tracker", skipped: [], tools: [{ name: "tracker__save_item", upstreamName: "save_item", description: "Save.", access: "write",
+      itemArguments: ["id"], scopes: [{ alias: "payments", schemaHash: "c".repeat(64) }], inputSchema: { type: "object", properties: { id: { type: "string" }, priority: { type: "number" } } } }] };
+    const api = { discoverConnectorTools: vi.fn(async () => catalog), callConnectorTool: vi.fn(), submitTask: vi.fn(), taskStatus: vi.fn(), taskResult: vi.fn(), followUp: vi.fn(),
+      createPullRequest: vi.fn(), managePullRequest: vi.fn(), pullRequestResult: vi.fn() } satisfies OrchestrationApi;
+    let asked!: () => void;
+    const classifierStarted = new Promise<void>((resolve) => { asked = resolve; });
+    const decisions: Array<{ reason: string; source: string }> = [];
+    const runtime = await createHostedSlackRuntime({
+      message: slackMessage("EvGATE000061", "set TRK-5 to high"), subject, workspaceId, conversationId: "33333333-3333-4333-8333-333333333333",
+      orchestratorInstructions: "Delegate.", connectors: [{ name: "tracker", type: "tracker", label: "Tracker issues", scopes: ["payments"], connected: true }],
+      requestId: () => "55555555-5555-4555-8555-555555555555",
+    }, { stateDirectory: await createFixtureDirectory("agentx-hosted-timeout-"), api, model: FAUX_MODEL, modelRuntime, classifierTimeoutMs: 12_000,
+      classifier: () => { asked(); return new Promise(() => undefined); }, onGateDecision: (decision) => decisions.push(decision) });
+    try {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const turn = runOrchestratorTurn(runtime, "set TRK-5 to high");
+      let started = false;
+      void classifierStarted.then(() => { started = true; });
+      while (!started) await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(8_000);
+      expect(decisions).toEqual([]);
+      await vi.advanceTimersByTimeAsync(4_000);
+      vi.useRealTimers();
+      await turn;
+    } finally { vi.useRealTimers(); await runtime.dispose(); }
+    expect(decisions).toMatchObject([{ source: "classifier_unavailable", reason: "the classifier could not decide: it did not answer within 12000 ms" }]);
+  });
+
   it("I1/D5: runs coding work in a thread whose compute is prepared without a classifier call", async () => {
     const { decisions, classifier, api } = await codingTurn({ computePrepared: true });
     expect(classifier).not.toHaveBeenCalled();

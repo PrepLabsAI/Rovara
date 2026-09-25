@@ -31,7 +31,7 @@ const messages = () => ["set TRK-5 to high priority"];
 let calls = 0;
 const call = (toolName: string, input: Record<string, unknown>) => ({ toolCallId: `call-${++calls}`, toolName, input });
 
-function gate(options: { session?: GateSession; classifier?: ActionClassifier; policy?: ActionPolicy; onDecision?: (decision: GateDecision) => void; maxClassifierCalls?: number; worker?: { prepared(): boolean; ensureReady(): Promise<undefined> } } = {}) {
+function gate(options: { session?: GateSession; classifier?: ActionClassifier; policy?: ActionPolicy; onDecision?: (decision: GateDecision) => void; maxClassifierCalls?: number; classifierTimeoutMs?: number; worker?: { prepared(): boolean; ensureReady(): Promise<undefined> } } = {}) {
   const session = options.session ?? createGateSession(member);
   return { session, gate: new ActionGate({ session, facts, ...options }, () => 1_000) };
 }
@@ -102,6 +102,27 @@ describe("the action gate's decisions", () => {
     await vi.advanceTimersByTimeAsync(8_000);
     expect(await pending).toMatchObject({ outcome: "ask", source: "classifier_unavailable", kind: "classifier", reason: "the classifier could not decide: it did not answer within 8000 ms" });
     expect(session.asks).toHaveLength(1);
+  });
+
+  it("M4: follows the configured classifier timeout rather than a fixed 8 seconds", async () => {
+    vi.useFakeTimers();
+    const { gate: g } = gate({ classifier: () => new Promise(() => undefined), classifierTimeoutMs: 12_000 });
+    let settled = false;
+    const pending = g.decide(call("tracker__save_item", { id: "A" }), { memberMessages: messages }).finally(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(await pending).toMatchObject({ outcome: "ask", source: "classifier_unavailable", reason: "the classifier could not decide: it did not answer within 12000 ms" });
+  });
+
+  it("M4: falls back to 8 seconds when the configured classifier timeout is not a positive whole number", async () => {
+    vi.useFakeTimers();
+    for (const classifierTimeoutMs of [0, -5, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const { gate: g } = gate({ classifier: () => new Promise(() => undefined), classifierTimeoutMs });
+      const pending = g.decide(call("tracker__save_item", { id: "A" }), { memberMessages: messages });
+      await vi.advanceTimersByTimeAsync(8_000);
+      expect(await pending, String(classifierTimeoutMs)).toMatchObject({ reason: "the classifier could not decide: it did not answer within 8000 ms" });
+    }
   });
 
   it("asks when the turn is cancelled while the classifier works", async () => {

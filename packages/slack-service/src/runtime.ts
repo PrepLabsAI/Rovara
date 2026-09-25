@@ -7,6 +7,8 @@ import type { ServiceLog, TurnInput } from "./processor.js";
 export interface HostedRuntimeOptions extends Pick<OrchestratorOptions, "stateDirectory" | "api" | "model" | "sessionFile" | "onConnectorUnavailable" | "modelRuntime"> {
   /** Absent, every change no rule settles asks. */
   classifier?: ActionClassifier;
+  /** The gate's deadline for one classifier check; the same setting as the classifier's own timeout. */
+  classifierTimeoutMs?: number;
   onGateDecision?: (decision: GateDecision) => void;
 }
 
@@ -16,7 +18,7 @@ export interface HostedRuntimeOptions extends Pick<OrchestratorOptions, "stateDi
  * message's author.
  */
 export function createHostedSlackRuntime(input: TurnInput, options: HostedRuntimeOptions) {
-  const { classifier, onGateDecision, ...runtime } = options;
+  const { classifier, classifierTimeoutMs: gateTimeoutMs, onGateDecision, ...runtime } = options;
   return createOrchestratorRuntime({
     ...runtime,
     projectInstructions: input.orchestratorInstructions,
@@ -34,6 +36,7 @@ export function createHostedSlackRuntime(input: TurnInput, options: HostedRuntim
       ...(input.computePrepared === true ? { computePrepared: true } : {}),
       ...(input.actionPolicy === undefined ? {} : { policy: input.actionPolicy }),
       ...(classifier === undefined ? {} : { classifier }),
+      ...(gateTimeoutMs === undefined ? {} : { classifierTimeoutMs: gateTimeoutMs }),
       ...(onGateDecision === undefined ? {} : { onDecision: onGateDecision }),
     },
   });

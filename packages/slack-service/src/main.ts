@@ -67,8 +67,9 @@ const classifierModel = {
   provider: process.env.AGENTX_GATE_CLASSIFIER_PROVIDER ?? "amazon-bedrock",
   modelId: process.env.AGENTX_GATE_CLASSIFIER_MODEL ?? "amazon.nova-lite-v1:0",
 };
+const gateClassifierTimeoutMs = classifierTimeoutMs(process.env.AGENTX_GATE_CLASSIFIER_TIMEOUT_MS);
 const { classifier, available: classifierAvailable } = await createHostedClassifier({
-  model: classifierModel, timeoutMs: classifierTimeoutMs(process.env.AGENTX_GATE_CLASSIFIER_TIMEOUT_MS), log,
+  model: classifierModel, timeoutMs: gateClassifierTimeoutMs, log,
 });
 const confirmations = createDynamoConfirmationStore(documentClient, threadsTableName, Date.now, log);
 
@@ -213,6 +214,8 @@ async function runTurn(input: TurnInput): Promise<string> {
         eventId: input.message.eventId, connector: failure.connector, cause: failure.cause, code: failure.code, message: failure.message,
       }),
       classifier,
+      // The gate's own deadline follows the same setting, so a longer timeout is not cut at 8 seconds.
+      classifierTimeoutMs: gateClassifierTimeoutMs,
       // One line per gate decision until turn records carry them; never the call's arguments.
       onGateDecision: (decision) => log("gate.decision", gateDecisionLogFields(input.message.eventId, decision)),
     });

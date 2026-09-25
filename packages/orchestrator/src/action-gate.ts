@@ -64,6 +64,8 @@ export interface ActionGateOptions {
   computePrepared?: boolean | undefined;
   onDecision?: ((decision: GateDecision) => void) | undefined;
   maxClassifierCalls?: number | undefined;
+  /** The gate's own deadline for one classifier check: the configured classifier timeout, else 8 seconds. */
+  classifierTimeoutMs?: number | undefined;
 }
 
 /** Stands in for the worker when the host says the thread's compute is already prepared. */
@@ -260,6 +262,8 @@ export class ActionGate {
     this.classifierCalls += 1;
     const started = this.now();
     // The gate keeps its own deadline and honours the turn's cancellation, whatever the classifier does.
+    const timeout = this.options.classifierTimeoutMs;
+    const deadlineMs = timeout !== undefined && Number.isSafeInteger(timeout) && timeout > 0 ? timeout : CLASSIFIER_TIMEOUT_MS;
     const controller = new AbortController();
     const signal = context.signal === undefined ? controller.signal : AbortSignal.any([context.signal, controller.signal]);
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -267,8 +271,8 @@ export class ActionGate {
     const stop = new Promise<never>((_resolve, reject) => {
       timer = setTimeout(() => {
         controller.abort();
-        reject(new GateWaitError(`it did not answer within ${CLASSIFIER_TIMEOUT_MS} ms`));
-      }, CLASSIFIER_TIMEOUT_MS);
+        reject(new GateWaitError(`it did not answer within ${deadlineMs} ms`));
+      }, deadlineMs);
       onAbort = () => {
         controller.abort();
         reject(new GateWaitError("the turn was cancelled"));

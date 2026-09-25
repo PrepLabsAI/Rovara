@@ -461,7 +461,9 @@ The model that checks changes is a deployment setting: the `AgentXSlackOrchestra
 `GateClassifierModelId`, default Amazon Nova Lite (`amazon.nova-lite-v1:0`). Claude Haiku 4.5
 (`us.anthropic.claude-haiku-4-5-20251001-v1:0`) is an alternative. The installer planned in spec 015
 (`agentx init`) will ask for it during installation. If the model is unavailable, errors, gives an
-answer that is not a plain verdict, or does not answer within 8 seconds, AgentX asks. A model ID the
+answer that is not a plain verdict, or does not answer in time, AgentX asks. The time limit is 8
+seconds unless the service's `AGENTX_GATE_CLASSIFIER_TIMEOUT_MS` is a positive whole number of
+milliseconds; the gate waits exactly that long. A model ID the
 runtime does not know is reported at start: the service logs `gate.classifier_unavailable` and its
 start line says `classifierAvailable: false`, and every change then asks. A turn makes at most 8
 model checks; later changes in that turn ask. The model's full prompt holds the members' own words,
