@@ -4,14 +4,16 @@
 
 **Goal:** Ship, with no user-visible change, everything the control plane must serve before the
 Slack service can turn the action gate on: the project's `actionPolicy`, the vendor's MCP hints
-and each connector's declared item argument on the tool catalog, each only to a Slack service that
-asks for it.
+and each connector's declared item argument paths on the tool catalog, each only to a Slack service
+that asks for it.
 
-**Architecture:** Contracts gain `ActionPolicySchema` (strict registration checks), `ToolHints`
-and a per-tool `itemArgument` on `PresentedTool`. The gateway keeps `readOnlyHint` and
+**Architecture:** Contracts gain `ActionPolicySchema` (strict registration checks), `ToolHints`,
+item argument paths (`ItemPathSchema` and a bounded resolver, R7) and a per-tool `itemArguments`
+on `PresentedTool`. The gateway keeps `readOnlyHint` and
 `destructiveHint` from `tools/list` (today it drops them), and each connector definition declares,
-as its own data, the arguments through which its tools name an existing item (`id` for Linear,
-`issueIdOrKey` for Jira, `issue_number` and `pull_number` for GitHub). The broker sends those
+as its own data, the argument paths through which its tools name an existing item (`id` for Linear,
+`issueIdOrKey` for Jira, `issue_number` and `pull_number` for GitHub; a path may reach inside an
+object or an array of objects, such as `tasks[].task`). The broker sends those
 catalog fields only with the request header `x-agentx-include: gate`, and the latest revision's
 `actionPolicy` only to a thread-workspace request with `includeActionPolicy: true`, on every path
 that builds a thread result, including 14b's `createUnpreparedThreadWorkspace` (C1). The Slack
@@ -29,6 +31,16 @@ arguments as connector data; the cross-plan order and C1, C2, C7, C8).
 cut from mainline once 14a and 14b PR A have merged. This plan is written against mainline plus
 those two phases.
 
+**Amended 2026-09-25 (owner-approved gate fixes).** Item arguments widen from top-level names to
+simple paths (R1, R7; Tasks 2 and 3), for spec 013 phase 7's Asana `update_tasks`, which names its
+tasks as `tasks[].task`. The per-tool field becomes `itemArguments: string[]` (it was
+`itemArgument: string | null`), so a tool that offers several declared paths keeps them all. The
+code blocks of `item-paths.ts` and its test, and part 2's amended `action-policy.ts` with its tests
+and vendor pins, were run in isolation (Vitest, and `tsc` with this repository's compiler flags);
+the other amended blocks (catalog, preflight, route tests) were not re-applied to the scratch copy,
+so the implementer runs every step's commands as written. Part 2 R19 carries the classification side
+and `completed`.
+
 **Verified:** every code block was applied, task by task, to a scratch copy of mainline `af67c2c`
 (spec 013 phase 4 merged) with every code block and test of the 14a plan and of 14b PR A (Tasks 1
 to 6) applied first. With this part's four tasks applied, `npm run build`, `npm run typecheck`,
@@ -42,13 +54,14 @@ discovery; Task 3 keeps it.
   `tests/contract/thread-workspace-request.test.ts` pins the exact opt-in body, so its expected
   line becomes `includeAllConnectorTypes: true, includeRecoverableOperations: true, includeActionPolicy: true,`
   (14b PR B later inserts `lazyPreparation: true` before `includeActionPolicy`, C2). Existing test
-  files otherwise only gain appended tests (`generic-connector-routes.test.ts`); support files gain
+  files otherwise only gain appended tests (`generic-connector-routes.test.ts`,
+  `registration-preflight.test.ts`); support files gain
   an appended loader (`tests/support/vendor-fixtures.ts`) and one field (`itemArguments` on the
   test-only tracker type, which the route strips without the header).
 - **Golden files are append-only.** No snapshot changes. The GitHub golden catalog test in
   `slack-control-plane.test.ts` stays green without edits.
 - **Wire compatibility.** The control plane releases before the Slack service and older services
-  parse strictly: `hints` and `itemArgument` only with `x-agentx-include: gate`; `actionPolicy`
+  parse strictly: `hints` and `itemArguments` only with `x-agentx-include: gate`; `actionPolicy`
   only with `includeActionPolicy: true`.
 - **Schema hashes do not change.** The hash already covers the whole upstream entry, annotations
   included (Task 1 pins one).
@@ -72,34 +85,52 @@ discovery; Task 3 keeps it.
    carries the policy on opt-in (C1), and not without it. Test: Task 4, "sends the action policy
    with a new thread's record that has no compute yet ...".
 4. **An administrator's allowedArguments removes the item argument.** Expected: the tool's
-   `itemArgument` is `null`, so the gate treats every call as a create, because the model can no
+   `itemArguments` is `[]`, so the gate treats every call as a create, because the model can no
    longer name an item. Test: Task 3, "offers no item argument that an administrator's
    allowedArguments removed".
 5. **A rule that can never apply.** Expected: registration refuses it (unknown connector, pattern
    matching no approved tool, both or neither of `outcome` and `treatAs`) and stores nothing.
    Tests: Tasks 2 and 4.
-
+6. **A tool names its item inside an array of objects** (`tasks[].task`). Expected: the path
+   resolves only through the shapes it names, at most four steps deep: a missing path, an empty
+   array or objects without the item resolve to nothing (a create in part 2); a present item
+   resolves (a change); the tool's `itemArguments` lists the path only when its schema offers it.
+   Tests: Task 2, `item-paths.test.ts`; Task 3, "offers an item argument path inside an array of
+   objects ...".
+7. **A connector declares a malformed path.** Expected: registration preflight refuses it before
+   contacting the vendor, every built-in declaration is pinned well formed, and if one is ever
+   served it is served as no declaration, so part 2 treats every write as a change (fails closed,
+   never a create). Tests: Task 2, "reports a malformed, duplicated or empty declaration"; Task 3,
+   "declares only well-formed item argument paths for every built-in connector", "refuses a connector whose definition declares a malformed item argument path ..." and "serves a
+   malformed declaration as none".
 ## File Structure
 
 | File | Responsibility |
 |---|---|
 | `packages/contracts/src/action-policy.ts` (new) | `ActionPolicySchema`, `toolPatternMatches`, `IN_HOUSE_TOOL_NAMES`, `actionPolicyProblems` |
-| `packages/contracts/src/connectors.ts` | `ToolHintsSchema`, `PresentedTool.hints`, `PresentedTool.itemArgument`, `connectorApprovals` |
+| `packages/contracts/src/item-paths.ts` (new) | `ItemPathSchema`, `ITEM_PATH_MAX_STEPS`, `parseItemPath`, `itemPathProblems`, `itemPathHolders`, `itemPathValues`, `schemaHasItemPath` (R7) |
+| `packages/contracts/src/connectors.ts` | `ToolHintsSchema`, `PresentedTool.hints`, `PresentedTool.itemArguments`, `connectorApprovals` |
 | `packages/contracts/src/project.ts`, `slack.ts`, `index.ts` | `actionPolicy` on the project and on the thread workspace result |
-| `packages/gateway/src/mcp-client.ts`, `types.ts`, `engine.ts`, `catalog.ts` | Carry the hints; `ConnectorDefinition.itemArguments`; compute each tool's `itemArgument` |
+| `packages/gateway/src/mcp-client.ts`, `types.ts`, `engine.ts`, `catalog.ts` | Carry the hints; `ConnectorDefinition.itemArguments`; compute each tool's `itemArguments` |
 | `packages/gateway/src/github.ts`, `linear.ts`, `jira.ts` | Each connector's item arguments |
 | `packages/broker/src/aws/connector-routes.ts`, `broker.ts` | Serve the gate fields and the policy on opt-in |
+| `packages/broker/src/aws/registration-preflight.ts` | Refuse a malformed item argument declaration (R7) |
 | `packages/slack-service/src/thread-workspace-request.ts` | Opts in with `includeActionPolicy: true` |
 
 ## Pre-decided Rulings
 
 - **R1. Item arguments are connector data.** `ConnectorDefinition.itemArguments` lists, most
-  specific first, the arguments through which that vendor's tools name an existing item. The
-  presented tool carries the first one its (narrowed) schema has, `null` when it has none, and no
-  field when the connector declares none. Part 2's gate classifies from this, so a new connector
-  needs one line, and the gate names no vendor. Linear: `id` (save_issue and save_comment update the
-  item named by id and create one without it). Jira: `issueIdOrKey`. GitHub: `issue_number`,
-  `pull_number`.
+  specific first, the argument paths (R7) through which that vendor's tools name an existing item.
+  The presented tool carries, as `itemArguments`, every declared path its (narrowed) schema offers,
+  in the declared order; `[]` when it offers none; and no field when the connector declares none (or
+  declares a malformed path, R7). Part 2's gate treats a call as a change when any of them resolves
+  to a present value, so a new connector needs one line, and the gate names no vendor. Linear: `id`
+  (save_issue and save_comment update the item named by id and create one without it). Jira:
+  `issueIdOrKey`. GitHub: `issue_number`, `pull_number`. These top-level names are paths of one step
+  and behave exactly as before. Asana (spec 013 phase 7) will declare `["task_id", "tasks[].task"]`
+  from its `ASANA_TASK_REFERENCES`; whichever of phase 7 and this part merges second sets that
+  declaration on `asanaConnector` (the field ships here, so this matches phase 7's own plan); part 2
+  R19 adds Asana to the classification tests.
 - **R2. Hints only tighten.** Part 2 reads them only where AgentX's own rules cannot decide (see
   part 2, R3). Here they are carried as booleans only; anything else is dropped.
 - **R3. One header for the gate's catalog fields.** `x-agentx-include: gate` (a comma list is
@@ -116,6 +147,21 @@ discovery; Task 3 keeps it.
   file locally). So: register a policy only after the 14c runtime and control plane are both
   released; neither may roll back below 14c afterwards; administrators need the 14c CLI. Part 2's
   rollout repeats this.
+- **R7. Item argument path grammar (amended 2026-09-25).** A path is `step ( "." step | "[]." step )*`
+  with at most `ITEM_PATH_MAX_STEPS` (4) steps, each step 1 to 64 of `A-Z a-z 0-9 _ -`: a name
+  (`id`), a name inside an object argument (`fields.key`), or a name inside each object of an array
+  argument (`tasks[].task`). The named value itself is never an array (`tasks[]` is malformed), and
+  there are no indexes, wildcards or other syntax. Resolving reads only the shapes the path names:
+  `.` needs a plain object and `[].` an array, whose non-object entries are skipped; anything else
+  resolves to nothing. A value is present when it is not `undefined`, `null` or `""`. A path's
+  holders (the objects that hold its last step) are what part 2 also searches for lifecycle keys.
+  A tool offers a path when each step is a declared property of its input schema, read through
+  `items` after `[]`. A declaration of 1 to 16 distinct well-formed paths is usable. Registration
+  preflight refuses a connector whose definition declares anything else, before it contacts the
+  vendor; a test pins every built-in declaration; and a malformed declaration that is ever served
+  anyway is served as no declaration, so part 2 treats every write as a change (never a create).
+  The module is vendor-neutral and lives in contracts, because both the gateway (presenting) and
+  the orchestrator (classifying) use it.
 
 ---
 
@@ -171,9 +217,9 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 ### Task 2: Contracts for the action policy, hints and item arguments
 
 **Files:**
-- Create: `packages/contracts/src/action-policy.ts`
+- Create: `packages/contracts/src/action-policy.ts`, `packages/contracts/src/item-paths.ts`
 - Modify: `packages/contracts/src/connectors.ts`, `project.ts`, `slack.ts`, `index.ts`
-- Test: `tests/contract/action-policy-contracts.test.ts`
+- Test: `tests/contract/action-policy-contracts.test.ts`, `tests/contract/item-paths.test.ts`
 
 **Interfaces:**
 - Produces:
@@ -186,7 +232,15 @@ export type ActionPolicy = { rules: ActionPolicyRule[] };
 export function toolPatternMatches(pattern: string, name: string): boolean;
 export function actionPolicyProblems(project): string[];
 export const ToolHintsSchema; export type ToolHints = { readOnlyHint?: boolean; destructiveHint?: boolean };
-// PresentedTool gains hints?: ToolHints and itemArgument?: string | null
+// PresentedTool gains hints?: ToolHints and itemArguments?: string[] (item argument paths)
+export const ITEM_PATH_MAX_STEPS = 4;
+export const ItemPathSchema; // a name, a.b or a[].b, at most four steps (R7)
+export interface ItemPathStep { name: string; each: boolean }
+export function parseItemPath(path: string): ItemPathStep[] | undefined;
+export function itemPathProblems(paths: readonly string[] | undefined): string[];
+export function itemPathHolders(args: Record<string, unknown>, path: string): Array<Record<string, unknown>>;
+export function itemPathValues(args: Record<string, unknown>, path: string): unknown[];
+export function schemaHasItemPath(inputSchema: Record<string, unknown>, path: string): boolean;
 export function connectorApprovals(definition): Array<{ name: string; tools: ReadonlyArray<{ name: string }> }>;
 // ProjectDefinition, StoredProjectDefinition and the WORKSPACE thread result gain actionPolicy?: ActionPolicy
 ```
@@ -271,11 +325,14 @@ describe("action policy contracts", () => {
     expect(StoredProjectDefinitionSchema.safeParse(project({ rules: [{ tool: "issue_write", connector: "github", outcome: "ask" }] })).success).toBe(true);
   });
 
-  it("carries a presented tool's two hints and item argument and nothing else, and an optional action policy on the thread workspace result", () => {
+  it("carries a presented tool's two hints and item arguments and nothing else, and an optional action policy on the thread workspace result", () => {
     const tool = { name: "linear__save_issue", upstreamName: "save_issue", description: "Save.", inputSchema: {}, access: "write", scopes: [{ alias: "charterarc", schemaHash: "a".repeat(64) }] };
-    expect(PresentedToolSchema.safeParse({ ...tool, hints: { readOnlyHint: false, destructiveHint: true }, itemArgument: "id" }).success).toBe(true);
-    expect(PresentedToolSchema.safeParse({ ...tool, itemArgument: null }).success).toBe(true);
-    expect(PresentedToolSchema.safeParse({ ...tool, itemArgument: "has space" }).success).toBe(false);
+    expect(PresentedToolSchema.safeParse({ ...tool, hints: { readOnlyHint: false, destructiveHint: true }, itemArguments: ["id"] }).success).toBe(true);
+    expect(PresentedToolSchema.safeParse({ ...tool, itemArguments: [] }).success).toBe(true);
+    expect(PresentedToolSchema.safeParse({ ...tool, itemArguments: ["task_id", "tasks[].task"] }).success).toBe(true);
+    expect(PresentedToolSchema.safeParse({ ...tool, itemArguments: ["has space"] }).success).toBe(false);
+    expect(PresentedToolSchema.safeParse({ ...tool, itemArguments: ["tasks[]"] }).success).toBe(false);
+    expect(PresentedToolSchema.safeParse({ ...tool, itemArgument: "id" }).success).toBe(false);
     expect(PresentedToolSchema.safeParse({ ...tool, hints: { idempotentHint: true } }).success).toBe(false);
     expect(SlackThreadWorkspaceResultSchema.safeParse({
       outcome: "WORKSPACE", workspaceId: "11111111-1111-4111-8111-111111111111", status: "READY", operationId: null, created: false,
@@ -285,10 +342,80 @@ describe("action policy contracts", () => {
 });
 ```
 
+```ts
+// tests/contract/item-paths.test.ts
+import { describe, expect, it } from "vitest";
+import { ITEM_PATH_MAX_STEPS, ItemPathSchema, itemPathHolders, itemPathProblems, itemPathValues, schemaHasItemPath } from "../../packages/contracts/src/index.js";
+
+describe("item argument paths (spec 014)", () => {
+  it("accepts a name, a.b and a[].b, with at most four steps", () => {
+    expect(ITEM_PATH_MAX_STEPS).toBe(4);
+    for (const path of ["id", "issueIdOrKey", "issue_number", "fields.key", "tasks[].task", "a[].b.c[].d"]) expect(ItemPathSchema.safeParse(path).success).toBe(true);
+    for (const path of ["", "tasks[]", "tasks[].", ".id", "id.", "a..b", "a[0].b", "a[]b", "a.*.b", "has space", "a.b.c.d.e", "a[].b[].c[].d[].e", "x".repeat(65)]) {
+      expect(ItemPathSchema.safeParse(path).success).toBe(false);
+    }
+  });
+
+  it("finds no item when the path is missing, empty, of another shape or malformed", () => {
+    expect(itemPathValues({ title: "x" }, "id")).toEqual([]);
+    expect(itemPathValues({ id: "" }, "id")).toEqual([]);
+    expect(itemPathValues({ id: null }, "id")).toEqual([]);
+    expect(itemPathValues({ tasks: [] }, "tasks[].task")).toEqual([]);
+    expect(itemPathValues({ tasks: [{ name: "new" }] }, "tasks[].task")).toEqual([]);
+    expect(itemPathValues({ tasks: { task: "11" } }, "tasks[].task")).toEqual([]);
+    expect(itemPathValues({ tasks: ["11", "12"] }, "tasks[].task")).toEqual([]);
+    expect(itemPathValues({ fields: [{ key: "PAY-7" }] }, "fields.key")).toEqual([]);
+    expect(itemPathValues({ tasks: [{ task: "11" }] }, "tasks[]")).toEqual([]);
+  });
+
+  it("finds each present item: top level, nested, or in every object of an array", () => {
+    expect(itemPathValues({ id: "T-5" }, "id")).toEqual(["T-5"]);
+    expect(itemPathValues({ issue_number: 42 }, "issue_number")).toEqual([42]);
+    expect(itemPathValues({ fields: { key: "PAY-7" } }, "fields.key")).toEqual(["PAY-7"]);
+    expect(itemPathValues({ tasks: [{ task: "11" }, { name: "new" }, { task: "12" }] }, "tasks[].task")).toEqual(["11", "12"]);
+    expect(itemPathHolders({ tasks: [{ task: "11", completed: true }, 3, null] }, "tasks[].task")).toEqual([{ task: "11", completed: true }]);
+    expect(itemPathHolders({ id: "T-5" }, "id")).toEqual([{ id: "T-5" }]);
+  });
+
+  it("never reads deeper than the path's own steps", () => {
+    const deep = { a: [{ b: { c: [{ d: "x", e: { f: "y" } }] } }] };
+    expect(itemPathValues(deep, "a[].b.c[].d")).toEqual(["x"]);
+    expect(itemPathValues(deep, "a[].b.c[].e.f")).toEqual([]);
+    expect(itemPathHolders(deep, "a[].b.c[].e.f")).toEqual([]);
+  });
+
+  it("reports a malformed, duplicated or empty declaration", () => {
+    expect(itemPathProblems(undefined)).toEqual([]);
+    expect(itemPathProblems(["id"])).toEqual([]);
+    expect(itemPathProblems(["task_id", "tasks[].task"])).toEqual([]);
+    expect(itemPathProblems(["id", "tasks[]"])).toEqual(["malformed item argument path \"tasks[]\""]);
+    expect(itemPathProblems(["id", "id"])).toEqual(["duplicate item argument path id"]);
+    expect(itemPathProblems([])).toEqual(["declare 1 to 16 item argument paths"]);
+  });
+
+  it("tells whether a tool's input schema offers a path", () => {
+    const schema = { type: "object", properties: {
+      id: { type: "string" },
+      fields: { type: "object", properties: { key: { type: "string" } } },
+      tasks: { type: "array", items: { type: "object", properties: { task: { type: "string" } } } },
+    } };
+    expect(schemaHasItemPath(schema, "id")).toBe(true);
+    expect(schemaHasItemPath(schema, "fields.key")).toBe(true);
+    expect(schemaHasItemPath(schema, "tasks[].task")).toBe(true);
+    expect(schemaHasItemPath(schema, "tasks.task")).toBe(false);
+    expect(schemaHasItemPath(schema, "fields[].key")).toBe(false);
+    expect(schemaHasItemPath(schema, "tasks[].name")).toBe(false);
+    expect(schemaHasItemPath(schema, "task_id")).toBe(false);
+    expect(schemaHasItemPath(schema, "tasks[]")).toBe(false);
+  });
+});
+```
+
 - [ ] **Step 2: Run it and watch it fail**
 
-Run: `npx vitest run tests/contract/action-policy-contracts.test.ts`
-Expected: FAIL; `ActionPolicySchema`, `IN_HOUSE_TOOL_NAMES` and `toolPatternMatches` are not exported.
+Run: `npx vitest run tests/contract/action-policy-contracts.test.ts tests/contract/item-paths.test.ts`
+Expected: FAIL; `ActionPolicySchema`, `IN_HOUSE_TOOL_NAMES`, `toolPatternMatches` and `ItemPathSchema`
+are not exported.
 
 - [ ] **Step 3: Create `packages/contracts/src/action-policy.ts`**
 
@@ -366,9 +493,98 @@ export type ActionPolicyRule = z.infer<typeof ActionPolicyRuleSchema>;
 export type ActionPolicy = z.infer<typeof ActionPolicySchema>;
 ```
 
-- [ ] **Step 4: Hints, item argument and `connectorApprovals` in `packages/contracts/src/connectors.ts`**
+- [ ] **Step 3b: Create `packages/contracts/src/item-paths.ts` (R7)**
 
-Replace the `PresentedToolSchema` declaration with:
+```ts
+import { z } from "zod";
+
+/** The most steps an item argument path may have, so resolving one is bounded. */
+export const ITEM_PATH_MAX_STEPS = 4;
+
+/**
+ * Where a connector's tools name an existing item (feature 014): an argument name (`id`), a name
+ * inside an object argument (`fields.key`), or a name inside each object of an array argument
+ * (`tasks[].task`). A step is 1 to 64 of A-Z, a-z, 0-9, `_` and `-`; a path has at most
+ * ITEM_PATH_MAX_STEPS steps (the `{0,3}` below); `[]` only ever comes before a `.`, so the named
+ * value itself is never an array.
+ */
+export const ItemPathSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}(?:(?:\.|\[\]\.)[A-Za-z0-9_-]{1,64}){0,3}$/u);
+
+/** One step of a path. `each` means the value at this step is an array whose objects the next step reads. */
+export interface ItemPathStep { name: string; each: boolean }
+
+/** The steps of a well-formed path, or undefined for a malformed one. */
+export function parseItemPath(path: string): ItemPathStep[] | undefined {
+  if (!ItemPathSchema.safeParse(path).success) return undefined;
+  return path.split(".").map((part) => part.endsWith("[]") ? { name: part.slice(0, -2), each: true } : { name: part, each: false });
+}
+
+/** Why a connector's declared item arguments cannot be used: malformed, duplicated, none or more than 16. */
+export function itemPathProblems(paths: readonly string[] | undefined): string[] {
+  if (paths === undefined) return [];
+  const problems: string[] = [];
+  if (paths.length === 0 || paths.length > 16) problems.push("declare 1 to 16 item argument paths");
+  for (const [index, path] of paths.entries()) {
+    if (parseItemPath(path) === undefined) problems.push(`malformed item argument path ${JSON.stringify(path.slice(0, 80))}`);
+    else if (paths.indexOf(path) !== index) problems.push(`duplicate item argument path ${path}`);
+  }
+  return problems;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** A value that names something: not undefined, null or the empty string. */
+function isPresent(value: unknown): boolean {
+  return value !== undefined && value !== null && value !== "";
+}
+
+/**
+ * The objects that hold a path's last step in a call's arguments: the arguments themselves for a
+ * name, the object at `a` for `a.b`, and each object of the array at `a` for `a[].b`. A value of any
+ * other shape, and a malformed path, holds nothing. It never reads deeper than the path's own steps.
+ */
+export function itemPathHolders(args: Record<string, unknown>, path: string): Array<Record<string, unknown>> {
+  const steps = parseItemPath(path);
+  if (steps === undefined) return [];
+  let holders: Array<Record<string, unknown>> = [args];
+  for (const step of steps.slice(0, -1)) {
+    holders = holders.flatMap((holder) => {
+      const value = Object.hasOwn(holder, step.name) ? holder[step.name] : undefined;
+      if (step.each) return Array.isArray(value) ? value.filter(isPlainObject) : [];
+      return isPlainObject(value) ? [value] : [];
+    });
+  }
+  return holders;
+}
+
+/** The present values a path names in a call's arguments; empty when it is missing, empty or malformed. */
+export function itemPathValues(args: Record<string, unknown>, path: string): unknown[] {
+  const last = parseItemPath(path)?.at(-1)?.name;
+  if (last === undefined) return [];
+  return itemPathHolders(args, path).flatMap((holder) => Object.hasOwn(holder, last) && isPresent(holder[last]) ? [holder[last]] : []);
+}
+
+/** Whether a tool's input schema offers a path: each step a declared property, read through `items` after `[]`. */
+export function schemaHasItemPath(inputSchema: Record<string, unknown>, path: string): boolean {
+  const steps = parseItemPath(path);
+  if (steps === undefined) return false;
+  let schema: unknown = inputSchema;
+  for (const step of steps) {
+    const properties = isPlainObject(schema) && isPlainObject(schema.properties) ? schema.properties : undefined;
+    if (properties === undefined || !Object.hasOwn(properties, step.name)) return false;
+    schema = properties[step.name];
+    if (step.each) schema = isPlainObject(schema) ? schema.items : undefined;
+  }
+  return true;
+}
+```
+
+- [ ] **Step 4: Hints, item arguments and `connectorApprovals` in `packages/contracts/src/connectors.ts`**
+
+Add `import { ItemPathSchema } from "./item-paths.js";` after the `zod` import, and replace the
+`PresentedToolSchema` declaration with:
 
 ```ts
 /**
@@ -391,11 +607,12 @@ export const PresentedToolSchema = z.object({
   // older services parse this schema strictly (feature 014).
   hints: ToolHintsSchema.optional(),
   /**
-   * The argument through which this tool names an existing item, from the connector's own data:
-   * a name when the tool has one, null when the connector declares item arguments and this tool
-   * has none (so a call creates), absent when the connector declares none.
+   * The connector's item argument paths (item-paths.ts) that this tool's schema offers, in the
+   * connector's order; a call that sets any of them names an existing item. Empty when the connector
+   * declares paths and this tool offers none (so a call creates), absent when the connector declares
+   * none.
    */
-  itemArgument: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/).nullable().optional(),
+  itemArguments: z.array(ItemPathSchema).max(16).optional(),
 }).strict();
 ```
 
@@ -436,18 +653,19 @@ above the `connectors.js` import, and in the `WORKSPACE` object of
       actionPolicy: ActionPolicySchema.optional(),
 ```
 
-In `packages/contracts/src/index.ts`, add `export * from "./action-policy.js";` as the first line.
+In `packages/contracts/src/index.ts`, add `export * from "./action-policy.js";` as the first line
+and `export * from "./item-paths.js";` as the second.
 
 - [ ] **Step 6: Run it and watch it pass**
 
-Run: `npm run build && npx vitest run tests/contract/action-policy-contracts.test.ts tests/contract/connector-config.test.ts tests/contract/contracts.test.ts tests/contract/slack-contracts.test.ts tests/contract/lazy-workspace-contracts.test.ts`
+Run: `npm run build && npx vitest run tests/contract/action-policy-contracts.test.ts tests/contract/item-paths.test.ts tests/contract/connector-config.test.ts tests/contract/contracts.test.ts tests/contract/slack-contracts.test.ts tests/contract/lazy-workspace-contracts.test.ts`
 Expected: PASS.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add packages/contracts/src tests/contract/action-policy-contracts.test.ts
-git commit -m "feat(contracts): action policy, tool hints and item arguments for the action gate
+git add packages/contracts/src tests/contract/action-policy-contracts.test.ts tests/contract/item-paths.test.ts
+git commit -m "feat(contracts): action policy, tool hints and item argument paths for the action gate
 
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 ```
@@ -458,15 +676,17 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 **Files:**
 - Modify: `packages/gateway/src/mcp-client.ts`, `types.ts`, `engine.ts`, `catalog.ts`, `github.ts`,
-  `linear.ts`, `jira.ts`; `packages/broker/src/aws/connector-routes.ts`; `packages/broker/src/aws/broker.ts` (connector route)
+  `linear.ts`, `jira.ts`; `packages/broker/src/aws/connector-routes.ts`; `packages/broker/src/aws/broker.ts` (connector route);
+  `packages/broker/src/aws/registration-preflight.ts` (R7 refusal)
 - Modify: `tests/support/vendor-fixtures.ts` (append), `tests/support/tracker-connector.ts` (one field),
-  `tests/contract/generic-connector-routes.test.ts` (extend Task 1's block)
+  `tests/contract/generic-connector-routes.test.ts` (extend Task 1's block),
+  `tests/contract/registration-preflight.test.ts` (append one test)
 - Test: `tests/contract/gateway-hints.test.ts`
 
 **Interfaces:**
-- Consumes: `ToolHints` (Task 2); Task 1's `annotated` and `annotatedConfig`.
-- Produces: `McpToolAnnotations`; `CatalogTool.hints`; `ConnectorDefinition.itemArguments?: readonly string[]`;
-  `presentCatalog({ ..., itemArguments? })`; `PresentedCatalogTool.hints` and `.itemArgument`;
+- Consumes: `ToolHints`, `itemPathProblems`, `schemaHasItemPath` (Task 2); Task 1's `annotated` and `annotatedConfig`.
+- Produces: `McpToolAnnotations`; `CatalogTool.hints`; `ConnectorDefinition.itemArguments?: readonly string[]` (paths, R7);
+  `presentCatalog({ ..., itemArguments? })`; `PresentedCatalogTool.hints` and `.itemArguments?: string[]`;
   `discoverConnector({ ..., includeGateFields? })`; `vendorToolsWithAnnotations(vendor)`.
 
 - [ ] **Step 1: Add the fixture loader that keeps annotations**
@@ -491,7 +711,8 @@ In `tests/support/tracker-connector.ts`, after `attributionKeys: ["body"],` in t
 ```ts
 // tests/contract/gateway-hints.test.ts
 import { describe, expect, it } from "vitest";
-import { jiraConnector, linearBinder, linearConnector, presentCatalog, reviewTools, type CatalogTool } from "../../packages/gateway/src/index.js";
+import { itemPathProblems } from "../../packages/contracts/src/index.js";
+import { githubConnector, jiraConnector, linearBinder, linearConnector, presentCatalog, reviewTools, type CatalogTool } from "../../packages/gateway/src/index.js";
 import { vendorTools, vendorToolsWithAnnotations } from "../support/vendor-fixtures.js";
 
 const scope = { alias: "charterarc", teamId: "c408e946-78aa-4db8-923e-f78053dd954f" };
@@ -541,19 +762,41 @@ describe("vendor hints through discovery", () => {
       connector: "linear", label: "Linear", scopeNoun: "team", approvals: approvals.map(({ name }) => ({ name })),
       scopes: [{ alias: "charterarc", tools: reviewed.tools }], itemArguments: linearConnector(unused).itemArguments,
     });
-    expect(presented.tools.map((tool) => [tool.name, tool.itemArgument])).toEqual([
-      ["linear__list_issues", null], ["linear__save_issue", "id"], ["linear__delete_comment", "id"],
+    expect(presented.tools.map((tool) => [tool.name, tool.itemArguments])).toEqual([
+      ["linear__list_issues", []], ["linear__save_issue", ["id"]], ["linear__delete_comment", ["id"]],
     ]);
     expect(jiraConnector(unused, { projectScoped: true }).itemArguments).toEqual(["issueIdOrKey"]);
     const undeclared = presentCatalog({ connector: "linear", label: "Linear", scopeNoun: "team", approvals: [{ name: "save_issue" }], scopes: [{ alias: "charterarc", tools: reviewed.tools }] });
-    expect(undeclared.tools[0]).not.toHaveProperty("itemArgument");
+    expect(undeclared.tools[0]).not.toHaveProperty("itemArguments");
+  });
+
+  it("declares only well-formed item argument paths for every built-in connector", () => {
+    const unused = { issue: () => { throw new Error("not used"); } };
+    const github = githubConnector(() => { throw new Error("not used"); });
+    for (const declared of [github.itemArguments, linearConnector(unused).itemArguments, jiraConnector(unused, { projectScoped: true }).itemArguments]) {
+      expect(declared).toBeDefined();
+      expect(itemPathProblems(declared)).toEqual([]);
+    }
+  });
+
+  it("offers an item argument path inside an array of objects, and serves a malformed declaration as none", () => {
+    const tool: CatalogTool = {
+      name: "update_items", scope: "payments", description: "Update items.", access: "write", schemaHash: "a".repeat(64),
+      inputSchema: { type: "object", properties: { items: { type: "array", items: { type: "object", properties: { item: { type: "string" }, completed: { type: "boolean" } } } } }, additionalProperties: false },
+    };
+    const present = (itemArguments: readonly string[]) => presentCatalog({
+      connector: "tracker", label: "Tracker", scopeNoun: "site", approvals: [{ name: "update_items" }], scopes: [{ alias: "payments", tools: [tool] }], itemArguments,
+    }).tools[0]!;
+    expect(present(["item_id", "items[].item"]).itemArguments).toEqual(["items[].item"]);
+    expect(present(["items.item"]).itemArguments).toEqual([]);
+    expect(present(["item_id", "items[]"])).not.toHaveProperty("itemArguments");
   });
 
   it("offers no item argument that an administrator's allowedArguments removed", () => {
     const narrowed = reviewTools({ tools: vendorToolsWithAnnotations("linear") }, { binder: linearBinder },
       { ...context, policy: { tools: [{ name: "save_issue", access: "write" as const, allowedArguments: ["title", "description"] }] } });
     const presented = presentCatalog({ connector: "linear", label: "Linear", scopeNoun: "team", approvals: [{ name: "save_issue" }], scopes: [{ alias: "charterarc", tools: narrowed.tools }], itemArguments: ["id"] });
-    expect(presented.tools[0]!.itemArgument).toBeNull();
+    expect(presented.tools[0]!.itemArguments).toEqual([]);
   });
 });
 ```
@@ -568,11 +811,11 @@ In `tests/contract/generic-connector-routes.test.ts`, replace the final `});` of
     const catalog = ConnectorCatalogSchema.parse((await call(handler, { method: "GET", path: `${path}/tools`, service, headers: { "x-agentx-include": "gate" } })).body.catalog);
     const close = catalog.tools.find((tool) => tool.name === "tracker__close_item")!;
     expect(close.hints).toEqual({ readOnlyHint: false, destructiveHint: true });
-    expect(catalog.tools.map((tool) => [tool.name, tool.itemArgument])).toEqual([["tracker__list_items", null], ["tracker__create_item", null], ["tracker__close_item", "id"]]);
+    expect(catalog.tools.map((tool) => [tool.name, tool.itemArguments])).toEqual([["tracker__list_items", []], ["tracker__create_item", []], ["tracker__close_item", ["id"]]]);
     expect(close.scopes).toEqual([{ alias: "payments", schemaHash: "c5c4fb16e67e06a1fda262e7262e6b5a64b59f5bd85beef35923851dcdb16728" }]);
     expect(catalog.tools.filter((tool) => tool.hints !== undefined).map((tool) => tool.name)).toEqual(["tracker__close_item"]);
     const plain = ConnectorCatalogSchema.parse((await call(handler, { method: "GET", path: `${path}/tools?include=gate`, service, headers: { "x-agentx-include": "other" } })).body.catalog);
-    expect(plain.tools.every((tool) => tool.hints === undefined && !("itemArgument" in tool))).toBe(true);
+    expect(plain.tools.every((tool) => tool.hints === undefined && !("itemArguments" in tool))).toBe(true);
   });
 });
 ```
@@ -580,7 +823,7 @@ In `tests/contract/generic-connector-routes.test.ts`, replace the final `});` of
 - [ ] **Step 3: Run them and watch them fail**
 
 Run: `npm run build && npx vitest run tests/contract/gateway-hints.test.ts tests/contract/generic-connector-routes.test.ts`
-Expected: FAIL; no tool has `hints` or `itemArgument`. Task 1's characterization still passes.
+Expected: FAIL; no tool has `hints` or `itemArguments`. Task 1's characterization still passes.
 
 - [ ] **Step 4: Type the annotations and the item arguments**
 
@@ -604,9 +847,10 @@ in `ConnectorDefinition`:
 
 ```ts
   /**
-   * The arguments through which this vendor's tools name an existing item, most specific first
-   * (feature 014). The action gate treats a call that sets one as a change, and a call on a tool
-   * that has none of them as a create. Connector data, so the gate itself names no vendor.
+   * The argument paths through which this vendor's tools name an existing item, most specific first
+   * (feature 014): a name, `a.b` or `a[].b` (contracts item-paths.ts). The action gate treats a call
+   * in which any of them resolves to a present value as a change, and a call on a tool that offers
+   * none of them as a create. Connector data, so the gate itself names no vendor.
    */
   itemArguments?: readonly string[];
 ```
@@ -642,19 +886,19 @@ function toolHints(annotations: McpToolAnnotations | undefined): { hints: ToolHi
 
 - [ ] **Step 6: Present them in `packages/gateway/src/catalog.ts`**
 
-Add `import type { ToolHints } from "@agentx/contracts";` as the first line. Add to
-`PresentedCatalogTool`, after `scopes`:
+Add `import { itemPathProblems, schemaHasItemPath, type ToolHints } from "@agentx/contracts";` as
+the first line. Add to `PresentedCatalogTool`, after `scopes`:
 
 ```ts
   hints?: ToolHints | undefined;
-  /** See PresentedToolSchema.itemArgument: a name, null for a tool with none, absent when the connector declares none. */
-  itemArgument?: string | null | undefined;
+  /** See PresentedToolSchema.itemArguments: the declared paths this tool offers, [] for none, absent when the connector declares none. */
+  itemArguments?: string[] | undefined;
 ```
 
 Add to `presentCatalog`'s input type, after `scopes`:
 
 ```ts
-  /** The connector's item arguments (ConnectorDefinition.itemArguments). */
+  /** The connector's item argument paths (ConnectorDefinition.itemArguments). */
   itemArguments?: readonly string[] | undefined;
 ```
 
@@ -662,7 +906,10 @@ After the `scopes:` line of the pushed tool, add:
 
 ```ts
       ...mergeHints(entries.map(({ tool }) => tool.hints)),
-      ...(input.itemArguments === undefined ? {} : { itemArgument: input.itemArguments.find((name) => Object.hasOwn(properties, name)) ?? null }),
+      // A malformed declaration is served as none, so the gate treats every write as a change (R7).
+      ...(input.itemArguments === undefined || itemPathProblems(input.itemArguments).length > 0
+        ? {}
+        : { itemArguments: input.itemArguments.filter((path) => schemaHasItemPath(inputSchema, path)) }),
 ```
 
 and above `function describe(`:
@@ -736,7 +983,7 @@ with
 function withoutGateFields(tool: PresentedCatalogTool): PresentedCatalogTool {
   const copy = { ...tool };
   delete copy.hints;
-  delete copy.itemArgument;
+  delete copy.itemArguments;
   return copy;
 }
 ```
@@ -758,6 +1005,55 @@ with
       }) }, request.requestId);
 ```
 
+- [ ] **Step 8b: Refuse a malformed declaration at registration (R7)**
+
+Append to the `"registration preflight across connector types"` block of
+`tests/contract/registration-preflight.test.ts` (replace that block's closing `});`):
+
+```ts
+  it("refuses a connector whose definition declares a malformed item argument path, before contacting its vendor", async () => {
+    const project = ProjectDefinitionSchema.parse(definition(githubConnector(["list_issues"])));
+    const connect = vi.fn();
+    const malformed: ResolvedConnector = {
+      name: "paths", type: "paths", label: "Paths connector", vendor: "Paths",
+      scopeNoun: "scope", scopes: [{ alias: "only", scope: {} }],
+      policy: { tools: [] }, approvals: [], attribution: false,
+      ledger: { prefix: "CONNECTOR#paths#", entityType: "CONNECTOR_INVOCATION" },
+      connect, configured: async () => true,
+      definition: () => Promise.resolve({
+        label: "Paths", endpoint: new URL("https://mcp.paths.test/mcp"), permissionsHint: "Paths permissions",
+        credentials: { issue: () => Promise.reject(new Error("not used")) },
+        binder: { properties: [], bind: () => ({}) }, guards: [],
+        itemArguments: ["id", "tasks[]"],
+      }),
+    };
+
+    const result = await preflightConnectors([malformed], project, "owner-key");
+    expect(result.refusals).toEqual(["connector paths: malformed item argument path \"tasks[]\""]);
+    expect(result.report.connectors).toEqual([
+      { name: "paths", status: "unavailable", problem: "connector paths declares unusable item arguments", offered: [], skipped: [] },
+    ]);
+    expect(connect).not.toHaveBeenCalled();
+  });
+});
+```
+
+In `packages/broker/src/aws/registration-preflight.ts`, add `itemPathProblems` to the
+`@agentx/contracts` import, and directly after the `if ("notConnected" in resolved) { ... }` block of
+`preflightConnector`:
+
+```ts
+  // Item argument paths are the connector's own data (feature 014, R7). A malformed declaration is
+  // refused here, before any vendor contact; if one were served anyway, it is served as none.
+  const pathProblems = itemPathProblems(resolved.itemArguments);
+  if (pathProblems.length > 0) {
+    return {
+      entry: { name: connector.name, status: "unavailable", problem: `connector ${connector.name} declares unusable item arguments`, offered: [], skipped: [] },
+      refusals: pathProblems.map((problem) => `connector ${connector.name}: ${problem}`),
+    };
+  }
+```
+
 - [ ] **Step 9: Run them and watch them pass, with GitHub and the snapshots unchanged**
 
 Run: `npm run build && npx vitest run tests/contract/gateway-hints.test.ts tests/contract/generic-connector-routes.test.ts tests/contract/gateway-binding.test.ts tests/contract/slack-control-plane.test.ts tests/contract/tool-presentation.test.ts tests/contract/registration-preflight.test.ts tests/contract/connector-types.test.ts`
@@ -766,8 +1062,8 @@ Expected: PASS.
 - [ ] **Step 10: Commit**
 
 ```bash
-git add packages/gateway/src packages/broker/src/aws/connector-routes.ts packages/broker/src/aws/broker.ts tests/support tests/contract/gateway-hints.test.ts tests/contract/generic-connector-routes.test.ts
-git commit -m "feat(gateway): carry vendor hints and connector item arguments to services that ask
+git add packages/gateway/src packages/broker/src/aws/connector-routes.ts packages/broker/src/aws/broker.ts packages/broker/src/aws/registration-preflight.ts tests/support tests/contract/gateway-hints.test.ts tests/contract/generic-connector-routes.test.ts tests/contract/registration-preflight.test.ts
+git commit -m "feat(gateway): carry vendor hints and connector item argument paths to services that ask
 
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 ```
@@ -971,9 +1267,10 @@ parses it, and uses nothing yet). An older Slack service does not send the flag 
 ## Self-Review
 
 1. **Spec coverage.** FR-014's inputs (hints carried, approved access kept, connector item
-   arguments): Task 3. FR-015's schema and strict registration: Tasks 2 and 4. C1 and C2: Task 4. C8:
+   argument paths, R7): Tasks 2 and 3. FR-015's schema and strict registration: Tasks 2 and 4. C1 and C2: Task 4. C8:
    own branch, no base check, no hard-coded totals.
 2. **Placeholders.** None.
-3. **Type consistency.** `ActionPolicy`, `ToolHints`, `itemArgument`, `itemArguments`,
+3. **Type consistency.** `ActionPolicy`, `ToolHints`, `ItemPathSchema`, `itemArguments` (connector
+   declaration and per-tool field),
    `includeGateFields`, `includeActionPolicy` keep one name and shape across tasks and part 2.
 4. **Review Focus.** Each line names its test.
