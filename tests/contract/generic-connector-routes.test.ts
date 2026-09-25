@@ -377,5 +377,9 @@ describe("vendor tool annotations on the connector route (feature 014)", () => {
     expect(catalog.tools.filter((tool) => tool.hints !== undefined).map((tool) => tool.name)).toEqual(["tracker__close_item"]);
     const plain = ConnectorCatalogSchema.parse((await call(handler, { method: "GET", path: `${path}/tools?include=gate`, service, headers: { "x-agentx-include": "other" } })).body.catalog);
     expect(plain.tools.every((tool) => tool.hints === undefined && !("itemArguments" in tool))).toBe(true);
+    const listed = ConnectorCatalogSchema.parse((await call(handler, { method: "GET", path: `${path}/tools`, service, headers: { "x-agentx-include": "other, gate" } })).body.catalog);
+    expect(listed.tools.find((tool) => tool.name === "tracker__close_item")).toMatchObject({ hints: { readOnlyHint: false, destructiveHint: true }, itemArguments: ["id"] });
+    const capitalized = ConnectorCatalogSchema.parse((await call(handler, { method: "GET", path: `${path}/tools`, service, headers: { "x-agentx-include": "Gate" } })).body.catalog);
+    expect(capitalized.tools.every((tool) => tool.hints === undefined && !("itemArguments" in tool))).toBe(true);
   });
 });

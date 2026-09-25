@@ -12,7 +12,7 @@ item argument paths (`ItemPathSchema` and a bounded resolver, R7) and a per-tool
 on `PresentedTool`. The gateway keeps `readOnlyHint` and
 `destructiveHint` from `tools/list` (today it drops them), and each connector definition declares,
 as its own data, the argument paths through which its tools name an existing item (`id` for Linear,
-`issueIdOrKey` for Jira, `issue_number` and `pull_number` for GitHub; a path may reach inside an
+`issueIdOrKey` for Jira, `issue_number` and `pullNumber` for GitHub; a path may reach inside an
 object or an array of objects, such as `tasks[].task`). The broker sends those
 catalog fields only with the request header `x-agentx-include: gate`, and the latest revision's
 `actionPolicy` only to a thread-workspace request with `includeActionPolicy: true`, on every path
@@ -130,7 +130,7 @@ passes 1,367 tests with one skip, so the 1,336 above is history, not a target.
   declares a malformed path, R7). Part 2's gate treats a call as a change when any of them resolves
   to a present value, so a new connector needs one line, and the gate names no vendor. Linear: `id`
   (save_issue and save_comment update the item named by id and create one without it). Jira:
-  `issueIdOrKey`. GitHub: `issue_number`, `pull_number`. These top-level names are paths of one step
+  `issueIdOrKey`. GitHub: `issue_number`, `pullNumber`. These top-level names are paths of one step
   and behave exactly as before. Asana (spec 013 phase 7) will declare `["task_id", "tasks[].task"]`
   from its `ASANA_TASK_REFERENCES`; whichever of phase 7 and this part merges second sets that
   declaration on `asanaConnector` (the field ships here, so this matches phase 7's own plan); part 2
@@ -933,7 +933,7 @@ function mergeHints(all: ReadonlyArray<ToolHints | undefined>): { hints: ToolHin
 - [ ] **Step 7: Declare each connector's item arguments**
 
 In `packages/gateway/src/github.ts`, after `attributionKeys: ["body"],` in `githubConnector`:
-`itemArguments: ["issue_number", "pull_number"],`. In `packages/gateway/src/linear.ts`, after
+`itemArguments: ["issue_number", "pullNumber"],`. In `packages/gateway/src/linear.ts`, after
 `attributionKeys: ["description", "body"],` in `linearConnector`:
 
 ```ts

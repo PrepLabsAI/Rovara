@@ -75,7 +75,7 @@ export async function discoverConnector(input: {
   context: ConnectorContextBase;
   catalogs: CatalogCache<ScopeDiscovery>;
   refresh?: boolean;
-  /** Only a Slack service that asks gets the action gate's fields; an older one parses each tool strictly. */
+  /** Only a caller that asks gets the action gate's fields; an older Slack service parses each tool strictly. */
   includeGateFields?: boolean;
 }): Promise<ConnectorCatalog> {
   const { connector, workspace, context, catalogs } = input;

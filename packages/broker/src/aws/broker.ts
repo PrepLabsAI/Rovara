@@ -419,7 +419,7 @@ async function routeWorkspaceRequest(
     if (parsed && !parsed.success) throw agentXError("CONFIG_INVALID", "invalid connector request");
     const context = connectorContext(identity, workspace, project);
     if (!parsed?.success) {
-      // Only a Slack service that sends x-agentx-include: gate gets the action gate's fields (feature 014).
+      // Only a caller that sends x-agentx-include: gate gets the action gate's fields (feature 014); they are not secret.
       const includeGateFields = request.headers["x-agentx-include"]?.split(",").map((entry) => entry.trim()).includes("gate") === true;
       return json({ catalog: await discoverConnector({
         connector, workspace, context, catalogs: dependencies.catalogs, refresh: url.searchParams.get("refresh") === "1", includeGateFields,

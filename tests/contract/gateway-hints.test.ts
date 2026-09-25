@@ -59,6 +59,24 @@ describe("vendor hints through discovery", () => {
     expect(undeclared.tools[0]).not.toHaveProperty("itemArguments");
   });
 
+  it("names GitHub's issue and pull request arguments as the official GitHub MCP server spells them", () => {
+    // Shaped like github/github-mcp-server: pkg/github/pullrequests.go names the pull request
+    // argument "pullNumber" (merge_pull_request, update_pull_request, pull_request_read, the review
+    // tools); pkg/github/issues.go names the issue argument "issue_number".
+    const tool = (name: string, properties: string[]): CatalogTool => ({
+      name, scope: "demo", description: name, access: "write", schemaHash: name.padEnd(64, "0"),
+      inputSchema: { type: "object", properties: Object.fromEntries(properties.map((property) => [property, { type: property === "pullNumber" || property === "issue_number" ? "number" : "string" }])), required: properties, additionalProperties: false },
+    });
+    const tools = [tool("merge_pull_request", ["owner", "repo", "pullNumber"]), tool("issue_write", ["owner", "repo", "issue_number", "method"]), tool("create_pull_request", ["owner", "repo", "title", "head", "base"])];
+    const presented = presentCatalog({
+      connector: "github", label: "GitHub", scopeNoun: "repository", approvals: tools.map(({ name }) => ({ name })),
+      scopes: [{ alias: "demo", tools }], itemArguments: githubConnector(() => { throw new Error("not used"); }).itemArguments,
+    });
+    expect(presented.tools.map((entry) => [entry.name, entry.itemArguments])).toEqual([
+      ["github__merge_pull_request", ["pullNumber"]], ["github__issue_write", ["issue_number"]], ["github__create_pull_request", []],
+    ]);
+  });
+
   it("declares only well-formed item argument paths for every built-in connector", () => {
     const unused = { issue: () => { throw new Error("not used"); } };
     const github = githubConnector(() => { throw new Error("not used"); });
