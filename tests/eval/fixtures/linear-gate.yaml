@@ -1,0 +1,27 @@
+# linear-payments.yaml plus delete_comment, which an administrator's rule denies (spec 014 FR-018).
+name: payments
+revision: 1
+repositories:
+  - name: payments-api
+    url: https://github.com/example/payments-api.git
+    path: repo/payments-api
+    defaultBranch: main
+    credentialRef: github-agentx-sdlc
+setup: []
+readiness: []
+orchestratorInstructions: Delegate every repository read, edit, build and test to the worker.
+integrations:
+  connectors:
+    - name: linear
+      type: linear
+      credentialRef: linear-payments
+      scopes:
+        - { alias: payments, teamId: "00000000-0000-4000-8000-000000000000" }
+      tools:
+        - { name: list_issues, access: read }
+        - { name: get_issue, access: read }
+        - { name: save_issue, access: write }
+        - { name: delete_comment, access: write }
+actionPolicy:
+  rules:
+    - { tool: delete_comment, connector: linear, outcome: deny, reason: "Deleting comments is turned off." }

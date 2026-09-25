@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { parseArgs } from "node:util";
+import { createModelClassifier } from "../../packages/orchestrator/src/action-classifier.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 import { EVAL_ROOT, loadCases } from "./case.js";
 import { scriptExpectedAnswers } from "./offline.js";
@@ -68,6 +69,11 @@ export function parseEvalArguments(argv: readonly string[], env: NodeJS.ProcessE
   };
 }
 
+/** The classifier model a live run gives the action gate: the deployment setting's default, Amazon Nova Lite, unless the environment names another (spec 014 R5). */
+export function gateClassifierModel(env: NodeJS.ProcessEnv = process.env): { provider: string; modelId: string } {
+  return { provider: env.AGENTX_GATE_CLASSIFIER_PROVIDER ?? "amazon-bedrock", modelId: env.AGENTX_GATE_CLASSIFIER_MODEL ?? "amazon.nova-lite-v1:0" };
+}
+
 export interface EvalCommandOutcome { report: EvalReport; exitCode: number; lines: string[] }
 
 /** Runs `npm run eval`. Results always go to <root>/results; a baseline is written only by a clean live run with --update-baseline. */
@@ -78,7 +84,8 @@ export async function runEvalCommand(argv: readonly string[], options: { root?: 
   const cases = await loadCases(parsed.cases);
   let report: EvalReport;
   if (parsed.live) {
-    report = await runEvaluation(cases, { model: parsed.model, presentation: parsed.presentation, repeat: parsed.repeat, live: true });
+    const gateClassifier = await createModelClassifier({ model: gateClassifierModel(options.env) });
+    report = await runEvaluation(cases, { model: parsed.model, presentation: parsed.presentation, repeat: parsed.repeat, live: true, gateClassifier });
   } else {
     const { modelRuntime, faux } = await fauxModelRuntime();
     report = await runEvaluation(cases, { model: parsed.model, modelRuntime, presentation: parsed.presentation, repeat: parsed.repeat, beforeRun: scriptExpectedAnswers(faux) });

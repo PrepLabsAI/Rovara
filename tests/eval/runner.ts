@@ -7,11 +7,13 @@ import { z } from "zod";
 import { agentXError, type ConnectorCatalog } from "../../packages/contracts/src/index.js";
 import type { OrchestrationApi } from "../../packages/orchestrator/src/orchestration-tools.js";
 import { createOrchestratorRuntime, createPiSessionRuntime, runOrchestratorTurn } from "../../packages/orchestrator/src/orchestrator.js";
+import { createGateSession, type ActionClassifier, type GateSession } from "../../packages/orchestrator/src/action-gate.js";
 import { TurnRecorder } from "../../packages/orchestrator/src/turn-recorder.js";
 import { slackReplyText } from "../../packages/slack-service/src/slack-format.js";
 import { FAUX_MODEL } from "../support/faux-model.js";
 import { EVAL_ROOT, loadCatalog, loadProject, type EvalCase, type UpstreamTool } from "./case.js";
 import { legacyNotApplicable, legacyPresentation } from "./legacy-presentation.js";
+import { expectedVerdict } from "./offline.js";
 import { newPresentation } from "./presentation.js";
 
 export const PresentationSchema = z.enum(["new", "legacy"]);
@@ -31,6 +33,11 @@ export interface EvalOptions {
    */
   beforeRun?: (evalCase: EvalCase, run: number, present: (tool: string, args: Record<string, unknown>) => { tool: string; args: Record<string, unknown> }) => void | Promise<void>;
   timeoutMs?: number;
+  /**
+   * The action gate's classifier in a case with expect.gate. Without it, an offline run answers as
+   * the case expects and a live run has none, so every change no rule settles asks.
+   */
+  gateClassifier?: ActionClassifier;
   /** How long a timed-out run may take to stop before the whole evaluation stops; default 10 s. */
   graceMs?: number;
 }
@@ -54,6 +61,9 @@ export const RunScoreSchema = z.object({
   /** For a case with expect.maxLines: the reply's non-empty lines as Slack shows them, and whether they fit (spec 014 SC-006). */
   replyLines: z.number().int().nonnegative().optional(),
   linesOk: z.boolean().optional(),
+  /** For a case with expect.gate: the gate's decision on the first call (null when no call reached it), and whether it matches. */
+  gate: z.enum(["allow", "ask", "deny"]).nullable().optional(),
+  gateOk: z.boolean().optional(),
 }).strict();
 /** `caseHash` identifies the case definition that was scored (see caseHash); SC-004 refuses baselines whose shared cases differ. */
 export const CaseResultSchema = z.object({ id: z.string(), caseHash: z.string().optional(), passed: z.boolean(), runs: z.array(RunScoreSchema) }).strict();
@@ -90,7 +100,11 @@ export type CaseResult = z.infer<typeof CaseResultSchema>;
 export type EvalReport = z.infer<typeof EvalReportSchema>;
 
 /** `stuck` marks a timed-out run whose work did not stop within the grace period. */
-interface RunOutcome { tool: string | null; offered?: false; args: Record<string, unknown>; response: string; error?: string; timedOut?: true; stuck?: true }
+/** `gate` is the gate's decision on the first call; absent when the run had no gate (legacy, or no expect.gate). */
+interface RunOutcome { tool: string | null; offered?: false; args: Record<string, unknown>; response: string; error?: string; timedOut?: true; stuck?: true; gate?: "allow" | "ask" | "deny" | null }
+
+/** The member a gate case runs for; a Slack member ID, never a real one. */
+const EVAL_REQUESTER = "U0EVAL00001";
 
 const DONE = "Done. (evaluation run: nothing was executed)";
 const DEFAULT_TIMEOUT_MS = 180_000;
@@ -130,6 +144,7 @@ async function runOnce(evalCase: EvalCase, run: number, catalogCache: Map<string
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   let canonical = same;
   let runtime: AgentSessionRuntime | undefined;
+  let gate: GateSession | undefined;
   let timedOut = false;
   let cleanupError: string | undefined;
   const work = (async (): Promise<string> => {
@@ -141,7 +156,9 @@ async function runOnce(evalCase: EvalCase, run: number, catalogCache: Map<string
       }
       stateDirectory = await mkdtemp(join(tmpdir(), "agentx-eval-"));
       if (options.presentation === "new") {
-        const presentation = newPresentation(project, catalogCache);
+        const presentation = newPresentation(project, catalogCache, { gateFields: evalCase.expect.gate !== undefined });
+        if (evalCase.expect.gate !== undefined) gate = createGateSession(EVAL_REQUESTER);
+        const classifier = options.gateClassifier ?? (options.live === true ? undefined : expectedVerdict(evalCase));
         await options.beforeRun?.(evalCase, run, same);
         if (timedOut) throw new Error("timed out");
         runtime = await createOrchestratorRuntime({
@@ -152,6 +169,12 @@ async function runOnce(evalCase: EvalCase, run: number, catalogCache: Map<string
           ...(evalCase.expect.maxLines === undefined ? {} : { replySurface: "slack" as const }),
           repositories: presentation.repositories, connectors: presentation.connectors,
           ...(presentation.recoverableOperations.length > 0 ? { recoverableOperations: presentation.recoverableOperations } : {}),
+          // Only a gate case runs the action gate (spec 014), so every other case runs as its baseline did.
+          ...(gate === undefined ? {} : { actionGate: {
+            session: gate,
+            ...(classifier === undefined ? {} : { classifier }),
+            ...(project.actionPolicy === undefined ? {} : { policy: project.actionPolicy }),
+          } }),
         });
       } else {
         const legacy = legacyPresentation(project, catalogCache);
@@ -221,6 +244,8 @@ async function runOnce(evalCase: EvalCase, run: number, catalogCache: Map<string
   const unoffered = first !== undefined && !offered.has(first.name);
   return {
     tool: call?.tool ?? null, ...(unoffered ? { offered: false as const } : {}), args: call?.args ?? {}, response,
+    // The gate decides calls in order, so its first decision is the first call's.
+    ...(gate === undefined ? {} : { gate: gate.decisions[0]?.outcome ?? null }),
     ...(error === undefined ? {} : { error }), ...(stuck ? { stuck: true as const } : timedOut ? { timedOut: true as const } : {}),
   };
 }
@@ -274,6 +299,7 @@ export function scoreRun(evalCase: EvalCase, run: RunOutcome): RunScore {
     ...(replyLines === undefined || formattedReply === undefined ? {} : {
       replyLines, linesOk: replyLines <= evalCase.expect.maxLines! && !hasLiteralNewlineOutsideCode(formattedReply),
     }),
+    ...(evalCase.expect.gate === undefined || run.gate === undefined ? {} : { gate: run.gate, gateOk: run.error === undefined && run.gate === evalCase.expect.gate }),
     ...(run.timedOut === true ? { timedOut: true as const } : {}), ...(run.error === undefined ? {} : { error: run.error }),
   };
 }
@@ -321,7 +347,7 @@ export async function runEvaluation(cases: readonly EvalCase[], options: EvalOpt
       runs.push(scoreRun(evalCase, outcome));
       if (stopped !== undefined) break;
     }
-    results.push({ id: evalCase.id, caseHash: caseHash(evalCase), passed: runs.every((run) => run.toolOk && run.argsOk && run.phraseOk !== false && run.linesOk !== false && run.error === undefined), runs });
+    results.push({ id: evalCase.id, caseHash: caseHash(evalCase), passed: runs.every((run) => run.toolOk && run.argsOk && run.phraseOk !== false && run.linesOk !== false && run.gateOk !== false && run.error === undefined), runs });
     if (stopped !== undefined) {
       notRun = cases.slice(index + 1).map((entry) => entry.id);
       break;
