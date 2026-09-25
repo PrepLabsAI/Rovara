@@ -4,6 +4,7 @@ import {
   boundNames,
   executeTool,
   githubBinder,
+  GuardRejection,
   reviewTools,
   type Binder,
   type ConnectorContext,
@@ -275,5 +276,98 @@ describe("when-present binding at call time", () => {
     expect(await rig.run("getJiraIssue", { issueIdOrKey: "KAN-1" })).toMatchObject({ status: "SUCCEEDED" });
     expect(rig.call).toHaveBeenLastCalledWith("getJiraIssue", { issueIdOrKey: "KAN-1", cloudId: jiraScope.cloudId });
     expect(Object.keys(rig.call.mock.lastCall![1])).toEqual(["issueIdOrKey", "cloudId"]);
+  });
+
+  it("checks a name listed as both required and when-present on the required path, not the when-present one", async () => {
+    // The vendor's cloudId accepts "", so a missing value is what separates the two paths: the
+    // required path fails the vendor schema, the when-present one would say "has no server-bound value".
+    const binder: Binder<JiraScope> = { properties: ["cloudId"], optionalProperties: ["cloudId", "projectKey"], bind: (scope) => ({ projectKey: scope.projectKey }) };
+    const rig = vendorRig("jira", binder, jiraScope, JIRA_TOOLS);
+    expect(await rig.run("getJiraIssue", { issueIdOrKey: "KAN-1" })).toMatchObject({
+      status: "FAILED", reason: "policy_denied", text: "Arguments do not match the upstream MCP tool schema.",
+    });
+    expect(rig.call).not.toHaveBeenCalled();
+  });
+
+  it("fails closed on a write, never as an unknown outcome, when the binder has no value for its when-present property", async () => {
+    const binder: Binder<LinearScope> = { properties: [], optionalProperties: ["team"], bind: () => ({}) };
+    const rig = vendorRig("linear", binder, linearScope, LINEAR_TOOLS);
+    expect(await rig.run("save_issue", { title: "Bug" })).toMatchObject({
+      status: "FAILED", reason: "policy_denied",
+      text: "Linear has no server-bound value for team. An administrator must fix the connector configuration.",
+    });
+    expect(rig.call).not.toHaveBeenCalled();
+  });
+});
+
+/** A test stand-in for phase 6's JQL guard: every search is limited to the scope's project. */
+const projectSearch: Guard = {
+  requiredTools: () => [],
+  check: async () => undefined,
+  rewrite({ tool, arguments: args, scope }) {
+    if (tool !== "searchJiraIssuesUsingJql") return { ...args };
+    if (typeof args.jql !== "string" || /\border\s+by\b/i.test(args.jql)) throw new GuardRejection("Search without ORDER BY.");
+    return { ...args, jql: `project = "${(scope as JiraScope).projectKey}" AND (${args.jql})` };
+  },
+};
+
+describe("guards that rewrite the model's arguments", () => {
+  it("sends the rewritten arguments, with bound values, and shows them to every check", async () => {
+    const check = vi.fn<Guard["check"]>(async () => undefined);
+    const rig = vendorRig("jira", jiraBinder, jiraScope, JIRA_TOOLS, [projectSearch, { requiredTools: () => [], check }]);
+    expect(await rig.run("searchJiraIssuesUsingJql", { jql: "status = Done" })).toMatchObject({ status: "SUCCEEDED" });
+    expect(rig.call).toHaveBeenLastCalledWith("searchJiraIssuesUsingJql", { jql: "project = \"KAN\" AND (status = Done)", cloudId: jiraScope.cloudId });
+    expect(check).toHaveBeenCalledWith(expect.objectContaining({ arguments: { jql: "project = \"KAN\" AND (status = Done)" } }));
+  });
+
+  it("returns a rewrite refusal as a policy denial without calling the vendor", async () => {
+    const rig = vendorRig("jira", jiraBinder, jiraScope, JIRA_TOOLS, [projectSearch]);
+    expect(await rig.run("searchJiraIssuesUsingJql", { jql: "status = Done ORDER BY created" })).toMatchObject({ status: "FAILED", reason: "policy_denied", text: "Search without ORDER BY." });
+    expect(rig.call).not.toHaveBeenCalled();
+  });
+
+  it("refuses a rewrite that sets a server-bound property, even one the tool does not have", async () => {
+    const rig = vendorRig("jira", jiraBinder, jiraScope, JIRA_TOOLS, [{ requiredTools: () => [], check: async () => undefined, rewrite: ({ arguments: args }) => ({ ...args, projectKey: "OTHER" }) }]);
+    expect(await rig.run("searchJiraIssuesUsingJql", { jql: "status = Done" })).toMatchObject({
+      status: "FAILED", reason: "policy_denied", text: "Jira guard set a server-controlled argument.",
+    });
+    expect(rig.call).not.toHaveBeenCalled();
+  });
+
+  it("replays a rewritten write from the ledger by the model's own arguments, without rewriting or calling again", async () => {
+    const rewrite = vi.fn<NonNullable<Guard["rewrite"]>>(({ arguments: args }) => ({ ...args, summary: `[KAN] ${String(args.summary)}` }));
+    const rig = vendorRig("jira", jiraBinder, jiraScope, JIRA_TOOLS, [{ requiredTools: () => [], check: async () => undefined, rewrite }]);
+    const request = rig.request("createJiraIssue", { summary: "Bug", issueType: "Task" });
+    expect(await rig.send(request)).toMatchObject({ status: "SUCCEEDED", replayed: false });
+    expect(rig.call).toHaveBeenLastCalledWith("createJiraIssue", { summary: "[KAN] Bug", issueType: "Task", cloudId: jiraScope.cloudId, projectKey: "KAN" });
+    expect(await rig.send(request)).toMatchObject({ status: "SUCCEEDED", replayed: true });
+    expect(rewrite).toHaveBeenCalledOnce();
+    expect(rig.call).toHaveBeenCalledOnce();
+  });
+
+  it("signs a long-text field the model wrote, with its rewritten value, and never one a rewrite added", async () => {
+    const tools = vendorTools("linear");
+    const call = vi.fn<(name: string, args: Record<string, unknown>) => Promise<McpToolResult>>(async () => ok);
+    const connect = vi.fn<typeof connectMcp>(async () => ({ tools, call, close: async () => undefined }));
+    const prefix: Guard = { requiredTools: () => [], check: async () => undefined, rewrite: ({ arguments: args }) => ({ ...args, title: `[Payments] ${String(args.title)}` }) };
+    const adds: Guard = { requiredTools: () => [], check: async () => undefined, rewrite: ({ arguments: args }) => typeof args.description === "string" ? { ...args, description: `${args.description} (triaged)` } : { ...args, description: "Filed from Slack." } };
+    const connector: ConnectorDefinition<LinearScope> = {
+      label: "Linear", endpoint: new URL("https://mcp.linear.test/mcp"), permissionsHint: "API key permissions",
+      credentials: { issue: async () => ({ token: "linear-secret", bindings: {} }) },
+      binder: linearBinder, guards: [prefix, adds],
+    };
+    const context = contextFor(linearScope, ["save_issue"], ["save_issue"]);
+    const options = { connect, ledger: memoryLedger(), attribution: "Requested by Pratik via AgentX" };
+    const schemaHash = approveTools({ tools }, connector, context)[0]!.schemaHash;
+    await executeTool({ requestId: "w-1", scope: linearScope.alias, tool: "save_issue", schemaHash, arguments: { title: "Bug", description: "Steps" } }, connector, context, options);
+    expect(call).toHaveBeenLastCalledWith("save_issue", { title: "[Payments] Bug", description: "Steps (triaged)\n\n—\nRequested by Pratik via AgentX", team: linearScope.teamId });
+    await executeTool({ requestId: "w-2", scope: linearScope.alias, tool: "save_issue", schemaHash, arguments: { title: "Bug" } }, connector, context, options);
+    expect(call).toHaveBeenLastCalledWith("save_issue", { title: "[Payments] Bug", description: "Filed from Slack.", team: linearScope.teamId });
+  });
+
+  it("validates the rewritten arguments against the vendor's schema", async () => {
+    const rig = vendorRig("jira", jiraBinder, jiraScope, JIRA_TOOLS, [{ requiredTools: () => [], check: async () => undefined, rewrite: ({ arguments: args }) => ({ ...args, notAJiraArgument: true }) }]);
+    expect(await rig.run("getJiraIssue", { issueIdOrKey: "KAN-1" })).toMatchObject({ status: "FAILED", reason: "policy_denied", text: "Arguments do not match the upstream MCP tool schema." });
+    expect(rig.call).not.toHaveBeenCalled();
   });
 });

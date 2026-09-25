@@ -133,6 +133,18 @@ function withAttribution(
 class PolicyFailure extends Error {}
 class DefinitionChanged extends PolicyFailure {}
 
+/** Applies each guard's rewrite in order. Without one, the model's arguments pass through as the same object. */
+function rewriteArguments<Scope>(request: ToolRequest, bound: Readonly<Record<string, unknown>>, scope: Scope, connector: Pick<ConnectorDefinition<Scope>, "binder" | "guards" | "label">): Record<string, unknown> {
+  let args = request.arguments;
+  const names = boundNames(connector.binder);
+  for (const guard of connector.guards) {
+    if (!guard.rewrite) continue;
+    args = guard.rewrite({ tool: request.tool, arguments: args, bound, scope });
+    if (names.some((name) => Object.hasOwn(args, name))) throw new PolicyFailure(`${connector.label} guard set a server-controlled argument.`);
+  }
+  return args;
+}
+
 /**
  * The bound values a call sends: those its tool has. A required binding's missing value fails the
  * upstream schema; a when-present one may be optional there, so its absence is refused here instead
@@ -258,16 +270,19 @@ export async function executeTool<Scope>(
     if (!validate(request.arguments).valid) throw new PolicyFailure("Arguments do not match the approved MCP tool schema.");
     const bound = connector.binder.bind(context.scope, credential);
     const injected = injectedValues(reviewed.bound, bound, connector);
+    const modelArgs = rewriteArguments(request, bound, context.scope, connector);
+    // Only keys the model wrote are signed, with the value a rewrite gave them; a key a rewrite added is not.
+    const signable = modelArgs === request.arguments ? modelArgs : Object.fromEntries(Object.entries(modelArgs).filter(([key]) => Object.hasOwn(request.arguments, key)));
     const upstream = connection.tools.find((tool) => tool.name === request.tool)!;
     const validateUpstream = new AjvJsonSchemaValidator().getValidator(upstream.inputSchema);
-    const unsigned = { ...request.arguments, ...injected };
+    const unsigned = { ...modelArgs, ...injected };
     if (!validateUpstream(unsigned).valid) throw new PolicyFailure("Arguments do not match the upstream MCP tool schema.");
     // The footer is best effort: when it would break the vendor's schema (a body maxLength, say),
     // the model's own arguments go through unsigned rather than the write failing.
-    const signed = withAttribution(unsigned, request.arguments, write ? options.attribution : undefined, upstream.inputSchema, connector.attributionKeys);
+    const signed = withAttribution(unsigned, signable, write ? options.attribution : undefined, upstream.inputSchema, connector.attributionKeys);
     const dropped = signed !== unsigned && !validateUpstream(signed).valid;
     const args = dropped ? unsigned : signed;
-    for (const guard of connector.guards) await guard.check({ tool: request.tool, arguments: request.arguments, bound, scope: context.scope, connection });
+    for (const guard of connector.guards) await guard.check({ tool: request.tool, arguments: modelArgs, bound, scope: context.scope, connection });
     signal.throwIfAborted();
     writeAttempted = write;
     if (dropped) options.onAttributionDropped?.(request.tool);

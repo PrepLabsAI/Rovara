@@ -54,9 +54,27 @@ export interface GuardInput {
   connection: Pick<McpConnection, "call">;
 }
 
+export interface RewriteInput {
+  tool: string;
+  /** The model's arguments, after any earlier guard rewrote them. */
+  arguments: Readonly<Record<string, unknown>>;
+  /** Every value the binder returned, including ones the called tool does not have. */
+  bound: Readonly<Record<string, unknown>>;
+  /** The call's scope. */
+  scope: unknown;
+}
+
 export interface Guard {
   /** Upstream tools the check needs on the call's connection besides the called tool. */
   requiredTools(tool: string, args: Readonly<Record<string, unknown>>): readonly string[];
+  /**
+   * Optional. Returns the model's arguments narrowed to the scope, such as a search limited to the
+   * bound project. It runs after the model's arguments pass the narrowed schema, and before bound
+   * values are merged, upstream validation, attribution and every check. It must not set a
+   * server-bound property, and throws GuardRejection to refuse. The ledger still fingerprints the
+   * model's own arguments.
+   */
+  rewrite?(input: RewriteInput): Record<string, unknown>;
   /** Throws GuardRejection to refuse the call before it executes. */
   check(input: GuardInput): Promise<void>;
 }
