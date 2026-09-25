@@ -3,7 +3,7 @@ import { AGENTX_NAME_PATTERN } from "./names.js";
 
 /** Every provider type. github-app is built in; per-user is reserved for a later release. */
 export const CredentialTypeSchema = z.enum(["github-app", "static-secret", "oauth-client-credentials", "oauth-refresh-token", "per-user"]);
-export const RegistrableCredentialTypeSchema = z.enum(["static-secret", "oauth-client-credentials"]);
+export const RegistrableCredentialTypeSchema = z.enum(["static-secret", "oauth-client-credentials", "oauth-refresh-token"]);
 export const CONNECTOR_SECRET_PREFIX = "agentx/connectors/";
 
 /** Escapes regex metacharacters (including "/") so a literal can be embedded in a RegExp built from a string. */

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  OAUTH_AUTHORIZATION_PROFILES, OAuthAppSecretSchema, OAuthRefreshTokenSecretSchema, oauthProfile,
+  CredentialRegistrationSchema, OAUTH_AUTHORIZATION_PROFILES, OAuthAppSecretSchema, OAuthRefreshTokenSecretSchema, oauthProfile,
 } from "../../packages/contracts/src/index.js";
 
 describe("oauth-refresh-token secrets and sign-in profiles (phase 7)", () => {
@@ -29,5 +29,13 @@ describe("oauth-refresh-token secrets and sign-in profiles (phase 7)", () => {
     expect(oauthProfile("asana")).toBe(OAUTH_AUTHORIZATION_PROFILES.asana);
     expect(oauthProfile("linear")).toBeUndefined();
     expect(oauthProfile("toString")).toBeUndefined();
+  });
+});
+
+describe("oauth-refresh-token registration (phase 7)", () => {
+  it("registers an oauth-refresh-token credential with a connector secret name", () => {
+    expect(CredentialRegistrationSchema.parse({ ref: "asana-bot", type: "oauth-refresh-token", secretName: "agentx/connectors/asana-bot" }))
+      .toEqual({ ref: "asana-bot", type: "oauth-refresh-token", secretName: "agentx/connectors/asana-bot" });
+    expect(CredentialRegistrationSchema.safeParse({ ref: "asana-bot", type: "oauth-refresh-token", secretName: "prod/asana" }).success).toBe(false);
   });
 });
