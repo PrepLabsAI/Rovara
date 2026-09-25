@@ -73,7 +73,7 @@ type FieldKind = "type" | "relation" | "other";
 
 /**
  * "Linked Issues", "outwardIssue", "Sub-tasks" and "epiclink" are relation names. Any name holding
- * "type" (issuetype, "Issue Type", a link's type) is not, and nothing under it is either.
+ * "type" (issuetype, "Issue Type", a link's type) is not; see typeReferences for what under it is.
  */
 function fieldKind(name: string): FieldKind {
   const compact = name.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -113,13 +113,35 @@ function nestedReferences(value: unknown, refs: string[], relation = false, dept
   if (position && !Object.hasOwn(value, "key") && !Object.hasOwn(value, "id") && !entries.some(([key]) => fieldKind(key) === "relation")) {
     throw new GuardRejection(RELATED_ISSUE_SHAPE);
   }
-  for (const [key, item] of entries) {
-    const lower = key.trim().toLowerCase();
-    if (TEXT_FIELDS.has(lower)) continue;
-    const kind = fieldKind(key);
-    if (kind === "type") nestedReferences(item, refs, false, depth + 1, false);
-    else if (kind === "relation") nestedReferences(item, refs, true, depth + 1, true);
-    else nestedReferences(item, refs, relation, depth + 1, relation && (lower === "key" || lower === "id"));
+  for (const [key, item] of entries) fieldReferences(key, item, refs, relation, depth);
+}
+
+/** One property of an object at `depth`, walked by its field kind. */
+function fieldReferences(key: string, item: unknown, refs: string[], relation: boolean, depth: number): void {
+  const lower = key.trim().toLowerCase();
+  if (TEXT_FIELDS.has(lower)) return;
+  const kind = fieldKind(key);
+  if (kind === "type") typeReferences(item, refs, relation, depth + 1);
+  else if (kind === "relation") nestedReferences(item, refs, true, depth + 1, true);
+  else nestedReferences(item, refs, relation, depth + 1, relation && (lower === "key" || lower === "id"));
+}
+
+/** A type field's own scalar properties, which name the type, not an issue. */
+const TYPE_OWN_PROPERTIES = new Set(["id", "name", "inward", "outward", "self", "description"]);
+
+/**
+ * A type field's value. A scalar value and the type's own scalar properties are not reference
+ * positions (an exact uppercase key is still checked). Anything nested keeps the surrounding
+ * relation flag and is walked normally, so a wrapper inside a link's type cannot hide a reference.
+ */
+function typeReferences(value: unknown, refs: string[], relation: boolean, depth: number): void {
+  if (depth > MAX_DEPTH) throw new GuardRejection("These Jira fields are nested too deeply to check.");
+  if (Array.isArray(value)) { nestedReferences(value, refs, relation, depth, false); return; }
+  if (!isObject(value)) { nestedReferences(value, refs, false, depth, false); return; }
+  for (const [key, item] of Object.entries(value)) {
+    const scalar = typeof item === "string" || typeof item === "number";
+    if (scalar && TYPE_OWN_PROPERTIES.has(key.trim().toLowerCase())) nestedReferences(item, refs, false, depth + 1, false);
+    else fieldReferences(key, item, refs, relation, depth);
   }
 }
 

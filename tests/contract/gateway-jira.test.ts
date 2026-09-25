@@ -263,6 +263,33 @@ describe("Jira connector definition", () => {
   });
 
   it.each([
+    ["a lowercase key", { key: "ops-1" }, "OPS-1"],
+    ["a padded key", { key: " OPS-1" }, "OPS-1"],
+    ["a numeric id", { id: "10002" }, "10002"],
+  ])("checks %s wrapped inside a link's type field", async (_label, wrapped, ref) => {
+    const f = jira(kan, { "KAN-1": issueWithKey("KAN-1"), "KAN-2": issueWithKey("KAN-2"), "OPS-1": issueWithKey("OPS-1"), "10002": issueWithKey("OPS-9") });
+    expect((await f.run("editJiraIssue", { issueIdOrKey: "KAN-1", additional_fields: { "Linked Issues": [{ type: { wrapper: wrapped }, outwardIssue: { key: "KAN-2" } }] } })).text)
+      .toBe(`Jira issue ${ref} is not in project KAN. This connector works only in KAN.`);
+    expect(vendorCalls(f.call).map((entry) => entry.name)).not.toContain("editJiraIssue");
+  });
+
+  it("keeps a link type's own id and name, and an issue type id on create and edit, unlooked-up", async () => {
+    const f = jira(kan, { "KAN-1": issueWithKey("KAN-1"), "KAN-2": issueWithKey("KAN-2") });
+    expect(await f.run("editJiraIssue", { issueIdOrKey: "KAN-1", additional_fields: { "Linked Issues": [{ type: { name: "Blocks", id: "10000" }, outwardIssue: { key: "KAN-2" } }] } })).toMatchObject({ status: "SUCCEEDED" });
+    expect(vendorCalls(f.call).map((entry) => entry.args.issueIdOrKey)).toEqual(["KAN-1", "KAN-2", "KAN-1"]);
+    f.call.mockClear();
+    expect(await f.run("createJiraIssue", { summary: "s", issueType: "Task", additional_fields: { issueType: { id: "10001" }, "Issue Type": { id: "10001" } } })).toMatchObject({ status: "SUCCEEDED" });
+    expect(vendorCalls(f.call).map((entry) => entry.name)).toEqual(["createJiraIssue"]);
+  });
+
+  it("still checks an exact key nested inside a type field with no relation above it", async () => {
+    const f = jira(kan, { "KAN-1": issueWithKey("KAN-1"), "OPS-1": issueWithKey("OPS-1") });
+    expect((await f.run("editJiraIssue", { issueIdOrKey: "KAN-1", fields: { customType: { wrapper: { key: "OPS-1" } } } })).text)
+      .toBe("Jira issue OPS-1 is not in project KAN. This connector works only in KAN.");
+    expect(vendorCalls(f.call).map((entry) => entry.name)).not.toContain("editJiraIssue");
+  });
+
+  it.each([
     ["Sub-tasks", [{ id: "10002" }]],
     ["epiclink", "10002"],
   ])("treats %s as a relation field", async (name, value) => {
