@@ -300,8 +300,9 @@ had nine tasks.)
   top-level declarations (Linear `id`, Jira `issueIdOrKey`, GitHub `issue_number`, `pull_number`)
   classify exactly as before; Task 2's vendor pins are unchanged. Asana declares
   `itemArguments: ["task_id", "tasks[].task"]`, from phase 7's `ASANA_TASK_REFERENCES` (its
-  `ASANA_ITEM_ARGUMENTS` widened by the array path), once phase 7 merges. Whichever of phase 7 and
-  this part merges second wires that declaration into `asanaConnector` and adds Asana's tools to
+  `ASANA_ITEM_ARGUMENTS` widened by the array path), once phase 7 merges. The declaration itself is set
+  on `asanaConnector` by whichever of phase 7 and part 1 merges second. Whichever of phase 7 and
+  this part merges second adds Asana's tools to
   `tests/contract/action-classes-vendors.test.ts` (with `update_tasks` bare `create` and with an item
   `change`, and `{ tasks: [{ task, completed: true }] }` destructive). `tasks[].parent` and the
   dependency arrays are not declared: they name another task the call links to, not the task it

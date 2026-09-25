@@ -128,8 +128,9 @@ discovery; Task 3 keeps it.
   (save_issue and save_comment update the item named by id and create one without it). Jira:
   `issueIdOrKey`. GitHub: `issue_number`, `pull_number`. These top-level names are paths of one step
   and behave exactly as before. Asana (spec 013 phase 7) will declare `["task_id", "tasks[].task"]`
-  from its `ASANA_TASK_REFERENCES`; whichever of phase 7 and part 2 merges second wires it (part 2
-  R19).
+  from its `ASANA_TASK_REFERENCES`; whichever of phase 7 and this part merges second sets that
+  declaration on `asanaConnector` (the field ships here, so this matches phase 7's own plan); part 2
+  R19 adds Asana to the classification tests.
 - **R2. Hints only tighten.** Part 2 reads them only where AgentX's own rules cannot decide (see
   part 2, R3). Here they are carried as booleans only; anything else is dropped.
 - **R3. One header for the gate's catalog fields.** `x-agentx-include: gate` (a comma list is
