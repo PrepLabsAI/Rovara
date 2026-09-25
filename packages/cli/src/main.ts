@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 import { realpathSync } from "node:fs";
-import { open } from "node:fs/promises";
+import { open, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
+  AgentXError,
   AgentXNameSchema,
   WorkspaceDeploymentModeSchema,
   agentXError,
@@ -202,23 +203,43 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       const globals = globalOptions(command);
       const since = parseSince(options.since);
       const { settings, accessToken } = await authenticate(globals, services.tokenStore);
-      const file = options.output === undefined ? undefined : await open(resolve(options.output), "w", 0o600);
+      if (options.output === undefined) {
+        const result = await exportTurns({
+          controlPlaneUrl: settings.controlPlaneUrl,
+          accessToken,
+          since,
+          write: (line) => { services.stdout.write(line); },
+        }, services.fetchImplementation);
+        // stdout carries only JSON Lines, so the summary goes to stderr.
+        services.stderr.write(formatSuccess(result, globals.json));
+        return;
+      }
+      // Write beside the target first, so a failure partway never leaves the target itself
+      // half-written; only a completed export is ever renamed over it.
+      const outputPath = resolve(options.output);
+      const partialPath = `${outputPath}.partial`;
+      const file = await open(partialPath, "w", 0o600);
+      let written = 0;
       try {
         // open() applies the mode only to a new file; tighten an existing one too.
-        await file?.chmod(0o600);
+        await file.chmod(0o600);
         const result = await exportTurns({
           controlPlaneUrl: settings.controlPlaneUrl,
           accessToken,
           since,
           write: async (line) => {
-            if (file) await file.write(line);
-            else services.stdout.write(line);
+            await file.write(line);
+            written += 1;
           },
         }, services.fetchImplementation);
+        await file.close();
+        await rename(partialPath, outputPath);
         // stdout carries only JSON Lines, so the summary goes to stderr.
         services.stderr.write(formatSuccess(result, globals.json));
-      } finally {
-        await file?.close();
+      } catch (error) {
+        await file.close().catch(() => undefined);
+        await rm(partialPath, { force: true });
+        throw exportFailure(error, written);
       }
     });
 
@@ -249,6 +270,21 @@ async function authenticate(
   const tokens = await tokenStore.get(tokenStoreKey(settings.auth));
   if (!tokens || tokens.expiresAt <= Date.now()) throw agentXError("AUTH_REQUIRED", "run agentx login");
   return { settings, accessToken: tokens.accessToken };
+}
+
+/**
+ * Turns a failure partway through a file export into one naming how many records were written
+ * before it happened, so a caller never mistakes a stopped export for a complete one. Keeps the
+ * original error's class and, for an AgentXError, its code, so the exit-code mapping is unchanged.
+ */
+function exportFailure(error: unknown, written: number): unknown {
+  const message = `turn export failed after ${written} records; no file was written`;
+  if (error instanceof AgentXError) return agentXError(error.code, message);
+  if (error instanceof Error) {
+    error.message = message;
+    return error;
+  }
+  return new Error(message);
 }
 
 /** The server's warnings, plus a note when a control plane too old to run preflight answered. */

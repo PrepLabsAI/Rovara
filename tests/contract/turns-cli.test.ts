@@ -95,6 +95,24 @@ describe("agentx admin turns export", () => {
     expect((await stat(output)).mode & 0o777).toBe(0o600);
   });
 
+  it("leaves no target or partial file when the export fails partway, and names the count", async () => {
+    const { directory, tokens, globals } = await context();
+    const output = join(directory, "turns.jsonl");
+    const pages = [{ turns: [{ eventId: "EvA00001" }], cursor: "c1" }];
+    const fetchImplementation = vi.fn<typeof fetch>(async () => {
+      if (pages.length > 0) return Response.json(pages.shift());
+      return Response.json({ error: { code: "FORBIDDEN", message: "administrator claim is required" } }, { status: 403 });
+    });
+    const { exitCode, stderr } = await run([...globals, "--json", "admin", "turns", "export", "--since", "12h", "--output", output], tokens, fetchImplementation);
+    expect(exitCode).toBe(4);
+    expect(JSON.parse(stderr)).toMatchObject({
+      ok: false,
+      error: { code: "FORBIDDEN", message: "turn export failed after 1 records; no file was written" },
+    });
+    await expect(stat(output)).rejects.toThrow();
+    await expect(stat(`${output}.partial`)).rejects.toThrow();
+  });
+
   it("refuses a bad duration before calling the control plane", async () => {
     const { tokens, globals } = await context();
     const fetchImplementation = vi.fn<typeof fetch>();
