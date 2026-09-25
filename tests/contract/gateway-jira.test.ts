@@ -224,6 +224,54 @@ describe("Jira connector definition", () => {
     expect(vendorCalls(f.call).map((entry) => entry.args.issueIdOrKey)).toEqual(["KAN-1", "KAN-2", "KAN-1"]);
   });
 
+  it.each([
+    ["a lowercase key", { "Epic Link": "ops-1" }],
+    ["a space-padded key", { "Epic Link": " OPS-1" }],
+    ["a lowercase key in a link", { "Linked Issues": [{ outwardIssue: { key: "ops-1" } }] }],
+  ])("normalises %s under a relation field and verifies it", async (_label, additional) => {
+    const f = jira(kan, { "KAN-1": issueWithKey("KAN-1"), "OPS-1": issueWithKey("OPS-1") });
+    expect(await f.run("editJiraIssue", { issueIdOrKey: "KAN-1", additional_fields: additional }))
+      .toMatchObject({ status: "FAILED", reason: "policy_denied", text: "Jira issue OPS-1 is not in project KAN. This connector works only in KAN." });
+    expect(vendorCalls(f.call).map((entry) => entry.args.issueIdOrKey)).toEqual(["KAN-1", "OPS-1"]);
+  });
+
+  it.each([
+    ["a self-only link", { "Linked Issues": [{ outwardIssue: { self: "https://x.atlassian.net/rest/api/3/issue/10002" } }] }],
+    ["a URL", { "Epic Link": "https://x.atlassian.net/browse/OPS-1" }],
+    ["other text", { "Epic Link": "the login epic" }],
+  ])("refuses %s under a relation field without writing", async (_label, additional) => {
+    const f = jira(kan);
+    expect(await f.run("editJiraIssue", { issueIdOrKey: "KAN-1", additional_fields: additional }))
+      .toMatchObject({ status: "FAILED", reason: "policy_denied", text: "Give each related Jira issue as its key (for example KAN-10) or numeric ID." });
+    expect(vendorCalls(f.call).map((entry) => entry.name)).not.toContain("editJiraIssue");
+  });
+
+  it("does not look up a lowercase key outside relation fields", async () => {
+    const f = jira(kan);
+    expect(await f.run("editJiraIssue", { issueIdOrKey: "KAN-1", fields: { labels: ["utf-8"] } })).toMatchObject({ status: "SUCCEEDED" });
+    expect(vendorCalls(f.call).map((entry) => entry.args.issueIdOrKey)).toEqual(["KAN-1", "KAN-1"]);
+  });
+
+  it("does not treat a type field as a relation", async () => {
+    const f = jira(kan, { "KAN-1": issueWithKey("KAN-1"), "KAN-2": issueWithKey("KAN-2") });
+    expect(await f.run("editJiraIssue", { issueIdOrKey: "KAN-1", fields: { issueType: { id: "10001" } }, additional_fields: { "Issue Type": { id: "10001" }, issue_type: "10001" } })).toMatchObject({ status: "SUCCEEDED" });
+    expect(await f.run("createJiraIssue", { summary: "s", issueType: "Task", additional_fields: { issuetype: { id: "10001" } } })).toMatchObject({ status: "SUCCEEDED" });
+    expect(vendorCalls(f.call).map((entry) => entry.args.issueIdOrKey)).toEqual(["KAN-1", "KAN-1", undefined]);
+    f.call.mockClear();
+    expect(await f.run("editJiraIssue", { issueIdOrKey: "KAN-1", additional_fields: { "Linked Issues": [{ type: { name: "Blocks" }, outwardIssue: { key: "KAN-2" } }] } })).toMatchObject({ status: "SUCCEEDED" });
+    expect(vendorCalls(f.call).map((entry) => entry.args.issueIdOrKey)).toEqual(["KAN-1", "KAN-2", "KAN-1"]);
+  });
+
+  it.each([
+    ["Sub-tasks", [{ id: "10002" }]],
+    ["epiclink", "10002"],
+  ])("treats %s as a relation field", async (name, value) => {
+    const f = jira(kan, { "KAN-1": issueWithKey("KAN-1"), "10002": issueWithKey("OPS-9") });
+    expect((await f.run("editJiraIssue", { issueIdOrKey: "KAN-1", additional_fields: { [name]: value } })).text)
+      .toBe("Jira issue 10002 is not in project KAN. This connector works only in KAN.");
+    expect(vendorCalls(f.call).map((entry) => entry.name)).not.toContain("editJiraIssue");
+  });
+
   it("binds and limits by the chosen scope when two scopes share a site", async () => {
     const ops: JiraScope = { alias: "ops", cloudId: CLOUD, projectKey: "OPS" };
     const f = jira(ops, { "OPS-1": issueWithKey("OPS-1") });

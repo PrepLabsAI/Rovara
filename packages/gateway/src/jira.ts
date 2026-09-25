@@ -63,30 +63,63 @@ const MAX_DEPTH = 12;
 /** Words that mark a field as naming another issue, so a bare numeric id under it is an issue id. */
 const RELATION_WORDS = new Set([
   "parent", "parents", "epic", "link", "links", "linked", "issuelinks", "issue", "issues", "blocks",
-  "relates", "duplicate", "duplicates", "clone", "clones", "cloned", "subtask", "subtasks",
+  "relates", "duplicate", "duplicates", "clone", "clones", "cloned", "sub", "tasks", "subtask", "subtasks",
 ]);
+/** Relation names written as one word, compared with separators removed. */
+const RELATION_COMPOUNDS = new Set(["epiclink", "parentlink", "linkedissues", "issuelinks", "subtasks"]);
+const RELATED_ISSUE_SHAPE = "Give each related Jira issue as its key (for example KAN-10) or numeric ID.";
 
-/** "Linked Issues", "outwardIssue" and "parent_link" are relation names; "issuetype" and "priority" are not. */
-function isRelationName(name: string): boolean {
-  return name.trim().replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z0-9]+/).some((word) => RELATION_WORDS.has(word));
+type FieldKind = "type" | "relation" | "other";
+
+/**
+ * "Linked Issues", "outwardIssue", "Sub-tasks" and "epiclink" are relation names. Any name holding
+ * "type" (issuetype, "Issue Type", a link's type) is not, and nothing under it is either.
+ */
+function fieldKind(name: string): FieldKind {
+  const compact = name.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (compact.includes("type")) return "type";
+  if (RELATION_COMPOUNDS.has(compact)) return "relation";
+  const words = name.trim().replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z0-9]+/);
+  return words.some((word) => RELATION_WORDS.has(word)) ? "relation" : "other";
+}
+
+/** A reference under a relation field: trimmed and uppercased, and it must be a key or numeric id. */
+function relatedRef(value: string | number): string {
+  const ref = String(value).trim().toUpperCase();
+  if (ISSUE_KEY.test(ref) || NUMERIC_ID.test(ref)) return ref;
+  throw new GuardRejection(RELATED_ISSUE_SHAPE);
 }
 
 /**
- * Every value inside a field object that is exactly an issue reference. A key-shaped string counts
- * wherever it is. A numeric id counts only under a relation-named field or ancestor, so priority,
- * component and version ids are not taken for issues.
+ * Every issue reference inside a field object.
+ * - Anywhere: an exact uppercase key-shaped string (for example OPS-1).
+ * - Under a relation field: the field's value, each element of an array under it, and every
+ *   `key`/`id`, normalised by relatedRef. An object there must carry `key` or `id`, unless it
+ *   only holds further relation fields (a link's outwardIssue); a self-only object is refused.
+ * Numeric ids elsewhere (priority, components, versions) are not issues and are ignored.
+ * `position` is true when the value itself stands where a related issue is expected.
  */
-function nestedReferences(value: unknown, refs: string[], relation = false, depth = 0): void {
+function nestedReferences(value: unknown, refs: string[], relation = false, depth = 0, position = false): void {
   if (depth > MAX_DEPTH) throw new GuardRejection("These Jira fields are nested too deeply to check.");
-  if (typeof value === "string") {
-    if (ISSUE_KEY.test(value) || (relation && NUMERIC_ID.test(value))) refs.push(value);
+  if (value === null || value === undefined) return;
+  if (typeof value === "string" || typeof value === "number") {
+    if (position) refs.push(relatedRef(value));
+    else if (typeof value === "string" && ISSUE_KEY.test(value)) refs.push(value);
     return;
   }
-  if (typeof value === "number") { if (relation && NUMERIC_ID.test(String(value))) refs.push(String(value)); return; }
-  if (Array.isArray(value)) { for (const item of value) nestedReferences(item, refs, relation, depth + 1); return; }
+  if (Array.isArray(value)) { for (const item of value) nestedReferences(item, refs, relation, depth + 1, position); return; }
   if (!isObject(value)) return;
-  for (const [key, item] of Object.entries(value)) {
-    if (!TEXT_FIELDS.has(key.trim().toLowerCase())) nestedReferences(item, refs, relation || isRelationName(key), depth + 1);
+  const entries = Object.entries(value);
+  if (position && !Object.hasOwn(value, "key") && !Object.hasOwn(value, "id") && !entries.some(([key]) => fieldKind(key) === "relation")) {
+    throw new GuardRejection(RELATED_ISSUE_SHAPE);
+  }
+  for (const [key, item] of entries) {
+    const lower = key.trim().toLowerCase();
+    if (TEXT_FIELDS.has(lower)) continue;
+    const kind = fieldKind(key);
+    if (kind === "type") nestedReferences(item, refs, false, depth + 1, false);
+    else if (kind === "relation") nestedReferences(item, refs, true, depth + 1, true);
+    else nestedReferences(item, refs, relation, depth + 1, relation && (lower === "key" || lower === "id"));
   }
 }
 
