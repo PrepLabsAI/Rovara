@@ -71,8 +71,8 @@ export interface Guard {
    * Optional. Returns the model's arguments narrowed to the scope, such as a search limited to the
    * bound project. It runs after the model's arguments pass the narrowed schema, and before bound
    * values are merged, upstream validation, attribution and every check. It must not set a
-   * server-bound property, and throws GuardRejection to refuse. The ledger still fingerprints the
-   * model's own arguments.
+   * server-bound property, and throws GuardRejection to refuse. Anything else it throws surfaces as a
+   * vendor_error failure, still before any write. The ledger still fingerprints the model's own arguments.
    */
   rewrite?(input: RewriteInput): Record<string, unknown>;
   /** Throws GuardRejection to refuse the call before it executes. */

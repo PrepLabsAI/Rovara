@@ -279,8 +279,8 @@ describe("when-present binding at call time", () => {
   });
 
   it("checks a name listed as both required and when-present on the required path, not the when-present one", async () => {
-    // The vendor's cloudId accepts "", so a missing value is what separates the two paths: the
-    // required path fails the vendor schema, the when-present one would say "has no server-bound value".
+    // A missing value makes the required path fail the vendor schema, so the refusal text shows which
+    // path ran: the when-present one would say "has no server-bound value" instead.
     const binder: Binder<JiraScope> = { properties: ["cloudId"], optionalProperties: ["cloudId", "projectKey"], bind: (scope) => ({ projectKey: scope.projectKey }) };
     const rig = vendorRig("jira", binder, jiraScope, JIRA_TOOLS);
     expect(await rig.run("getJiraIssue", { issueIdOrKey: "KAN-1" })).toMatchObject({
@@ -363,6 +363,28 @@ describe("guards that rewrite the model's arguments", () => {
     expect(call).toHaveBeenLastCalledWith("save_issue", { title: "[Payments] Bug", description: "Steps (triaged)\n\n—\nRequested by Pratik via AgentX", team: linearScope.teamId });
     await executeTool({ requestId: "w-2", scope: linearScope.alias, tool: "save_issue", schemaHash, arguments: { title: "Bug" } }, connector, context, options);
     expect(call).toHaveBeenLastCalledWith("save_issue", { title: "[Payments] Bug", description: "Filed from Slack.", team: linearScope.teamId });
+  });
+
+  it("never signs a description a guard added by mutating its input, and leaves the caller's arguments unchanged", async () => {
+    const tools = vendorTools("linear");
+    const call = vi.fn<(name: string, args: Record<string, unknown>) => Promise<McpToolResult>>(async () => ok);
+    const connect = vi.fn<typeof connectMcp>(async () => ({ tools, call, close: async () => undefined }));
+    const mutateAndReturn: Guard = { requiredTools: () => [], check: async () => undefined, rewrite: ({ arguments: args }) => { const writable = args as Record<string, unknown>; writable.description = "Filed from Slack."; return writable; } };
+    const mutateThenCopy: Guard = { requiredTools: () => [], check: async () => undefined, rewrite: ({ arguments: args }) => { (args as Record<string, unknown>).description = "Filed from Slack."; return { ...args }; } };
+    const context = contextFor(linearScope, ["save_issue"], ["save_issue"]);
+    for (const [index, guard] of [mutateAndReturn, mutateThenCopy].entries()) {
+      const connector: ConnectorDefinition<LinearScope> = {
+        label: "Linear", endpoint: new URL("https://mcp.linear.test/mcp"), permissionsHint: "API key permissions",
+        credentials: { issue: async () => ({ token: "linear-secret", bindings: {} }) },
+        binder: linearBinder, guards: [guard],
+      };
+      const schemaHash = approveTools({ tools }, connector, context)[0]!.schemaHash;
+      const modelArgs = { title: "Bug" };
+      const result = await executeTool({ requestId: `m-${index}`, scope: linearScope.alias, tool: "save_issue", schemaHash, arguments: modelArgs }, connector, context, { connect, ledger: memoryLedger(), attribution: "Requested by Pratik via AgentX" });
+      expect(result).toMatchObject({ status: "SUCCEEDED" });
+      expect(call).toHaveBeenLastCalledWith("save_issue", { title: "Bug", description: "Filed from Slack.", team: linearScope.teamId });
+      expect(modelArgs).toEqual({ title: "Bug" });
+    }
   });
 
   it("validates the rewritten arguments against the vendor's schema", async () => {

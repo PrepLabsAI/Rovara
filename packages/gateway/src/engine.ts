@@ -133,13 +133,17 @@ function withAttribution(
 class PolicyFailure extends Error {}
 class DefinitionChanged extends PolicyFailure {}
 
-/** Applies each guard's rewrite in order. Without one, the model's arguments pass through as the same object. */
+/**
+ * Applies each guard's rewrite in order. Without one, the model's arguments pass through as the same
+ * object. Each rewrite gets its own copy, so one that mutates its input cannot change the caller's
+ * request or make a key it added look model-written.
+ */
 function rewriteArguments<Scope>(request: ToolRequest, bound: Readonly<Record<string, unknown>>, scope: Scope, connector: Pick<ConnectorDefinition<Scope>, "binder" | "guards" | "label">): Record<string, unknown> {
   let args = request.arguments;
   const names = boundNames(connector.binder);
   for (const guard of connector.guards) {
     if (!guard.rewrite) continue;
-    args = guard.rewrite({ tool: request.tool, arguments: args, bound, scope });
+    args = guard.rewrite({ tool: request.tool, arguments: structuredClone(args), bound, scope });
     if (names.some((name) => Object.hasOwn(args, name))) throw new PolicyFailure(`${connector.label} guard set a server-controlled argument.`);
   }
   return args;
@@ -270,9 +274,10 @@ export async function executeTool<Scope>(
     if (!validate(request.arguments).valid) throw new PolicyFailure("Arguments do not match the approved MCP tool schema.");
     const bound = connector.binder.bind(context.scope, credential);
     const injected = injectedValues(reviewed.bound, bound, connector);
+    const modelKeys = new Set(Object.keys(request.arguments));
     const modelArgs = rewriteArguments(request, bound, context.scope, connector);
     // Only keys the model wrote are signed, with the value a rewrite gave them; a key a rewrite added is not.
-    const signable = modelArgs === request.arguments ? modelArgs : Object.fromEntries(Object.entries(modelArgs).filter(([key]) => Object.hasOwn(request.arguments, key)));
+    const signable = connector.guards.some((guard) => guard.rewrite !== undefined) ? Object.fromEntries(Object.entries(modelArgs).filter(([key]) => modelKeys.has(key))) : modelArgs;
     const upstream = connection.tools.find((tool) => tool.name === request.tool)!;
     const validateUpstream = new AjvJsonSchemaValidator().getValidator(upstream.inputSchema);
     const unsigned = { ...modelArgs, ...injected };
