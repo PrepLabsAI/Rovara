@@ -69,7 +69,7 @@ describe("Linear connector over Streamable HTTP", () => {
       expect(comment.name).toBe("save_comment");
       expect(comment.arguments).not.toHaveProperty("team");
       expect(comment.arguments).not.toHaveProperty("teamId");
-      expect(String(comment.arguments.body)).toMatch(/^Deployed\n\n—\nRequested by /);
+      expect(String(comment.arguments.body)).toMatch(/^Deployed\n\n—\nRequested by `Slack member U0123456789` via AgentX · https:\/\/slack\.com\/archives\/C0123456789\/p1695500000000001$/);
 
       // A reply cannot be verified and is refused without any call.
       const callsBeforeReply = fake.calls.length;
