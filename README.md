@@ -324,7 +324,9 @@ ship in phase 14c part 2.
 A thread that sends AgentX more than 6 requests in a minute is paused: AgentX posts one notice and
 runs nothing more in that thread until the next minute. This stops a tool that answers AgentX's
 replies from looping. The `AgentXControlPlane` parameter `SlackThreadTurnsPerMinute` changes the
-limit.
+limit. A request that AgentX could not queue is not counted, so Slack's retry of it is not held
+against the thread; in the rare case where that happens during a burst at the limit, the thread
+can get a second pause notice in the same minute.
 
 AgentX posts its replies in Slack formatting, with real line breaks and one Slack link per URL.
 Text such as `<!channel>` in a reply is shown as text and never notifies anyone.
