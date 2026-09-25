@@ -9,8 +9,11 @@ on descriptions over 2,048 characters. A presentation change is reviewed as a sn
 
 ## Tier 2: model replay (on demand)
 
-`npm run eval -- [--model <id>] [--repeat 3]` requires Bedrock credentials. Cases live in
-`tests/eval/cases/*.jsonl`, one per line:
+`npm run eval` runs offline by default: Pi's faux provider answers each case as expected, so it
+checks the cases, fixtures and harness and calls no model. `npm run eval -- --live [--model <id>]
+[--provider <id>] [--repeat 3] [--update-baseline]` calls a real model and needs its credentials
+(Bedrock for the default). `--model`, `--provider` and `--update-baseline` require `--live`. Run
+`npm run build` first. Cases live in `tests/eval/cases/*.jsonl`, one per line:
 
 ```json
 { "id": "files-not-pr", "project": "fixtures/payments.yaml",
@@ -24,16 +27,27 @@ on descriptions over 2,048 characters. A presentation change is reviewed as a sn
   "expect": { "tool": "agentx_manage_pull_request", "argsSubset": { "action": "append", "pullRequestNumber": 12 } } }
 ```
 
+Each `project` is a project definition in the registered format under `tests/eval/fixtures/`.
+Connectors are resolved by the broker's connector types, and each type's recorded vendor catalog is
+`tests/eval/catalogs/<type>.json`. A fixture may add an optional `eval:` key for thread state a
+definition cannot express: `notConnected` (connector names whose credential is missing) and
+`recoverableOperations` (unfinished operation IDs, which offer the recovery tools).
+
 The runner constructs the real orchestrator with a recording API that returns canned results and
 executes nothing. For each case it records the first tool call, or none. Scores:
 
 - **Tool accuracy**: first tool matches `expect.tool` (`null` means no tool).
 - **Argument match**: `argsSubset` is a subset of the arguments.
 - **Refusal accuracy**: for `tool: null` cases, the response contains the `refusal` phrase.
+- **Phrase match**: `refusal` and `contains` are scored separately and both must match; refusal
+  accuracy counts only `refusal`.
 
 Each case runs `--repeat` times; a case passes when every run passes. Results are written to
 `tests/eval/results/<model>.json` and compared with `tests/eval/baseline/<model>.json`; the command
 exits non-zero on a regression of more than one case.
+A live run also exits non-zero when any case errors. `--update-baseline` refuses to write a
+baseline from a run with errors, and a malformed baseline, or one for another model, provider or
+presentation, is an error.
 
 ## Seed cases
 

@@ -4,7 +4,7 @@ import { parseArgs } from "node:util";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 import { EVAL_ROOT, loadCases } from "./case.js";
 import { scriptExpectedAnswers } from "./offline.js";
-import { compareWithBaseline, reportPath, runEvaluation, type EvalOptions, type EvalReport, type Presentation } from "./runner.js";
+import { compareWithBaseline, EvalReportSchema, reportPath, runEvaluation, type EvalOptions, type EvalReport, type Presentation } from "./runner.js";
 
 export const EVAL_USAGE = "npm run eval -- [--live [--model <id>] [--provider <id>] [--update-baseline]] [--repeat <n>] [--presentation new|legacy] [--cases <dir>]";
 
@@ -55,7 +55,7 @@ export function parseEvalArguments(argv: readonly string[], env: NodeJS.ProcessE
 
 export interface EvalCommandOutcome { report: EvalReport; exitCode: number; lines: string[] }
 
-/** Runs `npm run eval`. Results always go to <root>/results; a baseline is written only by a live run with --update-baseline. */
+/** Runs `npm run eval`. Results always go to <root>/results; a baseline is written only by a clean live run with --update-baseline. */
 export async function runEvalCommand(argv: readonly string[], options: { root?: string; env?: NodeJS.ProcessEnv } = {}): Promise<EvalCommandOutcome> {
   const root = options.root ?? EVAL_ROOT;
   const parsed = parseEvalArguments(argv, options.env);
@@ -84,21 +84,57 @@ export async function runEvalCommand(argv: readonly string[], options: { root?: 
     // The oracle answers every case correctly, so any failure here is a harness or fixture fault.
     return { report, exitCode: summary.passed === summary.cases ? 0 : 1, lines };
   }
-  const baselinePath = reportPath("baseline", report.model, parsed.presentation, root);
-  if (parsed.updateBaseline) {
+  const recorded = await recordLiveReport(report, { updateBaseline: parsed.updateBaseline, root });
+  return { report, exitCode: recorded.exitCode, lines: [...lines, ...recorded.lines] };
+}
+
+/**
+ * The live run's verdict. A run with an errored case fails and never becomes a baseline; a baseline
+ * that is malformed or was recorded for another provider, model or presentation is an error.
+ */
+export async function recordLiveReport(report: EvalReport, options: { updateBaseline: boolean; root?: string }): Promise<{ exitCode: number; lines: string[] }> {
+  const root = options.root ?? EVAL_ROOT;
+  const lines: string[] = [];
+  const errored = report.summary.errors;
+  const erroredText = `${errored} case${errored === 1 ? "" : "s"} errored`;
+  const baselinePath = reportPath("baseline", report.model, report.presentation, root);
+  if (options.updateBaseline) {
+    if (errored > 0) return { exitCode: 1, lines: [`Baseline not written: ${erroredText}. Rerun once the errors are resolved.`] };
     await mkdir(dirname(baselinePath), { recursive: true });
     await writeFile(baselinePath, `${JSON.stringify(report, null, 2)}\n`);
-    lines.push(`Baseline written: ${baselinePath}`);
-    return { report, exitCode: 0, lines };
+    return { exitCode: 0, lines: [`Baseline written: ${baselinePath}`] };
   }
-  let baseline: EvalReport | undefined;
-  try {
-    baseline = JSON.parse(await readFile(baselinePath, "utf8")) as EvalReport;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error(`cannot read the baseline ${baselinePath}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
-    lines.push(`No baseline at ${baselinePath}; run again with --update-baseline to record one.`);
-  }
+  const baseline = await readBaseline(baselinePath, report);
+  if (baseline === undefined) lines.push(`No baseline at ${baselinePath}; run again with --update-baseline to record one.`);
   const { regressions, failed } = compareWithBaseline(report, baseline);
   if (regressions.length > 0) lines.push(`Regressed against the baseline: ${regressions.join(", ")}`);
-  return { report, exitCode: failed ? 1 : 0, lines };
+  if (errored > 0) lines.push(`The run failed: ${erroredText}.`);
+  return { exitCode: failed || errored > 0 ? 1 : 0, lines };
+}
+
+async function readBaseline(path: string, report: EvalReport): Promise<EvalReport | undefined> {
+  let text: string;
+  try {
+    text = await readFile(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw new Error(`cannot read the baseline ${path}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`baseline ${path} is malformed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  }
+  const parsed = EvalReportSchema.safeParse(value);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    throw new Error(`baseline ${path} is malformed: ${issue ? `${issue.path.join(".") || "report"}: ${issue.message}` : "invalid report"}`);
+  }
+  const baseline = parsed.data;
+  if (baseline.provider !== report.provider || baseline.model !== report.model || baseline.presentation !== report.presentation) {
+    throw new Error(`baseline ${path} (${baseline.provider}/${baseline.model}, ${baseline.presentation} presentation) does not match this run ` +
+      `(${report.provider}/${report.model}, ${report.presentation} presentation)`);
+  }
+  return baseline;
 }

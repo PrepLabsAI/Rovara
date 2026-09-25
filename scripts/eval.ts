@@ -2,6 +2,8 @@
 // Without --live it runs offline on Pi's faux provider and calls no model. --live calls the
 // configured model through Pi with ambient credentials (AWS credentials with Bedrock access for the
 // default, amazon-bedrock / amazon.nova-pro-v1:0). A live run never runs in CI.
+// Run `npm run build` first: tests/eval/case.ts imports the broker's connector types, which import
+// @agentx/gateway from its dist build.
 import { runEvalCommand } from "../tests/eval/command.js";
 
 try {

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, type FauxProviderHandle } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import { EVAL_ROOT, EvalProjectSchema, loadCases, loadCatalog, loadProject, type EvalCase } from "../eval/case.js";
-import { parseEvalArguments, runEvalCommand } from "../eval/command.js";
+import { parseEvalArguments, recordLiveReport, runEvalCommand } from "../eval/command.js";
 import { legacyPresentation } from "../eval/legacy-presentation.js";
 import { newPresentation } from "../eval/presentation.js";
 import { compareWithBaseline, reportPath, runEvaluation, type EvalReport } from "../eval/runner.js";
@@ -25,6 +25,18 @@ function expected(evalCase: EvalCase) {
   const phrase = [evalCase.expect.refusal ?? [], evalCase.expect.contains ?? []].flat()[0] ?? "";
   return tool === null || tool === undefined ? { text: `Sorry, ${phrase}.` } : { tool, args: evalCase.expect.argsSubset ?? {} };
 }
+
+function liveReport(overrides: Partial<EvalReport> = {}): EvalReport {
+  return {
+    provider: "amazon-bedrock", model: "amazon.nova-pro-v1:0", presentation: "new", repeat: 3, generatedAt: "2026-09-25T00:00:00.000Z",
+    cases: [{ id: "files-not-pr", passed: true, runs: [{ tool: "agentx_submit_task", toolOk: true, argsOk: true, phraseOk: null, refusalOk: null, containsOk: null }] }],
+    summary: { cases: 1, passed: 1, errors: 0, toolAccuracy: 1, refusalCases: 0, refusalAccuracy: 1 },
+    ...overrides,
+  };
+}
+
+const erroredCases: EvalReport["cases"] = [{ id: "files-not-pr", passed: false, runs: [{ tool: null, toolOk: false, argsOk: true, phraseOk: null, refusalOk: null, containsOk: null, error: "throttled" }] }];
+const erroredSummary: EvalReport["summary"] = { cases: 1, passed: 0, errors: 1, toolAccuracy: 0, refusalCases: 0, refusalAccuracy: 1 };
 
 async function temporaryDirectory(): Promise<string> {
   return mkdtemp(join(tmpdir(), "agentx-eval-test-"));
@@ -135,6 +147,31 @@ describe("evaluation harness, offline", () => {
     }
   }, 60_000);
 
+  it("scores refusal and contains separately: both must pass, and refusal accuracy counts only the refusal phrase", async () => {
+    const { modelRuntime, faux } = await fauxModelRuntime();
+    const directory = await temporaryDirectory();
+    try {
+      const both = (id: string) => JSON.stringify({ id, project: "fixtures/github-only.yaml", prompt: "what's open in Jira?", expect: { tool: null, refusal: "not connected", contains: "Jira" } });
+      await writeFile(join(directory, "both.jsonl"), `${both("both-present")}\n${both("contains-missing")}\n`);
+      const cases = await loadCases(directory);
+      const answers = oracle(faux, (evalCase) => ({ text: evalCase.id === "both-present" ? "Jira is not connected for this channel." : "That is not connected for this channel." }));
+      const report = await runEvaluation(cases, { model: FAUX_MODEL, modelRuntime, presentation: "new", repeat: 1, beforeRun: answers });
+      expect(report.cases.map((result) => [result.id, result.passed])).toEqual([["both-present", true], ["contains-missing", false]]);
+      expect(report.cases[1]?.runs[0]).toMatchObject({ toolOk: true, refusalOk: true, containsOk: false, phraseOk: false });
+      expect(report.summary).toMatchObject({ passed: 1, refusalCases: 2, refusalAccuracy: 1 });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it("times out the whole run, including the steps before the turn", async () => {
+    const { modelRuntime } = await fauxModelRuntime();
+    const cases = (await loadCases()).filter((entry) => entry.id === "files-not-pr");
+    const stuck = () => new Promise<void>((resolve) => setTimeout(resolve, 1_500));
+    const report = await runEvaluation(cases, { model: FAUX_MODEL, modelRuntime, presentation: "new", repeat: 1, timeoutMs: 50, beforeRun: stuck });
+    expect(report.cases[0]).toMatchObject({ passed: false, runs: [{ toolOk: false, error: "timed out after 50 ms" }] });
+  }, 30_000);
+
   it("counts a turn that runs past the timeout as an error", async () => {
     const { modelRuntime, faux } = await fauxModelRuntime();
     const cases = (await loadCases()).filter((entry) => entry.id === "files-not-pr");
@@ -184,6 +221,63 @@ describe("evaluation command, live safety", () => {
     // A provider no runtime knows, so even a broken guard fails here without reaching a network.
     await expect(runEvaluation(cases, { model: { provider: "agentx-no-such-provider", modelId: "none" }, presentation: "new", repeat: 1 }))
       .rejects.toThrow("runEvaluation needs a modelRuntime (offline) or live: true (calls a paid model)");
+  });
+
+  it("refuses a real provider on a faux runtime unless live is asked for, before resolving any model", async () => {
+    const { modelRuntime } = await fauxModelRuntime();
+    const cases = (await loadCases()).filter((entry) => entry.id === "files-not-pr");
+    // The spy throws on any model lookup, so even a missing guard stops here without reaching a network.
+    let lookups = 0;
+    modelRuntime.getModel = () => { lookups += 1; throw new Error("model lookup reached"); };
+    await expect(runEvaluation(cases, { model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" }, modelRuntime, presentation: "new", repeat: 1 }))
+      .rejects.toThrow("offline runs use the faux provider agentx-faux; amazon-bedrock needs live: true (calls a paid model)");
+    expect(lookups).toBe(0);
+  });
+
+  it("refuses to write a baseline from a run with errors", async () => {
+    const root = await temporaryDirectory();
+    try {
+      const outcome = await recordLiveReport(liveReport({ cases: erroredCases, summary: erroredSummary }), { updateBaseline: true, root });
+      expect(outcome.exitCode).toBe(1);
+      expect(outcome.lines.join("\n")).toContain("Baseline not written: 1 case errored");
+      await expect(readFile(reportPath("baseline", "amazon.nova-pro-v1:0", "new", root), "utf8")).rejects.toThrow(/ENOENT/);
+      expect(await recordLiveReport(liveReport(), { updateBaseline: true, root })).toMatchObject({ exitCode: 0 });
+      expect(JSON.parse(await readFile(reportPath("baseline", "amazon.nova-pro-v1:0", "new", root), "utf8"))).toEqual(liveReport());
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails a live run with any errored case, even with no baseline", async () => {
+    const root = await temporaryDirectory();
+    try {
+      const outcome = await recordLiveReport(liveReport({ cases: erroredCases, summary: erroredSummary }), { updateBaseline: false, root });
+      expect(outcome.exitCode).toBe(1);
+      expect(outcome.lines.join("\n")).toContain("1 case errored");
+      expect(await recordLiveReport(liveReport(), { updateBaseline: false, root })).toMatchObject({ exitCode: 0 });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("treats a malformed baseline or one for another model, provider or presentation as an error", async () => {
+    const root = await temporaryDirectory();
+    try {
+      const path = reportPath("baseline", "amazon.nova-pro-v1:0", "new", root);
+      await recordLiveReport(liveReport(), { updateBaseline: true, root });
+      await writeFile(path, "{ not json");
+      await expect(recordLiveReport(liveReport(), { updateBaseline: false, root })).rejects.toThrow(/baseline .* is malformed/);
+      await writeFile(path, JSON.stringify({ ...liveReport(), cases: "none" }));
+      await expect(recordLiveReport(liveReport(), { updateBaseline: false, root })).rejects.toThrow(/baseline .* is malformed/);
+      for (const other of [{ provider: "other-provider" }, { model: "amazon.nova-lite-v1:0" }, { presentation: "legacy" as const }]) {
+        await writeFile(path, JSON.stringify(liveReport(other)));
+        await expect(recordLiveReport(liveReport(), { updateBaseline: false, root })).rejects.toThrow(/does not match this run/);
+      }
+      await writeFile(path, JSON.stringify(liveReport({ cases: [{ ...liveReport().cases[0]!, passed: true }] })));
+      expect(await recordLiveReport(liveReport(), { updateBaseline: false, root })).toMatchObject({ exitCode: 0 });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("runs offline on the faux provider by default and needs --live for a real model or a baseline", () => {
