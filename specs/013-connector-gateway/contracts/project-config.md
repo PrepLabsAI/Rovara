@@ -59,10 +59,11 @@ integrations:
 | Condition | Result |
 |---|---|
 | Both `githubMcp` and `connectors` | Refused, naming both keys |
-| Connector type other than `github` (until phases 5–6) | Refused |
+| Connector type other than `github` or `linear` | Refused |
 | GitHub scope naming an unregistered repository | Refused, naming it |
 | Unknown `type` or `identity` other than `service` | Refused |
 | `credentialRef` not in the registry | Refused, naming the reference |
+| `credentialRef` of a type the connector does not accept | Refused, naming the reference and type |
 | Presented name longer than 64 characters | Refused, naming the tool |
 | Upstream schema already has `target` and the connector has several scopes | Refused, naming the tool |
 | Visible tools over 40 | Refused with the count |

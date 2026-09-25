@@ -19,7 +19,9 @@ Two limits can apply. You set the first one in Linear; AgentX enforces the secon
 2. **The project.** The project file names one or more teams and the tools members may use.
    AgentX sets the team on every tool that takes one, and refuses a model that tries to choose
    another. Before it reads, updates or comments on an existing issue, it checks that the issue is
-   in the project's team.
+   in the project's team. This check covers exactly `get_issue`, `save_issue`, `list_comments` and
+   `save_comment`. Any other tool that addresses an issue or comment, for example `delete_comment`,
+   is not checked, so it must not be approved.
 
 Tools that take no team, such as `list_teams`, `list_users` or `get_workspace`, reach everything
 the key reaches, and the guard in point 2 does not cover them. Approve them only if that is
@@ -90,6 +92,10 @@ security add-generic-password -a "$USER" -s agentx-linear-payments -w "$(pbpaste
 security find-generic-password -s agentx-linear-payments -w | tr -d '\n' | wc -c
 ```
 
+`-w "$(pbpaste)"` briefly puts the key in that process's command line, visible to anyone who can
+run `ps` on the machine while the command runs. Skip this optional Keychain copy on a shared
+machine.
+
 Never use `-w` without a value. Its interactive prompt cuts secrets at 128 characters, and the
 cut is silent. The second command prints the stored length so you can compare it with the key's.
 Do this for any tool you store the key through: a shell tool that silently truncates a long secret
@@ -131,7 +137,7 @@ integrations:
           allowedArguments: [id, includeCustomerNeeds, includeReleases]
         - name: save_issue
           access: write
-          allowedArguments: [id, title, description, state, assignee, priority, addLabels, removeLabels, dueDate]
+          allowedArguments: [id, title, description, state, assignee, priority, dueDate]
         - name: save_comment
           access: write
           allowedArguments: [issueId, body]
@@ -142,8 +148,13 @@ integrations:
 - With several scopes, members pick a team by its alias.
 - `allowedArguments` keeps the model to the fields you list. The `save_issue` and `save_comment`
   fields above are the recommended minimum for writes.
-- `get_issue`'s `allowedArguments` leaves out `includeRelations`, because a related issue can
-  belong to another team that the guard does not check.
+- `save_issue`'s `allowedArguments` leaves out `addLabels` and `removeLabels`. AgentX always sends
+  the team on an update, and Linear's schema says a label change cannot be combined with a team
+  change; whether that combination actually works has not yet been verified live. Add them back
+  once it has been.
+- `get_issue`'s `allowedArguments` leaves out `includeRelations`; if approved anyway, the connector
+  refuses any call that sets it to `true`, because a related issue can belong to another team it
+  does not return.
 - Leave `attribution` unset to keep the footer.
 
 ## 6. Register the project revision
@@ -168,9 +179,9 @@ What the other results mean:
 | Output | Meaning and fix |
 |---|---|
 | Refused: `connector linear: credential linear-payments is not registered; run agentx admin credential register first` | Run step 4 first. |
-| Refused: `connector linear: credential linear-payments is oauth-client-credentials; a linear connector needs static-secret` | Register a `static-secret` API key instead. |
+| Refused: `connector linear: credential linear-payments is oauth-client-credentials; a Linear connector needs static-secret` | Register a `static-secret` API key instead. |
 | Refused: `connector linear: connector credentials are not configured in this deployment` | The control plane was deployed without connector credentials. Redeploy with them. |
-| `Warning: connector linear: Linear rejected the credential twice; check the Linear API key's permissions and team access` | The key is wrong, revoked or lacks permissions. Check steps 1 to 3. |
+| `Warning: connector linear: Linear is not connected: Linear rejected the credential twice; check the Linear API key's permissions and team access` | The key is wrong, revoked or lacks permissions. Check steps 1 to 3. |
 | `Warning: connector linear: tool X skipped: not offered by the vendor` | The tool name is wrong or Linear renamed it. Check the name. |
 | `Warning: connector linear: tool X skipped: requires arguments outside allowedArguments` | Add the named arguments to `allowedArguments`. |
 
