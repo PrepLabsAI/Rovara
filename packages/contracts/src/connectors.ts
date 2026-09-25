@@ -15,6 +15,21 @@ export const JIRA_PROJECT_TOOL_ACCESS = {
   addOrEditJiraIssueComment: "write",
 } as const satisfies Record<string, "read" | "write">;
 
+/**
+ * The Asana tools AgentX can hold to one project, and the access each must be approved with.
+ * An Asana connector may approve only these.
+ */
+export const ASANA_PROJECT_TOOL_ACCESS = {
+  get_task: "read",
+  get_task_stories: "read",
+  get_tasks: "read",
+  search_tasks: "read",
+  get_project: "read",
+  create_tasks: "write",
+  update_tasks: "write",
+  add_comment: "write",
+} as const satisfies Record<string, "read" | "write">;
+
 const RepositoryNameSchema = z.string().regex(AGENTX_NAME_PATTERN);
 
 /** A scope alias such as a repository name. */

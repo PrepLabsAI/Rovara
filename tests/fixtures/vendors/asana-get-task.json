@@ -1,0 +1,17 @@
+{
+  "data": {
+    "gid": "1210000000000101",
+    "name": "Flaky login test",
+    "resource_type": "task",
+    "completed": false,
+    "assignee": null,
+    "due_on": null,
+    "notes": "Fails about one run in five.",
+    "parent": null,
+    "projects": [{ "gid": "1210000000000010", "name": "Payments", "resource_type": "project" }],
+    "memberships": [
+      { "project": { "gid": "1210000000000010", "name": "Payments" }, "section": { "gid": "1210000000000011", "name": "To do" } }
+    ],
+    "workspace": { "gid": "1210000000000001", "name": "Example workspace", "resource_type": "workspace" }
+  }
+}
