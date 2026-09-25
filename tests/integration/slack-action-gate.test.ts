@@ -221,6 +221,43 @@ describe("a redelivered request that asked for a confirmation", () => {
     expect(logs).toContainEqual({ event: "gate.confirmation_refused", fields: { eventId: "EvGATE000102", reason: "already_used_by_this_request" } });
   });
 
+  for (const via of ["typed yes", "click"] as const) {
+    it(`I2: tells a redelivered ${via} whose turn also posted a new confirmation that its earlier attempt already used the confirmation`, async () => {
+      const connectorCall = vi.fn();
+      const reopen = { tool: "tracker__reopen_item", input: { id: "TRK-9" } };
+      const { posts, turns, dependencies, advance, confirmationsPosted, confirmations, logs } = harness(async (input) => {
+        if (input.gate!.approvals.length === 0) return closeTurn(input);
+        connectorCall();
+        // The confirmed call ran, and the model made another call that asks: settle posts a new confirmation.
+        input.gate!.asks.push({ toolCallId: "c2", tool: reopen.tool, argumentsHash: argumentsHash(reopen.tool, reopen.input), summary: "tracker__reopen_item: id=TRK-9", kind: "destructive" });
+        return "Closed TRK-9.";
+      });
+      await processSlackRequest(slackMessage("EvGATE000131", "close TRK-9"), dependencies, { finalAttempt: false });
+      const { confirmationId } = confirmationsPosted[0]!.confirmation;
+      const post = dependencies.post;
+      dependencies.post = async (thread, text) => {
+        if (text === "Closed TRK-9.") throw new Error("Slack chat.postMessage failed: HTTP 500");
+        return post(thread, text);
+      };
+      advance(60_000);
+      const eventId = via === "click" ? confirmationClickEventId(confirmationId, "approve") : "EvGATE000132";
+      const approval = slackMessage(eventId, "yes", { receivedAt: new Date(start + 60_000).toISOString() });
+      await expect(processSlackRequest(approval, dependencies, { finalAttempt: false })).rejects.toThrow("HTTP 500");
+      expect(connectorCall).toHaveBeenCalledOnce();
+      expect(confirmationsPosted).toHaveLength(2);
+      expect(await confirmations.load(subject)).not.toMatchObject({ confirmationId });
+      dependencies.post = post;
+      advance(60_000);
+      await processSlackRequest(approval, dependencies, { finalAttempt: false, redelivered: true });
+      expect(connectorCall).toHaveBeenCalledOnce();
+      expect(turns).toHaveLength(2);
+      expect(posts.at(-1)).toBe("An earlier attempt of this request already used that confirmation, so I didn't run anything again. It may already have run; ask me to check, or ask again.");
+      expect(logs).toContainEqual({ event: "gate.confirmation_refused", fields: { eventId, reason: "already_used_by_this_request" } });
+      // The new confirmation stays pending and answerable.
+      expect(await confirmations.load(subject)).not.toHaveProperty("retiredAt");
+    });
+  }
+
   it("says which calls the still-pending confirmation lists when the redelivered turn asked for different ones", async () => {
     let target = "TRK-9";
     const { posts, dependencies, advance, confirmationsPosted } = harness(async (input) => {

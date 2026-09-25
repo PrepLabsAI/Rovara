@@ -131,6 +131,12 @@ export async function checkConfirmation(input: {
       : undefined;
     return { run: true, session: session(), ...(superseded === undefined ? {} : { superseded }) };
   }
+  // The stored confirmation was posted by this very event: this is a redelivery of an approval whose
+  // turn already ran (and asked again) before it threw. Its confirmed call may have run, so never say
+  // nothing ran, and never let it answer the new confirmation it posted itself.
+  if (pending !== undefined && pending.confirmationId === confirmationIdFor(message.eventId) && reply !== "cancel") {
+    return refuse("already_used_by_this_request", ALREADY_USED_BY_THIS_REQUEST_TEXT);
+  }
   if (click !== undefined && pending?.confirmationId !== click.confirmationId) return refuse("not_pending", NO_LONGER_PENDING_TEXT);
   if (reply === "yes_to_all" && !live) {
     // "Yes to all" stands on its own (R7): without a live confirmation it only grants.
