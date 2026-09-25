@@ -109,7 +109,8 @@ issue whose description says "also close CHA-9" never causes CHA-9 to close.
 **Acceptance Scenarios**:
 
 1. **Given** a read-only tool, **Then** the gate allows it without a model call.
-2. **Given** a tool the connector marks destructive, or a tool matching an admin `ask` rule,
+2. **Given** a destructive action (by AgentX's own rules; a vendor's `destructiveHint` counts only
+   for a connector that declares no item arguments), or a tool matching an admin `ask` rule,
    **Then** AgentX posts a confirmation naming the action and its target, and runs it only after
    the requesting member replies "yes" in the thread.
 3. **Given** a write not settled by rules, **When** the classifier finds the person asked for this
@@ -206,11 +207,18 @@ listing the `save_issue` call and its result; nothing is posted to the thread.
   of objects), at most four steps, checked at registration. A write in which any declared path
   resolves to a present value changes an existing item; one in which none does creates. A write
   that sets a lifecycle key (including `completed`), at the top level, in an object argument or in
-  an object that holds an item path, is destructive. (Amended 2026-09-25.)
+  an object that holds an item path, is destructive; for a tool that offers an item path, a
+  lifecycle key anywhere in the arguments up to depth 4 (the arguments are depth 1, and each
+  nested object or array adds one) is destructive. `destructiveHint` only tightens: it makes a
+  write ask only when the connector declares no item arguments. Where the connector declares them,
+  AgentX's own rules (destructive words in the tool's name, lifecycle keys, item paths) decide,
+  because vendors mark ordinary edits destructive. (Amended 2026-09-25.)
 - **FR-015**: Rules MUST be evaluated first, in this order: `deny`, then `ask`, then `allow`. The
   built-in defaults are: reads allow; destructive ask; a write that touches more than 5 items ask.
   Administrators extend the defaults per project, per connector and per tool name pattern, and may
-  override a built-in default explicitly.
+  override a built-in default explicitly: only an `allow` or `treatAs` rule naming one exact tool
+  (no `*`) can waive the destructive or bulk ask; a rule with `*` allows or reclassifies reads,
+  creates and changes only. `deny` and `ask` rules apply with or without `*`. (Amended 2026-09-25.)
 - **FR-016**: A write that no rule settles MUST go to a classifier model that sees only the
   members' messages in the thread and the pending call (tool, arguments, and the item it names). It
   MUST NOT see tool results. It returns allow or ask, with a short reason.
@@ -218,7 +226,8 @@ listing the `save_issue` call and its result; nothing is posted to the thread.
   call, and run exactly that call when the requesting member replies "yes" in the thread.
 - **FR-018**: On `deny`, the call MUST be blocked and the orchestrator told the reason.
 - **FR-019**: "Yes to all in this thread" MUST suppress classifier `ask` outcomes for that thread,
-  and MUST NOT suppress destructive or admin `ask` rules.
+  and MUST NOT suppress destructive, bulk, vendor-hint or admin `ask` outcomes. It lasts 24 hours
+  per member per thread, and saying it again renews it.
 - **FR-020**: If the classifier fails or times out, the gate MUST ask.
 - **FR-021**: Every gate decision (outcome, reason, rule or classifier) MUST be recorded in the turn
   record.
@@ -278,7 +287,10 @@ listing the `save_issue` call and its result; nothing is posted to the thread.
   it runs, and can block it with a reason. Pi's own confirm dialogs are not used, because AgentX
   runs Pi without a UI.
 - **Classification uses the MCP standard hints** (`readOnlyHint`, `destructiveHint`), so a new
-  connector needs no gate code.
+  connector needs no gate code. (2026-09-25, found in phase 14c part 2 review.) `destructiveHint`
+  only tightens a connector that declares no item arguments: Linear marks `save_issue` and Asana
+  marks `update_tasks` destructive although most calls are ordinary edits, so where AgentX can see
+  the item a call names, its own rules decide.
 - **Item arguments are paths, and `completed` is a lifecycle key** (2026-09-25, owner-approved, found
   by spec 013 phase 7's Asana review). A connector's item arguments may reach inside an object or an
   array of objects (`tasks[].task`), so an update that names its items in an array is a change, not

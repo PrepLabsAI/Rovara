@@ -278,6 +278,16 @@ Comments are signed. The `notes` and `html_notes` of tasks created or updated ar
 Turn records keep each request's text and tool arguments for 30 days, with known credential
 shapes redacted on a best-effort basis; they are readable only by administrators.
 
+### Confirmations
+
+AgentX creates tasks with `create_tasks` without asking, even tasks created already complete. It
+checks a change to an existing task against what the member asked: an `update_tasks` call, whose
+items name their tasks in `tasks[].task`, and an `add_comment` on a task. It always asks before a
+call that sets `completed`, true or false, anywhere in an `update_tasks` item, and before an
+`update_tasks` or `create_tasks` call with more than 5 tasks. Asana marks `update_tasks`
+destructive; AgentX does not ask for that alone, because it can see the tasks each call names. No
+action policy is needed for this.
+
 ## Re-authorizing and disconnecting
 
 If the bot user's access is removed, its password is reset or the app's client secret changes, the
