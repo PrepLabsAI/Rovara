@@ -303,7 +303,7 @@ export class CredentialRegistry {
         tokenEndpoint,
         // The reason is an error class name or "LeaseDeadlineExceeded", never the token.
         onRotationUnsaved: (reason) => {
-          console.log(JSON.stringify({ component: "broker", event: "connector.refresh_token_unsaved", credential: record.ref, error: reason }));
+          console.log(JSON.stringify({ component: "broker", event: "connector.refresh_token_unsaved", credential: record.ref, reason }));
         },
         ...(this.options.fetchImplementation ? { fetchImplementation: this.options.fetchImplementation } : {}),
       });

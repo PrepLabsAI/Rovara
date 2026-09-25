@@ -64,7 +64,7 @@ describe("oauth-refresh-token in the credential registry", () => {
       await registry!.provider("asana-bot", { tokenEndpoint }).issue(undefined, "read");
       const lines = log.mock.calls.map(([line]) => String(line));
       expect(lines.map((line) => JSON.parse(line) as Record<string, unknown>).filter((line) => line.event === "connector.refresh_token_unsaved"))
-        .toEqual([{ component: "broker", event: "connector.refresh_token_unsaved", credential: "asana-bot", error: "AccessDeniedException" }]);
+        .toEqual([{ component: "broker", event: "connector.refresh_token_unsaved", credential: "asana-bot", reason: "AccessDeniedException" }]);
       expect(lines.join("\n")).not.toMatch(/refresh-token-rotated|refresh-token-original|access-token-|client-secret-value/);
     } finally { log.mockRestore(); }
   });
