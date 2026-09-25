@@ -4,6 +4,7 @@ import { BUILT_IN_CONNECTOR_TYPES, resolveConnectors } from "../../packages/brok
 import { CredentialRegistry } from "../../packages/broker/src/aws/credentials.js";
 import { linearConnectorType } from "../../packages/broker/src/aws/linear-connector-type.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
+import { adminCall, createAdminBroker } from "../support/admin-broker.js";
 
 const CHARTERARC = "c408e946-78aa-4db8-923e-f78053dd954f";
 const tools = [{ name: "list_issues", access: "read" }, { name: "save_issue", access: "write" }];
@@ -95,5 +96,49 @@ describe("credential registry typeOf", () => {
     expect(await credentials.typeOf("github-app")).toBe("github-app");
     expect(await credentials.typeOf("linear-charterarc")).toBe("static-secret");
     expect(await credentials.typeOf("missing")).toBeUndefined();
+  });
+});
+
+const runtimeBinding = {
+  runtimeArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/agentx_production_worker-YVirjlFgvk",
+  endpointQualifier: "DEFAULT", deploymentMode: "instances-ebs",
+  capacityProviderArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:capacity-provider/agentx_production_capacity_v3-VwkM93EABZ",
+};
+const secretsFor = (types: Record<string, unknown>) => ({ read: vi.fn(async (name: string) => types[name] === undefined ? undefined : JSON.stringify(types[name])) });
+
+describe("registering a project with a linear connector", () => {
+  const register = (handler: Parameters<typeof adminCall>[0], connectors: unknown[], revision = 1) =>
+    adminCall(handler, { method: "POST", path: "/v1/admin/projects", body: { definition: { ...project(connectors), revision }, runtimeBinding } });
+
+  it("refuses when the deployment has no credential registry", async () => {
+    const { handler } = await createAdminBroker();
+    const response = await register(handler, [linear()]);
+    expect(response.status).toBe(400);
+    expect(response.body.error).toEqual({ code: "CONFIG_INVALID", message: "connector linear: connector credentials are not configured in this deployment" });
+  });
+
+  it("refuses an unregistered reference, an OAuth credential and the built-in GitHub App, naming each", async () => {
+    const { handler } = await createAdminBroker({ connectorCredentials: {
+      secrets: secretsFor({ "agentx/connectors/linear-oauth": { clientId: "c", clientSecret: "s", scopes: ["read"] } }),
+      githubApp: { ref: "github-app", secretName: "agentx/github-app" },
+    } });
+    expect((await adminCall(handler, { method: "POST", path: "/v1/admin/credentials", body: { ref: "linear-oauth", type: "oauth-client-credentials", secretName: "agentx/connectors/linear-oauth" } })).status).toBe(201);
+    expect((await register(handler, [linear()])).body.error).toEqual({ code: "CONFIG_INVALID", message: "connector linear: credential linear-charterarc is not registered; run agentx admin credential register first" });
+    expect((await register(handler, [linear({ credentialRef: "linear-oauth" })])).body.error).toEqual({ code: "CONFIG_INVALID", message: "connector linear: credential linear-oauth is oauth-client-credentials; a Linear connector needs static-secret" });
+    expect((await register(handler, [linear({ credentialRef: "github-app" })])).body.error).toEqual({ code: "CONFIG_INVALID", message: "connector linear: credential github-app is github-app; a Linear connector needs static-secret" });
+  });
+
+  it("registers once the static-secret credential exists, without contacting Linear, and stays idempotent", async () => {
+    const { handler, db } = await createAdminBroker({ connectorCredentials: {
+      secrets: secretsFor({ "agentx/connectors/linear-charterarc": { apiKey: "lin_api_value" } }),
+      githubApp: { ref: "github-app", secretName: "agentx/github-app" },
+    } });
+    expect((await adminCall(handler, { method: "POST", path: "/v1/admin/credentials", body: { ref: "linear-charterarc", type: "static-secret", secretName: "agentx/connectors/linear-charterarc" } })).status).toBe(201);
+    expect((await register(handler, [linear()])).status).toBe(201);
+    // The credential disappears; re-submitting the same registered revision still answers as a duplicate.
+    for (const item of db.find((entry) => entry.pk === "CREDENTIALS")) db.items.delete(`${item.pk as string}\u0000${item.sk as string}`);
+    const again = await register(handler, [linear()]);
+    expect(again.status).toBe(201);
+    expect(again.body.duplicate).toBe(true);
   });
 });
