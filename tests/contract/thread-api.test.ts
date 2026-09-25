@@ -51,7 +51,7 @@ describe("the Slack service's thread client", () => {
     await expect(threadApi(handler).prepareWorkspace!(randomUUID())).rejects.toThrow(/^thread workspace preparation failed: FORBIDDEN /);
   });
 
-  it("stays dormant: the ensure request does not opt in to lazy preparation, so compute is prepared as before", async () => {
+  it("PR A: the ensure body does not opt into lazy preparation, so compute is prepared as before (replaced when PR B opts in)", async () => {
     const { handler } = createBroker();
     await registerSlackProject(handler);
     const sent: unknown[] = [];

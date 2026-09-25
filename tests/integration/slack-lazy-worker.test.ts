@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { SlackRequestMessage, SlackThreadPrepareResult, SlackThreadWorkspaceResult } from "../../packages/contracts/src/index.js";
+import type { SlackRequestMessage, SlackThreadPrepareResult, SlackThreadWorkspaceResult, TurnRecord } from "../../packages/contracts/src/index.js";
 import { deterministicUuid } from "../../packages/slack-service/src/ids.js";
 import { LIMIT_REFUSAL, createLazyWorker, unavailableRefusal } from "../../packages/slack-service/src/lazy-worker.js";
 import { processSlackRequest, type ProcessorDependencies, type TurnInput } from "../../packages/slack-service/src/processor.js";
@@ -14,6 +14,7 @@ const conversationId = "33333333-3333-4333-8333-333333333333";
 const WORKING = "Working on it now. I'll post the result in this thread when it's done.";
 const SETTING_UP = "Setting up a new workspace for this thread. The first request takes a few minutes.";
 const STILL = "This thread's workspace is still being set up. I'll start as soon as it's ready.";
+const SLOW = "This thread's workspace is taking longer than expected to set up. It continues in the background; mention me again in this thread in a few minutes.";
 const MEMBER_LIMIT = [
   "You already have 3 AgentX workspaces, the most one person can have, so I can't start a new one. Continue in one of your existing threads instead:",
   "• <https://slack.com/archives/C0123456789/p1695500000000001|Thread 1>",
@@ -21,14 +22,18 @@ const MEMBER_LIMIT = [
 ].join("\n");
 const started: SlackThreadPrepareResult = { outcome: "WORKSPACE", workspaceId, status: "PREPARING", operationId, created: true };
 
-function lazyHarness(prepare: SlackThreadPrepareResult | Error, waited = "SUCCEEDED") {
+function lazyHarness(
+  prepare: SlackThreadPrepareResult | Error,
+  waited = "SUCCEEDED",
+  options: { wait?: () => Promise<{ status: string }>; waitDeadlineMilliseconds?: number } = {},
+) {
   const posts: string[] = [];
   const logs: string[] = [];
   const prepareWorkspace = vi.fn(async () => {
     if (prepare instanceof Error) throw prepare;
     return prepare;
   });
-  const waitForOperation = vi.fn(async () => ({ status: waited }));
+  const waitForOperation = vi.fn(options.wait ?? (async () => ({ status: waited })));
   const worker = createLazyWorker({
     api: { prepareWorkspace, waitForOperation },
     post: async (text) => {
@@ -38,6 +43,7 @@ function lazyHarness(prepare: SlackThreadPrepareResult | Error, waited = "SUCCEE
       logs.push(event);
     },
     eventId: "Ev0000000001",
+    ...(options.waitDeadlineMilliseconds === undefined ? {} : { waitDeadlineMilliseconds: options.waitDeadlineMilliseconds }),
   });
   return { worker, posts, logs, prepareWorkspace, waitForOperation };
 }
@@ -90,6 +96,32 @@ describe("the lazy worker", () => {
     expect(h.logs).toEqual(["workspace.preparation_failed"]);
   });
 
+  it("reports a setup it could not confirm and refuses the worker for the rest of the turn", async () => {
+    const h = lazyHarness(started, "SUCCEEDED", { wait: async () => {
+      throw new TypeError("fetch failed");
+    } });
+    const refusal = unavailableRefusal("workspace setup could not be confirmed");
+    expect(await h.worker.ensureReady()).toEqual(refusal);
+    expect(refusal.message).toMatch(/Do not retry this tool in this turn/);
+    expect(h.posts).toEqual([SETTING_UP, "AgentX could not set up this thread's workspace (UNCONFIRMED). Mention me again in this thread to retry."]);
+    expect(await h.worker.ensureReady()).toEqual(refusal);
+    expect(h.prepareWorkspace).toHaveBeenCalledOnce();
+    expect(h.waitForOperation).toHaveBeenCalledOnce();
+    expect(h.logs).toEqual(["workspace.preparation_failed"]);
+    expect(h.worker.prepared()).toBe(false);
+  });
+
+  it("stops waiting mid-turn at its deadline and says setup continues in the background", async () => {
+    const h = lazyHarness(started, "SUCCEEDED", { wait: () => new Promise(() => undefined), waitDeadlineMilliseconds: 20 });
+    const refusal = unavailableRefusal("workspace setup is taking longer than expected; it continues in the background");
+    expect(await h.worker.ensureReady()).toEqual(refusal);
+    expect(h.posts).toEqual([SETTING_UP, SLOW]);
+    expect(await h.worker.ensureReady()).toEqual(refusal);
+    expect(h.prepareWorkspace).toHaveBeenCalledOnce();
+    expect(h.logs).toEqual(["workspace.preparation_slow"]);
+    expect(h.worker.prepared()).toBe(false);
+  });
+
   it("refuses without posting when the thread's workspace is closed", async () => {
     const h = lazyHarness({ outcome: "CLOSED", workspaceId, closedAt: "2026-09-25T10:00:00.000Z" });
     expect(await h.worker.ensureReady()).toEqual(unavailableRefusal("this thread's workspace is closed; start a new Slack thread for coding work"));
@@ -116,6 +148,7 @@ function processorHarness(result: SlackThreadWorkspaceResult, turn: (input: Turn
   const posts: string[] = [];
   const turns: TurnInput[] = [];
   const saved: Array<{ workspaceId: string; conversationId: string }> = [];
+  const records: TurnRecord[] = [];
   const prepareWorkspace = vi.fn(async () => prepare);
   const waitForOperation = vi.fn(async () => ({ status: "SUCCEEDED" }));
   const dependencies: ProcessorDependencies = {
@@ -143,8 +176,14 @@ function processorHarness(result: SlackThreadWorkspaceResult, turn: (input: Turn
     post: async (_thread, text) => {
       posts.push(text);
     },
+    turnRecords: {
+      write: async (record) => {
+        records.push(record);
+        return "written";
+      },
+    },
   };
-  return { dependencies, posts, turns, saved, prepareWorkspace, waitForOperation };
+  return { dependencies, posts, turns, saved, records, prepareWorkspace, waitForOperation };
 }
 
 describe("processing a thread with no compute", () => {
@@ -179,6 +218,7 @@ describe("processing a thread with no compute", () => {
     );
     await processSlackRequest(message(), h.dependencies, { finalAttempt: false });
     expect(h.posts).toEqual([WORKING, MEMBER_LIMIT, "3 issues are open. The coding part did not run."]);
+    expect(h.records.map((record) => record.disposition)).toEqual(["answered"]);
   });
 
   it("gives a thread that already has compute no worker handle, as with an older control plane", async () => {
@@ -189,7 +229,7 @@ describe("processing a thread with no compute", () => {
     expect(h.prepareWorkspace).not.toHaveBeenCalled();
   });
 
-  it("leaves a failed setup to the next message's ensure call, never the prepare route", async () => {
+  it("does not use the prepare route for a thread whose setup failed", async () => {
     const h = processorHarness(workspaceResult({ status: "PREPARATION_FAILED" }), async () => "done");
     await processSlackRequest(message(), h.dependencies, { finalAttempt: false });
     expect(h.posts).toEqual(["This thread's workspace is not available right now (PREPARATION_FAILED). Mention me again later to retry."]);
