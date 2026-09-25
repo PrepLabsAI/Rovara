@@ -386,7 +386,18 @@ secret is wrong.
 `event.ignored reason="member_check_failed"` with `slackError="missing_scope"` means the bot token
 lacks `users:read`. `reason="not_a_person"` means a bot posted the mention, `reason="own_message"`
 that AgentX did, and `reason="app_posted_disabled"` that `SlackAppPostedMessages` is `ignore`.
-`thread.paused` records each request the per-thread limit refused.
+`reason="no_user"` means the event named no Slack user; every other unparseable event still logs
+`reason="malformed_event"`. A bot's mention used to log `reason="bot_or_edited_message"` no matter
+what; now that reason only covers an edited message, or app-posted messages that are off or not
+configured, and a bot's mention is checked like any other app-posted message, logging
+`reason="not_a_person"` instead. `thread.paused` records each request the per-thread limit refused.
+`turn_limit.failed` is a 500 that Slack retries, logged when the turn itself could not be counted.
+`member_check.notice_failed` and `thread_paused.notice_failed` mean the fail-closed notice or the
+pause notice could not be posted; the event is still handled and Slack is not asked to retry it.
+`turn_limit.release_failed` and `enqueue.release_failed` mean the claimed event's release itself
+failed, after a turn-count or enqueue failure that had already answered 500; `turn_limit.decrement_failed`
+means the turn count's own undo, on the enqueue-failure path, failed. All three are logged, not
+thrown, and only leave the retried event's claim, or its turn count, briefly stale, not lost.
 `connector.discovery_failed` means a connector's tools were left out of a turn: `cause="transient"`
 is an outage the next turn may clear, and `cause="setup"` (with its error `code`) needs an
 administrator, for example `FORBIDDEN` when the connector is no longer enabled for the project.
