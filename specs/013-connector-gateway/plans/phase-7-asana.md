@@ -31,8 +31,11 @@ plans this one follows, [phase-5-linear.md](phase-5-linear.md) and [phase-6-jira
 Owner requirements: every organisation creates its own Asana app and bot user; AgentX never holds
 anyone's credentials.
 
-**Branch:** `feat/013-phase-7-asana`, from `mainline` at `af67c2c` (phases 1a to 6 and 4 merged).
-One pull request. Spec 014 is in flight on its own branches; see "Coordination with spec 014".
+**Branch:** `feat/013-phase-7-asana`, from `mainline` at `af67c2c` (phases 1a to 6 and 4 merged),
+with `mainline` at `1992d5e` (spec 014 phase 14a: Slack ingress, formatter, `replySurface`) merged
+in before Task 1. 14a touches no file or anchor this plan edits except `infra/lib/control-plane.ts`
+and `README.md`, whose anchors are unchanged. One pull request. Spec 014 phases 14b to 14d are in
+flight on their own branches; see "Coordination with spec 014".
 
 **Task map to `tasks.md`:** T041 = Tasks 1 to 3. T042 = Task 4. T043 = Tasks 5 to 7. T044 = Task 8.
 T045 = Task 9.
@@ -153,8 +156,8 @@ a connector lists one scope per project: `{ alias, projectGid }`.
 
 ## Coordination with spec 014
 
-Spec 014 is in flight (`~/web/AgentX-p14`, plans 14a to 14d). This phase does not edit anything 014
-edits: `ConnectorDefinition`, `PresentedTool`, `catalog.ts`, the orchestrator and the Slack service
+Spec 014 phase 14a is merged into this branch; 14b to 14d are in flight (`~/web/AgentX-p14`). This
+phase does not edit anything 014 edits: `ConnectorDefinition`, `PresentedTool`, `catalog.ts`, the orchestrator and the Slack service
 are untouched.
 
 | Shared piece | What this phase does | What the second to land does |
