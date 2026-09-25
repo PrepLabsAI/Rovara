@@ -1,4 +1,4 @@
-import type { SlackRequester } from "@agentx/contracts";
+import type { SlackRequester, ToolHints } from "@agentx/contracts";
 import type { McpConnection } from "./mcp-client.js";
 
 export type Access = "read" | "write";
@@ -97,6 +97,13 @@ export interface ConnectorDefinition<Scope> {
   guards: readonly Guard[];
   /** Long-form text arguments a write's attribution is appended to; defaults to body and description. */
   attributionKeys?: readonly string[];
+  /**
+   * The argument paths through which this vendor's tools name an existing item, most specific first
+   * (feature 014): a name, `a.b` or `a[].b` (contracts item-paths.ts). The action gate treats a call
+   * in which any of them resolves to a present value as a change, and a call on a tool that offers
+   * none of them as a create. Connector data, so the gate itself names no vendor.
+   */
+  itemArguments?: readonly string[];
 }
 
 export interface ConnectorContext<Scope> {
@@ -117,6 +124,8 @@ export interface CatalogTool {
   inputSchema: Record<string, unknown>;
   schemaHash: string;
   access: Access;
+  /** The vendor's readOnlyHint and destructiveHint, when it sent them as booleans (feature 014). Never hashed separately. */
+  hints?: ToolHints | undefined;
 }
 
 export interface ToolRequest {

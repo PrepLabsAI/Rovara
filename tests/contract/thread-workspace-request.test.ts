@@ -5,7 +5,7 @@ describe("the Slack service's thread workspace request", () => {
   it("opts in to every field this service can parse, including unfinished operations", () => {
     expect(threadWorkspaceRequest("request-1")).toEqual({
       requestId: "request-1", includeIntegrations: true, includeSettingsRevision: true, includeConnectors: true,
-      includeAllConnectorTypes: true, includeRecoverableOperations: true,
+      includeAllConnectorTypes: true, includeRecoverableOperations: true, includeActionPolicy: true,
     });
   });
 });

@@ -1,3 +1,4 @@
+import { itemPathProblems, schemaHasItemPath, type ToolHints } from "@agentx/contracts";
 import type { SkippedTool } from "./engine.js";
 import type { CatalogTool } from "./types.js";
 import { canonical, isObject } from "./util.js";
@@ -17,6 +18,9 @@ export interface PresentedCatalogTool {
   inputSchema: Record<string, unknown>;
   access: "read" | "write";
   scopes: Array<{ alias: string; schemaHash: string }>;
+  hints?: ToolHints | undefined;
+  /** See PresentedToolSchema.itemArguments: the declared paths this tool offers, [] for none, absent when the connector declares none. */
+  itemArguments?: string[] | undefined;
 }
 
 const MAX_NAME = 64;
@@ -32,6 +36,8 @@ export function presentCatalog(input: {
   scopeNoun: string;
   approvals: readonly PresentationApproval[];
   scopes: readonly ScopeCatalog[];
+  /** The connector's item argument paths (ConnectorDefinition.itemArguments). */
+  itemArguments?: readonly string[] | undefined;
 }): { tools: PresentedCatalogTool[]; skipped: SkippedTool[] } {
   const tools: PresentedCatalogTool[] = [];
   const skipped: SkippedTool[] = [];
@@ -63,9 +69,24 @@ export function presentCatalog(input: {
       inputSchema,
       access: first.tool.access,
       scopes: entries.map(({ alias, tool }) => ({ alias, schemaHash: tool.schemaHash })),
+      ...mergeHints(entries.map(({ tool }) => tool.hints)),
+      // A malformed declaration is served as none, so the gate treats every write as a change (R7).
+      ...(input.itemArguments === undefined || itemPathProblems(input.itemArguments).length > 0
+        ? {}
+        : { itemArguments: input.itemArguments.filter((path) => schemaHasItemPath(inputSchema, path)) }),
     });
   }
   return { tools, skipped };
+}
+
+/** Across scopes the stricter reading wins: destructive if any scope says so, read-only only if every scope says so. */
+function mergeHints(all: ReadonlyArray<ToolHints | undefined>): { hints: ToolHints } | Record<string, never> {
+  const hints: ToolHints = {};
+  if (all.some((entry) => entry?.destructiveHint === true)) hints.destructiveHint = true;
+  else if (all.every((entry) => entry?.destructiveHint === false)) hints.destructiveHint = false;
+  if (all.some((entry) => entry?.readOnlyHint === false)) hints.readOnlyHint = false;
+  else if (all.every((entry) => entry?.readOnlyHint === true)) hints.readOnlyHint = true;
+  return Object.keys(hints).length > 0 ? { hints } : {};
 }
 
 function describe(

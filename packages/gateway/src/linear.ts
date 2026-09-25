@@ -116,5 +116,7 @@ export function linearConnector(credentials: CredentialProvider<LinearTeamScope>
     binder: linearBinder,
     guards: [issueInTeamGuard],
     attributionKeys: ["description", "body"],
+    // save_issue and save_comment update the item named by id, and create one without it.
+    itemArguments: ["id"],
   };
 }

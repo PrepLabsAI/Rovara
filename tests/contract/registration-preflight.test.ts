@@ -202,6 +202,31 @@ describe("registration preflight across connector types", () => {
       { name: "broken", status: "unavailable", problem: "Broken MCP discovery failed", offered: [], skipped: [] },
     ]);
   });
+
+  it("refuses a connector whose definition declares a malformed item argument path, before contacting its vendor", async () => {
+    const project = ProjectDefinitionSchema.parse(definition(githubConnector(["list_issues"])));
+    const connect = vi.fn();
+    const malformed: ResolvedConnector = {
+      name: "paths", type: "paths", label: "Paths connector", vendor: "Paths",
+      scopeNoun: "scope", scopes: [{ alias: "only", scope: {} }],
+      policy: { tools: [] }, approvals: [], attribution: false,
+      ledger: { prefix: "CONNECTOR#paths#", entityType: "CONNECTOR_INVOCATION" },
+      connect, configured: async () => true,
+      definition: () => Promise.resolve({
+        label: "Paths", endpoint: new URL("https://mcp.paths.test/mcp"), permissionsHint: "Paths permissions",
+        credentials: { issue: () => Promise.reject(new Error("not used")) },
+        binder: { properties: [], bind: () => ({}) }, guards: [],
+        itemArguments: ["id", "tasks[]"],
+      }),
+    };
+
+    const result = await preflightConnectors([malformed], project, "owner-key");
+    expect(result.refusals).toEqual(["connector paths: malformed item argument path \"tasks[]\""]);
+    expect(result.report.connectors).toEqual([
+      { name: "paths", status: "unavailable", problem: "connector paths declares unusable item arguments", offered: [], skipped: [] },
+    ]);
+    expect(connect).not.toHaveBeenCalled();
+  });
 });
 
 describe("registering a project with a jira connector", () => {

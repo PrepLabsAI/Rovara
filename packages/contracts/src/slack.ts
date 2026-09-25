@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ActionPolicySchema } from "./action-policy.js";
 import { ThreadConnectorSchema } from "./connectors.js";
 import { AgentXNameSchema } from "./project.js";
 import { WorkspaceStatusSchema } from "./workspace.js";
@@ -56,6 +57,8 @@ export const SlackThreadWorkspaceResultSchema = z.discriminatedUnion("outcome", 
       // The project revision whose settings the broker applied to this turn. Sent only to a
       // service that asked for it, because older deployed services parse this result strictly.
       settingsRevision: z.number().int().positive().optional(),
+      // The latest revision's action policy, sent only to a service that sends includeActionPolicy: true.
+      actionPolicy: ActionPolicySchema.optional(),
     })
     .strict(),
   z

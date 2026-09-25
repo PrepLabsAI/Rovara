@@ -419,7 +419,11 @@ async function routeWorkspaceRequest(
     if (parsed && !parsed.success) throw agentXError("CONFIG_INVALID", "invalid connector request");
     const context = connectorContext(identity, workspace, project);
     if (!parsed?.success) {
-      return json({ catalog: await discoverConnector({ connector, workspace, context, catalogs: dependencies.catalogs, refresh: url.searchParams.get("refresh") === "1" }) }, request.requestId);
+      // Only a caller that sends x-agentx-include: gate gets the action gate's fields (feature 014); they are not secret.
+      const includeGateFields = request.headers["x-agentx-include"]?.split(",").map((entry) => entry.trim()).includes("gate") === true;
+      return json({ catalog: await discoverConnector({
+        connector, workspace, context, catalogs: dependencies.catalogs, refresh: url.searchParams.get("refresh") === "1", includeGateFields,
+      }) }, request.requestId);
     }
     const attribution = attributionText(identity, connector);
     const result = await callConnector({
@@ -1115,11 +1119,14 @@ async function ensureThreadWorkspace(
   // UNPREPARED and prepares compute through POST /v1/threads/workspace/prepare when a tool first
   // needs the worker. Every other service keeps getting a workspace whose compute is prepared now.
   const lazyPreparation = input.lazyPreparation === true;
+  // A separate opt-in (feature 014): services released before the action gate parse strictly.
+  const includeActionPolicy = input.includeActionPolicy === true;
   const include: IntegrationInclude = {
     integrations: includeIntegrations,
     connectors: includeConnectors,
     allConnectorTypes: includeAllConnectorTypes,
     recoverableOperations: includeRecoverableOperations,
+    actionPolicy: includeActionPolicy,
   };
   const threadWorkspace = await getThreadWorkspace(dependencies, identity.ownerKey);
   if (threadWorkspace) {
@@ -1204,6 +1211,7 @@ async function ensureThreadWorkspace(
     ...await threadIntegrations(project.definition, include, dependencies),
     ...(include.recoverableOperations ? { recoverableOperations: [] } : {}),
     ...(includeSettingsRevision ? { settingsRevision: project.definition.revision } : {}),
+    ...(include.actionPolicy && project.definition.actionPolicy ? { actionPolicy: project.definition.actionPolicy } : {}),
   };
 }
 
@@ -1259,6 +1267,7 @@ async function createUnpreparedThreadWorkspace(
     ...await threadIntegrations(project.definition, include, dependencies),
     ...(include.recoverableOperations ? { recoverableOperations: [] } : {}),
     ...(includeSettingsRevision ? { settingsRevision: project.definition.revision } : {}),
+    ...(include.actionPolicy && project.definition.actionPolicy ? { actionPolicy: project.definition.actionPolicy } : {}),
   };
 }
 
@@ -1454,6 +1463,7 @@ async function existingThreadWorkspace(
     ...await threadIntegrations(settings.definition, include, dependencies),
     ...(include.recoverableOperations ? { recoverableOperations: workspace.status === "BUSY" && workspace.activeOperationId ? [workspace.activeOperationId] : [] } : {}),
     ...(includeSettingsRevision ? { settingsRevision: settings.definition.revision } : {}),
+    ...(include.actionPolicy && settings.definition.actionPolicy ? { actionPolicy: settings.definition.actionPolicy } : {}),
   };
   if (workspace.status === "PREPARATION_FAILED" && !workspace.activeOperationId) {
     const retried = await retryWorkspacePreparation(dependencies, identity, requestId, identity.ownerKey, pinned, workspace);
@@ -1476,7 +1486,7 @@ async function existingThreadWorkspace(
   };
 }
 
-interface IntegrationInclude { integrations: boolean; connectors: boolean; allConnectorTypes: boolean; recoverableOperations: boolean }
+interface IntegrationInclude { integrations: boolean; connectors: boolean; allConnectorTypes: boolean; recoverableOperations: boolean; actionPolicy: boolean }
 
 /**
  * Every connector the project's latest revision configures, for services that opt in with

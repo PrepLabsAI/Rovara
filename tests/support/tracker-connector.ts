@@ -51,6 +51,7 @@ export const trackerConnectorType: ConnectorType = {
           },
           guards: [],
           attributionKeys: ["body"],
+          itemArguments: ["id"],
         };
       },
     };

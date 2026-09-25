@@ -297,7 +297,7 @@ had nine tasks.)
   when any of them resolves to a present value, and `lifecycleKeySet` also looks inside the objects
   that hold an item path. Second, Asana closes a task with `completed: true`, so `completed` joins
   `LIFECYCLE_KEYS` (vendor-neutral: any tracker's "completed" is a lifecycle move). Existing
-  top-level declarations (Linear `id`, Jira `issueIdOrKey`, GitHub `issue_number`, `pull_number`)
+  top-level declarations (Linear `id`, Jira `issueIdOrKey`, GitHub `issue_number`, `pullNumber`)
   classify exactly as before; Task 2's vendor pins are unchanged. Asana declares
   `itemArguments: ["task_id", "tasks[].task"]`, from phase 7's `ASANA_TASK_REFERENCES` (its
   `ASANA_ITEM_ARGUMENTS` widened by the array path), once phase 7 merges. The declaration itself is set
