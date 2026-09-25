@@ -28,8 +28,20 @@ export interface CredentialProvider<Scope> {
 }
 
 export interface Binder<Scope> {
-  /** Required string properties removed from the model's schema and supplied by the server. */
+  /**
+   * String properties every approved tool must require. They are removed from the model's schema and
+   * supplied by the server. A tool without one, or with one optional, is skipped.
+   */
   readonly properties: readonly string[];
+  /**
+   * String properties bound only on the tools that have them, required or optional. They are removed
+   * from those tools' schemas and supplied by the server. Tools without them are offered unchanged.
+   */
+  readonly optionalProperties?: readonly string[] | undefined;
+  /**
+   * Values for the declared properties. Guards see every value; a call sends only the declared
+   * properties its tool has.
+   */
   bind(scope: Scope, credential: IssuedCredential): Record<string, unknown>;
 }
 

@@ -1,3 +1,4 @@
+export * from "./binding.js";
 export * from "./catalog-cache.js";
 export * from "./catalog.js";
 export * from "./credentials.js";

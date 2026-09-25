@@ -14,6 +14,7 @@ import {
   type ToolRequest,
   type ToolResult,
 } from "./types.js";
+import { removeBoundProperties } from "./binding.js";
 import { flattenSchema } from "./schema.js";
 import { fingerprint, isObject, resultText, withDeadline } from "./util.js";
 
@@ -25,7 +26,17 @@ export function reviewTools<Scope>(
   connector: Pick<ConnectorDefinition<Scope>, "binder">,
   context: ConnectorContext<Scope>,
 ): { tools: CatalogTool[]; skipped: SkippedTool[] } {
-  const tools: CatalogTool[] = [];
+  const { tools, skipped } = review(connection, connector, context);
+  return { tools: tools.map(({ tool }) => tool), skipped };
+}
+
+/** reviewTools, keeping for each offered tool the bound properties a call on it sends. */
+function review<Scope>(
+  connection: Pick<McpConnection, "tools">,
+  connector: Pick<ConnectorDefinition<Scope>, "binder">,
+  context: ConnectorContext<Scope>,
+): { tools: Array<{ tool: CatalogTool; bound: string[] }>; skipped: SkippedTool[] } {
+  const tools: Array<{ tool: CatalogTool; bound: string[] }> = [];
   const skipped: SkippedTool[] = [];
   const offered = new Set(connection.tools.map((tool) => tool.name));
   for (const approval of context.policy.tools) {
@@ -43,14 +54,8 @@ export function reviewTools<Scope>(
       continue;
     }
     const properties = schema.properties;
-    const required = Array.isArray(schema.required) ? schema.required as string[] : [];
-    const unbindable = connector.binder.properties.find((name) => {
-      const property = properties[name];
-      return !(isObject(property) && property.type === "string" && required.includes(name));
-    });
-    if (unbindable !== undefined) { skipped.push({ tool: upstream.name, reason: `missing server-bound property ${unbindable}` }); continue; }
-    for (const name of connector.binder.properties) delete properties[name];
-    schema.required = required.filter((name) => !connector.binder.properties.includes(name));
+    const binding = removeBoundProperties(schema, connector.binder);
+    if ("unbindable" in binding) { skipped.push({ tool: upstream.name, reason: binding.unbindable }); continue; }
     if (policy.allowedArguments) {
       const outside = (schema.required as string[]).filter((name) => !policy.allowedArguments!.includes(name));
       if (outside.length) { skipped.push({ tool: upstream.name, reason: `requires arguments outside allowedArguments: ${outside.join(", ")}` }); continue; }
@@ -71,7 +76,7 @@ export function reviewTools<Scope>(
     if (JSON.stringify(schema).length > 32_768) { skipped.push({ tool: upstream.name, reason: "flattened schema exceeds 32768 characters" }); continue; }
     // Compile during discovery too; schemas we cannot validate must never be advertised.
     try { new AjvJsonSchemaValidator().getValidator(schema); } catch { skipped.push({ tool: upstream.name, reason: "schema does not compile" }); continue; }
-    tools.push({
+    tools.push({ bound: binding.bound, tool: {
       name: upstream.name,
       scope: context.scopeAlias,
       description: (upstream.description ?? upstream.name).slice(0, 16_384),
@@ -79,7 +84,7 @@ export function reviewTools<Scope>(
       // Hashed under the feature 007 key `repository` so hashes survive the release.
       schemaHash: fingerprint({ upstream, policy, repository: context.scope }),
       access: policy.access,
-    });
+    } });
   }
   return { tools, skipped };
 }
