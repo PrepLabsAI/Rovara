@@ -8,6 +8,7 @@ import { agentXError, type ConnectorCatalog } from "../../packages/contracts/src
 import type { OrchestrationApi } from "../../packages/orchestrator/src/orchestration-tools.js";
 import { createOrchestratorRuntime, createPiSessionRuntime, runOrchestratorTurn } from "../../packages/orchestrator/src/orchestrator.js";
 import { TurnRecorder } from "../../packages/orchestrator/src/turn-recorder.js";
+import { slackReplyText } from "../../packages/slack-service/src/slack-format.js";
 import { FAUX_MODEL } from "../support/faux-model.js";
 import { EVAL_ROOT, loadCatalog, loadProject, type EvalCase, type UpstreamTool } from "./case.js";
 import { legacyNotApplicable, legacyPresentation } from "./legacy-presentation.js";
@@ -50,6 +51,9 @@ export const RunScoreSchema = z.object({
   /** The run hit its timeout and then stopped: model behaviour, a failed run, not an error that blocks the baseline. */
   timedOut: z.literal(true).optional(),
   error: z.string().optional(),
+  /** For a case with expect.maxLines: the reply's non-empty lines as Slack shows them, and whether they fit (spec 014 SC-006). */
+  replyLines: z.number().int().nonnegative().optional(),
+  linesOk: z.boolean().optional(),
 }).strict();
 /** `caseHash` identifies the case definition that was scored (see caseHash); SC-004 refuses baselines whose shared cases differ. */
 export const CaseResultSchema = z.object({ id: z.string(), caseHash: z.string().optional(), passed: z.boolean(), runs: z.array(RunScoreSchema) }).strict();
@@ -144,6 +148,8 @@ async function runOnce(evalCase: EvalCase, run: number, catalogCache: Map<string
           stateDirectory, projectInstructions: project.instructions, api: cannedApi(presentation.catalogs),
           context: { workspaceId: randomUUID(), conversationId: randomUUID() },
           model: options.model, modelRuntime: options.modelRuntime, turnRecorder: recorder,
+          // A reply-length case measures the reply style Slack threads get (spec 014 FR-023); no other case's prompt changes.
+          ...(evalCase.expect.maxLines === undefined ? {} : { replySurface: "slack" as const }),
           repositories: presentation.repositories, connectors: presentation.connectors,
           ...(presentation.recoverableOperations.length > 0 ? { recoverableOperations: presentation.recoverableOperations } : {}),
         });
@@ -248,8 +254,10 @@ export function scoreRun(evalCase: EvalCase, run: RunOutcome): RunScore {
   const refusalOk = group(evalCase.expect.refusal);
   const containsOk = group(evalCase.expect.contains);
   const phraseOk = refusalOk === null && containsOk === null ? null : refusalOk !== false && containsOk !== false;
+  const replyLines = evalCase.expect.maxLines === undefined ? undefined : slackReplyText(run.response).split("\n").filter((line) => line.trim().length > 0).length;
   return {
     tool: run.tool, ...(run.offered === false ? { offered: false as const } : {}), toolOk, argsOk, phraseOk, refusalOk, containsOk,
+    ...(replyLines === undefined ? {} : { replyLines, linesOk: replyLines <= evalCase.expect.maxLines! }),
     ...(run.timedOut === true ? { timedOut: true as const } : {}), ...(run.error === undefined ? {} : { error: run.error }),
   };
 }
@@ -297,7 +305,7 @@ export async function runEvaluation(cases: readonly EvalCase[], options: EvalOpt
       runs.push(scoreRun(evalCase, outcome));
       if (stopped !== undefined) break;
     }
-    results.push({ id: evalCase.id, caseHash: caseHash(evalCase), passed: runs.every((run) => run.toolOk && run.argsOk && run.phraseOk !== false && run.error === undefined), runs });
+    results.push({ id: evalCase.id, caseHash: caseHash(evalCase), passed: runs.every((run) => run.toolOk && run.argsOk && run.phraseOk !== false && run.linesOk !== false && run.error === undefined), runs });
     if (stopped !== undefined) {
       notRun = cases.slice(index + 1).map((entry) => entry.id);
       break;

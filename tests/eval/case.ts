@@ -28,6 +28,8 @@ export const EvalCaseSchema = z.object({
     argsSubset: z.record(z.string(), z.unknown()).optional(),
     refusal: Phrase.optional(),
     contains: Phrase.optional(),
+    /** Most non-empty lines the reply may have once Slack formatting is applied (spec 014 SC-006); the run uses the Slack reply style. */
+    maxLines: z.number().int().min(1).max(20).optional(),
   }).strict().refine((value) => value.tool !== null || value.refusal !== undefined || value.contains !== undefined,
     "a case that expects no tool needs a refusal or contains phrase"),
   source: z.enum(["synthetic", "channel", "channel-reconstructed", "turn-export"]).optional(),
