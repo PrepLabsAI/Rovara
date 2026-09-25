@@ -4,7 +4,8 @@ import { threadWorkspaceRequest } from "../../packages/slack-service/src/thread-
 describe("the Slack service's thread workspace request", () => {
   it("opts in to every field this service can parse, including unfinished operations", () => {
     expect(threadWorkspaceRequest("request-1")).toEqual({
-      requestId: "request-1", includeIntegrations: true, includeSettingsRevision: true, includeConnectors: true, includeRecoverableOperations: true,
+      requestId: "request-1", includeIntegrations: true, includeSettingsRevision: true, includeConnectors: true,
+      includeAllConnectorTypes: true, includeRecoverableOperations: true,
     });
   });
 });

@@ -59,6 +59,59 @@ describe("strict contracts", () => {
     expect(stored).toEqual(projectDefinition());
   });
 
+  it("StoredProjectDefinitionSchema passes through a connector of an unknown type and keeps a github connector validated; registration still refuses it", () => {
+    const withLinear = {
+      ...projectDefinition(),
+      integrations: {
+        connectors: [
+          { name: "gh", type: "github", scopes: "all-repositories", tools: [{ name: "list_issues", access: "read" }] },
+          { name: "tracker", type: "linear", credentialRef: "linear-key", scopes: ["payments"] },
+        ],
+      },
+    };
+    const stored = StoredProjectDefinitionSchema.parse(withLinear);
+    expect(stored.integrations?.connectors).toEqual(withLinear.integrations.connectors);
+    expect(() => ProjectDefinitionSchema.parse(withLinear)).toThrow();
+
+    // A malformed github connector still fails; it never passes through as an unknown type.
+    const malformedGithub = {
+      ...projectDefinition(),
+      integrations: {
+        connectors: [
+          { name: "gh", type: "github", scopes: 5, tools: [{ name: "list_issues", access: "read" }] },
+        ],
+      },
+    };
+    expect(() => StoredProjectDefinitionSchema.parse(malformedGithub)).toThrow();
+  });
+
+  it("accepts a prepare invocation whose stored project has a connector of an unknown type", () => {
+    const invocation = WorkerInvocationSchema.parse({
+      protocolVersion: 1,
+      kind: "prepare",
+      operationId: crypto.randomUUID(),
+      workspaceId: crypto.randomUUID(),
+      fence: 1,
+      projectRevision: 1,
+      callbackCapability: "c".repeat(64),
+      payload: {
+        project: {
+          ...projectDefinition(),
+          integrations: {
+            connectors: [
+              { name: "tracker", type: "linear", credentialRef: "linear-key", scopes: ["payments"] },
+            ],
+          },
+        },
+        repositoryGrant: "signed-grant",
+      },
+    });
+    if (invocation.kind !== "prepare") throw new Error("expected a prepare invocation");
+    expect(invocation.payload.project.integrations?.connectors).toEqual([
+      { name: "tracker", type: "linear", credentialRef: "linear-key", scopes: ["payments"] },
+    ]);
+  });
+
   it("drops the environment pin from a workspace record written before it was removed", () => {
     const now = new Date().toISOString();
     const workspace = WorkspaceInstanceSchema.parse({

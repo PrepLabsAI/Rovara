@@ -69,6 +69,17 @@ describe("AgentCore worker HTTP contract", () => {
     ]));
     expect((await journal.get(invocation.operationId))?.status).toBe("SUCCEEDED");
   });
+
+  it("accepts a prepare invocation whose stored project has a connector of an unknown type", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentx-journal-"));
+    const journal = new OperationJournal(root);
+    const state = createWorkerServerState(journal, { execute: async () => undefined });
+    const invocation = prepareInvocationWithUnknownConnector();
+
+    const accepted = await handleWorkerRequest(invocationRequest(invocation), state);
+    expect(accepted.status).toBe(200);
+    await expect(accepted.json()).resolves.toMatchObject({ accepted: true, status: "ACCEPTED" });
+  });
 });
 
 function invocationRequest(invocation: WorkerInvocation): Request {
@@ -89,5 +100,43 @@ function taskInvocation(): WorkerInvocation {
     projectRevision: 1,
     callbackCapability: "c".repeat(64),
     payload: { conversationId: randomUUID(), prompt: "Inspect the fixture" },
+  };
+}
+
+/** A revision written by a later control plane, before a rollback to this one: the worker never
+ * reads integrations.connectors, and StoredProjectDefinitionSchema passes an unknown type through. */
+function prepareInvocationWithUnknownConnector(): WorkerInvocation {
+  return {
+    protocolVersion: 1,
+    kind: "prepare",
+    operationId: randomUUID(),
+    workspaceId: randomUUID(),
+    fence: 1,
+    projectRevision: 1,
+    callbackCapability: "c".repeat(64),
+    payload: {
+      project: {
+        name: "payments",
+        revision: 1,
+        repositories: [
+          {
+            name: "api",
+            url: "https://git.example.test/api.git",
+            path: "repo/api",
+            defaultBranch: "main",
+            credentialRef: "api-readwrite",
+          },
+        ],
+        setup: [],
+        readiness: [],
+        orchestratorInstructions: "Delegate coding to the remote worker.",
+        integrations: {
+          connectors: [
+            { name: "tracker", type: "linear", credentialRef: "linear-key", scopes: ["api"] },
+          ],
+        },
+      },
+      repositoryGrant: "signed-grant",
+    },
   };
 }

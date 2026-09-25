@@ -1,7 +1,7 @@
 import { posix } from "node:path";
 import { z } from "zod";
 import { GitHubMcpPolicySchema } from "./github-mcp.js";
-import { ConnectorsSchema } from "./connectors.js";
+import { ConnectorsSchema, StoredConnectorsSchema } from "./connectors.js";
 import type { GitHubMcpPolicy } from "./github-mcp.js";
 
 import { AGENTX_NAME_PATTERN } from "./names.js";
@@ -132,57 +132,89 @@ export const RepositoryDefinitionSchema = z
  */
 export const LEGACY_PROJECT_FIELDS = ["schemaVersion", "controlPlaneUrl", "auth", "environment"] as const;
 
-export const ProjectDefinitionSchema = z
-  .object({
-    name: AgentXNameSchema,
-    revision: z.number().int().positive(),
-    repositories: z.array(RepositoryDefinitionSchema).min(1).max(32),
-    setup: z.array(ProjectCommandSchema).max(64),
-    readiness: z.array(ProjectCommandSchema).max(64),
-    orchestratorInstructions: z.string().min(1).max(32_768),
-    integrations: z.object({
-      githubMcp: GitHubMcpPolicySchema.optional(),
-      connectors: ConnectorsSchema.optional(),
-    }).strict().optional(),
-  })
-  .strict()
-  .superRefine((project, context) => {
-    const names = new Set<string>();
-    for (const [index, repository] of project.repositories.entries()) {
-      if (names.has(repository.name)) {
-        context.addIssue({
-          code: "custom",
-          path: ["repositories", index, "name"],
-          message: "repository names must be unique",
-        });
-      }
-      names.add(repository.name);
-    }
-    const paths = project.repositories.map((repository) => repository.path).sort();
-    for (let index = 1; index < paths.length; index += 1) {
-      const previous = paths[index - 1];
-      const current = paths[index];
-      if (previous && current && (current === previous || current.startsWith(`${previous}/`))) {
-        context.addIssue({ code: "custom", path: ["repositories"], message: "repository paths overlap" });
-      }
-    }
-    if (project.integrations?.githubMcp && project.integrations.connectors) {
-      context.addIssue({ code: "custom", path: ["integrations"], message: "use either integrations.githubMcp or integrations.connectors, not both" });
-    }
-    for (const connector of project.integrations?.connectors ?? []) {
-      if (connector.scopes === "all-repositories") continue;
-      for (const name of connector.scopes) {
-        if (!names.has(name)) {
-          context.addIssue({ code: "custom", path: ["integrations", "connectors"], message: `connector ${connector.name} scopes unregistered repository ${name}` });
-        }
-      }
-    }
-  });
+function projectDefinitionObject<Connectors extends z.ZodTypeAny>(connectorsSchema: Connectors) {
+  return z
+    .object({
+      name: AgentXNameSchema,
+      revision: z.number().int().positive(),
+      repositories: z.array(RepositoryDefinitionSchema).min(1).max(32),
+      setup: z.array(ProjectCommandSchema).max(64),
+      readiness: z.array(ProjectCommandSchema).max(64),
+      orchestratorInstructions: z.string().min(1).max(32_768),
+      integrations: z.object({
+        githubMcp: GitHubMcpPolicySchema.optional(),
+        connectors: connectorsSchema.optional(),
+      }).strict().optional(),
+    })
+    .strict();
+}
 
-/** Parses a definition that may predate the removal of {@link LEGACY_PROJECT_FIELDS}. */
+/**
+ * Shared by `ProjectDefinitionSchema` and `StoredProjectDefinitionSchema`. A connector's `scopes`
+ * is checked against registered repository names only for a `github` entry: an entry of a type
+ * this release's schema does not know (from `StoredConnectorsSchema`'s passthrough branch) may
+ * carry any shape there, which this release does not interpret.
+ */
+function checkProjectDefinition(
+  project: {
+    repositories: ReadonlyArray<{ name: string; path: string }>;
+    integrations?: {
+      githubMcp?: unknown;
+      connectors?: ReadonlyArray<{ name: string; type: string; scopes?: unknown }> | undefined;
+    } | undefined;
+  },
+  context: z.RefinementCtx,
+): void {
+  const names = new Set<string>();
+  for (const [index, repository] of project.repositories.entries()) {
+    if (names.has(repository.name)) {
+      context.addIssue({
+        code: "custom",
+        path: ["repositories", index, "name"],
+        message: "repository names must be unique",
+      });
+    }
+    names.add(repository.name);
+  }
+  const paths = project.repositories.map((repository) => repository.path).sort();
+  for (let index = 1; index < paths.length; index += 1) {
+    const previous = paths[index - 1];
+    const current = paths[index];
+    if (previous && current && (current === previous || current.startsWith(`${previous}/`))) {
+      context.addIssue({ code: "custom", path: ["repositories"], message: "repository paths overlap" });
+    }
+  }
+  if (project.integrations?.githubMcp && project.integrations.connectors) {
+    context.addIssue({ code: "custom", path: ["integrations"], message: "use either integrations.githubMcp or integrations.connectors, not both" });
+  }
+  for (const connector of project.integrations?.connectors ?? []) {
+    if (connector.type !== "github") continue;
+    const scopes = connector.scopes;
+    if (scopes === "all-repositories") continue;
+    for (const name of scopes as string[]) {
+      if (!names.has(name)) {
+        context.addIssue({ code: "custom", path: ["integrations", "connectors"], message: `connector ${connector.name} scopes unregistered repository ${name}` });
+      }
+    }
+  }
+}
+
+export const ProjectDefinitionSchema = projectDefinitionObject(ConnectorsSchema).superRefine(checkProjectDefinition);
+
+/**
+ * A project definition already on record: an `integrations.connectors` entry of a type this
+ * release's schema does not know (for example one written by a later control plane, before a
+ * rollback) passes through as `{name, type, ...}` instead of failing the parse. A `github` entry
+ * still validates exactly as strictly as `ProjectDefinitionSchema` does. Registration always uses
+ * `ProjectDefinitionSchema`, which keeps refusing an unknown connector type.
+ */
+const StoredProjectDefinitionObjectSchema = projectDefinitionObject(StoredConnectorsSchema).superRefine(checkProjectDefinition);
+
+/** Parses a definition that may predate the removal of {@link LEGACY_PROJECT_FIELDS}, and that may
+ * carry a connector of a type this release does not know (see `StoredConnectorsSchema`). */
 export const StoredProjectDefinitionSchema = z.preprocess(
   (value) => withoutFields(value, LEGACY_PROJECT_FIELDS),
-  ProjectDefinitionSchema,
+  StoredProjectDefinitionObjectSchema,
 );
 
 /** The legacy fields a value carries, so a caller can name them in its own error. */
@@ -199,6 +231,9 @@ function withoutFields(value: unknown, fields: readonly string[]): unknown {
 }
 
 export type ProjectDefinition = z.infer<typeof ProjectDefinitionSchema>;
+/** A project definition as `StoredProjectDefinitionSchema` parses it: its connectors may include
+ * an entry of a type this release's schema does not know, passed through unexamined. */
+export type StoredProjectDefinition = z.infer<typeof StoredProjectDefinitionSchema>;
 export type ProjectCommand = z.infer<typeof ProjectCommandSchema>;
 export type CodeBuildGateDefinition = z.infer<typeof CodeBuildGateDefinitionSchema>;
 

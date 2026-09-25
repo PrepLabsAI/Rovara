@@ -13,10 +13,10 @@ import {
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import {
-  ProjectDefinitionSchema,
+  StoredProjectDefinitionSchema,
   agentXError,
   type ProjectCommand,
-  type ProjectDefinition,
+  type StoredProjectDefinition,
 } from "@agentx/contracts";
 import { evaluateReadiness, type CommandResult } from "./readiness.js";
 import { gitSafeEnvironment } from "./git.js";
@@ -59,7 +59,7 @@ export interface PreparationManifest {
 }
 
 export type RepositoryMaterializer = (
-  repository: ProjectDefinition["repositories"][number],
+  repository: StoredProjectDefinition["repositories"][number],
   destination: string,
   credential: RepositoryCloneCredential,
 ) => Promise<void>;
@@ -72,7 +72,9 @@ export type PreparationCommandRunner = (
 
 export interface PrepareWorkspaceOptions {
   rootPath: string;
-  project: ProjectDefinition;
+  /** A definition already on record: its `integrations.connectors`, unused here, may contain an
+   * entry of a type this release does not know (see `StoredProjectDefinitionSchema`). */
+  project: StoredProjectDefinition;
   creationIdentity?: string;
   materializer?: RepositoryMaterializer;
   credentialProvider?: RepositoryCredentialProvider;
@@ -80,7 +82,7 @@ export interface PrepareWorkspaceOptions {
 }
 
 export async function prepareWorkspace(options: PrepareWorkspaceOptions): Promise<PreparationManifest> {
-  const project = ProjectDefinitionSchema.parse(options.project);
+  const project = StoredProjectDefinitionSchema.parse(options.project);
   const rootPath = resolve(options.rootPath);
   await mkdir(rootPath, { recursive: true });
   const canonicalRoot = await realpath(rootPath);
@@ -169,7 +171,7 @@ export async function prepareWorkspace(options: PrepareWorkspaceOptions): Promis
 
 async function loadOrCreateManifest(
   rootPath: string,
-  project: ProjectDefinition,
+  project: StoredProjectDefinition,
   creationIdentity: string,
 ): Promise<PreparationManifest> {
   const path = resolve(rootPath, MANIFEST_PATH);
@@ -216,7 +218,7 @@ async function writeManifest(rootPath: string, manifest: PreparationManifest): P
 }
 
 async function cloneRepository(
-  repository: ProjectDefinition["repositories"][number],
+  repository: StoredProjectDefinition["repositories"][number],
   destination: string,
   credential: RepositoryCloneCredential,
 ): Promise<void> {

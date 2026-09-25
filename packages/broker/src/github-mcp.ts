@@ -100,6 +100,11 @@ function connectorContext(context: GitHubMcpContext): ConnectorContext<GitHubRep
   };
 }
 
+/** A scope's discovered tools in the feature 007 catalog shape the legacy GitHub route returns. */
+export function toGitHubCatalog(discovery: { tools: readonly CatalogTool[] }): GitHubMcpCatalog {
+  return { tools: discovery.tools.map(toGitHubTool) };
+}
+
 function toGitHubTool(tool: CatalogTool): GitHubMcpTool {
   return { name: tool.name, repository: tool.scope, description: tool.description, inputSchema: tool.inputSchema, schemaHash: tool.schemaHash, access: tool.access };
 }

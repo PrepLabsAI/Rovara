@@ -72,6 +72,7 @@ tests/eval/                       phase 4: cases, runner, baselines
 | 2 | Presentation: names, `target`, descriptions, manifest, not-connected result, PR tool consolidation, conditional recovery tools, rename table, budget | 1b | written after 1b merges |
 | 3 | Credential registry, providers, admin commands, registration preflight | 1b | [plans/phase-3-credentials.md](plans/phase-3-credentials.md) |
 | 4 | Turn records, shared usage contract, metrics, alarms, export, evaluation tiers | 2 | written after 2 merges |
+| 5a | Generic connector types and routes; registration preflight and thread setup cover every configured type | 3 | [plans/phase-5a-generic-connectors.md](plans/phase-5a-generic-connectors.md) |
 | 5 | Linear connector | 3 | written after 3 merges |
 | 6 | Jira connector (live check gated on Atlassian administrator) | 3 | written after 3 merges |
 

@@ -109,7 +109,11 @@ Adds `connector`. Status set unchanged:
 The thread workspace response adds, for clients sending `includeConnectors: true`:
 
 - `connectors`: `[{ name, type, label, scopes: [alias], connected: boolean }]`, from the latest
-  registered revision and the credential registry.
+  registered revision and the credential registry. `type` accepts any connector name, not only
+  `github`. `includeConnectors: true` alone still lists only `github` connectors; sending
+  `includeAllConnectorTypes: true` as well adds every other resolved connector, in definition order.
+  This second flag exists because an older Slack service parses the list with a schema that still
+  requires the literal type `github`.
 - `repositories`: `[name]`, the project's registered repositories.
 
 `recoverableOperations` (IDs of non-terminal operations started by this thread, at most 5) ships in

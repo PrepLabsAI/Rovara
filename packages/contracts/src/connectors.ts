@@ -20,14 +20,42 @@ export const GitHubConnectorSchema = z.object({
 
 export const ConnectorConfigSchema = z.discriminatedUnion("type", [GitHubConnectorSchema]);
 
-export const ConnectorsSchema = z.array(ConnectorConfigSchema).min(1).max(8).superRefine((connectors, context) => {
+const KNOWN_CONNECTOR_TYPES = new Set(ConnectorConfigSchema.options.map((option) => option.shape.type.value as string));
+
+/**
+ * A connector entry whose type this release's schema does not know, for example one written by a
+ * later control plane before a rollback. Only its name and type are checked; every other field
+ * passes through unexamined, because a stored definition may carry a shape this release cannot
+ * interpret. A `github` entry never matches this schema: it must match `GitHubConnectorSchema`
+ * instead, so a malformed github connector still fails, never passes through as unknown.
+ */
+export const UnknownConnectorEntrySchema = z.object({
+  name: ConnectorNameSchema,
+  type: z.string().min(1).max(32),
+}).passthrough().refine(
+  (value) => !KNOWN_CONNECTOR_TYPES.has(value.type),
+  "a known connector type must match its own schema, not the passthrough shape",
+);
+
+/**
+ * A connector entry for a stored (already-registered) project definition: a known type validates
+ * strictly, exactly as `ConnectorConfigSchema` does, and any other type passes through as
+ * `UnknownConnectorEntrySchema`. Registration must still refuse an unknown type, so it parses with
+ * `ConnectorConfigSchema` (via `ConnectorsSchema`), never with this one.
+ */
+export const StoredConnectorConfigSchema = z.union([ConnectorConfigSchema, UnknownConnectorEntrySchema]);
+
+function connectorArrayChecks(connectors: ReadonlyArray<{ name: string; type: string }>, context: z.RefinementCtx): void {
   if (new Set(connectors.map((connector) => connector.name)).size !== connectors.length) {
     context.addIssue({ code: "custom", message: "connector names must be unique" });
   }
   if (connectors.filter((connector) => connector.type === "github").length > 1) {
     context.addIssue({ code: "custom", message: "at most one github connector is supported" });
   }
-});
+}
+
+export const ConnectorsSchema = z.array(ConnectorConfigSchema).min(1).max(8).superRefine(connectorArrayChecks);
+export const StoredConnectorsSchema = z.array(StoredConnectorConfigSchema).min(1).max(8).superRefine(connectorArrayChecks);
 
 /** A scope alias such as a repository name. */
 export const ConnectorAliasSchema = z.string().regex(AGENTX_NAME_PATTERN);
@@ -62,7 +90,7 @@ export const ConnectorResultSchema = GitHubMcpResultSchema.extend({ reason: Conn
 
 export const ThreadConnectorSchema = z.object({
   name: ConnectorNameSchema,
-  type: z.literal("github"),
+  type: ConnectorNameSchema,
   label: z.string().min(1).max(64),
   scopes: z.array(ConnectorAliasSchema).max(32),
   connected: z.boolean(),

@@ -129,6 +129,45 @@ describe("workspace preparation", () => {
     }
   });
 
+  it("prepares a workspace whose stored definition has a connector of an unknown type", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentx-workspace-"));
+    const source = await createGitFixture("rolled-back");
+    const project = {
+      ...fixtureProject([{ name: "rolled-back", commit: source.commit }]),
+      integrations: {
+        connectors: [
+          {
+            name: "tracker",
+            type: "linear",
+            credentialRef: "linear-key",
+            scopes: ["rolled-back"],
+            tools: [{ name: "list_items", access: "read" }],
+          },
+        ],
+      },
+    } as unknown as ProjectDefinition;
+
+    const manifest = await prepareWorkspace({
+      rootPath: root,
+      project,
+      materializer: async (_repository, destination) => {
+        await run("git", ["clone", "--quiet", source.directory, destination]);
+      },
+    });
+
+    expect(manifest.complete).toBe(true);
+  });
+
+  it("still rejects a project whose non-connector field is invalid", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentx-workspace-"));
+    const project: ProjectDefinition = {
+      ...fixtureProject([{ name: "bad", commit: "deadbeef" }]),
+      revision: -1,
+    };
+
+    await expect(prepareWorkspace({ rootPath: root, project })).rejects.toThrow();
+  });
+
   it("does not permit coding until every configured readiness check succeeds", async () => {
     await expect(
       evaluateReadiness(
