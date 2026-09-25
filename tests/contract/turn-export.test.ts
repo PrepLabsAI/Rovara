@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { EMPTY_TURN_OBSERVATION, type TurnRecord } from "../../packages/contracts/src/turns.js";
-import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader, type TurnRecordSource, type TurnRecordStartKey } from "../../packages/broker/src/aws/turns.js";
+import { TURN_EXPORT_PAGE_BYTES, TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader, type TurnRecordSource, type TurnRecordStartKey } from "../../packages/broker/src/aws/turns.js";
 import { adminCall, createAdminBroker } from "../support/admin-broker.js";
 
 const now = Date.parse("2026-09-24T12:00:00.000Z");
@@ -315,7 +315,7 @@ describe("turn record export page size", () => {
     let pages = 0;
     do {
       const result = await turns.page(new URLSearchParams({ since: "2026-09-17T00:00:00Z", ...(cursor === undefined ? {} : { cursor }) }));
-      expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(4_000_000);
+      expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(TURN_EXPORT_PAGE_BYTES);
       expect(result.turns.length).toBeGreaterThan(0);
       seen.push(...result.turns.map((turn) => turn.eventId));
       cursor = result.cursor;
