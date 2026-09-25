@@ -3442,8 +3442,8 @@ Directly before `const workspace = await api.ensureWorkspace(deterministicUuid(.
     }
 ```
 
-Directly before `await post("Working on it now. I'll post the result in this thread when it's done.");`
 (After 14b PR B Task 8b this post sits inside a comment block and `if (announceStart)`; insert before that comment block, so the check runs whether or not the notice is posted.)
+Directly before `await post("Working on it now. I'll post the result in this thread when it's done.");`
 (after 14b's lazy `worker`):
 
 ```ts
