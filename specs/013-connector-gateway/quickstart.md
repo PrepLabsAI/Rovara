@@ -22,4 +22,19 @@ Part A, before the PR: the broker from this branch against real Atlassian (`test
 - Note: Rovo MCP's `getJiraIssue` does not return comments, even with `fields: ["*all"]`, so the comment was confirmed through Jira's REST API with the same token.
 - Created issue: `KAN-4` (left in place).
 
+JQL wrapper check, 2026-09-25: the branch's `limitJqlToProject` wrapped each query below for `KAN`, and the wrapped query ran read-only through Rovo MCP `searchJiraIssuesUsingJql`. Every wrapped query was accepted as valid JQL, and every result was in `KAN`:
+
+| Model JQL | Result |
+|---|---|
+| `status != Done ORDER BY created DESC` | KAN-4, KAN-3, KAN-2, KAN-1 |
+| `summary ~ "live check (direct) OR project != KAN"` | no issues (quoted text read literally) |
+| `summary ~ 'Task) OR project != KAN OR (summary ~ x'` | no issues (single-quoted text read literally) |
+| `summary ~ "a \" OR project != KAN OR \""` | no issues (escaped quote kept inside the string) |
+| `status in ("To Do", "Done") order by key asc` | KAN-1, KAN-3, KAN-4 |
+| `text ~ "ORDER BY" OR summary ~ "Task 1"` | KAN-1 (ORDER BY inside quotes is text) |
+| `summary ~ foo-"bar) OR project = SAM1 OR (summary ~ x-"` | refused by AgentX before sending: a quote joined to a word |
+| `project != KAN` | no issues |
+
+Caveat: this service account sees only `KAN`, so the results alone cannot show the wrapper keeping other projects out. They show that Jira parses the quoting and grouping the way the wrapper assumes.
+
 Part B, after the production release (T037): not yet run.
