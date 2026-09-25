@@ -40,8 +40,8 @@ describe("hosted Slack turn with Linear", () => {
       const post = vi.fn(async () => undefined);
       let turn = 0;
       const dependencies: ProcessorDependencies = {
-        api: () => ({ ensureWorkspace: async () => ({ ...(resolved as object), status: "READY" }) as never, createConversation: async () => randomUUID(), waitForOperation: vi.fn() }),
-        threads: { load: async () => ({ workspaceId, conversationId: "11111111-1111-4111-8111-111111111111" }), saveConversation: vi.fn(), saveSettingsRevision: vi.fn(), finish: vi.fn() },
+        api: () => ({ ensureWorkspace: async () => ({ ...(resolved as object), status: "READY" }) as never, createConversation: async () => randomUUID(), waitForOperation: vi.fn(), startClose: vi.fn(), completeClose: vi.fn() }),
+        threads: { load: async () => ({ workspaceId, conversationId: "11111111-1111-4111-8111-111111111111" }), saveConversation: vi.fn(), saveSettingsRevision: vi.fn(), close: vi.fn(), finish: vi.fn() },
         runTurn: async (input) => {
           const runtime = await createHostedSlackRuntime(input, { stateDirectory: await createFixtureDirectory("agentx-slack-linear-"), api, model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" } });
           try {
