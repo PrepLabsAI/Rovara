@@ -347,3 +347,21 @@ describe("turn record fitting flags", () => {
     expect(TurnRecordSchema.safeParse(older).success).toBe(true);
   });
 });
+
+describe("turn record duplicate log", () => {
+  it("never reports a failure to log a duplicate as a write failure", async () => {
+    const { dependencies, logs } = harness({ write: async () => "duplicate" });
+    const finish = vi.fn(async () => undefined);
+    dependencies.threads.finish = finish;
+    dependencies.log = (event, fields) => {
+      if (event === "turn_record.duplicate") throw new Error("logger down");
+      logs.push(JSON.stringify({ event, ...fields }));
+    };
+    await processSlackRequest(message, dependencies, { finalAttempt: false });
+    expect(logs.some((line) => line.includes("turn_record.write_failed"))).toBe(false);
+    expect(logs.some((line) => line.includes("TurnRecordWriteFailed"))).toBe(false);
+    // A duplicate still skips turn metrics.
+    expect(logs.filter((line) => line.includes("\"event\":\"metric\""))).toEqual([]);
+    expect(finish).toHaveBeenCalledTimes(1);
+  });
+});

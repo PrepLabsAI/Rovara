@@ -256,11 +256,7 @@ async function recordTurn(
   let duplicate = false;
   try {
     record = buildTurnRecord({ ...input, observation: recorder.observation() });
-    const written = await sink.write(record);
-    if (written === "duplicate") {
-      duplicate = true;
-      log("turn_record.duplicate", { eventId: input.message.eventId });
-    }
+    duplicate = await sink.write(record) === "duplicate";
   } catch (error) {
     // recordTurn must never throw: it runs from processSlackRequest's finally, after the member
     // already has their reply, so a logging failure here must not skip threads.finish and invite a
@@ -272,6 +268,14 @@ async function recordTurn(
     }
     try {
       log("metric", { metric: "TurnRecordWriteFailed", count: 1 });
+    } catch {
+      // Logging itself failed; nothing left to report to.
+    }
+  }
+  if (duplicate) {
+    // Outside the write try, so a logging failure here is never reported as a write failure.
+    try {
+      log("turn_record.duplicate", { eventId: input.message.eventId });
     } catch {
       // Logging itself failed; nothing left to report to.
     }
