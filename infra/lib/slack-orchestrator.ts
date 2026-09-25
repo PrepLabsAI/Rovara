@@ -33,6 +33,11 @@ export class SlackOrchestratorStack extends Stack {
     const queueUrl = new CfnParameter(this, "SlackRequestQueueUrl", { type: "String", allowedPattern: "^https://sqs\\..+\\.fifo$" });
     const threadsTableName = new CfnParameter(this, "SlackThreadsTableName", { type: "String", minLength: 3 });
     const sessionBucketName = new CfnParameter(this, "ThreadSessionBucketName", { type: "String", minLength: 3 });
+    const turnRecordsTableName = new CfnParameter(this, "TurnRecordsTableName", {
+      type: "String",
+      minLength: 3,
+      description: "TurnRecordsTableName output of AgentXControlPlane",
+    });
     const secretArn = new CfnParameter(this, "SlackSecretArn", {
       type: "String",
       allowedPattern: "^arn:aws(-[^:]+)?:secretsmanager:.+$",
@@ -60,6 +65,34 @@ export class SlackOrchestratorStack extends Stack {
     const logGroup = new logs.LogGroup(this, "Logs", {
       retention: logs.RetentionDays.ONE_MONTH,
       removalPolicy: RemovalPolicy.DESTROY,
+    });
+    // The awslogs driver does not extract embedded metric format, so the service logs
+    // {"event":"metric","metric":<name>,"count":<n>} lines and these filters publish them.
+    const serviceMetrics: ReadonlyArray<{ metric: string; dimensions?: Record<string, string> }> = [
+      { metric: "TurnCompleted" },
+      { metric: "TurnEmptyResponse" },
+      { metric: "ToolUnknownName" },
+      { metric: "TurnRecordWriteFailed" },
+      { metric: "ToolSchemaError", dimensions: { connector: "$.connector" } },
+    ];
+    for (const { metric, dimensions } of serviceMetrics) {
+      logGroup.addMetricFilter(`${metric}Metric`, {
+        filterPattern: logs.FilterPattern.all(
+          logs.FilterPattern.stringValue("$.event", "=", "metric"),
+          logs.FilterPattern.stringValue("$.metric", "=", metric),
+        ),
+        metricNamespace: "AgentX",
+        metricName: metric,
+        metricValue: "$.count",
+        ...(dimensions === undefined ? {} : { dimensions }),
+      });
+    }
+    // A failure while emitting the lines above would otherwise leave those metrics silently missing.
+    logGroup.addMetricFilter("TurnMetricsEmitFailedMetric", {
+      filterPattern: logs.FilterPattern.stringValue("$.event", "=", "turn_metrics.emit_failed"),
+      metricNamespace: "AgentX",
+      metricName: "TurnMetricsEmitFailed",
+      metricValue: "1",
     });
     const executionRole = new iam.Role(this, "ExecutionRole", {
       assumedBy: new iam.ServicePrincipal("ecs-tasks.amazonaws.com", {
@@ -101,6 +134,7 @@ export class SlackOrchestratorStack extends Stack {
           { name: "SLACK_REQUEST_QUEUE_URL", value: queueUrl.valueAsString },
           { name: "SLACK_THREADS_TABLE_NAME", value: threadsTableName.valueAsString },
           { name: "THREAD_SESSION_BUCKET_NAME", value: sessionBucketName.valueAsString },
+          { name: "TURN_RECORDS_TABLE_NAME", value: turnRecordsTableName.valueAsString },
           { name: "SLACK_SECRET_ARN", value: secretArn.valueAsString },
           { name: "AGENTX_ORCHESTRATOR_PROVIDER", value: modelProvider.valueAsString },
           { name: "AGENTX_ORCHESTRATOR_MODEL", value: modelId.valueAsString },

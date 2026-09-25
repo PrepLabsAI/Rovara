@@ -8,6 +8,8 @@ import {
   Stack,
   type StackProps,
   aws_apigatewayv2 as apigwv2,
+  aws_cloudwatch as cloudwatch,
+  aws_cloudwatch_actions as cloudwatchActions,
   aws_dynamodb as dynamodb,
   aws_iam as iam,
   aws_lambda as lambda,
@@ -15,6 +17,7 @@ import {
   aws_logs as logs,
   aws_s3 as s3,
   aws_secretsmanager as secretsmanager,
+  aws_sns as sns,
   aws_sqs as sqs,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
@@ -234,6 +237,95 @@ export class ControlPlaneStack extends Stack {
         `arn:${this.partition}:bedrock:${this.region}:${this.account}:inference-profile/*`,
       ],
     }));
+    // One record per Slack event, kept 30 days for diagnosis and evaluation cases (feature 013 FR-025).
+    // Admin-only: the broker reads it for the admin export and nothing else can.
+    const turnRecords = new dynamodb.Table(this, "TurnRecords", {
+      partitionKey: { name: "pk", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "sk", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      encryption: dynamodb.TableEncryption.AWS_MANAGED,
+      timeToLiveAttribute: "expiresAt",
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+    turnRecords.addGlobalSecondaryIndex({
+      indexName: "byTime",
+      partitionKey: { name: "exportPk", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "exportSk", type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+    // The service writes each record once with a condition and never reads the table back.
+    slackOrchestratorRole.addToPolicy(new iam.PolicyStatement({
+      actions: ["dynamodb:PutItem"],
+      resources: [turnRecords.tableArn],
+    }));
+    // The admin export pages the time index newest first; the broker needs nothing else on this table.
+    broker.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["dynamodb:Query"],
+      resources: [turnRecords.tableArn, `${turnRecords.tableArn}/index/byTime`],
+    }));
+    broker.addEnvironment("TURN_RECORDS_TABLE_NAME", turnRecords.tableName);
+
+    // No subscription by default: the deployer subscribes an email address or connects AWS Chatbot.
+    const operatorAlerts = new sns.Topic(this, "OperatorAlerts", {
+      topicName: "AgentXOperatorAlerts",
+      displayName: "AgentX operator alerts",
+      enforceSSL: true,
+    });
+    const notifyOperator = new cloudwatchActions.SnsAction(operatorAlerts);
+    // The broker publishes these in embedded metric format with a dimensionless series as well as a
+    // per-connector one; the alarms read the dimensionless series, so they cover every connector.
+    const agentxSum = (metricName: string, period: Duration) =>
+      new cloudwatch.Metric({ namespace: "AgentX", metricName, statistic: "Sum", period });
+    new cloudwatch.Alarm(this, "ConnectorBrokenAlarm", {
+      alarmName: "AgentXConnectorBroken",
+      alarmDescription: "A connector's discovery failed or a vendor changed an approved tool's schema. Check the broker logs for connector metrics and connector.* events.",
+      metric: new cloudwatch.MathExpression({
+        expression: "FILL(discovery, 0) + FILL(drift, 0)",
+        usingMetrics: {
+          discovery: agentxSum("ConnectorDiscoveryFailed", Duration.minutes(5)),
+          drift: agentxSum("ConnectorSchemaDrift", Duration.minutes(5)),
+        },
+        period: Duration.minutes(5),
+        label: "Connector discovery failures and schema drift",
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(notifyOperator);
+    new cloudwatch.Alarm(this, "ConnectorNotConnectedAlarm", {
+      alarmName: "AgentXConnectorNotConnected",
+      alarmDescription: "A connector's vendor credential is missing, revoked or rejected. Check the broker logs for the connector, then reconnect it with agentx connectors.",
+      metric: agentxSum("ConnectorNotConnected", Duration.minutes(5)),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(notifyOperator);
+    new cloudwatch.Alarm(this, "EmptyResponsesAlarm", {
+      alarmName: "AgentXEmptyResponses",
+      alarmDescription: "More than three orchestrator turns in an hour ended without text. Export recent turns with agentx admin turns export.",
+      metric: agentxSum("TurnEmptyResponse", Duration.hours(1)),
+      threshold: 3,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(notifyOperator);
+    // A request that fails its final attempt without reaching the processor's own reporting lands here
+    // with no turn record and no other signal.
+    new cloudwatch.Alarm(this, "SlackDeadLettersAlarm", {
+      alarmName: "AgentXSlackDeadLetters",
+      alarmDescription: "A Slack request exhausted its receives and is in the Slack request dead-letter queue. Check the Slack orchestrator logs for its event ID.",
+      metric: slackDeadLetterQueue.metricApproximateNumberOfMessagesVisible({
+        statistic: "Maximum",
+        period: Duration.minutes(5),
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(notifyOperator);
+
     broker.addEnvironment("SLACK_ORCHESTRATOR_ROLE_ARN", slackOrchestratorRole.roleArn);
     broker.addEnvironment("SLACK_MEMBER_WORKSPACE_LIMIT", memberWorkspaceLimit.valueAsString);
     broker.addEnvironment("SLACK_ORGANIZATION_WORKSPACE_LIMIT", organizationWorkspaceLimit.valueAsString);
@@ -340,6 +432,8 @@ export class ControlPlaneStack extends Stack {
     new CfnOutput(this, "SlackThreadsTableName", { value: slackThreads.tableName });
     new CfnOutput(this, "SlackThreadSessionBucketName", { value: threadSessions.bucketName });
     new CfnOutput(this, "SlackOrchestratorTaskRoleArn", { value: slackOrchestratorRole.roleArn });
+    new CfnOutput(this, "TurnRecordsTableName", { value: turnRecords.tableName });
+    new CfnOutput(this, "OperatorAlertsTopicArn", { value: operatorAlerts.topicArn });
   }
 }
 
