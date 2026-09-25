@@ -64,7 +64,8 @@ Each phase is one pull request to `mainline`. Check a task only after its eviden
 
 - [x] T035 Record Atlassian fixtures; add the Jira connector type, `cloudId`/project binder and fake-server integration test.
 - [x] T036 Write the Jira setup guide including API-token enablement and service-account limits; add evaluation cases.
-- [ ] T037 Live check once an Atlassian administrator enables API-token authentication; record evidence.
+- [x] T037 Live check once an Atlassian administrator enables API-token authentication; record evidence.
+  Part A (before the PR) and Part B (in production, from Slack) passed on 2026-09-25 and are recorded under `## Jira (US3)` in `quickstart.md`.
 
 ## Phase 7: Asana (US6, spec Amendment 1)
 
@@ -72,8 +73,8 @@ Each phase is one pull request to `mainline`. Check a task only after its eviden
 - [x] T042 Add `agentx admin credential authorize` (PKCE, state, loopback callback, secret write and tag, registration).
 - [x] T043 Record Asana fixtures; add the Asana connector type, project binder and guard, and the fake-Asana flow test.
 - [x] T044 Write the Asana setup guide with the mandatory bot-user restriction; add evaluation cases and the presentation snapshot.
-- [ ] T045 Live check against a real Asana project with a one-time bot-user sign-in; record evidence in `quickstart.md`.
-  Part A (before the PR) passed on 2026-09-25 and is recorded under `## Asana (US6)` in `quickstart.md`. Part B (after the production release) is still to run; check T045 then.
+- [x] T045 Live check against a real Asana project with a one-time bot-user sign-in; record evidence in `quickstart.md`.
+  Part A (before the PR) and Part B (in production, from Slack) passed on 2026-09-25 and are recorded under `## Asana (US6)` in `quickstart.md`. Part B's owner auto-approval led to `--no-browser` and `--expect-account` on `agentx admin credential authorize`.
 
 ## Dependencies
 

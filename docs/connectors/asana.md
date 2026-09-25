@@ -104,25 +104,35 @@ issues one. AgentX may write only secrets with this tag. Step 4 adds it too, if 
 
 ## Step 4: Sign the bot user in and register the credential
 
-The sign-in must be the bot user's, not yours. The command opens your default browser, which is
-probably signed in to Asana as you, so open the sign-in URL it prints in a private (incognito)
-window instead and sign in there as the bot user. Run:
+The sign-in must be the bot user's, not yours. Run, with the bot user's email:
 
 ```sh
 agentx admin credential authorize --ref asana-bot \
-  --secret agentx/connectors/asana-bot --provider asana
+  --secret agentx/connectors/asana-bot --provider asana \
+  --no-browser --expect-account <bot user's email>
 ```
 
+Why both flags: without `--no-browser` the command opens your default browser, which is probably
+signed in to Asana as you. If you own the Asana app, Asana approves your own app for you silently
+within a second, before you can close the tab, and the command would store your sign-in instead of
+the bot user's. `--no-browser` only prints the sign-in URL, so nothing signs in until you open it
+yourself. `--expect-account` makes the command refuse, storing and registering nothing, when any
+account other than that email signs in (compared ignoring case), or when Asana does not say which
+account signed in.
+
 The secret must be in the control plane's AWS region. Add `--region <region>` if that is not your
-default AWS region. The command opens Asana's sign-in page and prints:
+default AWS region. The command prints:
 
 ```text
-Sign in as the connector's bot user (the Asana app's redirect URL must be exactly http://localhost:8765/callback). If no browser opened, or it is signed in as someone else, open this URL in a private window signed in as the bot user:
+Sign in as the connector's bot user (the Asana app's redirect URL must be exactly http://localhost:8765/callback). Open this URL in a private window signed in as the bot user:
 https://app.asana.com/-/oauth_authorize?...
 ```
 
-Close the tab the command opened if it shows your own Asana account. Copy the URL into a private
-window, sign in as the bot user and approve access within five minutes. After five minutes the
+(Without `--no-browser` the command also opens your default browser, and the prompt starts "If no
+browser opened, or it is signed in as someone else, open this URL ...".)
+
+Copy the URL into a private (incognito) window, sign in there as the bot user and approve access
+within five minutes. After five minutes the
 command stops waiting and closes its listener, so a later approval ends on a browser error such as
 `ERR_CONNECTION_REFUSED` for `localhost:8765`; run the command again. The browser shows "AgentX
 received the sign-in", and the command prints which Asana account signed in, then the result:
@@ -132,11 +142,19 @@ Signed in to Asana as AgentX Bot <agentx-bot@example.com>. This must be the conn
 Stored the refresh token in agentx/connectors/asana-bot and registered asana-bot as oauth-refresh-token.
 ```
 
-Check that the "Signed in to Asana as" line names the bot user. If it names you, AgentX would act
-as you, with everything you can see: run the command again in a private window, which replaces the
-stored sign-in. If Asana's answer carries no account, the line reads "Signed in to Asana (the
-account could not be shown)"; nothing then proves whose sign-in was stored, so run the command again
-in a fresh private window where you signed in only as the bot user.
+Check that the "Signed in to Asana as" line names the bot user. With `--expect-account`, any other
+account is refused before anything is stored:
+
+```text
+AgentX error [AUTH_REQUIRED]: the sign-in was for Your Name <you@example.com>, not agentx-bot@example.com; nothing was stored or registered. Run the command again with --no-browser and open the sign-in URL in a private window signed in as agentx-bot@example.com
+```
+
+Without `--expect-account` nothing checks the account: if the line names you, AgentX would act as
+you, with everything you can see, so run the command again as above, which replaces the stored
+sign-in. If Asana's answer carries no account, the line reads "Signed in to Asana (the account
+could not be shown)"; `--expect-account` then refuses the sign-in, and without it nothing proves
+whose sign-in was stored, so run the command again in a fresh private window where you signed in
+only as the bot user.
 
 What the command did: it signed in with PKCE and a one-time state value, listened only on
 `127.0.0.1:8765`, exchanged the code for a refresh token, wrote the refresh token into the secret
@@ -317,6 +335,17 @@ settings, then delete the secret.
   of that type (Step 2).
 - **"the token endpoint refused the sign-in with HTTP 400 (invalid_grant)".** The sign-in took too
   long or was used twice. Run Step 4 again.
+- **The command stored your sign-in seconds after it started, before you opened any private
+  window.** You ran it without `--no-browser` and you own the Asana app: it opened your default
+  browser, signed in to Asana as you, and Asana approved your own app silently. Run Step 4 again
+  with `--no-browser --expect-account <bot user's email>`; the new sign-in replaces the stored one.
+  Then, signed in as yourself, remove the AgentX app from your own authorized apps in Asana's
+  settings.
+- **"the sign-in was for ..., not ...; nothing was stored or registered".** `--expect-account`
+  refused a sign-in by another account (or by one Asana did not name). AgentX stored and registered
+  nothing, but that account has now authorized the app at Asana. Signed in to Asana as that
+  account, remove the AgentX app from its authorized apps (Settings → Apps). Then run Step 4 again
+  with `--no-browser` and open the URL in a private window signed in only as the bot user.
 - **"Signed in to Asana as" names you, or anyone other than the bot user.** The browser was
   signed in to your own account. Run Step 4 again with the sign-in URL opened in a private window
   signed in as the bot user; the new sign-in replaces the stored one. Then, signed in as yourself,

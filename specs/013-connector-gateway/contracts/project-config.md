@@ -98,7 +98,8 @@ An Asana credential is created by a browser sign-in instead (phase 7; see
 
 ```sh
 agentx admin credential authorize --ref asana-bot \
-  --secret agentx/connectors/asana-bot --provider asana   # secret first holds {"clientId","clientSecret"}
+  --secret agentx/connectors/asana-bot --provider asana \
+  --no-browser --expect-account <bot user's email>   # secret first holds {"clientId","clientSecret"}
 ```
 
 The secret must use the default `aws/secretsmanager` key. If the administrator uses a

@@ -1,5 +1,23 @@
 # Connector gateway live evidence
 
+## Linear (US2)
+
+No Part A: unlike Jira and Asana, no live test ran against a real Linear workspace before this PR;
+only fixtures (T032) and the setup guide (T033) exist. T034 stays open pending that, even though
+Part B below passed.
+
+Part B, after the production release (T034): passed on 2026-09-25, in production, from the bound
+Slack channel `#agentx-connectors`, project `connectors-check` at revision 2, model
+`amazon.nova-pro-v1:0`. Mentions were posted through a person's user token, not the app (spec 014
+phase 14a's app-posted path); Slack, a fresh thread `1790354000.643289` that answered without
+preparing a workspace first (spec 014 phase 14b PR B live):
+
+1. "what's open in Linear for charterarc" → `list_issues` (state open) SUCCEEDED: "no open
+   issues" (correct).
+2. Create → `save_issue` SUCCEEDED with `{title: "AgentX Slack check (T034)", labels: ["Bug"]}` →
+   `CHA-6` created with the label (the label check passes).
+3. Comment → `save_comment` SUCCEEDED on `CHA-6`.
+
 ## Jira (US3)
 
 Part A, before the PR: the broker from this branch against real Atlassian (`tests/live/jira-live.test.ts`).
@@ -37,7 +55,20 @@ JQL wrapper check, 2026-09-25: the branch's `limitJqlToProject` wrapped each que
 
 Caveat: this service account sees only `KAN`, so the results alone cannot show the wrapper keeping other projects out. They show that Jira parses the quoting and grouping the way the wrapper assumes.
 
-Part B, after the production release (T037): not yet run.
+Part B, after the production release (T037): passed on 2026-09-25, in production, from the bound
+Slack channel `#agentx-connectors`, project `connectors-check` at revision 2, model
+`amazon.nova-pro-v1:0`. Mentions were posted through a person's user token, not the app (spec 014
+phase 14a's app-posted path):
+
+1. Read, in an earlier thread `1790353613.516979`: `KAN-1` through `KAN-4` listed.
+2. Create, in a fresh thread `1790354000.643289` that answered without preparing a workspace first
+   (spec 014 phase 14b PR B live): `createJiraIssue` SUCCEEDED → `KAN-5` "AgentX Slack check
+   (T037)".
+3. Comment → `addOrEditJiraIssueComment` SUCCEEDED on `KAN-5`.
+
+Finding: the create reply linked an invented site, `your-jira-instance.atlassian.net`, because the
+create result carries no browse URL. Tracked as GitHub issue #61 ("Jira connector: model invents
+the issue URL after a create").
 
 ## Asana (US6)
 
@@ -70,7 +101,16 @@ Findings from the three runs:
 - (e) Asana did not rotate the refresh token on refresh.
 - (f) The sign-in must be approved within five minutes. A late approval ended on `ERR_CONNECTION_REFUSED` for `localhost:8765`, because the command had stopped waiting and closed its listener. The guide's Step 4 and Troubleshooting now say to run it again.
 
-Part B, after the production release (T045): not yet run.
+Part B, after the production release (T045): passed on 2026-09-25, in production, from the bound Slack channel `#agentx-connectors`, project `connectors-check` at revision 2.
+
+- Secret: the tagged secret `agentx/connectors/asana-bot` was created with the app's client (Step 3).
+- Sign-in, run 1: `agentx admin credential authorize` opened the default browser, which was signed in to Asana as the app's owner; Asana approved the owner's own app silently within a second, and the command stored the owner's sign-in (it printed the owner on the "Signed in to Asana as" line, but still stored and registered). Rerun with the automatic browser suppressed (before `--no-browser` existed, by putting a no-op `open` command first on `PATH`) and the printed URL opened in a private window as the bot user: the bot user's sign-in was stored and the registration answered `"replaced": true`. The owner capture happened twice overall: once in Part A (the first live-test run opened the default browser, finding (a)) and once here (authorize run 1). This is why the command gained `--no-browser` and `--expect-account <email>` (the latter refuses, storing and registering nothing, any other account), and why the guide's Step 4 now uses both.
+- Registration preflight: `asana` connected, offering `asana__search_tasks`, `asana__get_tasks`, `asana__get_task`, `asana__create_tasks`, `asana__update_tasks`, `asana__add_comment`; `linear` and `jira` connected too.
+- Slack, thread `1790312954.766639`:
+  1. Listing open tasks succeeded: `search_tasks` with `completed: false` answered 9 tasks, all from the project.
+  2. `create_tasks` succeeded ("AgentX Slack check (T045)"), and `add_comment` succeeded on that task.
+  3. `add_comment` on a task in another project FAILED before any write; the reply said the task was "not found or this connector cannot see it".
+- Model behaviour (`amazon.nova-pro-v1:0`), not connector defects: it twice called `get_tasks` with assignee `"me"`, which the project guard refused (`policy_denied`), and once answered a create-and-comment request without creating anything.
 
 ## SC-004: tool selection before and after (phase 4)
 
