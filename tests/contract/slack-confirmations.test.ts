@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { CONFIRMATION_TTL_MS, confirmationClickEventId, parseConfirmationClickEventId, type PendingConfirmation, type SlackRequestMessage } from "../../packages/contracts/src/index.js";
+import { CONFIRMATION_TTL_MS, answeredConfirmationBlocks, confirmationBlocks, confirmationClickEventId, parseConfirmationClickEventId, type PendingConfirmation, type SlackRequestMessage } from "../../packages/contracts/src/index.js";
 import { createGateSession } from "../../packages/orchestrator/src/action-gate.js";
 import { createDynamoConfirmationStore } from "../../packages/slack-service/src/confirmation-store.js";
 import {
@@ -48,6 +48,13 @@ describe("confirmation replies and clicks", () => {
     for (const text of ["yes, and also close TRK-10", "yesterday", "cancel PR 12", ""]) expect(parseConfirmationReply(text)).toBeUndefined();
   });
 
+  it("reads a few more whole-message answers, and a mention with a label", () => {
+    for (const text of ["yes please", "Yes, please.", "ok", "OK!", "okay", "sure", "do it", "<@U0AGENTX01|agentx> yes"]) expect(parseConfirmationReply(text)).toBe("yes");
+    for (const text of ["nope", "no thanks", "No, thanks."]) expect(parseConfirmationReply(text)).toBe("cancel");
+    expect(parseConfirmationReply("<@U0AGENTX01|agentx> yes to all")).toBe("yes_to_all");
+    for (const text of ["yes, but don't delete", "yesterday", "yes\nclose TRK-10", "ok\nand close TRK-10", "sure thing, close all of them"]) expect(parseConfirmationReply(text)).toBeUndefined();
+  });
+
   it("derives a click's event ID from the confirmation, and reads it back", () => {
     const eventId = confirmationClickEventId(pending.confirmationId, "approve");
     expect(eventId).toBe("EvAgxApprove44444444444454448444444444444444");
@@ -58,19 +65,38 @@ describe("confirmation replies and clicks", () => {
 });
 
 describe("the confirmation store", () => {
-  it("lets one Slack event claim a live confirmation, and leaves a tombstone only on the confirmation it names", async () => {
+  it("lets one Slack event claim a live confirmation once, and leaves a tombstone only on the confirmation it names", async () => {
     const { db, store } = harness();
     await store.save(subject, pending);
     expect(await store.load(subject)).toEqual(pending);
     expect(db.get(`THREAD#${subject}`, "CONFIRMATION")?.expiresAt).toBe(Math.floor(Date.parse(pending.expiresAt) / 1_000) + 7 * 24 * 60 * 60);
-    expect(await store.claim(subject, pending.confirmationId, "EvYES0000001")).toBe(true);
-    expect(await store.claim(subject, pending.confirmationId, "EvYES0000001")).toBe(true);
-    expect(await store.claim(subject, pending.confirmationId, "EvYES0000002")).toBe(false);
     await store.retire(subject, "55555555-5555-5555-8555-555555555555", "EvYES0000003");
     expect((await store.load(subject))?.retiredAt).toBeUndefined();
-    await store.retire(subject, pending.confirmationId, "EvYES0000001");
+    expect(await store.claim(subject, pending.confirmationId, "EvYES0000001")).toBe(true);
+    // The claim is the tombstone: a redelivery of the same event, or any other event, cannot claim it again.
     expect(await store.load(subject)).toEqual({ ...pending, retiredAt: new Date(postedAt + 120_000).toISOString(), usedBy: "EvYES0000001" });
     expect(await store.claim(subject, pending.confirmationId, "EvYES0000001")).toBe(false);
+    expect(await store.claim(subject, pending.confirmationId, "EvYES0000002")).toBe(false);
+    await store.retire(subject, pending.confirmationId, "EvYES0000004");
+    expect((await store.load(subject))?.usedBy).toBe("EvYES0000001");
+  });
+
+  it("refuses a claim once the confirmation expired", async () => {
+    const { store } = harness(Date.parse(pending.expiresAt) + 10 * 60_000);
+    await store.save(subject, pending);
+    expect(await store.claim(subject, pending.confirmationId, "EvYES0000001")).toBe(false);
+    expect((await store.load(subject))?.retiredAt).toBeUndefined();
+  });
+
+  it("refuses to save an invalid confirmation, and logs an unreadable one without its content", async () => {
+    const db = new FakeDynamoDb();
+    const log = vi.fn();
+    const store = createDynamoConfirmationStore(db, "threads", () => postedAt, log);
+    await expect(store.save(subject, { ...pending, calls: [] })).rejects.toThrow();
+    expect(db.get(`THREAD#${subject}`, "CONFIRMATION")).toBeUndefined();
+    db.set({ pk: `THREAD#${subject}`, sk: "CONFIRMATION", confirmationId: pending.confirmationId, confirmation: { ...pending, requesterId: "secret-ish" } });
+    expect(await store.load(subject)).toBeUndefined();
+    expect(log).toHaveBeenCalledWith("gate.confirmation_unreadable", {});
   });
 
   it("grants yes to all to one member for 24 hours, renewably", async () => {
@@ -153,6 +179,73 @@ describe("checking a message against the thread's confirmation", () => {
   });
 });
 
+describe("tombstones, expiry and yes to all", () => {
+  const EXPIRED_TEXT = "That confirmation request expired after 24 hours, so nothing was run. Ask me again if you still want it.";
+
+  it("forgets a used confirmation's tombstone at the end of its 24 hours", async () => {
+    const db = new FakeDynamoDb();
+    const early = createDynamoConfirmationStore(db, "threads", () => postedAt + 120_000);
+    await early.save(subject, pending);
+    expect(await early.claim(subject, pending.confirmationId, "EvYES0000001")).toBe(true);
+    const now = postedAt + 25 * 60 * 60 * 1_000;
+    const store = createDynamoConfirmationStore(db, "threads", () => now);
+    const posts: string[] = [];
+    const check = (text: string, eventId: string) => checkConfirmation({ message: message(text, { eventId, receivedAt: new Date(now).toISOString() }), subject, store, post: async (value) => { posts.push(value); }, log: vi.fn(), now });
+    expect(await check("yes", "EvYES0000002")).toEqual({ run: true, session: createGateSession(requester) });
+    expect(await check("yes to all", "EvYES0000003")).toEqual({ run: false });
+    expect(posts).toEqual([YES_TO_ALL_TEXT]);
+    expect(await store.yesToAll(subject, requester)).toBe(true);
+  });
+
+  it("grants yes to all within 24 hours of a used confirmation", async () => {
+    const { store, check, posts } = harness();
+    await store.save(subject, pending);
+    await store.claim(subject, pending.confirmationId, "EvYES0000001");
+    expect(await check("yes to all in this thread", { eventId: "EvYES0000002" })).toEqual({ run: false });
+    expect(posts).toEqual([YES_TO_ALL_TEXT]);
+    expect(await store.yesToAll(subject, requester)).toBe(true);
+  });
+
+  it("runs nothing again for a redelivered approving event after its claim", async () => {
+    const { store, check, posts } = harness();
+    await store.save(subject, pending);
+    expect(await check("yes")).toMatchObject({ run: true, claim: { confirmationId: pending.confirmationId } });
+    expect(await store.claim(subject, pending.confirmationId, "EvYES0000001")).toBe(true);
+    expect(await store.claim(subject, pending.confirmationId, "EvYES0000001")).toBe(false);
+    expect(await check("yes")).toEqual({ run: false });
+    expect(posts).toEqual([NO_LONGER_PENDING_TEXT]);
+    const session = createGateSession(requester, { approvals: pending.calls });
+    await settleConfirmations({ check: { run: true, session, claim: { confirmationId: pending.confirmationId } }, message: message("yes"), subject, store, postConfirmation: vi.fn(), log: vi.fn(), now: postedAt + 120_000 });
+    expect((await store.load(subject))?.usedBy).toBe("EvYES0000001");
+  });
+
+  it("answers any member's yes after expiry with expired, and keeps saying so", async () => {
+    const now = Date.parse(pending.expiresAt) + 60_000;
+    const { store, check, posts } = harness(now);
+    await store.save(subject, pending);
+    const receivedAt = new Date(now).toISOString();
+    expect(await check("yes", { userId: other, receivedAt })).toEqual({ run: false });
+    expect((await store.load(subject))?.usedBy).toBe("expired");
+    expect(await check("yes", { eventId: "EvYES0000002", receivedAt })).toEqual({ run: false });
+    expect(posts).toEqual([EXPIRED_TEXT, EXPIRED_TEXT]);
+    const later = harness(now + 3 * 24 * 60 * 60 * 1_000);
+    await later.store.save(subject, pending);
+    await later.store.retire(subject, pending.confirmationId, "expired");
+    expect(await later.check("yes", { receivedAt: new Date(now + 3 * 24 * 60 * 60 * 1_000).toISOString() })).toEqual({ run: false });
+    expect(later.posts).toEqual([EXPIRED_TEXT]);
+  });
+
+  it("tells a member whose confirmation another member's replaced that it was replaced", async () => {
+    const { store, check, posts } = harness();
+    await store.save(subject, pending);
+    const session = createGateSession(other);
+    session.asks.push({ toolCallId: "1", tool: "tracker__close_item", argumentsHash: "d".repeat(64), summary: "tracker__close_item: id=TRK-2", kind: "destructive" });
+    await settleConfirmations({ check: { run: true, session }, message: message("close TRK-2", { eventId: "EvOTHER00001", userId: other }), subject, store, postConfirmation: vi.fn(), log: vi.fn(), now: postedAt + 60_000 });
+    expect(await check("yes")).toEqual({ run: false });
+    expect(posts).toEqual([`The pending confirmation is <@${other}>'s; yours was replaced. Nothing was run.`]);
+  });
+});
+
 describe("settling a turn's confirmations", () => {
   it("leaves a tombstone on the used confirmation, then stores and posts one message listing every blocked call once", async () => {
     const { store, log } = harness();
@@ -195,5 +288,30 @@ describe("settling a turn's confirmations", () => {
     expect(confirmationMessage(raw)).toContain("• tracker__save_item: title=&lt;!channel&gt; &amp; &lt;https://x.example|y&gt; (destructive)");
     const escaped = { ...pending, calls: [{ ...pending.calls[0]!, summary: "tracker__save_item: id=&lt;!here&gt; &amp; more" }] };
     expect(confirmationMessage(escaped)).toContain("• tracker__save_item: id=&lt;!here&gt; &amp; more (destructive)");
+  });
+
+  it("splits a long confirmation across sections within Slack's 3,000-character limit", () => {
+    const calls = Array.from({ length: 20 }, (_, index) => ({ tool: "tracker__save_item", argumentsHash: index.toString(16).padStart(64, "0"), summary: `tracker__save_item: ${String(index).padStart(2, "0")}${"x".repeat(278)}`, kind: "classifier" as const }));
+    const text = confirmationMessage({ ...pending, calls });
+    for (const blocks of [confirmationBlocks(text, pending.confirmationId), answeredConfirmationBlocks(text, "Approved by <@U0123456789>")]) {
+      const sections = (blocks as Array<{ type: string; text?: { text: string } }>).filter((block) => block.type === "section").map((block) => block.text!.text);
+      expect(sections.length).toBeGreaterThan(1);
+      for (const section of sections) expect(section.length).toBeLessThanOrEqual(3_000);
+      expect(sections.join("\n")).toBe(text);
+    }
+    const huge = confirmationBlocks("y".repeat(7_000), pending.confirmationId) as Array<{ type: string; text?: { text: string } }>;
+    expect(huge.filter((block) => block.type === "section").map((block) => block.text!.text.length)).toEqual([3_000, 3_000, 1_000]);
+  });
+
+  it("retires the saved confirmation when posting it fails, so no unseen confirmation stays live", async () => {
+    const { store, log } = harness();
+    const session = createGateSession(requester);
+    session.asks.push({ toolCallId: "1", tool: "tracker__close_item", argumentsHash: "b".repeat(64), summary: "tracker__close_item: id=TRK-1", kind: "destructive" });
+    await expect(settleConfirmations({ check: { run: true, session }, message: message("close TRK-1"), subject, store,
+      postConfirmation: async () => { throw new Error("msg_too_long"); }, log, now: postedAt })).rejects.toThrow("msg_too_long");
+    const saved = await store.load(subject);
+    expect(saved?.calls[0]?.argumentsHash).toBe("b".repeat(64));
+    expect(saved?.retiredAt).toBeDefined();
+    expect(log).toHaveBeenCalledWith("gate.confirmation_post_failed", { eventId: "EvYES0000001" });
   });
 });

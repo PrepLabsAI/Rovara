@@ -28,6 +28,8 @@ export const PendingConfirmationSchema = z.object({
   expiresAt: z.string().datetime(),
   retiredAt: z.string().datetime().optional(),
   usedBy: z.string().min(1).max(80).optional(),
+  /** The member whose live confirmation this one replaced, so their "yes" hears that it was replaced. */
+  replacedRequesterId: SlackUserIdSchema.optional(),
 }).strict();
 
 export type ConfirmationCall = z.infer<typeof ConfirmationCallSchema>;
@@ -69,10 +71,33 @@ export function parseConfirmationClickEventId(eventId: string): { click: Confirm
   };
 }
 
+/** Slack refuses a section whose text is longer than this. */
+export const SLACK_SECTION_TEXT_LIMIT = 3_000;
+
+/** The text as consecutive sections of whole lines, each within Slack's limit; an overlong line is cut. */
+function sectionBlocks(text: string): Array<{ type: "section"; text: { type: "mrkdwn"; text: string } }> {
+  const chunks: string[] = [];
+  let current: string | undefined;
+  for (const line of text.split("\n")) {
+    const pieces: string[] = [];
+    for (let start = 0; start === 0 || start < line.length; start += SLACK_SECTION_TEXT_LIMIT) pieces.push(line.slice(start, start + SLACK_SECTION_TEXT_LIMIT));
+    for (const piece of pieces) {
+      if (current !== undefined && current.length + 1 + piece.length <= SLACK_SECTION_TEXT_LIMIT) {
+        current = `${current}\n${piece}`;
+      } else {
+        if (current !== undefined) chunks.push(current);
+        current = piece;
+      }
+    }
+  }
+  if (current !== undefined) chunks.push(current);
+  return chunks.map((chunk) => ({ type: "section", text: { type: "mrkdwn", text: chunk } }));
+}
+
 /** The confirmation message: its text, then Approve and Cancel buttons whose value is the confirmation ID. */
 export function confirmationBlocks(text: string, confirmationId: string): unknown[] {
   return [
-    { type: "section", text: { type: "mrkdwn", text } },
+    ...sectionBlocks(text),
     { type: "actions", block_id: "agentx_confirmation", elements: [
       { type: "button", action_id: CONFIRM_APPROVE_ACTION, style: "primary", text: { type: "plain_text", text: "Approve" }, value: confirmationId },
       { type: "button", action_id: CONFIRM_CANCEL_ACTION, text: { type: "plain_text", text: "Cancel" }, value: confirmationId },
@@ -83,7 +108,7 @@ export function confirmationBlocks(text: string, confirmationId: string): unknow
 /** The same message once answered: the text, and a line saying who answered, with no buttons. */
 export function answeredConfirmationBlocks(text: string, note: string): unknown[] {
   return [
-    { type: "section", text: { type: "mrkdwn", text } },
+    ...sectionBlocks(text),
     { type: "context", elements: [{ type: "mrkdwn", text: note }] },
   ];
 }

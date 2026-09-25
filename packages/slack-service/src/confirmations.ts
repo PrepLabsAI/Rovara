@@ -15,7 +15,7 @@ export interface ConfirmationStore {
   /** The thread's confirmation, a tombstone included. */
   load(subject: string): Promise<PendingConfirmation | undefined>;
   save(subject: string, confirmation: PendingConfirmation): Promise<void>;
-  /** Marks a live confirmation as used by this Slack event. False when it is retired or a different event used it. */
+  /** Uses a live, unexpired confirmation once: leaves its tombstone with this event. False when it is retired or expired. */
   claim(subject: string, confirmationId: string, eventId: string): Promise<boolean>;
   /** Leaves a tombstone (retiredAt, usedBy) if the thread's confirmation is still this one. */
   retire(subject: string, confirmationId: string, eventId: string): Promise<void>;
@@ -26,10 +26,11 @@ export interface ConfirmationStore {
 
 /** "yes" and plain synonyms, "yes to all in this thread", or "cancel"; anything else is an ordinary request. */
 export function parseConfirmationReply(text: string): ConfirmationReply | undefined {
-  const normalized = text.replace(/^\s*<@[A-Z0-9]+>\s*/iu, "").trim().toLowerCase().replace(/[.!\s]+$/u, "");
+  // The whole message must be the answer; a leading mention, with or without its label, is dropped.
+  const normalized = text.replace(/^\s*<@[A-Z0-9]+(?:\|[^>]*)?>\s*/iu, "").trim().toLowerCase().replace(/[.!\s]+$/u, "");
   if (/^yes,?\s+to\s+all(\s+in\s+this\s+thread)?$/u.test(normalized)) return "yes_to_all";
-  if (/^(yes|y|yep|confirm|confirmed|go ahead|approve)$/u.test(normalized)) return "yes";
-  if (/^(cancel|no|don't|do not)$/u.test(normalized)) return "cancel";
+  if (/^(yes|y|yep|yes,? please|ok|okay|sure|do it|confirm|confirmed|go ahead|approve)$/u.test(normalized)) return "yes";
+  if (/^(cancel|no|nope|no,? thanks|don't|do not)$/u.test(normalized)) return "cancel";
   return undefined;
 }
 
@@ -55,6 +56,12 @@ export function confirmationMessage(confirmation: PendingConfirmation): string {
 export const YES_TO_ALL_TEXT = "OK. For the next 24 hours in this thread I'll stop asking you when I'm unsure you asked for something. I'll still ask before destructive actions, large changes and anything an administrator requires.";
 export const NO_LONGER_PENDING_TEXT = "That confirmation is no longer pending, so nothing was run.";
 export const CANCELLED_TEXT = "Cancelled. Nothing was run.";
+export const EXPIRED_TEXT = "That confirmation request expired after 24 hours, so nothing was run. Ask me again if you still want it.";
+
+/** `usedBy` of a confirmation retired because it expired: it answers "expired" until the table drops it. */
+export const EXPIRED_MARK = "expired";
+/** `usedBy` of a confirmation retired because posting it failed: nobody saw it. */
+export const POST_FAILED_MARK = "post_failed";
 
 export type ConfirmationCheck =
   | { run: false }
@@ -81,7 +88,11 @@ export async function checkConfirmation(input: {
   const reply: ConfirmationReply | undefined = click ? (click.click === "approve" ? "yes" : "cancel") : parseConfirmationReply(message.text);
   const yesToAll = await store.yesToAll(subject, message.userId);
   const session = (approvals: readonly GateApproval[] = [], all = yesToAll) => createGateSession(message.userId, { approvals, yesToAll: all });
-  const pending = await store.load(subject);
+  const stored = await store.load(subject);
+  const expired = (confirmation: PendingConfirmation) => input.now >= Date.parse(confirmation.expiresAt);
+  // A used, cancelled or superseded confirmation's tombstone lasts the rest of its 24 hours, then the
+  // thread has nothing pending. An expired one answers "expired" until the table drops the item.
+  const pending = stored !== undefined && stored.retiredAt !== undefined && stored.usedBy !== EXPIRED_MARK && expired(stored) ? undefined : stored;
   const live = pending !== undefined && pending.retiredAt === undefined;
   const refuse = async (reason: string, text: string): Promise<ConfirmationCheck> => {
     log("gate.confirmation_refused", { eventId: message.eventId, reason });
@@ -93,23 +104,27 @@ export async function checkConfirmation(input: {
     return { run: true, session: session(), ...(live && pending.requesterId === message.userId ? { superseded: pending.confirmationId } : {}) };
   }
   if (click !== undefined && pending?.confirmationId !== click.confirmationId) return refuse("not_pending", NO_LONGER_PENDING_TEXT);
-  if (!pending) {
-    if (reply !== "yes_to_all") return { run: true, session: session() };
+  if (reply === "yes_to_all" && !live) {
+    // "Yes to all" stands on its own (R7): without a live confirmation it only grants.
     await store.grantYesToAll(subject, message.userId);
     log("gate.yes_to_all", { eventId: message.eventId });
     await post(YES_TO_ALL_TEXT);
     return { run: false };
   }
-  if (!live) return refuse("not_pending", NO_LONGER_PENDING_TEXT);
+  if (!pending) return { run: true, session: session() };
+  if (!live) return pending.usedBy === EXPIRED_MARK ? refuse("expired", EXPIRED_TEXT) : refuse("not_pending", NO_LONGER_PENDING_TEXT);
+  if (expired(pending)) {
+    // Before the requester check, so every later "yes", anyone's, hears the same thing.
+    await store.retire(subject, pending.confirmationId, EXPIRED_MARK);
+    return refuse("expired", EXPIRED_TEXT);
+  }
   if (pending.requesterId !== message.userId) {
-    return refuse("other_member", `Only <@${pending.requesterId}> can confirm what they asked for. Nothing was run.`);
+    return pending.replacedRequesterId === message.userId
+      ? refuse("replaced", `The pending confirmation is <@${pending.requesterId}>'s; yours was replaced. Nothing was run.`)
+      : refuse("other_member", `Only <@${pending.requesterId}> can confirm what they asked for. Nothing was run.`);
   }
   if (Date.parse(message.receivedAt) <= Date.parse(pending.postedAt)) {
     return refuse("before_request", "Your reply arrived before I asked for confirmation, so I didn't treat it as one. Press Approve or reply `@AgentX yes` again to confirm.");
-  }
-  if (input.now >= Date.parse(pending.expiresAt)) {
-    await store.retire(subject, pending.confirmationId, message.eventId);
-    return refuse("expired", "That confirmation request expired after 24 hours, so nothing was run. Ask me again if you still want it.");
   }
   if (reply === "cancel") {
     await store.retire(subject, pending.confirmationId, message.eventId);
@@ -141,18 +156,31 @@ export async function settleConfirmations(input: {
 }): Promise<void> {
   const { check, message, subject, store } = input;
   const retired = check.claim?.confirmationId ?? check.superseded;
+  // A claimed confirmation is already a tombstone; retiring it again changes nothing.
   if (retired !== undefined) await store.retire(subject, retired, message.eventId);
   const calls = [...new Map(check.session.asks.map((ask) => [ask.argumentsHash, { tool: ask.tool, argumentsHash: ask.argumentsHash, summary: ask.summary, kind: ask.kind }])).values()]
     .slice(0, MAX_CONFIRMATION_CALLS);
   if (calls.length === 0) return;
+  const previous = await store.load(subject);
+  const replaced = previous !== undefined && previous.retiredAt === undefined && input.now < Date.parse(previous.expiresAt) && previous.requesterId !== check.session.requesterId
+    ? previous.requesterId
+    : undefined;
   const confirmation: PendingConfirmation = {
     confirmationId: deterministicUuid(`${message.eventId}:confirmation`),
     requesterId: check.session.requesterId,
     calls,
     postedAt: new Date(input.now).toISOString(),
     expiresAt: new Date(input.now + CONFIRMATION_TTL_MS).toISOString(),
+    ...(replaced === undefined ? {} : { replacedRequesterId: replaced }),
   };
   await store.save(subject, confirmation);
-  await input.postConfirmation(confirmation, confirmationMessage(confirmation));
+  try {
+    await input.postConfirmation(confirmation, confirmationMessage(confirmation));
+  } catch (error) {
+    // Nobody saw it, so nobody may confirm it: leave it retired and let the caller tell the member.
+    await store.retire(subject, confirmation.confirmationId, POST_FAILED_MARK);
+    input.log("gate.confirmation_post_failed", { eventId: message.eventId });
+    throw error;
+  }
   input.log("gate.confirmation_requested", { eventId: message.eventId, calls: calls.length, kinds: [...new Set(calls.map((call) => call.kind))].join(",") });
 }

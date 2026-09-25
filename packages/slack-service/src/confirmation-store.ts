@@ -1,6 +1,7 @@
 import { GetCommand, PutCommand, UpdateCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { confirmationKey, pendingConfirmationFromItem } from "@agentx/contracts";
+import { PendingConfirmationSchema, confirmationKey, pendingConfirmationFromItem } from "@agentx/contracts";
 import type { ConfirmationStore } from "./confirmations.js";
+import type { ServiceLog } from "./processor.js";
 
 /** Expired confirmations stay readable for a week, so a late "yes" hears that it expired. */
 const RETAIN_AFTER_EXPIRY_SECONDS = 7 * 24 * 60 * 60;
@@ -12,26 +13,39 @@ function isConditionalFailure(error: unknown): boolean {
 }
 
 /** Confirmations and "yes to all" grants, in the Slack threads table beside each thread's META item. */
-export function createDynamoConfirmationStore(documentClient: Pick<DynamoDBDocumentClient, "send">, tableName: string, now: () => number = Date.now): ConfirmationStore {
+export function createDynamoConfirmationStore(
+  documentClient: Pick<DynamoDBDocumentClient, "send">,
+  tableName: string,
+  now: () => number = Date.now,
+  log: ServiceLog = () => undefined,
+): ConfirmationStore {
   const yesKey = (subject: string, userId: string) => ({ pk: `THREAD#${subject}`, sk: `YES_TO_ALL#${userId}` });
   return {
     async load(subject) {
       const response = await documentClient.send(new GetCommand({ TableName: tableName, Key: confirmationKey(subject), ConsistentRead: true }));
-      return pendingConfirmationFromItem(response.Item);
+      const confirmation = pendingConfirmationFromItem(response.Item);
+      // The event name only: an unreadable item's content is not logged.
+      if (response.Item !== undefined && confirmation === undefined) log("gate.confirmation_unreadable", {});
+      return confirmation;
     },
-    async save(subject, confirmation) {
+    async save(subject, input) {
+      // An invalid confirmation throws here, so the caller can tell the member, rather than being stored unreadable.
+      const confirmation = PendingConfirmationSchema.parse(input);
       await documentClient.send(new PutCommand({ TableName: tableName, Item: {
         ...confirmationKey(subject), confirmationId: confirmation.confirmationId, confirmation,
+        // Epoch milliseconds, so a claim can refuse an expired confirmation in its condition.
+        validUntil: Date.parse(confirmation.expiresAt),
         expiresAt: Math.floor(Date.parse(confirmation.expiresAt) / 1_000) + RETAIN_AFTER_EXPIRY_SECONDS,
       } }));
     },
     async claim(subject, confirmationId, eventId) {
+      // Single use: the claim itself leaves the tombstone, so a redelivery of the same event cannot claim again.
       try {
         await documentClient.send(new UpdateCommand({
           TableName: tableName, Key: confirmationKey(subject),
-          UpdateExpression: "SET claimedBy = :event",
-          ConditionExpression: "confirmationId = :id AND attribute_not_exists(retiredAt) AND (attribute_not_exists(claimedBy) OR claimedBy = :event)",
-          ExpressionAttributeValues: { ":id": confirmationId, ":event": eventId },
+          UpdateExpression: "SET retiredAt = :at, usedBy = :event",
+          ConditionExpression: "confirmationId = :id AND attribute_not_exists(retiredAt) AND validUntil > :now",
+          ExpressionAttributeValues: { ":id": confirmationId, ":event": eventId, ":at": new Date(now()).toISOString(), ":now": now() },
         }));
         return true;
       } catch (error) {
