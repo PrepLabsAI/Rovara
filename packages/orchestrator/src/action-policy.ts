@@ -82,13 +82,26 @@ export function nameWords(name: string): string[] {
 
 const INFLECTIONS = ["es", "s", "ed", "d"] as const;
 
-/** The destructive word a name word is, or is a simple inflection of (`deletes`, `closes`, `removed`). */
+/**
+ * The destructive word a name word is, or is a simple inflection of: a plural or past tense
+ * (`deletes`, `closes`, `removed`), a gerund (`closing`, `deleting`, `archiving`), or a doubled
+ * final "l" before "ed" or "ing" (`cancelled`, `cancelling`). Only a stem in DESTRUCTIVE_WORDS
+ * counts, so `string`, `thing`, `setting` and `listing` stay ordinary. Accepted gaps: nouns
+ * (`deletion`, `removal`) and words run together without a separator or case change (`bulkdelete`).
+ */
 function destructiveWord(word: string): string | undefined {
   if (DESTRUCTIVE_WORDS.has(word)) return word;
   for (const suffix of INFLECTIONS) {
     if (!word.endsWith(suffix)) continue;
     const stem = word.slice(0, -suffix.length);
     if (DESTRUCTIVE_WORDS.has(stem)) return stem;
+  }
+  for (const suffix of ["ing", "ed"] as const) {
+    if (!word.endsWith(suffix)) continue;
+    const stem = word.slice(0, -suffix.length);
+    const candidates = [stem, `${stem}e`, ...(stem.endsWith("ll") ? [stem.slice(0, -1)] : [])];
+    const found = candidates.find((candidate) => DESTRUCTIVE_WORDS.has(candidate));
+    if (found !== undefined) return found;
   }
   return undefined;
 }

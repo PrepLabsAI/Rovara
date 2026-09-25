@@ -143,6 +143,8 @@ describe("rules and built-in defaults", () => {
 
 describe("fix round 1 (task 2 review)", () => {
   const write = (upstreamName: string, itemArguments: readonly string[] | undefined = ["id"]) => tracker(upstreamName, "write", { itemArguments });
+  // Facts whose connector declares no item arguments (the default parameter above would turn undefined into ["id"]).
+  const undeclared = (upstreamName: string): ToolFacts => ({ ...tracker(upstreamName, "write"), itemArguments: undefined });
 
   it("I1: splits capital runs and letter-digit joins, and matches simple inflections of destructive words", () => {
     expect(nameWords("XMLDelete")).toEqual(["xml", "delete"]);
@@ -156,6 +158,17 @@ describe("fix round 1 (task 2 review)", () => {
     }
     expect(destructiveSignal("closes", {})).toBe("the tool's name says \"close\"");
     expect(destructiveSignal("removed", {})).toBe("the tool's name says \"remove\"");
+    // Fix round 2 (N3): gerunds and a doubled final "l" before "ed"/"ing".
+    for (const name of ["cancelled", "cancelling", "closing", "deleting", "removing", "merging", "archiving", "close_issues", "cancel_orders"]) {
+      expect(destructiveSignal(name, {}), name).toBeDefined();
+      expect(baseClass(`tracker__${name}`, write(name), {}), name).toBe("destructive");
+    }
+    expect(destructiveSignal("cancelling", {})).toBe("the tool's name says \"cancel\"");
+    expect(destructiveSignal("closing", {})).toBe("the tool's name says \"close\"");
+    for (const name of ["set_string", "add_thing", "save_setting", "add_listing", "update_settings", "add_listings"]) {
+      expect(destructiveSignal(name, {}), name).toBeUndefined();
+      expect(baseClass(`tracker__${name}`, write(name), { id: "1" }), name).toBe("change");
+    }
     for (const name of ["undelete", "unarchive", "reopen"]) {
       expect(destructiveSignal(name, {}), name).toBeUndefined();
       expect(baseClass(`tracker__${name}`, write(name), { id: "1" }), name).toBe("change");
@@ -177,7 +190,7 @@ describe("fix round 1 (task 2 review)", () => {
     expect(baseClass("tracker__save_item", write("save_item"), { id: "1", fields: { inner: { status: "Done" } } })).toBe("destructive");
     expect(destructiveSignal("save_item", { fields: { inner: { status: "Done" } } }, ["id"])).toBe("the call sets \"fields.inner.status\"");
     // Undeclared item arguments search deeply too.
-    expect(baseClass("tracker__save_item", write("save_item", undefined), { updates: [{ state: "closed" }] })).toBe("destructive");
+    expect(baseClass("tracker__save_item", undeclared("save_item"), { updates: [{ state: "closed" }] })).toBe("destructive");
     // Depth four is searched; depth five is not.
     expect(baseClass("tracker__save_item", write("save_item"), { id: "1", a: { b: { c: { status: "x" } } } })).toBe("destructive");
     expect(baseClass("tracker__save_item", write("save_item"), { id: "1", a: { b: { c: { d: { status: "x" } } } } })).toBe("change");
@@ -197,7 +210,7 @@ describe("fix round 1 (task 2 review)", () => {
   it("M1: arguments that are not a plain object make a write a change, never a throw", () => {
     for (const args of [null, undefined, "x", 3, ["a"]] as unknown as Array<Record<string, unknown>>) {
       expect(baseClass("tracker__save_item", write("save_item"), args)).toBe("change");
-      expect(baseClass("tracker__save_item", write("save_item", undefined), args)).toBe("change");
+      expect(baseClass("tracker__save_item", undeclared("save_item"), args)).toBe("change");
       expect(baseClass("mystery_tool", undefined, args)).toBe("change");
       expect(baseClass("agentx_manage_pull_request", undefined, args)).toBe("change");
       expect(() => destructiveSignal("save_item", args, ["id"])).not.toThrow();
