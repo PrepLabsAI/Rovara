@@ -1,3 +1,3 @@
 {"id":"files-not-pr","project":"fixtures/payments.yaml","prompt":"list the top-level files in the payments-api repository","expect":{"tool":"agentx_submit_task"},"source":"synthetic"}
-{"id":"jira-not-connected","project":"fixtures/github-only.yaml","prompt":"what's open in Jira?","expect":{"tool":null,"refusal":"not connected"},"source":"synthetic"}
-{"id":"append-pr","project":"fixtures/payments.yaml","prompt":"append the new commits to PR 12 in payments-api","expect":{"tool":"agentx_manage_pull_request","argsSubset":{"action":"append","pullRequestNumber":12}},"source":"synthetic"}
+{"id":"jira-not-connected","project":"fixtures/github-only.yaml","prompt":"what's open in Jira?","expect":{"tool":null,"refusal":["not connected","n't connected","not been connected","n't been connected"]},"source":"synthetic"}
+{"id":"append-pr","project":"fixtures/payments.yaml","prompt":"append the new commits to PR 12 in payments-api","expect":{"tool":"agentx_manage_pull_request","argsSubset":{"repository":"payments-api","action":"append","pullRequestNumber":12}},"source":"synthetic"}

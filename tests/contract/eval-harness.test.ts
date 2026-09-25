@@ -5,11 +5,11 @@ import { fauxAssistantMessage, fauxToolCall, type FauxProviderHandle } from "@ea
 import { describe, expect, it } from "vitest";
 import { EVAL_ROOT, EvalProjectSchema, loadCases, loadCatalog, loadProject, type EvalCase } from "../eval/case.js";
 import { parseEvalArguments, recordLiveReport, runEvalCli, runEvalCommand } from "../eval/command.js";
-import { legacyPresentation } from "../eval/legacy-presentation.js";
+import { legacyNotApplicable, legacyPresentation } from "../eval/legacy-presentation.js";
 import { scriptExpectedAnswers } from "../eval/offline.js";
 import { newPresentation } from "../eval/presentation.js";
 import { createOrchestrationTools } from "../../packages/orchestrator/src/orchestration-tools.js";
-import { cannedApi, compareWithBaseline, reportPath, runEvaluation, type EvalReport } from "../eval/runner.js";
+import { cannedApi, caseHash, compareWithBaseline, reportPath, runEvaluation, scoreRun, type EvalReport } from "../eval/runner.js";
 import { compareSc004 } from "../eval/sc004.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 
@@ -282,6 +282,40 @@ describe("evaluation harness, offline", () => {
     expect(fresh.summary).toEqual({ cases: 4, passed: 4, errors: 0, toolAccuracy: 1, refusalCases: 1, refusalAccuracy: 1 });
   }, 60_000);
 
+  it("matches phrases with curly apostrophes and quotes as straight ones", async () => {
+    const [refusal] = (await loadCases()).filter((entry) => entry.id === "linear-read-unconfigured");
+    expect(scoreRun(refusal!, { tool: null, args: {}, response: "Linear isn’t connected for this channel." })).toMatchObject({ toolOk: true, refusalOk: true, phraseOk: true });
+    expect(scoreRun(refusal!, { tool: null, args: {}, response: "Linear is not available here." })).toMatchObject({ refusalOk: false, phraseOk: false });
+    const quoted: EvalCase = { id: "quoted", project: "fixtures/github-only.yaml", prompt: "x", expect: { tool: null, contains: "“AGENTX_OK”" } };
+    expect(scoreRun(quoted, { tool: null, args: {}, response: 'I replied "agentx_ok".' })).toMatchObject({ containsOk: true });
+  });
+
+  it("marks a case not applicable to legacy when its fixture needs a recoverable operation", async () => {
+    const cases = await loadCases();
+    const recover = cases.find((entry) => entry.id === "recover-operation")!;
+    expect(legacyNotApplicable(await loadProject(recover.project), recover)).toBe("needs a recoverable operation ID, which the legacy presentation cannot receive");
+    const files = cases.find((entry) => entry.id === "files-not-pr")!;
+    expect(legacyNotApplicable(await loadProject(files.project), files)).toBeUndefined();
+  });
+
+  it("records a stable hash of each case definition and of the scored case set", async () => {
+    const { modelRuntime, faux } = await fauxModelRuntime();
+    const cases = (await loadCases()).filter((entry) => ["files-not-pr", "linear-open-issues"].includes(entry.id));
+    const options = { model: FAUX_MODEL, modelRuntime, repeat: 1, beforeRun: scriptExpectedAnswers(faux) };
+    const fresh = await runEvaluation(cases, { ...options, presentation: "new" });
+    const legacy = await runEvaluation(cases, { ...options, presentation: "legacy" });
+    const files = cases.find((entry) => entry.id === "files-not-pr")!;
+    expect(caseHash(files)).toMatch(/^[a-f0-9]{64}$/);
+    expect(caseHash({ ...files, note: "a note changes nothing", source: "channel" })).toBe(caseHash(files));
+    expect(caseHash({ ...files, expect: { tool: "agentx_submit_task", argsSubset: {} } })).not.toBe(caseHash(files));
+    expect(caseHash({ ...files, prompt: `${files.prompt}.` })).not.toBe(caseHash(files));
+    expect(fresh.cases.map((result) => result.caseHash)).toEqual(cases.map(caseHash));
+    expect(legacy.cases.map((result) => [result.id, result.caseHash])).toEqual([["files-not-pr", caseHash(files)]]);
+    expect(fresh.caseSetHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(legacy.caseSetHash).not.toBe(fresh.caseSetHash);
+    expect((await runEvaluation(cases, { ...options, presentation: "new" })).caseSetHash).toBe(fresh.caseSetHash);
+  }, 60_000);
+
   it("scores a first call to a tool the presentation does not offer as the wrong tool", async () => {
     const { modelRuntime, faux } = await fauxModelRuntime();
     const cases = (await loadCases()).filter((entry) => entry.id === "append-pr");
@@ -301,7 +335,7 @@ describe("evaluation harness, offline", () => {
 
 function scored(id: string, run: Partial<EvalReport["cases"][number]["runs"][number]>): EvalReport["cases"][number] {
   const full = { tool: "agentx_submit_task", toolOk: true, argsOk: true, phraseOk: null, refusalOk: null, containsOk: null, ...run };
-  return { id, passed: full.toolOk && full.argsOk && full.phraseOk !== false, runs: [full, full, full] };
+  return { id, caseHash: `${id}-definition`, passed: full.toolOk && full.argsOk && full.phraseOk !== false, runs: [full, full, full] };
 }
 
 function sc004Reports(): { fresh: EvalReport; legacy: EvalReport } {
@@ -338,6 +372,13 @@ describe("SC-004 comparison", () => {
     expect(() => compareSc004(fresh, { ...legacy, notApplicable: [] })).toThrow(/different cases: linear/);
     expect(() => compareSc004({ ...fresh, summary: { ...fresh.summary, errors: 1 } }, legacy)).toThrow(/new report has errors/);
     expect(() => compareSc004(fresh, { ...legacy, stopped: "stuck", notRun: [] })).toThrow(/legacy report has errors or stopped early/);
+    const edited = { ...legacy, cases: legacy.cases.map((result) => result.id === "issues" ? { ...result, caseHash: "issues-edited" } : result) };
+    expect(() => compareSc004(fresh, edited)).toThrow(/case definitions differ between the two baselines: issues/);
+    const unhashed = { ...legacy, cases: legacy.cases.map((result) => result.id === "files" ? { id: result.id, passed: result.passed, runs: result.runs } : result) };
+    expect(() => compareSc004(fresh, unhashed)).toThrow(/case definitions differ between the two baselines: files/);
+    // Only the shared cases must match: the not-applicable Linear case may differ.
+    const linearEdited = { ...fresh, cases: fresh.cases.map((result) => result.id === "linear" ? { ...result, caseHash: "linear-edited" } : result) };
+    expect(compareSc004(linearEdited, legacy).met).toBe(true);
   });
 
   it("reads both committed baselines with npm run eval -- --sc004 and calls no model", async () => {
@@ -453,17 +494,21 @@ describe("evaluation command, live safety", () => {
       expect(written.summary).toEqual(outcome.report.summary);
       await expect(readFile(join(root, "baseline", "scripted.json"), "utf8")).rejects.toThrow(/ENOENT/);
       expect(outcome.lines[0]).toMatch(/^Offline run on the faux provider/);
-      // The legacy presentation (commit 63f78f6) offers only GitHub, so cases that need a Linear or
-      // Jira tool are reported as not applicable: listed and counted, never scored or dropped.
+      // The legacy presentation (commit 63f78f6) offers only GitHub and cannot receive an unfinished
+      // operation's ID, so cases that need a Linear or Jira tool, or a recoverable operation, are
+      // reported as not applicable: listed and counted, never scored or dropped.
       const legacy = await runEvalCommand(["--presentation", "legacy"], { root, env: {} });
       const all = await loadCases();
-      const inexpressible = all.filter((entry) => [entry.expect.tool].flat().some((tool) => tool !== null && !/^(agentx_|github__)/.test(tool))).map((entry) => entry.id);
+      const recovering = new Set<string>();
+      for (const entry of all) if ((await loadProject(entry.project)).recoverableOperations.length > 0) recovering.add(entry.id);
+      expect(recovering.size).toBeGreaterThan(0);
+      const inexpressible = all.filter((entry) => recovering.has(entry.id) || [entry.expect.tool].flat().some((tool) => tool !== null && !/^(agentx_|github__)/.test(tool))).map((entry) => entry.id);
       expect(inexpressible.length).toBeGreaterThan(0);
       expect(legacy.report.notApplicable?.map((entry) => entry.id)).toEqual(inexpressible);
       expect(legacy.report.summary.cases + inexpressible.length).toBe(all.length);
       expect(legacy.lines).toEqual([
         expect.stringMatching(/^Offline run on the faux provider/),
-        `Not applicable to the legacy presentation: ${inexpressible.length} cases, not scored (they need a connector type it cannot offer): ${inexpressible.join(", ")}`,
+        `Not applicable to the legacy presentation: ${inexpressible.length} cases, not scored (they need what it cannot offer): ${inexpressible.join(", ")}`,
       ]);
       expect(legacy).toMatchObject({ exitCode: 0, report: { presentation: "legacy", summary: { passed: legacy.report.summary.cases, errors: 0, notApplicable: inexpressible.length } } });
     } finally {

@@ -28,7 +28,8 @@ function score(results: readonly CaseResult[]): PresentationScore {
 /**
  * SC-004 from the two live reports of one model. It compares the presentations only on the cases
  * both can express: a case the legacy presentation reported as not applicable is left out of both
- * scores. Any other difference in the case sets, and any errored or stopped run, is an error.
+ * scores. Any other difference in the case sets, a shared case whose definition hash differs, and
+ * any errored or stopped run, is an error.
  */
 export function compareSc004(fresh: EvalReport, legacy: EvalReport): Sc004Result {
   if (fresh.presentation !== "new" || legacy.presentation !== "legacy") {
@@ -50,6 +51,10 @@ export function compareSc004(fresh: EvalReport, legacy: EvalReport): Sc004Result
   ];
   if (unmatched.length > 0) throw new Error(`the two reports cover different cases: ${unmatched.join(", ")}`);
   const shared = fresh.cases.filter((result) => legacyIds.has(result.id));
+  // Both baselines must have scored the same definition of every shared case; a missing hash is not a match.
+  const legacyHashes = new Map(legacy.cases.map((result) => [result.id, result.caseHash]));
+  const changed = shared.filter((result) => result.caseHash === undefined || result.caseHash !== legacyHashes.get(result.id)).map((result) => result.id);
+  if (changed.length > 0) throw new Error(`the case definitions differ between the two baselines: ${changed.join(", ")}; record both again from the same cases`);
   const newScore = score(shared);
   const legacyScore = score(legacy.cases);
   return {

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -49,7 +49,8 @@ export const RunScoreSchema = z.object({
   containsOk: z.boolean().nullable(),
   error: z.string().optional(),
 }).strict();
-export const CaseResultSchema = z.object({ id: z.string(), passed: z.boolean(), runs: z.array(RunScoreSchema) }).strict();
+/** `caseHash` identifies the case definition that was scored (see caseHash); SC-004 refuses baselines whose shared cases differ. */
+export const CaseResultSchema = z.object({ id: z.string(), caseHash: z.string().optional(), passed: z.boolean(), runs: z.array(RunScoreSchema) }).strict();
 /** A results or baseline file; a baseline that does not parse is an error, never an empty baseline. */
 export const EvalReportSchema = z.object({
   provider: z.string().min(1),
@@ -57,6 +58,8 @@ export const EvalReportSchema = z.object({
   presentation: PresentationSchema,
   repeat: z.number().int().positive(),
   generatedAt: z.string(),
+  /** A hash of the scored cases' definitions (for legacy, the cases it can express). */
+  caseSetHash: z.string().optional(),
   cases: z.array(CaseResultSchema),
   /** Why the evaluation stopped early, and the cases it therefore never ran. */
   stopped: z.string().optional(),
@@ -211,15 +214,32 @@ async function runOnce(evalCase: EvalCase, run: number, catalogCache: Map<string
   };
 }
 
+/** Curly apostrophes and quotes count as straight ones, and case is ignored, so "isn’t connected" with a curly apostrophe matches "n't connected". */
+function normalisePhrase(text: string): string {
+  return text.replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"').toLowerCase();
+}
+
+function stable(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stable);
+  if (value && typeof value === "object") return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable((value as Record<string, unknown>)[key])]));
+  return value;
+}
+
+/** A stable hash of what a case asks and expects: id, project, prompt and expect. Its source and note do not affect scoring, so they are left out. */
+export function caseHash(evalCase: EvalCase): string {
+  const { id, project, prompt, expect } = evalCase;
+  return createHash("sha256").update(JSON.stringify(stable({ id, project, prompt, expect }))).digest("hex");
+}
+
 /** An errored run, or a call to a tool that was not offered, never counts as the correct tool. */
 export function scoreRun(evalCase: EvalCase, run: RunOutcome): RunScore {
   const expected = evalCase.expect.tool;
   const matches = Array.isArray(expected) ? run.tool !== null && expected.includes(run.tool) : run.tool === expected;
   const toolOk = run.error === undefined && run.offered !== false && matches;
   const argsOk = evalCase.expect.argsSubset === undefined || isSubset(evalCase.expect.argsSubset, run.args);
-  const text = run.response.toLowerCase();
+  const text = normalisePhrase(run.response);
   const group = (phrase: string | string[] | undefined): boolean | null =>
-    phrase === undefined ? null : [phrase].flat().some((entry) => text.includes(entry.toLowerCase()));
+    phrase === undefined ? null : [phrase].flat().some((entry) => text.includes(normalisePhrase(entry)));
   const refusalOk = group(evalCase.expect.refusal);
   const containsOk = group(evalCase.expect.contains);
   const phraseOk = refusalOk === null && containsOk === null ? null : refusalOk !== false && containsOk !== false;
@@ -269,7 +289,7 @@ export async function runEvaluation(cases: readonly EvalCase[], options: EvalOpt
       runs.push(scoreRun(evalCase, outcome));
       if (stopped !== undefined) break;
     }
-    results.push({ id: evalCase.id, passed: runs.every((run) => run.toolOk && run.argsOk && run.phraseOk !== false && run.error === undefined), runs });
+    results.push({ id: evalCase.id, caseHash: caseHash(evalCase), passed: runs.every((run) => run.toolOk && run.argsOk && run.phraseOk !== false && run.error === undefined), runs });
     if (stopped !== undefined) {
       notRun = cases.slice(index + 1).map((entry) => entry.id);
       break;
@@ -284,6 +304,7 @@ export async function runEvaluation(cases: readonly EvalCase[], options: EvalOpt
     presentation: options.presentation,
     repeat: options.repeat,
     generatedAt: new Date().toISOString(),
+    caseSetHash: createHash("sha256").update(JSON.stringify(results.map((result) => [result.id, result.caseHash]).sort())).digest("hex"),
     cases: results,
     ...(stopped === undefined ? {} : { stopped, notRun }),
     ...(notApplicable.length === 0 ? {} : { notApplicable }),

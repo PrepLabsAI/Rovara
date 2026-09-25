@@ -26,12 +26,15 @@ const DONE = "Done. (evaluation run: nothing was executed)";
 const LEGACY_CONNECTOR_TYPES: readonly string[] = ["github"];
 
 /**
- * Why the legacy presentation cannot express a case, or undefined when it can: the case expects a
- * tool of a connector whose type had no tools before feature 013. Such a case is reported as not
+ * Why the legacy presentation cannot express a case, or undefined when it can: its fixture needs a
+ * recoverable operation, or the case expects a tool of a connector whose type had no tools before
+ * feature 013. Such a case is reported as not
  * applicable to the legacy presentation, never scored as its failure, and SC-004 compares the two
  * presentations only on the cases both can express.
  */
 export function legacyNotApplicable(project: EvalProject, evalCase: EvalCase): string | undefined {
+  // The legacy prompt has no way to receive an unfinished operation's ID, so recovery cannot be expressed.
+  if (project.recoverableOperations.length > 0) return "needs a recoverable operation ID, which the legacy presentation cannot receive";
   for (const tool of [evalCase.expect.tool].flat()) {
     const separator = tool === null ? -1 : tool.indexOf("__");
     if (tool === null || separator < 0) continue;

@@ -11,7 +11,7 @@ const CaseSchema = z.object({
   id: z.string().regex(/^[a-z0-9-]{1,64}$/),
   project: z.string().regex(/^fixtures\/[a-z0-9-]+\.yaml$/),
   prompt: z.string().min(1).max(2_000),
-  expect: z.object({ tool: z.string().nullable(), argsSubset: z.record(z.string(), z.unknown()).optional(), refusal: z.string().optional() }).strict(),
+  expect: z.object({ tool: z.string().nullable(), argsSubset: z.record(z.string(), z.unknown()).optional(), refusal: z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]).optional() }).strict(),
 }).strict();
 
 const root = new URL("../eval/", import.meta.url);

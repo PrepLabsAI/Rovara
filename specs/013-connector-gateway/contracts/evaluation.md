@@ -40,7 +40,8 @@ executes nothing. For each case it records the first tool call, or none. Scores:
 - **Argument match**: `argsSubset` is a subset of the arguments.
 - **Refusal accuracy**: for `tool: null` cases, the response contains the `refusal` phrase.
 - **Phrase match**: `refusal` and `contains` are scored separately and both must match; refusal
-  accuracy counts only `refusal`.
+  accuracy counts only `refusal`. Matching ignores case, and curly apostrophes and quotes count as
+  straight ones.
 
 Each case runs `--repeat` times; a case passes when every run passes. Results are written to
 `tests/eval/results/<model>.json` and compared with `tests/eval/baseline/<model>.json`; the command
@@ -76,8 +77,10 @@ as [docs/connectors/jira.md](../../../docs/connectors/jira.md) sets up), once
 The pre-change presentation is kept as a fixture mode (`--presentation legacy`) until SC-004 is
 recorded in `quickstart.md`, then removed.
 
-The legacy presentation offers only GitHub, as before feature 013. A case that expects a tool of any
-other connector type is not applicable to it: the legacy report lists it under `notApplicable` with
-a count, and never scores it as a failure. `npm run eval -- --sc004 [--model <id>]` reads the two
-committed baselines, calls no model, and compares the presentations only on the cases both can
-express.
+The legacy presentation offers only GitHub, as before feature 013, and cannot receive an unfinished
+operation's ID. A case that expects a tool of any other connector type, or whose fixture needs
+`recoverableOperations`, is not applicable to it: the legacy report lists it under `notApplicable`
+with a count, and never scores it as a failure. Each report carries a hash of every scored case's
+definition and of the scored set. `npm run eval -- --sc004 [--model <id>]` reads the two committed
+baselines, calls no model, refuses them when a shared case's hash differs, and compares the
+presentations only on the cases both can express.
