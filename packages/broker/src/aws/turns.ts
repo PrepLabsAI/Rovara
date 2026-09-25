@@ -71,7 +71,7 @@ export class TurnRecordExport {
     log?: (line: string) => void;
   }) {}
 
-  async page(query: URLSearchParams): Promise<{ turns: TurnRecord[]; cursor?: string }> {
+  async page(query: URLSearchParams): Promise<{ turns: TurnRecord[]; cursor?: string; skipped?: number }> {
     const rawSince = query.get("since");
     if (rawSince === null || !validTime(rawSince)) {
       throw agentXError("CONFIG_INVALID", "since must be an ISO 8601 time such as 2026-09-17T00:00:00.000Z");
@@ -100,7 +100,9 @@ export class TurnRecordExport {
         throw agentXError("RUNTIME_UNAVAILABLE", "could not continue the turn record export; try again");
       }
     }
-    const records: { record: TurnRecord; key: TurnRecordStartKey | undefined }[] = [];
+    // invalidBefore: how many malformed items came before this record, so a page cut short by
+    // size reports only the ones it passed; the rest are counted on the page that reaches them.
+    const records: { record: TurnRecord; key: TurnRecordStartKey | undefined; invalidBefore: number }[] = [];
     const invalidKeys: string[] = [];
     const invalidFields = new Set<string>();
     let invalid = 0;
@@ -118,7 +120,7 @@ export class TurnRecordExport {
         }
         continue;
       }
-      records.push({ record: parsed.data, key: startKey(Object.fromEntries(KEY_NAMES.map((name) => [name, item[name]]))) });
+      records.push({ record: parsed.data, key: startKey(Object.fromEntries(KEY_NAMES.map((name) => [name, item[name]]))), invalidBefore: invalid });
     }
     if (invalid > 0) {
       log(JSON.stringify({ component: "broker", event: "turn_record.invalid", count: invalid, keys: invalidKeys, fields: [...invalidFields] }));
@@ -133,6 +135,7 @@ export class TurnRecordExport {
       }),
     ] as const)));
     const turns: TurnRecord[] = [];
+    let skipped = invalid;
     let bytes = PAGE_ENVELOPE_BYTES;
     for (const [index, { record, key }] of records.entries()) {
       const project = record.workspaceId === undefined ? undefined : projects.get(record.workspaceId);
@@ -147,11 +150,12 @@ export class TurnRecordExport {
           log(JSON.stringify({ component: "broker", event: "turn_record.cursor_unusable" }));
           throw agentXError("RUNTIME_UNAVAILABLE", "could not continue the turn record export; try again");
         }
+        skipped = records[index]?.invalidBefore ?? invalid;
         break;
       }
       turns.push(turn);
     }
-    return { turns, ...(next === undefined ? {} : { cursor: next }) };
+    return { turns, ...(next === undefined ? {} : { cursor: next }), ...(skipped > 0 ? { skipped } : {}) };
   }
 }
 

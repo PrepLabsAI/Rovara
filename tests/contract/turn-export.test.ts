@@ -328,3 +328,40 @@ describe("turn record export page size", () => {
     expect([...seen].sort()).toEqual(items.map((item) => item.eventId).sort());
   });
 });
+
+describe("turn record export skipped count", () => {
+  it("reports how many malformed items a page skipped, and says nothing when none were", async () => {
+    const malformed = { ...stored("EvSKIP00001", "2026-09-24T09:00:00.000Z"), disposition: "unheard-of" };
+    const expired = { ...stored("EvSKIP00002", "2026-08-20T10:00:00.000Z"), expiresAt: now / 1000 - 1 };
+    const { exporter: turns } = exporter({ page: async () => ({ items: [malformed, expired, stored("EvSKIP00003", "2026-09-24T08:00:00.000Z")] }) });
+    const result = await turns.page(new URLSearchParams({ since: "2026-08-01T00:00:00Z" }));
+    expect(result.turns.map((turn) => turn.eventId)).toEqual(["EvSKIP00003"]);
+    expect(result.skipped).toBe(1);
+    const clean = await exporter({ page: async () => ({ items: [stored("EvSKIP00004", "2026-09-24T08:00:00.000Z")] }) }).exporter
+      .page(new URLSearchParams({ since: "2026-09-17T00:00:00Z" }));
+    expect(clean).not.toHaveProperty("skipped");
+  });
+
+  it("counts only the skipped items before a page cut short by size, so the next page does not count them again", async () => {
+    const big = { requestText: "\u0001".repeat(40_000), responseText: "€".repeat(40_000) };
+    const items = [
+      ...Array.from({ length: 14 }, (_, index) => stored(`EvCUT${index}0000`, new Date(now - (index + 1) * 60_000).toISOString(), big)),
+      { ...stored("EvCUTBAD0001", new Date(now - 20 * 60_000).toISOString()), disposition: "unheard-of" },
+    ];
+    items.splice(1, 0, { ...stored("EvCUTBAD0000", new Date(now - 90_000).toISOString()), disposition: "unheard-of" });
+    const result = await exporter({ page: async () => ({ items }) }).exporter.page(new URLSearchParams({ since: "2026-09-17T00:00:00Z" }));
+    expect(result.cursor).toBeDefined();
+    expect(result.turns.length).toBeLessThan(14);
+    expect(result.skipped).toBe(1);
+  });
+
+  it("carries the skipped count on the route response", async () => {
+    const malformed = { ...stored("EvSKIP00005", "2026-09-24T09:00:00.000Z"), disposition: "unheard-of" };
+    const { handler } = await createAdminBroker({
+      turnRecords: new TurnRecordExport({ source: { page: async () => ({ items: [malformed] }) }, projectOf: async () => undefined, now: () => now, log: vi.fn() }),
+    });
+    const response = await adminCall(handler, { method: "GET", path: "/v1/admin/turns?since=2026-09-17T00:00:00.000Z" });
+    expect(response.status).toBe(200);
+    expect(response.body.skipped).toBe(1);
+  });
+});
