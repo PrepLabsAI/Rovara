@@ -805,6 +805,16 @@ Spec 014 phase 14c part 2 turns the action gate on. Operator notes:
   that bookkeeping; only one claims and runs the calls, and the other is told the confirmation was
   already used.
 - The part 1 rollback floor above still applies.
+- Rolling the control plane back below this release does not break the turn record export, but
+  `agentx admin turns export` then skips every record that has a call `gate` or one of the new
+  dispositions: the older control plane's record schema refuses them, counts them as `skipped` and
+  logs `turn_record.invalid`. The records stay in the table and export again after rolling forward,
+  within their 30 days.
+- Rolling the Slack service back below this release while confirmations are pending turns a
+  button press (the control plane still queues it as "yes" or "cancel") or a typed `@AgentX yes`
+  into an ordinary, ungated turn. The model may then re-issue the call it was holding back, and it
+  runs without asking. Roll back only when no confirmation is pending, or tell members not to
+  answer pending ones.
 - Turn records gain a `gate` object on each call and the dispositions `confirmation_refused`,
   `confirmation_cancelled` and `yes_to_all_granted`. Only `answered` and `failed` count in turn
   metrics. The

@@ -86,12 +86,18 @@ removed test line.
    workspace, and AgentX names who can confirm; clicked, the ingress answers that member privately
    and queues nothing. Tests: Task 6, "runs nothing for a yes from a different member"; Task 7,
    "tells anyone else, privately ..."; Task 8, "runs nothing and prepares no workspace ...".
-3. **A replayed or edited "yes".** Expected: a used, cancelled, superseded or expired confirmation
-   is a tombstone for the rest of its 24 hours, and any "yes" or click for it hears "no longer
-   pending"; a repeated click is one duplicate event; a "yes" received before the question does
-   not count; an edit never reaches the service (the ingress drops `message_changed`). Tests: Task 6,
-   "answers any yes for a used ... confirmation ..." and "does not count a yes sent before ...";
-   Task 7, "queues a repeated click once"; Task 8, the third message of the first test.
+3. **A replayed or edited "yes".** Expected (as amended by ruling N4): a used, cancelled,
+   superseded or expired confirmation is a tombstone for the rest of its 24 hours. Only a click on
+   it, or a redelivery of the event that claimed it (or of one received before it was retired),
+   hears "no longer pending"; a redelivery of the claiming "yes" or click hears that an earlier
+   attempt already used it, as does a redelivered approval whose own turn posted the confirmation
+   now pending. A later typed "yes" from anyone is an ordinary request (the single-use claim already
+   prevents a double run). An expired one answers "expired" for 24 hours after its expiry. A
+   repeated click is one duplicate event; a "yes" received before the question does not count; an
+   edit never reaches the service (the ingress drops `message_changed`). Tests: Task 6, "answers
+   only a redelivery ..." and "does not count a yes sent before ..."; Task 7, "queues a repeated
+   click once"; Task 8, the third message of the first test; final fix pass, "I2: tells a
+   redelivered ...".
 4. **The argument hash differs after the model re-issues the call.** Expected: evaluated afresh
    (a destructive call asks again) and the block reason says the arguments differ; key order alone
    never changes the hash. Tests: Task 4, "runs a confirmed call once ..."; Task 5, "tells the model
