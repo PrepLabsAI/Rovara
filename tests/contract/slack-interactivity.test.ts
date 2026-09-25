@@ -156,7 +156,7 @@ describe("Slack interactivity request URL (spec 014 D2)", () => {
     const details: SlackActionHandler = { matches: (id) => id === "agentx_details", handle: async (action) => { seen.push(action); } };
     const { handler, logs, ephemeral, queue } = harness({ extra: [details] });
     await handler(signed(payload({ actionId: "agentx_details", value: "turn-1" })));
-    expect(seen).toEqual([{ actionId: "agentx_details", value: "turn-1", userId: requester, thread, messageTs: "1695500001.000002", messageText: text, responseUrl: "https://hooks.slack.com/actions/T0BSHLLUGBD/1/abc", triggerId: "1.2.3" }]);
+    expect(seen).toEqual([{ actionId: "agentx_details", value: "turn-1", userId: requester, userTeamId: thread.teamId, thread, messageTs: "1695500001.000002", messageText: text, responseUrl: "https://hooks.slack.com/actions/T0BSHLLUGBD/1/abc", triggerId: "1.2.3" }]);
     expect(ephemeral).toEqual([]);
     // An old button after a rollback, or one from a later release: the clicker hears it, the thread does not.
     expect((await handler(signed(payload({ actionId: "something_else" })))).statusCode).toBe(200);

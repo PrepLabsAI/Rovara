@@ -22,6 +22,7 @@ import {
 } from "@agentx/contracts";
 import { requiredEnvironment, type HttpApiV2Event } from "./lambda.js";
 import { parseSlackSecrets, validSignature, type SlackIngressLog, type SlackSecrets } from "./slack-ingress.js";
+import { detailsActionHandler, dynamoTurnDetailsReader } from "./slack-details.js";
 
 const EVENT_RETENTION_SECONDS = 14 * 24 * 60 * 60;
 /** Every Slack call made while Slack waits (3 seconds) for this request's answer gives up after this. */
@@ -33,6 +34,11 @@ export interface SlackBlockAction {
   actionId: string;
   value: string;
   userId: string;
+  /**
+   * The clicking member's own workspace (the payload's user.team_id), which differs from the thread's
+   * team for a Slack Connect member from another organization. Empty when Slack sent none.
+   */
+  userTeamId: string;
   thread: SlackThread;
   /** The message that carries the button. */
   messageTs: string;
@@ -155,6 +161,7 @@ function parseBlockActions(payload: Record<string, unknown>): { actions: SlackBl
   const message = asRecord(payload.message);
   const teamId = SlackTeamIdSchema.safeParse(asRecord(payload.team).id ?? user.team_id);
   const userId = SlackUserIdSchema.safeParse(user.id);
+  const userTeamId = SlackTeamIdSchema.safeParse(user.team_id);
   const channelId = SlackChannelIdSchema.safeParse(container.channel_id ?? asRecord(payload.channel).id);
   const messageTs = SlackMessageTimestampSchema.safeParse(container.message_ts ?? message.ts);
   const threadTs = SlackMessageTimestampSchema.safeParse(message.thread_ts ?? container.thread_ts ?? container.message_ts);
@@ -167,6 +174,7 @@ function parseBlockActions(payload: Record<string, unknown>): { actions: SlackBl
       actionId: entry.action_id,
       value: entry.value,
       userId: userId.data,
+      userTeamId: userTeamId.success ? userTeamId.data : "",
       thread,
       messageTs: messageTs.data,
       messageText: typeof message.text === "string" ? message.text : "",
@@ -307,6 +315,7 @@ export function createAwsSlackInteractivityHandler() {
   const threadsTableName = requiredEnvironment("SLACK_THREADS_TABLE_NAME");
   const queueUrl = requiredEnvironment("SLACK_REQUEST_QUEUE_URL");
   const secretArn = requiredEnvironment("SLACK_SECRET_ARN");
+  const turnRecordsTableName = requiredEnvironment("TURN_RECORDS_TABLE_NAME");
   let cached: { secrets: Promise<SlackSecrets>; loadedAt: number } | undefined;
   const secrets = (): Promise<SlackSecrets> => {
     if (!cached || Date.now() - cached.loadedAt > SECRET_CACHE_MILLISECONDS) {
@@ -355,6 +364,12 @@ export function createAwsSlackInteractivityHandler() {
       async updateMessage(input) {
         await slackApi((await secrets()).botToken, "chat.update", input);
       },
+      respondEphemeral: (responseUrl, text) => respondEphemeral(responseUrl, text),
+      log,
+    }), detailsActionHandler({
+      // Spec 014 FR-024: the Details view reads one turn record's non-text fields and opens a modal.
+      readDetails: dynamoTurnDetailsReader(documentClient, turnRecordsTableName),
+      openView: async (triggerId, view) => slackApi((await secrets()).botToken, "views.open", { trigger_id: triggerId, view }),
       respondEphemeral: (responseUrl, text) => respondEphemeral(responseUrl, text),
       log,
     })],
