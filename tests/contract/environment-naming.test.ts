@@ -148,4 +148,12 @@ describe("environment naming", () => {
     const legacyControl = productionStacks(buildAgentXApp()).find((stack) => stack.stackName === "AgentXControlPlane")!;
     expect(JSON.stringify(Template.fromStack(legacyControl).toJSON())).not.toContain("CONNECTOR_SECRET_PREFIX");
   }, 240_000);
+
+  it("keeps each environment's metrics and alarms in its own namespace", () => {
+    const stacks = productionStacks(buildAgentXApp({ agentxEnv: "staging" }));
+    const text = stacks.map((stack) => JSON.stringify(Template.fromStack(stack).toJSON())).join("\n");
+    expect(text).not.toMatch(/"(?:Namespace|MetricNamespace)":"AgentX"/);
+    expect(text).toContain("\"AGENTX_METRICS_NAMESPACE\":\"AgentX/staging\"");
+    expect(text).toMatch(/"(?:Namespace|MetricNamespace)":"AgentX\/staging"/);
+  }, 240_000);
 });

@@ -8,6 +8,10 @@ export type ConnectorMetric =
 type Write = (line: string) => void;
 const stdout: Write = (line) => console.log(line);
 
+function metricsNamespace(): string {
+  return process.env.AGENTX_METRICS_NAMESPACE ?? "AgentX";
+}
+
 // The connector routes and their feature 007 github aliases; the query string is not part of the path.
 const CONNECTOR_ROUTE = /^\/v1\/workspaces\/[0-9a-f-]+\/(?:connectors\/([a-z][a-z0-9-]{0,19})|(github))\/(tools|call)$/;
 
@@ -20,13 +24,13 @@ const CONNECTOR_ROUTE = /^\/v1\/workspaces\/[0-9a-f-]+\/(?:connectors\/([a-z][a-
  * failure must not be silent either, so it is reported on a fallback line naming only the metric, the
  * connector and the error's class name (never its message, which could quote request content).
  */
-export function emitConnectorMetric(metric: ConnectorMetric, connector: string, count = 1, write: Write = stdout): void {
+export function emitConnectorMetric(metric: ConnectorMetric, connector: string, count = 1, write: Write = stdout, namespace = metricsNamespace()): void {
   if (count <= 0) return;
   try {
     write(JSON.stringify({
       _aws: {
         Timestamp: Date.now(),
-        CloudWatchMetrics: [{ Namespace: "AgentX", Dimensions: [["connector"], []], Metrics: [{ Name: metric, Unit: "Count" }] }],
+        CloudWatchMetrics: [{ Namespace: namespace, Dimensions: [["connector"], []], Metrics: [{ Name: metric, Unit: "Count" }] }],
       },
       component: "broker",
       event: "metric",

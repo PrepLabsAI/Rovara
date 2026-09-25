@@ -92,7 +92,7 @@ export class SlackOrchestratorStack extends Stack {
           logs.FilterPattern.stringValue("$.event", "=", "metric"),
           logs.FilterPattern.stringValue("$.metric", "=", metric),
         ),
-        metricNamespace: "AgentX",
+        metricNamespace: naming.metricsNamespace,
         metricName: metric,
         metricValue: "$.count",
         ...(dimensions === undefined ? {} : { dimensions }),
@@ -101,7 +101,7 @@ export class SlackOrchestratorStack extends Stack {
     // A failure while emitting the lines above would otherwise leave those metrics silently missing.
     logGroup.addMetricFilter("TurnMetricsEmitFailedMetric", {
       filterPattern: logs.FilterPattern.stringValue("$.event", "=", "turn_metrics.emit_failed"),
-      metricNamespace: "AgentX",
+      metricNamespace: naming.metricsNamespace,
       metricName: "TurnMetricsEmitFailed",
       metricValue: "1",
     });

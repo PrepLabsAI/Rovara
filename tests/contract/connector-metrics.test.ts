@@ -123,4 +123,18 @@ describe("broker connector metrics", () => {
       console.log = log;
     }
   });
+
+  it("publishes into the configured namespace", () => {
+    const lines: string[] = [];
+    emitConnectorMetric("ConnectorNotConnected", "linear", 1, (line) => lines.push(line), "AgentX/staging");
+    const parsed = JSON.parse(lines[0]!) as Record<string, unknown>;
+    expect(parsed._aws).toMatchObject({ CloudWatchMetrics: [{ Namespace: "AgentX/staging" }] });
+  });
+
+  it("defaults to the AgentX namespace", () => {
+    const lines: string[] = [];
+    emitConnectorMetric("ConnectorNotConnected", "linear", 1, (line) => lines.push(line));
+    const parsed = JSON.parse(lines[0]!) as Record<string, unknown>;
+    expect(parsed._aws).toMatchObject({ CloudWatchMetrics: [{ Namespace: "AgentX" }] });
+  });
 });

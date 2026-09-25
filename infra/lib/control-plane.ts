@@ -311,7 +311,8 @@ export class ControlPlaneStack extends Stack {
     // The broker publishes these in embedded metric format with a dimensionless series as well as a
     // per-connector one; the alarms read the dimensionless series, so they cover every connector.
     const agentxSum = (metricName: string, period: Duration) =>
-      new cloudwatch.Metric({ namespace: "AgentX", metricName, statistic: "Sum", period });
+      new cloudwatch.Metric({ namespace: naming.metricsNamespace, metricName, statistic: "Sum", period });
+    if (naming.env !== undefined) broker.addEnvironment("AGENTX_METRICS_NAMESPACE", naming.metricsNamespace);
     new cloudwatch.Alarm(this, "ConnectorBrokenAlarm", {
       alarmName: naming.alarmName("ConnectorBroken"),
       alarmDescription: "A connector's discovery failed or a vendor changed an approved tool's schema. Check the broker logs for connector metrics and connector.* events.",
