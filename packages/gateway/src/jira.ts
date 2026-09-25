@@ -240,6 +240,28 @@ export const jiraProjectGuard: Guard = {
   },
 };
 
+const MAX_SEARCH_NOTE = 512;
+const SEND_THE_REST = "send only the rest of the query.";
+
+/**
+ * The approvals as presented, with a sentence on a project-scoped search that says AgentX adds the
+ * project filter, so a model that names another project learns why nothing matches. An admin
+ * description override is left exactly as it is.
+ */
+export function jiraApprovals<Approval extends { name: string; description?: string | undefined }>(
+  approvals: readonly Approval[],
+  scopes: readonly JiraScope[],
+): Array<Approval & { note?: string }> {
+  const keyed = scopes.filter((scope): scope is JiraScope & { projectKey: string } => scope.projectKey !== undefined);
+  if (keyed.length === 0 || keyed.length !== scopes.length) return [...approvals];
+  const keys = [...new Set(keyed.map((scope) => scope.projectKey))];
+  let note = keys.length === 1
+    ? `AgentX limits every search to project ${keys[0]!}; ${SEND_THE_REST}`
+    : `AgentX limits every search to the project of the chosen target (${keyed.map((scope) => `${scope.alias}: ${scope.projectKey}`).join(", ")}); ${SEND_THE_REST}`;
+  if (note.length > MAX_SEARCH_NOTE) note = `AgentX limits every search to the project of the chosen target; ${SEND_THE_REST}`;
+  return approvals.map((approval) => approval.name === "searchJiraIssuesUsingJql" && approval.description === undefined ? { ...approval, note } : approval);
+}
+
 export function jiraConnector(credentials: CredentialProvider<JiraScope>, options: { projectScoped: boolean }): ConnectorDefinition<JiraScope> {
   return {
     label: "Jira",

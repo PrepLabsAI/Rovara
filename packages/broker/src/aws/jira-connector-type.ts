@@ -1,5 +1,5 @@
 import { JiraConnectorSchema, type CredentialType } from "@agentx/contracts";
-import { jiraConnector, type JiraScope } from "@agentx/gateway";
+import { jiraApprovals, jiraConnector, type JiraScope } from "@agentx/gateway";
 import { connectorLedgerKeys } from "./connector-ledger.js";
 import type { ConnectorType, ResolvedConnector } from "./connector-types.js";
 
@@ -31,7 +31,7 @@ export const jiraConnectorType: ConnectorType = {
       scopeNoun: projectScoped ? "Jira project" : "Jira site",
       scopes: jira.scopes.map((scope) => ({ alias: scope.alias, scope })),
       policy: { tools: jira.tools },
-      approvals: jira.tools,
+      approvals: jiraApprovals(jira.tools, jira.scopes),
       attribution: jira.attribution !== false,
       ledger: connectorLedgerKeys(jira.name),
       credential: { ref: jira.credentialRef, accepts: ACCEPTS },

@@ -114,6 +114,14 @@ describe("connector resolution", () => {
       credential: { ref: "jira-sa", accepts: ["static-secret"] }, ledger: { prefix: "CONNECTOR#jira#", entityType: "CONNECTOR_INVOCATION" },
     });
     expect(resolve([{ alias: "site", cloudId: "1437bb04-4c88-4efd-9d38-658e8febfeba" }]).scopeNoun).toBe("Jira site");
+    const searching = (scopes: unknown, description?: string) => resolveConnectors(project({ connectors: [
+      { name: "jira", type: "jira", credentialRef: "jira-sa", scopes, tools: [{ name: "searchJiraIssuesUsingJql", access: "read", ...(description ? { description } : {}) }] },
+    ] }), { credentialRegistry })[0]!;
+    expect(searching([{ alias: "kan", cloudId: "1437bb04-4c88-4efd-9d38-658e8febfeba", projectKey: "KAN" }]).approvals)
+      .toEqual([{ name: "searchJiraIssuesUsingJql", access: "read", note: "AgentX limits every search to project KAN; send only the rest of the query." }]);
+    expect(searching([{ alias: "kan", cloudId: "1437bb04-4c88-4efd-9d38-658e8febfeba", projectKey: "KAN" }], "Search KAN.").approvals)
+      .toEqual([{ name: "searchJiraIssuesUsingJql", access: "read", description: "Search KAN." }]);
+    expect(searching([{ alias: "site", cloudId: "1437bb04-4c88-4efd-9d38-658e8febfeba" }]).approvals).toEqual([{ name: "searchJiraIssuesUsingJql", access: "read" }]);
     expect(await projectScoped.configured()).toBe(false);
     expect(await projectScoped.definition()).toEqual({ notConnected: "credential jira-sa is not registered" });
 
