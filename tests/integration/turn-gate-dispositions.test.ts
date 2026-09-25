@@ -83,8 +83,30 @@ describe("turns that stop because a confirmation was refused (spec 014 FR-021)",
     expect(stored()[0]).toMatchObject({ disposition: "confirmation_refused", responseText: posts.at(-1) });
   });
 
+  it("M3: records a cancel as confirmation_cancelled, not abandoned, and counts no completed turn", async () => {
+    const turn = vi.fn(async () => "unused");
+    const { posts, logs, stored, dependencies, pending } = harness(turn);
+    await pending();
+    await processSlackRequest(slackMessage("EvGATEREF003", "cancel", { receivedAt: new Date(start + 60_000).toISOString() }), dependencies, { finalAttempt: false });
+    expect(turn).not.toHaveBeenCalled();
+    expect(posts.at(-1)).toBe("Cancelled. Nothing was run.");
+    expect(stored()[0]).toMatchObject({ disposition: "confirmation_cancelled", responseText: posts.at(-1), calls: [] });
+    expect(stored()[0]).not.toHaveProperty("error");
+    expect(logs.filter((line) => line.event === "metric")).toEqual([]);
+  });
+
+  it("M3: records a lone yes to all as yes_to_all_granted, not abandoned, and counts no completed turn", async () => {
+    const turn = vi.fn(async () => "unused");
+    const { posts, logs, stored, dependencies } = harness(turn);
+    await processSlackRequest(slackMessage("EvGATEREF004", "yes to all in this thread", { receivedAt: new Date(start + 60_000).toISOString() }), dependencies, { finalAttempt: false });
+    expect(turn).not.toHaveBeenCalled();
+    expect(stored()[0]).toMatchObject({ disposition: "yes_to_all_granted", responseText: posts.at(-1), calls: [] });
+    expect(logs.filter((line) => line.event === "metric")).toEqual([]);
+  });
+
   it("keeps every other disposition an older record used", () => {
-    for (const disposition of ["answered", "failed", "abandoned", "workspace_close", "workspace_limit", "workspace_closed", "workspace_unavailable", "confirmation_refused"]) {
+    for (const disposition of ["answered", "failed", "abandoned", "workspace_close", "workspace_limit", "workspace_closed", "workspace_unavailable", "confirmation_refused",
+      "confirmation_cancelled", "yes_to_all_granted"]) {
       expect(TurnRecordSchema.shape.disposition.safeParse(disposition).success, disposition).toBe(true);
     }
   });

@@ -542,7 +542,9 @@ requests the service settled without running the orchestrator: a close command
 (`workspace_close`), the workspace limit (`workspace_limit`), a closed workspace
 (`workspace_closed`), a workspace that could not be set up or is not runnable
 (`workspace_unavailable`), and an answer to a confirmation that could not be used because it was
-another member's, no longer pending, expired or already used (`confirmation_refused`). An attempt that fails and is retried leaves no record; the attempt that
+another member's, no longer pending, expired or already used (`confirmation_refused`), a cancel of a
+pending confirmation (`confirmation_cancelled`), and a "yes to all" that only granted it because no
+confirmation was pending (`yes_to_all_granted`). An attempt that fails and is retried leaves no record; the attempt that
 finishes writes the one record. A record holds the request and response text (each at most 40,000 characters), the tools the
 orchestrator was offered, each tool call with its redacted arguments, validation result,
 outcome and action gate decision (`gate`: outcome, source, kind, rule and a short reason), the stop reason, the orchestrator's token usage, and the worker operations it started.
@@ -801,7 +803,9 @@ Spec 014 phase 14c part 2 turns the action gate on. Operator notes:
   that bookkeeping; only one claims and runs the calls, and the other is told the confirmation was
   already used.
 - The part 1 rollback floor above still applies.
-- Turn records gain a `gate` object on each call and the disposition `confirmation_refused`. The
+- Turn records gain a `gate` object on each call and the dispositions `confirmation_refused`,
+  `confirmation_cancelled` and `yes_to_all_granted`. Only `answered` and `failed` count in turn
+  metrics. The
   service logs `gate.decision` for each call, and `gate.confirmation_requested`,
   `gate.confirmation_approved`, `gate.confirmation_cancelled`, `gate.confirmation_refused` and
   `gate.yes_to_all` for answers.

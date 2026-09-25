@@ -136,7 +136,7 @@ flight never gets a partial record.
 | `eventId`, `subject`, `requestedBy`, `settingsRevision`, `workspaceId`, `conversationId` | Identity and routing |
 | `project` | Added at export from the workspace record; not stored |
 | `receivedAt` | The time AgentX's Slack ingress received the event (ISO). Part of the sort key, so a redelivery of the same event maps to the same record |
-| `disposition` | `answered`, `failed`, `abandoned`, `workspace_close`, `workspace_limit`, `workspace_closed`, `workspace_unavailable`, `confirmation_refused` (spec 014: the message answered a confirmation that could not be used, so nothing ran; older records never have it) |
+| `disposition` | `answered`, `failed`, `abandoned`, `workspace_close`, `workspace_limit`, `workspace_closed`, `workspace_unavailable`, `confirmation_refused` (spec 014: the message answered a confirmation that could not be used, so nothing ran; older records never have it), `confirmation_cancelled` (spec 014: the requester cancelled a pending confirmation), `yes_to_all_granted` (spec 014: a "yes to all" with no pending confirmation only granted it) |
 | `model` | `{ provider, modelId }` |
 | `startedAt`, `finishedAt`, `durationMs` | Timing |
 | `manifestHash` | SHA-256 of the capabilities manifest |

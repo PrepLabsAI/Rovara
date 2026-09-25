@@ -155,7 +155,7 @@ describe("checking a message against the thread's confirmation", () => {
     await store.save(subject, pending);
     expect(await check("yes", { eventId: confirmationClickEventId(pending.confirmationId, "approve") })).toMatchObject({ run: true, claim: { confirmationId: pending.confirmationId } });
     expect(await check("yes", { eventId: confirmationClickEventId("66666666-6666-5666-8666-666666666666", "approve") })).toEqual({ run: false, refused: "not_pending" });
-    expect(await check("cancel", { eventId: confirmationClickEventId(pending.confirmationId, "cancel") })).toEqual({ run: false });
+    expect(await check("cancel", { eventId: confirmationClickEventId(pending.confirmationId, "cancel") })).toEqual({ run: false, answered: "cancelled" });
     expect(posts).toEqual([NO_LONGER_PENDING_TEXT, CANCELLED_TEXT]);
     expect((await store.load(subject))?.usedBy).toBe(confirmationClickEventId(pending.confirmationId, "cancel"));
   });
@@ -218,7 +218,7 @@ describe("checking a message against the thread's confirmation", () => {
     const { store, check, posts } = harness();
     expect(await check("yes")).toEqual({ run: true, session: createGateSession(requester) });
     expect(await check("no")).toEqual({ run: true, session: createGateSession(requester) });
-    expect(await check("yes to all in this thread")).toEqual({ run: false });
+    expect(await check("yes to all in this thread")).toEqual({ run: false, answered: "yes_to_all" });
     expect(posts).toEqual([YES_TO_ALL_TEXT]);
     expect(await check("create an item")).toEqual({ run: true, session: createGateSession(requester, { yesToAll: true }) });
     await store.save(subject, pending);
@@ -239,7 +239,7 @@ describe("tombstones, expiry and yes to all", () => {
     const posts: string[] = [];
     const check = (text: string, eventId: string) => checkConfirmation({ message: message(text, { eventId, receivedAt: new Date(now).toISOString() }), subject, store, post: async (value) => { posts.push(value); }, log: vi.fn(), now });
     expect(await check("yes", "EvYES0000002")).toEqual({ run: true, session: createGateSession(requester) });
-    expect(await check("yes to all", "EvYES0000003")).toEqual({ run: false });
+    expect(await check("yes to all", "EvYES0000003")).toEqual({ run: false, answered: "yes_to_all" });
     expect(posts).toEqual([YES_TO_ALL_TEXT]);
     expect(await store.yesToAll(subject, requester)).toBe(true);
   });
@@ -248,7 +248,7 @@ describe("tombstones, expiry and yes to all", () => {
     const { store, check, posts } = harness();
     await store.save(subject, pending);
     await store.claim(subject, pending.confirmationId, "EvYES0000001");
-    expect(await check("yes to all in this thread", { eventId: "EvYES0000002" })).toEqual({ run: false });
+    expect(await check("yes to all in this thread", { eventId: "EvYES0000002" })).toEqual({ run: false, answered: "yes_to_all" });
     expect(posts).toEqual([YES_TO_ALL_TEXT]);
     expect(await store.yesToAll(subject, requester)).toBe(true);
   });
@@ -313,7 +313,7 @@ describe("tombstones, expiry and yes to all", () => {
     const { store, check, posts } = harness(now);
     await store.save(subject, pending);
     const receivedAt = new Date(now).toISOString();
-    expect(await check("yes to all", { receivedAt })).toEqual({ run: false });
+    expect(await check("yes to all", { receivedAt })).toEqual({ run: false, answered: "yes_to_all" });
     expect(posts).toEqual([YES_TO_ALL_TEXT]);
     expect(await store.yesToAll(subject, requester)).toBe(true);
     expect(await store.load(subject)).toMatchObject({ usedBy: "expired" });

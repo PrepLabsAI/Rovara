@@ -77,8 +77,8 @@ export function confirmationIdFor(eventId: string): string {
 }
 
 export type ConfirmationCheck =
-  /** `refused` names why a confirmation answer could not be used; a cancel or a lone "yes to all" has none. */
-  | { run: false; refused?: string }
+  /** `refused` names why a confirmation answer could not be used; `answered` marks a cancel or a lone "yes to all". */
+  | { run: false; refused?: string; answered?: "cancelled" | "yes_to_all" }
   | { run: true; session: GateSession; claim?: { confirmationId: string }; superseded?: string };
 
 /**
@@ -143,7 +143,7 @@ export async function checkConfirmation(input: {
     await store.grantYesToAll(subject, message.userId);
     log("gate.yes_to_all", { eventId: message.eventId });
     await post(YES_TO_ALL_TEXT);
-    return { run: false };
+    return { run: false, answered: "yes_to_all" };
   }
   if (!pending) return { run: true, session: session() };
   if (!live) {
@@ -168,7 +168,7 @@ export async function checkConfirmation(input: {
     await store.retire(subject, pending.confirmationId, message.eventId);
     log("gate.confirmation_cancelled", { eventId: message.eventId, calls: pending.calls.length });
     await post(CANCELLED_TEXT);
-    return { run: false };
+    return { run: false, answered: "cancelled" };
   }
   if (reply === "yes_to_all") await store.grantYesToAll(subject, message.userId);
   log("gate.confirmation_approved", { eventId: message.eventId, calls: pending.calls.length, click: click !== undefined });

@@ -172,6 +172,8 @@ export async function processSlackRequest(
       if (!check.run) {
         // Spec 014 FR-021: a refused confirmation answer is recorded as such, not as abandoned.
         if (check.refused !== undefined) draft.disposition = "confirmation_refused";
+        else if (check.answered === "cancelled") draft.disposition = "confirmation_cancelled";
+        else if (check.answered === "yes_to_all") draft.disposition = "yes_to_all_granted";
         finished = true;
         return;
       }

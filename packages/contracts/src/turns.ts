@@ -69,11 +69,13 @@ export const TurnObservationSchema = z.object({
 /**
  * How a turn ended. `confirmation_refused` (spec 014 FR-021): the message answered a confirmation
  * that could not be used (another member's, no longer pending, expired, or claimed by another
- * event), so nothing ran. Like the workspace dispositions it never ran the orchestrator.
+ * event), so nothing ran. `confirmation_cancelled`: the requester cancelled a pending confirmation.
+ * `yes_to_all_granted`: a "yes to all" with no pending confirmation only granted it. Like the
+ * workspace dispositions, none of these ran the orchestrator or counts in turn metrics.
  */
 export const TurnDispositionSchema = z.enum([
   "answered", "failed", "abandoned", "workspace_close", "workspace_limit", "workspace_closed", "workspace_unavailable",
-  "confirmation_refused",
+  "confirmation_refused", "confirmation_cancelled", "yes_to_all_granted",
 ]);
 
 export const TurnRecordSchema = TurnObservationSchema.extend({
