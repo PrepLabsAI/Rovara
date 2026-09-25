@@ -18,6 +18,7 @@ import {
   createOrchestrationTools,
   type OrchestrationApi,
   type OrchestrationContext,
+  type WorkerAccess,
 } from "./orchestration-tools.js";
 import { capabilitiesManifest } from "./manifest.js";
 import type { TurnRecorder } from "./turn-recorder.js";
@@ -37,6 +38,8 @@ export interface OrchestratorOptions {
   refreshConnectors?: readonly string[];
   /** Told about each connector whose discovery failed this turn, so the host can log it. */
   onConnectorUnavailable?: (failure: ConnectorUnavailable) => void;
+  /** Spec 014: present only for a thread whose compute is not prepared yet. */
+  worker?: WorkerAccess;
   /** Collects this turn's record; the Slack service owns writing it. */
   turnRecorder?: TurnRecorder;
   /** Tests and the offline evaluation register Pi's faux provider here; production creates its own. */
@@ -84,6 +87,7 @@ export async function createOrchestratorRuntime(options: OrchestratorOptions): P
     recovery: (options.recoverableOperations?.length ?? 0) > 0,
     ...(options.requestId === undefined ? {} : { requestId: options.requestId }),
     ...(recorder === undefined ? {} : { onConnectorError: (toolCallId: string, code: string) => recorder.connectorFailed(toolCallId, code) }),
+    ...(options.worker === undefined ? {} : { worker: options.worker }),
   });
   assertOrchestrationOnly(customTools, catalogs);
   if (customTools.length > MAX_VISIBLE_TOOLS) {
