@@ -9,6 +9,7 @@ import {
   type SlackWorkspaceCloseCompleteResult,
   type SlackWorkspaceCloseStartResult,
   type ThreadConnector,
+  type TurnRecord,
 } from "@agentx/contracts";
 import { TurnRecorder } from "@agentx/orchestrator/turn-recorder";
 import { deterministicUuid, requestIdSequence } from "./ids.js";
@@ -227,6 +228,11 @@ export async function processSlackRequest(
  * Builds, validates, fits and writes the record inside one try: any failure, including a record
  * that fails its schema, is logged by event ID and error class with a metric, and never reaches the
  * member, who already has their reply. Record contents are never logged.
+ *
+ * Turn metrics are emitted in their own try, separate from the write: a turn that ran the
+ * orchestrator is counted whether or not its record could be written (including a write that throws
+ * or times out), but a turn whose record never built has nothing to derive metrics from. A failure
+ * while emitting metrics is reported on its own event, never mislabelled as a write failure.
  */
 async function recordTurn(
   sink: TurnRecordSink,
@@ -234,15 +240,25 @@ async function recordTurn(
   recorder: TurnRecorder,
   input: Omit<Parameters<typeof buildTurnRecord>[0], "observation">,
 ): Promise<void> {
+  let record: TurnRecord | undefined;
+  let duplicate = false;
   try {
-    const record = buildTurnRecord({ ...input, observation: recorder.observation() });
+    record = buildTurnRecord({ ...input, observation: recorder.observation() });
     const written = await sink.write(record);
-    // Emitted only for the first write, so a redelivered event is counted once.
-    if (written === "written") emitTurnMetrics(record, log);
-    else log("turn_record.duplicate", { eventId: input.message.eventId });
+    if (written === "duplicate") {
+      duplicate = true;
+      log("turn_record.duplicate", { eventId: input.message.eventId });
+    }
   } catch (error) {
     log("turn_record.write_failed", { eventId: input.message.eventId, errorName: errorName(error) });
     log("metric", { metric: "TurnRecordWriteFailed", count: 1 });
+  }
+  if (record !== undefined && !duplicate) {
+    try {
+      emitTurnMetrics(record, log);
+    } catch (error) {
+      log("turn_metrics.emit_failed", { eventId: input.message.eventId, errorName: errorName(error) });
+    }
   }
 }
 

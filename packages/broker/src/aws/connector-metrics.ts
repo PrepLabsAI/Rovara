@@ -34,13 +34,17 @@ export function emitConnectorMetric(metric: ConnectorMetric, connector: string, 
       [metric]: count,
     }));
   } catch (error) {
-    console.log(JSON.stringify({
-      component: "broker",
-      event: "metric_emit_failed",
-      metric,
-      connector,
-      error: error instanceof Error ? error.name : "unknown",
-    }));
+    try {
+      console.log(JSON.stringify({
+        component: "broker",
+        event: "metric_emit_failed",
+        metric,
+        connector,
+        error: error instanceof Error ? error.name : "unknown",
+      }));
+    } catch {
+      // The diagnostic channel is unavailable too (stdout itself is gone); nothing left to report to.
+    }
   }
 }
 
@@ -62,9 +66,10 @@ export async function observeConnectorRoute<T extends { statusCode: number; body
   try {
     response = await route();
   } catch (error) {
-    // An unreachable or failing vendor is RUNTIME_UNAVAILABLE; authorization and input errors are not the connector's fault.
+    // Only a modeled RUNTIME_UNAVAILABLE failure is the connector's fault; a code-less error (an AWS
+    // SDK throttle, for example) and an authorization or input error are not counted here.
     const code = (error as { code?: unknown } | null)?.code;
-    if (discovery && (code === undefined || code === "RUNTIME_UNAVAILABLE")) emitConnectorMetric("ConnectorDiscoveryFailed", connector, 1, write);
+    if (discovery && code === "RUNTIME_UNAVAILABLE") emitConnectorMetric("ConnectorDiscoveryFailed", connector, 1, write);
     throw error;
   }
   const body = parseObject(response.body);
@@ -74,9 +79,13 @@ export async function observeConnectorRoute<T extends { statusCode: number; body
     if (Array.isArray(catalog.skipped)) emitConnectorMetric("ConnectorToolSkipped", connector, catalog.skipped.length, write);
   } else {
     const result = asObject(body.result);
-    if (result.reason === "schema_changed") emitConnectorMetric("ConnectorSchemaDrift", connector, 1, write);
-    if (result.reason === "not_connected") emitConnectorMetric("ConnectorNotConnected", connector, 1, write);
-    if (result.status === "UNKNOWN") emitConnectorMetric("ToolCallUnknownOutcome", connector, 1, write);
+    // A replayed ledger result is the same outcome the original request already counted; counting
+    // it again would double-count every idempotent retry and hosted redelivery.
+    if (result.replayed !== true) {
+      if (result.reason === "schema_changed") emitConnectorMetric("ConnectorSchemaDrift", connector, 1, write);
+      if (result.reason === "not_connected") emitConnectorMetric("ConnectorNotConnected", connector, 1, write);
+      if (result.status === "UNKNOWN") emitConnectorMetric("ToolCallUnknownOutcome", connector, 1, write);
+    }
   }
   return response;
 }

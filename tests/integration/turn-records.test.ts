@@ -120,6 +120,8 @@ describe("turn records from the Slack processor", () => {
     expect(posts.at(-1)).toBe("No open issues.");
     expect(logs).toContain(JSON.stringify({ event: "turn_record.write_failed", eventId: "EvTURN00001", errorName: "ProvisionedThroughputExceededException" }));
     expect(logs).toContain(JSON.stringify({ event: "metric", metric: "TurnRecordWriteFailed", count: 1 }));
+    // A write failure still built a record, so the turn itself is still counted.
+    expect(logs).toContain(JSON.stringify({ event: "metric", metric: "TurnCompleted", count: 1 }));
   });
 });
 
@@ -137,6 +139,8 @@ describe("turn record failures and pass-through", () => {
     expect(stored()).toHaveLength(0);
     expect(logs).toContain(JSON.stringify({ event: "turn_record.write_failed", eventId: "EvTURN00001", errorName: "ZodError" }));
     expect(logs).toContain(JSON.stringify({ event: "metric", metric: "TurnRecordWriteFailed", count: 1 }));
+    // A record that never built has nothing to derive turn metrics from.
+    expect(logs.filter((line) => line.includes("\"event\":\"metric\""))).toEqual([JSON.stringify({ event: "metric", metric: "TurnRecordWriteFailed", count: 1 })]);
   });
 
   it("passes recording errors from the observation into the record and never logs them", async () => {
@@ -197,6 +201,8 @@ describe("turn record failures and pass-through", () => {
     expect(posts.at(-1)).toBe("No open issues.");
     expect(logs).toContain(JSON.stringify({ event: "turn_record.write_failed", eventId: "EvTURN00001", errorName: "TimeoutError" }));
     expect(logs).toContain(JSON.stringify({ event: "metric", metric: "TurnRecordWriteFailed", count: 1 }));
+    // A write that times out still built a record, so the turn itself is still counted.
+    expect(logs).toContain(JSON.stringify({ event: "metric", metric: "TurnCompleted", count: 1 }));
     expect(finish).toHaveBeenCalledOnce();
   });
 
@@ -276,5 +282,17 @@ describe("turn metrics", () => {
     const { dependencies, logs } = harness();
     await processSlackRequest({ ...message, eventId: "EvTURN00004", text: "close this workspace" }, dependencies, { finalAttempt: false });
     expect(logs.filter((line) => line.includes("\"event\":\"metric\""))).toEqual([]);
+  });
+
+  it("reports a metrics-emission failure on its own event, never mislabelled as a write failure", async () => {
+    const { dependencies, logs } = harness();
+    dependencies.log = (event, fields) => {
+      if (event === "metric") throw new Error("logger down");
+      logs.push(JSON.stringify({ event, ...fields }));
+    };
+    await processSlackRequest(message, dependencies, { finalAttempt: false });
+    expect(logs.some((line) => line.includes("turn_record.write_failed"))).toBe(false);
+    const parsed = logs.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(parsed).toContainEqual({ event: "turn_metrics.emit_failed", eventId: "EvTURN00001", errorName: "Error" });
   });
 });
