@@ -29,9 +29,10 @@ phase 4 on mainline (`packages/contracts/src/turns.ts`, `packages/slack-service/
 `infra/lib/control-plane.ts`).
 
 **Order and branch:** 14a, 14b PR A, 14c part 1, 14b PR B, 14c part 2, then **this phase**. Branch
-`feat/014d-details`, cut from mainline once 14c part 2 has merged. This plan is written against
-mainline `af67c2c` plus those five. Its code has not been compiled against that base yet. Task 1,
-Step 1 checks every anchor the later tasks edit, before any change.
+`feat/014d-details`, cut from mainline once 14c part 2 has merged. This plan was written against
+mainline `af67c2c` plus those five, and re-checked against `origin/mainline` at `f8b35b8` (the merge
+of 14c part 2, #63). Its code has not been compiled against that base yet. Task 1, Step 1 checks
+every anchor the later tasks edit, before any change.
 
 ## Global Constraints
 
@@ -51,7 +52,8 @@ Step 1 checks every anchor the later tasks edit, before any change.
   is unchanged.
 - **FR-025 is met by 14c part 2 and reused as is.** There is no new route, signing code or Lambda.
   The Details handler is one more entry in `createAwsSlackInteractivityHandler`'s `handlers` list.
-  The only other edit to `slack-interactivity.ts` is exporting its `slackApi` helper.
+  14c part 2 already exports `slackApi` and `respondEphemeral`, so the only edits to
+  `slack-interactivity.ts` are one import, one environment read and that `handlers` entry.
 - **Nothing is posted to the thread.** The Details handler has no posting dependency. It opens a
   modal, or answers through `response_url` with an ephemeral message when the modal cannot open.
 - **Never fail silently.** Every outcome the member can meet is said in the modal: no record yet,
@@ -67,6 +69,10 @@ Step 1 checks every anchor the later tasks edit, before any change.
 - **Docs style.** Plain, short sentences. No em-dashes. Written for any administrator of a
   self-hosted AgentX.
 - **Fix before the PR.** Fix cheap review findings, and anything that fails silently, before the PR.
+- **Call out the new reader in the PR (owner decision).** The PR description has a section for
+  Pratik: the ingress Lambda gains a narrow, read-only turn-record reader (Task 5: one `GetItem` by
+  key, only `TURN_DETAILS_READ_ATTRIBUTES`, no Query, Scan or index), and "gives no other role access
+  to turn records" is the one amended assertion.
 
 ## Review Focus
 
@@ -108,7 +114,7 @@ Step 1 checks every anchor the later tasks edit, before any change.
 | `packages/contracts/src/index.ts` | Export `slack-details.js` |
 | `packages/broker/src/aws/slack-details-view.ts` (new) | Pure modal builder: summary, calls, gate lines, Slack limits, escaping, truncation |
 | `packages/broker/src/aws/slack-details.ts` (new) | `detailsActionHandler` (parse, read, check, open, fall back) and `dynamoTurnDetailsReader` |
-| `packages/broker/src/aws/slack-interactivity.ts` | Export `slackApi`; register the Details handler in `createAwsSlackInteractivityHandler` |
+| `packages/broker/src/aws/slack-interactivity.ts` | Register the Details handler in `createAwsSlackInteractivityHandler` (`slackApi` is already exported) |
 | `infra/lib/control-plane.ts` | `TURN_DETAILS_READ_ATTRIBUTES`; the ingress `GetItem` grant with attribute conditions; `TURN_RECORDS_TABLE_NAME` on the ingress |
 | `packages/slack-service/src/processor.ts` | `ProcessorDependencies.postWithBlocks?`; the Details button on the last reply chunk; text fallback |
 | `packages/slack-service/src/main.ts` | Wires `postWithBlocks` to 14c part 2's `postToSlack(..., blocks)` |
@@ -194,10 +200,11 @@ Step 1 checks every anchor the later tasks edit, before any change.
   - It never shows request or response text, and it contains no links. Every piece of
     record-derived text has `&`, `<` and `>` escaped, and every text object sets `verbatim: true`,
     so nothing in a record becomes a link, mention or channel alert.
-- **R6. Gate decisions are shown when the record has them.** 14c part 2 names "gate decisions in
-  turn records" as a follow-up: `TurnCall.gate = { outcome, source, kind?, rule?, reason }`, with
-  `reason` of at most 200 characters. `TurnDetailsSchema` reads `calls[].gate` as unknown, and the
-  view parses it with its own lenient `DetailsGateSchema`. A matching decision is shown as one
+- **R6. Gate decisions are shown when the record has them.** 14c part 2 records them:
+  `TurnCall.gate` is `TurnGateSchema` in `turns.ts`, `{ outcome, source, kind?, rule?, reason }`
+  (strict enums, `rule` a 1-based number as text, `reason` at most 200 characters). `TurnDetailsSchema`
+  reads `calls[].gate` as unknown, and the view parses it with its own lenient `DetailsGateSchema`,
+  so a record written by a later gate with new enum values still opens. A matching decision is shown as one
   line. A differently shaped one says "a decision was recorded in a form this view cannot show",
   and the view still opens. With no `gate` field, the line is left out.
 - **R7. Slack limits, with named constants and a test:**
@@ -252,8 +259,9 @@ Step 1 checks every anchor the later tasks edit, before any change.
    yourself and as a second member. Both see the modal, and nothing new appears in the thread.
 5. **Rollback.** Roll back the Slack service first: new replies lose the button, and buttons
    already posted keep working. Do not roll the control plane back below 14d while replies with
-   buttons are less than 30 days old. 14c part 2's endpoint only logs an unknown action
-   (`interaction.ignored`), so a click would show the member nothing (see Open Questions).
+   buttons are less than 30 days old. 14c part 2's endpoint logs an unknown action
+   (`interaction.ignored`) and tells the member privately "This button is no longer available.",
+   so an old button is never silent, but it no longer opens anything.
 
 ---
 
@@ -278,7 +286,7 @@ Run:
 ```bash
 git log --oneline -1 && \
 grep -c "for (const chunk of splitSlackMessage(slackReplyText(response))) await post(chunk);" packages/slack-service/src/processor.ts && \
-grep -c "^async function slackApi" packages/broker/src/aws/slack-interactivity.ts && \
+grep -c "^export async function slackApi" packages/broker/src/aws/slack-interactivity.ts && \
 grep -c "respondEphemeral: (responseUrl, text) => respondEphemeral(responseUrl, text)," packages/broker/src/aws/slack-interactivity.ts && \
 grep -c "postConfirmation: (thread, confirmation, text) => postToSlack(" packages/slack-service/src/main.ts && \
 grep -c "slackSecret.grantRead(slackIngress);" infra/lib/control-plane.ts && \
@@ -420,8 +428,9 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 - Consumes: `TurnCallSchema`, `TurnRecordSchema`, `TURN_CALL_LIMIT`, `TURN_RETENTION_DAYS`,
   `turnRecordKeys` (`turns.ts`).
 - Produces (all exported from `@agentx/contracts`):
-  - `DETAILS_ACTION = "agentx_details"`, `DETAILS_BLOCK_ID = "agentx_details"`,
-    `SLACK_SECTION_TEXT_LIMIT = 3_000`
+  - `DETAILS_ACTION = "agentx_details"`, `DETAILS_BLOCK_ID = "agentx_details"` (it reuses 14c part
+    2's `SLACK_SECTION_TEXT_LIMIT = 3_000` from `slack-confirmation.ts`; declaring it again would
+    make `index.ts`'s two `export *` lines collide)
   - `interface DetailsReference { receivedAt: string; eventId: string }`
   - `detailsButtonValue(reference: DetailsReference): string | undefined`
   - `parseDetailsButtonValue(value: string): DetailsReference | undefined`
@@ -537,13 +546,12 @@ Expected: FAIL; `detailsButtonValue` and the other exports do not exist.
 
 ```ts
 import { z } from "zod";
+import { SLACK_SECTION_TEXT_LIMIT } from "./slack-confirmation.js";
 import { TURN_CALL_LIMIT, TURN_RETENTION_DAYS, TurnCallSchema, TurnRecordSchema, turnRecordKeys } from "./turns.js";
 
 /** The Details button's action ID (spec 014 FR-024), routed by the signed interactivity endpoint. */
 export const DETAILS_ACTION = "agentx_details";
 export const DETAILS_BLOCK_ID = "agentx_details";
-/** Slack caps a section block's text at 3,000 characters. */
-export const SLACK_SECTION_TEXT_LIMIT = 3_000;
 
 const DETAILS_VALUE_LIMIT = 128;
 const DETAILS_VALUE = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)#(Ev[A-Za-z0-9]{4,64})$/;
@@ -628,7 +636,7 @@ export const TURN_DETAILS_ATTRIBUTES = [
   "callsTruncated", "emptyResponse", "usage", "usageError", "recordingErrors", "argumentsOmitted", "error", "expiresAt",
 ] as const;
 
-/** A gate decision as the Details view shows it (spec 014 FR-021, recorded by 14c part 2's follow-up). Lenient on purpose. */
+/** A gate decision as the Details view shows it (spec 014 FR-021; TurnGateSchema in turns.ts). Lenient on purpose. */
 export const DetailsGateSchema = z.object({
   outcome: z.string().min(1).max(16),
   source: z.string().min(1).max(32),
@@ -861,6 +869,13 @@ describe("the Details modal (spec 014 FR-024)", () => {
     expect(texts(turnDetailsView(details({ usage: undefined }))).join("\n")).toContain("*Usage* not recorded");
   });
 
+  it("labels the action gate's dispositions in words", () => {
+    const result = (disposition: string) => texts(turnDetailsView(details({ disposition, calls: [] }))).join("\n");
+    expect(result("confirmation_refused")).toContain("*Result* confirmation refused, nothing ran, in 12.3 s");
+    expect(result("confirmation_cancelled")).toContain("*Result* confirmation cancelled, in 12.3 s");
+    expect(result("yes_to_all_granted")).toContain("*Result* yes to all granted, in 12.3 s");
+  });
+
   it("says when the turn made no tool calls, and shows a message on its own", () => {
     expect(texts(turnDetailsView(details({ calls: [] }))).join("\n")).toContain("This turn made no tool calls.");
     const view = detailsMessageView("AgentX couldn't find the details for this reply.");
@@ -911,6 +926,9 @@ const DISPOSITIONS: Record<TurnDetails["disposition"], string> = {
   workspace_limit: "workspace limit reached",
   workspace_closed: "workspace already closed",
   workspace_unavailable: "workspace unavailable",
+  confirmation_refused: "confirmation refused, nothing ran",
+  confirmation_cancelled: "confirmation cancelled",
+  yes_to_all_granted: "yes to all granted",
 };
 
 /** Slack's three control characters; after this, record text cannot form a link, mention or alert. */
@@ -1039,7 +1057,7 @@ function count(value: number): string {
 - [ ] **Step 4: Run it and watch it pass**
 
 Run: `npm run build && npx vitest run tests/contract/slack-details-view.test.ts && npx eslint packages/broker/src/aws/slack-details-view.ts tests/contract/slack-details-view.test.ts`
-Expected: PASS, 7 tests; no lint output.
+Expected: PASS, 8 tests; no lint output.
 
 - [ ] **Step 5: Commit**
 
@@ -1056,12 +1074,12 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 **Files:**
 - Create: `packages/broker/src/aws/slack-details.ts`
-- Modify: `packages/broker/src/aws/slack-interactivity.ts` (export `slackApi`; register the handler)
+- Modify: `packages/broker/src/aws/slack-interactivity.ts` (register the handler; `slackApi` is already exported)
 - Test: `tests/contract/slack-details.test.ts`
 
 **Interfaces:**
 - Consumes: from 14c part 2, `SlackActionHandler`, `SlackBlockAction`,
-  `createSlackInteractivityHandler`, `respondEphemeral`, `slackApi` (now exported), and
+  `createSlackInteractivityHandler`, `respondEphemeral`, `slackApi` (both already exported), and
   `createAwsSlackInteractivityHandler`'s `documentClient`, `secrets` and `log`; `SlackIngressLog`
   from `slack-ingress.ts`; Task 2 contracts; Task 3 `turnDetailsView`, `detailsMessageView` and
   `SlackModalView`.
@@ -1384,7 +1402,13 @@ export function detailsActionHandler(dependencies: DetailsClickDependencies): Sl
       await dependencies.openView(action.triggerId, view);
     } catch (error) {
       log("interaction.details_open_failed", { errorName: errorName(error), slackError: slackError(error) });
-      await dependencies.respondEphemeral(action.responseUrl, DETAILS_OPEN_FAILED);
+      // Guarded like 14c part 2's confirmation handler: a throw here would make the endpoint send its
+      // confirmation-worded CLICK_FAILED_TEXT ("reply `@AgentX yes`"), which is wrong for Details.
+      try {
+        await dependencies.respondEphemeral(action.responseUrl, DETAILS_OPEN_FAILED);
+      } catch (respondError) {
+        log("interaction.respond_failed", { errorName: errorName(respondError) });
+      }
     }
   };
 
@@ -1480,18 +1504,8 @@ function slackError(error: unknown): string {
 
 - [ ] **Step 4: Register it in `packages/broker/src/aws/slack-interactivity.ts`**
 
-Export the Slack Web API helper. Replace:
-
-```ts
-async function slackApi(token: string, method: string, body: unknown, fetchImplementation: typeof fetch = fetch): Promise<void> {
-```
-
-with:
-
-```ts
-/** Calls one Slack Web API method with the bot token; throws "Slack <method> failed: <error>" on refusal. */
-export async function slackApi(token: string, method: string, body: unknown, fetchImplementation: typeof fetch = fetch): Promise<void> {
-```
+14c part 2 already exports `slackApi` (it throws "Slack <method> failed: <error>" on refusal and
+gives up after 2 seconds), so it is not edited.
 
 After the `import { parseSlackSecrets, validSignature, ... } from "./slack-ingress.js";` line, add:
 
@@ -1941,7 +1955,7 @@ In the `processSlackRequest` dependencies, directly after 14c part 2's line
 
 - [ ] **Step 5: Run it and watch it pass, with every existing Slack test unchanged**
 
-Run: `npm run build && npx vitest run tests/integration/slack-details-button.test.ts tests/contract/slack-reply-characterization.test.ts tests/integration/slack-service.test.ts tests/integration/turn-records.test.ts tests/integration/turn-recording.test.ts tests/integration/slack-action-gate.test.ts tests/integration/hosted-slack-linear.test.ts tests/integration/hosted-slack-mcp.test.ts && npx eslint packages/slack-service/src tests/integration/slack-details-button.test.ts`
+Run: `npm run build && npx vitest run tests/integration/slack-details-button.test.ts tests/contract/slack-reply-characterization.test.ts tests/integration/slack-service.test.ts tests/integration/turn-records.test.ts tests/integration/turn-recording.test.ts tests/integration/slack-action-gate.test.ts tests/integration/action-gate-turn.test.ts tests/integration/turn-gate-dispositions.test.ts tests/integration/slack-processor-characterization.test.ts tests/integration/hosted-slack-reply-style.test.ts tests/integration/hosted-slack-linear.test.ts tests/integration/hosted-slack-mcp.test.ts && npx eslint packages/slack-service/src tests/integration/slack-details-button.test.ts`
 Expected: PASS; no lint output. Task 1's characterization passes unchanged.
 
 - [ ] **Step 6: Commit**
@@ -1967,8 +1981,8 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 - [ ] **Step 1: Document the Details button**
 
 In `README.md`, directly after the paragraph that ends
-"`turn_record.duplicate` means SQS redelivered a request that was already recorded.", add this
-paragraph:
+"`turn_record.duplicate` means SQS redelivered a request that was already recorded." (in the file
+the sentence wraps after "redelivered a"), add this paragraph:
 
 ```markdown
 A reply that follows tool calls carries a **Details** button. It opens a Slack view that only the
@@ -2025,27 +2039,30 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 ## Open Questions
 
-1. **Authorization (R1).** The plan lets any member who can see the reply open Details, and logs
+1. **Authorization (R1). Decided by the owner: any member in the thread may open Details.** The plan lets any member who can see the reply open Details, and logs
    who looked. If the owner wants requester-only, `detailsActionHandler` compares `action.userId`
    with `details.requestedBy.userId` and shows "Only <@requester> can open these details". There
    is no admin exception, because Slack clicks carry no AgentX admin identity.
-2. **The amended infrastructure assertion.** "gives no other role access to turn records" (spec 013
+2. **The amended infrastructure assertion. Decided by the owner: keep the ingress reader and call it
+   out in the PR for Pratik (Global Constraints).** "gives no other role access to turn records" (spec 013
    phase 4) now admits the ingress role. If Pratik rejects a third reader, the alternative is a
    broker-served read. That needs a loading modal (`views.open`, then `views.update`), a new
    service caller on the broker's `/v1/service` routes, and a second Lambda hop.
 3. **IAM attribute conditions.** AWS requires `dynamodb:Attributes` to list the key attributes. The
    plan lists the table and index keys. The rollout's `simulate-principal-policy` check confirms
    it before any button ships.
-4. **Gate decision shape (R6).** 14c part 2 leaves recording gate decisions in turn records as a
-   follow-up. The plan assumes the shape that plan names, `{ outcome, source, kind?, rule?,
-   reason }`. If the follow-up chooses another shape, the view says it cannot show it, and
-   `DetailsGateSchema` should be aligned.
-5. **Slack Connect and Enterprise Grid.** A member from another organization in a shared channel
-   may click with a different team ID. The key then misses, and they see "no saved details". This
-   fails closed. Confirm whether external members should see Details at all.
-6. **Control plane rollback.** Resolved: 14c2 answers unknown actions privately ("This button is no longer available").
-   nothing, so an old Details button would do nothing visible. Consider having 14c part 2 answer
-   any unknown action privately ("This button is no longer available").
+4. **Gate decision shape (R6). Resolved by 14c part 2:** `TurnGateSchema` records `{ outcome, source,
+   kind?, rule?, reason }`, the shape this plan assumed. `DetailsGateSchema` stays lenient so a
+   later gate's new enum values still open, with a line saying the decision cannot be shown only
+   when the shape itself differs.
+5. **Slack Connect and Enterprise Grid. Decided by the owner: external members see "no saved
+   details".** A member from another organization in a shared channel may click with a different
+   team ID. The key then misses, and they see `DETAILS_NOT_SAVED`. This fails closed. It relies on
+   the click's `team.id` being the clicker's own team (14c part 2 reads `team.id`, then
+   `user.team_id`); no test pins the external case.
+6. **Control plane rollback. Resolved by 14c part 2:** its endpoint answers any unknown action
+   privately with `UNKNOWN_BUTTON_TEXT` ("This button is no longer available."), so an old Details
+   button after a rollback is never silent.
 
 ## Self-Review
 
