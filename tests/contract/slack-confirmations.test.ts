@@ -228,11 +228,24 @@ describe("tombstones, expiry and yes to all", () => {
     expect((await store.load(subject))?.usedBy).toBe("expired");
     expect(await check("yes", { eventId: "EvYES0000002", receivedAt })).toEqual({ run: false });
     expect(posts).toEqual([EXPIRED_TEXT, EXPIRED_TEXT]);
-    const later = harness(now + 3 * 24 * 60 * 60 * 1_000);
-    await later.store.save(subject, pending);
-    await later.store.retire(subject, pending.confirmationId, "expired");
-    expect(await later.check("yes", { receivedAt: new Date(now + 3 * 24 * 60 * 60 * 1_000).toISOString() })).toEqual({ run: false });
-    expect(later.posts).toEqual([EXPIRED_TEXT]);
+  });
+
+  it("answers expired for 24 hours after the expiry, then treats a yes as an ordinary request", async () => {
+    const expiry = Date.parse(pending.expiresAt);
+    for (const [after, expected] of [[2, "expired"], [30, "ordinary"]] as const) {
+      const now = expiry + after * 60 * 60 * 1_000;
+      const { store, check, posts } = harness(now);
+      await store.save(subject, pending);
+      await store.retire(subject, pending.confirmationId, "expired");
+      const result = await check("yes", { eventId: "EvYES0000005", receivedAt: new Date(now).toISOString() });
+      if (expected === "expired") {
+        expect(result).toEqual({ run: false });
+        expect(posts).toEqual([EXPIRED_TEXT]);
+      } else {
+        expect(result).toEqual({ run: true, session: createGateSession(requester) });
+        expect(posts).toEqual([]);
+      }
+    }
   });
 
   it("tells a member whose confirmation another member's replaced that it was replaced", async () => {

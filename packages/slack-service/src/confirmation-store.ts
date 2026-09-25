@@ -3,7 +3,7 @@ import { PendingConfirmationSchema, confirmationKey, pendingConfirmationFromItem
 import type { ConfirmationStore } from "./confirmations.js";
 import type { ServiceLog } from "./processor.js";
 
-/** Expired confirmations stay readable for a week, so a late "yes" hears that it expired. */
+/** The table keeps a confirmation item a week past its expiry; it answers "expired" only for the first 24 hours of that. */
 const RETAIN_AFTER_EXPIRY_SECONDS = 7 * 24 * 60 * 60;
 /** "Yes to all" lasts 24 hours; saying it again renews it (spec 014 D4). */
 const YES_TO_ALL_SECONDS = 24 * 60 * 60;

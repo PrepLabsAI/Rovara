@@ -58,8 +58,10 @@ export const NO_LONGER_PENDING_TEXT = "That confirmation is no longer pending, s
 export const CANCELLED_TEXT = "Cancelled. Nothing was run.";
 export const EXPIRED_TEXT = "That confirmation request expired after 24 hours, so nothing was run. Ask me again if you still want it.";
 
-/** `usedBy` of a confirmation retired because it expired: it answers "expired" until the table drops it. */
+/** `usedBy` of a confirmation retired because it expired: it answers "expired" for EXPIRED_ANSWER_MS after its expiry. */
 export const EXPIRED_MARK = "expired";
+/** How long after its expiry an expired confirmation still answers "expired". */
+export const EXPIRED_ANSWER_MS = CONFIRMATION_TTL_MS;
 /** `usedBy` of a confirmation retired because posting it failed: nobody saw it. */
 export const POST_FAILED_MARK = "post_failed";
 
@@ -91,8 +93,12 @@ export async function checkConfirmation(input: {
   const stored = await store.load(subject);
   const expired = (confirmation: PendingConfirmation) => input.now >= Date.parse(confirmation.expiresAt);
   // A used, cancelled or superseded confirmation's tombstone lasts the rest of its 24 hours, then the
-  // thread has nothing pending. An expired one answers "expired" until the table drops the item.
-  const pending = stored !== undefined && stored.retiredAt !== undefined && stored.usedBy !== EXPIRED_MARK && expired(stored) ? undefined : stored;
+  // thread has nothing pending. An expired one answers "expired" for 24 hours more, then is gone too,
+  // so a later "yes" to another question is never swallowed.
+  const forgotten = (confirmation: PendingConfirmation) =>
+    confirmation.retiredAt !== undefined
+    && input.now >= Date.parse(confirmation.expiresAt) + (confirmation.usedBy === EXPIRED_MARK ? EXPIRED_ANSWER_MS : 0);
+  const pending = stored !== undefined && forgotten(stored) ? undefined : stored;
   const live = pending !== undefined && pending.retiredAt === undefined;
   const refuse = async (reason: string, text: string): Promise<ConfirmationCheck> => {
     log("gate.confirmation_refused", { eventId: message.eventId, reason });
