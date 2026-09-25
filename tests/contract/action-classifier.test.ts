@@ -39,12 +39,25 @@ describe("the action classifier, offline with Pi's faux model", () => {
     faux.setResponses([fauxAssistantMessage("Sure, go ahead."), fauxAssistantMessage("", { stopReason: "error", errorMessage: "throttled" })]);
     const classify = await createModelClassifier({ model, modelRuntime });
     await expect(classify({ memberMessages: ["x"], call })).rejects.toThrow("the classifier's answer was not a verdict");
-    await expect(classify({ memberMessages: ["x"], call })).rejects.toThrow("throttled");
+    await expect(classify({ memberMessages: ["x"], call })).rejects.toThrow("the classifier model returned an error (stop reason: error)");
     const unknown = await createModelClassifier({ model: { provider: "agentx-faux", modelId: "missing" }, modelRuntime });
     await expect(unknown({ memberMessages: ["x"], call })).rejects.toThrow("the classifier model is unavailable");
     faux.setResponses([() => new Promise(() => undefined)]);
     const slow = await createModelClassifier({ model, modelRuntime, timeoutMs: 50 });
     await expect(slow({ memberMessages: ["x"], call })).rejects.toThrow("the classifier did not answer within 50 ms");
+  });
+
+  it("M2: never carries the provider's own error text, which can name the account and role", async () => {
+    const { modelRuntime, faux } = await fauxModelRuntime();
+    const providerText = "AccessDeniedException: User: arn:aws:sts::123456789012:assumed-role/AgentXSlack/abc is not authorized";
+    faux.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: providerText }), fauxAssistantMessage("", { stopReason: "aborted", errorMessage: providerText })]);
+    const classify = await createModelClassifier({ model, modelRuntime });
+    for (const stopReason of ["error", "aborted"]) {
+      const error = await classify({ memberMessages: ["x"], call }).catch((caught: unknown) => caught) as Error;
+      expect(error).toBeInstanceOf(ClassifierError);
+      expect(error.message).toBe(`the classifier model returned an error (stop reason: ${stopReason})`);
+      expect(error.message).not.toContain("arn:aws");
+    }
   });
 
   it("keeps the most recent member messages within its budget and caps the arguments", () => {
@@ -110,7 +123,7 @@ describe("the action classifier, offline with Pi's faux model", () => {
     const { modelRuntime, faux } = await fauxModelRuntime();
     faux.setResponses([fauxAssistantMessage("Sure, go ahead."), fauxAssistantMessage("", { stopReason: "error", errorMessage: "throttled" })]);
     const classify = await createModelClassifier({ model, modelRuntime });
-    for (const message of ["the classifier's answer was not a verdict", "throttled"]) {
+    for (const message of ["the classifier's answer was not a verdict", "the classifier model returned an error (stop reason: error)"]) {
       const error: unknown = await classify({ memberMessages: ["x"], call }).catch((caught: unknown) => caught);
       expect(error).toBeInstanceOf(ClassifierError);
       expect((error as InstanceType<typeof ClassifierError>).message).toBe(message);

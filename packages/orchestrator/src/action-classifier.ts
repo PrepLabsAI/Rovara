@@ -158,7 +158,11 @@ export async function createModelClassifier(options: {
       if (input.signal?.aborted) await deadline;
       const message = await Promise.race([runtime.completeSimple(model, classifierContext(input), { signal, maxTokens: 200, temperature: 0 }), deadline]);
       const usage = { input: message.usage.input, output: message.usage.output, cost: message.usage.cost.total };
-      if (message.stopReason === "error" || message.stopReason === "aborted") throw new ClassifierError(message.errorMessage ?? "the classifier failed", usage);
+      // Never the provider's own error text: it can name the account, role or request (gate reasons
+      // reach turn records and logs). The stop reason is one of two fixed words.
+      if (message.stopReason === "error" || message.stopReason === "aborted") {
+        throw new ClassifierError(`the classifier model returned an error (stop reason: ${message.stopReason})`, usage);
+      }
       const verdict = parseVerdict(message.content.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n"));
       if (!verdict) throw new ClassifierError("the classifier's answer was not a verdict", usage);
       return { ...verdict, usage };
