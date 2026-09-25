@@ -60,6 +60,7 @@ describe("the Slack service's thread client", () => {
     expect(sent).toEqual([{
       requestId, includeIntegrations: true, includeSettingsRevision: true, includeConnectors: true,
       includeAllConnectorTypes: true, includeRecoverableOperations: true,
+      includeActionPolicy: true,
     }]);
     expect(result).toMatchObject({ outcome: "WORKSPACE", status: "PREPARING", created: true });
   });
