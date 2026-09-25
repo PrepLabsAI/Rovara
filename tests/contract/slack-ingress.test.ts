@@ -20,8 +20,14 @@ function harness(options: {
   failEnqueue?: number;
   appPosted?: { accept: boolean; members?: Record<string, SlackMemberCheck>; checkThrows?: boolean };
   failPost?: boolean;
+  turnsPerMinute?: number;
+  failCount?: number;
 } = {}) {
   const memberChecks: string[] = [];
+  const clock = { seconds: nowSeconds };
+  const turnWindows: Array<{ subject: string; windowStart: number; expiresAt: number }> = [];
+  const turnCounts = new Map<string, number>();
+  let countFailures = options.failCount ?? 0;
   const claimed = new Set<string>();
   const pending = new Map<string, number>();
   const queue: Array<{ message: SlackRequestMessage; groupId: string }> = [];
@@ -58,8 +64,23 @@ function harness(options: {
       if (options.failPost) throw new Error("Slack unavailable");
       posts.push(input);
     },
-    now: () => nowSeconds * 1_000,
+    now: () => clock.seconds * 1_000,
     log: (event, fields) => logs.push({ event, fields }),
+    ...(options.turnsPerMinute === undefined ? {} : {
+      turnLimit: {
+        perMinute: options.turnsPerMinute,
+        countTurn: async (subject: string, windowStart: number, expiresAt: number) => {
+          if (countFailures > 0) {
+            countFailures -= 1;
+            throw new Error("DynamoDB unavailable");
+          }
+          turnWindows.push({ subject, windowStart, expiresAt });
+          const key = `${subject}#${windowStart}`;
+          turnCounts.set(key, (turnCounts.get(key) ?? 0) + 1);
+          return turnCounts.get(key)!;
+        },
+      },
+    }),
     ...(options.appPosted === undefined ? {} : {
       appPosted: {
         accept: options.appPosted.accept,
@@ -71,7 +92,7 @@ function harness(options: {
       },
     }),
   });
-  return { handler, queue, posts, pending, logs, memberChecks };
+  return { handler, queue, posts, pending, logs, memberChecks, clock, turnWindows };
 }
 
 function signedEvent(payload: unknown, options: { timestamp?: number; signature?: string; base64?: boolean } = {}) {
@@ -385,5 +406,90 @@ describe("messages a person posts through another app (spec 014 US2)", () => {
     expect(logs.at(-1)).toMatchObject({ event: "event.ignored", fields: { reason: "app_posted_disabled" } });
     await send(handler, signedEvent(mention({ eventId: "Ev0000000002" })));
     expect(queue).toHaveLength(1);
+  });
+});
+
+describe("per-thread turn limit (spec 014 FR-011)", () => {
+  const pause = "I'm pausing this thread: it sent me more than 6 requests in a minute. Mention me again in a minute to continue. Anything waiting for your confirmation is still waiting; confirm again after a minute.";
+  const inThread = (index: number, overrides: Record<string, unknown> = {}) => mention({
+    eventId: `Ev${String(index).padStart(10, "0")}`,
+    event: { ts: `1695500${String(index).padStart(3, "0")}.000001`, thread_ts: "1695500000.000001", ...overrides },
+  });
+
+  it("runs six requests a minute in a thread, then posts one pause notice and runs nothing more", async () => {
+    const { handler, queue, posts, logs, clock } = harness({ turnsPerMinute: 6 });
+    clock.seconds = nowSeconds + 5;
+    for (let index = 1; index <= 9; index += 1) {
+      expect((await send(handler, signedEvent(inThread(index), { timestamp: clock.seconds }))).status).toBe(200);
+    }
+    expect(queue).toHaveLength(6);
+    expect(posts.filter((entry) => entry.text === pause)).toHaveLength(1);
+    expect(posts).toHaveLength(7);
+    expect(posts.at(-1)).toEqual({ channel, threadTs: "1695500000.000001", text: pause });
+    expect(logs.filter((entry) => entry.event === "thread.paused").map((entry) => entry.fields.turnsThisMinute)).toEqual([7, 8, 9]);
+  });
+
+  it("counts in one-minute windows that expire, and resumes in the next minute", async () => {
+    const { handler, queue, turnWindows, clock } = harness({ turnsPerMinute: 6 });
+    for (let index = 1; index <= 7; index += 1) await send(handler, signedEvent(inThread(index)));
+    expect(queue).toHaveLength(6);
+    clock.seconds = nowSeconds + 60;
+    await send(handler, signedEvent(inThread(8), { timestamp: clock.seconds }));
+    expect(queue).toHaveLength(7);
+    const windowStart = nowSeconds - (nowSeconds % 60);
+    expect(turnWindows[0]).toEqual({ subject: `${team}/${channel}/1695500000.000001`, windowStart, expiresAt: windowStart + 120 });
+    expect(turnWindows.at(-1)?.windowStart).toBe(windowStart + 60);
+  });
+
+  it("limits each thread on its own", async () => {
+    const { handler, queue } = harness({ turnsPerMinute: 6 });
+    for (let index = 1; index <= 7; index += 1) await send(handler, signedEvent(inThread(index)));
+    await send(handler, signedEvent(mention({ eventId: "Ev0000000100", event: { ts: "1695600000.000001" } })));
+    expect(queue).toHaveLength(7);
+    expect(queue.at(-1)?.message.thread.threadTs).toBe("1695600000.000001");
+  });
+
+  it("stops a tool that answers AgentX's replies in a loop, after six turns", async () => {
+    const { handler, queue, posts } = harness({ turnsPerMinute: 6, appPosted: { accept: true, members: { [pratik]: { outcome: "person" } } } });
+    for (let index = 1; index <= 20; index += 1) {
+      await send(handler, signedEvent({ ...inThread(index, { bot_id: "B0CLAUDE001", app_id: "A0CLAUDE001" }), api_app_id: "A0AGENTX001" }));
+    }
+    expect(queue).toHaveLength(6);
+    expect(posts.filter((entry) => entry.text === pause)).toHaveLength(1);
+  });
+
+  it("counts unconfirmed senders too, so their notices stop at the limit", async () => {
+    const { handler, queue, posts } = harness({ turnsPerMinute: 6, appPosted: { accept: true } });
+    for (let index = 1; index <= 9; index += 1) {
+      await send(handler, signedEvent({ ...inThread(index, { bot_id: "B0CLAUDE001" }), api_app_id: "A0AGENTX001" }));
+    }
+    expect(queue).toHaveLength(0);
+    expect(posts).toHaveLength(7);
+    expect(posts.at(-1)?.text).toBe(pause);
+  });
+
+  it("does not count a repeated Slack event twice", async () => {
+    const { handler, turnWindows } = harness({ turnsPerMinute: 6 });
+    await send(handler, signedEvent(inThread(1)));
+    await send(handler, signedEvent(inThread(1)));
+    expect(turnWindows).toHaveLength(1);
+  });
+
+  it("lets Slack retry an event whose turn could not be counted", async () => {
+    const { handler, queue, logs } = harness({ turnsPerMinute: 6, failCount: 1 });
+    expect((await send(handler, signedEvent(inThread(1)))).status).toBe(500);
+    expect(queue).toHaveLength(0);
+    expect(logs.at(-1)).toMatchObject({ event: "turn_limit.failed" });
+    expect((await send(handler, signedEvent(inThread(1)))).status).toBe(200);
+    expect(queue).toHaveLength(1);
+  });
+
+  it("still answers 200 and logs its own event when the pause notice cannot be posted", async () => {
+    const { handler, queue, logs } = harness({ turnsPerMinute: 6, failPost: true });
+    for (let index = 1; index <= 7; index += 1) {
+      expect((await send(handler, signedEvent(inThread(index)))).status).toBe(200);
+    }
+    expect(queue).toHaveLength(6);
+    expect(logs.filter((entry) => entry.event === "thread_paused.notice_failed")).toHaveLength(1);
   });
 });

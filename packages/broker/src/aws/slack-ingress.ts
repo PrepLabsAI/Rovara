@@ -52,6 +52,8 @@ export interface SlackIngressDependencies {
    * Absent: every app-posted message is ignored, as before feature 014.
    */
   appPosted?: { accept: boolean; checkMember: (userId: string) => Promise<SlackMemberCheck> };
+  /** Per-thread brake (spec 014 FR-011). Absent: no limit. */
+  turnLimit?: { perMinute: number; countTurn: (threadSubject: string, windowStartSeconds: number, expiresAtSeconds: number) => Promise<number> };
 }
 
 interface HttpResponse {
@@ -69,6 +71,8 @@ interface Mention {
   /** The event carries bot_id or app_id: a person's own token through an app, or a bot. */
   appPosted: boolean;
 }
+
+const TURN_WINDOW_SECONDS = 60;
 
 const UNVERIFIED_MEMBER_NOTICE = "I couldn't confirm that this message came from a person, so I didn't act on it. Try again, or type the request in Slack.";
 
@@ -121,6 +125,26 @@ export function createSlackIngressHandler(dependencies: SlackIngressDependencies
     if (!await dependencies.claimEvent(mention.eventId, nowSeconds + EVENT_RETENTION_SECONDS)) {
       return ignore(log, "duplicate_event", { eventId: mention.eventId });
     }
+    const subject = slackThreadSubject(thread);
+    if (dependencies.turnLimit) {
+      const { perMinute, countTurn } = dependencies.turnLimit;
+      const windowStart = nowSeconds - (nowSeconds % TURN_WINDOW_SECONDS);
+      let turns: number;
+      try {
+        turns = await countTurn(subject, windowStart, windowStart + 2 * TURN_WINDOW_SECONDS);
+      } catch {
+        await dependencies.releaseEvent(mention.eventId);
+        log("turn_limit.failed", { eventId: mention.eventId });
+        return respond(500, { error: "request could not be counted" });
+      }
+      if (turns > perMinute) {
+        log("thread.paused", { eventId: mention.eventId, turnsThisMinute: turns });
+        if (turns === perMinute + 1) {
+          await post(dependencies, log, thread, `I'm pausing this thread: it sent me more than ${perMinute} requests in a minute. Mention me again in a minute to continue. Anything waiting for your confirmation is still waiting; confirm again after a minute.`, "thread_paused.notice_failed");
+        }
+        return respond(200, { ok: true });
+      }
+    }
     if (memberCheckError !== undefined) {
       // Fail closed: an unconfirmed sender is never run, but the person is told rather than left in silence.
       log("event.ignored", { reason: "member_check_failed", slackError: memberCheckError });
@@ -142,7 +166,6 @@ export function createSlackIngressHandler(dependencies: SlackIngressDependencies
       text,
       receivedAt: new Date(now()).toISOString(),
     });
-    const subject = slackThreadSubject(thread);
     const pending = await dependencies.changePending(subject, 1);
     try {
       await dependencies.enqueue(message, createHash("sha256").update(subject).digest("hex"));
