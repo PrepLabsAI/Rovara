@@ -184,6 +184,16 @@ export class DynamoRefreshLease implements RefreshLease {
   }
 }
 
+/**
+ * The command that creates a credential of the type a connector needs: an oauth-refresh-token
+ * credential comes from a bot user's one-time sign-in (authorize); every other type is registered
+ * from an existing secret. An unstated need keeps the register hint.
+ */
+export function credentialSetupCommand(accepts: readonly CredentialType[] | undefined): string {
+  const signIn = accepts !== undefined && accepts.length > 0 && accepts.every((type) => type === "oauth-refresh-token");
+  return signIn ? "agentx admin credential authorize" : "agentx admin credential register";
+}
+
 /** Registered connector credentials: records name a secret, never hold one. */
 export class CredentialRegistry {
   private readonly documentClient: DynamoDBDocumentClient;
@@ -262,7 +272,7 @@ export class CredentialRegistry {
   }
 
   /** Phase 5 entry point: a provider that resolves the record on each issue, so re-registration takes effect. */
-  provider(ref: string, options: { tokenEndpoint?: URL } = {}): CredentialProvider<unknown> {
+  provider(ref: string, options: { tokenEndpoint?: URL; accepts?: readonly CredentialType[] } = {}): CredentialProvider<unknown> {
     const memoKey = `${ref}\u0000${options.tokenEndpoint?.href ?? ""}`;
     return {
       issue: async (scope, access, actor) => {
@@ -270,7 +280,7 @@ export class CredentialRegistry {
           throw new CredentialUnavailable(`credential ${ref} is the built-in GitHub App and serves only the github connector`);
         }
         const record = await this.readRecord(ref);
-        if (!record) throw new CredentialUnavailable(`credential ${ref} is not registered; run agentx admin credential register`);
+        if (!record) throw new CredentialUnavailable(`credential ${ref} is not registered; run ${credentialSetupCommand(options.accepts)}`);
         // registeredAt alone has millisecond resolution, so two registrations in the same
         // millisecond are told apart by what they point at.
         const registration = JSON.stringify([record.registeredAt, record.type, record.secretName]);
