@@ -194,6 +194,34 @@ describe("Slack interactivity request URL (spec 014 D2)", () => {
     expect(new Set(queue.map((message) => message.eventId)).size).toBe(2);
   });
 
+  it("releases the click and says so when the thread's pending count cannot be raised, so a second press is not a silent duplicate", async () => {
+    const claimed = new Set<string>();
+    const released: string[] = [];
+    const ephemeral: string[] = [];
+    const queue: SlackRequestMessage[] = [];
+    let failPending = true;
+    const handler = createSlackInteractivityHandler({
+      secrets: async () => ({ signingSecret, botToken: "xoxb-test" }),
+      now: () => nowSeconds * 1_000,
+      handlers: [confirmationActionHandler({
+        loadConfirmation: async () => pending,
+        claimEvent: async (eventId) => { if (claimed.has(eventId)) return false; claimed.add(eventId); return true; },
+        releaseEvent: async (eventId) => { released.push(eventId); claimed.delete(eventId); },
+        changePending: async () => { if (failPending) throw new Error("DynamoDB down"); return 1; },
+        enqueue: async (message) => { queue.push(message); },
+        updateMessage: async () => undefined,
+        respondEphemeral: async (_url, value) => { ephemeral.push(value); },
+        now: () => nowSeconds * 1_000,
+      })],
+    });
+    expect((await handler(signed(payload()))).statusCode).toBe(200);
+    expect(released).toEqual([confirmationClickEventId(pending.confirmationId, "approve", pending.postedAt)]);
+    expect(ephemeral).toEqual(["I couldn't take that click. Press the button again, or reply `@AgentX yes`."]);
+    failPending = false;
+    await handler(signed(payload()));
+    expect(queue).toHaveLength(1);
+  });
+
   it("takes the clicking member only from Slack's signed payload, and ignores a click without a Slack response URL", async () => {
     const { handler, queue, logs } = harness();
     const forged = { ...payload(), response_url: "https://attacker.example/hook" };

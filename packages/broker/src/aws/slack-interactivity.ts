@@ -200,11 +200,14 @@ export function confirmationActionHandler(dependencies: ConfirmationClickDepende
       const message = SlackRequestMessageSchema.parse({
         version: 1, eventId, thread: action.thread, userId: action.userId, text: click === "approve" ? "yes" : "cancel", receivedAt: new Date(now()).toISOString(),
       });
-      await dependencies.changePending(subject, 1);
+      // Any failure after the claim releases it, so the member can press again rather than hit a silent duplicate.
+      let raised = false;
       try {
+        await dependencies.changePending(subject, 1);
+        raised = true;
         await dependencies.enqueue(message, createHash("sha256").update(subject).digest("hex"));
       } catch {
-        await dependencies.changePending(subject, -1);
+        if (raised) await dependencies.changePending(subject, -1);
         await dependencies.releaseEvent(eventId);
         log("interaction.enqueue_failed", { eventId });
         await dependencies.respondEphemeral(action.responseUrl, "I couldn't take that click. Press the button again, or reply `@AgentX yes`.");
