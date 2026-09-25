@@ -78,14 +78,15 @@ describe("processing a thread's workspace result (characterization)", () => {
     await processSlackRequest(message(), h.dependencies, { finalAttempt: false });
     const turn = h.turns[0]!;
     expect(Object.keys(turn).sort()).toEqual([
-      "connectors", "conversationId", "message", "orchestratorInstructions", "recoverableOperations", "repositories", "requestId", "subject", "workspaceId",
+      // Spec 014 final fix I1: a runnable workspace also tells the gate its compute is prepared (D5).
+      "computePrepared", "connectors", "conversationId", "message", "orchestratorInstructions", "recoverableOperations", "repositories", "requestId", "subject", "workspaceId",
     ]);
-    expect(turn).toMatchObject({ connectors, repositories: ["demo"], recoverableOperations: [operationId], workspaceId, conversationId });
+    expect(turn).toMatchObject({ computePrepared: true, connectors, repositories: ["demo"], recoverableOperations: [operationId], workspaceId, conversationId });
   });
 
   it("hands the turn no routing field the workspace did not send", async () => {
     const h = harness(workspace());
     await processSlackRequest(message(), h.dependencies, { finalAttempt: false });
-    expect(Object.keys(h.turns[0]!).sort()).toEqual(["conversationId", "message", "orchestratorInstructions", "requestId", "subject", "workspaceId"]);
+    expect(Object.keys(h.turns[0]!).sort()).toEqual(["computePrepared", "conversationId", "message", "orchestratorInstructions", "requestId", "subject", "workspaceId"]);
   });
 });
