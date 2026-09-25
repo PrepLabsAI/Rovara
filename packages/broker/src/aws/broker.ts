@@ -1403,9 +1403,18 @@ async function startThreadPreparation(
       { Update: {
         TableName: dependencies.tableName,
         Key: slackThreadKey(identity.ownerKey),
-        UpdateExpression: "SET starterUserId = :user",
+        // The same record recordThreadRequester(..., true) writes, so a missing thread row is
+        // created whole and the charged member is among its requesters.
+        UpdateExpression: "SET #entity = :entity, #thread = if_not_exists(#thread, :thread), #workspace = if_not_exists(#workspace, :workspace), starterUserId = :user ADD #requesters :users",
         ConditionExpression: "attribute_not_exists(starterUserId)",
-        ExpressionAttributeValues: { ":user": userId },
+        ExpressionAttributeNames: { "#entity": "entityType", "#thread": "thread", "#workspace": "workspaceId", "#requesters": "requesters" },
+        ExpressionAttributeValues: {
+          ":entity": "SLACK_THREAD",
+          ":thread": identity.subject,
+          ":workspace": workspace.id,
+          ":user": userId,
+          ":users": new Set([userId]),
+        },
       } },
     ] }));
   } catch (error) {
@@ -1414,11 +1423,15 @@ async function startThreadPreparation(
     if (current.status !== "UNPREPARED") {
       return { outcome: "WORKSPACE", workspaceId: current.id, status: current.status, operationId: current.activeOperationId, created: false };
     }
-    const refusal = await threadWorkspaceLimitRefusal(dependencies, teamId, userId, limits);
-    if (refusal.outcome !== "LIMIT_REACHED") {
-      throw agentXError("WORKSPACE_BUSY", "thread workspace preparation conflicted with another request; retry");
+    // threadWorkspaceLimitRefusal throws its own WORKSPACE_BUSY, worded for creation, when no limit
+    // is reached. Answer with this route's wording instead.
+    try {
+      const refusal = await threadWorkspaceLimitRefusal(dependencies, teamId, userId, limits);
+      if (refusal.outcome === "LIMIT_REACHED") return refusal;
+    } catch (refusalError) {
+      if (!(refusalError instanceof AgentXError) || refusalError.code !== "WORKSPACE_BUSY") throw refusalError;
     }
-    return refusal;
+    throw agentXError("WORKSPACE_BUSY", "thread workspace preparation conflicted with another request; retry");
   }
   return { outcome: "WORKSPACE", workspaceId: workspace.id, status: "PREPARING", operationId, created: true };
 }

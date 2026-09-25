@@ -4,7 +4,7 @@ import { ConnectorCatalogSchema } from "../../packages/contracts/src/connectors.
 import { SlackThreadPrepareResultSchema, SlackThreadWorkspaceResultSchema } from "../../packages/contracts/src/slack.js";
 import {
   GITHUB_LIST_ISSUES, SLACK_CHANNEL, SLACK_TEAM, createBroker, ensureWorkspace, fakeGitHubMcp, finishOperation, lazyEnsureWorkspace,
-  loadSlackBroker, markReady, prepareThread, registerSlackProject, serviceCall,
+  account, call, loadSlackBroker, markReady, orchestratorPrincipal, prepareThread, registerSlackProject, serviceCall,
 } from "../support/slack-broker.js";
 
 const threadOne = `${SLACK_TEAM}/${SLACK_CHANNEL}/1695500000.000001`;
@@ -318,5 +318,68 @@ describe("a closed thread and the lazy opt-in", () => {
     expect(db.find((item) => item.entityType === "WORKSPACE")).toHaveLength(workspacesBefore);
     expect(db.find((item) => item.entityType === "DEFAULT_WORKSPACE")).toHaveLength(defaultsBefore);
     expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "CLOSED" });
+  });
+});
+
+describe("preparing a thread: authorization and the thread record", () => {
+  it("writes a complete thread record, with the charged member among its requesters, even if the record is missing", async () => {
+    const { db, handler } = createBroker();
+    await registerSlackProject(handler);
+    const workspaceId = (await lazyEnsureWorkspace(handler, threadOne, pratik)).body.workspaceId as string;
+    for (const [key, item] of db.items) if (item.entityType === "SLACK_THREAD") db.items.delete(key);
+
+    const prepared = await prepareThread(handler, threadOne, bob);
+    expect(prepared.body).toMatchObject({ outcome: "WORKSPACE", workspaceId, status: "PREPARING", created: true });
+    const threadRecord = db.find((item) => String(item.pk).startsWith("SLACK_THREAD#"));
+    expect(threadRecord).toHaveLength(1);
+    expect(threadRecord[0]).toMatchObject({ entityType: "SLACK_THREAD", thread: threadOne, workspaceId, starterUserId: bob });
+    expect([...(threadRecord[0]!.requesters as Set<string>)]).toEqual([bob]);
+  });
+
+  it("refuses a caller that is not the Slack orchestrator", async () => {
+    const { db, handler } = createBroker();
+    await registerSlackProject(handler);
+    await lazyEnsureWorkspace(handler, threadOne, pratik);
+    const refused = await call(handler, {
+      method: "POST",
+      path: "/v1/service/threads/workspace/prepare",
+      service: { principal: `arn:aws:sts::${account}:assumed-role/OtherRole/session`, thread: threadOne, slackUser: pratik },
+      body: { requestId: randomUUID() },
+    });
+    expect(refused.status).toBe(403);
+    expect(db.find((item) => item.entityType === "OPERATION")).toHaveLength(0);
+    expect(db.find((item) => item.entityType === "SLACK_LIMIT")).toHaveLength(0);
+  });
+
+  it("charges the member named by the Slack user header, never a member named in the body", async () => {
+    const { db, handler } = createBroker();
+    await registerSlackProject(handler);
+    await lazyEnsureWorkspace(handler, threadOne, pratik);
+    const prepared = await call(handler, {
+      method: "POST",
+      path: "/v1/service/threads/workspace/prepare",
+      service: { principal: orchestratorPrincipal, thread: threadOne, slackUser: pratik },
+      body: { requestId: randomUUID(), userId: "UOTHER" },
+    });
+    expect(prepared.body).toMatchObject({ outcome: "WORKSPACE", status: "PREPARING", created: true });
+    expect(db.get(`SLACK_LIMIT#${SLACK_TEAM}`, `MEMBER#${pratik}`)).toMatchObject({ count: 1, threads: [threadOne] });
+    expect(db.get(`SLACK_LIMIT#${SLACK_TEAM}`, "MEMBER#UOTHER")).toBeUndefined();
+    expect(members(db)).toHaveLength(1);
+    expect(db.find((item) => item.entityType === "SLACK_THREAD")[0]).toMatchObject({ starterUserId: pratik });
+  });
+
+  it("answers WORKSPACE_BUSY, and charges nothing, when the transaction fails for a reason other than the limit", async () => {
+    const { db, handler } = createBroker();
+    await registerSlackProject(handler);
+    const workspaceId = (await lazyEnsureWorkspace(handler, threadOne, pratik)).body.workspaceId as string;
+    db.find((item) => item.entityType === "SLACK_THREAD")[0]!.starterUserId = carol;
+
+    const refused = await prepareThread(handler, threadOne, pratik);
+    expect(refused.status).toBe(409);
+    expect(refused.body.error).toEqual({ code: "WORKSPACE_BUSY", message: "thread workspace preparation conflicted with another request; retry" });
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "UNPREPARED", fence: 0 });
+    expect(db.find((item) => item.entityType === "OPERATION")).toHaveLength(0);
+    expect(db.find((item) => item.entityType === "OUTBOX")).toHaveLength(0);
+    expect(db.find((item) => item.entityType === "SLACK_LIMIT")).toHaveLength(0);
   });
 });
