@@ -11,6 +11,9 @@ export const WorkspaceStatusSchema = z.enum([
   "RESUMING",
   "CLOSING",
   "CLOSED",
+  // Spec 014: a thread's workspace record whose compute has not been prepared. Only Slack services
+  // that send lazyPreparation: true are ever shown it.
+  "UNPREPARED",
 ]);
 
 export const WorkspaceDeploymentModeSchema = z.enum(["instances-ebs", "demo-microvm"]);

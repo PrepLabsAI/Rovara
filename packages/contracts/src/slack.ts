@@ -75,6 +75,36 @@ export const SlackThreadWorkspaceResultSchema = z.discriminatedUnion("outcome", 
     .strict(),
 ]);
 
+// The answer to POST /v1/threads/workspace/prepare (spec 014). Only a service that sends
+// lazyPreparation: true calls that route, so this schema never reaches an older service.
+export const SlackThreadPrepareResultSchema = z.discriminatedUnion("outcome", [
+  z
+    .object({
+      outcome: z.literal("WORKSPACE"),
+      workspaceId: z.string().uuid(),
+      status: WorkspaceStatusSchema,
+      operationId: z.string().uuid().nullable(),
+      // True only for the request whose write started this preparation.
+      created: z.boolean(),
+    })
+    .strict(),
+  z
+    .object({
+      outcome: z.literal("LIMIT_REACHED"),
+      limit: SlackWorkspaceLimitSchema,
+      maximum: z.number().int().positive(),
+      starterThreads: z.array(SlackThreadSchema),
+    })
+    .strict(),
+  z
+    .object({
+      outcome: z.literal("CLOSED"),
+      workspaceId: z.string().uuid(),
+      closedAt: z.string().datetime(),
+    })
+    .strict(),
+]);
+
 export const SlackWorkspaceCloseStartResultSchema = z.discriminatedUnion("outcome", [
   z.object({ outcome: z.literal("NOT_FOUND") }).strict(),
   z.object({
@@ -156,6 +186,7 @@ export type SlackRequester = z.infer<typeof SlackRequesterSchema>;
 export type SlackChannelBinding = z.infer<typeof SlackChannelBindingSchema>;
 export type SlackWorkspaceLimit = z.infer<typeof SlackWorkspaceLimitSchema>;
 export type SlackThreadWorkspaceResult = z.infer<typeof SlackThreadWorkspaceResultSchema>;
+export type SlackThreadPrepareResult = z.infer<typeof SlackThreadPrepareResultSchema>;
 export type SlackWorkspaceCloseStartResult = z.infer<typeof SlackWorkspaceCloseStartResultSchema>;
 export type SlackWorkspaceCloseCompleteResult = z.infer<typeof SlackWorkspaceCloseCompleteResultSchema>;
 export type SlackRequestMessage = z.infer<typeof SlackRequestMessageSchema>;

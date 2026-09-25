@@ -1,10 +1,10 @@
 import {
   slackThreadSubject,
-  slackThreadUrl,
   splitSlackMessage,
   WorkspaceClosePreflightResultSchema,
   type SlackRequestMessage,
   type SlackThread,
+  type SlackThreadPrepareResult,
   type SlackThreadWorkspaceResult,
   type SlackWorkspaceCloseCompleteResult,
   type SlackWorkspaceCloseStartResult,
@@ -12,16 +12,21 @@ import {
   type TurnObservation,
   type TurnRecord,
 } from "@agentx/contracts";
+import type { WorkerAccess } from "@agentx/orchestrator";
 import { TurnRecorder } from "@agentx/orchestrator/turn-recorder";
 import { deterministicUuid, requestIdSequence } from "./ids.js";
+import { createLazyWorker } from "./lazy-worker.js";
+import { NEW_WORKSPACE_MESSAGE, STILL_PREPARING_MESSAGE, limitMessage, preparationFailedMessage } from "./messages.js";
 import { escapeText, slackReplyText } from "./slack-format.js";
 import { buildTurnRecord, emitTurnMetrics, type TurnDraft, type TurnRecordSink } from "./turn-records.js";
 
 export interface ThreadServiceApi {
   ensureWorkspace(requestId: string): Promise<SlackThreadWorkspaceResult>;
+  /** Spec 014: prepares compute for a thread whose workspace is UNPREPARED. */
+  prepareWorkspace?(requestId: string): Promise<SlackThreadPrepareResult>;
   startClose(requestId: string): Promise<SlackWorkspaceCloseStartResult>;
   completeClose(requestId: string, operationId: string): Promise<SlackWorkspaceCloseCompleteResult>;
-  waitForOperation(workspaceId: string, operationId: string): Promise<{ status: string; error?: string | undefined; result?: unknown }>;
+  waitForOperation(workspaceId: string, operationId: string, signal?: AbortSignal): Promise<{ status: string; error?: string | undefined; result?: unknown }>;
   createConversation(workspaceId: string): Promise<string>;
 }
 
@@ -54,6 +59,8 @@ export interface TurnInput {
   connectors?: ThreadConnector[];
   repositories?: string[];
   recoverableOperations?: string[];
+  /** Spec 014: present only when the thread's compute is not prepared yet. */
+  worker?: WorkerAccess;
   requestId: () => string;
   /** Collects this turn's record; the processor writes it once the event is finished. */
   recorder?: TurnRecorder;
@@ -151,21 +158,19 @@ export async function processSlackRequest(
     }
     if (workspace.settingsRevision !== undefined) draft.settingsRevision = workspace.settingsRevision;
     if (workspace.status === "PREPARING" && workspace.operationId) {
-      await post(workspace.created
-        ? "Setting up a new workspace for this thread. The first request takes a few minutes."
-        : "This thread's workspace is still being set up. I'll start as soon as it's ready.");
+      await post(workspace.created ? NEW_WORKSPACE_MESSAGE : STILL_PREPARING_MESSAGE);
       const prepared = await api.waitForOperation(workspace.workspaceId, workspace.operationId);
       if (prepared.status !== "SUCCEEDED") {
         draft.disposition = "workspace_unavailable";
         log("workspace.preparation_failed", { eventId: message.eventId, status: prepared.status });
-        await post(`AgentX could not set up this thread's workspace (${prepared.status}). Mention me again in this thread to retry.`);
+        await post(preparationFailedMessage(prepared.status));
         finished = true;
         return;
       }
-    } else if (!RUNNABLE_STATUSES.has(workspace.status)) {
+    } else if (workspace.status !== "UNPREPARED" && !RUNNABLE_STATUSES.has(workspace.status)) {
       draft.disposition = "workspace_unavailable";
       log("workspace.unavailable", { eventId: message.eventId, status: workspace.status });
-      await post(`This thread's workspace is not available right now (${workspace.status}). Mention me again later to retry.`);
+      await post(`This thread's workspace is not available right now (${escapeText(workspace.status)}). Mention me again later to retry.`);
       finished = true;
       return;
     }
@@ -186,6 +191,10 @@ export async function processSlackRequest(
       await dependencies.threads.saveSettingsRevision(subject, workspace.settingsRevision);
     }
 
+    // Spec 014: a thread without compute prepares it only when a tool first needs the worker.
+    const worker = workspace.status === "UNPREPARED"
+      ? createLazyWorker({ api, post, log, eventId: message.eventId })
+      : undefined;
     await post("Working on it now. I'll post the result in this thread when it's done.");
     log("task.started", { eventId: message.eventId });
     let response: string;
@@ -199,6 +208,7 @@ export async function processSlackRequest(
         ...(workspace.connectors === undefined ? {} : { connectors: workspace.connectors }),
         ...(workspace.repositories === undefined ? {} : { repositories: workspace.repositories }),
         ...(workspace.recoverableOperations === undefined ? {} : { recoverableOperations: workspace.recoverableOperations }),
+        ...(worker === undefined ? {} : { worker }),
         requestId: requestIdSequence(message.eventId),
         ...(recorder === undefined ? {} : { recorder }),
         ...(state.refreshConnectors?.length ? { refreshConnectors: state.refreshConnectors } : {}),
@@ -369,19 +379,6 @@ function closeBlockedMessage(result: ReturnType<typeof WorkspaceClosePreflightRe
 }
 
 export { slackThreadUrl } from "@agentx/contracts";
-
-function limitMessage(result: Extract<SlackThreadWorkspaceResult, { outcome: "LIMIT_REACHED" }>): string {
-  if (result.limit === "ORGANIZATION") {
-    return `This organization already has ${result.maximum} AgentX workspaces, the most allowed, so I can't start a new one. ` +
-      "Continue in an existing thread, or ask an administrator to raise the limit.";
-  }
-  const links = result.starterThreads.map((thread, index) => `• <${slackThreadUrl(thread)}|Thread ${index + 1}>`);
-  return [
-    `You already have ${result.maximum} AgentX workspaces, the most one person can have, so I can't start a new one. ` +
-      "Continue in one of your existing threads instead:",
-    ...links,
-  ].join("\n");
-}
 
 function safeMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : "unknown error";
