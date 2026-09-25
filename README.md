@@ -641,6 +641,34 @@ access to `mainline` is deploy access. To roll back, revert the change on `mainl
 `npm run release:prod -- --worker-image <digest>` locally with an earlier digest from
 `agentx-worker-production`.
 
+Spec 014 phase 14c part 1 adds an optional `actionPolicy` field to project definitions, ahead of
+the gate that reads it in part 2. Its rollback floor (plan R6) starts the moment any project
+revision stores `actionPolicy`, not once part 2 ships: a stored revision with the field fails the
+strict parse of any component older than 14c, including the worker's `prepare` invocation and the
+administration CLI's local project-file check. Before reverting 14c1, or rolling the control plane
+or runtime back below it, confirm no stored project revision carries `actionPolicy`:
+
+```sh
+export AWS_PROFILE=agentx-deployer AWS_REGION=us-east-1
+STATE_TABLE_NAME=$(aws cloudformation describe-stacks --stack-name AgentXControlPlane \
+  --query "Stacks[0].Outputs[?OutputKey=='StateTableName'].OutputValue" --output text)
+
+aws dynamodb scan --table-name "$STATE_TABLE_NAME" --consistent-read \
+  --filter-expression "#et = :project AND attribute_exists(#def.#ap)" \
+  --expression-attribute-names '{"#et":"entityType","#def":"definition","#ap":"actionPolicy"}' \
+  --expression-attribute-values '{":project":{"S":"PROJECT"}}' \
+  --projection-expression "pk, sk"
+```
+
+This is read-only. Each item the scan returns is one offending revision: `pk` is
+`PROJECT#<project-name>` and `sk` is `REV#<revision, zero-padded>`. If the response carries a
+`LastEvaluatedKey`, repeat the scan with `--exclusive-start-key` set to it before treating an empty
+page as clean. `actionPolicy` cannot be removed from a stored revision: project revisions are
+immutable. Registering a new revision without the field only changes what a new thread, and an
+existing thread's non-disk settings, read going forward; a thread whose workspace is still pinned
+to an older revision that carries `actionPolicy` keeps reading that revision, so reverting stays
+unsafe for it until that thread closes or the revision is otherwise no longer live.
+
 ## Implementation documents
 
 - [Pull-request task list](specs/002-create-pull-request/tasks.md): implementation and validation

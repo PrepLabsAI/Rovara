@@ -1266,7 +1266,12 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 Part 1 changes no behaviour. The release order is as always: runtime (rebuilt, because contracts
 changed; no behaviour change), then control plane, then Slack service (it asks for the policy and
-parses it, and uses nothing yet). An older Slack service does not send the flag and gets no field. Do not register an `actionPolicy` yet: R6 (C7) applies once part 2 ships.
+parses it, and uses nothing yet). An older Slack service does not send the flag and gets no field.
+Do not register an `actionPolicy` yet: R6's rollback floor (C7) applies from the first
+`actionPolicy` registered on 14c1, not once part 2 ships. Registering one immediately fixes the
+floor for the runtime and the control plane: reverting this PR alone, or rolling either component
+back below 14c1, is then safe only while no stored `PROJECT` revision carries `actionPolicy`. See
+the README's rollback guidance for the pre-revert check and how to clear it.
 
 ## Self-Review
 

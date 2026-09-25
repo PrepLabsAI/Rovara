@@ -44,8 +44,9 @@ async function preflightConnector(
   if ("notConnected" in resolved) {
     return { entry: { name: connector.name, status: "not_connected", problem: resolved.notConnected, offered: [], skipped: [] }, refusals: [] };
   }
-  // Item argument paths are the connector's own data (feature 014, R7). A malformed declaration is
-  // refused here, before any vendor contact; if one were served anyway, it is served as none.
+  // Item argument paths are the connector's own data (feature 014, R7). This check runs only when
+  // the caller asks for preflight, after the connector definition resolves and before discovery
+  // contacts the vendor; if a malformed declaration were ever served anyway, it is served as none.
   const pathProblems = itemPathProblems(resolved.itemArguments);
   if (pathProblems.length > 0) {
     return {

@@ -204,7 +204,9 @@ function checkProjectDefinition(
 
 export const ProjectDefinitionSchema = projectDefinitionObject(ConnectorsSchema)
   .superRefine(checkProjectDefinition)
-  // Only registration checks that each rule can apply; a stored revision was checked when registered.
+  // Runs wherever ProjectDefinitionSchema parses a project: registration, the developer CLI's
+  // local project-file check, and the local broker. A stored revision is read with
+  // StoredProjectDefinitionSchema, which does not re-check.
   .superRefine((project, context) => {
     for (const message of actionPolicyProblems(project)) context.addIssue({ code: "custom", path: ["actionPolicy"], message });
   });
