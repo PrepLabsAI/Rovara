@@ -66,7 +66,8 @@ only that thread prepares a workspace.
 ### User Story 2 - Hand Work to AgentX From Another Tool (Priority: P1)
 
 A person posts to a bound channel through a tool acting as them, such as Claude Code's Slack
-access, a Slack workflow, or a script with the person's user token. AgentX treats the message
+access or a script with the person's user token. (A Slack workflow posts as a workflow bot user,
+so FR-008 ignores it.) AgentX treats the message
 exactly as if the person had typed it. AgentX still ignores its own messages and messages from
 bots.
 
@@ -185,11 +186,13 @@ listing the `save_issue` call and its result; nothing is posted to the thread.
 
 - **FR-007**: The ingress MUST ignore events from AgentX's own app ID or bot user ID.
 - **FR-008**: The ingress MUST ignore events with no `user`, or whose `user` is a bot (checked with
-  Slack's user profile and cached).
+  Slack's user profile and cached). The check applies to app-posted events (those carrying
+  `bot_id`, `app_id` or `bot_profile.app_id`); a typed message needs none. A failed check ignores
+  the event and posts one notice.
 - **FR-009**: The ingress MUST accept other app-posted events and attribute them to `user`.
 - **FR-010**: The ingress MUST keep ignoring message subtypes (edits, deletions, joins).
 - **FR-011**: The system MUST limit turns per thread per minute (default 6) and post one notice
-  when it pauses a thread.
+  when it pauses a thread. Minutes are fixed windows; the notice is posted once per window.
 - **FR-012**: An administrator MUST be able to turn off FR-009 per deployment.
 
 **Action gate (US3)**
@@ -280,7 +283,8 @@ listing the `save_issue` call and its result; nothing is posted to the thread.
   - Slack delivers `app_mention` events for app-posted messages that carry a human `user`. The
     2026-09-25 check observed such events reaching the ingress.
   - The Slack app has the `users:read` scope, which FR-008 needs to tell people from bots. It was
-    added on 2026-09-25.
+    added on 2026-09-25. Without it, app-posted messages fail closed with a notice; typed messages
+    are unaffected.
 - **Out of scope:**
   - An AgentX MCP server for Claude Code, covering hand-off, thread open and details. This is
     planned after the installer.
