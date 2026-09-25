@@ -73,6 +73,7 @@ Each phase is one pull request to `mainline`. Check a task only after its eviden
 - [x] T043 Record Asana fixtures; add the Asana connector type, project binder and guard, and the fake-Asana flow test.
 - [x] T044 Write the Asana setup guide with the mandatory bot-user restriction; add evaluation cases and the presentation snapshot.
 - [ ] T045 Live check against a real Asana project with a one-time bot-user sign-in; record evidence in `quickstart.md`.
+  Part A (before the PR) passed on 2026-09-25 and is recorded under `## Asana (US6)` in `quickstart.md`. Part B (after the production release) is still to run; check T045 then.
 
 ## Dependencies
 

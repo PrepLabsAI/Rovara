@@ -64,7 +64,13 @@ public team and project in the organisation, and Step 6 must still pass.
    app can call `https://mcp.asana.com/v2/mcp`.
 3. After the app is created, open its settings and add this redirect URL, exactly:
    `http://localhost:8765/callback`. Step 4 prints the same URL, so you can check it there.
-4. Copy the **Client ID** and the **Client secret**. There are no scopes to choose.
+4. Open the app's **Manage Distribution** settings and make the app available to the bot user's
+   workspace or organisation. A guest bot user with an address in another email domain signs in
+   through that other domain, so an app limited to your own workspace refuses it. Choosing **Any
+   workspace** works. Without this, Asana refuses the bot user's sign-in in Step 4 with "This app
+   is not available to your Asana workspace or organization" (see
+   [Troubleshooting](#troubleshooting)).
+5. Copy the **Client ID** and the **Client secret**. There are no scopes to choose.
 
 Never paste the client secret into a chat message or a screenshot. If it is ever exposed, reset
 it in the developer console, then repeat Steps 3 and 4.
@@ -116,7 +122,9 @@ https://app.asana.com/-/oauth_authorize?...
 ```
 
 Close the tab the command opened if it shows your own Asana account. Copy the URL into a private
-window, sign in as the bot user and approve access within five minutes. The browser shows "AgentX
+window, sign in as the bot user and approve access within five minutes. After five minutes the
+command stops waiting and closes its listener, so a later approval ends on a browser error such as
+`ERR_CONNECTION_REFUSED` for `localhost:8765`; run the command again. The browser shows "AgentX
 received the sign-in", and the command prints which Asana account signed in, then the result:
 
 ```text
@@ -204,7 +212,7 @@ Only these tools can be approved, each with the access shown:
 | `get_task`, `get_task_stories`, `get_tasks`, `search_tasks`, `get_project` | `read` |
 | `create_tasks`, `update_tasks`, `add_comment` | `write` |
 
-`search_tasks` works only on paid Asana plans. On a free workspace, approve `get_tasks` instead.
+`search_tasks` works only on paid Asana plans (a trial of a paid plan counts). On a free workspace, approve `get_tasks` instead.
 Registration refuses any other Asana tool, because AgentX cannot hold it to a project.
 
 ## Step 8: Register the project and read the preflight
@@ -295,6 +303,16 @@ settings, then delete the secret.
 - **"no sign-in arrived within 300 seconds".** Nobody approved the sign-in in time, or the browser
   never reached the command. The message repeats the redirect URL the app must use; check it and
   the entry above, then run Step 4 again.
+- **After you approve access, the browser shows `ERR_CONNECTION_REFUSED` (or "This site can't be
+  reached") for `localhost:8765`.** The command had already stopped waiting: the sign-in must be
+  approved within five minutes of starting Step 4, and after that nothing listens on port 8765.
+  Run Step 4 again and approve promptly.
+- **Asana's page says "invalid_request: This app is not available to your Asana workspace or
+  organization. If you are the app owner, adjust settings under "Manage Distribution" in the Asana
+  developer console."** The app is not distributed to the bot user's workspace or organisation,
+  which is the case for a guest bot user in another email domain. As the app's owner, set **Manage
+  Distribution** to **Any workspace**, or add the bot user's workspace or organisation (Step 2,
+  item 4), then run Step 4 again.
 - **"the token endpoint returned no refresh token".** The app is not an Asana MCP app. Create one
   of that type (Step 2).
 - **"the token endpoint refused the sign-in with HTTP 400 (invalid_grant)".** The sign-in took too
