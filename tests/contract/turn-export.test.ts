@@ -146,6 +146,43 @@ describe("turn record export", () => {
     });
   });
 
+  it("refuses an impossible calendar date or hour 24 that Date.parse would roll over", async () => {
+    const page = vi.fn<TurnRecordSource["page"]>(async () => ({ items: [] }));
+    const { exporter: turns } = exporter({ page });
+    for (const since of [
+      "2026-02-31T00:00:00Z", "2026-02-29T00:00:00Z", "2026-04-31T12:00:00.000Z", "2026-02-30T23:00:00-05:00",
+      "2026-09-17T24:00:00Z", "2026-09-17T24:00Z", "2026-09-17T24:00:00.000+02:00",
+    ]) {
+      await expect(turns.page(new URLSearchParams({ since }))).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    }
+    expect(page).not.toHaveBeenCalled();
+    await turns.page(new URLSearchParams({ since: "2028-02-29T23:59:59.999-05:00" }));
+    expect(page).toHaveBeenLastCalledWith(expect.objectContaining({ since: "2028-03-01T04:59:59.999Z" }));
+    await turns.page(new URLSearchParams({ since: "2026-12-31T23:00:00Z" }));
+    expect(page).toHaveBeenLastCalledWith(expect.objectContaining({ since: "2026-12-31T23:00:00.000Z" }));
+  });
+
+  it("looks up the projects of distinct workspaces concurrently, once each", async () => {
+    const otherWorkspace = "22222222-2222-4222-8222-222222222222";
+    const pending = new Map<string, (project: string) => void>();
+    const projectOf = vi.fn((id: string) => new Promise<string | undefined>((resolve) => { pending.set(id, resolve); }));
+    const items = [
+      stored("EvTURN00040", "2026-09-24T08:00:00.000Z"),
+      stored("EvTURN00041", "2026-09-24T07:00:00.000Z", { workspaceId: otherWorkspace }),
+      stored("EvTURN00042", "2026-09-24T06:00:00.000Z"),
+    ];
+    const { exporter: turns } = exporter({ page: async () => ({ items }) }, projectOf);
+    const result = turns.page(new URLSearchParams({ since: "2026-09-17T00:00:00Z" }));
+    await vi.waitFor(() => expect(projectOf).toHaveBeenCalledTimes(2));
+    expect(projectOf.mock.calls.map(([id]) => id)).toEqual([workspaceId, otherWorkspace]);
+    pending.get(otherWorkspace)?.("billing");
+    pending.get(workspaceId)?.("payments");
+    expect((await result).turns.map((turn) => [turn.eventId, turn.project])).toEqual([
+      ["EvTURN00040", "payments"], ["EvTURN00041", "billing"], ["EvTURN00042", "payments"],
+    ]);
+    expect(projectOf).toHaveBeenCalledTimes(2);
+  });
+
   it("reports a failed project lookup as a missing project, once per workspace", async () => {
     const throttled = Object.assign(new Error("slow down"), { name: "ProvisionedThroughputExceededException" });
     const projectOf = vi.fn(async (): Promise<string | undefined> => { throw throttled; });

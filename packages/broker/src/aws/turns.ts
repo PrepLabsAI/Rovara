@@ -11,7 +11,7 @@ export interface TurnRecordSource {
 }
 
 type Client = Pick<DynamoDBDocumentClient, "send">;
-const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/;
+const ISO_TIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/;
 const STORAGE_KEYS = new Set(["pk", "sk", "exportPk", "exportSk", "expiresAt"]);
 const KEY_NAMES = ["exportPk", "exportSk", "pk", "sk"];
 /** Far above any real key (a thread subject is at most 128 characters), far below abuse. */
@@ -66,7 +66,7 @@ export class TurnRecordExport {
 
   async page(query: URLSearchParams): Promise<{ turns: TurnRecord[]; cursor?: string }> {
     const rawSince = query.get("since");
-    if (rawSince === null || !ISO_TIME.test(rawSince) || Number.isNaN(Date.parse(rawSince))) {
+    if (rawSince === null || !validTime(rawSince)) {
       throw agentXError("CONFIG_INVALID", "since must be an ISO 8601 time such as 2026-09-17T00:00:00.000Z");
     }
     const since = new Date(rawSince).toISOString();
@@ -93,8 +93,7 @@ export class TurnRecordExport {
         throw agentXError("RUNTIME_UNAVAILABLE", "could not continue the turn record export; try again");
       }
     }
-    const projects = new Map<string, Promise<string | undefined>>();
-    const turns: TurnRecord[] = [];
+    const records: TurnRecord[] = [];
     const invalidKeys: string[] = [];
     const invalidFields = new Set<string>();
     let invalid = 0;
@@ -112,22 +111,24 @@ export class TurnRecordExport {
         }
         continue;
       }
-      const workspaceId = parsed.data.workspaceId;
-      let project: string | undefined;
-      if (workspaceId !== undefined) {
-        if (!projects.has(workspaceId)) {
-          projects.set(workspaceId, this.options.projectOf(workspaceId).catch((error: unknown) => {
-            log(JSON.stringify({ component: "broker", event: "turn_record.project_unavailable", workspaceId, errorName: errorName(error) }));
-            return undefined;
-          }));
-        }
-        project = await projects.get(workspaceId);
-      }
-      turns.push(project === undefined ? parsed.data : { ...parsed.data, project });
+      records.push(parsed.data);
     }
     if (invalid > 0) {
       log(JSON.stringify({ component: "broker", event: "turn_record.invalid", count: invalid, keys: invalidKeys, fields: [...invalidFields] }));
     }
+    // One lookup per distinct workspace on the page, all at once.
+    const workspaceIds = [...new Set(records.flatMap((record) => record.workspaceId === undefined ? [] : [record.workspaceId]))];
+    const projects = new Map(await Promise.all(workspaceIds.map(async (workspaceId) => [
+      workspaceId,
+      await this.options.projectOf(workspaceId).catch((error: unknown) => {
+        log(JSON.stringify({ component: "broker", event: "turn_record.project_unavailable", workspaceId, errorName: errorName(error) }));
+        return undefined;
+      }),
+    ] as const)));
+    const turns = records.map((record) => {
+      const project = record.workspaceId === undefined ? undefined : projects.get(record.workspaceId);
+      return project === undefined ? record : { ...record, project };
+    });
     return { turns, ...(next === undefined ? {} : { cursor: next }) };
   }
 }
@@ -171,6 +172,20 @@ function startKey(value: unknown): TurnRecordStartKey | undefined {
   const entries = Object.entries(value);
   if (entries.length !== KEY_NAMES.length || !entries.every(([name, child]) => KEY_NAMES.includes(name) && typeof child === "string")) return undefined;
   return value as TurnRecordStartKey;
+}
+
+/**
+ * An ISO 8601 time that names a real instant as written. V8's Date.parse rolls impossible values
+ * forward (2026-02-31 becomes March 3, T24:00 the next day), so the written calendar date must
+ * exist and the hour must be 00 to 23.
+ */
+function validTime(value: string): boolean {
+  const match = ISO_TIME.exec(value);
+  if (!match || Number.isNaN(Date.parse(value))) return false;
+  const [year, month, day, hour] = match.slice(1, 5).map(Number) as [number, number, number, number];
+  if (hour > 23) return false;
+  const written = new Date(Date.UTC(year, month - 1, day));
+  return written.getUTCFullYear() === year && written.getUTCMonth() === month - 1 && written.getUTCDate() === day;
 }
 
 function errorName(error: unknown): string {
