@@ -130,6 +130,11 @@ phase 2b (T038), alongside the conditional recovery tools that consume it.
 Table `TurnRecords` in `AgentXControlPlane`, TTL 30 days (the `expiresAt` attribute). Written once
 per Slack event, with a condition on absence, only when the event is finished. An event still in
 flight never gets a partial record.
+The Slack service only puts records. The broker only queries them, for the admin export. Since
+spec 014 phase 14d, the Slack ingress Lambda may also `GetItem` one record by key for the Details
+view, naming only the attributes that view shows (`TURN_DETAILS_ATTRIBUTES` in
+`packages/contracts/src/slack-details.ts`) plus the storage keys; it cannot read `requestText`,
+`responseText`, the workspace or `workerOperations`.
 
 | Field | Notes |
 |---|---|
