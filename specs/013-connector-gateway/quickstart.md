@@ -1,5 +1,62 @@
 # Connector gateway live evidence
 
+## Linear (US2)
+
+Part A, before release sign-off: the broker from branch `test/linear-live` (off `mainline` at
+`3d9f768`) against real Linear (`tests/live/linear-live.test.ts`).
+
+- Date: 2026-09-25, run locally.
+- Endpoint: `https://mcp.linear.app/mcp`. A Linear personal API key, registered as a
+  `static-secret` `{apiKey}` credential and sent as a Bearer token (the value is never recorded).
+- Team: `charterarc` (`c408e946-78aa-4db8-923e-f78053dd954f`), the dedicated test team. Tools
+  approved: `list_issues`, `get_issue`, `save_issue`, `save_comment`, `list_comments`.
+- First run: steps 1 to 3 passed and created `CHA-7` (with the `Bug` label); step 4 failed on the
+  test's own assumption. Linear stores markdown and reads the footer's bare thread URL back as an
+  autolink, `[url](<url>)`. The test now accepts either form; no product change. `CHA-7` has no
+  comment.
+- Second run: passed. Evidence lines as printed:
+
+  ```
+  linear live check: step 1 connected offered=5
+  linear live check: step 2 SUCCEEDED
+  linear live check: step 3 SUCCEEDED CHA-8 labels=Bug
+  linear live check: step 4 SUCCEEDED CHA-8 team=scoped footer=yes
+  linear live check: step 5 SUCCEEDED CHA-8 footer=yes
+  linear live check: step 6 403:FORBIDDEN model-supplied team/teamId (random uuid)
+  linear live check: step 7 FAILED:policy_denied ZZZNOPE-1 (not found)
+  linear live check: step 8 not_connected
+  ```
+
+  1. Register the credential and the project with preflight: `connected`, five offered tools, none
+     skipped; no discovered tool exposes `team` or `teamId`.
+  2. `list_issues` in the team: `SUCCEEDED`.
+  3. `save_issue` `AgentX Linear live check <ISO time>` with `labels: ["Bug"]` (the test first
+     confirms, read-only through Linear's GraphQL API, that a `Bug` label is usable in the team):
+     `SUCCEEDED`, `CHA-8`.
+  4. `get_issue` `CHA-8`: `SUCCEEDED`; same title, `teamId` is the scoped team, the description
+     ends with the AgentX footer, and the `Bug` label is present.
+  5. `save_comment` on `CHA-8`: `SUCCEEDED`; `list_comments` reads it back with the footer.
+  6. A model-supplied `team` or `teamId` on `save_issue`, and `team` on `list_issues`: `403`
+     "Linear routing arguments are server controlled", before Linear is contacted. No other
+     team's UUID was supplied (`AGENTX_LIVE_LINEAR_OTHER_TEAM` unset), so a random UUID stood in.
+  7. `get_issue` and `save_comment` on `ZZZNOPE-1`: `FAILED`, `policy_denied`, before any write
+     (`AGENTX_LIVE_LINEAR_OUTSIDE_ISSUE` unset, so a missing issue stood in for an outside one).
+  8. A second credential holding the key minus its last character: preflight `not_connected`,
+     "Linear rejected the credential twice".
+- Created issues: `CHA-7` (first run) and `CHA-8` with one comment (left in place).
+
+Part B, after the production release (T034): passed on 2026-09-25, in production, from the bound
+Slack channel `#agentx-connectors`, project `connectors-check` at revision 2, model
+`amazon.nova-pro-v1:0`. Mentions were posted through a person's user token, not the app (spec 014
+phase 14a's app-posted path); Slack, a fresh thread `1790354000.643289` that answered without
+preparing a workspace first (spec 014 phase 14b PR B live):
+
+1. "what's open in Linear for charterarc" → `list_issues` (state open) SUCCEEDED: "no open
+   issues" (correct).
+2. Create → `save_issue` SUCCEEDED with `{title: "AgentX Slack check (T034)", labels: ["Bug"]}` →
+   `CHA-6` created with the label (the label check passes).
+3. Comment → `save_comment` SUCCEEDED on `CHA-6`.
+
 ## Jira (US3)
 
 Part A, before the PR: the broker from this branch against real Atlassian (`tests/live/jira-live.test.ts`).
@@ -37,7 +94,20 @@ JQL wrapper check, 2026-09-25: the branch's `limitJqlToProject` wrapped each que
 
 Caveat: this service account sees only `KAN`, so the results alone cannot show the wrapper keeping other projects out. They show that Jira parses the quoting and grouping the way the wrapper assumes.
 
-Part B, after the production release (T037): not yet run.
+Part B, after the production release (T037): passed on 2026-09-25, in production, from the bound
+Slack channel `#agentx-connectors`, project `connectors-check` at revision 2, model
+`amazon.nova-pro-v1:0`. Mentions were posted through a person's user token, not the app (spec 014
+phase 14a's app-posted path):
+
+1. Read, in an earlier thread `1790353613.516979`: `KAN-1` through `KAN-4` listed.
+2. Create, in a fresh thread `1790354000.643289` that answered without preparing a workspace first
+   (spec 014 phase 14b PR B live): `createJiraIssue` SUCCEEDED → `KAN-5` "AgentX Slack check
+   (T037)".
+3. Comment → `addOrEditJiraIssueComment` SUCCEEDED on `KAN-5`.
+
+Finding: the create reply linked an invented site, `your-jira-instance.atlassian.net`, because the
+create result carries no browse URL. Tracked as GitHub issue #61 ("Jira connector: model invents
+the issue URL after a create").
 
 ## Asana (US6)
 
@@ -70,7 +140,16 @@ Findings from the three runs:
 - (e) Asana did not rotate the refresh token on refresh.
 - (f) The sign-in must be approved within five minutes. A late approval ended on `ERR_CONNECTION_REFUSED` for `localhost:8765`, because the command had stopped waiting and closed its listener. The guide's Step 4 and Troubleshooting now say to run it again.
 
-Part B, after the production release (T045): not yet run.
+Part B, after the production release (T045): passed on 2026-09-25, in production, from the bound Slack channel `#agentx-connectors`, project `connectors-check` at revision 2.
+
+- Secret: the tagged secret `agentx/connectors/asana-bot` was created with the app's client (Step 3).
+- Sign-in, run 1: `agentx admin credential authorize` opened the default browser, which was signed in to Asana as the app's owner; Asana approved the owner's own app silently within a second, and the command stored the owner's sign-in (it printed the owner on the "Signed in to Asana as" line, but still stored and registered). Rerun with the automatic browser suppressed (before `--no-browser` existed, by putting a no-op `open` command first on `PATH`) and the printed URL opened in a private window as the bot user: the bot user's sign-in was stored and the registration answered `"replaced": true`. The owner capture happened twice overall: once in Part A (the first live-test run opened the default browser, finding (a)) and once here (authorize run 1). This is why the command gained `--no-browser` and `--expect-account <email>` (the latter refuses, storing and registering nothing, any other account), and why the guide's Step 4 now uses both.
+- Registration preflight: `asana` connected, offering `asana__search_tasks`, `asana__get_tasks`, `asana__get_task`, `asana__create_tasks`, `asana__update_tasks`, `asana__add_comment`; `linear` and `jira` connected too.
+- Slack, thread `1790312954.766639`:
+  1. Listing open tasks succeeded: `search_tasks` with `completed: false` answered 9 tasks, all from the project.
+  2. `create_tasks` succeeded ("AgentX Slack check (T045)"), and `add_comment` succeeded on that task.
+  3. `add_comment` on a task in another project FAILED before any write; the reply said the task was "not found or this connector cannot see it".
+- Model behaviour (`amazon.nova-pro-v1:0`), not connector defects: it twice called `get_tasks` with assignee `"me"`, which the project guard refused (`policy_denied`), and once answered a create-and-comment request without creating anything.
 
 ## SC-004: tool selection before and after (phase 4)
 

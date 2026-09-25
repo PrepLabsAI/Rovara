@@ -13,7 +13,7 @@ import {
 } from "@agentx/contracts";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { Command } from "commander";
-import { authorizeCredential, secretsManagerAuthorizeSecrets, type AuthorizeSecrets } from "./admin/authorize.js";
+import { authorizeCredential, expectedAccountEmail, secretsManagerAuthorizeSecrets, type AuthorizeSecrets } from "./admin/authorize.js";
 import { listCredentials, registerCredential } from "./admin/credential.js";
 import { registerProject } from "./admin/register.js";
 import { bindSlackChannel, unbindSlackChannel } from "./admin/slack.js";
@@ -200,8 +200,12 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .requiredOption("--secret <name>", "Secrets Manager secret holding the app's {\"clientId\", \"clientSecret\"}, agentx/connectors/<name>")
     .requiredOption("--provider <name>", "whose sign-in page to use: asana")
     .option("--region <region>", "AWS region of the secret; defaults to your AWS configuration")
-    .action(async (options: { ref: string; secret: string; provider: string; region?: string }, command: Command) => {
+    .option("--no-browser", "do not open a browser; only print the sign-in URL, to open in a private window signed in as the bot user")
+    .option("--expect-account <email>", "the bot user's email; refuse, storing nothing, when another account signs in")
+    .action(async (options: { ref: string; secret: string; provider: string; region?: string; browser: boolean; expectAccount?: string }, command: Command) => {
       const globals = globalOptions(command);
+      // A blank --expect-account fails before logging in or reading the secret.
+      expectedAccountEmail(options.expectAccount);
       const { settings, accessToken } = await authenticate(globals, services.tokenStore);
       const overrides = dependencies.authorize ?? {};
       const result = await authorizeCredential({
@@ -211,8 +215,14 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         secretName: options.secret,
         provider: options.provider,
         secrets: overrides.secrets ?? secretsManagerAuthorizeSecrets(new SecretsManagerClient(options.region ? { region: options.region } : {})),
-        openBrowser: overrides.openBrowser ?? openSystemBrowser,
-        showUrl: (url, redirectRequirement) => { services.stderr.write(`Sign in as the connector's bot user ${redirectRequirement}. If no browser opened, or it is signed in as someone else, open this URL in a private window signed in as the bot user:\n${url}\n`); },
+        ...(options.browser ? { openBrowser: overrides.openBrowser ?? openSystemBrowser } : {}),
+        ...(options.expectAccount === undefined ? {} : { expectAccount: options.expectAccount }),
+        showUrl: (url, redirectRequirement) => {
+          const open = options.browser
+            ? "If no browser opened, or it is signed in as someone else, open this URL in a private window signed in as the bot user"
+            : "Open this URL in a private window signed in as the bot user";
+          services.stderr.write(`Sign in as the connector's bot user ${redirectRequirement}. ${open}:\n${url}\n`);
+        },
         showAccount: (line) => { services.stderr.write(`${line}\n`); },
         ...(options.region === undefined ? {} : { region: options.region }),
         fetchImplementation: services.fetchImplementation,

@@ -137,7 +137,7 @@ integrations:
           allowedArguments: [id, includeCustomerNeeds, includeReleases]
         - name: save_issue
           access: write
-          allowedArguments: [id, title, description, state, assignee, priority, dueDate]
+          allowedArguments: [id, title, description, state, assignee, priority, labels, dueDate]
         - name: save_comment
           access: write
           allowedArguments: [issueId, body]
@@ -148,10 +148,12 @@ integrations:
 - With several scopes, members pick a team by its alias.
 - `allowedArguments` keeps the model to the fields you list. The `save_issue` and `save_comment`
   fields above are the recommended minimum for writes.
-- `save_issue`'s `allowedArguments` leaves out `addLabels` and `removeLabels`. AgentX always sends
-  the team on an update, and Linear's schema says a label change cannot be combined with a team
-  change; whether that combination actually works has not yet been verified live. Add them back
-  once it has been.
+- `save_issue`'s `labels` replaces the full label set on the issue. A live check creating an issue
+  with `labels: ["Bug"]` alongside the team succeeded (Slack, 2026-09-25; see T034 in
+  `quickstart.md`). `allowedArguments` still leaves out `addLabels` and `removeLabels`: AgentX
+  always sends the team on an update, and Linear's schema says a label change through those two
+  fields cannot be combined with a team change; whether that combination actually works has not
+  yet been verified live. Add them back once it has been.
 - `get_issue`'s `allowedArguments` leaves out `includeRelations`; if approved anyway, the connector
   refuses any call that sets it to `true`, because a related issue can belong to another team it
   does not return.

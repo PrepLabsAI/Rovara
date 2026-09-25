@@ -459,7 +459,10 @@ the project guard, not-connected reporting and zero cross-project writes.
   report a refused refresh (HTTP 400, 401 or 403) as not connected, with a message naming
   `agentx admin credential authorize --ref <ref>`; and treat any other failure as transient.
 - **FR-034** (amends FR-012): The administration client MUST provide
-  `agentx admin credential authorize --ref <ref> --secret <name> --provider <name> [--region <r>]`.
+  `agentx admin credential authorize --ref <ref> --secret <name> --provider <name> [--region <r>] [--no-browser] [--expect-account <email>]`
+  (`--no-browser` only prints the sign-in URL; `--expect-account` refuses, storing and registering
+  nothing, a sign-in whose account email differs, compared trimmed and case-insensitively, or is
+  not shown).
   It reads the app's client from the secret with the administrator's AWS credentials; signs in with
   the authorization code flow, PKCE S256 and a random state of at least 128 bits compared in
   constant time; listens only on 127.0.0.1 at the provider's registered redirect port; accepts one
