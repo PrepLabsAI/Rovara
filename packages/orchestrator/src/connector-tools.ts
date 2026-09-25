@@ -41,7 +41,8 @@ export function createConnectorTools(
           // Pi turns a thrown error into plain text; the recorder still needs the AgentX code.
           const code = (error as { code?: unknown } | null)?.code;
           if (typeof code === "string") {
-            // An observer failure must never replace the call's own error.
+            // An observer failure must never replace the call's own error. Unreachable today:
+            // TurnRecorder.connectorFailed guards itself. Kept as a backstop for other observers.
             try { options.onConnectorError?.(callId, code); } catch { /* the record then lacks the code; the call is unchanged */ }
           }
           throw error;
