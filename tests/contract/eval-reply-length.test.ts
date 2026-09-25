@@ -24,6 +24,15 @@ describe("reply length in the evaluation (spec 014 SC-006)", () => {
     expect(scoreRun({ ...write, expect: { tool: "jira__createJiraIssue" } }, run("a\nb\nc\nd"))).not.toHaveProperty("linesOk");
   });
 
+  it("fails a reply that keeps a literal \\n outside code, even when its line count fits (spec 014 SC-006)", () => {
+    // One real newline (so the formatter's "no real newline" condition for converting \n no longer
+    // holds) plus a later literal "\n" that therefore stays literal: two lines, within the limit, but
+    // the member would still see a stray backslash-n.
+    expect(scoreRun(write, run("Created PAY-31.\nSummary: X\\nDone."))).toMatchObject({ replyLines: 2, linesOk: false });
+    // The same literal "\n" inside a code span must not fail the check: it is shown as-is, not literally.
+    expect(scoreRun(write, run("Created PAY-31.\n`a\\nb`"))).toMatchObject({ replyLines: 2, linesOk: true });
+  });
+
   it("gives a case with maxLines the Slack reply style, and every other case the unchanged prompt", async () => {
     const { modelRuntime, faux } = await fauxModelRuntime();
     const prompts: string[] = [];

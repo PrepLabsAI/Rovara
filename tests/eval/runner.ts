@@ -242,6 +242,19 @@ export function caseHash(evalCase: EvalCase): string {
   return createHash("sha256").update(JSON.stringify(stable({ id, project, prompt, expect }))).digest("hex");
 }
 
+// The same units `slackReplyText` leaves untouched (a fenced block, to its closing fence or to the
+// end if never closed; an inline code span). Kept in step with slack-format.ts's own CODE pattern.
+const CODE_SPAN_OR_BLOCK = /```[\s\S]*?(?:```|$)|`[^`\n]+`/gu;
+
+/**
+ * SC-006's "no literal \n" half: the formatter converts a literal "\n" to a real line break only
+ * when the whole reply has no real newline (Task 1 ruling), so a reply mixing the two keeps a literal
+ * "\n" outside code, which Slack shows verbatim rather than as a line break.
+ */
+function hasLiteralNewlineOutsideCode(formattedReply: string): boolean {
+  return /\\n/u.test(formattedReply.replace(CODE_SPAN_OR_BLOCK, ""));
+}
+
 /** An errored run, or a call to a tool that was not offered, never counts as the correct tool. */
 export function scoreRun(evalCase: EvalCase, run: RunOutcome): RunScore {
   const expected = evalCase.expect.tool;
@@ -254,10 +267,13 @@ export function scoreRun(evalCase: EvalCase, run: RunOutcome): RunScore {
   const refusalOk = group(evalCase.expect.refusal);
   const containsOk = group(evalCase.expect.contains);
   const phraseOk = refusalOk === null && containsOk === null ? null : refusalOk !== false && containsOk !== false;
-  const replyLines = evalCase.expect.maxLines === undefined ? undefined : slackReplyText(run.response).split("\n").filter((line) => line.trim().length > 0).length;
+  const formattedReply = evalCase.expect.maxLines === undefined ? undefined : slackReplyText(run.response);
+  const replyLines = formattedReply === undefined ? undefined : formattedReply.split("\n").filter((line) => line.trim().length > 0).length;
   return {
     tool: run.tool, ...(run.offered === false ? { offered: false as const } : {}), toolOk, argsOk, phraseOk, refusalOk, containsOk,
-    ...(replyLines === undefined ? {} : { replyLines, linesOk: replyLines <= evalCase.expect.maxLines! }),
+    ...(replyLines === undefined || formattedReply === undefined ? {} : {
+      replyLines, linesOk: replyLines <= evalCase.expect.maxLines! && !hasLiteralNewlineOutsideCode(formattedReply),
+    }),
     ...(run.timedOut === true ? { timedOut: true as const } : {}), ...(run.error === undefined ? {} : { error: run.error }),
   };
 }
