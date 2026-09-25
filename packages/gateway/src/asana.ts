@@ -298,7 +298,7 @@ export function asanaConnector(credentials: CredentialProvider<AsanaProjectScope
   return {
     label: "Asana",
     endpoint: ASANA_MCP_ENDPOINT,
-    permissionsHint: "the bot user's sign-in (run agentx admin credential authorize again if it was revoked) and its access to the Asana project",
+    permissionsHint: "the bot user's access to the Asana project",
     credentials,
     binder: asanaBinder,
     guards: [asanaProjectGuard],

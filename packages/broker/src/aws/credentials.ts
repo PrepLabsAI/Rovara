@@ -311,7 +311,7 @@ export class CredentialRegistry {
         tokens: new DynamoTokenCache(this.documentClient, this.tableName, record.ref),
         lease: new DynamoRefreshLease(this.documentClient, this.tableName, record.ref, this.now),
         tokenEndpoint,
-        // The reason is an error class name or "LeaseDeadlineExceeded", never the token.
+        // The reason is an error class name, "LeaseDeadlineExceeded" or "SecretChanged", never the token.
         onRotationUnsaved: (reason) => {
           console.log(JSON.stringify({ component: "broker", event: "connector.refresh_token_unsaved", credential: record.ref, reason }));
         },

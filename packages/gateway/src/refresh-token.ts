@@ -38,6 +38,8 @@ const MAX_TOKEN_RESPONSE = 65_536;
 const LEASE_DEADLINE_SAFETY_MS = 2_000;
 /** Reported through onRotationUnsaved when a rotated token's write-back was skipped, not failed, because the lease was nearly spent. */
 const LEASE_DEADLINE_UNSAVED_REASON = "LeaseDeadlineExceeded";
+/** Reported through onRotationUnsaved when a rotated token was dropped because the secret's refresh token changed (a new sign-in) meanwhile. */
+const SECRET_CHANGED_UNSAVED_REASON = "SecretChanged";
 
 interface Refreshed { token: string; expiresAt: number; lifetimeMs: number; refreshToken?: string | undefined }
 /** What this provider stores in the shared token cache: the plain CachedToken shape plus the
@@ -65,9 +67,10 @@ export function oauthRefreshTokenProvider(options: {
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
   /**
-   * Told the error class name when a rotated refresh token could not be saved, or the synthetic
+   * Told the error class name when a rotated refresh token could not be saved, the synthetic
    * reason `"LeaseDeadlineExceeded"` when the write was skipped because the lease was nearly
-   * spent; never the token itself. Required so a rotation that failed to persist is never silent.
+   * spent, or `"SecretChanged"` when it was dropped because a new sign-in replaced the secret's
+   * refresh token meanwhile; never the token itself. Required so a rotation that failed to persist is never silent.
    */
   onRotationUnsaved: (errorName: string) => void;
 }): CredentialProvider<unknown> {
@@ -77,6 +80,9 @@ export function oauthRefreshTokenProvider(options: {
   let memory: (CachedToken & { refreshAt: number }) | undefined;
   /** A rotated refresh token this container holds because saving it failed or was skipped. It is newer than the secret's. */
   let unsaved: string | undefined;
+  /** The secret's refresh token that `unsaved` replaces. Once the secret holds another (a new sign-in), `unsaved` is from the old grant and is dropped. */
+  let unsavedBase: string | undefined;
+  const keepUnsaved = (refreshToken: string, base: string) => { unsaved = refreshToken; unsavedBase = base; };
   /** Bumped by invalidate() so a refresh already in flight cannot write a stale token back afterwards. */
   let generation = 0;
   let inFlight: Promise<CachedToken> | undefined;
@@ -139,24 +145,34 @@ export function oauthRefreshTokenProvider(options: {
    * lease's budget out before a second attempt would start. Past it, this container keeps the token
    * in memory and reports the deadline reason rather than attempting a further write. Any other
    * failure of both attempts instead reports the error's class name only, never the token.
+   * Writes only while the secret still holds `expected`, the refresh token read under the lease: a
+   * different one there is a new sign-in (a re-authorize), which a token rotated from the old grant
+   * must never overwrite. That rotated token is then dropped, not kept, and reported.
    */
-  async function saveRotated(refreshToken: string, deadline: number): Promise<void> {
+  async function saveRotated(refreshToken: string, expected: string, deadline: number): Promise<void> {
     let failure: unknown;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       if (now() >= deadline) {
-        unsaved = refreshToken;
+        keepUnsaved(refreshToken, expected);
         options.onRotationUnsaved(LEASE_DEADLINE_UNSAVED_REASON);
         return;
       }
       try {
         const fresh = await readClient();
+        // An earlier attempt's write may have landed even though it reported failure.
+        if (fresh.refreshToken === refreshToken) { unsaved = undefined; return; }
+        if (fresh.refreshToken !== expected) {
+          unsaved = undefined;
+          options.onRotationUnsaved(SECRET_CHANGED_UNSAVED_REASON);
+          return;
+        }
         const value = JSON.stringify({ clientId: fresh.clientId, clientSecret: fresh.clientSecret, refreshToken });
         await options.secrets.write(options.secretName, value);
         unsaved = undefined;
         return;
       } catch (error) { failure = error; }
     }
-    unsaved = refreshToken;
+    keepUnsaved(refreshToken, expected);
     options.onRotationUnsaved(failure instanceof Error ? failure.name : "unknown");
   }
 
@@ -180,6 +196,11 @@ export function oauthRefreshTokenProvider(options: {
       if (storedUsable(stored)) return remember(stored, usableUntil(stored), generationAtStart);
       // Read under the lease, never from a cache, so a token another container rotated and saved is the one used.
       let client = await readClient();
+      if (unsaved !== undefined && unsavedBase !== client.refreshToken) {
+        // A new sign-in replaced the refresh token this container's unsaved one was rotated from.
+        unsaved = undefined;
+        options.onRotationUnsaved(SECRET_CHANGED_UNSAVED_REASON);
+      }
       let current = unsaved ?? client.refreshToken;
       let refreshed: Refreshed;
       try {
@@ -211,11 +232,11 @@ export function oauthRefreshTokenProvider(options: {
           if (renewed) refreshDeadline = now() + REFRESH_LEASE_TTL_MS - LEASE_DEADLINE_SAFETY_MS;
         }
         if (now() < refreshDeadline) {
-          await saveRotated(toKeep, refreshDeadline);
+          await saveRotated(toKeep, client.refreshToken, refreshDeadline);
         } else {
           // Renewal was refused (a new holder has already taken the lease over) or threw: writing
           // now could race that holder's own write. Keep it in memory; the next refresh retries.
-          unsaved = toKeep;
+          keepUnsaved(toKeep, client.refreshToken);
           options.onRotationUnsaved(LEASE_DEADLINE_UNSAVED_REASON);
         }
       }

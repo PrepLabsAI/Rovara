@@ -21,6 +21,8 @@ export interface FakeAsana {
   refreshes: string[];
   /** When true, each refresh issues a new refresh token and revokes the one presented. */
   rotate: boolean;
+  /** When set, the token endpoint answers every request with this HTTP status, as in an outage. */
+  tokenOutageStatus: number | undefined;
   /** Revokes every access token issued so far, as if they had expired. */
   expireAccessTokens(): void;
   /** Revokes the current refresh token, as if the bot user's grant was removed in Asana. */
@@ -39,6 +41,7 @@ export async function startFakeAsana(options: { clientId: string; clientSecret: 
     authorizations: [] as FakeAsana["authorizations"],
     refreshes: [] as string[],
     rotate: false,
+    tokenOutageStatus: undefined as number | undefined,
     expireAccessTokens: () => { issued.clear(); },
     revokeRefreshToken: () => { validRefresh = undefined; },
   };
@@ -67,6 +70,7 @@ export async function startFakeAsana(options: { clientId: string; clientSecret: 
     if (url.pathname === "/-/oauth_token" && request.method === "POST") {
       const form = new URLSearchParams(body);
       const json = (status: number, value: unknown) => response.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(value));
+      if (fake.tokenOutageStatus !== undefined) { json(fake.tokenOutageStatus, { error: "service_unavailable" }); return; }
       if (form.get("client_id") !== options.clientId || form.get("client_secret") !== options.clientSecret) { json(401, { error: "invalid_client" }); return; }
       if (form.get("grant_type") !== "refresh_token") { json(400, { error: "unsupported_grant_type" }); return; }
       const presented = form.get("refresh_token") ?? "";

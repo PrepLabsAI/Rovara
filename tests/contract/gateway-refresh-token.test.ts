@@ -453,4 +453,42 @@ describe("oauth-refresh-token provider", () => {
     await provider.issue(undefined, "read");
     expect(JSON.parse(secrets.values[SECRET]!)).toEqual({ ...CLIENT, clientSecret: "admin-rotated-secret-value", refreshToken: "refresh-token-rotated-1" });
   });
+  it("never overwrites a refresh token an administrator's re-authorize wrote while this refresh rotated the old one", async () => {
+    const endpoint = fakeTokenEndpoint({ ...CLIENT, refreshToken: REFRESH });
+    endpoint.rotate = true;
+    const { secrets, unsaved, clock, provider } = directSetup(endpoint.fetch);
+    const REAUTHORIZED = "refresh-token-from-a-new-sign-in";
+    let reads = 0;
+    secrets.read = async (name: string) => {
+      reads += 1;
+      // Between the read under the lease and the write-back's re-read, `authorize` stored a new sign-in.
+      if (reads === 2) secrets.values[SECRET] = JSON.stringify({ ...CLIENT, refreshToken: REAUTHORIZED });
+      return secrets.values[name];
+    };
+    const issued = await provider.issue(undefined, "read");
+    expect(issued.token).toBe(endpoint.accessTokens[0]);
+    expect(secrets.writes).toEqual([]);
+    expect(JSON.parse(secrets.values[SECRET]!)).toEqual({ ...CLIENT, refreshToken: REAUTHORIZED });
+    expect(unsaved).toEqual(["SecretChanged"]);
+    // The rotated token from the old grant is dropped, not kept in memory: the next refresh uses the new sign-in.
+    clock.advance(56 * 60_000);
+    await provider.issue(undefined, "read").catch(() => undefined);
+    expect(endpoint.presented).toEqual([REFRESH, REAUTHORIZED]);
+  });
+  it("drops a rotated token it holds unsaved once a new sign-in has replaced the secret's refresh token, and never writes it over the new one", async () => {
+    const { secrets, endpoint, clock, unsaved, container } = setup({ rotate: true });
+    secrets.failWrites = 2;
+    const provider = container();
+    await provider.issue(undefined, "read");
+    expect(unsaved).toEqual(["AccessDeniedException"]);
+    // An administrator re-authorizes: a new sign-in replaces the secret's refresh token.
+    const REAUTHORIZED = "refresh-token-from-a-new-sign-in";
+    secrets.values[SECRET] = JSON.stringify({ ...CLIENT, refreshToken: REAUTHORIZED });
+    clock.advance(56 * 60_000);
+    await provider.issue(undefined, "read").catch(() => undefined);
+    expect(endpoint.presented).toEqual([REFRESH, REAUTHORIZED]);
+    expect(secrets.writes).toEqual([]);
+    expect(JSON.parse(secrets.values[SECRET] ?? "")).toEqual({ ...CLIENT, refreshToken: REAUTHORIZED });
+    expect(unsaved).toEqual(["AccessDeniedException", "SecretChanged"]);
+  });
 });

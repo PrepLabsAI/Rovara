@@ -218,6 +218,19 @@ describe("asana connector, end to end against a fake Asana", () => {
     expect(writes(fake)).toEqual([]);
   });
 
+  it("reports a token-endpoint outage as a vendor error without telling anyone to sign in again, and writes nothing", async () => {
+    const { fake, run } = await readyBroker();
+    fake.tokenOutageStatus = 503;
+    fake.expireAccessTokens();
+    const result = await run("add_comment", { task_id: "1210000000000101", text: "x" });
+    expect(result.body.result).toMatchObject({
+      status: "FAILED", reason: "vendor_error",
+      text: "Asana MCP request failed before any write. Check the bot user's access to the Asana project and MCP availability.",
+    });
+    expect(JSON.stringify(result.body)).not.toContain("authorize");
+    expect(writes(fake)).toEqual([]);
+  });
+
   it("lists asana at thread setup for services that opt in", async () => {
     const { handler } = await readyBroker();
     const response = await call(handler, { method: "POST", path: "/v1/service/threads/workspace", service,
