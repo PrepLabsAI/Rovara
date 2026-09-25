@@ -34,6 +34,7 @@ export const trackerConnectorType: ConnectorType = {
       approvals,
       attribution: config.attribution !== false,
       ledger: connectorLedgerKeys(config.name),
+      ...(context.connect ? { connect: context.connect } : {}),
       configured: async () => await registry?.has(credentialRef) ?? false,
       async definition() {
         if (!registry || !await registry.has(credentialRef)) return { notConnected: `credential ${credentialRef} is not registered` };

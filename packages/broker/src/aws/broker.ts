@@ -73,7 +73,7 @@ import { CatalogCache } from "@agentx/gateway";
 import { executeGitHubTool, toGitHubCatalog, type GitHubMcpDependencies } from "../github-mcp.js";
 import { DynamoConnectorLedger, GITHUB_LEDGER } from "./connector-ledger.js";
 import { attributionDroppedLog, callConnector, connectorCatalogKey, discoverConnector, discoverLegacyGitHubScope, stripCode, type ConnectorContextBase, type ScopeDiscovery } from "./connector-routes.js";
-import { resolveConnectors, type ConnectorType, type ConnectorTypeContext, type ResolvedConnector } from "./connector-types.js";
+import { resolveConnectors, BUILT_IN_CONNECTOR_TYPES, type ConnectorType, type ConnectorTypeContext, type ResolvedConnector } from "./connector-types.js";
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
 import { preflightConnectors, registrationWarnings } from "./registration-preflight.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
@@ -367,8 +367,10 @@ async function routeWorkspaceRequest(
     if (!repository) throw agentXError("NOT_FOUND", "registered repository not found");
     const revision = project.definition.revision;
     if (!parsed?.success) {
+      const types = dependencies.connectorTypes ?? BUILT_IN_CONNECTOR_TYPES;
       const discovery = await discoverLegacyGitHubScope({
-        connectors: resolveConnectors(project.definition, connectorTypeContext(dependencies), dependencies.connectorTypes),
+        connectors: resolveConnectors(project.definition, connectorTypeContext(dependencies), types),
+        githubTypeKnown: Object.hasOwn(types, "github"),
         connectorName: github.name, repository: repository.name, projectName: workspace.projectName,
         context: connectorContext(identity, workspace, project), catalogs: dependencies.catalogs,
       });
@@ -1228,13 +1230,32 @@ async function threadIntegrations(project: ProjectDefinition, include: Integrati
       type: connector.type,
       label: connector.label,
       scopes: connector.scopes.map((scope) => scope.alias),
-      connected: await connector.configured(),
+      connected: await configuredSafely(connector, project),
     })));
   }
   return {
     ...(include.integrations && github ? { githubMcpRepositories: repositories } : {}),
     ...(include.connectors ? { repositories: project.repositories.map((repository) => repository.name), connectors: connectors ?? [] } : {}),
   };
+}
+
+/**
+ * One connector's `configured()` throwing, for example a DynamoDB error in CredentialRegistry.has,
+ * must not fail the whole Slack turn: every other connector, GitHub included, still needs to reach
+ * the thread. Log the connector's name and its error's class name only, never its message, which
+ * could carry vendor detail.
+ */
+async function configuredSafely(connector: ResolvedConnector, project: ProjectDefinition): Promise<boolean> {
+  try {
+    return await connector.configured();
+  } catch (error) {
+    console.log(JSON.stringify({
+      component: "broker", event: "connector.configured_failed",
+      project: project.name, revision: project.revision, connector: connector.name,
+      error: error instanceof Error ? error.constructor.name : "UnknownError",
+    }));
+    return false;
+  }
 }
 
 async function threadWorkspaceLimitRefusal(

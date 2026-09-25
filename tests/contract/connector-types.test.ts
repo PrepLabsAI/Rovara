@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { githubConnectorType, resolveConnectors } from "../../packages/broker/src/aws/connector-types.js";
+import { ConnectorConfigSchema } from "../../packages/contracts/src/connectors.js";
+import { BUILT_IN_CONNECTOR_TYPES, githubConnectorType, resolveConnectors } from "../../packages/broker/src/aws/connector-types.js";
 import { CredentialRegistry } from "../../packages/broker/src/aws/credentials.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { TRACKER_ENDPOINT, trackerConnectorType } from "../support/tracker-connector.js";
@@ -96,5 +97,37 @@ describe("connector resolution", () => {
 
     db.set({ pk: "CREDENTIALS", sk: "REF#broken", entityType: "CREDENTIAL", ref: "other", type: "static-secret" });
     expect(await credentialRegistry.has("broken")).toBe(false);
+  });
+
+  it("has a built-in entry for every type ConnectorConfigSchema accepts, so none is silently dropped", () => {
+    const schemaTypes = ConnectorConfigSchema.options.map((option) => option.shape.type.value as string);
+    expect(schemaTypes).toEqual(["github"]);
+    for (const type of schemaTypes) {
+      expect(Object.hasOwn(BUILT_IN_CONNECTOR_TYPES, type)).toBe(true);
+    }
+  });
+
+  it("resolves github with the context's connect only when this deployment's GitHub MCP has none of its own", () => {
+    const contextConnect = vi.fn();
+    const definition = project({ githubMcp: { tools: [{ name: "list_issues", access: "read" }] } });
+    const [withoutOwnConnect] = resolveConnectors(definition, { githubMcp: { credentials: vi.fn() }, connect: contextConnect as never });
+    expect(withoutOwnConnect!.connect).toBe(contextConnect);
+  });
+
+  it("keeps the deployment's own GitHub MCP connect ahead of the context's connect", () => {
+    const contextConnect = vi.fn();
+    const deploymentConnect = vi.fn();
+    const definition = project({ githubMcp: { tools: [{ name: "list_issues", access: "read" }] } });
+    const [withOwnConnect] = resolveConnectors(definition, { githubMcp: { credentials: vi.fn(), connect: deploymentConnect }, connect: contextConnect as never });
+    expect(withOwnConnect!.connect).toBe(deploymentConnect);
+  });
+
+  it("passes the context's connect through to a type-owned connector, like the tracker test type", () => {
+    const contextConnect = vi.fn();
+    const definition = project({ connectors: [
+      { name: "tracker", type: "tracker", credentialRef: "tracker-key", scopes: [{ alias: "payments", siteId: "site-42" }], tools: [{ name: "list_items", access: "read" }] },
+    ] });
+    const [tracker] = resolveConnectors(definition, { connect: contextConnect as never }, { tracker: trackerConnectorType });
+    expect(tracker!.connect).toBe(contextConnect);
   });
 });

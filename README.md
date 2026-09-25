@@ -183,9 +183,9 @@ workspace revision.
 
 #### Connector credentials
 
-Each connector type is one definition in the control plane. A new type supplies its scopes, its
-credential and its binder; the routes, catalog cache, ledger and registration checks then work for
-it without further change.
+Each connector type is one definition in the control plane. A new type is added to the config
+schema and to the built-in type map. It supplies its scopes, its credential and its binder; the
+routes, catalog cache, ledger and registration checks then work for it without further change.
 
 Connectors other than GitHub read their credential from an AWS Secrets Manager secret named
 `agentx/connectors/<name>`, registered once with the control plane:

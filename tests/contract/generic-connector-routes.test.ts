@@ -48,13 +48,11 @@ async function trackerBroker() {
     call: invoke,
     close: async () => undefined,
   }));
-  // The tracker type has no deployment connect; the test injects its fake into each resolution.
+  // The tracker type has no deployment connect of its own; the test supplies its fake through the
+  // context's connect, which trackerConnectorType now passes through to the resolved connector.
   const tracker: ConnectorType = {
     type: "tracker",
-    resolve(config, project, context) {
-      const resolved = trackerConnectorType.resolve(config, project, context);
-      return "unusable" in resolved ? resolved : { ...resolved, connect: connect as never };
-    },
+    resolve: (config, project, context) => trackerConnectorType.resolve(config, project, { ...context, connect: connect as never }),
   };
   const secrets = { read: vi.fn(async (name: string) => name === "agentx/connectors/tracker-key" ? JSON.stringify({ apiKey: TRACKER_KEY }) : undefined) };
   const githubConnect = vi.fn();
@@ -113,6 +111,24 @@ describe("legacy GitHub route", () => {
     const response = await call(handler, { method: "GET", path: `/v1/service/workspaces/${workspaceId}/github/tools?repository=demo`, service });
     expect(response.status).toBe(403);
     expect(response.body.error).toEqual({ code: "FORBIDDEN", message: "github connector type is not available in this deployment" });
+  });
+
+  it("says the stored config is unusable, not that the type is unavailable, when github resolves as a type but this connector does not", async () => {
+    const { db, handler } = createBroker({
+      githubMcp: { credentials: vi.fn(), connect: vi.fn() },
+      connectorTypes: { github: githubConnectorType },
+    });
+    await registerAndBind(handler);
+    const workspaceId = (await ensureWorkspace(handler, thread, pratik)).body.workspaceId as string;
+    markReady(db, workspaceId);
+    const [revision] = db.find((item) => item.pk === "PROJECT#payments" && String(item.sk).startsWith("REV#"));
+    if (!revision) throw new Error("project revision is missing");
+    const definition = revision.definition as { integrations: { connectors: Array<Record<string, unknown>> } };
+    definition.integrations.connectors[0]!.extraField = "not part of the schema";
+
+    const response = await call(handler, { method: "GET", path: `/v1/service/workspaces/${workspaceId}/github/tools?repository=demo`, service });
+    expect(response.status).toBe(403);
+    expect(response.body.error).toEqual({ code: "FORBIDDEN", message: "github connector configuration is not usable; see the connector.unusable log" });
   });
 });
 
@@ -247,5 +263,43 @@ describe("thread setup lists every connector, to services that can parse it", ()
       { name: "github", type: "github", label: "GitHub issues", scopes: ["demo"], connected: true },
       { name: "tracker", type: "tracker", label: "Tracker issues", scopes: ["payments", "billing"], connected: true },
     ]);
+  });
+
+  it("marks a connector not connected, without failing the whole turn, when its configured() throws", async () => {
+    class DynamoDbLookupError extends Error {}
+    const broken: ConnectorType = {
+      type: "broken",
+      resolve: (config) => ({
+        name: config.name, type: "broken", label: "Broken issues", vendor: "Broken", scopeNoun: "site",
+        scopes: [{ alias: "payments", scope: {} }], policy: { tools: [] }, approvals: [],
+        attribution: false, ledger: { prefix: "CONNECTOR#broken#", entityType: "CONNECTOR_INVOCATION" },
+        configured: () => { throw new DynamoDbLookupError("dynamo unavailable"); },
+        definition: async () => ({ notConnected: "unused in this test" }),
+      }),
+    };
+    const { db, handler } = createBroker({
+      githubMcp: { credentials: vi.fn(), connect: vi.fn() },
+      connectorTypes: { github: githubConnectorType, broken },
+    });
+    await registerAndBind(handler);
+    const [revision] = db.find((item) => item.pk === "PROJECT#payments" && String(item.sk).startsWith("REV#"));
+    if (!revision) throw new Error("project revision is missing");
+    const definition = revision.definition as { integrations: { connectors: unknown[] } };
+    definition.integrations.connectors.push({ name: "broken", type: "broken", scopes: ["payments"], tools: [] });
+
+    const response = await call(handler, { method: "POST", path: "/v1/service/threads/workspace", service,
+      body: { requestId: randomUUID(), includeConnectors: true, includeAllConnectorTypes: true } });
+    expect(response.status).toBe(200);
+    const result = resultOf(response.body);
+    expect(result.outcome === "WORKSPACE" && result.connectors).toEqual([
+      { name: "github", type: "github", label: "GitHub issues", scopes: ["demo"], connected: true },
+      { name: "broken", type: "broken", label: "Broken issues", scopes: ["payments"], connected: false },
+    ]);
+    const lines = logLines().filter((line) => line.includes("connector.configured_failed"));
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]!)).toEqual({
+      component: "broker", event: "connector.configured_failed",
+      project: "payments", revision: 1, connector: "broken", error: "DynamoDbLookupError",
+    });
   });
 });

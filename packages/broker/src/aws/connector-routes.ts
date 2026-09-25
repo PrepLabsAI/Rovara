@@ -146,14 +146,24 @@ export async function callConnector(input: {
 export async function discoverLegacyGitHubScope(input: {
   connectors: readonly ResolvedConnector[];
   connectorName: string;
+  /** Whether this deployment's type map has a `github` entry at all, independent of whether this
+   * particular stored connector resolved. Distinguishes the two reasons the connector can be
+   * missing from `connectors` below. */
+  githubTypeKnown: boolean;
   repository: string;
   projectName: string;
   context: ConnectorContextBase;
   catalogs: CatalogCache<ScopeDiscovery>;
 }): Promise<ScopeDiscovery> {
   const connector = input.connectors.find((entry) => entry.type === "github" && entry.name === input.connectorName);
-  // The revision configures a github connector (the caller checked), but this deployment cannot serve its type.
-  if (!connector) throw agentXError("FORBIDDEN", "github connector type is not available in this deployment");
+  if (!connector) {
+    // The revision configures a github connector (the caller checked). Either this deployment does
+    // not know the github type at all, or it does but the stored config did not resolve: see the
+    // connector.unusable log line resolveConnectors already wrote for the cause.
+    throw agentXError("FORBIDDEN", input.githubTypeKnown
+      ? "github connector configuration is not usable; see the connector.unusable log"
+      : "github connector type is not available in this deployment");
+  }
   const scope = connector.scopes.find((entry) => entry.alias === input.repository);
   if (!scope) throw agentXError("NOT_FOUND", "registered repository not found");
   const definition = await connector.definition();

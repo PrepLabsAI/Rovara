@@ -29,6 +29,8 @@ export interface ResolvedConnector<Scope = unknown> {
 export interface ConnectorTypeContext {
   githubMcp?: GitHubMcpDependencies;
   credentialRegistry?: CredentialRegistry;
+  /** A vendor connection override, for a connector type with no deployment connect of its own. Only test types use this today. */
+  connect?: typeof connectMcp;
 }
 
 /** A stored connectors entry. Only its name and type are known before its type validates the rest. */
@@ -55,6 +57,9 @@ export const githubConnectorType: ConnectorType = {
     const resolved = githubConnectorOf({ repositories: project.repositories, integrations: { connectors: [parsed.data] } });
     if (!resolved) return { unusable: "not a github connector" };
     const githubMcp = context.githubMcp;
+    // The deployment's own GitHub MCP connect, if any, always wins over the context's; only a type
+    // with no deployment connect of its own, such as a test type, relies on the context's.
+    const connect = githubMcp?.connect ?? context.connect;
     const connector: ResolvedConnector<RepositoryDefinition> = {
       name: resolved.name,
       type: "github",
@@ -70,13 +75,18 @@ export const githubConnectorType: ConnectorType = {
       definition: () => Promise.resolve(githubMcp
         ? githubConnector((repository, access) => githubMcp.credentials(repository, access))
         : { notConnected: GITHUB_NOT_CONFIGURED }),
-      ...(githubMcp?.connect ? { connect: githubMcp.connect } : {}),
+      ...(connect ? { connect } : {}),
     };
     return connector;
   },
 };
 
-const DEFAULT_TYPES: Readonly<Record<string, ConnectorType>> = { github: githubConnectorType };
+/**
+ * Every connector type this deployment serves when a project or a dependency override does not
+ * name its own map. A type added to `ConnectorConfigSchema` without an entry here would resolve
+ * as unknown and be silently dropped; a contract test checks every schema option has one.
+ */
+export const BUILT_IN_CONNECTOR_TYPES: Readonly<Record<string, ConnectorType>> = { github: githubConnectorType };
 
 /**
  * Every connector the project configures that this broker can serve, in definition order. The
@@ -85,7 +95,7 @@ const DEFAULT_TYPES: Readonly<Record<string, ConnectorType>> = { github: githubC
 export function resolveConnectors(
   project: ProjectDefinition,
   context: ConnectorTypeContext,
-  types: Readonly<Record<string, ConnectorType>> = DEFAULT_TYPES,
+  types: Readonly<Record<string, ConnectorType>> = BUILT_IN_CONNECTOR_TYPES,
 ): ResolvedConnector[] {
   const legacy = project.integrations?.githubMcp;
   const configs: StoredConnectorConfig[] = legacy
