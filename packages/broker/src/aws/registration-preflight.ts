@@ -2,7 +2,7 @@ import { AgentXError, itemPathProblems, type ConnectorPreflight, type ProjectDef
 import { ConnectorNotConnected, presentCatalog, TARGET_CONFLICT_REASON, type SkippedTool } from "@agentx/gateway";
 import { discoverScope, stripCode, type ConnectorContextBase, type ScopeDiscovery } from "./connector-routes.js";
 import type { ResolvedConnector } from "./connector-types.js";
-import type { CredentialRegistry } from "./credentials.js";
+import { credentialSetupCommand, type CredentialRegistry } from "./credentials.js";
 
 const MAX_SKIPPED = 64;
 const MAX_PROBLEM = 512;
@@ -103,8 +103,8 @@ export async function credentialRefusals(connectors: readonly ResolvedConnector[
     if (!credential) continue;
     if (!registry) { refusals.push(`connector ${connector.name}: connector credentials are not configured in this deployment`); continue; }
     const type = await registry.typeOf(credential.ref);
-    if (type === undefined) refusals.push(`connector ${connector.name}: credential ${credential.ref} is not registered; run agentx admin credential register first`);
-    else if (!credential.accepts.includes(type)) refusals.push(`connector ${connector.name}: credential ${credential.ref} is ${type}; a ${connector.vendor} connector needs ${credential.accepts.join(" or ")}`);
+    if (type === undefined) refusals.push(`connector ${connector.name}: credential ${credential.ref} is not registered; run ${credentialSetupCommand(credential.accepts)} first`);
+    else if (!credential.accepts.includes(type)) refusals.push(`connector ${connector.name}: credential ${credential.ref} is ${type}; ${/^[AEIOU]/.test(connector.vendor) ? "an" : "a"} ${connector.vendor} connector needs ${credential.accepts.join(" or ")}`);
   }
   return refusals;
 }

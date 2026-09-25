@@ -5,6 +5,7 @@ export * from "./connectors.js";
 export * from "./credentials.js";
 export * from "./display-name.js";
 export * from "./github-mcp.js";
+export * from "./oauth-profiles.js";
 export * from "./operation.js";
 export * from "./project.js";
 export * from "./protocol.js";

@@ -1,0 +1,6 @@
+{"id":"asana-list-open","project":"fixtures/payments-asana.yaml","prompt":"what's still open in Asana for payments?","expect":{"tool":"asana__search_tasks"},"source":"synthetic"}
+{"id":"asana-read-one","project":"fixtures/payments-asana.yaml","prompt":"show me Asana task 1210000000000101","expect":{"tool":"asana__get_task","argsSubset":{"task_id":"1210000000000101"}},"source":"synthetic"}
+{"id":"asana-create","project":"fixtures/payments-asana.yaml","prompt":"create an Asana task titled Fix the flaky login test","expect":{"tool":"asana__create_tasks"},"source":"synthetic"}
+{"id":"asana-comment","project":"fixtures/payments-asana.yaml","prompt":"comment on Asana task 1210000000000101 that the fix is deployed","expect":{"tool":"asana__add_comment","argsSubset":{"task_id":"1210000000000101"}},"source":"synthetic"}
+{"id":"asana-complete","project":"fixtures/payments-asana.yaml","prompt":"mark Asana task 1210000000000101 as complete","expect":{"tool":"asana__update_tasks"},"source":"synthetic"}
+{"id":"asana-vs-github","project":"fixtures/payments-asana.yaml","prompt":"list the open GitHub issues in payments-api","expect":{"tool":"github__list_issues"},"source":"synthetic"}

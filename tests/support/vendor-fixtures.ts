@@ -1,10 +1,11 @@
 // tests/support/vendor-fixtures.ts
 // Real vendor tools/list output, trimmed to the tools the binding tests need.
 // Recorded 2026-09-24 from https://mcp.linear.app/mcp and https://mcp.atlassian.com/v2/mcp.
+// asana-tools.json is Asana's whole tools/list (39 tools), recorded 2026-09-24 from https://mcp.asana.com/v2/mcp.
 import { readFileSync } from "node:fs";
 import type { McpConnection } from "../../packages/gateway/src/index.js";
 
-export type VendorFixture = "linear" | "jira";
+export type VendorFixture = "linear" | "jira" | "asana";
 
 /** The tools a vendor offered, in its order, shaped as an MCP connection lists them. */
 export function vendorTools(vendor: VendorFixture): McpConnection["tools"] {

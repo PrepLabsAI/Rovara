@@ -2,6 +2,7 @@ import { GitHubConnectorSchema, githubConnectorOf, type CredentialType, type Pro
 import { githubConnector, type ConnectorDefinition, type ConnectorPolicy, type PresentationApproval, type connectMcp } from "@agentx/gateway";
 import type { GitHubMcpDependencies } from "../github-mcp.js";
 import { GITHUB_LEDGER } from "./connector-ledger.js";
+import { asanaConnectorType } from "./asana-connector-type.js";
 import type { CredentialRegistry } from "./credentials.js";
 import { jiraConnectorType } from "./jira-connector-type.js";
 import { linearConnectorType } from "./linear-connector-type.js";
@@ -90,7 +91,7 @@ export const githubConnectorType: ConnectorType = {
  * name its own map. A type added to `ConnectorConfigSchema` without an entry here would resolve
  * as unknown and be silently dropped; a contract test checks every schema option has one.
  */
-export const BUILT_IN_CONNECTOR_TYPES: Readonly<Record<string, ConnectorType>> = { github: githubConnectorType, linear: linearConnectorType, jira: jiraConnectorType };
+export const BUILT_IN_CONNECTOR_TYPES: Readonly<Record<string, ConnectorType>> = { github: githubConnectorType, linear: linearConnectorType, jira: jiraConnectorType, asana: asanaConnectorType };
 
 /**
  * Every connector the project configures that this broker can serve, in definition order. The

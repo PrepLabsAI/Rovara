@@ -82,4 +82,27 @@ describe("what the orchestrator sees", () => {
     expect(orchestratorSystemPrompt("Delegate every repository read, edit, build and test to the worker.", manifest)).toMatchSnapshot();
     expect(presented.tools.every((tool) => tool.description.length <= 2_048 && /^[a-zA-Z0-9_-]{1,64}$/.test(tool.name))).toBe(true);
   });
+
+  it("for a one-project Asana connector, from the recorded vendor fixture", async () => {
+    const { asanaConnector } = await import("../../packages/gateway/src/index.js");
+    const connector = asanaConnector({ issue: () => { throw new Error("not used by reviewTools"); } });
+    const approvals = [
+      { name: "search_tasks", access: "read" as const }, { name: "get_task", access: "read" as const },
+      { name: "create_tasks", access: "write" as const }, { name: "update_tasks", access: "write" as const }, { name: "add_comment", access: "write" as const },
+    ];
+    const reviewed = reviewTools({ tools: vendorTools("asana") }, connector, {
+      workspaceId: "registration", ownerKey: "owner-key", scopeAlias: "payments", scope: { alias: "payments", projectGid: "1210000000000010" }, policy: { tools: approvals },
+    });
+    expect(reviewed.skipped).toEqual([]);
+    const presented = presentCatalog({ connector: "asana", label: "Asana", scopeNoun: "Asana project", approvals, scopes: [{ alias: "payments", tools: reviewed.tools }] });
+    const catalog: ConnectorCatalog = { connector: "asana", tools: presented.tools, skipped: presented.skipped };
+    const manifest = capabilitiesManifest({
+      repositories: [],
+      connectors: [{ name: "asana", type: "asana", label: "Asana tasks", scopes: ["payments"], connected: true }],
+      catalogs: [catalog],
+    });
+    expect({ tools: presented.tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })), skipped: presented.skipped }).toMatchSnapshot();
+    expect(manifest.split("\n").find((line) => line.startsWith("- Asana tasks"))).toMatchSnapshot();
+    expect(presented.tools.every((tool) => tool.description.length <= 2_048)).toBe(true);
+  });
 });

@@ -39,7 +39,8 @@ Linear's hosted MCP server accepts an OAuth access token or API key in the `Auth
 header and can act as an application user. Atlassian's Rovo MCP server accepts a service-account
 API key as a Bearer token once an organization administrator enables API-token authentication.
 Asana's hosted MCP server documents interactive OAuth only; it is out of scope here, and the
-credential interface is required to admit it later without other changes.
+credential interface is required to admit it later without other changes. (Superseded by
+[Amendment 1](#amendment-1-2026-09-25-asana-connector-phase-7): Asana arrives in phase 7.)
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -354,7 +355,7 @@ turn with the fields below; inject schema drift and verify the metric and alarm 
   `/github/` routes. Decided 2026-09-24.
 - **Asana is deferred.** Its hosted MCP server documents interactive OAuth only. It will arrive as
   an `oauth-refresh-token` provider for an administrator-authorized bot user, or with per-user
-  identity. Decided 2026-09-24.
+  identity. Decided 2026-09-24. Superseded by Amendment 1 (bot user, `oauth-refresh-token`).
 - **Retired tool names are handled by a prompt mapping, not a hook.** Pi's agent loop rejects an
   unknown tool before `tool_call` handlers run.
 - **Linear uses a team-restricted API key, not client credentials.** Linear's client-credentials
@@ -375,5 +376,163 @@ turn with the fields below; inject schema drift and verify the metric and alarm 
 - Tool search, meta-tools and staged disclosure are out of scope; with a 20-tool budget they are
   not needed.
 - A confirmation step for writes, per-user identity, Asana and a web dashboard for turn records are
-  out of scope.
+  out of scope. (Asana is brought in scope by Amendment 1.)
 - Deployed acceptance is not claimed by this document.
+
+## Amendment 1 (2026-09-25): Asana connector, phase 7
+
+**Status**: Amendment, draft for review. It adds User Story 6, FR-033 to FR-041 and SC-008, and
+supersedes the "Asana is deferred" decision. Nothing above is otherwise changed. Detailed plan:
+[plans/phase-7-asana.md](plans/phase-7-asana.md).
+
+**Facts proven live on 2026-09-24.** Asana's MCP server is `https://mcp.asana.com/v2/mcp` and
+accepts only OAuth user tokens: no API key and no client credentials. The client is an
+organisation's own "Asana MCP" app with a client ID and secret; the authorize endpoint is
+`https://app.asana.com/-/oauth_authorize` (with PKCE S256 and `resource=https://mcp.asana.com/v2/mcp`),
+the token endpoint `https://app.asana.com/-/oauth_token`, and the redirect
+`http://localhost:8765/callback`. Access tokens last 3,600 seconds. Refreshing worked headlessly,
+and the refresh token was not rotated. `tools/list` returned 39 tools, recorded as the vendor
+fixture.
+
+### User Story 6 - Read and Write Asana Tasks from a Thread (Priority: P2)
+
+An administrator creates an Asana MCP app for the organisation, invites a dedicated bot user to
+the payments project only, signs the bot user in once with `agentx admin credential authorize`,
+and approves Asana tools for that project. A member asks "what's open in Asana for payments?",
+then "comment on the flaky login task that the fix is deployed". AgentX searches the project's
+tasks and comments with a footer naming the member. Hours later, with nobody signed in, AgentX
+still answers.
+
+**Why this priority**: The third non-GitHub connector, and the first whose vendor accepts only
+user OAuth. It proves FR-004: a refresh-token provider added without changing routes, ledger,
+catalog or orchestrator.
+
+**Independent Test**: Against a local fake Asana (an OAuth token endpoint and an MCP server serving
+the recorded `tools/list`), register an `oauth-refresh-token` credential and an `asana` connector,
+drive calls through the broker routes, and verify refresh, rotation write-back, project binding,
+the project guard, not-connected reporting and zero cross-project writes.
+
+**Acceptance Scenarios**:
+
+1. **Given** a secret holding the app's client ID and secret, **When** an administrator runs
+   `agentx admin credential authorize` and the bot user approves in the browser, **Then** the
+   refresh token is stored in the same secret, the secret is tagged for write-back, and the
+   credential is registered as `oauth-refresh-token`; no token, code or client secret is printed.
+2. **Given** an expired or rejected access token, **When** a call needs one, **Then** AgentX
+   refreshes without anyone signing in, at most once at a time across broker containers, and the
+   call succeeds.
+3. **Given** Asana returns a new refresh token, **When** AgentX refreshes, **Then** the new token is
+   written back to the secret before its access token is used, and the next refresh uses it.
+4. **Given** a revoked sign-in, **When** a call needs a token, **Then** the result is
+   `FAILED, not_connected` with a message naming `agentx admin credential authorize --ref <ref>`,
+   and registration preflight reports the connector as not connected.
+5. **Given** a task in another project, **When** a member asks to read, update or comment on it,
+   **Then** the call is refused as `policy_denied` and nothing is written to Asana.
+6. **Given** a list, a search or a create, **When** the tool is presented and called, **Then** the
+   project GID is absent from the model's schema and bound by the server.
+
+### Edge Cases (Amendment 1)
+
+- Two containers need a token at once: one refreshes; the other waits for its token. A container
+  that dies while refreshing loses its lease after 15 seconds, within one 20-second call.
+- A refresh outlives its lease and races a rotation: the refused one re-reads the secret once and
+  retries with the token the other saved.
+- Saving a rotated refresh token fails: that container keeps it in memory, logs
+  `connector.refresh_token_unsaved` by error class only, and still serves the call. Other
+  containers report not connected until the bot user signs in again.
+- The browser redirect carries another state: it is answered and ignored, and the command keeps
+  waiting for the right one until its five-minute timeout.
+- The redirect carries an `error` with the right state: the command stops and stores nothing.
+- A subtask in no project: accepted when its parent, up to three levels up, is in the project.
+- Asana answers `get_task` in a shape AgentX does not accept: the call is refused, never allowed.
+- A free Asana workspace: `search_tasks` fails as a vendor error; `get_tasks` works.
+
+### Functional Requirements (Amendment 1)
+
+- **FR-033** (amends FR-004 and FR-013): An `oauth-refresh-token` provider MUST read a secret of
+  shape `{clientId, clientSecret, refreshToken}` and mint access tokens with the refresh grant at
+  the token endpoint its connector type supplies. It MUST share the access token across broker
+  containers and reuse it until five minutes (at most half its lifetime) before expiry; allow at
+  most one refresh at a time per credential across containers; read the secret fresh when
+  refreshing; write a rotated refresh token back to the same secret before its access token is
+  used or cached, retrying once and otherwise keeping it in memory and logging the error class;
+  report a refused refresh (HTTP 400, 401 or 403) as not connected, with a message naming
+  `agentx admin credential authorize --ref <ref>`; and treat any other failure as transient.
+- **FR-034** (amends FR-012): The administration client MUST provide
+  `agentx admin credential authorize --ref <ref> --secret <name> --provider <name> [--region <r>]`.
+  It reads the app's client from the secret with the administrator's AWS credentials; signs in with
+  the authorization code flow, PKCE S256 and a random state of at least 128 bits compared in
+  constant time; listens only on 127.0.0.1 at the provider's registered redirect port; accepts one
+  redirect with the right state, ignores any other, stops on an `error` redirect, and times out
+  after five minutes; requires a refresh token in the exchange; writes
+  `{clientId, clientSecret, refreshToken}` to the secret, tags it `agentx-writable: refresh-token`,
+  and registers it as `oauth-refresh-token`. It MUST NOT print or log a token, the authorization
+  code or the client secret. Each provider's authorize URL, token URL, resource and redirect are
+  data per connector type in `@agentx/contracts`; `asana` is the only one.
+- **FR-035** (amends FR-011): The broker role MUST be allowed `secretsmanager:PutSecretValue` only on
+  `agentx/connectors/*` secrets tagged `agentx-writable: refresh-token`, and no other secret write.
+- **FR-036** (amends FR-009): A connector of type `asana` MUST have scopes `{alias, projectGid}`,
+  one Asana project each, MUST accept only an `oauth-refresh-token` credential, and uses service
+  identity (the bot user). Its endpoint is `https://mcp.asana.com/v2/mcp` and its token endpoint
+  `https://app.asana.com/-/oauth_token`.
+- **FR-037** (amends FR-005): The Asana binder MUST bind `project`, `project_id`, `default_project`
+  and `projects_any`, where a tool has them, to the scope's project GID, and remove them from the
+  model's schema.
+- **FR-038**: Before an Asana call reads or changes an existing task, every task it names MUST be
+  read with `get_task` and be in the scope's project, directly or through its parent up to three
+  levels: the `task_id`; in `create_tasks` each parent; in `update_tasks` each task, parent and
+  dependency. The check MUST fail closed on an error, an unrecognised result or a different task,
+  and one call MUST name at most 10 tasks. Task references MUST be numeric GIDs. The guard MUST
+  refuse `tag`, `section`, `user_task_list` and `assignee` on `get_tasks`; a `project_id` other
+  than the scope's, `section_id` and `assignee_section` on `create_tasks`; and `add_projects`,
+  `remove_projects` and `assignee_section` on `update_tasks`.
+- **FR-039**: An Asana connector MUST approve only `get_task`, `get_task_stories`, `get_tasks`,
+  `search_tasks` and `get_project` with `access: read`, and `create_tasks`, `update_tasks` and
+  `add_comment` with `access: write`. Registration MUST refuse any other Asana tool or access.
+- **FR-040**: The Asana connector MUST declare `task_id` as the argument through which a tool names
+  an existing item, for spec 014's action gate, and publish its nested task references
+  (`tasks[].task`, parents and dependencies) as argument paths.
+- **FR-041** (applies FR-024): The attribution footer MUST be appended to `add_comment`'s `text`.
+  Task notes inside `create_tasks` and `update_tasks` items and `html_text` comments are not signed.
+
+### Success Criteria (Amendment 1)
+
+- **SC-008**: In the fake-Asana flow test, cross-project requests cause zero upstream writes, a
+  revoked sign-in is reported as not connected, and no access token, refresh token or client
+  secret appears in any response or log line.
+
+### Decisions (Amendment 1)
+
+- **Asana is served by an administrator-authorized bot user through `oauth-refresh-token`.** Each
+  organisation creates its own Asana MCP app and bot user; AgentX never runs a shared OAuth app.
+  Per-user identity stays deferred. Decided by the owner 2026-09-24/25.
+- **A scope is one Asana project, not a workspace.** Asana's MCP tools take no workspace argument
+  except the interactive widget tools, so AgentX could not hold a search or a list to a workspace.
+  Project arguments exist on the list, search, create and project-read tools, and every call that
+  names a task can be checked with one `get_task`. A connector that needs several projects lists
+  several scopes. Decided 2026-09-25.
+- **The vendor-side restriction is the bot user's membership.** Asana OAuth has no scopes, so the
+  bot user must be a guest or member of only the intended projects; the setup guide makes this
+  mandatory and checkable. Constitution 2.1.0, Principle I.
+- **The refresh token lives in Secrets Manager beside the app's client**, and the broker writes a
+  rotated one back, narrowed by the tag condition in FR-035. Rotation was not observed on
+  2026-09-24 but is handled. Decided by the owner 2026-09-25.
+- **Refreshes are serialized across containers by a lease in the state table.** A lease that
+  cannot be read or written is treated as acquired, so a DynamoDB fault never stops refreshing; a
+  refused refresh re-reads the secret once, which covers the race that allows.
+- **The sign-in runs in the administration client with the administrator's AWS credentials.** The
+  refresh token goes from Asana to the administrator's machine to Secrets Manager and never
+  through the control plane's API. The client gains the Secrets Manager SDK dependency the broker
+  already pins.
+- **OAuth sign-in profiles are data in `@agentx/contracts`**, as `JIRA_PROJECT_TOOL_ACCESS` is. The
+  broker names no vendor (FR-001); the gateway's `asana.ts` holds every Asana argument name.
+
+### Assumptions (Amendment 1)
+
+- `get_task` answers `{ data: { gid, projects: [{ gid }], parent, memberships } }`, Asana's REST
+  shape. The 2026-09-24 spike recorded `tools/list` but no `get_task` result; the phase 7 live
+  check captures one. If the shape differs, every task check refuses until the parser is fixed.
+- `search_tasks` needs a paid Asana plan.
+- Whether a bot user joins as a guest, and whether it takes a seat, depends on the organisation's
+  Asana plan and email domain.
+

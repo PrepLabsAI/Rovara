@@ -135,7 +135,7 @@ async function createCallbackListener(expectedState: string, timeoutMilliseconds
   };
 }
 
-async function openSystemBrowser(url: string): Promise<void> {
+export async function openSystemBrowser(url: string): Promise<void> {
   if (process.platform === "darwin") await execFileAsync("open", [url]);
   else if (process.platform === "linux") await execFileAsync("xdg-open", [url]);
   else throw agentXError("AUTH_REQUIRED", "open the authorization URL in a browser manually");
