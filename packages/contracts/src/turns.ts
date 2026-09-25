@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { redactText } from "./redaction.js";
 import { SlackTeamIdSchema, SlackUserIdSchema } from "./slack.js";
 import { TaskUsageTelemetrySchema } from "./usage.js";
 
@@ -76,7 +77,17 @@ export type TurnRecord = z.infer<typeof TurnRecordSchema>;
 export const EMPTY_TURN_OBSERVATION: TurnObservation = { offeredTools: [], calls: [], emptyResponse: false, workerOperations: [] };
 
 export function capText(text: string, limit = TURN_TEXT_LIMIT): { text: string; truncated: boolean } {
-  return text.length > limit ? { text: text.slice(0, limit), truncated: true } : { text, truncated: false };
+  if (text.length <= limit) return { text, truncated: false };
+  // Back off one unit if the cut would split a surrogate pair (a high surrogate at the boundary).
+  const code = text.charCodeAt(limit - 1);
+  const cut = code >= 0xd800 && code <= 0xdbff ? limit - 1 : limit;
+  return { text: text.slice(0, cut), truncated: true };
+}
+
+/** Redacts before capping, so a secret that would straddle the cut cannot leak a truncated
+ * fragment: capping first and redacting afterward can leave a partial credential in the output. */
+export function redactAndCap(text: string, limit = TURN_TEXT_LIMIT): { text: string; truncated: boolean } {
+  return capText(redactText(text), limit);
 }
 
 export function turnRecordKeys(record: Pick<TurnRecord, "subject" | "receivedAt" | "eventId">) {
