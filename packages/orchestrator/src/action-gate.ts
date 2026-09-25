@@ -45,8 +45,11 @@ export interface GateSession {
   yesToAll: boolean;
   asks: PendingAsk[];
   decisions: GateDecision[];
-  /** Tool calls this turn that ran and returned without an error; the Slack service stays quiet after a confirmation when none did. */
-  succeeded: number;
+  /**
+   * Tool calls this turn that the gate let through and that then ran, whether they succeeded or
+   * failed. The Slack service lets a confirmation stand as the whole reply only when none did.
+   */
+  ran: number;
 }
 
 export interface ActionGateOptions {
@@ -77,7 +80,7 @@ const PREPARED_COMPUTE = { prepared: () => true };
 export const MAX_CLASSIFIER_CALLS_PER_TURN = 8;
 
 export function createGateSession(requesterId: string, options: { approvals?: readonly GateApproval[]; yesToAll?: boolean } = {}): GateSession {
-  return { requesterId, approvals: [...(options.approvals ?? [])], yesToAll: options.yesToAll ?? false, asks: [], decisions: [], succeeded: 0 };
+  return { requesterId, approvals: [...(options.approvals ?? [])], yesToAll: options.yesToAll ?? false, asks: [], decisions: [], ran: 0 };
 }
 
 // The hash assumes JSON-shaped tool input (what a model's tool call carries): a cycle or a BigInt
@@ -164,7 +167,7 @@ export function blockReason(decision: GateDecision): string {
   return "Not run yet: AgentX has already posted a confirmation request for this action to the member in the Slack thread, with Approve and Cancel buttons." +
     `${again} Do not call this tool again or try another way in this turn. ` +
     "Do not restate, summarise or mention this action, its details or the confirmation in your reply: the member already sees the request. " +
-    "Report only anything else you did or found in this turn; if there is nothing else, reply with nothing.";
+    "Report only anything else you did or found in this turn.";
 }
 
 /** A failure path must not throw: arguments that are not JSON-shaped get a fixed hash. */
@@ -353,11 +356,17 @@ export function actionGateExtension(options: ActionGateOptions): InlineExtension
         const content = confirmationNote(options.session);
         return content === undefined ? undefined : { message: { customType: GATE_MESSAGE_TYPE, content, display: false } };
       });
-      // A blocked call ends as an error, so only calls that ran and returned cleanly count.
+      // A blocked call also ends (as an error), so only calls the gate let through count as ran.
+      const blocked = new Set<string>();
       pi.on("tool_execution_end", (event) => {
-        if (!event.isError) options.session.succeeded += 1;
+        if (!blocked.has(event.toolCallId)) options.session.ran += 1;
       });
       pi.on("tool_call", async (event, ctx) => {
+        const verdict = await check(event, ctx);
+        if (verdict !== undefined) blocked.add(event.toolCallId);
+        return verdict;
+      });
+      const check = async (event: { toolCallId: string; toolName: string; input: unknown }, ctx: { sessionManager: { getBranch(): Parameters<typeof memberMessages>[0] }; signal?: AbortSignal | undefined }) => {
         try {
           const call = { toolCallId: event.toolCallId, toolName: event.toolName, input: event.input as Record<string, unknown> };
           let decision: GateDecision;
@@ -374,7 +383,7 @@ export function actionGateExtension(options: ActionGateOptions): InlineExtension
         } catch {
           return { block: true, reason: GATE_FAILURE_REASON };
         }
-      });
+      };
     },
   };
 }

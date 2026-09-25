@@ -33,12 +33,13 @@ async function turn(options: {
   classifier?: ActionClassifier;
   policy?: ActionPolicy;
   toolText?: string;
+  toolFails?: boolean;
   worker?: { prepared(): boolean; ensureReady(): Promise<undefined> };
   log?: string[];
 }) {
   const { modelRuntime, faux } = await fauxModelRuntime();
   faux.setResponses(options.script);
-  const callConnectorTool = vi.fn(async (input: { tool: string }) => (options.log?.push(`run:${input.tool}`), { requestId: "33333333-3333-4333-8333-333333333333", status: "SUCCEEDED", text: options.toolText ?? "done", truncated: false, replayed: false }));
+  const callConnectorTool = vi.fn(async (input: { tool: string }) => (options.log?.push(`run:${input.tool}`), options.toolFails ? (() => { throw new Error("tracker unavailable"); })() : { requestId: "33333333-3333-4333-8333-333333333333", status: "SUCCEEDED", text: options.toolText ?? "done", truncated: false, replayed: false }));
   const api = {
     discoverConnectorTools: vi.fn(async () => catalog), callConnectorTool,
     submitTask: vi.fn(), taskStatus: vi.fn(), taskResult: vi.fn(), followUp: vi.fn(), createPullRequest: vi.fn(), managePullRequest: vi.fn(), pullRequestResult: vi.fn(),
@@ -70,7 +71,7 @@ describe("the action gate in a real Pi turn", () => {
     expect(callConnectorTool).not.toHaveBeenCalled();
     expect(results).toEqual([{ tool: "tracker__close_item", isError: true, text: expect.stringContaining("AgentX has already posted a confirmation request for this action to the member in the Slack thread") as string }]);
     expect(results[0]!.text).not.toContain("TRK-9");
-    expect(session.succeeded).toBe(0);
+    expect(session.ran).toBe(0);
     expect(session.asks).toMatchObject([{ tool: "tracker__close_item", kind: "destructive", summary: "tracker__close_item: id=TRK-9" }]);
     expect(reply).toBe("I asked you to confirm closing TRK-9.");
   });
@@ -92,7 +93,17 @@ describe("the action gate in a real Pi turn", () => {
     expect(results.map((result) => [result.tool, result.isError])).toEqual([["tracker__list_items", false], ["tracker__close_item", true], ["tracker__close_item", true]]);
     expect(session.asks.map((ask) => ask.summary)).toEqual(["tracker__close_item: id=TRK-1", "tracker__close_item: id=TRK-2"]);
     expect(session.decisions.map((decision) => decision.outcome)).toEqual(["allow", "ask", "ask"]);
-    expect(session.succeeded).toBe(1);
+    expect(session.ran).toBe(1);
+  });
+
+  it("counts a call that ran and failed as ran, and never a call the gate blocked", async () => {
+    const session = createGateSession(member, { approvals: [{ tool: "tracker__close_item", argumentsHash: argumentsHash("tracker__close_item", { id: "TRK-9" }), summary: "tracker__close_item: id=TRK-9" }] });
+    const { results, callConnectorTool } = await turn({ session, prompt: "yes", toolFails: true,
+      script: [toolUse(fauxToolCall("tracker__close_item", { id: "TRK-9" }), fauxToolCall("tracker__close_item", { id: "TRK-10" })), fauxAssistantMessage("Closing TRK-9 failed.")] });
+    expect(callConnectorTool).toHaveBeenCalledOnce();
+    expect(results.map((result) => result.isError)).toEqual([true, true]);
+    expect(session.decisions.map((decision) => decision.outcome)).toEqual(["allow", "ask"]);
+    expect(session.ran).toBe(1);
   });
 
   it("tells the model what was confirmed, runs exactly that call once, and asks again for a changed or repeated one", async () => {

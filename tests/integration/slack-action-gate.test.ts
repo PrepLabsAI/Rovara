@@ -65,8 +65,8 @@ const closeTurn = async (input: TurnInput) => {
     input.gate!.asks.push({ toolCallId: "c1", tool: close.tool, argumentsHash: argumentsHash(close.tool, close.input), summary: "tracker__close_item: id=TRK-9", kind: "destructive" });
     return "I asked you to confirm closing TRK-9.";
   }
-  // The confirmed call ran and succeeded.
-  input.gate!.succeeded += 1;
+  // The confirmed call ran.
+  input.gate!.ran += 1;
   return "Closed TRK-9.";
 };
 
@@ -199,9 +199,9 @@ describe("the reply of a turn that posted a confirmation", () => {
     expect(posts).toEqual([]);
   });
 
-  it("posts the confirmation and the model's reply when another call in the turn succeeded", async () => {
+  it("posts the confirmation and the model's reply when another call in the turn ran", async () => {
     const { posts, confirmationsPosted, dependencies } = harness(async (input) => {
-      input.gate!.succeeded += 1;
+      input.gate!.ran += 1;
       ask(input);
       return "TRK-5 is open and assigned to Priya.";
     });
@@ -210,9 +210,9 @@ describe("the reply of a turn that posted a confirmation", () => {
     expect(posts).toEqual(["TRK-5 is open and assigned to Priya."]);
   });
 
-  it("posts only the confirmation when another call succeeded but the model had nothing else to say", async () => {
+  it("posts only the confirmation when another call ran but the model had nothing to say", async () => {
     const { posts, confirmationsPosted, dependencies } = harness(async (input) => {
-      input.gate!.succeeded += 1;
+      input.gate!.ran += 1;
       ask(input);
       return "  ";
     });
@@ -221,7 +221,32 @@ describe("the reply of a turn that posted a confirmation", () => {
     expect(posts).toEqual([]);
   });
 
-  it("posts the reply unchanged when nothing asked, even when no call succeeded", async () => {
+  for (const source of ["rule", "gate_error"] as const) {
+    it(`posts the model's reply when the turn also had a ${source === "rule" ? "deny" : "gate failure"}, so the member hears why`, async () => {
+      const { posts, confirmationsPosted, dependencies } = harness(async (input) => {
+        input.gate!.decisions.push({ toolCallId: "c1", tool: "tracker__delete_item", actionClass: "change", outcome: "deny", source, reason: "blocked", argumentsHash: "d".repeat(64) });
+        ask(input);
+        return source === "rule" ? "An administrator's rule blocks deleting TRK-2." : "AgentX could not check deleting TRK-2.";
+      });
+      await processSlackRequest(slackMessage(`EvQUIET0001${source === "rule" ? "1" : "2"}`, "delete TRK-2 and rename TRK-5"), dependencies, { finalAttempt: false, queuedBehind: 0 });
+      expect(confirmationsPosted).toHaveLength(1);
+      expect(posts).toEqual([source === "rule" ? "An administrator's rule blocks deleting TRK-2." : "AgentX could not check deleting TRK-2."]);
+    });
+  }
+
+  it("posts the model's reply when a confirmed call ran and failed, and the turn asked again", async () => {
+    const { posts, confirmationsPosted, dependencies } = harness(async (input) => {
+      // The approved call ran and returned an error; the model's retry with other arguments asked.
+      input.gate!.ran += 1;
+      ask(input);
+      return "Renaming TRK-5 failed: the tracker is unavailable.";
+    });
+    await processSlackRequest(slackMessage("EvQUIET00013", "rename TRK-5"), dependencies, { finalAttempt: false, queuedBehind: 0 });
+    expect(confirmationsPosted).toHaveLength(1);
+    expect(posts).toEqual(["Renaming TRK-5 failed: the tracker is unavailable."]);
+  });
+
+  it("posts the reply unchanged when nothing asked, even when no call ran", async () => {
     const { posts, confirmationsPosted, dependencies } = harness(async () => "There are no open items.");
     await processSlackRequest(slackMessage("EvQUIET00004", "any open items?"), dependencies, { finalAttempt: false, queuedBehind: 0 });
     expect(confirmationsPosted).toEqual([]);
@@ -288,7 +313,7 @@ describe("a redelivered request that asked for a confirmation", () => {
       const { posts, turns, dependencies, advance, confirmationsPosted, confirmations, logs } = harness(async (input) => {
         if (input.gate!.approvals.length === 0) return closeTurn(input);
         connectorCall();
-        input.gate!.succeeded += 1;
+        input.gate!.ran += 1;
         // The confirmed call ran, and the model made another call that asks: settle posts a new confirmation.
         input.gate!.asks.push({ toolCallId: "c2", tool: reopen.tool, argumentsHash: argumentsHash(reopen.tool, reopen.input), summary: "tracker__reopen_item: id=TRK-9", kind: "destructive" });
         return "Closed TRK-9.";

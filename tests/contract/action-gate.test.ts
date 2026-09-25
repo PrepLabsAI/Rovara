@@ -211,7 +211,9 @@ describe("the action gate's decisions", () => {
     const reason = blockReason(decision);
     expect(reason).toContain("AgentX has already posted a confirmation request for this action to the member in the Slack thread");
     expect(reason).toContain("Do not restate, summarise or mention this action, its details or the confirmation in your reply");
-    expect(reason).toContain("Report only anything else you did or found in this turn; if there is nothing else, reply with nothing.");
+    expect(reason).toContain("Report only anything else you did or found in this turn.");
+    // Nothing that invites an empty answer: an empty answer counts as TurnEmptyResponse.
+    expect(reason).not.toMatch(/nothing else|reply with nothing|say nothing/u);
     expect(reason).toContain("Do not call this tool again or try another way in this turn.");
     for (const value of ["TRK-9", "duplicate", "TRK-4", "close_item", member, "waiting for their confirmation"]) expect(reason).not.toContain(value);
     const again = await g.decide(call("tracker__close_item", { id: "TRK-9", reason: "duplicate of TRK-4" }), { memberMessages: messages });

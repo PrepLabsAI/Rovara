@@ -395,8 +395,9 @@ AgentX's own rules, the same for every connector:
 - A write whose arguments hold a list of more than 5 entries, such as 6 tasks, asks.
 
 When AgentX asks, it posts one message listing every action it held back, with **Approve** and
-**Cancel** buttons. That message is the reply: AgentX adds its own answer only when it also did or
-found something else in that turn, and that answer does not repeat the question. Only the member who made the request can press them; anyone else is told so
+**Cancel** buttons. That message is the reply: AgentX adds its own answer only when something else
+happened in that turn (a call ran, even if it failed, or an action was refused or could not be
+checked), and that answer does not repeat the question. Only the member who made the request can press them; anyone else is told so
 privately. You can also reply `@AgentX yes` or `@AgentX cancel`. A confirmation counts once, only
 after the question, and for 24 hours. AgentX then runs exactly the listed calls; a call with any
 other arguments is checked afresh, as a new call. Any other message from you replaces the question.

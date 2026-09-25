@@ -117,6 +117,30 @@ describe("turns that stop because a confirmation was refused (spec 014 FR-021)",
     expect(stored()[0]).toMatchObject({ disposition: "answered", responseText: reply });
   });
 
+  it("does not count a turn whose confirmation was its reply as an empty response", async () => {
+    const { posts, logs, stored, dependencies } = harness(async (input) => {
+      input.gate!.asks.push({ toolCallId: "c1", tool: "tracker__close_item", argumentsHash: "b".repeat(64), summary: "close", kind: "destructive" });
+      input.recorder!.agentEnded([{ role: "assistant", content: [], stopReason: "stop" }]);
+      return "";
+    });
+    await processSlackRequest(slackMessage("EvGATEQUIET2", "close TRK-9", { receivedAt: new Date(start + 60_000).toISOString() }), dependencies, { finalAttempt: false, queuedBehind: 0 });
+    expect(dependencies.postConfirmation).toHaveBeenCalledOnce();
+    expect(posts).toEqual([]);
+    expect(stored()[0]).toMatchObject({ disposition: "answered", emptyResponse: false });
+    expect(logs).toContainEqual({ event: "metric", fields: { metric: "TurnCompleted", count: 1 } });
+    expect(logs).not.toContainEqual({ event: "metric", fields: { metric: "TurnEmptyResponse", count: 1 } });
+  });
+
+  it("still counts an empty answer with no confirmation as an empty response", async () => {
+    const { logs, stored, dependencies } = harness(async (input) => {
+      input.recorder!.agentEnded([{ role: "assistant", content: [], stopReason: "stop" }]);
+      return "";
+    });
+    await processSlackRequest(slackMessage("EvGATEQUIET3", "anything?", { receivedAt: new Date(start + 60_000).toISOString() }), dependencies, { finalAttempt: false, queuedBehind: 0 });
+    expect(stored()[0]).toMatchObject({ disposition: "answered", emptyResponse: true });
+    expect(logs).toContainEqual({ event: "metric", fields: { metric: "TurnEmptyResponse", count: 1 } });
+  });
+
   it("keeps every other disposition an older record used", () => {
     for (const disposition of ["answered", "failed", "abandoned", "workspace_close", "workspace_limit", "workspace_closed", "workspace_unavailable", "confirmation_refused",
       "confirmation_cancelled", "yes_to_all_granted"]) {
