@@ -56,7 +56,7 @@ the result.
 
 ## Step 5: Create an API token with six scopes
 
-On the service account, open **Credentials**, then create an **API token** (verify). Set an
+On the service account, open **Credentials**, then create an **API token**. Set an
 expiry. Choose these scopes: `read:jira-work`, `write:jira-work`, `read:jira-user`,
 `read:jira:agent-interface`, `write:jira:agent-interface`, `search:jira:agent-interface`. Without
 `write:jira:agent-interface`, searches and reads work but every create or comment is refused with
