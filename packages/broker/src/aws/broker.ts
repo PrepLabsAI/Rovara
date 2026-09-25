@@ -898,6 +898,8 @@ async function startThreadWorkspaceClose(
   const requestId = uuid(input.requestId, "requestId");
   const workspace = await getThreadWorkspace(dependencies, identity.ownerKey);
   if (!workspace) return { outcome: "NOT_FOUND" };
+  // Spec 014: a thread that never needed the worker has no compute, so there is nothing to close.
+  if (workspace.status === "UNPREPARED") return { outcome: "NOT_FOUND" };
   if (workspace.status === "CLOSED" && workspace.closedAt) {
     return { outcome: "CLOSED", workspaceId: workspace.id, closedAt: workspace.closedAt };
   }
@@ -1105,6 +1107,10 @@ async function ensureThreadWorkspace(
   // recoverableOperations. The control plane deploys first, so gating this on includeConnectors
   // would fail every turn until the Slack service caught up.
   const includeRecoverableOperations = input.includeRecoverableOperations === true;
+  // Spec 014, a separate opt-in: a service that sends lazyPreparation: true parses status
+  // UNPREPARED and prepares compute through POST /v1/threads/workspace/prepare when a tool first
+  // needs the worker. Every other service keeps getting a workspace whose compute is prepared now.
+  const lazyPreparation = input.lazyPreparation === true;
   const include: IntegrationInclude = {
     integrations: includeIntegrations,
     connectors: includeConnectors,
@@ -1130,6 +1136,9 @@ async function ensureThreadWorkspace(
 
   // New threads use the latest revision; an existing thread keeps the revision its workspace was prepared with.
   const project = await requireLatestProject(dependencies, slack.binding.projectName);
+  if (lazyPreparation) {
+    return createUnpreparedThreadWorkspace(dependencies, identity, requestId, project, include, includeSettingsRevision);
+  }
   const preparation = await newWorkspacePreparation(dependencies, identity, project, identity.ownerKey, requestId);
   const { teamId, userId } = slack.requester;
   try {
@@ -1184,6 +1193,82 @@ async function ensureThreadWorkspace(
     ...(include.recoverableOperations ? { recoverableOperations: [] } : {}),
     ...(includeSettingsRevision ? { settingsRevision: project.definition.revision } : {}),
   };
+}
+
+/**
+ * Spec 014: a new thread's record with no compute and no limit charge. The workspace ID exists
+ * from the first message because connector routes, the connector ledger and conversations are keyed
+ * by it. startThreadPreparation prepares compute the first time the thread needs the worker.
+ */
+async function createUnpreparedThreadWorkspace(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  requestId: string,
+  project: RegisteredProjectRecord,
+  include: IntegrationInclude,
+  includeSettingsRevision: boolean,
+): Promise<SlackThreadWorkspaceResult> {
+  const projectName = project.definition.name;
+  const workspace = unpreparedWorkspace(project, identity.ownerKey);
+  const existingMembership = await getMembership(dependencies, identity.ownerKey, projectName);
+  try {
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { Put: { TableName: dependencies.tableName, Item: workspaceItem(workspace), ConditionExpression: "attribute_not_exists(pk)" } },
+      { Put: {
+        TableName: dependencies.tableName,
+        Item: { pk: `OWNER#${identity.ownerKey}`, sk: `PROJECT#${projectName}`, entityType: "DEFAULT_WORKSPACE", workspaceId: workspace.id },
+        ConditionExpression: "attribute_not_exists(pk)",
+      } },
+      { Put: { TableName: dependencies.tableName, Item: membershipRecord(identity.ownerKey, projectName, existingMembership?.role ?? "developer") } },
+      { Put: {
+        TableName: dependencies.tableName,
+        Item: { pk: `IDEMPOTENCY#${identity.ownerKey}#THREAD`, sk: `REQUEST#${requestId}`, entityType: "IDEMPOTENCY", workspaceId: workspace.id },
+        ConditionExpression: "attribute_not_exists(pk)",
+      } },
+    ] }));
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+    // Another first message in this thread created the record.
+    const concurrent = await getDefaultWorkspace(dependencies, identity.ownerKey, projectName);
+    if (concurrent) return existingThreadWorkspace(dependencies, identity, requestId, concurrent, include, includeSettingsRevision);
+    throw agentXError("WORKSPACE_BUSY", "thread workspace creation conflicted with another request; retry");
+  }
+  // The starter is recorded when compute is prepared, because that member is the one charged.
+  await recordThreadRequester(dependencies, identity, workspace.id, false);
+  // Each optional field is its own spread, so a later opt-in (phase 14c's action policy) adds one
+  // more spread line here, after settingsRevision, the same way ensureThreadWorkspace gains it.
+  return {
+    outcome: "WORKSPACE",
+    workspaceId: workspace.id,
+    status: "UNPREPARED",
+    operationId: null,
+    created: true,
+    orchestratorInstructions: project.definition.orchestratorInstructions,
+    ...await threadIntegrations(project.definition, include, dependencies),
+    ...(include.recoverableOperations ? { recoverableOperations: [] } : {}),
+    ...(includeSettingsRevision ? { settingsRevision: project.definition.revision } : {}),
+  };
+}
+
+/** A workspace record pinned to the thread's starting revision and runtime, with fence 0 and no operation. */
+function unpreparedWorkspace(project: RegisteredProjectRecord, ownerKey: string): WorkspaceInstance {
+  const now = new Date().toISOString();
+  return WorkspaceInstanceSchema.parse({
+    id: randomUUID(),
+    ownerKey,
+    projectName: project.definition.name,
+    projectRevision: project.definition.revision,
+    runtimeArn: project.runtimeBinding.runtimeArn,
+    endpointQualifier: project.runtimeBinding.endpointQualifier,
+    runtimeSessionId: randomUUID(),
+    deploymentMode: project.runtimeBinding.deploymentMode,
+    capacityProviderArn: project.runtimeBinding.capacityProviderArn,
+    rootPath: "/mnt/workspace",
+    status: "UNPREPARED",
+    fence: 0,
+    createdAt: now,
+    updatedAt: now,
+  });
 }
 
 async function existingThreadWorkspace(

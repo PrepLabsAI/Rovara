@@ -235,3 +235,16 @@ export function fakeGitHubMcp() {
 export const GITHUB_LIST_ISSUES = [
   { name: "github", type: "github", scopes: "all-repositories", tools: [{ name: "list_issues", access: "read" }] },
 ];
+
+/** The thread workspace request of a Slack service that opts in to lazy preparation (spec 014). */
+export function lazyEnsureWorkspace(handler: Handler, thread: string, slackUser: string, requestId = randomUUID()) {
+  return call(handler, {
+    method: "POST",
+    path: "/v1/service/threads/workspace",
+    service: { principal: orchestratorPrincipal, thread, slackUser },
+    body: {
+      requestId, includeIntegrations: true, includeSettingsRevision: true, includeConnectors: true,
+      includeAllConnectorTypes: true, includeRecoverableOperations: true, lazyPreparation: true,
+    },
+  });
+}
