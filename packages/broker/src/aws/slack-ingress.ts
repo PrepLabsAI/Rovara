@@ -52,7 +52,10 @@ export interface SlackIngressDependencies {
    * Absent: every app-posted message is ignored, as before feature 014.
    */
   appPosted?: { accept: boolean; checkMember: (userId: string) => Promise<SlackMemberCheck> };
-  /** Per-thread brake (spec 014 FR-011). Absent: no limit. */
+  /**
+   * Per-thread brake (spec 014 FR-011). Absent: no limit. `countTurn` must increment atomically and
+   * return the new count; the single pause notice relies on exactly one caller seeing perMinute + 1.
+   */
   turnLimit?: { perMinute: number; countTurn: (threadSubject: string, windowStartSeconds: number, expiresAtSeconds: number) => Promise<number> };
 }
 
@@ -73,6 +76,8 @@ interface Mention {
 }
 
 const TURN_WINDOW_SECONDS = 60;
+// A window's counter outlives the window by one more, so a late event still finds it.
+const TURN_COUNTER_TTL_SECONDS = 2 * TURN_WINDOW_SECONDS;
 
 const UNVERIFIED_MEMBER_NOTICE = "I couldn't confirm that this message came from a person, so I didn't act on it. Try again, or type the request in Slack.";
 
@@ -131,7 +136,7 @@ export function createSlackIngressHandler(dependencies: SlackIngressDependencies
       const windowStart = nowSeconds - (nowSeconds % TURN_WINDOW_SECONDS);
       let turns: number;
       try {
-        turns = await countTurn(subject, windowStart, windowStart + 2 * TURN_WINDOW_SECONDS);
+        turns = await countTurn(subject, windowStart, windowStart + TURN_COUNTER_TTL_SECONDS);
       } catch {
         await dependencies.releaseEvent(mention.eventId);
         log("turn_limit.failed", { eventId: mention.eventId });
