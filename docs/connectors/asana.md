@@ -98,28 +98,36 @@ issues one. AgentX may write only secrets with this tag. Step 4 adds it too, if 
 
 ## Step 4: Sign the bot user in and register the credential
 
-In your browser, sign in to Asana as the bot user, or use a private window, so the sign-in is the
-bot user's and not yours. Then run:
+The sign-in must be the bot user's, not yours. The command opens your default browser, which is
+probably signed in to Asana as you, so open the sign-in URL it prints in a private (incognito)
+window instead and sign in there as the bot user. Run:
 
 ```sh
 agentx admin credential authorize --ref asana-bot \
   --secret agentx/connectors/asana-bot --provider asana
 ```
 
-Add `--region <region>` if the secret is not in your default AWS region. The command opens
-Asana's sign-in page and prints:
+The secret must be in the control plane's AWS region. Add `--region <region>` if that is not your
+default AWS region. The command opens Asana's sign-in page and prints:
 
 ```text
-Sign in as the connector's bot user (the Asana app's redirect URL must be exactly http://localhost:8765/callback). If no browser opened, open this URL:
+Sign in as the connector's bot user (the Asana app's redirect URL must be exactly http://localhost:8765/callback). If no browser opened, or it is signed in as someone else, open this URL in a private window signed in as the bot user:
 https://app.asana.com/-/oauth_authorize?...
 ```
 
-Approve access as the bot user within five minutes. The browser shows "AgentX received the
-sign-in", and the command prints:
+Close the tab the command opened if it shows your own Asana account. Copy the URL into a private
+window, sign in as the bot user and approve access within five minutes. The browser shows "AgentX
+received the sign-in", and the command prints which Asana account signed in, then the result:
 
 ```text
+Signed in to Asana as AgentX Bot <agentx-bot@example.com>. This must be the connector's bot user; if it is not, run the command again with the sign-in URL opened in a private window signed in as the bot user.
 Stored the refresh token in agentx/connectors/asana-bot and registered asana-bot as oauth-refresh-token.
 ```
+
+Check that the "Signed in to Asana as" line names the bot user. If it names you, AgentX would act
+as you, with everything you can see: run the command again in a private window, which replaces the
+stored sign-in. If Asana's answer carries no account, the line reads "Signed in to Asana (the
+account could not be shown)"; check the account in Step 6 instead.
 
 What the command did: it signed in with PKCE and a one-time state value, listened only on
 `127.0.0.1:8765`, exchanged the code for a refresh token, wrote the refresh token into the secret
@@ -152,6 +160,12 @@ Signed in to Asana as the bot user:
 1. The sidebar lists only the project from Step 1, and no teams.
 2. Search for the name of a task you know is in another project of your workspace. Asana finds
    nothing.
+3. Under your profile photo, **Settings > Apps > Authorized apps** lists your AgentX app. This
+   shows the sign-in stored in Step 4 is this bot user's. If it is missing, or the "Signed in to
+   Asana as" line from Step 4 named someone else, run Step 4 again in a private window.
+
+Checks 1 and 2 test what the bot user can see; they pass even if Step 4 stored another account's
+sign-in, so check 3 matters.
 
 If the bot user sees more, remove it from those projects or teams and check again. Until it
 passes, the check in [What AgentX enforces](#what-agentx-enforces) is the only limit.
@@ -282,6 +296,18 @@ settings, then delete the secret.
   of that type (Step 2).
 - **"the token endpoint refused the sign-in with HTTP 400 (invalid_grant)".** The sign-in took too
   long or was used twice. Run Step 4 again.
+- **"Signed in to Asana as" names you, or anyone other than the bot user.** The browser was
+  signed in to your own account. Run Step 4 again with the sign-in URL opened in a private window
+  signed in as the bot user; the new sign-in replaces the stored one. Then, signed in as yourself,
+  remove the AgentX app from your own authorized apps in Asana's settings.
+- **"secret ... holds binary data, not a JSON string".** The secret was stored as binary. Store it
+  again as a JSON string with Step 3's pipe, using `aws secretsmanager put-secret-value --secret-id
+  agentx/connectors/asana-bot` in place of `create-secret` and dropping `--tags`.
+- **The error says the secret "was not found" and "the control plane reads secrets in its own AWS
+  region".** The sign-in stored the token in the region your AWS configuration points at, and the
+  control plane runs in another. Running `register` again fails the same way. Create the secret in
+  the control plane's region (Step 3 with `--region <region>`), then run Step 4 again with the same
+  `--region <region>`, and delete the secret in the wrong region.
 - **"could not tag it agentx-writable=refresh-token".** Your AWS credentials lack
   `secretsmanager:TagResource`. Nothing was registered; fix the permission and run Step 4 again.
 - **The error ends with "finish with `agentx admin credential register ...` (no new sign-in
@@ -304,6 +330,8 @@ settings, then delete the secret.
     Step 3, or run Step 4 again, which tags the secret.
   - `"reason":"LeaseDeadlineExceeded"` means a slow refresh skipped the write; the next refresh
     tries again.
+  - `"reason":"SecretChanged"` means Step 4 was run again while a refresh was under way. AgentX
+    dropped the token from the old sign-in and kept the new one. Nothing to do.
 
   Until the new token is saved, the broker keeps it in memory and retries the write on the next
   refresh. If that copy is lost before it is saved and Asana no longer accepts the old token, calls

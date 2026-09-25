@@ -13,11 +13,12 @@ import { registerCredential } from "./credential.js";
 export const WRITABLE_TAG = { Key: "agentx-writable", Value: "refresh-token" } as const;
 const SIGN_IN_TIMEOUT_MS = 300_000;
 const TOKEN_TIMEOUT_MS = 10_000;
+const MAX_ACCOUNT_FIELD = 128;
 const APP_SECRET_SHAPE = '{"clientId": "...", "clientSecret": "..."}';
 
 /** What `authorize` needs from Secrets Manager, with the administrator's own AWS credentials. */
 export interface AuthorizeSecrets {
-  /** The secret's value, or undefined when it does not exist. */
+  /** The secret's value, or undefined when it does not exist. Throws when it is not a string secret. */
   read(secretName: string): Promise<string | undefined>;
   write(secretName: string, value: string): Promise<void>;
   /** Tags the secret so the broker may write a rotated refresh token back to it. */
@@ -38,24 +39,34 @@ export interface AuthorizeInput {
    * the redirect URL the vendor app must be registered with, as "(the Asana app's redirect URL must be exactly ...)".
    */
   showUrl: (url: string, redirectRequirement: string) => void;
+  /**
+   * Told which vendor account signed in, as one line, right after the code exchange and before
+   * anything is stored or registered, so an administrator can see a wrong-account sign-in. It carries
+   * only the account's name and email from the token response, never a token.
+   */
+  showAccount?: (line: string) => void;
   fetchImplementation?: typeof fetch;
   timeoutMilliseconds?: number;
   /** Tests only: listen on this port instead of the redirect URI's, and report the port bound. */
   listenPort?: number;
   onListening?: (port: number) => void;
+  /** The AWS region the secret was read in (the command's --region), named only in a recovery hint. */
+  region?: string;
 }
 
 /** Reads, writes and tags secrets with the administrator's AWS credentials. */
 export function secretsManagerAuthorizeSecrets(client: Pick<SecretsManagerClient, "send">): AuthorizeSecrets {
   return {
     async read(secretName) {
+      let response: { SecretString?: string | undefined };
       try {
-        const response = await client.send(new GetSecretValueCommand({ SecretId: secretName }));
-        return response.SecretString;
+        response = await client.send(new GetSecretValueCommand({ SecretId: secretName }));
       } catch (error) {
         if (error instanceof Error && error.name === "ResourceNotFoundException") return undefined;
         throw agentXError("CONFIG_INVALID", `could not read secret ${secretName} with your AWS credentials (${errorName(error)})`);
       }
+      if (typeof response.SecretString === "string") return response.SecretString;
+      throw agentXError("CONFIG_INVALID", `secret ${secretName} holds binary data, not a JSON string; store it as a JSON string ${APP_SECRET_SHAPE}`);
     },
     async write(secretName, value) {
       await client.send(new PutSecretValueCommand({ SecretId: secretName, SecretString: value }));
@@ -86,7 +97,8 @@ export async function authorizeCredential(input: AuthorizeInput): Promise<unknow
   if (!app.success) throw agentXError("CONFIG_INVALID", `secret ${input.secretName} must be JSON ${APP_SECRET_SHAPE}`);
   const { clientId, clientSecret } = app.data;
 
-  const redirectRequirement = `(the ${input.provider.charAt(0).toUpperCase()}${input.provider.slice(1)} app's redirect URL must be exactly ${profile.redirectUri})`;
+  const vendor = `${input.provider.charAt(0).toUpperCase()}${input.provider.slice(1)}`;
+  const redirectRequirement = `(the ${vendor} app's redirect URL must be exactly ${profile.redirectUri})`;
   const pkce = createPkceParameters();
   const callback = await listenForCallback({
     redirectUri: new URL(profile.redirectUri),
@@ -114,10 +126,11 @@ export async function authorizeCredential(input: AuthorizeInput): Promise<unknow
     callback.close();
   }
 
-  const refreshToken = await exchangeCode({
+  const { refreshToken, account } = await exchangeCode({
     tokenUrl: new URL(profile.tokenUrl), code, verifier: pkce.verifier, redirectUri: profile.redirectUri, clientId, clientSecret,
     fetchImplementation: input.fetchImplementation ?? fetch,
   });
+  input.showAccount?.(`${account === undefined ? `Signed in to ${vendor} (the account could not be shown)` : `Signed in to ${vendor} as ${account}`}. This must be the connector's bot user; if it is not, run the command again with the sign-in URL opened in a private window signed in as the bot user.`);
   await input.secrets.write(input.secretName, JSON.stringify({ clientId, clientSecret, refreshToken })).catch((error: unknown) => {
     throw agentXError("CONFIG_INVALID", `could not store the refresh token in secret ${input.secretName} with your AWS credentials (${errorName(error)}); nothing was registered, run the command again`);
   });
@@ -128,7 +141,13 @@ export async function authorizeCredential(input: AuthorizeInput): Promise<unknow
     return await registerCredential({ controlPlaneUrl: input.controlPlaneUrl, accessToken: input.accessToken, ref: input.ref, type: "oauth-refresh-token", secretName: input.secretName }, input.fetchImplementation);
   } catch (error) {
     // The sign-in already succeeded: say how to finish without signing in again.
-    throw withRecovery(error, `the refresh token is stored and tagged in secret ${input.secretName}; finish with \`agentx admin credential register --ref ${input.ref} --type oauth-refresh-token --secret ${input.secretName}\` (no new sign-in needed)`);
+    const register = `finish with \`agentx admin credential register --ref ${input.ref} --type oauth-refresh-token --secret ${input.secretName}\` (no new sign-in needed)`;
+    // The control plane refusing the secret itself (CONFIG_INVALID) is most often a secret written in
+    // another region than the control plane's, where registering again would only fail the same way.
+    const wrongRegion = error instanceof AgentXError && error.code === "CONFIG_INVALID";
+    throw withRecovery(error, wrongRegion
+      ? `the refresh token is stored and tagged in secret ${input.secretName} in ${input.region ?? "your default AWS region"}, but the control plane reads secrets in its own AWS region: if that is a different region, run the command again with --region set to the control plane's region; otherwise ${register}`
+      : `the refresh token is stored and tagged in secret ${input.secretName}; ${register}`);
   }
 }
 
@@ -148,7 +167,7 @@ function withRecovery(error: unknown, recovery: string): Error {
 
 async function exchangeCode(input: {
   tokenUrl: URL; code: string; verifier: string; redirectUri: string; clientId: string; clientSecret: string; fetchImplementation: typeof fetch;
-}): Promise<string> {
+}): Promise<{ refreshToken: string; account: string | undefined }> {
   const response = await input.fetchImplementation(input.tokenUrl, {
     method: "POST",
     redirect: "error",
@@ -171,7 +190,24 @@ async function exchangeCode(input: {
   if (typeof record.refresh_token !== "string" || record.refresh_token.length === 0) {
     throw agentXError("AUTH_REQUIRED", "the token endpoint returned no refresh token, so AgentX could not stay signed in; check the app type in the setup guide. Nothing was stored");
   }
-  return record.refresh_token;
+  return { refreshToken: record.refresh_token, account: accountOf(record.data) };
+}
+
+/**
+ * "Name <email>", "Name" or "email" from the token response's user object (Asana's `data`), or
+ * undefined when neither is usable. Both are shown on a terminal, so each keeps printable
+ * characters only and at most 128 of them.
+ */
+function accountOf(data: unknown): string | undefined {
+  if (!data || typeof data !== "object") return undefined;
+  const printable = (value: unknown) => typeof value === "string"
+    ? Array.from(value.replace(/[\p{C}]/gu, "")).slice(0, MAX_ACCOUNT_FIELD).join("").trim()
+    : "";
+  const { name, email } = data as Record<string, unknown>;
+  const shownName = printable(name);
+  const shownEmail = printable(email);
+  if (shownName && shownEmail) return `${shownName} <${shownEmail}>`;
+  return shownName || shownEmail || undefined;
 }
 
 /**

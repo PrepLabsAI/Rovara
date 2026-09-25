@@ -101,6 +101,54 @@ describe("agentx admin credential authorize", () => {
     expect(JSON.stringify(result)).not.toMatch(new RegExp(`${REFRESH}|${ACCESS}|${CODE}|${CLIENT.clientSecret}`));
   });
 
+  it("shows which Asana account signed in, from the token response's user, before anything is stored or registered", async () => {
+    const secrets = secretsWith(JSON.stringify(CLIENT));
+    const order: string[] = [];
+    const { fetchImplementation } = vendorAndControlPlane({ tokenBody: {
+      access_token: ACCESS, refresh_token: REFRESH, expires_in: 3600, token_type: "bearer",
+      data: { id: 1210000000000555, gid: "1210000000000555", name: "AgentX Bot", email: "agentx-bot@example.test" },
+    } });
+    secrets.write = vi.fn(async (name: string, next: string) => { order.push("write"); secrets.writes.push([name, next]); });
+    const play = browser((authorize) => [{ code: CODE, state: authorize.searchParams.get("state")! }]);
+    const lines: string[] = [];
+    await authorizeCredential({ ...base(secrets, fetchImplementation, play), showAccount: (line: string) => { order.push("account"); lines.push(line); } });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^Signed in to Asana as AgentX Bot <agentx-bot@example\.test>\. /);
+    expect(lines[0]).toContain("bot user");
+    expect(lines[0]).not.toMatch(new RegExp(`${REFRESH}|${ACCESS}|${CODE}|${CLIENT.clientSecret}`));
+    expect(order).toEqual(["account", "write"]);
+  });
+
+  it("still succeeds, saying the account could not be shown, when the token response has no usable user", async () => {
+    for (const data of [undefined, "AgentX Bot", { id: 1 }, { name: "\u0007\u001b\u0000", email: 42 }]) {
+      const secrets = secretsWith(JSON.stringify(CLIENT));
+      const { fetchImplementation, registrations } = vendorAndControlPlane({ tokenBody: { access_token: ACCESS, refresh_token: REFRESH, expires_in: 3600, ...(data === undefined ? {} : { data }) } });
+      const play = browser((authorize) => [{ code: CODE, state: authorize.searchParams.get("state")! }]);
+      const lines: string[] = [];
+      await authorizeCredential({ ...base(secrets, fetchImplementation, play), showAccount: (line: string) => { lines.push(line); } });
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toMatch(/^Signed in to Asana \(the account could not be shown\)\. /);
+      expect(registrations).toHaveLength(1);
+    }
+  });
+
+  it("shows the account's name and email as printable text of at most 128 characters each", async () => {
+    const secrets = secretsWith(JSON.stringify(CLIENT));
+    const { fetchImplementation } = vendorAndControlPlane({ tokenBody: {
+      access_token: ACCESS, refresh_token: REFRESH, expires_in: 3600,
+      data: { name: `\u001b[31mAgentX\u0000 Bot\n${"n".repeat(300)}`, email: `bot@example.test\r\u202e${"e".repeat(300)}` },
+    } });
+    const play = browser((authorize) => [{ code: CODE, state: authorize.searchParams.get("state")! }]);
+    const lines: string[] = [];
+    await authorizeCredential({ ...base(secrets, fetchImplementation, play), showAccount: (line: string) => { lines.push(line); } });
+    const shown = /^Signed in to Asana as (.*) <(.*)>\. /.exec(lines[0]!);
+    expect(shown).not.toBeNull();
+    const [, name, email] = shown!;
+    expect(name).toBe(`[31mAgentX Bot${"n".repeat(128 - "[31mAgentX Bot".length)}`);
+    expect(email).toBe(`bot@example.test${"e".repeat(128 - "bot@example.test".length)}`);
+    expect(lines[0]).not.toMatch(/\p{C}/u);
+  });
+
   it("ignores a redirect with the wrong state, then accepts the right one", async () => {
     const secrets = secretsWith(JSON.stringify(CLIENT));
     const { fetchImplementation, exchanges } = vendorAndControlPlane();
@@ -181,6 +229,16 @@ describe("agentx admin credential authorize", () => {
     expect(await missing.read(SECRET)).toBeUndefined();
   });
 
+  it("reports a binary secret as not a JSON string secret, never as not found", async () => {
+    const binary = secretsManagerAuthorizeSecrets({ send: vi.fn(async () => ({ SecretBinary: new Uint8Array([123, 125]) })) } as never);
+    await expect(binary.read(SECRET)).rejects.toMatchObject({
+      code: "CONFIG_INVALID",
+      message: expect.stringContaining(`secret ${SECRET} holds binary data, not a JSON string; store it as a JSON string {"clientId": "...", "clientSecret": "..."}`) as unknown,
+    });
+    const failure = await binary.read(SECRET).catch((error: unknown) => error) as Error;
+    expect(failure.message).not.toContain("was not found");
+  });
+
   it("runs from the command line, printing the sign-in URL and the result but never a token, the code or the client secret", async () => {
     const directory = await mkdtemp(join(tmpdir(), "agentx-authorize-"));
     const deploymentFile = join(directory, "deployment.yaml");
@@ -188,7 +246,10 @@ describe("agentx admin credential authorize", () => {
     const tokenStore = new InMemoryTokenStore();
     await tokenStore.set(tokenStoreKey({ issuer: "https://identity.example.test", clientId: "cli", audience: "agentx" }), { accessToken: "admin-token", expiresAt: Date.now() + 3_600_000 });
     const secrets = secretsWith(JSON.stringify(CLIENT));
-    const { fetchImplementation, registrations } = vendorAndControlPlane();
+    const { fetchImplementation, registrations } = vendorAndControlPlane({ tokenBody: {
+      access_token: ACCESS, refresh_token: REFRESH, expires_in: 3600, token_type: "bearer",
+      data: { id: 1210000000000555, gid: "1210000000000555", name: "AgentX Bot", email: "agentx-bot@example.test" },
+    } });
     const play = browser((authorize) => [{ code: CODE, state: authorize.searchParams.get("state")! }]);
     let stdout = "";
     let stderr = "";
@@ -204,6 +265,7 @@ describe("agentx admin credential authorize", () => {
     expect(registrations).toHaveLength(1);
     expect(stderr).toContain("https://app.asana.com/-/oauth_authorize?");
     expect(stderr).toContain("(the Asana app's redirect URL must be exactly http://localhost:8765/callback)");
+    expect(stderr).toContain("Signed in to Asana as AgentX Bot <agentx-bot@example.test>. This must be the connector's bot user");
     expect(stderr).toContain(`Stored the refresh token in ${SECRET} and registered asana-bot as oauth-refresh-token.`);
     expect(JSON.parse(stdout)).toMatchObject({ credential: { ref: "asana-bot", type: "oauth-refresh-token" } });
     expect(`${stdout}${stderr}`).not.toMatch(new RegExp(`${REFRESH}|${ACCESS}|${CODE}|${CLIENT.clientSecret}`));
@@ -354,7 +416,24 @@ describe("agentx admin credential authorize", () => {
       expect(secrets.tags).toEqual([SECRET]);
       expect(stderr).toContain(`AgentX error [${failure.code}]: ${failure.message}; the refresh token is stored and tagged in secret ${SECRET}; finish with \`agentx admin credential register --ref asana-bot --type oauth-refresh-token --secret ${SECRET}\` (no new sign-in needed)`);
       expect(stderr).not.toContain("Stored the refresh token in");
+      // The account is shown before registration, so a failed registration still shows who signed in.
+      expect(stderr).toContain("Signed in to Asana (the account could not be shown).");
+      expect(stderr.indexOf("Signed in to Asana")).toBeLessThan(stderr.indexOf("AgentX error"));
       expect(`${stdout}${stderr}`).not.toMatch(new RegExp(`${REFRESH}|${ACCESS}|${CODE}|${CLIENT.clientSecret}`));
+    }
+  });
+
+  it("explains the control plane's region, naming --region, when registration cannot use the stored secret", async () => {
+    for (const region of [undefined, "eu-west-1"]) {
+      const secrets = secretsWith(JSON.stringify(CLIENT));
+      const { fetchImplementation } = vendorAndControlPlane({
+        registration: Response.json({ error: { code: "CONFIG_INVALID", message: `credential asana-bot: secret ${SECRET} was not found` } }, { status: 400 }),
+      });
+      const play = browser((authorize) => [{ code: CODE, state: authorize.searchParams.get("state")! }]);
+      const failure = await authorizeCredential({ ...base(secrets, fetchImplementation, play), ...(region === undefined ? {} : { region }) }).catch((error: unknown) => error) as Error & { code?: string };
+      expect(failure.code).toBe("CONFIG_INVALID");
+      const where = region === undefined ? "your default AWS region" : region;
+      expect(failure.message).toBe(`CONFIG_INVALID: credential asana-bot: secret ${SECRET} was not found; the refresh token is stored and tagged in secret ${SECRET} in ${where}, but the control plane reads secrets in its own AWS region: if that is a different region, run the command again with --region set to the control plane's region; otherwise finish with \`agentx admin credential register --ref asana-bot --type oauth-refresh-token --secret ${SECRET}\` (no new sign-in needed)`);
     }
   });
 
