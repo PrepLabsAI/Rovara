@@ -107,7 +107,7 @@ describe("agentx admin turns export", () => {
     expect(exitCode).toBe(4);
     expect(JSON.parse(stderr)).toMatchObject({
       ok: false,
-      error: { code: "FORBIDDEN", message: "turn export failed after 1 records; no file was written" },
+      error: { code: "FORBIDDEN", message: "turn export failed after 1 records; no file was written: FORBIDDEN: administrator claim is required" },
     });
     await expect(stat(output)).rejects.toThrow();
     await expect(stat(`${output}.partial`)).rejects.toThrow();

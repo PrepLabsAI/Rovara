@@ -278,7 +278,8 @@ async function authenticate(
  * original error's class and, for an AgentXError, its code, so the exit-code mapping is unchanged.
  */
 function exportFailure(error: unknown, written: number): unknown {
-  const message = `turn export failed after ${written} records; no file was written`;
+  const cause = error instanceof Error ? error.message : String(error);
+  const message = `turn export failed after ${written} records; no file was written: ${cause}`;
   if (error instanceof AgentXError) return agentXError(error.code, message);
   if (error instanceof Error) {
     error.message = message;
