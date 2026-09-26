@@ -192,7 +192,7 @@ deleted.
 
 AgentX can run more than one independent deployment (for example `production` and `staging`) in
 the same AWS account and region, selected everywhere with `--env <name>` (default `production`).
-Each gets its own physical names: stacks `agentx-<env>-foundation/-runtime/-control-plane/-slack`,
+Each gets its own physical names: stacks `agentx-<env>-access/-foundation/-runtime/-control-plane/-slack`,
 AgentCore runtime `agentx_<env>_worker`, alerts topic `agentx-<env>-alerts`, connector secrets
 `agentx/<env>/connectors/<name>`, metrics namespace `AgentX/<env>`, and SSM settings under
 `/agentx/<env>/`. The name `connectors` is reserved and cannot be used as an environment name.
@@ -210,3 +210,75 @@ beside it: the two would collide on the AgentCore runtime name `agentx_productio
 that writes an environment's settings takes an SSM-backed lock at `/agentx/<env>/lock`: it names
 its holder and start time, refuses a fresh lock held by someone else, and allows takeover of a
 lock older than two hours only with explicit confirmation.
+
+## Access stack
+
+Every named environment's first stack, `agentx-<env>-access`, deploys with the installing admin's
+own AWS rights, because a role cannot deploy the stack that creates it. It holds a private,
+versioned artifact bucket (retained if the stack is ever deleted) for release code packages and
+rendered templates; an ECR pull-through cache rule (prefix `agentx-<env>`, upstream
+`public.ecr.aws`) so the worker and Slack service pull AgentX's public images through private ECR
+in the account (the cache repository is created on first pull); the `agentx-<env>-cloudformation` service role
+that deploys every other stack; and the `agentx-<env>-operator` role for day-to-day `agentx`
+commands, which trusts the account root for 1-hour sessions unless an `OperatorPrincipalArn`
+parameter names another principal.
+
+Every other environment role lives under the IAM path `/agentx/<env>/`, not just a name prefix:
+CloudFormation can truncate a generated role name past its `agentx-<env>-` prefix, and a name
+prefix could also match a differently-named sibling environment (`agentx-prod-*` also matches
+`prod-eu`). A path cannot collide, because `/` is not a legal character inside an environment name.
+The access stack's own two roles stay at the IAM root path, outside the service role's reach.
+
+The **service role** may use the listed AWS services broadly, but its IAM actions are limited to
+roles under that path. It cannot create a role without the environment's permission boundary, and
+cannot change or remove a role's boundary once set.
+
+**A permission boundary always applies.** When the company gives no `PermissionsBoundaryArn`, the
+access stack creates a default boundary, the managed policy `agentx-<env>-boundary` under
+`/agentx/<env>/` (so its ARN is fixed and every other stack can name it), and every environment
+role, the access stack's two roles included, carries it. The `EffectiveBoundaryArn` output names
+whichever boundary is in force. The default boundary allows the AWS services AgentX's roles use
+(a generated test keeps that list complete and adds nothing unused), role actions and `PassRole`
+only for roles under `/agentx/<env>/` (plus the service role itself, and AgentCore's default
+instance role, which the capacity provider's AWS-managed policy passes to EC2), and a few
+service-linked roles. It explicitly denies Organizations and Account changes, anything on IAM users
+or groups, creating, versioning or deleting managed policies, and changing the boundary itself. A
+company-supplied boundary replaces the default entirely, so it must allow every action AgentX's
+roles need.
+
+What this does and does not protect, plainly:
+
+- The operator role can deploy CloudFormation through the service role, so it is powerful within
+  the account: it can create and change any resource of the services AgentX uses.
+- The boundary stops it creating roles or policies beyond AgentX's own needs: no IAM users or
+  groups, no managed-policy management, no Organizations or Account changes, and every role it
+  creates carries the boundary.
+- Environments that share one AWS account are **not** a security boundary against each other.
+  Names and IAM paths keep them apart for IAM, but resource policies and non-IAM access (S3, KMS,
+  Secrets Manager, SQS and the like) can still reach across environments in the same account.
+- A dedicated AWS account per install is recommended (spec 015, FR-015).
+
+**Changing the boundary later.** Update the access stack first, then every other environment stack
+with the same new `PermissionsBoundaryArn`, in upgrade order (foundation, identity, runtime,
+control-plane, slack). The service role's Deny statements follow the access stack, so a stack
+deployed with a different boundary than the access stack's is refused. When switching from the
+default boundary to a company boundary, the old `agentx-<env>-boundary` policy may be left behind:
+roles still use it while the switch is in progress, so CloudFormation cannot always remove it
+cleanly. Once every stack carries the new boundary, delete the leftover policy by hand.
+
+**Reinstalling an environment name.** The environment's Slack secret `agentx/<env>/slack` is kept
+when the control-plane stack is deleted. Reinstalling the same environment name needs that secret
+deleted first, with `--force-delete-without-recovery` if it is still in its recovery window;
+otherwise the new stack cannot create a secret of the same name.
+
+The **operator role** may create, describe and execute change sets only for the five non-access
+stacks, by their exact names, and read all six (including the access stack). It may pass only the
+service role, and only to CloudFormation. It can read and write its environment's SSM settings
+(`/agentx/<env>/*`) and Secrets Manager secrets (`agentx/<env>/*`), read and write the artifact
+bucket, list cached images, call `bedrock:InvokeModel` as a model check, and read its stacks' and
+the AgentCore runtime's logs.
+
+A public image `public.ecr.aws/<alias>/<repo>@sha256:<digest>` reaches the runtime as
+`<account>.dkr.ecr.<region>.amazonaws.com/agentx-<env>/<alias>/<repo>@sha256:<digest>`, private ECR
+in the account. `PermissionsBoundaryArn` is optional on every environment stack, access included;
+every `AWS::IAM::Role` in every environment stack carries the given boundary, else the default one.

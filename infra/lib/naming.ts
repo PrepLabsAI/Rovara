@@ -24,10 +24,19 @@ export interface AgentXNaming {
   /** The value of the resource `Environment` tag used by the foundation stack. */
   readonly environmentTagValue: string;
   readonly taskFamily: string;
+  /** Prefix for the ECR pull-through cache rule, at most 27 characters. */
+  readonly pullThroughPrefix: string;
+  /** The role CloudFormation assumes to deploy this environment's stacks. */
+  readonly cloudFormationRoleName: string;
+  /** The role an operator assumes to run `agentx` against this environment. */
+  readonly operatorRoleName: string;
 }
 
+/** The deployment that predates named environments has no access or identity stack. */
+const NO_NAMED_ENVIRONMENTS_MESSAGE = "the access stack exists only for named environments";
+
 /** The legacy deployment predates the identity stack; it has no fixed name for it. */
-export const LEGACY_STACK_NAMES: Record<Exclude<StackPart, "identity">, string> = {
+export const LEGACY_STACK_NAMES: Record<Exclude<StackPart, "identity" | "access">, string> = {
   foundation: "AgentXProductionFoundation",
   runtime: "AgentXProductionRuntime",
   "control-plane": "AgentXControlPlane",
@@ -40,6 +49,7 @@ export function legacyNaming(): AgentXNaming {
     env: undefined,
     stackName: (part) => {
       if (part === "identity") throw new Error("the legacy deployment has no identity stack");
+      if (part === "access") throw new Error(NO_NAMED_ENVIRONMENTS_MESSAGE);
       return LEGACY_STACK_NAMES[part];
     },
     workerSecurityGroupName: "agentx-production-workers",
@@ -54,6 +64,17 @@ export function legacyNaming(): AgentXNaming {
     metricsNamespace: "AgentX",
     environmentTagValue: "production",
     taskFamily: "agentx-slack-orchestrator",
+    // Getters, not eagerly computed values: legacy synthesis never reads them, so a getter throws
+    // only if something actually tries to.
+    get pullThroughPrefix(): string {
+      throw new Error(NO_NAMED_ENVIRONMENTS_MESSAGE);
+    },
+    get cloudFormationRoleName(): string {
+      throw new Error(NO_NAMED_ENVIRONMENTS_MESSAGE);
+    },
+    get operatorRoleName(): string {
+      throw new Error(NO_NAMED_ENVIRONMENTS_MESSAGE);
+    },
   };
 }
 
@@ -75,6 +96,9 @@ export function environmentNaming(env: string): AgentXNaming {
     metricsNamespace: `AgentX/${name}`,
     environmentTagValue: name,
     taskFamily: `agentx-${name}-slack-orchestrator`,
+    pullThroughPrefix: `agentx-${name}`,
+    cloudFormationRoleName: `agentx-${name}-cloudformation`,
+    operatorRoleName: `agentx-${name}-operator`,
   };
 }
 

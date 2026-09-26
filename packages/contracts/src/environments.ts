@@ -39,10 +39,10 @@ export function assertCognitoDomainSafe(env: string): void {
   }
 }
 
-export type StackPart = "foundation" | "identity" | "runtime" | "control-plane" | "slack";
+export type StackPart = "access" | "foundation" | "identity" | "runtime" | "control-plane" | "slack";
 
 /** In deploy order. */
-export const STACK_PARTS: readonly StackPart[] = ["foundation", "identity", "runtime", "control-plane", "slack"];
+export const STACK_PARTS: readonly StackPart[] = ["access", "foundation", "identity", "runtime", "control-plane", "slack"];
 
 function checked(env: string): string {
   const parsed = EnvironmentNameSchema.safeParse(env);

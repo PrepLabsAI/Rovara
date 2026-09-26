@@ -1,4 +1,5 @@
 import {
+  Aws,
   CfnOutput,
   CfnParameter,
   RemovalPolicy,
@@ -129,6 +130,27 @@ export class AgentRuntimeStack extends Stack {
           actions: ["ecr:GetAuthorizationToken"],
           resources: ["*"],
         }),
+        // Under environment naming, the runtime pulls AgentX images through the ECR pull-through
+        // cache: the first pull of any tag imports it into the environment's cache prefix, which
+        // needs BatchImportUpstreamImage and CreateRepository in addition to the ordinary image-pull
+        // actions above. The legacy deployment has no pull-through prefix to scope this to. Aws.REGION,
+        // not the synthesis region, so the released template deploys in any region.
+        ...(naming.env === undefined
+          ? []
+          : [
+              new iam.PolicyStatement({
+                sid: "EcrPullThroughCache",
+                actions: [
+                  "ecr:BatchGetImage",
+                  "ecr:GetDownloadUrlForLayer",
+                  "ecr:BatchImportUpstreamImage",
+                  "ecr:CreateRepository",
+                ],
+                resources: [
+                  `arn:${Aws.PARTITION}:ecr:${Aws.REGION}:${Aws.ACCOUNT_ID}:repository/${naming.pullThroughPrefix}/*`,
+                ],
+              }),
+            ]),
         new iam.PolicyStatement({
           sid: "BedrockModelInvocation",
           actions: ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],

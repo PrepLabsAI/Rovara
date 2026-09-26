@@ -1,14 +1,17 @@
 import { readFileSync } from "node:fs";
-import { App, LegacyStackSynthesizer, Tags } from "aws-cdk-lib";
+import { App, Aspects, LegacyStackSynthesizer, Stack, Tags } from "aws-cdk-lib";
 import type { IReusableStackSynthesizer } from "aws-cdk-lib";
 import { CONTEXT_ENV, CONTEXT_OVERFLOW_LOCATION_ENV } from "aws-cdk-lib/cx-api";
+import { AccessStack } from "./access.js";
 import { AgentRuntimeStack } from "./agent-runtime.js";
 import { ControlPlaneStack } from "./control-plane.js";
 import { DemoRuntimeStack } from "./demo-runtime.js";
 import { IdentityStack } from "./identity.js";
 import { namingFromContext } from "./naming.js";
+import { applyPermissionsBoundaryParameter } from "./permissions-boundary.js";
 import { ProductionFoundationStack } from "./production-foundation.js";
 import { ReleasePipelineStack } from "./release-pipeline.js";
+import { EnvironmentRolePath } from "./role-path.js";
 import { SlackOrchestratorStack } from "./slack-orchestrator.js";
 
 export function buildAgentXApp(context: Record<string, unknown> = {}): App {
@@ -99,6 +102,19 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
     );
   }
 
+  // The access stack holds the roles every other environment stack is deployed with, so it comes
+  // first. The deployment that predates environments has none.
+  let accessStack: AccessStack | undefined;
+  if (naming.env !== undefined) {
+    const region = deploymentRegion ?? "us-east-1";
+    accessStack = new AccessStack(app, "AgentXAccess", {
+      description: "AgentX access for a named environment: artifact bucket, image cache rule, deploy and operator roles",
+      stackName: naming.stackName("access"),
+      naming,
+      terminationProtection: true,
+      env: { region },
+    });
+  }
   new ControlPlaneStack(app, "AgentXControlPlane", {
     description: "AgentX authenticated control plane and durable dispatch foundation",
     naming,
@@ -155,6 +171,16 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
   }
   if (naming.env !== undefined) {
     Tags.of(app).add("agentx:env", naming.env);
+    // Every environment role goes under /agentx/<env>/, the path the CloudFormation service role is
+    // scoped to; the access stack's own roles are what that scoping protects, so they stay at root.
+    Aspects.of(app).add(new EnvironmentRolePath(naming.env, new Set(accessStack === undefined ? [] : [accessStack])));
+    // Every environment stack gets its own permission boundary parameter, condition, and aspect (the
+    // given boundary, else the access stack's default boundary). The access stack already called
+    // this itself (it creates the default boundary and needs the effective boundary for its roles'
+    // policy statements), so this is a no-op for it.
+    for (const stack of app.node.children.filter((c): c is Stack => Stack.isStack(c))) {
+      applyPermissionsBoundaryParameter(stack, naming.env);
+    }
   }
   return app;
 }

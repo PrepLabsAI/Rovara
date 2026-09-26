@@ -1,4 +1,5 @@
 import {
+  Aws,
   CfnOutput,
   CfnParameter,
   RemovalPolicy,
@@ -119,6 +120,24 @@ export class SlackOrchestratorStack extends Stack {
       actions: ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
       resources: [`arn:${this.partition}:ecr:${this.region}:${this.account}:repository/${AGENTX_SLACK_ORCHESTRATOR_REPOSITORY}`],
     }));
+    // Under environment naming, the Slack service pulls AgentX images through the ECR pull-through
+    // cache: the first pull of any tag imports it into the environment's cache prefix, which needs
+    // BatchImportUpstreamImage and CreateRepository in addition to the ordinary image-pull actions
+    // above. The legacy deployment has no pull-through prefix to scope this to. Aws.REGION, not the
+    // synthesis region, so the released template deploys in any region.
+    if (naming.env !== undefined) {
+      executionRole.addToPolicy(new iam.PolicyStatement({
+        sid: "EcrPullThroughCache",
+        actions: [
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:BatchGetImage",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:BatchImportUpstreamImage",
+          "ecr:CreateRepository",
+        ],
+        resources: [`arn:${Aws.PARTITION}:ecr:${Aws.REGION}:${Aws.ACCOUNT_ID}:repository/${naming.pullThroughPrefix}/*`],
+      }));
+    }
     logGroup.grantWrite(executionRole);
 
     const cluster = new ecs.CfnCluster(this, "Cluster", {

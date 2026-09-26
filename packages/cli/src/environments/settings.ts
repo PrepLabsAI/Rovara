@@ -12,7 +12,7 @@ export const EnvironmentSettingsSchema = z.object({
   version: z.string().regex(/^(?:\d+\.\d+\.\d+|unversioned)$/),
   /** Legacy for a deployment adopted with fixed stack names. */
   naming: z.enum(["environment", "legacy"]),
-  stacks: z.object({ foundation: z.string(), identity: z.string().optional(), runtime: z.string(), "control-plane": z.string(), slack: z.string() }).strict(),
+  stacks: z.object({ access: z.string().optional(), foundation: z.string(), identity: z.string().optional(), runtime: z.string(), "control-plane": z.string(), slack: z.string() }).strict(),
   controlPlaneUrl: z.string().url(),
   identity: z.object({
     mode: z.enum(["cognito", "oidc"]),
@@ -22,6 +22,16 @@ export const EnvironmentSettingsSchema = z.object({
   }).strict(),
   models: z.object({ orchestrator: z.string().min(1), classifier: z.string().min(1), worker: z.string().min(1) }).strict(),
   alertAddress: z.string().min(1).optional(),
+  access: z
+    .object({
+      artifactBucket: z.string().min(1),
+      cloudFormationRoleArn: z.string().regex(/^arn:aws[a-z-]*:iam::[0-9]{12}:role\/.+$/),
+      operatorRoleArn: z.string().regex(/^arn:aws[a-z-]*:iam::[0-9]{12}:role\/.+$/),
+      pullThroughPrefix: z.string().min(1),
+      permissionsBoundaryArn: z.string().regex(/^arn:aws[a-z-]*:iam::[0-9]{12}:policy\/.+$/).optional(),
+    })
+    .strict()
+    .optional(),
   updatedAt: z.iso.datetime(),
 }).strict();
 

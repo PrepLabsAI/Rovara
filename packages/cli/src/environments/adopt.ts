@@ -8,9 +8,10 @@ import { readEnvironmentSettings, settingsParameterName, writeEnvironmentSetting
 
 /**
  * Must equal infra/lib/naming.ts LEGACY_STACK_NAMES (a test compares them). The legacy deployment
- * predates the identity stack, so it has no entry here; adopted settings leave stacks.identity unset.
+ * predates the identity and access stacks, so it has no entry for either here; adopted settings
+ * leave stacks.identity and stacks.access unset.
  */
-export const ADOPTED_STACK_NAMES: Record<Exclude<StackPart, "identity">, string> = {
+export const ADOPTED_STACK_NAMES: Record<Exclude<StackPart, "identity" | "access">, string> = {
   foundation: "AgentXProductionFoundation",
   runtime: "AgentXProductionRuntime",
   "control-plane": "AgentXControlPlane",
