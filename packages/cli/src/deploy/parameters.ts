@@ -2,7 +2,7 @@
 // It turns the operator's answers, a release manifest, and the stack outputs collected so far into
 // the exact CloudFormation Parameters map for one environment stack. The caller (phase 15d's `agentx
 // init`/`agentx upgrade`) reads secrets and calls CloudFormation; this file only computes values.
-import { environmentStackName } from "@agentx/contracts";
+import { ImageDigest, environmentStackName } from "@agentx/contracts";
 import type { ReleaseManifest, StackPart } from "@agentx/contracts";
 
 export type StackOutputs = Record<string, string>;
@@ -32,6 +32,9 @@ export interface InstallAnswers {
   callbackSigningKey: string;
   permissionsBoundaryArn?: string;
   operatorPrincipalArn?: string;
+  /** Testing only, until the first published release exists: a private-ECR image digest used as-is
+   * instead of mapping the release's public image through the pull-through cache. */
+  images?: { worker?: string; slack?: string };
 }
 
 /** The shortest callback signing key the control plane accepts. */
@@ -96,6 +99,12 @@ function requiredImage(release: ReleaseManifest, which: "worker" | "slack"): str
   const digest = release.images[which];
   if (digest === undefined) throw new Error(`release ${release.version} has no ${which} image digest`);
   return digest;
+}
+
+/** Throws the exact message a non-digest image override must report; otherwise returns it as-is. */
+function checkedImageOverride(uri: string, which: "worker" | "slack"): string {
+  if (!ImageDigest.safeParse(uri).success) throw new Error(`image override for ${which} must be referenced by digest`);
+  return uri;
 }
 
 /** Every release package deployed with `part`: the asset parameters that stack's template declares. */
@@ -183,10 +192,13 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
     }
 
     case "runtime": {
-      const prefix = required(outputs, "access", "PullThroughPrefix", answers.env);
+      const workerImage =
+        answers.images?.worker !== undefined
+          ? checkedImageOverride(answers.images.worker, "worker")
+          : privateImageUri(requiredImage(answers.release, "worker"), imageTarget(answers, required(outputs, "access", "PullThroughPrefix", answers.env)));
       return {
         ...base,
-        WorkerImageUri: privateImageUri(requiredImage(answers.release, "worker"), imageTarget(answers, prefix)),
+        WorkerImageUri: workerImage,
         ControlPlaneUrl: required(outputs, "control-plane", "ApiEndpoint", answers.env),
         ModelProvider: "amazon-bedrock",
         ModelId: answers.models.worker,
@@ -195,10 +207,13 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
     }
 
     case "slack": {
-      const prefix = required(outputs, "access", "PullThroughPrefix", answers.env);
+      const orchestratorImage =
+        answers.images?.slack !== undefined
+          ? checkedImageOverride(answers.images.slack, "slack")
+          : privateImageUri(requiredImage(answers.release, "slack"), imageTarget(answers, required(outputs, "access", "PullThroughPrefix", answers.env)));
       return {
         ...base,
-        OrchestratorImageUri: privateImageUri(requiredImage(answers.release, "slack"), imageTarget(answers, prefix)),
+        OrchestratorImageUri: orchestratorImage,
         TaskRoleArn: required(outputs, "control-plane", "SlackOrchestratorTaskRoleArn", answers.env),
         ControlPlaneUrl: required(outputs, "control-plane", "ApiEndpoint", answers.env),
         SlackRequestQueueUrl: required(outputs, "control-plane", "SlackRequestQueueUrl", answers.env),

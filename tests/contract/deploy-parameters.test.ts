@@ -192,4 +192,10 @@ describe("deploy parameters", () => {
     expect(message).not.toContain(shortKey);
     expect(() => stackParameters("control-plane", { ...answers(), callbackSigningKey: "k".repeat(32) }, outputs)).not.toThrow();
   });
+
+  it("uses image overrides as-is, and only by digest", () => {
+    const withOverrides = { ...answers(), images: { worker: `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-worker-production@sha256:${d("e")}` } };
+    expect(stackParameters("runtime", withOverrides, outputs).WorkerImageUri).toBe(withOverrides.images.worker);
+    expect(() => stackParameters("runtime", { ...answers(), images: { worker: "x/y:latest" } }, outputs)).toThrow("image override for worker must be referenced by digest");
+  });
 });
