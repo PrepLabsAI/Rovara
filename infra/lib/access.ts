@@ -1,10 +1,11 @@
-import { Aws, CfnCondition, CfnOutput, CfnParameter, Duration, Fn, RemovalPolicy, Stack, Token, Validations, type StackProps } from "aws-cdk-lib";
+import { Aws, CfnCondition, CfnOutput, CfnParameter, Duration, Fn, RemovalPolicy, Stack, type StackProps } from "aws-cdk-lib";
 import * as ecr from "aws-cdk-lib/aws-ecr";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import type { Construct } from "constructs";
 import { operatorRoleStatements, serviceRoleStatements, type PolicyStatementJson } from "./access-policies.js";
 import type { AgentXNaming } from "./naming.js";
+import { applyPermissionsBoundaryParameter } from "./permissions-boundary.js";
 
 export interface AccessStackProps extends StackProps {
   naming: AgentXNaming;
@@ -26,25 +27,16 @@ export class AccessStack extends Stack {
     const env = naming.env;
     if (env === undefined) throw new Error("the access stack exists only for named environments");
 
-    const permissionsBoundaryArn = new CfnParameter(this, "PermissionsBoundaryArn", {
-      type: "String",
-      default: "",
-      allowedPattern: "^$|^arn:aws[a-z-]*:iam::[0-9]{12}:policy/.+$",
-      description: "Optional IAM permissions boundary policy ARN applied to every role this environment creates",
-    });
+    const { parameter: permissionsBoundaryArn, condition: hasPermissionsBoundary } = applyPermissionsBoundaryParameter(this);
     const operatorPrincipalArn = new CfnParameter(this, "OperatorPrincipalArn", {
       type: "String",
       default: "",
       allowedPattern: "^$|^arn:aws[a-z-]*:iam::[0-9]{12}:(root|role/.+|user/.+)$",
       description: "Optional principal allowed to assume the operator role; empty trusts the account root",
     });
-    const hasPermissionsBoundary = new CfnCondition(this, "HasPermissionsBoundary", {
-      expression: Fn.conditionNot(Fn.conditionEquals(permissionsBoundaryArn.valueAsString, "")),
-    });
     const hasOperatorPrincipal = new CfnCondition(this, "HasOperatorPrincipal", {
       expression: Fn.conditionNot(Fn.conditionEquals(operatorPrincipalArn.valueAsString, "")),
     });
-    const boundary = Token.asString(Fn.conditionIf(hasPermissionsBoundary.logicalId, permissionsBoundaryArn.valueAsString, Aws.NO_VALUE));
 
     const bucket = new s3.Bucket(this, "ArtifactBucket", {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
@@ -94,7 +86,6 @@ export class AccessStack extends Stack {
         ],
       },
       policies: [{ policyName: "deploy", policyDocument: { Version: "2012-10-17", Statement: serviceStatements } }],
-      permissionsBoundary: boundary,
     });
 
     const operatorRole = new iam.CfnRole(this, "OperatorRole", {
@@ -118,17 +109,7 @@ export class AccessStack extends Stack {
       },
       maxSessionDuration: 3600,
       policies: [{ policyName: "operate", policyDocument: { Version: "2012-10-17", Statement: operatorRoleStatements(policyScope) } }],
-      permissionsBoundary: boundary,
     });
-
-    // The template validator checks PermissionsBoundary's minimum length against the Fn::If's
-    // empty-string branch; that branch is AWS::NoValue, so the property is omitted instead.
-    for (const role of [serviceRole, operatorRole]) {
-      Validations.of(role).acknowledge({
-        id: "CloudFormation-Validate::F3033",
-        reason: "PermissionsBoundary is AWS::NoValue, not an empty string, when no boundary is given",
-      });
-    }
 
     new CfnOutput(this, "ArtifactBucketName", { value: bucket.bucketName });
     new CfnOutput(this, "CloudFormationRoleArn", { value: serviceRole.attrArn });
