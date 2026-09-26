@@ -18,12 +18,21 @@ const PHYSICAL_NAME_KEYS = ["GroupName", "AgentRuntimeName", "TopicName", "Alarm
 // entry), so they are checked by resource type rather than added to PHYSICAL_NAME_KEYS.
 const NAME_PROPERTY_BY_TYPE = new Set(["AWS::ApiGatewayV2::Api", "AWS::BedrockAgentCore::CapacityProvider"]);
 
+// AWS::Cognito::UserPoolGroup also carries a "GroupName" key, but (unlike every other resource
+// PHYSICAL_NAME_KEYS covers, e.g. an EC2 security group) it is unique only within its own user
+// pool, not the account and region, and the identity stack deliberately uses the same group name
+// (agentx-admin) in every environment's own pool. Excluded rather than added to PHYSICAL_NAME_KEYS.
+const POOL_SCOPED_TYPES = new Set(["AWS::Cognito::UserPoolGroup"]);
+
 function physicalNames(stack: Stack): string[] {
   const resources = Template.fromStack(stack).toJSON().Resources as Record<string, { Type: string; Properties?: Record<string, unknown> }>;
-  return Object.values(resources).flatMap((resource) => [
-    ...PHYSICAL_NAME_KEYS.map((key) => resource.Properties?.[key]),
-    NAME_PROPERTY_BY_TYPE.has(resource.Type) ? resource.Properties?.Name : undefined,
-  ].filter((value): value is string => typeof value === "string"));
+  return Object.values(resources).flatMap((resource) => {
+    if (POOL_SCOPED_TYPES.has(resource.Type)) return [];
+    return [
+      ...PHYSICAL_NAME_KEYS.map((key) => resource.Properties?.[key]),
+      NAME_PROPERTY_BY_TYPE.has(resource.Type) ? resource.Properties?.Name : undefined,
+    ].filter((value): value is string => typeof value === "string");
+  });
 }
 
 // CloudFormation export names are account-and-region unique, like physical names.
@@ -88,7 +97,7 @@ describe("environment naming", () => {
     const production = productionStacks(buildAgentXApp({ agentxEnv: "production" }));
     const staging = productionStacks(buildAgentXApp({ agentxEnv: "staging" }));
     expect(production.map((stack) => stack.stackName).sort()).toEqual([
-      "agentx-production-control-plane", "agentx-production-foundation", "agentx-production-runtime", "agentx-production-slack",
+      "agentx-production-control-plane", "agentx-production-foundation", "agentx-production-identity", "agentx-production-runtime", "agentx-production-slack",
     ]);
     const productionNames = new Set(production.flatMap(physicalNames));
     const shared = staging.flatMap(physicalNames).filter((name) => productionNames.has(name));

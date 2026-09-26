@@ -1,0 +1,157 @@
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A second tag push (or a re-run) must never race a release already publishing: cancelling a
+# half-published release would leave images, the GitHub release and npm inconsistent with each
+# other. Keyed by ref, not workflow, so only the same tag's own runs share the group.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with: { node-version-file: .node-version, cache: npm }
+      - run: npm ci
+      - run: npm run typecheck && npm run lint && npm run build && npm test && npm run infra:synth
+
+  images:
+    needs: test
+    if: vars.AGENTX_PUBLISH_ENABLED == 'true'
+    runs-on: ubuntu-24.04-arm
+    permissions: { contents: read, id-token: write }
+    outputs:
+      worker: ${{ steps.push.outputs.worker }}
+      slack: ${{ steps.push.outputs.slack }}
+    steps:
+      # AGENTX_PUBLISH_ROLE_ARN's trust policy only allows repo:PrepLabsAI/AgentX:ref:refs/tags/v*,
+      # so a workflow_dispatch run must be re-run from the tag ref itself; fail clearly here instead
+      # of letting configure-aws-credentials fail later with an opaque AssumeRoleWithWebIdentity
+      # error. GITHUB_REF/GITHUB_REF_NAME are the runner's own default environment variables, read
+      # directly rather than interpolated in as `${{ github.ref }}`, so the version this job (and
+      # every job below it) uses comes from one source of truth: the tag, never a workflow_dispatch
+      # input.
+      - name: Require a version tag ref
+        run: |
+          if [[ "$GITHUB_REF" != refs/tags/v* ]]; then
+            echo "::error::release.yml publishing jobs must run from a version tag (refs/tags/v*), not $GITHUB_REF. Re-run workflow_dispatch from the tag." >&2
+            exit 1
+          fi
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::release.yml requires a tag name of the form vX.Y.Z, not $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+      - uses: actions/checkout@v5
+        with: { persist-credentials: false }
+      - uses: aws-actions/configure-aws-credentials@v5
+        with: { role-to-assume: "${{ vars.AGENTX_PUBLISH_ROLE_ARN }}", aws-region: us-east-1 }
+      - uses: aws-actions/amazon-ecr-login@v2
+        with: { registry-type: public }
+      - uses: docker/setup-buildx-action@v3
+      - id: push
+        # Without an explicit shell, GitHub Actions runs a Linux run: step's script as plain
+        # `bash -e {0}`, not `bash --noprofile --norc -eo pipefail {0}`: a failing
+        # `docker buildx imagetools inspect` piped into `tr -d '"'` would be swallowed by the pipe
+        # and this step would carry on with an empty (or stale) registry_digest instead of failing.
+        # `shell: bash` is what turns pipefail on.
+        shell: bash
+        env:
+          ALIAS: ${{ vars.AGENTX_ECR_PUBLIC_ALIAS }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          VERSION="${VERSION#v}"
+          for image in worker slack; do
+            dockerfile=environments/base/Dockerfile; [ "$image" = slack ] && dockerfile=environments/slack/Dockerfile
+            repo="public.ecr.aws/$ALIAS/agentx-$image"
+            # --provenance=false --sbom=false: without them, buildx pushes an OCI image *index*
+            # (the tagged manifest plus attached provenance/SBOM attestations) instead of a single
+            # linux/arm64 image manifest, and the digest this job would read back is the index's,
+            # not the image's — the wrong thing to pin the release to.
+            docker buildx build --platform linux/arm64 --provenance=false --sbom=false --file "$dockerfile" --tag "$repo:$VERSION" --push --metadata-file "$RUNNER_TEMP/$image.json" .
+            digest=$(jq -r '."containerimage.digest"' "$RUNNER_TEMP/$image.json")
+            # Don't trust the local build metadata alone: read back what the registry actually
+            # holds for this tag, and fail loudly if it's missing or doesn't match what was just
+            # pushed, rather than shipping a release pinned to a digest nobody can pull.
+            registry_digest=$(docker buildx imagetools inspect "$repo:$VERSION" --format '{{json .Manifest.Digest}}' | tr -d '"')
+            if [ -z "$registry_digest" ] || [ "$registry_digest" = "null" ]; then
+              echo "::error::registry returned no digest for $repo:$VERSION after push" >&2
+              exit 1
+            fi
+            if [ "$registry_digest" != "$digest" ]; then
+              echo "::error::registry digest $registry_digest for $repo:$VERSION does not match the pushed digest $digest" >&2
+              exit 1
+            fi
+            echo "$image=$repo@$registry_digest" >> "$GITHUB_OUTPUT"
+          done
+
+  release:
+    needs: images
+    if: vars.AGENTX_PUBLISH_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    permissions: { contents: write }
+    steps:
+      - uses: actions/checkout@v5
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@v5
+        with: { node-version-file: .node-version, cache: npm }
+      - run: npm ci
+      # release:build imports workspace packages (e.g. @agentx/contracts) by their built dist/
+      # output, which is gitignored: without this, a fresh checkout fails with
+      # ERR_MODULE_NOT_FOUND before release:build even starts.
+      - run: npm run build
+      - env:
+          VERSION: ${{ github.ref_name }}
+          WORKER: ${{ needs.images.outputs.worker }}
+          SLACK: ${{ needs.images.outputs.slack }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${VERSION#v}"
+          npm run release:build -- --version "$VERSION" --out "$RUNNER_TEMP/release" --worker-image "$WORKER" --slack-image "$SLACK"
+          npm run release:verify -- "$RUNNER_TEMP/release"
+          (cd "$RUNNER_TEMP/release" && tar -czf "$RUNNER_TEMP/agentx-$VERSION.tar.gz" .)
+          gh release create "v$VERSION" --verify-tag --title "AgentX $VERSION" --notes-from-tag "$RUNNER_TEMP/agentx-$VERSION.tar.gz" "$RUNNER_TEMP/release/release.json"
+
+  npm:
+    needs: release
+    if: vars.AGENTX_PUBLISH_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    permissions: { contents: read, id-token: write }
+    steps:
+      - uses: actions/checkout@v5
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@v5
+        with: { node-version-file: .node-version, cache: npm, registry-url: "https://registry.npmjs.org" }
+      - run: npm ci
+      # release:pack-cli bundles packages/cli, which resolves @agentx/contracts through its built
+      # dist/ output (gitignored): without this, a fresh checkout fails with ERR_MODULE_NOT_FOUND.
+      - run: npm run build
+      # Trusted publishing (OIDC, no stored token) needs a newer npm than Node 22 ships.
+      - run: npm install -g npm@11
+      - env:
+          VERSION: ${{ github.ref_name }}
+          NAME: ${{ vars.AGENTX_NPM_PACKAGE || '@charterarc/agentx' }}
+        run: |
+          VERSION="${VERSION#v}"
+          npm run release:pack-cli -- --version "$VERSION" --name "$NAME" --out "$RUNNER_TEMP/cli"
+          # A hand-published first version (see docs/releases.md's one-time owner setup) means the
+          # very first automated run would otherwise hit this same version already on the registry
+          # and fail; npm refuses to publish over an existing version. Check first and skip cleanly
+          # instead of failing the job.
+          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+            echo "$NAME@$VERSION is already published; skipping npm publish"
+            exit 0
+          fi
+          # PrepLabsAI/AgentX is private today, and npm provenance attestation fails for private
+          # repositories, so the provenance flag stays off here. Trusted publishing adds it
+          # automatically once the repo is public; nothing here needs to change when that happens.
+          npm publish "$RUNNER_TEMP"/cli/*.tgz --access public

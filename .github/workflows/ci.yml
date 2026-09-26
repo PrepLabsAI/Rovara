@@ -20,6 +20,12 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run infra:synth
+      - name: Release builds are reproducible
+        run: |
+          npm run release:build -- --version 0.0.0-ci --out "$RUNNER_TEMP/release-a"
+          npm run release:build -- --version 0.0.0-ci --out "$RUNNER_TEMP/release-b"
+          diff "$RUNNER_TEMP/release-a/release.json" "$RUNNER_TEMP/release-b/release.json"
+          npm run release:verify -- "$RUNNER_TEMP/release-a"
 
   live-aws:
     if: github.event_name == 'workflow_dispatch' && vars.AGENTX_ENABLE_AWS_TESTS == 'true'

@@ -7,6 +7,7 @@ export default tseslint.config(
       "**/dist/**",
       "**/node_modules/**",
       "cdk.out/**",
+      ".release-synth/**",
       "coverage/**",
       "eslint.config.js",
     ],

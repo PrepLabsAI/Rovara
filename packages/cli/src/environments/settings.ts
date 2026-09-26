@@ -12,7 +12,7 @@ export const EnvironmentSettingsSchema = z.object({
   version: z.string().regex(/^(?:\d+\.\d+\.\d+|unversioned)$/),
   /** Legacy for a deployment adopted with fixed stack names. */
   naming: z.enum(["environment", "legacy"]),
-  stacks: z.object({ foundation: z.string(), runtime: z.string(), "control-plane": z.string(), slack: z.string() }).strict(),
+  stacks: z.object({ foundation: z.string(), identity: z.string().optional(), runtime: z.string(), "control-plane": z.string(), slack: z.string() }).strict(),
   controlPlaneUrl: z.string().url(),
   identity: z.object({
     mode: z.enum(["cognito", "oidc"]),

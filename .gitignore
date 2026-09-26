@@ -3,6 +3,7 @@ dist/
 build/
 coverage/
 cdk.out/
+.release-synth/
 docs/
 .DS_Store
 Thumbs.db

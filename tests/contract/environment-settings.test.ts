@@ -67,6 +67,18 @@ describe("environment settings", () => {
     expect(EnvironmentSettingsSchema.safeParse({ ...stagingSettings, slackBotToken: "xoxb-1" }).success).toBe(false);
   });
 
+  it("round-trips settings with an identity stack", async () => {
+    const store = new MemoryParameterStore();
+    const withIdentity: EnvironmentSettings = { ...stagingSettings, stacks: { ...stagingSettings.stacks, identity: "agentx-staging-identity" } };
+    await writeEnvironmentSettings(store, withIdentity);
+    expect(await readEnvironmentSettings(store, "staging")).toEqual(withIdentity);
+  });
+
+  it("still parses settings with no identity stack (the legacy fixture)", () => {
+    expect(EnvironmentSettingsSchema.safeParse(stagingSettings).success).toBe(true);
+    expect(stagingSettings.stacks.identity).toBeUndefined();
+  });
+
   it("lists environments that have settings", async () => {
     const store = new MemoryParameterStore();
     await writeEnvironmentSettings(store, stagingSettings);

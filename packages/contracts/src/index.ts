@@ -14,6 +14,7 @@ export * from "./redaction.js";
 export * from "./slack.js";
 export * from "./slack-details.js";
 export * from "./slack-confirmation.js";
+export * from "./templates.js";
 export * from "./turns.js";
 export * from "./usage.js";
 export * from "./workspace.js";

@@ -8,6 +8,7 @@ import {
   AgentXError,
   AgentXNameSchema,
   DEFAULT_ENVIRONMENT,
+  ENVIRONMENT_PLACEHOLDER,
   EnvironmentNameSchema,
   WorkspaceDeploymentModeSchema,
   agentXError,
@@ -104,6 +105,22 @@ export function environmentSsmClient(region?: string): SSMClient {
   return new SSMClient(region === undefined ? {} : { region });
 }
 
+/**
+ * The `login --callback-port` default. `auth.ts`'s loopback listener builds its redirect URI as
+ * `http://127.0.0.1:<port>/callback`, so the identity stack's Cognito app client must register a
+ * callback URL of `http://127.0.0.1:${DEFAULT_CALLBACK_PORT}/callback` for a login with no
+ * `--callback-port` override to work; a test ties the two together.
+ */
+export const DEFAULT_CALLBACK_PORT = 8765;
+
+/**
+ * Set by `scripts/release/pack-cli.ts`'s esbuild `define`, so the packed CLI reports the release
+ * version it was built at. Reading it through `typeof` keeps a plain `tsc`-built (unbundled) copy of
+ * this file safe: an undeclared bare identifier throws a ReferenceError, but `typeof` on one never
+ * does, so it falls through to the fallback version below.
+ */
+declare const __AGENTX_VERSION__: string | undefined;
+
 export function createCliProgram(dependencies: CliDependencies = {}): Command {
   const services = {
     fetchImplementation: dependencies.fetchImplementation ?? fetch,
@@ -146,7 +163,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
   const program = new Command()
     .name("agentx")
     .description("Administration client for AgentX; developers work through the project's Slack channel")
-    .version("0.1.0")
+    .version(typeof __AGENTX_VERSION__ === "string" ? __AGENTX_VERSION__ : "0.1.0")
     .option("--project <project-name>", "select a locally configured AgentX project")
     .option("--config-dir <directory>", "project configuration directory", join(homedir(), ".agentx/projects"))
     .option("--deployment-file <path>", "AgentX deployment settings; defaults to this environment's local cache, or, for production, ~/.agentx/deployment.yaml")
@@ -161,12 +178,18 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     if (!parsed.success) {
       throw agentXError("CONFIG_INVALID", `invalid --env ${JSON.stringify(env)}: ${parsed.error.issues[0]?.message ?? "invalid environment name"}`);
     }
+    // EnvironmentNameSchema itself still accepts the placeholder (synthesizing its templates
+    // requires that), but it is reserved for published templates, not a real deployment: refuse it
+    // here, before any AWS or file access.
+    if (parsed.data === ENVIRONMENT_PLACEHOLDER) {
+      throw agentXError("CONFIG_INVALID", `--env ${JSON.stringify(env)} is reserved for published templates and cannot be used as a real environment`);
+    }
   });
 
   program
     .command("login")
     .description("authenticate with the selected project's OIDC provider")
-    .option("--callback-port <port>", "fixed loopback callback port registered with the OIDC client", parsePort, 8765)
+    .option("--callback-port <port>", "fixed loopback callback port registered with the OIDC client", parsePort, DEFAULT_CALLBACK_PORT)
     .action(async (options: { callbackPort: number }, command: Command) => {
       const globals = globalOptions(command);
       const settings = await deploymentSettings(globals);

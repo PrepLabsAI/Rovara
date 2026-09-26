@@ -2,6 +2,7 @@ import { mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { ENVIRONMENT_PLACEHOLDER } from "@agentx/contracts";
 import type { CallerIdentity, StackReader } from "../../packages/cli/src/environments/adopt.js";
 import { environmentCachePath, resolveDeploymentFile, writeEnvironmentCache } from "../../packages/cli/src/environments/cache.js";
 import type { ParameterStore } from "../../packages/cli/src/environments/parameter-store.js";
@@ -66,6 +67,21 @@ describe("agentx env", () => {
     const code = await executeCli(["--env", "Prod", "env", "use"], { ...io, environments: { store, home: await home() } });
     expect(code).not.toBe(0);
     expect(store.calls).toEqual([]);
+  });
+
+  it("refuses the reserved placeholder --env before any AWS access, even though EnvironmentNameSchema itself accepts it", async () => {
+    // A store whose every method throws: if the placeholder guard were ever bypassed, this test
+    // would fail loudly on the store call itself, not just on an empty store.calls array.
+    const throwingStore: ParameterStore = {
+      get: () => { throw new Error("must not be called"); },
+      put: () => { throw new Error("must not be called"); },
+      delete: () => { throw new Error("must not be called"); },
+      list: () => { throw new Error("must not be called"); },
+    };
+    const io = capture();
+    const code = await executeCli(["--env", ENVIRONMENT_PLACEHOLDER, "env", "list"], { ...io, environments: { store: throwingStore, home: await home() } });
+    expect(code).not.toBe(0);
+    expect(io.err.join("")).toContain("reserved");
   });
 
   it("scopes env list's and env use's SSM client to --region", async () => {
