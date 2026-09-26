@@ -437,6 +437,25 @@ and the budget.
   were imported on first pull. The role that does this needs `ecr:BatchImportUpstreamImage` and
   `ecr:CreateRepository` on the cache prefix (that IAM change belongs to phase 15c). Cached images
   carry no tags, so the installer must reference them by digest.
+- **A separate access stack** (2026-09-26, owner) holds the service role, operator role, artifact
+  bucket and pull-through rule, because the service role cannot deploy its own stack. For an
+  enterprise, the access stack is the one template the platform team deploys and reviews; it
+  creates every IAM role that operators and CloudFormation will use.
+- **Environment roles live under IAM path `/agentx/<env>/`, not a name prefix** (2026-09-26,
+  owner). CloudFormation truncates generated role names, which can drop a name prefix, and a name
+  prefix would also match a differently-named sibling environment (`agentx-prod-*` also matches
+  `prod-eu`). A path cannot collide, because `/` is not a legal character inside an environment
+  name. The access stack's own two roles stay at the IAM root path, out of the service role's
+  reach.
+- **Deploy order** (2026-09-26, owner).
+  - **Fresh install:** access, foundation, identity, control-plane, runtime, slack. The runtime
+    takes the control plane's URL as a parameter, so the control plane must exist first. The
+    control plane needs the GitHub App's details, so `init` (phase 15d) creates the GitHub App
+    before deploying the control plane.
+  - **Upgrade:** access, foundation, identity, runtime, control-plane, slack. The runtime goes
+    before the control plane, as in the release pipeline, because the worker parses strictly and
+    must be the tolerant side of the window.
+  - The identity stack is skipped when the environment brings its own OIDC.
 - **Published templates are synthesized once for a reserved placeholder environment and rendered for
   the real environment at install, proven equal to a direct synthesis (FR-012).**
 - **npm package name and license** (owners, 2026-09-26). The CLI publishes as `@charterarc/agentx`
