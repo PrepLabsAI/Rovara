@@ -9,11 +9,13 @@
 // `terminationProtection: true` on the protected stacks' constructs (infra/lib/app.ts), so unlike
 // the templates engine (which calls UpdateTerminationProtection after a bare CloudFormation
 // change set), this engine never needs to touch it.
-import { readFile } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import type { DeployRequest, StackDeployer, StackOutputs } from "./deployer.js";
 import { SECRET_PARAMETERS, type DeployPart } from "./parameters.js";
+
+const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 /** What the cdk engine needs to run a shell command: the release pipeline's real implementation
  * shells out to `child_process`; tests record calls instead. */
@@ -40,7 +42,12 @@ const CDK_BOOTSTRAP_VERSION_PARAMETER = "/cdk-bootstrap/hnb659fds/version";
  * template to, so the deploy would fail deep into the run instead of failing fast here.
  */
 export async function assertCdkBootstrapped(input: { store: ParameterStore; region: string }): Promise<void> {
-  const parameter = await input.store.get(CDK_BOOTSTRAP_VERSION_PARAMETER);
+  let parameter: Awaited<ReturnType<ParameterStore["get"]>>;
+  try {
+    parameter = await input.store.get(CDK_BOOTSTRAP_VERSION_PARAMETER);
+  } catch (error) {
+    throw new Error(`could not read ${CDK_BOOTSTRAP_VERSION_PARAMETER} in ${input.region}: ${errorMessage(error)}`, { cause: error });
+  }
   if (parameter === undefined) {
     throw new Error(
       `CDK is not bootstrapped in ${input.region}; run: npx cdk bootstrap aws://<account>/${input.region} (or use --engine templates, which needs no bootstrap)`,
@@ -49,25 +56,47 @@ export async function assertCdkBootstrapped(input: { store: ParameterStore; regi
 }
 
 /**
- * Refuses to run the cdk engine from a checkout that isn't exactly the release's tag: unlike the
- * templates engine (which deploys pre-synthesized templates a release records checksums for), the
- * cdk engine synthesizes from whatever source is on disk, so an untagged or mismatched checkout
- * would silently deploy something other than the release it claims to be.
+ * Refuses to run the cdk engine from a checkout that isn't exactly, cleanly, the release's tag:
+ * unlike the templates engine (which deploys pre-synthesized templates a release records
+ * checksums for), the cdk engine synthesizes from whatever source is on disk, so an untagged,
+ * mismatched, or locally modified checkout would silently deploy something other than the release
+ * it claims to be.
+ *
+ * `git describe --tags --exact-match` picks one tag when HEAD carries several, which could hide
+ * the release tag behind an unrelated one; `git tag --points-at HEAD` lists every tag at HEAD, so
+ * the release tag is required to be among them rather than to be the one describe happens to pick.
  */
 export async function assertSourceAtRelease(input: { runner: CommandRunner; source: string; version: string }): Promise<void> {
   const expected = `v${input.version}`;
-  let described: string;
-  try {
-    const { stdout } = await input.runner.run("git", ["describe", "--tags", "--exact-match"], {
-      cwd: input.source,
-      display: "git describe --tags --exact-match",
-    });
-    described = stdout.trim();
-  } catch {
-    described = "";
+
+  const { stdout: statusOutput } = await input.runner.run("git", ["status", "--porcelain"], {
+    cwd: input.source,
+    display: "git status --porcelain",
+  });
+  if (statusOutput.trim() !== "") {
+    throw new Error(`source at ${input.source} has uncommitted changes; check out ${expected} cleanly`);
   }
-  if (described !== expected) {
-    throw new Error(`the cdk engine must run from a checkout of tag ${expected}; ${input.source} is at ${described === "" ? "no tag" : described}`);
+
+  let tags: string[];
+  try {
+    const { stdout } = await input.runner.run("git", ["tag", "--points-at", "HEAD"], {
+      cwd: input.source,
+      display: "git tag --points-at HEAD",
+    });
+    tags = stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line !== "");
+  } catch (error) {
+    // The brief's wording ("... is at no tag") is preserved even when the runner itself failed
+    // (not a git repo, git missing, etc.) rather than simply finding zero tags — but the cause
+    // must not be silently lost, so it's attached and its first line folded into the message.
+    const firstLine = errorMessage(error).split("\n")[0];
+    throw new Error(`the cdk engine must run from a checkout of tag ${expected}; ${input.source} is at no tag (${firstLine})`, { cause: error });
+  }
+
+  if (!tags.includes(expected)) {
+    throw new Error(`the cdk engine must run from a checkout of tag ${expected}; ${input.source} is at ${tags.length === 0 ? "no tag" : tags.join(", ")}`);
   }
 }
 
@@ -76,7 +105,10 @@ function displayArg(arg: string): string {
   return /\s/.test(arg) ? JSON.stringify(arg) : arg;
 }
 
-/** Replaces every secret parameter's value in `text`; mirrors the templates engine's redactor. */
+/** Replaces every secret parameter's value in `text`; mirrors the templates engine's redactor.
+ * Must run on each raw argument *before* `displayArg` quotes it: quoting can escape characters
+ * (a `"` or `\` inside the secret) that would then no longer match the secret's literal value,
+ * letting an escaped fragment of it slip into the printed command unredacted. */
 function redactSecrets(text: string, parameters: Record<string, string>): string {
   let redacted = text;
   for (const name of SECRET_PARAMETERS) {
@@ -120,15 +152,48 @@ export function cdkDeployer(input: {
         args.push("--parameters", `${constructId}:${key}=${value}`);
       }
 
-      const display = redactSecrets(["npx", ...args.map(displayArg)].join(" "), request.parameters);
+      // Redact each raw argument first, then quote the (now secret-free) result — quoting after
+      // redaction would let an escaped fragment of a secret containing whitespace, a quote, or a
+      // backslash slip through unredacted (see redactSecrets's doc comment).
+      const display = ["npx", ...args.map((arg) => displayArg(redactSecrets(arg, request.parameters)))].join(" ");
       request.onEvent?.({ kind: "deploying", stackName: request.stackName });
+
+      // A stale outputs file from an earlier run at this path must never be read back as this
+      // run's result, so it is removed before `cdk deploy` runs; `force` makes a missing file a
+      // no-op rather than an error.
+      await rm(outputsFile, { force: true });
       await input.runner.run("npx", args, { cwd: input.source, display });
 
-      const written = JSON.parse(await readFile(outputsFile, "utf8")) as Record<string, StackOutputs>;
-      const outputs = written[request.stackName] ?? {};
+      const outputs = await readOutputs(outputsFile, request.stackName);
       request.onEvent?.({ kind: "deployed", stackName: request.stackName });
       return outputs;
     },
     outputs: input.outputs,
   };
+}
+
+/** Reads the outputs file `cdk deploy --outputs-file` wrote and returns `stackName`'s entry.
+ * Throws a clear, cause-carrying message for a missing or unparseable file, and — since neither of
+ * those is possible once the file is confirmed to parse — a distinct message naming the stacks it
+ * actually holds when `stackName` itself has no entry (a stack `cdk deploy` didn't touch, or a
+ * `--outputs-file` path that doesn't match what was requested). */
+async function readOutputs(file: string, stackName: string): Promise<StackOutputs> {
+  let raw: string;
+  try {
+    raw = await readFile(file, "utf8");
+  } catch (error) {
+    throw new Error(`cdk deploy wrote no outputs file at ${file}: ${errorMessage(error)}`, { cause: error });
+  }
+  let written: Record<string, StackOutputs>;
+  try {
+    written = JSON.parse(raw) as Record<string, StackOutputs>;
+  } catch (error) {
+    throw new Error(`cdk deploy wrote an unreadable outputs file at ${file}: ${errorMessage(error)}`, { cause: error });
+  }
+  const outputs = written[stackName];
+  if (outputs === undefined) {
+    const stacksWritten = Object.keys(written);
+    throw new Error(`cdk deploy wrote no outputs for ${stackName} to ${file} (stacks written: ${stacksWritten.length === 0 ? "none" : stacksWritten.join(", ")})`);
+  }
+  return outputs;
 }

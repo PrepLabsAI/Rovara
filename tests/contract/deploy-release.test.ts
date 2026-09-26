@@ -67,4 +67,29 @@ describe("containedPath: the loader's own path-containment guard, independent of
     await symlink(join(outside, "secret.txt"), join(dir, "escape-link"));
     expect(() => containedPath(dir, "escape-link")).toThrow("release file escape-link is outside the release directory");
   });
+
+  it("treats ENOTDIR (a path component that is actually a regular file) as missing, with a clear error and a cause", () => {
+    let error: unknown;
+    try {
+      containedPath(dir, "templates/us-east-1/access.template.json/nested");
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe("release file templates/us-east-1/access.template.json/nested is missing");
+    expect((error as Error).cause).toBeDefined();
+  });
+
+  it("refuses a symlink loop clearly, distinct from a plain missing file, with a cause", async () => {
+    await symlink("self-loop", join(dir, "self-loop"));
+    let error: unknown;
+    try {
+      containedPath(dir, "self-loop");
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/release file self-loop is not a regular file/);
+    expect((error as Error).cause).toBeDefined();
+  });
 });

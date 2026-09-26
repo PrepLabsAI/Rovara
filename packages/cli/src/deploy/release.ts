@@ -45,8 +45,18 @@ export function containedPath(dir: string, file: string): string {
     realBase = realpathSync(base);
     realTarget = realpathSync(resolved);
   } catch (error) {
-    if (error instanceof Error && (error as NodeJS.ErrnoException).code === "ENOENT") {
+    const code = error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined;
+    // ENOTDIR: a path component that should be a directory (to hold the rest of `file`) is
+    // actually a regular file — indistinguishable from a plain missing file to whoever asked for
+    // this path, so it gets the same "is missing" message.
+    if (code === "ENOENT" || code === "ENOTDIR") {
       throw new Error(`release file ${file} is missing`, { cause: error });
+    }
+    // ELOOP: too many symlinks were followed resolving `file` (most commonly a symlink whose
+    // target — directly or transitively — is itself), so unlike ENOENT this is never simply
+    // "absent"; say so distinctly rather than call a symlink loop "missing".
+    if (code === "ELOOP") {
+      throw new Error(`release file ${file} is not a regular file (too many symbolic links)`, { cause: error });
     }
     throw error;
   }
