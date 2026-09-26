@@ -1,18 +1,15 @@
-import { Aws, CfnCondition, CfnOutput, CfnParameter, Duration, Fn, RemovalPolicy, Stack, type StackProps } from "aws-cdk-lib";
+import { Aws, CfnCondition, CfnOutput, CfnParameter, Duration, Fn, RemovalPolicy, Stack, Validations, type StackProps } from "aws-cdk-lib";
 import * as ecr from "aws-cdk-lib/aws-ecr";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import type { Construct } from "constructs";
-import { operatorRoleStatements, serviceRoleStatements, type PolicyStatementJson } from "./access-policies.js";
+import { defaultBoundaryName, defaultBoundaryStatements, environmentRolePath, operatorRoleStatements, serviceRoleStatements } from "./access-policies.js";
 import type { AgentXNaming } from "./naming.js";
 import { applyPermissionsBoundaryParameter } from "./permissions-boundary.js";
 
 export interface AccessStackProps extends StackProps {
   naming: AgentXNaming;
 }
-
-/** Statements the policy module returns only when a boundary is set; the template decides at deploy time. */
-const BOUNDARY_STATEMENT_SIDS = new Set(["IamRequireBoundary", "IamKeepBoundary"]);
 
 /**
  * The one template a platform team deploys and reviews for an environment: the artifact bucket,
@@ -27,7 +24,29 @@ export class AccessStack extends Stack {
     const env = naming.env;
     if (env === undefined) throw new Error("the access stack exists only for named environments");
 
-    const { parameter: permissionsBoundaryArn, condition: hasPermissionsBoundary } = applyPermissionsBoundaryParameter(this);
+    // The default boundary applies whenever the company gives none, so every AgentX role always has
+    // one. It exists only under UseDefaultBoundary; the roles and the Deny statements Ref it inside
+    // the Fn::If's else branch, which is valid for a conditional resource (the branch is evaluated
+    // only when the resource exists) and makes CloudFormation create the policy before the roles.
+    // A DependsOn would not do: DependsOn on a resource whose condition is false fails the stack.
+    const { effectiveBoundaryArn } = applyPermissionsBoundaryParameter(this, env, {
+      defaultBoundary: (hasPermissionsBoundary) => {
+        const useDefaultBoundary = new CfnCondition(this, "UseDefaultBoundary", {
+          expression: Fn.conditionNot(hasPermissionsBoundary),
+        });
+        const policy = new iam.CfnManagedPolicy(this, "DefaultPermissionsBoundary", {
+          managedPolicyName: defaultBoundaryName(env),
+          path: environmentRolePath(env),
+          description: `Default permission boundary for every agentx-${env} role`,
+          policyDocument: {
+            Version: "2012-10-17",
+            Statement: defaultBoundaryStatements({ env, partition: Aws.PARTITION, account: this.account, cloudFormationRoleName: naming.cloudFormationRoleName }),
+          },
+        });
+        policy.cfnOptions.condition = useDefaultBoundary;
+        return policy.ref;
+      },
+    });
     const operatorPrincipalArn = new CfnParameter(this, "OperatorPrincipalArn", {
       type: "String",
       default: "",
@@ -64,12 +83,8 @@ export class AccessStack extends Stack {
       cloudFormationRoleName: naming.cloudFormationRoleName,
       runtimeName: naming.runtimeName,
     };
-    // The boundary statements are built with the parameter reference and then emitted only under
-    // HasPermissionsBoundary, so an environment without a boundary gets no Deny at all.
-    const serviceStatements = serviceRoleStatements({ ...policyScope, permissionsBoundaryArn: permissionsBoundaryArn.valueAsString }).map(
-      (statement: PolicyStatementJson) =>
-        BOUNDARY_STATEMENT_SIDS.has(statement.Sid) ? Fn.conditionIf(hasPermissionsBoundary.logicalId, statement, Aws.NO_VALUE) : statement,
-    );
+    // The boundary Deny statements always apply and name the effective boundary.
+    const serviceStatements = serviceRoleStatements({ ...policyScope, permissionsBoundaryArn: effectiveBoundaryArn });
 
     const serviceRole = new iam.CfnRole(this, "CloudFormationServiceRole", {
       roleName: naming.cloudFormationRoleName,
@@ -114,6 +129,12 @@ export class AccessStack extends Stack {
     new CfnOutput(this, "ArtifactBucketName", { value: bucket.bucketName });
     new CfnOutput(this, "CloudFormationRoleArn", { value: serviceRole.attrArn });
     new CfnOutput(this, "OperatorRoleArn", { value: operatorRole.attrArn });
+    const effectiveBoundaryOutput = new CfnOutput(this, "EffectiveBoundaryArn", { value: effectiveBoundaryArn });
+    // The validator does not see that the Fn::If takes the Ref branch only under UseDefaultBoundary.
+    Validations.of(effectiveBoundaryOutput).acknowledge({
+      id: "CloudFormation-Validate::W1001",
+      reason: "The Ref to DefaultPermissionsBoundary is in the Fn::If branch taken only when UseDefaultBoundary holds",
+    });
     new CfnOutput(this, "PullThroughPrefix", { value: naming.pullThroughPrefix });
   }
 }

@@ -9,15 +9,26 @@ const stacksOf = (app: App) => app.node.children.filter((c): c is Stack => Stack
 const EXISTING_BOUNDARY = "arn:aws:iam::123456789012:policy/existing-boundary";
 
 describe("permission boundary", () => {
-  it("is a parameter on every environment stack and conditionally on every role", () => {
-    for (const stack of stacksOf(buildAgentXApp({ agentxEnv: "staging" }))) {
+  it("is a parameter on every environment stack, and every role gets the given boundary or the default", () => {
+    const defaultArn = { "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":iam::", { Ref: "AWS::AccountId" }, ":policy/agentx/staging/agentx-staging-boundary"]] };
+    const stacks = stacksOf(buildAgentXApp({ agentxEnv: "staging" }));
+    expect(stacks.map((s) => s.stackName).sort()).toEqual(["access", "control-plane", "foundation", "identity", "runtime", "slack"].map((p) => `agentx-staging-${p}`));
+    let roles = 0;
+    for (const stack of stacks) {
       const json = Template.fromStack(stack).toJSON() as { Parameters: Record<string, { Default?: string; AllowedPattern?: string }>; Conditions: Record<string, unknown>; Resources: Record<string, { Type: string; Properties: { PermissionsBoundary?: unknown } }> };
       expect(json.Parameters.PermissionsBoundaryArn, stack.stackName).toMatchObject({ Default: "", AllowedPattern: "^$|^arn:aws[a-z-]*:iam::[0-9]{12}:policy/.+$" });
       expect(json.Conditions.HasPermissionsBoundary, stack.stackName).toBeDefined();
+      // The access stack creates the default boundary, so its roles Ref it (which also orders the
+      // policy before the roles); every other stack names its deterministic ARN.
+      const policyIds = Object.entries(json.Resources).filter(([, r]) => r.Type === "AWS::IAM::ManagedPolicy").map(([id]) => id);
+      const elseBranch = stack.stackName === "agentx-staging-access" ? { Ref: policyIds[0] } : defaultArn;
+      expect(policyIds, stack.stackName).toHaveLength(stack.stackName === "agentx-staging-access" ? 1 : 0);
       for (const [id, resource] of Object.entries(json.Resources).filter(([, r]) => r.Type === "AWS::IAM::Role")) {
-        expect(resource.Properties.PermissionsBoundary, `${stack.stackName} ${id}`).toEqual({ "Fn::If": ["HasPermissionsBoundary", { Ref: "PermissionsBoundaryArn" }, { Ref: "AWS::NoValue" }] });
+        roles += 1;
+        expect(resource.Properties.PermissionsBoundary, `${stack.stackName} ${id}`).toEqual({ "Fn::If": ["HasPermissionsBoundary", { Ref: "PermissionsBoundaryArn" }, elseBranch] });
       }
     }
+    expect(roles).toBeGreaterThan(2);
   }, 300_000);
 
   it("is absent from the deployment that predates environments", () => {
@@ -32,7 +43,7 @@ describe("permission boundary", () => {
       assumeRolePolicyDocument: { Version: "2012-10-17", Statement: [] },
       permissionsBoundary: EXISTING_BOUNDARY,
     });
-    applyPermissionsBoundaryParameter(stack);
+    applyPermissionsBoundaryParameter(stack, "staging");
     expect(() => Template.fromStack(stack)).toThrow(/already has a permissions boundary/);
   });
 
@@ -45,7 +56,7 @@ describe("permission boundary", () => {
         PermissionsBoundary: EXISTING_BOUNDARY,
       },
     });
-    applyPermissionsBoundaryParameter(stack);
+    applyPermissionsBoundaryParameter(stack, "staging");
     expect(() => Template.fromStack(stack)).toThrow(/already has a permissions boundary/);
   });
 });

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { SERVICE_ROLE_SERVICES, operatorRoleStatements, serviceRoleStatements, type PolicyScope } from "../../infra/lib/access-policies.js";
+import {
+  BOUNDARY_SERVICES, SERVICE_ROLE_SERVICES, defaultBoundaryArn, defaultBoundaryName, defaultBoundaryStatements, operatorRoleStatements, serviceRoleStatements, type PolicyScope,
+} from "../../infra/lib/access-policies.js";
 
 const scope: PolicyScope = {
   env: "staging", partition: "aws", region: "us-east-1", account: "123456789012",
@@ -27,8 +29,7 @@ describe("service role policy", () => {
     }
   });
 
-  it("adds the boundary rules only when a boundary is set, limited to the actions that carry the key", () => {
-    expect(serviceRoleStatements(scope).some((s) => s.Sid === "IamRequireBoundary")).toBe(false);
+  it("always denies creating or changing a role without the given boundary, limited to the actions that carry the key", () => {
     const withBoundary = serviceRoleStatements({ ...scope, permissionsBoundaryArn: "arn:aws:iam::123456789012:policy/Boundary" });
     const require = withBoundary.find((s) => s.Sid === "IamRequireBoundary")!;
     // Only actions that carry iam:PermissionsBoundary (CreateRole and PutRolePermissionsBoundary as
@@ -37,13 +38,30 @@ describe("service role policy", () => {
     expect(require.Action.sort()).toEqual([
       "iam:AttachRolePolicy", "iam:CreateRole", "iam:DeleteRolePolicy", "iam:DetachRolePolicy", "iam:PutRolePermissionsBoundary", "iam:PutRolePolicy",
     ]);
-    for (const keyless of ["iam:UpdateAssumeRolePolicy", "iam:TagRole", "iam:UntagRole", "iam:DeleteRole", "iam:GetRole", "iam:UpdateRole"]) {
+    for (const keyless of ["iam:UpdateAssumeRolePolicy", "iam:TagRole", "iam:UntagRole", "iam:DeleteRole", "iam:GetRole", "iam:UpdateRole", "iam:UpdateRoleDescription"]) {
       expect(require.Action).not.toContain(keyless);
     }
     expect([require.Resource].flat()).toEqual(["arn:aws:iam::123456789012:role/agentx/staging/*"]);
     expect([withBoundary.find((s) => s.Sid === "IamKeepBoundary")!.Resource].flat()).toEqual(["arn:aws:iam::123456789012:role/agentx/staging/*"]);
     expect(require.Condition).toEqual({ StringNotEquals: { "iam:PermissionsBoundary": "arn:aws:iam::123456789012:policy/Boundary" } });
     expect(withBoundary.find((s) => s.Sid === "IamKeepBoundary")!.Action).toEqual(["iam:DeleteRolePermissionsBoundary"]);
+  });
+
+  it("uses the default boundary in the Deny statements when no boundary is given", () => {
+    const require = serviceRoleStatements(scope).find((s) => s.Sid === "IamRequireBoundary")!;
+    expect(require.Condition).toEqual({ StringNotEquals: { "iam:PermissionsBoundary": "arn:aws:iam::123456789012:policy/agentx/staging/agentx-staging-boundary" } });
+    expect(serviceRoleStatements(scope).some((s) => s.Sid === "IamKeepBoundary")).toBe(true);
+  });
+
+  it("may change a role's description", () => {
+    expect(serviceRoleStatements(scope).find((s) => s.Sid === "IamRoles")!.Action).toContain("iam:UpdateRoleDescription");
+  });
+
+  it("creates only the ECS and AgentCore service-linked roles", () => {
+    const linked = serviceRoleStatements(scope).find((s) => s.Sid === "ServiceLinkedRoles")!;
+    expect(linked.Condition).toEqual({
+      StringLike: { "iam:AWSServiceName": ["ecs.amazonaws.com", "bedrock-agentcore.amazonaws.com", "*.bedrock-agentcore.amazonaws.com"] },
+    });
   });
 
   it("never grants iam:* or wildcard IAM user, group or policy management", () => {
@@ -105,5 +123,69 @@ describe("operator role policy", () => {
     const logs = operatorRoleStatements(scope).find((s) => s.Sid === "Logs")!;
     expect(logs.Action).toEqual(["logs:FilterLogEvents", "logs:StartQuery"]);
     expect([logs.Resource].flat()).toContain("arn:aws:logs:us-east-1:123456789012:log-group:/aws/bedrock-agentcore/runtimes/agentx_staging_worker-*");
+  });
+});
+
+describe("default permission boundary", () => {
+  const statements = defaultBoundaryStatements(scope);
+  const allows = statements.filter((s) => s.Effect === "Allow");
+  const denies = statements.filter((s) => s.Effect === "Deny");
+
+  it("has a deterministic name and ARN under the environment's IAM path", () => {
+    expect(defaultBoundaryName("staging")).toBe("agentx-staging-boundary");
+    expect(defaultBoundaryArn(scope)).toBe("arn:aws:iam::123456789012:policy/agentx/staging/agentx-staging-boundary");
+  });
+
+  it("allows each needed service by wildcard, never IAM, Organizations or Account", () => {
+    const services = allows.find((s) => s.Sid === "Services")!;
+    expect(services.Action).toEqual(BOUNDARY_SERVICES.map((s) => `${s}:*`));
+    expect(services.Resource).toBe("*");
+    for (const service of ["iam", "organizations", "account"]) expect(BOUNDARY_SERVICES).not.toContain(service);
+    // The service role's own wildcard services must all pass the boundary it runs under.
+    expect(SERVICE_ROLE_SERVICES.filter((s) => !BOUNDARY_SERVICES.includes(s))).toEqual([]);
+  });
+
+  it("never allows iam:* or any user, group, access key, login profile or managed-policy action", () => {
+    const iam = allows.flatMap((s) => s.Action).filter((a) => a.startsWith("iam:") || a === "*");
+    expect(iam).not.toContain("iam:*");
+    expect(iam).not.toContain("*");
+    expect(iam.filter((a) => /User|Group|AccessKey|LoginProfile|PolicyVersion|^iam:(Create|Delete)Policy$|DefaultPolicyVersion/.test(a))).toEqual([]);
+    expect(iam.filter((a) => a.includes("*"))).toEqual([]);
+  });
+
+  it("scopes role actions and PassRole to AgentX's own roles", () => {
+    const byId = Object.fromEntries(allows.map((s) => [s.Sid, s]));
+    expect([byId.IamRoles!.Resource].flat()).toEqual(["arn:aws:iam::123456789012:role/agentx/staging/*"]);
+    expect(byId.IamRoles!.Action.every((a) => /^iam:[A-Za-z]*Role[A-Za-z]*$/.test(a))).toBe(true);
+    expect([byId.PassRoles!.Resource].flat()).toEqual([
+      "arn:aws:iam::123456789012:role/agentx/staging/*",
+      "arn:aws:iam::123456789012:role/agentx-staging-cloudformation",
+    ]);
+    expect(byId.PassRoles!.Action).toEqual(["iam:PassRole"]);
+    // The AWS-managed BedrockAgentCoreRuntimeInstancesOperatorRolePolicy on the capacity provider's
+    // operator role passes AgentCore's default instance role to EC2; the boundary allows exactly that.
+    expect(byId.PassDefaultInstanceRole).toEqual({
+      Sid: "PassDefaultInstanceRole", Effect: "Allow", Action: ["iam:PassRole"],
+      Resource: [
+        "arn:aws:iam::123456789012:role/AmazonBedrockAgentCoreCapacityProviderDefaultInstanceRole*",
+        "arn:aws:iam::123456789012:role/service-role/AmazonBedrockAgentCoreCapacityProviderDefaultInstanceRole*",
+      ],
+      Condition: { StringLike: { "iam:PassedToService": "ec2.*" } },
+    });
+    expect(byId.ServiceLinkedRoles).toEqual({
+      Sid: "ServiceLinkedRoles", Effect: "Allow", Action: ["iam:CreateServiceLinkedRole"],
+      Resource: "arn:aws:iam::123456789012:role/aws-service-role/*",
+      Condition: { StringLike: { "iam:AWSServiceName": ["ecs.amazonaws.com", "bedrock-agentcore.amazonaws.com", "*.bedrock-agentcore.amazonaws.com", "autoscaling.amazonaws.com"] } },
+    });
+  });
+
+  it("explicitly denies account, organization, user, group and policy management, and changing itself", () => {
+    expect(denies.map((s) => ({ Action: s.Action, Resource: s.Resource }))).toEqual([
+      { Action: ["organizations:*", "account:*"], Resource: "*" },
+      { Action: ["iam:*User*", "iam:*Group*"], Resource: "*" },
+      { Action: ["iam:CreatePolicy*", "iam:*PolicyVersion*", "iam:DeletePolicy", "iam:SetDefaultPolicyVersion"], Resource: "*" },
+      { Action: ["iam:*Policy*"], Resource: "arn:aws:iam::123456789012:policy/agentx/staging/agentx-staging-boundary" },
+    ]);
+    expect(denies.every((s) => s.Condition === undefined)).toBe(true);
   });
 });
