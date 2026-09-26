@@ -26,6 +26,9 @@ export interface InstallAnswers {
         /** Required together: bringing your own OIDC provider means there is no identity stack's fixed admin group to fall back on. */
         adminClaim?: string;
         adminValues?: string[];
+        /** Required to write environment settings (the deploy orchestrator's clientId for `agentx login`): bringing
+         * your own OIDC provider means there is no identity stack's ClientId output to read it from instead. */
+        clientId?: string;
       };
   github: { account: string; appId: string; installationId: string; privateKeySecretArn: string; credentialRef?: string };
   /** The value; the caller reads it from Secrets Manager, never logs it. */
