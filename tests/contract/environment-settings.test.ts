@@ -130,6 +130,16 @@ describe("environment settings", () => {
     expect(EnvironmentSettingsSchema.safeParse({ ...stagingSettings, access: { ...validAccess, artifactBucket: "" } }).success).toBe(false);
   });
 
+  it("refuses an access block with an empty pullThroughPrefix", () => {
+    const validAccess = {
+      artifactBucket: "agentx-staging-access-artifactbucket-abc",
+      cloudFormationRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-cloudformation",
+      operatorRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-operator",
+      pullThroughPrefix: "agentx-staging",
+    };
+    expect(EnvironmentSettingsSchema.safeParse({ ...stagingSettings, access: { ...validAccess, pullThroughPrefix: "" } }).success).toBe(false);
+  });
+
   it("lists environments that have settings", async () => {
     const store = new MemoryParameterStore();
     await writeEnvironmentSettings(store, stagingSettings);

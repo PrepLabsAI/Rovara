@@ -132,6 +132,11 @@ function adminParameters(identity: InstallAnswers["identity"]): Record<string, s
   if (adminClaim === undefined || adminValues === undefined) {
     throw new Error("bringing your own OIDC provider requires adminClaim and adminValues (the claim and values that mark AgentX administrators)");
   }
+  if (adminClaim === "" || adminValues.length === 0) {
+    // An empty claim or an empty value list would pass the undefined check above but leave the
+    // install with no administrators: every login would fail the claim check silently.
+    throw new Error("bringing your own OIDC provider requires a non-empty adminClaim and adminValues (the claim and values that mark AgentX administrators)");
+  }
   return { AdminClaim: adminClaim, AdminValues: JSON.stringify(adminValues) };
 }
 

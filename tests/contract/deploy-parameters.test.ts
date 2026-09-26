@@ -104,6 +104,28 @@ describe("deploy parameters", () => {
     });
   });
 
+  it("refuses your own OIDC when only one of adminClaim/adminValues is given", () => {
+    const claimOnly = { ...answers(), identity: { mode: "oidc" as const, issuer: "https://login.example.com", audience: "api://agentx", adminClaim: "custom:roles" } };
+    expect(() => stackParameters("control-plane", claimOnly, oidcOutputs)).toThrow(
+      "bringing your own OIDC provider requires adminClaim and adminValues (the claim and values that mark AgentX administrators)",
+    );
+    const valuesOnly = { ...answers(), identity: { mode: "oidc" as const, issuer: "https://login.example.com", audience: "api://agentx", adminValues: ["platform-admin"] } };
+    expect(() => stackParameters("control-plane", valuesOnly, oidcOutputs)).toThrow(
+      "bringing your own OIDC provider requires adminClaim and adminValues (the claim and values that mark AgentX administrators)",
+    );
+  });
+
+  it("refuses your own OIDC when adminClaim is empty or adminValues is an empty list", () => {
+    const emptyClaim = { ...answers(), identity: { ...oidcAnswers().identity, adminClaim: "" } };
+    expect(() => stackParameters("control-plane", emptyClaim, oidcOutputs)).toThrow(
+      "bringing your own OIDC provider requires a non-empty adminClaim and adminValues (the claim and values that mark AgentX administrators)",
+    );
+    const emptyValues = { ...answers(), identity: { ...oidcAnswers().identity, adminValues: [] } };
+    expect(() => stackParameters("control-plane", emptyValues, oidcOutputs)).toThrow(
+      "bringing your own OIDC provider requires a non-empty adminClaim and adminValues (the claim and values that mark AgentX administrators)",
+    );
+  });
+
   it("keeps the Cognito template defaults (never sets AdminClaim/AdminValues) when using the identity stack", () => {
     const params = stackParameters("control-plane", answers(), outputs);
     expect(params).not.toHaveProperty("AdminClaim");
