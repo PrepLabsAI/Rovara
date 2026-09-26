@@ -1,21 +1,31 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import YAML from "yaml";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { buildRelease } from "../../scripts/release/build.js";
 import { verifyRelease } from "../../scripts/release/verify.js";
 
+const temporaryDirectories: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+});
+
 describe("release verification", () => {
   it("passes for a release built from the current source", async () => {
-    const dir = join(await mkdtemp(join(tmpdir(), "agentx-verify-")), "r");
+    const base = await mkdtemp(join(tmpdir(), "agentx-verify-"));
+    temporaryDirectories.push(base);
+    const dir = join(base, "r");
     await buildRelease({ version: "1.2.3", out: dir, gitCommit: "c".repeat(40) });
     expect(await verifyRelease({ dir })).toEqual({ ok: true });
   }, 900_000);
 
   it("names a tampered package and a tampered template", async () => {
-    const dir = join(await mkdtemp(join(tmpdir(), "agentx-verify-")), "r");
+    const base = await mkdtemp(join(tmpdir(), "agentx-verify-"));
+    temporaryDirectories.push(base);
+    const dir = join(base, "r");
     const manifest = await buildRelease({ version: "1.2.3", out: dir, gitCommit: "c".repeat(40) });
     await writeFile(join(dir, manifest.packages[0]!.file), "tampered");
     await writeFile(join(dir, manifest.templates[0]!.file), "{}\n");
@@ -27,9 +37,10 @@ describe("release verification", () => {
   }, 900_000);
 
   it("names a missing file instead of throwing", async () => {
-    const dir = join(await mkdtemp(join(tmpdir(), "agentx-verify-")), "r");
+    const base = await mkdtemp(join(tmpdir(), "agentx-verify-"));
+    temporaryDirectories.push(base);
+    const dir = join(base, "r");
     const manifest = await buildRelease({ version: "1.2.3", out: dir, gitCommit: "c".repeat(40) });
-    const { rm } = await import("node:fs/promises");
     await rm(join(dir, manifest.templates[0]!.file));
     const result = await verifyRelease({ dir });
     expect(result.ok).toBe(false);
@@ -38,7 +49,9 @@ describe("release verification", () => {
   }, 900_000);
 
   it("names a template that a rebuild from current source produces but the release doesn't have, not just the reverse", async () => {
-    const dir = join(await mkdtemp(join(tmpdir(), "agentx-verify-")), "r");
+    const base = await mkdtemp(join(tmpdir(), "agentx-verify-"));
+    temporaryDirectories.push(base);
+    const dir = join(base, "r");
     const manifest = await buildRelease({ version: "1.2.3", out: dir, gitCommit: "c".repeat(40) });
     const dropped = manifest.templates[0]!;
     const edited = { ...manifest, templates: manifest.templates.filter((t) => t.part !== dropped.part) };
@@ -53,6 +66,7 @@ describe("release verification", () => {
 describe("verifyRelease: release.json problems", () => {
   it("reports a missing release.json as a problem naming release.json, instead of throwing", async () => {
     const dir = await mkdtemp(join(tmpdir(), "agentx-verify-missing-"));
+    temporaryDirectories.push(dir);
     const result = await verifyRelease({ dir });
     expect(result.ok).toBe(false);
     const problems = result.ok ? [] : result.problems;
@@ -62,6 +76,7 @@ describe("verifyRelease: release.json problems", () => {
 
   it("reports an unparseable release.json (invalid JSON) as a problem naming release.json", async () => {
     const dir = await mkdtemp(join(tmpdir(), "agentx-verify-badjson-"));
+    temporaryDirectories.push(dir);
     await writeFile(join(dir, "release.json"), "{ this is not json", "utf8");
     const result = await verifyRelease({ dir });
     expect(result.ok).toBe(false);
@@ -72,6 +87,7 @@ describe("verifyRelease: release.json problems", () => {
 
   it("reports a schema-invalid release.json as a problem naming release.json", async () => {
     const dir = await mkdtemp(join(tmpdir(), "agentx-verify-badschema-"));
+    temporaryDirectories.push(dir);
     await writeFile(join(dir, "release.json"), `${JSON.stringify({ schemaVersion: 2, version: "not-a-version" })}\n`, "utf8");
     const result = await verifyRelease({ dir });
     expect(result.ok).toBe(false);

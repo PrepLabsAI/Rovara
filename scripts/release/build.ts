@@ -88,11 +88,12 @@ function checkedNoAmbientCdkContext(): void {
  * root (e.g. "packages/broker/src/aws/broker.ts"), and NodejsFunction bundles each one synchronously
  * while the stacks are being constructed — before `.synth()` is ever called. So this release builder
  * has to produce the same output regardless of the caller's own working directory.
+ *
+ * process.chdir is process-global state, not scoped to this call: it affects every other piece of
+ * code running in this process at the same time, so this only works because vitest runs this
+ * suite's files under the forks pool (a separate OS process per test file) and no test in this file
+ * calls buildRelease concurrently with another cwd-sensitive call.
  */
-// process.chdir is process-global state, not scoped to this call: it affects every other piece of
-// code running in this process at the same time, so this only works because vitest runs this
-// suite's files under the forks pool (a separate OS process per test file) and no test in this file
-// calls buildRelease concurrently with another cwd-sensitive call.
 function withRepoRootCwd<T>(run: () => T): T {
   const originalCwd = process.cwd();
   process.chdir(REPO_ROOT);

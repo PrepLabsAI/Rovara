@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
@@ -11,6 +11,11 @@ const execFileAsync = promisify(execFile);
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const DEFAULT_PACKAGE_NAME = "@charterarc/agentx";
 const ENTRY_POINT = join(REPO_ROOT, "packages/cli/src/main.ts");
+
+// esbuild reports `args.path` with the platform's own separators, so the filter must match both
+// `/` (macOS/Linux) and `\` (Windows) between path segments. Exported so its cross-platform
+// behavior can be tested directly, without needing an actual Windows filesystem.
+export const ENTRY_SHEBANG_FILTER = /packages[\\/]cli[\\/]src[\\/]main\.ts$/;
 
 /**
  * main.ts starts with its own `#!/usr/bin/env node` shebang, needed when @agentx/cli's own
@@ -25,7 +30,7 @@ function stripEntryShebang(): Plugin {
   return {
     name: "strip-entry-shebang",
     setup(pluginBuild) {
-      pluginBuild.onLoad({ filter: /packages\/cli\/src\/main\.ts$/ }, async (args) => {
+      pluginBuild.onLoad({ filter: ENTRY_SHEBANG_FILTER }, async (args) => {
         const text = await readFile(args.path, "utf8");
         const stripped = text.startsWith("#!") ? text.slice(text.indexOf("\n") + 1) : text;
         return { contents: stripped, loader: "ts" };
@@ -72,6 +77,9 @@ export async function packCli(input: PackCliInput): Promise<PackCliResult> {
   const out = resolve(input.out);
   const packageDir = join(out, "package");
   const binDir = join(packageDir, "bin");
+  // Rerunning packCli into the same --out (e.g. a developer retrying a failed release build)
+  // must not leave stray files from a previous attempt mixed into the new package.
+  await rm(packageDir, { recursive: true, force: true });
   await mkdir(binDir, { recursive: true });
 
   const bundlePath = join(binDir, "agentx.mjs");
@@ -105,7 +113,9 @@ export async function packCli(input: PackCliInput): Promise<PackCliResult> {
   };
   await writeFile(join(packageDir, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
   await writeFile(join(packageDir, "README.md"), readmeText(name), "utf8");
-  await writeFile(join(packageDir, "LICENSE"), await readFile(join(REPO_ROOT, "LICENSE"), "utf8"), "utf8");
+  // copyFile, not read-as-utf8-then-write, so the packaged LICENSE is byte-for-byte identical to
+  // the repo root's (no re-encoding, no line-ending normalization).
+  await copyFile(join(REPO_ROOT, "LICENSE"), join(packageDir, "LICENSE"));
 
   // npm pack, run with `packageDir` as cwd, prints only the tarball's filename to stdout (its
   // human-readable "npm notice" summary goes to stderr instead).
@@ -126,11 +136,14 @@ interface CliArgs {
 }
 
 export function parsePackCliArgs(argv: readonly string[]): CliArgs {
+  const consumed = new Set<number>();
   const valueAfter = (flag: string): string | undefined => {
     const index = argv.indexOf(flag);
     if (index < 0) return undefined;
     const value = argv[index + 1];
     if (!value || value.startsWith("--")) throw new Error(`${flag} requires a value`);
+    consumed.add(index);
+    consumed.add(index + 1);
     return value;
   };
   const known = new Set(["--version", "--out", "--name", "--help"]);
@@ -142,6 +155,11 @@ export function parsePackCliArgs(argv: readonly string[]): CliArgs {
   if (version === undefined) throw new Error("--version is required");
   if (out === undefined) throw new Error("--out is required");
   const name = valueAfter("--name");
+  // Every remaining argument must be a recognized flag (already checked above) or a value consumed
+  // by one; anything else is a stray positional argument (e.g. a misplaced value, or a typo that
+  // happens not to start with "--") that this command has no use for and would otherwise ignore.
+  const stray = argv.filter((argument, index) => !consumed.has(index) && argument !== "--help");
+  if (stray.length > 0) throw new Error(`unexpected argument ${stray[0]}`);
   return { version, out, ...(name !== undefined ? { name } : {}) };
 }
 
