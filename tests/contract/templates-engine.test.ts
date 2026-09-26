@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CloudFormationClient } from "@aws-sdk/client-cloudformation";
@@ -119,6 +119,8 @@ const ROLE = "arn:aws:iam::123456789012:role/agentx-staging-cloudformation";
 const TEMPLATE_KEY = (part: DeployPart) => `templates/1.2.3/us-east-1/${part}.template.json`;
 const TEMPLATE_URL = (part: DeployPart) => `https://bucket.s3.us-east-1.amazonaws.com/${TEMPLATE_KEY(part)}`;
 const NO_CHANGES_REASON = "The submitted information didn't contain changes. Submit different information to create a change set.";
+/** Must match templates-engine.ts's own (unexported) MAX_EVENT_PAGES. */
+const MAX_EVENT_PAGES = 20;
 
 function deployer(fake: ReturnType<typeof fakeClients>, options: { release?: LoadedRelease; artifactBucket?: () => string } = {}) {
   return templatesDeployer({
@@ -576,8 +578,117 @@ describe("templates engine", () => {
       timeoutMs: 60_000,
     });
     await expect(engine.deploy(request("foundation"))).rejects.toThrow(
-      "stack agentx-staging-foundation is still UPDATE_IN_PROGRESS after 1 minutes; it may still finish — watch it with aws cloudformation describe-stacks --stack-name agentx-staging-foundation",
+      "stack agentx-staging-foundation is still UPDATE_IN_PROGRESS after 1 minute; it may still finish; watch it with aws cloudformation describe-stacks --stack-name agentx-staging-foundation",
     );
+  });
+
+  it("uses no em dashes in any message text", async () => {
+    const source = await readFile(new URL("../../packages/cli/src/deploy/templates-engine.ts", import.meta.url), "utf8");
+    expect(source).not.toContain("—");
+  });
+
+  it("names the change set's own status (not the stack's) when it times out waiting for creation, says minute correctly, and deletes the stalled change set", async () => {
+    let clock = NOW;
+    const fake = fakeClients({
+      PutObject: [{}],
+      DescribeStacks: [stack("UPDATE_COMPLETE")],
+      CreateChangeSet: [{}],
+      DescribeChangeSet: [
+        { Status: "CREATE_IN_PROGRESS", ExecutionStatus: "UNAVAILABLE" },
+        { Status: "CREATE_IN_PROGRESS", ExecutionStatus: "UNAVAILABLE" },
+        { Status: "CREATE_IN_PROGRESS", ExecutionStatus: "UNAVAILABLE" },
+      ],
+      DeleteChangeSet: [{}],
+    });
+    const engine = templatesDeployer({
+      clients: fake.clients,
+      release: makeRelease(),
+      env: "staging",
+      region: "us-east-1",
+      artifactBucket: () => "bucket",
+      // Each reading of the clock is 30 seconds later.
+      now: () => (clock += 30_000) - 30_000,
+      pollMs: 0,
+      timeoutMs: 60_000,
+    });
+    await expect(engine.deploy(request("foundation"))).rejects.toThrow(
+      `change set ${CHANGE_SET} for stack agentx-staging-foundation is still CREATE_IN_PROGRESS after 1 minute; it was deleted`,
+    );
+    expect(fake.inputs("DeleteChangeSet")).toEqual([{ StackName: "agentx-staging-foundation", ChangeSetName: CHANGE_SET }]);
+  });
+
+  it("mentions a failed delete of the timed-out change set without masking the timeout error", async () => {
+    let clock = NOW;
+    const fake = fakeClients({
+      PutObject: [{}],
+      DescribeStacks: [stack("UPDATE_COMPLETE")],
+      CreateChangeSet: [{}],
+      DescribeChangeSet: [
+        { Status: "CREATE_IN_PROGRESS", ExecutionStatus: "UNAVAILABLE" },
+        { Status: "CREATE_IN_PROGRESS", ExecutionStatus: "UNAVAILABLE" },
+        { Status: "CREATE_IN_PROGRESS", ExecutionStatus: "UNAVAILABLE" },
+      ],
+      DeleteChangeSet: [awsError("AccessDenied", "not authorized to perform cloudformation:DeleteChangeSet", 403)],
+    });
+    const engine = templatesDeployer({
+      clients: fake.clients,
+      release: makeRelease(),
+      env: "staging",
+      region: "us-east-1",
+      artifactBucket: () => "bucket",
+      now: () => (clock += 30_000) - 30_000,
+      pollMs: 0,
+      timeoutMs: 60_000,
+    });
+    await expect(engine.deploy(request("foundation"))).rejects.toThrow(
+      `change set ${CHANGE_SET} for stack agentx-staging-foundation is still CREATE_IN_PROGRESS after 1 minute; it could not be deleted: not authorized to perform cloudformation:DeleteChangeSet`,
+    );
+  });
+
+  it.each(["DELETE_PENDING", "DELETE_IN_PROGRESS", "DELETE_COMPLETE", "DELETE_FAILED"])(
+    "fails fast when the change set is being deleted or is gone (%s), instead of waiting for the timeout",
+    async (status) => {
+      const fake = fakeClients({
+        PutObject: [{}],
+        DescribeStacks: [stack("UPDATE_COMPLETE")],
+        CreateChangeSet: [{}],
+        DescribeChangeSet: [{ Status: status }],
+      });
+      await expect(deployer(fake).deploy(request("foundation"))).rejects.toThrow(
+        `change set ${CHANGE_SET} for stack agentx-staging-foundation is ${status}; deploy again`,
+      );
+      expect(fake.names().filter((name) => name === "cloudFormation:DescribeChangeSet")).toHaveLength(1);
+      expect(fake.inputs("DeleteChangeSet")).toEqual([]);
+    },
+  );
+
+  it("bounds event paging when no event carries this deploy's token, instead of paging forever", async () => {
+    const foreignPage = (n: number) => ({
+      StackEvents: [{ LogicalResourceId: `Resource${n}`, ResourceStatus: "UPDATE_FAILED", ResourceStatusReason: `unrelated failure ${n}`, ClientRequestToken: `other-${n}` }],
+      NextToken: `page-${n + 1}`,
+    });
+    const pages = Array.from({ length: MAX_EVENT_PAGES }, (_, index) => foreignPage(index + 1));
+    const fake = rollbackScript(pages);
+    await expect(deployer(fake).deploy(request("runtime"))).rejects.toThrow(
+      "stack agentx-staging-runtime ended in UPDATE_ROLLBACK_COMPLETE: no failed resource reported a reason",
+    );
+    expect(fake.inputs("DescribeStackEvents")).toHaveLength(MAX_EVENT_PAGES);
+  });
+
+  it("stops paging once it reaches an event older than this deploy started, even with no matching token yet", async () => {
+    const fake = rollbackScript([
+      {
+        StackEvents: [
+          { LogicalResourceId: "Resource1", ResourceStatus: "UPDATE_FAILED", ResourceStatusReason: "unrelated failure", ClientRequestToken: "other-1", Timestamp: new Date(NOW) },
+          { LogicalResourceId: "Old", ResourceStatus: "UPDATE_FAILED", ResourceStatusReason: "an older failure", ClientRequestToken: "other-2", Timestamp: new Date(NOW - 60_000) },
+        ],
+        NextToken: "page-2",
+      },
+    ]);
+    await expect(deployer(fake).deploy(request("runtime"))).rejects.toThrow(
+      "stack agentx-staging-runtime ended in UPDATE_ROLLBACK_COMPLETE: no failed resource reported a reason",
+    );
+    expect(fake.inputs("DescribeStackEvents")).toEqual([{ StackName: "agentx-staging-runtime" }]);
   });
 
   it("uses the partition's S3 host in the template URL", async () => {

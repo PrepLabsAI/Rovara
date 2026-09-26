@@ -36,6 +36,17 @@ const DEFAULT_TIMEOUT_MS = 3 * 60 * 60 * 1000;
 const NO_CHANGES = ["didn't contain changes", "No updates are to be performed"];
 /** Change set execution statuses after which the stack operation it started is over. */
 const EXECUTION_ENDED = new Set(["EXECUTE_COMPLETE", "EXECUTE_FAILED", "OBSOLETE"]);
+/** Change set statuses meaning it is gone or going: fail fast instead of waiting for the timeout. */
+const DELETED_CHANGE_SET_STATUSES = new Set(["DELETE_PENDING", "DELETE_IN_PROGRESS", "DELETE_COMPLETE", "DELETE_FAILED"]);
+/** Looking for this deploy's rollback reason pages through stack events at most this many times, even if none of
+ * them ever carries this deploy's ClientRequestToken. */
+const MAX_EVENT_PAGES = 20;
+
+/** "1 minute" or "N minutes"; never grammatically wrong the way a bare `${n} minutes` would be at n=1. */
+function minutesPhrase(ms: number): string {
+  const minutes = Math.round(ms / 60_000);
+  return `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
+}
 
 /** S3's DNS suffix per partition. */
 const S3_HOST_SUFFIX: Readonly<Record<string, string>> = {
@@ -182,22 +193,41 @@ export function templatesDeployer(input: {
     const changeSetName = `agentx-${version.replaceAll(".", "-")}-${Math.floor(startedAt / 1000)}`;
     const changeSetId = { StackName: stackName, ChangeSetName: changeSetName };
 
-    /** Waits one poll interval, or throws once this deploy has waited longer than the timeout. */
-    async function waitWhile(status: string): Promise<void> {
+    /** Waits one poll interval while the stack is `status`, or throws once this deploy has waited longer than the timeout. */
+    async function waitForStack(status: string): Promise<void> {
       if (now() - startedAt >= timeoutMs) {
         throw new Error(
-          `stack ${stackName} is still ${status} after ${Math.round(timeoutMs / 60_000)} minutes; it may still finish — watch it with aws cloudformation describe-stacks --stack-name ${stackName}`,
+          `stack ${stackName} is still ${status} after ${minutesPhrase(timeoutMs)}; it may still finish; watch it with aws cloudformation describe-stacks --stack-name ${stackName}`,
         );
       }
       await new Promise<void>((resolve) => setTimeout(resolve, pollMs));
     }
 
-    /** Polls until the change set is CREATE_COMPLETE (returning it with all its changes) or FAILED. */
+    /** Best-effort delete of this deploy's change set: never throws, only describes what happened. */
+    async function attemptChangeSetDelete(): Promise<string> {
+      try {
+        await cloudFormation.send(new DeleteChangeSetCommand(changeSetId));
+        return "; it was deleted";
+      } catch (error) {
+        return `; it could not be deleted: ${errorMessage(error)}`;
+      }
+    }
+
+    /**
+     * Polls until the change set is CREATE_COMPLETE (returning it with all its changes) or FAILED. Fails fast,
+     * without waiting for the timeout, when the change set is already being deleted or is gone. On a timeout,
+     * names the change set's own status (never the stack's, which may already have moved on) and makes a
+     * best-effort attempt to delete the stalled change set, mentioning the outcome either way.
+     */
     async function awaitChangeSet(): Promise<DescribeChangeSetCommandOutput> {
       for (;;) {
         const described = await cloudFormation.send(new DescribeChangeSetCommand(changeSetId));
-        if (described.Status === "FAILED") return described;
-        if (described.Status === "CREATE_COMPLETE") {
+        const status = described.Status ?? "";
+        if (status === "FAILED") return described;
+        if (DELETED_CHANGE_SET_STATUSES.has(status)) {
+          throw new Error(`change set ${changeSetName} for stack ${stackName} is ${status}; deploy again`);
+        }
+        if (status === "CREATE_COMPLETE") {
           const changes = [...(described.Changes ?? [])];
           let nextToken = described.NextToken;
           while (nextToken !== undefined) {
@@ -207,7 +237,12 @@ export function templatesDeployer(input: {
           }
           return { ...described, Changes: changes };
         }
-        await waitWhile(described.Status ?? "creating its change set");
+        if (now() - startedAt >= timeoutMs) {
+          const shown = status === "" ? "creating its change set" : status;
+          const outcome = await attemptChangeSetDelete();
+          throw new Error(`change set ${changeSetName} for stack ${stackName} is still ${shown} after ${minutesPhrase(timeoutMs)}${outcome}`);
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, pollMs));
       }
     }
 
@@ -225,14 +260,14 @@ export function templatesDeployer(input: {
       for (;;) {
         const { ExecutionStatus } = await cloudFormation.send(new DescribeChangeSetCommand(changeSetId));
         if (EXECUTION_ENDED.has(ExecutionStatus ?? "")) break;
-        await waitWhile(ExecutionStatus ?? "executing its change set");
+        await waitForStack(ExecutionStatus ?? "executing its change set");
       }
       for (;;) {
         const stack = await describeStack(stackName);
         if (stack === undefined) throw new Error(`stack ${stackName} disappeared while deploying`);
         const status = stack.StackStatus ?? "";
         if (!status.endsWith("_IN_PROGRESS")) return stack;
-        await waitWhile(status);
+        await waitForStack(status);
       }
     }
 
@@ -240,14 +275,23 @@ export function templatesDeployer(input: {
     async function failureReason(stack: Stack, token: string): Promise<string> {
       const ours: StackEvent[] = [];
       let nextToken: string | undefined;
-      do {
+      let pages = 0;
+      paging: for (;;) {
+        pages++;
         const page = await cloudFormation.send(new DescribeStackEventsCommand({ StackName: stackName, ...(nextToken === undefined ? {} : { NextToken: nextToken }) }));
         const events = page.StackEvents ?? [];
-        ours.push(...events.filter((event) => event.ClientRequestToken === token));
-        // Events are newest first: once a page reaches events older than this operation, stop.
+        for (const event of events) {
+          // Events are newest first: once a page reaches an event older than this deploy started, nothing
+          // further back can be ours, no matter how many pages remain.
+          if (event.Timestamp !== undefined && event.Timestamp.getTime() < startedAt) break paging;
+          if (event.ClientRequestToken === token) ours.push(event);
+        }
+        // Once we've found some of ours, a page that also carries a foreign token means we've reached events
+        // from before this operation began.
         if (ours.length > 0 && events.some((event) => event.ClientRequestToken !== token)) break;
         nextToken = page.NextToken;
-      } while (nextToken !== undefined);
+        if (nextToken === undefined || pages >= MAX_EVENT_PAGES) break;
+      }
       const rootCause = ours
         .filter((event) => (event.ResourceStatus ?? "").endsWith("_FAILED") && event.ResourceStatusReason !== undefined)
         .filter((event) => !/cancelled/i.test(event.ResourceStatusReason ?? ""))
