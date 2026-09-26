@@ -258,7 +258,8 @@ and the budget.
   (default: the installing principal's account, restricted by an optional condition).
 - **FR-024**: Stacks MUST be deployed through a **CloudFormation service role** created by `init`,
   so operators need no rights to the underlying services.
-- **FR-025**: When a permission boundary is given, every role AgentX creates MUST carry it.
+- **FR-025**: Every role AgentX creates MUST carry a permission boundary: the one given, else the
+  access stack's default boundary (see Decisions).
 - **FR-026**: `init --export <dir>` MUST write, without calling any AWS write API:
   - the templates;
   - a parameters file per stack, filled from the answers;
@@ -447,6 +448,17 @@ and the budget.
   `prod-eu`). A path cannot collide, because `/` is not a legal character inside an environment
   name. The access stack's own two roles stay at the IAM root path, out of the service role's
   reach.
+- **A default permission boundary always applies** (2026-09-26, owner, option B). When the
+  company gives no boundary, the access stack creates `agentx-<env>-boundary` (path
+  `/agentx/<env>/`, so its ARN is fixed and the other stacks name it without an import), and every
+  environment role, the access stack's own included, carries it. It allows the services AgentX's
+  roles use, role actions and `PassRole` only on AgentX's roles, and denies IAM users and groups,
+  managed-policy management, Organizations and Account changes, and changes to itself. A
+  company-supplied boundary replaces it and must allow AgentX's actions. Honest limits: the operator
+  role can deploy CloudFormation through the service role, so it is powerful within the account;
+  the boundary only stops it creating roles or policies beyond AgentX's own needs. Environments that
+  share one account are not a security boundary against each other (resource policies and non-IAM
+  access can still reach across), which is why FR-015 recommends a dedicated account per install.
 - **Deploy order** (2026-09-26, owner).
   - **Fresh install:** access, foundation, identity, control-plane, runtime, slack. The runtime
     takes the control plane's URL as a parameter, so the control plane must exist first. The
@@ -512,8 +524,8 @@ and the budget.
   - each `doctor` check's failing case, fix message and exit code.
 - **Build checks (every PR)**:
   - the templates generated for the release equal the CDK synthesis (FR-012);
-  - the operator and service role policies stay within AgentX's names, and carry the permission
-    boundary when one is set;
+  - the operator and service role policies stay within AgentX's names, and every role carries the
+    given permission boundary or the default one;
   - an export bundle is complete and self-consistent.
 - **Release tests (before each release, in a throwaway AWS account)**:
   - a full non-interactive install with each engine, using pre-made test Slack and GitHub apps passed

@@ -217,8 +217,8 @@ Every named environment's first stack, `agentx-<env>-access`, deploys with the i
 own AWS rights, because a role cannot deploy the stack that creates it. It holds a private,
 versioned artifact bucket (retained if the stack is ever deleted) for release code packages and
 rendered templates; an ECR pull-through cache rule (prefix `agentx-<env>`, upstream
-`public.ecr.aws`) so the worker and Slack service pull AgentX's public images through a private
-repository in the account, created on first pull; the `agentx-<env>-cloudformation` service role
+`public.ecr.aws`) so the worker and Slack service pull AgentX's public images through private ECR
+in the account (the cache repository is created on first pull); the `agentx-<env>-cloudformation` service role
 that deploys every other stack; and the `agentx-<env>-operator` role for day-to-day `agentx`
 commands, which trusts the account root for 1-hour sessions unless an `OperatorPrincipalArn`
 parameter names another principal.
@@ -230,8 +230,33 @@ prefix could also match a differently-named sibling environment (`agentx-prod-*`
 The access stack's own two roles stay at the IAM root path, outside the service role's reach.
 
 The **service role** may use the listed AWS services broadly, but its IAM actions are limited to
-roles under that path. When the optional `PermissionsBoundaryArn` parameter is set, the role cannot
-create a role without that boundary, and cannot change or remove a role's boundary once set.
+roles under that path. It cannot create a role without the environment's permission boundary, and
+cannot change or remove a role's boundary once set.
+
+**A permission boundary always applies.** When the company gives no `PermissionsBoundaryArn`, the
+access stack creates a default boundary, the managed policy `agentx-<env>-boundary` under
+`/agentx/<env>/` (so its ARN is fixed and every other stack can name it), and every environment
+role, the access stack's two roles included, carries it. The `EffectiveBoundaryArn` output names
+whichever boundary is in force. The default boundary allows the AWS services AgentX's roles use
+(a generated test keeps that list complete and adds nothing unused), role actions and `PassRole`
+only for roles under `/agentx/<env>/` (plus the service role itself, and AgentCore's default
+instance role, which the capacity provider's AWS-managed policy passes to EC2), and a few
+service-linked roles. It explicitly denies Organizations and Account changes, anything on IAM users
+or groups, creating, versioning or deleting managed policies, and changing the boundary itself. A
+company-supplied boundary replaces the default entirely, so it must allow every action AgentX's
+roles need.
+
+What this does and does not protect, plainly:
+
+- The operator role can deploy CloudFormation through the service role, so it is powerful within
+  the account: it can create and change any resource of the services AgentX uses.
+- The boundary stops it creating roles or policies beyond AgentX's own needs: no IAM users or
+  groups, no managed-policy management, no Organizations or Account changes, and every role it
+  creates carries the boundary.
+- Environments that share one AWS account are **not** a security boundary against each other.
+  Names and IAM paths keep them apart for IAM, but resource policies and non-IAM access (S3, KMS,
+  Secrets Manager, SQS and the like) can still reach across environments in the same account.
+- A dedicated AWS account per install is recommended (spec 015, FR-015).
 
 The **operator role** may create, describe and execute change sets only for the five non-access
 stacks, by their exact names, and read all six (including the access stack). It may pass only the
@@ -243,4 +268,4 @@ the AgentCore runtime's logs.
 A public image `public.ecr.aws/<alias>/<repo>@sha256:<digest>` reaches the runtime as
 `<account>.dkr.ecr.<region>.amazonaws.com/agentx-<env>/<alias>/<repo>@sha256:<digest>`, private ECR
 in the account. `PermissionsBoundaryArn` is optional on every environment stack, access included;
-when given, every `AWS::IAM::Role` in that stack carries it.
+every `AWS::IAM::Role` in every environment stack carries the given boundary, else the default one.
