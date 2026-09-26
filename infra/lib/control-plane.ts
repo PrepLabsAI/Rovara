@@ -206,6 +206,9 @@ export class ControlPlaneStack extends Stack {
     });
     // Operators store the real values with put-secret-value; the generated placeholder rejects every request until then.
     const slackSecret = new secretsmanager.Secret(this, "SlackSecret", {
+      // Under environment naming, a fixed name under agentx/<env>/ so the operator role's secrets
+      // scope covers it. The legacy deployment keeps its generated name.
+      ...(naming.env === undefined ? {} : { secretName: `agentx/${naming.env}/slack` }),
       description: "AgentX Slack app credentials as JSON: {\"signingSecret\":\"...\",\"botToken\":\"xoxb-...\"}",
       generateSecretString: {
         secretStringTemplate: JSON.stringify({ botToken: "unset" }),

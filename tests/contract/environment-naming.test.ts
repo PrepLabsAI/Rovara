@@ -2,6 +2,7 @@ import { App, Stack } from "aws-cdk-lib";
 import { Match, Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
+import { operatorRoleStatements } from "../../infra/lib/access-policies.js";
 import { environmentNaming, legacyNaming, namingFromContext } from "../../infra/lib/naming.js";
 
 function productionStacks(app: App): Stack[] {
@@ -184,6 +185,22 @@ describe("environment naming", () => {
     expect(JSON.stringify(Template.fromStack(stagingControl).toJSON())).toContain("\"CONNECTOR_SECRET_PREFIX\":\"agentx/staging/connectors/\"");
     const legacyControl = productionStacks(buildAgentXApp()).find((stack) => stack.stackName === "AgentXControlPlane")!;
     expect(JSON.stringify(Template.fromStack(legacyControl).toJSON())).not.toContain("CONNECTOR_SECRET_PREFIX");
+  }, 240_000);
+
+  it("names the environment's Slack secret under agentx/<env>/, which the operator may write", () => {
+    const stagingControl = productionStacks(buildAgentXApp({ agentxEnv: "staging" })).find((stack) => stack.stackName === "agentx-staging-control-plane")!;
+    const secrets = Object.values(Template.fromStack(stagingControl).findResources("AWS::SecretsManager::Secret") as Record<string, { Properties: { Name?: string; Description?: string } }>)
+      .filter((secret) => secret.Properties.Description?.includes("Slack app credentials"));
+    expect(secrets).toHaveLength(1);
+    expect(secrets[0]!.Properties.Name).toBe("agentx/staging/slack");
+    const operatorSecrets = operatorRoleStatements({
+      env: "staging", partition: "aws", region: "us-east-1", account: "123456789012", artifactBucketArn: "arn:aws:s3:::b",
+      pullThroughPrefix: "agentx-staging", cloudFormationRoleName: "agentx-staging-cloudformation", runtimeName: "agentx_staging_worker",
+    }).find((statement) => statement.Sid === "Secrets")!;
+    // Secrets Manager appends a six-character suffix to the name in the secret's ARN.
+    const secretArn = `arn:aws:secretsmanager:us-east-1:123456789012:secret:${secrets[0]!.Properties.Name}-AbCdEf`;
+    const pattern = new RegExp(`^${String(operatorSecrets.Resource).replace(/[.+?^${}()|[\]\\]/g, "\\$&").replaceAll("*", ".*")}$`);
+    expect(secretArn).toMatch(pattern);
   }, 240_000);
 
   it("keeps each environment's metrics and alarms in its own namespace", () => {
