@@ -36,7 +36,7 @@ credentials, through one guided command, and operable afterwards with a few day-
 
 ### User Story 1 - Install AgentX With One Guided Command (Priority: P1)
 
-An engineer with admin rights in an AWS account runs `npx @agentx/cli init`. A wizard checks
+An engineer with admin rights in an AWS account runs `npx @charterarc/agentx init`. A wizard checks
 prerequisites, asks a few questions, deploys AgentX, walks the engineer through creating the GitHub
 and Slack apps, creates their admin user, sets up a first project and channel, and ends with a
 working reply in Slack. Nothing is copied between screens by hand.
@@ -242,9 +242,10 @@ and the budget.
   Secrets MUST be read from hidden prompts, or from an environment variable or file named by a flag,
   never from a flag's value.
 - **FR-021**: A new identity stack MUST create a Cognito user pool, an app client for the CLI's PKCE
-  login (localhost callback) and an `agentx-admin` group, and output the issuer and audience the
-  control plane takes. With bring-your-own OIDC, `init` MUST check that the issuer's discovery
-  document is reachable and that the admin's token carries the configured admin group claim.
+  login (loopback callback http://127.0.0.1:8765/callback) and an `agentx-admin` group, and output
+  the issuer and audience the control plane takes. With bring-your-own OIDC, `init` MUST check that
+  the issuer's discovery document is reachable and that the admin's token carries the configured
+  admin group claim.
 
 **AWS access (US3)**
 
@@ -467,8 +468,8 @@ and the budget.
 ## Assumptions and Scope
 
 - **Assumptions:**
-  - The npm package name `@agentx/cli` and an ECR Public namespace are available to the project. If
-    not, the owner picks the names before release, and the spec is updated.
+  - The npm package name `@charterarc/agentx` and an ECR Public namespace are available to the
+    project. If not, the owner picks the names before release, and the spec is updated.
   - Releases are cut from mainline by a tag, and a GitHub Actions workflow publishes them. The
     maintainers' own `AgentXReleasePipeline` keeps deploying the authors' environment.
   - GitHub's manifest flow and Slack's "create from manifest" remain available.
