@@ -140,9 +140,16 @@ describe("default permission boundary", () => {
     const services = allows.find((s) => s.Sid === "Services")!;
     expect(services.Action).toEqual(BOUNDARY_SERVICES.map((s) => `${s}:*`));
     expect(services.Resource).toBe("*");
-    for (const service of ["iam", "organizations", "account"]) expect(BOUNDARY_SERVICES).not.toContain(service);
+    for (const service of ["iam", "organizations", "account", "sts"]) expect(BOUNDARY_SERVICES).not.toContain(service);
     // The service role's own wildcard services must all pass the boundary it runs under.
     expect(SERVICE_ROLE_SERVICES.filter((s) => !BOUNDARY_SERVICES.includes(s))).toEqual([]);
+  });
+
+  it("allows only sts:GetCallerIdentity from STS, never AssumeRole", () => {
+    const sts = allows.flatMap((s) => s.Action).filter((a) => a.startsWith("sts:"));
+    expect(sts).toEqual(["sts:GetCallerIdentity"]);
+    expect(allows.find((s) => s.Sid === "CallerIdentity")).toEqual({ Sid: "CallerIdentity", Effect: "Allow", Action: ["sts:GetCallerIdentity"], Resource: "*" });
+    expect(allows.flatMap((s) => s.Action).filter((a) => a === "*" || a === "sts:*" || /^sts:AssumeRole/.test(a))).toEqual([]);
   });
 
   it("never allows iam:* or any user, group, access key, login profile or managed-policy action", () => {

@@ -23,6 +23,25 @@ describe("access stack", () => {
   const access = stacksOf(app).find((s) => s.stackName === "agentx-staging-access")!;
   const template = Template.fromStack(access);
 
+  const environmentResources = () => stacksOf(app).map((stack) => ({ stack, resources: resourcesOf(stack) }));
+  /** The AWS service each resource type in the non-access templates is created through. */
+  const resourceTypeServices = () => {
+    const serviceOf = (type: string) => type.split("::")[1]!.toLowerCase().replace("bedrockagentcore", "bedrock-agentcore").replace("apigatewayv2", "apigateway").replace("cognito", "cognito-idp").replace("applicationautoscaling", "application-autoscaling");
+    const types = new Set(environmentResources().filter(({ stack }) => stack.stackName !== "agentx-staging-access").flatMap(({ resources }) => Object.values(resources).map((r) => r.Type)));
+    // AWS::CDK::Metadata is a CDK pseudo-resource, not an AWS service call. Custom resources are
+    // backed by Lambda, so they need the lambda service. Roles and policies are IAM, checked by action.
+    return new Set([...types].filter((t) => t !== "AWS::CDK::Metadata" && t !== "AWS::IAM::Role" && t !== "AWS::IAM::Policy")
+      .map((t) => (t.startsWith("Custom::") || t === "AWS::CloudFormation::CustomResource" ? "lambda" : serviceOf(t))));
+  };
+  /**
+   * Every action of every role's inline statements in every environment template, except the service
+   * role's own `Services` wildcards: those are derived from what the templates need, so counting them
+   * as a need would make the "nothing unused" checks circular.
+   */
+  const usedActions = () => new Set(environmentResources().flatMap(({ stack, resources }) => roleStatements(resources)
+    .filter((st) => !(stack.stackName === "agentx-staging-access" && st.Sid === "Services"))
+    .flatMap((st) => [st.Action].flat())));
+
   it("exists only for named environments, first in the app", () => {
     expect(access).toBeDefined();
     expect(stacksOf(buildAgentXApp()).some((s) => s.stackName.toLowerCase().includes("access"))).toBe(false);
@@ -99,7 +118,7 @@ describe("access stack", () => {
     // The IAM actions of those managed policies, checked by name like the inline ones below.
     const MANAGED_POLICY_IAM_ACTIONS = ["iam:CreateServiceLinkedRole", "iam:PassRole"];
     const all = stacksOf(app).map(resourcesOf);
-    const actions = new Set(all.flatMap(roleStatements).flatMap((st) => [st.Action].flat()));
+    const actions = usedActions();
     const managed = new Set(all.flatMap((resources) => Object.values(resources).filter((r) => r.Type === "AWS::IAM::Role")
       .flatMap((r) => (r.Properties.ManagedPolicyArns ?? []) as unknown[]).map((arn) => JSON.stringify(arn).match(/policy\/(?:service-role\/)?([A-Za-z0-9]+)/)![1]!)));
     expect([...managed].sort()).toEqual(Object.keys(MANAGED_POLICY_SERVICES).sort());
@@ -108,14 +127,17 @@ describe("access stack", () => {
     const allowed = new Set(boundary.flatMap((st) => [st.Action].flat()));
     const allowedServices = new Set([...allowed].filter((a) => a.endsWith(":*")).map((a) => a.split(":")[0]));
     expect(allowedServices.has("iam")).toBe(false);
-    const needed = new Set([...[...actions].map((a) => a.split(":")[0]!), ...Object.values(MANAGED_POLICY_SERVICES).flat()]);
-    expect([...needed].filter((service) => service !== "iam" && !allowedServices.has(service))).toEqual([]);
-    const iamActions = [...[...actions].filter((a) => a.startsWith("iam:")), ...MANAGED_POLICY_IAM_ACTIONS];
-    expect(iamActions.length).toBeGreaterThan(0);
-    // The service role's own boundary Deny actions (DeleteRolePermissionsBoundary) are never needed as allows.
-    expect(iamActions.filter((a) => a !== "iam:DeleteRolePermissionsBoundary" && !allowed.has(a))).toEqual([]);
-    // Nothing the roles never use.
-    expect([...allowedServices].filter((service) => !needed.has(service))).toEqual([]);
+    // The service role creates resources of these services, and the roles call them.
+    const neededServices = new Set([...resourceTypeServices(), ...Object.values(MANAGED_POLICY_SERVICES).flat().filter((s) => s !== "iam")]);
+    expect([...neededServices].filter((service) => !allowedServices.has(service))).toEqual([]);
+    // Every action a role uses is allowed by its service's wildcard or by name (IAM and STS only by name).
+    const namedActions = [...actions, ...MANAGED_POLICY_IAM_ACTIONS];
+    expect(namedActions.length).toBeGreaterThan(0);
+    // The service role's own boundary Deny action (DeleteRolePermissionsBoundary) is never needed as an allow.
+    expect(namedActions.filter((a) => a !== "iam:DeleteRolePermissionsBoundary" && !allowed.has(a) && !allowedServices.has(a.split(":")[0]))).toEqual([]);
+    // Nothing the roles never use: every wildcard service is a resource type's service or used by an action.
+    const used = new Set([...neededServices, ...[...actions].map((a) => a.split(":")[0]!)]);
+    expect([...allowedServices].filter((service) => !used.has(service!))).toEqual([]);
   }, 240_000);
 
   it("lets only CloudFormation in this account assume the service role", () => {
@@ -152,14 +174,11 @@ describe("access stack", () => {
     expect(text).toContain('"Ref":"AWS::Region"');
   }, 240_000);
 
-  it("lets the service role create every resource type the environment templates contain", () => {
-    const serviceOf = (type: string) => type.split("::")[1]!.toLowerCase().replace("bedrockagentcore", "bedrock-agentcore").replace("apigatewayv2", "apigateway").replace("cognito", "cognito-idp").replace("applicationautoscaling", "application-autoscaling");
-    const types = new Set(stacksOf(app).filter((s) => s.stackName !== "agentx-staging-access")
-      .flatMap((s) => Object.values(Template.fromStack(s).toJSON().Resources as Record<string, { Type: string }>).map((r) => r.Type)));
-    // AWS::CDK::Metadata is a CDK pseudo-resource, not an AWS service call. Custom resources are
-    // backed by Lambda, so they need the lambda service.
-    const needed = [...types].filter((t) => t !== "AWS::CDK::Metadata" && t !== "AWS::IAM::Role" && t !== "AWS::IAM::Policy")
-      .map((t) => (t.startsWith("Custom::") || t === "AWS::CloudFormation::CustomResource" ? "lambda" : serviceOf(t)));
-    expect([...new Set(needed)].filter((service) => !SERVICE_ROLE_SERVICES.includes(service))).toEqual([]);
+  it("lets the service role create every resource type the environment templates contain, and nothing unused", () => {
+    const needed = resourceTypeServices();
+    expect([...needed].filter((service) => !SERVICE_ROLE_SERVICES.includes(service))).toEqual([]);
+    // The reverse: every wildcard service is created by some resource type or called by some role.
+    const used = new Set([...needed, ...[...usedActions()].map((a) => a.split(":")[0]!)]);
+    expect(SERVICE_ROLE_SERVICES.filter((service) => !used.has(service))).toEqual([]);
   }, 240_000);
 });

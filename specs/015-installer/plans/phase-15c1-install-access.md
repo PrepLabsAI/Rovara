@@ -85,6 +85,7 @@ against `mainline`.
   pattern `^$|^arn:aws[a-z-]*:iam::[0-9]{12}:policy/.+$`. It sits on every environment stack, and
   every `AWS::IAM::Role` in those stacks gets
   `PermissionsBoundary: Fn::If [HasPermissionsBoundary, Ref PermissionsBoundaryArn, Ref AWS::NoValue]`.
+  *Superseded (owner decision 2026-09-26, option B): the boundary is always set; the default boundary `agentx-<env>-boundary` applies when none is given (the else branch is its ARN, not `AWS::NoValue`).*
 - **Operator principal parameter (access stack only):** `OperatorPrincipalArn`, type String, default
   `""`, allowed pattern `^$|^arn:aws[a-z-]*:iam::[0-9]{12}:(root|role/.+|user/.+)$`. When empty, the
   operator role trusts the account root.
@@ -273,6 +274,7 @@ export class AccessStack extends Stack  // props: { naming: AgentXNaming } & Sta
 3. Sids `IamRequireBoundary` and `IamKeepBoundary`, emitted only when a boundary is set (the stack
    wraps both with `Fn::If [HasPermissionsBoundary, …, AWS::NoValue]`; the pure function takes an
    optional `permissionsBoundaryArn` and returns them only when it is given):
+   *Superseded (owner decision 2026-09-26, option B): the boundary is always set; the default boundary `agentx-<env>-boundary` applies when none is given; both Deny statements are always emitted and name the effective boundary.*
    - **`IamRequireBoundary`:** Effect `Deny`; actions only `iam:CreateRole` and
      `iam:PutRolePermissionsBoundary` (the two actions that carry the `iam:PermissionsBoundary`
      key); Resource `role/agentx-<env>-*`; Condition
@@ -492,6 +494,8 @@ git commit -m "feat(infra): access stack with artifact bucket, pull-through rule
     one, because we have none today.
 
 - [ ] **Step 1: Write the failing test**
+
+> Superseded (owner decision 2026-09-26, option B): the boundary is always set; the default boundary `agentx-<env>-boundary` applies when none is given (the `Fn::If` else branch is that ARN, not `AWS::NoValue`).
 
 ```ts
 // tests/contract/permissions-boundary.test.ts

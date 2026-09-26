@@ -34,7 +34,6 @@ export const SERVICE_ROLE_SERVICES: readonly string[] = [
   "ec2",
   "ecr",
   "ecs",
-  "events",
   "kms",
   "lambda",
   "logs",
@@ -47,11 +46,13 @@ export const SERVICE_ROLE_SERVICES: readonly string[] = [
 
 /**
  * Services the default permission boundary allows by wildcard: the service role's own, plus what
- * the environment's roles call (Bedrock models, X-Ray, CodeBuild, API Gateway invoke, EC2 Auto
- * Scaling through the AgentCore capacity provider's AWS-managed policy) and the operator's
- * sts:GetCallerIdentity. The generated test in access-stack.test.ts keeps this list complete.
+ * the environment's roles call (Bedrock models, X-Ray, CodeBuild, API Gateway invoke, and EC2 Auto
+ * Scaling and EventBridge through the AgentCore capacity provider's AWS-managed policy). STS is
+ * not here: sts:* would let a bounded role assume any same-account role that trusts the account,
+ * escaping the boundary, so the boundary names sts:GetCallerIdentity alone. The generated test in
+ * access-stack.test.ts keeps this list complete and free of unused services.
  */
-export const BOUNDARY_SERVICES: readonly string[] = [...SERVICE_ROLE_SERVICES, "autoscaling", "bedrock", "codebuild", "execute-api", "sts", "xray"];
+export const BOUNDARY_SERVICES: readonly string[] = [...SERVICE_ROLE_SERVICES, "autoscaling", "bedrock", "codebuild", "events", "execute-api", "xray"];
 
 /** Service-linked roles the service role may create while deploying (ECS, AgentCore and its sub-services). */
 const SERVICE_LINKED_ROLE_SERVICES = ["ecs.amazonaws.com", "bedrock-agentcore.amazonaws.com", "*.bedrock-agentcore.amazonaws.com"];
@@ -156,6 +157,8 @@ export function defaultBoundaryStatements(scope: Pick<PolicyScope, "env" | "part
   const defaultInstanceRole = "AmazonBedrockAgentCoreCapacityProviderDefaultInstanceRole*";
   return [
     { Sid: "Services", Effect: "Allow", Action: BOUNDARY_SERVICES.map((s) => `${s}:*`), Resource: "*" },
+    // The operator's identity check; the only STS action any AgentX role uses.
+    { Sid: "CallerIdentity", Effect: "Allow", Action: ["sts:GetCallerIdentity"], Resource: "*" },
     { Sid: "IamRoles", Effect: "Allow", Action: [...ROLE_ACTIONS], Resource: roles },
     {
       // The operator passes the service role (root path) to CloudFormation; CloudFormation passes

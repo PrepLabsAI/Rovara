@@ -258,6 +258,19 @@ What this does and does not protect, plainly:
   Secrets Manager, SQS and the like) can still reach across environments in the same account.
 - A dedicated AWS account per install is recommended (spec 015, FR-015).
 
+**Changing the boundary later.** Update the access stack first, then every other environment stack
+with the same new `PermissionsBoundaryArn`, in upgrade order (foundation, identity, runtime,
+control-plane, slack). The service role's Deny statements follow the access stack, so a stack
+deployed with a different boundary than the access stack's is refused. When switching from the
+default boundary to a company boundary, the old `agentx-<env>-boundary` policy may be left behind:
+roles still use it while the switch is in progress, so CloudFormation cannot always remove it
+cleanly. Once every stack carries the new boundary, delete the leftover policy by hand.
+
+**Reinstalling an environment name.** The environment's Slack secret `agentx/<env>/slack` is kept
+when the control-plane stack is deleted. Reinstalling the same environment name needs that secret
+deleted first, with `--force-delete-without-recovery` if it is still in its recovery window;
+otherwise the new stack cannot create a secret of the same name.
+
 The **operator role** may create, describe and execute change sets only for the five non-access
 stacks, by their exact names, and read all six (including the access stack). It may pass only the
 service role, and only to CloudFormation. It can read and write its environment's SSM settings
