@@ -24,14 +24,19 @@ interface Call {
 function awsError(name: string, message: string, httpStatusCode = 400): Error {
   const error = new Error(message);
   error.name = name;
-  Object.assign(error, { $metadata: { httpStatusCode } });
+  Object.assign(error, { $metadata: { httpStatusCode, requestId: "request-1" } });
   return error;
 }
 const notFound = () => awsError("NotFound", "UnknownError", 404);
 const stackAbsent = (stackName: string) => awsError("ValidationError", `Stack with id ${stackName} does not exist`);
-const stack = (StackStatus: string, outputs: Record<string, string> = {}) => ({
-  Stacks: [{ StackStatus, Outputs: Object.entries(outputs).map(([OutputKey, OutputValue]) => ({ OutputKey, OutputValue })) }],
+const stack = (StackStatus: string, outputs: Record<string, string> = {}, extra: { EnableTerminationProtection?: boolean; StackStatusReason?: string } = {}) => ({
+  Stacks: [{ StackStatus, Outputs: Object.entries(outputs).map(([OutputKey, OutputValue]) => ({ OutputKey, OutputValue })), ...extra }],
 });
+const protectedStack = (StackStatus: string, outputs: Record<string, string> = {}) => stack(StackStatus, outputs, { EnableTerminationProtection: true });
+/** A created change set, ready to execute. */
+const ready = (Changes: unknown[] = []) => ({ Status: "CREATE_COMPLETE", ExecutionStatus: "AVAILABLE", Changes });
+/** The change set once the stack operation it started is over. */
+const executed = (ExecutionStatus = "EXECUTE_COMPLETE") => ({ Status: "CREATE_COMPLETE", ExecutionStatus });
 
 /**
  * Minimal `{ send(command) }` fakes keyed on the command's class name (without "Command"). Each
@@ -148,17 +153,18 @@ describe("templates engine", () => {
     const fake = fakeClients({
       HeadObject: [notFound()],
       PutObject: [{}, {}],
-      DescribeStacks: [stackAbsent("agentx-staging-runtime"), stack("CREATE_IN_PROGRESS"), stack("CREATE_COMPLETE", { RuntimeArn: "arn:runtime" })],
+      // Only the read after the execution is over counts: no stale in-progress read in between.
+      DescribeStacks: [stackAbsent("agentx-staging-runtime"), stack("CREATE_COMPLETE", { RuntimeArn: "arn:runtime" })],
       CreateChangeSet: [{ Id: "arn:changeset" }],
       DescribeChangeSet: [
-        { Status: "CREATE_IN_PROGRESS" },
-        {
-          Status: "CREATE_COMPLETE",
-          Changes: [
-            { Type: "Resource", ResourceChange: { Action: "Add", LogicalResourceId: "Worker", ResourceType: "AWS::BedrockAgentCore::Runtime" } },
-            { Type: "Resource", ResourceChange: { Action: "Modify", LogicalResourceId: "Role", ResourceType: "AWS::IAM::Role", Replacement: "False" } },
-          ],
-        },
+        { Status: "CREATE_IN_PROGRESS", ExecutionStatus: "UNAVAILABLE" },
+        ready([
+          { Type: "Resource", ResourceChange: { Action: "Add", LogicalResourceId: "Worker", ResourceType: "AWS::BedrockAgentCore::Runtime" } },
+          { Type: "Resource", ResourceChange: { Action: "Modify", LogicalResourceId: "Role", ResourceType: "AWS::IAM::Role", Replacement: "False" } },
+        ]),
+        { Status: "CREATE_COMPLETE", ExecutionStatus: "AVAILABLE" },
+        executed("EXECUTE_IN_PROGRESS"),
+        executed(),
       ],
       ExecuteChangeSet: [{}],
       UpdateTerminationProtection: [{}],
@@ -177,7 +183,9 @@ describe("templates engine", () => {
       "cloudFormation:DescribeChangeSet",
       "cloudFormation:DescribeChangeSet",
       "cloudFormation:ExecuteChangeSet",
-      "cloudFormation:DescribeStacks",
+      "cloudFormation:DescribeChangeSet",
+      "cloudFormation:DescribeChangeSet",
+      "cloudFormation:DescribeChangeSet",
       "cloudFormation:DescribeStacks",
       "cloudFormation:UpdateTerminationProtection",
     ]);
@@ -203,7 +211,8 @@ describe("templates engine", () => {
       },
     ]);
     expect(fake.inputs("DescribeChangeSet")[0]).toEqual({ StackName: "agentx-staging-runtime", ChangeSetName: CHANGE_SET });
-    expect(fake.inputs("ExecuteChangeSet")).toEqual([{ StackName: "agentx-staging-runtime", ChangeSetName: CHANGE_SET }]);
+    expect(fake.inputs("ExecuteChangeSet")).toEqual([{ StackName: "agentx-staging-runtime", ChangeSetName: CHANGE_SET, ClientRequestToken: CHANGE_SET }]);
+    expect(fake.inputs("DescribeChangeSet").slice(2)).toEqual(Array(3).fill({ StackName: "agentx-staging-runtime", ChangeSetName: CHANGE_SET }));
     expect(fake.inputs("UpdateTerminationProtection")).toEqual([{ StackName: "agentx-staging-runtime", EnableTerminationProtection: true }]);
     expect(req.events).toEqual([
       { kind: "uploading", what: `package ${RUNTIME_ASSET}` },
@@ -227,7 +236,7 @@ describe("templates engine", () => {
       PutObject: [{}],
       DescribeStacks: [stackAbsent("agentx-staging-control-plane"), stack("CREATE_COMPLETE", { ApiEndpoint: "https://api" })],
       CreateChangeSet: [{}],
-      DescribeChangeSet: [{ Status: "CREATE_COMPLETE", Changes: [] }],
+      DescribeChangeSet: [ready(), executed()],
       ExecuteChangeSet: [{}],
     });
     const req = request("control-plane");
@@ -241,7 +250,7 @@ describe("templates engine", () => {
     const fake = fakeClients({
       DescribeStacks: [stackAbsent("agentx-staging-access"), stack("CREATE_COMPLETE", { ArtifactBucketName: "bucket" })],
       CreateChangeSet: [{}],
-      DescribeChangeSet: [{ Status: "CREATE_COMPLETE", Changes: [] }],
+      DescribeChangeSet: [ready(), executed()],
       ExecuteChangeSet: [{}],
       UpdateTerminationProtection: [{}],
     });
@@ -311,7 +320,7 @@ describe("templates engine", () => {
   it.each([NO_CHANGES_REASON, "No updates are to be performed."])("treats a change set with no changes as success and deletes it (%s)", async (reason) => {
     const fake = fakeClients({
       PutObject: [{}],
-      DescribeStacks: [stack("UPDATE_COMPLETE", { VpcId: "vpc-1" })],
+      DescribeStacks: [protectedStack("UPDATE_COMPLETE", { VpcId: "vpc-1" })],
       CreateChangeSet: [{}],
       DescribeChangeSet: [{ Status: "FAILED", StatusReason: reason }],
       DeleteChangeSet: [{}],
@@ -330,17 +339,46 @@ describe("templates engine", () => {
     ]);
   });
 
+  it("protects an unprotected stack on a rerun with no changes", async () => {
+    const fake = fakeClients({
+      PutObject: [{}],
+      DescribeStacks: [stack("CREATE_COMPLETE", { VpcId: "vpc-1" })],
+      CreateChangeSet: [{}],
+      DescribeChangeSet: [{ Status: "FAILED", StatusReason: NO_CHANGES_REASON }],
+      DeleteChangeSet: [{}],
+      UpdateTerminationProtection: [{}],
+    });
+    const req = request("foundation");
+    await expect(deployer(fake).deploy(req)).resolves.toEqual({ VpcId: "vpc-1" });
+    expect(fake.names().slice(-2)).toEqual(["cloudFormation:DeleteChangeSet", "cloudFormation:UpdateTerminationProtection"]);
+    expect(fake.inputs("UpdateTerminationProtection")).toEqual([{ StackName: "agentx-staging-foundation", EnableTerminationProtection: true }]);
+    expect(req.events.at(-1)).toEqual({ kind: "no-changes", stackName: "agentx-staging-foundation" });
+  });
+
+  it("reports a change set with no changes that cannot be deleted, clearly", async () => {
+    const fake = fakeClients({
+      PutObject: [{}],
+      DescribeStacks: [protectedStack("UPDATE_COMPLETE")],
+      CreateChangeSet: [{}],
+      DescribeChangeSet: [{ Status: "FAILED", StatusReason: NO_CHANGES_REASON }],
+      DeleteChangeSet: [awsError("AccessDenied", "not authorized to perform cloudformation:DeleteChangeSet", 403)],
+    });
+    await expect(deployer(fake).deploy(request("foundation"))).rejects.toThrow(
+      `stack agentx-staging-foundation has no changes, and its change set ${CHANGE_SET} could not be deleted: not authorized to perform cloudformation:DeleteChangeSet`,
+    );
+  });
+
   it("updates a stack whose last update rolled back", async () => {
     const fake = fakeClients({
       PutObject: [{}],
-      DescribeStacks: [stack("UPDATE_ROLLBACK_COMPLETE"), stack("UPDATE_COMPLETE", { VpcId: "vpc-2" })],
+      DescribeStacks: [protectedStack("UPDATE_ROLLBACK_COMPLETE"), protectedStack("UPDATE_COMPLETE", { VpcId: "vpc-2" })],
       CreateChangeSet: [{}],
-      DescribeChangeSet: [{ Status: "CREATE_COMPLETE", Changes: [] }],
+      DescribeChangeSet: [ready(), executed()],
       ExecuteChangeSet: [{}],
     });
     await expect(deployer(fake).deploy(request("foundation"))).resolves.toEqual({ VpcId: "vpc-2" });
     expect(fake.inputs("CreateChangeSet")[0]).toMatchObject({ ChangeSetType: "UPDATE" });
-    // An existing stack is already protected (or deliberately not): only a new stack is changed.
+    // Already protected: nothing to change.
     expect(fake.inputs("UpdateTerminationProtection")).toEqual([]);
   });
 
@@ -373,7 +411,7 @@ describe("templates engine", () => {
       PutObject: [{}],
       DescribeStacks: [stack("REVIEW_IN_PROGRESS"), stack("CREATE_COMPLETE", { RuntimeArn: "arn:runtime" })],
       CreateChangeSet: [{}],
-      DescribeChangeSet: [{ Status: "CREATE_COMPLETE", Changes: [] }],
+      DescribeChangeSet: [ready(), executed()],
       ExecuteChangeSet: [{}],
       UpdateTerminationProtection: [{}],
     });
@@ -405,25 +443,35 @@ describe("templates engine", () => {
     expect(fake.inputs("CreateChangeSet")).toEqual([]);
   });
 
-  it("reports the failing resource's reason when a deploy rolls back", async () => {
-    const fake = fakeClients({
+  /** A runtime update that rolls back, with the given stack events (newest first) and final stack. */
+  function rollbackScript(eventPages: unknown[], finalStack = stack("UPDATE_ROLLBACK_COMPLETE")) {
+    return fakeClients({
       HeadObject: [{ Metadata: { sha256: sha256(zipBytes[RUNTIME_ASSET]!) } }],
       PutObject: [{}],
-      DescribeStacks: [stack("UPDATE_COMPLETE"), stack("UPDATE_IN_PROGRESS"), stack("UPDATE_ROLLBACK_IN_PROGRESS"), stack("UPDATE_ROLLBACK_COMPLETE")],
+      DescribeStacks: [stack("UPDATE_COMPLETE"), finalStack],
       CreateChangeSet: [{}],
-      DescribeChangeSet: [{ Status: "CREATE_COMPLETE", Changes: [] }],
+      DescribeChangeSet: [ready(), executed("EXECUTE_FAILED")],
       ExecuteChangeSet: [{}],
-      DescribeStackEvents: [
-        {
-          StackEvents: [
-            { LogicalResourceId: "agentx-staging-runtime", ResourceStatus: "UPDATE_ROLLBACK_COMPLETE" },
-            { LogicalResourceId: "agentx-staging-runtime", ResourceStatus: "UPDATE_ROLLBACK_IN_PROGRESS", ResourceStatusReason: "The following resource(s) failed to update: [Worker]." },
-            { LogicalResourceId: "Worker", ResourceStatus: "UPDATE_FAILED", ResourceStatusReason: "Resource handler returned message: image not found" },
-            { LogicalResourceId: "Old", ResourceStatus: "CREATE_FAILED", ResourceStatusReason: "an older failure" },
-          ],
-        },
-      ],
+      DescribeStackEvents: eventPages,
     });
+  }
+  const ours = { ClientRequestToken: CHANGE_SET };
+  const earlier = { ClientRequestToken: "agentx-1-2-2-1600000000" };
+
+  it("reports the root cause when a deploy rolls back, not the cancelled siblings after it", async () => {
+    const fake = rollbackScript([
+      {
+        StackEvents: [
+          { LogicalResourceId: "agentx-staging-runtime", ResourceStatus: "UPDATE_ROLLBACK_COMPLETE", ...ours },
+          { LogicalResourceId: "agentx-staging-runtime", ResourceStatus: "UPDATE_ROLLBACK_IN_PROGRESS", ResourceStatusReason: "The following resource(s) failed to update: [Worker].", ...ours },
+          { LogicalResourceId: "Endpoint", ResourceStatus: "UPDATE_FAILED", ResourceStatusReason: "Resource update cancelled", ...ours },
+          { LogicalResourceId: "Alarm", ResourceStatus: "CREATE_FAILED", ResourceStatusReason: "Resource creation CANCELLED", ...ours },
+          { LogicalResourceId: "Worker", ResourceStatus: "UPDATE_FAILED", ResourceStatusReason: "Resource handler returned message: image not found", ...ours },
+          { LogicalResourceId: "agentx-staging-runtime", ResourceStatus: "UPDATE_IN_PROGRESS", ResourceStatusReason: "User Initiated", ...ours },
+          { LogicalResourceId: "Old", ResourceStatus: "CREATE_FAILED", ResourceStatusReason: "an older failure", ...earlier },
+        ],
+      },
+    ]);
     const req = request("runtime");
     await expect(deployer(fake).deploy(req)).rejects.toThrow(
       "stack agentx-staging-runtime ended in UPDATE_ROLLBACK_COMPLETE: Resource handler returned message: image not found",
@@ -433,17 +481,139 @@ describe("templates engine", () => {
     expect(req.events.map((event) => event.kind)).toEqual(["uploading", "changes", "deploying"]);
   });
 
+  it("follows stack event pages until it reaches events older than this deploy", async () => {
+    const fake = rollbackScript([
+      {
+        StackEvents: [
+          { LogicalResourceId: "agentx-staging-runtime", ResourceStatus: "UPDATE_ROLLBACK_COMPLETE", ...ours },
+          { LogicalResourceId: "Endpoint", ResourceStatus: "UPDATE_FAILED", ResourceStatusReason: "Resource update cancelled", ...ours },
+        ],
+        NextToken: "page-2",
+      },
+      {
+        StackEvents: [
+          { LogicalResourceId: "Worker", ResourceStatus: "UPDATE_FAILED", ResourceStatusReason: "image not found", ...ours },
+          { LogicalResourceId: "Old", ResourceStatus: "UPDATE_FAILED", ResourceStatusReason: "an older failure", ...earlier },
+        ],
+        NextToken: "page-3",
+      },
+    ]);
+    await expect(deployer(fake).deploy(request("runtime"))).rejects.toThrow("stack agentx-staging-runtime ended in UPDATE_ROLLBACK_COMPLETE: image not found");
+    expect(fake.inputs("DescribeStackEvents")).toEqual([{ StackName: "agentx-staging-runtime" }, { StackName: "agentx-staging-runtime", NextToken: "page-2" }]);
+  });
+
+  it("never names a failure from an earlier deploy; falls back to the stack's own reason", async () => {
+    const fake = rollbackScript(
+      [
+        {
+          StackEvents: [
+            { LogicalResourceId: "agentx-staging-runtime", ResourceStatus: "UPDATE_ROLLBACK_COMPLETE", ...ours },
+            { LogicalResourceId: "Endpoint", ResourceStatus: "UPDATE_FAILED", ResourceStatusReason: "Resource update cancelled", ...ours },
+            { LogicalResourceId: "Old", ResourceStatus: "UPDATE_FAILED", ResourceStatusReason: "a stale failure from the last deploy", ...earlier },
+          ],
+        },
+      ],
+      stack("UPDATE_ROLLBACK_COMPLETE", {}, { StackStatusReason: "The following resource(s) failed to update: [Worker]." }),
+    );
+    await expect(deployer(fake).deploy(request("runtime"))).rejects.toThrow(
+      "stack agentx-staging-runtime ended in UPDATE_ROLLBACK_COMPLETE: The following resource(s) failed to update: [Worker].",
+    );
+  });
+
+  it("says no resource reported a reason when neither the events nor the stack give one", async () => {
+    const fake = rollbackScript([{ StackEvents: [{ LogicalResourceId: "Old", ResourceStatus: "UPDATE_FAILED", ResourceStatusReason: "stale", ...earlier }] }]);
+    await expect(deployer(fake).deploy(request("runtime"))).rejects.toThrow(
+      "stack agentx-staging-runtime ended in UPDATE_ROLLBACK_COMPLETE: no failed resource reported a reason",
+    );
+  });
+
   it("does not protect a new stack whose create rolled back", async () => {
     const fake = fakeClients({
       PutObject: [{}],
       DescribeStacks: [stackAbsent("agentx-staging-identity"), stack("ROLLBACK_COMPLETE")],
       CreateChangeSet: [{}],
-      DescribeChangeSet: [{ Status: "CREATE_COMPLETE", Changes: [] }],
+      DescribeChangeSet: [ready(), executed("EXECUTE_FAILED")],
       ExecuteChangeSet: [{}],
-      DescribeStackEvents: [{ StackEvents: [{ LogicalResourceId: "UserPool", ResourceStatus: "CREATE_FAILED", ResourceStatusReason: "domain already taken" }] }],
+      DescribeStackEvents: [{ StackEvents: [{ LogicalResourceId: "UserPool", ResourceStatus: "CREATE_FAILED", ResourceStatusReason: "domain already taken", ...ours }] }],
     });
     await expect(deployer(fake).deploy(request("identity"))).rejects.toThrow("stack agentx-staging-identity ended in ROLLBACK_COMPLETE: domain already taken");
     expect(fake.inputs("UpdateTerminationProtection")).toEqual([]);
+  });
+
+  it("refuses to execute a change set that is not available, and deletes it", async () => {
+    const fake = fakeClients({
+      PutObject: [{}],
+      DescribeStacks: [protectedStack("UPDATE_COMPLETE")],
+      CreateChangeSet: [{}],
+      DescribeChangeSet: [{ Status: "CREATE_COMPLETE", ExecutionStatus: "OBSOLETE", StatusReason: "the stack changed after this change set was created" }],
+      DeleteChangeSet: [{}],
+    });
+    await expect(deployer(fake).deploy(request("foundation"))).rejects.toThrow(
+      "change set for agentx-staging-foundation cannot be executed (OBSOLETE): the stack changed after this change set was created",
+    );
+    expect(fake.inputs("DeleteChangeSet")).toEqual([{ StackName: "agentx-staging-foundation", ChangeSetName: CHANGE_SET }]);
+    expect(fake.inputs("ExecuteChangeSet")).toEqual([]);
+  });
+
+  it("gives up waiting after the timeout, saying the stack may still finish and how to watch it", async () => {
+    let clock = NOW;
+    const fake = fakeClients({
+      PutObject: [{}],
+      DescribeStacks: [protectedStack("UPDATE_COMPLETE"), stack("UPDATE_IN_PROGRESS"), stack("UPDATE_IN_PROGRESS"), stack("UPDATE_IN_PROGRESS")],
+      CreateChangeSet: [{}],
+      DescribeChangeSet: [ready(), executed()],
+      ExecuteChangeSet: [{}],
+    });
+    const engine = templatesDeployer({
+      clients: fake.clients,
+      release: makeRelease(),
+      env: "staging",
+      region: "us-east-1",
+      artifactBucket: () => "bucket",
+      // Each reading of the clock is 30 seconds later.
+      now: () => (clock += 30_000) - 30_000,
+      pollMs: 0,
+      timeoutMs: 60_000,
+    });
+    await expect(engine.deploy(request("foundation"))).rejects.toThrow(
+      "stack agentx-staging-foundation is still UPDATE_IN_PROGRESS after 1 minutes; it may still finish — watch it with aws cloudformation describe-stacks --stack-name agentx-staging-foundation",
+    );
+  });
+
+  it("uses the partition's S3 host in the template URL", async () => {
+    const fake = fakeClients({
+      PutObject: [{}],
+      DescribeStacks: [protectedStack("UPDATE_COMPLETE")],
+      CreateChangeSet: [{}],
+      DescribeChangeSet: [{ Status: "FAILED", StatusReason: NO_CHANGES_REASON }],
+      DeleteChangeSet: [{}],
+    });
+    const engine = templatesDeployer({
+      clients: fake.clients,
+      release: makeRelease(),
+      env: "staging",
+      region: "cn-north-1",
+      partition: "aws-cn",
+      artifactBucket: () => "bucket",
+      now: () => NOW,
+      pollMs: 0,
+    });
+    await engine.deploy(request("foundation"));
+    expect(fake.inputs("CreateChangeSet")[0]!.TemplateURL).toBe("https://bucket.s3.cn-north-1.amazonaws.com.cn/templates/1.2.3/cn-north-1/foundation.template.json");
+    expect(() => templatesDeployer({ clients: fake.clients, release: makeRelease(), env: "staging", region: "us-east-1", partition: "aws-xx", artifactBucket: () => "bucket" })).toThrow(
+      "unknown partition aws-xx; expected aws, aws-cn, or aws-us-gov",
+    );
+  });
+
+  it("refuses to upload a package whose file changed after the release was loaded", async () => {
+    const tampered = join(releaseDir, "tampered.zip");
+    await writeFile(tampered, "changed after load");
+    const release = { ...makeRelease(), packagePath: () => tampered };
+    const fake = fakeClients({ HeadObject: [notFound()] });
+    await expect(deployer(fake, { release }).deploy(request("control-plane"))).rejects.toThrow(
+      `release file packages/${CONTROL_PLANE_ASSET}.zip does not match release.json`,
+    );
+    expect(fake.inputs("PutObject")).toEqual([]);
   });
 
   describe("secret parameters", () => {
@@ -486,10 +656,17 @@ describe("templates engine", () => {
         DescribeStacks: [stack("UPDATE_COMPLETE"), stack("UPDATE_ROLLBACK_COMPLETE")],
         CreateChangeSet: [{}],
         DescribeChangeSet: [
-          { Status: "CREATE_COMPLETE", Changes: [{ Type: "Resource", ResourceChange: { Action: "Modify", LogicalResourceId: "Api", ResourceType: "AWS::Lambda::Function", Replacement: "False" } }] },
+          ready([{ Type: "Resource", ResourceChange: { Action: "Modify", LogicalResourceId: "Api", ResourceType: "AWS::Lambda::Function", Replacement: "False" } }]),
+          executed("EXECUTE_FAILED"),
         ],
         ExecuteChangeSet: [{}],
-        DescribeStackEvents: [{ StackEvents: [{ LogicalResourceId: "Api", ResourceStatus: "UPDATE_FAILED", ResourceStatusReason: `environment variable CALLBACK_KEY=${SECRET} rejected` }] }],
+        DescribeStackEvents: [
+          {
+            StackEvents: [
+              { LogicalResourceId: "Api", ResourceStatus: "UPDATE_FAILED", ResourceStatusReason: `environment variable CALLBACK_KEY=${SECRET} rejected`, ClientRequestToken: CHANGE_SET },
+            ],
+          },
+        ],
       });
       const second = secretRequest();
       const secondError = await failure(rollsBack, second);
@@ -506,6 +683,7 @@ describe("templates engine", () => {
       const third = secretRequest();
       const thirdError = await failure(sdkError, third);
       expect(thirdError.name).toBe("ValidationError");
+      expect((thirdError as { $metadata?: unknown }).$metadata).toEqual({ httpStatusCode: 400, requestId: "request-1" });
       expect(thirdError.message).toContain("does not match the pattern");
       messages.push(thirdError.message);
       events.push(...third.events);
