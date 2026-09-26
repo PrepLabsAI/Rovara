@@ -110,6 +110,9 @@ export async function packCli(input: PackCliInput): Promise<PackCliResult> {
     license: "FSL-1.1-ALv2",
     files: ["bin", "README.md", "LICENSE"],
     description: "AgentX installer and administration CLI",
+    // npm's provenance/trusted-publishing UI links back to the source repository; without this,
+    // npm has nothing to link to even once provenance is enabled (see release.yml's npm job).
+    repository: { type: "git", url: "git+https://github.com/PrepLabsAI/AgentX.git" },
   };
   await writeFile(join(packageDir, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
   await writeFile(join(packageDir, "README.md"), readmeText(name), "utf8");

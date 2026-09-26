@@ -36,6 +36,16 @@ describe("release workflow", () => {
     expect(wf.permissions).toEqual({ contents: "read" });
   });
 
+  it("takes the version only from the tag: workflow_dispatch has no inputs, nothing reads inputs.*", async () => {
+    const wf = await workflow();
+    // "by hand" still means re-running from the tag ref itself (the guard test below enforces
+    // that); it must not accept an operator-typed version that could disagree with the tag.
+    expect((wf.on.workflow_dispatch as Record<string, unknown> | null | undefined)?.inputs).toBeUndefined();
+    const text = await workflowText();
+    expect(text).not.toMatch(/inputs\.version/);
+    expect(text).not.toMatch(/inputs\./);
+  });
+
   it("guards every publishing job and runs the tests first", async () => {
     const wf = await workflow();
     for (const name of ["images", "release", "npm"]) {
@@ -43,6 +53,20 @@ describe("release workflow", () => {
     }
     expect(wf.jobs.images?.needs).toBe("test");
     expect(wf.jobs.test?.if).toBeUndefined();
+  });
+
+  it("the test job runs typecheck, lint, build, test and infra:synth", async () => {
+    const wf = await workflow();
+    const testRun = wf.jobs.test!.steps.map((s) => s.run ?? "").join("\n");
+    expect(testRun).toContain("npm run typecheck");
+    expect(testRun).toContain("npm run lint");
+    expect(testRun).toContain("npm run build");
+    expect(testRun).toContain("npm test");
+    expect(testRun).toContain("npm run infra:synth");
+    // In the declared order, so a later step can't silently run against a stale build.
+    expect(testRun.indexOf("npm run lint")).toBeLessThan(testRun.indexOf("npm run build"));
+    expect(testRun.indexOf("npm run build")).toBeLessThan(testRun.indexOf("npm test"));
+    expect(testRun.indexOf("npm test")).toBeLessThan(testRun.indexOf("npm run infra:synth"));
   });
 
   it("grants OIDC and write access only where they are needed", async () => {
@@ -53,12 +77,35 @@ describe("release workflow", () => {
     expect(wf.jobs.npm?.permissions).toEqual({ contents: "read", "id-token": "write" });
   });
 
-  it("builds arm64 images, passes digests (not tags) to the release, and verifies before publishing", async () => {
+  it("builds arm64 images with buildx, pushes a single-manifest image, and cross-checks the registry digest before publishing", async () => {
     const wf = await workflow();
-    const push = wf.jobs.images!.steps.map((s) => s.run ?? "").join("\n");
+    const steps = wf.jobs.images!.steps;
+    const buildxIndex = steps.findIndex((s) => s.uses?.startsWith("docker/setup-buildx-action"));
+    expect(buildxIndex).toBeGreaterThanOrEqual(0);
+    const push = steps.map((s) => s.run ?? "").join("\n");
+    const buildIndex = push.indexOf("docker buildx build");
+    expect(buildIndex).toBeGreaterThanOrEqual(0);
+    // setup-buildx-action must run as an earlier *step* than the one containing the build.
+    const pushStepIndex = steps.findIndex((s) => (s.run ?? "").includes("docker buildx build"));
+    expect(buildxIndex).toBeLessThan(pushStepIndex);
+
     expect(push).toContain("--platform linux/arm64");
+    // Without these, buildx pushes an OCI index (image + attestations), not a single arm64
+    // manifest, and the digest read back would be the index's, not the image's.
+    expect(push).toContain("--provenance=false");
+    expect(push).toContain("--sbom=false");
     expect(push).toContain("containerimage.digest");
-    expect(push).toContain("@$digest");
+
+    // The registry, not just the local build metadata, must confirm what got pushed.
+    expect(push).toContain("docker buildx imagetools inspect");
+    expect(push).toMatch(/imagetools inspect "\$repo:\$VERSION" --format '\{\{json \.Manifest\.Digest\}\}'/);
+    expect(push).toMatch(/registry_digest/);
+    // Fails on an empty/null registry digest, and on a mismatch against the pushed digest.
+    expect(push).toMatch(/registry_digest"\s*\]\s*\|\|\s*\[\s*"\$registry_digest"\s*=\s*"null"/);
+    expect(push).toMatch(/"\$registry_digest"\s*!=\s*"\$digest"/);
+    expect(push).toContain("exit 1");
+    expect(push).toContain("@$registry_digest");
+
     const release = wf.jobs.release!.steps.map((s) => s.run ?? "").join("\n");
     expect(release.indexOf("release:verify")).toBeGreaterThan(release.indexOf("release:build"));
     expect(release.indexOf("gh release create")).toBeGreaterThan(release.indexOf("release:verify"));
@@ -72,17 +119,31 @@ describe("release workflow", () => {
     expect(text).not.toMatch(/set -x/);
   });
 
-  it("refuses to run the images job's publishing steps unless the ref is a version tag", async () => {
+  it("no run: script interpolates a GitHub Actions expression; everything flows through env", async () => {
+    const wf = await workflow();
+    for (const [jobName, job] of Object.entries(wf.jobs)) {
+      for (const step of job.steps) {
+        if (step.run) expect(step.run, `${jobName}: ${step.run}`).not.toContain("${{");
+      }
+    }
+  });
+
+  it("refuses to run the images job's publishing steps unless the ref is a version tag matching vX.Y.Z", async () => {
     const wf = await workflow();
     const steps = wf.jobs.images!.steps;
     // The publish role's trust policy only allows repo:PrepLabsAI/AgentX:ref:refs/tags/v*, so a
     // workflow_dispatch run started from a branch would otherwise fail deep inside
     // configure-aws-credentials with an opaque AssumeRoleWithWebIdentity error. Guard first, and
-    // fail clearly, before checkout or any AWS action runs.
-    const guardIndex = steps.findIndex((s) => (s.run ?? "").includes("github.ref"));
+    // fail clearly, before checkout or any AWS action runs. GITHUB_REF/GITHUB_REF_NAME are the
+    // runner's own default env vars, read directly rather than interpolated in as `${{ github.ref
+    // }}` (see the "no run: script interpolates" test above).
+    const guardIndex = steps.findIndex((s) => (s.run ?? "").includes("GITHUB_REF"));
     expect(guardIndex).toBeGreaterThanOrEqual(0);
     const guard = steps[guardIndex]!;
+    expect(guard.run).toContain("$GITHUB_REF");
     expect(guard.run).toMatch(/refs\/tags\/v\*/);
+    expect(guard.run).toContain("$GITHUB_REF_NAME");
+    expect(guard.run).toMatch(/\^v\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\$/);
     expect(guard.run).toMatch(/exit 1/);
     const checkoutIndex = steps.findIndex((s) => s.uses?.startsWith("actions/checkout"));
     expect(checkoutIndex).toBeGreaterThan(guardIndex);
@@ -90,7 +151,7 @@ describe("release workflow", () => {
     expect(credentialsIndex).toBeGreaterThan(guardIndex);
   });
 
-  it("publishes npm with trusted publishing (OIDC): no stored token, npm upgraded to 11 first", async () => {
+  it("publishes npm with trusted publishing (OIDC): no stored token, npm upgraded to 11 first, no --provenance (private repo)", async () => {
     const text = await workflowText();
     expect(text).not.toMatch(/NPM_TOKEN/);
     expect(text).not.toMatch(/NODE_AUTH_TOKEN/);
@@ -102,6 +163,8 @@ describe("release workflow", () => {
     expect(upgradeIndex).toBeGreaterThanOrEqual(0);
     expect(publishIndex).toBeGreaterThan(upgradeIndex);
     expect(npmSteps[publishIndex]!.run).toContain("--access public");
-    expect(npmSteps[publishIndex]!.run).toContain("--provenance");
+    // PrepLabsAI/AgentX is private today, and npm provenance attestation fails for private repos;
+    // trusted publishing adds provenance automatically once the repo goes public.
+    expect(npmSteps[publishIndex]!.run).not.toContain("--provenance");
   });
 });

@@ -30,6 +30,7 @@ describe("publishable CLI package", () => {
     expect(manifest.dependencies).toBeUndefined();
     expect(manifest.files).toEqual(["bin", "README.md", "LICENSE"]);
     expect(manifest.description).toBe("AgentX installer and administration CLI");
+    expect(manifest.repository).toEqual({ type: "git", url: "git+https://github.com/PrepLabsAI/AgentX.git" });
 
     const packagedLicense = await readFile(join(out, "package", "LICENSE"), "utf8");
     expect(packagedLicense).toBe(await readFile(join(repoRoot, "LICENSE"), "utf8"));
@@ -78,9 +79,11 @@ describe("ENTRY_SHEBANG_FILTER", () => {
   it("matches the entry file's path on both POSIX and Windows-style separators", () => {
     expect(ENTRY_SHEBANG_FILTER.test("/repo/packages/cli/src/main.ts")).toBe(true);
     expect(ENTRY_SHEBANG_FILTER.test("C:\\repo\\packages\\cli\\src\\main.ts")).toBe(true);
-    // A mixed separator string is not something esbuild would produce on a single OS, but the
-    // filter should still only match paths that actually end in the entry file.
+  });
+
+  it("does not match a different file, on either separator style", () => {
     expect(ENTRY_SHEBANG_FILTER.test("/repo/packages/cli/src/other.ts")).toBe(false);
+    expect(ENTRY_SHEBANG_FILTER.test("C:\\repo\\packages\\cli\\src\\other.ts")).toBe(false);
   });
 });
 
