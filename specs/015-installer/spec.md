@@ -430,9 +430,18 @@ and the budget.
 - **Images come to private ECR in the account.** The runtime and the orchestrator task pull from
   private ECR (their IAM statements are scoped to the account's repositories today). The release
   publishes images to ECR Public by digest, and the installer uses an ECR pull-through cache rule for
-  ECR Public to serve them from private ECR. The first plan task proves that AgentCore Runtime can
-  start from a pull-through image. If it cannot, the installer copies the images into private ECR
-  repositories instead, with the same digests.
+  ECR Public to serve them from private ECR. **Proven (2026-09-26, account 944937319445):** a
+  throwaway AgentCore runtime reached `READY` from an image pulled through an ECR pull-through cache
+  rule for `public.ecr.aws`; the cached repository was created on demand and the upstream manifests
+  were imported on first pull. The role that does this needs `ecr:BatchImportUpstreamImage` and
+  `ecr:CreateRepository` on the cache prefix (that IAM change belongs to phase 15c). Cached images
+  carry no tags, so the installer must reference them by digest.
+- **Published templates are synthesized once for a reserved placeholder environment and rendered for
+  the real environment at install, proven equal to a direct synthesis (FR-012).**
+- **npm package name and license** (owners, 2026-09-26). The CLI publishes as `@charterarc/agentx`
+  (organization `charterarc`; AgentX stays the product name). The repository's license is
+  FSL-1.1-ALv2 (Functional Source License, Apache-2.0 future license); the `LICENSE` file is added in
+  this phase.
 - **Code packages are uploaded into the account**, not read from a public bucket, so the deployment
   does not depend on an outside bucket staying available.
 - **Default models** (2026-09-26, owner, from the 2026-09-25 bake-off: 65 evaluation cases, 3 runs

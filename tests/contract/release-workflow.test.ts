@@ -3,9 +3,11 @@ import { describe, expect, it } from "vitest";
 import YAML from "yaml";
 
 interface Step {
+  id?: string;
   name?: string;
   run?: string;
   uses?: string;
+  shell?: string;
   env?: Record<string, string>;
 }
 interface Job {
@@ -111,6 +113,15 @@ describe("release workflow", () => {
     expect(release.indexOf("gh release create")).toBeGreaterThan(release.indexOf("release:verify"));
     expect(release).toContain('--worker-image "$WORKER"');
     expect(wf.jobs.release!.steps.some((s) => s.env?.GH_TOKEN === "${{ github.token }}")).toBe(true);
+  });
+
+  it("runs the images push step with shell: bash, so a failing `imagetools inspect | tr` fails the step instead of being swallowed by the pipe", async () => {
+    const wf = await workflow();
+    const push = wf.jobs.images!.steps.find((s) => s.id === "push");
+    expect(push).toBeDefined();
+    // Without an explicit shell, GitHub Actions runs a Linux run: step as plain `bash -e {0}`, not
+    // `bash --noprofile --norc -eo pipefail {0}`; only shell: bash turns pipefail on.
+    expect(push?.shell).toBe("bash");
   });
 
   it("never prints secrets", async () => {

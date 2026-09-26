@@ -51,6 +51,12 @@ jobs:
         with: { registry-type: public }
       - uses: docker/setup-buildx-action@v3
       - id: push
+        # Without an explicit shell, GitHub Actions runs a Linux run: step's script as plain
+        # `bash -e {0}`, not `bash --noprofile --norc -eo pipefail {0}`: a failing
+        # `docker buildx imagetools inspect` piped into `tr -d '"'` would be swallowed by the pipe
+        # and this step would carry on with an empty (or stale) registry_digest instead of failing.
+        # `shell: bash` is what turns pipefail on.
+        shell: bash
         env:
           ALIAS: ${{ vars.AGENTX_ECR_PUBLIC_ALIAS }}
           VERSION: ${{ github.ref_name }}
