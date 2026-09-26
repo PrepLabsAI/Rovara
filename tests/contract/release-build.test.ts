@@ -373,6 +373,15 @@ describe("ReleaseManifestSchema: file path containment", () => {
     expect(() => ReleaseManifestSchema.parse(manifest)).toThrow(/file must equal packages\/<assetId>\.zip/);
   });
 
+  it("refuses a template whose file does not equal templates/<region>/<part>.template.json for its own region and part", () => {
+    const manifest = {
+      ...baseManifest,
+      templates: [{ region: "us-east-1", part: "access", file: "templates/us-west-2/access.template.json", sha256: "a".repeat(64) }],
+      packages: [],
+    };
+    expect(() => ReleaseManifestSchema.parse(manifest)).toThrow(/file must equal templates\/<region>\/<part>\.template\.json/);
+  });
+
   it("accepts the well-formed template and package file shapes the release builder produces", () => {
     const manifest = {
       ...baseManifest,

@@ -30,7 +30,8 @@ export const ReleaseManifestSchema = z
             file: z.string().regex(TEMPLATE_FILE_PATTERN),
             sha256: Sha256,
           })
-          .strict(),
+          .strict()
+          .refine((t) => t.file === `templates/${t.region}/${t.part}.template.json`, "file must equal templates/<region>/<part>.template.json"),
       )
       .refine(
         (templates) => new Set(templates.map((t) => `${t.region}/${t.part}`)).size === templates.length,

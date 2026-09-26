@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -55,5 +55,16 @@ describe("containedPath: the loader's own path-containment guard, independent of
 
   it("accepts a legitimate path inside the release directory", () => {
     expect(containedPath(dir, "templates/us-east-1/access.template.json")).toBe(resolve(dir, "templates/us-east-1/access.template.json"));
+  });
+
+  it("refuses a file that is missing, with a clear error naming it", () => {
+    expect(() => containedPath(dir, "packages/does-not-exist.zip")).toThrow("release file packages/does-not-exist.zip is missing");
+  });
+
+  it("refuses a symlink inside the release directory that points outside it", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "agentx-outside-"));
+    await writeFile(join(outside, "secret.txt"), "not part of the release");
+    await symlink(join(outside, "secret.txt"), join(dir, "escape-link"));
+    expect(() => containedPath(dir, "escape-link")).toThrow("release file escape-link is outside the release directory");
   });
 });

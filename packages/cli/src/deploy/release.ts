@@ -2,7 +2,7 @@
 // checks every template's and package's sha256 against what's on disk (catching a stale or
 // tampered local copy before any stack is touched), and hands back the rendered templates and
 // package paths the deploy engine needs.
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { ReleaseManifestSchema, renderTemplate, type ReleaseManifest } from "@agentx/contracts";
@@ -26,11 +26,31 @@ export interface LoadedRelease {
  * controls its recorded sha256, so a checksum match alone proves nothing about where the path
  * actually points; this check is the loader's own, independent guard and runs on every read here,
  * regardless of what the schema did or didn't catch.
+ *
+ * A lexical check alone would miss a `file` that resolves lexically inside `dir` but is itself a
+ * symlink (or sits under a symlinked directory) pointing outside it, so — mirroring
+ * packages/cli/src/config.ts and deployment.ts — this also resolves both `dir` and the candidate
+ * path with realpath and re-checks containment on the resolved paths. A `file` that does not exist
+ * throws a clear "is missing" error instead of a raw ENOENT.
  */
 export function containedPath(dir: string, file: string): string {
   const base = resolve(dir);
   const resolved = resolve(base, file);
   if (resolved !== base && !resolved.startsWith(base + sep)) {
+    throw new Error(`release file ${file} is outside the release directory`);
+  }
+  let realBase: string;
+  let realTarget: string;
+  try {
+    realBase = realpathSync(base);
+    realTarget = realpathSync(resolved);
+  } catch (error) {
+    if (error instanceof Error && (error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error(`release file ${file} is missing`);
+    }
+    throw error;
+  }
+  if (realTarget !== realBase && !realTarget.startsWith(realBase + sep)) {
     throw new Error(`release file ${file} is outside the release directory`);
   }
   return resolved;
