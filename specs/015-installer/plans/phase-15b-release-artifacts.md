@@ -876,7 +876,7 @@ git commit -m "feat(release): verify releases and check reproducibility in CI"
 **Interfaces:**
 - Produces:
   - `packCli(input: { version: string; out: string; name?: string }): Promise<{ tarball: string }>`.
-    The default `name` is `@agentx/cli`.
+    The default `name` is `@charterarc/agentx`.
   - `pack-cli.ts` writes `out/package/bin/agentx.mjs` (a single esbuild bundle), a generated
     `out/package/package.json`, and `README.md`, then runs `npm pack` into `out`.
   - `main.ts` uses `declare const __AGENTX_VERSION__: string | undefined;` and
@@ -910,7 +910,7 @@ describe("publishable CLI package", () => {
     const out = await mkdtemp(join(tmpdir(), "agentx-pack-"));
     const { tarball } = await packCli({ version: "1.2.3", out });
     const manifest = JSON.parse(await readFile(join(out, "package", "package.json"), "utf8")) as Record<string, unknown>;
-    expect(manifest).toMatchObject({ name: "@agentx/cli", version: "1.2.3", bin: { agentx: "bin/agentx.mjs" }, license: "UNLICENSED" });
+    expect(manifest).toMatchObject({ name: "@charterarc/agentx", version: "1.2.3", bin: { agentx: "bin/agentx.mjs" }, license: "UNLICENSED" });
     expect(manifest.dependencies).toBeUndefined();
 
     const project = await mkdtemp(join(tmpdir(), "agentx-install-"));
@@ -967,7 +967,7 @@ git commit -m "feat(release): self-contained npm package for the CLI"
   - `AGENTX_PUBLISH_ENABLED`;
   - `AGENTX_PUBLISH_ROLE_ARN`: the AWS role GitHub assumes through OIDC to push to ECR Public;
   - `AGENTX_ECR_PUBLIC_ALIAS`;
-  - `AGENTX_NPM_PACKAGE`: the default is `@agentx/cli`.
+  - `AGENTX_NPM_PACKAGE`: the default is `@charterarc/agentx`.
 - No npm token: publishing uses npm trusted publishing (OIDC). The owners publish the first
   version by hand, then enable the trusted publisher for `release.yml`. The workflow upgrades npm
   to 11 and runs `npm publish --provenance`.
@@ -1063,7 +1063,7 @@ jobs:
       - run: npm install -g npm@11
       - env:
           VERSION: ${{ inputs.version || github.ref_name }}
-          NAME: ${{ vars.AGENTX_NPM_PACKAGE || '@agentx/cli' }}
+          NAME: ${{ vars.AGENTX_NPM_PACKAGE || '@charterarc/agentx' }}
         run: |
           VERSION="${VERSION#v}"
           npm run release:pack-cli -- --version "$VERSION" --name "$NAME" --out "$RUNNER_TEMP/cli"
