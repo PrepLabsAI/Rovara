@@ -11,15 +11,21 @@ export const ReleaseManifestSchema = z
     version: z.string().regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/),
     gitCommit: z.string().regex(/^[a-f0-9]{40}$/),
     environmentPlaceholder: z.literal("qqenv-placeholderqq"),
-    templates: z.array(
-      z
-        .object({
-          part: z.enum(STACK_PARTS),
-          file: z.string(),
-          sha256: Sha256,
-        })
-        .strict(),
-    ),
+    templates: z
+      .array(
+        z
+          .object({
+            region: z.string().regex(/^[a-z]{2}(-[a-z]+)+-\d$/),
+            part: z.enum(STACK_PARTS),
+            file: z.string(),
+            sha256: Sha256,
+          })
+          .strict(),
+      )
+      .refine(
+        (templates) => new Set(templates.map((t) => `${t.region}/${t.part}`)).size === templates.length,
+        "each (region, part) pair must appear exactly once in templates",
+      ),
     packages: z.array(
       z
         .object({

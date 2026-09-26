@@ -18,7 +18,11 @@ describe("release builder", () => {
     const manifest = await buildRelease({ version: "1.2.3", out, gitCommit: "b".repeat(40), images: { worker } });
     expect(ReleaseManifestSchema.parse(JSON.parse(await readFile(join(out, "release.json"), "utf8")))).toEqual(manifest);
     expect(manifest.templates.map((t) => t.part)).toEqual(["access", "foundation", "identity", "runtime", "control-plane", "slack"]);
-    for (const t of manifest.templates) expect(sha(await readFile(join(out, t.file)))).toBe(t.sha256);
+    for (const t of manifest.templates) {
+      expect(t.region).toBe("us-east-1");
+      expect(t.file).toBe(`templates/us-east-1/${t.part}.template.json`);
+      expect(sha(await readFile(join(out, t.file)))).toBe(t.sha256);
+    }
     for (const p of manifest.packages) {
       expect(sha(await readFile(join(out, p.file)))).toBe(p.sha256);
       expect(p.file).toBe(`packages/${p.assetId}.zip`);
@@ -35,7 +39,7 @@ describe("release builder", () => {
     for (const t of manifest.templates) {
       const template = JSON.parse(await readFile(join(out, t.file), "utf8")) as { Parameters?: Record<string, unknown> };
       for (const name of Object.keys(template.Parameters ?? {}).filter((n) => n.startsWith("AssetParameters"))) {
-        expect(declared.has(name), `${t.part}: ${name}`).toBe(true);
+        expect(declared.has(name), `${t.region}/${t.part}: ${name}`).toBe(true);
         used.add(name);
       }
     }

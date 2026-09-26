@@ -26,6 +26,13 @@ const DEFAULT_AZ_IDS: Readonly<Record<string, readonly [string, string]>> = {
   "us-east-1": ["use1-az1", "use1-az2"],
 };
 
+/**
+ * The regions a release covers: exactly the regions with verified AgentCore Instances
+ * availability-zone IDs above. Adding a region means adding its verified zone IDs to
+ * `DEFAULT_AZ_IDS`; nothing else changes.
+ */
+export const SUPPORTED_REGIONS: readonly string[] = Object.keys(DEFAULT_AZ_IDS).sort();
+
 export interface ProductionFoundationConfiguration {
   region: string;
   availabilityZoneIds: readonly [string, string];

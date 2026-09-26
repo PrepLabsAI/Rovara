@@ -54,7 +54,10 @@ describe("release verification", () => {
     const dir = join(base, "r");
     const manifest = await buildRelease({ version: "1.2.3", out: dir, gitCommit: "c".repeat(40) });
     const dropped = manifest.templates[0]!;
-    const edited = { ...manifest, templates: manifest.templates.filter((t) => t.part !== dropped.part) };
+    const edited = {
+      ...manifest,
+      templates: manifest.templates.filter((t) => !(t.region === dropped.region && t.part === dropped.part)),
+    };
     await writeFile(join(dir, "release.json"), `${JSON.stringify(edited, null, 2)}\n`, "utf8");
     const result = await verifyRelease({ dir });
     expect(result.ok).toBe(false);
