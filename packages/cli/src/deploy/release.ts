@@ -4,7 +4,7 @@
 // package paths the deploy engine needs.
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { ReleaseManifestSchema, renderTemplate, type ReleaseManifest } from "@agentx/contracts";
 import { sha256Hex } from "./hash.js";
 import type { DeployPart } from "./parameters.js";
@@ -19,13 +19,32 @@ export interface LoadedRelease {
   regions(): string[];
 }
 
-/** Reads each entry's file relative to `dir` and compares its checksum against `entry.sha256`; a
- * missing file or a mismatch throws naming the file, exactly as release.json records it. */
+/**
+ * Resolves `file` (as recorded in release.json) against `dir` and refuses to hand back a path
+ * outside it, whether `file` is absolute or escapes via `..` segments. release.json's schema
+ * already constrains every `file` value to a safe pattern, but whoever can edit release.json also
+ * controls its recorded sha256, so a checksum match alone proves nothing about where the path
+ * actually points; this check is the loader's own, independent guard and runs on every read here,
+ * regardless of what the schema did or didn't catch.
+ */
+export function containedPath(dir: string, file: string): string {
+  const base = resolve(dir);
+  const resolved = resolve(base, file);
+  if (resolved !== base && !resolved.startsWith(base + sep)) {
+    throw new Error(`release file ${file} is outside the release directory`);
+  }
+  return resolved;
+}
+
+/** Reads each entry's file relative to `dir` (via `containedPath`) and compares its checksum
+ * against `entry.sha256`; a missing file or a mismatch throws naming the file, exactly as
+ * release.json records it. */
 async function checkFileChecksums(dir: string, entries: readonly { readonly file: string; readonly sha256: string }[]): Promise<void> {
   for (const entry of entries) {
+    const path = containedPath(dir, entry.file);
     let data: Buffer;
     try {
-      data = await readFile(join(dir, entry.file));
+      data = await readFile(path);
     } catch {
       throw new Error(`release file ${entry.file} does not match release.json`);
     }
@@ -52,7 +71,7 @@ export async function loadRelease(dir: string): Promise<LoadedRelease> {
       if (entry === undefined) {
         throw new Error(`release ${manifest.version} does not cover region ${region}`);
       }
-      const text = readFileSync(join(dir, entry.file), "utf8");
+      const text = readFileSync(containedPath(dir, entry.file), "utf8");
       return renderTemplate(text, env);
     },
     packagePath(assetId: string): string {
@@ -60,7 +79,7 @@ export async function loadRelease(dir: string): Promise<LoadedRelease> {
       if (entry === undefined) {
         throw new Error(`release ${manifest.version} has no package ${assetId}`);
       }
-      return resolve(dir, entry.file);
+      return containedPath(dir, entry.file);
     },
   };
 }

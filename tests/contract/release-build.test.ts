@@ -304,3 +304,81 @@ describe("ReleaseManifestSchema: (region, part) uniqueness", () => {
     expect(() => ReleaseManifestSchema.parse(manifest)).not.toThrow();
   });
 });
+
+// Whoever can edit release.json also controls its recorded sha256, so a checksum match alone
+// proves nothing about where a `file` path points: the schema itself must refuse any `file` value
+// that could escape the release directory, by construction (not merely by convention).
+describe("ReleaseManifestSchema: file path containment", () => {
+  const baseManifest = {
+    schemaVersion: 1 as const,
+    version: "1.2.3",
+    gitCommit: "b".repeat(40),
+    environmentPlaceholder: "qqenv-placeholderqq" as const,
+    images: {},
+  };
+  const assetId = "a".repeat(64);
+  const validPackage = {
+    assetId,
+    file: `packages/${assetId}.zip`,
+    sha256: "a".repeat(64),
+    parts: ["runtime"],
+    bucketParameter: "Bucket1",
+    keyParameter: "Key1",
+    hashParameter: "Hash1",
+    keyParameterValue: `packages/||${assetId}.zip`,
+  };
+
+  it("refuses a template file that escapes the release directory via .. segments", () => {
+    const manifest = {
+      ...baseManifest,
+      templates: [{ region: "us-east-1", part: "access", file: "templates/../../../etc/passwd", sha256: "a".repeat(64) }],
+      packages: [],
+    };
+    expect(() => ReleaseManifestSchema.parse(manifest)).toThrow();
+  });
+
+  it("refuses a template file that is an absolute path", () => {
+    const manifest = {
+      ...baseManifest,
+      templates: [{ region: "us-east-1", part: "access", file: "/etc/passwd", sha256: "a".repeat(64) }],
+      packages: [],
+    };
+    expect(() => ReleaseManifestSchema.parse(manifest)).toThrow();
+  });
+
+  it("refuses a package file that escapes the release directory via .. segments", () => {
+    const manifest = {
+      ...baseManifest,
+      templates: [],
+      packages: [{ ...validPackage, file: `packages/../../../etc/passwd` }],
+    };
+    expect(() => ReleaseManifestSchema.parse(manifest)).toThrow();
+  });
+
+  it("refuses a package file that is an absolute path", () => {
+    const manifest = {
+      ...baseManifest,
+      templates: [],
+      packages: [{ ...validPackage, file: "/etc/passwd" }],
+    };
+    expect(() => ReleaseManifestSchema.parse(manifest)).toThrow();
+  });
+
+  it("refuses a package whose file does not equal packages/<assetId>.zip", () => {
+    const manifest = {
+      ...baseManifest,
+      templates: [],
+      packages: [{ ...validPackage, file: `packages/${"b".repeat(64)}.zip` }],
+    };
+    expect(() => ReleaseManifestSchema.parse(manifest)).toThrow(/file must equal packages\/<assetId>\.zip/);
+  });
+
+  it("accepts the well-formed template and package file shapes the release builder produces", () => {
+    const manifest = {
+      ...baseManifest,
+      templates: [{ region: "us-east-1", part: "access", file: "templates/us-east-1/access.template.json", sha256: "a".repeat(64) }],
+      packages: [validPackage],
+    };
+    expect(() => ReleaseManifestSchema.parse(manifest)).not.toThrow();
+  });
+});

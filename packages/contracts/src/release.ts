@@ -5,6 +5,16 @@ const Sha256 = z.string().regex(/^[a-f0-9]{64}$/);
 /** An image reference pinned to a digest (never a mutable tag). */
 export const ImageDigest = z.string().regex(/^[^@\s]+@sha256:[a-f0-9]{64}$/);
 
+// Both patterns are anchored and admit no "/" inside a segment and no ".." or leading "/", so a
+// file recorded in release.json can never name a path outside the release directory by
+// construction: there is no character class or literal in either pattern that a traversal or an
+// absolute path could match. packages/cli/src/deploy/release.ts still re-checks containment at
+// load time (defense in depth), but the schema is the first and strongest line of defense because
+// whoever can edit release.json also controls its recorded sha256, so a checksum match alone
+// proves nothing about where the path points.
+const TEMPLATE_FILE_PATTERN = /^templates\/[a-z0-9-]+\/[a-z-]+\.template\.json$/;
+const PACKAGE_FILE_PATTERN = /^packages\/[a-f0-9]{64}\.zip$/;
+
 export const ReleaseManifestSchema = z
   .object({
     schemaVersion: z.literal(1),
@@ -17,7 +27,7 @@ export const ReleaseManifestSchema = z
           .object({
             region: z.string().regex(/^[a-z]{2}(-[a-z]+)+-\d$/),
             part: z.enum(STACK_PARTS),
-            file: z.string(),
+            file: z.string().regex(TEMPLATE_FILE_PATTERN),
             sha256: Sha256,
           })
           .strict(),
@@ -30,7 +40,7 @@ export const ReleaseManifestSchema = z
       z
         .object({
           assetId: z.string().regex(/^[a-f0-9]{64}$/),
-          file: z.string(),
+          file: z.string().regex(PACKAGE_FILE_PATTERN),
           sha256: Sha256,
           parts: z.array(z.string()).min(1),
           bucketParameter: z.string(),
@@ -38,7 +48,8 @@ export const ReleaseManifestSchema = z
           hashParameter: z.string(),
           keyParameterValue: z.string(),
         })
-        .strict(),
+        .strict()
+        .refine((pkg) => pkg.file === `packages/${pkg.assetId}.zip`, "file must equal packages/<assetId>.zip"),
     ),
     images: z.object({ worker: ImageDigest.optional(), slack: ImageDigest.optional() }).strict(),
   })

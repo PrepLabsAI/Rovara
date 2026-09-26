@@ -107,6 +107,19 @@ function checkedImageOverride(uri: string, which: "worker" | "slack"): string {
   return uri;
 }
 
+/**
+ * The image URI for `which`: the answers' override when given (validated to be a digest
+ * reference, used as-is), otherwise the release's public image mapped through the account's
+ * pull-through cache. Only the non-override path needs the access stack's `PullThroughPrefix`
+ * output, so an override lets `runtime`/`slack` resolve without it.
+ */
+function resolvedImage(answers: InstallAnswers, which: "worker" | "slack", outputs: Partial<Record<DeployPart, StackOutputs>>): string {
+  const override = answers.images?.[which];
+  if (override !== undefined) return checkedImageOverride(override, which);
+  const prefix = required(outputs, "access", "PullThroughPrefix", answers.env);
+  return privateImageUri(requiredImage(answers.release, which), imageTarget(answers, prefix));
+}
+
 /** Every release package deployed with `part`: the asset parameters that stack's template declares. */
 function packageParameters(release: ReleaseManifest, part: DeployPart, outputs: Partial<Record<DeployPart, StackOutputs>>, env: string): Record<string, string> {
   const params: Record<string, string> = {};
@@ -192,13 +205,9 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
     }
 
     case "runtime": {
-      const workerImage =
-        answers.images?.worker !== undefined
-          ? checkedImageOverride(answers.images.worker, "worker")
-          : privateImageUri(requiredImage(answers.release, "worker"), imageTarget(answers, required(outputs, "access", "PullThroughPrefix", answers.env)));
       return {
         ...base,
-        WorkerImageUri: workerImage,
+        WorkerImageUri: resolvedImage(answers, "worker", outputs),
         ControlPlaneUrl: required(outputs, "control-plane", "ApiEndpoint", answers.env),
         ModelProvider: "amazon-bedrock",
         ModelId: answers.models.worker,
@@ -207,13 +216,9 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
     }
 
     case "slack": {
-      const orchestratorImage =
-        answers.images?.slack !== undefined
-          ? checkedImageOverride(answers.images.slack, "slack")
-          : privateImageUri(requiredImage(answers.release, "slack"), imageTarget(answers, required(outputs, "access", "PullThroughPrefix", answers.env)));
       return {
         ...base,
-        OrchestratorImageUri: orchestratorImage,
+        OrchestratorImageUri: resolvedImage(answers, "slack", outputs),
         TaskRoleArn: required(outputs, "control-plane", "SlackOrchestratorTaskRoleArn", answers.env),
         ControlPlaneUrl: required(outputs, "control-plane", "ApiEndpoint", answers.env),
         SlackRequestQueueUrl: required(outputs, "control-plane", "SlackRequestQueueUrl", answers.env),

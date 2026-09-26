@@ -1,9 +1,9 @@
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { buildRelease } from "../../scripts/release/build.js";
-import { loadRelease } from "../../packages/cli/src/deploy/release.js";
+import { containedPath, loadRelease } from "../../packages/cli/src/deploy/release.js";
 
 let dir: string;
 beforeAll(async () => {
@@ -31,4 +31,29 @@ describe("loading a release for install", () => {
     await writeFile(join(tampered, manifest.packages[0]!.file), "tampered");
     await expect(loadRelease(tampered)).rejects.toThrow(manifest.packages[0]!.file);
   }, 900_000);
+
+  it("packagePath throws for an unknown asset id", async () => {
+    const release = await loadRelease(dir);
+    expect(() => release.packagePath("f".repeat(64))).toThrow(/release 1\.2\.3 has no package/);
+  });
+});
+
+// The schema (packages/contracts/src/release.ts) already refuses a release.json whose `file`
+// values could escape the release directory, but the loader must not rely on that alone: whoever
+// can edit release.json also controls its recorded sha256, so a checksum match alone proves
+// nothing about where the path points. containedPath is the loader's own, independent guard;
+// these tests call it directly, bypassing the schema entirely, so its containment check is proven
+// on its own rather than merely inferred from the schema tests passing.
+describe("containedPath: the loader's own path-containment guard, independent of the schema", () => {
+  it("refuses a file that escapes the release directory via .. segments, naming it", () => {
+    expect(() => containedPath(dir, "../../../etc/passwd")).toThrow("release file ../../../etc/passwd is outside the release directory");
+  });
+
+  it("refuses an absolute file path, naming it", () => {
+    expect(() => containedPath(dir, "/etc/passwd")).toThrow("release file /etc/passwd is outside the release directory");
+  });
+
+  it("accepts a legitimate path inside the release directory", () => {
+    expect(containedPath(dir, "templates/us-east-1/access.template.json")).toBe(resolve(dir, "templates/us-east-1/access.template.json"));
+  });
 });

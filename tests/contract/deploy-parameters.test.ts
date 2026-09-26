@@ -198,4 +198,30 @@ describe("deploy parameters", () => {
     expect(stackParameters("runtime", withOverrides, outputs).WorkerImageUri).toBe(withOverrides.images.worker);
     expect(() => stackParameters("runtime", { ...answers(), images: { worker: "x/y:latest" } }, outputs)).toThrow("image override for worker must be referenced by digest");
   });
+
+  it("uses a slack image override as-is, and only by digest", () => {
+    const withOverrides = { ...answers(), images: { slack: `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-slack-production@sha256:${d("f")}` } };
+    expect(stackParameters("slack", withOverrides, outputs).OrchestratorImageUri).toBe(withOverrides.images.slack);
+    expect(() => stackParameters("slack", { ...answers(), images: { slack: "x/y:latest" } }, outputs)).toThrow("image override for slack must be referenced by digest");
+  });
+
+  it("a worker image override does not require the access stack's PullThroughPrefix output", () => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop the key
+    const { PullThroughPrefix: _prefixGone, ...accessNoPrefix } = outputs.access;
+    const withOverride = { ...answers(), images: { worker: `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-worker-production@sha256:${d("e")}` } };
+    expect(() => stackParameters("runtime", withOverride, { ...outputs, access: accessNoPrefix })).not.toThrow();
+  });
+
+  it("a slack image override does not require the access stack's PullThroughPrefix output", () => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop the key
+    const { PullThroughPrefix: _prefixGone, ...accessNoPrefix } = outputs.access;
+    const withOverride = { ...answers(), images: { slack: `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-slack-production@sha256:${d("f")}` } };
+    expect(() => stackParameters("slack", withOverride, { ...outputs, access: accessNoPrefix })).not.toThrow();
+  });
+
+  it("without an override, the slack stack still requires the access stack's PullThroughPrefix output, naming it", () => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop the key
+    const { PullThroughPrefix: _prefixGone, ...accessNoPrefix } = outputs.access;
+    expect(() => stackParameters("slack", answers(), { ...outputs, access: accessNoPrefix })).toThrow("stack agentx-staging-access has no output PullThroughPrefix");
+  });
 });
