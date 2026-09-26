@@ -1,6 +1,7 @@
 import { GetSecretValueCommand, PutSecretValueCommand } from "@aws-sdk/client-secrets-manager";
 import { DeleteCommand, GetCommand, PutCommand, QueryCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import {
+  CONNECTOR_SECRET_PREFIX,
   CredentialRecordSchema,
   CredentialRegistrationSchema,
   agentXError,
@@ -32,6 +33,8 @@ export interface ConnectorCredentialsConfiguration {
   secrets: SecretSource | SecretStore;
   githubApp: { ref: string; secretName: string };
   fetchImplementation?: typeof fetch;
+  /** This deployment's connector secret prefix (naming.connectorSecretPrefix); defaults to CONNECTOR_SECRET_PREFIX. */
+  connectorSecretPrefix?: string;
 }
 
 const REGISTRY_PK = "CREDENTIALS";
@@ -45,9 +48,13 @@ const tokenPartition = (ref: string) => `CREDENTIAL#${ref}`;
  * `undefined`; an access denial names only the secret. The broker role may write only secrets the
  * administrator tagged `agentx-writable: refresh-token` (see infra/lib/control-plane.ts).
  */
-export function secretsManagerSource(client: {
-  send(command: GetSecretValueCommand | PutSecretValueCommand): Promise<{ SecretString?: string; SecretBinary?: Uint8Array }>;
-}): SecretStore {
+export function secretsManagerSource(
+  client: {
+    send(command: GetSecretValueCommand | PutSecretValueCommand): Promise<{ SecretString?: string; SecretBinary?: Uint8Array }>;
+  },
+  /** This deployment's (or environment's) actual connector secret prefix, named in an access-denied message. */
+  connectorSecretPrefix: string = CONNECTOR_SECRET_PREFIX,
+): SecretStore {
   return {
     async write(name, value) {
       await client.send(new PutSecretValueCommand({ SecretId: name, SecretString: value }));
@@ -61,7 +68,7 @@ export function secretsManagerSource(client: {
         const errorName = error instanceof Error ? error.name : undefined;
         if (errorName === "ResourceNotFoundException") return undefined;
         if (errorName === "AccessDeniedException") {
-          throw new CredentialUnavailable(`AgentX cannot read secret ${name}; connector secrets must be named agentx/connectors/<name> in this account and region, or its KMS key does not allow the AgentX broker`);
+          throw new CredentialUnavailable(`AgentX cannot read secret ${name}; connector secrets must be named ${connectorSecretPrefix}<name> in this account and region, or its KMS key does not allow the AgentX broker`);
         }
         // These name a permanent problem with the secret itself (its ciphertext, its KMS key or
         // its deletion state), never a transient AWS fault, so a retry would never help.
@@ -213,6 +220,10 @@ export class CredentialRegistry {
     const parsed = CredentialRegistrationSchema.safeParse(body);
     if (!parsed.success) throw agentXError("CONFIG_INVALID", "invalid credential registration");
     const registration = parsed.data;
+    const prefix = this.options.connectorSecretPrefix ?? CONNECTOR_SECRET_PREFIX;
+    if (!registration.secretName.startsWith(prefix)) {
+      throw agentXError("CONFIG_INVALID", `secret name must be ${prefix}<name> in this deployment`);
+    }
     if (registration.ref === this.options.githubApp.ref) {
       throw agentXError("CONFIG_INVALID", `${registration.ref} is the built-in GitHub App credential and cannot be replaced`);
     }

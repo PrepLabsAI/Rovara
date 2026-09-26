@@ -7,11 +7,16 @@ import { pathToFileURL } from "node:url";
 import {
   AgentXError,
   AgentXNameSchema,
+  DEFAULT_ENVIRONMENT,
+  EnvironmentNameSchema,
   WorkspaceDeploymentModeSchema,
   agentXError,
   type ProjectDefinition,
 } from "@agentx/contracts";
+import { CloudFormationClient } from "@aws-sdk/client-cloudformation";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
+import { SSMClient } from "@aws-sdk/client-ssm";
+import { STSClient } from "@aws-sdk/client-sts";
 import { Command } from "commander";
 import { authorizeCredential, expectedAccountEmail, secretsManagerAuthorizeSecrets, type AuthorizeSecrets } from "./admin/authorize.js";
 import { listCredentials, registerCredential } from "./admin/credential.js";
@@ -22,13 +27,19 @@ import { exportTurns, parseSince } from "./admin/turns.js";
 import { loginWithPkce, openSystemBrowser, tokenStoreKey } from "./auth.js";
 import { loadProjectConfig } from "./config.js";
 import { loadDeploymentSettings, type DeploymentSettings } from "./deployment.js";
+import { cloudFormationStackReader, stsCallerIdentity, type CallerIdentity, type StackReader } from "./environments/adopt.js";
+import { resolveDeploymentFile } from "./environments/cache.js";
+import { runEnvAdopt, runEnvList, runEnvUse } from "./environments/commands.js";
+import { ssmParameterStore, type ParameterStore } from "./environments/parameter-store.js";
+import { settingsParameterName } from "./environments/settings.js";
 import { formatError, formatSuccess } from "./output.js";
 import { SystemCredentialTokenStore, type TokenStore } from "./token-store.js";
 
 interface GlobalOptions {
   project?: string;
   configDir: string;
-  deploymentFile: string;
+  deploymentFile?: string;
+  env: string;
   allowLoopback: boolean;
   json: boolean;
 }
@@ -49,11 +60,48 @@ export interface CliDependencies {
     listenPort?: number;
     onListening?: (port: number) => void;
   };
+  /** Named-environment overrides, for tests: the SSM-backed store, the local cache's home directory, and env adopt's AWS readers. */
+  environments?: {
+    store?: ParameterStore;
+    home?: string;
+    sts?: CallerIdentity;
+    stacks?: StackReader;
+    /**
+     * Overrides how `env list` and `env use` build their region-scoped SSM client, for tests: lets
+     * a test observe the --region the CLI passed into client construction even when `store` above
+     * also overrides the client's actual use, so that override can't quietly bypass the client.
+     */
+    ssmClient?: (region?: string) => SSMClient;
+  };
 }
 
 interface AuthenticatedDeployment {
   settings: DeploymentSettings;
   accessToken: string;
+}
+
+/**
+ * The AWS SDK clients `env adopt` reads from, scoped to its `--region` (never the ambient default
+ * region: adopt must read the deployment in the region the operator names, not wherever the AWS
+ * profile happens to point). Exported so a test can assert the region reaches client construction
+ * without making any network call (constructing a client, or reading its resolved `config.region`,
+ * never calls AWS).
+ */
+export function environmentAdoptClients(region: string): { ssm: SSMClient; cloudFormation: CloudFormationClient; sts: STSClient } {
+  return {
+    ssm: new SSMClient({ region }),
+    cloudFormation: new CloudFormationClient({ region }),
+    sts: new STSClient({ region }),
+  };
+}
+
+/**
+ * The SSM client `env list` and `env use` read from: scoped to an explicit `--region` when given,
+ * the ambient AWS configuration otherwise. Exported so a test can assert the region reaches client
+ * construction without making any network call, the same way `environmentAdoptClients` is tested.
+ */
+export function environmentSsmClient(region?: string): SSMClient {
+  return new SSMClient(region === undefined ? {} : { region });
 }
 
 export function createCliProgram(dependencies: CliDependencies = {}): Command {
@@ -63,6 +111,37 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     stdout: dependencies.stdout ?? process.stdout,
     stderr: dependencies.stderr ?? process.stderr,
   };
+  // Where `agentx env use` caches settings and, for production only, where the legacy
+  // deployment file lives.
+  const home = dependencies.environments?.home ?? homedir();
+  const parameterStore = (region?: string): ParameterStore => {
+    // Always built from the given region, even when a test overrides the store below: env list and
+    // env use must read the account/region the operator names, never an ambient default. A test can
+    // substitute how this client itself is built (environments.ssmClient) to observe that, the same
+    // way env adopt's client construction is independently testable.
+    const client = (dependencies.environments?.ssmClient ?? environmentSsmClient)(region);
+    return dependencies.environments?.store ?? ssmParameterStore(client);
+  };
+
+  /** The deployment settings for the selected --env: an explicit --deployment-file wins, then the environment cache, then, for production only, the legacy ~/.agentx/deployment.yaml. */
+  async function deploymentSettings(options: GlobalOptions): Promise<DeploymentSettings> {
+    const path = await resolveDeploymentFile({
+      home,
+      env: options.env,
+      ...(options.deploymentFile === undefined ? {} : { explicitFile: options.deploymentFile }),
+    });
+    return loadDeploymentSettings({ path, allowLoopback: options.allowLoopback, expectedEnv: options.env });
+  }
+
+  async function authenticate(
+    options: GlobalOptions,
+    tokenStore: TokenStore,
+  ): Promise<AuthenticatedDeployment> {
+    const settings = await deploymentSettings(options);
+    const tokens = await tokenStore.get(tokenStoreKey(settings.auth));
+    if (!tokens || tokens.expiresAt <= Date.now()) throw agentXError("AUTH_REQUIRED", "run agentx login");
+    return { settings, accessToken: tokens.accessToken };
+  }
 
   const program = new Command()
     .name("agentx")
@@ -70,9 +149,19 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .version("0.1.0")
     .option("--project <project-name>", "select a locally configured AgentX project")
     .option("--config-dir <directory>", "project configuration directory", join(homedir(), ".agentx/projects"))
-    .option("--deployment-file <path>", "AgentX deployment settings", join(homedir(), ".agentx/deployment.yaml"))
+    .option("--deployment-file <path>", "AgentX deployment settings; defaults to this environment's local cache, or, for production, ~/.agentx/deployment.yaml")
+    .option("--env <name>", "AgentX environment", DEFAULT_ENVIRONMENT)
     .option("--allow-loopback", "allow loopback HTTP endpoints for local testing only", false)
     .option("--json", "emit stable machine-readable output", false);
+
+  // Refuse an invalid --env before any command runs, so a malformed name never reaches AWS.
+  program.hook("preAction", (_program, actionCommand) => {
+    const { env } = actionCommand.optsWithGlobals<GlobalOptions>();
+    const parsed = EnvironmentNameSchema.safeParse(env);
+    if (!parsed.success) {
+      throw agentXError("CONFIG_INVALID", `invalid --env ${JSON.stringify(env)}: ${parsed.error.issues[0]?.message ?? "invalid environment name"}`);
+    }
+  });
 
   program
     .command("login")
@@ -181,13 +270,13 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       services.stdout.write(formatSuccess(result, globals.json));
     });
 
-  const adminCredential = admin.command("credential").description("register connector credentials stored in Secrets Manager under agentx/connectors/");
+  const adminCredential = admin.command("credential").description("register connector credentials stored in Secrets Manager under agentx/connectors/ or agentx/<env>/connectors/");
   adminCredential
     .command("register")
     .description("register or replace a credential reference; the secret must already exist")
     .requiredOption("--ref <reference>", "credential reference used by connectors' credentialRef")
     .requiredOption("--type <type>", "static-secret, oauth-client-credentials or oauth-refresh-token")
-    .requiredOption("--secret <name>", "Secrets Manager secret name, agentx/connectors/<name>")
+    .requiredOption("--secret <name>", "Secrets Manager secret name, agentx/connectors/<name> or agentx/<env>/connectors/<name>")
     .action(async (options: { ref: string; type: string; secret: string }, command: Command) => {
       const globals = globalOptions(command);
       const { settings, accessToken } = await authenticate(globals, services.tokenStore);
@@ -197,7 +286,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .command("authorize")
     .description("sign the connector's bot user in once in a browser, store its refresh token in the secret, and register it as oauth-refresh-token")
     .requiredOption("--ref <reference>", "credential reference used by connectors' credentialRef")
-    .requiredOption("--secret <name>", "Secrets Manager secret holding the app's {\"clientId\", \"clientSecret\"}, agentx/connectors/<name>")
+    .requiredOption("--secret <name>", "Secrets Manager secret holding the app's {\"clientId\", \"clientSecret\"}, agentx/connectors/<name> or agentx/<env>/connectors/<name>")
     .requiredOption("--provider <name>", "whose sign-in page to use: asana")
     .option("--region <region>", "AWS region of the secret; defaults to your AWS configuration")
     .option("--no-browser", "do not open a browser; only print the sign-in URL, to open in a private window signed in as the bot user")
@@ -300,6 +389,63 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       }
     });
 
+  const envCommand = program.command("env").description("AgentX environments in this AWS account and region");
+  envCommand
+    .command("list")
+    .description("list the environments installed in this AWS account and region")
+    .option("--region <region>", "AWS region to list environments in; defaults to your AWS configuration")
+    .action(async (options: { region?: string }, command: Command) => {
+      const globals = globalOptions(command);
+      const environments = await runEnvList(parameterStore(options.region));
+      if (globals.json) {
+        services.stdout.write(formatSuccess({ environments }, true));
+      } else {
+        services.stdout.write(
+          environments.length > 0
+            ? environments.map((name) => `${name}\n`).join("")
+            : "no environments in this account and region\n",
+        );
+      }
+    });
+  envCommand
+    .command("use")
+    .description("rebuild the selected --env's local settings cache from SSM")
+    .option("--region <region>", "AWS region of the environment's SSM parameters; defaults to your AWS configuration")
+    .action(async (options: { region?: string }, command: Command) => {
+      const globals = globalOptions(command);
+      const result = await runEnvUse({ store: parameterStore(options.region), home, env: globals.env });
+      services.stdout.write(
+        globals.json
+          ? formatSuccess(result, true)
+          : `Using environment ${result.env} (${result.controlPlaneUrl}); settings saved to ${result.path}\n`,
+      );
+    });
+  envCommand
+    .command("adopt")
+    .description("register the existing deployment (fixed legacy stack names) as the selected --env, reading its CloudFormation stacks; never changes them")
+    .requiredOption("--region <region>", "AWS region of the existing deployment")
+    .option("--client-id <id>", "OIDC/Cognito app client ID; defaults to the control plane's OidcAudience")
+    .action(async (options: { region: string; clientId?: string }, command: Command) => {
+      const globals = globalOptions(command);
+      // Always built from --region, even when a test overrides the higher-level store/stacks/sts
+      // below: adopt must read the deployment in the named region, never an ambient default.
+      const clients = environmentAdoptClients(options.region);
+      const result = await runEnvAdopt({
+        store: dependencies.environments?.store ?? ssmParameterStore(clients.ssm),
+        home,
+        env: globals.env,
+        region: options.region,
+        ...(options.clientId === undefined ? {} : { clientId: options.clientId }),
+        stacks: dependencies.environments?.stacks ?? cloudFormationStackReader(clients.cloudFormation),
+        identity: dependencies.environments?.sts ?? stsCallerIdentity(clients.sts),
+      });
+      services.stdout.write(
+        globals.json
+          ? formatSuccess(result, true)
+          : `Adopted ${result.env}: ${result.controlPlaneUrl}; settings in ${settingsParameterName(result.env)}\n`,
+      );
+    });
+
   return program;
 }
 
@@ -313,20 +459,6 @@ export async function executeCli(argv = process.argv.slice(2), dependencies: Cli
     (dependencies.stderr ?? process.stderr).write(failure.text);
     return failure.exitCode;
   }
-}
-
-function deploymentSettings(options: GlobalOptions): Promise<DeploymentSettings> {
-  return loadDeploymentSettings({ path: options.deploymentFile, allowLoopback: options.allowLoopback });
-}
-
-async function authenticate(
-  options: GlobalOptions,
-  tokenStore: TokenStore,
-): Promise<AuthenticatedDeployment> {
-  const settings = await deploymentSettings(options);
-  const tokens = await tokenStore.get(tokenStoreKey(settings.auth));
-  if (!tokens || tokens.expiresAt <= Date.now()) throw agentXError("AUTH_REQUIRED", "run agentx login");
-  return { settings, accessToken: tokens.accessToken };
 }
 
 /**

@@ -5,7 +5,7 @@ describe("AgentX executable command surface", () => {
   it("exposes administration only; developers work through Slack", () => {
     const program = createCliProgram();
 
-    expect(program.commands.map((command) => command.name())).toEqual(["login", "admin"]);
+    expect(program.commands.map((command) => command.name())).toEqual(["login", "admin", "env"]);
 
     const admin = program.commands.find((command) => command.name() === "admin");
     expect(admin?.commands.map((command) => command.name())).toEqual(["project", "workspace", "slack", "credential", "turns"]);
@@ -14,6 +14,9 @@ describe("AgentX executable command surface", () => {
     expect(subcommands(admin, "slack")).toEqual(["bind", "unbind"]);
     expect(subcommands(admin, "credential")).toEqual(["register", "authorize", "list"]);
     expect(subcommands(admin, "turns")).toEqual(["export"]);
+
+    const env = program.commands.find((command) => command.name() === "env");
+    expect(env?.commands.map((command) => command.name())).toEqual(["list", "use", "adopt"]);
   });
 
   it("keeps no developer workflow or runtime routing option", () => {

@@ -15,6 +15,7 @@ import {
   AGENTCORE_INSTANCES_REGIONS,
   AGENTX_WORKSPACE_VOLUME,
 } from "./agent-runtime.js";
+import { type AgentXNaming, legacyNaming } from "./naming.js";
 
 export const AGENTX_PRODUCTION_DEPLOYMENT_MODE = "instances-ebs";
 export const AGENTX_PRODUCTION_VPC_CIDR = "10.42.0.0/16";
@@ -37,6 +38,7 @@ export interface ProductionFoundationConfiguration {
 export interface ProductionFoundationStackProps extends StackProps {
   deploymentRegion: string;
   configuration?: Partial<Omit<ProductionFoundationConfiguration, "region">>;
+  naming?: AgentXNaming;
 }
 
 export function defaultProductionAvailabilityZoneIds(
@@ -91,6 +93,7 @@ export class ProductionFoundationStack extends Stack {
 
   constructor(scope: Construct, id: string, props: ProductionFoundationStackProps) {
     super(scope, id, props);
+    const naming = props.naming ?? legacyNaming();
     const configuration = validateProductionFoundationConfiguration({
       region: props.deploymentRegion,
       availabilityZoneIds:
@@ -108,10 +111,10 @@ export class ProductionFoundationStack extends Stack {
       enableDnsHostnames: true,
       enableDnsSupport: true,
       instanceTenancy: "default",
-      tags: resourceTags("agentx-production"),
+      tags: resourceTags(naming.resourcePrefix, naming),
     });
     const internetGateway = new ec2.CfnInternetGateway(this, "InternetGateway", {
-      tags: resourceTags("agentx-production-igw"),
+      tags: resourceTags(`${naming.resourcePrefix}-igw`, naming),
     });
     const gatewayAttachment = new ec2.CfnVPCGatewayAttachment(this, "InternetGatewayAttachment", {
       internetGatewayId: internetGateway.ref,
@@ -131,11 +134,11 @@ export class ProductionFoundationStack extends Stack {
         cidrBlock: publicCidrs[index],
         mapPublicIpOnLaunch: false,
         vpcId: vpc.ref,
-        tags: resourceTags(`agentx-production-public-${suffix}`),
+        tags: resourceTags(`${naming.resourcePrefix}-public-${suffix}`, naming),
       });
       const publicRouteTable = new ec2.CfnRouteTable(this, `PublicRouteTable${suffix}`, {
         vpcId: vpc.ref,
-        tags: resourceTags(`agentx-production-public-${suffix}`),
+        tags: resourceTags(`${naming.resourcePrefix}-public-${suffix}`, naming),
       });
       new ec2.CfnSubnetRouteTableAssociation(this, `PublicAssociation${suffix}`, {
         routeTableId: publicRouteTable.ref,
@@ -154,7 +157,7 @@ export class ProductionFoundationStack extends Stack {
         allocationId: eip.attrAllocationId,
         connectivityType: "public",
         subnetId: publicSubnet.ref,
-        tags: resourceTags(`agentx-production-nat-${suffix}`),
+        tags: resourceTags(`${naming.resourcePrefix}-nat-${suffix}`, naming),
       });
       natGateway.addResourceDependency(publicRoute);
 
@@ -163,11 +166,11 @@ export class ProductionFoundationStack extends Stack {
         cidrBlock: privateCidrs[index],
         mapPublicIpOnLaunch: false,
         vpcId: vpc.ref,
-        tags: resourceTags(`agentx-production-private-${suffix}`),
+        tags: resourceTags(`${naming.resourcePrefix}-private-${suffix}`, naming),
       });
       const privateRouteTable = new ec2.CfnRouteTable(this, `PrivateRouteTable${suffix}`, {
         vpcId: vpc.ref,
-        tags: resourceTags(`agentx-production-private-${suffix}`),
+        tags: resourceTags(`${naming.resourcePrefix}-private-${suffix}`, naming),
       });
       new ec2.CfnSubnetRouteTableAssociation(this, `PrivateAssociation${suffix}`, {
         routeTableId: privateRouteTable.ref,
@@ -193,7 +196,7 @@ export class ProductionFoundationStack extends Stack {
 
     const workerSecurityGroup = new ec2.CfnSecurityGroup(this, "WorkerSecurityGroup", {
       groupDescription: "AgentX production workers: no ingress and HTTPS-only egress",
-      groupName: "agentx-production-workers",
+      groupName: naming.workerSecurityGroupName,
       securityGroupEgress: [
         {
           ipProtocol: "tcp",
@@ -203,7 +206,7 @@ export class ProductionFoundationStack extends Stack {
           description: "HTTPS to Git providers, package registries, AWS APIs, and documentation",
         },
       ],
-      tags: resourceTags("agentx-production-workers"),
+      tags: resourceTags(naming.workerSecurityGroupName, naming),
       vpcId: vpc.ref,
     });
 
@@ -227,8 +230,8 @@ export class ProductionFoundationStack extends Stack {
     });
 
     const workspaceKey = new kms.Key(this, "WorkspaceKey", {
-      alias: "alias/agentx/production-workspaces",
-      description: "Encrypts AgentX production root and per-session workspace EBS volumes",
+      alias: naming.workspaceKeyAlias,
+      description: `Encrypts AgentX ${naming.environmentTagValue} root and per-session workspace EBS volumes`,
       enableKeyRotation: true,
       removalPolicy: RemovalPolicy.RETAIN,
     });
@@ -263,7 +266,7 @@ export class ProductionFoundationStack extends Stack {
       this,
       "AgentXProductionCapacityProvider",
       {
-        name: "agentx_production_capacity_v3",
+        name: naming.capacityProviderName,
         description: "Stable AgentX production compute and per-session EBS workspace boundary",
         permissionsConfiguration: {
           capacityProviderOperatorRoleArn: operatorRole.roleArn,
@@ -280,7 +283,7 @@ export class ProductionFoundationStack extends Stack {
                 propagatedTags: {
                   Application: "AgentX",
                   DeploymentMode: AGENTX_PRODUCTION_DEPLOYMENT_MODE,
-                  Environment: "production",
+                  Environment: naming.environmentTagValue,
                 },
               },
             },
@@ -314,7 +317,7 @@ export class ProductionFoundationStack extends Stack {
         tags: [
           { key: "Application", value: "AgentX" },
           { key: "DeploymentMode", value: AGENTX_PRODUCTION_DEPLOYMENT_MODE },
-          { key: "Environment", value: "production" },
+          { key: "Environment", value: naming.environmentTagValue },
         ],
       },
     );
@@ -335,10 +338,10 @@ export class ProductionFoundationStack extends Stack {
   }
 }
 
-function resourceTags(name: string): CfnTag[] {
+function resourceTags(name: string, naming: AgentXNaming): CfnTag[] {
   return [
     { key: "Name", value: name },
     { key: "Application", value: "AgentX" },
-    { key: "Environment", value: "production" },
+    { key: "Environment", value: naming.environmentTagValue },
   ];
 }
