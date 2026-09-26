@@ -1,4 +1,4 @@
-import { Aws, CfnCondition, CfnOutput, CfnParameter, Duration, Fn, RemovalPolicy, Stack, Token, type StackProps } from "aws-cdk-lib";
+import { Aws, CfnCondition, CfnOutput, CfnParameter, Duration, Fn, RemovalPolicy, Stack, Token, Validations, type StackProps } from "aws-cdk-lib";
 import * as ecr from "aws-cdk-lib/aws-ecr";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as s3 from "aws-cdk-lib/aws-s3";
@@ -63,11 +63,14 @@ export class AccessStack extends Stack {
     const policyScope = {
       env,
       partition: Aws.PARTITION,
-      region: this.region,
+      // Aws.REGION, not this.region: the stack's env pins a region for synthesis, but the released
+      // template must deploy into whichever region the operator picks.
+      region: Aws.REGION,
       account: this.account,
       artifactBucketArn: bucket.bucketArn,
       pullThroughPrefix: naming.pullThroughPrefix,
       cloudFormationRoleName: naming.cloudFormationRoleName,
+      runtimeName: naming.runtimeName,
     };
     // The boundary statements are built with the parameter reference and then emitted only under
     // HasPermissionsBoundary, so an environment without a boundary gets no Deny at all.
@@ -117,6 +120,15 @@ export class AccessStack extends Stack {
       policies: [{ policyName: "operate", policyDocument: { Version: "2012-10-17", Statement: operatorRoleStatements(policyScope) } }],
       permissionsBoundary: boundary,
     });
+
+    // The template validator checks PermissionsBoundary's minimum length against the Fn::If's
+    // empty-string branch; that branch is AWS::NoValue, so the property is omitted instead.
+    for (const role of [serviceRole, operatorRole]) {
+      Validations.of(role).acknowledge({
+        id: "CloudFormation-Validate::F3033",
+        reason: "PermissionsBoundary is AWS::NoValue, not an empty string, when no boundary is given",
+      });
+    }
 
     new CfnOutput(this, "ArtifactBucketName", { value: bucket.bucketName });
     new CfnOutput(this, "CloudFormationRoleArn", { value: serviceRole.attrArn });
