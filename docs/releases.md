@@ -111,11 +111,12 @@ deployment.
 
 ## If a release fails partway
 
-- Use GitHub's "Re-run failed jobs" button on the workflow run, not a fresh tag push. Re-running
-  rebuilds and re-tags the images (the images job pushes the version tag again every time it runs,
-  so that part is always safe), then continues into the jobs that failed.
-- If the GitHub release was already created before something failed later (for example, npm),
-  re-running will hit `gh release create`'s own guard and report that the release already exists.
-  `gh release create` publishes a real release, not a draft, so there is no draft to delete instead.
-  To redo that version, delete the release and its tag first, then push the tag again — or leave it
-  and cut a new patch version instead.
+- Use GitHub's "Re-run failed jobs" button on the workflow run, not a fresh tag push. It re-runs
+  only the jobs that failed (and the jobs after them); jobs that already succeeded, such as the
+  images job, are not run again, and their results are reused.
+- If only the npm job failed, "Re-run failed jobs" simply retries the npm step. Nothing else runs
+  again.
+- The one case that needs cleanup: the release job itself failing after it created the GitHub
+  release (`gh release create` is its last step, so this is rare). A re-run then reports that the
+  release already exists. `gh release create` publishes a real release, not a draft. To redo that
+  version, delete the release and its tag, then push the tag again, or cut a new patch version.

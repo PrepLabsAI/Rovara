@@ -115,7 +115,7 @@ export async function packCli(input: PackCliInput): Promise<PackCliResult> {
     // npm trusted publishing (OIDC) adds provenance automatically, with no flag and no other change
     // needed here — except that npm cross-checks this field against the source repository the
     // publish's OIDC token was minted for (release.yml checks out PrepLabsAI/AgentX), so a missing
-    // or mismatched repository.url would make that automatic provenance attach incorrectly.
+    // or mismatched repository.url would make npm reject the publish.
     repository: { type: "git", url: "git+https://github.com/PrepLabsAI/AgentX.git" },
   };
   await writeFile(join(packageDir, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");

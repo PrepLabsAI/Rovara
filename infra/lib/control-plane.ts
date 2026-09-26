@@ -30,7 +30,7 @@ export const SLACK_MAX_RECEIVE_COUNT = 5;
 // TURN_DETAILS_ATTRIBUTES in packages/contracts/src/slack-details.ts plus the table keys pk and sk
 // (required). The byTime index keys exportPk and exportSk are not needed by this policy and carry no
 // new data; they stay listed so a later projection that names them is not refused.
-// A contract test keeps the two lists equal; infra does not depend on @agentx/contracts.
+// A contract test keeps the two lists equal.
 export const TURN_DETAILS_READ_ATTRIBUTES = [
   "pk", "sk", "exportPk", "exportSk",
   "eventId", "subject", "receivedAt", "requestedBy", "disposition", "durationMs", "model", "offeredTools", "calls",
