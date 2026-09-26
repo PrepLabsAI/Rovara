@@ -2,6 +2,7 @@ import { App, Tags } from "aws-cdk-lib";
 import { AgentRuntimeStack } from "./agent-runtime.js";
 import { ControlPlaneStack } from "./control-plane.js";
 import { DemoRuntimeStack } from "./demo-runtime.js";
+import { IdentityStack } from "./identity.js";
 import { namingFromContext } from "./naming.js";
 import { ProductionFoundationStack } from "./production-foundation.js";
 import { ReleasePipelineStack } from "./release-pipeline.js";
@@ -26,6 +27,10 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
       `agentxDeploymentMode=demo-microvm is not supported with an agentxEnv context (got ${JSON.stringify(naming.env)})`,
     );
   }
+  const identityMode = app.node.tryGetContext("agentxIdentity") as string | undefined;
+  if (identityMode !== undefined && identityMode !== "cognito" && identityMode !== "oidc") {
+    throw new Error(`unsupported agentxIdentity ${JSON.stringify(identityMode)}; expected cognito, oidc, or unset`);
+  }
 
   new ControlPlaneStack(app, "AgentXControlPlane", {
     description: "AgentX authenticated control plane and durable dispatch foundation",
@@ -47,6 +52,16 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
       naming,
       ...(naming.env === undefined ? {} : { stackName: naming.stackName("foundation") }),
     });
+    // The identity stack is new with named environments; the legacy deployment brings its own OIDC
+    // provider instead. Skip it entirely when the environment opts out with agentxIdentity=oidc.
+    if (naming.env !== undefined && identityMode !== "oidc") {
+      new IdentityStack(app, "AgentXIdentity", {
+        description: "AgentX Cognito user pool, admin group and CLI app client for a named environment",
+        stackName: naming.stackName("identity"),
+        naming,
+        env: { region: deploymentRegion ?? "us-east-1" },
+      });
+    }
     new AgentRuntimeStack(app, "AgentXProductionRuntime", {
       description: "AgentX production coding runtime on stable EBS-backed capacity",
       deploymentRegion: deploymentRegion ?? "us-east-1",

@@ -26,7 +26,8 @@ export interface AgentXNaming {
   readonly taskFamily: string;
 }
 
-export const LEGACY_STACK_NAMES: Record<StackPart, string> = {
+/** The legacy deployment predates the identity stack; it has no fixed name for it. */
+export const LEGACY_STACK_NAMES: Record<Exclude<StackPart, "identity">, string> = {
   foundation: "AgentXProductionFoundation",
   runtime: "AgentXProductionRuntime",
   "control-plane": "AgentXControlPlane",
@@ -37,7 +38,10 @@ export const LEGACY_STACK_NAMES: Record<StackPart, string> = {
 export function legacyNaming(): AgentXNaming {
   return {
     env: undefined,
-    stackName: (part) => LEGACY_STACK_NAMES[part],
+    stackName: (part) => {
+      if (part === "identity") throw new Error("the legacy deployment has no identity stack");
+      return LEGACY_STACK_NAMES[part];
+    },
     workerSecurityGroupName: "agentx-production-workers",
     apiName: "agentx-control-plane",
     resourcePrefix: "agentx-production",

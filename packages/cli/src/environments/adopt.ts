@@ -6,8 +6,11 @@ import { withEnvironmentLock } from "./lock.js";
 import type { ParameterStore } from "./parameter-store.js";
 import { readEnvironmentSettings, settingsParameterName, writeEnvironmentSettings, type EnvironmentSettings } from "./settings.js";
 
-/** Must equal infra/lib/naming.ts LEGACY_STACK_NAMES (a test compares them). */
-export const ADOPTED_STACK_NAMES: Record<StackPart, string> = {
+/**
+ * Must equal infra/lib/naming.ts LEGACY_STACK_NAMES (a test compares them). The legacy deployment
+ * predates the identity stack, so it has no entry here; adopted settings leave stacks.identity unset.
+ */
+export const ADOPTED_STACK_NAMES: Record<Exclude<StackPart, "identity">, string> = {
   foundation: "AgentXProductionFoundation",
   runtime: "AgentXProductionRuntime",
   "control-plane": "AgentXControlPlane",

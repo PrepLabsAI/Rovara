@@ -242,7 +242,7 @@ and the budget.
   Secrets MUST be read from hidden prompts, or from an environment variable or file named by a flag,
   never from a flag's value.
 - **FR-021**: A new identity stack MUST create a Cognito user pool, an app client for the CLI's PKCE
-  login (localhost callback) and an `agentx-admins` group, and output the issuer and audience the
+  login (localhost callback) and an `agentx-admin` group, and output the issuer and audience the
   control plane takes. With bring-your-own OIDC, `init` MUST check that the issuer's discovery
   document is reachable and that the admin's token carries the configured admin group claim.
 

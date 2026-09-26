@@ -14,10 +14,10 @@ export const EnvironmentNameSchema = z
 
 export const DEFAULT_ENVIRONMENT = "production";
 
-export type StackPart = "foundation" | "runtime" | "control-plane" | "slack";
+export type StackPart = "foundation" | "identity" | "runtime" | "control-plane" | "slack";
 
 /** In deploy order. */
-export const STACK_PARTS: readonly StackPart[] = ["foundation", "runtime", "control-plane", "slack"];
+export const STACK_PARTS: readonly StackPart[] = ["foundation", "identity", "runtime", "control-plane", "slack"];
 
 function checked(env: string): string {
   const parsed = EnvironmentNameSchema.safeParse(env);
