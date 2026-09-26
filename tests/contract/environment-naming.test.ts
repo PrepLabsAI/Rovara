@@ -93,6 +93,26 @@ describe("environment naming", () => {
     expect(() => namingFromContext(new App({ context: { agentxEnv: "Prod" } }))).toThrow(/environment name/);
   });
 
+  it("names the access stack's pieces with the environment", () => {
+    const naming = environmentNaming("dev-2");
+    expect(naming.stackName("access")).toBe("agentx-dev-2-access");
+    expect(naming.pullThroughPrefix).toBe("agentx-dev-2");
+    expect(naming.cloudFormationRoleName).toBe("agentx-dev-2-cloudformation");
+    expect(naming.operatorRoleName).toBe("agentx-dev-2-operator");
+  });
+
+  it("keeps the pull-through prefix within ECR's 30-character limit for the longest name", () => {
+    expect(environmentNaming("abcdefghijklmnopqrst").pullThroughPrefix.length).toBeLessThanOrEqual(30);
+  });
+
+  it("has no access stack pieces for the deployment that predates environments", () => {
+    const naming = legacyNaming();
+    expect(() => naming.stackName("access")).toThrow(/named environments/);
+    expect(() => naming.pullThroughPrefix).toThrow(/named environments/);
+    expect(() => naming.cloudFormationRoleName).toThrow(/named environments/);
+    expect(() => naming.operatorRoleName).toThrow(/named environments/);
+  });
+
   it("deploys two environments in one account with no shared physical name or stack name", () => {
     const production = productionStacks(buildAgentXApp({ agentxEnv: "production" }));
     const staging = productionStacks(buildAgentXApp({ agentxEnv: "staging" }));

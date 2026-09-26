@@ -13,7 +13,7 @@ export const ReleaseManifestSchema = z
     templates: z.array(
       z
         .object({
-          part: z.enum(["foundation", "identity", "runtime", "control-plane", "slack"]),
+          part: z.enum(["access", "foundation", "identity", "runtime", "control-plane", "slack"]),
           file: z.string(),
           sha256: Sha256,
         })
