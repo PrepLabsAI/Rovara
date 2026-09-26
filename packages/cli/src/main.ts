@@ -7,11 +7,14 @@ import { pathToFileURL } from "node:url";
 import {
   AgentXError,
   AgentXNameSchema,
+  DEFAULT_ENVIRONMENT,
+  EnvironmentNameSchema,
   WorkspaceDeploymentModeSchema,
   agentXError,
   type ProjectDefinition,
 } from "@agentx/contracts";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
+import { SSMClient } from "@aws-sdk/client-ssm";
 import { Command } from "commander";
 import { authorizeCredential, expectedAccountEmail, secretsManagerAuthorizeSecrets, type AuthorizeSecrets } from "./admin/authorize.js";
 import { listCredentials, registerCredential } from "./admin/credential.js";
@@ -22,13 +25,17 @@ import { exportTurns, parseSince } from "./admin/turns.js";
 import { loginWithPkce, openSystemBrowser, tokenStoreKey } from "./auth.js";
 import { loadProjectConfig } from "./config.js";
 import { loadDeploymentSettings, type DeploymentSettings } from "./deployment.js";
+import { resolveDeploymentFile } from "./environments/cache.js";
+import { runEnvList, runEnvUse } from "./environments/commands.js";
+import { ssmParameterStore, type ParameterStore } from "./environments/parameter-store.js";
 import { formatError, formatSuccess } from "./output.js";
 import { SystemCredentialTokenStore, type TokenStore } from "./token-store.js";
 
 interface GlobalOptions {
   project?: string;
   configDir: string;
-  deploymentFile: string;
+  deploymentFile?: string;
+  env: string;
   allowLoopback: boolean;
   json: boolean;
 }
@@ -49,6 +56,11 @@ export interface CliDependencies {
     listenPort?: number;
     onListening?: (port: number) => void;
   };
+  /** Named-environment overrides, for tests: the SSM-backed store and the local cache's home directory. */
+  environments?: {
+    store?: ParameterStore;
+    home?: string;
+  };
 }
 
 interface AuthenticatedDeployment {
@@ -63,6 +75,30 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     stdout: dependencies.stdout ?? process.stdout,
     stderr: dependencies.stderr ?? process.stderr,
   };
+  // Where `agentx env use` caches settings and, for production only, where the legacy
+  // deployment file lives.
+  const home = dependencies.environments?.home ?? homedir();
+  const parameterStore = (): ParameterStore => dependencies.environments?.store ?? ssmParameterStore(new SSMClient({}));
+
+  /** The deployment settings for the selected --env: an explicit --deployment-file wins, then the environment cache, then, for production only, the legacy ~/.agentx/deployment.yaml. */
+  async function deploymentSettings(options: GlobalOptions): Promise<DeploymentSettings> {
+    const path = await resolveDeploymentFile({
+      home,
+      env: options.env,
+      ...(options.deploymentFile === undefined ? {} : { explicitFile: options.deploymentFile }),
+    });
+    return loadDeploymentSettings({ path, allowLoopback: options.allowLoopback, expectedEnv: options.env });
+  }
+
+  async function authenticate(
+    options: GlobalOptions,
+    tokenStore: TokenStore,
+  ): Promise<AuthenticatedDeployment> {
+    const settings = await deploymentSettings(options);
+    const tokens = await tokenStore.get(tokenStoreKey(settings.auth));
+    if (!tokens || tokens.expiresAt <= Date.now()) throw agentXError("AUTH_REQUIRED", "run agentx login");
+    return { settings, accessToken: tokens.accessToken };
+  }
 
   const program = new Command()
     .name("agentx")
@@ -70,9 +106,19 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .version("0.1.0")
     .option("--project <project-name>", "select a locally configured AgentX project")
     .option("--config-dir <directory>", "project configuration directory", join(homedir(), ".agentx/projects"))
-    .option("--deployment-file <path>", "AgentX deployment settings", join(homedir(), ".agentx/deployment.yaml"))
+    .option("--deployment-file <path>", "AgentX deployment settings; defaults to this environment's local cache, or, for production, ~/.agentx/deployment.yaml")
+    .option("--env <name>", "AgentX environment", DEFAULT_ENVIRONMENT)
     .option("--allow-loopback", "allow loopback HTTP endpoints for local testing only", false)
     .option("--json", "emit stable machine-readable output", false);
+
+  // Refuse an invalid --env before any command runs, so a malformed name never reaches AWS.
+  program.hook("preAction", (_program, actionCommand) => {
+    const { env } = actionCommand.optsWithGlobals<GlobalOptions>();
+    const parsed = EnvironmentNameSchema.safeParse(env);
+    if (!parsed.success) {
+      throw agentXError("CONFIG_INVALID", `invalid --env ${JSON.stringify(env)}: ${parsed.error.issues[0]?.message ?? "invalid environment name"}`);
+    }
+  });
 
   program
     .command("login")
@@ -300,6 +346,32 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       }
     });
 
+  const envCommand = program.command("env").description("AgentX environments in this AWS account and region");
+  envCommand
+    .command("list")
+    .description("list the environments installed in this AWS account and region")
+    .action(async (_options: unknown, command: Command) => {
+      const globals = globalOptions(command);
+      const environments = await runEnvList(parameterStore());
+      services.stdout.write(
+        globals.json
+          ? `${JSON.stringify({ environments })}\n`
+          : environments.map((name) => `${name}\n`).join(""),
+      );
+    });
+  envCommand
+    .command("use")
+    .description("rebuild the selected --env's local settings cache from SSM")
+    .action(async (_options: unknown, command: Command) => {
+      const globals = globalOptions(command);
+      const result = await runEnvUse({ store: parameterStore(), home, env: globals.env });
+      services.stdout.write(
+        globals.json
+          ? `${JSON.stringify(result)}\n`
+          : `Using environment ${result.env} (${result.controlPlaneUrl}); settings saved to ${result.path}\n`,
+      );
+    });
+
   return program;
 }
 
@@ -313,20 +385,6 @@ export async function executeCli(argv = process.argv.slice(2), dependencies: Cli
     (dependencies.stderr ?? process.stderr).write(failure.text);
     return failure.exitCode;
   }
-}
-
-function deploymentSettings(options: GlobalOptions): Promise<DeploymentSettings> {
-  return loadDeploymentSettings({ path: options.deploymentFile, allowLoopback: options.allowLoopback });
-}
-
-async function authenticate(
-  options: GlobalOptions,
-  tokenStore: TokenStore,
-): Promise<AuthenticatedDeployment> {
-  const settings = await deploymentSettings(options);
-  const tokens = await tokenStore.get(tokenStoreKey(settings.auth));
-  if (!tokens || tokens.expiresAt <= Date.now()) throw agentXError("AUTH_REQUIRED", "run agentx login");
-  return { settings, accessToken: tokens.accessToken };
 }
 
 /**
