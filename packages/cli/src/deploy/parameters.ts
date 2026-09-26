@@ -17,7 +17,16 @@ export interface InstallAnswers {
   partition?: string;
   release: ReleaseManifest;
   models: { orchestrator: string; classifier: string; worker: string };
-  identity: { mode: "cognito" } | { mode: "oidc"; issuer: string; audience: string };
+  identity:
+    | { mode: "cognito" }
+    | {
+        mode: "oidc";
+        issuer: string;
+        audience: string;
+        /** Required together: bringing your own OIDC provider means there is no identity stack's fixed admin group to fall back on. */
+        adminClaim?: string;
+        adminValues?: string[];
+      };
   github: { account: string; appId: string; installationId: string; privateKeySecretArn: string; credentialRef?: string };
   /** The value; the caller reads it from Secrets Manager, never logs it. */
   callbackSigningKey: string;
@@ -46,8 +55,21 @@ function withoutIdentityWhenOidc(order: DeployPart[], identityMode: "cognito" | 
 
 const PUBLIC_ECR_PREFIX = "public.ecr.aws/";
 
-/** public.ecr.aws/<alias>/<repo>@sha256:<d> → <account>.dkr.ecr.<region>.amazonaws.com/<prefix>/<alias>/<repo>@sha256:<d> */
-export function privateImageUri(publicRef: string, target: { account: string; region: string; prefix: string }): string {
+/** ECR's own DNS suffix per partition (not every partition's general service-endpoint suffix: aws-us-gov's ECR is still under amazonaws.com). */
+const ECR_HOST_SUFFIX: Readonly<Record<string, string>> = {
+  aws: "amazonaws.com",
+  "aws-cn": "amazonaws.com.cn",
+  "aws-us-gov": "amazonaws.com",
+};
+
+function ecrHostSuffix(partition: string): string {
+  const suffix = ECR_HOST_SUFFIX[partition];
+  if (suffix === undefined) throw new Error(`unknown partition ${partition}; expected aws, aws-cn, or aws-us-gov`);
+  return suffix;
+}
+
+/** public.ecr.aws/<alias>/<repo>@sha256:<d> → <account>.dkr.ecr.<region>.<ecr host suffix for partition, default aws>/<prefix>/<alias>/<repo>@sha256:<d> */
+export function privateImageUri(publicRef: string, target: { account: string; region: string; prefix: string; partition?: string }): string {
   if (!publicRef.startsWith(PUBLIC_ECR_PREFIX)) {
     throw new Error(`image ${publicRef} is not a ${PUBLIC_ECR_PREFIX} reference`);
   }
@@ -55,7 +77,8 @@ export function privateImageUri(publicRef: string, target: { account: string; re
   if (!/@sha256:[a-f0-9]{64}$/.test(rest)) {
     throw new Error(`image ${publicRef} is not pinned to a digest`);
   }
-  return `${target.account}.dkr.ecr.${target.region}.amazonaws.com/${target.prefix}/${rest}`;
+  const hostSuffix = ecrHostSuffix(target.partition ?? "aws");
+  return `${target.account}.dkr.ecr.${target.region}.${hostSuffix}/${target.prefix}/${rest}`;
 }
 
 /** Throws the exact message a missing stack output must report. */
@@ -76,12 +99,40 @@ function requiredImage(release: ReleaseManifest, which: "worker" | "slack"): str
 function packageParameters(release: ReleaseManifest, part: DeployPart, outputs: Partial<Record<DeployPart, StackOutputs>>, env: string): Record<string, string> {
   const params: Record<string, string> = {};
   for (const pkg of release.packages) {
+    // The access stack is the one template the service role cannot deploy itself, so it is
+    // synthesized without the legacy asset-parameter machinery and has no ArtifactBucketName
+    // output of its own to resolve pkg.bucketParameter against (required() below would throw a
+    // confusing "stack agentx-<env>-access has no output ArtifactBucketName" instead of naming
+    // the actual problem: the release manifest itself is wrong).
+    if (pkg.parts.includes("access")) {
+      throw new Error(`release package ${pkg.assetId} lists "access" among its parts, but the access stack carries no zip assets`);
+    }
     if (!pkg.parts.includes(part)) continue;
     params[pkg.bucketParameter] = required(outputs, "access", "ArtifactBucketName", env);
     params[pkg.keyParameter] = pkg.keyParameterValue;
     params[pkg.hashParameter] = pkg.assetId;
   }
   return params;
+}
+
+/** The `privateImageUri` target for `answers`, carrying the partition through only when given (exactOptionalPropertyTypes forbids `partition: undefined`). */
+function imageTarget(answers: InstallAnswers, prefix: string): { account: string; region: string; prefix: string; partition?: string } {
+  return {
+    account: answers.account,
+    region: answers.region,
+    prefix,
+    ...(answers.partition === undefined ? {} : { partition: answers.partition }),
+  };
+}
+
+/** Throws when your own OIDC provider is given without naming its administrators; returns nothing for Cognito, whose template defaults (cognito:groups / ["agentx-admin"]) already match the identity stack's admin group. */
+function adminParameters(identity: InstallAnswers["identity"]): Record<string, string> {
+  if (identity.mode === "cognito") return {};
+  const { adminClaim, adminValues } = identity;
+  if (adminClaim === undefined || adminValues === undefined) {
+    throw new Error("bringing your own OIDC provider requires adminClaim and adminValues (the claim and values that mark AgentX administrators)");
+  }
+  return { AdminClaim: adminClaim, AdminValues: JSON.stringify(adminValues) };
 }
 
 /** Parameters for one stack. Throws a clear error naming the missing input or output. */
@@ -109,6 +160,7 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
         ...base,
         OidcIssuer: oidc.issuer,
         OidcAudience: oidc.audience,
+        ...adminParameters(answers.identity),
         CallbackSigningKey: answers.callbackSigningKey,
         GitHubAppAccount: answers.github.account,
         GitHubAppId: answers.github.appId,
@@ -122,7 +174,7 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
       const prefix = required(outputs, "access", "PullThroughPrefix", answers.env);
       return {
         ...base,
-        WorkerImageUri: privateImageUri(requiredImage(answers.release, "worker"), { account: answers.account, region: answers.region, prefix }),
+        WorkerImageUri: privateImageUri(requiredImage(answers.release, "worker"), imageTarget(answers, prefix)),
         ControlPlaneUrl: required(outputs, "control-plane", "ApiEndpoint", answers.env),
         ModelProvider: "amazon-bedrock",
         ModelId: answers.models.worker,
@@ -134,7 +186,7 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
       const prefix = required(outputs, "access", "PullThroughPrefix", answers.env);
       return {
         ...base,
-        OrchestratorImageUri: privateImageUri(requiredImage(answers.release, "slack"), { account: answers.account, region: answers.region, prefix }),
+        OrchestratorImageUri: privateImageUri(requiredImage(answers.release, "slack"), imageTarget(answers, prefix)),
         TaskRoleArn: required(outputs, "control-plane", "SlackOrchestratorTaskRoleArn", answers.env),
         ControlPlaneUrl: required(outputs, "control-plane", "ApiEndpoint", answers.env),
         SlackRequestQueueUrl: required(outputs, "control-plane", "SlackRequestQueueUrl", answers.env),

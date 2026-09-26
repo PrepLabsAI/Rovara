@@ -24,11 +24,11 @@ export const EnvironmentSettingsSchema = z.object({
   alertAddress: z.string().min(1).optional(),
   access: z
     .object({
-      artifactBucket: z.string(),
-      cloudFormationRoleArn: z.string(),
-      operatorRoleArn: z.string(),
-      pullThroughPrefix: z.string(),
-      permissionsBoundaryArn: z.string().optional(),
+      artifactBucket: z.string().min(1),
+      cloudFormationRoleArn: z.string().regex(/^arn:aws[a-z-]*:iam::[0-9]{12}:role\/.+$/),
+      operatorRoleArn: z.string().regex(/^arn:aws[a-z-]*:iam::[0-9]{12}:role\/.+$/),
+      pullThroughPrefix: z.string().min(1),
+      permissionsBoundaryArn: z.string().regex(/^arn:aws[a-z-]*:iam::[0-9]{12}:policy\/.+$/).optional(),
     })
     .strict()
     .optional(),

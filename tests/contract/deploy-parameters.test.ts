@@ -42,10 +42,24 @@ const outputs = {
   identity: { Issuer: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_abc", Audience: "client123" },
   "control-plane": { ApiEndpoint: "https://abc.execute-api.us-east-1.amazonaws.com", SlackOrchestratorTaskRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-control-plane-SlackTask", SlackRequestQueueUrl: "https://sqs.us-east-1.amazonaws.com/123456789012/q.fifo", SlackThreadsTableName: "t", TurnRecordsTableName: "tr", SlackThreadSessionBucketName: "b", SlackSecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:SlackSecret-x" },
 };
+// No "identity" key: your own OIDC provider means there is no identity stack to read outputs from.
+const oidcOutputs = { access: outputs.access, foundation: outputs.foundation, "control-plane": outputs["control-plane"] };
+const oidcAnswers = (): InstallAnswers => ({
+  ...answers(),
+  identity: { mode: "oidc", issuer: "https://login.example.com", audience: "api://agentx", adminClaim: "custom:roles", adminValues: ["platform-admin"] },
+});
 
 describe("deploy parameters", () => {
   it.each(["access", "foundation", "identity", "control-plane", "runtime", "slack"] as DeployPart[])("supplies every required parameter of %s and nothing unknown", (part) => {
     const params = stackParameters(part, answers(), outputs);
+    const declared = templates.get(part)!.Parameters ?? {};
+    const required = Object.entries(declared).filter(([, p]) => p.Default === undefined).map(([name]) => name);
+    expect(required.filter((name) => !(name in params))).toEqual([]);
+    expect(Object.keys(params).filter((name) => !(name in declared))).toEqual([]);
+  });
+
+  it.each(["access", "foundation", "control-plane", "runtime", "slack"] as DeployPart[])("supplies every required parameter of %s under your own OIDC and nothing unknown", (part) => {
+    const params = stackParameters(part, oidcAnswers(), oidcOutputs);
     const declared = templates.get(part)!.Parameters ?? {};
     const required = Object.entries(declared).filter(([, p]) => p.Default === undefined).map(([name]) => name);
     expect(required.filter((name) => !(name in params))).toEqual([]);
@@ -59,6 +73,14 @@ describe("deploy parameters", () => {
     expect(() => privateImageUri(`docker.io/x/y@sha256:${d("b")}`, { account: "1", region: "r", prefix: "p" })).toThrow(/public.ecr.aws/);
   });
 
+  it("derives the ECR host suffix from the target partition, defaulting to aws", () => {
+    expect(privateImageUri(`public.ecr.aws/agentx/agentx-worker@sha256:${d("b")}`, { account: "123456789012", region: "cn-north-1", prefix: "agentx-staging", partition: "aws-cn" }))
+      .toBe(`123456789012.dkr.ecr.cn-north-1.amazonaws.com.cn/agentx-staging/agentx/agentx-worker@sha256:${d("b")}`);
+    expect(privateImageUri(`public.ecr.aws/agentx/agentx-worker@sha256:${d("b")}`, { account: "123456789012", region: "us-gov-west-1", prefix: "agentx-staging", partition: "aws-us-gov" }))
+      .toBe(`123456789012.dkr.ecr.us-gov-west-1.amazonaws.com/agentx-staging/agentx/agentx-worker@sha256:${d("b")}`);
+    expect(() => privateImageUri(`public.ecr.aws/agentx/agentx-worker@sha256:${d("b")}`, { account: "1", region: "r", prefix: "p", partition: "aws-mars" })).toThrow(/partition/);
+  });
+
   it("orders a fresh install and an upgrade differently, and skips identity for your own OIDC", () => {
     expect(installOrder("cognito")).toEqual(["access", "foundation", "identity", "control-plane", "runtime", "slack"]);
     expect(upgradeOrder("cognito")).toEqual(["access", "foundation", "identity", "runtime", "control-plane", "slack"]);
@@ -67,10 +89,30 @@ describe("deploy parameters", () => {
 
   it("takes the OIDC issuer from the identity stack or from your own provider", () => {
     expect(stackParameters("control-plane", answers(), outputs)).toMatchObject({ OidcIssuer: outputs.identity.Issuer, OidcAudience: "client123" });
-    const own = { ...answers(), identity: { mode: "oidc" as const, issuer: "https://login.example.com", audience: "api://agentx" } };
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop the key
-    const { identity: _identity, ...withoutIdentity } = outputs;
-    expect(stackParameters("control-plane", own, withoutIdentity)).toMatchObject({ OidcIssuer: "https://login.example.com", OidcAudience: "api://agentx" });
+    const own = oidcAnswers();
+    expect(stackParameters("control-plane", own, oidcOutputs)).toMatchObject({ OidcIssuer: "https://login.example.com", OidcAudience: "api://agentx" });
+  });
+
+  it("requires an admin claim and values for your own OIDC, and sets them when given", () => {
+    const noAdmin = { ...answers(), identity: { mode: "oidc" as const, issuer: "https://login.example.com", audience: "api://agentx" } };
+    expect(() => stackParameters("control-plane", noAdmin, oidcOutputs)).toThrow(
+      "bringing your own OIDC provider requires adminClaim and adminValues (the claim and values that mark AgentX administrators)",
+    );
+    expect(stackParameters("control-plane", oidcAnswers(), oidcOutputs)).toMatchObject({
+      AdminClaim: "custom:roles",
+      AdminValues: JSON.stringify(["platform-admin"]),
+    });
+  });
+
+  it("keeps the Cognito template defaults (never sets AdminClaim/AdminValues) when using the identity stack", () => {
+    const params = stackParameters("control-plane", answers(), outputs);
+    expect(params).not.toHaveProperty("AdminClaim");
+    expect(params).not.toHaveProperty("AdminValues");
+  });
+
+  it("passes the GitHub App credential ref through when given", () => {
+    const withRef = { ...answers(), github: { ...answers().github, credentialRef: "github-custom-ref" } };
+    expect(stackParameters("control-plane", withRef, outputs)).toMatchObject({ GitHubAppCredentialRef: "github-custom-ref" });
   });
 
   it("names the missing output or image", () => {
@@ -79,6 +121,23 @@ describe("deploy parameters", () => {
     expect(() => stackParameters("slack", answers(), { ...outputs, foundation })).toThrow("stack agentx-staging-foundation has no output VpcId");
     const noWorker = { ...answers(), release: { ...release, images: {} } };
     expect(() => stackParameters("runtime", noWorker, outputs)).toThrow("release 1.0.0 has no worker image digest");
+  });
+
+  it("names a missing access output", () => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop the key
+    const { PullThroughPrefix: _prefixGone, ...accessNoPrefix } = outputs.access;
+    expect(() => stackParameters("runtime", answers(), { ...outputs, access: accessNoPrefix })).toThrow("stack agentx-staging-access has no output PullThroughPrefix");
+
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop the key
+    const { ArtifactBucketName: _bucketGone, ...accessNoBucket } = outputs.access;
+    expect(() => stackParameters("control-plane", answers(), { ...outputs, access: accessNoBucket })).toThrow("stack agentx-staging-access has no output ArtifactBucketName");
+  });
+
+  it("refuses a release package that lists the access stack (it has no zip assets of its own)", () => {
+    const [firstPackage] = release.packages;
+    if (firstPackage === undefined) throw new Error("test setup: the synthesized release has no packages to corrupt");
+    const badRelease: ReleaseManifest = { ...release, packages: [{ ...firstPackage, parts: ["access"] }] };
+    expect(() => stackParameters("access", { ...answers(), release: badRelease }, outputs)).toThrow(/access stack carries no zip assets/);
   });
 
   it("marks the callback signing key as secret", () => {
