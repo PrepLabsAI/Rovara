@@ -74,6 +74,21 @@ interface AuthenticatedDeployment {
   accessToken: string;
 }
 
+/**
+ * The AWS SDK clients `env adopt` reads from, scoped to its `--region` (never the ambient default
+ * region: adopt must read the deployment in the region the operator names, not wherever the AWS
+ * profile happens to point). Exported so a test can assert the region reaches client construction
+ * without making any network call (constructing a client, or reading its resolved `config.region`,
+ * never calls AWS).
+ */
+export function environmentAdoptClients(region: string): { ssm: SSMClient; cloudFormation: CloudFormationClient; sts: STSClient } {
+  return {
+    ssm: new SSMClient({ region }),
+    cloudFormation: new CloudFormationClient({ region }),
+    sts: new STSClient({ region }),
+  };
+}
+
 export function createCliProgram(dependencies: CliDependencies = {}): Command {
   const services = {
     fetchImplementation: dependencies.fetchImplementation ?? fetch,
@@ -85,8 +100,6 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
   // deployment file lives.
   const home = dependencies.environments?.home ?? homedir();
   const parameterStore = (): ParameterStore => dependencies.environments?.store ?? ssmParameterStore(new SSMClient({}));
-  const callerIdentity = (): CallerIdentity => dependencies.environments?.sts ?? stsCallerIdentity(new STSClient({}));
-  const stackReader = (): StackReader => dependencies.environments?.stacks ?? cloudFormationStackReader(new CloudFormationClient({}));
 
   /** The deployment settings for the selected --env: an explicit --deployment-file wins, then the environment cache, then, for production only, the legacy ~/.agentx/deployment.yaml. */
   async function deploymentSettings(options: GlobalOptions): Promise<DeploymentSettings> {
@@ -390,14 +403,17 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--client-id <id>", "OIDC/Cognito app client ID; defaults to the control plane's OidcAudience")
     .action(async (options: { region: string; clientId?: string }, command: Command) => {
       const globals = globalOptions(command);
+      // Always built from --region, even when a test overrides the higher-level store/stacks/sts
+      // below: adopt must read the deployment in the named region, never an ambient default.
+      const clients = environmentAdoptClients(options.region);
       const result = await runEnvAdopt({
-        store: parameterStore(),
+        store: dependencies.environments?.store ?? ssmParameterStore(clients.ssm),
         home,
         env: globals.env,
         region: options.region,
         ...(options.clientId === undefined ? {} : { clientId: options.clientId }),
-        stacks: stackReader(),
-        identity: callerIdentity(),
+        stacks: dependencies.environments?.stacks ?? cloudFormationStackReader(clients.cloudFormation),
+        identity: dependencies.environments?.sts ?? stsCallerIdentity(clients.sts),
       });
       services.stdout.write(
         globals.json

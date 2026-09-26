@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { agentXError, EnvironmentNameSchema, environmentSettingsPrefix } from "@agentx/contracts";
-import type { ParameterStore } from "./parameter-store.js";
+import { ParameterExistsError, type ParameterStore } from "./parameter-store.js";
 
 export const EnvironmentSettingsSchema = z.object({
   schemaVersion: z.literal(1),
@@ -46,10 +46,17 @@ export async function readEnvironmentSettings(store: ParameterStore, env: string
   return parsed.data;
 }
 
-export async function writeEnvironmentSettings(store: ParameterStore, settings: EnvironmentSettings): Promise<void> {
+export async function writeEnvironmentSettings(store: ParameterStore, settings: EnvironmentSettings, options: { createOnly?: boolean } = {}): Promise<void> {
   const parsed = EnvironmentSettingsSchema.safeParse(settings);
   if (!parsed.success) throw agentXError("CONFIG_INVALID", `environment settings are invalid: ${parsed.error.issues[0]?.path.join(".") ?? ""} ${parsed.error.issues[0]?.message ?? ""}`.trim());
-  await store.put(settingsParameterName(parsed.data.env), JSON.stringify(parsed.data));
+  try {
+    await store.put(settingsParameterName(parsed.data.env), JSON.stringify(parsed.data), options.createOnly ? { createOnly: true } : {});
+  } catch (error) {
+    if (options.createOnly && error instanceof ParameterExistsError) {
+      throw agentXError("CONFIG_INVALID", `environment ${parsed.data.env} already has settings; nothing changed`);
+    }
+    throw error;
+  }
 }
 
 export async function listEnvironments(store: ParameterStore): Promise<string[]> {

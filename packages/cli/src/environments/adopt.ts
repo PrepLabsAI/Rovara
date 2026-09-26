@@ -1,10 +1,10 @@
 import { DescribeStacksCommand, type CloudFormationClient } from "@aws-sdk/client-cloudformation";
 import { GetCallerIdentityCommand, type STSClient } from "@aws-sdk/client-sts";
-import { agentXError, type StackPart } from "@agentx/contracts";
+import { agentXError, DEFAULT_ENVIRONMENT, type StackPart } from "@agentx/contracts";
 import { writeEnvironmentCache } from "./cache.js";
 import { withEnvironmentLock } from "./lock.js";
 import type { ParameterStore } from "./parameter-store.js";
-import { readEnvironmentSettings, writeEnvironmentSettings, type EnvironmentSettings } from "./settings.js";
+import { readEnvironmentSettings, settingsParameterName, writeEnvironmentSettings, type EnvironmentSettings } from "./settings.js";
 
 /** Must equal infra/lib/naming.ts LEGACY_STACK_NAMES (a test compares them). */
 export const ADOPTED_STACK_NAMES: Record<StackPart, string> = {
@@ -63,10 +63,15 @@ export function stsCallerIdentity(client: STSClient): CallerIdentity {
   };
 }
 
+/** Healthy means settled in a *_COMPLETE state other than a rollback or a deletion. */
+function isHealthyStatus(status: string): boolean {
+  return status.endsWith("_COMPLETE") && status !== "ROLLBACK_COMPLETE" && status !== "DELETE_COMPLETE";
+}
+
 async function healthyStack(stacks: StackReader, name: string): Promise<StackDescription> {
   const stack = await stacks.describe(name);
   if (stack === undefined) throw agentXError("CONFIG_INVALID", `stack ${name} was not found in this account and region; nothing changed`);
-  if (stack.status.endsWith("_FAILED") || stack.status === "ROLLBACK_COMPLETE") {
+  if (!isHealthyStatus(stack.status)) {
     throw agentXError("CONFIG_INVALID", `stack ${name} is ${stack.status}; fix it before adopting; nothing changed`);
   }
   return stack;
@@ -96,6 +101,9 @@ export async function adoptEnvironment(input: {
   home: string;
   now?: () => number;
 }): Promise<EnvironmentSettings> {
+  if (input.env !== DEFAULT_ENVIRONMENT) {
+    throw agentXError("CONFIG_INVALID", "only the production environment can adopt the deployment that predates environments; nothing changed");
+  }
   const now = input.now ?? Date.now;
   const caller = await input.identity.get();
   return withEnvironmentLock({ store: input.store, env: input.env, holder: caller.arn, command: "env adopt", now }, async () => {
@@ -127,8 +135,23 @@ export async function adoptEnvironment(input: {
       },
       updatedAt: new Date(now()).toISOString(),
     };
-    await writeEnvironmentSettings(input.store, settings);
-    await writeEnvironmentCache(input.home, settings);
+    await writeEnvironmentSettings(input.store, settings, { createOnly: true });
+    try {
+      await writeEnvironmentCache(input.home, settings);
+    } catch (error) {
+      const detail = errnoDetail(error);
+      throw agentXError(
+        "RUNTIME_UNAVAILABLE",
+        `settings for ${input.env} were saved to ${settingsParameterName(input.env)}, but the local cache could not be written${detail}; run agentx --env ${input.env} env use`,
+      );
+    }
     return settings;
   });
+}
+
+/** The failed write's error class and, for a Node filesystem error, its code (e.g. ENOTDIR) — never its message, which may include a local path. */
+function errnoDetail(error: unknown): string {
+  if (!(error instanceof Error)) return "";
+  const code = "code" in error && typeof (error as NodeJS.ErrnoException).code === "string" ? (error as NodeJS.ErrnoException).code : undefined;
+  return ` (${error.name}${code ? `: ${code}` : ""})`;
 }

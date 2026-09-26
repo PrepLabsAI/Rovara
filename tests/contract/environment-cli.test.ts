@@ -6,7 +6,7 @@ import type { CallerIdentity, StackReader } from "../../packages/cli/src/environ
 import { environmentCachePath, resolveDeploymentFile, writeEnvironmentCache } from "../../packages/cli/src/environments/cache.js";
 import type { ParameterStore } from "../../packages/cli/src/environments/parameter-store.js";
 import { writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
-import { executeCli } from "../../packages/cli/src/main.js";
+import { environmentAdoptClients, executeCli } from "../../packages/cli/src/main.js";
 import { InMemoryTokenStore } from "../../packages/cli/src/token-store.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 import { stagingSettings } from "../support/environment-fixtures.js";
@@ -118,6 +118,28 @@ describe("agentx env adopt", () => {
     expect(code).not.toBe(0);
     expect(JSON.parse(io.err.join(""))).toMatchObject({ ok: false, error: { code: "CONFIG_INVALID", message: expect.stringContaining("AgentXSlackOrchestrator") as unknown } });
     expect(store.values.has("/agentx/production/settings")).toBe(false);
+  });
+
+  it("refuses through the CLI when --env is not production, calling nothing", async () => {
+    const store = new MemoryParameterStore();
+    const io = capture();
+    const code = await executeCli(
+      ["--env", "staging", "--json", "env", "adopt", "--region", "us-east-1"],
+      { ...io, environments: { store, home: await home(), stacks, sts: identity } },
+    );
+    expect(code).not.toBe(0);
+    expect(JSON.parse(io.err.join(""))).toMatchObject({
+      ok: false,
+      error: { code: "CONFIG_INVALID", message: expect.stringContaining("only the production environment can adopt") as unknown },
+    });
+    expect(store.calls).toEqual([]);
+  });
+
+  it("scopes env adopt's SSM, CloudFormation and STS clients to --region", async () => {
+    const clients = environmentAdoptClients("eu-west-2");
+    expect(await clients.ssm.config.region()).toBe("eu-west-2");
+    expect(await clients.cloudFormation.config.region()).toBe("eu-west-2");
+    expect(await clients.sts.config.region()).toBe("eu-west-2");
   });
 });
 
