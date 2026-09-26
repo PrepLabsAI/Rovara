@@ -68,13 +68,30 @@ deployment.
    `944937319445` (`us-east-1`). A shorter alias, `agentx`, has been requested and is waiting on
    AWS's approval; until it is approved, images use the default alias `i7z2k3a8` instead.
 2. **A role GitHub can assume — done.** `arn:aws:iam::944937319445:role/agentx-github-release`
-   exists. It can only be assumed from a version-tag push on `PrepLabsAI/AgentX`, and it can only
-   push to the two repositories above.
+   exists. It can only be assumed from a version-tag push on `PrepLabsAI/AgentX`. Its permissions
+   let it push images only to the two repositories above, plus the two sign-in permissions ECR
+   Public itself requires to let anything push at all (`ecr-public:GetAuthorizationToken` and
+   `sts:GetServiceBearerToken`).
 3. **The npm package — partly done.** The `charterarc` npm organization exists, and the package
-   name `@charterarc/agentx` is reserved. Two steps remain: someone publishes the very first
-   version by hand (`npm login`, then `npm publish <tarball> --access public`), then turns on
-   "Trusted Publisher" on the package's npm page (GitHub Actions, `PrepLabsAI/AgentX`,
-   `release.yml`) so every later version can publish itself with no stored password.
+   name `@charterarc/agentx` is reserved. Before turning on `AGENTX_PUBLISH_ENABLED` (step 6
+   below), publish the very first version by hand:
+   1. From a checkout of the commit you are about to tag as the first release, run
+      `npm run release:pack-cli -- --version <x.y.z> --out ./cli-release` (use the exact version
+      you are about to tag, for example `0.1.0`). This writes a tarball named
+      `./cli-release/charterarc-agentx-<x.y.z>.tgz`.
+   2. `npm login`, signed in as an owner of the `charterarc` organization.
+   3. `npm publish ./cli-release/charterarc-agentx-<x.y.z>.tgz --access public`.
+   4. On the package's npm page, turn on "Trusted Publisher" (GitHub Actions,
+      `PrepLabsAI/AgentX`, `release.yml`), so every later version can publish itself with no
+      stored password.
+
+   Publish this first version under the same version number you are about to tag, and do it before
+   `AGENTX_PUBLISH_ENABLED` is set to `true`. When you later push that tag with publishing enabled,
+   the workflow's own `npm` job will try to publish that same version again — and fail, because npm
+   refuses to publish over a version already on the registry. That one failure is expected and
+   harmless: by then the images and the GitHub release have already published normally in that same
+   run, the package itself is already correctly on npm, and every version after this first one
+   publishes through npm automatically with no manual step.
 4. **A license — done.** The `LICENSE` file (FSL-1.1-ALv2) is in this repository as of this phase.
 5. **A decision still open.** `PrepLabsAI/AgentX` is a private repository today. Publishing a
    release makes the built code public: the npm package is plain, readable JavaScript, and the two
