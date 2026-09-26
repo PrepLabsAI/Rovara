@@ -5,7 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONTEXT_ENV, CONTEXT_OVERFLOW_LOCATION_ENV } from "aws-cdk-lib/cx-api";
 import { describe, expect, it } from "vitest";
-import { accumulateAsset, buildRelease, type PackageAccumulator } from "../../scripts/release/build.js";
+import { accumulateAsset, assetSignatureMismatch, buildRelease, type PackageAccumulator } from "../../scripts/release/build.js";
 import { ReleaseManifestSchema } from "../../scripts/release/manifest.js";
 import { readZipEntries } from "../support/zip-entries.js";
 
@@ -214,5 +214,93 @@ describe("accumulateAsset", () => {
     expect(() => accumulateAsset(packagesById, { ...zipAsset, s3BucketParameter: "Bucket2" }, "slack", "/tmp/dir")).toThrow(
       /different parameter names/,
     );
+  });
+});
+
+describe("assetSignatureMismatch", () => {
+  const accumulator = (overrides: Partial<PackageAccumulator> = {}): PackageAccumulator => ({
+    assetId: "a".repeat(64),
+    directory: "/tmp/dir",
+    parts: ["control-plane"],
+    bucketParameter: "Bucket1",
+    keyParameter: "Key1",
+    hashParameter: "Hash1",
+    ...overrides,
+  });
+
+  it("reports no mismatch when baseline and candidate have identical asset ids and parameter names", () => {
+    const baseline = new Map([["a".repeat(64), accumulator()]]);
+    const candidate = new Map([["a".repeat(64), accumulator({ directory: "/tmp/other-region-dir" })]]);
+    expect(assetSignatureMismatch(baseline, candidate)).toBe(false);
+  });
+
+  it("reports a mismatch when the candidate is missing an asset id present in the baseline", () => {
+    const baseline = new Map([
+      ["a".repeat(64), accumulator({ assetId: "a".repeat(64) })],
+      ["b".repeat(64), accumulator({ assetId: "b".repeat(64) })],
+    ]);
+    const candidate = new Map([["a".repeat(64), accumulator({ assetId: "a".repeat(64) })]]);
+    expect(assetSignatureMismatch(baseline, candidate)).toBe(true);
+  });
+
+  it("reports a mismatch when the candidate has an extra asset id not present in the baseline", () => {
+    const baseline = new Map([["a".repeat(64), accumulator({ assetId: "a".repeat(64) })]]);
+    const candidate = new Map([
+      ["a".repeat(64), accumulator({ assetId: "a".repeat(64) })],
+      ["b".repeat(64), accumulator({ assetId: "b".repeat(64) })],
+    ]);
+    expect(assetSignatureMismatch(baseline, candidate)).toBe(true);
+  });
+
+  it("reports a mismatch when the same asset id has a different bucketParameter", () => {
+    const baseline = new Map([["a".repeat(64), accumulator({ bucketParameter: "Bucket1" })]]);
+    const candidate = new Map([["a".repeat(64), accumulator({ bucketParameter: "Bucket2" })]]);
+    expect(assetSignatureMismatch(baseline, candidate)).toBe(true);
+  });
+
+  it("reports a mismatch when the same asset id has a different keyParameter", () => {
+    const baseline = new Map([["a".repeat(64), accumulator({ keyParameter: "Key1" })]]);
+    const candidate = new Map([["a".repeat(64), accumulator({ keyParameter: "Key2" })]]);
+    expect(assetSignatureMismatch(baseline, candidate)).toBe(true);
+  });
+
+  it("reports a mismatch when the same asset id has a different hashParameter", () => {
+    const baseline = new Map([["a".repeat(64), accumulator({ hashParameter: "Hash1" })]]);
+    const candidate = new Map([["a".repeat(64), accumulator({ hashParameter: "Hash2" })]]);
+    expect(assetSignatureMismatch(baseline, candidate)).toBe(true);
+  });
+});
+
+describe("ReleaseManifestSchema: (region, part) uniqueness", () => {
+  const template = (region: string, part: string) => ({
+    region,
+    part,
+    file: `templates/${region}/${part}.template.json`,
+    sha256: "a".repeat(64),
+  });
+
+  const baseManifest = {
+    schemaVersion: 1 as const,
+    version: "1.2.3",
+    gitCommit: "b".repeat(40),
+    environmentPlaceholder: "qqenv-placeholderqq" as const,
+    packages: [],
+    images: {},
+  };
+
+  it("refuses a manifest with a duplicate (region, part) template pair", () => {
+    const manifest = {
+      ...baseManifest,
+      templates: [template("us-east-1", "access"), template("us-east-1", "access")],
+    };
+    expect(() => ReleaseManifestSchema.parse(manifest)).toThrow(/each \(region, part\) pair must appear exactly once/);
+  });
+
+  it("accepts the same part used in two different regions", () => {
+    const manifest = {
+      ...baseManifest,
+      templates: [template("us-east-1", "access"), template("us-west-2", "access")],
+    };
+    expect(() => ReleaseManifestSchema.parse(manifest)).not.toThrow();
   });
 });

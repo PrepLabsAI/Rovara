@@ -181,7 +181,7 @@ export function accumulateAsset(packagesById: Map<string, PackageAccumulator>, a
  * asset ids, each with the same parameter names. Returns true when `candidate` (a later region)
  * disagrees with `baseline` (the first region synthesized) in either respect.
  */
-function assetSignatureMismatch(
+export function assetSignatureMismatch(
   baseline: ReadonlyMap<string, PackageAccumulator>,
   candidate: ReadonlyMap<string, PackageAccumulator>,
 ): boolean {
