@@ -1,9 +1,12 @@
-import { Stack, type App } from "aws-cdk-lib";
+import { App, CfnResource, Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
+import * as iam from "aws-cdk-lib/aws-iam";
 import { describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
+import { applyPermissionsBoundaryParameter } from "../../infra/lib/permissions-boundary.js";
 
 const stacksOf = (app: App) => app.node.children.filter((c): c is Stack => Stack.isStack(c));
+const EXISTING_BOUNDARY = "arn:aws:iam::123456789012:policy/existing-boundary";
 
 describe("permission boundary", () => {
   it("is a parameter on every environment stack and conditionally on every role", () => {
@@ -22,4 +25,27 @@ describe("permission boundary", () => {
       expect(JSON.stringify(Template.fromStack(stack).toJSON()), stack.stackName).not.toContain("PermissionsBoundaryArn");
     }
   }, 300_000);
+
+  it("throws when an iam.CfnRole already has a permissions boundary", () => {
+    const stack = new Stack(new App(), "TestStack");
+    new iam.CfnRole(stack, "RoleWithBoundary", {
+      assumeRolePolicyDocument: { Version: "2012-10-17", Statement: [] },
+      permissionsBoundary: EXISTING_BOUNDARY,
+    });
+    applyPermissionsBoundaryParameter(stack);
+    expect(() => Template.fromStack(stack)).toThrow(/already has a permissions boundary/);
+  });
+
+  it("throws when a plain AWS::IAM::Role CfnResource already has a permissions boundary", () => {
+    const stack = new Stack(new App(), "TestStack");
+    new CfnResource(stack, "PlainRoleWithBoundary", {
+      type: "AWS::IAM::Role",
+      properties: {
+        AssumeRolePolicyDocument: { Version: "2012-10-17", Statement: [] },
+        PermissionsBoundary: EXISTING_BOUNDARY,
+      },
+    });
+    applyPermissionsBoundaryParameter(stack);
+    expect(() => Template.fromStack(stack)).toThrow(/already has a permissions boundary/);
+  });
 });

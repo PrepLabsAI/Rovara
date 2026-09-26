@@ -1,7 +1,8 @@
-import { CfnResource, Stack, type IAspect } from "aws-cdk-lib";
+import { Stack, type IAspect } from "aws-cdk-lib";
 import * as iam from "aws-cdk-lib/aws-iam";
 import type { IConstruct } from "constructs";
 import { environmentRolePath } from "./access-policies.js";
+import { isIamRole } from "./iam-roles.js";
 
 /**
  * Puts every IAM role in the visited stacks under the environment's path, so the CloudFormation
@@ -17,7 +18,7 @@ export class EnvironmentRolePath implements IAspect {
   ) {}
 
   visit(node: IConstruct): void {
-    if (!CfnResource.isCfnResource(node) || node.cfnResourceType !== "AWS::IAM::Role") return;
+    if (!isIamRole(node)) return;
     if (this.except.has(Stack.of(node))) return;
     if (node instanceof iam.CfnRole) node.path = environmentRolePath(this.env);
     else node.addPropertyOverride("Path", environmentRolePath(this.env));

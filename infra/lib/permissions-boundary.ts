@@ -1,6 +1,7 @@
-import { Aspects, Aws, CfnCondition, CfnParameter, CfnResource, Fn, Token, Validations, type IAspect, type Stack } from "aws-cdk-lib";
+import { Aspects, Aws, CfnCondition, CfnParameter, Fn, Token, Validations, type IAspect, type Stack } from "aws-cdk-lib";
 import * as iam from "aws-cdk-lib/aws-iam";
 import type { IConstruct } from "constructs";
+import { isIamRole } from "./iam-roles.js";
 
 const PARAMETER_ID = "PermissionsBoundaryArn";
 const CONDITION_ID = "HasPermissionsBoundary";
@@ -37,7 +38,7 @@ class PermissionsBoundaryAspect implements IAspect {
   constructor(private readonly boundary: string) {}
 
   visit(node: IConstruct): void {
-    if (!CfnResource.isCfnResource(node) || node.cfnResourceType !== "AWS::IAM::Role") return;
+    if (!isIamRole(node)) return;
     if (node instanceof iam.CfnRole) {
       if (node.permissionsBoundary !== undefined) {
         throw new Error(`${node.node.path} already has a permissions boundary`);
@@ -46,6 +47,8 @@ class PermissionsBoundaryAspect implements IAspect {
     } else {
       // Plain CfnResource properties are raw CloudFormation JSON (PascalCase), unlike the
       // camelCase props cfn2ts-generated classes like iam.CfnRole translate for us.
+      // Reading `_cfnProperties` relies on an aws-cdk-lib internal field (pinned at 2.269.0);
+      // the "throws on an existing plain-CfnResource boundary" test in permissions-boundary.test.ts guards it.
       const properties = (node as unknown as { _cfnProperties?: Record<string, unknown> })._cfnProperties;
       if (properties?.PermissionsBoundary !== undefined) {
         throw new Error(`${node.node.path} already has a permissions boundary`);
