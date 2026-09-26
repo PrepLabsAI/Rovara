@@ -353,11 +353,15 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .action(async (_options: unknown, command: Command) => {
       const globals = globalOptions(command);
       const environments = await runEnvList(parameterStore());
-      services.stdout.write(
-        globals.json
-          ? `${JSON.stringify({ environments })}\n`
-          : environments.map((name) => `${name}\n`).join(""),
-      );
+      if (globals.json) {
+        services.stdout.write(formatSuccess({ environments }, true));
+      } else {
+        services.stdout.write(
+          environments.length > 0
+            ? environments.map((name) => `${name}\n`).join("")
+            : "no environments in this account and region\n",
+        );
+      }
     });
   envCommand
     .command("use")
@@ -367,7 +371,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       const result = await runEnvUse({ store: parameterStore(), home, env: globals.env });
       services.stdout.write(
         globals.json
-          ? `${JSON.stringify(result)}\n`
+          ? formatSuccess(result, true)
           : `Using environment ${result.env} (${result.controlPlaneUrl}); settings saved to ${result.path}\n`,
       );
     });

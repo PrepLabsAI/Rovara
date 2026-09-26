@@ -2,9 +2,11 @@ import { mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { environmentCachePath, resolveDeploymentFile } from "../../packages/cli/src/environments/cache.js";
+import { environmentCachePath, resolveDeploymentFile, writeEnvironmentCache } from "../../packages/cli/src/environments/cache.js";
+import type { ParameterStore } from "../../packages/cli/src/environments/parameter-store.js";
 import { writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import { executeCli } from "../../packages/cli/src/main.js";
+import { InMemoryTokenStore } from "../../packages/cli/src/token-store.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 import { stagingSettings } from "../support/environment-fixtures.js";
 
@@ -25,7 +27,14 @@ describe("agentx env", () => {
     const io = capture();
     const code = await executeCli(["--json", "env", "list"], { ...io, environments: { store, home: await home() } });
     expect(code).toBe(0);
-    expect(JSON.parse(io.out.join(""))).toMatchObject({ environments: ["staging"] });
+    expect(JSON.parse(io.out.join(""))).toMatchObject({ ok: true, data: { environments: ["staging"] } });
+  });
+
+  it("tells a plain-text listing there are no environments, rather than printing nothing", async () => {
+    const io = capture();
+    const code = await executeCli(["env", "list"], { ...io, environments: { store: new MemoryParameterStore(), home: await home() } });
+    expect(code).toBe(0);
+    expect(io.out.join("")).toBe("no environments in this account and region\n");
   });
 
   it("use writes the environment cache from SSM with owner-only permissions", async () => {
@@ -89,5 +98,54 @@ describe("deployment file resolution", () => {
     const code = await executeCli(["--env", "staging", "--json", "login"], { ...io, environments: { store: new MemoryParameterStore(), home: dir } });
     expect(code).not.toBe(0);
     expect(io.err.join("") + io.out.join("")).toContain("is for environment production, not staging");
+  });
+});
+
+describe("writeEnvironmentCache", () => {
+  it("removes the temp file when the rename to the target fails", async () => {
+    const dir = await home();
+    const target = environmentCachePath(dir, stagingSettings.env);
+    // Occupy the target path with a directory, so the final rename() fails (EISDIR/ENOTEMPTY).
+    await mkdir(target, { recursive: true });
+    await expect(writeEnvironmentCache(dir, stagingSettings)).rejects.toThrow();
+    await expect(stat(`${target}.${process.pid}.tmp`)).rejects.toThrow();
+  });
+});
+
+describe("legacy deployment file and --env validation", () => {
+  it("loads the legacy deployment file when no --env and no --deployment-file override it", async () => {
+    const dir = await home();
+    await mkdir(join(dir, ".agentx"), { recursive: true });
+    await writeFile(join(dir, ".agentx", "deployment.yaml"), [
+      "controlPlaneUrl: https://abc.execute-api.us-east-1.amazonaws.com",
+      "auth:",
+      "  issuer: https://cognito-idp.us-east-1.amazonaws.com/us-east-1_x",
+      "  clientId: client",
+      "  audience: client",
+      "",
+    ].join("\n"));
+    const io = capture();
+    const code = await executeCli(["admin", "credential", "list"], {
+      ...io,
+      tokenStore: new InMemoryTokenStore(),
+      environments: { home: dir },
+    });
+    // No token is cached, so the command fails past settings loading, at the login check;
+    // that proves the legacy file (the only settings source here) was found and parsed.
+    expect(code).not.toBe(0);
+    expect(io.err.join("")).toContain("run agentx login");
+  });
+
+  it("refuses an invalid --env before any SSM or file access, for a non-env command", async () => {
+    const throwing: ParameterStore = {
+      get: () => { throw new Error("must not be called"); },
+      put: () => { throw new Error("must not be called"); },
+      delete: () => { throw new Error("must not be called"); },
+      list: () => { throw new Error("must not be called"); },
+    };
+    const io = capture();
+    const code = await executeCli(["--env", "Prod", "login"], { ...io, environments: { store: throwing, home: await home() } });
+    expect(code).not.toBe(0);
+    expect(io.err.join("")).toContain("invalid --env");
   });
 });

@@ -1,4 +1,4 @@
-import { access, mkdir, open, rename } from "node:fs/promises";
+import { access, mkdir, open, rename, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { agentXError } from "@agentx/contracts";
 import YAML from "yaml";
@@ -27,17 +27,23 @@ export async function writeEnvironmentCache(home: string, settings: EnvironmentS
   const path = environmentCachePath(home, settings.env);
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.${process.pid}.tmp`;
-  const handle = await open(temporary, "w", 0o600);
   try {
-    // open() applies the mode only to a new file; tighten it explicitly too, in case an earlier
-    // run left a temp file behind with looser permissions.
-    await handle.chmod(0o600);
-    await handle.writeFile(`# AgentX environment ${settings.env}; rebuilt from SSM by agentx env use.\n${YAML.stringify(cacheFromSettings(settings))}`);
-  } finally {
-    await handle.close();
+    const handle = await open(temporary, "w", 0o600);
+    try {
+      // open() applies the mode only to a new file; tighten it explicitly too, in case an earlier
+      // run left a temp file behind with looser permissions.
+      await handle.chmod(0o600);
+      await handle.writeFile(`# AgentX environment ${settings.env}; rebuilt from SSM by agentx env use.\n${YAML.stringify(cacheFromSettings(settings))}`);
+    } finally {
+      await handle.close();
+    }
+    await rename(temporary, path);
+    return path;
+  } catch (error) {
+    // Never leave a half-written or unrenamed temp file behind on failure.
+    await rm(temporary, { force: true });
+    throw error;
   }
-  await rename(temporary, path);
-  return path;
 }
 
 const exists = (path: string) => access(path).then(() => true, () => false);
