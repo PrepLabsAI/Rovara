@@ -82,6 +82,74 @@ describe("environment lock", () => {
     expect(error.message).toContain("work finished");
   });
 
+  it("says the lock is unreadable, not released, when the recheck after takeover confirmation finds garbage", async () => {
+    const store = new MemoryParameterStore();
+    const stale = { holder: "bob", command: "upgrade", acquiredAt: new Date(t0 - STALE_LOCK_MS - 1).toISOString() };
+    store.values.set("/agentx/staging/lock", JSON.stringify(stale));
+    const confirmTakeover = async () => {
+      // Something unparseable replaces the stale lock while we wait for takeover confirmation.
+      store.values.set("/agentx/staging/lock", "not json");
+      return true;
+    };
+    const error = await withEnvironmentLock({ ...base, store, now: () => t0, confirmTakeover }, async () => 1)
+      .catch((caught: unknown) => caught) as { code?: string; message?: string };
+    expect(error.code).toBe("CONFIG_INVALID");
+    expect(error.message).toContain("unreadable");
+    expect(error.message).toContain("/agentx/staging/lock");
+    expect(error.message).toContain("no AgentX command is running");
+    expect(error.message).not.toContain("released");
+  });
+
+  it("says the lock is unreadable, not removed by someone else, when it is unparseable after the work finished", async () => {
+    const store = new MemoryParameterStore();
+    const error = await withEnvironmentLock({ ...base, store, now: () => t0 }, async () => {
+      // Something unparseable replaces our lock (not a clean removal) while our work was running.
+      store.values.set(lockParameterName("staging"), "not json");
+      return 1;
+    }).catch((caught: unknown) => caught) as { code?: string; message?: string };
+    expect(error.code).toBe("CONFIG_INVALID");
+    expect(error.message).toContain("unreadable");
+    expect(error.message).toContain("/agentx/staging/lock");
+    expect(error.message).not.toContain("removed by someone else");
+  });
+
+  it("distinguishes an unreadable lock from another command's re-create in the post-delete race", async () => {
+    const store = new MemoryParameterStore();
+    const stale = { holder: "bob", command: "upgrade", acquiredAt: new Date(t0 - STALE_LOCK_MS - 1).toISOString() };
+    store.values.set("/agentx/staging/lock", JSON.stringify(stale));
+    const realDelete = store.delete.bind(store);
+    vi.spyOn(store, "delete").mockImplementation(async (name: string) => {
+      await realDelete(name);
+      // Simulate another command's write landing in the gap between this command's delete and its own re-create.
+      store.values.set(name, "not json");
+    });
+    const error = await withEnvironmentLock({ ...base, store, now: () => t0, confirmTakeover: async () => true }, async () => 1)
+      .catch((caught: unknown) => caught) as { code?: string; message?: string };
+    expect(error.code).toBe("CONFIG_INVALID");
+    expect(error.message).toContain("unreadable");
+    expect(error.message).toContain("/agentx/staging/lock");
+    expect(error.message).not.toContain("between this command's delete and re-create");
+  });
+
+  it("names the command that raced this one to re-create the lock right after this one deleted it", async () => {
+    const store = new MemoryParameterStore();
+    const stale = { holder: "bob", command: "upgrade", acquiredAt: new Date(t0 - STALE_LOCK_MS - 1).toISOString() };
+    store.values.set("/agentx/staging/lock", JSON.stringify(stale));
+    const realDelete = store.delete.bind(store);
+    const otherLock = JSON.stringify({ holder: "carol", command: "env upgrade", acquiredAt: new Date(t0).toISOString() });
+    vi.spyOn(store, "delete").mockImplementation(async (name: string) => {
+      await realDelete(name);
+      // Another command's own createOnly put lands in the gap between this command's delete and its re-create.
+      store.values.set(name, otherLock);
+    });
+    const error = await withEnvironmentLock({ ...base, store, now: () => t0, confirmTakeover: async () => true }, async () => 1)
+      .catch((caught: unknown) => caught) as { code?: string; message?: string };
+    expect(error.code).toBe("CONFIG_INVALID");
+    expect(error.message).toContain("carol");
+    expect(error.message).toContain("between this command's delete and re-create");
+    expect(error.message).not.toContain("took over the lock first");
+  });
+
   it("takes over a stale lock only after confirmation", async () => {
     const store = new MemoryParameterStore();
     const stale = { holder: "bob", command: "upgrade", acquiredAt: new Date(t0 - STALE_LOCK_MS - 1).toISOString() };

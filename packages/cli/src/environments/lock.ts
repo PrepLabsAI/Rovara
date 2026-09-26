@@ -34,6 +34,18 @@ const takeoverRaceMessage = (env: string, racedHeld: LockRecord | undefined) =>
     : `${heldMessage(env, racedHeld)}, which took over the lock first`;
 
 /**
+ * By the time we tried to re-create the lock, another command's own createOnly put had already
+ * landed in the small window between our delete of the stale lock and that re-create: it holds the
+ * lock now (racedHeld names it), or it briefly held it and released it again before this check
+ * (racedHeld is undefined). Either way this is not a takeover of the lock we deleted — it is a
+ * fresh acquisition by someone else — so this command must simply be run again.
+ */
+const postDeleteRaceMessage = (env: string, racedHeld: LockRecord | undefined) =>
+  racedHeld === undefined
+    ? `environment ${env}'s lock was acquired and released by another command between this command's delete and re-create; run the command again`
+    : `${heldMessage(env, racedHeld)}, which acquired the lock between this command's delete and re-create`;
+
+/**
  * The lock we held was replaced by someone else's takeover while our own work was still running
  * (held names the new holder), or it was simply removed by someone else in that window and nobody
  * holds it now (held is undefined): either way the work itself finished.
@@ -78,6 +90,7 @@ export async function withEnvironmentLock<T>(input: {
     const recheck = await input.store.get(name);
     if (recheck?.value !== stored.value) {
       const racedHeld = recheck === undefined ? undefined : parseLock(recheck.value);
+      if (recheck !== undefined && racedHeld === undefined) throw agentXError("CONFIG_INVALID", unreadableLockMessage(input.env, name));
       throw agentXError("CONFIG_INVALID", takeoverRaceMessage(input.env, racedHeld));
     }
     // SSM has no conditional delete, so a small window between the check above and this delete
@@ -89,7 +102,8 @@ export async function withEnvironmentLock<T>(input: {
       if (!(raceError instanceof ParameterExistsError)) throw raceError;
       const racedStored = await input.store.get(name);
       const racedHeld = racedStored === undefined ? undefined : parseLock(racedStored.value);
-      throw agentXError("CONFIG_INVALID", takeoverRaceMessage(input.env, racedHeld));
+      if (racedStored !== undefined && racedHeld === undefined) throw agentXError("CONFIG_INVALID", unreadableLockMessage(input.env, name));
+      throw agentXError("CONFIG_INVALID", postDeleteRaceMessage(input.env, racedHeld));
     }
   }
 
@@ -113,6 +127,7 @@ export async function withEnvironmentLock<T>(input: {
   const stored = await input.store.get(name);
   if (stored?.value !== mineJson) {
     const held = stored === undefined ? undefined : parseLock(stored.value);
+    if (stored !== undefined && held === undefined) throw agentXError("CONFIG_INVALID", unreadableLockMessage(input.env, name));
     throw agentXError("CONFIG_INVALID", releaseTakeoverMessage(input.env, held));
   }
   await input.store.delete(name);

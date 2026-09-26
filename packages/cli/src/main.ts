@@ -66,6 +66,12 @@ export interface CliDependencies {
     home?: string;
     sts?: CallerIdentity;
     stacks?: StackReader;
+    /**
+     * Overrides how `env list` and `env use` build their region-scoped SSM client, for tests: lets
+     * a test observe the --region the CLI passed into client construction even when `store` above
+     * also overrides the client's actual use, so that override can't quietly bypass the client.
+     */
+    ssmClient?: (region?: string) => SSMClient;
   };
 }
 
@@ -108,8 +114,14 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
   // Where `agentx env use` caches settings and, for production only, where the legacy
   // deployment file lives.
   const home = dependencies.environments?.home ?? homedir();
-  const parameterStore = (region?: string): ParameterStore =>
-    dependencies.environments?.store ?? ssmParameterStore(environmentSsmClient(region));
+  const parameterStore = (region?: string): ParameterStore => {
+    // Always built from the given region, even when a test overrides the store below: env list and
+    // env use must read the account/region the operator names, never an ambient default. A test can
+    // substitute how this client itself is built (environments.ssmClient) to observe that, the same
+    // way env adopt's client construction is independently testable.
+    const client = (dependencies.environments?.ssmClient ?? environmentSsmClient)(region);
+    return dependencies.environments?.store ?? ssmParameterStore(client);
+  };
 
   /** The deployment settings for the selected --env: an explicit --deployment-file wins, then the environment cache, then, for production only, the legacy ~/.agentx/deployment.yaml. */
   async function deploymentSettings(options: GlobalOptions): Promise<DeploymentSettings> {

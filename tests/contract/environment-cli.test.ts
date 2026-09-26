@@ -84,6 +84,31 @@ describe("agentx env", () => {
     const useCode = await executeCli(["--env", "staging", "env", "use", "--region", "eu-west-2"], { ...io2, environments: { store, home: await home() } });
     expect(useCode).toBe(0);
   });
+
+  it("passes --region into env list's and env use's own SSM client construction, not just past a test-injected store", async () => {
+    const store = new MemoryParameterStore();
+    await writeEnvironmentSettings(store, stagingSettings);
+    // A store override lets these commands run without a network call, but it must not be the only
+    // thing standing between --region and the client: the CLI still builds its own region-scoped
+    // client on every call, so a spy standing in for that client construction (returning a real,
+    // harmless SSMClient, the same one environmentSsmClient would have built) can observe the region
+    // the CLI actually passed in, regardless of the store override.
+    const seenRegions: (string | undefined)[] = [];
+    const ssmClient = (region?: string) => {
+      seenRegions.push(region);
+      return environmentSsmClient(region);
+    };
+
+    const io = capture();
+    const listCode = await executeCli(["--json", "env", "list", "--region", "eu-west-2"], { ...io, environments: { store, home: await home(), ssmClient } });
+    expect(listCode).toBe(0);
+
+    const io2 = capture();
+    const useCode = await executeCli(["--env", "staging", "env", "use", "--region", "eu-west-2"], { ...io2, environments: { store, home: await home(), ssmClient } });
+    expect(useCode).toBe(0);
+
+    expect(seenRegions).toEqual(["eu-west-2", "eu-west-2"]);
+  });
 });
 
 describe("agentx env adopt", () => {

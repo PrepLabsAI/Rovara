@@ -9,9 +9,9 @@ export function normalizedTemplate(stack: Stack): unknown {
 }
 
 /**
- * The production stacks, built with the same ids and props as infra/bin/agentx.ts
+ * The production stacks, built with the same ids and props as infra/lib/app.ts
  * (default deployment mode "instances-ebs", no agentxRegion context: region "us-east-1",
- * no agentxEnv context: legacy naming). Includes the release pipeline: infra/bin/agentx.ts
+ * no agentxEnv context: legacy naming). Includes the release pipeline: infra/lib/app.ts
  * builds it as one of the live deployment's stacks.
  */
 export function legacyProductionStacks(): Stack[] {

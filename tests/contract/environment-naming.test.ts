@@ -166,12 +166,18 @@ describe("environment naming", () => {
   }, 240_000);
 
   it("deploys legacy production next to a staging environment with no shared physical name or export name", () => {
-    const legacy = productionStacks(buildAgentXApp());
+    // Unlike productionStacks() elsewhere in this file, the legacy side here is not filtered to
+    // exclude AgentXReleasePipeline: it is one of the live deployment's stacks (infra/lib/app.ts
+    // builds it whenever there is no agentxEnv context), so its physical and export names must be
+    // checked for collisions too. Staging never builds a release pipeline stack, so this only adds
+    // coverage on the legacy side.
+    const legacyStacks = buildAgentXApp().node.children.filter((child): child is Stack => Stack.isStack(child));
+    expect(legacyStacks.some((stack) => stack.stackName === "AgentXReleasePipeline")).toBe(true);
     const staging = productionStacks(buildAgentXApp({ agentxEnv: "staging" }));
-    const legacyNames = new Set(legacy.flatMap(physicalNames));
+    const legacyNames = new Set(legacyStacks.flatMap(physicalNames));
     const shared = staging.flatMap(physicalNames).filter((name) => legacyNames.has(name));
     expect(shared).toEqual([]);
-    const legacyExports = new Set(legacy.flatMap(exportNames));
+    const legacyExports = new Set(legacyStacks.flatMap(exportNames));
     const sharedExports = staging.flatMap(exportNames).filter((name) => legacyExports.has(name));
     expect(sharedExports).toEqual([]);
   }, 240_000);
