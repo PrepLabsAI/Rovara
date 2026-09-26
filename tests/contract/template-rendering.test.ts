@@ -179,6 +179,17 @@ describe("context-overflow temp file (App's own readContextFromTempFile, layered
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("ignores an empty value, matching App's own readContextFromTempFile (`location ? ... : {}`)", () => {
+    const original = process.env[CONTEXT_OVERFLOW_LOCATION_ENV];
+    try {
+      process.env[CONTEXT_OVERFLOW_LOCATION_ENV] = "";
+      expect(() => buildAgentXApp({ agentxEnv: "staging", agentxSynthesizer: "legacy" })).not.toThrow();
+    } finally {
+      if (original === undefined) delete process.env[CONTEXT_OVERFLOW_LOCATION_ENV];
+      else process.env[CONTEXT_OVERFLOW_LOCATION_ENV] = original;
+    }
+  });
 });
 
 describe("outdir context (buildAgentXApp forwards it to `new App({ outdir })`)", () => {

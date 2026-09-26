@@ -36,7 +36,10 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
   }
   const overflowLocation = process.env[CONTEXT_OVERFLOW_LOCATION_ENV];
   let overflowContext: Record<string, unknown> = {};
-  if (overflowLocation !== undefined) {
+  // Matches CDK App's own readContextFromTempFile: `location ? fs().readJSONSync(location) : {}`.
+  // An empty (but set) environment variable must be ignored the same way App ignores it, not
+  // treated as a path to read.
+  if (overflowLocation) {
     try {
       overflowContext = JSON.parse(readFileSync(overflowLocation, "utf8")) as Record<string, unknown>;
     } catch (error) {

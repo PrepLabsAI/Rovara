@@ -12,5 +12,5 @@
     "infra/**/*.ts",
     "vitest.config.ts"
   ],
-  "exclude": ["**/dist/**", "**/node_modules/**", "cdk.out/**"]
+  "exclude": ["**/dist/**", "**/node_modules/**", "cdk.out/**", ".release-synth/**"]
 }

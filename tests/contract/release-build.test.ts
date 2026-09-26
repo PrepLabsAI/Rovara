@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -100,16 +100,46 @@ describe("release builder", () => {
           for (const entry of readZipEntries(zipBuffer)) {
             if (!entry.name.endsWith(".js.map")) continue;
             checkedAny = true;
-            const text = entry.data.toString("utf8");
-            expect(text).not.toMatch(/\/Users\//);
-            expect(text).not.toMatch(/\/home\//);
-            expect(text.includes(repoRoot)).toBe(false);
+            // Check only `sources` (the paths esbuild recorded for each original file), not
+            // `sourcesContent` (the original file text, embedded verbatim): that text is free-form
+            // source code and could legitimately contain a string that looks like an absolute path,
+            // e.g. in a comment or a string literal, without that being the bug this test guards.
+            const sourceMap = JSON.parse(entry.data.toString("utf8")) as { sources?: unknown };
+            const sources = Array.isArray(sourceMap.sources) ? (sourceMap.sources as unknown[]).join("\n") : "";
+            expect(sources).not.toMatch(/\/Users\//);
+            expect(sources).not.toMatch(/\/home\//);
+            expect(sources.includes(repoRoot)).toBe(false);
           }
         }
         expect(checkedAny).toBe(true);
       } finally {
         if (originalTmpdir === undefined) delete process.env.TMPDIR;
         else process.env.TMPDIR = originalTmpdir;
+      }
+    },
+    600_000,
+  );
+
+  it(
+    "succeeds when the caller's current working directory is somewhere other than the repo root, and restores it afterward",
+    async () => {
+      const originalCwd = process.cwd();
+      const elsewhere = await mkdtemp(join(tmpdir(), "agentx-release-elsewhere-"));
+      process.chdir(elsewhere);
+      try {
+        // infra/lib/control-plane.ts resolves each Lambda's `entry` (e.g.
+        // "packages/broker/src/aws/broker.ts") with resolve(process.cwd(), entry); before this fix,
+        // running buildRelease from a directory that is not the repo root made NodejsFunction fail
+        // to find those entry files at all.
+        const out = join(await mkdtemp(join(tmpdir(), "agentx-release-")), "r");
+        const manifest = await buildRelease({ version: "1.2.3", out, gitCommit: "b".repeat(40) });
+        expect(manifest.templates.length).toBeGreaterThan(0);
+        expect(manifest.packages.length).toBeGreaterThan(0);
+        // Compare realpaths: process.cwd() resolves the macOS /tmp -> /private/tmp symlink, but
+        // `elsewhere` (built from os.tmpdir()) does not, even though they name the same directory.
+        expect(await realpath(process.cwd())).toBe(await realpath(elsewhere));
+      } finally {
+        process.chdir(originalCwd);
       }
     },
     600_000,

@@ -85,6 +85,24 @@ function checkedNoAmbientCdkContext(): void {
   }
 }
 
+/**
+ * Runs `run` with the process's current working directory pinned to the repo root, restoring the
+ * caller's original cwd afterward (even if `run` throws). infra/lib/control-plane.ts resolves each
+ * Lambda's `entry` with `resolve(process.cwd(), entry)` against paths that are relative to the repo
+ * root (e.g. "packages/broker/src/aws/broker.ts"), and NodejsFunction bundles each one synchronously
+ * while the stacks are being constructed — before `.synth()` is ever called. So this release builder
+ * has to produce the same output regardless of the caller's own working directory.
+ */
+function withRepoRootCwd<T>(run: () => T): T {
+  const originalCwd = process.cwd();
+  process.chdir(REPO_ROOT);
+  try {
+    return run();
+  } finally {
+    process.chdir(originalCwd);
+  }
+}
+
 /** The out directory must not already hold a release; it is created if absent. */
 async function claimOutDir(out: string): Promise<void> {
   let existing: string[];
@@ -169,13 +187,16 @@ export async function buildRelease(input: BuildReleaseInput): Promise<ReleaseMan
   const synthDir = await mkdtemp(join(RELEASE_SYNTH_ROOT, "run-"));
   try {
     // Synthesize the placeholder-environment app, bootstrap-free, at a fixed depth under the repo
-    // root (see REPO_ROOT's comment for why).
-    const assembly = buildAgentXApp({
-      agentxEnv: ENVIRONMENT_PLACEHOLDER,
-      agentxSynthesizer: "legacy",
-      agentxRegion: "us-east-1",
-      outdir: synthDir,
-    }).synth();
+    // root (see REPO_ROOT's comment for why), with the repo root as the working directory (see
+    // withRepoRootCwd's comment for why).
+    const assembly = withRepoRootCwd(() =>
+      buildAgentXApp({
+        agentxEnv: ENVIRONMENT_PLACEHOLDER,
+        agentxSynthesizer: "legacy",
+        agentxRegion: "us-east-1",
+        outdir: synthDir,
+      }).synth(),
+    );
 
     const stackByName = new Map(assembly.stacks.map((stack) => [stack.stackName, stack]));
 
