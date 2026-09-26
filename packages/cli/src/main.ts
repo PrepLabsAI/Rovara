@@ -8,6 +8,7 @@ import {
   AgentXError,
   AgentXNameSchema,
   DEFAULT_ENVIRONMENT,
+  ENVIRONMENT_PLACEHOLDER,
   EnvironmentNameSchema,
   WorkspaceDeploymentModeSchema,
   agentXError,
@@ -168,6 +169,12 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     const parsed = EnvironmentNameSchema.safeParse(env);
     if (!parsed.success) {
       throw agentXError("CONFIG_INVALID", `invalid --env ${JSON.stringify(env)}: ${parsed.error.issues[0]?.message ?? "invalid environment name"}`);
+    }
+    // EnvironmentNameSchema itself still accepts the placeholder (synthesizing its templates
+    // requires that), but it is reserved for published templates, not a real deployment: refuse it
+    // here, before any AWS or file access.
+    if (parsed.data === ENVIRONMENT_PLACEHOLDER) {
+      throw agentXError("CONFIG_INVALID", `--env ${JSON.stringify(env)} is reserved for published templates and cannot be used as a real environment`);
     }
   });
 

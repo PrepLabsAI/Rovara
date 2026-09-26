@@ -11,14 +11,22 @@ import { SlackOrchestratorStack } from "./slack-orchestrator.js";
 
 export function buildAgentXApp(context: Record<string, unknown> = {}): App {
   // The default stack synthesizer is an App-construction-time setting (Stack cannot pick it up
-  // afterwards), so it must be decided from the context argument itself, before `new App(...)`.
-  const synthesizerMode = context.agentxSynthesizer as string | undefined;
+  // afterwards), so it must be decided before `new App(...)`, from the same context sources CDK
+  // itself would merge for every other context key: CDK_CONTEXT_JSON (how the `cdk` CLI passes
+  // `-c` flags and cdk.json to the app it shells out to, since bin/agentx.ts calls
+  // buildAgentXApp() with no arguments) and this function's own context argument, which wins on
+  // conflict (e.g. a test that passes agentxSynthesizer directly). Reading only the argument, as
+  // before, silently ignored `cdk synth -c agentxEnv=... -c agentxSynthesizer=legacy` and produced
+  // bootstrap-dependent templates instead of refusing or honoring the request.
+  const cliContext = JSON.parse(process.env.CDK_CONTEXT_JSON ?? "{}") as Record<string, unknown>;
+  const mergedContext = { ...cliContext, ...context };
+  const synthesizerMode = mergedContext.agentxSynthesizer as string | undefined;
   if (synthesizerMode !== undefined && synthesizerMode !== "legacy") {
     throw new Error(`unsupported agentxSynthesizer ${JSON.stringify(synthesizerMode)}; expected legacy or unset`);
   }
   // The legacy synthesizer (no CDK bootstrap, assets as template parameters) is only for a named
   // environment: the deployment that predates environments keeps CDK bootstrap.
-  if (synthesizerMode === "legacy" && context.agentxEnv === undefined) {
+  if (synthesizerMode === "legacy" && mergedContext.agentxEnv === undefined) {
     throw new Error("agentxSynthesizer=legacy requires a named environment (agentxEnv context); the deployment that predates environments keeps CDK bootstrap");
   }
   const app = new App({
