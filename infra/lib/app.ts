@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { App, LegacyStackSynthesizer, Tags } from "aws-cdk-lib";
 import type { IReusableStackSynthesizer } from "aws-cdk-lib";
 import { CONTEXT_ENV, CONTEXT_OVERFLOW_LOCATION_ENV } from "aws-cdk-lib/cx-api";
+import { AccessStack } from "./access.js";
 import { AgentRuntimeStack } from "./agent-runtime.js";
 import { ControlPlaneStack } from "./control-plane.js";
 import { DemoRuntimeStack } from "./demo-runtime.js";
@@ -99,6 +100,18 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
     );
   }
 
+  // The access stack holds the roles every other environment stack is deployed with, so it comes
+  // first. The deployment that predates environments has none.
+  if (naming.env !== undefined) {
+    const region = deploymentRegion ?? "us-east-1";
+    new AccessStack(app, "AgentXAccess", {
+      description: "AgentX access for a named environment: artifact bucket, image cache rule, deploy and operator roles",
+      stackName: naming.stackName("access"),
+      naming,
+      terminationProtection: true,
+      env: { region },
+    });
+  }
   new ControlPlaneStack(app, "AgentXControlPlane", {
     description: "AgentX authenticated control plane and durable dispatch foundation",
     naming,

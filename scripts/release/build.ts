@@ -207,9 +207,6 @@ export async function buildRelease(input: BuildReleaseInput): Promise<ReleaseMan
     const packagesById = new Map<string, PackageAccumulator>();
     await mkdir(join(input.out, "templates"), { recursive: true });
     for (const part of STACK_PARTS) {
-      // TODO(phase 15c1 task 2): the access stack does not exist yet, so the placeholder assembly
-      // has no stack for it. Remove this skip once task 2 adds the access stack.
-      if (part === "access") continue;
       const stackName = environmentStackName(ENVIRONMENT_PLACEHOLDER, part);
       const stack = stackByName.get(stackName);
       if (!stack) throw new Error(`release synth produced no stack named ${stackName} (part ${part})`);

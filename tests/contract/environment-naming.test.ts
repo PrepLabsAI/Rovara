@@ -117,7 +117,7 @@ describe("environment naming", () => {
     const production = productionStacks(buildAgentXApp({ agentxEnv: "production" }));
     const staging = productionStacks(buildAgentXApp({ agentxEnv: "staging" }));
     expect(production.map((stack) => stack.stackName).sort()).toEqual([
-      "agentx-production-control-plane", "agentx-production-foundation", "agentx-production-identity", "agentx-production-runtime", "agentx-production-slack",
+      "agentx-production-access", "agentx-production-control-plane", "agentx-production-foundation", "agentx-production-identity", "agentx-production-runtime", "agentx-production-slack",
     ]);
     const productionNames = new Set(production.flatMap(physicalNames));
     const shared = staging.flatMap(physicalNames).filter((name) => productionNames.has(name));
