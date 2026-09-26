@@ -10,6 +10,14 @@ export const EnvironmentNameSchema = z
   .refine(
     (name) => name !== "connectors",
     'environment name must not be "connectors" (reserved: its connector-secret prefix agentx/connectors/connectors/ would fall under the legacy connector secrets grant agentx/connectors/*)',
+  )
+  // The placeholder itself ("qqenv-placeholderqq") must still parse, because
+  // environmentNaming(ENVIRONMENT_PLACEHOLDER) has to work; every other name containing "qqenv" is
+  // refused so no real environment can collide with the reserved placeholder. templates.ts is not
+  // imported here (it would create a cycle); the literal is duplicated and pinned by tests instead.
+  .refine(
+    (name) => name === "qqenv-placeholderqq" || !name.includes("qqenv"),
+    'environment name must not contain "qqenv" (reserved for published templates)',
   );
 
 export const DEFAULT_ENVIRONMENT = "production";

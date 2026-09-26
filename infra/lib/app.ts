@@ -1,4 +1,5 @@
-import { App, Tags } from "aws-cdk-lib";
+import { App, LegacyStackSynthesizer, Tags } from "aws-cdk-lib";
+import type { IReusableStackSynthesizer } from "aws-cdk-lib";
 import { AgentRuntimeStack } from "./agent-runtime.js";
 import { ControlPlaneStack } from "./control-plane.js";
 import { DemoRuntimeStack } from "./demo-runtime.js";
@@ -9,8 +10,23 @@ import { ReleasePipelineStack } from "./release-pipeline.js";
 import { SlackOrchestratorStack } from "./slack-orchestrator.js";
 
 export function buildAgentXApp(context: Record<string, unknown> = {}): App {
+  // The default stack synthesizer is an App-construction-time setting (Stack cannot pick it up
+  // afterwards), so it must be decided from the context argument itself, before `new App(...)`.
+  const synthesizerMode = context.agentxSynthesizer as string | undefined;
+  if (synthesizerMode !== undefined && synthesizerMode !== "legacy") {
+    throw new Error(`unsupported agentxSynthesizer ${JSON.stringify(synthesizerMode)}; expected legacy or unset`);
+  }
+  // The legacy synthesizer (no CDK bootstrap, assets as template parameters) is only for a named
+  // environment: the deployment that predates environments keeps CDK bootstrap.
+  if (synthesizerMode === "legacy" && context.agentxEnv === undefined) {
+    throw new Error("agentxSynthesizer=legacy requires a named environment (agentxEnv context); the deployment that predates environments keeps CDK bootstrap");
+  }
   const app = new App({
     context: { "@aws-cdk/core:defaultCrossStackReferences": "strong", ...context },
+    // aws-cdk-lib types IStackSynthesizer.bootstrapQualifier as `string | undefined` via a getter,
+    // which exactOptionalPropertyTypes rejects for the optional `bootstrapQualifier?: string` on
+    // IReusableStackSynthesizer (same shape as the artifactBucket cast in release-pipeline.ts).
+    ...(synthesizerMode === "legacy" ? { defaultStackSynthesizer: new LegacyStackSynthesizer() as IReusableStackSynthesizer } : {}),
   });
   const naming = namingFromContext(app);
   const deploymentRegion = app.node.tryGetContext("agentxRegion") as string | undefined;
