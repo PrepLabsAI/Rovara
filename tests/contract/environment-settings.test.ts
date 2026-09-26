@@ -79,6 +79,35 @@ describe("environment settings", () => {
     expect(stagingSettings.stacks.identity).toBeUndefined();
   });
 
+  it("round-trips settings with an access block", async () => {
+    const store = new MemoryParameterStore();
+    const withAccess: EnvironmentSettings = {
+      ...stagingSettings,
+      access: {
+        artifactBucket: "agentx-staging-access-artifactbucket-abc",
+        cloudFormationRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-cloudformation",
+        operatorRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-operator",
+        pullThroughPrefix: "agentx-staging",
+        permissionsBoundaryArn: "arn:aws:iam::123456789012:policy/agentx-boundary",
+      },
+    };
+    await writeEnvironmentSettings(store, withAccess);
+    expect(await readEnvironmentSettings(store, "staging")).toEqual(withAccess);
+  });
+
+  it("still parses settings with no access block (the legacy fixture)", () => {
+    expect(EnvironmentSettingsSchema.safeParse(stagingSettings).success).toBe(true);
+    expect(stagingSettings.access).toBeUndefined();
+  });
+
+  it("never stores an access field outside its own schema", () => {
+    const withUnknownAccessField = {
+      ...stagingSettings,
+      access: { artifactBucket: "b", cloudFormationRoleArn: "r", operatorRoleArn: "o", pullThroughPrefix: "p", extra: "nope" },
+    };
+    expect(EnvironmentSettingsSchema.safeParse(withUnknownAccessField).success).toBe(false);
+  });
+
   it("lists environments that have settings", async () => {
     const store = new MemoryParameterStore();
     await writeEnvironmentSettings(store, stagingSettings);

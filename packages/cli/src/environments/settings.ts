@@ -22,6 +22,16 @@ export const EnvironmentSettingsSchema = z.object({
   }).strict(),
   models: z.object({ orchestrator: z.string().min(1), classifier: z.string().min(1), worker: z.string().min(1) }).strict(),
   alertAddress: z.string().min(1).optional(),
+  access: z
+    .object({
+      artifactBucket: z.string(),
+      cloudFormationRoleArn: z.string(),
+      operatorRoleArn: z.string(),
+      pullThroughPrefix: z.string(),
+      permissionsBoundaryArn: z.string().optional(),
+    })
+    .strict()
+    .optional(),
   updatedAt: z.iso.datetime(),
 }).strict();
 
