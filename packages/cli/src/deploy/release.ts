@@ -46,7 +46,7 @@ export function containedPath(dir: string, file: string): string {
     realTarget = realpathSync(resolved);
   } catch (error) {
     if (error instanceof Error && (error as NodeJS.ErrnoException).code === "ENOENT") {
-      throw new Error(`release file ${file} is missing`);
+      throw new Error(`release file ${file} is missing`, { cause: error });
     }
     throw error;
   }
