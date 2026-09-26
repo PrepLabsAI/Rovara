@@ -199,6 +199,12 @@ describe("identity stack", () => {
     identityTemplate().hasResourceProperties("AWS::Cognito::UserPoolDomain", { Domain: "agentx-staging-123456789012" });
   });
 
+  it("refuses an environment name Cognito would reject in the hosted UI domain", () => {
+    for (const env of ["aws-dev", "amazon", "mycognito"]) {
+      expect(() => identityTemplate(env), env).toThrow(/Cognito domain/);
+    }
+  });
+
   it("outputs what the control plane and the CLI need", () => {
     const outputs = identityTemplate().toJSON().Outputs as Record<string, unknown>;
     expect(Object.keys(outputs).sort()).toEqual(["Audience", "ClientId", "HostedUiDomain", "Issuer", "UserPoolId"]);
@@ -252,6 +258,9 @@ export class IdentityStack extends Stack {
     super(scope, id, props);
     const env = props.naming.env;
     if (env === undefined) throw new Error("the identity stack exists only for named environments");
+    // Cognito refuses hosted UI domain prefixes containing these words; fail at synth, not deploy.
+    const reserved = ["aws", "amazon", "cognito"].find((word) => env.includes(word));
+    if (reserved !== undefined) throw new Error(`environment name ${env} cannot be used for the Cognito domain (it contains "${reserved}"); choose another name or bring your own OIDC`);
 
     const pool = new cognito.UserPool(this, "UserPool", {
       userPoolName: `agentx-${env}`,
