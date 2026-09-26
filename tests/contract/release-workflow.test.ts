@@ -9,6 +9,7 @@ interface Step {
   uses?: string;
   shell?: string;
   env?: Record<string, string>;
+  with?: Record<string, unknown>;
 }
 interface Job {
   if?: string;
@@ -19,6 +20,7 @@ interface Job {
 interface Workflow {
   on: Record<string, unknown>;
   permissions: Record<string, string>;
+  concurrency?: Record<string, unknown>;
   jobs: Record<string, Job>;
 }
 
@@ -177,5 +179,45 @@ describe("release workflow", () => {
     // PrepLabsAI/AgentX is private today, and npm provenance attestation fails for private repos;
     // trusted publishing adds provenance automatically once the repo goes public.
     expect(npmSteps[publishIndex]!.run).not.toContain("--provenance");
+  });
+
+  it("builds the workspace (npm run build) before any release: script runs, in every job that invokes one", async () => {
+    const wf = await workflow();
+    for (const [name, job] of Object.entries(wf.jobs)) {
+      const runs = job.steps.map((s) => s.run ?? "");
+      const releaseScriptIndex = runs.findIndex((r) => /\brelease:/.test(r));
+      if (releaseScriptIndex === -1) continue;
+      const buildIndex = runs.findIndex((r) => /\bnpm run build\b/.test(r));
+      expect(buildIndex, `${name} job must run "npm run build" before any release: script`).toBeGreaterThanOrEqual(0);
+      expect(buildIndex, name).toBeLessThan(releaseScriptIndex);
+    }
+    // Sanity: this test only means something if at least one job actually invokes a release: script.
+    const anyReleaseScript = Object.values(wf.jobs).some((job) => job.steps.some((s) => /\brelease:/.test(s.run ?? "")));
+    expect(anyReleaseScript).toBe(true);
+  });
+
+  it("has a top-level concurrency group keyed by ref, and never cancels a release already in flight", async () => {
+    const wf = await workflow();
+    expect(wf.concurrency).toEqual({ group: "release-${{ github.ref }}", "cancel-in-progress": false });
+  });
+
+  it("does not persist a git credential after checkout in the images, release and npm jobs", async () => {
+    const wf = await workflow();
+    for (const name of ["images", "release", "npm"]) {
+      const checkout = wf.jobs[name]!.steps.find((s) => s.uses?.startsWith("actions/checkout"));
+      expect(checkout, name).toBeDefined();
+      expect(checkout!.with?.["persist-credentials"], name).toBe(false);
+    }
+  });
+
+  it("skips npm publish instead of failing when the version is already on the registry", async () => {
+    const wf = await workflow();
+    const npmRun = wf.jobs.npm!.steps.map((s) => s.run ?? "").join("\n");
+    expect(npmRun).toMatch(/npm view "\$NAME@\$VERSION" version/);
+    expect(npmRun).toMatch(/already published[^\n]*skipping/);
+    const viewIndex = npmRun.indexOf("npm view");
+    const publishIndex = npmRun.lastIndexOf("npm publish");
+    expect(viewIndex).toBeGreaterThanOrEqual(0);
+    expect(publishIndex).toBeGreaterThan(viewIndex);
   });
 });
