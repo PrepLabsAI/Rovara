@@ -114,13 +114,14 @@ describe("environment settings", () => {
     expect(EnvironmentSettingsSchema.safeParse(withUnknownAccessField).success).toBe(false);
   });
 
+  const validAccess = {
+    artifactBucket: "agentx-staging-access-artifactbucket-abc",
+    cloudFormationRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-cloudformation",
+    operatorRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-operator",
+    pullThroughPrefix: "agentx-staging",
+  };
+
   it("refuses an access block whose role or boundary fields are not the right kind of ARN", () => {
-    const validAccess = {
-      artifactBucket: "agentx-staging-access-artifactbucket-abc",
-      cloudFormationRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-cloudformation",
-      operatorRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-operator",
-      pullThroughPrefix: "agentx-staging",
-    };
     expect(EnvironmentSettingsSchema.safeParse({ ...stagingSettings, access: validAccess }).success).toBe(true);
     expect(EnvironmentSettingsSchema.safeParse({ ...stagingSettings, access: { ...validAccess, cloudFormationRoleArn: "not-an-arn" } }).success).toBe(false);
     expect(EnvironmentSettingsSchema.safeParse({ ...stagingSettings, access: { ...validAccess, operatorRoleArn: "arn:aws:iam::123456789012:policy/wrong-resource-type" } }).success).toBe(false);
@@ -131,12 +132,6 @@ describe("environment settings", () => {
   });
 
   it("refuses an access block with an empty pullThroughPrefix", () => {
-    const validAccess = {
-      artifactBucket: "agentx-staging-access-artifactbucket-abc",
-      cloudFormationRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-cloudformation",
-      operatorRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-operator",
-      pullThroughPrefix: "agentx-staging",
-    };
     expect(EnvironmentSettingsSchema.safeParse({ ...stagingSettings, access: { ...validAccess, pullThroughPrefix: "" } }).success).toBe(false);
   });
 

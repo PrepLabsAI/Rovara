@@ -3,11 +3,11 @@
 // the exact CloudFormation Parameters map for one environment stack. The caller (phase 15d's `agentx
 // init`/`agentx upgrade`) reads secrets and calls CloudFormation; this file only computes values.
 import { environmentStackName } from "@agentx/contracts";
-import type { ReleaseManifest } from "@agentx/contracts";
+import type { ReleaseManifest, StackPart } from "@agentx/contracts";
 
 export type StackOutputs = Record<string, string>;
 
-export type DeployPart = "access" | "foundation" | "identity" | "runtime" | "control-plane" | "slack";
+export type DeployPart = StackPart;
 
 export interface InstallAnswers {
   env: string;
@@ -34,7 +34,10 @@ export interface InstallAnswers {
   operatorPrincipalArn?: string;
 }
 
-/** The parameter names whose values must never be printed. */
+/** The shortest callback signing key the control plane accepts. */
+const MIN_CALLBACK_SIGNING_KEY_LENGTH = 32;
+
+/** The parameter names whose values must never be printed: every NoEcho template parameter. */
 export const SECRET_PARAMETERS: ReadonlySet<string> = new Set(["CallbackSigningKey"]);
 
 /** Fresh install order: the control plane needs the GitHub App before the runtime needs the control plane's URL. */
@@ -157,6 +160,10 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
       return base;
 
     case "control-plane": {
+      if (answers.callbackSigningKey.length < MIN_CALLBACK_SIGNING_KEY_LENGTH) {
+        // Never include the value: it is a secret.
+        throw new Error(`the callback signing key must be at least ${MIN_CALLBACK_SIGNING_KEY_LENGTH} characters`);
+      }
       const oidc =
         answers.identity.mode === "cognito"
           ? { issuer: required(outputs, "identity", "Issuer", answers.env), audience: required(outputs, "identity", "Audience", answers.env) }

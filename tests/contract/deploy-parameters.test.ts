@@ -4,7 +4,7 @@ import { buildAgentXApp } from "../../infra/lib/app.js";
 import { SECRET_PARAMETERS, installOrder, privateImageUri, stackParameters, upgradeOrder, type DeployPart, type InstallAnswers } from "../../packages/cli/src/deploy/parameters.js";
 
 const d = (c: string) => c.repeat(64);
-let templates: Map<string, { Parameters?: Record<string, { Default?: unknown }> }>;
+let templates: Map<string, { Parameters?: Record<string, { Default?: unknown; NoEcho?: boolean }>; Outputs?: Record<string, unknown> }>;
 let release: ReleaseManifest;
 
 beforeAll(() => {
@@ -162,7 +162,34 @@ describe("deploy parameters", () => {
     expect(() => stackParameters("access", { ...answers(), release: badRelease }, outputs)).toThrow(/access stack carries no zip assets/);
   });
 
-  it("marks the callback signing key as secret", () => {
-    expect([...SECRET_PARAMETERS]).toEqual(["CallbackSigningKey"]);
+  it("marks every NoEcho template parameter as secret, and nothing else", () => {
+    const noEcho = new Set([...templates.values()].flatMap((t) => Object.entries(t.Parameters ?? {}).filter(([, p]) => p.NoEcho === true).map(([name]) => name)));
+    expect(noEcho.size).toBeGreaterThan(0);
+    expect([...SECRET_PARAMETERS].sort()).toEqual([...noEcho].sort());
+  });
+
+  it("reads only outputs the producing templates declare", () => {
+    const read: Array<[DeployPart, string]> = [];
+    const recording = (source: Partial<Record<DeployPart, Record<string, string>>>) =>
+      Object.fromEntries(Object.entries(source).map(([part, values]) => [part, new Proxy(values, {
+        get: (target, name: string) => { read.push([part as DeployPart, name]); return target[name]; },
+      })]));
+    for (const part of ["access", "foundation", "identity", "control-plane", "runtime", "slack"] as DeployPart[]) stackParameters(part, answers(), recording(outputs));
+    for (const part of ["access", "foundation", "control-plane", "runtime", "slack"] as DeployPart[]) stackParameters(part, oidcAnswers(), recording(oidcOutputs));
+    expect(read.length).toBeGreaterThan(0);
+    expect(read.filter(([part, name]) => !(name in (templates.get(part)!.Outputs ?? {}))).map(([part, name]) => `${part}.${name}`)).toEqual([]);
+  });
+
+  it("refuses a callback signing key shorter than 32 characters without echoing it", () => {
+    const shortKey = "short-signing-key-value";
+    let message = "";
+    try {
+      stackParameters("control-plane", { ...answers(), callbackSigningKey: shortKey }, outputs);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toBe("the callback signing key must be at least 32 characters");
+    expect(message).not.toContain(shortKey);
+    expect(() => stackParameters("control-plane", { ...answers(), callbackSigningKey: "k".repeat(32) }, outputs)).not.toThrow();
   });
 });
