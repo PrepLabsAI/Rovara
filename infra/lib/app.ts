@@ -10,16 +10,28 @@ import { ReleasePipelineStack } from "./release-pipeline.js";
 import { SlackOrchestratorStack } from "./slack-orchestrator.js";
 
 export function buildAgentXApp(context: Record<string, unknown> = {}): App {
-  // The default stack synthesizer is an App-construction-time setting (Stack cannot pick it up
-  // afterwards), so it must be decided before `new App(...)`, from the same context sources CDK
-  // itself would merge for every other context key: CDK_CONTEXT_JSON (how the `cdk` CLI passes
-  // `-c` flags and cdk.json to the app it shells out to, since bin/agentx.ts calls
-  // buildAgentXApp() with no arguments) and this function's own context argument, which wins on
-  // conflict (e.g. a test that passes agentxSynthesizer directly). Reading only the argument, as
-  // before, silently ignored `cdk synth -c agentxEnv=... -c agentxSynthesizer=legacy` and produced
-  // bootstrap-dependent templates instead of refusing or honoring the request.
-  const cliContext = JSON.parse(process.env.CDK_CONTEXT_JSON ?? "{}") as Record<string, unknown>;
-  const mergedContext = { ...cliContext, ...context };
+  // The default stack synthesizer (and the assembly output directory, below) are
+  // App-construction-time settings (Stack cannot pick them up afterwards), so they must be decided
+  // before `new App(...)`, from the same context sources CDK itself would merge for every other
+  // context key: CDK_CONTEXT_JSON (how the `cdk` CLI passes `-c` flags and cdk.json to the app it
+  // shells out to, since bin/agentx.ts calls buildAgentXApp() with no arguments) and this
+  // function's own context argument. CDK_CONTEXT_JSON wins on conflict: that is how the App itself
+  // merges context for every other key (App.loadContext treats the constructor's `context` prop as
+  // defaults, then layers the CDK_CONTEXT_JSON environment context on top of it), so these pre-App
+  // guard clauses must use the same precedence to validate the values the App actually goes on to
+  // use. Letting the argument win instead, as before, meant the guard could accept a value that
+  // CDK_CONTEXT_JSON would then silently override once the App applied its own precedence — a
+  // mismatch between what was validated and what was actually built.
+  let cliContext: Record<string, unknown>;
+  try {
+    cliContext = JSON.parse(process.env.CDK_CONTEXT_JSON ?? "{}") as Record<string, unknown>;
+  } catch (error) {
+    throw new Error(
+      `CDK_CONTEXT_JSON environment variable is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+  const mergedContext = { ...context, ...cliContext };
   const synthesizerMode = mergedContext.agentxSynthesizer as string | undefined;
   if (synthesizerMode !== undefined && synthesizerMode !== "legacy") {
     throw new Error(`unsupported agentxSynthesizer ${JSON.stringify(synthesizerMode)}; expected legacy or unset`);
@@ -29,8 +41,13 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
   if (synthesizerMode === "legacy" && mergedContext.agentxEnv === undefined) {
     throw new Error("agentxSynthesizer=legacy requires a named environment (agentxEnv context); the deployment that predates environments keeps CDK bootstrap");
   }
+  // Lets a caller (the release builder) pin the cloud assembly to a directory it controls and
+  // cleans up, instead of the auto-generated temporary directory App falls back to when this is
+  // unset (unchanged default behavior).
+  const outdir = mergedContext.outdir as string | undefined;
   const app = new App({
     context: { "@aws-cdk/core:defaultCrossStackReferences": "strong", ...context },
+    ...(outdir === undefined ? {} : { outdir }),
     // aws-cdk-lib types IStackSynthesizer.bootstrapQualifier as `string | undefined` via a getter,
     // which exactOptionalPropertyTypes rejects for the optional `bootstrapQualifier?: string` on
     // IReusableStackSynthesizer (same shape as the artifactBucket cast in release-pipeline.ts).

@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { ENVIRONMENT_PLACEHOLDER, ENVIRONMENT_PLACEHOLDER_UNDERSCORED, EnvironmentNameSchema, renderTemplate } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
@@ -99,5 +102,49 @@ describe("agentxSynthesizer from CDK_CONTEXT_JSON (how the cdk CLI actually pass
     withCdkContextJson({ agentxSynthesizer: "legacy" }, () => {
       expect(() => buildAgentXApp()).toThrow(/named environment/);
     });
+  });
+
+  it("gives CDK_CONTEXT_JSON precedence over the context argument for the pre-App guard, matching how App itself merges context for every other key", () => {
+    withCdkContextJson({ agentxSynthesizer: "bogus" }, () => {
+      // The context argument's agentxSynthesizer disagrees with CDK_CONTEXT_JSON's. Once
+      // `new App(...)` runs, App.loadContext would give CDK_CONTEXT_JSON the final say for every
+      // other context key regardless of what this argument says, so the pre-App guard (which must
+      // decide the synthesizer before construction) has to honor the same precedence: it must
+      // reject "bogus", not silently accept the argument's "legacy".
+      expect(() => buildAgentXApp({ agentxSynthesizer: "legacy", agentxEnv: "staging" })).toThrow(/bogus/);
+    });
+  });
+
+  it("throws a clear error naming CDK_CONTEXT_JSON when it is malformed, instead of a raw SyntaxError", () => {
+    const original = process.env.CDK_CONTEXT_JSON;
+    try {
+      process.env.CDK_CONTEXT_JSON = "{not json";
+      expect(() => buildAgentXApp({ agentxEnv: "staging", agentxSynthesizer: "legacy" })).toThrow(/CDK_CONTEXT_JSON/);
+    } finally {
+      if (original === undefined) delete process.env.CDK_CONTEXT_JSON;
+      else process.env.CDK_CONTEXT_JSON = original;
+    }
+  });
+});
+
+describe("outdir context (buildAgentXApp forwards it to `new App({ outdir })`)", () => {
+  it("defaults to a fresh temporary directory when no outdir context is given, unchanged from before", () => {
+    const first = buildAgentXApp({ agentxSynthesizer: "legacy", agentxEnv: "staging" });
+    const second = buildAgentXApp({ agentxSynthesizer: "legacy", agentxEnv: "staging" });
+    expect(first.outdir).toMatch(/cdk\.out/);
+    expect(second.outdir).toMatch(/cdk\.out/);
+    // Two apps built with no outdir context each get their own ephemeral directory: proof this is
+    // still App's own default, not something buildAgentXApp now pins by accident.
+    expect(first.outdir).not.toBe(second.outdir);
+  });
+
+  it("honors an explicit outdir context key", () => {
+    const outdir = mkdtempSync(join(tmpdir(), "agentx-outdir-context-"));
+    try {
+      const app = buildAgentXApp({ agentxSynthesizer: "legacy", agentxEnv: "staging", outdir });
+      expect(app.outdir).toBe(outdir);
+    } finally {
+      rmSync(outdir, { recursive: true, force: true });
+    }
   });
 });

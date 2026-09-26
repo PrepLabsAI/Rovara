@@ -25,6 +25,7 @@
     "image:build:demo": "docker buildx build --platform linux/arm64 --load --tag agentx-worker:demo-arm64 --file environments/base/Dockerfile .",
     "release:demo": "tsx scripts/release-demo.ts",
     "release:prod": "tsx scripts/release-production.ts",
+    "release:build": "tsx scripts/release/build.ts",
     "infra:synth": "npm run build --workspace @agentx/infra && cdk synth --app 'node infra/dist/bin/agentx.js'",
     "infra:synth:demo": "npm run build --workspace @agentx/infra && cdk synth AgentXDemoRuntime --app 'node infra/dist/bin/agentx.js' -c agentxDeploymentMode=demo-microvm -c agentxRegion=us-east-1"
   },
