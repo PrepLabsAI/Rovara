@@ -3547,7 +3547,7 @@ export const handler = createAwsBrokerHandler({
   githubPullRequests: githubCredentials,
   githubMcp: { credentials: (repository, access) => githubCredentials.issueCredentials(repository, access) },
   connectorCredentials: {
-    secrets: secretsManagerSource(secretsManager),
+    secrets: secretsManagerSource(secretsManager, process.env.CONNECTOR_SECRET_PREFIX),
     githubApp: { ref: requiredEnvironment("GITHUB_APP_CREDENTIAL_REF"), secretName: githubPrivateKeySecretArn },
     ...(process.env.CONNECTOR_SECRET_PREFIX ? { connectorSecretPrefix: process.env.CONNECTOR_SECRET_PREFIX } : {}),
   },

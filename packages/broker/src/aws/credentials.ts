@@ -48,9 +48,13 @@ const tokenPartition = (ref: string) => `CREDENTIAL#${ref}`;
  * `undefined`; an access denial names only the secret. The broker role may write only secrets the
  * administrator tagged `agentx-writable: refresh-token` (see infra/lib/control-plane.ts).
  */
-export function secretsManagerSource(client: {
-  send(command: GetSecretValueCommand | PutSecretValueCommand): Promise<{ SecretString?: string; SecretBinary?: Uint8Array }>;
-}): SecretStore {
+export function secretsManagerSource(
+  client: {
+    send(command: GetSecretValueCommand | PutSecretValueCommand): Promise<{ SecretString?: string; SecretBinary?: Uint8Array }>;
+  },
+  /** This deployment's (or environment's) actual connector secret prefix, named in an access-denied message. */
+  connectorSecretPrefix: string = CONNECTOR_SECRET_PREFIX,
+): SecretStore {
   return {
     async write(name, value) {
       await client.send(new PutSecretValueCommand({ SecretId: name, SecretString: value }));
@@ -64,7 +68,7 @@ export function secretsManagerSource(client: {
         const errorName = error instanceof Error ? error.name : undefined;
         if (errorName === "ResourceNotFoundException") return undefined;
         if (errorName === "AccessDeniedException") {
-          throw new CredentialUnavailable(`AgentX cannot read secret ${name}; connector secrets must be named with this deployment's connector prefix in this account and region, or its KMS key does not allow the AgentX broker`);
+          throw new CredentialUnavailable(`AgentX cannot read secret ${name}; connector secrets must be named ${connectorSecretPrefix}<name> in this account and region, or its KMS key does not allow the AgentX broker`);
         }
         // These name a permanent problem with the secret itself (its ciphertext, its KMS key or
         // its deletion state), never a transient AWS fault, so a retry would never help.

@@ -118,12 +118,20 @@ describe("Secrets Manager source and token cache", () => {
     }
   });
 
-  it("extends the access-denied message to name the KMS key as a possible cause", async () => {
+  it("extends the access-denied message to name the KMS key as a possible cause, and the actual configured connector prefix", async () => {
     const { secretsManagerSource } = await import("../../packages/broker/src/aws/credentials.js");
     const failing = { send: vi.fn(async () => { throw Object.assign(new Error("denied"), { name: "AccessDeniedException" }); }) };
     const error = await secretsManagerSource(failing).read("agentx/connectors/x").catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(CredentialUnavailable);
-    expect((error as Error).message).toBe("AgentX cannot read secret agentx/connectors/x; connector secrets must be named with this deployment's connector prefix in this account and region, or its KMS key does not allow the AgentX broker");
+    expect((error as Error).message).toBe("AgentX cannot read secret agentx/connectors/x; connector secrets must be named agentx/connectors/<name> in this account and region, or its KMS key does not allow the AgentX broker");
+  });
+
+  it("names an environment's own connector prefix in the access-denied message, when the source is given one", async () => {
+    const { secretsManagerSource } = await import("../../packages/broker/src/aws/credentials.js");
+    const failing = { send: vi.fn(async () => { throw Object.assign(new Error("denied"), { name: "AccessDeniedException" }); }) };
+    const error = await secretsManagerSource(failing, "agentx/staging/connectors/").read("agentx/staging/connectors/x").catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(CredentialUnavailable);
+    expect((error as Error).message).toBe("AgentX cannot read secret agentx/staging/connectors/x; connector secrets must be named agentx/staging/connectors/<name> in this account and region, or its KMS key does not allow the AgentX broker");
   });
 
   it("logs and swallows a token cache write failure without the token", async () => {

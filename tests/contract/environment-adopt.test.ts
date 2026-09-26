@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { LEGACY_STACK_NAMES } from "../../infra/lib/naming.js";
 import { ADOPTED_STACK_NAMES, adoptEnvironment, type StackReader } from "../../packages/cli/src/environments/adopt.js";
+import { STALE_LOCK_MS, lockParameterName } from "../../packages/cli/src/environments/lock.js";
 import type { ParameterStore } from "../../packages/cli/src/environments/parameter-store.js";
 import { readEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
@@ -150,6 +151,20 @@ describe("agentx env adopt", () => {
     });
     // The SSM write already landed; only the cache write failed.
     expect(await readEnvironmentSettings(store, "production")).toBeDefined();
+  });
+
+  it("refuses a stale lock by naming how to clear it, not by offering a takeover (adopt never confirms one)", async () => {
+    const store = new MemoryParameterStore();
+    const stale = { holder: "carol", command: "env adopt", acquiredAt: new Date(now() - STALE_LOCK_MS - 1).toISOString() };
+    store.values.set(lockParameterName("production"), JSON.stringify(stale));
+    const { result } = await run(liveStacks, store);
+    const error = await result.catch((caught: unknown) => caught) as { code?: string; message?: string };
+    expect(error.code).toBe("CONFIG_INVALID");
+    expect(error.message).toContain("older than 2 hours");
+    expect(error.message).not.toContain("confirm to take it over");
+    expect(error.message).toContain(lockParameterName("production"));
+    expect(error.message).toMatch(/no AgentX command is running/);
+    expect(store.values.has("/agentx/production/settings")).toBe(false);
   });
 
   it("marks a non-Cognito issuer as oidc and uses --client-id", async () => {

@@ -1,6 +1,6 @@
 import { Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
-import { buildAgentXApp } from "../../infra/bin/agentx.js";
+import { buildAgentXApp } from "../../infra/lib/app.js";
 
 /** Asset hashes change whenever bundled code changes; the names and shapes must not. */
 export function normalizedTemplate(stack: Stack): unknown {

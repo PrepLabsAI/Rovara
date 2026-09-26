@@ -1,7 +1,7 @@
 import { App, Stack } from "aws-cdk-lib";
 import { Match, Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
-import { buildAgentXApp } from "../../infra/bin/agentx.js";
+import { buildAgentXApp } from "../../infra/lib/app.js";
 import { environmentNaming, legacyNaming, namingFromContext } from "../../infra/lib/naming.js";
 
 function productionStacks(app: App): Stack[] {
@@ -130,6 +130,14 @@ describe("environment naming", () => {
     expect(text).not.toContain("secret:agentx/connectors/*");
   }, 120_000);
 
+  it("scopes the broker's capacity-provider session termination to the environment's capacity provider", () => {
+    const staging = productionStacks(buildAgentXApp({ agentxEnv: "staging" }));
+    const control = staging.find((stack) => stack.stackName === "agentx-staging-control-plane")!;
+    const text = JSON.stringify(Template.fromStack(control).toJSON());
+    expect(text).toContain("capacity-provider/agentx_staging_capacity-*");
+    expect(text).not.toContain("capacity-provider/*");
+  }, 120_000);
+
   it("does not leak the legacy production Environment tag onto foundation or runtime resources", () => {
     const staging = productionStacks(buildAgentXApp({ agentxEnv: "staging" }));
     const foundation = staging.find((stack) => stack.stackName === "agentx-staging-foundation")!;
@@ -155,5 +163,16 @@ describe("environment naming", () => {
     expect(text).not.toMatch(/"(?:Namespace|MetricNamespace)":"AgentX"/);
     expect(text).toContain("\"AGENTX_METRICS_NAMESPACE\":\"AgentX/staging\"");
     expect(text).toMatch(/"(?:Namespace|MetricNamespace)":"AgentX\/staging"/);
+  }, 240_000);
+
+  it("deploys legacy production next to a staging environment with no shared physical name or export name", () => {
+    const legacy = productionStacks(buildAgentXApp());
+    const staging = productionStacks(buildAgentXApp({ agentxEnv: "staging" }));
+    const legacyNames = new Set(legacy.flatMap(physicalNames));
+    const shared = staging.flatMap(physicalNames).filter((name) => legacyNames.has(name));
+    expect(shared).toEqual([]);
+    const legacyExports = new Set(legacy.flatMap(exportNames));
+    const sharedExports = staging.flatMap(exportNames).filter((name) => legacyExports.has(name));
+    expect(sharedExports).toEqual([]);
   }, 240_000);
 });

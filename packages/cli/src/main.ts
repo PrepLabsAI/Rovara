@@ -89,6 +89,15 @@ export function environmentAdoptClients(region: string): { ssm: SSMClient; cloud
   };
 }
 
+/**
+ * The SSM client `env list` and `env use` read from: scoped to an explicit `--region` when given,
+ * the ambient AWS configuration otherwise. Exported so a test can assert the region reaches client
+ * construction without making any network call, the same way `environmentAdoptClients` is tested.
+ */
+export function environmentSsmClient(region?: string): SSMClient {
+  return new SSMClient(region === undefined ? {} : { region });
+}
+
 export function createCliProgram(dependencies: CliDependencies = {}): Command {
   const services = {
     fetchImplementation: dependencies.fetchImplementation ?? fetch,
@@ -99,7 +108,8 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
   // Where `agentx env use` caches settings and, for production only, where the legacy
   // deployment file lives.
   const home = dependencies.environments?.home ?? homedir();
-  const parameterStore = (): ParameterStore => dependencies.environments?.store ?? ssmParameterStore(new SSMClient({}));
+  const parameterStore = (region?: string): ParameterStore =>
+    dependencies.environments?.store ?? ssmParameterStore(environmentSsmClient(region));
 
   /** The deployment settings for the selected --env: an explicit --deployment-file wins, then the environment cache, then, for production only, the legacy ~/.agentx/deployment.yaml. */
   async function deploymentSettings(options: GlobalOptions): Promise<DeploymentSettings> {
@@ -371,9 +381,10 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
   envCommand
     .command("list")
     .description("list the environments installed in this AWS account and region")
-    .action(async (_options: unknown, command: Command) => {
+    .option("--region <region>", "AWS region to list environments in; defaults to your AWS configuration")
+    .action(async (options: { region?: string }, command: Command) => {
       const globals = globalOptions(command);
-      const environments = await runEnvList(parameterStore());
+      const environments = await runEnvList(parameterStore(options.region));
       if (globals.json) {
         services.stdout.write(formatSuccess({ environments }, true));
       } else {
@@ -387,9 +398,10 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
   envCommand
     .command("use")
     .description("rebuild the selected --env's local settings cache from SSM")
-    .action(async (_options: unknown, command: Command) => {
+    .option("--region <region>", "AWS region of the environment's SSM parameters; defaults to your AWS configuration")
+    .action(async (options: { region?: string }, command: Command) => {
       const globals = globalOptions(command);
-      const result = await runEnvUse({ store: parameterStore(), home, env: globals.env });
+      const result = await runEnvUse({ store: parameterStore(options.region), home, env: globals.env });
       services.stdout.write(
         globals.json
           ? formatSuccess(result, true)

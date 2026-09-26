@@ -40,6 +40,48 @@ describe("environment lock", () => {
     expect(confirmTakeover).not.toHaveBeenCalled();
   });
 
+  it("refuses a stale lock without confirmTakeover, naming how to clear it instead of offering takeover", async () => {
+    const store = new MemoryParameterStore();
+    const stale = { holder: "bob", command: "upgrade", acquiredAt: new Date(t0 - STALE_LOCK_MS - 1).toISOString() };
+    store.values.set("/agentx/staging/lock", JSON.stringify(stale));
+    const error = await withEnvironmentLock({ ...base, store, now: () => t0 }, async () => 1)
+      .catch((caught: unknown) => caught) as { code?: string; message?: string };
+    expect(error.code).toBe("CONFIG_INVALID");
+    expect(error.message).toContain("older than 2 hours");
+    expect(error.message).not.toContain("confirm to take it over");
+    expect(error.message).toContain("/agentx/staging/lock");
+    expect(error.message).toMatch(/no AgentX command is running/);
+  });
+
+  it("says the lock was released while waiting for takeover confirmation, when the recheck finds it gone", async () => {
+    const store = new MemoryParameterStore();
+    const stale = { holder: "bob", command: "upgrade", acquiredAt: new Date(t0 - STALE_LOCK_MS - 1).toISOString() };
+    store.values.set("/agentx/staging/lock", JSON.stringify(stale));
+    const confirmTakeover = async () => {
+      // The original stale lock is released (e.g. cleaned up) while we wait for confirmation.
+      store.values.delete("/agentx/staging/lock");
+      return true;
+    };
+    const error = await withEnvironmentLock({ ...base, store, now: () => t0, confirmTakeover }, async () => 1)
+      .catch((caught: unknown) => caught) as { code?: string; message?: string };
+    expect(error.code).toBe("CONFIG_INVALID");
+    expect(error.message).toContain("released");
+    expect(error.message).not.toContain("another command that took over");
+    expect(error.message).toMatch(/run (?:the command|it) again/);
+  });
+
+  it("says the lock was removed by someone else while the work ran, when it is gone after the work finished", async () => {
+    const store = new MemoryParameterStore();
+    const error = await withEnvironmentLock({ ...base, store, now: () => t0 }, async () => {
+      // Someone else removed the lock entirely (not a takeover) while our work was running.
+      store.values.delete(lockParameterName("staging"));
+      return 1;
+    }).catch((caught: unknown) => caught) as { code?: string; message?: string };
+    expect(error.code).toBe("CONFIG_INVALID");
+    expect(error.message).toContain("removed by someone else");
+    expect(error.message).toContain("work finished");
+  });
+
   it("takes over a stale lock only after confirmation", async () => {
     const store = new MemoryParameterStore();
     const stale = { holder: "bob", command: "upgrade", acquiredAt: new Date(t0 - STALE_LOCK_MS - 1).toISOString() };

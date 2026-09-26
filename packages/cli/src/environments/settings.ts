@@ -31,6 +31,11 @@ export function settingsParameterName(env: string): string {
   return `${environmentSettingsPrefix(env)}settings`;
 }
 
+/** `<prefix>: <path> <message>` for a zod error's first issue, trimmed. */
+function firstIssueMessage(prefix: string, error: z.ZodError): string {
+  return `${prefix}: ${error.issues[0]?.path.join(".") ?? ""} ${error.issues[0]?.message ?? ""}`.trim();
+}
+
 export async function readEnvironmentSettings(store: ParameterStore, env: string): Promise<EnvironmentSettings | undefined> {
   const stored = await store.get(settingsParameterName(env));
   if (stored === undefined) return undefined;
@@ -41,14 +46,14 @@ export async function readEnvironmentSettings(store: ParameterStore, env: string
     throw agentXError("CONFIG_INVALID", `settings for environment ${env} are not valid JSON`);
   }
   const parsed = EnvironmentSettingsSchema.safeParse(json);
-  if (!parsed.success) throw agentXError("CONFIG_INVALID", `settings for environment ${env} are invalid: ${parsed.error.issues[0]?.path.join(".") ?? ""} ${parsed.error.issues[0]?.message ?? ""}`.trim());
+  if (!parsed.success) throw agentXError("CONFIG_INVALID", firstIssueMessage(`settings for environment ${env} are invalid`, parsed.error));
   if (parsed.data.env !== env) throw agentXError("CONFIG_INVALID", `settings stored for environment ${env} name environment ${parsed.data.env}`);
   return parsed.data;
 }
 
 export async function writeEnvironmentSettings(store: ParameterStore, settings: EnvironmentSettings, options: { createOnly?: boolean } = {}): Promise<void> {
   const parsed = EnvironmentSettingsSchema.safeParse(settings);
-  if (!parsed.success) throw agentXError("CONFIG_INVALID", `environment settings are invalid: ${parsed.error.issues[0]?.path.join(".") ?? ""} ${parsed.error.issues[0]?.message ?? ""}`.trim());
+  if (!parsed.success) throw agentXError("CONFIG_INVALID", firstIssueMessage("environment settings are invalid", parsed.error));
   try {
     await store.put(settingsParameterName(parsed.data.env), JSON.stringify(parsed.data), options.createOnly ? { createOnly: true } : {});
   } catch (error) {

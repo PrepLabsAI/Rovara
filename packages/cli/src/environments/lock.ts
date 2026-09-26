@@ -23,15 +23,25 @@ const unreadableLockMessage = (env: string, name: string) =>
 
 const heldMessage = (env: string, held: LockRecord) => `environment ${env} is locked by ${held.holder} running "${held.command}" since ${held.acquiredAt}`;
 
-/** Another command already took the stale lock before we could; racedHeld is what it now holds. */
+/**
+ * Another command already took the stale lock before we could (racedHeld is what it now holds), or
+ * the stale lock was simply released while we waited for takeover confirmation (racedHeld is
+ * undefined): nobody holds it now, so running the command again should succeed.
+ */
 const takeoverRaceMessage = (env: string, racedHeld: LockRecord | undefined) =>
   racedHeld === undefined
-    ? `environment ${env} is locked by another command that took over the lock first`
+    ? `environment ${env}'s lock was released while this command waited for takeover confirmation; run the command again`
     : `${heldMessage(env, racedHeld)}, which took over the lock first`;
 
-/** The lock we held was replaced by someone else's while our own work was still running. */
+/**
+ * The lock we held was replaced by someone else's takeover while our own work was still running
+ * (held names the new holder), or it was simply removed by someone else in that window and nobody
+ * holds it now (held is undefined): either way the work itself finished.
+ */
 const releaseTakeoverMessage = (env: string, held: LockRecord | undefined) =>
-  `environment ${env}'s lock was taken over by ${held === undefined ? "another command" : held.holder} while this command ran (the work finished, but its own lock had already been replaced)`;
+  held === undefined
+    ? `environment ${env}'s lock was removed by someone else while this command ran (the work finished, but there was no lock left to release)`
+    : `environment ${env}'s lock was taken over by ${held.holder} while this command ran (the work finished, but its own lock had already been replaced)`;
 
 export async function withEnvironmentLock<T>(input: {
   store: ParameterStore; env: string; holder: string; command: string;
@@ -53,7 +63,13 @@ export async function withEnvironmentLock<T>(input: {
 
     const stale = now() - Date.parse(held.acquiredAt) > STALE_LOCK_MS;
     if (!stale) throw agentXError("CONFIG_INVALID", heldMessage(input.env, held));
-    if (!input.confirmTakeover || !(await input.confirmTakeover(held))) {
+    if (!input.confirmTakeover) {
+      throw agentXError(
+        "CONFIG_INVALID",
+        `${heldMessage(input.env, held)} (older than 2 hours; to clear it, delete ${name} once you are sure no AgentX command is running)`,
+      );
+    }
+    if (!(await input.confirmTakeover(held))) {
       throw agentXError("CONFIG_INVALID", `${heldMessage(input.env, held)} (older than 2 hours; confirm to take it over)`);
     }
 

@@ -6,7 +6,7 @@ import type { CallerIdentity, StackReader } from "../../packages/cli/src/environ
 import { environmentCachePath, resolveDeploymentFile, writeEnvironmentCache } from "../../packages/cli/src/environments/cache.js";
 import type { ParameterStore } from "../../packages/cli/src/environments/parameter-store.js";
 import { writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
-import { environmentAdoptClients, executeCli } from "../../packages/cli/src/main.js";
+import { environmentAdoptClients, environmentSsmClient, executeCli } from "../../packages/cli/src/main.js";
 import { InMemoryTokenStore } from "../../packages/cli/src/token-store.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 import { stagingSettings } from "../support/environment-fixtures.js";
@@ -66,6 +66,23 @@ describe("agentx env", () => {
     const code = await executeCli(["--env", "Prod", "env", "use"], { ...io, environments: { store, home: await home() } });
     expect(code).not.toBe(0);
     expect(store.calls).toEqual([]);
+  });
+
+  it("scopes env list's and env use's SSM client to --region", async () => {
+    expect(await environmentSsmClient("eu-west-2").config.region()).toBe("eu-west-2");
+  });
+
+  it("accepts --region on env list and env use without disturbing a test-injected store", async () => {
+    const store = new MemoryParameterStore();
+    await writeEnvironmentSettings(store, stagingSettings);
+    const io = capture();
+    const listCode = await executeCli(["--json", "env", "list", "--region", "eu-west-2"], { ...io, environments: { store, home: await home() } });
+    expect(listCode).toBe(0);
+    expect(JSON.parse(io.out.join(""))).toMatchObject({ ok: true, data: { environments: ["staging"] } });
+
+    const io2 = capture();
+    const useCode = await executeCli(["--env", "staging", "env", "use", "--region", "eu-west-2"], { ...io2, environments: { store, home: await home() } });
+    expect(useCode).toBe(0);
   });
 });
 

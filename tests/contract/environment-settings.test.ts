@@ -42,6 +42,15 @@ describe("environment settings", () => {
     await expect(readEnvironmentSettings(store, "staging")).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("staging") as unknown });
   });
 
+  it("refuses stored settings that are not valid JSON, naming the environment", async () => {
+    const store = new MemoryParameterStore();
+    store.values.set("/agentx/staging/settings", "not json");
+    await expect(readEnvironmentSettings(store, "staging")).rejects.toMatchObject({
+      code: "CONFIG_INVALID",
+      message: expect.stringContaining("staging") as unknown,
+    });
+  });
+
   it("refuses settings whose env does not match the parameter's environment", async () => {
     const store = new MemoryParameterStore();
     store.values.set("/agentx/staging/settings", JSON.stringify({ ...stagingSettings, env: "production" }));
