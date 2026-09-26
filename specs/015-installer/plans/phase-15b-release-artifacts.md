@@ -77,7 +77,7 @@ phase map is in [README.md](README.md).
   - stack part `identity`; stack name `agentx-<env>-identity`;
   - user pool name `agentx-<env>`; admin group `agentx-admin`;
   - hosted UI domain prefix `agentx-<env>-<account id>`;
-  - app client callback and logout URL `http://localhost:8765/callback`; no client secret;
+  - app client callback and logout URL `http://127.0.0.1:8765/callback`; no client secret;
     authorization-code flow only; scopes `openid`, `email`, `profile`;
   - outputs `UserPoolId`, `Issuer` (`https://cognito-idp.<region>.amazonaws.com/<pool id>`),
     `ClientId`, `Audience` (equal to the client id), `HostedUiDomain`.
@@ -140,7 +140,7 @@ phase map is in [README.md](README.md).
 **Interfaces:**
 - Produces:
   - `export class IdentityStack extends Stack` with props `{ naming: AgentXNaming } & StackProps`.
-  - `export const ADMIN_GROUP = "agentx-admin"` and `export const CLI_CALLBACK_URL = "http://localhost:8765/callback"`
+  - `export const ADMIN_GROUP = "agentx-admin"` and `export const CLI_CALLBACK_URL = "http://127.0.0.1:8765/callback"`
     in `infra/lib/identity.ts`.
   - `StackPart` gains `"identity"`.
   - `EnvironmentSettings.stacks.identity?: string`.
@@ -182,14 +182,14 @@ describe("identity stack", () => {
   });
 
   it("creates a public PKCE app client for the CLI's loopback login", () => {
-    expect(CLI_CALLBACK_URL).toBe("http://localhost:8765/callback");
+    expect(CLI_CALLBACK_URL).toBe("http://127.0.0.1:8765/callback");
     identityTemplate().hasResourceProperties("AWS::Cognito::UserPoolClient", {
       GenerateSecret: false,
       AllowedOAuthFlows: ["code"],
       AllowedOAuthFlowsUserPoolClient: true,
       AllowedOAuthScopes: Match.arrayEquals(["openid", "email", "profile"]),
-      CallbackURLs: ["http://localhost:8765/callback"],
-      LogoutURLs: ["http://localhost:8765/callback"],
+      CallbackURLs: ["http://127.0.0.1:8765/callback"],
+      LogoutURLs: ["http://127.0.0.1:8765/callback"],
       SupportedIdentityProviders: ["COGNITO"],
       PreventUserExistenceErrors: "ENABLED",
     });
@@ -246,7 +246,7 @@ import type { Construct } from "constructs";
 import type { AgentXNaming } from "./naming.js";
 
 export const ADMIN_GROUP = "agentx-admin";
-export const CLI_CALLBACK_URL = "http://localhost:8765/callback";
+export const CLI_CALLBACK_URL = "http://127.0.0.1:8765/callback";
 
 export interface IdentityStackProps extends StackProps {
   naming: AgentXNaming;
@@ -968,8 +968,9 @@ git commit -m "feat(release): self-contained npm package for the CLI"
   - `AGENTX_PUBLISH_ROLE_ARN`: the AWS role GitHub assumes through OIDC to push to ECR Public;
   - `AGENTX_ECR_PUBLIC_ALIAS`;
   - `AGENTX_NPM_PACKAGE`: the default is `@agentx/cli`.
-- Secret: `NPM_TOKEN`, unless npm trusted publishing is configured. The workflow uses
-  `npm publish --provenance`.
+- No npm token: publishing uses npm trusted publishing (OIDC). The owners publish the first
+  version by hand, then enable the trusted publisher for `release.yml`. The workflow upgrades npm
+  to 11 and runs `npm publish --provenance`.
 
 The workflow, exact structure:
 
@@ -1058,10 +1059,11 @@ jobs:
       - uses: actions/setup-node@v5
         with: { node-version-file: .node-version, cache: npm, registry-url: "https://registry.npmjs.org" }
       - run: npm ci
+      # Trusted publishing (OIDC, no stored token) needs a newer npm than Node 22 ships.
+      - run: npm install -g npm@11
       - env:
           VERSION: ${{ inputs.version || github.ref_name }}
           NAME: ${{ vars.AGENTX_NPM_PACKAGE || '@agentx/cli' }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           VERSION="${VERSION#v}"
           npm run release:pack-cli -- --version "$VERSION" --name "$NAME" --out "$RUNNER_TEMP/cli"
