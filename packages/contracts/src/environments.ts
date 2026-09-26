@@ -22,6 +22,23 @@ export const EnvironmentNameSchema = z
 
 export const DEFAULT_ENVIRONMENT = "production";
 
+/** Cognito refuses hosted UI domain prefixes containing these words. */
+const RESERVED_COGNITO_DOMAIN_WORDS = ["aws", "amazon", "cognito"];
+
+/**
+ * Throws if `env` cannot be used for a Cognito hosted UI domain prefix. Called both at synth time
+ * (IdentityStack, so a bad name fails fast for a direct per-environment synth) and by
+ * renderTemplate for any template containing a Cognito user pool domain (so a name that only the
+ * once-synthesized placeholder template ever saw still gets checked before install, instead of
+ * failing later at deploy).
+ */
+export function assertCognitoDomainSafe(env: string): void {
+  const reserved = RESERVED_COGNITO_DOMAIN_WORDS.find((word) => env.includes(word));
+  if (reserved !== undefined) {
+    throw new Error(`environment name ${env} cannot be used for the Cognito domain (it contains "${reserved}"); choose another name or bring your own OIDC`);
+  }
+}
+
 export type StackPart = "foundation" | "identity" | "runtime" | "control-plane" | "slack";
 
 /** In deploy order. */

@@ -84,6 +84,18 @@ describe("templates for any environment", () => {
     expect(() => renderTemplate("qqenv", "staging")).toThrow(/placeholder/);
   });
 
+  it("refuses to render the identity template (which carries a Cognito hosted UI domain) for an environment name Cognito would reject, even though the placeholder synth itself succeeded", () => {
+    const identityText = placeholderTemplates.get("identity");
+    expect(identityText).toContain("AWS::Cognito::UserPoolDomain");
+    expect(() => renderTemplate(identityText!, "aws-dev")).toThrow(/Cognito domain/);
+  });
+
+  it("renders a non-identity template (no Cognito user pool domain) for that same environment name without issue", () => {
+    const foundationText = placeholderTemplates.get("foundation");
+    expect(foundationText).not.toContain("AWS::Cognito::UserPoolDomain");
+    expect(() => renderTemplate(foundationText!, "aws-dev")).not.toThrow();
+  });
+
   it("is refused for the deployment that predates environments", () => {
     expect(() => buildAgentXApp({ agentxSynthesizer: "legacy" })).toThrow(/named environment/);
   });

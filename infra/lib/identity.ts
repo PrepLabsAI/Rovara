@@ -1,6 +1,7 @@
 import { CfnOutput, Duration, RemovalPolicy, Stack, type StackProps } from "aws-cdk-lib";
 import * as cognito from "aws-cdk-lib/aws-cognito";
 import type { Construct } from "constructs";
+import { assertCognitoDomainSafe } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
 
 export const ADMIN_GROUP = "agentx-admin";
@@ -20,9 +21,10 @@ export class IdentityStack extends Stack {
     super(scope, id, props);
     const env = props.naming.env;
     if (env === undefined) throw new Error("the identity stack exists only for named environments");
-    // Cognito refuses hosted UI domain prefixes containing these words; fail at synth, not deploy.
-    const reserved = ["aws", "amazon", "cognito"].find((word) => env.includes(word));
-    if (reserved !== undefined) throw new Error(`environment name ${env} cannot be used for the Cognito domain (it contains "${reserved}"); choose another name or bring your own OIDC`);
+    // Fails at synth, not deploy. The same check runs again in renderTemplate (packages/contracts),
+    // since published templates are synthesized once for the placeholder and never see the real
+    // environment name here.
+    assertCognitoDomainSafe(env);
 
     // Changing signInAliases/autoVerify (UsernameAttributes/AliasAttributes) or adding custom
     // Schema attributes replaces the user pool: Cognito does not support updating those in place,
