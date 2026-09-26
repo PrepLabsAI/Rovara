@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { ADMIN_GROUP, CLI_CALLBACK_URL, IdentityStack } from "../../infra/lib/identity.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
+import { DEFAULT_CALLBACK_PORT } from "../../packages/cli/src/main.js";
 
 function identityTemplate(env = "staging"): Template {
   const app = new App();
@@ -29,17 +30,24 @@ describe("identity stack", () => {
   });
 
   it("creates a public PKCE app client for the CLI's loopback login", () => {
-    expect(CLI_CALLBACK_URL).toBe("http://localhost:8765/callback");
+    expect(CLI_CALLBACK_URL).toBe("http://127.0.0.1:8765/callback");
     identityTemplate().hasResourceProperties("AWS::Cognito::UserPoolClient", {
       GenerateSecret: false,
       AllowedOAuthFlows: ["code"],
       AllowedOAuthFlowsUserPoolClient: true,
       AllowedOAuthScopes: Match.arrayEquals(["openid", "email", "profile"]),
-      CallbackURLs: ["http://localhost:8765/callback"],
-      LogoutURLs: ["http://localhost:8765/callback"],
+      CallbackURLs: ["http://127.0.0.1:8765/callback"],
+      LogoutURLs: ["http://127.0.0.1:8765/callback"],
       SupportedIdentityProviders: ["COGNITO"],
       PreventUserExistenceErrors: "ENABLED",
     });
+  });
+
+  it("matches the CLI's actual loopback redirect, so the two can't drift apart", () => {
+    // packages/cli/src/auth.ts builds the redirect URI as `http://127.0.0.1:${port}/callback`, and
+    // packages/cli/src/main.ts's `login --callback-port` defaults that port to DEFAULT_CALLBACK_PORT.
+    // A login with no --callback-port override sends exactly this URL.
+    expect(CLI_CALLBACK_URL).toBe(`http://127.0.0.1:${DEFAULT_CALLBACK_PORT}/callback`);
   });
 
   it("restricts the app client to refresh-token auth only, never password auth", () => {
@@ -70,5 +78,21 @@ describe("identity stack", () => {
     expect(names(buildAgentXApp()).some((n) => n.toLowerCase().includes("identity"))).toBe(false);
     expect(names(buildAgentXApp({ agentxEnv: "staging" }))).toContain("agentx-staging-identity");
     expect(names(buildAgentXApp({ agentxEnv: "staging", agentxIdentity: "oidc" }))).not.toContain("agentx-staging-identity");
+  }, 240_000);
+
+  it("refuses an agentxIdentity value that is neither cognito, oidc, nor unset, naming it", () => {
+    expect(() => buildAgentXApp({ agentxEnv: "staging", agentxIdentity: "okta" })).toThrow(/agentxIdentity/);
+    expect(() => buildAgentXApp({ agentxEnv: "staging", agentxIdentity: "okta" })).toThrow(/okta/);
+  });
+
+  it("refuses agentxIdentity with no agentxEnv: the legacy deployment has no identity stack to configure", () => {
+    expect(() => buildAgentXApp({ agentxIdentity: "cognito" })).toThrow(/agentxIdentity/);
+    expect(() => buildAgentXApp({ agentxIdentity: "oidc" })).toThrow(/agentxIdentity/);
+  });
+
+  it("termination-protects the identity stack like the foundation and runtime stacks", () => {
+    const stacks = buildAgentXApp({ agentxEnv: "staging" }).node.children.filter((c): c is Stack => Stack.isStack(c));
+    const identity = stacks.find((stack) => stack.stackName === "agentx-staging-identity");
+    expect(identity?.terminationProtection).toBe(true);
   }, 240_000);
 });

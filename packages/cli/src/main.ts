@@ -104,6 +104,14 @@ export function environmentSsmClient(region?: string): SSMClient {
   return new SSMClient(region === undefined ? {} : { region });
 }
 
+/**
+ * The `login --callback-port` default. `auth.ts`'s loopback listener builds its redirect URI as
+ * `http://127.0.0.1:<port>/callback`, so the identity stack's Cognito app client must register a
+ * callback URL of `http://127.0.0.1:${DEFAULT_CALLBACK_PORT}/callback` for a login with no
+ * `--callback-port` override to work; a test ties the two together.
+ */
+export const DEFAULT_CALLBACK_PORT = 8765;
+
 export function createCliProgram(dependencies: CliDependencies = {}): Command {
   const services = {
     fetchImplementation: dependencies.fetchImplementation ?? fetch,
@@ -166,7 +174,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
   program
     .command("login")
     .description("authenticate with the selected project's OIDC provider")
-    .option("--callback-port <port>", "fixed loopback callback port registered with the OIDC client", parsePort, 8765)
+    .option("--callback-port <port>", "fixed loopback callback port registered with the OIDC client", parsePort, DEFAULT_CALLBACK_PORT)
     .action(async (options: { callbackPort: number }, command: Command) => {
       const globals = globalOptions(command);
       const settings = await deploymentSettings(globals);

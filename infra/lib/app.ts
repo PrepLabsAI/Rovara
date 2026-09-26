@@ -31,6 +31,14 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
   if (identityMode !== undefined && identityMode !== "cognito" && identityMode !== "oidc") {
     throw new Error(`unsupported agentxIdentity ${JSON.stringify(identityMode)}; expected cognito, oidc, or unset`);
   }
+  // The legacy deployment (no agentxEnv context) predates the identity stack and brings its own
+  // OIDC provider by fixed configuration, not by this context value; agentxIdentity has no meaning
+  // for it.
+  if (naming.env === undefined && identityMode !== undefined) {
+    throw new Error(
+      `agentxIdentity=${JSON.stringify(identityMode)} is not supported without an agentxEnv context; the legacy deployment has no identity stack`,
+    );
+  }
 
   new ControlPlaneStack(app, "AgentXControlPlane", {
     description: "AgentX authenticated control plane and durable dispatch foundation",
@@ -58,6 +66,7 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
       new IdentityStack(app, "AgentXIdentity", {
         description: "AgentX Cognito user pool, admin group and CLI app client for a named environment",
         stackName: naming.stackName("identity"),
+        terminationProtection: true,
         naming,
         env: { region: deploymentRegion ?? "us-east-1" },
       });

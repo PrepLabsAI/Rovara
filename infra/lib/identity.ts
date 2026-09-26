@@ -4,7 +4,11 @@ import type { Construct } from "constructs";
 import type { AgentXNaming } from "./naming.js";
 
 export const ADMIN_GROUP = "agentx-admin";
-export const CLI_CALLBACK_URL = "http://localhost:8765/callback";
+// Must be exactly what the CLI's loopback listener sends: packages/cli/src/auth.ts builds
+// `http://127.0.0.1:${port}/callback`, and packages/cli/src/main.ts's `login --callback-port`
+// defaults that port to DEFAULT_CALLBACK_PORT (8765). tests/contract/identity-stack.test.ts ties
+// this literal to that default so the two can't silently drift.
+export const CLI_CALLBACK_URL = "http://127.0.0.1:8765/callback";
 
 export interface IdentityStackProps extends StackProps {
   naming: AgentXNaming;
@@ -20,6 +24,14 @@ export class IdentityStack extends Stack {
     const reserved = ["aws", "amazon", "cognito"].find((word) => env.includes(word));
     if (reserved !== undefined) throw new Error(`environment name ${env} cannot be used for the Cognito domain (it contains "${reserved}"); choose another name or bring your own OIDC`);
 
+    // Changing signInAliases/autoVerify (UsernameAttributes/AliasAttributes) or adding custom
+    // Schema attributes replaces the user pool: Cognito does not support updating those in place,
+    // so CloudFormation deletes and recreates it (every user would be lost). Once deployed, treat
+    // them as fixed. Likewise, UserPoolClient.generateSecret can't be toggled on an existing client;
+    // changing it replaces the "Cli" client (and invalidates the CLI's stored client ID).
+    // Invitation and verification emails go out through Cognito's built-in default email sender
+    // (no SES configuration here), which is capped at roughly 50 emails/day per user pool. That's
+    // fine for an invite-only admin pool; move to SES if an environment ever needs more.
     const pool = new cognito.UserPool(this, "UserPool", {
       userPoolName: `agentx-${env}`,
       selfSignUpEnabled: false,
