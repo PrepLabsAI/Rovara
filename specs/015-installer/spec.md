@@ -435,9 +435,17 @@ and the budget.
   repositories instead, with the same digests.
 - **Code packages are uploaded into the account**, not read from a public bucket, so the deployment
   does not depend on an outside bucket staying available.
-- **Default models**: the orchestrator defaults to the winner of the 2026-09-25 model bake-off
-  (expected: Claude Haiku 4.5 with prompt caching). The worker keeps its current default. The checker defaults to Nova Lite, as today.
-  This spec is updated with the bake-off result before approval.
+- **Default models** (2026-09-26, owner, from the 2026-09-25 bake-off: 65 evaluation cases, 3 runs
+  each, live on Bedrock):
+  - The orchestrator defaults to **Claude Sonnet 4.6** (`us.anthropic.claude-sonnet-4-6`). It tied
+    for the most cases passed (58 of 65), refused correctly in 7 of 7, and was steady from run to
+    run. It costs about $0.025 a turn. Production switched to it on 2026-09-26.
+  - `init` offers **GLM 4.7** (`zai.glm-4.7`) as the lower-cost choice: 58 of 65 passed, about
+    $0.007 a turn, but it refused correctly in only 6 of 7. `init` states this when it is chosen.
+  - Not offered: Nova Pro, which went ahead in 5 of 7 cases where a connector was not set up, and
+    MiniMax M2.5, which was slow and had timeouts. Claude Haiku 4.5 (55 of 65) was inconsistent at
+    creating items.
+  - The worker keeps its current default. The checker defaults to Nova Lite, as today.
 - **Identity**: Cognito by default, bring-your-own OIDC as the alternative (2026-09-25, owner).
 - **The Slack and GitHub apps are created from manifests**, and secrets go straight from a hidden
   prompt or the vendor's redirect into Secrets Manager.
