@@ -110,10 +110,12 @@ export async function packCli(input: PackCliInput): Promise<PackCliResult> {
     license: "FSL-1.1-ALv2",
     files: ["bin", "README.md", "LICENSE"],
     description: "AgentX installer and administration CLI",
-    // npm cross-checks this field against the source repository the publish's OIDC token was
-    // minted for (release.yml checks out PrepLabsAI/AgentX): once provenance is enabled there
-    // (see release.yml's npm job), a missing or mismatched repository.url makes
-    // `npm publish --provenance` fail the publish outright, not just omit the badge.
+    // release.yml's npm job passes no --provenance flag: PrepLabsAI/AgentX is private today, and
+    // npm provenance attestation fails for private repositories. Once the repository is public,
+    // npm trusted publishing (OIDC) adds provenance automatically, with no flag and no other change
+    // needed here — except that npm cross-checks this field against the source repository the
+    // publish's OIDC token was minted for (release.yml checks out PrepLabsAI/AgentX), so a missing
+    // or mismatched repository.url would make that automatic provenance attach incorrectly.
     repository: { type: "git", url: "git+https://github.com/PrepLabsAI/AgentX.git" },
   };
   await writeFile(join(packageDir, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");

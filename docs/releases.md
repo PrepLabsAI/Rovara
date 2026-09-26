@@ -75,7 +75,8 @@ deployment.
 3. **The npm package — partly done.** The `charterarc` npm organization exists, and the package
    name `@charterarc/agentx` is reserved. Before turning on `AGENTX_PUBLISH_ENABLED` (step 6
    below), publish the very first version by hand:
-   1. From a checkout of the commit you are about to tag as the first release, run
+   1. From a checkout of the release tag's commit, run `npm ci && npm run build` first (workspace
+      packages such as `@agentx/contracts` are only importable once built), then
       `npm run release:pack-cli -- --version <x.y.z> --out ./cli-release` (use the exact version
       you are about to tag, for example `0.1.0`). This writes a tarball named
       `./cli-release/charterarc-agentx-<x.y.z>.tgz`.
@@ -87,11 +88,11 @@ deployment.
 
    Publish this first version under the same version number you are about to tag, and do it before
    `AGENTX_PUBLISH_ENABLED` is set to `true`. When you later push that tag with publishing enabled,
-   the workflow's own `npm` job will try to publish that same version again — and fail, because npm
-   refuses to publish over a version already on the registry. That one failure is expected and
-   harmless: by then the images and the GitHub release have already published normally in that same
-   run, the package itself is already correctly on npm, and every version after this first one
-   publishes through npm automatically with no manual step.
+   the workflow's own `npm` job checks whether that version is already on the registry before
+   publishing, finds it, and skips the publish instead of failing: by then the images and the
+   GitHub release have already published normally in that same run, the package itself is already
+   correctly on npm, and every version after this first one publishes through npm automatically
+   with no manual step.
 4. **A license — done.** The `LICENSE` file (FSL-1.1-ALv2) is in this repository as of this phase.
 5. **A decision still open.** `PrepLabsAI/AgentX` is a private repository today. Publishing a
    release makes the built code public: the npm package is plain, readable JavaScript, and the two
@@ -102,11 +103,19 @@ deployment.
    Secrets and variables → Actions → Variables, saving the last one for last:
    `AGENTX_PUBLISH_ROLE_ARN`, `AGENTX_ECR_PUBLIC_ALIAS`, `AGENTX_NPM_PACKAGE`, then
    `AGENTX_PUBLISH_ENABLED=true`.
+7. **A tag protection ruleset — recommended.** The workflow only checks that a tag's *name* matches
+   `vX.Y.Z`; it does not check who pushed it or what commit it points at. Anyone who can push a
+   matching tag can trigger a real publish. Add a repository ruleset (Settings → Rules → Rulesets →
+   New tag ruleset) targeting `v*` that restricts tag creation to repository owners/admins, so an
+   accidental or malicious `v*` tag from anyone else can't publish.
 
 ## If a release fails partway
 
-- If the images already pushed but a later job failed, re-running the workflow from the same tag
-  is safe — the images job pushes the version tag again every time it runs.
-- If the GitHub release was already created before something failed later, re-running from the same
-  tag will not work: GitHub refuses to create a release that already exists. Either delete the
-  draft release and its tag first, or cut a new patch version and tag that instead.
+- Use GitHub's "Re-run failed jobs" button on the workflow run, not a fresh tag push. Re-running
+  rebuilds and re-tags the images (the images job pushes the version tag again every time it runs,
+  so that part is always safe), then continues into the jobs that failed.
+- If the GitHub release was already created before something failed later (for example, npm),
+  re-running will hit `gh release create`'s own guard and report that the release already exists.
+  `gh release create` publishes a real release, not a draft, so there is no draft to delete instead.
+  To redo that version, delete the release and its tag first, then push the tag again — or leave it
+  and cut a new patch version instead.
