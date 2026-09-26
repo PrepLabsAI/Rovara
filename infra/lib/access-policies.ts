@@ -230,6 +230,8 @@ export function operatorRoleStatements(scope: PolicyScope): PolicyStatementJson[
         "cloudformation:ExecuteChangeSet",
         "cloudformation:DeleteChangeSet",
         "cloudformation:ListChangeSets",
+        // The templates engine turns termination protection on right after a new stack's first deploy.
+        "cloudformation:UpdateTerminationProtection",
       ],
       Resource: deployedParts.map(stackArn),
     },
