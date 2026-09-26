@@ -1,11 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { ENVIRONMENT_PLACEHOLDER, STACK_PARTS, environmentStackName } from "@agentx/contracts";
 import { CONTEXT_ENV, CONTEXT_OVERFLOW_LOCATION_ENV } from "aws-cdk-lib/cx-api";
 import { buildAgentXApp } from "../../infra/lib/app.js";
+import { sha256Hex } from "./hash.js";
 import { ImageDigest, ReleaseManifestSchema, type ReleaseManifest } from "./manifest.js";
 import { zipDirectory } from "./zip.js";
 
@@ -30,10 +30,6 @@ export interface BuildReleaseInput {
 // `<repoRoot>/.release-synth/...` produced clean "../../../node_modules/..." with no absolute path.
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const RELEASE_SYNTH_ROOT = join(REPO_ROOT, ".release-synth");
-
-function sha256Hex(data: Buffer): string {
-  return createHash("sha256").update(data).digest("hex");
-}
 
 /** Validates images against ImageDigest before any other work, so a bad reference fails fast. */
 function checkedImages(images: BuildReleaseInput["images"]): ReleaseManifest["images"] {
@@ -93,6 +89,10 @@ function checkedNoAmbientCdkContext(): void {
  * while the stacks are being constructed — before `.synth()` is ever called. So this release builder
  * has to produce the same output regardless of the caller's own working directory.
  */
+// process.chdir is process-global state, not scoped to this call: it affects every other piece of
+// code running in this process at the same time, so this only works because vitest runs this
+// suite's files under the forks pool (a separate OS process per test file) and no test in this file
+// calls buildRelease concurrently with another cwd-sensitive call.
 function withRepoRootCwd<T>(run: () => T): T {
   const originalCwd = process.cwd();
   process.chdir(REPO_ROOT);

@@ -36,6 +36,49 @@ describe("release verification", () => {
     const problems = result.ok ? [] : result.problems;
     expect(problems.some((p) => p.includes(manifest.templates[0]!.file))).toBe(true);
   }, 900_000);
+
+  it("names a template that a rebuild from current source produces but the release doesn't have, not just the reverse", async () => {
+    const dir = join(await mkdtemp(join(tmpdir(), "agentx-verify-")), "r");
+    const manifest = await buildRelease({ version: "1.2.3", out: dir, gitCommit: "c".repeat(40) });
+    const dropped = manifest.templates[0]!;
+    const edited = { ...manifest, templates: manifest.templates.filter((t) => t.part !== dropped.part) };
+    await writeFile(join(dir, "release.json"), `${JSON.stringify(edited, null, 2)}\n`, "utf8");
+    const result = await verifyRelease({ dir });
+    expect(result.ok).toBe(false);
+    const problems = result.ok ? [] : result.problems;
+    expect(problems.some((p) => p.includes(dropped.file) && p.includes("not present in this release"))).toBe(true);
+  }, 900_000);
+});
+
+describe("verifyRelease: release.json problems", () => {
+  it("reports a missing release.json as a problem naming release.json, instead of throwing", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "agentx-verify-missing-"));
+    const result = await verifyRelease({ dir });
+    expect(result.ok).toBe(false);
+    const problems = result.ok ? [] : result.problems;
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain("release.json");
+  });
+
+  it("reports an unparseable release.json (invalid JSON) as a problem naming release.json", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "agentx-verify-badjson-"));
+    await writeFile(join(dir, "release.json"), "{ this is not json", "utf8");
+    const result = await verifyRelease({ dir });
+    expect(result.ok).toBe(false);
+    const problems = result.ok ? [] : result.problems;
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain("release.json");
+  });
+
+  it("reports a schema-invalid release.json as a problem naming release.json", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "agentx-verify-badschema-"));
+    await writeFile(join(dir, "release.json"), `${JSON.stringify({ schemaVersion: 2, version: "not-a-version" })}\n`, "utf8");
+    const result = await verifyRelease({ dir });
+    expect(result.ok).toBe(false);
+    const problems = result.ok ? [] : result.problems;
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain("release.json");
+  });
 });
 
 describe("CI workflow reproducibility check", () => {

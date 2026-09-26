@@ -1,9 +1,9 @@
-import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { buildRelease } from "./build.js";
+import { sha256Hex } from "./hash.js";
 import { ReleaseManifestSchema, type ReleaseManifest } from "./manifest.js";
 
 export interface VerifyReleaseInput {
@@ -11,10 +11,6 @@ export interface VerifyReleaseInput {
 }
 
 export type VerifyReleaseResult = { ok: true } | { ok: false; problems: string[] };
-
-function sha256Hex(data: Buffer): string {
-  return createHash("sha256").update(data).digest("hex");
-}
 
 /** Reads each entry's file relative to `dir` and compares its checksum against `entry.sha256`,
  * pushing a problem naming the file instead of throwing when the file is missing or unreadable. */
@@ -46,7 +42,9 @@ async function checkFileChecksums(
  *  2. The same version and gitCommit are rebuilt from the current source (no images — they play no
  *     part in template/package synthesis) into a throwaway directory, and every template's and
  *     package's checksum is compared against that rebuild, catching a release that no longer
- *     matches what the current checkout would produce.
+ *     matches what the current checkout would produce. Drift is reported in both directions: a
+ *     release entry the rebuild no longer produces, and a rebuilt template or package the release
+ *     doesn't have.
  */
 export async function verifyRelease(input: VerifyReleaseInput): Promise<VerifyReleaseResult> {
   const dir = resolve(input.dir);
@@ -71,6 +69,7 @@ export async function verifyRelease(input: VerifyReleaseInput): Promise<VerifyRe
     });
 
     const rebuiltTemplatesByPart = new Map(rebuilt.templates.map((t) => [t.part, t.sha256]));
+    const releaseTemplateParts = new Set(manifest.templates.map((t) => t.part));
     for (const template of manifest.templates) {
       const rebuiltSha = rebuiltTemplatesByPart.get(template.part);
       if (rebuiltSha === undefined) {
@@ -79,6 +78,11 @@ export async function verifyRelease(input: VerifyReleaseInput): Promise<VerifyRe
         problems.push(
           `${template.file}: does not match a rebuild from current source (release has ${template.sha256}, rebuild has ${rebuiltSha})`,
         );
+      }
+    }
+    for (const rebuiltTemplate of rebuilt.templates) {
+      if (!releaseTemplateParts.has(rebuiltTemplate.part)) {
+        problems.push(`${rebuiltTemplate.file}: rebuilding from current source produces a ${rebuiltTemplate.part} template not present in this release`);
       }
     }
 
