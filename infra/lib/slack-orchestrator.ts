@@ -10,14 +10,20 @@ import {
   aws_logs as logs,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
+import { type AgentXNaming, legacyNaming } from "./naming.js";
 
 export const AGENTX_SLACK_ORCHESTRATOR_REPOSITORY = "agentx-slack-orchestrator";
+
+export interface SlackOrchestratorStackProps extends StackProps {
+  naming?: AgentXNaming;
+}
 
 // The task role and every queue, table, bucket, and secret it uses belong to AgentXControlPlane,
 // which must know the role before this stack exists. This stack only runs the container.
 export class SlackOrchestratorStack extends Stack {
-  constructor(scope: Construct, id: string, props?: StackProps) {
+  constructor(scope: Construct, id: string, props?: SlackOrchestratorStackProps) {
     super(scope, id, props);
+    const naming = props?.naming ?? legacyNaming();
 
     const imageUri = new CfnParameter(this, "OrchestratorImageUri", {
       type: "String",
@@ -86,7 +92,7 @@ export class SlackOrchestratorStack extends Stack {
           logs.FilterPattern.stringValue("$.event", "=", "metric"),
           logs.FilterPattern.stringValue("$.metric", "=", metric),
         ),
-        metricNamespace: "AgentX",
+        metricNamespace: naming.metricsNamespace,
         metricName: metric,
         metricValue: "$.count",
         ...(dimensions === undefined ? {} : { dimensions }),
@@ -95,7 +101,7 @@ export class SlackOrchestratorStack extends Stack {
     // A failure while emitting the lines above would otherwise leave those metrics silently missing.
     logGroup.addMetricFilter("TurnMetricsEmitFailedMetric", {
       filterPattern: logs.FilterPattern.stringValue("$.event", "=", "turn_metrics.emit_failed"),
-      metricNamespace: "AgentX",
+      metricNamespace: naming.metricsNamespace,
       metricName: "TurnMetricsEmitFailed",
       metricValue: "1",
     });
@@ -120,7 +126,7 @@ export class SlackOrchestratorStack extends Stack {
       tags: [{ key: "Application", value: "AgentX" }],
     });
     const taskDefinition = new ecs.CfnTaskDefinition(this, "TaskDefinition", {
-      family: "agentx-slack-orchestrator",
+      family: naming.taskFamily,
       requiresCompatibilities: ["FARGATE"],
       networkMode: "awsvpc",
       cpu: "512",

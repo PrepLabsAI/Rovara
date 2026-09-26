@@ -1,0 +1,5061 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
+{
+  "Description": "AgentX authenticated control plane and durable dispatch foundation",
+  "Outputs": {
+    "ApiEndpoint": {
+      "Value": {
+        "Fn::GetAtt": [
+          "HttpApi",
+          "ApiEndpoint",
+        ],
+      },
+    },
+    "ArtifactBucketName": {
+      "Value": {
+        "Ref": "Artifacts82DD59A1",
+      },
+    },
+    "DispatchDeadLetterQueueUrl": {
+      "Value": {
+        "Ref": "DispatchDeadLetterQueue3E30F4B8",
+      },
+    },
+    "OperatorAlertsTopicArn": {
+      "Value": {
+        "Ref": "OperatorAlertsA2431256",
+      },
+    },
+    "SlackEventsUrl": {
+      "Value": {
+        "Fn::Join": [
+          "",
+          [
+            {
+              "Fn::GetAtt": [
+                "HttpApi",
+                "ApiEndpoint",
+              ],
+            },
+            "/v1/slack/events",
+          ],
+        ],
+      },
+    },
+    "SlackInteractivityUrl": {
+      "Value": {
+        "Fn::Join": [
+          "",
+          [
+            {
+              "Fn::GetAtt": [
+                "HttpApi",
+                "ApiEndpoint",
+              ],
+            },
+            "/v1/slack/interactions",
+          ],
+        ],
+      },
+    },
+    "SlackOrchestratorTaskRoleArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "SlackOrchestratorTaskRole2372FE40",
+          "Arn",
+        ],
+      },
+    },
+    "SlackRequestDeadLetterQueueUrl": {
+      "Value": {
+        "Ref": "SlackRequestDeadLetterQueueBBBDDF4E",
+      },
+    },
+    "SlackRequestQueueUrl": {
+      "Value": {
+        "Ref": "SlackRequestQueueCC82C864",
+      },
+    },
+    "SlackSecretArn": {
+      "Value": {
+        "Ref": "SlackSecretEA96F13F",
+      },
+    },
+    "SlackThreadSessionBucketName": {
+      "Value": {
+        "Ref": "SlackThreadSessions6FD21617",
+      },
+    },
+    "SlackThreadsTableName": {
+      "Value": {
+        "Ref": "SlackThreads36E14C1E",
+      },
+    },
+    "StateTableName": {
+      "Value": {
+        "Ref": "State1C20CC9A",
+      },
+    },
+    "TurnRecordsTableName": {
+      "Value": {
+        "Ref": "TurnRecords69ECFCD9",
+      },
+    },
+  },
+  "Parameters": {
+    "AdminClaim": {
+      "Default": "cognito:groups",
+      "Type": "String",
+    },
+    "AdminValues": {
+      "Default": "["agentx-admin"]",
+      "Description": "JSON string array of claim values that grant AgentX administrator access",
+      "Type": "String",
+    },
+    "BootstrapVersion": {
+      "Default": "/cdk-bootstrap/hnb659fds/version",
+      "Description": "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]",
+      "Type": "AWS::SSM::Parameter::Value<String>",
+    },
+    "CallbackSigningKey": {
+      "Description": "Random secret used to scope and authenticate worker callbacks",
+      "MinLength": 32,
+      "NoEcho": true,
+      "Type": "String",
+    },
+    "GitHubAppAccount": {
+      "Type": "String",
+    },
+    "GitHubAppCredentialRef": {
+      "Default": "github-agentx-sdlc",
+      "Type": "String",
+    },
+    "GitHubAppId": {
+      "Type": "String",
+    },
+    "GitHubAppInstallationId": {
+      "Type": "String",
+    },
+    "GitHubAppPrivateKeySecretArn": {
+      "Description": "Complete Secrets Manager ARN containing the GitHub App private key PEM",
+      "Type": "String",
+    },
+    "OidcAudience": {
+      "Type": "String",
+    },
+    "OidcIssuer": {
+      "Type": "String",
+    },
+    "SlackAppPostedMessages": {
+      "AllowedValues": [
+        "accept",
+        "ignore",
+      ],
+      "Default": "accept",
+      "Description": "accept: answer mentions a person posts through another app with their own Slack token; ignore: answer only typed mentions",
+      "Type": "String",
+    },
+    "SlackMemberWorkspaceLimit": {
+      "Default": 3,
+      "Description": "Maximum Slack thread workspaces one channel member may start",
+      "MinValue": 1,
+      "Type": "Number",
+    },
+    "SlackOrganizationWorkspaceLimit": {
+      "Default": 20,
+      "Description": "Maximum Slack thread workspaces for the whole Slack organization",
+      "MinValue": 1,
+      "Type": "Number",
+    },
+    "SlackThreadTurnsPerMinute": {
+      "AllowedPattern": "^([1-9]|[1-5][0-9]|60)$",
+      "ConstraintDescription": "must be a whole number from 1 to 60",
+      "Default": "6",
+      "Description": "Most requests one Slack thread may start in a minute; further requests pause the thread with one notice",
+      "Type": "String",
+    },
+  },
+  "Resources": {
+    "Artifacts82DD59A1": {
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "BucketEncryption": {
+          "ServerSideEncryptionConfiguration": [
+            {
+              "ServerSideEncryptionByDefault": {
+                "SSEAlgorithm": "AES256",
+              },
+            },
+          ],
+        },
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "BlockPublicPolicy": true,
+          "IgnorePublicAcls": true,
+          "RestrictPublicBuckets": true,
+        },
+      },
+      "Type": "AWS::S3::Bucket",
+      "UpdateReplacePolicy": "Retain",
+    },
+    "ArtifactsPolicy6E9058CC": {
+      "Properties": {
+        "Bucket": {
+          "Ref": "Artifacts82DD59A1",
+        },
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "s3:*",
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false",
+                },
+              },
+              "Effect": "Deny",
+              "Principal": {
+                "AWS": "*",
+              },
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "Artifacts82DD59A1",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "Artifacts82DD59A1",
+                          "Arn",
+                        ],
+                      },
+                      "/*",
+                    ],
+                  ],
+                },
+              ],
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+      },
+      "Type": "AWS::S3::BucketPolicy",
+    },
+    "BrokerApiInvokeC6C766F0": {
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {
+          "Fn::GetAtt": [
+            "BrokerE1355FD6",
+            "Arn",
+          ],
+        },
+        "Principal": "apigateway.amazonaws.com",
+        "SourceArn": {
+          "Fn::Join": [
+            "",
+            [
+              "arn:",
+              {
+                "Ref": "AWS::Partition",
+              },
+              ":execute-api:",
+              {
+                "Ref": "AWS::Region",
+              },
+              ":",
+              {
+                "Ref": "AWS::AccountId",
+              },
+              ":",
+              {
+                "Ref": "HttpApi",
+              },
+              "/*/*/*",
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::Lambda::Permission",
+    },
+    "BrokerE1355FD6": {
+      "DependsOn": [
+        "BrokerServiceRoleDefaultPolicyDDFD9E7E",
+        "BrokerServiceRole1938BCC9",
+      ],
+      "Properties": {
+        "Code": {
+          "S3Bucket": {
+            "Fn::Sub": "cdk-hnb659fds-assets-\${AWS::AccountId}-\${AWS::Region}",
+          },
+          "S3Key": "<asset-hash>.zip",
+        },
+        "Environment": {
+          "Variables": {
+            "ADMIN_CLAIM": {
+              "Ref": "AdminClaim",
+            },
+            "ADMIN_VALUES": {
+              "Ref": "AdminValues",
+            },
+            "ARTIFACT_BUCKET_NAME": {
+              "Ref": "Artifacts82DD59A1",
+            },
+            "CALLBACK_SIGNING_KEY": {
+              "Ref": "CallbackSigningKey",
+            },
+            "GITHUB_APP_ACCOUNT": {
+              "Ref": "GitHubAppAccount",
+            },
+            "GITHUB_APP_CREDENTIAL_REF": {
+              "Ref": "GitHubAppCredentialRef",
+            },
+            "GITHUB_APP_ID": {
+              "Ref": "GitHubAppId",
+            },
+            "GITHUB_APP_INSTALLATION_ID": {
+              "Ref": "GitHubAppInstallationId",
+            },
+            "GITHUB_APP_PRIVATE_KEY_SECRET_ARN": {
+              "Ref": "GitHubAppPrivateKeySecretArn",
+            },
+            "OIDC_ISSUER": {
+              "Ref": "OidcIssuer",
+            },
+            "SLACK_MEMBER_WORKSPACE_LIMIT": {
+              "Ref": "SlackMemberWorkspaceLimit",
+            },
+            "SLACK_ORCHESTRATOR_ROLE_ARN": {
+              "Fn::GetAtt": [
+                "SlackOrchestratorTaskRole2372FE40",
+                "Arn",
+              ],
+            },
+            "SLACK_ORGANIZATION_WORKSPACE_LIMIT": {
+              "Ref": "SlackOrganizationWorkspaceLimit",
+            },
+            "STATE_TABLE_NAME": {
+              "Ref": "State1C20CC9A",
+            },
+            "TURN_RECORDS_TABLE_NAME": {
+              "Ref": "TurnRecords69ECFCD9",
+            },
+          },
+        },
+        "Handler": "index.handler",
+        "LoggingConfig": {
+          "LogGroup": {
+            "Ref": "BrokerLogs003CD6FC",
+          },
+        },
+        "MemorySize": 512,
+        "Role": {
+          "Fn::GetAtt": [
+            "BrokerServiceRole1938BCC9",
+            "Arn",
+          ],
+        },
+        "Runtime": "nodejs22.x",
+        "Timeout": 30,
+        "TracingConfig": {
+          "Mode": "Active",
+        },
+      },
+      "Type": "AWS::Lambda::Function",
+    },
+    "BrokerIntegration": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "IntegrationType": "AWS_PROXY",
+        "IntegrationUri": {
+          "Fn::GetAtt": [
+            "BrokerE1355FD6",
+            "Arn",
+          ],
+        },
+        "PayloadFormatVersion": "2.0",
+      },
+      "Type": "AWS::ApiGatewayV2::Integration",
+    },
+    "BrokerLogs003CD6FC": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "RetentionInDays": 30,
+      },
+      "Type": "AWS::Logs::LogGroup",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "BrokerServiceRole1938BCC9": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+              ],
+            ],
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "BrokerServiceRoleDefaultPolicyDDFD9E7E": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "xray:PutTraceSegments",
+                "xray:PutTelemetryRecords",
+              ],
+              "Effect": "Allow",
+              "Resource": "*",
+            },
+            {
+              "Action": [
+                "dynamodb:BatchGetItem",
+                "dynamodb:Query",
+                "dynamodb:GetItem",
+                "dynamodb:Scan",
+                "dynamodb:ConditionCheckItem",
+                "dynamodb:BatchWriteItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:DeleteItem",
+                "dynamodb:DescribeTable",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "State1C20CC9A",
+                    "Arn",
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "dynamodb:GetRecords",
+                "dynamodb:GetShardIterator",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "State1C20CC9A",
+                    "Arn",
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "s3:GetObject*",
+                "s3:GetBucket*",
+                "s3:List*",
+                "s3:DeleteObject*",
+                "s3:PutObject",
+                "s3:PutObjectLegalHold",
+                "s3:PutObjectRetention",
+                "s3:PutObjectTagging",
+                "s3:PutObjectVersionTagging",
+                "s3:Abort*",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "Artifacts82DD59A1",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "Artifacts82DD59A1",
+                          "Arn",
+                        ],
+                      },
+                      "/*",
+                    ],
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": "bedrock-agentcore:StopRuntimeSession",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":bedrock-agentcore:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":runtime/*",
+                  ],
+                ],
+              },
+            },
+            {
+              "Action": "bedrock-agentcore:DeleteCapacityProviderSession",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":bedrock-agentcore:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":capacity-provider/*",
+                  ],
+                ],
+              },
+            },
+            {
+              "Action": "secretsmanager:GetSecretValue",
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "GitHubAppPrivateKeySecretArn",
+              },
+            },
+            {
+              "Action": "secretsmanager:GetSecretValue",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":secretsmanager:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":secret:agentx/connectors/*",
+                  ],
+                ],
+              },
+            },
+            {
+              "Action": "secretsmanager:PutSecretValue",
+              "Condition": {
+                "StringEquals": {
+                  "secretsmanager:ResourceTag/agentx-writable": "refresh-token",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":secretsmanager:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":secret:agentx/connectors/*",
+                  ],
+                ],
+              },
+            },
+            {
+              "Action": [
+                "codebuild:StartBuild",
+                "codebuild:BatchGetBuilds",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":codebuild:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":project/agentx-*",
+                  ],
+                ],
+              },
+            },
+            {
+              "Action": "dynamodb:Query",
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "TurnRecords69ECFCD9",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "TurnRecords69ECFCD9",
+                          "Arn",
+                        ],
+                      },
+                      "/index/byTime",
+                    ],
+                  ],
+                },
+              ],
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "BrokerServiceRoleDefaultPolicyDDFD9E7E",
+        "Roles": [
+          {
+            "Ref": "BrokerServiceRole1938BCC9",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "ConnectorBrokenAlarmBE25C37B": {
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "OperatorAlertsA2431256",
+          },
+        ],
+        "AlarmDescription": "A connector's discovery failed or a vendor changed an approved tool's schema. Check the broker logs for connector metrics and connector.* events.",
+        "AlarmName": "AgentXConnectorBroken",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "Metrics": [
+          {
+            "Expression": "FILL(discovery, 0) + FILL(drift, 0)",
+            "Id": "expr_1",
+            "Label": "Connector discovery failures and schema drift",
+            "ReturnData": true,
+          },
+          {
+            "Id": "discovery",
+            "MetricStat": {
+              "Metric": {
+                "MetricName": "ConnectorDiscoveryFailed",
+                "Namespace": "AgentX",
+              },
+              "Period": 300,
+              "Stat": "Sum",
+            },
+            "ReturnData": false,
+          },
+          {
+            "Id": "drift",
+            "MetricStat": {
+              "Metric": {
+                "MetricName": "ConnectorSchemaDrift",
+                "Namespace": "AgentX",
+              },
+              "Period": 300,
+              "Stat": "Sum",
+            },
+            "ReturnData": false,
+          },
+        ],
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
+    "ConnectorNotConnectedAlarmF2FDC428": {
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "OperatorAlertsA2431256",
+          },
+        ],
+        "AlarmDescription": "A connector's vendor credential is missing, revoked or rejected. Check the broker logs for the connector, then reconnect it with agentx connectors.",
+        "AlarmName": "AgentXConnectorNotConnected",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "MetricName": "ConnectorNotConnected",
+        "Namespace": "AgentX",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
+    "DefaultStage": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AutoDeploy": true,
+        "StageName": "$default",
+      },
+      "Type": "AWS::ApiGatewayV2::Stage",
+    },
+    "DispatchDeadLetterQueue3E30F4B8": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "MessageRetentionPeriod": 1209600,
+        "SqsManagedSseEnabled": true,
+      },
+      "Type": "AWS::SQS::Queue",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "DispatchQueue898EB017": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "RedrivePolicy": {
+          "deadLetterTargetArn": {
+            "Fn::GetAtt": [
+              "DispatchDeadLetterQueue3E30F4B8",
+              "Arn",
+            ],
+          },
+          "maxReceiveCount": 5,
+        },
+        "SqsManagedSseEnabled": true,
+        "VisibilityTimeout": 120,
+      },
+      "Type": "AWS::SQS::Queue",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "DispatchQueueMappingEFBBE6CE": {
+      "Properties": {
+        "BatchSize": 1,
+        "EventSourceArn": {
+          "Fn::GetAtt": [
+            "DispatchQueue898EB017",
+            "Arn",
+          ],
+        },
+        "FunctionName": {
+          "Ref": "DispatcherD4A12972",
+        },
+        "FunctionResponseTypes": [
+          "ReportBatchItemFailures",
+        ],
+      },
+      "Type": "AWS::Lambda::EventSourceMapping",
+    },
+    "DispatcherD4A12972": {
+      "DependsOn": [
+        "DispatcherServiceRoleDefaultPolicyDA413007",
+        "DispatcherServiceRole904BCD09",
+      ],
+      "Properties": {
+        "Code": {
+          "S3Bucket": {
+            "Fn::Sub": "cdk-hnb659fds-assets-\${AWS::AccountId}-\${AWS::Region}",
+          },
+          "S3Key": "<asset-hash>.zip",
+        },
+        "Environment": {
+          "Variables": {
+            "MAX_DISPATCH_ATTEMPTS": "5",
+            "STATE_TABLE_NAME": {
+              "Ref": "State1C20CC9A",
+            },
+          },
+        },
+        "Handler": "index.handler",
+        "LoggingConfig": {
+          "LogGroup": {
+            "Ref": "DispatcherLogsCDE1995F",
+          },
+        },
+        "MemorySize": 512,
+        "Role": {
+          "Fn::GetAtt": [
+            "DispatcherServiceRole904BCD09",
+            "Arn",
+          ],
+        },
+        "Runtime": "nodejs22.x",
+        "Timeout": 60,
+        "TracingConfig": {
+          "Mode": "Active",
+        },
+      },
+      "Type": "AWS::Lambda::Function",
+    },
+    "DispatcherLogsCDE1995F": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "RetentionInDays": 30,
+      },
+      "Type": "AWS::Logs::LogGroup",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "DispatcherServiceRole904BCD09": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+              ],
+            ],
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "DispatcherServiceRoleDefaultPolicyDA413007": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "xray:PutTraceSegments",
+                "xray:PutTelemetryRecords",
+              ],
+              "Effect": "Allow",
+              "Resource": "*",
+            },
+            {
+              "Action": [
+                "sqs:ReceiveMessage",
+                "sqs:ChangeMessageVisibility",
+                "sqs:GetQueueUrl",
+                "sqs:DeleteMessage",
+                "sqs:GetQueueAttributes",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DispatchQueue898EB017",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "dynamodb:BatchGetItem",
+                "dynamodb:Query",
+                "dynamodb:GetItem",
+                "dynamodb:Scan",
+                "dynamodb:ConditionCheckItem",
+                "dynamodb:BatchWriteItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:DeleteItem",
+                "dynamodb:DescribeTable",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "State1C20CC9A",
+                    "Arn",
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "dynamodb:GetRecords",
+                "dynamodb:GetShardIterator",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "State1C20CC9A",
+                    "Arn",
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": "bedrock-agentcore:InvokeAgentRuntime",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":bedrock-agentcore:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":runtime/*",
+                  ],
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "DispatcherServiceRoleDefaultPolicyDA413007",
+        "Roles": [
+          {
+            "Ref": "DispatcherServiceRole904BCD09",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "EmptyResponsesAlarm52CCCA09": {
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "OperatorAlertsA2431256",
+          },
+        ],
+        "AlarmDescription": "More than three orchestrator turns in an hour ended without text. Export recent turns with agentx admin turns export.",
+        "AlarmName": "AgentXEmptyResponses",
+        "ComparisonOperator": "GreaterThanThreshold",
+        "EvaluationPeriods": 1,
+        "MetricName": "TurnEmptyResponse",
+        "Namespace": "AgentX",
+        "Period": 3600,
+        "Statistic": "Sum",
+        "Threshold": 3,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
+    "HttpApi": {
+      "Properties": {
+        "Name": "agentx-control-plane",
+        "ProtocolType": "HTTP",
+      },
+      "Type": "AWS::ApiGatewayV2::Api",
+    },
+    "JwtAuthorizer": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AuthorizerType": "JWT",
+        "IdentitySource": [
+          "$request.header.Authorization",
+        ],
+        "JwtConfiguration": {
+          "Audience": [
+            {
+              "Ref": "OidcAudience",
+            },
+          ],
+          "Issuer": {
+            "Ref": "OidcIssuer",
+          },
+        },
+        "Name": "agentx-jwt",
+      },
+      "Type": "AWS::ApiGatewayV2::Authorizer",
+    },
+    "OperatorAlertsA2431256": {
+      "Properties": {
+        "DisplayName": "AgentX operator alerts",
+        "TopicName": "AgentXOperatorAlerts",
+      },
+      "Type": "AWS::SNS::Topic",
+    },
+    "OperatorAlertsPolicyD550F6A8": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sns:Publish",
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false",
+                },
+              },
+              "Effect": "Deny",
+              "Principal": "*",
+              "Resource": {
+                "Ref": "OperatorAlertsA2431256",
+              },
+              "Sid": "AllowPublishThroughSSLOnly",
+            },
+            {
+              "Action": "sns:Publish",
+              "Condition": {
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "arn:",
+                        {
+                          "Ref": "AWS::Partition",
+                        },
+                        ":cloudwatch:",
+                        {
+                          "Ref": "AWS::Region",
+                        },
+                        ":",
+                        {
+                          "Ref": "AWS::AccountId",
+                        },
+                        ":alarm:*",
+                      ],
+                    ],
+                  },
+                },
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId",
+                  },
+                },
+              },
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "cloudwatch.amazonaws.com",
+              },
+              "Resource": {
+                "Ref": "OperatorAlertsA2431256",
+              },
+              "Sid": "1",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Topics": [
+          {
+            "Ref": "OperatorAlertsA2431256",
+          },
+        ],
+      },
+      "Type": "AWS::SNS::TopicPolicy",
+    },
+    "OutboxPublisherD572F72E": {
+      "DependsOn": [
+        "OutboxPublisherServiceRoleDefaultPolicy150DE9E8",
+        "OutboxPublisherServiceRole6934E053",
+      ],
+      "Properties": {
+        "Code": {
+          "S3Bucket": {
+            "Fn::Sub": "cdk-hnb659fds-assets-\${AWS::AccountId}-\${AWS::Region}",
+          },
+          "S3Key": "<asset-hash>.zip",
+        },
+        "Environment": {
+          "Variables": {
+            "DISPATCH_QUEUE_URL": {
+              "Ref": "DispatchQueue898EB017",
+            },
+            "STATE_TABLE_NAME": {
+              "Ref": "State1C20CC9A",
+            },
+          },
+        },
+        "Handler": "index.handler",
+        "LoggingConfig": {
+          "LogGroup": {
+            "Ref": "OutboxPublisherLogs96ED67C4",
+          },
+        },
+        "MemorySize": 512,
+        "Role": {
+          "Fn::GetAtt": [
+            "OutboxPublisherServiceRole6934E053",
+            "Arn",
+          ],
+        },
+        "Runtime": "nodejs22.x",
+        "Timeout": 30,
+        "TracingConfig": {
+          "Mode": "Active",
+        },
+      },
+      "Type": "AWS::Lambda::Function",
+    },
+    "OutboxPublisherLogs96ED67C4": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "RetentionInDays": 30,
+      },
+      "Type": "AWS::Logs::LogGroup",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "OutboxPublisherServiceRole6934E053": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+              ],
+            ],
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "OutboxPublisherServiceRoleDefaultPolicy150DE9E8": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "xray:PutTraceSegments",
+                "xray:PutTelemetryRecords",
+              ],
+              "Effect": "Allow",
+              "Resource": "*",
+            },
+            {
+              "Action": "dynamodb:ListStreams",
+              "Effect": "Allow",
+              "Resource": "*",
+            },
+            {
+              "Action": [
+                "dynamodb:DescribeStream",
+                "dynamodb:GetRecords",
+                "dynamodb:GetShardIterator",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "StreamArn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "dynamodb:BatchGetItem",
+                "dynamodb:Query",
+                "dynamodb:GetItem",
+                "dynamodb:Scan",
+                "dynamodb:ConditionCheckItem",
+                "dynamodb:BatchWriteItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:DeleteItem",
+                "dynamodb:DescribeTable",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "State1C20CC9A",
+                    "Arn",
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "dynamodb:GetRecords",
+                "dynamodb:GetShardIterator",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "State1C20CC9A",
+                    "Arn",
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:GetQueueAttributes",
+                "sqs:GetQueueUrl",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DispatchQueue898EB017",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "OutboxPublisherServiceRoleDefaultPolicy150DE9E8",
+        "Roles": [
+          {
+            "Ref": "OutboxPublisherServiceRole6934E053",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "OutboxStreamMappingBE739F11": {
+      "Properties": {
+        "BatchSize": 100,
+        "BisectBatchOnFunctionError": true,
+        "EventSourceArn": {
+          "Fn::GetAtt": [
+            "State1C20CC9A",
+            "StreamArn",
+          ],
+        },
+        "FunctionName": {
+          "Ref": "OutboxPublisherD572F72E",
+        },
+        "MaximumRetryAttempts": 3,
+        "StartingPosition": "LATEST",
+      },
+      "Type": "AWS::Lambda::EventSourceMapping",
+    },
+    "ProxyRoute": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AuthorizationType": "JWT",
+        "AuthorizerId": {
+          "Ref": "JwtAuthorizer",
+        },
+        "RouteKey": "ANY /{proxy+}",
+        "Target": {
+          "Fn::Join": [
+            "",
+            [
+              "integrations/",
+              {
+                "Ref": "BrokerIntegration",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::ApiGatewayV2::Route",
+    },
+    "RecordingFailuresAlarm0AF7AA6D": {
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "OperatorAlertsA2431256",
+          },
+        ],
+        "AlarmDescription": "Turn records or turn metrics are being lost: a turn record write failed or the Slack service could not emit turn metrics. Check the Slack orchestrator logs for turn_record.write_failed and turn_metrics.emit_failed. A write that timed out may still have landed, so check the table before assuming the record is lost.",
+        "AlarmName": "AgentXRecordingFailures",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "Metrics": [
+          {
+            "Expression": "FILL(write,0) + FILL(emit,0)",
+            "Id": "expr_1",
+            "Label": "Turn record write and turn metric emit failures",
+            "ReturnData": true,
+          },
+          {
+            "Id": "write",
+            "MetricStat": {
+              "Metric": {
+                "MetricName": "TurnRecordWriteFailed",
+                "Namespace": "AgentX",
+              },
+              "Period": 300,
+              "Stat": "Sum",
+            },
+            "ReturnData": false,
+          },
+          {
+            "Id": "emit",
+            "MetricStat": {
+              "Metric": {
+                "MetricName": "TurnMetricsEmitFailed",
+                "Namespace": "AgentX",
+              },
+              "Period": 300,
+              "Stat": "Sum",
+            },
+            "ReturnData": false,
+          },
+        ],
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
+    "SlackDeadLettersAlarm9EF9F079": {
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "OperatorAlertsA2431256",
+          },
+        ],
+        "AlarmDescription": "A Slack request exhausted its receives and is in the Slack request dead-letter queue. Check the Slack orchestrator logs for its event ID.",
+        "AlarmName": "AgentXSlackDeadLetters",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": {
+              "Fn::GetAtt": [
+                "SlackRequestDeadLetterQueueBBBDDF4E",
+                "QueueName",
+              ],
+            },
+          },
+        ],
+        "EvaluationPeriods": 1,
+        "MetricName": "ApproximateNumberOfMessagesVisible",
+        "Namespace": "AWS/SQS",
+        "Period": 300,
+        "Statistic": "Maximum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
+    "SlackEventsRoute": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AuthorizationType": "NONE",
+        "RouteKey": "POST /v1/slack/events",
+        "Target": {
+          "Fn::Join": [
+            "",
+            [
+              "integrations/",
+              {
+                "Ref": "SlackIngressIntegration",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::ApiGatewayV2::Route",
+    },
+    "SlackIngress5C88FFA0": {
+      "DependsOn": [
+        "SlackIngressServiceRoleDefaultPolicy6F2F26FC",
+        "SlackIngressServiceRole8DA92EC7",
+      ],
+      "Properties": {
+        "Code": {
+          "S3Bucket": {
+            "Fn::Sub": "cdk-hnb659fds-assets-\${AWS::AccountId}-\${AWS::Region}",
+          },
+          "S3Key": "<asset-hash>.zip",
+        },
+        "Environment": {
+          "Variables": {
+            "SLACK_APP_POSTED_MESSAGES": {
+              "Ref": "SlackAppPostedMessages",
+            },
+            "SLACK_REQUEST_QUEUE_URL": {
+              "Ref": "SlackRequestQueueCC82C864",
+            },
+            "SLACK_SECRET_ARN": {
+              "Ref": "SlackSecretEA96F13F",
+            },
+            "SLACK_THREADS_TABLE_NAME": {
+              "Ref": "SlackThreads36E14C1E",
+            },
+            "SLACK_THREAD_TURNS_PER_MINUTE": {
+              "Ref": "SlackThreadTurnsPerMinute",
+            },
+            "STATE_TABLE_NAME": {
+              "Ref": "State1C20CC9A",
+            },
+            "TURN_RECORDS_TABLE_NAME": {
+              "Ref": "TurnRecords69ECFCD9",
+            },
+          },
+        },
+        "Handler": "index.handler",
+        "LoggingConfig": {
+          "LogGroup": {
+            "Ref": "SlackIngressLogs5D31BE54",
+          },
+        },
+        "MemorySize": 512,
+        "Role": {
+          "Fn::GetAtt": [
+            "SlackIngressServiceRole8DA92EC7",
+            "Arn",
+          ],
+        },
+        "Runtime": "nodejs22.x",
+        "Timeout": 10,
+        "TracingConfig": {
+          "Mode": "Active",
+        },
+      },
+      "Type": "AWS::Lambda::Function",
+    },
+    "SlackIngressApiInvoke723D39D6": {
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {
+          "Fn::GetAtt": [
+            "SlackIngress5C88FFA0",
+            "Arn",
+          ],
+        },
+        "Principal": "apigateway.amazonaws.com",
+        "SourceArn": {
+          "Fn::Join": [
+            "",
+            [
+              "arn:",
+              {
+                "Ref": "AWS::Partition",
+              },
+              ":execute-api:",
+              {
+                "Ref": "AWS::Region",
+              },
+              ":",
+              {
+                "Ref": "AWS::AccountId",
+              },
+              ":",
+              {
+                "Ref": "HttpApi",
+              },
+              "/*/*/v1/slack/events",
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::Lambda::Permission",
+    },
+    "SlackIngressIntegration": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "IntegrationType": "AWS_PROXY",
+        "IntegrationUri": {
+          "Fn::GetAtt": [
+            "SlackIngress5C88FFA0",
+            "Arn",
+          ],
+        },
+        "PayloadFormatVersion": "2.0",
+      },
+      "Type": "AWS::ApiGatewayV2::Integration",
+    },
+    "SlackIngressInteractivityInvokeEEF8EB87": {
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {
+          "Fn::GetAtt": [
+            "SlackIngress5C88FFA0",
+            "Arn",
+          ],
+        },
+        "Principal": "apigateway.amazonaws.com",
+        "SourceArn": {
+          "Fn::Join": [
+            "",
+            [
+              "arn:",
+              {
+                "Ref": "AWS::Partition",
+              },
+              ":execute-api:",
+              {
+                "Ref": "AWS::Region",
+              },
+              ":",
+              {
+                "Ref": "AWS::AccountId",
+              },
+              ":",
+              {
+                "Ref": "HttpApi",
+              },
+              "/*/*/v1/slack/interactions",
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::Lambda::Permission",
+    },
+    "SlackIngressLogs5D31BE54": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "RetentionInDays": 30,
+      },
+      "Type": "AWS::Logs::LogGroup",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "SlackIngressServiceRole8DA92EC7": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+              ],
+            ],
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "SlackIngressServiceRoleDefaultPolicy6F2F26FC": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "xray:PutTraceSegments",
+                "xray:PutTelemetryRecords",
+              ],
+              "Effect": "Allow",
+              "Resource": "*",
+            },
+            {
+              "Action": "dynamodb:GetItem",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "SLACK_BINDING#*",
+                  ],
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "dynamodb:BatchGetItem",
+                "dynamodb:Query",
+                "dynamodb:GetItem",
+                "dynamodb:Scan",
+                "dynamodb:ConditionCheckItem",
+                "dynamodb:BatchWriteItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:DeleteItem",
+                "dynamodb:DescribeTable",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "SlackThreads36E14C1E",
+                    "Arn",
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "dynamodb:GetRecords",
+                "dynamodb:GetShardIterator",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "SlackThreads36E14C1E",
+                    "Arn",
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:GetQueueAttributes",
+                "sqs:GetQueueUrl",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "SlackRequestQueueCC82C864",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "secretsmanager:GetSecretValue",
+                "secretsmanager:DescribeSecret",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "SlackSecretEA96F13F",
+              },
+            },
+            {
+              "Action": "dynamodb:GetItem",
+              "Condition": {
+                "ForAllValues:StringEquals": {
+                  "dynamodb:Attributes": [
+                    "pk",
+                    "sk",
+                    "exportPk",
+                    "exportSk",
+                    "eventId",
+                    "subject",
+                    "receivedAt",
+                    "requestedBy",
+                    "disposition",
+                    "durationMs",
+                    "model",
+                    "offeredTools",
+                    "calls",
+                    "callsTruncated",
+                    "emptyResponse",
+                    "usage",
+                    "usageError",
+                    "recordingErrors",
+                    "argumentsOmitted",
+                    "error",
+                    "expiresAt",
+                  ],
+                },
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "THREAD#*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:Attributes": "false",
+                },
+                "StringEqualsIfExists": {
+                  "dynamodb:Select": "SPECIFIC_ATTRIBUTES",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "TurnRecords69ECFCD9",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "SlackIngressServiceRoleDefaultPolicy6F2F26FC",
+        "Roles": [
+          {
+            "Ref": "SlackIngressServiceRole8DA92EC7",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "SlackInteractivityRoute": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AuthorizationType": "NONE",
+        "RouteKey": "POST /v1/slack/interactions",
+        "Target": {
+          "Fn::Join": [
+            "",
+            [
+              "integrations/",
+              {
+                "Ref": "SlackIngressIntegration",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::ApiGatewayV2::Route",
+    },
+    "SlackOrchestratorTaskRole2372FE40": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId",
+                  },
+                },
+              },
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Description": "Hosted AgentX Slack orchestrator; the only principal allowed on /v1/service routes",
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "SlackOrchestratorTaskRoleDefaultPolicy9529A10F": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "sqs:ReceiveMessage",
+                "sqs:ChangeMessageVisibility",
+                "sqs:GetQueueUrl",
+                "sqs:DeleteMessage",
+                "sqs:GetQueueAttributes",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "SlackRequestQueueCC82C864",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "dynamodb:BatchGetItem",
+                "dynamodb:Query",
+                "dynamodb:GetItem",
+                "dynamodb:Scan",
+                "dynamodb:ConditionCheckItem",
+                "dynamodb:BatchWriteItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:DeleteItem",
+                "dynamodb:DescribeTable",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "SlackThreads36E14C1E",
+                    "Arn",
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "dynamodb:GetRecords",
+                "dynamodb:GetShardIterator",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "SlackThreads36E14C1E",
+                    "Arn",
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "s3:GetObject*",
+                "s3:GetBucket*",
+                "s3:List*",
+                "s3:DeleteObject*",
+                "s3:PutObject",
+                "s3:PutObjectLegalHold",
+                "s3:PutObjectRetention",
+                "s3:PutObjectTagging",
+                "s3:PutObjectVersionTagging",
+                "s3:Abort*",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "SlackThreadSessions6FD21617",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "SlackThreadSessions6FD21617",
+                          "Arn",
+                        ],
+                      },
+                      "/*",
+                    ],
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "secretsmanager:GetSecretValue",
+                "secretsmanager:DescribeSecret",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "SlackSecretEA96F13F",
+              },
+            },
+            {
+              "Action": [
+                "bedrock:InvokeModel",
+                "bedrock:InvokeModelWithResponseStream",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":bedrock:*::foundation-model/*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":bedrock:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":inference-profile/*",
+                    ],
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": "dynamodb:PutItem",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "TurnRecords69ECFCD9",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": "execute-api:Invoke",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":execute-api:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":",
+                    {
+                      "Ref": "HttpApi",
+                    },
+                    "/*/*/v1/service/*",
+                  ],
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "SlackOrchestratorTaskRoleDefaultPolicy9529A10F",
+        "Roles": [
+          {
+            "Ref": "SlackOrchestratorTaskRole2372FE40",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "SlackRequestDeadLetterQueueBBBDDF4E": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "FifoQueue": true,
+        "MessageRetentionPeriod": 1209600,
+        "SqsManagedSseEnabled": true,
+      },
+      "Type": "AWS::SQS::Queue",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "SlackRequestQueueCC82C864": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "ContentBasedDeduplication": false,
+        "FifoQueue": true,
+        "MessageRetentionPeriod": 345600,
+        "RedrivePolicy": {
+          "deadLetterTargetArn": {
+            "Fn::GetAtt": [
+              "SlackRequestDeadLetterQueueBBBDDF4E",
+              "Arn",
+            ],
+          },
+          "maxReceiveCount": 5,
+        },
+        "SqsManagedSseEnabled": true,
+        "VisibilityTimeout": 900,
+      },
+      "Type": "AWS::SQS::Queue",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "SlackSecretEA96F13F": {
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "Description": "AgentX Slack app credentials as JSON: {"signingSecret":"...","botToken":"xoxb-..."}",
+        "GenerateSecretString": {
+          "ExcludePunctuation": true,
+          "GenerateStringKey": "signingSecret",
+          "SecretStringTemplate": "{"botToken":"unset"}",
+        },
+      },
+      "Type": "AWS::SecretsManager::Secret",
+      "UpdateReplacePolicy": "Retain",
+    },
+    "SlackServiceRoute": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AuthorizationType": "AWS_IAM",
+        "RouteKey": "ANY /v1/service/{proxy+}",
+        "Target": {
+          "Fn::Join": [
+            "",
+            [
+              "integrations/",
+              {
+                "Ref": "BrokerIntegration",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::ApiGatewayV2::Route",
+    },
+    "SlackThreadSessions6FD21617": {
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "BucketEncryption": {
+          "ServerSideEncryptionConfiguration": [
+            {
+              "ServerSideEncryptionByDefault": {
+                "SSEAlgorithm": "AES256",
+              },
+            },
+          ],
+        },
+        "LifecycleConfiguration": {
+          "Rules": [
+            {
+              "NoncurrentVersionExpiration": {
+                "NoncurrentDays": 30,
+              },
+              "Status": "Enabled",
+            },
+          ],
+        },
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "BlockPublicPolicy": true,
+          "IgnorePublicAcls": true,
+          "RestrictPublicBuckets": true,
+        },
+        "VersioningConfiguration": {
+          "Status": "Enabled",
+        },
+      },
+      "Type": "AWS::S3::Bucket",
+      "UpdateReplacePolicy": "Retain",
+    },
+    "SlackThreadSessionsPolicy6BA2E3A7": {
+      "Properties": {
+        "Bucket": {
+          "Ref": "SlackThreadSessions6FD21617",
+        },
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "s3:*",
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false",
+                },
+              },
+              "Effect": "Deny",
+              "Principal": {
+                "AWS": "*",
+              },
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "SlackThreadSessions6FD21617",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "SlackThreadSessions6FD21617",
+                          "Arn",
+                        ],
+                      },
+                      "/*",
+                    ],
+                  ],
+                },
+              ],
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+      },
+      "Type": "AWS::S3::BucketPolicy",
+    },
+    "SlackThreads36E14C1E": {
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "AttributeDefinitions": [
+          {
+            "AttributeName": "pk",
+            "AttributeType": "S",
+          },
+          {
+            "AttributeName": "sk",
+            "AttributeType": "S",
+          },
+        ],
+        "BillingMode": "PAY_PER_REQUEST",
+        "KeySchema": [
+          {
+            "AttributeName": "pk",
+            "KeyType": "HASH",
+          },
+          {
+            "AttributeName": "sk",
+            "KeyType": "RANGE",
+          },
+        ],
+        "SSESpecification": {
+          "SSEEnabled": true,
+        },
+        "TimeToLiveSpecification": {
+          "AttributeName": "expiresAt",
+          "Enabled": true,
+        },
+      },
+      "Type": "AWS::DynamoDB::Table",
+      "UpdateReplacePolicy": "Retain",
+    },
+    "State1C20CC9A": {
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "AttributeDefinitions": [
+          {
+            "AttributeName": "pk",
+            "AttributeType": "S",
+          },
+          {
+            "AttributeName": "sk",
+            "AttributeType": "S",
+          },
+        ],
+        "BillingMode": "PAY_PER_REQUEST",
+        "KeySchema": [
+          {
+            "AttributeName": "pk",
+            "KeyType": "HASH",
+          },
+          {
+            "AttributeName": "sk",
+            "KeyType": "RANGE",
+          },
+        ],
+        "PointInTimeRecoverySpecification": {
+          "PointInTimeRecoveryEnabled": true,
+        },
+        "SSESpecification": {
+          "SSEEnabled": true,
+        },
+        "StreamSpecification": {
+          "StreamViewType": "NEW_AND_OLD_IMAGES",
+        },
+      },
+      "Type": "AWS::DynamoDB::Table",
+      "UpdateReplacePolicy": "Retain",
+    },
+    "TurnRecords69ECFCD9": {
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "AttributeDefinitions": [
+          {
+            "AttributeName": "pk",
+            "AttributeType": "S",
+          },
+          {
+            "AttributeName": "sk",
+            "AttributeType": "S",
+          },
+          {
+            "AttributeName": "exportPk",
+            "AttributeType": "S",
+          },
+          {
+            "AttributeName": "exportSk",
+            "AttributeType": "S",
+          },
+        ],
+        "BillingMode": "PAY_PER_REQUEST",
+        "GlobalSecondaryIndexes": [
+          {
+            "IndexName": "byTime",
+            "KeySchema": [
+              {
+                "AttributeName": "exportPk",
+                "KeyType": "HASH",
+              },
+              {
+                "AttributeName": "exportSk",
+                "KeyType": "RANGE",
+              },
+            ],
+            "Projection": {
+              "ProjectionType": "ALL",
+            },
+          },
+        ],
+        "KeySchema": [
+          {
+            "AttributeName": "pk",
+            "KeyType": "HASH",
+          },
+          {
+            "AttributeName": "sk",
+            "KeyType": "RANGE",
+          },
+        ],
+        "SSESpecification": {
+          "SSEEnabled": true,
+        },
+        "TimeToLiveSpecification": {
+          "AttributeName": "expiresAt",
+          "Enabled": true,
+        },
+      },
+      "Type": "AWS::DynamoDB::Table",
+      "UpdateReplacePolicy": "Retain",
+    },
+    "WorkerCallbackRoute": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AuthorizationType": "NONE",
+        "RouteKey": "POST /v1/internal/{proxy+}",
+        "Target": {
+          "Fn::Join": [
+            "",
+            [
+              "integrations/",
+              {
+                "Ref": "BrokerIntegration",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::ApiGatewayV2::Route",
+    },
+  },
+  "Rules": {
+    "CheckBootstrapVersion": {
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Not": [
+              {
+                "Fn::Contains": [
+                  [
+                    "1",
+                    "2",
+                    "3",
+                    "4",
+                    "5",
+                  ],
+                  {
+                    "Ref": "BootstrapVersion",
+                  },
+                ],
+              },
+            ],
+          },
+          "AssertDescription": "CDK bootstrap stack version 6 required. Please run 'cdk bootstrap' with a recent version of the CDK CLI.",
+        },
+      ],
+    },
+  },
+}
+`;
+
+exports[`legacy production templates > AgentXProductionFoundation is unchanged 1`] = `
+{
+  "Description": "Stable AgentX production network, encryption, and persistent workspace capacity",
+  "Outputs": {
+    "CapacityProviderArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "AgentXProductionCapacityProvider",
+          "Arn",
+        ],
+      },
+    },
+    "DeploymentMode": {
+      "Value": "instances-ebs",
+    },
+    "PrivateSubnetIds": {
+      "Value": {
+        "Fn::Join": [
+          "",
+          [
+            {
+              "Ref": "PrivateSubnet1",
+            },
+            ",",
+            {
+              "Ref": "PrivateSubnet2",
+            },
+          ],
+        ],
+      },
+    },
+    "VpcId": {
+      "Value": {
+        "Ref": "Vpc",
+      },
+    },
+    "WorkerSecurityGroupId": {
+      "Value": {
+        "Fn::GetAtt": [
+          "WorkerSecurityGroup",
+          "GroupId",
+        ],
+      },
+    },
+    "WorkspaceKmsKeyArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "WorkspaceKey21BC864D",
+          "Arn",
+        ],
+      },
+    },
+  },
+  "Parameters": {
+    "BootstrapVersion": {
+      "Default": "/cdk-bootstrap/hnb659fds/version",
+      "Description": "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]",
+      "Type": "AWS::SSM::Parameter::Value<String>",
+    },
+  },
+  "Resources": {
+    "AgentXProductionCapacityProvider": {
+      "DeletionPolicy": "Retain",
+      "DependsOn": [
+        "PrivateDefaultRoute1",
+        "PrivateDefaultRoute2",
+      ],
+      "Properties": {
+        "ComputeConfiguration": {
+          "Ec2Configuration": {
+            "LaunchTemplateSource": {
+              "LaunchParameters": {
+                "InstanceRequirements": {
+                  "AllowedInstanceTypes": [
+                    "m6g.medium",
+                  ],
+                },
+                "Monitoring": "DETAILED",
+                "OperatingSystem": "LINUX_ARM64",
+                "PropagatedTags": {
+                  "Application": "AgentX",
+                  "DeploymentMode": "instances-ebs",
+                  "Environment": "production",
+                },
+              },
+            },
+            "LifecycleConfiguration": {
+              "IdleInstanceTimeout": 300,
+              "MaxLifetime": 1209600,
+            },
+            "RootVolume": {
+              "Encrypted": true,
+              "FreeSpaceGiB": 30,
+              "KmsKeyId": {
+                "Fn::GetAtt": [
+                  "WorkspaceKey21BC864D",
+                  "Arn",
+                ],
+              },
+              "VolumeType": "gp3",
+            },
+            "Volumes": [
+              {
+                "EbsConfiguration": {
+                  "Encrypted": true,
+                  "KmsKeyId": {
+                    "Fn::GetAtt": [
+                      "WorkspaceKey21BC864D",
+                      "Arn",
+                    ],
+                  },
+                  "Name": "workspace",
+                  "SizeGiB": 20,
+                  "VolumeType": "gp3",
+                },
+              },
+            ],
+            "VpcConfiguration": {
+              "SecurityGroups": [
+                {
+                  "Fn::GetAtt": [
+                    "WorkerSecurityGroup",
+                    "GroupId",
+                  ],
+                },
+              ],
+              "Subnets": [
+                {
+                  "Ref": "PrivateSubnet1",
+                },
+                {
+                  "Ref": "PrivateSubnet2",
+                },
+              ],
+            },
+          },
+        },
+        "Description": "Stable AgentX production compute and per-session EBS workspace boundary",
+        "Name": "agentx_production_capacity_v3",
+        "PermissionsConfiguration": {
+          "CapacityProviderOperatorRoleArn": {
+            "Fn::GetAtt": [
+              "CapacityProviderOperatorRole1D65CAE2",
+              "Arn",
+            ],
+          },
+        },
+        "Tags": [
+          {
+            "Key": "Application",
+            "Value": "AgentX",
+          },
+          {
+            "Key": "DeploymentMode",
+            "Value": "instances-ebs",
+          },
+          {
+            "Key": "Environment",
+            "Value": "production",
+          },
+        ],
+      },
+      "Type": "AWS::BedrockAgentCore::CapacityProvider",
+      "UpdateReplacePolicy": "Retain",
+    },
+    "CapacityProviderOperatorRole1D65CAE2": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "arn:",
+                        {
+                          "Ref": "AWS::Partition",
+                        },
+                        ":bedrock-agentcore:us-east-1:",
+                        {
+                          "Ref": "AWS::AccountId",
+                        },
+                        ":*",
+                      ],
+                    ],
+                  },
+                },
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId",
+                  },
+                },
+              },
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "bedrock-agentcore.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Description": "Allows AgentCore to operate the AgentX production capacity provider",
+        "ManagedPolicyArns": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                ":iam::aws:policy/BedrockAgentCoreRuntimeInstancesOperatorRolePolicy",
+              ],
+            ],
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "CapacityProviderOperatorRoleDefaultPolicy8C991BC8": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "kms:CreateGrant",
+                "kms:Decrypt",
+                "kms:DescribeKey",
+                "kms:Encrypt",
+                "kms:GenerateDataKey*",
+                "kms:ReEncrypt*",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "WorkspaceKey21BC864D",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "CapacityProviderOperatorRoleDefaultPolicy8C991BC8",
+        "Roles": [
+          {
+            "Ref": "CapacityProviderOperatorRole1D65CAE2",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "InternetGateway": {
+      "Properties": {
+        "Tags": [
+          {
+            "Key": "Application",
+            "Value": "AgentX",
+          },
+          {
+            "Key": "Environment",
+            "Value": "production",
+          },
+          {
+            "Key": "Name",
+            "Value": "agentx-production-igw",
+          },
+        ],
+      },
+      "Type": "AWS::EC2::InternetGateway",
+    },
+    "InternetGatewayAttachment": {
+      "Properties": {
+        "InternetGatewayId": {
+          "Ref": "InternetGateway",
+        },
+        "VpcId": {
+          "Ref": "Vpc",
+        },
+      },
+      "Type": "AWS::EC2::VPCGatewayAttachment",
+    },
+    "NatEip1": {
+      "DependsOn": [
+        "InternetGatewayAttachment",
+      ],
+      "Properties": {
+        "Domain": "vpc",
+      },
+      "Type": "AWS::EC2::EIP",
+    },
+    "NatEip2": {
+      "DependsOn": [
+        "InternetGatewayAttachment",
+      ],
+      "Properties": {
+        "Domain": "vpc",
+      },
+      "Type": "AWS::EC2::EIP",
+    },
+    "NatGateway1": {
+      "DependsOn": [
+        "PublicDefaultRoute1",
+      ],
+      "Properties": {
+        "AllocationId": {
+          "Fn::GetAtt": [
+            "NatEip1",
+            "AllocationId",
+          ],
+        },
+        "ConnectivityType": "public",
+        "SubnetId": {
+          "Ref": "PublicSubnet1",
+        },
+        "Tags": [
+          {
+            "Key": "Application",
+            "Value": "AgentX",
+          },
+          {
+            "Key": "Environment",
+            "Value": "production",
+          },
+          {
+            "Key": "Name",
+            "Value": "agentx-production-nat-1",
+          },
+        ],
+      },
+      "Type": "AWS::EC2::NatGateway",
+    },
+    "NatGateway2": {
+      "DependsOn": [
+        "PublicDefaultRoute2",
+      ],
+      "Properties": {
+        "AllocationId": {
+          "Fn::GetAtt": [
+            "NatEip2",
+            "AllocationId",
+          ],
+        },
+        "ConnectivityType": "public",
+        "SubnetId": {
+          "Ref": "PublicSubnet2",
+        },
+        "Tags": [
+          {
+            "Key": "Application",
+            "Value": "AgentX",
+          },
+          {
+            "Key": "Environment",
+            "Value": "production",
+          },
+          {
+            "Key": "Name",
+            "Value": "agentx-production-nat-2",
+          },
+        ],
+      },
+      "Type": "AWS::EC2::NatGateway",
+    },
+    "PrivateAssociation1": {
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "PrivateRouteTable1",
+        },
+        "SubnetId": {
+          "Ref": "PrivateSubnet1",
+        },
+      },
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+    },
+    "PrivateAssociation2": {
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "PrivateRouteTable2",
+        },
+        "SubnetId": {
+          "Ref": "PrivateSubnet2",
+        },
+      },
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+    },
+    "PrivateDefaultRoute1": {
+      "DependsOn": [
+        "NatGateway1",
+      ],
+      "Properties": {
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "NatGatewayId": {
+          "Ref": "NatGateway1",
+        },
+        "RouteTableId": {
+          "Ref": "PrivateRouteTable1",
+        },
+      },
+      "Type": "AWS::EC2::Route",
+    },
+    "PrivateDefaultRoute2": {
+      "DependsOn": [
+        "NatGateway2",
+      ],
+      "Properties": {
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "NatGatewayId": {
+          "Ref": "NatGateway2",
+        },
+        "RouteTableId": {
+          "Ref": "PrivateRouteTable2",
+        },
+      },
+      "Type": "AWS::EC2::Route",
+    },
+    "PrivateRouteTable1": {
+      "Properties": {
+        "Tags": [
+          {
+            "Key": "Application",
+            "Value": "AgentX",
+          },
+          {
+            "Key": "Environment",
+            "Value": "production",
+          },
+          {
+            "Key": "Name",
+            "Value": "agentx-production-private-1",
+          },
+        ],
+        "VpcId": {
+          "Ref": "Vpc",
+        },
+      },
+      "Type": "AWS::EC2::RouteTable",
+    },
+    "PrivateRouteTable2": {
+      "Properties": {
+        "Tags": [
+          {
+            "Key": "Application",
+            "Value": "AgentX",
+          },
+          {
+            "Key": "Environment",
+            "Value": "production",
+          },
+          {
+            "Key": "Name",
+            "Value": "agentx-production-private-2",
+          },
+        ],
+        "VpcId": {
+          "Ref": "Vpc",
+        },
+      },
+      "Type": "AWS::EC2::RouteTable",
+    },
+    "PrivateSubnet1": {
+      "Properties": {
+        "AvailabilityZoneId": "use1-az1",
+        "CidrBlock": "10.42.128.0/20",
+        "MapPublicIpOnLaunch": false,
+        "Tags": [
+          {
+            "Key": "Application",
+            "Value": "AgentX",
+          },
+          {
+            "Key": "Environment",
+            "Value": "production",
+          },
+          {
+            "Key": "Name",
+            "Value": "agentx-production-private-1",
+          },
+        ],
+        "VpcId": {
+          "Ref": "Vpc",
+        },
+      },
+      "Type": "AWS::EC2::Subnet",
+    },
+    "PrivateSubnet2": {
+      "Properties": {
+        "AvailabilityZoneId": "use1-az2",
+        "CidrBlock": "10.42.144.0/20",
+        "MapPublicIpOnLaunch": false,
+        "Tags": [
+          {
+            "Key": "Application",
+            "Value": "AgentX",
+          },
+          {
+            "Key": "Environment",
+            "Value": "production",
+          },
+          {
+            "Key": "Name",
+            "Value": "agentx-production-private-2",
+          },
+        ],
+        "VpcId": {
+          "Ref": "Vpc",
+        },
+      },
+      "Type": "AWS::EC2::Subnet",
+    },
+    "PublicAssociation1": {
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "PublicRouteTable1",
+        },
+        "SubnetId": {
+          "Ref": "PublicSubnet1",
+        },
+      },
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+    },
+    "PublicAssociation2": {
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "PublicRouteTable2",
+        },
+        "SubnetId": {
+          "Ref": "PublicSubnet2",
+        },
+      },
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+    },
+    "PublicDefaultRoute1": {
+      "DependsOn": [
+        "InternetGatewayAttachment",
+      ],
+      "Properties": {
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "GatewayId": {
+          "Ref": "InternetGateway",
+        },
+        "RouteTableId": {
+          "Ref": "PublicRouteTable1",
+        },
+      },
+      "Type": "AWS::EC2::Route",
+    },
+    "PublicDefaultRoute2": {
+      "DependsOn": [
+        "InternetGatewayAttachment",
+      ],
+      "Properties": {
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "GatewayId": {
+          "Ref": "InternetGateway",
+        },
+        "RouteTableId": {
+          "Ref": "PublicRouteTable2",
+        },
+      },
+      "Type": "AWS::EC2::Route",
+    },
+    "PublicRouteTable1": {
+      "Properties": {
+        "Tags": [
+          {
+            "Key": "Application",
+            "Value": "AgentX",
+          },
+          {
+            "Key": "Environment",
+            "Value": "production",
+          },
+          {
+            "Key": "Name",
+            "Value": "agentx-production-public-1",
+          },
+        ],
+        "VpcId": {
+          "Ref": "Vpc",
+        },
+      },
+      "Type": "AWS::EC2::RouteTable",
+    },
+    "PublicRouteTable2": {
+      "Properties": {
+        "Tags": [
+          {
+            "Key": "Application",
+            "Value": "AgentX",
+          },
+          {
+            "Key": "Environment",
+            "Value": "production",
+          },
+          {
+            "Key": "Name",
+            "Value": "agentx-production-public-2",
+          },
+        ],
+        "VpcId": {
+          "Ref": "Vpc",
+        },
+      },
+      "Type": "AWS::EC2::RouteTable",
+    },
+    "PublicSubnet1": {
+      "Properties": {
+        "AvailabilityZoneId": "use1-az1",
+        "CidrBlock": "10.42.0.0/20",
+        "MapPublicIpOnLaunch": false,
+        "Tags": [
+          {
+            "Key": "Application",
+            "Value": "AgentX",
+          },
+          {
+            "Key": "Environment",
+            "Value": "production",
+          },
+          {
+            "Key": "Name",
+            "Value": "agentx-production-public-1",
+          },
+        ],
+        "VpcId": {
+          "Ref": "Vpc",
+        },
+      },
+      "Type": "AWS::EC2::Subnet",
+    },
+    "PublicSubnet2": {
+      "Properties": {
+        "AvailabilityZoneId": "use1-az2",
+        "CidrBlock": "10.42.16.0/20",
+        "MapPublicIpOnLaunch": false,
+        "Tags": [
+          {
+            "Key": "Application",
+            "Value": "AgentX",
+          },
+          {
+            "Key": "Environment",
+            "Value": "production",
+          },
+          {
+            "Key": "Name",
+            "Value": "agentx-production-public-2",
+          },
+        ],
+        "VpcId": {
+          "Ref": "Vpc",
+        },
+      },
+      "Type": "AWS::EC2::Subnet",
+    },
+    "S3GatewayEndpoint": {
+      "Properties": {
+        "RouteTableIds": [
+          {
+            "Ref": "PrivateRouteTable1",
+          },
+          {
+            "Ref": "PrivateRouteTable2",
+          },
+        ],
+        "ServiceName": "com.amazonaws.us-east-1.s3",
+        "VpcEndpointType": "Gateway",
+        "VpcId": {
+          "Ref": "Vpc",
+        },
+      },
+      "Type": "AWS::EC2::VPCEndpoint",
+    },
+    "Vpc": {
+      "Properties": {
+        "CidrBlock": "10.42.0.0/16",
+        "EnableDnsHostnames": true,
+        "EnableDnsSupport": true,
+        "InstanceTenancy": "default",
+        "Tags": [
+          {
+            "Key": "Application",
+            "Value": "AgentX",
+          },
+          {
+            "Key": "Environment",
+            "Value": "production",
+          },
+          {
+            "Key": "Name",
+            "Value": "agentx-production",
+          },
+        ],
+      },
+      "Type": "AWS::EC2::VPC",
+    },
+    "VpcFlowLog": {
+      "Properties": {
+        "DeliverLogsPermissionArn": {
+          "Fn::GetAtt": [
+            "VpcFlowLogRoleF66FA0B2",
+            "Arn",
+          ],
+        },
+        "LogDestinationType": "cloud-watch-logs",
+        "LogGroupName": {
+          "Ref": "VpcFlowLogsE6FFDEF9",
+        },
+        "MaxAggregationInterval": 60,
+        "ResourceId": {
+          "Ref": "Vpc",
+        },
+        "ResourceType": "VPC",
+        "TrafficType": "ALL",
+      },
+      "Type": "AWS::EC2::FlowLog",
+    },
+    "VpcFlowLogRoleDefaultPolicy0C9618DE": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "logs:CreateLogStream",
+                "logs:PutLogEvents",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "VpcFlowLogsE6FFDEF9",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "VpcFlowLogRoleDefaultPolicy0C9618DE",
+        "Roles": [
+          {
+            "Ref": "VpcFlowLogRoleF66FA0B2",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "VpcFlowLogRoleF66FA0B2": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "vpc-flow-logs.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Description": "Delivers AgentX production VPC flow logs to CloudWatch Logs",
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "VpcFlowLogsE6FFDEF9": {
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "RetentionInDays": 30,
+      },
+      "Type": "AWS::Logs::LogGroup",
+      "UpdateReplacePolicy": "Retain",
+    },
+    "WorkerSecurityGroup": {
+      "Properties": {
+        "GroupDescription": "AgentX production workers: no ingress and HTTPS-only egress",
+        "GroupName": "agentx-production-workers",
+        "SecurityGroupEgress": [
+          {
+            "CidrIp": "0.0.0.0/0",
+            "Description": "HTTPS to Git providers, package registries, AWS APIs, and documentation",
+            "FromPort": 443,
+            "IpProtocol": "tcp",
+            "ToPort": 443,
+          },
+        ],
+        "Tags": [
+          {
+            "Key": "Application",
+            "Value": "AgentX",
+          },
+          {
+            "Key": "Environment",
+            "Value": "production",
+          },
+          {
+            "Key": "Name",
+            "Value": "agentx-production-workers",
+          },
+        ],
+        "VpcId": {
+          "Ref": "Vpc",
+        },
+      },
+      "Type": "AWS::EC2::SecurityGroup",
+    },
+    "WorkspaceKey21BC864D": {
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "Description": "Encrypts AgentX production root and per-session workspace EBS volumes",
+        "EnableKeyRotation": true,
+        "KeyPolicy": {
+          "Statement": [
+            {
+              "Action": "kms:*",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":iam::",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":root",
+                    ],
+                  ],
+                },
+              },
+              "Resource": "*",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+      },
+      "Type": "AWS::KMS::Key",
+      "UpdateReplacePolicy": "Retain",
+    },
+    "WorkspaceKeyAliasC89D406D": {
+      "Properties": {
+        "AliasName": "alias/agentx/production-workspaces",
+        "TargetKeyId": {
+          "Fn::GetAtt": [
+            "WorkspaceKey21BC864D",
+            "Arn",
+          ],
+        },
+      },
+      "Type": "AWS::KMS::Alias",
+    },
+  },
+  "Rules": {
+    "CheckBootstrapVersion": {
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Not": [
+              {
+                "Fn::Contains": [
+                  [
+                    "1",
+                    "2",
+                    "3",
+                    "4",
+                    "5",
+                  ],
+                  {
+                    "Ref": "BootstrapVersion",
+                  },
+                ],
+              },
+            ],
+          },
+          "AssertDescription": "CDK bootstrap stack version 6 required. Please run 'cdk bootstrap' with a recent version of the CDK CLI.",
+        },
+      ],
+    },
+  },
+}
+`;
+
+exports[`legacy production templates > AgentXProductionRuntime is unchanged 1`] = `
+{
+  "Description": "AgentX production coding runtime on stable EBS-backed capacity",
+  "Outputs": {
+    "AgentRuntimeArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "AgentXRuntime",
+          "AgentRuntimeArn",
+        ],
+      },
+    },
+    "CapacityProviderArn": {
+      "Value": {
+        "Ref": "CapacityProviderArn",
+      },
+    },
+    "DeploymentMode": {
+      "Value": "instances-ebs",
+    },
+    "RuntimeExecutionRoleArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "RuntimeExecutionRoleFBC63B09",
+          "Arn",
+        ],
+      },
+    },
+    "WorkspaceMountPath": {
+      "Value": "/mnt/workspace",
+    },
+  },
+  "Parameters": {
+    "BootstrapVersion": {
+      "Default": "/cdk-bootstrap/hnb659fds/version",
+      "Description": "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]",
+      "Type": "AWS::SSM::Parameter::Value<String>",
+    },
+    "CapacityProviderArn": {
+      "AllowedPattern": "^arn:aws(-[^:]+)?:bedrock-agentcore:[a-z0-9-]+:[0-9]{12}:capacity-provider/[a-zA-Z][a-zA-Z0-9_]{0,47}-[a-zA-Z0-9]{10}$",
+      "Description": "Stable AgentCore Instances capacity provider for production workspaces",
+      "Type": "String",
+    },
+    "ControlPlaneUrl": {
+      "AllowedPattern": "^https://.+$",
+      "Description": "HTTPS AgentX callback API URL",
+      "Type": "String",
+    },
+    "ModelId": {
+      "Description": "pi model identifier available in the deployment region",
+      "Type": "String",
+    },
+    "ModelProvider": {
+      "Default": "amazon-bedrock",
+      "Description": "pi model provider identifier",
+      "Type": "String",
+    },
+    "PromptCacheRetention": {
+      "AllowedValues": [
+        "short",
+        "long",
+      ],
+      "Default": "long",
+      "Description": "Bedrock prompt-cache retention mode used by pi",
+      "Type": "String",
+    },
+    "WorkerImageUri": {
+      "AllowedPattern": "^.+@sha256:[a-f0-9]{64}$",
+      "Description": "Immutable private ECR linux/arm64 worker image URI",
+      "Type": "String",
+    },
+  },
+  "Resources": {
+    "AgentXRuntime": {
+      "DeletionPolicy": "Retain",
+      "DependsOn": [
+        "RuntimeExecutionPolicy269B6DF1",
+      ],
+      "Properties": {
+        "AgentRuntimeArtifact": {
+          "ContainerConfiguration": {
+            "ContainerUri": {
+              "Ref": "WorkerImageUri",
+            },
+          },
+        },
+        "AgentRuntimeName": "agentx_production_worker",
+        "CapacityProviderConfiguration": {
+          "CapacityProviderArn": {
+            "Ref": "CapacityProviderArn",
+          },
+        },
+        "Description": "AgentX production remote coding worker",
+        "EnvironmentVariables": {
+          "AGENTX_CONTROL_PLANE_URL": {
+            "Ref": "ControlPlaneUrl",
+          },
+          "AGENTX_MODEL_ID": {
+            "Ref": "ModelId",
+          },
+          "AGENTX_MODEL_PROVIDER": {
+            "Ref": "ModelProvider",
+          },
+          "AGENTX_WORKSPACE_ROOT": "/mnt/workspace",
+          "PI_CACHE_RETENTION": {
+            "Ref": "PromptCacheRetention",
+          },
+        },
+        "FilesystemConfigurations": [
+          {
+            "CapacityProviderVolume": {
+              "MountPath": "/mnt/workspace",
+              "VolumeName": "workspace",
+            },
+          },
+        ],
+        "LifecycleConfiguration": {
+          "IdleRuntimeSessionTimeout": 300,
+          "MaxLifetime": 1209600,
+        },
+        "ProtocolConfiguration": "HTTP",
+        "RoleArn": {
+          "Fn::GetAtt": [
+            "RuntimeExecutionRoleFBC63B09",
+            "Arn",
+          ],
+        },
+        "Tags": {
+          "Application": "AgentX",
+          "DeploymentMode": "instances-ebs",
+          "Environment": "production",
+        },
+      },
+      "Type": "AWS::BedrockAgentCore::Runtime",
+      "UpdateReplacePolicy": "Retain",
+    },
+    "RuntimeExecutionPolicy269B6DF1": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "ecr:BatchGetImage",
+                "ecr:GetDownloadUrlForLayer",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":ecr:us-east-1:",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":repository/*",
+                  ],
+                ],
+              },
+              "Sid": "EcrImageAccess",
+            },
+            {
+              "Action": "ecr:GetAuthorizationToken",
+              "Effect": "Allow",
+              "Resource": "*",
+              "Sid": "EcrTokenAccess",
+            },
+            {
+              "Action": [
+                "bedrock:InvokeModel",
+                "bedrock:InvokeModelWithResponseStream",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":bedrock:*::foundation-model/*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":bedrock:us-east-1:",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":*",
+                    ],
+                  ],
+                },
+              ],
+              "Sid": "BedrockModelInvocation",
+            },
+            {
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:DescribeLogGroups",
+                "logs:DescribeLogStreams",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents",
+                "logs:PutResourcePolicy",
+              ],
+              "Effect": "Allow",
+              "Resource": "*",
+              "Sid": "RuntimeLogs",
+            },
+            {
+              "Action": [
+                "xray:PutTraceSegments",
+                "xray:PutTelemetryRecords",
+                "xray:GetSamplingRules",
+                "xray:GetSamplingTargets",
+              ],
+              "Effect": "Allow",
+              "Resource": "*",
+              "Sid": "RuntimeTracing",
+            },
+            {
+              "Action": "cloudwatch:PutMetricData",
+              "Condition": {
+                "StringEquals": {
+                  "cloudwatch:namespace": "bedrock-agentcore",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": "*",
+              "Sid": "RuntimeMetrics",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "RuntimeExecutionPolicy269B6DF1",
+        "Roles": [
+          {
+            "Ref": "RuntimeExecutionRoleFBC63B09",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "RuntimeExecutionRoleFBC63B09": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "arn:",
+                        {
+                          "Ref": "AWS::Partition",
+                        },
+                        ":bedrock-agentcore:us-east-1:",
+                        {
+                          "Ref": "AWS::AccountId",
+                        },
+                        ":*",
+                      ],
+                    ],
+                  },
+                },
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId",
+                  },
+                },
+              },
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "bedrock-agentcore.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Description": "Execution role for the AgentX production coding runtime",
+      },
+      "Type": "AWS::IAM::Role",
+    },
+  },
+  "Rules": {
+    "CheckBootstrapVersion": {
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Not": [
+              {
+                "Fn::Contains": [
+                  [
+                    "1",
+                    "2",
+                    "3",
+                    "4",
+                    "5",
+                  ],
+                  {
+                    "Ref": "BootstrapVersion",
+                  },
+                ],
+              },
+            ],
+          },
+          "AssertDescription": "CDK bootstrap stack version 6 required. Please run 'cdk bootstrap' with a recent version of the CDK CLI.",
+        },
+      ],
+    },
+  },
+}
+`;
+
+exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = `
+{
+  "Description": "AgentX production release pipeline for the mainline branch",
+  "Parameters": {
+    "BootstrapVersion": {
+      "Default": "/cdk-bootstrap/hnb659fds/version",
+      "Description": "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]",
+      "Type": "AWS::SSM::Parameter::Value<String>",
+    },
+    "GitHubConnectionArn": {
+      "AllowedPattern": "^arn:aws(-[a-z]+)?:(codeconnections|codestar-connections):[a-z0-9-]+:[0-9]{12}:connection/[0-9a-f-]{36}$",
+      "Description": "Authorized CodeConnections GitHub connection for PrepLabsAI/AgentX",
+      "Type": "String",
+    },
+  },
+  "Resources": {
+    "Artifacts82DD59A1": {
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "BucketEncryption": {
+          "ServerSideEncryptionConfiguration": [
+            {
+              "ServerSideEncryptionByDefault": {
+                "SSEAlgorithm": "AES256",
+              },
+            },
+          ],
+        },
+        "LifecycleConfiguration": {
+          "Rules": [
+            {
+              "ExpirationInDays": 30,
+              "Status": "Enabled",
+            },
+          ],
+        },
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "BlockPublicPolicy": true,
+          "IgnorePublicAcls": true,
+          "RestrictPublicBuckets": true,
+        },
+      },
+      "Type": "AWS::S3::Bucket",
+      "UpdateReplacePolicy": "Retain",
+    },
+    "ArtifactsPolicy6E9058CC": {
+      "Properties": {
+        "Bucket": {
+          "Ref": "Artifacts82DD59A1",
+        },
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "s3:*",
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false",
+                },
+              },
+              "Effect": "Deny",
+              "Principal": {
+                "AWS": "*",
+              },
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "Artifacts82DD59A1",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "Artifacts82DD59A1",
+                          "Arn",
+                        ],
+                      },
+                      "/*",
+                    ],
+                  ],
+                },
+              ],
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+      },
+      "Type": "AWS::S3::BucketPolicy",
+    },
+    "PipelineC660917D": {
+      "DependsOn": [
+        "PipelineRoleDefaultPolicyC7A05455",
+        "PipelineRoleD68726F7",
+      ],
+      "Properties": {
+        "ArtifactStore": {
+          "Location": {
+            "Ref": "Artifacts82DD59A1",
+          },
+          "Type": "S3",
+        },
+        "ExecutionMode": "SUPERSEDED",
+        "Name": "AgentXProductionRelease",
+        "PipelineType": "V2",
+        "RestartExecutionOnUpdate": false,
+        "RoleArn": {
+          "Fn::GetAtt": [
+            "PipelineRoleD68726F7",
+            "Arn",
+          ],
+        },
+        "Stages": [
+          {
+            "Actions": [
+              {
+                "ActionTypeId": {
+                  "Category": "Source",
+                  "Owner": "AWS",
+                  "Provider": "CodeStarSourceConnection",
+                  "Version": "1",
+                },
+                "Configuration": {
+                  "BranchName": "mainline",
+                  "ConnectionArn": {
+                    "Ref": "GitHubConnectionArn",
+                  },
+                  "FullRepositoryId": "PrepLabsAI/AgentX",
+                  "OutputArtifactFormat": "CODEBUILD_CLONE_REF",
+                },
+                "Name": "GitHub",
+                "OutputArtifacts": [
+                  {
+                    "Name": "Source",
+                  },
+                ],
+                "RoleArn": {
+                  "Fn::GetAtt": [
+                    "SourceActionRole4344B1D1",
+                    "Arn",
+                  ],
+                },
+                "RunOrder": 1,
+              },
+            ],
+            "Name": "Source",
+          },
+          {
+            "Actions": [
+              {
+                "ActionTypeId": {
+                  "Category": "Build",
+                  "Owner": "AWS",
+                  "Provider": "CodeBuild",
+                  "Version": "1",
+                },
+                "Configuration": {
+                  "ProjectName": {
+                    "Ref": "ReleaseBuild2D3CBBB5",
+                  },
+                },
+                "InputArtifacts": [
+                  {
+                    "Name": "Source",
+                  },
+                ],
+                "Name": "ReleaseProduction",
+                "OutputArtifacts": [
+                  {
+                    "Name": "ReleaseManifest",
+                  },
+                ],
+                "RoleArn": {
+                  "Fn::GetAtt": [
+                    "PipelineReleaseReleaseProductionCodePipelineActionRole000BD899",
+                    "Arn",
+                  ],
+                },
+                "RunOrder": 1,
+              },
+            ],
+            "Name": "Release",
+          },
+        ],
+        "Triggers": [
+          {
+            "GitConfiguration": {
+              "Push": [
+                {
+                  "Branches": {
+                    "Includes": [
+                      "mainline",
+                    ],
+                  },
+                  "FilePaths": {
+                    "Includes": [
+                      "environments/**",
+                      "infra/**",
+                      "packages/{broker,cli,contracts,gateway,orchestrator,slack-service,worker}/**",
+                      "{package.json,package-lock.json,tsconfig.json,tsconfig.base.json,.dockerignore}",
+                    ],
+                  },
+                },
+              ],
+              "SourceActionName": "GitHub",
+            },
+            "ProviderType": "CodeStarSourceConnection",
+          },
+        ],
+      },
+      "Type": "AWS::CodePipeline::Pipeline",
+    },
+    "PipelineReleaseReleaseProductionCodePipelineActionRole000BD899": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "PipelineRoleD68726F7",
+                    "Arn",
+                  ],
+                },
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "PipelineReleaseReleaseProductionCodePipelineActionRoleDefaultPolicyFDBF1E29": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "codebuild:BatchGetBuilds",
+                "codebuild:StartBuild",
+                "codebuild:StopBuild",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "ReleaseBuild2D3CBBB5",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "PipelineReleaseReleaseProductionCodePipelineActionRoleDefaultPolicyFDBF1E29",
+        "Roles": [
+          {
+            "Ref": "PipelineReleaseReleaseProductionCodePipelineActionRole000BD899",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "PipelineRoleD68726F7": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "codepipeline.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "PipelineRoleDefaultPolicyC7A05455": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "s3:GetObject*",
+                "s3:GetBucket*",
+                "s3:List*",
+                "s3:DeleteObject*",
+                "s3:PutObject",
+                "s3:PutObjectLegalHold",
+                "s3:PutObjectRetention",
+                "s3:PutObjectTagging",
+                "s3:PutObjectVersionTagging",
+                "s3:Abort*",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "Artifacts82DD59A1",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "Artifacts82DD59A1",
+                          "Arn",
+                        ],
+                      },
+                      "/*",
+                    ],
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "SourceActionRole4344B1D1",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "PipelineReleaseReleaseProductionCodePipelineActionRole000BD899",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "PipelineRoleDefaultPolicyC7A05455",
+        "Roles": [
+          {
+            "Ref": "PipelineRoleD68726F7",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "ReleaseBuild2D3CBBB5": {
+      "Properties": {
+        "Artifacts": {
+          "Type": "CODEPIPELINE",
+        },
+        "Cache": {
+          "Modes": [
+            "LOCAL_DOCKER_LAYER_CACHE",
+          ],
+          "Type": "LOCAL",
+        },
+        "ConcurrentBuildLimit": 1,
+        "Description": "Runs npm run release:prod for AgentX mainline commits",
+        "EncryptionKey": "alias/aws/s3",
+        "Environment": {
+          "ComputeType": "BUILD_GENERAL1_MEDIUM",
+          "Image": "aws/codebuild/amazonlinux-aarch64-standard:3.0",
+          "ImagePullCredentialsType": "CODEBUILD",
+          "PrivilegedMode": true,
+          "Type": "ARM_CONTAINER",
+        },
+        "LogsConfig": {
+          "CloudWatchLogs": {
+            "GroupName": {
+              "Ref": "ReleaseBuildLogsD2C04AA9",
+            },
+            "Status": "ENABLED",
+          },
+        },
+        "Name": "release-agentx-production",
+        "ServiceRole": {
+          "Fn::GetAtt": [
+            "ReleaseBuildRole789F2E69",
+            "Arn",
+          ],
+        },
+        "Source": {
+          "BuildSpec": "{
+  "version": "0.2",
+  "env": {
+    "shell": "bash",
+    "variables": {
+      "AWS_CLI_VERSION": "2.36.47"
+    }
+  },
+  "phases": {
+    "install": {
+      "commands": [
+        "node_version=\\"$(cat .node-version)\\"",
+        "node_archive=\\"node-v\${node_version}-linux-arm64.tar.xz\\"",
+        "curl -fsSL -o \\"/tmp/\${node_archive}\\" \\"https://nodejs.org/dist/v\${node_version}/\${node_archive}\\"",
+        "curl -fsSL \\"https://nodejs.org/dist/v\${node_version}/SHASUMS256.txt\\" | grep \\" \${node_archive}$\\" | (cd /tmp && sha256sum -c -)",
+        "mkdir -p /opt/node && tar -xJf \\"/tmp/\${node_archive}\\" -C /opt/node --strip-components=1",
+        "curl -fsSL -o /tmp/awscliv2.zip \\"https://awscli.amazonaws.com/awscli-exe-linux-aarch64-\${AWS_CLI_VERSION}.zip\\"",
+        "unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install --install-dir /opt/aws-cli --bin-dir /opt/aws-cli/bin",
+        "export PATH=\\"/opt/node/bin:/opt/aws-cli/bin:$PATH\\"",
+        "node --version && npm --version && aws --version && docker buildx version"
+      ]
+    },
+    "pre_build": {
+      "commands": [
+        "npm ci"
+      ]
+    },
+    "build": {
+      "commands": [
+        "npm run release:prod -- --region \\"$AWS_REGION\\" --reuse-unchanged-worker --require-existing-foundation"
+      ]
+    }
+  },
+  "artifacts": {
+    "files": [
+      "cdk.out/agentx-production-release.json"
+    ],
+    "discard-paths": "yes"
+  }
+}",
+          "Type": "CODEPIPELINE",
+        },
+        "TimeoutInMinutes": 60,
+      },
+      "Type": "AWS::CodeBuild::Project",
+    },
+    "ReleaseBuildLogsD2C04AA9": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "RetentionInDays": 30,
+      },
+      "Type": "AWS::Logs::LogGroup",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "ReleaseBuildRole789F2E69": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "codebuild.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "ReleaseBuildRoleDefaultPolicyEA29B62F": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "logs:CreateLogStream",
+                "logs:PutLogEvents",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "ReleaseBuildLogsD2C04AA9",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":logs:us-east-1:",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":log-group:/aws/codebuild/",
+                      {
+                        "Ref": "ReleaseBuild2D3CBBB5",
+                      },
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":logs:us-east-1:",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":log-group:/aws/codebuild/",
+                      {
+                        "Ref": "ReleaseBuild2D3CBBB5",
+                      },
+                      ":*",
+                    ],
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "codebuild:CreateReportGroup",
+                "codebuild:CreateReport",
+                "codebuild:UpdateReport",
+                "codebuild:BatchPutTestCases",
+                "codebuild:BatchPutCodeCoverages",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":codebuild:us-east-1:",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":report-group/",
+                    {
+                      "Ref": "ReleaseBuild2D3CBBB5",
+                    },
+                    "-*",
+                  ],
+                ],
+              },
+            },
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":iam::",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":role/cdk-hnb659fds-*-",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    "-us-east-1",
+                  ],
+                ],
+              },
+              "Sid": "AssumeCdkBootstrapRoles",
+            },
+            {
+              "Action": "ecr:GetAuthorizationToken",
+              "Effect": "Allow",
+              "Resource": "*",
+              "Sid": "EcrAuthorization",
+            },
+            {
+              "Action": [
+                "ecr:BatchCheckLayerAvailability",
+                "ecr:BatchGetImage",
+                "ecr:CompleteLayerUpload",
+                "ecr:DescribeImages",
+                "ecr:DescribeRepositories",
+                "ecr:GetDownloadUrlForLayer",
+                "ecr:InitiateLayerUpload",
+                "ecr:PutImage",
+                "ecr:PutImageScanningConfiguration",
+                "ecr:PutImageTagMutability",
+                "ecr:PutLifecyclePolicy",
+                "ecr:UploadLayerPart",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ecr:us-east-1:",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":repository/agentx-worker-production",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ecr:us-east-1:",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":repository/agentx-slack-orchestrator",
+                    ],
+                  ],
+                },
+              ],
+              "Sid": "ProductionWorkerRepository",
+            },
+            {
+              "Action": "cloudformation:DescribeStacks",
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":cloudformation:us-east-1:",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":stack/AgentXControlPlane/*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":cloudformation:us-east-1:",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":stack/AgentXProductionFoundation/*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":cloudformation:us-east-1:",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":stack/AgentXProductionRuntime/*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":cloudformation:us-east-1:",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":stack/AgentXSlackOrchestrator/*",
+                    ],
+                  ],
+                },
+              ],
+              "Sid": "ReadReleaseStacks",
+            },
+            {
+              "Action": [
+                "bedrock-agentcore:GetAgentRuntime",
+                "bedrock-agentcore:GetCapacityProvider",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":bedrock-agentcore:us-east-1:",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":runtime/agentx_production_worker-*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":bedrock-agentcore:us-east-1:",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":capacity-provider/agentx_production_capacity_*",
+                    ],
+                  ],
+                },
+              ],
+              "Sid": "ReadProductionAgentCore",
+            },
+            {
+              "Action": "logs:DescribeLogGroups",
+              "Effect": "Allow",
+              "Resource": "*",
+              "Sid": "DescribeLogGroups",
+            },
+            {
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:PutRetentionPolicy",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":logs:us-east-1:",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":log-group:/aws/bedrock-agentcore/runtimes/*",
+                  ],
+                ],
+              },
+              "Sid": "RuntimeLogRetention",
+            },
+            {
+              "Action": [
+                "codeconnections:UseConnection",
+                "codestar-connections:UseConnection",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "GitHubConnectionArn",
+              },
+            },
+            {
+              "Action": [
+                "s3:GetObject*",
+                "s3:GetBucket*",
+                "s3:List*",
+                "s3:DeleteObject*",
+                "s3:PutObject",
+                "s3:PutObjectLegalHold",
+                "s3:PutObjectRetention",
+                "s3:PutObjectTagging",
+                "s3:PutObjectVersionTagging",
+                "s3:Abort*",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "Artifacts82DD59A1",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "Artifacts82DD59A1",
+                          "Arn",
+                        ],
+                      },
+                      "/*",
+                    ],
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": "codestar-connections:UseConnection",
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "GitHubConnectionArn",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "ReleaseBuildRoleDefaultPolicyEA29B62F",
+        "Roles": [
+          {
+            "Ref": "ReleaseBuildRole789F2E69",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "SourceActionRole4344B1D1": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":iam::",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":root",
+                    ],
+                  ],
+                },
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Description": "Reads AgentX mainline through the GitHub connection",
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "SourceActionRoleDefaultPolicy01E4F9FE": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "codeconnections:UseConnection",
+                "codestar-connections:UseConnection",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "GitHubConnectionArn",
+              },
+            },
+            {
+              "Action": "codestar-connections:UseConnection",
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "GitHubConnectionArn",
+              },
+            },
+            {
+              "Action": [
+                "s3:GetObject*",
+                "s3:GetBucket*",
+                "s3:List*",
+                "s3:DeleteObject*",
+                "s3:PutObject",
+                "s3:PutObjectLegalHold",
+                "s3:PutObjectRetention",
+                "s3:PutObjectTagging",
+                "s3:PutObjectVersionTagging",
+                "s3:Abort*",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "Artifacts82DD59A1",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "Artifacts82DD59A1",
+                          "Arn",
+                        ],
+                      },
+                      "/*",
+                    ],
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "s3:PutObjectAcl",
+                "s3:PutObjectVersionAcl",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    {
+                      "Fn::GetAtt": [
+                        "Artifacts82DD59A1",
+                        "Arn",
+                      ],
+                    },
+                    "/*",
+                  ],
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "SourceActionRoleDefaultPolicy01E4F9FE",
+        "Roles": [
+          {
+            "Ref": "SourceActionRole4344B1D1",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+  },
+  "Rules": {
+    "CheckBootstrapVersion": {
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Not": [
+              {
+                "Fn::Contains": [
+                  [
+                    "1",
+                    "2",
+                    "3",
+                    "4",
+                    "5",
+                  ],
+                  {
+                    "Ref": "BootstrapVersion",
+                  },
+                ],
+              },
+            ],
+          },
+          "AssertDescription": "CDK bootstrap stack version 6 required. Please run 'cdk bootstrap' with a recent version of the CDK CLI.",
+        },
+      ],
+    },
+  },
+}
+`;
+
+exports[`legacy production templates > AgentXSlackOrchestrator is unchanged 1`] = `
+{
+  "Description": "Hosted AgentX Slack orchestrator on ECS Fargate",
+  "Outputs": {
+    "ClusterName": {
+      "Value": {
+        "Ref": "Cluster",
+      },
+    },
+    "ServiceName": {
+      "Value": {
+        "Fn::GetAtt": [
+          "Service",
+          "Name",
+        ],
+      },
+    },
+  },
+  "Parameters": {
+    "BootstrapVersion": {
+      "Default": "/cdk-bootstrap/hnb659fds/version",
+      "Description": "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]",
+      "Type": "AWS::SSM::Parameter::Value<String>",
+    },
+    "ControlPlaneUrl": {
+      "AllowedPattern": "^https://.+$",
+      "Type": "String",
+    },
+    "GateClassifierModelId": {
+      "Default": "amazon.nova-lite-v1:0",
+      "Description": "Small Bedrock model the action gate asks whether a member asked for a change",
+      "Type": "String",
+    },
+    "ModelId": {
+      "Default": "amazon.nova-pro-v1:0",
+      "Type": "String",
+    },
+    "ModelProvider": {
+      "Default": "amazon-bedrock",
+      "Type": "String",
+    },
+    "OrchestratorImageUri": {
+      "AllowedPattern": "^.+@sha256:[a-f0-9]{64}$",
+      "Description": "Immutable private ECR linux/arm64 Slack orchestrator image URI",
+      "Type": "String",
+    },
+    "PrivateSubnetIds": {
+      "Description": "Private subnets with NAT egress, such as AgentXProductionFoundation's PrivateSubnetIds",
+      "Type": "List<AWS::EC2::Subnet::Id>",
+    },
+    "SlackRequestQueueUrl": {
+      "AllowedPattern": "^https://sqs\\..+\\.fifo$",
+      "Type": "String",
+    },
+    "SlackSecretArn": {
+      "AllowedPattern": "^arn:aws(-[^:]+)?:secretsmanager:.+$",
+      "Type": "String",
+    },
+    "SlackThreadsTableName": {
+      "MinLength": 3,
+      "Type": "String",
+    },
+    "TaskRoleArn": {
+      "AllowedPattern": "^arn:aws(-[^:]+)?:iam::[0-9]{12}:role/.+$",
+      "Description": "SlackOrchestratorTaskRoleArn output of AgentXControlPlane",
+      "Type": "String",
+    },
+    "ThreadSessionBucketName": {
+      "MinLength": 3,
+      "Type": "String",
+    },
+    "TurnRecordsTableName": {
+      "Description": "TurnRecordsTableName output of AgentXControlPlane",
+      "MinLength": 3,
+      "Type": "String",
+    },
+    "VpcId": {
+      "Type": "AWS::EC2::VPC::Id",
+    },
+  },
+  "Resources": {
+    "Cluster": {
+      "Properties": {
+        "ClusterSettings": [
+          {
+            "Name": "containerInsights",
+            "Value": "disabled",
+          },
+        ],
+        "Tags": [
+          {
+            "Key": "Application",
+            "Value": "AgentX",
+          },
+        ],
+      },
+      "Type": "AWS::ECS::Cluster",
+    },
+    "ExecutionRole605A040B": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId",
+                  },
+                },
+              },
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Description": "Pulls the AgentX Slack orchestrator image and writes its logs",
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "ExecutionRoleDefaultPolicyA5B92313": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "ecr:GetAuthorizationToken",
+              "Effect": "Allow",
+              "Resource": "*",
+            },
+            {
+              "Action": [
+                "ecr:BatchCheckLayerAvailability",
+                "ecr:BatchGetImage",
+                "ecr:GetDownloadUrlForLayer",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":ecr:us-east-1:",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":repository/agentx-slack-orchestrator",
+                  ],
+                ],
+              },
+            },
+            {
+              "Action": [
+                "logs:CreateLogStream",
+                "logs:PutLogEvents",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "Logs6819BB44",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "ExecutionRoleDefaultPolicyA5B92313",
+        "Roles": [
+          {
+            "Ref": "ExecutionRole605A040B",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "Logs6819BB44": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "RetentionInDays": 30,
+      },
+      "Type": "AWS::Logs::LogGroup",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "LogsToolSchemaErrorMetric416461BE": {
+      "Properties": {
+        "FilterPattern": "{ ($.event = "metric") && ($.metric = "ToolSchemaError") }",
+        "LogGroupName": {
+          "Ref": "Logs6819BB44",
+        },
+        "MetricTransformations": [
+          {
+            "Dimensions": [
+              {
+                "Key": "connector",
+                "Value": "$.connector",
+              },
+            ],
+            "MetricName": "ToolSchemaError",
+            "MetricNamespace": "AgentX",
+            "MetricValue": "$.count",
+          },
+        ],
+      },
+      "Type": "AWS::Logs::MetricFilter",
+    },
+    "LogsToolUnknownNameMetricE33CCBBA": {
+      "Properties": {
+        "FilterPattern": "{ ($.event = "metric") && ($.metric = "ToolUnknownName") }",
+        "LogGroupName": {
+          "Ref": "Logs6819BB44",
+        },
+        "MetricTransformations": [
+          {
+            "MetricName": "ToolUnknownName",
+            "MetricNamespace": "AgentX",
+            "MetricValue": "$.count",
+          },
+        ],
+      },
+      "Type": "AWS::Logs::MetricFilter",
+    },
+    "LogsTurnCompletedMetricDA5CB0D0": {
+      "Properties": {
+        "FilterPattern": "{ ($.event = "metric") && ($.metric = "TurnCompleted") }",
+        "LogGroupName": {
+          "Ref": "Logs6819BB44",
+        },
+        "MetricTransformations": [
+          {
+            "MetricName": "TurnCompleted",
+            "MetricNamespace": "AgentX",
+            "MetricValue": "$.count",
+          },
+        ],
+      },
+      "Type": "AWS::Logs::MetricFilter",
+    },
+    "LogsTurnEmptyResponseMetric2057D718": {
+      "Properties": {
+        "FilterPattern": "{ ($.event = "metric") && ($.metric = "TurnEmptyResponse") }",
+        "LogGroupName": {
+          "Ref": "Logs6819BB44",
+        },
+        "MetricTransformations": [
+          {
+            "MetricName": "TurnEmptyResponse",
+            "MetricNamespace": "AgentX",
+            "MetricValue": "$.count",
+          },
+        ],
+      },
+      "Type": "AWS::Logs::MetricFilter",
+    },
+    "LogsTurnMetricsEmitFailedMetric8DE45640": {
+      "Properties": {
+        "FilterPattern": "{ $.event = "turn_metrics.emit_failed" }",
+        "LogGroupName": {
+          "Ref": "Logs6819BB44",
+        },
+        "MetricTransformations": [
+          {
+            "MetricName": "TurnMetricsEmitFailed",
+            "MetricNamespace": "AgentX",
+            "MetricValue": "1",
+          },
+        ],
+      },
+      "Type": "AWS::Logs::MetricFilter",
+    },
+    "LogsTurnRecordWriteFailedMetric7361DAE7": {
+      "Properties": {
+        "FilterPattern": "{ ($.event = "metric") && ($.metric = "TurnRecordWriteFailed") }",
+        "LogGroupName": {
+          "Ref": "Logs6819BB44",
+        },
+        "MetricTransformations": [
+          {
+            "MetricName": "TurnRecordWriteFailed",
+            "MetricNamespace": "AgentX",
+            "MetricValue": "$.count",
+          },
+        ],
+      },
+      "Type": "AWS::Logs::MetricFilter",
+    },
+    "SecurityGroup": {
+      "Properties": {
+        "GroupDescription": "AgentX Slack orchestrator: no ingress and HTTPS-only egress",
+        "SecurityGroupEgress": [
+          {
+            "CidrIp": "0.0.0.0/0",
+            "Description": "HTTPS to Slack, Amazon Bedrock, the AgentX control plane, and AWS APIs",
+            "FromPort": 443,
+            "IpProtocol": "tcp",
+            "ToPort": 443,
+          },
+        ],
+        "Tags": [
+          {
+            "Key": "Application",
+            "Value": "AgentX",
+          },
+        ],
+        "VpcId": {
+          "Ref": "VpcId",
+        },
+      },
+      "Type": "AWS::EC2::SecurityGroup",
+    },
+    "Service": {
+      "Properties": {
+        "Cluster": {
+          "Ref": "Cluster",
+        },
+        "DeploymentConfiguration": {
+          "DeploymentCircuitBreaker": {
+            "Enable": true,
+            "Rollback": true,
+          },
+          "MaximumPercent": 200,
+          "MinimumHealthyPercent": 100,
+        },
+        "DesiredCount": 1,
+        "EnableExecuteCommand": false,
+        "LaunchType": "FARGATE",
+        "NetworkConfiguration": {
+          "AwsvpcConfiguration": {
+            "AssignPublicIp": "DISABLED",
+            "SecurityGroups": [
+              {
+                "Fn::GetAtt": [
+                  "SecurityGroup",
+                  "GroupId",
+                ],
+              },
+            ],
+            "Subnets": {
+              "Ref": "PrivateSubnetIds",
+            },
+          },
+        },
+        "TaskDefinition": {
+          "Ref": "TaskDefinition",
+        },
+      },
+      "Type": "AWS::ECS::Service",
+    },
+    "TaskDefinition": {
+      "Properties": {
+        "ContainerDefinitions": [
+          {
+            "Environment": [
+              {
+                "Name": "AWS_REGION",
+                "Value": "us-east-1",
+              },
+              {
+                "Name": "CONTROL_PLANE_URL",
+                "Value": {
+                  "Ref": "ControlPlaneUrl",
+                },
+              },
+              {
+                "Name": "SLACK_REQUEST_QUEUE_URL",
+                "Value": {
+                  "Ref": "SlackRequestQueueUrl",
+                },
+              },
+              {
+                "Name": "SLACK_THREADS_TABLE_NAME",
+                "Value": {
+                  "Ref": "SlackThreadsTableName",
+                },
+              },
+              {
+                "Name": "THREAD_SESSION_BUCKET_NAME",
+                "Value": {
+                  "Ref": "ThreadSessionBucketName",
+                },
+              },
+              {
+                "Name": "TURN_RECORDS_TABLE_NAME",
+                "Value": {
+                  "Ref": "TurnRecordsTableName",
+                },
+              },
+              {
+                "Name": "SLACK_SECRET_ARN",
+                "Value": {
+                  "Ref": "SlackSecretArn",
+                },
+              },
+              {
+                "Name": "AGENTX_ORCHESTRATOR_PROVIDER",
+                "Value": {
+                  "Ref": "ModelProvider",
+                },
+              },
+              {
+                "Name": "AGENTX_ORCHESTRATOR_MODEL",
+                "Value": {
+                  "Ref": "ModelId",
+                },
+              },
+              {
+                "Name": "AGENTX_GATE_CLASSIFIER_MODEL",
+                "Value": {
+                  "Ref": "GateClassifierModelId",
+                },
+              },
+            ],
+            "Essential": true,
+            "Image": {
+              "Ref": "OrchestratorImageUri",
+            },
+            "LogConfiguration": {
+              "LogDriver": "awslogs",
+              "Options": {
+                "awslogs-group": {
+                  "Ref": "Logs6819BB44",
+                },
+                "awslogs-region": "us-east-1",
+                "awslogs-stream-prefix": "orchestrator",
+              },
+            },
+            "Name": "orchestrator",
+            "StopTimeout": 120,
+          },
+        ],
+        "Cpu": "512",
+        "ExecutionRoleArn": {
+          "Fn::GetAtt": [
+            "ExecutionRole605A040B",
+            "Arn",
+          ],
+        },
+        "Family": "agentx-slack-orchestrator",
+        "Memory": "1024",
+        "NetworkMode": "awsvpc",
+        "RequiresCompatibilities": [
+          "FARGATE",
+        ],
+        "RuntimePlatform": {
+          "CpuArchitecture": "ARM64",
+          "OperatingSystemFamily": "LINUX",
+        },
+        "TaskRoleArn": {
+          "Ref": "TaskRoleArn",
+        },
+      },
+      "Type": "AWS::ECS::TaskDefinition",
+    },
+  },
+  "Rules": {
+    "CheckBootstrapVersion": {
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Not": [
+              {
+                "Fn::Contains": [
+                  [
+                    "1",
+                    "2",
+                    "3",
+                    "4",
+                    "5",
+                  ],
+                  {
+                    "Ref": "BootstrapVersion",
+                  },
+                ],
+              },
+            ],
+          },
+          "AssertDescription": "CDK bootstrap stack version 6 required. Please run 'cdk bootstrap' with a recent version of the CDK CLI.",
+        },
+      ],
+    },
+  },
+}
+`;

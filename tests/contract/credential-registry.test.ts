@@ -1,7 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 import { CredentialUnavailable } from "@agentx/gateway";
+import type { AuthenticatedIdentity } from "../../packages/broker/src/index.js";
 import { adminCall, createAdminBroker } from "../support/admin-broker.js";
 
+const administrator: AuthenticatedIdentity = {
+  issuer: "https://identity.example.test",
+  subject: "admin-subject",
+  ownerKey: "admin-subject",
+  isAdministrator: true,
+  claims: {},
+};
 const githubApp = { ref: "github-app", secretName: "arn:aws:secretsmanager:us-east-1:111122223333:secret:github-key" };
 const secretValues: Record<string, string> = {
   "agentx/connectors/jira-sa": JSON.stringify({ apiKey: "jira-key-value" }),
@@ -110,12 +118,20 @@ describe("Secrets Manager source and token cache", () => {
     }
   });
 
-  it("extends the access-denied message to name the KMS key as a possible cause", async () => {
+  it("extends the access-denied message to name the KMS key as a possible cause, and the actual configured connector prefix", async () => {
     const { secretsManagerSource } = await import("../../packages/broker/src/aws/credentials.js");
     const failing = { send: vi.fn(async () => { throw Object.assign(new Error("denied"), { name: "AccessDeniedException" }); }) };
     const error = await secretsManagerSource(failing).read("agentx/connectors/x").catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(CredentialUnavailable);
     expect((error as Error).message).toBe("AgentX cannot read secret agentx/connectors/x; connector secrets must be named agentx/connectors/<name> in this account and region, or its KMS key does not allow the AgentX broker");
+  });
+
+  it("names an environment's own connector prefix in the access-denied message, when the source is given one", async () => {
+    const { secretsManagerSource } = await import("../../packages/broker/src/aws/credentials.js");
+    const failing = { send: vi.fn(async () => { throw Object.assign(new Error("denied"), { name: "AccessDeniedException" }); }) };
+    const error = await secretsManagerSource(failing, "agentx/staging/connectors/").read("agentx/staging/connectors/x").catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(CredentialUnavailable);
+    expect((error as Error).message).toBe("AgentX cannot read secret agentx/staging/connectors/x; connector secrets must be named agentx/staging/connectors/<name> in this account and region, or its KMS key does not allow the AgentX broker");
   });
 
   it("logs and swallows a token cache write failure without the token", async () => {
@@ -213,5 +229,13 @@ describe("registry failure modes", () => {
     const refs = (listed.body.credentials as Array<{ ref: string }>).map((entry) => entry.ref);
     expect(refs).toEqual(["github-app"]);
     expect(listed.body.credentials).toContainEqual({ ref: "github-app", type: "github-app", secretName: githubApp.secretName, builtIn: true, tokenCached: false });
+  });
+
+  it("refuses a secret outside the deployment's own connector prefix", async () => {
+    const { registry } = await createAdminBroker({ connectorCredentials: { secrets, githubApp, connectorSecretPrefix: "agentx/staging/connectors/" } });
+    await expect(registry!.register(administrator, { ref: "linear", type: "static-secret", secretName: "agentx/production/connectors/linear" }))
+      .rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("agentx/staging/connectors/") as unknown });
+    await expect(registry!.register(administrator, { ref: "linear", type: "static-secret", secretName: "agentx/connectors/linear" }))
+      .rejects.toMatchObject({ code: "CONFIG_INVALID" });
   });
 });
