@@ -1,0 +1,134 @@
+import { DescribeStacksCommand, type CloudFormationClient } from "@aws-sdk/client-cloudformation";
+import { GetCallerIdentityCommand, type STSClient } from "@aws-sdk/client-sts";
+import { agentXError, type StackPart } from "@agentx/contracts";
+import { writeEnvironmentCache } from "./cache.js";
+import { withEnvironmentLock } from "./lock.js";
+import type { ParameterStore } from "./parameter-store.js";
+import { readEnvironmentSettings, writeEnvironmentSettings, type EnvironmentSettings } from "./settings.js";
+
+/** Must equal infra/lib/naming.ts LEGACY_STACK_NAMES (a test compares them). */
+export const ADOPTED_STACK_NAMES: Record<StackPart, string> = {
+  foundation: "AgentXProductionFoundation",
+  runtime: "AgentXProductionRuntime",
+  "control-plane": "AgentXControlPlane",
+  slack: "AgentXSlackOrchestrator",
+};
+
+export interface StackDescription {
+  outputs: Record<string, string>;
+  parameters: Record<string, string>;
+  status: string;
+}
+
+export interface StackReader {
+  /** DescribeStacks for one stack; undefined when it does not exist. */
+  describe(stackName: string): Promise<StackDescription | undefined>;
+}
+
+export interface CallerIdentity {
+  get(): Promise<{ account: string; arn: string }>;
+}
+
+export function cloudFormationStackReader(client: CloudFormationClient): StackReader {
+  return {
+    async describe(stackName) {
+      try {
+        const { Stacks } = await client.send(new DescribeStacksCommand({ StackName: stackName }));
+        const stack = Stacks?.[0];
+        if (!stack) return undefined;
+        return {
+          status: stack.StackStatus ?? "UNKNOWN",
+          outputs: Object.fromEntries(
+            (stack.Outputs ?? []).flatMap((output) => (output.OutputKey && output.OutputValue !== undefined ? [[output.OutputKey, output.OutputValue]] : [])),
+          ),
+          parameters: Object.fromEntries(
+            (stack.Parameters ?? []).flatMap((parameter) => (parameter.ParameterKey && parameter.ParameterValue !== undefined ? [[parameter.ParameterKey, parameter.ParameterValue]] : [])),
+          ),
+        };
+      } catch (error) {
+        if (error instanceof Error && error.name === "ValidationError" && /does not exist/.test(error.message)) return undefined;
+        throw error;
+      }
+    },
+  };
+}
+
+export function stsCallerIdentity(client: STSClient): CallerIdentity {
+  return {
+    async get() {
+      const { Account, Arn } = await client.send(new GetCallerIdentityCommand({}));
+      if (!Account || !Arn) throw agentXError("RUNTIME_UNAVAILABLE", "AWS did not return the caller identity");
+      return { account: Account, arn: Arn };
+    },
+  };
+}
+
+async function healthyStack(stacks: StackReader, name: string): Promise<StackDescription> {
+  const stack = await stacks.describe(name);
+  if (stack === undefined) throw agentXError("CONFIG_INVALID", `stack ${name} was not found in this account and region; nothing changed`);
+  if (stack.status.endsWith("_FAILED") || stack.status === "ROLLBACK_COMPLETE") {
+    throw agentXError("CONFIG_INVALID", `stack ${name} is ${stack.status}; fix it before adopting; nothing changed`);
+  }
+  return stack;
+}
+
+function required(stack: StackDescription, stackName: string, kind: "outputs" | "parameters", key: string): string {
+  const value = stack[kind][key];
+  if (value === undefined || value === "") {
+    throw agentXError("CONFIG_INVALID", `stack ${stackName} has no ${kind === "outputs" ? "output" : "parameter"} ${key}; nothing changed`);
+  }
+  return value;
+}
+
+/**
+ * `agentx --env <env> env adopt --region <region>`: register the existing deployment identified by
+ * the fixed legacy stack names as environment `<env>`, reading its CloudFormation stacks and
+ * writing settings to SSM. Never changes any stack. Refuses, writing nothing, when a stack is
+ * missing or unhealthy, an output or parameter is missing, or the environment already has settings.
+ */
+export async function adoptEnvironment(input: {
+  env: string;
+  region: string;
+  clientId?: string;
+  stacks: StackReader;
+  identity: CallerIdentity;
+  store: ParameterStore;
+  home: string;
+  now?: () => number;
+}): Promise<EnvironmentSettings> {
+  const now = input.now ?? Date.now;
+  const caller = await input.identity.get();
+  return withEnvironmentLock({ store: input.store, env: input.env, holder: caller.arn, command: "env adopt", now }, async () => {
+    if ((await readEnvironmentSettings(input.store, input.env)) !== undefined) {
+      throw agentXError("CONFIG_INVALID", `environment ${input.env} already has settings; nothing changed`);
+    }
+    const names = ADOPTED_STACK_NAMES;
+    await healthyStack(input.stacks, names.foundation);
+    const runtime = await healthyStack(input.stacks, names.runtime);
+    const control = await healthyStack(input.stacks, names["control-plane"]);
+    const slack = await healthyStack(input.stacks, names.slack);
+    const issuer = required(control, names["control-plane"], "parameters", "OidcIssuer");
+    const audience = required(control, names["control-plane"], "parameters", "OidcAudience");
+    const settings: EnvironmentSettings = {
+      schemaVersion: 1,
+      env: input.env,
+      account: caller.account,
+      region: input.region,
+      engine: "cdk",
+      version: "unversioned",
+      naming: "legacy",
+      stacks: { ...names },
+      controlPlaneUrl: required(control, names["control-plane"], "outputs", "ApiEndpoint"),
+      identity: { mode: issuer.startsWith("https://cognito-idp.") ? "cognito" : "oidc", issuer, audience, clientId: input.clientId ?? audience },
+      models: {
+        orchestrator: required(slack, names.slack, "parameters", "ModelId"),
+        classifier: required(slack, names.slack, "parameters", "GateClassifierModelId"),
+        worker: required(runtime, names.runtime, "parameters", "ModelId"),
+      },
+      updatedAt: new Date(now()).toISOString(),
+    };
+    await writeEnvironmentSettings(input.store, settings);
+    await writeEnvironmentCache(input.home, settings);
+    return settings;
+  });
+}

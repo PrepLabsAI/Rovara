@@ -16,7 +16,7 @@ describe("AgentX executable command surface", () => {
     expect(subcommands(admin, "turns")).toEqual(["export"]);
 
     const env = program.commands.find((command) => command.name() === "env");
-    expect(env?.commands.map((command) => command.name())).toEqual(["list", "use"]);
+    expect(env?.commands.map((command) => command.name())).toEqual(["list", "use", "adopt"]);
   });
 
   it("keeps no developer workflow or runtime routing option", () => {

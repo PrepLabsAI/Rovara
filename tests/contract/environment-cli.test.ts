@@ -2,6 +2,7 @@ import { mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import type { CallerIdentity, StackReader } from "../../packages/cli/src/environments/adopt.js";
 import { environmentCachePath, resolveDeploymentFile, writeEnvironmentCache } from "../../packages/cli/src/environments/cache.js";
 import type { ParameterStore } from "../../packages/cli/src/environments/parameter-store.js";
 import { writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
@@ -65,6 +66,58 @@ describe("agentx env", () => {
     const code = await executeCli(["--env", "Prod", "env", "use"], { ...io, environments: { store, home: await home() } });
     expect(code).not.toBe(0);
     expect(store.calls).toEqual([]);
+  });
+});
+
+describe("agentx env adopt", () => {
+  const liveStacks: Record<string, { outputs: Record<string, string>; parameters: Record<string, string>; status: string }> = {
+    AgentXProductionFoundation: { outputs: {}, parameters: {}, status: "UPDATE_COMPLETE" },
+    AgentXProductionRuntime: { outputs: {}, parameters: { ModelId: "amazon.nova-pro-v1:0" }, status: "UPDATE_COMPLETE" },
+    AgentXControlPlane: {
+      outputs: { ApiEndpoint: "https://abc.execute-api.us-east-1.amazonaws.com" },
+      parameters: { OidcIssuer: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_x", OidcAudience: "client123" },
+      status: "UPDATE_COMPLETE",
+    },
+    AgentXSlackOrchestrator: { outputs: {}, parameters: { ModelId: "amazon.nova-pro-v1:0", GateClassifierModelId: "amazon.nova-lite-v1:0" }, status: "UPDATE_COMPLETE" },
+  };
+  const stacks: StackReader = { describe: async (name) => liveStacks[name] };
+  const identity: CallerIdentity = { get: async () => ({ account: "944937319445", arn: "arn:aws:iam::944937319445:user/admin" }) };
+
+  it("registers the existing deployment through the CLI, in the {ok,data} JSON shape", async () => {
+    const store = new MemoryParameterStore();
+    const io = capture();
+    const code = await executeCli(
+      ["--env", "production", "--json", "env", "adopt", "--region", "us-east-1"],
+      { ...io, environments: { store, home: await home(), stacks, sts: identity } },
+    );
+    expect(code).toBe(0);
+    expect(JSON.parse(io.out.join(""))).toMatchObject({
+      ok: true,
+      data: { env: "production", account: "944937319445", region: "us-east-1", naming: "legacy", controlPlaneUrl: "https://abc.execute-api.us-east-1.amazonaws.com" },
+    });
+  });
+
+  it("prints a plain-text confirmation naming the settings path", async () => {
+    const io = capture();
+    const code = await executeCli(
+      ["--env", "production", "env", "adopt", "--region", "us-east-1"],
+      { ...io, environments: { store: new MemoryParameterStore(), home: await home(), stacks, sts: identity } },
+    );
+    expect(code).toBe(0);
+    expect(io.out.join("")).toBe("Adopted production: https://abc.execute-api.us-east-1.amazonaws.com; settings in /agentx/production/settings\n");
+  });
+
+  it("refuses and writes nothing when a stack is missing, reported through the CLI error shape", async () => {
+    const rest: typeof liveStacks = Object.fromEntries(Object.entries(liveStacks).filter(([name]) => name !== "AgentXSlackOrchestrator"));
+    const store = new MemoryParameterStore();
+    const io = capture();
+    const code = await executeCli(
+      ["--env", "production", "--json", "env", "adopt", "--region", "us-east-1"],
+      { ...io, environments: { store, home: await home(), stacks: { describe: async (name) => rest[name] }, sts: identity } },
+    );
+    expect(code).not.toBe(0);
+    expect(JSON.parse(io.err.join(""))).toMatchObject({ ok: false, error: { code: "CONFIG_INVALID", message: expect.stringContaining("AgentXSlackOrchestrator") as unknown } });
+    expect(store.values.has("/agentx/production/settings")).toBe(false);
   });
 });
 

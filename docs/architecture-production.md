@@ -187,3 +187,26 @@ changes need to be carried over, create or update the production binding, prepar
 workspace, verify repository state and readiness, and only then retire the old demo session. Each
 of those actions is independently observable and reversible until the old session is explicitly
 deleted.
+
+## Environments
+
+AgentX can run more than one independent deployment (for example `production` and `staging`) in
+the same AWS account and region, selected everywhere with `--env <name>` (default `production`).
+Each gets its own physical names: stacks `agentx-<env>-foundation/-runtime/-control-plane/-slack`,
+AgentCore runtime `agentx_<env>_worker`, alerts topic `agentx-<env>-alerts`, connector secrets
+`agentx/<env>/connectors/<name>`, metrics namespace `AgentX/<env>`, and SSM settings under
+`/agentx/<env>/`. The name `connectors` is reserved and cannot be used as an environment name.
+
+The deployment described above predates environments and keeps its fixed legacy names
+(`AgentXProductionFoundation`, `AgentXProductionRuntime`, `AgentXControlPlane`,
+`AgentXSlackOrchestrator`, runtime `agentx_production_worker`) forever. It must be adopted as the
+`production` environment with `agentx --env production env adopt --region us-east-1`, which only
+reads its CloudFormation stacks and caller identity and writes settings to SSM; it never changes
+the stacks. A fresh `agentxEnv=production` install must never be deployed into the same account
+beside it: the two would collide on the AgentCore runtime name `agentx_production_worker`.
+
+`agentx env list` shows the environments installed in this account and region; `agentx --env
+<name> env use` rebuilds this machine's local settings cache for `<name>` from SSM. Any command
+that writes an environment's settings takes an SSM-backed lock at `/agentx/<env>/lock`: it names
+its holder and start time, refuses a fresh lock held by someone else, and allows takeover of a
+lock older than two hours only with explicit confirmation.

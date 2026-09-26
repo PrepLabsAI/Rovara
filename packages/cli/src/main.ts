@@ -13,8 +13,10 @@ import {
   agentXError,
   type ProjectDefinition,
 } from "@agentx/contracts";
+import { CloudFormationClient } from "@aws-sdk/client-cloudformation";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SSMClient } from "@aws-sdk/client-ssm";
+import { STSClient } from "@aws-sdk/client-sts";
 import { Command } from "commander";
 import { authorizeCredential, expectedAccountEmail, secretsManagerAuthorizeSecrets, type AuthorizeSecrets } from "./admin/authorize.js";
 import { listCredentials, registerCredential } from "./admin/credential.js";
@@ -25,9 +27,11 @@ import { exportTurns, parseSince } from "./admin/turns.js";
 import { loginWithPkce, openSystemBrowser, tokenStoreKey } from "./auth.js";
 import { loadProjectConfig } from "./config.js";
 import { loadDeploymentSettings, type DeploymentSettings } from "./deployment.js";
+import { cloudFormationStackReader, stsCallerIdentity, type CallerIdentity, type StackReader } from "./environments/adopt.js";
 import { resolveDeploymentFile } from "./environments/cache.js";
-import { runEnvList, runEnvUse } from "./environments/commands.js";
+import { runEnvAdopt, runEnvList, runEnvUse } from "./environments/commands.js";
 import { ssmParameterStore, type ParameterStore } from "./environments/parameter-store.js";
+import { settingsParameterName } from "./environments/settings.js";
 import { formatError, formatSuccess } from "./output.js";
 import { SystemCredentialTokenStore, type TokenStore } from "./token-store.js";
 
@@ -56,10 +60,12 @@ export interface CliDependencies {
     listenPort?: number;
     onListening?: (port: number) => void;
   };
-  /** Named-environment overrides, for tests: the SSM-backed store and the local cache's home directory. */
+  /** Named-environment overrides, for tests: the SSM-backed store, the local cache's home directory, and env adopt's AWS readers. */
   environments?: {
     store?: ParameterStore;
     home?: string;
+    sts?: CallerIdentity;
+    stacks?: StackReader;
   };
 }
 
@@ -79,6 +85,8 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
   // deployment file lives.
   const home = dependencies.environments?.home ?? homedir();
   const parameterStore = (): ParameterStore => dependencies.environments?.store ?? ssmParameterStore(new SSMClient({}));
+  const callerIdentity = (): CallerIdentity => dependencies.environments?.sts ?? stsCallerIdentity(new STSClient({}));
+  const stackReader = (): StackReader => dependencies.environments?.stacks ?? cloudFormationStackReader(new CloudFormationClient({}));
 
   /** The deployment settings for the selected --env: an explicit --deployment-file wins, then the environment cache, then, for production only, the legacy ~/.agentx/deployment.yaml. */
   async function deploymentSettings(options: GlobalOptions): Promise<DeploymentSettings> {
@@ -373,6 +381,28 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         globals.json
           ? formatSuccess(result, true)
           : `Using environment ${result.env} (${result.controlPlaneUrl}); settings saved to ${result.path}\n`,
+      );
+    });
+  envCommand
+    .command("adopt")
+    .description("register the existing deployment (fixed legacy stack names) as the selected --env, reading its CloudFormation stacks; never changes them")
+    .requiredOption("--region <region>", "AWS region of the existing deployment")
+    .option("--client-id <id>", "OIDC/Cognito app client ID; defaults to the control plane's OidcAudience")
+    .action(async (options: { region: string; clientId?: string }, command: Command) => {
+      const globals = globalOptions(command);
+      const result = await runEnvAdopt({
+        store: parameterStore(),
+        home,
+        env: globals.env,
+        region: options.region,
+        ...(options.clientId === undefined ? {} : { clientId: options.clientId }),
+        stacks: stackReader(),
+        identity: callerIdentity(),
+      });
+      services.stdout.write(
+        globals.json
+          ? formatSuccess(result, true)
+          : `Adopted ${result.env}: ${result.controlPlaneUrl}; settings in ${settingsParameterName(result.env)}\n`,
       );
     });
 
