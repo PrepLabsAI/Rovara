@@ -1,5 +1,7 @@
+import { readFileSync } from "node:fs";
 import { App, LegacyStackSynthesizer, Tags } from "aws-cdk-lib";
 import type { IReusableStackSynthesizer } from "aws-cdk-lib";
+import { CONTEXT_ENV, CONTEXT_OVERFLOW_LOCATION_ENV } from "aws-cdk-lib/cx-api";
 import { AgentRuntimeStack } from "./agent-runtime.js";
 import { ControlPlaneStack } from "./control-plane.js";
 import { DemoRuntimeStack } from "./demo-runtime.js";
@@ -13,25 +15,38 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
   // The default stack synthesizer (and the assembly output directory, below) are
   // App-construction-time settings (Stack cannot pick them up afterwards), so they must be decided
   // before `new App(...)`, from the same context sources CDK itself would merge for every other
-  // context key: CDK_CONTEXT_JSON (how the `cdk` CLI passes `-c` flags and cdk.json to the app it
-  // shells out to, since bin/agentx.ts calls buildAgentXApp() with no arguments) and this
-  // function's own context argument. CDK_CONTEXT_JSON wins on conflict: that is how the App itself
-  // merges context for every other key (App.loadContext treats the constructor's `context` prop as
-  // defaults, then layers the CDK_CONTEXT_JSON environment context on top of it), so these pre-App
-  // guard clauses must use the same precedence to validate the values the App actually goes on to
-  // use. Letting the argument win instead, as before, meant the guard could accept a value that
-  // CDK_CONTEXT_JSON would then silently override once the App applied its own precedence — a
-  // mismatch between what was validated and what was actually built.
+  // context key: CDK_CONTEXT_JSON and the context-overflow temp file (how the `cdk` CLI passes `-c`
+  // flags and cdk.json to the app it shells out to, since bin/agentx.ts calls buildAgentXApp() with
+  // no arguments — the overflow file is used instead of the environment variable when the context
+  // is too large for one) and this function's own context argument. App.loadContext treats the
+  // constructor's `context` prop as defaults, then layers `{...environment, ...tempFile}` on top of
+  // it (the overflow file winning over the environment variable for any key both set), so these
+  // pre-App guard clauses must use the same precedence to validate the values the App actually goes
+  // on to use. Letting the argument win instead, as before, meant the guard could accept a value
+  // that CDK_CONTEXT_JSON/the overflow file would then silently override once the App applied its
+  // own precedence — a mismatch between what was validated and what was actually built.
   let cliContext: Record<string, unknown>;
   try {
-    cliContext = JSON.parse(process.env.CDK_CONTEXT_JSON ?? "{}") as Record<string, unknown>;
+    cliContext = JSON.parse(process.env[CONTEXT_ENV] ?? "{}") as Record<string, unknown>;
   } catch (error) {
     throw new Error(
-      `CDK_CONTEXT_JSON environment variable is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+      `${CONTEXT_ENV} environment variable is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error },
     );
   }
-  const mergedContext = { ...context, ...cliContext };
+  const overflowLocation = process.env[CONTEXT_OVERFLOW_LOCATION_ENV];
+  let overflowContext: Record<string, unknown> = {};
+  if (overflowLocation !== undefined) {
+    try {
+      overflowContext = JSON.parse(readFileSync(overflowLocation, "utf8")) as Record<string, unknown>;
+    } catch (error) {
+      throw new Error(
+        `${CONTEXT_OVERFLOW_LOCATION_ENV} (${JSON.stringify(overflowLocation)}) could not be read as JSON: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
+    }
+  }
+  const mergedContext = { ...context, ...cliContext, ...overflowContext };
   const synthesizerMode = mergedContext.agentxSynthesizer as string | undefined;
   if (synthesizerMode !== undefined && synthesizerMode !== "legacy") {
     throw new Error(`unsupported agentxSynthesizer ${JSON.stringify(synthesizerMode)}; expected legacy or unset`);

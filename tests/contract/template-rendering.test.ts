@@ -1,6 +1,7 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { CONTEXT_ENV, CONTEXT_OVERFLOW_LOCATION_ENV } from "aws-cdk-lib/cx-api";
 import { beforeAll, describe, expect, it } from "vitest";
 import { ENVIRONMENT_PLACEHOLDER, ENVIRONMENT_PLACEHOLDER_UNDERSCORED, EnvironmentNameSchema, renderTemplate } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
@@ -13,6 +14,35 @@ function templates(env: string): Map<string, string> {
     byPart.set(part, JSON.stringify(stack.template));
   }
   return byPart;
+}
+
+function withCdkContextJson(value: Record<string, unknown>, run: () => void): void {
+  const original = process.env[CONTEXT_ENV];
+  try {
+    process.env[CONTEXT_ENV] = JSON.stringify(value);
+    run();
+  } finally {
+    if (original === undefined) delete process.env[CONTEXT_ENV];
+    else process.env[CONTEXT_ENV] = original;
+  }
+}
+
+/** Simulates CDK's own context-overflow temp file (used instead of CDK_CONTEXT_JSON when the
+ * context is too large for an environment variable): writes `value` to a temp JSON file and points
+ * CONTEXT_OVERFLOW_LOCATION_ENV at it for the duration of `run`. */
+function withContextOverflowFile(value: Record<string, unknown>, run: () => void): void {
+  const dir = mkdtempSync(join(tmpdir(), "agentx-context-overflow-"));
+  const file = join(dir, "context-overflow.json");
+  writeFileSync(file, JSON.stringify(value));
+  const original = process.env[CONTEXT_OVERFLOW_LOCATION_ENV];
+  try {
+    process.env[CONTEXT_OVERFLOW_LOCATION_ENV] = file;
+    run();
+  } finally {
+    if (original === undefined) delete process.env[CONTEXT_OVERFLOW_LOCATION_ENV];
+    else process.env[CONTEXT_OVERFLOW_LOCATION_ENV] = original;
+    rmSync(dirname(file), { recursive: true, force: true });
+  }
 }
 
 describe("templates for any environment", () => {
@@ -72,17 +102,6 @@ describe("templates for any environment", () => {
  * the request.
  */
 describe("agentxSynthesizer from CDK_CONTEXT_JSON (how the cdk CLI actually passes -c flags)", () => {
-  function withCdkContextJson(value: Record<string, unknown>, run: () => void): void {
-    const original = process.env.CDK_CONTEXT_JSON;
-    try {
-      process.env.CDK_CONTEXT_JSON = JSON.stringify(value);
-      run();
-    } finally {
-      if (original === undefined) delete process.env.CDK_CONTEXT_JSON;
-      else process.env.CDK_CONTEXT_JSON = original;
-    }
-  }
-
   it("synthesizes bootstrap-free templates from agentxEnv/agentxSynthesizer alone", () => {
     withCdkContextJson({ agentxEnv: "staging", agentxSynthesizer: "legacy" }, () => {
       const assembly = buildAgentXApp().synth();
@@ -116,13 +135,48 @@ describe("agentxSynthesizer from CDK_CONTEXT_JSON (how the cdk CLI actually pass
   });
 
   it("throws a clear error naming CDK_CONTEXT_JSON when it is malformed, instead of a raw SyntaxError", () => {
-    const original = process.env.CDK_CONTEXT_JSON;
+    const original = process.env[CONTEXT_ENV];
     try {
-      process.env.CDK_CONTEXT_JSON = "{not json";
-      expect(() => buildAgentXApp({ agentxEnv: "staging", agentxSynthesizer: "legacy" })).toThrow(/CDK_CONTEXT_JSON/);
+      process.env[CONTEXT_ENV] = "{not json";
+      expect(() => buildAgentXApp({ agentxEnv: "staging", agentxSynthesizer: "legacy" })).toThrow(new RegExp(CONTEXT_ENV));
     } finally {
-      if (original === undefined) delete process.env.CDK_CONTEXT_JSON;
-      else process.env.CDK_CONTEXT_JSON = original;
+      if (original === undefined) delete process.env[CONTEXT_ENV];
+      else process.env[CONTEXT_ENV] = original;
+    }
+  });
+});
+
+describe("context-overflow temp file (App's own readContextFromTempFile, layered like App.loadContext)", () => {
+  it("is read the same way App reads it, and feeds the pre-App guard clauses", () => {
+    withContextOverflowFile({ agentxSynthesizer: "legacy", agentxEnv: "overflow-env" }, () => {
+      const app = buildAgentXApp();
+      expect(app.node.tryGetContext("agentxEnv")).toBe("overflow-env");
+    });
+  });
+
+  it("wins over CDK_CONTEXT_JSON for a key both set, matching App.loadContext's own layering ({...environment, ...tempFile})", () => {
+    withCdkContextJson({ agentxSynthesizer: "bogus" }, () => {
+      withContextOverflowFile({ agentxSynthesizer: "legacy", agentxEnv: "staging" }, () => {
+        // If CDK_CONTEXT_JSON still won, this would throw naming "bogus" instead.
+        expect(() => buildAgentXApp()).not.toThrow();
+      });
+    });
+  });
+
+  it(`throws a clear error naming ${CONTEXT_OVERFLOW_LOCATION_ENV} when the file it points to is not valid JSON`, () => {
+    const dir = mkdtempSync(join(tmpdir(), "agentx-context-overflow-bad-"));
+    const file = join(dir, "context-overflow.json");
+    writeFileSync(file, "{not json");
+    const original = process.env[CONTEXT_OVERFLOW_LOCATION_ENV];
+    try {
+      process.env[CONTEXT_OVERFLOW_LOCATION_ENV] = file;
+      expect(() => buildAgentXApp({ agentxEnv: "staging", agentxSynthesizer: "legacy" })).toThrow(
+        new RegExp(CONTEXT_OVERFLOW_LOCATION_ENV),
+      );
+    } finally {
+      if (original === undefined) delete process.env[CONTEXT_OVERFLOW_LOCATION_ENV];
+      else process.env[CONTEXT_OVERFLOW_LOCATION_ENV] = original;
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

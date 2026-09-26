@@ -1,10 +1,10 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { ENVIRONMENT_PLACEHOLDER, STACK_PARTS, environmentStackName } from "@agentx/contracts";
+import { CONTEXT_ENV, CONTEXT_OVERFLOW_LOCATION_ENV } from "aws-cdk-lib/cx-api";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { ImageDigest, ReleaseManifestSchema, type ReleaseManifest } from "./manifest.js";
 import { zipDirectory } from "./zip.js";
@@ -15,6 +15,21 @@ export interface BuildReleaseInput {
   gitCommit: string;
   images?: { worker?: string; slack?: string };
 }
+
+// scripts/release/build.ts -> repo root is two levels up. NodejsFunction's esbuild bundles embed
+// source-map `sources` as paths *relative to the bundle's own location*: when that bundle is built
+// under an unrelated directory tree (os.tmpdir(), which varies by TMPDIR and by how deep the OS
+// nests it), esbuild finds no common ancestor with the checkout and falls back to walking all the
+// way up to "/" and back down through the checkout's *absolute* path — embedding that path as text
+// and making the number of ".." segments depend on tmpdir's depth. Synthesizing at a fixed depth
+// under the repo root instead keeps the relative path between the bundle and its sources constant
+// (the same "../../../packages/..." however deep or wherever the checkout itself lives), so asset
+// ids, zip checksums, the control-plane template and release.json stop depending on TMPDIR or the
+// checkout's location. Verified by inspecting a real index.js.map: synthesizing under os.tmpdir()
+// embedded "../../../../../../../../Users/<name>/.../packages/...", synthesizing under
+// `<repoRoot>/.release-synth/...` produced clean "../../../node_modules/..." with no absolute path.
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const RELEASE_SYNTH_ROOT = join(REPO_ROOT, ".release-synth");
 
 function sha256Hex(data: Buffer): string {
   return createHash("sha256").update(data).digest("hex");
@@ -36,6 +51,40 @@ function checkedImages(images: BuildReleaseInput["images"]): ReleaseManifest["im
   return result;
 }
 
+/** Reuses the manifest schema's own field validators, so "valid" means the same thing everywhere. */
+function checkedVersion(version: string): string {
+  const parsed = ReleaseManifestSchema.shape.version.safeParse(version);
+  if (!parsed.success) throw new Error(`version must be a semantic version such as 1.2.3 or 1.2.3-beta.1, not ${JSON.stringify(version)}`);
+  return parsed.data;
+}
+
+function checkedGitCommit(gitCommit: string): string {
+  const parsed = ReleaseManifestSchema.shape.gitCommit.safeParse(gitCommit);
+  if (!parsed.success) throw new Error(`gitCommit must be a 40-character hex git commit SHA, not ${JSON.stringify(gitCommit)}`);
+  return parsed.data;
+}
+
+/**
+ * CDK_CONTEXT_JSON and the context-overflow temp file are how the `cdk` CLI (or a leftover/ambient
+ * environment) inject context; buildAgentXApp lets CDK_CONTEXT_JSON/the overflow file win over its
+ * own context argument to match how App itself merges context (see infra/lib/app.ts). That is the
+ * right behavior for `cdk synth`, but it means an ambient CDK_CONTEXT_JSON could silently override
+ * this function's agentxEnv/agentxSynthesizer/outdir and produce a release that depends on whatever
+ * happened to be in the calling shell's environment. Refuse instead.
+ */
+function checkedNoAmbientCdkContext(): void {
+  if (process.env[CONTEXT_ENV] !== undefined) {
+    throw new Error(
+      `refusing to build a release with ${CONTEXT_ENV} set in the environment; it could override this release's context and make the output depend on the ambient environment instead of these inputs alone. Unset it and retry`,
+    );
+  }
+  if (process.env[CONTEXT_OVERFLOW_LOCATION_ENV] !== undefined) {
+    throw new Error(
+      `refusing to build a release with ${CONTEXT_OVERFLOW_LOCATION_ENV} set in the environment; it could override this release's context and make the output depend on the ambient environment instead of these inputs alone. Unset it and retry`,
+    );
+  }
+}
+
 /** The out directory must not already hold a release; it is created if absent. */
 async function claimOutDir(out: string): Promise<void> {
   let existing: string[];
@@ -53,7 +102,7 @@ async function claimOutDir(out: string): Promise<void> {
   }
 }
 
-interface PackageAccumulator {
+export interface PackageAccumulator {
   assetId: string;
   directory: string;
   parts: string[];
@@ -62,15 +111,65 @@ interface PackageAccumulator {
   hashParameter: string;
 }
 
+/** The shape of a CDK FileAssetMetadataEntry/ContainerImageAssetMetadataEntry this function needs. */
+export interface ReleaseAssetLike {
+  packaging: string;
+  id: string;
+  s3BucketParameter: string;
+  s3KeyParameter: string;
+  artifactHashParameter: string;
+}
+
+/**
+ * Folds one stack's asset into the running per-assetId accumulator (mutates `packagesById`). Only
+ * zip-packaged Lambda code assets are supported; anything else (a Docker image asset, or a plain
+ * "file"-packaged asset) is an error naming it, because images are published separately and this
+ * release has no other asset kind today. The legacy synthesizer names a parameter from the asset id
+ * alone, so the same asset id must produce the same parameter names in every stack that uses it;
+ * that is checked here rather than assumed.
+ */
+export function accumulateAsset(packagesById: Map<string, PackageAccumulator>, asset: ReleaseAssetLike, part: string, directory: string): void {
+  if (asset.packaging !== "zip") {
+    throw new Error(
+      `unsupported asset packaging ${JSON.stringify(asset.packaging)} for asset ${asset.id} in the ${part} template; only zip-packaged Lambda code assets are supported here, images are published separately`,
+    );
+  }
+  const existing = packagesById.get(asset.id);
+  if (existing === undefined) {
+    packagesById.set(asset.id, {
+      assetId: asset.id,
+      directory,
+      parts: [part],
+      bucketParameter: asset.s3BucketParameter,
+      keyParameter: asset.s3KeyParameter,
+      hashParameter: asset.artifactHashParameter,
+    });
+  } else if (
+    existing.bucketParameter !== asset.s3BucketParameter ||
+    existing.keyParameter !== asset.s3KeyParameter ||
+    existing.hashParameter !== asset.artifactHashParameter
+  ) {
+    throw new Error(`asset ${asset.id} has different parameter names across stacks, which the legacy synthesizer should never produce`);
+  } else {
+    existing.parts.push(part);
+  }
+}
+
 export async function buildRelease(input: BuildReleaseInput): Promise<ReleaseManifest> {
-  // 1. Validate images before any other work (fail fast, before the expensive synth below).
+  // Fail fast, before touching the filesystem or running the expensive synth below, and in an
+  // order that leaves the output directory untouched (absent, or unmodified if pre-existing) for
+  // every one of these refusals, not just the non-empty-directory one.
   const images = checkedImages(input.images);
-  // 2. Refuse a non-empty output directory.
+  const version = checkedVersion(input.version);
+  const gitCommit = checkedGitCommit(input.gitCommit);
+  checkedNoAmbientCdkContext();
   await claimOutDir(input.out);
 
-  const synthDir = await mkdtemp(join(tmpdir(), "agentx-release-synth-"));
+  await mkdir(RELEASE_SYNTH_ROOT, { recursive: true });
+  const synthDir = await mkdtemp(join(RELEASE_SYNTH_ROOT, "run-"));
   try {
-    // 3. Synthesize the placeholder-environment app, bootstrap-free, into a temporary directory.
+    // Synthesize the placeholder-environment app, bootstrap-free, at a fixed depth under the repo
+    // root (see REPO_ROOT's comment for why).
     const assembly = buildAgentXApp({
       agentxEnv: ENVIRONMENT_PLACEHOLDER,
       agentxSynthesizer: "legacy",
@@ -80,7 +179,8 @@ export async function buildRelease(input: BuildReleaseInput): Promise<ReleaseMan
 
     const stackByName = new Map(assembly.stacks.map((stack) => [stack.stackName, stack]));
 
-    // 4. Write each part's template, in deploy order.
+    // Write each part's template, in deploy order, and group each stack's zip-packaged code assets
+    // by asset id across stacks.
     const templates: ReleaseManifest["templates"] = [];
     const packagesById = new Map<string, PackageAccumulator>();
     await mkdir(join(input.out, "templates"), { recursive: true });
@@ -93,34 +193,8 @@ export async function buildRelease(input: BuildReleaseInput): Promise<ReleaseMan
       await writeFile(join(input.out, file), text, "utf8");
       templates.push({ part, file, sha256: sha256Hex(Buffer.from(text, "utf8")) });
 
-      // 5. Group this stack's zip-packaged code assets by asset id across stacks. The legacy
-      // synthesizer names a parameter from the asset id alone, so the same id has the same
-      // parameter names in every stack that references it.
       for (const asset of stack.assets) {
-        if (asset.packaging !== "zip") {
-          throw new Error(
-            `unsupported asset packaging ${JSON.stringify(asset.packaging)} for asset ${asset.id} in the ${part} template; only zip-packaged Lambda code assets are supported here, images are published separately`,
-          );
-        }
-        const existing = packagesById.get(asset.id);
-        if (existing === undefined) {
-          packagesById.set(asset.id, {
-            assetId: asset.id,
-            directory: join(assembly.directory, asset.path),
-            parts: [part],
-            bucketParameter: asset.s3BucketParameter,
-            keyParameter: asset.s3KeyParameter,
-            hashParameter: asset.artifactHashParameter,
-          });
-        } else if (
-          existing.bucketParameter !== asset.s3BucketParameter ||
-          existing.keyParameter !== asset.s3KeyParameter ||
-          existing.hashParameter !== asset.artifactHashParameter
-        ) {
-          throw new Error(`asset ${asset.id} has different parameter names across stacks, which the legacy synthesizer should never produce`);
-        } else {
-          existing.parts.push(part);
-        }
+        accumulateAsset(packagesById, asset, part, join(assembly.directory, asset.path));
       }
     }
 
@@ -145,11 +219,11 @@ export async function buildRelease(input: BuildReleaseInput): Promise<ReleaseMan
       });
     }
 
-    // 6. Write release.json as validated, pretty JSON.
+    // Write release.json as validated, pretty JSON.
     const manifest = ReleaseManifestSchema.parse({
       schemaVersion: 1,
-      version: input.version,
-      gitCommit: input.gitCommit,
+      version,
+      gitCommit,
       environmentPlaceholder: ENVIRONMENT_PLACEHOLDER,
       templates,
       packages,
@@ -206,21 +280,31 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   if (process.argv.includes("--help")) {
     process.stdout.write(usage());
   } else {
-    const args = parseBuildArgs(process.argv.slice(2));
-    const gitCommit = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-    buildRelease({
-      version: args.version,
-      out: resolve(args.out),
-      gitCommit,
-      ...(args.images !== undefined ? { images: args.images } : {}),
-    })
-      .then((manifest) => {
-        process.stdout.write(`wrote release ${manifest.version} (${manifest.gitCommit}) to ${resolve(args.out)}\n`);
+    // Wraps the synchronous argument parsing and `git rev-parse` too, not just the buildRelease
+    // promise below: a bad flag or a missing git checkout used to crash with a raw Node stack trace
+    // instead of the same clean "agentx release build failed: ..." message + exit code every other
+    // failure gets.
+    try {
+      const args = parseBuildArgs(process.argv.slice(2));
+      const gitCommit = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+      buildRelease({
+        version: args.version,
+        out: resolve(args.out),
+        gitCommit,
+        ...(args.images !== undefined ? { images: args.images } : {}),
       })
-      .catch((error: unknown) => {
-        const message = error instanceof Error ? error.message : String(error);
-        process.stderr.write(`agentx release build failed: ${message}\n`);
-        process.exitCode = 1;
-      });
+        .then((manifest) => {
+          process.stdout.write(`wrote release ${manifest.version} (${manifest.gitCommit}) to ${resolve(args.out)}\n`);
+        })
+        .catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          process.stderr.write(`agentx release build failed: ${message}\n`);
+          process.exitCode = 1;
+        });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`agentx release build failed: ${message}\n`);
+      process.exitCode = 1;
+    }
   }
 }
