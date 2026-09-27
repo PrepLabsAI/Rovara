@@ -3,6 +3,7 @@
 // offered only when every other check has passed.
 import { BedrockAgentCoreControlClient, ListAgentRuntimesCommand } from "@aws-sdk/client-bedrock-agentcore-control";
 import { BedrockRuntimeClient, ConverseCommand } from "@aws-sdk/client-bedrock-runtime";
+import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { agentXError, AgentXError } from "@agentx/contracts";
 import { assertCdkBootstrapped, type CommandRunner } from "../deploy/cdk-engine.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
@@ -43,35 +44,55 @@ export function endpointMissing(error: unknown): boolean {
   return false;
 }
 
-function profilePrefix(region: string): string {
-  if (region.startsWith("eu-")) return "eu.";
-  if (region.startsWith("ap-")) return "apac.";
-  return "us.";
+/** Names the inference-profile prefix a model id needs in `region`, or, where none can be guessed
+ * reliably (item 8), sends the person to the console instead of a wrong id: `ca-` and `sa-` regions
+ * are not covered by the `us.`/`eu.`/`apac.` cross-region profile families, so guessing would print
+ * an id that does not exist. */
+function inferenceProfileHint(modelId: string, region: string, role: ModelRole): string {
+  if (region.startsWith("us-gov-")) return `use us-gov.${modelId} instead (--${role}-model)`;
+  if (region.startsWith("eu-")) return `use eu.${modelId} instead (--${role}-model)`;
+  if (region.startsWith("ap-")) return `use apac.${modelId} instead (--${role}-model)`;
+  if (region.startsWith("ca-") || region.startsWith("sa-")) {
+    return `use the inference profile id listed in the Bedrock console for ${region} instead (--${role}-model)`;
+  }
+  return `use us.${modelId} instead (--${role}-model)`;
 }
 
-/** Turns a failed one-token Converse call into a message that says what to change, for the four
- * failures a new account hits in practice (Review Focus 5): the Anthropic use-case form, a model
- * id that must be called through an inference profile, an id Bedrock does not recognize in this
- * region, and access simply not being enabled for the model. */
+/** Turns a failed one-token Converse call into a message that says what to change, for the
+ * failures a new account hits in practice (Review Focus 5): the Anthropic one-time usage form, a
+ * model id that must be called through an inference profile, an id Bedrock does not recognize in
+ * this region, access denied for some other reason, a throttled check, a timed-out check, and a
+ * model that failed for no clear reason at all. Every branch ends by saying what to try next. */
 export function modelCheckProblem(input: { modelId: string; role: ModelRole; region: string; error: unknown }): string {
   const { modelId, role, region, error } = input;
   const name = errorName(error);
   const message = errorMessage(error);
-  if (endpointMissing(error)) return `Amazon Bedrock is not available in ${region}`;
-  if (name === "AccessDeniedException" && /use case/i.test(message)) {
-    return `${modelId}: Anthropic models need a one-time use-case form in this account. Open the Bedrock console in ${region}, Model catalog, choose the model and submit the form, then run agentx init again`;
+  if (endpointMissing(error)) return `Amazon Bedrock is not available in ${region}; choose another region with --region`;
+  // Item 1: Bedrock reports the Anthropic one-time usage-form problem as AccessDeniedException in
+  // some accounts and ResourceNotFoundException in others; only the message says which problem
+  // this is, so it is checked before any check on the error's name.
+  if (/use case/i.test(message)) {
+    return `${modelId}: Anthropic models need a one-time usage form submitted in the Bedrock console. Open the Bedrock console in ${region}, Model catalog, choose the model and submit the form; submitting it in your organization's management account covers every member account. Then run agentx init again`;
   }
   if (name === "ValidationException" && /on-demand throughput/i.test(message)) {
-    return `${modelId} must be called through an inference profile in ${region}; use ${profilePrefix(region)}${modelId} instead (--${role}-model)`;
+    return `${modelId} must be called through an inference profile in ${region}; ${inferenceProfileHint(modelId, region, role)}`;
   }
   if (name === "ResourceNotFoundException" || (name === "ValidationException" && /model identifier is invalid/i.test(message))) {
     return `${modelId} is not a Bedrock model id available in ${region}; check the id, or choose another with --${role}-model`;
   }
   if (name === "AccessDeniedException") {
-    return `${modelId}: this account or your credentials cannot call it in ${region} (${message}). Enable access in the Bedrock console (Model access), or choose another model with --${role}-model`;
+    // Item 7: AWS retired the Bedrock console's "Model access" page (What's New, October 2025);
+    // serverless models are enabled automatically in commercial regions, so a plain access denial
+    // now means a role or SCP denies bedrock:InvokeModel, or (for a Marketplace model) the role
+    // is missing aws-marketplace:Subscribe.
+    return `${modelId}: this account or your credentials cannot call it in ${region} (${message}). Your role or an SCP may deny bedrock:InvokeModel for this model; for a Marketplace model, the role also needs aws-marketplace:Subscribe. Check your permissions, or choose another model with --${role}-model`;
   }
   if (name === "ThrottlingException") return `Bedrock throttled the check of ${modelId}; wait a minute and run agentx init again`;
-  return `${modelId} did not answer a one-token test call in ${region}: ${message}`;
+  // Item 2: awsPrerequisiteChecks' own withDeadline already builds this exact, complete message
+  // (naming the model, the region, and what to try), so it is returned as-is rather than wrapped
+  // a second time.
+  if (name === "TimeoutError") return message;
+  return `${modelId} did not answer a one-token test call in ${region}: ${message}; check your credentials or network, or choose another model with --${role}-model`;
 }
 
 function nodeVersionOk(version: string): boolean {
@@ -108,8 +129,15 @@ export async function checkPrerequisites(input: {
     write(`ok AgentCore Runtime is available in ${region}`);
   } catch (error) {
     if (errorName(error).startsWith("AccessDenied")) write(`ok AgentCore Runtime answers in ${region}`);
-    else if (endpointMissing(error)) problems.push(`Amazon Bedrock AgentCore Runtime is not available in ${region}`);
-    else problems.push(`could not reach AgentCore Runtime in ${region}: ${errorMessage(error)}`);
+    else if (endpointMissing(error)) {
+      // Item 5: name the exact hostname this machine failed to resolve, so a DNS or network
+      // problem is not confused with the region genuinely lacking the service.
+      problems.push(`Amazon Bedrock AgentCore Runtime is not available in ${region} (or this machine cannot resolve bedrock-agentcore-control.${region}.amazonaws.com; check your network)`);
+    } else {
+      // Item 6: name a next step for a failure that is neither an access denial nor a missing
+      // endpoint (a network blip, a service error, and so on).
+      problems.push(`could not reach AgentCore Runtime in ${region}: ${errorMessage(error)}; check your credentials or network, or choose another region with --region`);
+    }
   }
 
   const roles: Array<[ModelRole, string]> = [
@@ -141,10 +169,14 @@ export async function checkPrerequisites(input: {
     try {
       const document = (await checks.oidcDiscovery(answers.identity.issuer)) as { issuer?: unknown };
       const named = typeof document.issuer === "string" ? document.issuer.replace(/\/$/, "") : undefined;
-      if (named !== issuer) problems.push(`the OIDC discovery document at ${url} names issuer ${named ?? "nothing"}, not ${issuer}`);
+      // Item 6: name a next step for a mismatched issuer too.
+      if (named !== issuer) problems.push(`the OIDC discovery document at ${url} names issuer ${named ?? "nothing"}, not ${issuer}; check --oidc-issuer`);
       else write(`ok OIDC discovery at ${url}`);
     } catch (error) {
-      problems.push(`could not read the OIDC discovery document at ${url}: ${errorMessage(error)}`);
+      // Item 3: awsPrerequisiteChecks' own oidcDiscovery already builds a complete message (naming
+      // the issuer/URL and saying to check --oidc-issuer) for every failure it can throw, so it is
+      // reported as-is rather than wrapped a second time.
+      problems.push(errorMessage(error));
     }
   }
 
@@ -153,7 +185,14 @@ export async function checkPrerequisites(input: {
     const node = await checks.commandVersion("node");
     if (node === undefined || !nodeVersionOk(node)) problems.push(`the cdk engine needs Node 22.19 or later (found ${node?.trim() ?? "no node"})`);
     if ((await checks.commandVersion("npx")) === undefined) problems.push("the cdk engine needs npx (it comes with npm)");
-    needsBootstrap = !(await checks.cdkBootstrapped());
+    try {
+      needsBootstrap = !(await checks.cdkBootstrapped());
+    } catch (error) {
+      // Item 4: a failed read of the bootstrap parameter (anything other than "not bootstrapped",
+      // which cdkBootstrapped() already turns into `false`) is one more collected problem, not an
+      // early abort: every other check still runs, and cdk bootstrap is not offered this run.
+      problems.push(`could not check CDK bootstrap: ${errorMessage(error)}; check your credentials can read SSM`);
+    }
   }
 
   // cdk bootstrap creates the CDKToolkit stack (Review Focus 5's sibling concern): offered only
@@ -175,12 +214,52 @@ export async function checkPrerequisites(input: {
   }
 }
 
+// Item 2: `maxAttempts: 1` turns off the SDK's own retry loop (checkPrerequisites already retries
+// once on throttling, so the call is attempted at most twice in total, not up to 2 x 3), and the
+// request handler's own timeouts bound a single attempt well inside CONVERSE_DEADLINE_MS below.
+export const CONVERSE_CLIENT_MAX_ATTEMPTS = 1;
+export const CONVERSE_REQUEST_HANDLER_OPTIONS = { requestTimeout: 15_000, connectionTimeout: 5_000 } as const;
+const CONVERSE_DEADLINE_MS = 20_000;
+const OIDC_DISCOVERY_TIMEOUT_MS = 10_000;
+
+/**
+ * Races `run(signal)` against a `ms` deadline: if the deadline wins, the signal handed to `run` is
+ * aborted and the returned promise rejects with a `TimeoutError` carrying `message`. Uses a plain
+ * `setTimeout` (not the native, non-fake-timer-friendly `AbortSignal.timeout`) so a hung call fails
+ * clearly and deterministically instead of hanging `agentx init` forever, and so this is directly
+ * testable with fake timers and a `run` that never resolves.
+ */
+export async function withDeadline<T>(run: (signal: AbortSignal) => Promise<T>, ms: number, message: string): Promise<T> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(Object.assign(new Error(message), { name: "TimeoutError" }));
+    }, ms);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([run(controller.signal), deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export function awsPrerequisiteChecks(input: { region: string; account: string; store: ParameterStore; runner: CommandRunner; fetch: typeof fetch }): PrerequisiteChecks {
-  const bedrock = new BedrockRuntimeClient({ region: input.region });
+  const bedrock = new BedrockRuntimeClient({
+    region: input.region,
+    maxAttempts: CONVERSE_CLIENT_MAX_ATTEMPTS,
+    requestHandler: new NodeHttpHandler(CONVERSE_REQUEST_HANDLER_OPTIONS),
+  });
   const agentCore = new BedrockAgentCoreControlClient({ region: input.region });
   return {
     async converse(modelId) {
-      await bedrock.send(new ConverseCommand({ modelId, messages: [{ role: "user", content: [{ text: "Reply with OK." }] }], inferenceConfig: { maxTokens: 1 } }));
+      await withDeadline(
+        (signal) => bedrock.send(new ConverseCommand({ modelId, messages: [{ role: "user", content: [{ text: "Reply with OK." }] }], inferenceConfig: { maxTokens: 1 } }), { abortSignal: signal }),
+        CONVERSE_DEADLINE_MS,
+        `${modelId} did not answer a one-token test call in ${input.region} within ${CONVERSE_DEADLINE_MS / 1000}s; check your credentials or network, or try again`,
+      );
     },
     async agentCore() {
       await agentCore.send(new ListAgentRuntimesCommand({ maxResults: 1 }));
@@ -212,9 +291,24 @@ export function awsPrerequisiteChecks(input: { region: string; account: string; 
       await input.runner.run("npx", ["cdk", "bootstrap", target], { cwd: process.cwd(), display: `npx cdk bootstrap ${target}` });
     },
     async oidcDiscovery(issuer) {
-      const response = await input.fetch(`${issuer.replace(/\/$/, "")}/.well-known/openid-configuration`);
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      return response.json();
+      // Item 3: bounded with its own deadline, parses the body itself (rather than trusting
+      // `response.json()`'s own error, which does not name the issuer), and every failure names
+      // the issuer/URL and says to check --oidc-issuer.
+      const url = `${issuer.replace(/\/$/, "")}/.well-known/openid-configuration`;
+      let response: Response;
+      try {
+        response = await input.fetch(url, { signal: AbortSignal.timeout(OIDC_DISCOVERY_TIMEOUT_MS) });
+      } catch (error) {
+        const detail = errorName(error) === "TimeoutError" ? `did not answer within ${OIDC_DISCOVERY_TIMEOUT_MS / 1000}s` : errorMessage(error);
+        throw new Error(`could not reach the OIDC discovery document at ${url} (${detail}); check --oidc-issuer`, { cause: error });
+      }
+      if (!response.ok) throw new Error(`the OIDC discovery document at ${url} answered HTTP ${response.status}; check --oidc-issuer`);
+      const text = await response.text();
+      try {
+        return JSON.parse(text) as unknown;
+      } catch {
+        throw new Error(`the OIDC discovery document at ${url} is not valid JSON; check --oidc-issuer`);
+      }
     },
     sleep: (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms)),
   };
