@@ -5,6 +5,7 @@ import { PROTECTED_PARTS, type DeployRequest, type StackDeployer, type StackOutp
 import type { DeployPart } from "../../packages/cli/src/deploy/parameters.js";
 import type { LoadedRelease } from "../../packages/cli/src/deploy/release.js";
 import type { SecretValueStore } from "../../packages/cli/src/deploy/signing-key.js";
+import type { ParameterStore } from "../../packages/cli/src/environments/parameter-store.js";
 import { readEnvironmentSettings, settingsParameterName, writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 import { stagingSettings } from "../support/environment-fixtures.js";
@@ -34,6 +35,27 @@ function fakeDeployer(scripted: Record<string, StackOutputs>): { deployer: Stack
         return scripted[name];
       },
     },
+  };
+}
+
+/** Wraps `real` so that reading `flipName` returns `undefined` the first time and `real`'s actual
+ * value on every read after that: models a settings write landing in the window between
+ * `deployEnvironment`'s pre-lock check and the point where `lockHeld` hands control straight to
+ * `work` (no lock of its own to make that window visible). Everything else passes through to `real`
+ * unchanged. */
+function flipOnceThenReveal(real: MemoryParameterStore, flipName: string): ParameterStore {
+  let flipped = false;
+  return {
+    async get(name) {
+      if (name === flipName && !flipped) {
+        flipped = true;
+        return undefined;
+      }
+      return real.get(name);
+    },
+    put: (name, value, options) => real.put(name, value, options),
+    delete: (name) => real.delete(name),
+    list: (path) => real.list(path),
   };
 }
 
@@ -432,5 +454,30 @@ describe("deploy environment", () => {
     const stored = store.values.get(settingsParameterName(ENV));
     expect(stored).toBeDefined();
     for (const value of store.values.values()) expect(value).not.toContain(signingKey);
+  });
+});
+
+describe("deployEnvironment with lockHeld", () => {
+  it("never touches the lock parameter when the caller already holds the lock", async () => {
+    const store = new MemoryParameterStore();
+    const { deployer } = fakeDeployer(scriptedOutputs());
+    await deployEnvironment({ mode: "install", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer, store, secrets: memorySecrets(), holder: HOLDER, parts: ["access"], lockHeld: true });
+    expect(store.calls.filter((call) => call.name === "/agentx/staging/lock")).toEqual([]);
+  });
+
+  // F16: a naive version of this test (writing settings, then calling deployEnvironment with a
+  // conflicting engine) would pass even if `work` never re-checked anything, because
+  // `assertDeployAllowed`'s call before the lock/lockHeld branch already catches it. This version
+  // makes the settings parameter read as "not installed yet" the first time (what the pre-lockHeld
+  // check sees) and only reveal the real, conflicting settings on the second read (what `work`'s own
+  // re-check sees), so the test can only pass if that re-check genuinely runs under `lockHeld`.
+  it("still refuses a different engine with lockHeld, via the re-check inside work (not just the check before it)", async () => {
+    const store = new MemoryParameterStore();
+    await writeEnvironmentSettings(store, stagingSettings);
+    const flippingStore = flipOnceThenReveal(store, settingsParameterName(ENV));
+    const { deployer, requests } = fakeDeployer(scriptedOutputs());
+    await expect(deployEnvironment({ mode: "install", engine: "cdk", answers: baseAnswers(), release: fakeRelease(), deployer, store: flippingStore, secrets: memorySecrets(), holder: HOLDER, parts: ["slack"], lockHeld: true }))
+      .rejects.toThrow("was installed with the templates engine");
+    expect(requests).toEqual([]);
   });
 });

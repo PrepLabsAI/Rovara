@@ -34,6 +34,8 @@ export interface DeployEnvironmentInput {
   /** Passed through to every deploy request when given; only the templates engine consults it. */
   confirm?: DeployRequest["confirm"];
   now?: () => number;
+  /** The caller already holds the environment lock (agentx init's step runner): do not take it again. */
+  lockHeld?: boolean;
 }
 
 export interface DeployEnvironmentResult {
@@ -90,9 +92,10 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
     throw agentXError("CONFIG_INVALID", "bringing your own OIDC provider requires clientId to write environment settings (needed for agentx login)");
   }
 
-  return withEnvironmentLock({ store, env, holder, command: `deploy ${mode}`, now }, async () => {
-    // Settings may have changed in the window between the check above and taking the lock; the
-    // lock now held, this is the authoritative read the rest of the deploy is based on.
+  const work = async (): Promise<DeployEnvironmentResult> => {
+    // Settings may have changed in the window between the check above and taking the lock (or, with
+    // lockHeld, in whatever window the caller's own held lock does not cover); the lock now held (or
+    // already held by the caller), this is the authoritative read the rest of the deploy is based on.
     const existing = await readEnvironmentSettings(store, env);
     assertDeployAllowed(existing, mode, engine, input.parts, env);
 
@@ -209,7 +212,9 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
     };
     await writeEnvironmentSettings(store, settings);
     return { outputs, settingsWritten: true };
-  });
+  };
+
+  return input.lockHeld === true ? work() : withEnvironmentLock({ store, env, holder, command: `deploy ${mode}`, now }, work);
 }
 
 /**

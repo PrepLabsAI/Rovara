@@ -18,6 +18,7 @@ import { AgentXError, agentXError, environmentStackName, EnvironmentNameSchema, 
 import type { CallerIdentity } from "../environments/adopt.js";
 import { stsCallerIdentity } from "../environments/adopt.js";
 import { ssmParameterStore, type ParameterStore } from "../environments/parameter-store.js";
+import { ACCOUNT_PATTERN, IdentityAnswersSchema, ImagesAnswersSchema, ModelsAnswersSchema, REGION_PATTERN } from "./answer-schemas.js";
 import { assertCdkBootstrapped, assertSourceAtRelease, buildSource, cdkDeployer, type CommandRunner } from "./cdk-engine.js";
 import type { ChangeSetChange, DeployEvent, StackDeployer, StackOutputs } from "./deployer.js";
 import { deployEnvironment, type DeployAnswers, type DeployEnvironmentResult } from "./deploy-environment.js";
@@ -58,20 +59,9 @@ export interface DeployCliDependencies {
 }
 
 // ---- DeployAnswersSchema: mirrors DeployAnswers (deploy-environment.ts), strict -----------------
-
-const IdentityAnswersSchema = z.discriminatedUnion("mode", [
-  z.object({ mode: z.literal("cognito") }).strict(),
-  z
-    .object({
-      mode: z.literal("oidc"),
-      issuer: z.string().url(),
-      audience: z.string().min(1),
-      adminClaim: z.string().min(1).optional(),
-      adminValues: z.array(z.string().min(1)).min(1).optional(),
-      clientId: z.string().min(1).optional(),
-    })
-    .strict(),
-]);
+// Identity, models, images and the region/account patterns live in answer-schemas.ts, shared with
+// `agentx init`'s own InitAnswersSchema (install-state.ts), so both answer files agree on what a
+// valid region, account, identity, models or images answer looks like.
 
 const GithubAnswersSchema = z
   .object({
@@ -82,15 +72,6 @@ const GithubAnswersSchema = z
     credentialRef: z.string().min(1).optional(),
   })
   .strict();
-
-const ModelsAnswersSchema = z.object({ orchestrator: z.string().min(1), classifier: z.string().min(1), worker: z.string().min(1) }).strict();
-
-const ImagesAnswersSchema = z.object({ worker: z.string().min(1).optional(), slack: z.string().min(1).optional() }).strict();
-
-/** Shared with `runInitExport`'s own `--region`/`--account` validation, so both commands refuse the
- * same malformed values the same way. */
-const REGION_PATTERN = /^[a-z]{2}(-[a-z]+)+-\d$/;
-const ACCOUNT_PATTERN = /^\d{12}$/;
 
 /** Your own OIDC provider must name who administers AgentX (adminClaim and adminValues) and the
  * client `agentx login` uses (clientId): without them the deploy either grants nobody admin or
