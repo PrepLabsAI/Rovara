@@ -246,4 +246,16 @@ describe("deploy parameters", () => {
     const { PullThroughPrefix: _prefixGone, ...accessNoPrefix } = outputs.access;
     expect(() => stackParameters("slack", answers(), { ...outputs, access: accessNoPrefix })).toThrow("stack agentx-staging-access has no output PullThroughPrefix");
   });
+
+  it("passes stored developer sign-in to the control plane, every key declared by the template", () => {
+    const params = stackParameters("control-plane", { ...answers(), developerSignIn: { slackTeamId: "T0TEAM1", settings: { schemaVersion: 1, env: "staging", slack: true, updatedAt: "2026-09-27T00:00:00.000Z", updatedBy: "x" } } }, outputs);
+    expect(params).toMatchObject({ SlackTeamId: "T0TEAM1", DeveloperSignInSlack: "enabled", DeveloperOidcIssuer: "" });
+    const declared = templates.get("control-plane")!.Parameters ?? {};
+    expect(Object.keys(params).filter((name) => !(name in declared))).toEqual([]);
+    expect(stackParameters("runtime", { ...answers(), developerSignIn: { slackTeamId: "T0TEAM1" } }, outputs)).not.toHaveProperty("SlackTeamId");
+  });
+
+  it("leaves the template defaults when no sign-in is stored", () => {
+    expect(stackParameters("control-plane", answers(), outputs)).not.toHaveProperty("DeveloperSignInSlack");
+  });
 });

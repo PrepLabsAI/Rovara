@@ -10,6 +10,7 @@ import { readEnvironmentSettings, writeEnvironmentSettings, type EnvironmentSett
 import { installOrder, stackParameters, upgradeOrder, type DeployPart, type InstallAnswers, type StackOutputs } from "./parameters.js";
 import type { LoadedRelease } from "./release.js";
 import { callbackSigningKey, type SecretValueStore } from "./signing-key.js";
+import { readStoredDeveloperSignIn } from "../signin/settings.js";
 
 export type { SecretValueStore } from "./signing-key.js";
 
@@ -100,10 +101,19 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
     assertDeployAllowed(existing, mode, engine, input.parts, env);
 
     const key = await callbackSigningKey(secrets, env);
-    const fullAnswers: InstallAnswers = { ...answers, release: release.manifest, callbackSigningKey: key };
 
     const fullOrder = mode === "install" ? installOrder(answers.identity.mode) : upgradeOrder(answers.identity.mode);
     const deploySet = new Set(input.parts ?? fullOrder);
+    // F24: never carry stored sign-in into a legacy-named environment's control plane (its template
+    // never declares these parameters, and R3 keeps the legacy deployment untouched); `existing`
+    // undefined means a fresh install, which this orchestrator always writes as "environment" naming.
+    // assertDeployAllowed above already refuses a legacy-named deploy outright, so this check is a
+    // second, explicit line of defense rather than the only one.
+    const environmentNamed = existing === undefined || existing.naming === "environment";
+    // R7: a control-plane deploy always carries the stored developer sign-in, so no deploy resets it.
+    const developerSignIn = answers.developerSignIn ?? (deploySet.has("control-plane") && environmentNamed ? await readStoredDeveloperSignIn(store, env) : undefined);
+    const fullAnswers: InstallAnswers = { ...answers, ...(developerSignIn === undefined ? {} : { developerSignIn }), release: release.manifest, callbackSigningKey: key };
+
     const outputs: Partial<Record<DeployPart, StackOutputs>> = {};
 
     if (existing !== undefined) {

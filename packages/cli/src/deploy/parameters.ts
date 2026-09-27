@@ -4,6 +4,7 @@
 // init`/`agentx upgrade`) reads secrets and calls CloudFormation; this file only computes values.
 import { CONTROL_PLANE_FOUNDATION_PARAMETERS, ImageDigest, environmentStackName } from "@agentx/contracts";
 import type { ReleaseManifest, StackPart } from "@agentx/contracts";
+import { signInStackParameters, type StoredDeveloperSignIn } from "../signin/settings.js";
 
 import type { ModelsAnswers } from "./answer-schemas.js";
 
@@ -43,6 +44,8 @@ export interface InstallAnswers {
   images?: { worker?: string; slack?: string };
   /** the control plane's SlackAppPostedMessages (spec 014 FR-012); template default accept */
   slackAppPostedMessages?: "accept" | "ignore";
+  /** Spec 025 R7: the stored developer sign-in; deployEnvironment reads it from SSM when absent. */
+  developerSignIn?: StoredDeveloperSignIn;
 }
 
 /** The shortest callback signing key the control plane accepts. */
@@ -214,6 +217,10 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
         // The EC2 session lifecycle (#83) runs in the foundation's network with its key and role.
         ...Object.fromEntries(CONTROL_PLANE_FOUNDATION_PARAMETERS.map((name) => [name, required(outputs, "foundation", name, answers.env)])),
         ...(answers.slackAppPostedMessages === undefined ? {} : { SlackAppPostedMessages: answers.slackAppPostedMessages }),
+        // F24: only when a stored sign-in choice is actually given; the template's own defaults
+        // (sign-in off) are otherwise left untouched, and only the seven keys the control-plane
+        // template declares (infra/lib/developer-signin.ts) are ever added here.
+        ...(answers.developerSignIn === undefined ? {} : signInStackParameters(answers.developerSignIn)),
       };
     }
 

@@ -446,6 +446,26 @@ describe("deploy environment", () => {
     expect(store.values.has("/agentx/staging/lock")).toBe(false);
   });
 
+  it("passes the stored sign-in settings to every control-plane deploy (Review Focus 4, R7)", async () => {
+    const store = new MemoryParameterStore();
+    const secrets = memorySecrets();
+    const first = fakeDeployer(scriptedOutputs());
+    await deployEnvironment({ mode: "install", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer: first.deployer, store, secrets, holder: HOLDER });
+    await store.put("/agentx/staging/slack/teamId", "T0TEAM1");
+    await store.put("/agentx/staging/signin", JSON.stringify({ schemaVersion: 1, env: "staging", slack: true, updatedAt: "2026-09-27T00:00:00.000Z", updatedBy: HOLDER }));
+
+    const again = fakeDeployer(scriptedOutputs());
+    await deployEnvironment({ mode: "upgrade", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer: again.deployer, store, secrets, holder: HOLDER, parts: ["control-plane"] });
+    expect(again.requests.find((request) => request.part === "control-plane")!.parameters).toMatchObject({ SlackTeamId: "T0TEAM1", DeveloperSignInSlack: "enabled" });
+  });
+
+  it("does not read sign-in settings for a deploy without the control plane", async () => {
+    const store = new MemoryParameterStore();
+    const { deployer } = fakeDeployer(scriptedOutputs());
+    await deployEnvironment({ mode: "install", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer, store, secrets: memorySecrets(), holder: HOLDER, parts: ["access"] });
+    expect(store.calls.filter((call) => call.name.includes("/signin") || call.name.includes("/slack/teamId"))).toEqual([]);
+  });
+
   it("never writes the callback signing key into settings", async () => {
     const store = new MemoryParameterStore();
     const secrets = memorySecrets();
