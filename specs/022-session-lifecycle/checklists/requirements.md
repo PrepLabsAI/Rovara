@@ -4,4 +4,4 @@
 - [x] CHK002 A failed start fails its parked work instead of retrying forever.
 - [x] CHK003 Destructive EC2 actions are limited to this environment's tagged resources.
 - [x] CHK004 Production only gains resources; the foundation is unchanged.
-- [ ] CHK005 End-to-end run passed against production.
+- [x] CHK005 End-to-end run passed against production (2026-09-27).
