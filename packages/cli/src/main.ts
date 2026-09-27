@@ -36,6 +36,7 @@ import { ssmParameterStore, type ParameterStore } from "./environments/parameter
 import { settingsParameterName } from "./environments/settings.js";
 import { formatError, formatSuccess } from "./output.js";
 import { SystemCredentialTokenStore, type TokenStore } from "./token-store.js";
+import { CLI_VERSION } from "./version.js";
 
 interface GlobalOptions {
   project?: string;
@@ -116,14 +117,6 @@ export function environmentSsmClient(region?: string): SSMClient {
  */
 export const DEFAULT_CALLBACK_PORT = 8765;
 
-/**
- * Set by `scripts/release/pack-cli.ts`'s esbuild `define`, so the packed CLI reports the release
- * version it was built at. Reading it through `typeof` keeps a plain `tsc`-built (unbundled) copy of
- * this file safe: an undeclared bare identifier throws a ReferenceError, but `typeof` on one never
- * does, so it falls through to the fallback version below.
- */
-declare const __AGENTX_VERSION__: string | undefined;
-
 export function createCliProgram(dependencies: CliDependencies = {}): Command {
   const services = {
     fetchImplementation: dependencies.fetchImplementation ?? fetch,
@@ -166,7 +159,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
   const program = new Command()
     .name("agentx")
     .description("Administration client for AgentX; developers work through the project's Slack channel")
-    .version(typeof __AGENTX_VERSION__ === "string" ? __AGENTX_VERSION__ : "0.1.0")
+    .version(CLI_VERSION)
     .option("--project <project-name>", "select a locally configured AgentX project")
     .option("--config-dir <directory>", "project configuration directory", join(homedir(), ".agentx/projects"))
     .option("--deployment-file <path>", "AgentX deployment settings; defaults to this environment's local cache, or, for production, ~/.agentx/deployment.yaml")
