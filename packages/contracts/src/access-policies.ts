@@ -38,6 +38,7 @@ export const SERVICE_ROLE_SERVICES: readonly string[] = [
   "lambda",
   "logs",
   "s3",
+  "scheduler",
   "secretsmanager",
   "sns",
   "sqs",

@@ -87,9 +87,28 @@ describe("EC2 session lifecycle infrastructure (issue #83)", () => {
     expect(create.Condition).toEqual({ StringEquals: { "aws:RequestTag/DeploymentMode": "ec2-ebs", "aws:RequestTag/Environment": "production" } });
   });
 
+  it("runs the idle reaper every minute, one run at a time, in the VPC, terminating only its own instances (#85)", () => {
+    const [reaperId, reaper] = ofType("AWS::Lambda::Function").find(([id]) => id.startsWith("SessionsReaper"))!;
+    expect(reaper.Properties.ReservedConcurrentExecutions).toBe(1);
+    expect(reaper.Properties.VpcConfig).toEqual({
+      SubnetIds: { "Fn::Split": [",", { Ref: "PrivateSubnetIds" }] },
+      SecurityGroupIds: [{ Ref: "SessionManagerSecurityGroupId" }],
+    });
+    expect((reaper.Properties.Environment as { Variables: Record<string, unknown> }).Variables).toMatchObject({ AGENTX_METRICS_NAMESPACE: "AgentX" });
+    const [[, schedule]] = ofType("AWS::Scheduler::Schedule") as [[string, Resource]];
+    expect(schedule.Properties.ScheduleExpression).toBe("rate(1 minute)");
+    expect(JSON.stringify(schedule.Properties.Target)).toContain(reaperId);
+    const roleId = (reaper.Properties.Role as { "Fn::GetAtt": [string] })["Fn::GetAtt"][0];
+    const statements = roleStatements(roleId);
+    const terminate = statements.find((st) => [st.Action].flat().includes("ec2:TerminateInstances"))!;
+    expect(terminate.Condition?.StringEquals).toMatchObject({ "aws:ResourceTag/DeploymentMode": "ec2-ebs", "aws:ResourceTag/Environment": "production" });
+    expect(actions(statements)).toContain("states:StartExecution");
+    expect([...actions(statements)].filter((a) => a.endsWith(":*"))).toEqual([]);
+  });
+
   it("alarms the operator when either state machine fails or times out", () => {
     const alarms = ofType("AWS::CloudWatch::Alarm").filter(([, a]) => String(a.Properties.AlarmName).startsWith("AgentXSession"));
-    expect(alarms.map(([, a]) => a.Properties.AlarmName).sort()).toEqual(["AgentXSessionDeleterFailures", "AgentXSessionProvisionerFailures"]);
+    expect(alarms.map(([, a]) => a.Properties.AlarmName).sort()).toEqual(["AgentXSessionDeleterFailures", "AgentXSessionProvisionerFailures", "AgentXSessionReaperErrors"]);
     for (const [, alarm] of alarms) expect(JSON.stringify(alarm.Properties.AlarmActions)).toContain("OperatorAlerts");
   });
 });

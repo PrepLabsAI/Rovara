@@ -1583,6 +1583,92 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       },
       "Type": "AWS::CloudWatch::Alarm",
     },
+    "SchedulerRoleForTarget9cef70DefaultPolicyAB2709AD": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "lambda:InvokeFunction",
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "SessionsReaper8FEF958E",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "SessionsReaper8FEF958E",
+                          "Arn",
+                        ],
+                      },
+                      ":*",
+                    ],
+                  ],
+                },
+              ],
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "SchedulerRoleForTarget9cef70DefaultPolicyAB2709AD",
+        "Roles": [
+          {
+            "Ref": "SchedulerRoleForTarget9cef70F3140B0B",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "SchedulerRoleForTarget9cef70F3140B0B": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId",
+                  },
+                  "aws:SourceArn": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "arn:",
+                        {
+                          "Ref": "AWS::Partition",
+                        },
+                        ":scheduler:",
+                        {
+                          "Ref": "AWS::Region",
+                        },
+                        ":",
+                        {
+                          "Ref": "AWS::AccountId",
+                        },
+                        ":schedule-group/default",
+                      ],
+                    ],
+                  },
+                },
+              },
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "scheduler.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+      },
+      "Type": "AWS::IAM::Role",
+    },
     "SessionsDeleterB48741EA": {
       "DeletionPolicy": "Delete",
       "DependsOn": [
@@ -2462,6 +2548,315 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         "Roles": [
           {
             "Ref": "SessionsProvisionerRole99939C5B",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "SessionsReaper8FEF958E": {
+      "DependsOn": [
+        "SessionsReaperServiceRoleDefaultPolicy9FC571C4",
+        "SessionsReaperServiceRole81A36521",
+      ],
+      "Properties": {
+        "Code": {
+          "S3Bucket": {
+            "Fn::Sub": "cdk-hnb659fds-assets-\${AWS::AccountId}-\${AWS::Region}",
+          },
+          "S3Key": "<asset-hash>.zip",
+        },
+        "Environment": {
+          "Variables": {
+            "AGENTX_METRICS_NAMESPACE": "AgentX",
+            "DELETER_ARN": {
+              "Ref": "SessionsDeleterB48741EA",
+            },
+            "PROVISIONER_ARN": {
+              "Ref": "SessionsProvisioner9C44055B",
+            },
+            "STATE_TABLE_NAME": {
+              "Ref": "State1C20CC9A",
+            },
+          },
+        },
+        "Handler": "index.handler",
+        "LoggingConfig": {
+          "LogGroup": {
+            "Ref": "SessionsReaperLogs421F4D40",
+          },
+        },
+        "MemorySize": 512,
+        "ReservedConcurrentExecutions": 1,
+        "Role": {
+          "Fn::GetAtt": [
+            "SessionsReaperServiceRole81A36521",
+            "Arn",
+          ],
+        },
+        "Runtime": "nodejs22.x",
+        "Timeout": 50,
+        "TracingConfig": {
+          "Mode": "Active",
+        },
+        "VpcConfig": {
+          "SecurityGroupIds": [
+            {
+              "Ref": "SessionManagerSecurityGroupId",
+            },
+          ],
+          "SubnetIds": {
+            "Fn::Split": [
+              ",",
+              {
+                "Ref": "PrivateSubnetIds",
+              },
+            ],
+          },
+        },
+      },
+      "Type": "AWS::Lambda::Function",
+    },
+    "SessionsReaperErrorsAlarmE8E9B095": {
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "OperatorAlertsA2431256",
+          },
+        ],
+        "AlarmDescription": "The EC2 session idle reaper failed on every run for 15 minutes; idle workers are not being stopped. Check the reaper's logs.",
+        "AlarmName": "AgentXSessionReaperErrors",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "Dimensions": [
+          {
+            "Name": "FunctionName",
+            "Value": {
+              "Ref": "SessionsReaper8FEF958E",
+            },
+          },
+        ],
+        "EvaluationPeriods": 3,
+        "MetricName": "Errors",
+        "Namespace": "AWS/Lambda",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
+    "SessionsReaperLogs421F4D40": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "RetentionInDays": 30,
+      },
+      "Type": "AWS::Logs::LogGroup",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "SessionsReaperSchedule31A10B36": {
+      "Properties": {
+        "Description": "Runs the AgentX EC2 session idle reaper",
+        "FlexibleTimeWindow": {
+          "Mode": "OFF",
+        },
+        "ScheduleExpression": "rate(1 minute)",
+        "ScheduleExpressionTimezone": "Etc/UTC",
+        "State": "ENABLED",
+        "Target": {
+          "Arn": {
+            "Fn::GetAtt": [
+              "SessionsReaper8FEF958E",
+              "Arn",
+            ],
+          },
+          "RetryPolicy": {
+            "MaximumEventAgeInSeconds": 86400,
+            "MaximumRetryAttempts": 185,
+          },
+          "RoleArn": {
+            "Fn::GetAtt": [
+              "SchedulerRoleForTarget9cef70F3140B0B",
+              "Arn",
+            ],
+          },
+        },
+      },
+      "Type": "AWS::Scheduler::Schedule",
+    },
+    "SessionsReaperServiceRole81A36521": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+              ],
+            ],
+          },
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                ":iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole",
+              ],
+            ],
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "SessionsReaperServiceRoleDefaultPolicy9FC571C4": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "xray:PutTraceSegments",
+                "xray:PutTelemetryRecords",
+              ],
+              "Effect": "Allow",
+              "Resource": "*",
+            },
+            {
+              "Action": [
+                "dynamodb:BatchGetItem",
+                "dynamodb:Query",
+                "dynamodb:GetItem",
+                "dynamodb:Scan",
+                "dynamodb:ConditionCheckItem",
+                "dynamodb:BatchWriteItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:DeleteItem",
+                "dynamodb:DescribeTable",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "State1C20CC9A",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "State1C20CC9A",
+                          "Arn",
+                        ],
+                      },
+                      "/index/*",
+                    ],
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "dynamodb:GetRecords",
+                "dynamodb:GetShardIterator",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "State1C20CC9A",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "State1C20CC9A",
+                          "Arn",
+                        ],
+                      },
+                      "/index/*",
+                    ],
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": "states:StartExecution",
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "SessionsProvisioner9C44055B",
+              },
+            },
+            {
+              "Action": [
+                "ec2:DescribeInstances",
+                "ec2:DescribeVolumes",
+              ],
+              "Effect": "Allow",
+              "Resource": "*",
+              "Sid": "Describe",
+            },
+            {
+              "Action": "ec2:TerminateInstances",
+              "Condition": {
+                "StringEquals": {
+                  "aws:ResourceTag/DeploymentMode": "ec2-ebs",
+                  "aws:ResourceTag/Environment": "production",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":ec2:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":instance/*",
+                  ],
+                ],
+              },
+              "Sid": "TerminateOwn",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "SessionsReaperServiceRoleDefaultPolicy9FC571C4",
+        "Roles": [
+          {
+            "Ref": "SessionsReaperServiceRole81A36521",
           },
         ],
       },

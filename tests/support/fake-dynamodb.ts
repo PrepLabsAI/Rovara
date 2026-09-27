@@ -67,6 +67,14 @@ export class FakeDynamoDb {
   // (a project's latest revision, credential records and a credential's cached tokens).
   private query(input: Record<string, unknown>): Item[] {
     const values = input.ExpressionAttributeValues as Values;
+    if (input.IndexName !== undefined) {
+      // A secondary index keyed by one attribute: `<attribute> = :value`, sparse like DynamoDB's.
+      const names = (input.ExpressionAttributeNames ?? {}) as Names;
+      const indexed = /^(#?[A-Za-z0-9_]+) = (:[A-Za-z0-9_]+)$/.exec(String(input.KeyConditionExpression));
+      if (!indexed) throw new Error(`FakeDynamoDb does not support the index key condition ${String(input.KeyConditionExpression)}`);
+      const attribute = indexed[1]!.startsWith("#") ? names[indexed[1]!]! : indexed[1]!;
+      return this.find((item) => item[attribute] !== undefined && item[attribute] === values[indexed[2]!]).map((item) => structuredClone(item));
+    }
     const match = /^pk = :pk AND begins_with\(sk, (:[a-zA-Z]+)\)$/.exec(String(input.KeyConditionExpression));
     if (!match) throw new Error(`FakeDynamoDb does not support the key condition ${String(input.KeyConditionExpression)}`);
     const prefix = values[match[1]!] as string;
@@ -127,7 +135,7 @@ function toAction(kind: WriteAction["kind"], input: Record<string, unknown>): Wr
   };
 }
 
-const TOKEN = /\s*(attribute_not_exists|attribute_exists|if_not_exists|list_append|AND|OR|NOT|<>|<=|>=|[=<>(),.+-]|#[A-Za-z0-9_]+|:[A-Za-z0-9_]+|[A-Za-z_][A-Za-z0-9_]*)/y;
+const TOKEN = /\s*(attribute_not_exists|attribute_exists|attribute_type|if_not_exists|list_append|AND|OR|NOT|<>|<=|>=|[=<>(),.+-]|#[A-Za-z0-9_]+|:[A-Za-z0-9_]+|[A-Za-z_][A-Za-z0-9_]*)/y;
 
 function tokenize(expression: string): string[] {
   const tokens: string[] = [];
@@ -243,6 +251,15 @@ class Parser {
       this.expect(")");
       return result;
     }
+    if (token === "attribute_type") {
+      this.next();
+      this.expect("(");
+      const path = this.path();
+      this.expect(",");
+      const type = this.operand(item ?? {});
+      this.expect(")");
+      return dynamoType(item?.[path]) === type;
+    }
     if (token === "attribute_not_exists" || token === "attribute_exists") {
       this.next();
       this.expect("(");
@@ -320,4 +337,14 @@ function splitTopLevel(text: string): string[] {
   }
   if (current.trim()) parts.push(current.trim());
   return parts;
+}
+
+function dynamoType(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return "NULL";
+  if (typeof value === "string") return "S";
+  if (typeof value === "number") return "N";
+  if (typeof value === "boolean") return "BOOL";
+  if (value instanceof Set) return "SS";
+  return Array.isArray(value) ? "L" : "M";
 }
