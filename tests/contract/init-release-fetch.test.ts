@@ -30,15 +30,10 @@ async function publishedRelease(manifest = MANIFEST): Promise<Buffer> {
   return readFile(out);
 }
 
-/** A tarball with one entry recorded as "../outside.txt" (built by archiving that relative path
- * from one directory in, so tar records the literal ".." segment rather than resolving it away). */
-async function tarballWithDotDotEntry(): Promise<Buffer> {
-  const source = await tmp("agentx-rel-evil-dotdot-");
-  await mkdir(join(source, "inner"), { recursive: true });
-  await writeFile(join(source, "outside.txt"), "evil");
-  const out = join(await tmp("agentx-rel-evil-dotdot-tar-"), "agentx-1.2.3.tar.gz");
-  execFileSync("tar", ["-czf", out, "../outside.txt"], { cwd: join(source, "inner") });
-  return readFile(out);
+/** A tarball with one entry recorded as "../outside.txt". Written by hand: GNU tar strips a leading
+ * "../" when it creates an archive, so a tar-built fixture would not contain the entry on Linux. */
+function tarballWithDotDotEntry(): Buffer {
+  return ustarArchive([{ name: "../outside.txt", type: "0", mode: 0o644, body: "evil" }]);
 }
 
 /** A tarball with one entry recorded as an absolute path (tar's own default strips a leading "/"
@@ -144,7 +139,7 @@ describe("fetching the release for this CLI", () => {
   it("refuses an archive entry with a `..` segment, leaving nothing behind", async () => {
     const home = await tmp("agentx-home-");
     const urls = releaseAssetUrls("1.2.3");
-    await expect(fetchRelease({ version: "1.2.3", home, fetch: github({ [urls.manifest]: MANIFEST, [urls.tarball]: await tarballWithDotDotEntry() }), runner, write: () => undefined }))
+    await expect(fetchRelease({ version: "1.2.3", home, fetch: github({ [urls.manifest]: MANIFEST, [urls.tarball]: tarballWithDotDotEntry() }), runner, write: () => undefined }))
       .rejects.toThrow("the release archive for 1.2.3 is unsafe and must not be used; try again later, or pass --release <dir>");
     await expect(readdir(join(home, ".agentx", "releases"))).resolves.toEqual([]);
   });
