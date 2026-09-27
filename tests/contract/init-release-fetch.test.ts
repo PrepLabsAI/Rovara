@@ -23,6 +23,37 @@ async function publishedRelease(manifest = MANIFEST): Promise<Buffer> {
   return readFile(out);
 }
 
+/** A tarball with one entry recorded as "../outside.txt" (built by archiving that relative path
+ * from one directory in, so tar records the literal ".." segment rather than resolving it away). */
+async function tarballWithDotDotEntry(): Promise<Buffer> {
+  const source = await tmp("agentx-rel-evil-dotdot-");
+  await mkdir(join(source, "inner"), { recursive: true });
+  await writeFile(join(source, "outside.txt"), "evil");
+  const out = join(await tmp("agentx-rel-evil-dotdot-tar-"), "agentx-1.2.3.tar.gz");
+  execFileSync("tar", ["-czf", out, "../outside.txt"], { cwd: join(source, "inner") });
+  return readFile(out);
+}
+
+/** A tarball with one entry recorded as an absolute path (tar's own default strips a leading "/"
+ * unless told to preserve it with -P). */
+async function tarballWithAbsoluteEntry(): Promise<Buffer> {
+  const source = await tmp("agentx-rel-evil-abs-");
+  const file = join(source, "evil.txt");
+  await writeFile(file, "evil");
+  const out = join(await tmp("agentx-rel-evil-abs-tar-"), "agentx-1.2.3.tar.gz");
+  execFileSync("tar", ["-czPf", out, file]);
+  return readFile(out);
+}
+
+/** A tarball with one entry that is a symlink to a path outside the archive entirely. */
+async function tarballWithSymlinkEntry(): Promise<Buffer> {
+  const source = await tmp("agentx-rel-evil-sym-");
+  execFileSync("ln", ["-s", "/etc/passwd", join(source, "evil-link")]);
+  const out = join(await tmp("agentx-rel-evil-sym-tar-"), "agentx-1.2.3.tar.gz");
+  execFileSync("tar", ["-czf", out, "-C", source, "."]);
+  return readFile(out);
+}
+
 function requestUrl(input: Parameters<typeof fetch>[0]): string {
   return typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
 }
@@ -70,6 +101,30 @@ describe("fetching the release for this CLI", () => {
     const urls = releaseAssetUrls("1.2.3");
     await expect(fetchRelease({ version: "1.2.3", home, fetch: github({ [urls.manifest]: MANIFEST, [urls.tarball]: await publishedRelease("{\"tampered\":true}") }), runner, write: () => undefined }))
       .rejects.toThrow("the downloaded release 1.2.3 does not match its published release.json; try again later, or pass --release <dir>");
+    await expect(readdir(join(home, ".agentx", "releases"))).resolves.toEqual([]);
+  });
+
+  it("refuses an archive entry with a `..` segment, leaving nothing behind", async () => {
+    const home = await tmp("agentx-home-");
+    const urls = releaseAssetUrls("1.2.3");
+    await expect(fetchRelease({ version: "1.2.3", home, fetch: github({ [urls.manifest]: MANIFEST, [urls.tarball]: await tarballWithDotDotEntry() }), runner, write: () => undefined }))
+      .rejects.toThrow("the release archive for 1.2.3 is unsafe and must not be used; try again later, or pass --release <dir>");
+    await expect(readdir(join(home, ".agentx", "releases"))).resolves.toEqual([]);
+  });
+
+  it("refuses an archive entry with an absolute path, leaving nothing behind", async () => {
+    const home = await tmp("agentx-home-");
+    const urls = releaseAssetUrls("1.2.3");
+    await expect(fetchRelease({ version: "1.2.3", home, fetch: github({ [urls.manifest]: MANIFEST, [urls.tarball]: await tarballWithAbsoluteEntry() }), runner, write: () => undefined }))
+      .rejects.toThrow("the release archive for 1.2.3 is unsafe and must not be used; try again later, or pass --release <dir>");
+    await expect(readdir(join(home, ".agentx", "releases"))).resolves.toEqual([]);
+  });
+
+  it("refuses an archive entry that is a symlink pointing outside the archive, leaving nothing behind", async () => {
+    const home = await tmp("agentx-home-");
+    const urls = releaseAssetUrls("1.2.3");
+    await expect(fetchRelease({ version: "1.2.3", home, fetch: github({ [urls.manifest]: MANIFEST, [urls.tarball]: await tarballWithSymlinkEntry() }), runner, write: () => undefined }))
+      .rejects.toThrow("the release archive for 1.2.3 is unsafe and must not be used; try again later, or pass --release <dir>");
     await expect(readdir(join(home, ".agentx", "releases"))).resolves.toEqual([]);
   });
 

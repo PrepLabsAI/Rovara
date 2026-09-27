@@ -1,8 +1,9 @@
 // `npx @charterarc/agentx init` needs the release matching the CLI: the GitHub release's
 // release.json and tarball. The extracted release.json must equal the published one byte for byte;
-// loadRelease then checks every file's sha256 against it.
-import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+// loadRelease then checks every file's sha256 against it. The tarball itself is untrusted until
+// its entries are checked for containment (assertArchiveEntriesAreSafe, assertExtractedTreeIsContained).
+import { mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { dirname, join, sep } from "node:path";
 import { agentXError } from "@agentx/contracts";
 import type { CommandRunner } from "../deploy/cdk-engine.js";
 
@@ -24,14 +25,66 @@ async function download(fetchImplementation: typeof fetch, url: string, version:
   return Buffer.from(await response.arrayBuffer());
 }
 
+function unsafeArchiveError(version: string): Error {
+  return agentXError("CONFIG_INVALID", `the release archive for ${version} is unsafe and must not be used; try again later, or pass --release <dir>`);
+}
+
 /**
- * Downloads the GitHub release's release.json and tarball, extracts it with tar, and checks the
- * extracted release.json is byte for byte the published one. A cached release whose release.json
- * already matches is reused without downloading the tarball again. A mismatch (or a missing
- * release) refuses and leaves the cache untouched: the tarball is extracted into a scratch
- * directory next to the cache and only renamed into place once it checks out, so a failed or
- * interrupted fetch never leaves a half-written release directory. `loadRelease` then checks every
- * file's checksum.
+ * Refuses a tarball that could write outside the directory it is extracted into ("tar slip"):
+ * an absolute path, a path with a ".." segment, a symlink or hard link (either can point its
+ * target anywhere on disk, entirely outside the archive), or a device or FIFO node. Checked from
+ * the archive's own listing, read once plain (for entry names) and once verbose (for entry
+ * types), before anything is extracted — so a malicious release is refused without ever writing
+ * one of its entries to disk, anywhere.
+ */
+async function assertArchiveEntriesAreSafe(input: { runner: CommandRunner; archive: string; cwd: string; archiveName: string; version: string }): Promise<void> {
+  const { runner, archive, cwd, archiveName, version } = input;
+  const plain = await runner.run("tar", ["-tzf", archive], { cwd, display: `tar -tzf ${archiveName}` });
+  const verbose = await runner.run("tar", ["-tzvf", archive], { cwd, display: `tar -tzvf ${archiveName}` });
+  const names = plain.stdout.split("\n").filter((line) => line.length > 0);
+  const details = verbose.stdout.split("\n").filter((line) => line.length > 0);
+  // The plain and verbose listings come from the same tar reading the same archive back to back:
+  // same entries, same order. A mismatched count means the two listings can't be paired up
+  // entry-for-entry, so the archive can't be vouched for either way; refuse it.
+  if (names.length !== details.length) throw unsafeArchiveError(version);
+  names.forEach((name, index) => {
+    if (name.startsWith("/") || name.split("/").includes("..")) throw unsafeArchiveError(version);
+    const detail = details[index] ?? "";
+    const type = detail.charAt(0);
+    if (type === "l" || detail.includes(" -> ")) throw unsafeArchiveError(version); // symlink
+    if (type === "h" || / link to /.test(detail)) throw unsafeArchiveError(version); // hard link
+    if (type === "b" || type === "c" || type === "p" || type === "s") throw unsafeArchiveError(version); // device or FIFO
+  });
+}
+
+/**
+ * Defense in depth alongside `assertArchiveEntriesAreSafe`: walks the extracted tree and confirms
+ * every entry's realpath still resolves inside `root`. The listing check above should already
+ * have refused any symlink, but this catches one regardless of how it got there, before the
+ * release is ever read from or moved into the cache.
+ */
+async function assertExtractedTreeIsContained(root: string, version: string): Promise<void> {
+  const realRoot = await realpath(root);
+  async function walk(dir: string): Promise<void> {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isSymbolicLink()) throw unsafeArchiveError(version);
+      const real = await realpath(path);
+      if (real !== realRoot && !real.startsWith(realRoot + sep)) throw unsafeArchiveError(version);
+      if (entry.isDirectory()) await walk(path);
+    }
+  }
+  await walk(root);
+}
+
+/**
+ * Downloads the GitHub release's release.json and tarball, checks the tarball's own entries are
+ * safe to extract, extracts it with tar, and checks the extracted release.json is byte for byte
+ * the published one. A cached release whose release.json already matches is reused without
+ * downloading the tarball again. A mismatch, an unsafe archive, or a missing release all refuse
+ * and leave the cache untouched: the tarball is extracted into a scratch directory next to the
+ * cache and only renamed into place once it checks out, so a failed or interrupted fetch never
+ * leaves a half-written release directory. `loadRelease` then checks every file's checksum.
  */
 export async function fetchRelease(input: { version: string | undefined; home: string; fetch: typeof fetch; runner: CommandRunner; write(line: string): void }): Promise<string> {
   const { version } = input;
@@ -49,11 +102,14 @@ export async function fetchRelease(input: { version: string | undefined; home: s
   await mkdir(dirname(dir), { recursive: true });
   const scratch = await mkdtemp(join(dirname(dir), `.${version}.`));
   try {
-    const archive = join(scratch, `agentx-${version}.tar.gz`);
+    const archiveName = `agentx-${version}.tar.gz`;
+    const archive = join(scratch, archiveName);
     const extracted = join(scratch, "release");
     await writeFile(archive, tarball);
+    await assertArchiveEntriesAreSafe({ runner: input.runner, archive, cwd: scratch, archiveName, version });
     await mkdir(extracted);
-    await input.runner.run("tar", ["-xzf", archive, "-C", extracted], { cwd: scratch, display: `tar -xzf agentx-${version}.tar.gz` });
+    await input.runner.run("tar", ["-xzf", archive, "-C", extracted], { cwd: scratch, display: `tar -xzf ${archiveName}` });
+    await assertExtractedTreeIsContained(extracted, version);
     const inside = await readFile(join(extracted, "release.json")).catch(() => undefined);
     if (inside === undefined || !inside.equals(published)) {
       throw agentXError("CONFIG_INVALID", `the downloaded release ${version} does not match its published release.json; try again later, or pass --release <dir>`);
