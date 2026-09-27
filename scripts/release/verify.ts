@@ -68,12 +68,13 @@ export async function verifyRelease(input: VerifyReleaseInput): Promise<VerifyRe
       gitCommit: manifest.gitCommit,
     });
 
-    const rebuiltTemplatesByPart = new Map(rebuilt.templates.map((t) => [t.part, t.sha256]));
-    const releaseTemplateParts = new Set(manifest.templates.map((t) => t.part));
+    const templateKey = (t: { region: string; part: string }): string => `${t.region}/${t.part}`;
+    const rebuiltTemplatesByKey = new Map(rebuilt.templates.map((t) => [templateKey(t), t.sha256]));
+    const releaseTemplateKeys = new Set(manifest.templates.map(templateKey));
     for (const template of manifest.templates) {
-      const rebuiltSha = rebuiltTemplatesByPart.get(template.part);
+      const rebuiltSha = rebuiltTemplatesByKey.get(templateKey(template));
       if (rebuiltSha === undefined) {
-        problems.push(`${template.file}: rebuilding from current source produced no ${template.part} template`);
+        problems.push(`${template.file}: rebuilding from current source produced no ${template.part} template for region ${template.region}`);
       } else if (rebuiltSha !== template.sha256) {
         problems.push(
           `${template.file}: does not match a rebuild from current source (release has ${template.sha256}, rebuild has ${rebuiltSha})`,
@@ -81,8 +82,10 @@ export async function verifyRelease(input: VerifyReleaseInput): Promise<VerifyRe
       }
     }
     for (const rebuiltTemplate of rebuilt.templates) {
-      if (!releaseTemplateParts.has(rebuiltTemplate.part)) {
-        problems.push(`${rebuiltTemplate.file}: rebuilding from current source produces a ${rebuiltTemplate.part} template not present in this release`);
+      if (!releaseTemplateKeys.has(templateKey(rebuiltTemplate))) {
+        problems.push(
+          `${rebuiltTemplate.file}: rebuilding from current source produces a ${rebuiltTemplate.part} template for region ${rebuiltTemplate.region} not present in this release`,
+        );
       }
     }
 

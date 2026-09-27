@@ -282,3 +282,85 @@ A public image `public.ecr.aws/<alias>/<repo>@sha256:<digest>` reaches the runti
 `<account>.dkr.ecr.<region>.amazonaws.com/agentx-<env>/<alias>/<repo>@sha256:<digest>`, private ECR
 in the account. `PermissionsBoundaryArn` is optional on every environment stack, access included;
 every `AWS::IAM::Role` in every environment stack carries the given boundary, else the default one.
+
+## Deploying an environment
+
+`agentx deploy` installs or upgrades one environment's stacks: access, foundation, identity (skipped when
+the environment brings its own OIDC), control-plane, runtime and slack, in that order for a fresh install;
+an upgrade deploys runtime before control-plane instead, so the worker (the tolerant side) parses strictly
+first. Access deploys first, with the caller's own AWS credentials; every later stack deploys through the
+service role the access stack creates.
+
+Two engines deploy the same release:
+- **templates** (the default). Deploys the release's pre-synthesized templates as a change set. Needs no
+  local checkout and no CDK bootstrap; use this for most installs and enterprise pipelines.
+- **cdk**. Runs `cdk deploy` from a real source checkout, one stack at a time; pick it for CDK's own drift
+  reconciliation or asset diffing. Requires `--source <path>` and `--yes` (there is no change-set review to
+  confirm), a clean checkout at tag `v<version>` for the release, and a region CDK has already been
+  bootstrapped in. After those checks it runs `npm ci` and `npm run build` in the checkout (the built
+  `infra/dist` is not in git, so a checkout at the right tag can still hold a stale build), then
+  `npx --no-install cdk deploy`, the CDK CLI from the release's own lockfile.
+
+With the templates engine, before executing, `agentx deploy` prints each stack's changes (action, logical
+id, resource type, whether it replaces the resource) and asks "Execute this change set? [y/N]", unless
+`--yes` is given; with no `--yes` and no terminal on stdin, it refuses rather than guessing. A change set
+that fails only because it has no changes is deleted and treated as success ("no changes"), and the stack's
+existing outputs are used as-is.
+
+Before any AWS write, `agentx deploy` refuses (with `CONFIG_INVALID`) AWS credentials for a different
+account than the answers file names, a region the release does not cover (templates engine), and your own
+OIDC provider without `adminClaim`, `adminValues` and `clientId`. Missing or expired AWS credentials fail
+with `AUTH_REQUIRED`, an AWS access denial with `FORBIDDEN`. Use credentials whose session lasts at least as
+long as the deploy (plan for about an hour): a session that expires partway leaves the rest undeployed.
+
+**Recovering a stuck stack.** A stack in `ROLLBACK_COMPLETE` (its first create failed) must be deleted
+before deploying again; the error names the exact `delete-stack` command. A failed create keeps the
+resources its stack retains, so remove those too (see "Tearing down an environment"). A failed or refused
+change set on a new stack leaves it in `REVIEW_IN_PROGRESS` with no resources: `agentx deploy` deletes its
+own change set and a rerun treats the stack as a fresh create; to clean up by hand (for example after
+`deploy-access.sh`), delete the change set, then delete the stack only if it is still REVIEW_IN_PROGRESS with
+no resources. A failed install resumes with `--parts`, naming only the parts still needed; when settings
+were not written, `agentx deploy` prints the deployed and missing parts and the exact command to resume. An
+environment adopted from the legacy deployment (fixed stack names, none of the `agentx-<env>-` naming) is
+refused by `agentx deploy`.
+
+**Regions.** A release only covers the regions it was built for (today: `us-east-1`), each with its own
+verified AgentCore availability-zone IDs and its own templates (`templates/<region>/<part>.template.json`).
+An uncovered region is refused, by name. Adding a region means adding its verified zone IDs to
+`DEFAULT_AZ_IDS` in `infra/lib/production-foundation.ts`; the release builder picks the region up from
+there, and nothing else about deploy changes.
+
+**The export bundle** (`agentx init --export`, requiring an explicit `--env` and refusing the name
+`production`) writes what a platform team needs to deploy the access stack themselves, with their own
+credentials and no AWS call ever made by our CLI: templates, parameters, a `deploy-access.sh` script, and
+the policy that principal needs. That policy is for creating the stack only; updating it later needs a
+broader principal, the operator's job. The ECR pull-through rule's create and delete actions cannot be
+scoped to a resource, so that statement stays on every resource (`*`). `deploy-access.sh` prompts for
+confirmation before executing (`--yes` skips it, same as `agentx deploy`), and prints the failure reason
+plus the exact recovery command on failure. It does not create the callback signing key; `agentx deploy`
+creates it on its first run. Every later stack is then deployed by the AgentX operator, through the role the
+access stack created, with `agentx deploy --mode install --parts foundation,identity,control-plane,runtime,slack
+--release <dir> --answers <file>` (never access: the operator role is denied change sets on it).
+
+**The callback signing key** lives only in Secrets Manager, at `agentx/<env>/callback-signing-key`, never in
+settings. The templates engine passes it to CloudFormation as a `NoEcho` parameter, never printed. The cdk
+engine can only pass it as a `cdk deploy --parameters` argument, so for that command's length it is visible
+in the operator's own machine's process list (the engines' one difference in secret handling); it stays
+redacted everywhere `agentx` itself prints anything, including the displayed command, any error, and the
+streamed output.
+
+### Tearing down an environment
+
+`agentx destroy` is planned for phase 15e; until then, teardown is by hand. Turn termination protection off
+on access, foundation, identity and runtime, then delete the stacks in reverse install order (slack, runtime,
+control-plane, identity, foundation, access). A named environment's AgentCore runtime is deleted with its
+stack; the legacy deployment's is retained.
+
+Stack deletion keeps, on purpose: the capacity provider, the Cognito user pool (deletion protection), three
+S3 buckets (two versioned: empty every version and delete marker first), three DynamoDB tables, two log
+groups (VPC flow logs and `/aws/bedrock-agentcore/runtimes/<runtimeId>-DEFAULT`), and the KMS workspace key (schedule deletion; 7 days minimum). Two secrets live outside or beyond the
+stacks: `agentx/<env>/callback-signing-key` (created by the CLI) and `agentx/<env>/slack`; delete both with
+`--force-delete-without-recovery` so a new install can reuse the names. **Deleting the capacity provider
+deletes every worker session's persistent workspace volume** (AgentCore's runtime-instances data management).
+A failed create keeps its retained resources too, so "delete the stack and rerun" leaves them behind. The
+export bundle's README lists the exact command for each step.

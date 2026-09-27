@@ -2,7 +2,7 @@
 // It turns the operator's answers, a release manifest, and the stack outputs collected so far into
 // the exact CloudFormation Parameters map for one environment stack. The caller (phase 15d's `agentx
 // init`/`agentx upgrade`) reads secrets and calls CloudFormation; this file only computes values.
-import { environmentStackName } from "@agentx/contracts";
+import { ImageDigest, environmentStackName } from "@agentx/contracts";
 import type { ReleaseManifest, StackPart } from "@agentx/contracts";
 
 export type StackOutputs = Record<string, string>;
@@ -26,12 +26,18 @@ export interface InstallAnswers {
         /** Required together: bringing your own OIDC provider means there is no identity stack's fixed admin group to fall back on. */
         adminClaim?: string;
         adminValues?: string[];
+        /** Required to write environment settings (the deploy orchestrator's clientId for `agentx login`): bringing
+         * your own OIDC provider means there is no identity stack's ClientId output to read it from instead. */
+        clientId?: string;
       };
   github: { account: string; appId: string; installationId: string; privateKeySecretArn: string; credentialRef?: string };
   /** The value; the caller reads it from Secrets Manager, never logs it. */
   callbackSigningKey: string;
   permissionsBoundaryArn?: string;
   operatorPrincipalArn?: string;
+  /** Testing only, until the first published release exists: a private-ECR image digest used as-is
+   * instead of mapping the release's public image through the pull-through cache. */
+  images?: { worker?: string; slack?: string };
 }
 
 /** The shortest callback signing key the control plane accepts. */
@@ -96,6 +102,25 @@ function requiredImage(release: ReleaseManifest, which: "worker" | "slack"): str
   const digest = release.images[which];
   if (digest === undefined) throw new Error(`release ${release.version} has no ${which} image digest`);
   return digest;
+}
+
+/** Throws the exact message a non-digest image override must report; otherwise returns it as-is. */
+function checkedImageOverride(uri: string, which: "worker" | "slack"): string {
+  if (!ImageDigest.safeParse(uri).success) throw new Error(`image override for ${which} must be referenced by digest`);
+  return uri;
+}
+
+/**
+ * The image URI for `which`: the answers' override when given (validated to be a digest
+ * reference, used as-is), otherwise the release's public image mapped through the account's
+ * pull-through cache. Only the non-override path needs the access stack's `PullThroughPrefix`
+ * output, so an override lets `runtime`/`slack` resolve without it.
+ */
+function resolvedImage(answers: InstallAnswers, which: "worker" | "slack", outputs: Partial<Record<DeployPart, StackOutputs>>): string {
+  const override = answers.images?.[which];
+  if (override !== undefined) return checkedImageOverride(override, which);
+  const prefix = required(outputs, "access", "PullThroughPrefix", answers.env);
+  return privateImageUri(requiredImage(answers.release, which), imageTarget(answers, prefix));
 }
 
 /** Every release package deployed with `part`: the asset parameters that stack's template declares. */
@@ -183,10 +208,9 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
     }
 
     case "runtime": {
-      const prefix = required(outputs, "access", "PullThroughPrefix", answers.env);
       return {
         ...base,
-        WorkerImageUri: privateImageUri(requiredImage(answers.release, "worker"), imageTarget(answers, prefix)),
+        WorkerImageUri: resolvedImage(answers, "worker", outputs),
         ControlPlaneUrl: required(outputs, "control-plane", "ApiEndpoint", answers.env),
         ModelProvider: "amazon-bedrock",
         ModelId: answers.models.worker,
@@ -195,10 +219,9 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
     }
 
     case "slack": {
-      const prefix = required(outputs, "access", "PullThroughPrefix", answers.env);
       return {
         ...base,
-        OrchestratorImageUri: privateImageUri(requiredImage(answers.release, "slack"), imageTarget(answers, prefix)),
+        OrchestratorImageUri: resolvedImage(answers, "slack", outputs),
         TaskRoleArn: required(outputs, "control-plane", "SlackOrchestratorTaskRoleArn", answers.env),
         ControlPlaneUrl: required(outputs, "control-plane", "ApiEndpoint", answers.env),
         SlackRequestQueueUrl: required(outputs, "control-plane", "SlackRequestQueueUrl", answers.env),

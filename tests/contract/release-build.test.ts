@@ -5,7 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONTEXT_ENV, CONTEXT_OVERFLOW_LOCATION_ENV } from "aws-cdk-lib/cx-api";
 import { describe, expect, it } from "vitest";
-import { accumulateAsset, buildRelease, type PackageAccumulator } from "../../scripts/release/build.js";
+import { accumulateAsset, assetSignatureMismatch, buildRelease, type PackageAccumulator } from "../../scripts/release/build.js";
 import { ReleaseManifestSchema } from "../../scripts/release/manifest.js";
 import { readZipEntries } from "../support/zip-entries.js";
 
@@ -18,7 +18,11 @@ describe("release builder", () => {
     const manifest = await buildRelease({ version: "1.2.3", out, gitCommit: "b".repeat(40), images: { worker } });
     expect(ReleaseManifestSchema.parse(JSON.parse(await readFile(join(out, "release.json"), "utf8")))).toEqual(manifest);
     expect(manifest.templates.map((t) => t.part)).toEqual(["access", "foundation", "identity", "runtime", "control-plane", "slack"]);
-    for (const t of manifest.templates) expect(sha(await readFile(join(out, t.file)))).toBe(t.sha256);
+    for (const t of manifest.templates) {
+      expect(t.region).toBe("us-east-1");
+      expect(t.file).toBe(`templates/us-east-1/${t.part}.template.json`);
+      expect(sha(await readFile(join(out, t.file)))).toBe(t.sha256);
+    }
     for (const p of manifest.packages) {
       expect(sha(await readFile(join(out, p.file)))).toBe(p.sha256);
       expect(p.file).toBe(`packages/${p.assetId}.zip`);
@@ -35,7 +39,7 @@ describe("release builder", () => {
     for (const t of manifest.templates) {
       const template = JSON.parse(await readFile(join(out, t.file), "utf8")) as { Parameters?: Record<string, unknown> };
       for (const name of Object.keys(template.Parameters ?? {}).filter((n) => n.startsWith("AssetParameters"))) {
-        expect(declared.has(name), `${t.part}: ${name}`).toBe(true);
+        expect(declared.has(name), `${t.region}/${t.part}: ${name}`).toBe(true);
         used.add(name);
       }
     }
@@ -210,5 +214,180 @@ describe("accumulateAsset", () => {
     expect(() => accumulateAsset(packagesById, { ...zipAsset, s3BucketParameter: "Bucket2" }, "slack", "/tmp/dir")).toThrow(
       /different parameter names/,
     );
+  });
+});
+
+describe("assetSignatureMismatch", () => {
+  const accumulator = (overrides: Partial<PackageAccumulator> = {}): PackageAccumulator => ({
+    assetId: "a".repeat(64),
+    directory: "/tmp/dir",
+    parts: ["control-plane"],
+    bucketParameter: "Bucket1",
+    keyParameter: "Key1",
+    hashParameter: "Hash1",
+    ...overrides,
+  });
+
+  it("reports no mismatch when baseline and candidate have identical asset ids and parameter names", () => {
+    const baseline = new Map([["a".repeat(64), accumulator()]]);
+    const candidate = new Map([["a".repeat(64), accumulator({ directory: "/tmp/other-region-dir" })]]);
+    expect(assetSignatureMismatch(baseline, candidate)).toBe(false);
+  });
+
+  it("reports a mismatch when the candidate is missing an asset id present in the baseline", () => {
+    const baseline = new Map([
+      ["a".repeat(64), accumulator({ assetId: "a".repeat(64) })],
+      ["b".repeat(64), accumulator({ assetId: "b".repeat(64) })],
+    ]);
+    const candidate = new Map([["a".repeat(64), accumulator({ assetId: "a".repeat(64) })]]);
+    expect(assetSignatureMismatch(baseline, candidate)).toBe(true);
+  });
+
+  it("reports a mismatch when the candidate has an extra asset id not present in the baseline", () => {
+    const baseline = new Map([["a".repeat(64), accumulator({ assetId: "a".repeat(64) })]]);
+    const candidate = new Map([
+      ["a".repeat(64), accumulator({ assetId: "a".repeat(64) })],
+      ["b".repeat(64), accumulator({ assetId: "b".repeat(64) })],
+    ]);
+    expect(assetSignatureMismatch(baseline, candidate)).toBe(true);
+  });
+
+  it("reports a mismatch when the same asset id has a different bucketParameter", () => {
+    const baseline = new Map([["a".repeat(64), accumulator({ bucketParameter: "Bucket1" })]]);
+    const candidate = new Map([["a".repeat(64), accumulator({ bucketParameter: "Bucket2" })]]);
+    expect(assetSignatureMismatch(baseline, candidate)).toBe(true);
+  });
+
+  it("reports a mismatch when the same asset id has a different keyParameter", () => {
+    const baseline = new Map([["a".repeat(64), accumulator({ keyParameter: "Key1" })]]);
+    const candidate = new Map([["a".repeat(64), accumulator({ keyParameter: "Key2" })]]);
+    expect(assetSignatureMismatch(baseline, candidate)).toBe(true);
+  });
+
+  it("reports a mismatch when the same asset id has a different hashParameter", () => {
+    const baseline = new Map([["a".repeat(64), accumulator({ hashParameter: "Hash1" })]]);
+    const candidate = new Map([["a".repeat(64), accumulator({ hashParameter: "Hash2" })]]);
+    expect(assetSignatureMismatch(baseline, candidate)).toBe(true);
+  });
+});
+
+describe("ReleaseManifestSchema: (region, part) uniqueness", () => {
+  const template = (region: string, part: string) => ({
+    region,
+    part,
+    file: `templates/${region}/${part}.template.json`,
+    sha256: "a".repeat(64),
+  });
+
+  const baseManifest = {
+    schemaVersion: 1 as const,
+    version: "1.2.3",
+    gitCommit: "b".repeat(40),
+    environmentPlaceholder: "qqenv-placeholderqq" as const,
+    packages: [],
+    images: {},
+  };
+
+  it("refuses a manifest with a duplicate (region, part) template pair", () => {
+    const manifest = {
+      ...baseManifest,
+      templates: [template("us-east-1", "access"), template("us-east-1", "access")],
+    };
+    expect(() => ReleaseManifestSchema.parse(manifest)).toThrow(/each \(region, part\) pair must appear exactly once/);
+  });
+
+  it("accepts the same part used in two different regions", () => {
+    const manifest = {
+      ...baseManifest,
+      templates: [template("us-east-1", "access"), template("us-west-2", "access")],
+    };
+    expect(() => ReleaseManifestSchema.parse(manifest)).not.toThrow();
+  });
+});
+
+// Whoever can edit release.json also controls its recorded sha256, so a checksum match alone
+// proves nothing about where a `file` path points: the schema itself must refuse any `file` value
+// that could escape the release directory, by construction (not merely by convention).
+describe("ReleaseManifestSchema: file path containment", () => {
+  const baseManifest = {
+    schemaVersion: 1 as const,
+    version: "1.2.3",
+    gitCommit: "b".repeat(40),
+    environmentPlaceholder: "qqenv-placeholderqq" as const,
+    images: {},
+  };
+  const assetId = "a".repeat(64);
+  const validPackage = {
+    assetId,
+    file: `packages/${assetId}.zip`,
+    sha256: "a".repeat(64),
+    parts: ["runtime"],
+    bucketParameter: "Bucket1",
+    keyParameter: "Key1",
+    hashParameter: "Hash1",
+    keyParameterValue: `packages/||${assetId}.zip`,
+  };
+
+  it("refuses a template file that escapes the release directory via .. segments", () => {
+    const manifest = {
+      ...baseManifest,
+      templates: [{ region: "us-east-1", part: "access", file: "templates/../../../etc/passwd", sha256: "a".repeat(64) }],
+      packages: [],
+    };
+    expect(() => ReleaseManifestSchema.parse(manifest)).toThrow();
+  });
+
+  it("refuses a template file that is an absolute path", () => {
+    const manifest = {
+      ...baseManifest,
+      templates: [{ region: "us-east-1", part: "access", file: "/etc/passwd", sha256: "a".repeat(64) }],
+      packages: [],
+    };
+    expect(() => ReleaseManifestSchema.parse(manifest)).toThrow();
+  });
+
+  it("refuses a package file that escapes the release directory via .. segments", () => {
+    const manifest = {
+      ...baseManifest,
+      templates: [],
+      packages: [{ ...validPackage, file: `packages/../../../etc/passwd` }],
+    };
+    expect(() => ReleaseManifestSchema.parse(manifest)).toThrow();
+  });
+
+  it("refuses a package file that is an absolute path", () => {
+    const manifest = {
+      ...baseManifest,
+      templates: [],
+      packages: [{ ...validPackage, file: "/etc/passwd" }],
+    };
+    expect(() => ReleaseManifestSchema.parse(manifest)).toThrow();
+  });
+
+  it("refuses a package whose file does not equal packages/<assetId>.zip", () => {
+    const manifest = {
+      ...baseManifest,
+      templates: [],
+      packages: [{ ...validPackage, file: `packages/${"b".repeat(64)}.zip` }],
+    };
+    expect(() => ReleaseManifestSchema.parse(manifest)).toThrow(/file must equal packages\/<assetId>\.zip/);
+  });
+
+  it("refuses a template whose file does not equal templates/<region>/<part>.template.json for its own region and part", () => {
+    const manifest = {
+      ...baseManifest,
+      templates: [{ region: "us-east-1", part: "access", file: "templates/us-west-2/access.template.json", sha256: "a".repeat(64) }],
+      packages: [],
+    };
+    expect(() => ReleaseManifestSchema.parse(manifest)).toThrow(/file must equal templates\/<region>\/<part>\.template\.json/);
+  });
+
+  it("accepts the well-formed template and package file shapes the release builder produces", () => {
+    const manifest = {
+      ...baseManifest,
+      templates: [{ region: "us-east-1", part: "access", file: "templates/us-east-1/access.template.json", sha256: "a".repeat(64) }],
+      packages: [validPackage],
+    };
+    expect(() => ReleaseManifestSchema.parse(manifest)).not.toThrow();
   });
 });

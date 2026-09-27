@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { ENVIRONMENT_PLACEHOLDER, STACK_PARTS, environmentStackName } from "@agentx/contracts";
 import { CONTEXT_ENV, CONTEXT_OVERFLOW_LOCATION_ENV } from "aws-cdk-lib/cx-api";
 import { buildAgentXApp } from "../../infra/lib/app.js";
+import { SUPPORTED_REGIONS } from "../../infra/lib/production-foundation.js";
 import { sha256Hex } from "./hash.js";
 import { ImageDigest, ReleaseManifestSchema, type ReleaseManifest } from "./manifest.js";
 import { zipDirectory } from "./zip.js";
@@ -174,6 +175,31 @@ export function accumulateAsset(packagesById: Map<string, PackageAccumulator>, a
   }
 }
 
+/**
+ * Code packages are shared across regions: an asset's id is a hash of its content, and Lambda code
+ * doesn't depend on region, so every region's synth is expected to accumulate the very same set of
+ * asset ids, each with the same parameter names. Returns true when `candidate` (a later region)
+ * disagrees with `baseline` (the first region synthesized) in either respect.
+ */
+export function assetSignatureMismatch(
+  baseline: ReadonlyMap<string, PackageAccumulator>,
+  candidate: ReadonlyMap<string, PackageAccumulator>,
+): boolean {
+  if (baseline.size !== candidate.size) return true;
+  for (const [assetId, expected] of baseline) {
+    const actual = candidate.get(assetId);
+    if (
+      actual === undefined ||
+      actual.bucketParameter !== expected.bucketParameter ||
+      actual.keyParameter !== expected.keyParameter ||
+      actual.hashParameter !== expected.hashParameter
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export async function buildRelease(input: BuildReleaseInput): Promise<ReleaseManifest> {
   // Fail fast, before touching the filesystem or running the expensive synth below, and in an
   // order that leaves the output directory untouched (absent, or unmodified if pre-existing) for
@@ -185,38 +211,54 @@ export async function buildRelease(input: BuildReleaseInput): Promise<ReleaseMan
   await claimOutDir(input.out);
 
   await mkdir(RELEASE_SYNTH_ROOT, { recursive: true });
-  const synthDir = await mkdtemp(join(RELEASE_SYNTH_ROOT, "run-"));
+  const synthDirs: string[] = [];
   try {
-    // Synthesize the placeholder-environment app, bootstrap-free, at a fixed depth under the repo
-    // root (see REPO_ROOT's comment for why), with the repo root as the working directory (see
-    // withRepoRootCwd's comment for why).
-    const assembly = withRepoRootCwd(() =>
-      buildAgentXApp({
-        agentxEnv: ENVIRONMENT_PLACEHOLDER,
-        agentxSynthesizer: "legacy",
-        agentxRegion: "us-east-1",
-        outdir: synthDir,
-      }).synth(),
-    );
-
-    const stackByName = new Map(assembly.stacks.map((stack) => [stack.stackName, stack]));
-
-    // Write each part's template, in deploy order, and group each stack's zip-packaged code assets
-    // by asset id across stacks.
+    // Write each region's parts, in SUPPORTED_REGIONS order, each region's parts in STACK_PARTS
+    // (deploy) order, and group each stack's zip-packaged code assets by asset id. Code packages are
+    // shared across regions (asset hashes don't depend on region), so only the first region's
+    // (the baseline's) synth directories are kept around for zipping below; every later region is
+    // checked against the baseline's asset ids and parameter names instead of contributing its own.
     const templates: ReleaseManifest["templates"] = [];
     const packagesById = new Map<string, PackageAccumulator>();
     await mkdir(join(input.out, "templates"), { recursive: true });
-    for (const part of STACK_PARTS) {
-      const stackName = environmentStackName(ENVIRONMENT_PLACEHOLDER, part);
-      const stack = stackByName.get(stackName);
-      if (!stack) throw new Error(`release synth produced no stack named ${stackName} (part ${part})`);
-      const file = `templates/${part}.template.json`;
-      const text = `${JSON.stringify(stack.template, null, 2)}\n`;
-      await writeFile(join(input.out, file), text, "utf8");
-      templates.push({ part, file, sha256: sha256Hex(Buffer.from(text, "utf8")) });
 
-      for (const asset of stack.assets) {
-        accumulateAsset(packagesById, asset, part, join(assembly.directory, asset.path));
+    for (const [index, region] of SUPPORTED_REGIONS.entries()) {
+      // Synthesize the placeholder-environment app, bootstrap-free, at a fixed depth under the repo
+      // root (see REPO_ROOT's comment for why), with the repo root as the working directory (see
+      // withRepoRootCwd's comment for why).
+      const synthDir = await mkdtemp(join(RELEASE_SYNTH_ROOT, "run-"));
+      synthDirs.push(synthDir);
+      const assembly = withRepoRootCwd(() =>
+        buildAgentXApp({
+          agentxEnv: ENVIRONMENT_PLACEHOLDER,
+          agentxSynthesizer: "legacy",
+          agentxRegion: region,
+          outdir: synthDir,
+        }).synth(),
+      );
+
+      const stackByName = new Map(assembly.stacks.map((stack) => [stack.stackName, stack]));
+      await mkdir(join(input.out, "templates", region), { recursive: true });
+
+      const regionPackagesById = new Map<string, PackageAccumulator>();
+      for (const part of STACK_PARTS) {
+        const stackName = environmentStackName(ENVIRONMENT_PLACEHOLDER, part);
+        const stack = stackByName.get(stackName);
+        if (!stack) throw new Error(`release synth produced no stack named ${stackName} (part ${part}, region ${region})`);
+        const file = `templates/${region}/${part}.template.json`;
+        const text = `${JSON.stringify(stack.template, null, 2)}\n`;
+        await writeFile(join(input.out, file), text, "utf8");
+        templates.push({ region, part, file, sha256: sha256Hex(Buffer.from(text, "utf8")) });
+
+        for (const asset of stack.assets) {
+          accumulateAsset(regionPackagesById, asset, part, join(assembly.directory, asset.path));
+        }
+      }
+
+      if (index === 0) {
+        for (const [assetId, accumulated] of regionPackagesById) packagesById.set(assetId, accumulated);
+      } else if (assetSignatureMismatch(packagesById, regionPackagesById)) {
+        throw new Error(`region ${region} produced different code packages`);
       }
     }
 
@@ -254,7 +296,7 @@ export async function buildRelease(input: BuildReleaseInput): Promise<ReleaseMan
     await writeFile(join(input.out, "release.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
     return manifest;
   } finally {
-    await rm(synthDir, { recursive: true, force: true });
+    await Promise.all(synthDirs.map((synthDir) => rm(synthDir, { recursive: true, force: true })));
   }
 }
 

@@ -1,7 +1,11 @@
 import type { App } from "aws-cdk-lib";
 import {
   EnvironmentNameSchema,
+  environmentCloudFormationRoleName,
   environmentConnectorSecretPrefix,
+  environmentOperatorRoleName,
+  environmentPullThroughPrefix,
+  environmentRuntimeName,
   environmentStackName,
   type StackPart,
 } from "@agentx/contracts";
@@ -87,7 +91,7 @@ export function environmentNaming(env: string): AgentXNaming {
     apiName: `agentx-${name}-control-plane`,
     resourcePrefix: `agentx-${name}`,
     // AgentCore runtime and capacity-provider names allow letters, digits and underscores only.
-    runtimeName: `agentx_${name.replaceAll("-", "_")}_worker`,
+    runtimeName: environmentRuntimeName(name),
     capacityProviderName: `agentx_${name.replaceAll("-", "_")}_capacity`,
     workspaceKeyAlias: `alias/agentx/${name}/workspaces`,
     alertsTopicName: `agentx-${name}-alerts`,
@@ -96,9 +100,9 @@ export function environmentNaming(env: string): AgentXNaming {
     metricsNamespace: `AgentX/${name}`,
     environmentTagValue: name,
     taskFamily: `agentx-${name}-slack-orchestrator`,
-    pullThroughPrefix: `agentx-${name}`,
-    cloudFormationRoleName: `agentx-${name}-cloudformation`,
-    operatorRoleName: `agentx-${name}-operator`,
+    pullThroughPrefix: environmentPullThroughPrefix(name),
+    cloudFormationRoleName: environmentCloudFormationRoleName(name),
+    operatorRoleName: environmentOperatorRoleName(name),
   };
 }
 

@@ -18,7 +18,7 @@ import { CloudFormationClient } from "@aws-sdk/client-cloudformation";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SSMClient } from "@aws-sdk/client-ssm";
 import { STSClient } from "@aws-sdk/client-sts";
-import { Command } from "commander";
+import { Command, Option } from "commander";
 import { authorizeCredential, expectedAccountEmail, secretsManagerAuthorizeSecrets, type AuthorizeSecrets } from "./admin/authorize.js";
 import { listCredentials, registerCredential } from "./admin/credential.js";
 import { registerProject } from "./admin/register.js";
@@ -28,6 +28,7 @@ import { exportTurns, parseSince } from "./admin/turns.js";
 import { loginWithPkce, openSystemBrowser, tokenStoreKey } from "./auth.js";
 import { loadProjectConfig } from "./config.js";
 import { loadDeploymentSettings, type DeploymentSettings } from "./deployment.js";
+import { resumeCommand, runDeploy, runInitExport, type DeployCliDependencies, type DeployCommandOptions } from "./deploy/commands.js";
 import { cloudFormationStackReader, stsCallerIdentity, type CallerIdentity, type StackReader } from "./environments/adopt.js";
 import { resolveDeploymentFile } from "./environments/cache.js";
 import { runEnvAdopt, runEnvList, runEnvUse } from "./environments/commands.js";
@@ -74,6 +75,8 @@ export interface CliDependencies {
      */
     ssmClient?: (region?: string) => SSMClient;
   };
+  /** `agentx deploy` and `agentx init --export` overrides, for tests: never touch AWS. */
+  deploy?: DeployCliDependencies;
 }
 
 interface AuthenticatedDeployment {
@@ -466,6 +469,129 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         globals.json
           ? formatSuccess(result, true)
           : `Adopted ${result.env}: ${result.controlPlaneUrl}; settings in ${settingsParameterName(result.env)}\n`,
+      );
+    });
+
+  program
+    .command("deploy")
+    .description("deploy or upgrade an environment from a release; used by init and upgrade, and for automation")
+    .addOption(new Option("--mode <mode>", "install a fresh environment or upgrade an existing one").choices(["install", "upgrade"]).makeOptionMandatory())
+    .addOption(new Option("--engine <engine>", "deploy engine: pre-synthesized CloudFormation change sets, or a real cdk deploy").choices(["templates", "cdk"]).default("templates"))
+    .requiredOption("--release <dir>", "release directory (agentx release build output)")
+    .requiredOption("--answers <file>", "deploy answers JSON file (see DeployAnswers)")
+    .option("--parts <parts>", "comma-separated subset of parts to deploy, in the mode's order; default: the whole order")
+    .option("--source <dir>", "git checkout of the release's source tag; required for --engine cdk")
+    .option("--yes", "execute without an interactive change-set confirmation; required for --engine cdk", false)
+    .action(async (options: { mode: "install" | "upgrade"; engine: "templates" | "cdk"; release: string; answers: string; parts?: string; source?: string; yes: boolean }, command: Command) => {
+      const globals = globalOptions(command);
+      // --env is a global option (defaulting to production); only cross-check it against the
+      // answers file's own env when the operator actually typed --env, never against the silent
+      // default, so an omitted --env keeps working unchanged (the answers file alone decides).
+      const envGivenExplicitly = command.getOptionValueSourceWithGlobals("env") === "cli";
+      const deployOptions: DeployCommandOptions = {
+        mode: options.mode,
+        engine: options.engine,
+        releaseDir: options.release,
+        answersFile: options.answers,
+        yes: options.yes,
+        ...(options.parts === undefined ? {} : { parts: options.parts }),
+        ...(options.source === undefined ? {} : { source: options.source }),
+        ...(envGivenExplicitly ? { expectedEnv: globals.env } : {}),
+      };
+      const result = await runDeploy(deployOptions, dependencies.deploy ?? {}, { stderr: services.stderr });
+      if (globals.json) {
+        services.stdout.write(formatSuccess(result, true));
+        return;
+      }
+      const lines = [`${options.mode === "install" ? "Installed" : "Upgraded"} environment ${result.env}${result.settingsWritten ? "" : " (not every part is deployed yet)"}`];
+      if (!result.settingsWritten) {
+        lines.push(
+          `Deployed parts: ${result.deployedParts.join(", ") || "none"}`,
+          `Missing parts: ${result.missingParts.join(", ") || "none"}`,
+          "Environment settings are written once every part is deployed.",
+        );
+        if (result.missingParts.length > 0) lines.push(`Resume with: ${resumeCommand(deployOptions, result.missingParts)}`);
+      }
+      services.stdout.write(`${lines.join("\n")}\n`);
+    });
+
+  program
+    .command("init")
+    .description("bootstrap a new AgentX environment from a release")
+    .option("--export <dir>", "write a self-contained bundle a platform team deploys to create the access stack")
+    .option("--region <region>", "AWS region to deploy into")
+    .option("--account <account>", "AWS account id; defaults to the caller's own account (sts GetCallerIdentity, read-only)")
+    .option("--release <dir>", "release directory (agentx release build output)")
+    .addOption(new Option("--identity <mode>", "identity provider").choices(["cognito", "oidc"]).default("cognito"))
+    .option("--oidc-issuer <url>", "your OIDC provider's issuer URL (required with --identity oidc)")
+    .option("--oidc-audience <audience>", "your OIDC provider's audience (required with --identity oidc)")
+    .option("--oidc-client-id <id>", "your OIDC provider's client id, needed for agentx login")
+    .option("--admin-claim <claim>", "the OIDC claim that marks AgentX administrators")
+    .option("--admin-values <values>", "comma-separated values of --admin-claim that mark an administrator")
+    .option("--permission-boundary <arn>", "IAM permissions boundary ARN applied to every role AgentX creates")
+    .option("--operator-principal <arn>", "IAM principal ARN allowed to assume the AgentX operator role")
+    .option("--orchestrator-model <id>", "Bedrock model id for the Slack orchestrator", "us.anthropic.claude-sonnet-4-6")
+    .option("--classifier-model <id>", "Bedrock model id for the gate classifier", "amazon.nova-lite-v1:0")
+    .option("--worker-model <id>", "Bedrock model id for the runtime worker", "amazon.nova-pro-v1:0")
+    .action(async (
+      options: {
+        export?: string;
+        region?: string;
+        account?: string;
+        release?: string;
+        identity: "cognito" | "oidc";
+        oidcIssuer?: string;
+        oidcAudience?: string;
+        oidcClientId?: string;
+        adminClaim?: string;
+        adminValues?: string;
+        permissionBoundary?: string;
+        operatorPrincipal?: string;
+        orchestratorModel: string;
+        classifierModel: string;
+        workerModel: string;
+      },
+      command: Command,
+    ) => {
+      const globals = globalOptions(command);
+      if (options.export === undefined) {
+        throw agentXError("CONFIG_INVALID", "interactive install arrives in a later AgentX release; use agentx init --export or agentx deploy");
+      }
+      // --env defaults to production (the live, legacy-adopted deployment): --export must never
+      // silently write a bundle for it just because --env was left off.
+      if (command.getOptionValueSourceWithGlobals("env") !== "cli") {
+        throw agentXError("CONFIG_INVALID", "agentx init --export requires an explicit --env (the default, production, is the live environment)");
+      }
+      if (globals.env === DEFAULT_ENVIRONMENT) {
+        throw agentXError("CONFIG_INVALID", `--env ${DEFAULT_ENVIRONMENT} belongs to the legacy deployment that predates environments; choose a different --env for the export bundle`);
+      }
+      if (options.region === undefined) throw agentXError("CONFIG_INVALID", "--region is required with --export");
+      if (options.release === undefined) throw agentXError("CONFIG_INVALID", "--release is required with --export");
+      const result = await runInitExport(
+        {
+          env: globals.env,
+          dir: options.export,
+          region: options.region,
+          releaseDir: options.release,
+          identity: options.identity,
+          orchestratorModel: options.orchestratorModel,
+          classifierModel: options.classifierModel,
+          workerModel: options.workerModel,
+          ...(options.account === undefined ? {} : { account: options.account }),
+          ...(options.oidcIssuer === undefined ? {} : { oidcIssuer: options.oidcIssuer }),
+          ...(options.oidcAudience === undefined ? {} : { oidcAudience: options.oidcAudience }),
+          ...(options.oidcClientId === undefined ? {} : { oidcClientId: options.oidcClientId }),
+          ...(options.adminClaim === undefined ? {} : { adminClaim: options.adminClaim }),
+          ...(options.adminValues === undefined ? {} : { adminValues: options.adminValues }),
+          ...(options.permissionBoundary === undefined ? {} : { permissionsBoundaryArn: options.permissionBoundary }),
+          ...(options.operatorPrincipal === undefined ? {} : { operatorPrincipalArn: options.operatorPrincipal }),
+        },
+        dependencies.deploy ?? {},
+      );
+      services.stdout.write(
+        globals.json
+          ? formatSuccess(result, true)
+          : `Wrote export bundle to ${result.dir}\nNext: have your platform team run ${result.dir}/deploy-access.sh (see ${result.dir}/README.md) with their own AWS credentials to deploy the access stack.\n`,
       );
     });
 

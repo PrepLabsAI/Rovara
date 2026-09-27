@@ -26,6 +26,13 @@ const DEFAULT_AZ_IDS: Readonly<Record<string, readonly [string, string]>> = {
   "us-east-1": ["use1-az1", "use1-az2"],
 };
 
+/**
+ * The regions a release covers: exactly the regions with verified AgentCore Instances
+ * availability-zone IDs above. Adding a region means adding its verified zone IDs to
+ * `DEFAULT_AZ_IDS`; nothing else changes.
+ */
+export const SUPPORTED_REGIONS: readonly string[] = Object.keys(DEFAULT_AZ_IDS).sort();
+
 export interface ProductionFoundationConfiguration {
   region: string;
   availabilityZoneIds: readonly [string, string];
@@ -212,6 +219,7 @@ export class ProductionFoundationStack extends Stack {
 
     const flowLogGroup = new logs.LogGroup(this, "VpcFlowLogs", {
       retention: logs.RetentionDays.ONE_MONTH,
+      // Retained: flow logs are audit data that must outlive a stack deletion.
       removalPolicy: RemovalPolicy.RETAIN,
     });
     const flowLogRole = new iam.Role(this, "VpcFlowLogRole", {
@@ -233,6 +241,7 @@ export class ProductionFoundationStack extends Stack {
       alias: naming.workspaceKeyAlias,
       description: `Encrypts AgentX ${naming.environmentTagValue} root and per-session workspace EBS volumes`,
       enableKeyRotation: true,
+      // Retained: retained workspace volumes and snapshots stay unreadable without this key.
       removalPolicy: RemovalPolicy.RETAIN,
     });
 
@@ -324,6 +333,7 @@ export class ProductionFoundationStack extends Stack {
     for (const privateRoute of privateRoutes) {
       capacityProvider.addResourceDependency(privateRoute);
     }
+    // Retained: deleting the capacity provider deletes every worker session's persistent workspace volume.
     capacityProvider.applyRemovalPolicy(RemovalPolicy.RETAIN);
 
     this.capacityProviderArn = capacityProvider.attrArn;

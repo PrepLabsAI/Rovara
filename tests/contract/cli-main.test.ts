@@ -5,7 +5,7 @@ describe("AgentX executable command surface", () => {
   it("exposes administration only; developers work through Slack", () => {
     const program = createCliProgram();
 
-    expect(program.commands.map((command) => command.name())).toEqual(["login", "admin", "env"]);
+    expect(program.commands.map((command) => command.name())).toEqual(["login", "admin", "env", "deploy", "init"]);
 
     const admin = program.commands.find((command) => command.name() === "admin");
     expect(admin?.commands.map((command) => command.name())).toEqual(["project", "workspace", "slack", "credential", "turns"]);
@@ -34,7 +34,16 @@ describe("AgentX executable command surface", () => {
     );
     expect(optionNames).not.toContain("--runtime-session-id");
     expect(optionNames).not.toContain("--prompt");
-    expect(optionNames).not.toContain("--orchestrator-model");
+
+    // --orchestrator-model reappears, but only on `init` (an install-time Bedrock model choice, not
+    // the retired ad-hoc runtime-routing flag this guard was originally written against): every
+    // other command, including the root program itself, must never carry it.
+    for (const command of allCommands(program)) {
+      if (command.name() === "init") continue;
+      expect(command.options.map((option) => option.long)).not.toContain("--orchestrator-model");
+    }
+    const init = program.commands.find((command) => command.name() === "init");
+    expect(init?.options.map((option) => option.long)).toContain("--orchestrator-model");
   });
 });
 

@@ -63,6 +63,7 @@ export class AccessStack extends Stack {
       enforceSSL: true,
       versioned: true,
       lifecycleRules: [{ noncurrentVersionExpiration: Duration.days(30) }],
+      // Retained: release artifacts must outlive a stack deletion.
       removalPolicy: RemovalPolicy.RETAIN,
     });
 

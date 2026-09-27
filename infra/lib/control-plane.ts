@@ -84,6 +84,7 @@ export class ControlPlaneStack extends Stack {
       encryption: dynamodb.TableEncryption.AWS_MANAGED,
       stream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      // Retained: workspace and operation records must outlive a stack deletion.
       removalPolicy: RemovalPolicy.RETAIN,
     });
 
@@ -91,6 +92,7 @@ export class ControlPlaneStack extends Stack {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
       enforceSSL: true,
+      // Retained: the broker's operation artifacts must outlive a stack deletion.
       removalPolicy: RemovalPolicy.RETAIN,
     });
 
@@ -215,6 +217,7 @@ export class ControlPlaneStack extends Stack {
         generateStringKey: "signingSecret",
         excludePunctuation: true,
       },
+      // Retained: the Slack app credentials must outlive a stack deletion.
       removalPolicy: RemovalPolicy.RETAIN,
     });
     const slackThreads = new dynamodb.Table(this, "SlackThreads", {
@@ -223,6 +226,7 @@ export class ControlPlaneStack extends Stack {
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       encryption: dynamodb.TableEncryption.AWS_MANAGED,
       timeToLiveAttribute: "expiresAt",
+      // Retained: Slack thread state must outlive a stack deletion.
       removalPolicy: RemovalPolicy.RETAIN,
     });
     const slackDeadLetterQueue = new sqs.Queue(this, "SlackRequestDeadLetterQueue", {
@@ -244,6 +248,7 @@ export class ControlPlaneStack extends Stack {
       enforceSSL: true,
       versioned: true,
       lifecycleRules: [{ noncurrentVersionExpiration: Duration.days(30) }],
+      // Retained: Pi thread sessions must outlive a stack deletion.
       removalPolicy: RemovalPolicy.RETAIN,
     });
 
@@ -273,6 +278,7 @@ export class ControlPlaneStack extends Stack {
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       encryption: dynamodb.TableEncryption.AWS_MANAGED,
       timeToLiveAttribute: "expiresAt",
+      // Retained: turn records are audit data that must outlive a stack deletion.
       removalPolicy: RemovalPolicy.RETAIN,
     });
     turnRecords.addGlobalSecondaryIndex({

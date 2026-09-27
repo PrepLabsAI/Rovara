@@ -124,6 +124,13 @@ describe("operator role policy", () => {
     expect(logs.Action).toEqual(["logs:FilterLogEvents", "logs:StartQuery"]);
     expect([logs.Resource].flat()).toContain("arn:aws:logs:us-east-1:123456789012:log-group:/aws/bedrock-agentcore/runtimes/agentx_staging_worker-*");
   });
+
+  it("may turn on termination protection for the five stacks it deploys, and only those", () => {
+    const statements = operatorRoleStatements(scope).filter((s) => s.Action.includes("cloudformation:UpdateTerminationProtection"));
+    expect(statements.map((s) => s.Sid)).toEqual(["ChangeSets"]);
+    const stack = (part: string) => `arn:aws:cloudformation:us-east-1:123456789012:stack/agentx-staging-${part}/*`;
+    expect([statements[0]!.Resource].flat()).toEqual(["foundation", "identity", "runtime", "control-plane", "slack"].map(stack));
+  });
 });
 
 describe("default permission boundary", () => {
