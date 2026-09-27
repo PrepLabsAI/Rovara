@@ -232,7 +232,7 @@ describe("deploy environment", () => {
     expect(result.settingsWritten).toBe(true);
   });
 
-  it("refuses a different engine than the environment was installed with, before deploying anything", async () => {
+  it("refuses a different engine than the environment was installed with, before deploying anything, taking the lock or creating a key", async () => {
     const store = new MemoryParameterStore();
     const secrets = memorySecrets();
     await writeEnvironmentSettings(store, stagingSettings);
@@ -242,6 +242,107 @@ describe("deploy environment", () => {
       deployEnvironment({ mode: "upgrade", engine: "cdk", answers: baseAnswers(), release: fakeRelease(), deployer: attempt.deployer, store, secrets, holder: HOLDER }),
     ).rejects.toThrow("environment staging was installed with the templates engine; switching engines is not supported");
     expect(attempt.requests).toEqual([]);
+    expect(store.values.has("/agentx/staging/lock")).toBe(false);
+    expect(secrets.creates).toEqual([]);
+  });
+
+  it("refuses to deploy an environment adopted with legacy stack naming, before deploying anything, taking the lock or creating a key", async () => {
+    const store = new MemoryParameterStore();
+    const secrets = memorySecrets();
+    await writeEnvironmentSettings(store, { ...stagingSettings, naming: "legacy", engine: "cdk" });
+    const attempt = fakeDeployer(scriptedOutputs());
+
+    await expect(
+      deployEnvironment({ mode: "upgrade", engine: "cdk", answers: baseAnswers(), release: fakeRelease(), deployer: attempt.deployer, store, secrets, holder: HOLDER }),
+    ).rejects.toThrow("environment staging uses the legacy stack names; upgrading it with agentx deploy is not supported yet");
+    expect(attempt.requests).toEqual([]);
+    expect(store.values.has("/agentx/staging/lock")).toBe(false);
+    expect(secrets.creates).toEqual([]);
+  });
+
+  it("refuses your own OIDC provider without clientId before deploying anything, taking the lock or creating a key", async () => {
+    const store = new MemoryParameterStore();
+    const secrets = memorySecrets();
+    const answers: DeployAnswers = { ...baseAnswers(), identity: { mode: "oidc", issuer: "https://login.example.com", audience: "api://agentx" } };
+    const { deployer, requests } = fakeDeployer(scriptedOutputs());
+
+    await expect(
+      deployEnvironment({ mode: "install", engine: "templates", answers, release: fakeRelease(), deployer, store, secrets, holder: HOLDER }),
+    ).rejects.toThrow("bringing your own OIDC provider requires clientId to write environment settings (needed for agentx login)");
+
+    expect(requests).toEqual([]);
+    expect(store.values.has("/agentx/staging/lock")).toBe(false);
+    expect(secrets.creates).toEqual([]);
+  });
+
+  it("throws instead of silently deploying a non-access part without the service role", async () => {
+    const store = new MemoryParameterStore();
+    const secrets = memorySecrets();
+    const outputs = scriptedOutputs();
+    const accessOutputs = { ...outputs[stackName("access")]! };
+    delete (accessOutputs as Record<string, string>).CloudFormationRoleArn;
+    outputs[stackName("access")] = accessOutputs;
+    const { deployer, requests } = fakeDeployer(outputs);
+
+    await expect(
+      deployEnvironment({ mode: "install", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer, store, secrets, holder: HOLDER }),
+    ).rejects.toThrow(`stack ${stackName("access")} has no output CloudFormationRoleArn`);
+
+    // Access itself deployed fine (it needs no role); nothing after it was ever attempted without one.
+    expect(requests.map((request) => request.part)).toEqual(["access"]);
+  });
+
+  it("resumes a failed install with no settings yet, reading already-deployed parts' outputs directly", async () => {
+    const store = new MemoryParameterStore();
+    const secrets = memorySecrets();
+    const outputs = scriptedOutputs();
+    const failingAtRuntime: StackDeployer = {
+      async deploy(request) {
+        if (request.part === "runtime") throw new Error("runtime deploy failed");
+        return outputs[request.stackName]!;
+      },
+      async outputs(name) {
+        return outputs[name];
+      },
+    };
+
+    await expect(
+      deployEnvironment({ mode: "install", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer: failingAtRuntime, store, secrets, holder: HOLDER }),
+    ).rejects.toThrow("runtime deploy failed");
+    // The failed install never got far enough to write settings.
+    expect(await readEnvironmentSettings(store, ENV)).toBeUndefined();
+
+    // Resuming names only the parts still needed; access/foundation/identity/control-plane already
+    // exist (from the failed attempt) but have no settings recording them yet.
+    const resume = fakeDeployer(scriptedOutputs());
+    const result = await deployEnvironment({
+      mode: "install", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer: resume.deployer, store, secrets, holder: HOLDER,
+      parts: ["runtime", "slack"],
+    });
+
+    expect(resume.requests.map((request) => request.part)).toEqual(["runtime", "slack"]);
+    expect(resume.outputCalls).toEqual(
+      expect.arrayContaining([stackName("access"), stackName("foundation"), stackName("identity"), stackName("control-plane")]),
+    );
+    expect(result.settingsWritten).toBe(true);
+  });
+
+  it("throws when a stack settings lists (access or identity) no longer reports outputs, instead of silently dropping it from rewritten settings", async () => {
+    const store = new MemoryParameterStore();
+    const secrets = memorySecrets();
+    const install = fakeDeployer(scriptedOutputs());
+    await deployEnvironment({ mode: "install", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer: install.deployer, store, secrets, holder: HOLDER });
+
+    const missingAccess = scriptedOutputs();
+    delete missingAccess[stackName("access")];
+    const { deployer } = fakeDeployer(missingAccess);
+
+    await expect(
+      deployEnvironment({
+        mode: "upgrade", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer, store, secrets, holder: HOLDER,
+        parts: ["runtime"],
+      }),
+    ).rejects.toThrow(`stack ${stackName("access")} (environment staging's access stack) no longer reports outputs`);
   });
 
   it("refuses an upgrade of an environment that is not installed, and an install over an installed one", async () => {
