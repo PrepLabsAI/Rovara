@@ -652,6 +652,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       services.stdout.write(`${lines.join("\n")}\n`);
     });
 
+  addSignInOptions(
   program
     .command("init")
     .description("install AgentX in this AWS account, step by step, resuming where it stopped; --export writes a bundle for a platform team instead")
@@ -702,7 +703,9 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--slack-signing-secret-file <path>", "file holding the Slack signing secret")
     .option("--slack-signing-secret-env <NAME>", "environment variable holding the Slack signing secret")
     .option("--worker-image <digest-ref>", "worker image by digest (testing only)")
-    .option("--slack-image <digest-ref>", "Slack service image by digest (testing only)")
+    .option("--slack-image <digest-ref>", "Slack service image by digest (testing only)"),
+  )
+    .addOption(new Option("--signin <method>", "how developers sign in: Slack (default), your company's sign-in (oidc), or both").choices(["slack", "oidc", "both"]))
     .action(async (
       options: InitCommandOptions & { export?: string },
       command: Command,
@@ -835,7 +838,7 @@ function parsePort(value: string): number {
   return port;
 }
 
-interface InitCommandOptions {
+interface InitCommandOptions extends SignInCommandOptions {
   region?: string; account?: string; release?: string; engine?: "templates" | "cdk"; source?: string;
   resume: boolean; yes: boolean; browser: boolean;
   identity: "cognito" | "oidc"; oidcIssuer?: string; oidcAudience?: string; oidcClientId?: string; adminClaim?: string; adminValues?: string;
@@ -848,6 +851,8 @@ interface InitCommandOptions {
   slackAppName?: string; slackAppPostedMessages?: "accept" | "ignore"; slackInstall?: "installed" | "approval";
   slackBotTokenFile?: string; slackBotTokenEnv?: string; slackSigningSecretFile?: string; slackSigningSecretEnv?: string;
   workerImage?: string; slackImage?: string;
+  /** --signin: which developer sign-in methods agentx init's developer-signin step enables. */
+  signin?: "slack" | "oidc" | "both";
 }
 
 /** A secret's source from its `-file` and `-env` flags; undefined when neither was given (the prompt asks). */
@@ -926,10 +931,13 @@ function initOptions(env: string, options: InitCommandOptions, command: Command)
   if (preMadeGiven && (appId === undefined || installationId === undefined || keySource === undefined)) {
     throw agentXError("CONFIG_INVALID", "--github-app-id, --github-installation-id and --github-private-key-file (or --github-private-key-env) go together");
   }
+  const signin = signInFlags(options);
   const secretFlags = definedEntries<SecretFlags>({
     slackBotToken: secretSource(options.slackBotTokenFile, options.slackBotTokenEnv),
     slackSigningSecret: secretSource(options.slackSigningSecretFile, options.slackSigningSecretEnv),
     githubPrivateKey: keySource,
+    slackClientSecret: signin.secretFlags.slackClientSecret,
+    oidcClientSecret: signin.secretFlags.oidcClientSecret,
   });
   return {
     env,
@@ -940,6 +948,7 @@ function initOptions(env: string, options: InitCommandOptions, command: Command)
     yes: options.yes, browser: options.browser, resume: options.resume,
     flags,
     secretFlags,
+    signinFlags: definedEntries<SigninFlags>({ methods: options.signin, ...signin.flags }),
     ...(appId === undefined || installationId === undefined ? {} : { preMadeGitHubApp: { appId, installationId } }),
     ...(options.slackInstall === undefined ? {} : { slackInstall: options.slackInstall }),
   };

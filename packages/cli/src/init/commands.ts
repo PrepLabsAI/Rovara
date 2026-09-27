@@ -13,6 +13,7 @@ import { stsCallerIdentity } from "../environments/adopt.js";
 import type { LockRecord } from "../environments/lock.js";
 import { ssmParameterStore } from "../environments/parameter-store.js";
 import { readEnvironmentSettings, type EnvironmentSettings } from "../environments/settings.js";
+import type { SigninFlags } from "../signin/collect.js";
 import { isPrereleaseVersion, RELEASE_VERSION } from "../version.js";
 import {
   assertResumeFlagsMatch, checkAlertWebhook, collectInitAnswers, openRouterSecretName, persistInitAnswers, readOpenRouterKeyAnswer, storeAlertWebhook,
@@ -26,6 +27,7 @@ import { confirmInstallPlan } from "./plan.js";
 import { awsPrerequisiteChecks, checkPrerequisites, type PrerequisiteChecks } from "./prerequisites.js";
 import { processPrompter, secretFromSource, unattendedPrompter, type Prompter } from "./prompts.js";
 import { fetchRelease } from "./release-fetch.js";
+import { developerSignInStep } from "./signin-step.js";
 import { slackAppStep, slackWebApi, verifySlackUrls, type SlackApi } from "./slack-app.js";
 import { runInitSteps, type InitEvent, type InitRunResult, type InitStep } from "./steps.js";
 
@@ -37,6 +39,7 @@ export interface InitCliDependencies {
   checks?: PrerequisiteChecks;
   github?: GitHubApi;
   slack?: SlackApi;
+  cloudFormation?: { send(command: unknown): Promise<unknown> };
   stackStatus?: StackStatusReader;
   fetch?: typeof fetch;
   /** May throw (no xdg-open, Windows): init reports it and carries on. Its result is ignored. */
@@ -62,6 +65,7 @@ export interface InitOptions {
   resume: boolean;
   flags: InitFlags;
   secretFlags: SecretFlags;
+  signinFlags?: SigninFlags;
   preMadeGitHubApp?: PreMadeGitHubApp;
   /** --slack-install: answers the Slack step's "is it installed?" question (for --yes). */
   slackInstall?: "installed" | "approval";
@@ -85,6 +89,7 @@ export function initSteps(input: { github: GitHubApi; slack: SlackApi }): InitSt
     deployStep({ id: "control-plane", title: "Deploy the control plane and runtime" }),
     slackAppStep(input.slack),
     deployStep({ id: "slack-service", title: "Deploy the Slack service", after: verifySlackUrls }),
+    developerSignInStep({ slack: input.slack }),
   ];
 }
 
@@ -309,6 +314,8 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     fetch: fetchImplementation,
     processEnv,
     secretFlags: options.secretFlags,
+    cloudFormation: deps.cloudFormation ?? new CloudFormationClient({ region }),
+    signinFlags: options.signinFlags ?? {},
     ...(options.preMadeGitHubApp === undefined ? {} : { preMadeGitHubApp: options.preMadeGitHubApp }),
     // Built once and reused by every deploy step. The caller identity is the one already checked
     // against the answers' account, and no partition is passed, so prepareDeployment's "answers

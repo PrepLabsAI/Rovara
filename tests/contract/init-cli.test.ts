@@ -19,6 +19,7 @@ import {
   slackIngressFetch, T0, TEST_BOT_TOKEN, TEST_PRIVATE_KEY, TEST_SIGNING_SECRET,
 } from "../support/init-fakes.js";
 import { stagingSettings } from "../support/environment-fixtures.js";
+import { SIGN_IN_PARAMETERS, fakeCloudFormation } from "../support/fake-cloudformation.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 
 const dirs: string[] = [];
@@ -62,6 +63,7 @@ async function harness(options: { releaseVersion?: string; regions?: string[] } 
     checks: passingChecks(),
     github,
     slack: fakeSlackApi(),
+    cloudFormation: fakeCloudFormation({ parameters: SIGN_IN_PARAMETERS }),
     stackStatus: { status: async () => undefined },
     fetch: slackIngressFetch({ signingSecret: TEST_SIGNING_SECRET }),
     openBrowser: browserThatCreatesGitHubApp(opened),
@@ -96,12 +98,15 @@ const FIRST_RUN = ["", "", "", "", "", "", "", "", "", "ops@example.com", "acme"
 // The Slack step: installed, the token, the signing secret, "the right bot?"; then the Slack
 // service step's "Request URL Verified?" (Task 9's fix round added both confirms).
 const SLACK = ["installed", TEST_BOT_TOKEN, TEST_SIGNING_SECRET, true, true];
+// The developer-signin step: default method Slack, client ID, client secret, "Apply this change?".
+const SIGNIN = ["", "1111111111.2222222222222", "fedcba9876543210fedcba9876543210", true];
 // A GitHub App made beforehand, and both Slack secrets, so --yes needs no prompt at all.
 const UNATTENDED = [
   "--yes", "--no-browser", "--github-account", "acme", "--github-app-id", "424242", "--github-installation-id", "777",
   "--github-private-key-env", "GH_KEY", "--slack-bot-token-env", "BOT", "--slack-signing-secret-env", "SIGNING",
+  "--slack-client-id", "1111111111.2222222222222", "--slack-client-secret-env", "SLACK_CLIENT_SECRET",
 ];
-const UNATTENDED_ENV = { GH_KEY: TEST_PRIVATE_KEY, BOT: TEST_BOT_TOKEN, SIGNING: TEST_SIGNING_SECRET };
+const UNATTENDED_ENV = { GH_KEY: TEST_PRIVATE_KEY, BOT: TEST_BOT_TOKEN, SIGNING: TEST_SIGNING_SECRET, SLACK_CLIENT_SECRET: "fedcba9876543210fedcba9876543210" };
 const WEBHOOK = "https://events.pagerduty.com/integration/0123SECRETintegrationKEY/enqueue";
 
 describe("agentx init", () => {
@@ -111,7 +116,7 @@ describe("agentx init", () => {
 
   it("a first run asks, checks, shows the plan, deploys every stack, creates both apps, and writes settings and the local cache", async () => {
     const h = await harness();
-    const prompter = scriptedPrompter([...FIRST_RUN, ...SLACK]);
+    const prompter = scriptedPrompter([...FIRST_RUN, ...SLACK, ...SIGNIN]);
     expect(await h.run([], { prompter })).toBe(0);
     expect(prompter.remaining()).toBe(0);
     expect(h.deployer.requests.map((request) => request.part)).toEqual(["access", "foundation", "identity", "control-plane", "runtime", "slack"]);
@@ -127,6 +132,7 @@ describe("agentx init", () => {
     expect(printed).toContain("aws cognito-idp admin-create-user --user-pool-id us-east-1_abc");
     const everywhere = await everywhereButSecrets(h);
     expect(everywhere).toContain("abc123.execute-api");
+    expect(everywhere).not.toContain("fedcba9876543210fedcba9876543210");
     for (const secret of [TEST_PRIVATE_KEY.split("\n")[1]!, TEST_BOT_TOKEN, TEST_SIGNING_SECRET, h.secrets.values.get("agentx/staging/callback-signing-key")!]) {
       expect(secret.length).toBeGreaterThan(10);
       expect(everywhere).not.toContain(secret);
@@ -141,7 +147,7 @@ describe("agentx init", () => {
     expect(h.store.values.has(lockParameterName("staging"))).toBe(false);
     h.deployer.fail.clear();
     h.deployer.requests.length = 0;
-    expect(await h.run([], { prompter: scriptedPrompter(SLACK) })).toBe(0);
+    expect(await h.run([], { prompter: scriptedPrompter([...SLACK, ...SIGNIN]) })).toBe(0);
     expect(h.printed()).toContain("Resuming the install of environment staging.");
     expect(h.github.conversions).toHaveLength(1);
     expect(h.deployer.requests.map((request) => request.part)).toEqual(["control-plane", "runtime", "slack"]);
@@ -149,7 +155,7 @@ describe("agentx init", () => {
 
   it("changes nothing when run again after it finished", async () => {
     const h = await harness();
-    await h.run([], { prompter: scriptedPrompter([...FIRST_RUN, ...SLACK]) });
+    await h.run([], { prompter: scriptedPrompter([...FIRST_RUN, ...SLACK, ...SIGNIN]) });
     const before = h.store.values.get(installProgressParameterName("staging"));
     const settingsBefore = h.store.values.get(settingsParameterName("staging"));
     h.deployer.requests.length = 0;
@@ -173,7 +179,7 @@ describe("agentx init", () => {
     const h = await harness();
     expect(await h.run(["--json"], { prompter: scriptedPrompter([...FIRST_RUN, "approval"]) })).toBe(0);
     expect(JSON.parse(h.out.join(""))).toMatchObject({ ok: true, data: { status: "waiting", step: "slack-app" } });
-    expect(await h.run([], { prompter: scriptedPrompter(SLACK) })).toBe(0);
+    expect(await h.run([], { prompter: scriptedPrompter([...SLACK, ...SIGNIN]) })).toBe(0);
     expect((await readInstallProgress(h.store, "staging"))?.steps["slack-service"]?.status).toBe("done");
   });
 
@@ -182,7 +188,7 @@ describe("agentx init", () => {
     const tried: string[] = [];
     // xdg-open missing (CloudShell, SSH hosts, containers), or Windows, where openSystemBrowser throws AUTH_REQUIRED.
     const openBrowser = async (url: string) => { tried.push(url); throw Object.assign(new Error("spawn xdg-open ENOENT"), { code: "ENOENT" }); };
-    const prompter = scriptedPrompter([...FIRST_RUN, "0123456789abcdef0123", ...SLACK]);
+    const prompter = scriptedPrompter([...FIRST_RUN, "0123456789abcdef0123", ...SLACK, ...SIGNIN]);
     expect(await h.run([], { prompter, openBrowser })).toBe(0);
     expect(prompter.remaining()).toBe(0);
     expect(h.github.conversions).toEqual(["0123456789abcdef0123"]);
@@ -296,7 +302,7 @@ describe("agentx init", () => {
 
   it("prints the completed run as JSON with --json", async () => {
     const h = await harness();
-    expect(await h.run(["--json"], { prompter: scriptedPrompter([...FIRST_RUN, ...SLACK]) })).toBe(0);
+    expect(await h.run(["--json"], { prompter: scriptedPrompter([...FIRST_RUN, ...SLACK, ...SIGNIN]) })).toBe(0);
     expect(JSON.parse(h.out.join(""))).toMatchObject({
       ok: true,
       data: { status: "complete", env: "staging", resumed: false, controlPlaneUrl: "https://abc123.execute-api.us-east-1.amazonaws.com" },
@@ -321,7 +327,7 @@ describe("agentx init", () => {
       ...(await prepareDeployment(input)),
       cleanup: async () => { throw new Error("directory busy"); },
     });
-    expect(await h.run([], { prompter: scriptedPrompter([...FIRST_RUN, ...SLACK]), prepareDeployment: prepare })).toBe(0);
+    expect(await h.run([], { prompter: scriptedPrompter([...FIRST_RUN, ...SLACK, ...SIGNIN]), prepareDeployment: prepare })).toBe(0);
     expect(h.printed()).toContain("AgentX environment staging is deployed.");
     expect(h.printed()).toContain("could not remove temporary files: directory busy");
   });
@@ -365,7 +371,7 @@ describe("agentx init", () => {
   it("offers to take over its own lock left by a closed terminal", async () => {
     const h = await harness();
     h.store.values.set(lockParameterName("staging"), JSON.stringify({ holder: HOLDER, command: "init", acquiredAt: new Date(T0 - 60_000).toISOString() }));
-    const prompter = scriptedPrompter([...FIRST_RUN, true, ...SLACK]);
+    const prompter = scriptedPrompter([...FIRST_RUN, true, ...SLACK, ...SIGNIN]);
     expect(await h.run([], { prompter })).toBe(0);
     expect(prompter.asked).toContain("Environment staging is locked by your own earlier agentx init since 2026-09-26T23:59:00.000Z. Take the lock over? Say yes only if that run is no longer going.");
     expect(h.store.values.has(lockParameterName("staging"))).toBe(false);

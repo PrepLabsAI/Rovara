@@ -7,7 +7,7 @@ import { agentXError, EnvironmentNameSchema, environmentSettingsPrefix, ImageDig
 import { AlertEmailSchema, ACCOUNT_PATTERN, GITHUB_LOGIN_PATTERN, IdentityAnswersSchema, ModelsAnswersSchema, REGION_PATTERN } from "../deploy/answer-schemas.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 
-export const INIT_STEP_IDS = ["prerequisites", "access", "core", "github-app", "control-plane", "slack-app", "slack-service"] as const;
+export const INIT_STEP_IDS = ["prerequisites", "access", "core", "github-app", "control-plane", "slack-app", "slack-service", "developer-signin"] as const;
 export type InitStepId = (typeof INIT_STEP_IDS)[number];
 export const SSM_STANDARD_VALUE_LIMIT = 4096;
 

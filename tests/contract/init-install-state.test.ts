@@ -13,7 +13,7 @@ describe("install state", () => {
   it("names its parameters under the environment's settings prefix", () => {
     expect(installAnswersParameterName("staging")).toBe("/agentx/staging/install/answers");
     expect(installProgressParameterName("staging")).toBe("/agentx/staging/install/progress");
-    expect(INIT_STEP_IDS).toEqual(["prerequisites", "access", "core", "github-app", "control-plane", "slack-app", "slack-service"]);
+    expect(INIT_STEP_IDS).toEqual(["prerequisites", "access", "core", "github-app", "control-plane", "slack-app", "slack-service", "developer-signin"]);
   });
 
   it("round-trips answers and progress", async () => {
