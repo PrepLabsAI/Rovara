@@ -118,6 +118,27 @@ describe("jira connectors", () => {
     expect(issues(project({ connectors: [jira({ scopes: [{ alias: "pay", cloudId: CLOUD, projectKey: "PAYMENTSOP" }] })] }))).toEqual([]);
   });
 
+  it("accepts a scope with no siteUrl, unchanged from before this field existed", () => {
+    expect(issues(project({ connectors: [jira()] }))).toEqual([]);
+  });
+
+  it("accepts a well-formed siteUrl beside cloudId", () => {
+    expect(issues(project({ connectors: [jira({ scopes: [{ alias: "pay", cloudId: CLOUD, projectKey: "PAY", siteUrl: "https://example.atlassian.net" }] })] }))).toEqual([]);
+  });
+
+  it.each([
+    ["a path", "https://example.atlassian.net/browse"],
+    ["a trailing slash", "https://example.atlassian.net/"],
+    ["an uppercase host", "https://Example.atlassian.net"],
+    ["http instead of https", "http://example.atlassian.net"],
+    ["a non-atlassian host", "https://example.com"],
+    ["a bare host with no site name", "https://.atlassian.net"],
+    ["a query string", "https://example.atlassian.net?x=1"],
+    ["a trailing hyphen in the label", "https://foo-.atlassian.net"],
+  ])("refuses siteUrl with %s", (_label, siteUrl) => {
+    expect(issues(project({ connectors: [jira({ scopes: [{ alias: "pay", cloudId: CLOUD, projectKey: "PAY", siteUrl }] })] })).length).toBeGreaterThan(0);
+  });
+
   it("requires projectKey on every scope of a project-scoped connector, because the guard does nothing for a scope without one", () => {
     const mixed = jira({ scopes: [{ alias: "a", cloudId: CLOUD, projectKey: "PAY" }, { alias: "b", cloudId: CLOUD }, { alias: "c", cloudId: CLOUD, projectKey: "OPS" }] });
     expect(issues(project({ connectors: [mixed] }))).toContain("connector jira: set projectKey on every scope or on none");

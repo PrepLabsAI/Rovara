@@ -1,4 +1,5 @@
-# payments-jira.yaml plus the Jira tools that change or move an existing issue, for the gate cases (spec 014).
+# payments-jira.yaml, but the Jira scope has no siteUrl (issue 061 review): a project registered
+# before that field existed, or one whose admin has not set it yet.
 name: payments
 revision: 1
 repositories:
@@ -21,11 +22,9 @@ integrations:
       type: jira
       credentialRef: jira-agentx-sa
       scopes:
-        - { alias: pay, cloudId: "4b8c2d1e-6f7a-4c3b-9e8d-1a2b3c4d5e6f", projectKey: PAY, siteUrl: "https://example.atlassian.net" }
+        - { alias: pay, cloudId: "4b8c2d1e-6f7a-4c3b-9e8d-1a2b3c4d5e6f", projectKey: PAY }
       tools:
         - { name: searchJiraIssuesUsingJql, access: read }
         - { name: getJiraIssue, access: read }
         - { name: createJiraIssue, access: write }
         - { name: addOrEditJiraIssueComment, access: write }
-        - { name: editJiraIssue, access: write }
-        - { name: transitionJiraIssue, access: write }

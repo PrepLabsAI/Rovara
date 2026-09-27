@@ -46,7 +46,7 @@ integrations:
       type: jira
       credentialRef: jira-agentx-sa
       scopes:
-        - { alias: pay, cloudId: "00000000-0000-0000-0000-000000000000", projectKey: PAY }
+        - { alias: pay, cloudId: "00000000-0000-0000-0000-000000000000", projectKey: PAY, siteUrl: "https://example.atlassian.net" }
       tools:
         - name: searchJiraIssuesUsingJql
           access: read
@@ -74,6 +74,7 @@ integrations:
 | Visible tools over 20 | Registered, with a warning |
 | Vendor authentication fails | Registered, with the connector reported as not connected |
 | Approved tool not found upstream or not representable | Registered, with the tool reported as skipped |
+| Jira `siteUrl` not exactly `https://<site>.atlassian.net` (path, trailing slash, uppercase host, leading/trailing hyphen in the site name) | Refused |
 | Jira `projectKey` on some scopes only | Refused |
 | Jira tool AgentX cannot limit, with `projectKey` | Refused, naming the tool |
 | Jira guarded tool with the wrong `access` | Refused, naming the tool |

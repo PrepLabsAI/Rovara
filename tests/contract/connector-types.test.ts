@@ -117,11 +117,16 @@ describe("connector resolution", () => {
     const searching = (scopes: unknown, description?: string) => resolveConnectors(project({ connectors: [
       { name: "jira", type: "jira", credentialRef: "jira-sa", scopes, tools: [{ name: "searchJiraIssuesUsingJql", access: "read", ...(description ? { description } : {}) }] },
     ] }), { credentialRegistry })[0]!;
+    // Neither scope below sets siteUrl, so every note also carries the unknown-site warning (issue 061).
+    const unknownSite = "AgentX does not know this Jira site's web address; give the issue key, and never write a link to it.";
     expect(searching([{ alias: "kan", cloudId: "1437bb04-4c88-4efd-9d38-658e8febfeba", projectKey: "KAN" }]).approvals)
-      .toEqual([{ name: "searchJiraIssuesUsingJql", access: "read", note: "AgentX limits every search to project KAN; send only the rest of the query." }]);
+      .toEqual([{ name: "searchJiraIssuesUsingJql", access: "read", note: `${unknownSite} AgentX limits every search to project KAN; send only the rest of the query.` }]);
     expect(searching([{ alias: "kan", cloudId: "1437bb04-4c88-4efd-9d38-658e8febfeba", projectKey: "KAN" }], "Search KAN.").approvals)
       .toEqual([{ name: "searchJiraIssuesUsingJql", access: "read", description: "Search KAN." }]);
-    expect(searching([{ alias: "site", cloudId: "1437bb04-4c88-4efd-9d38-658e8febfeba" }]).approvals).toEqual([{ name: "searchJiraIssuesUsingJql", access: "read" }]);
+    expect(searching([{ alias: "site", cloudId: "1437bb04-4c88-4efd-9d38-658e8febfeba" }]).approvals)
+      .toEqual([{ name: "searchJiraIssuesUsingJql", access: "read", note: unknownSite }]);
+    expect(searching([{ alias: "site", cloudId: "1437bb04-4c88-4efd-9d38-658e8febfeba", siteUrl: "https://example.atlassian.net" }]).approvals)
+      .toEqual([{ name: "searchJiraIssuesUsingJql", access: "read", note: "Link a Jira issue as https://example.atlassian.net/browse/<KEY>." }]);
     expect(await projectScoped.configured()).toBe(false);
     expect(await projectScoped.definition()).toEqual({ notConnected: "credential jira-sa is not registered" });
 

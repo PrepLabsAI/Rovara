@@ -75,7 +75,9 @@ revoke it in Atlassian and issue a new one.
 
 Open `https://<your-site>.atlassian.net/_edge/tenant_info`. It returns `{"cloudId":"..."}`. That
 UUID is your `cloudId`. Write it down lowercase, exactly as returned; AgentX refuses a `cloudId`
-that is not lowercase.
+that is not lowercase. That same address, `https://<your-site>.atlassian.net` with nothing after
+it, is also your `siteUrl` for Step 10: it gives AgentX's replies the issue's real link instead of
+a guessed one.
 
 ## Step 7: Store the token in Secrets Manager, without cutting it
 
@@ -151,14 +153,15 @@ integrations:
       type: jira
       credentialRef: jira-agentx-sa
       scopes:
-        - { alias: pay, cloudId: "<your cloudId>", projectKey: PAY }
+        - { alias: pay, cloudId: "<your cloudId>", projectKey: PAY, siteUrl: "https://<your-site>.atlassian.net" }
       tools:
         - name: searchJiraIssuesUsingJql
           access: read
           description: >-
             Search Jira issues in project PAY with JQL. AgentX adds the project filter
             itself; send only the rest of the query, for example
-            status = "To Do" ORDER BY created DESC.
+            status = "To Do" ORDER BY created DESC. Link a Jira issue as
+            https://<your-site>.atlassian.net/browse/<KEY>.
         - name: getJiraIssue
           access: read
         - name: createJiraIssue
@@ -170,10 +173,33 @@ integrations:
 `editJiraIssue` and `transitionJiraIssue` may be added too (access `write`). Edits are not signed
 with the footer, because Jira takes the description inside `fields`.
 
+`siteUrl` is optional, so a connector registered before this field existed keeps working, but
+without it AgentX cannot form a link: it tells the model to give only the issue key and never
+write a link, rather than let the model guess a host (a guess is exactly the bug this field fixes).
+It must be exactly `https://<site>.atlassian.net`, with no path and no trailing slash, and it must
+be lowercase.
+
+**Adding `siteUrl` to an already-registered connector.** Edit the project YAML you registered with:
+add `siteUrl` to each scope alongside its `cloudId`, then register the file again the same way as
+Step 11 (`agentx --project <name> admin project register --file <file> ...`) with the revision
+number increased. Registration is immutable per revision, so this is a new revision, not an edit in
+place; existing threads move to it the same way any other revision change reaches them. Do not
+change anything else in the same file unless you mean to.
+
+**Rolling back to a broker release from before this field existed.** Remove `siteUrl` from every
+scope first. `JiraScopeSchema` is strict (an unrecognised key refuses the whole entry), so an older
+broker does not simply ignore a `siteUrl` it does not know: it marks the whole Jira connector
+unusable, the same as any other invalid Jira configuration, dropping it from what is offered (the
+rest of the project keeps working; only Jira stops) until you register a revision without
+`siteUrl`. Registering a new revision that still carries `siteUrl` is refused outright on that
+older broker, the same as any other configuration it cannot validate.
+
 Use your own project key in the `description` override, in place of `PAY` above. Without an
 override, AgentX adds "AgentX limits every search to project PAY; send only the rest of the query."
-to the search tool's description itself. With an override, AgentX shows your text as written, so
-keep the project sentence in it. AgentX refuses a
+to the search tool's description itself, followed by the link sentence above when `siteUrl` is set.
+With an override, AgentX shows your text as written and adds nothing, so an override should include
+both the project sentence and, if you set `siteUrl`, the link sentence, as the example above does.
+AgentX refuses a
 `projectKey` longer than 10 characters. That fails closed: if your key is longer, shorten it or
 split the project, because registration is refused rather than left to run unchecked.
 
