@@ -92,6 +92,11 @@ function describedChanges(changes: Change[]): Extract<DeployEvent, { kind: "chan
   );
 }
 
+/** The SDK names this ChangeSetNotFoundException; its message is "ChangeSet [<name>] does not exist". */
+function isChangeSetNotFound(error: unknown): boolean {
+  return error instanceof Error && (error.name === "ChangeSetNotFoundException" || error.name === "ChangeSetNotFound");
+}
+
 /** Replaces every secret parameter's value in text; CloudFormation and the SDK may echo parameter values in reasons and errors. */
 function redactor(parameters: Record<string, string>): (text: string) => string {
   const secrets = [...SECRET_PARAMETERS].map((name) => parameters[name]).filter((value): value is string => value !== undefined && value !== "");
@@ -255,12 +260,23 @@ export function templatesDeployer(input: {
       }
     }
 
-    /** Polls the change set until the stack operation it started is over, then the stack until it is settled. */
+    /**
+     * Polls the change set until the stack operation it started is over, then the stack until it is settled.
+     * CloudFormation can remove an executed change set while the operation runs (seen live creating a new
+     * stack), so a change set that is gone hands over to the stack, whose status is the real outcome.
+     */
     async function awaitExecution(): Promise<Stack> {
       for (;;) {
-        const { ExecutionStatus } = await cloudFormation.send(new DescribeChangeSetCommand(changeSetId));
-        if (EXECUTION_ENDED.has(ExecutionStatus ?? "")) break;
-        await waitForStack(ExecutionStatus ?? "executing its change set");
+        let executionStatus: string;
+        try {
+          const { ExecutionStatus } = await cloudFormation.send(new DescribeChangeSetCommand(changeSetId));
+          executionStatus = ExecutionStatus ?? "";
+        } catch (error) {
+          if (isChangeSetNotFound(error)) break;
+          throw error;
+        }
+        if (EXECUTION_ENDED.has(executionStatus)) break;
+        await waitForStack(executionStatus === "" ? "executing its change set" : executionStatus);
       }
       for (;;) {
         const stack = await describeStack(stackName);

@@ -327,6 +327,25 @@ describe("templates engine", () => {
     expect(req.events.map((event) => event.kind)).toEqual(["changes", "deploying", "deployed"]);
   });
 
+  it("follows the stack when the executed change set is already gone (CloudFormation removed it after executing)", async () => {
+    // Seen live on 2026-09-27: the access stack reached CREATE_COMPLETE, but DescribeChangeSet right after
+    // ExecuteChangeSet answered "ChangeSet [...] does not exist", and the deploy failed before protecting it.
+    const fake = fakeClients({
+      DescribeStacks: [stackAbsent("agentx-staging-access"), stack("CREATE_COMPLETE", { ArtifactBucketName: "bucket" })],
+      CreateChangeSet: [{}],
+      DescribeChangeSet: [ready(), awsError("ChangeSetNotFoundException", `ChangeSet [${CHANGE_SET}] does not exist`, 404)],
+      ExecuteChangeSet: [{}],
+      UpdateTerminationProtection: [{}],
+    });
+    const req = request("access", { parameters: { PermissionsBoundaryArn: "", OperatorPrincipalArn: "" } });
+
+    const outputs = await deployer(fake).deploy(req);
+
+    expect(outputs).toEqual({ ArtifactBucketName: "bucket" });
+    expect(fake.inputs("UpdateTerminationProtection")).toEqual([{ StackName: "agentx-staging-access", EnableTerminationProtection: true }]);
+    expect(req.events.map((event) => event.kind)).toEqual(["changes", "deploying", "deployed"]);
+  });
+
   it("refuses an access template too large to deploy inline, before calling AWS", async () => {
     const fake = fakeClients({});
     const release = makeRelease(() => "x".repeat(51_201));
