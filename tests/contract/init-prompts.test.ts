@@ -67,6 +67,23 @@ describe("hidden input", () => {
     input.emit("data", Buffer.from("piped-value\r\nnext line\n"));
     await expect(pending).resolves.toBe("piped-value");
   });
+
+  it("keeps newlines pasted inside bracketed-paste markers, ending only on Enter after the paste (Important finding)", async () => {
+    const input = new FakeTty();
+    const pending = readHidden(input, sink(), "Secret: ");
+    input.emit("data", "\u001b[200~-----BEGIN KEY-----\nabc\n-----END KEY-----\u001b[201~");
+    input.emit("data", "\r");
+    await expect(pending).resolves.toBe("-----BEGIN KEY-----\nabc\n-----END KEY-----");
+  });
+
+  it("removes a bracketed-paste marker even when it is split across two data events (Minor finding)", async () => {
+    const input = new FakeTty();
+    const pending = readHidden(input, sink(), "Secret: ");
+    input.emit("data", "\u001b[20");
+    input.emit("data", "0~abc\u001b[201~");
+    input.emit("data", "\r");
+    await expect(pending).resolves.toBe("abc");
+  });
 });
 
 describe("cleaning secrets", () => {
@@ -110,6 +127,16 @@ describe("secret sources", () => {
   it("with --yes and no source, names both flags that could supply the secret", async () => {
     await expect(secretFromSource({ what: "Slack bot token", flag: "--slack-bot-token", source: {}, processEnv: {}, prompter: unattendedPrompter() }))
       .rejects.toThrow("Slack bot token needs an answer; with --yes, pass --slack-bot-token-file <path> or --slack-bot-token-env <NAME>");
+  });
+
+  it("passes multiline through to the prompter, so a multiline value with no source falls through only to be refused", async () => {
+    const prompter = terminalPrompter({
+      readLine: () => { throw new Error("test setup: should not read a line"); },
+      readSecret: () => { throw new Error("test setup: should not read a secret"); },
+      write: () => {},
+    });
+    await expect(secretFromSource({ what: "GitHub App private key", flag: "--github-private-key", source: {}, processEnv: {}, prompter, multiline: true }))
+      .rejects.toThrow("a multi-line GitHub App private key cannot be pasted into a hidden prompt; pass --github-private-key-file <path> or --github-private-key-env <NAME>");
   });
 });
 
@@ -164,5 +191,15 @@ describe("terminal prompter", () => {
     await expect(prompter.choose("Engine", choices, { flag: "--engine", defaultValue: "templates" })).resolves.toBe("cdk");
     await expect(prompter.confirm("Continue?", { defaultValue: true })).resolves.toBe(true);
     await expect(prompter.confirm("Continue?", { defaultValue: true })).resolves.toBe(false);
+  });
+
+  it("refuses a multiline secret up front, before ever reading it, naming the file and env flags (Important finding)", async () => {
+    const prompter = terminalPrompter({
+      readLine: () => { throw new Error("test setup: should not read a line"); },
+      readSecret: () => { throw new Error("test setup: should not read a secret"); },
+      write: () => {},
+    });
+    await expect(prompter.secret("GitHub App private key", { flag: "--github-private-key", multiline: true }))
+      .rejects.toThrow("a multi-line GitHub App private key cannot be pasted into a hidden prompt; pass --github-private-key-file <path> or --github-private-key-env <NAME>");
   });
 });
