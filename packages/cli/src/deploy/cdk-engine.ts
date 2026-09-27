@@ -111,6 +111,18 @@ export async function assertSourceAtRelease(input: { runner: CommandRunner; sour
   }
 }
 
+/**
+ * Installs and builds the release's source checkout before `cdk deploy` runs: `infra/dist` is
+ * gitignored, so a checkout at the right tag can still hold a stale build (or none at all), and the
+ * tag check alone would then pass while `cdk deploy` synthesized something else. `npm ci` installs
+ * exactly the lockfile's dependencies (including the CDK CLI `npx --no-install cdk` then runs), and
+ * `npm run build` compiles every workspace, infra included.
+ */
+export async function buildSource(input: { runner: CommandRunner; source: string }): Promise<void> {
+  await input.runner.run("npm", ["ci"], { cwd: input.source, display: "npm ci" });
+  await input.runner.run("npm", ["run", "build"], { cwd: input.source, display: "npm run build" });
+}
+
 /** Quotes an argument for the printed command line when it contains whitespace (only `--app`'s value does today). */
 function displayArg(arg: string): string {
   return /\s/.test(arg) ? JSON.stringify(arg) : arg;
@@ -145,6 +157,9 @@ export function cdkDeployer(input: {
       const outputsFile = join(input.outputsDir, `${request.part}.json`);
 
       const args: string[] = [
+        // --no-install: only the CDK CLI `npm ci` installed from the release's own lockfile, never
+        // one npx would otherwise download on the fly.
+        "--no-install",
         "cdk",
         "deploy",
         constructId,
@@ -159,8 +174,10 @@ export function cdkDeployer(input: {
       if (input.identityMode === "oidc") args.push("-c", "agentxIdentity=oidc");
       args.push("--require-approval", "never", "--outputs-file", outputsFile);
       if (request.roleArn !== undefined) args.push("--role-arn", request.roleArn);
+      // The CDK CLI looks `--parameters` up by the physical stack name (parameterMap[stack.stackName]),
+      // not the construct id; a construct-id prefix silently drops every parameter.
       for (const [key, value] of Object.entries(request.parameters)) {
-        args.push("--parameters", `${constructId}:${key}=${value}`);
+        args.push("--parameters", `${request.stackName}:${key}=${value}`);
       }
 
       // Redact each raw argument first, then quote the (now secret-free) result — quoting after

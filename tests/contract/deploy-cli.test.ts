@@ -509,6 +509,39 @@ describe("agentx deploy", () => {
     await expect(stat(runner.outputsDir as string)).rejects.toThrow();
   });
 
+  it("--engine cdk builds the tagged source (npm ci, npm run build) before any cdk deploy, and runs the installed CDK CLI", async () => {
+    const releaseDir = await emptyReleaseDir();
+    const answersPath = await writeAnswers();
+    const store = new MemoryParameterStore();
+    await store.put("/cdk-bootstrap/hnb659fds/version", "21");
+    const inner = cleanCdkRunner(scriptedOutputs());
+    const calls: Array<{ line: string; display: string; cwd: string }> = [];
+    const runner: CommandRunner = {
+      async run(command, args, options) {
+        calls.push({ line: [command, ...args.slice(0, 3)].join(" "), display: options.display, cwd: options.cwd });
+        return inner.run(command, args, options);
+      },
+    };
+    const io = capture();
+
+    const code = await executeCli(
+      ["deploy", "--mode", "install", "--engine", "cdk", "--release", releaseDir, "--answers", answersPath, "--source", "/some/source", "--yes"],
+      { ...io, deploy: safeDeployDeps({ identity: fakeIdentity, store, secrets: memorySecrets(), commandRunner: runner }) },
+    );
+
+    expect(code).toBe(0);
+    expect(calls.slice(0, 5).map((call) => call.line)).toEqual([
+      "git status --porcelain",
+      "git tag --points-at HEAD",
+      "npm ci",
+      "npm run build",
+      "npx --no-install cdk deploy",
+    ]);
+    expect(calls[2]).toMatchObject({ display: "npm ci", cwd: "/some/source" });
+    expect(calls[3]).toMatchObject({ display: "npm run build", cwd: "/some/source" });
+    expect(calls.slice(4).every((call) => call.line === "npx --no-install cdk deploy")).toBe(true);
+  });
+
   it("prints progress and never a parameter value", async () => {
     const releaseDir = await emptyReleaseDir();
     const answersPath = await writeAnswers();

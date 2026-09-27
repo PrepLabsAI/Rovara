@@ -2,7 +2,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { CDK_CONSTRUCT_IDS, assertCdkBootstrapped, assertSourceAtRelease, cdkDeployer, type CommandRunner } from "../../packages/cli/src/deploy/cdk-engine.js";
+import { CDK_CONSTRUCT_IDS, assertCdkBootstrapped, assertSourceAtRelease, buildSource, cdkDeployer, type CommandRunner } from "../../packages/cli/src/deploy/cdk-engine.js";
 import type { ParameterStore } from "../../packages/cli/src/environments/parameter-store.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 
@@ -45,12 +45,60 @@ describe("cdk engine", () => {
     expect(out).toEqual({ ApiEndpoint: "https://x" });
     const call = runner.calls[0]!;
     expect(call.command).toBe("npx");
-    expect(call.args.slice(0, 4)).toEqual(["cdk", "deploy", "AgentXControlPlane", "--exclusively"]);
+    expect(call.args.slice(0, 5)).toEqual(["--no-install", "cdk", "deploy", "AgentXControlPlane", "--exclusively"]);
     expect(call.args).toContain("agentxEnv=staging");
     expect(call.args).toContain("--role-arn");
-    expect(call.args).toContain(`AgentXControlPlane:OidcIssuer=https://i`);
+    expect(call.args).toContain(`agentx-staging-control-plane:OidcIssuer=https://i`);
     expect(call.display).not.toContain(SECRET);
-    expect(call.display).toContain("AgentXControlPlane:CallbackSigningKey=<redacted>");
+    expect(call.display).toContain("agentx-staging-control-plane:CallbackSigningKey=<redacted>");
+  });
+
+  it("keys every --parameters value by the physical stack name, which is what the CDK CLI looks parameters up by", async () => {
+    // aws-cdk 2.1142 resolves `--parameters Stack:Key=Value` with parameterMap[stack.stackName]: a
+    // construct-id prefix (AgentXControlPlane) never matches a named environment's stack
+    // (agentx-staging-control-plane), so every parameter would be silently dropped.
+    const dir = await mkdtemp(join(tmpdir(), "agentx-cdk-"));
+    const runner = recordingRunner(dir, { "agentx-staging-control-plane": {} });
+    const deployer = cdkDeployer({ runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => undefined });
+    await deployer.deploy({
+      part: "control-plane",
+      stackName: "agentx-staging-control-plane",
+      parameters: { CallbackSigningKey: SECRET, PermissionsBoundaryArn: "arn:aws:iam::1:policy/b", OperatorPrincipalArn: "arn:aws:iam::1:role/o" },
+      roleArn: "arn:aws:iam::1:role/r",
+      terminationProtection: false,
+    });
+    const { args } = runner.calls[0]!;
+    const values = args.flatMap((arg, index) => (args[index - 1] === "--parameters" ? [arg] : []));
+    expect(values).toHaveLength(3);
+    for (const value of values) expect(value.slice(0, value.indexOf(":"))).toBe("agentx-staging-control-plane");
+  });
+
+  it("builds the release source with npm ci then npm run build, through the runner, each with a display string", async () => {
+    const calls: Array<{ command: string; args: string[]; cwd: string; display: string }> = [];
+    const runner: CommandRunner = {
+      async run(command, args, options) {
+        calls.push({ command, args, cwd: options.cwd, display: options.display });
+        return { stdout: "" };
+      },
+    };
+    await buildSource({ runner, source: "/src" });
+    expect(calls).toEqual([
+      { command: "npm", args: ["ci"], cwd: "/src", display: "npm ci" },
+      { command: "npm", args: ["run", "build"], cwd: "/src", display: "npm run build" },
+    ]);
+  });
+
+  it("stops before building when npm ci fails", async () => {
+    const calls: string[] = [];
+    const runner: CommandRunner = {
+      async run(_command, args) {
+        calls.push(args.join(" "));
+        if (args[0] === "ci") throw new Error("npm ci exited with code 1");
+        return { stdout: "" };
+      },
+    };
+    await expect(buildSource({ runner, source: "/src" })).rejects.toThrow("npm ci exited with code 1");
+    expect(calls).toEqual(["ci"]);
   });
 
   it("passes agentxIdentity=oidc when the environment brings its own provider", async () => {
@@ -137,7 +185,7 @@ describe("cdk engine", () => {
     expect(display).not.toContain(SPACEY_SECRET);
     expect(display).not.toContain("sp ace");
     expect(display).not.toContain("quote");
-    expect(display).toContain("AgentXControlPlane:CallbackSigningKey=<redacted>");
+    expect(display).toContain("agentx-staging-control-plane:CallbackSigningKey=<redacted>");
   });
 
   it("emits deploying then deployed in order", async () => {

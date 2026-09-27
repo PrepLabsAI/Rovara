@@ -18,7 +18,7 @@ import { agentXError, environmentStackName, EnvironmentNameSchema, STACK_PARTS, 
 import type { CallerIdentity } from "../environments/adopt.js";
 import { stsCallerIdentity } from "../environments/adopt.js";
 import { ssmParameterStore, type ParameterStore } from "../environments/parameter-store.js";
-import { assertCdkBootstrapped, assertSourceAtRelease, cdkDeployer, type CommandRunner } from "./cdk-engine.js";
+import { assertCdkBootstrapped, assertSourceAtRelease, buildSource, cdkDeployer, type CommandRunner } from "./cdk-engine.js";
 import type { ChangeSetChange, DeployEvent, StackDeployer, StackOutputs } from "./deployer.js";
 import { deployEnvironment, type DeployAnswers, type DeployEnvironmentResult } from "./deploy-environment.js";
 import { writeExportBundle } from "./export-bundle.js";
@@ -492,6 +492,9 @@ export async function runDeploy(options: DeployCommandOptions, deps: DeployCliDe
     const runner = deps.commandRunner ?? realCommandRunner(services.stderr);
     await assertSourceAtRelease({ runner, source, version: release.manifest.version });
     await assertCdkBootstrapped({ store, region: answers.region });
+    // After the cheap checks, before any cdk deploy: infra/dist is gitignored, so only a fresh
+    // install and build guarantees `cdk deploy` synthesizes the tagged source.
+    await buildSource({ runner, source });
     cdkOutputsDir = await mkdtemp(join(tmpdir(), "agentx-cdk-outputs-"));
     deployer = cdkDeployer({
       runner,
