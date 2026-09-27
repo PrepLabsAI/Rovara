@@ -1,5 +1,5 @@
 // Shared fakes for `agentx init` tests. Nothing here reaches AWS, GitHub or Slack.
-import { randomBytes } from "node:crypto";
+import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { environmentStackName, type ReleaseManifest } from "@agentx/contracts";
@@ -8,6 +8,7 @@ import type { LoadedRelease } from "../../packages/cli/src/deploy/release.js";
 import { SecretAlreadyExistsError } from "../../packages/cli/src/deploy/signing-key.js";
 import { lockParameterName } from "../../packages/cli/src/environments/lock.js";
 import type { InitContext, InitSecrets } from "../../packages/cli/src/init/context.js";
+import type { GitHubApi } from "../../packages/cli/src/init/github-app.js";
 import { emptyProgress, type InitAnswers, type InstallProgress } from "../../packages/cli/src/init/install-state.js";
 import type { PrerequisiteChecks } from "../../packages/cli/src/init/prerequisites.js";
 import type { Prompter } from "../../packages/cli/src/init/prompts.js";
@@ -211,4 +212,39 @@ export function initContext(overrides: Partial<Omit<InitContext, "secrets">> & {
     ...overrides,
   };
   return Object.assign(context, { lines, deployer, opened }) as TestInitContext;
+}
+
+// ---- GitHub fakes (Task 8) -----------------------------------------------------------------------
+
+const TEST_KEYS = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
+// Trimmed, as the CLI stores it: GitHub's PEM ends with a newline, and the CLI trims before storing.
+export const TEST_PRIVATE_KEY = TEST_KEYS.privateKey.trim();
+export const TEST_PUBLIC_KEY = TEST_KEYS.publicKey;
+
+/** A GitHub that converts any code into an app owned by `owner`, installs it after `installAfterPolls` polls, and reports repository counts in turn. */
+export function fakeGitHubApi(input: { owner?: string; ownerType?: string; installAfterPolls?: number; repositoryCounts?: number[]; installationId?: number } = {}): GitHubApi & { conversions: string[]; polls: () => number } {
+  const conversions: string[] = [];
+  let polls = 0;
+  const counts = [...(input.repositoryCounts ?? [1])];
+  const owner = { login: input.owner ?? "acme", type: input.ownerType ?? "Organization" };
+  return {
+    conversions,
+    polls: () => polls,
+    async convertManifest(code) { conversions.push(code); return { id: 424242, slug: "agentx-acme-staging", pem: TEST_PRIVATE_KEY, owner }; },
+    async getApp() { return { slug: "agentx-acme-staging", owner }; },
+    async listInstallations() { polls += 1; return polls > (input.installAfterPolls ?? 0) ? [{ id: input.installationId ?? 777, account: { login: owner.login } }] : []; },
+    async installationToken() { return "ghs_installation-token-value"; },
+    async repositoryCount() { return counts.length > 1 ? (counts.shift() as number) : (counts[0] as number); },
+  };
+}
+
+/** A browser that, given the local form page, plays GitHub: it redirects back with `code` and the page's state. */
+export function browserThatCreatesGitHubApp(opened: string[], code = "0123456789abcdef0123"): (url: string) => Promise<void> {
+  return async (url) => {
+    opened.push(url);
+    if (!url.startsWith("http://127.0.0.1:")) return;
+    const page = await (await fetch(url)).text();
+    const state = /[?&]state=([a-f0-9]+)/.exec(page)?.[1];
+    await fetch(`${url.replace("/github/start", "/github/created")}?code=${code}&state=${state ?? "missing"}`);
+  };
 }

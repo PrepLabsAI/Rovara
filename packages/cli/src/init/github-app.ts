@@ -1,0 +1,286 @@
+// FR-027 to FR-030: the GitHub App is created with GitHub's manifest flow. A one-time listener on
+// 127.0.0.1 serves the pre-filled form and receives GitHub's redirect; the conversion's private key
+// goes straight into Secrets Manager and is never printed or written to disk. The app has no
+// webhook: AgentX handles no GitHub events.
+import { createSign, randomBytes } from "node:crypto";
+import { createServer } from "node:http";
+import { agentXError } from "@agentx/contracts";
+import type { InitContext } from "./context.js";
+import { checkPrivateKeyPem, secretFromSource } from "./prompts.js";
+import type { InitStep } from "./steps.js";
+
+export const AGENTX_HOMEPAGE = "https://github.com/PrepLabsAI/AgentX";
+export const GITHUB_WAIT_MS = 15 * 60 * 1000;
+const POLL_MS = 5_000;
+const API = "https://api.github.com";
+
+export interface GitHubManifest {
+  name: string; url: string; redirect_url: string; public: false;
+  default_permissions: { contents: "write"; pull_requests: "write"; issues: "write"; metadata: "read" };
+  default_events: string[];
+}
+
+export function githubAppManifest(input: { appName: string; redirectUrl: string }): GitHubManifest {
+  return {
+    name: input.appName,
+    url: AGENTX_HOMEPAGE,
+    redirect_url: input.redirectUrl,
+    public: false,
+    default_permissions: { contents: "write", pull_requests: "write", issues: "write", metadata: "read" },
+    default_events: [],
+  };
+}
+
+export function githubNewAppUrl(input: { account: string; accountType: "organization" | "user"; state: string }): string {
+  return input.accountType === "organization"
+    ? `https://github.com/organizations/${encodeURIComponent(input.account)}/settings/apps/new?state=${input.state}`
+    : `https://github.com/settings/apps/new?state=${input.state}`;
+}
+
+const escapeHtml = (text: string) => text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+
+export function manifestFormPage(input: { actionUrl: string; manifest: GitHubManifest }): string {
+  return [
+    "<!doctype html><meta charset=\"utf-8\"><title>Create the AgentX GitHub App</title>",
+    `<form id="manifest-form" method="post" action="${escapeHtml(input.actionUrl)}">`,
+    `<input type="hidden" name="manifest" value="${escapeHtml(JSON.stringify(input.manifest))}">`,
+    "<p>Opening GitHub with the AgentX GitHub App filled in.</p><button type=\"submit\">Continue to GitHub</button></form>",
+    "<script>document.getElementById(\"manifest-form\").submit()</script>",
+  ].join("\n");
+}
+
+export function parseManifestCallback(pasted: string, expectedState: string): string {
+  const text = pasted.trim();
+  if (/^https?:\/\//.test(text)) {
+    const url = new URL(text);
+    const state = url.searchParams.get("state");
+    if (state !== null && state !== expectedState) throw agentXError("CONFIG_INVALID", "that address is from a different agentx init run (its state does not match); create the app from the page this run printed");
+    const code = url.searchParams.get("code");
+    if (code === null || code === "") throw agentXError("CONFIG_INVALID", "that address has no code; paste the address GitHub sent your browser to after creating the app");
+    return code;
+  }
+  if (!/^[A-Za-z0-9_-]{8,}$/.test(text)) throw agentXError("CONFIG_INVALID", "that is not a GitHub manifest code; paste the address GitHub sent your browser to after creating the app");
+  return text;
+}
+
+export interface ManifestListener { port: number; startUrl: string; redirectUrl: string; code: Promise<string>; close(): void }
+
+export async function startManifestListener(input: { state: string; page: (redirectUrl: string) => string; timeoutMs: number }): Promise<ManifestListener> {
+  let resolveCode: (code: string) => void = () => undefined;
+  let rejectCode: (error: Error) => void = () => undefined;
+  const code = new Promise<string>((resolvePromise, reject) => { resolveCode = resolvePromise; rejectCode = reject; });
+  code.catch(() => undefined); // a timeout nobody awaits (the --no-browser path) must not crash the process
+  let redirectUrl = "";
+  const server = createServer((request, response) => {
+    const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    const send = (status: number, body: string) => { response.writeHead(status, { "content-type": "text/html; charset=utf-8" }); response.end(body); };
+    if (request.method === "GET" && url.pathname === "/github/start") return send(200, input.page(redirectUrl));
+    if (request.method === "GET" && url.pathname === "/github/created") {
+      if (url.searchParams.get("state") !== input.state) return send(400, "<p>This page is from a different agentx init run.</p>");
+      const received = url.searchParams.get("code");
+      if (received === null || received === "") return send(400, "<p>GitHub sent no code.</p>");
+      resolveCode(received);
+      return send(200, "<p>AgentX has the new GitHub App. You can close this tab and return to the terminal.</p>");
+    }
+    return send(404, "<p>Not found.</p>");
+  });
+  await new Promise<void>((resolvePromise) => server.listen(0, "127.0.0.1", () => resolvePromise()));
+  const address = server.address();
+  const port = typeof address === "object" && address !== null ? address.port : 0;
+  redirectUrl = `http://127.0.0.1:${port}/github/created`;
+  const timer = setTimeout(() => rejectCode(agentXError("CONFIG_INVALID", `no GitHub App was created within ${Math.round(input.timeoutMs / 60_000)} minutes; run agentx init again`)), input.timeoutMs);
+  return {
+    port,
+    startUrl: `http://127.0.0.1:${port}/github/start`,
+    redirectUrl,
+    code,
+    // closeAllConnections too: a browser's keep-alive socket would otherwise hold the process open.
+    close: () => { clearTimeout(timer); server.close(); server.closeAllConnections(); },
+  };
+}
+
+export function githubAppJwt(input: { appId: string; privateKey: string; nowSeconds: number }): string {
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const unsigned = `${encode({ alg: "RS256", typ: "JWT" })}.${encode({ iat: input.nowSeconds - 60, exp: input.nowSeconds + 540, iss: input.appId })}`;
+  return `${unsigned}.${createSign("RSA-SHA256").update(unsigned).sign(input.privateKey).toString("base64url")}`;
+}
+
+export interface GitHubApi {
+  convertManifest(code: string): Promise<{ id: number; slug: string; pem: string; owner: { login: string; type: string } }>;
+  getApp(jwt: string): Promise<{ slug: string; owner: { login: string; type: string } }>;
+  listInstallations(jwt: string): Promise<Array<{ id: number; account: { login: string } }>>;
+  installationToken(jwt: string, installationId: string): Promise<string>;
+  repositoryCount(token: string): Promise<number>;
+}
+
+export function githubRestApi(fetchImplementation: typeof fetch): GitHubApi {
+  const call = async (what: string, path: string, init: { method?: string; token?: string } = {}): Promise<unknown> => {
+    const response = await fetchImplementation(`${API}${path}`, {
+      method: init.method ?? "GET",
+      headers: {
+        accept: "application/vnd.github+json",
+        "x-github-api-version": "2022-11-28",
+        "user-agent": "agentx-cli",
+        ...(init.token === undefined ? {} : { authorization: `Bearer ${init.token}` }),
+      },
+    });
+    // Never include the body: a conversion response carries the private key.
+    if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub ${what} failed with HTTP ${response.status}`);
+    return response.json();
+  };
+  return {
+    async convertManifest(code) {
+      return (await call("manifest conversion (the code is valid for one hour)", `/app-manifests/${encodeURIComponent(code)}/conversions`, { method: "POST" })) as Awaited<ReturnType<GitHubApi["convertManifest"]>>;
+    },
+    async getApp(jwt) {
+      return (await call("app lookup", "/app", { token: jwt })) as Awaited<ReturnType<GitHubApi["getApp"]>>;
+    },
+    async listInstallations(jwt) {
+      return (await call("installation list", "/app/installations?per_page=100", { token: jwt })) as Awaited<ReturnType<GitHubApi["listInstallations"]>>;
+    },
+    async installationToken(jwt, installationId) {
+      return ((await call("installation token", `/app/installations/${encodeURIComponent(installationId)}/access_tokens`, { method: "POST", token: jwt })) as { token: string }).token;
+    },
+    async repositoryCount(token) {
+      return ((await call("repository list", "/installation/repositories?per_page=1", { token })) as { total_count: number }).total_count;
+    },
+  };
+}
+
+export function githubAppSecretName(env: string): string {
+  return `agentx/${env}/github-app`;
+}
+
+interface AppSecret { appId: string; slug: string; account: string; privateKey: string }
+
+function parseAppSecret(raw: string, name: string): AppSecret {
+  try {
+    const value = JSON.parse(raw) as Partial<AppSecret>;
+    if (typeof value.appId === "string" && typeof value.slug === "string" && typeof value.account === "string" && typeof value.privateKey === "string") {
+      return { appId: value.appId, slug: value.slug, account: value.account, privateKey: checkPrivateKeyPem(value.privateKey) };
+    }
+  } catch { /* the one message below; never echo the value */ }
+  throw agentXError("CONFIG_INVALID", `secret ${name} is not an AgentX GitHub App secret; delete it (aws secretsmanager delete-secret --secret-id ${name} --force-delete-without-recovery) and run agentx init again`);
+}
+
+const appSettingsUrl = (owner: { login: string; type: string }, slug: string) =>
+  owner.type === "Organization" ? `https://github.com/organizations/${owner.login}/settings/apps/${slug}` : `https://github.com/settings/apps/${slug}`;
+const installationSettingsUrl = (accountType: "organization" | "user", account: string, id: string) =>
+  accountType === "organization" ? `https://github.com/organizations/${account}/settings/installations/${id}` : `https://github.com/settings/installations/${id}`;
+
+async function createWithManifest(context: InitContext, api: GitHubApi): Promise<AppSecret & { owner: { login: string; type: string } }> {
+  const { account, accountType, appName } = context.answers.github;
+  const state = randomBytes(16).toString("hex");
+  const actionUrl = githubNewAppUrl({ account, accountType, state });
+  const listener = await startManifestListener({ state, page: (redirectUrl) => manifestFormPage({ actionUrl, manifest: githubAppManifest({ appName, redirectUrl }) }), timeoutMs: GITHUB_WAIT_MS });
+  try {
+    context.write(`Create the GitHub App "${appName}" for ${account}: GitHub opens with everything filled in; press Create GitHub App.`);
+    let code: string;
+    if (context.openBrowser !== undefined) {
+      context.write(`If no browser opens, open ${listener.startUrl}`);
+      await context.openBrowser(listener.startUrl);
+      code = await listener.code;
+    } else {
+      context.write(`Open ${listener.startUrl} in a browser on this machine. From another machine, first run: ssh -L ${listener.port}:127.0.0.1:${listener.port} <this host>`);
+      context.write("After GitHub creates the app it sends your browser to a 127.0.0.1 address. If that page does not load, copy the address from the address bar.");
+      code = parseManifestCallback(await context.prompter.ask("Paste that address (or just its code)", { flag: "--github-app-id, --github-installation-id and --github-private-key-file (a GitHub App made beforehand)" }), state);
+    }
+    const conversion = await api.convertManifest(code);
+    return { appId: String(conversion.id), slug: conversion.slug, account: conversion.owner.login, privateKey: checkPrivateKeyPem(conversion.pem.trim()), owner: conversion.owner };
+  } finally {
+    listener.close();
+  }
+}
+
+async function usePreMadeApp(context: InitContext, api: GitHubApi, appId: string): Promise<AppSecret & { owner: { login: string; type: string } }> {
+  const privateKey = checkPrivateKeyPem(await secretFromSource({
+    what: "GitHub App private key", flag: "--github-private-key", source: context.secretFlags.githubPrivateKey ?? {}, processEnv: context.processEnv, prompter: context.prompter, multiline: true,
+  }));
+  const app = await api.getApp(githubAppJwt({ appId, privateKey, nowSeconds: Math.floor(context.now() / 1000) }));
+  return { appId, slug: app.slug, account: app.owner.login, privateKey, owner: app.owner };
+}
+
+export function githubAppStep(api: GitHubApi): InitStep<InitContext> {
+  return {
+    id: "github-app",
+    title: "Create and install the GitHub App",
+    async run(context, progress) {
+      const { account, accountType } = context.answers.github;
+      const name = githubAppSecretName(context.env);
+      const requireArn = async () => {
+        const arn = await context.secrets.arn(name);
+        if (arn === undefined) throw agentXError("RUNTIME_UNAVAILABLE", `secret ${name} was just stored but cannot be described; run agentx init again`);
+        return arn;
+      };
+      const jwtFor = (appId: string, privateKey: string) => githubAppJwt({ appId, privateKey, nowSeconds: Math.floor(context.now() / 1000) });
+
+      let app = progress.current().github;
+      let privateKey: string | undefined;
+      if (app === undefined) {
+        const leftover = await context.secrets.get(name);
+        if (leftover !== undefined) {
+          const recovered = parseAppSecret(leftover, name);
+          privateKey = recovered.privateKey;
+          app = { account: recovered.account, appId: recovered.appId, slug: recovered.slug, privateKeySecretArn: await requireArn() };
+          await progress.update({ github: app });
+          context.write(`Found the GitHub App ${recovered.slug} an earlier run created.`);
+        }
+      }
+      if (app === undefined) {
+        const preMade = context.preMadeGitHubApp;
+        const created = preMade !== undefined ? await usePreMadeApp(context, api, preMade.appId) : await createWithManifest(context, api);
+        if (created.owner.login.toLowerCase() !== account.toLowerCase()) {
+          // An app made beforehand is the owner's own: point at the flag, never tell them to delete it.
+          if (preMade !== undefined) {
+            throw agentXError("CONFIG_INVALID", `GitHub App ${preMade.appId} belongs to ${created.owner.login}, not ${account}; nothing was saved. Check --github-app-id and run agentx init again`);
+          }
+          throw agentXError("CONFIG_INVALID", `the GitHub App was created under ${created.owner.login}, not ${account}; nothing was saved. Delete it at ${appSettingsUrl(created.owner, created.slug)}/advanced and run agentx init again`);
+        }
+        await context.secrets.create(name, JSON.stringify({ appId: created.appId, slug: created.slug, account, privateKey: created.privateKey }));
+        privateKey = created.privateKey;
+        app = { account, appId: created.appId, slug: created.slug, privateKeySecretArn: await requireArn() };
+        await progress.update({ github: app });
+      }
+      if (privateKey === undefined) {
+        const stored = await context.secrets.get(name);
+        if (stored === undefined) throw agentXError("CONFIG_INVALID", `secret ${name} is missing; delete the GitHub App ${app.slug} and run agentx init again`);
+        privateKey = parseAppSecret(stored, name).privateKey;
+      }
+
+      const installUrl = `https://github.com/apps/${app.slug}/installations/new`;
+      const deadline = context.now() + GITHUB_WAIT_MS;
+      let installationId = context.preMadeGitHubApp?.installationId;
+      if (installationId !== undefined) {
+        const listed = await api.listInstallations(jwtFor(app.appId, privateKey));
+        if (!listed.some((entry) => String(entry.id) === installationId && entry.account.login.toLowerCase() === account.toLowerCase())) {
+          throw agentXError("CONFIG_INVALID", `installation ${installationId} of GitHub App ${app.appId} is not on ${account}; check --github-installation-id`);
+        }
+      } else {
+        context.write(`Install the app on ${account} and choose the repositories AgentX may use: ${installUrl}`);
+        if (context.openBrowser !== undefined) await context.openBrowser(installUrl);
+        for (;;) {
+          const match = (await api.listInstallations(jwtFor(app.appId, privateKey))).find((entry) => entry.account.login.toLowerCase() === account.toLowerCase());
+          if (match !== undefined) { installationId = String(match.id); break; }
+          if (context.now() >= deadline) {
+            throw agentXError("CONFIG_INVALID", `the GitHub App was not installed on ${account} within 15 minutes; install it at ${installUrl}, then run agentx init again`);
+          }
+          await context.sleep(POLL_MS);
+        }
+      }
+
+      let told = false;
+      for (;;) {
+        const token = await api.installationToken(jwtFor(app.appId, privateKey), installationId);
+        if ((await api.repositoryCount(token)) > 0) break;
+        if (!told) {
+          context.write(`The app is installed but can see no repositories. Choose at least one at ${installationSettingsUrl(accountType, account, installationId)}`);
+          told = true;
+        }
+        if (context.now() >= deadline) throw agentXError("CONFIG_INVALID", `the GitHub App can see no repositories; choose at least one at ${installationSettingsUrl(accountType, account, installationId)}, then run agentx init again`);
+        await context.sleep(POLL_MS);
+      }
+      await progress.update({ github: { ...app, installationId } });
+      return { status: "done", note: `GitHub App ${app.slug} installed on ${account}` };
+    },
+  };
+}
