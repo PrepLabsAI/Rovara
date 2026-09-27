@@ -20,6 +20,54 @@ beforeEach(() => {
   store = new DeveloperSignInStore({ documentClient: db, tableName: "signin", now: () => clock });
 });
 
+/**
+ * Fix round 1, F1: real DynamoDB always reports a cancelled TransactWriteItems with a
+ * CancellationReasons array, one entry per TransactItem, "None" for items not implicated
+ * (docs.aws.amazon.com/amazondynamodb .../TransactionCanceledException). FakeDynamoDb does not
+ * track per-item reasons, so this wraps it to manufacture that shape for one TransactWriteCommand,
+ * then falls through to the real fake for everything else (including the rest of that same
+ * transaction's item checks, since the manufactured throw happens before any real send).
+ */
+function withTransactConflict(real: FakeDynamoDb, reasons: Array<{ Code: string }>): { send(command: unknown): Promise<unknown> } {
+  let armed = true;
+  return {
+    async send(command: unknown) {
+      const name = (command as { constructor: { name: string } }).constructor.name;
+      if (armed && name === "TransactWriteCommand") {
+        armed = false;
+        throw Object.assign(new Error("simulated transaction cancellation"), {
+          name: "TransactionCanceledException",
+          CancellationReasons: reasons,
+        });
+      }
+      return real.send(command as Parameters<typeof real.send>[0]);
+    },
+  };
+}
+
+/**
+ * Fix round 1, F3: simulates a concurrent revocation landing between upsertDeveloper's internal
+ * read and its internal write, by injecting the mutation immediately before the first write this
+ * store issues for the given key (whichever DynamoDB verb that is), then delegating for real. A
+ * blind read-then-overwrite clobbers the injected revocation; an atomic conditional update does not.
+ */
+function withConcurrentRevocation(real: FakeDynamoDb, key: string): { send(command: unknown): Promise<unknown> } {
+  let armed = true;
+  return {
+    async send(command: unknown) {
+      const name = (command as { constructor: { name: string } }).constructor.name;
+      const input = (command as { input: { Key?: { pk: string }; Item?: { pk: string } } }).input;
+      const targetsKey = input.Key?.pk === key || input.Item?.pk === key;
+      if (armed && targetsKey && (name === "PutCommand" || name === "UpdateCommand")) {
+        armed = false;
+        const current = real.get(key, "META");
+        if (current !== undefined) real.set({ ...current, revoked: true });
+      }
+      return real.send(command as Parameters<typeof real.send>[0]);
+    },
+  };
+}
+
 describe("authorization requests", () => {
   it("expire after 10 minutes and are consumed once, for the method chosen", async () => {
     const request = await store.createAuthRequest({ clientRedirectUri: redirect, clientState: "cs", codeChallenge: challenge, nonce: "n1" });
@@ -53,6 +101,22 @@ describe("developers", () => {
     const next = await store.upsertDeveloper({ developerId, provider: "oidc", issuer: "https://idp.example.test", subject: "s1", displayName: "Maya" });
     expect(next.email).toBeUndefined();
     expect(next.slackUserId).toBeUndefined();
+  });
+
+  // Fix round 1, F3: upsertDeveloper must not overwrite a concurrent revocation.
+  it("never lets a re-sign-in un-revoke a developer racing a concurrent revocation", async () => {
+    const profile = { developerId, provider: "slack" as const, issuer: "https://slack.com", subject: "U0123ABCD", displayName: "Maya", slackUserId: "U0123ABCD" };
+    await store.upsertDeveloper(profile);
+
+    const racingStore = new DeveloperSignInStore({
+      documentClient: withConcurrentRevocation(db, `DEVELOPER#${developerId}`),
+      tableName: "signin",
+      now: () => clock,
+    });
+    clock = T0 + 60_000;
+    const next = await racingStore.upsertDeveloper({ ...profile, displayName: "Maya Chen" });
+    expect(next).toMatchObject({ revoked: true, displayName: "Maya Chen" });
+    expect(db.get(`DEVELOPER#${developerId}`, "META")).toMatchObject({ revoked: true });
   });
 });
 
@@ -102,6 +166,7 @@ describe("sessions and refresh tokens (FR-005)", () => {
     clock = T0 + 3_600_000;
     const rotated = await store.rotateRefresh(lookup);
     if (!("refreshToken" in rotated)) throw new Error("expected a new token");
+    clock += 61_000; // past the reuse grace window (fix round 1, F2); see "refresh reuse grace window" below
     expect(await store.lookupRefresh(refreshToken)).toEqual({ kind: "reused", sessionId: lookup.session.sessionId });
     const next = await store.lookupRefresh(rotated.refreshToken);
     expect(next).toMatchObject({ kind: "active", session: { endsAt: T0 / 1000 + 604_800 } });
@@ -123,5 +188,106 @@ describe("sessions and refresh tokens (FR-005)", () => {
     clock = T0 + 604_801_000;
     expect((await store.lookupRefresh(two.refreshToken)).kind).toBe("ended");
     expect(await store.lookupRefresh(`agxr_${"z".repeat(43)}`)).toEqual({ kind: "unknown" });
+  });
+});
+
+// Fix round 1, F1: a cancelled transaction must be read for which item's condition actually
+// failed, not blanket-reported as reuse (DynamoDB also cancels for TransactionConflict and
+// throttling, and Task 6 revokes the session on "reused").
+describe("rotation failures distinguish reuse, ended and transient errors", () => {
+  it("reports reused precisely when CancellationReasons names the old token's condition", async () => {
+    const { refreshToken } = await store.createSession({ developerId, amr: "slack" });
+    const lookup = await store.lookupRefresh(refreshToken);
+    if (lookup.kind !== "active") throw new Error("expected active");
+    const reusedStore = new DeveloperSignInStore({
+      documentClient: withTransactConflict(db, [{ Code: "ConditionalCheckFailed" }, { Code: "None" }, { Code: "None" }]),
+      tableName: "signin",
+      now: () => clock,
+    });
+    expect(await reusedStore.rotateRefresh(lookup)).toEqual({ reused: true });
+  });
+
+  it("reports ended precisely when CancellationReasons names the session's condition", async () => {
+    const { refreshToken } = await store.createSession({ developerId, amr: "slack" });
+    const lookup = await store.lookupRefresh(refreshToken);
+    if (lookup.kind !== "active") throw new Error("expected active");
+    const endedStore = new DeveloperSignInStore({
+      documentClient: withTransactConflict(db, [{ Code: "None" }, { Code: "None" }, { Code: "ConditionalCheckFailed" }]),
+      tableName: "signin",
+      now: () => clock,
+    });
+    expect(await endedStore.rotateRefresh(lookup)).toEqual({ ended: true });
+  });
+
+  it("rethrows a transaction conflict instead of reporting reuse, and leaves the token active", async () => {
+    const { refreshToken } = await store.createSession({ developerId, amr: "slack" });
+    const lookup = await store.lookupRefresh(refreshToken);
+    if (lookup.kind !== "active") throw new Error("expected active");
+    const conflictStore = new DeveloperSignInStore({
+      documentClient: withTransactConflict(db, [{ Code: "None" }, { Code: "TransactionConflict" }, { Code: "None" }]),
+      tableName: "signin",
+      now: () => clock,
+    });
+    await expect(conflictStore.rotateRefresh(lookup)).rejects.toThrow("simulated transaction cancellation");
+    expect(await store.lookupRefresh(refreshToken)).toMatchObject({ kind: "active" });
+  });
+
+  // Fix round 1, F4: the session condition now also requires endsAt > :now.
+  it("rotateRefresh refuses once the session's end date has passed, even given a lookup taken before", async () => {
+    const { refreshToken } = await store.createSession({ developerId, amr: "slack" });
+    const lookup = await store.lookupRefresh(refreshToken);
+    if (lookup.kind !== "active") throw new Error("expected active");
+    clock = T0 + 604_801_000;
+    expect(await store.rotateRefresh(lookup)).toEqual({ ended: true });
+  });
+});
+
+// Fix round 1, F2 (owner ruling): an Auth0-style reuse interval. A token presented again within
+// REFRESH_REUSE_GRACE_SECONDS of its own rotation is not treated as theft, so a lost response or a
+// stale-lock race between two local processes does not sign the person out.
+describe("refresh reuse grace window", () => {
+  it("inside the window, presenting the just-rotated token again mints a fresh successor without revoking the session", async () => {
+    const { session, refreshToken } = await store.createSession({ developerId, amr: "slack" });
+    const lookup = await store.lookupRefresh(refreshToken);
+    if (lookup.kind !== "active") throw new Error("expected active");
+    const rotated = await store.rotateRefresh(lookup);
+    if (!("refreshToken" in rotated)) throw new Error("expected a new token");
+
+    clock += 59_000;
+    const replay = await store.lookupRefresh(refreshToken);
+    expect(replay).toMatchObject({ kind: "recently_rotated", session: { sessionId: session.sessionId } });
+    if (replay.kind !== "recently_rotated") throw new Error("expected recently_rotated");
+
+    const successor = await store.rotateRecentlyUsed(replay);
+    if (!("refreshToken" in successor)) throw new Error("expected a successor token");
+    expect(successor.refreshToken).toMatch(/^agxr_[A-Za-z0-9_-]{43}$/);
+
+    const finalSession = await store.getSession(session.sessionId);
+    expect(finalSession?.revokedAt).toBeUndefined();
+    expect(await store.lookupRefresh(rotated.refreshToken)).toMatchObject({ kind: "active" });
+    expect(await store.lookupRefresh(successor.refreshToken)).toMatchObject({ kind: "active" });
+  });
+
+  it("outside the window, presenting the same token again is reused as before", async () => {
+    const { refreshToken } = await store.createSession({ developerId, amr: "slack" });
+    const lookup = await store.lookupRefresh(refreshToken);
+    if (lookup.kind !== "active") throw new Error("expected active");
+    await store.rotateRefresh(lookup);
+
+    clock += 61_000;
+    expect(await store.lookupRefresh(refreshToken)).toEqual({ kind: "reused", sessionId: lookup.session.sessionId });
+  });
+
+  it("a revoked session never rotates, even inside the grace window", async () => {
+    const { session, refreshToken } = await store.createSession({ developerId, amr: "slack" });
+    const lookup = await store.lookupRefresh(refreshToken);
+    if (lookup.kind !== "active") throw new Error("expected active");
+    const rotated = await store.rotateRefresh(lookup);
+    if (!("refreshToken" in rotated)) throw new Error("expected a new token");
+    await store.revokeSession(session.sessionId, "refresh_token_reused");
+
+    clock += 1_000;
+    expect(await store.lookupRefresh(refreshToken)).toEqual({ kind: "reused", sessionId: session.sessionId });
+    expect(await store.rotateRecentlyUsed({ session: lookup.session, tokenHash: lookup.tokenHash })).toEqual({ reused: true });
   });
 });

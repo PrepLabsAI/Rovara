@@ -18,14 +18,29 @@ export type RefreshLookup =
   | { kind: "active"; session: SessionRecord; tokenHash: string }
   | { kind: "unknown" }
   | { kind: "reused"; sessionId: string }
+  | { kind: "recently_rotated"; session: SessionRecord; tokenHash: string }
   | { kind: "ended"; session: SessionRecord };
+
+/** Auth0-style reuse interval (rulings.md, Task 4 fix round 1, F2): a refresh token presented again
+ * within this many seconds of its own rotation is not treated as theft, so a lost response or a
+ * stale-lock race between two local processes does not sign the person out. */
+export const REFRESH_REUSE_GRACE_SECONDS = 60;
 
 interface CodeRecord { developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; codeChallenge: string; redirectUri: string; expiresAt: number; usedAt?: string }
 interface RefreshRecord { sessionId: string; expiresAt: number; usedAt?: string }
+interface CancellationReason { Code?: string }
 
 const META = "META";
 const conditionFailed = (error: unknown) =>
   error instanceof Error && (error.name === "ConditionalCheckFailedException" || error.name === "TransactionCanceledException");
+
+/** Real DynamoDB always populates this on a cancelled TransactWriteItems, one entry per
+ * TransactItem, ordered the same way, "None" for items not implicated. FakeDynamoDb does not
+ * model it, so callers must tolerate it being absent. */
+function cancellationReasons(error: unknown): CancellationReason[] | undefined {
+  const reasons = (error as { CancellationReasons?: unknown } | null)?.CancellationReasons;
+  return Array.isArray(reasons) ? (reasons as CancellationReason[]) : undefined;
+}
 
 export class DeveloperSignInStore {
   constructor(private readonly input: { documentClient: { send(command: unknown): Promise<unknown> }; tableName: string; now: () => number }) {}
@@ -89,22 +104,44 @@ export class DeveloperSignInStore {
   }
 
   async upsertDeveloper(profile: Omit<DeveloperRecord, "firstSignInAt" | "lastSignInAt" | "revoked">): Promise<DeveloperRecord> {
-    const existing = await this.getDeveloper(profile.developerId);
+    // One atomic update, not a read-then-overwrite: a concurrent revocation (or another sign-in)
+    // must never be clobbered by this call. firstSignInAt and revoked are set only if absent;
+    // revoked in particular must never flip true back to false (fix round 1, F3).
     const at = this.iso();
-    const record: DeveloperRecord = {
-      developerId: profile.developerId,
-      provider: profile.provider,
-      issuer: profile.issuer,
-      subject: profile.subject,
-      displayName: profile.displayName,
-      ...(profile.email === undefined ? {} : { email: profile.email }),
-      ...(profile.slackUserId === undefined ? {} : { slackUserId: profile.slackUserId }),
-      firstSignInAt: existing?.firstSignInAt ?? at,
-      lastSignInAt: at,
-      revoked: existing?.revoked ?? false,
+    const setClauses = [
+      "entityType = :entityType",
+      "provider = :provider",
+      "issuer = :issuer",
+      "subject = :subject",
+      "displayName = :displayName",
+      "lastSignInAt = :at",
+      "firstSignInAt = if_not_exists(firstSignInAt, :at)",
+      "revoked = if_not_exists(revoked, :false)",
+    ];
+    const removeClauses: string[] = [];
+    const values: Record<string, unknown> = {
+      ":entityType": "DEVELOPER",
+      ":provider": profile.provider,
+      ":issuer": profile.issuer,
+      ":subject": profile.subject,
+      ":displayName": profile.displayName,
+      ":at": at,
+      ":false": false,
     };
-    await this.put({ pk: `DEVELOPER#${record.developerId}`, sk: META, entityType: "DEVELOPER", ...record });
-    return record;
+    if (profile.email === undefined) removeClauses.push("email");
+    else { setClauses.push("email = :email"); values[":email"] = profile.email; }
+    if (profile.slackUserId === undefined) removeClauses.push("slackUserId");
+    else { setClauses.push("slackUserId = :slackUserId"); values[":slackUserId"] = profile.slackUserId; }
+
+    await this.input.documentClient.send(new UpdateCommand({
+      TableName: this.input.tableName,
+      Key: { pk: `DEVELOPER#${profile.developerId}`, sk: META },
+      UpdateExpression: `SET ${setClauses.join(", ")}${removeClauses.length > 0 ? ` REMOVE ${removeClauses.join(", ")}` : ""}`,
+      ExpressionAttributeValues: values,
+    }));
+    const stored = await this.getDeveloper(profile.developerId);
+    if (stored === undefined) throw new Error("developer upsert did not persist");
+    return stored;
   }
 
   async getDeveloper(developerId: string): Promise<DeveloperRecord | undefined> {
@@ -163,14 +200,26 @@ export class DeveloperSignInStore {
     const tokenHash = sha256Hex(refreshToken);
     const record = await this.get<RefreshRecord>(`REFRESH#${tokenHash}`);
     if (record === undefined) return { kind: "unknown" };
-    if (record.usedAt !== undefined) return { kind: "reused", sessionId: record.sessionId };
+    if (record.usedAt !== undefined) {
+      // Fix round 1, F2 (owner ruling): inside the grace window, and only for a session that is
+      // still healthy, a repeat presentation gets a fresh successor instead of being treated as
+      // theft. Past the window, or against a dead session, it's reused exactly as before.
+      const withinGrace = this.input.now() - Date.parse(record.usedAt) <= REFRESH_REUSE_GRACE_SECONDS * 1000;
+      if (withinGrace) {
+        const session = await this.getSession(record.sessionId);
+        if (session !== undefined && session.revokedAt === undefined && session.endsAt > this.seconds()) {
+          return { kind: "recently_rotated", session, tokenHash };
+        }
+      }
+      return { kind: "reused", sessionId: record.sessionId };
+    }
     const session = await this.getSession(record.sessionId);
     if (session === undefined) return { kind: "unknown" };
     if (session.revokedAt !== undefined || session.endsAt <= this.seconds()) return { kind: "ended", session };
     return { kind: "active", session, tokenHash };
   }
 
-  async rotateRefresh(input: { session: SessionRecord; tokenHash: string }): Promise<{ refreshToken: string } | { reused: true }> {
+  async rotateRefresh(input: { session: SessionRecord; tokenHash: string }): Promise<{ refreshToken: string } | { reused: true } | { ended: true }> {
     const refreshToken = randomToken("agxr_");
     const at = this.iso();
     try {
@@ -178,7 +227,29 @@ export class DeveloperSignInStore {
         TransactItems: [
           { Update: { TableName: this.input.tableName, Key: { pk: `REFRESH#${input.tokenHash}`, sk: META }, UpdateExpression: "SET usedAt = :at", ConditionExpression: "attribute_exists(pk) AND attribute_not_exists(usedAt)", ExpressionAttributeValues: { ":at": at } } },
           { Put: { TableName: this.input.tableName, Item: { pk: `REFRESH#${sha256Hex(refreshToken)}`, sk: META, entityType: "REFRESH_TOKEN", sessionId: input.session.sessionId, expiresAt: input.session.endsAt }, ConditionExpression: "attribute_not_exists(pk)" } },
-          { Update: { TableName: this.input.tableName, Key: { pk: `SESSION#${input.session.sessionId}`, sk: META }, UpdateExpression: "SET lastRefreshAt = :at", ConditionExpression: "attribute_exists(pk) AND attribute_not_exists(revokedAt)", ExpressionAttributeValues: { ":at": at } } },
+          { Update: { TableName: this.input.tableName, Key: { pk: `SESSION#${input.session.sessionId}`, sk: META }, UpdateExpression: "SET lastRefreshAt = :at", ConditionExpression: "attribute_exists(pk) AND attribute_not_exists(revokedAt) AND endsAt > :now", ExpressionAttributeValues: { ":at": at, ":now": this.seconds() } } },
+        ],
+      }));
+    } catch (error) {
+      return this.classifyRotationFailure(error, input.tokenHash, input.session.sessionId);
+    }
+    return { refreshToken };
+  }
+
+  /** Fix round 1, F2 (owner ruling): mints a fresh successor for a token already used within
+   * REFRESH_REUSE_GRACE_SECONDS, atomically re-checking that window and the session's health so a
+   * caller can't be tricked by a stale lookup. Covers a lost response and a stale-lock race between
+   * two local processes refreshing at once, without weakening reuse detection past the window. */
+  async rotateRecentlyUsed(input: { session: SessionRecord; tokenHash: string }): Promise<{ refreshToken: string } | { reused: true }> {
+    const refreshToken = randomToken("agxr_");
+    const at = this.iso();
+    const cutoff = new Date(this.input.now() - REFRESH_REUSE_GRACE_SECONDS * 1000).toISOString();
+    try {
+      await this.input.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          { ConditionCheck: { TableName: this.input.tableName, Key: { pk: `REFRESH#${input.tokenHash}`, sk: META }, ConditionExpression: "attribute_exists(pk) AND attribute_exists(usedAt) AND usedAt > :cutoff", ExpressionAttributeValues: { ":cutoff": cutoff } } },
+          { Put: { TableName: this.input.tableName, Item: { pk: `REFRESH#${sha256Hex(refreshToken)}`, sk: META, entityType: "REFRESH_TOKEN", sessionId: input.session.sessionId, expiresAt: input.session.endsAt }, ConditionExpression: "attribute_not_exists(pk)" } },
+          { Update: { TableName: this.input.tableName, Key: { pk: `SESSION#${input.session.sessionId}`, sk: META }, UpdateExpression: "SET lastRefreshAt = :at", ConditionExpression: "attribute_exists(pk) AND attribute_not_exists(revokedAt) AND endsAt > :now", ExpressionAttributeValues: { ":at": at, ":now": this.seconds() } } },
         ],
       }));
     } catch (error) {
@@ -186,6 +257,27 @@ export class DeveloperSignInStore {
       throw error;
     }
     return { refreshToken };
+  }
+
+  /** Fix round 1, F1: a cancelled transaction must be read for which item's condition actually
+   * failed. ConditionalCheckFailed on the old token means reused; on the session, ended. Anything
+   * else (TransactionConflict, throttling, ...) is transient and gets rethrown so the caller can
+   * retry, instead of being folded into "reused" and signing the person out. Real DynamoDB always
+   * includes CancellationReasons on a cancelled transaction; FakeDynamoDb does not model it, so
+   * when it's absent this re-derives the answer from the table directly. */
+  private async classifyRotationFailure(error: unknown, tokenHash: string, sessionId: string): Promise<{ reused: true } | { ended: true }> {
+    if (!conditionFailed(error)) throw error;
+    const reasons = cancellationReasons(error);
+    if (reasons !== undefined) {
+      if (reasons[0]?.Code === "ConditionalCheckFailed") return { reused: true };
+      if (reasons[2]?.Code === "ConditionalCheckFailed") return { ended: true };
+      throw error;
+    }
+    const token = await this.get<RefreshRecord>(`REFRESH#${tokenHash}`);
+    if (token?.usedAt !== undefined) return { reused: true };
+    const session = await this.getSession(sessionId);
+    if (session === undefined || session.revokedAt !== undefined || session.endsAt <= this.seconds()) return { ended: true };
+    throw error;
   }
 
   async revokeSession(sessionId: string, reason: string): Promise<void> {
