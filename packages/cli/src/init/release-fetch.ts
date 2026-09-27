@@ -40,8 +40,10 @@ function unsafeArchiveError(version: string): Error {
 async function assertArchiveEntriesAreSafe(input: { runner: CommandRunner; archive: string; cwd: string; archiveName: string; version: string }): Promise<void> {
   const { runner, archive, cwd, archiveName, version } = input;
   // quiet: the listings are for this check only, and a release lists thousands of files.
-  const plain = await runner.run("tar", ["-tzf", archive], { cwd, display: `tar -tzf ${archiveName}`, quiet: true });
-  const verbose = await runner.run("tar", ["-tzvf", archive], { cwd, display: `tar -tzvf ${archiveName}`, quiet: true });
+  // -P shows every entry's name as stored: GNU tar otherwise strips a leading "/" or "../" from the
+  // listing (and from extraction), which would hide exactly the entries this check must refuse.
+  const plain = await runner.run("tar", ["-tPzf", archive], { cwd, display: `tar -tPzf ${archiveName}`, quiet: true });
+  const verbose = await runner.run("tar", ["-tPzvf", archive], { cwd, display: `tar -tPzvf ${archiveName}`, quiet: true });
   const names = plain.stdout.split("\n").filter((line) => line.length > 0);
   const details = verbose.stdout.split("\n").filter((line) => line.length > 0);
   // The plain and verbose listings come from the same tar reading the same archive back to back:
