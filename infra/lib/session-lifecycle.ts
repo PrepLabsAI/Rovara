@@ -159,8 +159,9 @@ export class SessionLifecycle extends Construct {
       AGENTX_METRICS_NAMESPACE: naming.metricsNamespace,
     }, Duration.seconds(50));
     inVpc(this.reaper);
-    // One run at a time; every transition is conditional anyway, so an overlap would only waste work.
-    (this.reaper.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = 1;
+    // No reserved concurrency: an account whose concurrency limit is Lambda's minimum unreserved pool
+    // (10) cannot reserve any. Overlapping runs are safe, because every transition is conditional, and
+    // rare, because a run times out before the next one-minute tick.
     props.state.grantReadWriteData(this.reaper);
     this.provisioner.grantStartExecution(this.reaper);
     this.reaper.addToRolePolicy(new iam.PolicyStatement({ sid: "Describe", actions: ["ec2:DescribeInstances", "ec2:DescribeVolumes"], resources: ["*"] }));

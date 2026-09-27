@@ -18,8 +18,9 @@ second phase waits for the deployed reaper to stop the session and then resumes 
 
 ## Requirements
 
-- **FR-001**: An EventBridge Scheduler schedule MUST run the reaper every minute, one run at a time, as a
-  Lambda in the private subnets.
+- **FR-001**: An EventBridge Scheduler schedule MUST run the reaper every minute as a Lambda in the private
+  subnets. Runs MUST be safe to overlap; the reaper reserves no concurrency, which an account at the
+  Lambda minimum (10) cannot grant.
 - **FR-002**: A READY session idle over five minutes or launched over 14 days ago MUST be skipped when its
   workspace has an active operation or `/ping` returns `HealthyBusy`.
 - **FR-003**: Otherwise the reaper MUST claim READY → STOPPING conditionally on an unchanged

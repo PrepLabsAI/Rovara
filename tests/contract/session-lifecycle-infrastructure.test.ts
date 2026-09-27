@@ -87,9 +87,11 @@ describe("EC2 session lifecycle infrastructure (issue #83)", () => {
     expect(create.Condition).toEqual({ StringEquals: { "aws:RequestTag/DeploymentMode": "ec2-ebs", "aws:RequestTag/Environment": "production" } });
   });
 
-  it("runs the idle reaper every minute, one run at a time, in the VPC, terminating only its own instances (#85)", () => {
+  it("runs the idle reaper every minute in the VPC, terminating only its own instances (#85)", () => {
     const [reaperId, reaper] = ofType("AWS::Lambda::Function").find(([id]) => id.startsWith("SessionsReaper"))!;
-    expect(reaper.Properties.ReservedConcurrentExecutions).toBe(1);
+    // Reserving concurrency fails in an account whose limit is Lambda's minimum unreserved pool of 10.
+    expect(reaper.Properties.ReservedConcurrentExecutions).toBeUndefined();
+    expect(reaper.Properties.Timeout).toBeLessThan(60);
     expect(reaper.Properties.VpcConfig).toEqual({
       SubnetIds: { "Fn::Split": [",", { Ref: "PrivateSubnetIds" }] },
       SecurityGroupIds: [{ Ref: "SessionManagerSecurityGroupId" }],

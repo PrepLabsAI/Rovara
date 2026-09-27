@@ -8,7 +8,8 @@
 - `packages/broker/src/aws/session-reaper.ts`: a handler over injected dependencies; the Lambda wires EC2,
   DynamoDB, Step Functions and `/ping`. An unreachable worker counts as not busy: stopping it frees the
   instance, and the reconciler (#86) owns workers that stay unreachable while in use.
-- Infrastructure in the session lifecycle construct: the reaper Lambda (VPC, reserved concurrency 1), a
+- Infrastructure in the session lifecycle construct: the reaper Lambda (VPC; no reserved concurrency: the
+  first release failed because this account's Lambda limit is 10, the minimum unreserved pool), a
   `rate(1 minute)` schedule, termination limited to this environment's `ec2-ebs` instances, an errors
   alarm. Named environments' access stacks gain the `scheduler` service.
 - `scripts/session-e2e.ts`: phase 2 waits for the deployed reaper; phase 3 stops through `claimStop` and
