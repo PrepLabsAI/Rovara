@@ -283,6 +283,62 @@ A public image `public.ecr.aws/<alias>/<repo>@sha256:<digest>` reaches the runti
 in the account. `PermissionsBoundaryArn` is optional on every environment stack, access included;
 every `AWS::IAM::Role` in every environment stack carries the given boundary, else the default one.
 
+## Installing with agentx init
+
+`agentx init --env <name>` (`npx @charterarc/agentx init`) walks an engineer from AWS credentials to a
+deployed AgentX environment with its own GitHub App and Slack app. For this first run it needs AWS admin
+credentials, a GitHub organization or personal account to own the GitHub App, and a Slack workspace where
+the engineer can create apps. Day-2 commands then use the narrower operator role.
+
+`init` checks prerequisites (the region, model access, and the chosen engine's tooling), asks its
+questions, shows the plan and an estimated cost, then runs its steps in order, recording each one in SSM
+as it finishes:
+
+1. **prerequisites**: the checks above.
+2. **access**: the access stack, deployed with the caller's own AWS credentials.
+3. **core**: foundation and identity (skipped when bringing your own OIDC).
+4. **the GitHub App**: one click on GitHub's pre-filled manifest page creates the app; then choose which
+   repositories it may use. A GitHub App made beforehand can be used instead, with `--github-app-id`,
+   `--github-installation-id` and `--github-private-key-file` (or `-env`); its private key cannot be
+   pasted into a hidden prompt because it spans several lines.
+5. **control-plane**: the control plane and runtime.
+6. **the Slack app**: create it from AgentX's manifest, install it to the workspace, then paste the Bot
+   User OAuth Token and the Signing Secret into two hidden prompts.
+7. **slack-service**: the Slack service, a signed self-probe of both Slack URLs, then a request to
+   confirm the app's Event Subscriptions page shows "Verified" (Slack has no API that reports this).
+
+Every question has a flag (`--engine`, `--identity`, `--orchestrator-model`, `--github-account`, and so
+on). `--yes` answers every question with its default or its flag and accepts every confirmation except a
+broken Slack probe, which still fails. Secrets (an alert webhook, the GitHub App private key, the Slack
+bot token, the Slack signing secret) are never a flag's value: each comes from a hidden prompt, or from
+`--<name>-file <path>` or `--<name>-env <NAME>`.
+
+Before creating anything, `init` prints every stack, role, secret and app it will create, and an
+estimated monthly cost for the chosen models at a stated usage (1,000 turns, 100 worker sessions, 60
+worker instance-hours, 10 kept workspaces a month, us-east-1 list prices). This is an estimate, not a
+bill: it does not include any separate AgentCore runtime charge, which has not been confirmed.
+
+Running `agentx init --env <name>` again resumes at the first incomplete step; a completed step never
+runs again. When the Slack workspace needs an admin to approve new apps, the Slack app step exits with
+status "waiting" (exit code 0, nothing failed): once approved, run `agentx init` again to continue. A
+terminal closed mid-run leaves the environment's lock held; the same caller's next `agentx init` offers to
+take it over at once, while a different caller must wait for it to go stale (two hours).
+
+`--no-browser` prints every address instead of opening one. For the GitHub App: open the printed address
+through an SSH tunnel (`ssh -L <port>:127.0.0.1:<port> <this host>`) from another machine, or directly on
+the same machine, then paste back the address GitHub sent your browser to (or just its code).
+
+State lives in SSM beside the environment's settings: `/agentx/<env>/install/answers` (the answers, no
+secret) and `/agentx/<env>/install/progress` (step outcomes and the GitHub and Slack facts collected so
+far). `/agentx/<env>/settings` is written only once the Slack stack exists. Secrets go straight into
+Secrets Manager: `agentx/<env>/github-app`, `agentx/<env>/slack`, and, for a webhook alert address,
+`agentx/<env>/alert-endpoint`.
+
+Until a later AgentX release adds them to `init` (phase 15d2), finish the install by hand: create your
+admin user (Cognito: `aws cognito-idp admin-create-user` then `admin-add-user-to-group`; your own OIDC:
+mark yourself an administrator there), then `agentx login --env <name>`, then `agentx admin project
+register` and `agentx admin slack bind` to register a project and bind its channel.
+
 ## Deploying an environment
 
 `agentx deploy` installs or upgrades one environment's stacks: access, foundation, identity (skipped when

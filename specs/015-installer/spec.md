@@ -169,9 +169,10 @@ and the budget.
   letters, digits and hyphens, at most 20 characters.
 - **FR-002**: Stacks, roles, secrets, parameters and alarms MUST be named with the environment:
   stacks `agentx-<env>-<part>`, secrets under `agentx/<env>/`, settings under `/agentx/<env>/`.
-- **FR-003**: Each environment's settings MUST be stored in SSM Parameter Store under
-  `/agentx/<env>/`: engine, version, region, models, stack names, alert address, identity mode and
-  install progress. SSM is the source of truth.
+- **FR-003** (amended 2026-09-27; see Decisions): Each environment's settings MUST be stored in SSM
+  Parameter Store under `/agentx/<env>/`: engine, version, region, models, stack names, alert
+  address and identity mode. SSM is the source of truth. Install progress is stored separately,
+  under `/agentx/<env>/install/`, because settings are written only once the Slack stack exists.
 - **FR-004**: `~/.agentx/deployment.yaml` MUST become a per-environment cache the CLI rebuilds from
   SSM. `agentx env use <name>` MUST set up a new machine from SSM alone. `agentx env list` MUST list
   the environments in the account and region.
@@ -224,20 +225,23 @@ and the budget.
   - the alert address (PagerDuty or Opsgenie integration address, or an email).
 - **FR-017**: Before deploying, `init` MUST show everything it will create, the estimated monthly
   cost for the chosen models at a stated usage, and ask for confirmation.
-- **FR-018**: `init` MUST run these steps in order, recording each step's completion in SSM:
+- **FR-018** (amended 2026-09-27; see Decisions): `init` MUST run these steps in order, recording
+  each step's completion in SSM:
   1. prerequisites;
-  2. core stacks (foundation, identity, runtime, control plane) with stack outputs passed between
-     them automatically;
-  3. the AgentX operator role and the CloudFormation service role;
+  2. access: the AgentX operator role, the CloudFormation service role and the access stack,
+     deployed with the caller's own AWS credentials;
+  3. the foundation and identity stacks (identity skipped when bringing your own OIDC);
   4. the GitHub App (US1, FR-027 to FR-030);
-  5. the Slack app and the Slack service stack (FR-031 to FR-035);
-  6. the admin user and login;
-  7. the first project (FR-040);
-  8. connectors (optional, FR-036 to FR-039);
-  9. alerts and the budget (FR-045 to FR-047);
-  10. an end-to-end check: a test message in the chosen channel, waiting for a threaded reply.
-- **FR-019**: Re-running `init` MUST resume at the first incomplete step. Re-running a completed step
-  MUST change nothing. `init --resume` MUST work under the operator role for steps 4 to 10.
+  5. the control plane and runtime stacks, with stack outputs passed between them automatically;
+  6. the Slack app and the Slack service stack (FR-031 to FR-035);
+  7. the admin user and login;
+  8. the first project (FR-040);
+  9. connectors (optional, FR-036 to FR-039);
+  10. alerts and the budget (FR-045 to FR-047);
+  11. an end-to-end check: a test message in the chosen channel, waiting for a threaded reply.
+- **FR-019** (step count updated 2026-09-27 for FR-018's amended order): Re-running `init` MUST
+  resume at the first incomplete step. Re-running a completed step MUST change nothing.
+  `init --resume` MUST work under the operator role for steps 4 to 11.
 - **FR-020**: Every prompt MUST have a flag, so `init` can run without prompts (`--yes` plus flags).
   Secrets MUST be read from hidden prompts, or from an environment variable or file named by a flag,
   never from a flag's value.
@@ -272,9 +276,10 @@ and the budget.
 
 **GitHub App**
 
-- **FR-027**: The CLI MUST create the GitHub App with GitHub's manifest flow: it opens a page with a
-  pre-filled manifest (the permissions AgentX needs, the webhook URL of this environment, no
-  unused events), for a personal account or an organization.
+- **FR-027** (amended 2026-09-27; see Decisions): The CLI MUST create the GitHub App with GitHub's
+  manifest flow: it opens a page with a pre-filled manifest (contents, pull requests and issues:
+  read and write; metadata: read), for a personal account or an organization. The app MUST have no
+  webhook and subscribe to no events: AgentX handles no GitHub webhook.
 - **FR-028**: The app ID and private key MUST go from GitHub to a one-time local listener and
   straight into Secrets Manager under `agentx/<env>/github-app`. They MUST never be written to disk
   or printed.
@@ -290,8 +295,11 @@ and the budget.
   engineer picks. It MUST open Slack's "create from manifest" page with it.
 - **FR-032**: The bot token and signing secret MUST be read from hidden prompts, checked (the token
   with `auth.test`, which must return a bot user), and stored straight into Secrets Manager.
-- **FR-033**: After deploying the Slack service stack, the CLI MUST confirm Slack has verified the
-  events URL and the interactivity URL, and store the bot's user ID and app ID.
+- **FR-033** (amended 2026-09-27; see Decisions): After deploying the Slack service stack, the CLI
+  MUST send both the events URL and the interactivity URL a signed self-probe (a `url_verification`
+  challenge to the events URL, which must be echoed back, and a request to the interactivity URL,
+  which must answer with anything but 401), then ask the engineer to confirm the app's Event
+  Subscriptions page shows the Request URL as Verified. It MUST store the bot's user ID and app ID.
 - **FR-034**: The CLI MUST NOT weaken the ingress's protection against answering itself or other
   bots. Accepting app-posted messages from people stays a setting (`slack.appPostedMessages`, the
   `SlackAppPostedMessages` parameter, spec 014 FR-012), shown during `init`.
@@ -527,6 +535,49 @@ and the budget.
   delete order, emptied versioned buckets, and `--keep-data` (FR-055). Until then the manual
   teardown guide (FR-054) is the way. A named environment's AgentCore runtime has DeletionPolicy
   Delete; the capacity provider and data resources stay Retain.
+- **The init step order follows the deploy order** (2026-09-27; phase 15d1 plan, the owner confirms
+  in the PR). FR-018 listed the operator and service roles (step 3) after the core stacks (step 2),
+  and the GitHub App (step 4) after the control plane; the spec's own deploy-order decision needs
+  access first, and the GitHub App before the control plane. FR-018's list is amended to that order.
+- **The GitHub App has no webhook and subscribes to no events** (2026-09-27; phase 15d1 plan, the
+  owner confirms in the PR). AgentX handles no GitHub webhook, and the control plane does not exist
+  yet when the app is created. The manifest asks only for contents, pull requests and issues (read
+  and write) and metadata (read). FR-027 is amended to say so.
+- **Slack URL verification is a signed self-probe plus a manual "Verified" check** (2026-09-27; phase
+  15d1 plan, the owner confirms in the PR). No Slack API reports verification without an app
+  configuration token, and Slack never verifies the interactivity URL. `init` signs a request to
+  both URLs itself, then the engineer confirms "Verified" on the Event Subscriptions page; 15d2's
+  end-to-end reply is the real proof. FR-033 is amended to say so.
+- **Two hidden-prompt pastes for Slack are kept** (2026-09-27; phase 15d1 plan, the owner confirms in
+  the PR). This runs against User Story 1's "nothing is copied between screens by hand", but FR-032
+  itself requires hidden prompts; the alternative, Slack's App Manifest API, needs an app
+  configuration token pasted instead, and still needs an OAuth install for the bot token. The two
+  pastes count toward SC-002's 15 actions; revisit only if SC-001 shows people stumble here.
+- **Alert webhook addresses are secrets** (2026-09-27; phase 15d1 plan, the owner confirms in the
+  PR). PagerDuty and Opsgenie integration addresses carry their integration key. They are stored in
+  `agentx/<env>/alert-endpoint`, and FR-048's `alerts.address` shows only the host for a webhook.
+- **`agentx init --export` refuses `production` only when it is already installed** (2026-09-27;
+  phase 15d1 plan, the owner confirms in the PR). FR-026's outright refusal of `--env production`
+  exists because of the authors' own adopted deployment, but it blocks every other organization's
+  natural default name. The rule becomes: refuse only when SSM already holds settings for that
+  environment, a read-only check FR-026 already allows. Changed in phase 15d2, with the export
+  resume; the interactive `init` in phase 15d1 already follows this rule.
+- **A waiting step exits 0** (2026-09-27; phase 15d1 plan, the owner confirms in the PR). A step
+  waiting on a person (for example, Slack admin approval) exits 0, with `"status": "waiting"` in
+  `--json`, because nothing failed.
+- **Install progress lives beside settings, in its own SSM parameters** (2026-09-27; phase 15d1
+  plan, the owner confirms in the PR). FR-003 listed install progress among the settings, but
+  settings are written only once the Slack stack exists, and one SSM parameter holds at most 4 KB.
+  Install progress instead lives in `/agentx/<env>/install/answers` and
+  `/agentx/<env>/install/progress`, beside the settings. FR-003 is amended to say so.
+- **The cost estimate's basis is a stated usage, checked against the bill in the live test**
+  (2026-09-27; phase 15d1 plan, the owner confirms in the PR). The estimate uses list prices at
+  1,000 turns, 100 worker sessions, 60 worker instance-hours and 10 kept workspaces a month; it does
+  not include any AgentCore charge beyond the EC2 instance and EBS volumes, which the plan could not
+  confirm. The live check confirms the AgentCore pricing line against the real bill.
+- **`--yes` runs `cdk bootstrap` when the cdk engine needs it** (2026-09-27; phase 15d1 plan, the
+  owner confirms in the PR). `--yes` means yes to every question, including this one, rather than
+  needing a separate `--cdk-bootstrap` flag.
 
 ## Assumptions and Scope
 
