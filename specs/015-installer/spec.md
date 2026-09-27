@@ -298,7 +298,7 @@ and the budget.
 - **FR-033** (amended 2026-09-27; see Decisions): After deploying the Slack service stack, the CLI
   MUST send both the events URL and the interactivity URL a signed self-probe (a `url_verification`
   challenge to the events URL, which must be echoed back, and a request to the interactivity URL,
-  which must answer with anything but 401), then ask the engineer to confirm the app's Event
+  which must answer with a 2xx status), then ask the engineer to confirm the app's Event
   Subscriptions page shows the Request URL as Verified. It MUST store the bot's user ID and app ID.
 - **FR-034**: The CLI MUST NOT weaken the ingress's protection against answering itself or other
   bots. Accepting app-posted messages from people stays a setting (`slack.appPostedMessages`, the

@@ -290,11 +290,11 @@ deployed AgentX environment with its own GitHub App and Slack app. For this firs
 credentials, a GitHub organization or personal account to own the GitHub App, and a Slack workspace where
 the engineer can create apps. Day-2 commands then use the narrower operator role.
 
-`init` checks prerequisites (the region, model access, and the chosen engine's tooling), asks its
-questions, shows the plan and an estimated cost, then runs its steps in order, recording each one in SSM
+`init` asks its questions, then checks prerequisites (the region, model access, and the chosen engine's
+tooling), shows the plan and an estimated cost, then runs its steps in order, recording each one in SSM
 as it finishes:
 
-1. **prerequisites**: the checks above.
+1. **prerequisites**: the checks above (already run on a first run; a resumed run runs them here).
 2. **access**: the access stack, deployed with the caller's own AWS credentials.
 3. **core**: foundation and identity (skipped when bringing your own OIDC).
 4. **the GitHub App**: one click on GitHub's pre-filled manifest page creates the app; then choose which
@@ -309,7 +309,9 @@ as it finishes:
 
 Every question has a flag (`--engine`, `--identity`, `--orchestrator-model`, `--github-account`, and so
 on). `--yes` answers every question with its default or its flag and accepts every confirmation except a
-broken Slack probe, which still fails. Secrets (an alert webhook, the GitHub App private key, the Slack
+broken Slack probe, which still fails; it also needs `--region`, so a resumed run never looks in the
+wrong region. Without `--yes`, the region question defaults to `AWS_REGION`, then `AWS_DEFAULT_REGION`,
+when the release covers it. Secrets (an alert webhook, the GitHub App private key, the Slack
 bot token, the Slack signing secret) are never a flag's value: each comes from a hidden prompt, or from
 `--<name>-file <path>` or `--<name>-env <NAME>`.
 
@@ -322,9 +324,12 @@ Running `agentx init --env <name>` again resumes at the first incomplete step; a
 runs again. When the Slack workspace needs an admin to approve new apps, the Slack app step exits with
 status "waiting" (exit code 0, nothing failed): once approved, run `agentx init` again to continue. A
 terminal closed mid-run leaves the environment's lock held; the same caller's next `agentx init` offers to
-take it over at once, while a different caller must wait for it to go stale (two hours).
+take it over at once, while a different caller must wait for it to go stale (two hours). `--yes` refuses
+every takeover, even of its own lock: run `agentx init` without `--yes` to be asked.
 
-`--no-browser` prints every address instead of opening one. For the GitHub App: open the printed address
+`--no-browser` prints every address instead of opening one. When a browser cannot be opened (no
+`xdg-open` on CloudShell, an SSH host or a container), `init` says so and carries on as if
+`--no-browser` were given. For the GitHub App: open the printed address
 through an SSH tunnel (`ssh -L <port>:127.0.0.1:<port> <this host>`) from another machine, or directly on
 the same machine, then paste back the address GitHub sent your browser to (or just its code).
 
