@@ -259,7 +259,7 @@ export const TEST_SIGNING_SECRET = "0123456789abcdef0123456789abcdef";
 
 export function fakeSlackApi(overrides: Partial<SlackApi> = {}): SlackApi {
   return {
-    authTest: async () => ({ ok: true, user_id: "U0BOT", bot_id: "B0BOT", team_id: "T0TEAM" }),
+    authTest: async () => ({ ok: true, user_id: "U0BOT", bot_id: "B0BOT", team_id: "T0TEAM", team: "Acme", url: "https://acme.slack.com/", user: "agentx" }),
     botsInfo: async () => ({ ok: true, bot: { app_id: "A0APP" } }),
     ...overrides,
   };

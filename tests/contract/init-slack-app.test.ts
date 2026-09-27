@@ -16,12 +16,14 @@ afterEach(async () => { await Promise.all(homes.splice(0).map((home) => rm(home,
 const EVENTS = "https://abc123.execute-api.us-east-1.amazonaws.com/v1/slack/events";
 const INTERACTIONS = "https://abc123.execute-api.us-east-1.amazonaws.com/v1/slack/interactions";
 const SLACK_SECRET = slackSecretName("staging");
+/** What the control plane's generateSecretString leaves in the Slack secret before init puts real values: 32 mixed-case letters and digits. */
+const PLACEHOLDER = "Qm7ZkX2pLr9TbV4nHs8WcY3dJf6GtA1e";
 
 /** A context whose control plane is deployed and whose Slack secret exists with the control plane's placeholder. */
 function slackContext(prompts: Array<string | boolean>, extra: Parameters<typeof initContext>[0] = {}) {
   const outputs = allStackOutputs();
   const deployer = scriptedDeployer(outputs, Object.keys(outputs));
-  const secrets = memoryInitSecrets({ [SLACK_SECRET]: JSON.stringify({ botToken: "unset", signingSecret: "generated-placeholder" }) });
+  const secrets = memoryInitSecrets({ [SLACK_SECRET]: JSON.stringify({ botToken: "unset", signingSecret: PLACEHOLDER }) });
   const context = initContext({ prompter: scriptedPrompter(prompts), secrets, ...extra });
   context.deployment = async () => ({ deployer, store: context.store, secrets, holder: context.holder, partition: "aws", cleanup: async () => undefined });
   homes.push(context.home);
@@ -90,7 +92,7 @@ describe("probing the Slack URLs", () => {
 
   it("gives up after 7 minutes, suggesting the likeliest mistake", async () => {
     await expect(probe(slackIngressFetch({ signingSecret: "ffffffffffffffffffffffffffffffff" })))
-      .rejects.toThrow(`${EVENTS} still refuses requests signed with the new signing secret after 7 minutes; check that you pasted the Signing Secret, not the Client Secret, then run agentx init again`);
+      .rejects.toThrow(`${EVENTS} still refuses requests signed with the new signing secret after 7 minutes; check that you pasted the Signing Secret, not the Client Secret, and that this computer's clock is correct (Slack refuses signatures older than 5 minutes), then run agentx init again`);
   });
 
   it("passes the control plane's real ingress and interactivity handlers", async () => {
@@ -110,6 +112,16 @@ describe("probing the Slack URLs", () => {
     };
     await probe(realIngress);
     expect(statuses).toEqual([200, 200]);
+  });
+
+  it("refuses an interactivity URL that answers 403 or 404: a wrong route or stage", async () => {
+    for (const status of [403, 404]) {
+      const passing = slackIngressFetch({ signingSecret: TEST_SIGNING_SECRET });
+      const wrongRoute = Object.assign(async (url: Parameters<typeof fetch>[0], init?: RequestInit) => (
+        requestUrl(url) === INTERACTIONS ? new Response("Not Found", { status }) : passing(url, init)
+      ), { calls: [] });
+      await expect(probe(wrongRoute)).rejects.toThrow(`${INTERACTIONS} answered HTTP ${status}, so the route or stage is wrong; check that the Slack URLs come from this environment's control-plane stack outputs, then run agentx init again`);
+    }
   });
 });
 
@@ -139,7 +151,9 @@ describe("Slack Web API client", () => {
 
 describe("Slack app step", () => {
   it("stores the bot token and signing secret in the Slack secret and records the app, never printing either", async () => {
-    const context = slackContext(["installed", TEST_BOT_TOKEN, `${TEST_SIGNING_SECRET}\n`]);
+    const confirmations: Array<{ question: string; defaultValue: boolean }> = [];
+    const prompter = { ...scriptedPrompter(["installed", TEST_BOT_TOKEN, `${TEST_SIGNING_SECRET}\n`]), confirm: async (question: string, options: { defaultValue: boolean }) => { confirmations.push({ question, defaultValue: options.defaultValue }); return true; } };
+    const context = slackContext([], { prompter });
     const progress = progressHandle();
     expect(await slackAppStep(fakeSlackApi()).run(context, progress)).toMatchObject({ status: "done" });
     expect(storedSlack(context)).toEqual({ signingSecret: TEST_SIGNING_SECRET, botToken: TEST_BOT_TOKEN });
@@ -150,6 +164,16 @@ describe("Slack app step", () => {
     expect(JSON.stringify(progress.value())).not.toContain(TEST_BOT_TOKEN);
     expect(JSON.stringify(progress.value())).not.toContain(TEST_SIGNING_SECRET);
     expect(context.opened[0]).toMatch(/^https:\/\/api\.slack\.com\/apps\?new_app=1&manifest_json=/);
+    expect(context.lines).toContain("Bot @agentx in workspace Acme (https://acme.slack.com/)");
+    expect(confirmations).toEqual([{ question: "Is this the AgentX bot in the right workspace?", defaultValue: true }]);
+  });
+
+  it("stores nothing when the engineer says the token is for the wrong bot or workspace", async () => {
+    const context = slackContext(["installed", TEST_BOT_TOKEN, TEST_SIGNING_SECRET, false]);
+    await expect(slackAppStep(fakeSlackApi()).run(context, progressHandle()))
+      .rejects.toThrow("nothing was saved; copy the Bot User OAuth Token from the AgentX app in the right workspace, then run agentx init again");
+    expect(storedSlack(context).botToken).toBe("unset");
+    expect(context.lines.join("\n")).not.toContain(TEST_BOT_TOKEN);
   });
 
   it("waits when a workspace admin must approve the app, and continues on the next run", async () => {
@@ -158,10 +182,11 @@ describe("Slack app step", () => {
     expect(outcome).toEqual({ status: "waiting", message: 'Slack is waiting for a workspace admin to approve "AgentX". Once it is installed, run agentx init --env staging again; it continues here.' });
     expect(storedSlack(waiting).botToken).toBe("unset");
 
-    const resumed = slackContext(["installed", TEST_BOT_TOKEN, TEST_SIGNING_SECRET]);
+    const resumed = slackContext(["installed", TEST_BOT_TOKEN, TEST_SIGNING_SECRET, true]);
     const progress = progressHandle({ ...emptyProgress("staging", T0), steps: { "slack-app": { status: "waiting", at: "2026-09-27T00:00:00.000Z" } } });
     expect(await slackAppStep(fakeSlackApi()).run(resumed, progress)).toMatchObject({ status: "done" });
     expect(resumed.opened).toEqual([]);
+    expect(resumed.lines.some((line) => line.includes("https://api.slack.com/apps?new_app=1&manifest_json="))).toBe(true);
   });
 
   it("refuses a user token before storing anything", async () => {
@@ -195,7 +220,7 @@ describe("Slack app step", () => {
       secretFlags: { slackBotToken: { envName: "BOT" }, slackSigningSecret: { envName: "SIGNING" } },
       processEnv: { BOT: TEST_BOT_TOKEN, SIGNING: TEST_SIGNING_SECRET },
     });
-    context.prompter = { ...scriptedPrompter([]), choose: async (_q, _c, options) => options.defaultValue };
+    context.prompter = { ...scriptedPrompter([true]), choose: async (_q, _c, options) => options.defaultValue };
     expect(await slackAppStep(fakeSlackApi()).run(context, progressHandle())).toMatchObject({ status: "done" });
     expect(storedSlack(context)).toEqual({ signingSecret: TEST_SIGNING_SECRET, botToken: TEST_BOT_TOKEN });
   });
@@ -212,6 +237,13 @@ describe("verifying the Slack URLs after the Slack service deploys", () => {
     const printed = context.lines.join("\n");
     expect(printed).not.toContain(TEST_BOT_TOKEN);
     expect(printed).not.toContain(TEST_SIGNING_SECRET);
+  });
+
+  it("refuses at once while the secret still holds the control plane's placeholder", async () => {
+    const fetch = slackIngressFetch({ signingSecret: PLACEHOLDER });
+    const context = slackContext([], { fetch });
+    await expect(verifySlackUrls(context, progressHandle())).rejects.toThrow("secret agentx/staging/slack holds no Slack signing secret; run agentx init again to repeat the Slack app step");
+    expect(fetch.calls).toEqual([]);
   });
 
   it("stops with what to check when Slack does not show Verified", async () => {

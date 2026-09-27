@@ -11,6 +11,7 @@ import type { InitContext } from "./context.js";
 import { checkSlackBotToken, checkSlackSigningSecret, secretFromSource } from "./prompts.js";
 import type { InitStep, ProgressHandle } from "./steps.js";
 
+// channels:join, channels:read and groups:read serve 15d2's `channel add`; adding scopes later would force every workspace to reinstall the app.
 export const SLACK_BOT_SCOPES: readonly string[] = ["app_mentions:read", "channels:join", "channels:read", "chat:write", "groups:read", "users:read"];
 export const SLACK_PROBE_TIMEOUT_MS = 7 * 60 * 1000;
 const PROBE_POLL_MS = 15_000;
@@ -92,7 +93,7 @@ export async function probeSlackUrls(input: {
   });
   const retry = async (url: string) => {
     if (input.now() >= deadline) {
-      throw agentXError("CONFIG_INVALID", `${url} still refuses requests signed with the new signing secret after ${Math.round(timeoutMs / 60_000)} minutes; check that you pasted the Signing Secret, not the Client Secret, then run agentx init again`);
+      throw agentXError("CONFIG_INVALID", `${url} still refuses requests signed with the new signing secret after ${Math.round(timeoutMs / 60_000)} minutes; check that you pasted the Signing Secret, not the Client Secret, and that this computer's clock is correct (Slack refuses signatures older than 5 minutes), then run agentx init again`);
     }
     if (!told) {
       input.write("Waiting for the Slack ingress to pick up the new signing secret (it keeps the old one for up to 5 minutes)");
@@ -118,13 +119,16 @@ export async function probeSlackUrls(input: {
   for (;;) {
     const response = await send(input.interactivityUrl, form, "application/x-www-form-urlencoded");
     if (response.status >= 500) throw agentXError("RUNTIME_UNAVAILABLE", `${input.interactivityUrl} answered HTTP ${response.status}; check the control plane's SlackIngress logs`);
-    if (response.status !== 401) return;
+    if (response.status >= 200 && response.status < 300) return;
+    if (response.status !== 401) {
+      throw agentXError("CONFIG_INVALID", `${input.interactivityUrl} answered HTTP ${response.status}, so the route or stage is wrong; check that the Slack URLs come from this environment's control-plane stack outputs, then run agentx init again`);
+    }
     await retry(input.interactivityUrl);
   }
 }
 
 export interface SlackApi {
-  authTest(token: string): Promise<{ ok: boolean; error?: string; user_id?: string; bot_id?: string; team_id?: string }>;
+  authTest(token: string): Promise<{ ok: boolean; error?: string; user_id?: string; bot_id?: string; team_id?: string; team?: string; url?: string; user?: string }>;
   botsInfo(token: string, botId: string): Promise<{ ok: boolean; error?: string; bot?: { app_id?: string } }>;
 }
 
@@ -160,10 +164,11 @@ export function slackAppStep(api: SlackApi): InitStep<InitContext> {
       const { appName } = context.answers.slack;
       const urls = await controlPlaneSlackUrls(context);
       const resuming = progress.current().steps["slack-app"]?.status === "waiting";
+      const url = slackCreateAppUrl(slackAppManifest({ appName, ...urls }));
       if (resuming) {
         context.write(`Continuing with the Slack app "${appName}". Once an admin approves it, install it from its Install App page.`);
+        context.write(`If you have not created the app yet, open: ${url}`);
       } else {
-        const url = slackCreateAppUrl(slackAppManifest({ appName, ...urls }));
         context.write(`Create the Slack app "${appName}" from AgentX's manifest: pick the workspace, press Next, then Create, then Install to Workspace. If your workspace needs an admin to approve new apps, choose Request to Install.`);
         context.write(`If no browser opens, open: ${url}`);
         if (context.openBrowser !== undefined) await context.openBrowser(url);
@@ -194,6 +199,12 @@ export function slackAppStep(api: SlackApi): InitStep<InitContext> {
       const appId = info.bot?.app_id;
       if (!info.ok || appId === undefined) {
         throw agentXError("RUNTIME_UNAVAILABLE", `Slack bots.info did not return the app id (${info.error ?? "no app_id"}); run agentx init again`);
+      }
+
+      const where = auth.url === undefined ? "" : ` (${auth.url})`;
+      context.write(`Bot @${auth.user ?? auth.user_id} in workspace ${auth.team ?? auth.team_id}${where}`);
+      if (!(await context.prompter.confirm("Is this the AgentX bot in the right workspace?", { defaultValue: true }))) {
+        throw agentXError("CONFIG_INVALID", "nothing was saved; copy the Bot User OAuth Token from the AgentX app in the right workspace, then run agentx init again");
       }
 
       await context.secrets.put(slackSecretName(env), JSON.stringify({ signingSecret, botToken }));
