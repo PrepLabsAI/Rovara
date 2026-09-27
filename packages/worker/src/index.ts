@@ -7,6 +7,7 @@ export * from "./close-workspace.js";
 export * from "./codebuild.js";
 export * from "./conversations.js";
 export * from "./events.js";
+export * from "./invoke-auth.js";
 export * from "./diagnostics.js";
 export * from "./pi-session.js";
 export * from "./publish.js";

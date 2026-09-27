@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { z } from "zod";
 
 // Contracts for ec2-ebs workspaces, whose compute the Session Manager provisions on self-managed
@@ -133,6 +134,23 @@ export const WorkerInvokeTokenClaimsSchema = z
     expiresAt: z.number().int().positive(),
   })
   .strict();
+
+/** The HTTP authorization scheme of a worker invocation: `Authorization: AgentX-Invoke <token>`. */
+export const WORKER_INVOKE_AUTHORIZATION_SCHEME = "AgentX-Invoke";
+
+/**
+ * The first part of an invoke token, and the exact bytes the KMS key signs (ECDSA_SHA_256 on an
+ * ECC_NIST_P256 key): the base64url of the claims' JSON. Signing the encoded form means the worker
+ * verifies what it received, with no JSON canonicalization.
+ */
+export function workerInvokeTokenPayload(claims: WorkerInvokeTokenClaims): string {
+  return Buffer.from(JSON.stringify(WorkerInvokeTokenClaimsSchema.parse(claims)), "utf8").toString("base64url");
+}
+
+/** `<payload>.<signature>`, the signature being the DER-encoded ECDSA signature KMS Sign returns. */
+export function workerInvokeToken(payload: string, signature: Uint8Array): string {
+  return `${payload}.${Buffer.from(signature).toString("base64url")}`;
+}
 
 export type Ec2RuntimeBinding = z.infer<typeof Ec2RuntimeBindingSchema>;
 export type WorkspaceSessionState = z.infer<typeof WorkspaceSessionStateSchema>;

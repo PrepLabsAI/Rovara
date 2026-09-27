@@ -9,11 +9,14 @@ import { maintainPullRequest } from "./maintain-pull-request.js";
 import { WorkerCancellationController } from "./cancel.js";
 import { inspectWorkspaceForClose } from "./close-workspace.js";
 import { createWorkerServerState, startWorkerServer } from "./server.js";
+import { invokeAuthenticationFromEnvironment } from "./invoke-auth.js";
 import { resolveTaskModel } from "./task-model.js";
 
 const rootPath = process.env.AGENTX_WORKSPACE_ROOT ?? "/mnt/workspace";
 const port = Number.parseInt(process.env.PORT ?? "8080", 10);
 
+// Read first, so a partly configured EC2 boot fails before the port opens.
+const invokeAuthentication = invokeAuthenticationFromEnvironment();
 const journal = new OperationJournal(rootPath);
 const cancellationController = new WorkerCancellationController();
 const state = createWorkerServerState(
@@ -95,6 +98,7 @@ const state = createWorkerServerState(
       await callbacks.terminalSink(result);
     },
   },
+  invokeAuthentication,
 );
 
 startWorkerServer(state, { port });

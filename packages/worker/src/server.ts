@@ -2,6 +2,12 @@ import { createServer, type Server } from "node:http";
 import { AgentXError, WorkerInvocationSchema, type WorkerInvocation } from "@agentx/contracts";
 import type { OperationJournal } from "./journal.js";
 import { WorkerOperationCancelledError } from "./cancel.js";
+import {
+  invocationMatchesClaims,
+  verifyInvokeAuthorization,
+  type InvokeAuthentication,
+  type InvokeRejection,
+} from "./invoke-auth.js";
 
 const MAX_INVOCATION_BYTES = 1_048_576;
 
@@ -25,14 +31,23 @@ export interface WorkerServerState {
   executor: WorkerExecutor;
   callbacks: WorkerServerCallbacks;
   activeOperations: Set<string>;
+  /** Present on EC2 workers, whose port is reachable over the network. AgentCore workers have none. */
+  invokeAuthentication?: InvokeAuthentication;
 }
 
 export function createWorkerServerState(
   journal: OperationJournal,
   executor: WorkerExecutor,
   callbacks: WorkerServerCallbacks = {},
+  invokeAuthentication?: InvokeAuthentication,
 ): WorkerServerState {
-  return { journal, executor, callbacks, activeOperations: new Set() };
+  return {
+    journal,
+    executor,
+    callbacks,
+    activeOperations: new Set(),
+    ...(invokeAuthentication === undefined ? {} : { invokeAuthentication }),
+  };
 }
 
 export async function handleWorkerRequest(request: Request, state: WorkerServerState): Promise<Response> {
@@ -44,12 +59,17 @@ export async function handleWorkerRequest(request: Request, state: WorkerServerS
     });
   }
   if (request.method === "POST" && url.pathname === "/invocations") {
+    const verified = state.invokeAuthentication
+      ? verifyInvokeAuthorization(request.headers.get("authorization"), state.invokeAuthentication)
+      : undefined;
+    if (verified && !verified.ok) return unauthorized(verified.reason);
     try {
       const text = await request.text();
       if (Buffer.byteLength(text, "utf8") > MAX_INVOCATION_BYTES) {
         return response(413, { error: "invocation is too large" });
       }
       const invocation = WorkerInvocationSchema.parse(JSON.parse(text) as unknown);
+      if (verified && !invocationMatchesClaims(invocation, verified.claims)) return unauthorized("invocation_mismatch");
       const accepted = await state.journal.accept(invocation);
       if (!accepted.duplicate) {
         state.activeOperations.add(invocation.operationId);
@@ -155,6 +175,13 @@ async function reportTerminal(
       if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
     }
   }
+}
+
+function unauthorized(reason: InvokeRejection): Response {
+  return Response.json(
+    { error: "invocation is not authorized", reason },
+    { status: 401, headers: { "cache-control": "no-store", "www-authenticate": "AgentX-Invoke" } },
+  );
 }
 
 function response(status: number, body: unknown): Response {
