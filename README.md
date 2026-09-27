@@ -1004,3 +1004,5 @@ npm run infra:synth
 The latest observed results are recorded in
 [docs/validation/agentx-foundation.md](docs/validation/agentx-foundation.md). Docker and AWS are
 not required for this local suite.
+
+For Bedrock/OpenRouter configuration, Slack model selection, and the live verification checklist, see [OpenRouter model access](docs/openrouter.md).

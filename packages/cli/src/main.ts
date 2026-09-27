@@ -536,9 +536,14 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--admin-values <values>", "comma-separated values of --admin-claim that mark an administrator")
     .option("--permission-boundary <arn>", "IAM permissions boundary ARN applied to every role AgentX creates")
     .option("--operator-principal <arn>", "IAM principal ARN allowed to assume the AgentX operator role")
-    .option("--orchestrator-model <id>", "Bedrock model id for the Slack orchestrator", "us.anthropic.claude-sonnet-4-6")
-    .option("--classifier-model <id>", "Bedrock model id for the gate classifier", "amazon.nova-lite-v1:0")
-    .option("--worker-model <id>", "Bedrock model id for the runtime worker", "amazon.nova-pro-v1:0")
+    .option("--orchestrator-provider <provider>", "amazon-bedrock (default) or openrouter")
+    .option("--classifier-provider <provider>", "amazon-bedrock (default) or openrouter")
+    .option("--worker-provider <provider>", "amazon-bedrock (default) or openrouter")
+    .option("--openrouter-secret-arn <arn>", "Secrets Manager ARN containing the raw OpenRouter key; enables OpenRouter")
+    .option("--openrouter-providers <slugs>", "comma-separated OpenRouter provider allowlist")
+    .option("--orchestrator-model <id>", "Provider model id for the Slack orchestrator", "us.anthropic.claude-sonnet-4-6")
+    .option("--classifier-model <id>", "Provider model id for the gate classifier", "amazon.nova-lite-v1:0")
+    .option("--worker-model <id>", "Provider model id for the runtime worker", "amazon.nova-pro-v1:0")
     .option("--alert-email <address>", "email address AgentX sends alerts to")
     .option("--alert-webhook-file <path>", "file holding a PagerDuty or Opsgenie integration address (kept secret)")
     .option("--alert-webhook-env <NAME>", "environment variable holding a PagerDuty or Opsgenie integration address (kept secret)")
@@ -597,6 +602,11 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
           orchestratorModel: options.orchestratorModel,
           classifierModel: options.classifierModel,
           workerModel: options.workerModel,
+          ...(options.orchestratorProvider ? { orchestratorProvider: options.orchestratorProvider } : {}),
+          ...(options.classifierProvider ? { classifierProvider: options.classifierProvider } : {}),
+          ...(options.workerProvider ? { workerProvider: options.workerProvider } : {}),
+          ...(options.openrouterSecretArn ? { openrouterSecretArn: options.openrouterSecretArn } : {}),
+          ...(options.openrouterProviders ? { openrouterProviders: options.openrouterProviders } : {}),
           ...(options.account === undefined ? {} : { account: options.account }),
           ...(options.oidcIssuer === undefined ? {} : { oidcIssuer: options.oidcIssuer }),
           ...(options.oidcAudience === undefined ? {} : { oidcAudience: options.oidcAudience }),
@@ -686,6 +696,7 @@ interface InitCommandOptions {
   region?: string; account?: string; release?: string; engine?: "templates" | "cdk"; source?: string;
   resume: boolean; yes: boolean; browser: boolean;
   identity: "cognito" | "oidc"; oidcIssuer?: string; oidcAudience?: string; oidcClientId?: string; adminClaim?: string; adminValues?: string;
+  orchestratorProvider?: string; classifierProvider?: string; workerProvider?: string; openrouterSecretArn?: string; openrouterProviders?: string;
   permissionBoundary?: string; operatorPrincipal?: string; orchestratorModel: string; classifierModel: string; workerModel: string;
   alertEmail?: string; alertWebhookFile?: string; alertWebhookEnv?: string; alerts: boolean;
   githubAccount?: string; githubAccountType?: "organization" | "user"; githubAppName?: string;
@@ -714,6 +725,8 @@ function initOptions(env: string, options: InitCommandOptions, command: Command)
     orchestratorModel: typed("orchestratorModel", options.orchestratorModel),
     classifierModel: typed("classifierModel", options.classifierModel),
     workerModel: typed("workerModel", options.workerModel),
+    orchestratorProvider: options.orchestratorProvider, classifierProvider: options.classifierProvider, workerProvider: options.workerProvider,
+    openrouterSecretArn: options.openrouterSecretArn, openrouterProviders: options.openrouterProviders,
     permissionBoundary: options.permissionBoundary, operatorPrincipal: options.operatorPrincipal,
     alertEmail: options.alertEmail,
     alertWebhook: source(options.alertWebhookFile, options.alertWebhookEnv),

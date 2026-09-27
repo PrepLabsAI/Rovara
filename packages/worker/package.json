@@ -7,6 +7,7 @@
     "@agentx/contracts": "0.1.0",
     "@devcontainers/cli": "0.89.0",
     "@earendil-works/pi-ai": "0.85.1",
-    "@earendil-works/pi-coding-agent": "0.85.1"
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@agentx/model-runtime": "0.1.0"
   }
 }

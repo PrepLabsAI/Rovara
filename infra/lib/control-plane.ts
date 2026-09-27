@@ -1,3 +1,4 @@
+import { grantOpenRouterSecret } from "./openrouter.js";
 import { resolve } from "node:path";
 import {
   ArnFormat,
@@ -558,6 +559,9 @@ export class ControlPlaneStack extends Stack {
     }));
 
     const sessions = new SessionLifecycle(this, "Sessions", { naming, state, invokeSigningKey, notifyOperator });
+    // Own both attachments in this releasable stack. Secret changes must never mutate the
+    // protected foundation template or require a separate foundation change set.
+    grantOpenRouterSecret(this, [slackOrchestratorRole.roleName, sessions.instanceRoleName]);
     sessions.steps.addEnvironment("CONTROL_PLANE_URL", api.attrApiEndpoint);
     sessions.connectDispatcher(dispatcher);
     sessions.connectBroker(broker);

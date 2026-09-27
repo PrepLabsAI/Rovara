@@ -1,3 +1,4 @@
+import { MissingOpenRouterSecret, DEFAULT_BEDROCK_MODELS } from "@agentx/model-runtime/config";
 import { describe, expect, it, vi } from "vitest";
 import { AgentXError } from "@agentx/contracts";
 import {
@@ -26,6 +27,45 @@ async function run(answers: InitAnswers, checks = passingChecks(), prompter = sc
 }
 
 describe("init prerequisites", () => {
+  it("checks each role's fallback even when the same missing-credential OpenRouter model is selected", async () => {
+    const checks = passingChecks();
+    const model = "qwen/qwen3-coder";
+    await run(sampleAnswers({ models: { orchestrator: model, classifier: model, worker: model,
+      providers: { orchestrator: "openrouter", classifier: "openrouter", worker: "openrouter" },
+    } }), checks);
+    expect(checks.models).toEqual([DEFAULT_BEDROCK_MODELS.orchestrator, DEFAULT_BEDROCK_MODELS.classifier, DEFAULT_BEDROCK_MODELS.worker]);
+  });
+  it("checks and reports the default Bedrock model when the OpenRouter secret is absent", async () => {
+    for (const openRouter of [undefined, { secretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:missing-AbCdEf" }]) {
+      const checks = passingChecks({ openRouter: async () => { throw new MissingOpenRouterSecret(); } });
+      const answers = sampleAnswers({ models: { orchestrator: "a", classifier: "b", worker: "qwen/qwen3-coder",
+        providers: { worker: "openrouter" }, ...(openRouter ? { openRouter } : {}),
+      } });
+      const lines = await run(answers, checks);
+      expect(checks.models).toContain(DEFAULT_BEDROCK_MODELS.worker);
+      expect(lines.join("\n")).toContain("OpenRouter secret missing; using default amazon-bedrock/");
+    }
+  });
+  it("checks OpenRouter independently and never invokes Bedrock for OpenRouter roles", async () => {
+    const openRouter = vi.fn(async () => {});
+    const checks = passingChecks({ openRouter });
+    const model = "anthropic/claude-sonnet-4";
+    await run(sampleAnswers({ models: { orchestrator: model, classifier: model, worker: model,
+      providers: { orchestrator: "openrouter", classifier: "openrouter", worker: "openrouter" },
+      openRouter: { secretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:openrouter-AbCdEf" },
+    } }), checks);
+    expect(checks.models).toEqual([]);
+    expect(openRouter).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not print upstream errors or credentials when OpenRouter preflight fails", async () => {
+    const checks = passingChecks({ openRouter: async () => { throw new Error("sk-secret and private prompt"); } });
+    const answers = sampleAnswers({ models: { orchestrator: "model", classifier: "model", worker: "model",
+      providers: { worker: "openrouter" }, openRouter: { secretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:openrouter-AbCdEf" },
+    } });
+    await expect(run(answers, checks)).rejects.toThrow("OpenRouter preflight failed");
+    await expect(run(answers, checks)).rejects.not.toThrow("sk-secret");
+  });
   it("names the account, recommends a dedicated account, and checks each distinct model once", async () => {
     const checks = passingChecks();
     const lines = await run(sampleAnswers({ models: { orchestrator: "a", classifier: "b", worker: "a" } }), checks);

@@ -54,6 +54,19 @@ const oidcAnswers = (): InstallAnswers => ({
 });
 
 describe("deploy parameters", () => {
+  it("propagates mixed model providers and secret references to each declared stack parameter", () => {
+    const configured = answers();
+    configured.models.providers = { orchestrator: "openrouter", classifier: "amazon-bedrock", worker: "openrouter" };
+    configured.models.openRouter = { secretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:openrouter-AbCdEf", providers: ["anthropic"] };
+    expect(stackParameters("foundation", configured, outputs)).not.toHaveProperty("OpenRouterSecretArn");
+    for (const part of ["control-plane", "runtime", "slack"] as const) {
+      const params = stackParameters(part, configured, outputs);
+      expect(params.OpenRouterSecretArn).toBe(configured.models.openRouter.secretArn);
+      expect(Object.keys(params).filter((name) => !(name in templates.get(part)!.Parameters!))).toEqual([]);
+      if (part === "runtime" || part === "slack") expect(params).toMatchObject({ ModelProvider: "openrouter", OpenRouterProviders: "anthropic" });
+      if (part === "slack") expect(params.GateClassifierProvider).toBe("amazon-bedrock");
+    }
+  });
   it.each(["access", "foundation", "identity", "control-plane", "runtime", "slack"] as DeployPart[])("supplies every required parameter of %s and nothing unknown", (part) => {
     const params = stackParameters(part, answers(), outputs);
     const declared = templates.get(part)!.Parameters ?? {};

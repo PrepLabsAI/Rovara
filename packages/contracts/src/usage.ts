@@ -17,7 +17,8 @@ export interface TaskUsageTelemetry {
     total: number;
   };
   cacheReadRatio: number;
-  costUsd: number;
+  costUsd: number | null;
+  costSource?: "estimated" | "unknown";
 }
 
 /** The part of Pi's SessionStats usage telemetry reads; SessionStats is assignable to it. */
@@ -36,7 +37,8 @@ export const TaskUsageTelemetrySchema = z.object({
   cacheRetention: z.enum(["short", "long"]),
   tokens: z.object({ input: TokenCount, output: TokenCount, cacheRead: TokenCount, cacheWrite: TokenCount, total: TokenCount }).strict(),
   cacheReadRatio: z.number().min(0).max(1),
-  costUsd: z.number().nonnegative(),
+  costUsd: z.number().nonnegative().nullable(),
+  costSource: z.enum(["estimated", "unknown"]).optional(),
 }).strict();
 
 export function effectiveCacheRetention(value: unknown): PiCacheRetention {
@@ -65,7 +67,8 @@ export function createTaskUsageTelemetry(
     cacheRetention: effectiveCacheRetention(model.cacheRetention),
     tokens,
     cacheReadRatio: inputSideTokens === 0 ? 0 : tokens.cacheRead / inputSideTokens,
-    costUsd: nonNegativeNumber(stats.cost, "session cost"),
+    costUsd: model.provider === "openrouter" && stats.cost === 0 ? null : nonNegativeNumber(stats.cost, "session cost"),
+    ...(model.provider === "openrouter" ? { costSource: stats.cost > 0 ? "estimated" as const : "unknown" as const } : {}),
   };
 }
 

@@ -9,6 +9,11 @@ import * as worker from "../../packages/worker/src/usage.js";
 const stats = { tokens: { input: 10, output: 2, cacheRead: 8, cacheWrite: 1, total: 21 }, cost: 0.25 };
 
 describe("shared usage contract", () => {
+  it("labels OpenRouter catalog estimates and unknown cost without calling it free", () => {
+    const unknown = createTaskUsageTelemetry({ ...stats, cost: 0 }, { provider: "openrouter", modelId: "model" }, "SUCCEEDED");
+    expect(TaskUsageTelemetrySchema.parse(unknown)).toMatchObject({ costUsd: null, costSource: "unknown" });
+    expect(createTaskUsageTelemetry(stats, { provider: "openrouter", modelId: "model" }, "SUCCEEDED")).toMatchObject({ costUsd: 0.25, costSource: "estimated" });
+  });
   it("builds the feature 011 shape from session totals", () => {
     const usage = createTaskUsageTelemetry(stats, { provider: "amazon-bedrock", modelId: "model", cacheRetention: "long" }, "SUCCEEDED");
     expect(usage).toEqual({

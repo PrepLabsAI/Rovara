@@ -31,7 +31,16 @@ export const IdentityAnswersSchema = z.discriminatedUnion("mode", [
     .strict(),
 ]);
 
-export const ModelsAnswersSchema = z.object({ orchestrator: z.string().min(1), classifier: z.string().min(1), worker: z.string().min(1) }).strict();
+const ModelProviderSchema = z.enum(["amazon-bedrock", "openrouter"]);
+export const ModelsAnswersSchema = z.object({
+  orchestrator: z.string().min(1), classifier: z.string().min(1), worker: z.string().min(1),
+  providers: z.object({ orchestrator: ModelProviderSchema.optional(), classifier: ModelProviderSchema.optional(), worker: ModelProviderSchema.optional() }).strict().optional(),
+  openRouter: z.object({
+    secretArn: z.string().regex(/^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:\d{12}:secret:[A-Za-z0-9/_+=.@-]+$/),
+    providers: z.array(z.string().regex(/^[a-z0-9][a-z0-9_/-]{0,79}$/)).min(1).optional(),
+  }).strict().optional(),
+}).strict();
+export type ModelsAnswers = z.infer<typeof ModelsAnswersSchema>;
 
 export const ImagesAnswersSchema = z.object({ worker: z.string().min(1).optional(), slack: z.string().min(1).optional() }).strict();
 

@@ -301,6 +301,8 @@ describe("AgentCore Instances infrastructure", () => {
       ["WorkerImageParameter7CA9ADBB", "AWS::SSM::Parameter"],
       ["WorkerModelIdParameter02DE997A", "AWS::SSM::Parameter"],
       ["WorkerModelProviderParameterFBA25A19", "AWS::SSM::Parameter"],
+      [expect.stringMatching(/^WorkerOpenRouterProvidersParameter/), "AWS::SSM::Parameter"],
+      [expect.stringMatching(/^WorkerOpenRouterSecretParameter/), "AWS::SSM::Parameter"],
       ["WorkerPromptCacheRetentionParameter7E1031C3", "AWS::SSM::Parameter"],
     ]);
     expect(Object.keys(template.toJSON().Parameters as object)).toEqual(expect.arrayContaining(["WorkerImageUri", "ModelProvider", "ModelId", "PromptCacheRetention"]));

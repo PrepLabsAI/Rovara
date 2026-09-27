@@ -157,6 +157,8 @@ export const WORKER_SETTING_PARAMETERS = {
   modelProvider: "worker-model-provider",
   modelId: "worker-model-id",
   promptCacheRetention: "worker-prompt-cache-retention",
+  openRouterSecretArn: "worker-openrouter-secret-arn",
+  openRouterProviders: "worker-openrouter-providers",
 } as const;
 
 /**
@@ -239,6 +241,8 @@ export const Ec2WorkerBootConfigSchema = z
     modelProvider: z.string().min(1).max(128).regex(SHELL_SAFE, "model provider has unsafe characters"),
     /** AGENTX_MODEL_ID */
     modelId: z.string().min(1).max(256).regex(SHELL_SAFE, "model ID has unsafe characters"),
+    openRouterSecretArn: z.string().regex(/^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:\d{12}:secret:[A-Za-z0-9/_+=.@-]+$/).optional(),
+    openRouterProviders: z.string().regex(/^[a-z0-9][a-z0-9_/-]{0,79}(?:,[a-z0-9][a-z0-9_/-]{0,79})*$/).optional(),
     /** PI_CACHE_RETENTION */
     promptCacheRetention: z.enum(["short", "long"]),
     /** AGENTX_LOG_GROUP: the CloudWatch Logs group the worker container writes to. */
@@ -262,6 +266,8 @@ export function ec2WorkerUserData(config: Ec2WorkerBootConfig, bootScript: strin
     ["PI_CACHE_RETENTION", parsed.promptCacheRetention],
     ["AGENTX_LOG_GROUP", parsed.logGroupName],
   ];
+  if (parsed.openRouterSecretArn) variables.push(["AGENTX_OPENROUTER_SECRET_ARN", parsed.openRouterSecretArn]);
+  if (parsed.openRouterProviders) variables.push(["AGENTX_OPENROUTER_PROVIDERS", parsed.openRouterProviders]);
   const body = bootScript.replace(/^#!.*\n/, "");
   return [
     "#!/bin/bash",

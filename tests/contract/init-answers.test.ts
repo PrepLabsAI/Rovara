@@ -32,6 +32,15 @@ function memoryAlertSecrets() {
 }
 
 describe("init questions", () => {
+  it("collects mixed providers and only a secret reference, and protects resumed answers", async () => {
+    const secretArn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:openrouter-AbCdEf";
+    const flags = { ...everyFlag, workerProvider: "openrouter", workerModel: "anthropic/claude-sonnet-4", openrouterSecretArn: secretArn, openrouterProviders: "anthropic" };
+    const { answers } = await collectInitAnswers({ ...base, flags, prompter: scriptedPrompter([]) });
+    expect(answers.models.providers).toEqual({ orchestrator: "amazon-bedrock", classifier: "amazon-bedrock", worker: "openrouter" });
+    expect(answers.models.openRouter).toEqual({ secretArn, providers: ["anthropic"] });
+    expect(() => assertResumeFlagsMatch(answers, { workerProvider: "amazon-bedrock" })).toThrow();
+    await expect(collectInitAnswers({ ...base, flags: { ...flags, openrouterSecretArn: "sk-raw-secret" }, prompter: scriptedPrompter([]) })).rejects.toThrow("invalid model configuration");
+  });
   it("takes every default with Enter and asks for what has no default", async () => {
     const prompter = scriptedPrompter(["", "", "", "", "", "", "", "", "ops@example.com", "acme", "", "", "", ""]);
     const { answers, notes, alertWebhook } = await collectInitAnswers({ ...base, flags: {}, prompter });

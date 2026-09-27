@@ -715,6 +715,8 @@ export interface InitExportOptions {
   orchestratorModel: string;
   classifierModel: string;
   workerModel: string;
+  orchestratorProvider?: string; classifierProvider?: string; workerProvider?: string;
+  openrouterSecretArn?: string; openrouterProviders?: string;
 }
 
 export interface InitExportResult {
@@ -771,11 +773,19 @@ async function initExport(options: InitExportOptions, deps: DeployCliDependencie
     throw agentXError("CONFIG_INVALID", `--account ${account} must be a 12-digit AWS account id`);
   }
 
+  if (options.openrouterProviders && !options.openrouterSecretArn) throw agentXError("CONFIG_INVALID", "--openrouter-providers requires --openrouter-secret-arn");
   const answers: DeployAnswers = {
     env: options.env,
     region: options.region,
     account,
-    models: { orchestrator: options.orchestratorModel, classifier: options.classifierModel, worker: options.workerModel },
+    models: ModelsAnswersSchema.parse({ orchestrator: options.orchestratorModel, classifier: options.classifierModel, worker: options.workerModel,
+      ...(options.orchestratorProvider || options.classifierProvider || options.workerProvider ? { providers: {
+        ...(options.orchestratorProvider ? { orchestrator: options.orchestratorProvider } : {}),
+        ...(options.classifierProvider ? { classifier: options.classifierProvider } : {}),
+        ...(options.workerProvider ? { worker: options.workerProvider } : {}),
+      } } : {}),
+      ...(options.openrouterSecretArn ? { openRouter: { secretArn: options.openrouterSecretArn, ...(options.openrouterProviders ? { providers: options.openrouterProviders.split(",") } : {}) } } : {}),
+    }),
     identity: identityAnswers,
     // The export bundle always replaces this with `{{github:...}}` markers (markerAnswers in
     // export-bundle.ts); the GitHub App is not set up until the operator configures it, phase 15d.

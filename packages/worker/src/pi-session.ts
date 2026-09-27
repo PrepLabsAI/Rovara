@@ -6,11 +6,11 @@ import {
   DefaultResourceLoader,
   type BashOperations,
   type ToolDefinition,
-  ModelRuntime,
   SessionManager,
   type SessionStats,
 } from "@earendil-works/pi-coding-agent";
 import { amazonBedrockProvider } from "@earendil-works/pi-ai/providers/amazon-bedrock";
+import { createModelRuntimeWithFallback } from "@agentx/model-runtime";
 import { agentXError } from "@agentx/contracts";
 import {
   appendRepositoryContextFiles,
@@ -148,12 +148,13 @@ async function createDefaultSession(
   manager: SessionManager,
   conversationId?: string,
 ): Promise<PiSessionHandle> {
-    const modelRuntime = await ModelRuntime.create({ refreshOnCreate: false });
-    if (input.model.provider === "amazon-bedrock") {
+    const resolved = await createModelRuntimeWithFallback(input.model, "worker");
+    const modelRuntime = resolved.runtime;
+    if (resolved.model.provider === "amazon-bedrock") {
       modelRuntime.registerNativeProvider(agentCoreBedrockProvider());
       await modelRuntime.refresh({ allowNetwork: false, providers: ["amazon-bedrock"] });
     }
-    const model = modelRuntime.getModel(input.model.provider, input.model.modelId);
+    const model = modelRuntime.getModel(resolved.model.provider, resolved.model.modelId);
     if (!model) {
       throw agentXError(
         "RUNTIME_UNAVAILABLE",
@@ -174,7 +175,7 @@ async function createDefaultSession(
       agentDir: input.agentDirectory,
       modelRuntime,
       model,
-      thinkingLevel: input.model.thinkingLevel ?? "medium",
+      thinkingLevel: input.model.thinkingLevel ?? (model.reasoning ? "medium" : "off"),
       tools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
       // A custom tool named bash replaces the built-in one.
       ...(input.bashOperations === undefined
@@ -192,8 +193,8 @@ async function createDefaultSession(
       prompt: async (text) => session.prompt(text, { expandPromptTemplates: false }),
       abort: async () => session.abort(),
       getModel: () => ({
-        provider: session.model?.provider ?? input.model.provider,
-        modelId: session.model?.id ?? input.model.modelId,
+        provider: session.model?.provider ?? resolved.model.provider,
+        modelId: session.model?.id ?? resolved.model.modelId,
       }),
       getSessionStats: () => session.getSessionStats(),
       subscribe: (listener) => session.subscribe((event) => listener(event)),

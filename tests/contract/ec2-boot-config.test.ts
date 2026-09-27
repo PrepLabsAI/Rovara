@@ -25,6 +25,15 @@ const config: Ec2WorkerBootConfig = {
 };
 
 describe("EC2 worker user data", () => {
+  it("passes OpenRouter references to the container and rejects secrets or shell injection", () => {
+    const secretArn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/test/openrouter-AbCdEf";
+    const rendered = ec2WorkerUserData({ ...config, openRouterSecretArn: secretArn, openRouterProviders: "anthropic,openai" }, bootScript);
+    expect(rendered).toContain(`export AGENTX_OPENROUTER_SECRET_ARN='${secretArn}'`);
+    expect(rendered).toContain("AGENTX_OPENROUTER_SECRET_ARN=${AGENTX_OPENROUTER_SECRET_ARN:-}");
+    expect(rendered).not.toContain("OPENROUTER_API_KEY");
+    expect(() => ec2WorkerUserData({ ...config, openRouterSecretArn: "sk-key" }, bootScript)).toThrow();
+    expect(() => ec2WorkerUserData({ ...config, openRouterProviders: "anthropic';touch /tmp/bad" }, bootScript)).toThrow();
+  });
   it("prepends every boot value to the script as a quoted export", () => {
     const userData = ec2WorkerUserData(config, bootScript);
     expect(userData.startsWith("#!/bin/bash\n")).toBe(true);

@@ -36,6 +36,8 @@ export interface WorkerSettings {
   modelProvider: string;
   modelId: string;
   promptCacheRetention: "short" | "long";
+  openRouterSecretArn?: string;
+  openRouterProviders?: string;
 }
 
 export interface SessionStepsDependencies {
@@ -67,6 +69,8 @@ export function createSessionStepsHandler(dependencies: SessionStepsDependencies
           modelProvider: settings.modelProvider,
           modelId: settings.modelId,
           promptCacheRetention: settings.promptCacheRetention,
+          ...(settings.openRouterSecretArn ? { openRouterSecretArn: settings.openRouterSecretArn } : {}),
+          ...(settings.openRouterProviders ? { openRouterProviders: settings.openRouterProviders } : {}),
           logGroupName: dependencies.logGroupName,
         }, dependencies.bootScript());
         return { userData: Buffer.from(userData, "utf8").toString("base64") };
@@ -119,7 +123,11 @@ export const handler = createSessionStepsHandler({
     };
     const promptCacheRetention = setting("promptCacheRetention");
     if (promptCacheRetention !== "short" && promptCacheRetention !== "long") throw new Error("worker prompt cache retention must be short or long");
-    return { workerImage: setting("workerImage"), modelProvider: setting("modelProvider"), modelId: setting("modelId"), promptCacheRetention };
+    const optional = (key: "openRouterSecretArn" | "openRouterProviders") => {
+      const value = values.get(names[key]);
+      return value && value !== "none" ? { [key]: value } : {};
+    };
+    return { ...optional("openRouterSecretArn"), ...optional("openRouterProviders"), workerImage: setting("workerImage"), modelProvider: setting("modelProvider"), modelId: setting("modelId"), promptCacheRetention };
   },
   invokePublicKey() {
     // The key never changes, so one read per container.

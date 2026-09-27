@@ -5,6 +5,7 @@ FROM public.ecr.aws/docker/library/node:22.23.2-bookworm-slim@sha256:83f487e0a63
 
 WORKDIR /opt/agentx
 COPY package.json package-lock.json tsconfig.json tsconfig.base.json ./
+COPY packages/model-runtime/package.json packages/model-runtime/package.json
 COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/gateway/package.json packages/gateway/package.json
 COPY packages/worker/package.json packages/worker/package.json
@@ -15,6 +16,7 @@ COPY packages/slack-service/package.json packages/slack-service/package.json
 COPY infra/package.json infra/package.json
 RUN npm ci --ignore-scripts
 
+COPY packages/model-runtime packages/model-runtime
 COPY packages/contracts packages/contracts
 COPY packages/orchestrator packages/orchestrator
 COPY packages/slack-service packages/slack-service
@@ -28,6 +30,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /opt/agentx
 COPY --from=build /opt/agentx/node_modules ./node_modules
+COPY --from=build /opt/agentx/packages/model-runtime ./packages/model-runtime
 COPY --from=build /opt/agentx/packages/contracts ./packages/contracts
 COPY --from=build /opt/agentx/packages/orchestrator ./packages/orchestrator
 COPY --from=build /opt/agentx/packages/slack-service ./packages/slack-service
