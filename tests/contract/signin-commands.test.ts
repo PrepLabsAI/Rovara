@@ -1,0 +1,225 @@
+import { describe, expect, it } from "vitest";
+import { writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
+import { executeCli } from "../../packages/cli/src/main.js";
+import { changeLine } from "../../packages/cli/src/signin/apply.js";
+import { runSigninDisable, runSigninEnable, runSigninShow, type SigninServices } from "../../packages/cli/src/signin/commands.js";
+import { readSignInSettings, writeSignInSettings, writeSlackTeamId } from "../../packages/cli/src/signin/settings.js";
+import { stagingSettings } from "../support/environment-fixtures.js";
+import { SIGN_IN_PARAMETERS, fakeCloudFormation } from "../support/fake-cloudformation.js";
+import { HOLDER, T0, fakeSlackApi, memoryInitSecrets, scriptedPrompter, TEST_BOT_TOKEN, TEST_SIGNING_SECRET } from "../support/init-fakes.js";
+import { MemoryParameterStore } from "../support/memory-parameter-store.js";
+
+const SLACK_CLIENT_SECRET = "fedcba9876543210fedcba9876543210";
+const OIDC_SECRET = "planted-company-client-secret";
+const installed = { ...stagingSettings, access: { artifactBucket: "b", cloudFormationRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-cloudformation", operatorRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-operator", pullThroughPrefix: "agentx-staging" } };
+const discovery = (issuer: string): typeof fetch => async (input: string | URL | Request) => {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  if (url === `${issuer}/.well-known/openid-configuration`) return Response.json({ issuer, authorization_endpoint: `${issuer}/authorize`, token_endpoint: `${issuer}/token`, jwks_uri: `${issuer}/keys` });
+  throw new TypeError("fetch failed");
+};
+const slackOn = { schemaVersion: 1 as const, env: "staging", slack: true, updatedAt: "2026-09-27T00:00:00.000Z", updatedBy: HOLDER };
+
+async function services(prompts: Array<string | boolean>, overrides: Partial<SigninServices> = {}, parameters: Record<string, string> = SIGN_IN_PARAMETERS) {
+  const store = new MemoryParameterStore();
+  await writeEnvironmentSettings(store, installed);
+  const secrets = memoryInitSecrets({ "agentx/staging/slack": JSON.stringify({ signingSecret: TEST_SIGNING_SECRET, botToken: TEST_BOT_TOKEN }) });
+  const cloudFormation = fakeCloudFormation({ parameters });
+  const prompter = scriptedPrompter(prompts);
+  const lines: string[] = [];
+  const s: SigninServices = {
+    store, secrets, cloudFormation, identity: { get: async () => ({ account: "123456789012", arn: HOLDER }) },
+    fetch: discovery("https://acme.okta.com"),
+    slackApi: fakeSlackApi({ authTest: async () => ({ ok: true, team_id: "T0TEAM", user_id: "U0BOT", bot_id: "B0BOT", scopes: ["app_mentions:read", "channels:read", "groups:read", "im:write", "users:read", "users:read.email"] }) }),
+    prompter, processEnv: { OIDC_SECRET }, write: (line) => lines.push(line), now: () => T0, sleep: async () => undefined, pollMs: 1,
+    ...overrides,
+  };
+  return { s, store, secrets, cloudFormation, lines, prompter };
+}
+
+describe("the sign-in change line", () => {
+  it("shows a changed line as before -> after, and an unchanged line as it is", () => {
+    expect(changeLine("Slack sign-in: off", "Slack sign-in: on")).toBe("  Slack sign-in: off -> on");
+    expect(changeLine("Company sign-in: on (Okta, https://acme.okta.com, client 0oa1)", "Company sign-in: off")).toBe("  Company sign-in: on -> off");
+    expect(changeLine("Slack sign-in: on", "Slack sign-in: on")).toBe("  Slack sign-in: on");
+  });
+});
+
+describe("agentx signin enable slack (FR-045)", () => {
+  it("stores the client credentials in the Slack secret, records the team ID, shows the change, updates the stack and writes the settings", async () => {
+    const h = await services(["1111111111.2222222222222", SLACK_CLIENT_SECRET, true]);
+    expect(await runSigninEnable(h.s, "staging", "slack", {}, {}, false)).toEqual({ changed: true });
+    expect(JSON.parse(h.secrets.values.get("agentx/staging/slack")!)).toEqual({ signingSecret: TEST_SIGNING_SECRET, botToken: TEST_BOT_TOKEN, clientId: "1111111111.2222222222222", clientSecret: SLACK_CLIENT_SECRET });
+    expect(h.store.values.get("/agentx/staging/slack/teamId")).toBe("T0TEAM");
+    expect(h.cloudFormation.parameters).toMatchObject({ SlackTeamId: "T0TEAM", DeveloperSignInSlack: "enabled" });
+    expect(await readSignInSettings(h.store, "staging")).toMatchObject({ slack: true, updatedBy: HOLDER });
+    const printed = h.lines.join("\n");
+    expect(printed).toContain("Slack sign-in: off -> on");
+    expect(printed).toContain("https://abc.execute-api.us-east-1.amazonaws.com/v1/auth/callback/slack");
+    for (const secret of [SLACK_CLIENT_SECRET, TEST_BOT_TOKEN, TEST_SIGNING_SECRET]) {
+      expect(printed).not.toContain(secret);
+      expect([...h.store.values.values()].join("\n")).not.toContain(secret);
+    }
+    expect(h.store.values.has("/agentx/staging/lock")).toBe(false);
+  });
+
+  it("asks \"Apply this change?\" once, and does not print it as well (F30)", async () => {
+    const h = await services(["1111111111.2222222222222", SLACK_CLIENT_SECRET, true]);
+    await runSigninEnable(h.s, "staging", "slack", {}, {}, false);
+    expect(h.prompter.asked.filter((question) => question === "Apply this change?")).toHaveLength(1);
+    expect(h.lines.join("\n")).not.toContain("Apply this change?");
+  });
+
+  it("refuses, storing nothing, when the Slack app lacks the sign-in bot scopes", async () => {
+    const h = await services([], { slackApi: fakeSlackApi({ authTest: async () => ({ ok: true, team_id: "T0TEAM", user_id: "U0BOT", bot_id: "B0BOT", scopes: ["app_mentions:read", "users:read"] }) }) });
+    await expect(runSigninEnable(h.s, "staging", "slack", {}, {}, false)).rejects.toThrow("the Slack app is missing the bot scopes channels:read, groups:read, im:write, users:read.email; add them on the app's OAuth & Permissions page, reinstall the app, then run this again");
+    expect(h.cloudFormation.calls).toEqual([]);
+    expect(JSON.parse(h.secrets.values.get("agentx/staging/slack")!)).not.toHaveProperty("clientId");
+  });
+
+  it("changes nothing, not even the Slack secret, when the change is declined (F21)", async () => {
+    const h = await services(["1111111111.2222222222222", SLACK_CLIENT_SECRET, false]);
+    await expect(runSigninEnable(h.s, "staging", "slack", {}, {}, false)).rejects.toThrow(/not applied; nothing changed/);
+    expect(h.cloudFormation.parameters.DeveloperSignInSlack).toBe("disabled");
+    expect(await readSignInSettings(h.store, "staging")).toBeUndefined();
+    expect(JSON.parse(h.secrets.values.get("agentx/staging/slack")!)).toEqual({ signingSecret: TEST_SIGNING_SECRET, botToken: TEST_BOT_TOKEN });
+    expect(h.store.values.has("/agentx/staging/slack/teamId")).toBe(false);
+  });
+
+  it("leaves the stack and settings alone, and removes the change set, when storing the credentials fails", async () => {
+    const h = await services(["1111111111.2222222222222", SLACK_CLIENT_SECRET, true]);
+    h.secrets.put = async () => { throw Object.assign(new Error("User is not authorized to perform secretsmanager:PutSecretValue"), { name: "AccessDeniedException" }); };
+    await expect(runSigninEnable(h.s, "staging", "slack", {}, {}, false)).rejects.toThrow("User is not authorized to perform secretsmanager:PutSecretValue");
+    expect(h.cloudFormation.calls.map((call) => call.name)).toContain("DeleteChangeSetCommand");
+    expect(h.cloudFormation.calls.map((call) => call.name)).not.toContain("ExecuteChangeSetCommand");
+    expect(await readSignInSettings(h.store, "staging")).toBeUndefined();
+    expect(h.store.values.has("/agentx/staging/lock")).toBe(false);
+  });
+
+  it("stores new client credentials after asking, even when the stack parameters stay the same", async () => {
+    const h = await services(["1111111111.2222222222222", SLACK_CLIENT_SECRET, true], {}, { ...SIGN_IN_PARAMETERS, DeveloperSignInSlack: "enabled", SlackTeamId: "T0TEAM" });
+    await writeSignInSettings(h.store, slackOn);
+    await writeSlackTeamId(h.store, "staging", "T0TEAM");
+    expect(await runSigninEnable(h.s, "staging", "slack", {}, {}, false)).toEqual({ changed: true });
+    expect(h.prompter.asked.filter((question) => question === "Apply this change?")).toHaveLength(1);
+    expect(h.cloudFormation.calls.map((call) => call.name)).toEqual(["DescribeStacksCommand"]);
+    expect(JSON.parse(h.secrets.values.get("agentx/staging/slack")!)).toMatchObject({ clientId: "1111111111.2222222222222", clientSecret: SLACK_CLIENT_SECRET });
+    expect(h.lines.join("\n")).toContain("the new client credentials replace the stored ones");
+  });
+
+  it("never reads a secret from a flag value", async () => {
+    const h = await services([]);
+    await expect(runSigninEnable(h.s, "staging", "slack", { slackClientId: "1111111111.2222222222222" }, { slackClientSecret: { envName: "MISSING" } }, true)).rejects.toThrow(/environment variable MISSING/);
+  });
+
+  it("refuses an environment that uses the legacy stack names", async () => {
+    const h = await services([]);
+    await writeEnvironmentSettings(h.store, { ...installed, env: "staging", naming: "legacy" });
+    await expect(runSigninEnable(h.s, "staging", "slack", {}, {}, true)).rejects.toThrow(/installed with agentx init/);
+  });
+});
+
+describe("agentx signin enable oidc (FR-004, FR-010, FR-045)", () => {
+  it("checks the issuer's discovery document, stores the client secret, and keeps Slack as it was", async () => {
+    const h = await services([true]);
+    await writeSignInSettings(h.store, slackOn);
+    await writeSlackTeamId(h.store, "staging", "T0TEAM");
+    await runSigninEnable(h.s, "staging", "oidc", { oidcIssuer: "https://acme.okta.com", oidcClientId: "0oa1", oidcRequiredClaim: "groups", oidcRequiredValues: "engineering,platform", oidcDisplayName: "Okta" }, { oidcClientSecret: { envName: "OIDC_SECRET" } }, false);
+    expect(JSON.parse(h.secrets.values.get("agentx/staging/developer-oidc")!)).toEqual({ clientSecret: OIDC_SECRET });
+    expect(await readSignInSettings(h.store, "staging")).toMatchObject({ slack: true, oidc: { issuer: "https://acme.okta.com", clientId: "0oa1", requiredClaim: "groups", requiredValues: ["engineering", "platform"], displayName: "Okta", clientSecretName: "agentx/staging/developer-oidc" } });
+    expect(h.cloudFormation.parameters).toMatchObject({ DeveloperOidcIssuer: "https://acme.okta.com", DeveloperOidcRequiredValues: "[\"engineering\",\"platform\"]", DeveloperSignInSlack: "enabled", SlackTeamId: "T0TEAM" });
+    expect(h.lines.join("\n")).toContain("Register this redirect URI with your identity provider: https://abc.execute-api.us-east-1.amazonaws.com/v1/auth/callback/oidc");
+    expect(h.lines.join("\n")).not.toContain(OIDC_SECRET);
+  });
+
+  it("prints the change under --yes too, and asks nothing", async () => {
+    const h = await services([]);
+    await writeSignInSettings(h.store, slackOn);
+    await writeSlackTeamId(h.store, "staging", "T0TEAM");
+    await runSigninEnable(h.s, "staging", "oidc", { oidcIssuer: "https://acme.okta.com", oidcClientId: "0oa1", oidcRequiredClaim: "", oidcDisplayName: "Okta" }, { oidcClientSecret: { envName: "OIDC_SECRET" } }, true);
+    expect(h.prompter.asked).toEqual([]);
+    const printed = h.lines.join("\n");
+    expect(printed).toContain("  Company sign-in: off -> on (Okta, https://acme.okta.com, client 0oa1)");
+    expect(printed).toContain("agentx-staging-control-plane will change: Modify DeveloperSignInFunction1A2B3C4D (AWS::Lambda::Function)");
+  });
+
+  it("refuses an issuer whose discovery document cannot be read, before storing anything", async () => {
+    const h = await services([]);
+    await expect(runSigninEnable(h.s, "staging", "oidc", { oidcIssuer: "https://down.example.test", oidcClientId: "c" }, { oidcClientSecret: { envName: "OIDC_SECRET" } }, true))
+      .rejects.toThrow("could not read https://down.example.test/.well-known/openid-configuration; check the issuer URL and that this computer can reach it");
+    expect(h.secrets.values.has("agentx/staging/developer-oidc")).toBe(false);
+  });
+
+  it("stores no company client secret when the change is declined (F21)", async () => {
+    const h = await services([false]);
+    await writeSignInSettings(h.store, slackOn);
+    await writeSlackTeamId(h.store, "staging", "T0TEAM");
+    await expect(runSigninEnable(h.s, "staging", "oidc", { oidcIssuer: "https://acme.okta.com", oidcClientId: "0oa1", oidcRequiredClaim: "", oidcDisplayName: "Okta" }, { oidcClientSecret: { envName: "OIDC_SECRET" } }, false))
+      .rejects.toThrow(/not applied; nothing changed/);
+    expect(h.secrets.values.has("agentx/staging/developer-oidc")).toBe(false);
+  });
+});
+
+describe("agentx signin disable and show", () => {
+  it("disables a method, which revokes its sessions through the control plane (FR-045, R13)", async () => {
+    const h = await services([true], {}, { ...SIGN_IN_PARAMETERS, DeveloperSignInSlack: "enabled", SlackTeamId: "T0TEAM" });
+    await writeSignInSettings(h.store, { ...slackOn, oidc: { issuer: "https://acme.okta.com", clientId: "0oa1", displayName: "Okta", clientSecretName: "agentx/staging/developer-oidc" } });
+    await writeSlackTeamId(h.store, "staging", "T0TEAM");
+    expect(await runSigninDisable(h.s, "staging", "slack", false)).toEqual({ changed: true });
+    expect(h.cloudFormation.parameters.DeveloperSignInSlack).toBe("disabled");
+    expect(await readSignInSettings(h.store, "staging")).toMatchObject({ slack: false });
+    expect(h.lines.join("\n")).toContain("Everyone signed in with Slack is signed out as soon as the update finishes");
+  });
+
+  it("refuses to disable the last method (FR-010)", async () => {
+    const h = await services([]);
+    await writeSignInSettings(h.store, slackOn);
+    await expect(runSigninDisable(h.s, "staging", "slack", true)).rejects.toThrow("Slack sign-in is the only method enabled; enable company sign-in first (agentx signin enable oidc), because at least one method must stay on");
+  });
+
+  it("shows the settings and what the control plane offers, never a secret", async () => {
+    const h = await services([], {
+      fetch: async () => Response.json({ env: "staging", apiVersion: "1.0", issuer: "i", authorizationEndpoint: "https://a/x", tokenEndpoint: "https://a/t", revocationEndpoint: "https://a/r", clientId: "agentx-cli", methods: { slack: true, oidc: null } }),
+    });
+    await writeSignInSettings(h.store, slackOn);
+    await writeSlackTeamId(h.store, "staging", "T0TEAM");
+    const shown = await runSigninShow(h.s, "staging");
+    expect(shown.lines).toEqual([
+      "Slack sign-in: on",
+      "Company sign-in: off",
+      "Slack team: T0TEAM",
+      "The control plane offers: Slack",
+      "Developers sign in with: npx @charterarc/agentx login https://abc.execute-api.us-east-1.amazonaws.com",
+    ]);
+  });
+});
+
+describe("the agentx signin command (F14)", () => {
+  it("takes the same flag names as agentx init, and reads the company secret from --signin-oidc-client-secret-env", async () => {
+    const h = await services([]);
+    await writeSignInSettings(h.store, slackOn);
+    await writeSlackTeamId(h.store, "staging", "T0TEAM");
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const code = await executeCli([
+      "--env", "staging", "signin", "enable", "oidc", "--yes",
+      "--signin-oidc-issuer", "https://acme.okta.com", "--signin-oidc-client-id", "0oa1", "--signin-oidc-client-secret-env", "OIDC_SECRET",
+      "--signin-oidc-required-claim", "groups", "--signin-oidc-required-values", "engineering", "--signin-oidc-display-name", "Okta",
+    ], { stdout: { write: (text: string) => stdout.push(text) }, stderr: { write: (text: string) => stderr.push(text) }, signin: h.s });
+    expect(stderr.join("")).toBe("");
+    expect(code).toBe(0);
+    expect(stdout.join("")).toBe("Developer sign-in updated.\n");
+    expect(await readSignInSettings(h.store, "staging")).toMatchObject({ oidc: { issuer: "https://acme.okta.com", clientId: "0oa1", requiredClaim: "groups", requiredValues: ["engineering"], displayName: "Okta" } });
+    expect(JSON.parse(h.secrets.values.get("agentx/staging/developer-oidc")!)).toEqual({ clientSecret: OIDC_SECRET });
+  });
+
+  it("names a flag signin enable accepts when --yes leaves a question unanswered", async () => {
+    const stderr: string[] = [];
+    const h = await services([]);
+    // Without a prompter override, --yes uses the CLI's own unattended prompter.
+    const withoutPrompter: Partial<SigninServices> = { ...h.s };
+    delete withoutPrompter.prompter;
+    const code = await executeCli(["--env", "staging", "signin", "enable", "oidc", "--yes"], { stdout: { write: () => true }, stderr: { write: (text: string) => stderr.push(text) }, signin: withoutPrompter });
+    expect(code).not.toBe(0);
+    expect(stderr.join("")).toContain("with --yes, pass --signin-oidc-issuer");
+  });
+});

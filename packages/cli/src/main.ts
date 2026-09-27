@@ -36,12 +36,15 @@ import { resolveDeploymentFile } from "./environments/cache.js";
 import { DEFAULT_CLASSIFIER_MODEL, DEFAULT_ORCHESTRATOR_MODEL, DEFAULT_WORKER_MODEL, type InitFlags } from "./init/answers.js";
 import { runInit, type InitCliDependencies, type InitOptions } from "./init/commands.js";
 import { secretsManagerInitSecrets, type InitSecrets, type SecretFlags } from "./init/context.js";
-import type { SecretSource } from "./init/prompts.js";
+import { processPrompter, unattendedPrompter, type SecretSource } from "./init/prompts.js";
 import { readSlackTeamIdFromSecret, slackWebApi } from "./init/slack-app.js";
 import { runEnvAdopt, runEnvList, runEnvUse } from "./environments/commands.js";
 import { ssmParameterStore, type ParameterStore } from "./environments/parameter-store.js";
 import { settingsParameterName } from "./environments/settings.js";
 import { formatError, formatSuccess } from "./output.js";
+import { checkLines } from "./signin/check.js";
+import { SIGNIN_FLAG_NAMES, type SigninFlags, type SigninSecretFlags } from "./signin/collect.js";
+import { runSigninCheck, runSigninDisable, runSigninEnable, runSigninShow, type SigninServices } from "./signin/commands.js";
 import { SystemCredentialTokenStore, type TokenStore } from "./token-store.js";
 import { CLI_VERSION } from "./version.js";
 
@@ -89,6 +92,8 @@ export interface CliDependencies {
   deploy?: DeployCliDependencies;
   /** `agentx init` overrides, for tests: never touch AWS, GitHub or Slack. */
   init?: InitCliDependencies;
+  /** `agentx signin` overrides, for tests: never touch AWS, Slack or an identity provider. */
+  signin?: Partial<SigninServices>;
 }
 
 interface AuthenticatedDeployment {
@@ -263,6 +268,78 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       const globals = globalOptions(command);
       const result = await fetchDeveloperProjects(developerSession(), developerEnv(command));
       services.stdout.write(globals.json ? formatSuccess({ env: result.env, url: result.url, ...result.projects }, true) : whoamiText(result));
+    });
+
+  const signin = program.command("signin").description("choose how developers sign in: Slack, your company's sign-in, or both (operator role)");
+  /** Real AWS and Slack clients for --region, each built only when a test has not overridden it. */
+  const signinServices = (region: string | undefined, yes: boolean): SigninServices => {
+    const overrides = dependencies.signin ?? {};
+    const config = region === undefined ? {} : { region };
+    return {
+      store: overrides.store ?? parameterStore(region),
+      secrets: overrides.secrets ?? secretsManagerInitSecrets(new SecretsManagerClient(config)),
+      cloudFormation: overrides.cloudFormation ?? new CloudFormationClient(config),
+      identity: overrides.identity ?? stsCallerIdentity(new STSClient(config)),
+      fetch: overrides.fetch ?? services.fetchImplementation,
+      slackApi: overrides.slackApi ?? slackWebApi(services.fetchImplementation),
+      prompter: overrides.prompter ?? (yes ? unattendedPrompter() : processPrompter(services.stderr)),
+      processEnv: overrides.processEnv ?? process.env,
+      write: overrides.write ?? ((line) => { services.stderr.write(`${line}\n`); }),
+      now: overrides.now ?? Date.now,
+      ...(overrides.sleep === undefined ? {} : { sleep: overrides.sleep }),
+      ...(overrides.pollMs === undefined ? {} : { pollMs: overrides.pollMs }),
+    };
+  };
+  const signinMethod = (method: string): "slack" | "oidc" => {
+    if (method !== "slack" && method !== "oidc") throw agentXError("CONFIG_INVALID", `unknown sign-in method ${JSON.stringify(method)}; use slack or oidc`);
+    return method;
+  };
+  const changedText = (changed: boolean) => (changed ? "Developer sign-in updated.\n" : "Nothing to change.\n");
+  const regionOption = "--region <region>";
+  const regionHelp = "AWS region of the environment; defaults to your AWS configuration";
+  signin
+    .command("show")
+    .description("show which sign-in methods are on and what the control plane offers")
+    .option(regionOption, regionHelp)
+    .action(async (options: { region?: string }, command: Command) => {
+      const globals = globalOptions(command);
+      const result = await runSigninShow(signinServices(options.region, false), globals.env);
+      services.stdout.write(globals.json ? formatSuccess(result.data, true) : `${result.lines.join("\n")}\n`);
+    });
+  addSignInOptions(
+    signin
+      .command("enable")
+      .description("turn on Slack sign-in or company sign-in; shows the change to the control plane and asks first")
+      .argument("<method>", "slack or oidc")
+      .option(regionOption, regionHelp)
+      .option("--yes", "apply without asking; the change is still printed", false),
+  ).action(async (method: string, options: SignInCommandOptions & { region?: string; yes: boolean }, command: Command) => {
+    const globals = globalOptions(command);
+    const { flags, secretFlags } = signInFlags(options);
+    const result = await runSigninEnable(signinServices(options.region, options.yes), globals.env, signinMethod(method), flags, secretFlags, options.yes);
+    services.stdout.write(globals.json ? formatSuccess(result, true) : changedText(result.changed));
+  });
+  signin
+    .command("disable")
+    .description("turn a sign-in method off; everyone signed in with it is signed out")
+    .argument("<method>", "slack or oidc")
+    .option(regionOption, regionHelp)
+    .option("--yes", "apply without asking; the change is still printed", false)
+    .action(async (method: string, options: { region?: string; yes: boolean }, command: Command) => {
+      const globals = globalOptions(command);
+      const result = await runSigninDisable(signinServices(options.region, options.yes), globals.env, signinMethod(method), options.yes);
+      services.stdout.write(globals.json ? formatSuccess(result, true) : changedText(result.changed));
+    });
+  signin
+    .command("check")
+    .description("check every piece developer sign-in needs, and say what to fix")
+    .option(regionOption, regionHelp)
+    .action(async (options: { region?: string }, command: Command) => {
+      const globals = globalOptions(command);
+      const checks = await runSigninCheck(signinServices(options.region, false), globals.env);
+      services.stdout.write(globals.json ? formatSuccess(checks, true) : `${checkLines(checks).join("\n")}\n`);
+      const failed = checks.filter((check) => !check.ok).length;
+      if (failed > 0) throw agentXError("CONFIG_INVALID", `${failed} developer sign-in check${failed === 1 ? "" : "s"} failed; fix what each one names, then run agentx signin check again`);
     });
 
   const admin = program.command("admin").description("administrator workflows");
@@ -773,6 +850,47 @@ interface InitCommandOptions {
   workerImage?: string; slackImage?: string;
 }
 
+/** A secret's source from its `-file` and `-env` flags; undefined when neither was given (the prompt asks). */
+function secretSource(file?: string, envName?: string): SecretSource | undefined {
+  return file === undefined && envName === undefined ? undefined : { ...(file === undefined ? {} : { file }), ...(envName === undefined ? {} : { envName }) };
+}
+
+/** The developer sign-in flags, as commander names them from SIGNIN_FLAG_NAMES. */
+interface SignInCommandOptions {
+  slackClientId?: string; slackClientSecretFile?: string; slackClientSecretEnv?: string;
+  signinOidcIssuer?: string; signinOidcClientId?: string; signinOidcClientSecretFile?: string; signinOidcClientSecretEnv?: string;
+  signinOidcRequiredClaim?: string; signinOidcRequiredValues?: string; signinOidcDisplayName?: string;
+}
+
+/** Adds the developer sign-in flags (F14): the same names on agentx signin enable and agentx init. */
+function addSignInOptions(command: Command): Command {
+  const names = SIGNIN_FLAG_NAMES;
+  return command
+    .option(`${names.slackClientId} <id>`, "the Slack app's Client ID (Basic Information, App Credentials)")
+    .option(`${names.slackClientSecret}-file <path>`, "file holding the Slack app's Client Secret")
+    .option(`${names.slackClientSecret}-env <NAME>`, "environment variable holding the Slack app's Client Secret")
+    .option(`${names.oidcIssuer} <url>`, "company sign-in issuer URL, for example https://acme.okta.com")
+    .option(`${names.oidcClientId} <id>`, "client ID of the company sign-in app")
+    .option(`${names.oidcClientSecret}-file <path>`, "file holding the company sign-in app's client secret")
+    .option(`${names.oidcClientSecret}-env <NAME>`, "environment variable holding the company sign-in app's client secret")
+    .option(`${names.oidcRequiredClaim} <claim>`, "claim a person must carry to use AgentX, for example groups; empty for none")
+    .option(`${names.oidcRequiredValues} <values>`, "comma-separated values of the required claim that may use AgentX")
+    .option(`${names.oidcDisplayName} <name>`, "name on the sign-in button, for example Okta");
+}
+
+function signInFlags(options: SignInCommandOptions): { flags: SigninFlags; secretFlags: SigninSecretFlags } {
+  return {
+    flags: definedEntries<SigninFlags>({
+      slackClientId: options.slackClientId, oidcIssuer: options.signinOidcIssuer, oidcClientId: options.signinOidcClientId,
+      oidcRequiredClaim: options.signinOidcRequiredClaim, oidcRequiredValues: options.signinOidcRequiredValues, oidcDisplayName: options.signinOidcDisplayName,
+    }),
+    secretFlags: definedEntries<SigninSecretFlags>({
+      slackClientSecret: secretSource(options.slackClientSecretFile, options.slackClientSecretEnv),
+      oidcClientSecret: secretSource(options.signinOidcClientSecretFile, options.signinOidcClientSecretEnv),
+    }),
+  };
+}
+
 /** Keeps only the entries that have a value, so an optional property is absent rather than undefined. */
 function definedEntries<T extends object>(record: { [K in keyof T]: T[K] | undefined }): T {
   return Object.fromEntries(Object.entries(record).filter(([, value]) => value !== undefined)) as T;
@@ -782,8 +900,6 @@ function definedEntries<T extends object>(record: { [K in keyof T]: T[K] | undef
  * --identity, --no-alerts's true) must never silently answer a question init would otherwise ask. */
 function initOptions(env: string, options: InitCommandOptions, command: Command): InitOptions {
   const typed = <T>(name: string, value: T): T | undefined => (command.getOptionValueSource(name) === "cli" ? value : undefined);
-  const source = (file?: string, envName?: string): SecretSource | undefined =>
-    file === undefined && envName === undefined ? undefined : { ...(file === undefined ? {} : { file }), ...(envName === undefined ? {} : { envName }) };
   const flags = definedEntries<InitFlags>({
     engine: options.engine,
     identity: typed("identity", options.identity),
@@ -798,21 +914,21 @@ function initOptions(env: string, options: InitCommandOptions, command: Command)
     openrouterKey: source(options.openrouterKeyFile, options.openrouterKeyEnv),
     permissionBoundary: options.permissionBoundary, operatorPrincipal: options.operatorPrincipal,
     alertEmail: options.alertEmail,
-    alertWebhook: source(options.alertWebhookFile, options.alertWebhookEnv),
+    alertWebhook: secretSource(options.alertWebhookFile, options.alertWebhookEnv),
     alerts: typed("alerts", options.alerts),
     githubAccount: options.githubAccount, githubAccountType: options.githubAccountType, githubAppName: options.githubAppName,
     slackAppName: options.slackAppName, slackAppPostedMessages: options.slackAppPostedMessages,
     workerImage: options.workerImage, slackImage: options.slackImage,
   });
-  const keySource = source(options.githubPrivateKeyFile, options.githubPrivateKeyEnv);
+  const keySource = secretSource(options.githubPrivateKeyFile, options.githubPrivateKeyEnv);
   const { githubAppId: appId, githubInstallationId: installationId } = options;
   const preMadeGiven = appId !== undefined || installationId !== undefined;
   if (preMadeGiven && (appId === undefined || installationId === undefined || keySource === undefined)) {
     throw agentXError("CONFIG_INVALID", "--github-app-id, --github-installation-id and --github-private-key-file (or --github-private-key-env) go together");
   }
   const secretFlags = definedEntries<SecretFlags>({
-    slackBotToken: source(options.slackBotTokenFile, options.slackBotTokenEnv),
-    slackSigningSecret: source(options.slackSigningSecretFile, options.slackSigningSecretEnv),
+    slackBotToken: secretSource(options.slackBotTokenFile, options.slackBotTokenEnv),
+    slackSigningSecret: secretSource(options.slackSigningSecretFile, options.slackSigningSecretEnv),
     githubPrivateKey: keySource,
   });
   return {
