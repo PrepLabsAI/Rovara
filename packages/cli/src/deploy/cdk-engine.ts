@@ -11,6 +11,7 @@
 // change set), this engine never needs to touch it.
 import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { agentXError } from "@agentx/contracts";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import type { DeployRequest, StackDeployer, StackOutputs } from "./deployer.js";
 import { SECRET_PARAMETERS, type DeployPart } from "./parameters.js";
@@ -60,7 +61,8 @@ export async function assertCdkBootstrapped(input: { store: ParameterStore; regi
     throw new Error(`could not read ${CDK_BOOTSTRAP_VERSION_PARAMETER} in ${input.region}: ${errorMessage(error)}`, { cause: error });
   }
   if (parameter === undefined) {
-    throw new Error(
+    throw agentXError(
+      "CONFIG_INVALID",
       `CDK is not bootstrapped in ${input.region}; run: npx cdk bootstrap aws://<account>/${input.region} (or use --engine templates, which needs no bootstrap)`,
     );
   }
@@ -85,7 +87,7 @@ export async function assertSourceAtRelease(input: { runner: CommandRunner; sour
     display: "git status --porcelain",
   });
   if (statusOutput.trim() !== "") {
-    throw new Error(`source at ${input.source} has uncommitted changes; check out ${expected} cleanly`);
+    throw agentXError("CONFIG_INVALID", `source at ${input.source} has uncommitted changes; check out ${expected} cleanly`);
   }
 
   let tags: string[];
@@ -107,7 +109,7 @@ export async function assertSourceAtRelease(input: { runner: CommandRunner; sour
   }
 
   if (!tags.includes(expected)) {
-    throw new Error(`the cdk engine must run from a checkout of tag ${expected}; ${input.source} is at ${tags.length === 0 ? "no tag" : tags.join(", ")}`);
+    throw agentXError("CONFIG_INVALID", `the cdk engine must run from a checkout of tag ${expected}; ${input.source} is at ${tags.length === 0 ? "no tag" : tags.join(", ")}`);
   }
 }
 

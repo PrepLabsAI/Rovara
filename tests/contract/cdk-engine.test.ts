@@ -2,6 +2,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { AgentXError } from "@agentx/contracts";
 import { CDK_CONSTRUCT_IDS, assertCdkBootstrapped, assertSourceAtRelease, buildSource, cdkDeployer, type CommandRunner } from "../../packages/cli/src/deploy/cdk-engine.js";
 import type { ParameterStore } from "../../packages/cli/src/environments/parameter-store.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
@@ -227,6 +228,29 @@ describe("cdk engine", () => {
       }),
     ).rejects.toThrow("cdk deploy failed");
     expect(events).toEqual([{ kind: "deploying", stackName: "agentx-staging-control-plane" }]);
+  });
+
+  describe("refusals carry CONFIG_INVALID, never an internal error", () => {
+    async function code(promise: Promise<unknown>): Promise<string | undefined> {
+      const error: unknown = await promise.then(
+        () => undefined,
+        (caught: unknown) => caught,
+      );
+      expect(error).toBeInstanceOf(AgentXError);
+      return (error as AgentXError).code;
+    }
+
+    it("CDK not bootstrapped", async () => {
+      expect(await code(assertCdkBootstrapped({ store: new MemoryParameterStore(), region: "us-east-1" }))).toBe("CONFIG_INVALID");
+    });
+
+    it("a dirty source tree", async () => {
+      expect(await code(assertSourceAtRelease({ runner: gitRunner({ status: " M x\n" }), source: "/src", version: "1.2.3" }))).toBe("CONFIG_INVALID");
+    });
+
+    it("a source checkout at the wrong tag", async () => {
+      expect(await code(assertSourceAtRelease({ runner: gitRunner({ tags: "v1.2.2\n" }), source: "/src", version: "1.2.3" }))).toBe("CONFIG_INVALID");
+    });
   });
 
   describe("outputs file handling", () => {

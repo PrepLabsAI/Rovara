@@ -18,6 +18,7 @@ import {
   type StackEvent,
 } from "@aws-sdk/client-cloudformation";
 import { HeadObjectCommand, PutObjectCommand, type S3Client } from "@aws-sdk/client-s3";
+import { AgentXError, agentXError } from "@agentx/contracts";
 import type { DeployEvent, DeployRequest, StackDeployer, StackOutputs } from "./deployer.js";
 import { sha256Hex } from "./hash.js";
 import { SECRET_PARAMETERS } from "./parameters.js";
@@ -75,6 +76,12 @@ function stackOutputs(stack: Stack): StackOutputs {
     if (output.OutputKey !== undefined && output.OutputValue !== undefined) outputs[output.OutputKey] = output.OutputValue;
   }
   return outputs;
+}
+
+/** Whether the stack last changed (its last update, or its creation if never updated) at or after `since`. */
+function changedSince(stack: Stack, since: number): boolean {
+  const changed = stack.LastUpdatedTime ?? stack.CreationTime;
+  return changed !== undefined && changed.getTime() >= since;
 }
 
 function describedChanges(changes: Change[]): Extract<DeployEvent, { kind: "changes" }>["changes"] {
@@ -162,6 +169,9 @@ export function templatesDeployer(input: {
 
   /** Uploads the template and returns where CreateChangeSet finds it; the access stack's goes inline. */
   async function templateSource(request: DeployRequest, emit: (event: DeployEvent) => void): Promise<{ TemplateURL: string } | { TemplateBody: string }> {
+    if (!release.regions().includes(region)) {
+      throw agentXError("CONFIG_INVALID", `release ${version} does not cover region ${region}; it covers: ${release.regions().join(", ") || "no region"}`);
+    }
     const text = release.template(request.part, region, env);
     if (request.part === "access") {
       if (Buffer.byteLength(text, "utf8") > MAX_INLINE_TEMPLATE_BYTES) throw new Error("the access template is too large to deploy inline");
@@ -175,19 +185,20 @@ export function templatesDeployer(input: {
     return { TemplateURL: `https://${bucket}.s3.${region}.${s3HostSuffix}/${key}` };
   }
 
-  /** CREATE for a missing stack or one awaiting its first change set; UPDATE when it can be updated; otherwise throws saying what to do. */
+  /** CREATE for a missing stack or one awaiting its first change set; UPDATE when it can be updated; otherwise refuses (CONFIG_INVALID) saying what to do. */
   function changeSetType(stackName: string, stack: Stack | undefined): "CREATE" | "UPDATE" {
     if (stack === undefined) return "CREATE";
     const status = stack.StackStatus ?? "";
     if (status === "ROLLBACK_COMPLETE") {
-      throw new Error(
-        `stack ${stackName} failed to create earlier and must be deleted before it can be deployed again (aws cloudformation delete-stack --stack-name ${stackName})`,
+      throw agentXError(
+        "CONFIG_INVALID",
+        `stack ${stackName} failed to create earlier and must be deleted before it can be deployed again (aws cloudformation delete-stack --stack-name ${stackName} --region ${region})`,
       );
     }
     // A stack in REVIEW_IN_PROGRESS has only ever had a CREATE change set that was never executed.
     if (status === "REVIEW_IN_PROGRESS") return "CREATE";
-    if (status.endsWith("_IN_PROGRESS")) throw new Error(`stack ${stackName} is busy (${status}); try again when it finishes`);
-    if (status.endsWith("_FAILED")) throw new Error(`stack ${stackName} is ${status}; fix it in the AWS console before deploying`);
+    if (status.endsWith("_IN_PROGRESS")) throw agentXError("CONFIG_INVALID", `stack ${stackName} is busy (${status}); try again when it finishes`);
+    if (status.endsWith("_FAILED")) throw agentXError("CONFIG_INVALID", `stack ${stackName} is ${status}; fix it in the AWS console before deploying`);
     return "UPDATE";
   }
 
@@ -263,16 +274,23 @@ export function templatesDeployer(input: {
     /**
      * Polls the change set until the stack operation it started is over, then the stack until it is settled.
      * CloudFormation can remove an executed change set while the operation runs (seen live creating a new
-     * stack), so a change set that is gone hands over to the stack, whose status is the real outcome.
+     * stack), so a change set that is gone hands over to the stack, whose status is the real outcome. The
+     * stack may not have started this operation yet when that happens, so a settled status then counts
+     * only when the stack last changed at or after `executedAt`; an older one is the previous operation's
+     * result and polling continues (within the timeout).
      */
-    async function awaitExecution(): Promise<Stack> {
+    async function awaitExecution(executedAt: number): Promise<Stack> {
+      let changeSetGone = false;
       for (;;) {
         let executionStatus: string;
         try {
           const { ExecutionStatus } = await cloudFormation.send(new DescribeChangeSetCommand(changeSetId));
           executionStatus = ExecutionStatus ?? "";
         } catch (error) {
-          if (isChangeSetNotFound(error)) break;
+          if (isChangeSetNotFound(error)) {
+            changeSetGone = true;
+            break;
+          }
           throw error;
         }
         if (EXECUTION_ENDED.has(executionStatus)) break;
@@ -282,7 +300,7 @@ export function templatesDeployer(input: {
         const stack = await describeStack(stackName);
         if (stack === undefined) throw new Error(`stack ${stackName} disappeared while deploying`);
         const status = stack.StackStatus ?? "";
-        if (!status.endsWith("_IN_PROGRESS")) return stack;
+        if (!status.endsWith("_IN_PROGRESS") && (!changeSetGone || changedSince(stack, executedAt))) return stack;
         await waitForStack(status);
       }
     }
@@ -347,12 +365,12 @@ export function templatesDeployer(input: {
       }
       const failure = `change set for ${stackName} failed: ${reason}`;
       await deleteChangeSet(failure);
-      throw new Error(failure);
+      throw agentXError("CONFIG_INVALID", failure);
     }
     if (changeSet.ExecutionStatus !== "AVAILABLE") {
       const failure = `change set for ${stackName} cannot be executed (${changeSet.ExecutionStatus ?? "no execution status"}): ${reason}`;
       await deleteChangeSet(failure);
-      throw new Error(failure);
+      throw agentXError("CONFIG_INVALID", failure);
     }
 
     const changes = describedChanges(changeSet.Changes ?? []);
@@ -368,10 +386,11 @@ export function templatesDeployer(input: {
     }
     // Every stack event this execution causes carries this token, which picks out its failures later.
     const token = changeSetName;
+    const executedAt = now();
     await cloudFormation.send(new ExecuteChangeSetCommand({ ...changeSetId, ClientRequestToken: token }));
     emit({ kind: "deploying", stackName });
 
-    const deployed = await awaitExecution();
+    const deployed = await awaitExecution(executedAt);
     const status = deployed.StackStatus ?? "";
     if (status !== "CREATE_COMPLETE" && status !== "UPDATE_COMPLETE") {
       throw new Error(`stack ${stackName} ended in ${status}: ${await failureReason(deployed, token)}`);
@@ -390,6 +409,11 @@ export function templatesDeployer(input: {
       } catch (error) {
         // Rebuild any error whose message carries a secret value, so neither the message nor the stack
         // does; the request metadata (ids and status only) is kept for support cases.
+        if (error instanceof AgentXError && redact(error.message) !== error.message) {
+          // Keeps the refusal's code; the message is rebuilt without its "CODE: " prefix, which
+          // agentXError adds again.
+          throw agentXError(error.code, redact(error.message.slice(`${error.code}: `.length)));
+        }
         if (error instanceof Error && redact(error.message) !== error.message) {
           const safe = new Error(redact(error.message));
           safe.name = error.name;

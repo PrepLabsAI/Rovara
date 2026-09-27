@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CloudFormationClient } from "@aws-sdk/client-cloudformation";
 import type { S3Client } from "@aws-sdk/client-s3";
-import type { ReleaseManifest } from "@agentx/contracts";
+import { AgentXError, type ReleaseManifest } from "@agentx/contracts";
 import { beforeAll, describe, expect, it } from "vitest";
 import { PROTECTED_PARTS, type DeployEvent, type DeployRequest } from "../../packages/cli/src/deploy/deployer.js";
 import type { DeployPart } from "../../packages/cli/src/deploy/parameters.js";
@@ -29,7 +29,7 @@ function awsError(name: string, message: string, httpStatusCode = 400): Error {
 }
 const notFound = () => awsError("NotFound", "UnknownError", 404);
 const stackAbsent = (stackName: string) => awsError("ValidationError", `Stack with id ${stackName} does not exist`);
-const stack = (StackStatus: string, outputs: Record<string, string> = {}, extra: { EnableTerminationProtection?: boolean; StackStatusReason?: string } = {}) => ({
+const stack = (StackStatus: string, outputs: Record<string, string> = {}, extra: { EnableTerminationProtection?: boolean; StackStatusReason?: string; LastUpdatedTime?: Date; CreationTime?: Date } = {}) => ({
   Stacks: [{ StackStatus, Outputs: Object.entries(outputs).map(([OutputKey, OutputValue]) => ({ OutputKey, OutputValue })), ...extra }],
 });
 const protectedStack = (StackStatus: string, outputs: Record<string, string> = {}) => stack(StackStatus, outputs, { EnableTerminationProtection: true });
@@ -331,7 +331,7 @@ describe("templates engine", () => {
     // Seen live on 2026-09-27: the access stack reached CREATE_COMPLETE, but DescribeChangeSet right after
     // ExecuteChangeSet answered "ChangeSet [...] does not exist", and the deploy failed before protecting it.
     const fake = fakeClients({
-      DescribeStacks: [stackAbsent("agentx-staging-access"), stack("CREATE_COMPLETE", { ArtifactBucketName: "bucket" })],
+      DescribeStacks: [stackAbsent("agentx-staging-access"), stack("CREATE_COMPLETE", { ArtifactBucketName: "bucket" }, { CreationTime: new Date(NOW - 5_000), LastUpdatedTime: new Date(NOW) })],
       CreateChangeSet: [{}],
       DescribeChangeSet: [ready(), awsError("ChangeSetNotFoundException", `ChangeSet [${CHANGE_SET}] does not exist`, 404)],
       ExecuteChangeSet: [{}],
@@ -344,6 +344,170 @@ describe("templates engine", () => {
     expect(outputs).toEqual({ ArtifactBucketName: "bucket" });
     expect(fake.inputs("UpdateTerminationProtection")).toEqual([{ StackName: "agentx-staging-access", EnableTerminationProtection: true }]);
     expect(req.events.map((event) => event.kind)).toEqual(["changes", "deploying", "deployed"]);
+  });
+
+  describe("after the executed change set is gone", () => {
+    const gone = () => awsError("ChangeSetNotFoundException", `ChangeSet [${CHANGE_SET}] does not exist`, 404);
+    const fresh = { LastUpdatedTime: new Date(NOW) };
+    const stale = { LastUpdatedTime: new Date(NOW - 60_000) };
+
+    it("throws when the stack then shows ROLLBACK_COMPLETE", async () => {
+      const fake = fakeClients({
+        PutObject: [{}],
+        DescribeStacks: [stackAbsent("agentx-staging-identity"), stack("ROLLBACK_COMPLETE", {}, { CreationTime: new Date(NOW - 5_000), ...fresh })],
+        CreateChangeSet: [{}],
+        DescribeChangeSet: [ready(), gone()],
+        ExecuteChangeSet: [{}],
+        DescribeStackEvents: [{ StackEvents: [] }],
+      });
+      await expect(deployer(fake).deploy(request("identity"))).rejects.toThrow("stack agentx-staging-identity ended in ROLLBACK_COMPLETE");
+      expect(fake.inputs("UpdateTerminationProtection")).toEqual([]);
+    });
+
+    it("throws when the stack then shows UPDATE_ROLLBACK_COMPLETE", async () => {
+      const fake = fakeClients({
+        PutObject: [{}],
+        DescribeStacks: [protectedStack("UPDATE_COMPLETE"), stack("UPDATE_ROLLBACK_COMPLETE", {}, fresh)],
+        CreateChangeSet: [{}],
+        DescribeChangeSet: [ready(), gone()],
+        ExecuteChangeSet: [{}],
+        DescribeStackEvents: [{ StackEvents: [] }],
+      });
+      await expect(deployer(fake).deploy(request("foundation"))).rejects.toThrow("stack agentx-staging-foundation ended in UPDATE_ROLLBACK_COMPLETE");
+    });
+
+    it("keeps polling past a stale UPDATE_COMPLETE (older than the execute) until a fresh one arrives", async () => {
+      const fake = fakeClients({
+        PutObject: [{}],
+        DescribeStacks: [
+          protectedStack("UPDATE_COMPLETE", { Version: "old" }),
+          stack("UPDATE_COMPLETE", { Version: "old" }, { EnableTerminationProtection: true, ...stale }),
+          stack("UPDATE_IN_PROGRESS", { Version: "old" }, fresh),
+          stack("UPDATE_COMPLETE", { Version: "new" }, { EnableTerminationProtection: true, ...fresh }),
+        ],
+        CreateChangeSet: [{}],
+        DescribeChangeSet: [ready(), gone()],
+        ExecuteChangeSet: [{}],
+      });
+      await expect(deployer(fake).deploy(request("foundation"))).resolves.toEqual({ Version: "new" });
+      expect(fake.inputs("DescribeStacks")).toHaveLength(4);
+    });
+
+    it("keeps polling past a stale UPDATE_ROLLBACK_COMPLETE from an earlier failed update instead of reporting it as this deploy's failure", async () => {
+      const fake = fakeClients({
+        PutObject: [{}],
+        DescribeStacks: [
+          protectedStack("UPDATE_ROLLBACK_COMPLETE"),
+          stack("UPDATE_ROLLBACK_COMPLETE", {}, { EnableTerminationProtection: true, ...stale }),
+          stack("UPDATE_COMPLETE", { Version: "new" }, { EnableTerminationProtection: true, ...fresh }),
+        ],
+        CreateChangeSet: [{}],
+        DescribeChangeSet: [ready(), gone()],
+        ExecuteChangeSet: [{}],
+      });
+      await expect(deployer(fake).deploy(request("foundation"))).resolves.toEqual({ Version: "new" });
+    });
+
+    it("still gives up at the timeout when only a stale status ever shows", async () => {
+      let clock = NOW;
+      const staleStack = () => stack("UPDATE_COMPLETE", {}, { EnableTerminationProtection: true, LastUpdatedTime: new Date(NOW - 60_000) });
+      const fake = fakeClients({
+        PutObject: [{}],
+        DescribeStacks: [protectedStack("UPDATE_COMPLETE"), staleStack(), staleStack(), staleStack(), staleStack()],
+        CreateChangeSet: [{}],
+        DescribeChangeSet: [ready(), gone()],
+        ExecuteChangeSet: [{}],
+      });
+      const engine = templatesDeployer({
+        clients: fake.clients,
+        release: makeRelease(),
+        env: "staging",
+        region: "us-east-1",
+        artifactBucket: () => "bucket",
+        now: () => (clock += 30_000) - 30_000,
+        pollMs: 0,
+        timeoutMs: 60_000,
+      });
+      await expect(engine.deploy(request("foundation"))).rejects.toThrow("stack agentx-staging-foundation is still UPDATE_COMPLETE");
+    });
+  });
+
+  describe("refusals carry CONFIG_INVALID, never an internal error", () => {
+    async function refusal(fake: ReturnType<typeof fakeClients>, part: DeployPart = "foundation", release?: LoadedRelease): Promise<AgentXError> {
+      const error: unknown = await deployer(fake, release === undefined ? {} : { release }).deploy(request(part)).then(
+        () => undefined,
+        (caught: unknown) => caught,
+      );
+      expect(error).toBeInstanceOf(AgentXError);
+      expect((error as AgentXError).code).toBe("CONFIG_INVALID");
+      return error as AgentXError;
+    }
+
+    it("a stack in ROLLBACK_COMPLETE", async () => {
+      await refusal(fakeClients({ PutObject: [{}], DescribeStacks: [stack("ROLLBACK_COMPLETE")] }));
+    });
+
+    it("a busy stack", async () => {
+      await refusal(fakeClients({ PutObject: [{}], DescribeStacks: [stack("UPDATE_IN_PROGRESS")] }));
+    });
+
+    it("a failed stack", async () => {
+      await refusal(fakeClients({ PutObject: [{}], DescribeStacks: [stack("UPDATE_ROLLBACK_FAILED")] }));
+    });
+
+    it("a change set that fails", async () => {
+      await refusal(
+        fakeClients({
+          PutObject: [{}],
+          DescribeStacks: [stack("UPDATE_COMPLETE")],
+          CreateChangeSet: [{}],
+          DescribeChangeSet: [{ Status: "FAILED", StatusReason: "Template format error" }],
+          DeleteChangeSet: [{}],
+        }),
+      );
+    });
+
+    it("a change set that cannot be executed", async () => {
+      await refusal(
+        fakeClients({
+          PutObject: [{}],
+          DescribeStacks: [stack("UPDATE_COMPLETE")],
+          CreateChangeSet: [{}],
+          DescribeChangeSet: [{ Status: "CREATE_COMPLETE", ExecutionStatus: "OBSOLETE" }],
+          DeleteChangeSet: [{}],
+        }),
+      );
+    });
+
+    it("a region the release does not cover, before calling AWS", async () => {
+      const release = { ...makeRelease(), regions: () => ["eu-west-1"] };
+      const fake = fakeClients({});
+      const error = await refusal(fake, "foundation", release);
+      expect(error.message).toContain("does not cover region us-east-1");
+      expect(fake.calls).toEqual([]);
+    });
+
+    it("keeps CONFIG_INVALID when a secret is redacted out of the message", async () => {
+      const SECRET = "s3cr3t-value-that-must-not-leak-11111111111";
+      const fake = fakeClients({
+        HeadObject: [{ Metadata: { sha256: sha256(zipBytes[CONTROL_PLANE_ASSET]!) } }],
+        PutObject: [{}],
+        DescribeStacks: [stack("UPDATE_COMPLETE")],
+        CreateChangeSet: [{}],
+        DescribeChangeSet: [{ Status: "FAILED", StatusReason: `Parameter CallbackSigningKey value ${SECRET} is invalid` }],
+        DeleteChangeSet: [{}],
+      });
+      const error: unknown = await deployer(fake)
+        .deploy(request("control-plane", { parameters: { PermissionsBoundaryArn: "", CallbackSigningKey: SECRET } }))
+        .then(
+          () => undefined,
+          (caught: unknown) => caught,
+        );
+      expect(error).toBeInstanceOf(AgentXError);
+      expect((error as AgentXError).code).toBe("CONFIG_INVALID");
+      expect((error as AgentXError).message).not.toContain(SECRET);
+      expect((error as AgentXError).message).toContain("<redacted>");
+    });
   });
 
   it("refuses an access template too large to deploy inline, before calling AWS", async () => {
@@ -466,7 +630,7 @@ describe("templates engine", () => {
   it("refuses a stack in ROLLBACK_COMPLETE with the delete command to run", async () => {
     const fake = fakeClients({ PutObject: [{}], DescribeStacks: [stack("ROLLBACK_COMPLETE")] });
     await expect(deployer(fake).deploy(request("identity"))).rejects.toThrow(
-      "stack agentx-staging-identity failed to create earlier and must be deleted before it can be deployed again (aws cloudformation delete-stack --stack-name agentx-staging-identity)",
+      "stack agentx-staging-identity failed to create earlier and must be deleted before it can be deployed again (aws cloudformation delete-stack --stack-name agentx-staging-identity --region us-east-1)",
     );
     expect(fake.inputs("CreateChangeSet")).toEqual([]);
   });
@@ -765,7 +929,7 @@ describe("templates engine", () => {
     });
     const engine = templatesDeployer({
       clients: fake.clients,
-      release: makeRelease(),
+      release: { ...makeRelease(), regions: () => ["us-east-1", "cn-north-1"] },
       env: "staging",
       region: "cn-north-1",
       partition: "aws-cn",
@@ -820,7 +984,8 @@ describe("templates engine", () => {
       });
       const first = secretRequest();
       const firstError = await failure(changeSetFails, first);
-      expect(firstError.message).toMatch(/^change set for agentx-staging-control-plane failed: /);
+      // A refused change set is CONFIG_INVALID, and keeps that code once the secret is redacted.
+      expect(firstError.message).toMatch(/^CONFIG_INVALID: change set for agentx-staging-control-plane failed: /);
       expect(changeSetFails.inputs("CreateChangeSet")[0]!.Parameters).toContainEqual({ ParameterKey: "CallbackSigningKey", ParameterValue: SECRET });
       messages.push(firstError.message);
       events.push(...first.events);
