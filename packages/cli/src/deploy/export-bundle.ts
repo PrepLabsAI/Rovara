@@ -586,7 +586,8 @@ credentials that can delete every resource below.
      aws dynamodb delete-table --table-name <table> --region ${region}
      \`\`\`
    - **Two log groups**: the foundation's VPC flow logs, and the log group AgentCore itself creates
-     for the runtime (find it with \`aws logs describe-log-groups --log-group-name-prefix /aws/bedrock-agentcore/\`):
+     for the runtime, \`/aws/bedrock-agentcore/runtimes/<runtimeId>-DEFAULT\` (\`<runtimeId>\` is the
+     last part of the runtime's ARN):
      \`\`\`
      aws logs delete-log-group --log-group-name <name> --region ${region}
      \`\`\`

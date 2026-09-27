@@ -670,20 +670,27 @@ export interface InitExportResult {
 
 function buildIdentityAnswers(options: InitExportOptions): DeployAnswers["identity"] {
   if (options.identity === "cognito") return { mode: "cognito" };
-  if (options.oidcIssuer === undefined || options.oidcAudience === undefined) {
-    throw agentXError("CONFIG_INVALID", "--oidc-issuer and --oidc-audience are required with --identity oidc");
-  }
-  const adminValues = options.adminValues
-    ?.split(",")
+  // The same fields DeployAnswersSchema requires of your own OIDC provider, refused by flag name.
+  const adminValues = (options.adminValues ?? "")
+    .split(",")
     .map((value) => value.trim())
     .filter((value) => value !== "");
+  const required: Array<[flag: string, value: string | undefined]> = [
+    ["--oidc-issuer", options.oidcIssuer],
+    ["--oidc-audience", options.oidcAudience],
+    ["--oidc-client-id", options.oidcClientId],
+    ["--admin-claim", options.adminClaim],
+    ["--admin-values", adminValues.length === 0 ? undefined : adminValues.join(",")],
+  ];
+  const missing = required.find(([, value]) => value === undefined || value.trim() === "");
+  if (missing !== undefined) throw agentXError("CONFIG_INVALID", `--identity oidc requires ${missing[0]}`);
   return {
     mode: "oidc",
-    issuer: options.oidcIssuer,
-    audience: options.oidcAudience,
-    ...(options.adminClaim === undefined ? {} : { adminClaim: options.adminClaim }),
-    ...(adminValues === undefined || adminValues.length === 0 ? {} : { adminValues }),
-    ...(options.oidcClientId === undefined ? {} : { clientId: options.oidcClientId }),
+    issuer: options.oidcIssuer as string,
+    audience: options.oidcAudience as string,
+    adminClaim: options.adminClaim as string,
+    adminValues,
+    clientId: options.oidcClientId as string,
   };
 }
 

@@ -39,6 +39,12 @@ const NO_CHANGES = ["didn't contain changes", "No updates are to be performed"];
 const EXECUTION_ENDED = new Set(["EXECUTE_COMPLETE", "EXECUTE_FAILED", "OBSOLETE"]);
 /** Change set statuses meaning it is gone or going: fail fast instead of waiting for the timeout. */
 const DELETED_CHANGE_SET_STATUSES = new Set(["DELETE_PENDING", "DELETE_IN_PROGRESS", "DELETE_COMPLETE", "DELETE_FAILED"]);
+/** When a change set reports no CreationTime, the freshness baseline falls back to the local clock
+ * at execute less this much, so a local clock running ahead of AWS's cannot make a fresh result look stale. */
+const LOCAL_CLOCK_TOLERANCE_MS = 5 * 60_000;
+/** A new stack's CreationTime is set by the same CreateChangeSet call as the change set's own, so it
+ * can be a moment earlier; judged by CreationTime alone, a stack gets this much leeway. */
+const SAME_REQUEST_LEEWAY_MS = 60_000;
 /** Looking for this deploy's rollback reason pages through stack events at most this many times, even if none of
  * them ever carries this deploy's ClientRequestToken. */
 const MAX_EVENT_PAGES = 20;
@@ -78,10 +84,15 @@ function stackOutputs(stack: Stack): StackOutputs {
   return outputs;
 }
 
-/** Whether the stack last changed (its last update, or its creation if never updated) at or after `since`. */
+/**
+ * Whether the stack last changed (its last update, or its creation if never updated) at or after
+ * `since`, the change set's own CreationTime (AWS's clock, like the stack's timestamps). A stack
+ * with no LastUpdatedTime is judged by its CreationTime, which for a stack the change set created
+ * can be a moment before the change set's own, hence the leeway.
+ */
 function changedSince(stack: Stack, since: number): boolean {
-  const changed = stack.LastUpdatedTime ?? stack.CreationTime;
-  return changed !== undefined && changed.getTime() >= since;
+  if (stack.LastUpdatedTime !== undefined) return stack.LastUpdatedTime.getTime() >= since;
+  return stack.CreationTime !== undefined && stack.CreationTime.getTime() >= since - SAME_REQUEST_LEEWAY_MS;
 }
 
 function describedChanges(changes: Change[]): Extract<DeployEvent, { kind: "changes" }>["changes"] {
@@ -276,10 +287,10 @@ export function templatesDeployer(input: {
      * CloudFormation can remove an executed change set while the operation runs (seen live creating a new
      * stack), so a change set that is gone hands over to the stack, whose status is the real outcome. The
      * stack may not have started this operation yet when that happens, so a settled status then counts
-     * only when the stack last changed at or after `executedAt`; an older one is the previous operation's
+     * only when the stack last changed at or after `freshSince`; an older one is the previous operation's
      * result and polling continues (within the timeout).
      */
-    async function awaitExecution(executedAt: number): Promise<Stack> {
+    async function awaitExecution(freshSince: number): Promise<Stack> {
       let changeSetGone = false;
       for (;;) {
         let executionStatus: string;
@@ -300,7 +311,7 @@ export function templatesDeployer(input: {
         const stack = await describeStack(stackName);
         if (stack === undefined) throw new Error(`stack ${stackName} disappeared while deploying`);
         const status = stack.StackStatus ?? "";
-        if (!status.endsWith("_IN_PROGRESS") && (!changeSetGone || changedSince(stack, executedAt))) return stack;
+        if (!status.endsWith("_IN_PROGRESS") && (!changeSetGone || changedSince(stack, freshSince))) return stack;
         await waitForStack(status);
       }
     }
@@ -386,11 +397,12 @@ export function templatesDeployer(input: {
     }
     // Every stack event this execution causes carries this token, which picks out its failures later.
     const token = changeSetName;
-    const executedAt = now();
+    // AWS's own time for this change set: every earlier operation on the stack ended before it.
+    const freshSince = changeSet.CreationTime?.getTime() ?? now() - LOCAL_CLOCK_TOLERANCE_MS;
     await cloudFormation.send(new ExecuteChangeSetCommand({ ...changeSetId, ClientRequestToken: token }));
     emit({ kind: "deploying", stackName });
 
-    const deployed = await awaitExecution(executedAt);
+    const deployed = await awaitExecution(freshSince);
     const status = deployed.StackStatus ?? "";
     if (status !== "CREATE_COMPLETE" && status !== "UPDATE_COMPLETE") {
       throw new Error(`stack ${stackName} ended in ${status}: ${await failureReason(deployed, token)}`);

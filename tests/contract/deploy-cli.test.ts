@@ -360,18 +360,58 @@ describe("agentx init --export", () => {
     expect(policyText).toContain(stsAccount);
   });
 
-  it("--identity oidc without --oidc-issuer refuses", async () => {
+  const OIDC_FLAGS: Record<string, string> = {
+    "--oidc-issuer": "https://idp.example.com",
+    "--oidc-audience": "api://agentx",
+    "--oidc-client-id": "cli-client",
+    "--admin-claim": "groups",
+    "--admin-values": "agentx-admins",
+  };
+
+  for (const missing of Object.keys(OIDC_FLAGS)) {
+    it(`--identity oidc without ${missing} refuses with CONFIG_INVALID naming it, writing nothing`, async () => {
+      const releaseDir = await fullReleaseDir();
+      const exportDir = join(await tmp("agentx-deploy-cli-export-"), "bundle");
+      const flags = Object.entries(OIDC_FLAGS).filter(([flag]) => flag !== missing).flat();
+      const io = capture();
+
+      const code = await executeCli(
+        ["--env", ENV, "init", "--export", exportDir, "--region", REGION, "--account", ACCOUNT, "--release", releaseDir, "--identity", "oidc", ...flags],
+        { ...io, deploy: { identity: throwingIdentity } },
+      );
+
+      expect(code).toBe(2);
+      expect(io.err.join("")).toBe(`AgentX error [CONFIG_INVALID]: --identity oidc requires ${missing}\n`);
+      await expect(stat(exportDir)).rejects.toThrow();
+    });
+  }
+
+  it("--identity oidc refuses --admin-values with no value in it", async () => {
+    const releaseDir = await fullReleaseDir();
+    const exportDir = join(await tmp("agentx-deploy-cli-export-"), "bundle");
+    const flags = Object.entries({ ...OIDC_FLAGS, "--admin-values": " , " }).flat();
+    const io = capture();
+
+    const code = await executeCli(
+      ["--env", ENV, "init", "--export", exportDir, "--region", REGION, "--account", ACCOUNT, "--release", releaseDir, "--identity", "oidc", ...flags],
+      { ...io, deploy: { identity: throwingIdentity } },
+    );
+
+    expect(code).toBe(2);
+    expect(io.err.join("")).toBe("AgentX error [CONFIG_INVALID]: --identity oidc requires --admin-values\n");
+  });
+
+  it("--identity oidc with every flag writes a bundle", async () => {
     const releaseDir = await fullReleaseDir();
     const exportDir = join(await tmp("agentx-deploy-cli-export-"), "bundle");
     const io = capture();
 
     const code = await executeCli(
-      ["--env", ENV, "init", "--export", exportDir, "--region", REGION, "--account", ACCOUNT, "--release", releaseDir, "--identity", "oidc", "--oidc-audience", "api://agentx"],
+      ["--env", ENV, "init", "--export", exportDir, "--region", REGION, "--account", ACCOUNT, "--release", releaseDir, "--identity", "oidc", ...Object.entries(OIDC_FLAGS).flat()],
       { ...io, deploy: { identity: throwingIdentity } },
     );
 
-    expect(code).not.toBe(0);
-    expect(io.err.join("")).toContain("--oidc-issuer and --oidc-audience are required with --identity oidc");
+    expect(code).toBe(0);
   });
 
   it("maps missing AWS credentials while reading the caller's account to AUTH_REQUIRED", async () => {

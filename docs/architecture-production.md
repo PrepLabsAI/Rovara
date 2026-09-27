@@ -358,7 +358,7 @@ stack; the legacy deployment's is retained.
 
 Stack deletion keeps, on purpose: the capacity provider, the Cognito user pool (deletion protection), three
 S3 buckets (two versioned: empty every version and delete marker first), three DynamoDB tables, two log
-groups, and the KMS workspace key (schedule deletion; 7 days minimum). Two secrets live outside or beyond the
+groups (VPC flow logs and `/aws/bedrock-agentcore/runtimes/<runtimeId>-DEFAULT`), and the KMS workspace key (schedule deletion; 7 days minimum). Two secrets live outside or beyond the
 stacks: `agentx/<env>/callback-signing-key` (created by the CLI) and `agentx/<env>/slack`; delete both with
 `--force-delete-without-recovery` so a new install can reuse the names. **Deleting the capacity provider
 deletes every worker session's persistent workspace volume** (AgentCore's runtime-instances data management).

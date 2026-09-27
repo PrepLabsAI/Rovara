@@ -350,13 +350,75 @@ describe("templates engine", () => {
     const gone = () => awsError("ChangeSetNotFoundException", `ChangeSet [${CHANGE_SET}] does not exist`, 404);
     const fresh = { LastUpdatedTime: new Date(NOW) };
     const stale = { LastUpdatedTime: new Date(NOW - 60_000) };
+    /** The change set's own CreationTime (AWS's clock) is the freshness baseline. */
+    const CHANGE_SET_CREATED = new Date(NOW - 1_000);
+    const readyAt = () => ({ ...ready(), CreationTime: CHANGE_SET_CREATED });
+    const engineAt = (fake: ReturnType<typeof fakeClients>, now: () => number) =>
+      templatesDeployer({ clients: fake.clients, release: makeRelease(), env: "staging", region: "us-east-1", artifactBucket: () => "bucket", now, pollMs: 0 });
+
+    it("judges freshness by the change set's CreationTime, not the local clock: a machine running 10 minutes fast still accepts a fresh result", async () => {
+      const fake = fakeClients({
+        PutObject: [{}],
+        DescribeStacks: [protectedStack("UPDATE_COMPLETE", { Version: "old" }), stack("UPDATE_COMPLETE", { Version: "new" }, { EnableTerminationProtection: true, LastUpdatedTime: new Date(NOW + 11_000) })],
+        CreateChangeSet: [{}],
+        DescribeChangeSet: [{ ...ready(), CreationTime: new Date(NOW) }, gone()],
+        ExecuteChangeSet: [{}],
+      });
+      await expect(engineAt(fake, () => NOW + 10 * 60_000).deploy(request("foundation"))).resolves.toEqual({ Version: "new" });
+      expect(fake.inputs("DescribeStacks")).toHaveLength(2);
+    });
+
+    it("accepts a new stack as fresh with the live timestamps: created with the change set, last updated when it ran", async () => {
+      // Seen live on 2026-09-27: the access stack's CreationTime 02:33:02, LastUpdatedTime 02:33:13.
+      const changeSetCreated = new Date("2026-09-27T02:33:02.400Z");
+      const fake = fakeClients({
+        DescribeStacks: [
+          stackAbsent("agentx-staging-access"),
+          stack("CREATE_COMPLETE", { ArtifactBucketName: "bucket" }, { CreationTime: new Date("2026-09-27T02:33:02.000Z"), LastUpdatedTime: new Date("2026-09-27T02:33:13.000Z") }),
+        ],
+        CreateChangeSet: [{}],
+        DescribeChangeSet: [{ ...ready(), CreationTime: changeSetCreated }, gone()],
+        ExecuteChangeSet: [{}],
+        UpdateTerminationProtection: [{}],
+      });
+      const req = request("access", { parameters: { PermissionsBoundaryArn: "", OperatorPrincipalArn: "" } });
+      await expect(engineAt(fake, () => changeSetCreated.getTime() + 60 * 60_000).deploy(req)).resolves.toEqual({ ArtifactBucketName: "bucket" });
+    });
+
+    it("accepts a new stack with no LastUpdatedTime whose CreationTime is just before the change set's", async () => {
+      const fake = fakeClients({
+        DescribeStacks: [stackAbsent("agentx-staging-access"), stack("CREATE_COMPLETE", { ArtifactBucketName: "bucket" }, { CreationTime: new Date(CHANGE_SET_CREATED.getTime() - 500) })],
+        CreateChangeSet: [{}],
+        DescribeChangeSet: [readyAt(), gone()],
+        ExecuteChangeSet: [{}],
+        UpdateTerminationProtection: [{}],
+      });
+      const req = request("access", { parameters: { PermissionsBoundaryArn: "", OperatorPrincipalArn: "" } });
+      await expect(deployer(fake).deploy(req)).resolves.toEqual({ ArtifactBucketName: "bucket" });
+    });
+
+    it("with no change set CreationTime, falls back to the local clock less a tolerance: a status 10 minutes old is stale, one a minute old is fresh", async () => {
+      const fake = fakeClients({
+        PutObject: [{}],
+        DescribeStacks: [
+          protectedStack("UPDATE_COMPLETE", { Version: "old" }),
+          stack("UPDATE_COMPLETE", { Version: "old" }, { EnableTerminationProtection: true, LastUpdatedTime: new Date(NOW - 10 * 60_000) }),
+          stack("UPDATE_COMPLETE", { Version: "new" }, { EnableTerminationProtection: true, LastUpdatedTime: new Date(NOW - 60_000) }),
+        ],
+        CreateChangeSet: [{}],
+        DescribeChangeSet: [ready(), gone()],
+        ExecuteChangeSet: [{}],
+      });
+      await expect(deployer(fake).deploy(request("foundation"))).resolves.toEqual({ Version: "new" });
+      expect(fake.inputs("DescribeStacks")).toHaveLength(3);
+    });
 
     it("throws when the stack then shows ROLLBACK_COMPLETE", async () => {
       const fake = fakeClients({
         PutObject: [{}],
         DescribeStacks: [stackAbsent("agentx-staging-identity"), stack("ROLLBACK_COMPLETE", {}, { CreationTime: new Date(NOW - 5_000), ...fresh })],
         CreateChangeSet: [{}],
-        DescribeChangeSet: [ready(), gone()],
+        DescribeChangeSet: [readyAt(), gone()],
         ExecuteChangeSet: [{}],
         DescribeStackEvents: [{ StackEvents: [] }],
       });
@@ -369,7 +431,7 @@ describe("templates engine", () => {
         PutObject: [{}],
         DescribeStacks: [protectedStack("UPDATE_COMPLETE"), stack("UPDATE_ROLLBACK_COMPLETE", {}, fresh)],
         CreateChangeSet: [{}],
-        DescribeChangeSet: [ready(), gone()],
+        DescribeChangeSet: [readyAt(), gone()],
         ExecuteChangeSet: [{}],
         DescribeStackEvents: [{ StackEvents: [] }],
       });
@@ -386,7 +448,7 @@ describe("templates engine", () => {
           stack("UPDATE_COMPLETE", { Version: "new" }, { EnableTerminationProtection: true, ...fresh }),
         ],
         CreateChangeSet: [{}],
-        DescribeChangeSet: [ready(), gone()],
+        DescribeChangeSet: [readyAt(), gone()],
         ExecuteChangeSet: [{}],
       });
       await expect(deployer(fake).deploy(request("foundation"))).resolves.toEqual({ Version: "new" });
@@ -402,7 +464,7 @@ describe("templates engine", () => {
           stack("UPDATE_COMPLETE", { Version: "new" }, { EnableTerminationProtection: true, ...fresh }),
         ],
         CreateChangeSet: [{}],
-        DescribeChangeSet: [ready(), gone()],
+        DescribeChangeSet: [readyAt(), gone()],
         ExecuteChangeSet: [{}],
       });
       await expect(deployer(fake).deploy(request("foundation"))).resolves.toEqual({ Version: "new" });
@@ -415,7 +477,7 @@ describe("templates engine", () => {
         PutObject: [{}],
         DescribeStacks: [protectedStack("UPDATE_COMPLETE"), staleStack(), staleStack(), staleStack(), staleStack()],
         CreateChangeSet: [{}],
-        DescribeChangeSet: [ready(), gone()],
+        DescribeChangeSet: [readyAt(), gone()],
         ExecuteChangeSet: [{}],
       });
       const engine = templatesDeployer({

@@ -214,6 +214,7 @@ describe("writeExportBundle", () => {
     expect(readmeText).toMatch(/deletes every worker session's persistent workspace volume/);
     expect(readmeText).toContain("--force-delete-without-recovery");
     expect(readmeText).toContain("agentx destroy");
+    expect(readmeText).toContain("/aws/bedrock-agentcore/runtimes/<runtimeId>-DEFAULT");
     // M5: one recovery wording for a failed or refused change set on a new stack.
     const recovery = "delete the change set, then delete the stack only if it is still REVIEW_IN_PROGRESS with no resources";
     expect(readmeText.toLowerCase()).toContain(recovery.toLowerCase());
