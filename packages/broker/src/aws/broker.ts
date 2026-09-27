@@ -1,5 +1,6 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import {
   DeleteCommand,
   DynamoDBDocumentClient,
@@ -81,6 +82,7 @@ import { observeConnectorRoute } from "./connector-metrics.js";
 import { attributionDroppedLog, callConnector, connectorCatalogKey, discoverConnector, discoverLegacyGitHubScope, stripCode, type ConnectorContextBase, type ScopeDiscovery } from "./connector-routes.js";
 import { resolveConnectors, BUILT_IN_CONNECTOR_TYPES, type ConnectorType, type ConnectorTypeContext, type ResolvedConnector } from "./connector-types.js";
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
+import { routeDeveloperRequest, type DeveloperApiConfiguration } from "./developer-routes.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
@@ -230,6 +232,8 @@ interface AwsBrokerDependencies {
   checkRepositoryAccess?: (repository: { credentialRef: string; url: string }) => Promise<void>;
   codeBuild: CodeBuildGateway;
   slack?: SlackServiceConfiguration;
+  /** Spec 025 developer sign-in; absent when the deployment has none, and /v1/dev/* answers NOT_FOUND. */
+  developer?: DeveloperApiConfiguration;
   githubMcp?: GitHubMcpDependencies;
   catalogs: CatalogCache<ScopeDiscovery>;
   credentialRegistry?: CredentialRegistry;
@@ -330,6 +334,13 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
           return json(await putProjectModel(dependencies, identity, parseBody(request.body)), request.requestId);
         }
         return await observeConnectorRoute(request.method, serviceUrl.pathname, () => routeWorkspaceRequest(dependencies, request, serviceUrl, identity));
+      }
+
+      // Spec 025: the developer API. API Gateway's second JWT authorizer guards /v1/dev/*; the
+      // broker checks issuer, audience, method and session again (FR-009).
+      if (url.pathname.startsWith("/v1/dev/")) {
+        if (!dependencies.developer) throw agentXError("NOT_FOUND", "developer sign-in is not set up in this deployment");
+        return json(await routeDeveloperRequest({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now }, request, url), request.requestId);
       }
 
       const identity = identityFromJwtClaims(request.jwtClaims, {
@@ -3630,6 +3641,35 @@ const repositoryGrants = new RepositoryGrantService(
   (credentialRef, repositoryUrl, access) => githubCredentials.resolve(credentialRef, repositoryUrl, access),
 );
 
+const lambdaClient = new LambdaClient(awsClientConfiguration);
+/** Set only in named environments with developer sign-in (infra/lib/developer-signin.ts). */
+function developerConfiguration(): DeveloperApiConfiguration | undefined {
+  const issuer = process.env.DEVELOPER_TOKEN_ISSUER;
+  if (!issuer) return undefined;
+  const functionName = requiredEnvironment("DEVELOPER_IDENTITY_FUNCTION_ARN");
+  const teamId = process.env.SLACK_TEAM_ID ?? "";
+  return {
+    issuer,
+    env: requiredEnvironment("AGENTX_ENV"),
+    methods: { slack: process.env.DEVELOPER_SIGNIN_SLACK === "enabled", oidc: (process.env.DEVELOPER_OIDC_ISSUER ?? "") !== "" },
+    ...(teamId === "" ? {} : { slackTeamId: teamId }),
+    signInTableName: requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME"),
+    async channelMembers(request) {
+      try {
+        const response = await lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: Buffer.from(JSON.stringify(request)) }));
+        if (response.FunctionError !== undefined || response.Payload === undefined) return { ok: false, error: "slack_unavailable" };
+        const parsed = JSON.parse(Buffer.from(response.Payload).toString("utf8")) as { ok?: unknown; memberOf?: unknown };
+        return parsed.ok === true && Array.isArray(parsed.memberOf)
+          ? { ok: true, memberOf: parsed.memberOf.filter((entry): entry is string => typeof entry === "string") }
+          : { ok: false, error: "slack_unavailable" };
+      } catch {
+        return { ok: false, error: "slack_unavailable" };
+      }
+    },
+  };
+}
+const developer = developerConfiguration();
+
 export const handler = createAwsBrokerHandler({
   documentClient,
   s3,
@@ -3649,6 +3689,7 @@ export const handler = createAwsBrokerHandler({
     ...(process.env.CONNECTOR_SECRET_PREFIX ? { connectorSecretPrefix: process.env.CONNECTOR_SECRET_PREFIX } : {}),
   },
   codeBuild,
+  ...(developer ? { developer } : {}),
   ...(process.env.TURN_RECORDS_TABLE_NAME ? { turnRecordsTableName: process.env.TURN_RECORDS_TABLE_NAME } : {}),
   ...(process.env.SLACK_ORCHESTRATOR_ROLE_ARN
     ? {

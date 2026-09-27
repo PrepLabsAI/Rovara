@@ -3,6 +3,7 @@
 import { randomUUID } from "node:crypto";
 import { vi } from "vitest";
 import type { GitHubMcpDependencies } from "../../packages/broker/src/github-mcp.js";
+import type { DeveloperApiConfiguration } from "../../packages/broker/src/aws/developer-routes.js";
 import type { ConnectorCredentialsConfiguration, CredentialRegistry } from "../../packages/broker/src/aws/credentials.js";
 import type { TurnRecordExport } from "../../packages/broker/src/aws/turns.js";
 import { RepositoryGrantService } from "../../packages/broker/src/repository-access.js";
@@ -50,6 +51,7 @@ export async function createAdminBroker(options: {
   connectorCredentials?: ConnectorCredentialsConfiguration;
   turnRecords?: TurnRecordExport;
   checkRepositoryAccess?: (repository: { credentialRef: string; url: string }) => Promise<void>;
+  developer?: DeveloperApiConfiguration;
 } = {}): Promise<{ db: FakeDynamoDb; handler: AdminHandler; registry: CredentialRegistry | undefined }> {
   const { createAwsBrokerHandler, CredentialRegistry: Registry } = await loadBroker();
   const db = new FakeDynamoDb();
@@ -73,6 +75,7 @@ export async function createAdminBroker(options: {
     ...(options.connectorCredentials ? { connectorCredentials: options.connectorCredentials } : {}),
     ...(registry ? { credentialRegistry: registry } : {}),
     ...(options.turnRecords ? { turnRecords: options.turnRecords } : {}),
+    ...(options.developer ? { developer: options.developer } : {}),
   } as never);
   return { db, handler, registry };
 }
