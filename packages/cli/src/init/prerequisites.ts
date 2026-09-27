@@ -6,7 +6,7 @@ import { BedrockRuntimeClient, ConverseCommand } from "@aws-sdk/client-bedrock-r
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { agentXError, AgentXError } from "@agentx/contracts";
 import { assertCdkBootstrapped, type CommandRunner } from "../deploy/cdk-engine.js";
-import { assertReleaseCoversRegion, type ReleaseCoverage } from "../deploy/release.js";
+import { releaseRegionProblem, type ReleaseCoverage } from "../deploy/release.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import type { InitAnswers } from "./install-state.js";
 import type { Prompter } from "./prompts.js";
@@ -120,12 +120,8 @@ export async function checkPrerequisites(input: {
   write(DEDICATED_ACCOUNT_NOTE);
 
   // The same check and wording as agentx deploy's, collected with every other problem.
-  try {
-    assertReleaseCoversRegion(input.release, region);
-  } catch (error) {
-    if (!(error instanceof AgentXError)) throw error;
-    problems.push(error.message.slice(`${error.code}: `.length));
-  }
+  const regionProblem = releaseRegionProblem(input.release, region);
+  if (regionProblem !== undefined) problems.push(regionProblem);
 
   try {
     await checks.agentCore();

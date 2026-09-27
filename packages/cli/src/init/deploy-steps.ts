@@ -55,14 +55,16 @@ const busyStatus = (status: string | undefined): string | undefined =>
   status !== undefined && status.endsWith("_IN_PROGRESS") && status !== "REVIEW_IN_PROGRESS" ? status : undefined;
 
 /** Waits, stack by stack, until none of `stackNames` is busy, saying once per stack that it waits.
- * Gives up after `timeoutMs` (60 minutes) on any one stack with what to do. */
+ * Gives up once `timeoutMs` (60 minutes) has passed in total, with what to do. Settled statuses,
+ * including failed ones such as ROLLBACK_COMPLETE, are not waited for: the deploy reports those. */
 export async function waitForIdleStacks(input: {
   reader: StackStatusReader; stackNames: readonly string[]; sleep: (ms: number) => Promise<void>; write: (line: string) => void; now: () => number;
   pollMs?: number; timeoutMs?: number;
 }): Promise<void> {
   const timeout = input.timeoutMs ?? IDLE_WAIT_TIMEOUT_MS;
+  // One budget for the whole step, so a step with two busy stacks still gives up after 60 minutes.
+  const started = input.now();
   for (const stackName of input.stackNames) {
-    const started = input.now();
     let busy = busyStatus(await input.reader.status(stackName));
     if (busy !== undefined) input.write(`Waiting for ${stackName}: it is ${busy} from an earlier run`);
     while (busy !== undefined) {

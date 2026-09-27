@@ -121,6 +121,26 @@ describe("waiting for stacks left busy by an interrupted run (Review Focus 2)", 
     expect(clock - T0).toBe(60 * 60 * 1000);
   });
 
+  it("counts the 60 minutes across every stack in the step, not per stack", async () => {
+    let clock = T0;
+    // The first stack settles after 40 minutes; the second never does.
+    const status = async (name: string) => (name.endsWith("foundation") && clock - T0 >= 40 * 60_000 ? "UPDATE_COMPLETE" : "UPDATE_IN_PROGRESS");
+    await expect(waitForIdleStacks({ reader: { status }, stackNames: ["agentx-staging-foundation", "agentx-staging-identity"], sleep: async (ms) => { clock += ms; }, write: () => undefined, now: () => clock }))
+      .rejects.toThrow("stack agentx-staging-identity is still UPDATE_IN_PROGRESS after 60 minutes");
+    expect(clock - T0).toBe(60 * 60_000);
+  });
+
+  it.each(["ROLLBACK_COMPLETE", "UPDATE_ROLLBACK_FAILED", "UPDATE_COMPLETE"])("does not wait for a settled stack (%s): the deploy handles it", async (settled) => {
+    const sleep = vi.fn(async () => undefined);
+    await waitForIdleStacks({ reader: { status: async () => settled }, stackNames: ["agentx-staging-access"], sleep, write: () => undefined, now: () => T0 });
+    expect(sleep).not.toHaveBeenCalled();
+    const context = initContext({ stackStatus: { status: async () => settled } });
+    homes.push(context.home);
+    await deployStep({ id: "access", title: "a" }).run(context, progressHandle());
+    expect(context.deployer.requests.map((request) => request.part)).toEqual(["access"]);
+    expect(context.lines.some((line) => line.startsWith("Waiting for"))).toBe(false);
+  });
+
   it("is what a deploy step does before deploying", async () => {
     const statuses = ["CREATE_IN_PROGRESS", "CREATE_COMPLETE"];
     const context = initContext({ stackStatus: { status: async () => statuses.shift() } });

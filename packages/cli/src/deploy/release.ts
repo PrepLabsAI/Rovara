@@ -29,10 +29,16 @@ export interface ReleaseCoverage {
  * region, listing the ones it covers. The one place this check and its wording live, shared by
  * `agentx deploy`, `agentx init`, the export bundle and the templates engine itself. */
 export function assertReleaseCoversRegion(release: ReleaseCoverage, region: string): void {
+  const problem = releaseRegionProblem(release, region);
+  if (problem !== undefined) throw agentXError("CONFIG_INVALID", problem);
+}
+
+/** `assertReleaseCoversRegion`'s message when the release does not cover `region`, otherwise
+ * undefined: for callers that collect problems instead of stopping at the first. */
+export function releaseRegionProblem(release: ReleaseCoverage, region: string): string | undefined {
   const regions = release.regions();
-  if (!regions.includes(region)) {
-    throw agentXError("CONFIG_INVALID", `release ${release.manifest.version} does not cover region ${region}; it covers: ${regions.join(", ") || "no region"}`);
-  }
+  if (regions.includes(region)) return undefined;
+  return `release ${release.manifest.version} does not cover region ${region}; it covers: ${regions.join(", ") || "no region"}`;
 }
 
 /**

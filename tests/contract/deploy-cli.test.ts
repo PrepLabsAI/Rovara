@@ -13,7 +13,7 @@ import type { DeployRequest, StackDeployer, StackOutputs } from "../../packages/
 import type { ParameterStore } from "../../packages/cli/src/environments/parameter-store.js";
 import type { SecretValueStore } from "../../packages/cli/src/deploy/signing-key.js";
 import type { DeployCliDependencies } from "../../packages/cli/src/deploy/commands.js";
-import { assertReleaseCoversRegion } from "../../packages/cli/src/deploy/release.js";
+import { assertReleaseCoversRegion, releaseRegionProblem } from "../../packages/cli/src/deploy/release.js";
 import type { TemplatesEngineClients } from "../../packages/cli/src/deploy/templates-engine.js";
 import { executeCli } from "../../packages/cli/src/main.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
@@ -967,5 +967,14 @@ describe("assertReleaseCoversRegion", () => {
   it("refuses any other region, listing the ones it covers", () => {
     expect(() => assertReleaseCoversRegion(release, "eu-west-1")).toThrow("release 1.2.3 does not cover region eu-west-1; it covers: us-east-1, us-west-2");
     expect(() => assertReleaseCoversRegion({ manifest: { version: "1.2.3" }, regions: () => [] }, "eu-west-1")).toThrow("it covers: no region");
+  });
+});
+
+describe("releaseRegionProblem", () => {
+  const release = { manifest: { version: "1.2.3" }, regions: () => ["us-east-1"] };
+
+  it("is undefined for a covered region and names the problem, without an error code, otherwise", () => {
+    expect(releaseRegionProblem(release, "us-east-1")).toBeUndefined();
+    expect(releaseRegionProblem(release, "eu-west-1")).toBe("release 1.2.3 does not cover region eu-west-1; it covers: us-east-1");
   });
 });
