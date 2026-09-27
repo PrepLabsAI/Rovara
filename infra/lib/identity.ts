@@ -44,6 +44,7 @@ export class IdentityStack extends Stack {
       mfaSecondFactor: { otp: true, sms: false },
       accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
       deletionProtection: true,
+      // Retained: the user pool holds every user account and must outlive a stack deletion.
       removalPolicy: RemovalPolicy.RETAIN,
     });
     new cognito.CfnUserPoolGroup(this, "AdminGroup", {

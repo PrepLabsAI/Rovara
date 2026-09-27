@@ -225,7 +225,8 @@ export class AgentRuntimeStack extends Stack {
       },
     });
     runtime.node.addDependency(runtimePolicy);
-    runtime.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    // A named environment's runtime holds no data (workspaces live on the capacity provider), so it goes with its stack; legacy keeps Retain unchanged.
+    runtime.applyRemovalPolicy(naming.env === undefined ? RemovalPolicy.RETAIN : RemovalPolicy.DESTROY);
 
     this.runtimeArn = runtime.attrAgentRuntimeArn;
     this.capacityProviderArn = capacityProviderArn.valueAsString;

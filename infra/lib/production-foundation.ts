@@ -219,6 +219,7 @@ export class ProductionFoundationStack extends Stack {
 
     const flowLogGroup = new logs.LogGroup(this, "VpcFlowLogs", {
       retention: logs.RetentionDays.ONE_MONTH,
+      // Retained: flow logs are audit data that must outlive a stack deletion.
       removalPolicy: RemovalPolicy.RETAIN,
     });
     const flowLogRole = new iam.Role(this, "VpcFlowLogRole", {
@@ -240,6 +241,7 @@ export class ProductionFoundationStack extends Stack {
       alias: naming.workspaceKeyAlias,
       description: `Encrypts AgentX ${naming.environmentTagValue} root and per-session workspace EBS volumes`,
       enableKeyRotation: true,
+      // Retained: retained workspace volumes and snapshots stay unreadable without this key.
       removalPolicy: RemovalPolicy.RETAIN,
     });
 
@@ -331,6 +333,7 @@ export class ProductionFoundationStack extends Stack {
     for (const privateRoute of privateRoutes) {
       capacityProvider.addResourceDependency(privateRoute);
     }
+    // Retained: deleting the capacity provider deletes every worker session's persistent workspace volume.
     capacityProvider.applyRemovalPolicy(RemovalPolicy.RETAIN);
 
     this.capacityProviderArn = capacityProvider.attrArn;

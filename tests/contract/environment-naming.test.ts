@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { operatorRoleStatements } from "../../infra/lib/access-policies.js";
 import { environmentNaming, legacyNaming, namingFromContext } from "../../infra/lib/naming.js";
+import { AgentRuntimeStack } from "../../infra/lib/agent-runtime.js";
+import { ProductionFoundationStack } from "../../infra/lib/production-foundation.js";
 
 function productionStacks(app: App): Stack[] {
   return app.node.children.filter((child): child is Stack => Stack.isStack(child))
@@ -149,6 +151,27 @@ describe("environment naming", () => {
       Tags: Match.arrayWith([{ Key: "agentx:env", Value: "staging" }]),
     });
   }, 120_000);
+
+  it("deletes a named environment's AgentCore runtime with its stack, and keeps the legacy runtime retained", () => {
+    const resources = (stack: Stack) =>
+      Object.values(Template.fromStack(stack).toJSON().Resources as Record<string, { Type: string; DeletionPolicy?: string; UpdateReplacePolicy?: string }>)
+        .filter((resource) => resource.Type === "AWS::BedrockAgentCore::Runtime");
+    const staging = resources(new AgentRuntimeStack(new App(), "Runtime", { deploymentRegion: "us-east-1", naming: environmentNaming("staging") }));
+    expect(staging).toHaveLength(1);
+    expect(staging[0]).toMatchObject({ DeletionPolicy: "Delete", UpdateReplacePolicy: "Delete" });
+    const legacy = resources(new AgentRuntimeStack(new App(), "Runtime", { deploymentRegion: "us-east-1" }));
+    expect(legacy).toHaveLength(1);
+    expect(legacy[0]).toMatchObject({ DeletionPolicy: "Retain", UpdateReplacePolicy: "Retain" });
+  });
+
+  it("keeps a named environment's capacity provider, workspace key and flow logs retained: deleting the capacity provider deletes every workspace volume", () => {
+    const template = Template.fromStack(new ProductionFoundationStack(new App(), "Foundation", { deploymentRegion: "us-east-1", naming: environmentNaming("staging") }));
+    for (const type of ["AWS::BedrockAgentCore::CapacityProvider", "AWS::KMS::Key", "AWS::Logs::LogGroup"]) {
+      const found = Object.values(template.toJSON().Resources as Record<string, { Type: string; DeletionPolicy?: string }>).filter((resource) => resource.Type === type);
+      expect(found.length).toBeGreaterThan(0);
+      for (const resource of found) expect(resource.DeletionPolicy).toBe("Retain");
+    }
+  });
 
   it("scopes runtime ARNs and connector secrets to the environment", () => {
     const staging = productionStacks(buildAgentXApp({ agentxEnv: "staging" }));
