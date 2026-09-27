@@ -12,6 +12,7 @@ import {
   type DevcontainerCli,
 } from "./devcontainer.js";
 import { EventBatcher, redactCredentials, type EventBatchSink } from "./events.js";
+import { ToolLoopGuard } from "./tool-loop-guard.js";
 import {
   createWorkspacePiSession,
   openRegisteredWorkspacePiSession,
@@ -118,9 +119,21 @@ export async function runTaskInvocation(
   }
 
   const unregisterCancellation = dependencies.cancellationController?.register(invocation.operationId, session);
+  // A model repeating the same failing call is told once, then stopped (#127).
+  const loopGuard = new ToolLoopGuard();
+  let loopStop: Error | undefined;
   const unsubscribe = session.subscribe((event) => {
     if (eventType(event) === "tool_end") toolEvidence.push(redactCredentials(event));
     void events.append(eventType(event), event).catch(() => undefined);
+    if (loopStop !== undefined) return;
+    const action = loopGuard.observe(event);
+    if (action.kind === "warn") {
+      void events.append("progress", { message: "The agent repeated a failing call; AgentX told it to change approach." }).catch(() => undefined);
+      void session.steer?.(action.message).catch(() => undefined);
+    } else if (action.kind === "stop") {
+      loopStop = action.error;
+      void session.abort().catch(() => undefined);
+    }
   });
   try {
     let outcome: TaskUsageOutcome = "FAILED";
@@ -135,6 +148,8 @@ export async function runTaskInvocation(
       });
       for (const message of contextDiagnostics) await events.append("progress", { message });
       await session.prompt(invocation.payload.prompt);
+      // An abort can end the prompt without an error; the guard's reason is the task's outcome.
+      if (loopStop !== undefined) throw loopStop;
       await publishWorkspaceDiff(dependencies.rootPath, dependencies.artifactSink);
       await dependencies.artifactSink({
         name: "test-and-tool-evidence.json",
@@ -149,7 +164,7 @@ export async function runTaskInvocation(
       });
       taskResult = { conversationId, reopened: registered !== undefined };
     } catch (error) {
-      if (dependencies.cancellationController?.isCancelled(invocation.operationId)) {
+      if (loopStop === undefined && dependencies.cancellationController?.isCancelled(invocation.operationId)) {
         outcome = "CANCELLED";
         taskFailure = new WorkerOperationCancelledError(invocation.operationId);
         try {
@@ -159,7 +174,7 @@ export async function runTaskInvocation(
         }
       } else {
         outcome = "FAILED";
-        taskFailure = asError(error);
+        taskFailure = loopStop ?? asError(error);
         try {
           await events.append("error", { message: taskFailure.message });
         } catch (reportingError) {
