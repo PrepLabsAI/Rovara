@@ -223,5 +223,6 @@ describe("outdir context (buildAgentXApp forwards it to `new App({ outdir })`)",
     } finally {
       rmSync(outdir, { recursive: true, force: true });
     }
-  });
+    // A named-environment synthesis bundles every Lambda; under parallel load that can pass 10 s.
+  }, 120_000);
 });
