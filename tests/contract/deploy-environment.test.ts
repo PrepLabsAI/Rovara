@@ -5,6 +5,7 @@ import { PROTECTED_PARTS, type DeployRequest, type StackDeployer, type StackOutp
 import type { DeployPart } from "../../packages/cli/src/deploy/parameters.js";
 import type { LoadedRelease } from "../../packages/cli/src/deploy/release.js";
 import type { SecretValueStore } from "../../packages/cli/src/deploy/signing-key.js";
+import { lockParameterName } from "../../packages/cli/src/environments/lock.js";
 import type { ParameterStore } from "../../packages/cli/src/environments/parameter-store.js";
 import { readEnvironmentSettings, settingsParameterName, writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
@@ -457,12 +458,19 @@ describe("deploy environment", () => {
   });
 });
 
+/** Sets up `store`'s lock parameter as already held by `holder`, the way agentx init's step runner
+ * leaves it while it calls deployEnvironment repeatedly with lockHeld. */
+function seedOwnLock(store: MemoryParameterStore, holder: string): void {
+  store.values.set(lockParameterName(ENV), JSON.stringify({ holder, command: "init", acquiredAt: "2026-09-27T00:00:00.000Z" }));
+}
+
 describe("deployEnvironment with lockHeld", () => {
-  it("never touches the lock parameter when the caller already holds the lock", async () => {
+  it("never puts or deletes the lock parameter when the caller already holds the lock (only reads it, to confirm it is theirs)", async () => {
     const store = new MemoryParameterStore();
+    seedOwnLock(store, HOLDER);
     const { deployer } = fakeDeployer(scriptedOutputs());
     await deployEnvironment({ mode: "install", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer, store, secrets: memorySecrets(), holder: HOLDER, parts: ["access"], lockHeld: true });
-    expect(store.calls.filter((call) => call.name === "/agentx/staging/lock")).toEqual([]);
+    expect(store.calls.filter((call) => call.name === lockParameterName(ENV) && call.op !== "get")).toEqual([]);
   });
 
   // F16: a naive version of this test (writing settings, then calling deployEnvironment with a
@@ -473,11 +481,33 @@ describe("deployEnvironment with lockHeld", () => {
   // re-check sees), so the test can only pass if that re-check genuinely runs under `lockHeld`.
   it("still refuses a different engine with lockHeld, via the re-check inside work (not just the check before it)", async () => {
     const store = new MemoryParameterStore();
+    seedOwnLock(store, HOLDER);
     await writeEnvironmentSettings(store, stagingSettings);
     const flippingStore = flipOnceThenReveal(store, settingsParameterName(ENV));
     const { deployer, requests } = fakeDeployer(scriptedOutputs());
     await expect(deployEnvironment({ mode: "install", engine: "cdk", answers: baseAnswers(), release: fakeRelease(), deployer, store: flippingStore, secrets: memorySecrets(), holder: HOLDER, parts: ["slack"], lockHeld: true }))
       .rejects.toThrow("was installed with the templates engine");
+    expect(requests).toEqual([]);
+  });
+
+  // Fix round 1, item 5: lockHeld must not be a way to skip locking altogether. It only skips
+  // *taking* the lock for a caller who genuinely already holds it.
+  it("refuses lockHeld when the lock is held by someone else", async () => {
+    const store = new MemoryParameterStore();
+    seedOwnLock(store, "arn:aws:iam::123456789012:user/bob");
+    const { deployer, requests } = fakeDeployer(scriptedOutputs());
+    await expect(
+      deployEnvironment({ mode: "install", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer, store, secrets: memorySecrets(), holder: HOLDER, parts: ["access"], lockHeld: true }),
+    ).rejects.toThrow("is not held by");
+    expect(requests).toEqual([]);
+  });
+
+  it("refuses lockHeld when there is no lock at all", async () => {
+    const store = new MemoryParameterStore();
+    const { deployer, requests } = fakeDeployer(scriptedOutputs());
+    await expect(
+      deployEnvironment({ mode: "install", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer, store, secrets: memorySecrets(), holder: HOLDER, parts: ["access"], lockHeld: true }),
+    ).rejects.toThrow("is not held by");
     expect(requests).toEqual([]);
   });
 });

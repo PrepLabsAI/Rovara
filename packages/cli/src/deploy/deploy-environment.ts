@@ -4,7 +4,7 @@
 // deployEnvironment; everything else (order, outputs feeding forward, the lock, settings) lives here.
 import { agentXError, environmentStackName } from "@agentx/contracts";
 import { PROTECTED_PARTS, type DeployEvent, type DeployRequest, type StackDeployer } from "./deployer.js";
-import { withEnvironmentLock } from "../environments/lock.js";
+import { currentLockHolder, withEnvironmentLock } from "../environments/lock.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import { readEnvironmentSettings, writeEnvironmentSettings, type EnvironmentSettings } from "../environments/settings.js";
 import { installOrder, stackParameters, upgradeOrder, type DeployPart, type InstallAnswers, type StackOutputs } from "./parameters.js";
@@ -214,7 +214,14 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
     return { outputs, settingsWritten: true };
   };
 
-  return input.lockHeld === true ? work() : withEnvironmentLock({ store, env, holder, command: `deploy ${mode}`, now }, work);
+  if (input.lockHeld === true) {
+    const holdingArn = await currentLockHolder(store, env);
+    if (holdingArn !== holder) {
+      throw agentXError("CONFIG_INVALID", `environment ${env}'s lock is not held by ${holder}; lockHeld only skips taking a lock the caller already holds, and this caller does not currently hold it`);
+    }
+    return work();
+  }
+  return withEnvironmentLock({ store, env, holder, command: `deploy ${mode}`, now }, work);
 }
 
 /**

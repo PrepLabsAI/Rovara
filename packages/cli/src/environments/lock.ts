@@ -18,6 +18,15 @@ function parseLock(value: string): LockRecord | undefined {
   return undefined;
 }
 
+/** The ARN currently holding `env`'s lock, or undefined when there is none or it is unreadable.
+ * `deployEnvironment`'s `lockHeld` path uses this to confirm the caller passing `lockHeld` actually
+ * holds the lock, without duplicating `parseLock`'s parsing there. */
+export async function currentLockHolder(store: ParameterStore, env: string): Promise<string | undefined> {
+  const stored = await store.get(lockParameterName(env));
+  if (stored === undefined) return undefined;
+  return parseLock(stored.value)?.holder;
+}
+
 const unreadableLockMessage = (env: string, name: string) =>
   `environment ${env} is locked by an unreadable lock at ${name}; remove it only if no AgentX command is running`;
 

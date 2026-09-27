@@ -52,6 +52,23 @@ describe("init step runner", () => {
     expect(second[1]!.run).not.toHaveBeenCalled();
   });
 
+  // Fix round 1, item 7: resuming past an already-done step must emit step-skipped for it, and that
+  // event must come before the next (not-yet-done) step's own step-started.
+  it("emits step-skipped for an already-done step, before the next step's step-started, on resume", async () => {
+    const store = new MemoryParameterStore();
+    await run(store, [step("prerequisites"), step("access")]);
+    const events: InitEvent[] = [];
+    const resumed = [step("prerequisites"), step("access"), step("core")];
+    const result = await run(store, resumed, { onEvent: (event) => events.push(event) });
+    expect(result).toEqual({ status: "complete", ran: ["core"], skipped: ["prerequisites", "access"] });
+    expect(events).toEqual([
+      { kind: "step-skipped", id: "prerequisites", title: "step prerequisites" },
+      { kind: "step-skipped", id: "access", title: "step access" },
+      { kind: "step-started", id: "core", title: "step core" },
+      { kind: "step-done", id: "core", title: "step core" },
+    ]);
+  });
+
   it("changes nothing when every step is already done", async () => {
     const store = new MemoryParameterStore();
     await run(store, [step("prerequisites"), step("access")]);

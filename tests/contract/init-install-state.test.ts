@@ -50,27 +50,94 @@ describe("install state", () => {
     expect(Buffer.byteLength(store.values.get("/agentx/staging/install/answers")!)).toBeLessThan(2048);
   });
 
-  it("explains progress written by a newer agentx", async () => {
+  it("explains progress written by a newer agentx (a schema version this agentx does not know)", async () => {
     const store = new MemoryParameterStore();
-    store.values.set("/agentx/staging/install/progress", JSON.stringify({ ...emptyProgress("staging", T0), steps: { "admin-user": { status: "done", at: "2026-09-27T00:00:00.000Z" } } }));
+    store.values.set("/agentx/staging/install/progress", JSON.stringify({ ...emptyProgress("staging", T0), schemaVersion: 2 }));
     await expect(readInstallProgress(store, "staging")).rejects.toThrow("install progress for environment staging is invalid or was written by a newer agentx; upgrade agentx and run it again");
+  });
+
+  // Fix round 1, item 6: an unknown step id (one an older or newer agentx used, that this one has
+  // removed or renamed) must not fail the whole read — it carries no state this agentx can use, but
+  // every other step's already-recorded progress is still worth keeping.
+  it("drops an unknown step id instead of refusing, keeping the known steps intact", async () => {
+    const store = new MemoryParameterStore();
+    store.values.set(installProgressParameterName("staging"), JSON.stringify({
+      ...emptyProgress("staging", T0),
+      steps: {
+        access: { status: "done", at: "2026-09-27T00:00:00.000Z" },
+        "admin-user": { status: "done", at: "2026-09-27T00:00:00.000Z" },
+      },
+    }));
+    const progress = await readInstallProgress(store, "staging");
+    expect(progress?.steps).toEqual({ access: { status: "done", at: "2026-09-27T00:00:00.000Z" } });
   });
 
   // F22: reading install state refuses when the stored env does not match the requested one, even
   // though the stored value is otherwise a perfectly well-formed answers/progress document (its own
   // `env` field is just a different, equally valid, environment name).
-  it("refuses install answers whose own env field names a different environment than requested", async () => {
+  it("refuses install answers whose own env field names a different environment than requested, saying what to do next", async () => {
     const store = new MemoryParameterStore();
     await writeInstallAnswers(store, sampleAnswers({ env: "production" }));
     // Copy the value under staging's parameter name, as if it had been restored or copied by hand.
     store.values.set(installAnswersParameterName("staging"), store.values.get(installAnswersParameterName("production"))!);
     await expect(readInstallAnswers(store, "staging")).rejects.toThrow(/staging.*production/);
+    await expect(readInstallAnswers(store, "staging")).rejects.toThrow("run agentx init --env production, or delete /agentx/staging/install/answers to start over");
   });
 
-  it("refuses install progress whose own env field names a different environment than requested", async () => {
+  it("refuses install progress whose own env field names a different environment than requested, saying what to do next", async () => {
     const store = new MemoryParameterStore();
     await writeInstallProgress(store, emptyProgress("production", T0));
     store.values.set(installProgressParameterName("staging"), store.values.get(installProgressParameterName("production"))!);
     await expect(readInstallProgress(store, "staging")).rejects.toThrow(/staging.*production/);
+    await expect(readInstallProgress(store, "staging")).rejects.toThrow("run agentx init --env production, or delete /agentx/staging/install/progress to start over");
+  });
+
+  // Fix round 1, item 1: a webhook display value must never be able to carry an integration key
+  // (or any other userinfo) through to what gets stored and shown back.
+  it("refuses a webhook display that embeds userinfo, so a key cannot slip into the stored value", async () => {
+    const store = new MemoryParameterStore();
+    const withKey = sampleAnswers({ alert: { kind: "webhook", display: "https://KEY@host/...", secretName: "agentx/staging/alert-endpoint" } });
+    await expect(writeInstallAnswers(store, withKey)).rejects.toThrow("install answers are invalid");
+    expect(store.values.size).toBe(0);
+  });
+
+  // Fix round 1, item 2: a webhook's secretName must be this environment's own alert-endpoint
+  // secret, not some other environment's.
+  it("refuses a webhook secretName for a different environment than the answers themselves", async () => {
+    const store = new MemoryParameterStore();
+    const wrongEnv = sampleAnswers({ alert: { kind: "webhook", display: "https://events.pagerduty.com/...", secretName: "agentx/production/alert-endpoint" } });
+    await expect(writeInstallAnswers(store, wrongEnv)).rejects.toThrow("must be agentx/staging/alert-endpoint");
+    expect(store.values.size).toBe(0);
+  });
+
+  it("accepts a webhook secretName that does match the answers' own environment", async () => {
+    const store = new MemoryParameterStore();
+    const rightEnv = sampleAnswers({ alert: { kind: "webhook", display: "https://events.pagerduty.com/...", secretName: "agentx/staging/alert-endpoint" } });
+    await writeInstallAnswers(store, rightEnv);
+    expect(await readInstallAnswers(store, "staging")).toEqual(rightEnv);
+  });
+
+  // Fix round 1, item 3: the size-limit error's advice depends on what is too big.
+  it("the size-limit error for answers suggests shortening the longest answer", async () => {
+    const store = new MemoryParameterStore();
+    const huge = sampleAnswers({ identity: { mode: "oidc", issuer: "https://id.example.com", audience: "a", clientId: "c", adminClaim: "groups", adminValues: Array.from({ length: 400 }, (_, i) => `group-${i}`) } });
+    await expect(writeInstallAnswers(store, huge)).rejects.toThrow(/shorten the longest answer/);
+  });
+
+  it("the size-limit error for progress says it is an internal limit and that deleting the parameter restarts init safely", async () => {
+    const store = new MemoryParameterStore();
+    const huge = {
+      ...emptyProgress("staging", T0),
+      steps: { "github-app": { status: "waiting" as const, at: "2026-09-27T00:00:00.000Z" } },
+      github: {
+        account: "acme",
+        appId: "123",
+        slug: "a".repeat(4200),
+        privateKeySecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:x",
+      },
+    };
+    await expect(writeInstallProgress(store, huge)).rejects.toThrow(/internal limit/);
+    await expect(writeInstallProgress(store, huge)).rejects.toThrow(/delete the install\/progress parameter/);
+    await expect(writeInstallProgress(store, huge)).rejects.toThrow(/restart agentx init safely/);
   });
 });
