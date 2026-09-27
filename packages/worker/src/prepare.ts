@@ -62,6 +62,8 @@ export interface PreparationManifest {
     repository: string;
     configPath: string;
     containerId: string;
+    /** The repository's folder inside the devcontainer, as its config mounts it (#128). */
+    containerWorkspaceFolder?: string;
     startedAt: string;
   };
   readinessResults: Array<{
@@ -170,6 +172,7 @@ export async function prepareWorkspace(options: PrepareWorkspaceOptions): Promis
           repository: project.devcontainer.repository,
           configPath: relative(canonicalRoot, target.configPath),
           containerId: started.containerId,
+          ...(started.remoteWorkspaceFolder ? { containerWorkspaceFolder: started.remoteWorkspaceFolder } : {}),
           startedAt: new Date().toISOString(),
         },
       }));

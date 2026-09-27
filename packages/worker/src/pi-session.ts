@@ -3,6 +3,12 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import {
   createAgentSession,
   createBashToolDefinition,
+  createEditToolDefinition,
+  createFindToolDefinition,
+  createGrepToolDefinition,
+  createLsToolDefinition,
+  createReadToolDefinition,
+  createWriteToolDefinition,
   DefaultResourceLoader,
   type BashOperations,
   type ToolDefinition,
@@ -12,6 +18,7 @@ import {
 import { amazonBedrockProvider } from "@earendil-works/pi-ai/providers/amazon-bedrock";
 import { createModelRuntimeWithFallback } from "@agentx/model-runtime";
 import { agentXError } from "@agentx/contracts";
+import { devcontainerContextFile, hostPath, type DevcontainerPaths } from "./devcontainer.js";
 import {
   appendRepositoryContextFiles,
   loadRepositoryContextFiles,
@@ -53,6 +60,8 @@ export interface PiSessionInput {
   contextFiles: RepositoryContextFile[];
   /** Where the agent's shell runs instead of the worker: the project's devcontainer (#121). */
   bashOperations?: BashOperations;
+  /** The repository's folder in the devcontainer, which the file tools resolve to the host folder (#128). */
+  devcontainerPaths?: DevcontainerPaths;
 }
 
 export interface PiSessionAdapter {
@@ -67,6 +76,7 @@ export async function createWorkspacePiSession(
     conversationId?: string;
     onDiagnostic?: (message: string) => void;
     bashOperations?: BashOperations;
+    devcontainerPaths?: DevcontainerPaths;
   },
   adapter: PiSessionAdapter = defaultPiSessionAdapter,
 ): Promise<PiSessionHandle> {
@@ -77,7 +87,7 @@ export async function createWorkspacePiSession(
     mkdir(sessionDirectory, { recursive: true, mode: 0o700 }),
     mkdir(agentDirectory, { recursive: true, mode: 0o700 }),
   ]);
-  const contextFiles = await loadWorkspaceContextFiles(rootPath, input.onDiagnostic);
+  const contextFiles = await loadWorkspaceContextFiles(rootPath, input.onDiagnostic, input.devcontainerPaths);
   const handle = await adapter.create({
     cwd: rootPath,
     sessionDirectory,
@@ -86,6 +96,7 @@ export async function createWorkspacePiSession(
     contextFiles,
     ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }),
     ...(input.bashOperations === undefined ? {} : { bashOperations: input.bashOperations }),
+    ...(input.devcontainerPaths === undefined ? {} : { devcontainerPaths: input.devcontainerPaths }),
   });
   assertContained(sessionDirectory, handle.sessionFile);
   return handle;
@@ -99,6 +110,7 @@ export async function openRegisteredWorkspacePiSession(
     sessionFile: string;
     onDiagnostic?: (message: string) => void;
     bashOperations?: BashOperations;
+    devcontainerPaths?: DevcontainerPaths;
   },
   adapter: PiSessionAdapter = defaultPiSessionAdapter,
 ): Promise<PiSessionHandle> {
@@ -113,7 +125,7 @@ export async function openRegisteredWorkspacePiSession(
   });
   assertContained(sessionDirectory, sessionFile);
   if (!adapter.open) throw new Error("pi session adapter does not support saved-session reopen");
-  const contextFiles = await loadWorkspaceContextFiles(rootPath, input.onDiagnostic);
+  const contextFiles = await loadWorkspaceContextFiles(rootPath, input.onDiagnostic, input.devcontainerPaths);
   const handle = await adapter.open({
     cwd: rootPath,
     sessionDirectory,
@@ -123,6 +135,7 @@ export async function openRegisteredWorkspacePiSession(
     conversationId: input.conversationId,
     sessionFile,
     ...(input.bashOperations === undefined ? {} : { bashOperations: input.bashOperations }),
+    ...(input.devcontainerPaths === undefined ? {} : { devcontainerPaths: input.devcontainerPaths }),
   });
   assertContained(sessionDirectory, handle.sessionFile);
   return handle;
@@ -179,11 +192,14 @@ async function createDefaultSession(
       model,
       thinkingLevel: input.model.thinkingLevel ?? (model.reasoning ? "medium" : "off"),
       tools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
-      // A custom tool named bash replaces the built-in one.
-      ...(input.bashOperations === undefined
-        ? {}
-        // The typed definition's render callbacks are narrower than customTools' generic slot.
-        : { customTools: [createBashToolDefinition(input.cwd, { operations: input.bashOperations }) as unknown as ToolDefinition] }),
+      // A custom tool with a built-in's name replaces it.
+      customTools: [
+        // The typed definitions' render callbacks are narrower than customTools' generic slot.
+        ...(input.bashOperations === undefined
+          ? []
+          : [createBashToolDefinition(input.cwd, { operations: input.bashOperations }) as unknown as ToolDefinition]),
+        ...(input.devcontainerPaths === undefined ? [] : devcontainerFileTools(input.cwd, input.devcontainerPaths)),
+      ],
       resourceLoader,
       sessionManager: manager,
     });
@@ -222,15 +238,35 @@ export function agentCoreBedrockProvider(): ReturnType<typeof amazonBedrockProvi
   };
 }
 
+/**
+ * pi's file tools, with a path under the devcontainer's repository folder resolved to the same file
+ * in the worker (#128). The shell sees both folders; these tools run in the worker.
+ */
+export function devcontainerFileTools(cwd: string, paths: DevcontainerPaths): ToolDefinition[] {
+  const tools = [
+    createReadToolDefinition(cwd), createEditToolDefinition(cwd), createWriteToolDefinition(cwd),
+    createGrepToolDefinition(cwd), createFindToolDefinition(cwd), createLsToolDefinition(cwd),
+  ] as unknown as ToolDefinition[];
+  return tools.map((tool) => ({
+    ...tool,
+    execute: (toolCallId, params, signal, onUpdate, context) => {
+      const args = params as { path?: unknown };
+      const mapped = typeof args.path === "string" ? { ...args, path: hostPath(paths, args.path) } : args;
+      return tool.execute(toolCallId, mapped, signal, onUpdate, context);
+    },
+  }));
+}
+
 /** Reloaded for every session, so an edited context file reaches the next task. */
 async function loadWorkspaceContextFiles(
   rootPath: string,
   onDiagnostic?: (message: string) => void,
+  devcontainerPaths?: DevcontainerPaths,
 ): Promise<RepositoryContextFile[]> {
   const repositories = await readPreparedRepositories(rootPath);
   const { files, diagnostics } = await loadRepositoryContextFiles(rootPath, repositories);
   for (const diagnostic of diagnostics) onDiagnostic?.(diagnostic);
-  return files;
+  return devcontainerPaths === undefined ? files : [...files, devcontainerContextFile(devcontainerPaths)];
 }
 
 function assertContained(parent: string, child: string): void {

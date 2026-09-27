@@ -188,6 +188,9 @@ describe("a task in a workspace with a devcontainer", () => {
 
     expect(calls[0]?.[0]).toBe("up");
     expect(inputs[0]?.bashOperations).toBeDefined();
+    // The fake CLI reports the repository at /workspaces/sample in the container (#128).
+    expect(inputs[0]?.devcontainerPaths).toEqual({ hostFolder: join(await realpath(root), "repo/sample"), containerFolder: "/workspaces/sample" });
+    expect(inputs[0]?.contextFiles.map((file) => file.path)).toContain("AgentX devcontainer");
     await inputs[0]!.bashOperations!.exec("npm test", join(await realpath(root), "repo/sample"), { onData: () => undefined });
     expect(calls.at(-1)).toEqual(expect.arrayContaining(["exec", "npm test"]));
   });

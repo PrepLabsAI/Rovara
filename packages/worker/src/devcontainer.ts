@@ -36,6 +36,42 @@ export interface DevcontainerProcess {
   stderr: string;
 }
 
+/**
+ * The repository's folder in the devcontainer, where the project's own config mounts it (for example
+ * `/workspaces/sample-project-a`), and the same folder in the worker. The shell sees both; the file
+ * tools, which run in the worker, see only the host folder (#128).
+ */
+export interface DevcontainerPaths {
+  hostFolder: string;
+  containerFolder: string;
+}
+
+/** The two folders, or undefined when the devcontainer mounts the repository at its host path. */
+export function devcontainerPaths(target: DevcontainerTarget, started: DevcontainerUpResult): DevcontainerPaths | undefined {
+  const containerFolder = started.remoteWorkspaceFolder.replace(/\/+$/, "");
+  if (!isAbsolute(containerFolder) || containerFolder === "" || containerFolder === target.workspaceFolder) return undefined;
+  return { hostFolder: target.workspaceFolder, containerFolder };
+}
+
+/** A path under the container folder, as the same file under the host folder; any other path as given. */
+export function hostPath(paths: DevcontainerPaths, path: string): string {
+  if (path === paths.containerFolder) return paths.hostFolder;
+  if (path.startsWith(`${paths.containerFolder}/`)) return `${paths.hostFolder}${path.slice(paths.containerFolder.length)}`;
+  return path;
+}
+
+/** What the agent is told, so it knows both paths name the same files. */
+export function devcontainerContextFile(paths: DevcontainerPaths): { path: string; content: string } {
+  return {
+    path: "AgentX devcontainer",
+    content: [
+      "Shell commands (the bash tool) run inside this project's devcontainer.",
+      `The repository is at ${paths.hostFolder}. Inside the devcontainer it is also at ${paths.containerFolder}.`,
+      "Both paths name the same files, in the file tools and in the shell; prefer the first.",
+    ].join("\n"),
+  };
+}
+
 /** The `devcontainer` CLI, as a seam for tests. */
 export interface DevcontainerCli {
   run(
