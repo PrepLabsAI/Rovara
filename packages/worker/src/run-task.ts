@@ -7,9 +7,11 @@ import { WorkspaceConversationStore, type ConversationRecord } from "./conversat
 import {
   createDevcontainerCli,
   devcontainerBashOperations,
+  devcontainerPaths,
   ensureDevcontainer,
   preparedDevcontainerTarget,
   type DevcontainerCli,
+  type DevcontainerPaths,
 } from "./devcontainer.js";
 import { EventBatcher, redactCredentials, type EventBatchSink } from "./events.js";
 import { ToolLoopGuard } from "./tool-loop-guard.js";
@@ -60,10 +62,12 @@ export async function runTaskInvocation(
   const canonicalRoot = await realpath(resolve(dependencies.rootPath));
   const devcontainer = preparedDevcontainerTarget(canonicalRoot, manifest);
   let bashOperations: BashOperations | undefined;
+  let containerPaths: DevcontainerPaths | undefined;
   if (devcontainer !== undefined) {
     const cli = dependencies.devcontainerCli ?? createDevcontainerCli();
-    await ensureDevcontainer(cli, devcontainer);
+    const started = await ensureDevcontainer(cli, devcontainer);
     bashOperations = devcontainerBashOperations(cli, devcontainer);
+    containerPaths = devcontainerPaths(devcontainer, started);
   }
 
   const conversationId = invocation.payload.conversationId;
@@ -97,6 +101,7 @@ export async function runTaskInvocation(
         sessionFile: registered.sessionFile,
         onDiagnostic,
         ...(bashOperations === undefined ? {} : { bashOperations }),
+        ...(containerPaths === undefined ? {} : { devcontainerPaths: containerPaths }),
       },
       dependencies.piAdapter,
     );
@@ -105,6 +110,7 @@ export async function runTaskInvocation(
       {
         rootPath: dependencies.rootPath, model: dependencies.model, conversationId, onDiagnostic,
         ...(bashOperations === undefined ? {} : { bashOperations }),
+        ...(containerPaths === undefined ? {} : { devcontainerPaths: containerPaths }),
       },
       dependencies.piAdapter,
     );
