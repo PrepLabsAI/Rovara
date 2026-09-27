@@ -2,7 +2,7 @@
 // commander default never silently skips a question. An alert webhook carries its integration
 // key, so it is a secret: it is never a flag value and never stored in the answers.
 import { agentXError, ImageDigest } from "@agentx/contracts";
-import { AlertEmailSchema } from "../deploy/answer-schemas.js";
+import { AlertEmailSchema, GITHUB_LOGIN_PATTERN } from "../deploy/answer-schemas.js";
 import { SecretAlreadyExistsError } from "../deploy/signing-key.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import { writeInstallAnswers, type InitAnswers } from "./install-state.js";
@@ -27,8 +27,6 @@ export const GLM_NOTE =
 export const HAIKU_NOTE =
   "Claude Haiku 4.5 needs Anthropic model access in this account: a one-time use-case form in the Bedrock console. The prerequisite check below tests it.";
 const NO_ALERTS_NOTE = "No alert address: nobody is told when AgentX fails until you add one (agentx config set alerts.address, phase 15e).";
-
-const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 
 export interface InitFlags {
   engine?: "templates" | "cdk";
@@ -162,9 +160,9 @@ export async function collectInitAnswers(input: {
   if (alert.kind === "none") notes.push(NO_ALERTS_NOTE);
 
   const githubAccount = flags.githubAccount ?? (await prompter.ask("GitHub organization or user that will own the AgentX GitHub App", {
-    flag: "--github-account", validate: (value) => (GITHUB_LOGIN.test(value) ? undefined : "must be a GitHub organization or user name"),
+    flag: "--github-account", validate: (value) => (GITHUB_LOGIN_PATTERN.test(value) ? undefined : "must be a GitHub organization or user name"),
   }));
-  if (!GITHUB_LOGIN.test(githubAccount)) throw agentXError("CONFIG_INVALID", `--github-account ${githubAccount} is not a GitHub organization or user name`);
+  if (!GITHUB_LOGIN_PATTERN.test(githubAccount)) throw agentXError("CONFIG_INVALID", `--github-account ${githubAccount} is not a GitHub organization or user name`);
   const accountType = flags.githubAccountType ?? (await prompter.choose<"organization" | "user">(`Is ${githubAccount} an organization or a personal account?`, [
     { value: "organization", label: "An organization" },
     { value: "user", label: "A personal account" },
@@ -199,21 +197,25 @@ export async function collectInitAnswers(input: {
   return { answers, notes, ...(alertWebhook === undefined ? {} : { alertWebhook }) };
 }
 
-const RESUME_CHECKS: Array<{ flag: string; key: keyof InitFlags; stored: (answers: InitAnswers) => string | undefined }> = [
+/** How a resume check's value is normalized before comparing (Fix round 1, item 2): a person
+ * retyping the same flag on a resumed run should not be refused over formatting, only over an
+ * actually different answer. Every kind starts from a trimmed value. */
+type ResumeCheckKind = "url" | "login" | "email";
+
+const RESUME_CHECKS: Array<{ flag: string; key: keyof InitFlags; kind?: ResumeCheckKind; stored: (answers: InitAnswers) => string | undefined }> = [
   { flag: "--engine", key: "engine", stored: (a) => a.engine },
   { flag: "--identity", key: "identity", stored: (a) => a.identity.mode },
-  { flag: "--oidc-issuer", key: "oidcIssuer", stored: (a) => (a.identity.mode === "oidc" ? a.identity.issuer : undefined) },
+  { flag: "--oidc-issuer", key: "oidcIssuer", kind: "url", stored: (a) => (a.identity.mode === "oidc" ? a.identity.issuer : undefined) },
   { flag: "--oidc-audience", key: "oidcAudience", stored: (a) => (a.identity.mode === "oidc" ? a.identity.audience : undefined) },
   { flag: "--oidc-client-id", key: "oidcClientId", stored: (a) => (a.identity.mode === "oidc" ? a.identity.clientId : undefined) },
   { flag: "--admin-claim", key: "adminClaim", stored: (a) => (a.identity.mode === "oidc" ? a.identity.adminClaim : undefined) },
-  { flag: "--admin-values", key: "adminValues", stored: (a) => (a.identity.mode === "oidc" ? a.identity.adminValues?.join(", ") : undefined) },
   { flag: "--orchestrator-model", key: "orchestratorModel", stored: (a) => a.models.orchestrator },
   { flag: "--classifier-model", key: "classifierModel", stored: (a) => a.models.classifier },
   { flag: "--worker-model", key: "workerModel", stored: (a) => a.models.worker },
   { flag: "--permission-boundary", key: "permissionBoundary", stored: (a) => a.permissionsBoundaryArn ?? "" },
   { flag: "--operator-principal", key: "operatorPrincipal", stored: (a) => a.operatorPrincipalArn ?? "" },
-  { flag: "--alert-email", key: "alertEmail", stored: (a) => (a.alert.kind === "email" ? a.alert.address : undefined) },
-  { flag: "--github-account", key: "githubAccount", stored: (a) => a.github.account },
+  { flag: "--alert-email", key: "alertEmail", kind: "email", stored: (a) => (a.alert.kind === "email" ? a.alert.address : undefined) },
+  { flag: "--github-account", key: "githubAccount", kind: "login", stored: (a) => a.github.account },
   { flag: "--github-account-type", key: "githubAccountType", stored: (a) => a.github.accountType },
   { flag: "--github-app-name", key: "githubAppName", stored: (a) => a.github.appName },
   { flag: "--slack-app-name", key: "slackAppName", stored: (a) => a.slack.appName },
@@ -221,6 +223,16 @@ const RESUME_CHECKS: Array<{ flag: string; key: keyof InitFlags; stored: (answer
   { flag: "--worker-image", key: "workerImage", stored: (a) => a.images?.worker },
   { flag: "--slack-image", key: "slackImage", stored: (a) => a.images?.slack },
 ];
+
+/** Trims, then applies the one further normalization `kind` calls for: a URL (the OIDC issuer)
+ * drops a trailing slash, and a login or an email address lowercases (GitHub logins and email
+ * addresses are not case-sensitive; everything else here is compared as typed). */
+function normalizeResumeValue(value: string, kind: ResumeCheckKind | undefined): string {
+  const trimmed = value.trim();
+  if (kind === "url") return trimmed.replace(/\/+$/, "");
+  if (kind === "login" || kind === "email") return trimmed.toLowerCase();
+  return trimmed;
+}
 
 function resumeMismatch(flagDisplay: string, was: string | undefined): never {
   throw agentXError(
@@ -241,16 +253,37 @@ function alertKindWord(alert: InitAnswers["alert"]): string {
   return alert.kind;
 }
 
+/** `--admin-values` as a set of trimmed, non-empty entries: order and spacing around the commas
+ * are not part of the answer, so a resume that retypes the same values in a different order or
+ * without the space after a comma must not be refused over it. */
+function adminValuesSet(raw: string): Set<string> {
+  return new Set(raw.split(",").map((value) => value.trim()).filter((value) => value !== ""));
+}
+
+function sameSet(given: Set<string>, was: Set<string>): boolean {
+  return given.size === was.size && [...given].every((value) => was.has(value));
+}
+
 /** Refuses a typed flag that differs from what this install started with (F10: also the OIDC
  * flags, --alert-webhook-file/--alert-webhook-env, and --no-alerts, none of which fit the
  * string-flag loop above, since an OIDC field can share the loop but a webhook source and a
- * boolean cannot: the loop only ever compares strings, and a webhook's real value is secret). */
+ * boolean cannot: the loop only ever compares strings, and a webhook's real value is secret).
+ * Every comparison first normalizes both sides (Fix round 1, item 2), so a resume is refused only
+ * over an actually different answer, never over whitespace, a trailing slash on a URL, letter
+ * case in a GitHub login or email address, or the order admin values were typed in. */
 export function assertResumeFlagsMatch(stored: InitAnswers, flags: InitFlags): void {
   for (const check of RESUME_CHECKS) {
     const given = flags[check.key];
     if (given === undefined || typeof given !== "string") continue;
     const was = check.stored(stored);
-    if (given !== was) resumeMismatch(`${check.flag} ${given}`, was);
+    const normalizedWas = was === undefined ? undefined : normalizeResumeValue(was, check.kind);
+    if (normalizeResumeValue(given, check.kind) !== normalizedWas) resumeMismatch(`${check.flag} ${given}`, was);
+  }
+  if (flags.adminValues !== undefined) {
+    const was = stored.identity.mode === "oidc" ? stored.identity.adminValues : undefined;
+    if (!sameSet(adminValuesSet(flags.adminValues), new Set(was ?? []))) {
+      resumeMismatch(`--admin-values ${flags.adminValues}`, was === undefined ? undefined : was.join(", "));
+    }
   }
   if (flags.alerts === false && stored.alert.kind !== "none") {
     resumeMismatch("--no-alerts", alertKindWord(stored.alert));

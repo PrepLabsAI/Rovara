@@ -4,6 +4,7 @@ import {
 } from "../../packages/cli/src/init/answers.js";
 import { readInstallAnswers } from "../../packages/cli/src/init/install-state.js";
 import { unattendedPrompter } from "../../packages/cli/src/init/prompts.js";
+import { GITHUB_LOGIN_PATTERN } from "../../packages/cli/src/deploy/answer-schemas.js";
 import { SecretAlreadyExistsError } from "../../packages/cli/src/deploy/signing-key.js";
 import { scriptedPrompter } from "../support/init-fakes.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
@@ -125,6 +126,12 @@ describe("init questions", () => {
     await expect(collectInitAnswers({ ...base, flags: { ...everyFlag, githubAccount: undefined } as InitFlags, prompter: unattendedPrompter() }))
       .rejects.toThrow("with --yes, pass --github-account");
   });
+
+  it("shares the GitHub login pattern with install-state's schema (Fix round 1, item 1), refusing the same invalid login", async () => {
+    expect(GITHUB_LOGIN_PATTERN.test("-bad")).toBe(false);
+    await expect(collectInitAnswers({ ...base, flags: { ...everyFlag, githubAccount: "-bad" }, prompter: scriptedPrompter([]) }))
+      .rejects.toThrow("--github-account -bad is not a GitHub organization or user name");
+  });
 });
 
 describe("resuming with flags", () => {
@@ -145,12 +152,42 @@ describe("resuming with flags", () => {
       "--oidc-issuer https://other.example.com differs from what this install started with (https://id.example.com); an install's answers cannot change halfway. Run agentx init without that flag to continue",
     );
     expect(() => assertResumeFlagsMatch(answers, { adminClaim: "role" })).toThrow("--admin-claim role differs");
-    expect(() => assertResumeFlagsMatch(answers, { adminValues: "agentx-admins,platform" })).toThrow("--admin-values agentx-admins,platform differs");
+    expect(() => assertResumeFlagsMatch(answers, { adminValues: "other-group, platform" })).toThrow("--admin-values other-group, platform differs");
 
     const { answers: cognitoAnswers } = await collectInitAnswers({ ...base, flags: everyFlag, prompter: scriptedPrompter([]) });
     expect(() => assertResumeFlagsMatch(cognitoAnswers, { oidcIssuer: "https://id.example.com" })).toThrow(
       "--oidc-issuer https://id.example.com differs from what this install started with (not set); an install's answers cannot change halfway. Run agentx init without that flag to continue",
     );
+  });
+
+  it("normalizes before comparing on resume (Fix round 1, item 2): trailing slash, case and admin values as a set", async () => {
+    const flags: InitFlags = { ...everyFlag, identity: "oidc", oidcIssuer: "https://id.example.com", oidcAudience: "agentx", oidcClientId: "cli", adminClaim: "groups", adminValues: "agentx-admins, platform" };
+    const { answers } = await collectInitAnswers({ ...base, flags, prompter: scriptedPrompter([]) });
+
+    // A trailing slash on the OIDC issuer must not refuse a matching resume, but a genuinely
+    // different issuer must still be refused.
+    expect(() => assertResumeFlagsMatch(answers, { oidcIssuer: "https://id.example.com/" })).not.toThrow();
+    expect(() => assertResumeFlagsMatch(answers, { oidcIssuer: "https://other.example.com" })).toThrow(
+      "--oidc-issuer https://other.example.com differs from what this install started with (https://id.example.com); an install's answers cannot change halfway. Run agentx init without that flag to continue",
+    );
+
+    // Admin values compare as a set: reordered or reformatted (no space after the comma) is the
+    // same set and must not refuse; a genuinely different set of values must still be refused.
+    expect(() => assertResumeFlagsMatch(answers, { adminValues: "platform, agentx-admins" })).not.toThrow();
+    expect(() => assertResumeFlagsMatch(answers, { adminValues: "agentx-admins,platform" })).not.toThrow();
+    expect(() => assertResumeFlagsMatch(answers, { adminValues: "agentx-admins" })).toThrow("--admin-values agentx-admins differs");
+
+    const { answers: emailAnswers } = await collectInitAnswers({ ...base, flags: everyFlag, prompter: scriptedPrompter([]) });
+
+    // GitHub logins and email addresses compare case-insensitively, but a genuinely different
+    // value must still be refused.
+    expect(() => assertResumeFlagsMatch(emailAnswers, { githubAccount: "ACME" })).not.toThrow();
+    expect(() => assertResumeFlagsMatch(emailAnswers, { githubAccount: "other" })).toThrow("--github-account other differs");
+    expect(() => assertResumeFlagsMatch(emailAnswers, { alertEmail: "OPS@EXAMPLE.COM" })).not.toThrow();
+    expect(() => assertResumeFlagsMatch(emailAnswers, { alertEmail: "other@example.com" })).toThrow("--alert-email other@example.com differs");
+
+    // Surrounding whitespace never causes a spurious refusal.
+    expect(() => assertResumeFlagsMatch(emailAnswers, { orchestratorModel: " us.anthropic.claude-sonnet-4-6 " })).not.toThrow();
   });
 
   it("also checks --alert-webhook-* and --no-alerts (F10) against the stored alert kind", async () => {

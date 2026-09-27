@@ -4,14 +4,13 @@
 // resume before that, from any machine with access to the account.
 import { z } from "zod";
 import { agentXError, EnvironmentNameSchema, environmentSettingsPrefix, ImageDigest } from "@agentx/contracts";
-import { AlertEmailSchema, ACCOUNT_PATTERN, IdentityAnswersSchema, ModelsAnswersSchema, REGION_PATTERN } from "../deploy/answer-schemas.js";
+import { AlertEmailSchema, ACCOUNT_PATTERN, GITHUB_LOGIN_PATTERN, IdentityAnswersSchema, ModelsAnswersSchema, REGION_PATTERN } from "../deploy/answer-schemas.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 
 export const INIT_STEP_IDS = ["prerequisites", "access", "core", "github-app", "control-plane", "slack-app", "slack-service"] as const;
 export type InitStepId = (typeof INIT_STEP_IDS)[number];
 export const SSM_STANDARD_VALUE_LIMIT = 4096;
 
-const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const SECRET_ARN = /^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:\d{12}:secret:.+$/;
 
 // Host and an optional port only: no userinfo (`user@` or `user:pass@`), so a webhook integration
@@ -48,7 +47,7 @@ export const InitAnswersSchema = z.object({
   operatorPrincipalArn: z.string().regex(/^arn:aws[a-z-]*:(iam|sts)::\d{12}:.+$/).optional(),
   images: z.object({ worker: ImageDigest.optional(), slack: ImageDigest.optional() }).strict().optional(),
   alert: AlertAnswersSchema,
-  github: z.object({ account: z.string().regex(GITHUB_LOGIN), accountType: z.enum(["organization", "user"]), appName: z.string().min(1).max(34) }).strict(),
+  github: z.object({ account: z.string().regex(GITHUB_LOGIN_PATTERN), accountType: z.enum(["organization", "user"]), appName: z.string().min(1).max(34) }).strict(),
   slack: z.object({ appName: z.string().min(1).max(35), appPostedMessages: z.enum(["accept", "ignore"]) }).strict(),
   createdAt: z.iso.datetime(),
 }).strict().superRefine(requireWebhookSecretMatchesEnv);
@@ -63,7 +62,7 @@ export const InstallProgressSchema = z.object({
   env: EnvironmentNameSchema,
   steps: z.partialRecord(z.enum(INIT_STEP_IDS), StepRecordSchema),
   github: z.object({
-    account: z.string().regex(GITHUB_LOGIN),
+    account: z.string().regex(GITHUB_LOGIN_PATTERN),
     appId: z.string().regex(/^\d+$/),
     slug: z.string().regex(/^[a-z0-9-]+$/),
     privateKeySecretArn: z.string().regex(SECRET_ARN),

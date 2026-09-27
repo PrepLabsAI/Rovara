@@ -12,6 +12,11 @@ import { z } from "zod";
 export const REGION_PATTERN = /^[a-z]{2}(-[a-z]+)+-\d$/;
 export const ACCOUNT_PATTERN = /^\d{12}$/;
 
+/** Shared between `InitAnswersSchema` (../init/install-state.js, parsing a GitHub account already
+ * stored) and `agentx init`'s own `--github-account` prompt and flag validation, so a GitHub
+ * organization or user name is accepted or refused identically wherever it is checked. */
+export const GITHUB_LOGIN_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+
 export const IdentityAnswersSchema = z.discriminatedUnion("mode", [
   z.object({ mode: z.literal("cognito") }).strict(),
   z

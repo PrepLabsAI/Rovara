@@ -3,6 +3,7 @@ import {
   INIT_STEP_IDS, emptyProgress, installAnswersParameterName, installProgressParameterName, readInstallAnswers,
   readInstallProgress, writeInstallAnswers, writeInstallProgress, type InitAnswers,
 } from "../../packages/cli/src/init/install-state.js";
+import { GITHUB_LOGIN_PATTERN } from "../../packages/cli/src/deploy/answer-schemas.js";
 import { sampleAnswers } from "../support/init-fakes.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 
@@ -23,6 +24,14 @@ describe("install state", () => {
     await writeInstallProgress(store, progress);
     expect(await readInstallProgress(store, "staging")).toEqual(progress);
     expect(await readInstallProgress(store, "other")).toBeUndefined();
+  });
+
+  it("shares the GitHub login pattern with answers.ts (Fix round 1, item 1): refuses the same invalid login", async () => {
+    expect(GITHUB_LOGIN_PATTERN.test("-bad")).toBe(false);
+    const store = new MemoryParameterStore();
+    await expect(writeInstallAnswers(store, sampleAnswers({ github: { account: "-bad", accountType: "organization", appName: "AgentX" } })))
+      .rejects.toThrow("install answers are invalid");
+    expect(store.values.size).toBe(0);
   });
 
   it("refuses answers that carry an unknown field, such as a secret someone added", async () => {
