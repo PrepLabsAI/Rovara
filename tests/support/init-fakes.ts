@@ -2,7 +2,7 @@
 import { createHmac, generateKeyPairSync, randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { environmentStackName, type ReleaseManifest } from "@agentx/contracts";
+import { CONTROL_PLANE_FOUNDATION_PARAMETERS, environmentStackName, type ReleaseManifest } from "@agentx/contracts";
 import type { DeployRequest, StackDeployer, StackOutputs } from "../../packages/cli/src/deploy/deployer.js";
 import type { LoadedRelease } from "../../packages/cli/src/deploy/release.js";
 import { SecretAlreadyExistsError } from "../../packages/cli/src/deploy/signing-key.js";
@@ -120,12 +120,17 @@ export function storeWithInitLock(env = "staging", holder = HOLDER): MemoryParam
   return store;
 }
 
+/** A placeholder for every foundation output the control plane takes, so a new one never breaks these fakes. */
+function foundationParameterDefaults(): Record<string, string> {
+  return Object.fromEntries(CONTROL_PLANE_FOUNDATION_PARAMETERS.map((name) => [name, `fake-${name}`]));
+}
+
 /** Every part's outputs, enough for stackParameters, settings and the Slack step. */
 export function allStackOutputs(env = "staging"): Record<string, StackOutputs> {
   const name = (part: Parameters<typeof environmentStackName>[1]) => environmentStackName(env, part);
   return {
     [name("access")]: { ArtifactBucketName: `agentx-${env}-access-artifactbucket-abc`, CloudFormationRoleArn: `arn:aws:iam::123456789012:role/agentx-${env}-cloudformation`, OperatorRoleArn: `arn:aws:iam::123456789012:role/agentx-${env}-operator`, PullThroughPrefix: `agentx-${env}` },
-    [name("foundation")]: { CapacityProviderArn: `arn:aws:bedrock-agentcore:us-east-1:123456789012:capacity-provider/agentx_${env}_capacity-AbCdEfGhIj`, VpcId: "vpc-0123456789abcdef0", PrivateSubnetIds: "subnet-1,subnet-2", SessionManagerSecurityGroupId: "sg-0123456789abcdef0", WorkspaceKmsKeyArn: "arn:aws:kms:us-east-1:123456789012:key/k", Ec2WorkerInstanceRoleArn: `arn:aws:iam::123456789012:role/agentx/${env}/worker`, Ec2WorkerLaunchTemplateId: "lt-0123456789abcdef0" },
+    [name("foundation")]: { CapacityProviderArn: `arn:aws:bedrock-agentcore:us-east-1:123456789012:capacity-provider/agentx_${env}_capacity-AbCdEfGhIj`, VpcId: "vpc-0123456789abcdef0", PrivateSubnetIds: "subnet-1,subnet-2", SessionManagerSecurityGroupId: "sg-0123456789abcdef0", WorkspaceKmsKeyArn: "arn:aws:kms:us-east-1:123456789012:key/k", Ec2WorkerInstanceRoleArn: `arn:aws:iam::123456789012:role/agentx/${env}/worker`, Ec2WorkerLaunchTemplateId: "lt-0123456789abcdef0", ...foundationParameterDefaults() },
     [name("identity")]: { Issuer: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_abc", Audience: "client123", ClientId: "client123" },
     [name("control-plane")]: {
       ApiEndpoint: "https://abc123.execute-api.us-east-1.amazonaws.com",
