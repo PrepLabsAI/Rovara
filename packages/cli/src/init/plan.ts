@@ -27,6 +27,9 @@ const HOURS_PER_MONTH = 730;
 // current per-model on-demand tables render client-side and could not be scraped directly, so the
 // model prices below are corroborated from AWS's own worked examples and documentation instead of
 // the live pricing widget (see ORCHESTRATOR_PER_TURN, CLASSIFIER_PER_CHECK and WORKER_PER_SESSION).
+// Each running EC2 worker also carries its own 30 GiB gp3 root volume, deleted with the instance
+// (infra/lib/ec2-workers.ts EC2_WORKER_ROOT_VOLUME_GIB); that is separate from the 20 GiB gp3
+// workspace volume kept until the workspace closes.
 const PRICES = {
   natGatewayHour: 0.045,
   fargateArmVcpuHour: 0.03238,
@@ -34,6 +37,7 @@ const PRICES = {
   m6gMediumHour: 0.0385,
   gp3GbMonth: 0.08,
   workspaceGiB: 20,
+  ec2WorkerRootVolumeGiB: 30,
   smallServicesMonth: 10,
 };
 // The Sonnet 4.6 and GLM 4.7 figures come from the spec's 2026-09-25 evaluation (do not change).
@@ -74,8 +78,13 @@ export function estimateMonthlyCost(models: InitAnswers["models"], usage = STATE
     priced("Two NAT gateways", 2 * PRICES.natGatewayHour * HOURS_PER_MONTH, `2 x $${PRICES.natGatewayHour}/hour, plus $0.045 per GB processed`),
     priced("Slack service (Fargate, 0.5 vCPU, 1 GB, arm64)", (0.5 * PRICES.fargateArmVcpuHour + 1 * PRICES.fargateArmGbHour) * HOURS_PER_MONTH, "one task, always on"),
     priced("Worker instances (m6g.medium)", PRICES.m6gMediumHour * usage.workerInstanceHoursPerMonth, `${usage.workerInstanceHoursPerMonth} instance-hours at $${PRICES.m6gMediumHour}/hour`),
+    priced(
+      `Worker root volumes (${PRICES.ec2WorkerRootVolumeGiB} GiB gp3)`,
+      usage.workerInstanceHoursPerMonth * PRICES.ec2WorkerRootVolumeGiB * (PRICES.gp3GbMonth / HOURS_PER_MONTH),
+      `${usage.workerInstanceHoursPerMonth} instance-hours at ${PRICES.ec2WorkerRootVolumeGiB} GiB gp3 and $${PRICES.gp3GbMonth}/GB-month, the same usage assumption as the worker instances above; each running worker's root volume is deleted with it, unlike the workspace volumes below`,
+    ),
     priced("Workspace volumes", usage.keptWorkspaces * PRICES.workspaceGiB * PRICES.gp3GbMonth, `${usage.keptWorkspaces} kept workspaces x ${PRICES.workspaceGiB} GiB gp3 at $${PRICES.gp3GbMonth}/GB-month`),
-    priced("API Gateway, Lambda, DynamoDB, SQS, Secrets Manager, KMS and CloudWatch", PRICES.smallServicesMonth, "about, at this usage"),
+    priced("API Gateway, Lambda, DynamoDB, SQS, Secrets Manager, KMS (including the invocation-signing key) and CloudWatch", PRICES.smallServicesMonth, "about, at this usage"),
     perUse(`Orchestrator model (${models.orchestrator})`, models.orchestrator, ORCHESTRATOR_PER_TURN, usage.turnsPerMonth, "turns"),
     perUse(`Classifier model (${models.classifier})`, models.classifier, CLASSIFIER_PER_CHECK, usage.turnsPerMonth, "checks"),
     perUse(`Worker model (${models.worker})`, models.worker, WORKER_PER_SESSION, usage.workerSessionsPerMonth, "sessions"),
@@ -110,9 +119,9 @@ export function installPlanText(answers: InitAnswers, estimate: CostEstimate, no
     "Estimated monthly cost:",
     ...estimate.lines.map((line) => `  ${line.usd === undefined ? "    n/a" : money(line.usd).padStart(8)}  ${line.item} (${line.basis})`),
     `Estimated monthly total: ${money(estimate.totalUsd)} at ${count(STATED_USAGE.turnsPerMonth)} turns, ${count(STATED_USAGE.workerSessionsPerMonth)} worker sessions and ${STATED_USAGE.workerInstanceHoursPerMonth} worker instance-hours a month (us-east-1 list prices, ${PRICES_CHECKED}; your bill will differ)${estimate.unpriced.length > 0 ? `, not counting ${estimate.unpriced.join(", ")}` : ""}.`,
-    "This does not include any separate AgentCore runtime charge on top of EC2 and EBS for the instances-ebs capacity provider mode, which has not been confirmed; the live test checks the real bill.",
+    "This does not include any separate AgentCore runtime charge on top of EC2 and EBS for the instances-ebs capacity provider mode; that applies to AgentCore workers only, has not been confirmed, and the live test checks the real bill.",
     "",
-    "To remove it later, follow the teardown guide (agentx destroy arrives in phase 15e). Deleting the capacity provider deletes every workspace volume.",
+    "To remove it later, follow the teardown guide (agentx destroy arrives in phase 15e). Deleting the capacity provider deletes every AgentCore workspace volume; EC2 worker volumes are separate and are deleted by the teardown steps.",
   ];
   return `${lines.join("\n")}\n`;
 }

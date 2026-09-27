@@ -12,13 +12,15 @@ describe("cost estimate", () => {
       ["Two NAT gateways", 65.7],
       ["Slack service (Fargate, 0.5 vCPU, 1 GB, arm64)", 14.42],
       ["Worker instances (m6g.medium)", 2.31],
+      ["Worker root volumes (30 GiB gp3)", 0.2],
       ["Workspace volumes", 16],
-      ["API Gateway, Lambda, DynamoDB, SQS, Secrets Manager, KMS and CloudWatch", 10],
+      ["API Gateway, Lambda, DynamoDB, SQS, Secrets Manager, KMS (including the invocation-signing key) and CloudWatch", 10],
       ["Orchestrator model (us.anthropic.claude-sonnet-4-6)", 25],
       ["Classifier model (amazon.nova-lite-v1:0)", 0.15],
       ["Worker model (amazon.nova-pro-v1:0)", 19.2],
     ]);
-    expect(estimate.totalUsd).toBe(152.78);
+    // 60 instance-hours x 30 GiB x ($0.08/GB-month / 730 hours/month) = $0.1972..., rounded to $0.20.
+    expect(estimate.totalUsd).toBe(152.98);
     expect(estimate.unpriced).toEqual([]);
   });
 
@@ -31,11 +33,19 @@ describe("cost estimate", () => {
   });
 
   it("prices GLM 4.7 lower, and names a model it has no price for instead of guessing", () => {
-    expect(estimateMonthlyCost({ ...sampleAnswers().models, orchestrator: "zai.glm-4.7" }).totalUsd).toBe(134.78);
+    expect(estimateMonthlyCost({ ...sampleAnswers().models, orchestrator: "zai.glm-4.7" }).totalUsd).toBe(134.98);
     const custom = estimateMonthlyCost({ ...sampleAnswers().models, worker: "us.amazon.nova-premier-v1:0" });
     expect(custom.unpriced).toEqual(["us.amazon.nova-premier-v1:0"]);
     expect(custom.lines.find((line) => line.item.startsWith("Worker model"))?.usd).toBeUndefined();
-    expect(custom.totalUsd).toBe(133.58);
+    expect(custom.totalUsd).toBe(133.78);
+  });
+
+  it("prices the worker root volume at the same usage assumption as the worker instances, separately from the kept workspace volumes", () => {
+    const estimate = estimateMonthlyCost(sampleAnswers().models);
+    const rootVolume = estimate.lines.find((line) => line.item.startsWith("Worker root volumes"));
+    expect(rootVolume?.usd).toBe(0.2);
+    expect(rootVolume?.basis).toContain("the same usage assumption as the worker instances above");
+    expect(rootVolume?.basis).toContain("deleted with it, unlike the workspace volumes below");
   });
 });
 
@@ -54,8 +64,11 @@ describe("install plan", () => {
       "In Slack: an app named \"AgentX\".",
       "Alerts (subscribed in a later AgentX release): email to ops@example.com",
       "AgentX never answers itself or other bots. Mentions people post through other apps: accept (slack.appPostedMessages).",
-      "Estimated monthly total: $152.78 at 1,000 turns, 100 worker sessions and 60 worker instance-hours a month",
-      "Deleting the capacity provider deletes every workspace volume.",
+      "Estimated monthly total: $152.98 at 1,000 turns, 100 worker sessions and 60 worker instance-hours a month",
+      "Deleting the capacity provider deletes every AgentCore workspace volume; EC2 worker volumes are separate and are deleted by the teardown steps.",
+      "that applies to AgentCore workers only",
+      "Worker root volumes (30 GiB gp3)",
+      "KMS (including the invocation-signing key)",
     ]) expect(text).toContain(expected);
   });
 

@@ -417,6 +417,14 @@ on access, foundation, identity and runtime, then delete the stacks in reverse i
 control-plane, identity, foundation, access). A named environment's AgentCore runtime is deleted with its
 stack; the legacy deployment's is retained.
 
+Between deleting the control-plane stack and the foundation stack, tear down the EC2 workers: they are
+launched by Step Functions, outside CloudFormation, so their instances and volumes survive every stack
+delete above and are never removed by CloudFormation. List instances tagged `Environment=<env>` and
+`DeploymentMode=ec2-ebs` with `aws ec2 describe-instances`, terminate them, and wait with `aws ec2 wait
+instance-terminated`; then list and delete the volumes carrying the same tags with `aws ec2 describe-volumes`
+and `aws ec2 delete-volume`. A worker instance still running in the worker security group blocks the
+foundation stack's delete. The export bundle's README lists the exact commands, each naming its region.
+
 Stack deletion keeps, on purpose: the capacity provider, the Cognito user pool (deletion protection), three
 S3 buckets (two versioned: empty every version and delete marker first), three DynamoDB tables, two log
 groups (VPC flow logs and `/aws/bedrock-agentcore/runtimes/<runtimeId>-DEFAULT`), and the KMS workspace key (schedule deletion; 7 days minimum). Two secrets live outside or beyond the
