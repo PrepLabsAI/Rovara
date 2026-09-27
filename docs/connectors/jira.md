@@ -75,7 +75,9 @@ revoke it in Atlassian and issue a new one.
 
 Open `https://<your-site>.atlassian.net/_edge/tenant_info`. It returns `{"cloudId":"..."}`. That
 UUID is your `cloudId`. Write it down lowercase, exactly as returned; AgentX refuses a `cloudId`
-that is not lowercase.
+that is not lowercase. That same address, `https://<your-site>.atlassian.net` with nothing after
+it, is also your `siteUrl` for Step 10: it gives AgentX's replies the issue's real link instead of
+a guessed one.
 
 ## Step 7: Store the token in Secrets Manager, without cutting it
 
@@ -151,7 +153,7 @@ integrations:
       type: jira
       credentialRef: jira-agentx-sa
       scopes:
-        - { alias: pay, cloudId: "<your cloudId>", projectKey: PAY }
+        - { alias: pay, cloudId: "<your cloudId>", projectKey: PAY, siteUrl: "https://<your-site>.atlassian.net" }
       tools:
         - name: searchJiraIssuesUsingJql
           access: read
@@ -169,6 +171,12 @@ integrations:
 
 `editJiraIssue` and `transitionJiraIssue` may be added too (access `write`). Edits are not signed
 with the footer, because Jira takes the description inside `fields`.
+
+`siteUrl` is optional, so a connector registered before this field existed keeps working, but
+without it AgentX cannot form a link: it tells the model to give only the issue key and never
+write a link, rather than let the model guess a host (a guess is exactly the bug this field fixes).
+It must be exactly `https://<site>.atlassian.net`, with no path and no trailing slash, and it must
+be lowercase.
 
 Use your own project key in the `description` override, in place of `PAY` above. Without an
 override, AgentX adds "AgentX limits every search to project PAY; send only the rest of the query."
