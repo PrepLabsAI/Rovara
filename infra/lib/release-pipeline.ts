@@ -198,7 +198,9 @@ export class ReleasePipelineStack extends Stack {
     new codepipeline.Pipeline(this, "Pipeline", {
       pipelineName: "AgentXProductionRelease",
       pipelineType: codepipeline.PipelineType.V2,
-      executionMode: codepipeline.ExecutionMode.SUPERSEDED,
+      // Each merge is released on its own, in order: a waiting release is never replaced by a newer one
+      // (#114), so a failure always points at one merge.
+      executionMode: codepipeline.ExecutionMode.QUEUED,
       // aws-cdk-lib types Bucket.isWebsite as `boolean | undefined`, which exactOptionalPropertyTypes rejects for IBucket.
       artifactBucket: artifactBucket as s3.IBucket,
       crossAccountKeys: false,
