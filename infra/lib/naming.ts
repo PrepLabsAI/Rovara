@@ -18,6 +18,8 @@ export interface AgentXNaming {
   /** Prefix of the foundation's `Name` tags. */
   readonly resourcePrefix: string;
   readonly workspaceKeyAlias: string;
+  /** KMS alias of the key that signs developer access tokens (spec 025). */
+  readonly developerTokenKeyAlias: string;
   readonly alertsTopicName: string;
   alarmName(suffix: string): string;
   readonly connectorSecretPrefix: string;
@@ -71,6 +73,8 @@ export function legacyNaming(): AgentXNaming {
     apiName: "agentx-control-plane",
     resourcePrefix: "agentx-production",
     workspaceKeyAlias: "alias/agentx/production-workspaces",
+    // Never used: developer sign-in exists only for named environments (R3).
+    developerTokenKeyAlias: "alias/agentx/developer-tokens",
     alertsTopicName: "AgentXOperatorAlerts",
     alarmName: (suffix) => `AgentX${suffix}`,
     connectorSecretPrefix: "agentx/connectors/",
@@ -109,6 +113,7 @@ export function environmentNaming(env: string): AgentXNaming {
     apiName: `agentx-${name}-control-plane`,
     resourcePrefix: `agentx-${name}`,
     workspaceKeyAlias: `alias/agentx/${name}/workspaces`,
+    developerTokenKeyAlias: `alias/agentx/${name}/developer-tokens`,
     alertsTopicName: `agentx-${name}-alerts`,
     alarmName: (suffix) => `agentx-${name}-${suffix}`,
     connectorSecretPrefix: environmentConnectorSecretPrefix(name),

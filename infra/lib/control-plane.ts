@@ -25,6 +25,7 @@ import {
 import type { Construct } from "constructs";
 import { WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
+import { DeveloperSignIn, developerSignInParameters } from "./developer-signin.js";
 import { SessionLifecycle } from "./session-lifecycle.js";
 
 const MAX_DISPATCH_ATTEMPTS = 5;
@@ -77,6 +78,8 @@ export class ControlPlaneStack extends Stack {
       type: "String",
       description: "Complete Secrets Manager ARN containing the GitHub App private key PEM",
     });
+    // Spec 025 phase 25a: declared on the stack itself so the names are exact; named environments only (R3).
+    const signInParameters = naming.env === undefined ? undefined : developerSignInParameters(this);
 
     const state = new dynamodb.Table(this, "State", {
       partitionKey: { name: "pk", type: dynamodb.AttributeType.STRING },
@@ -545,6 +548,13 @@ export class ControlPlaneStack extends Stack {
       actions: ["execute-api:Invoke"],
       resources: [`arn:${this.partition}:execute-api:${this.region}:${this.account}:${api.ref}/*/*/v1/service/*`],
     }));
+
+    // Spec 025 phase 25a: developer sign-in, named environments only (R3).
+    if (naming.env !== undefined && signInParameters !== undefined) {
+      new DeveloperSignIn(this, "DeveloperSignIn", {
+        naming, env: naming.env, api, brokerIntegration: integration, broker, slackSecret, parameters: signInParameters,
+      });
+    }
 
     const sessions = new SessionLifecycle(this, "Sessions", { naming, state, invokeSigningKey, notifyOperator });
     // Own both attachments in this releasable stack. Secret changes must never mutate the
