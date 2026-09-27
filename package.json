@@ -26,6 +26,7 @@
     "image:build:demo": "docker buildx build --platform linux/arm64 --load --tag agentx-worker:demo-arm64 --file environments/base/Dockerfile .",
     "release:demo": "tsx scripts/release-demo.ts",
     "release:prod": "tsx scripts/release-production.ts",
+    "session:e2e": "tsx scripts/session-e2e.ts",
     "release:build": "tsx scripts/release/build.ts",
     "release:verify": "tsx scripts/release/verify.ts",
     "release:pack-cli": "tsx scripts/release/pack-cli.ts",

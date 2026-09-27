@@ -48,6 +48,8 @@ export interface Ec2WorkerNaming {
   readonly invokeSigningKeyAlias: string;
   /** SSM parameter holding the worker image URI pinned by digest. */
   readonly workerImageParameterName: string;
+  /** Prefix of the worker setting parameters (WORKER_SETTING_PARAMETERS in contracts). */
+  readonly workerSettingsPrefix: string;
 }
 
 /** The deployment that predates named environments has no access or identity stack. */
@@ -101,6 +103,7 @@ export function legacyNaming(): AgentXNaming {
       workerLogGroupName: "/agentx/production/worker",
       invokeSigningKeyAlias: "alias/agentx/production/invoke-signing",
       workerImageParameterName: "/agentx/production/worker-image",
+      workerSettingsPrefix: "/agentx/production/",
     },
   };
 }
@@ -134,6 +137,7 @@ export function environmentNaming(env: string): AgentXNaming {
       workerLogGroupName: `/agentx/${name}/worker`,
       invokeSigningKeyAlias: `alias/agentx/${name}/invoke-signing`,
       workerImageParameterName: `${environmentSettingsPrefix(name)}worker-image`,
+      workerSettingsPrefix: environmentSettingsPrefix(name),
     },
   };
 }

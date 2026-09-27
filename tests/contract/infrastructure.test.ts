@@ -175,7 +175,8 @@ describe("control-plane infrastructure", () => {
     const template = Template.fromStack(stack);
     const json = JSON.stringify(template.toJSON());
 
-    template.resourceCountIs("AWS::Lambda::Function", 4);
+    // Broker, outbox publisher, dispatcher, Slack ingress and the EC2 session steps (#83).
+    template.resourceCountIs("AWS::Lambda::Function", 5);
     expect(json).not.toContain("ZipFile");
     expect(json).not.toContain("not packaged");
     expect(json).toContain("STATE_TABLE_NAME");
@@ -216,7 +217,8 @@ describe("control-plane infrastructure", () => {
     const stack = new ControlPlaneStack(app, "LoggedControlPlane");
     const template = Template.fromStack(stack);
 
-    template.resourceCountIs("AWS::Logs::LogGroup", 4);
+    // One per Lambda, plus the EC2 session provisioner's and deleter's (#83).
+    template.resourceCountIs("AWS::Logs::LogGroup", 7);
     template.allResourcesProperties("AWS::Logs::LogGroup", {
       RetentionInDays: 30,
     });
@@ -546,7 +548,8 @@ describe("Slack interactivity infrastructure (spec 014)", () => {
       Target: { "Fn::Join": ["", ["integrations/", { Ref: Match.stringLikeRegexp("^SlackIngressIntegration") }]] },
     });
     template.hasOutput("SlackInteractivityUrl", {});
-    template.resourceCountIs("AWS::Lambda::Function", 4);
+    // Broker, outbox publisher, dispatcher, Slack ingress and the EC2 session steps (#83).
+    template.resourceCountIs("AWS::Lambda::Function", 5);
   });
 });
 

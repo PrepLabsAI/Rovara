@@ -42,6 +42,7 @@ export const SERVICE_ROLE_SERVICES: readonly string[] = [
   "sns",
   "sqs",
   "ssm",
+  "states",
 ];
 
 /**

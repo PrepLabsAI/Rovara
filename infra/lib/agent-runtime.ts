@@ -10,6 +10,7 @@ import {
   aws_ssm as ssm,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
+import { WORKER_SETTING_PARAMETERS } from "@agentx/contracts";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
 
 export const AGENTX_WORKSPACE_MOUNT = "/mnt/workspace";
@@ -229,12 +230,25 @@ export class AgentRuntimeStack extends Stack {
     // A named environment's runtime holds no data (workspaces live on the capacity provider), so it goes with its stack; legacy keeps Retain unchanged.
     runtime.applyRemovalPolicy(naming.env === undefined ? RemovalPolicy.RETAIN : RemovalPolicy.DESTROY);
 
-    // The EC2 session provisioner (#83) launches workers with the image a release last deployed here.
+    // The EC2 session provisioner (#83) boots workers with the image and model a release last
+    // deployed here.
     new ssm.StringParameter(this, "WorkerImageParameter", {
       parameterName: naming.ec2.workerImageParameterName,
       stringValue: imageUri.valueAsString,
       description: "AgentX worker image URI pinned by digest, for EC2 workers",
     });
+    const workerSettings: Array<[string, keyof typeof WORKER_SETTING_PARAMETERS, string]> = [
+      ["WorkerModelProviderParameter", "modelProvider", modelProvider.valueAsString],
+      ["WorkerModelIdParameter", "modelId", modelId.valueAsString],
+      ["WorkerPromptCacheRetentionParameter", "promptCacheRetention", promptCacheRetention.valueAsString],
+    ];
+    for (const [id, setting, value] of workerSettings) {
+      new ssm.StringParameter(this, id, {
+        parameterName: `${naming.ec2.workerSettingsPrefix}${WORKER_SETTING_PARAMETERS[setting]}`,
+        stringValue: value,
+        description: `AgentX worker ${setting} for EC2 workers`,
+      });
+    }
 
     this.runtimeArn = runtime.attrAgentRuntimeArn;
     this.capacityProviderArn = capacityProviderArn.valueAsString;

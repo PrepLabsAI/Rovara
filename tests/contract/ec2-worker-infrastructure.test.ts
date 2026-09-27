@@ -32,7 +32,10 @@ describe("EC2 worker infrastructure (issue #82), shown for a named environment",
     expect(all("AWS::EC2::SecurityGroup").map((r) => r.Properties.GroupName).filter((name) => name !== undefined).sort()).toEqual([
       "agentx-production-dispatcher", "agentx-production-ec2-workers", "agentx-production-session-manager", "agentx-production-workers",
     ]);
-    expect(all("AWS::SSM::Parameter").map((r) => r.Properties.Name)).toEqual(["/agentx/production/worker-image"]);
+    expect(all("AWS::SSM::Parameter").map((r) => r.Properties.Name).sort()).toEqual([
+      "/agentx/production/worker-image", "/agentx/production/worker-model-id", "/agentx/production/worker-model-provider",
+      "/agentx/production/worker-prompt-cache-retention",
+    ]);
     expect(all("AWS::KMS::Alias").map((r) => r.Properties.AliasName).sort()).toEqual([
       "alias/agentx/production-workspaces", "alias/agentx/production/invoke-signing",
     ]);

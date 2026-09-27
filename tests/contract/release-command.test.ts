@@ -224,10 +224,15 @@ describe("release ordering", () => {
   it("updates the production runtime before the control plane", () => {
     const source = readFileSync("scripts/release-production.ts", "utf8");
     const runtimeDeploy = source.indexOf("\n    RUNTIME_STACK,\n");
-    const controlPlaneDeploy = source.indexOf("\n  deployControlPlane(runner, options);\n");
+    const controlPlaneDeploy = source.indexOf("\n  deployControlPlane(runner, options, foundation);\n");
     expect(runtimeDeploy).toBeGreaterThan(-1);
     expect(controlPlaneDeploy).toBeGreaterThan(-1);
     expect(runtimeDeploy).toBeLessThan(controlPlaneDeploy);
+  });
+
+  it("passes the control plane the foundation outputs its EC2 session lifecycle needs", () => {
+    const source = readFileSync("scripts/release-production.ts", "utf8");
+    expect(source).toContain("CONTROL_PLANE_FOUNDATION_PARAMETERS.flatMap((name) => [\"--parameters\", `${CONTROL_PLANE_STACK}:${name}=${stackOutput(foundation, name)}`])");
   });
 
   it("updates the demo runtime before the control plane once both stacks exist", () => {
