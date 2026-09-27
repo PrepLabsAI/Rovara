@@ -51,6 +51,7 @@ import {
   parseSlackThreadSubject,
   slackThreadSubject,
   slackThreadUrl,
+  unhandledDeploymentMode,
   type Operation,
   type OperationStatus,
   type CodeBuildCheckResult,
@@ -745,17 +746,12 @@ async function newWorkspacePreparation(
   const now = new Date().toISOString();
   const workspaceId = randomUUID();
   const operationId = randomUUID();
-  const runtimeSessionId = randomUUID();
   const workspace = WorkspaceInstanceSchema.parse({
     id: workspaceId,
     ownerKey: targetOwnerKey,
     projectName,
     projectRevision,
-    runtimeArn: project.runtimeBinding.runtimeArn,
-    endpointQualifier: project.runtimeBinding.endpointQualifier,
-    runtimeSessionId,
-    deploymentMode: project.runtimeBinding.deploymentMode,
-    capacityProviderArn: project.runtimeBinding.capacityProviderArn,
+    ...workspaceRuntime(project.runtimeBinding),
     rootPath: "/mnt/workspace",
     status: "PREPARING",
     activeOperationId: operationId,
@@ -794,7 +790,7 @@ async function newWorkspacePreparation(
       ),
     },
   };
-  const outbox = outboxRecord(project.runtimeBinding, workspace, invocation);
+  const outbox = outboxRecord(workspace, invocation, project.runtimeBinding);
   const existingMembership = await getMembership(dependencies, targetOwnerKey, projectName);
   const membership = membershipRecord(
     targetOwnerKey,
@@ -977,12 +973,7 @@ async function startThreadWorkspaceClose(
     callbackCapability: issueCapability(dependencies, workspace.id, operationId, fence),
     payload: {},
   };
-  const outbox = outboxRecord({
-    runtimeArn: workspace.runtimeArn,
-    endpointQualifier: workspace.endpointQualifier,
-    deploymentMode: workspace.deploymentMode,
-    ...(workspace.capacityProviderArn === undefined ? {} : { capacityProviderArn: workspace.capacityProviderArn }),
-  }, workspace, invocation);
+  const outbox = outboxRecord(workspace, invocation);
   try {
     await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
       { Update: {
@@ -1035,7 +1026,7 @@ async function completeThreadWorkspaceClose(
   const workspace = await getThreadWorkspace(dependencies, identity.ownerKey);
   if (!workspace) throw agentXError("NOT_FOUND", "thread workspace not found");
   if (workspace.status === "CLOSED" && workspace.closedAt && workspace.closeOperationId === operationId) {
-    return { outcome: "CLOSED", workspaceId: workspace.id, operationId, closedAt: workspace.closedAt, storageReleased: workspace.deploymentMode === "instances-ebs" };
+    return { outcome: "CLOSED", workspaceId: workspace.id, operationId, closedAt: workspace.closedAt, storageReleased: closeReleasesStorage(workspace) };
   }
   const operation = await requireOperation(dependencies, workspace.id, operationId);
   if (operation.kind !== "close" || operation.status !== "SUCCEEDED" || workspace.status !== "CLOSING" || workspace.closeOperationId !== operationId) {
@@ -1044,19 +1035,28 @@ async function completeThreadWorkspaceClose(
   const preflight = WorkspaceClosePreflightResultSchema.parse(operation.result);
   if (!preflight.safeToClose) throw agentXError("WORKSPACE_NOT_READY", "workspace contains unpublished work");
 
-  let storageReleased = false;
-  if (workspace.deploymentMode === "instances-ebs") {
-    if (!workspace.capacityProviderArn) throw agentXError("CONFIG_INVALID", "workspace capacity provider is missing");
-    try {
-      await dependencies.deleteWorkspaceSession({
-        capacityProviderArn: workspace.capacityProviderArn,
-        runtimeSessionId: workspace.runtimeSessionId,
-      });
-    } catch {
-      throw agentXError("RUNTIME_UNAVAILABLE", "workspace resource cleanup failed; retry the close request");
-    }
-    storageReleased = true;
+  switch (workspace.deploymentMode) {
+    case "instances-ebs":
+      if (!workspace.capacityProviderArn) throw agentXError("CONFIG_INVALID", "workspace capacity provider is missing");
+      try {
+        await dependencies.deleteWorkspaceSession({
+          capacityProviderArn: workspace.capacityProviderArn,
+          runtimeSessionId: workspace.runtimeSessionId,
+        });
+      } catch {
+        throw agentXError("RUNTIME_UNAVAILABLE", "workspace resource cleanup failed; retry the close request");
+      }
+      break;
+    case "demo-microvm":
+      break;
+    case "ec2-ebs":
+      // Closing must delete the workspace's EBS volume. Until the Session Manager can, refuse
+      // rather than mark the workspace CLOSED and leak the volume.
+      throw agentXError("RUNTIME_UNAVAILABLE", "closing an ec2-ebs workspace is not supported yet");
+    default:
+      unhandledDeploymentMode(workspace);
   }
+  const storageReleased = closeReleasesStorage(workspace);
 
   const thread = await getItem<{ starterUserId?: string; closedAt?: string }>(dependencies, slackThreadKey(identity.ownerKey));
   if (typeof thread?.starterUserId !== "string") throw agentXError("CONFIG_INVALID", "Slack thread starter is missing");
@@ -1301,11 +1301,7 @@ function unpreparedWorkspace(project: RegisteredProjectRecord, ownerKey: string)
     ownerKey,
     projectName: project.definition.name,
     projectRevision: project.definition.revision,
-    runtimeArn: project.runtimeBinding.runtimeArn,
-    endpointQualifier: project.runtimeBinding.endpointQualifier,
-    runtimeSessionId: randomUUID(),
-    deploymentMode: project.runtimeBinding.deploymentMode,
-    capacityProviderArn: project.runtimeBinding.capacityProviderArn,
+    ...workspaceRuntime(project.runtimeBinding),
     rootPath: "/mnt/workspace",
     status: "UNPREPARED",
     fence: 0,
@@ -1386,7 +1382,7 @@ async function startThreadPreparation(
     },
   };
   const updated = WorkspaceInstanceSchema.parse({ ...workspace, status: "PREPARING", activeOperationId: operationId, fence, updatedAt: now });
-  const outbox = outboxRecord(pinned.runtimeBinding, updated, invocation);
+  const outbox = outboxRecord(updated, invocation, pinned.runtimeBinding);
   const { teamId, userId } = slack.requester;
   try {
     await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
@@ -1707,7 +1703,7 @@ async function retryWorkspacePreparation(
     fence,
     updatedAt: now,
   });
-  const outbox = outboxRecord(project.runtimeBinding, updated, invocation);
+  const outbox = outboxRecord(updated, invocation, project.runtimeBinding);
   await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
     { Update: {
       TableName: dependencies.tableName,
@@ -1841,16 +1837,7 @@ async function acceptTask(
       ...(resolvedModel.diagnostic === undefined ? {} : { modelSelectionDiagnostic: resolvedModel.diagnostic }),
     },
   };
-  const outbox = outboxRecord(
-    {
-      runtimeArn: workspace.runtimeArn,
-      endpointQualifier: workspace.endpointQualifier,
-      deploymentMode: workspace.deploymentMode,
-      ...(workspace.capacityProviderArn === undefined ? {} : { capacityProviderArn: workspace.capacityProviderArn }),
-    },
-    workspace,
-    invocation,
-  );
+  const outbox = outboxRecord(workspace, invocation);
   try {
     await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
       { Update: {
@@ -1975,12 +1962,7 @@ async function acceptPullRequest(
       ),
     },
   };
-  const outbox = outboxRecord({
-    runtimeArn: workspace.runtimeArn,
-    endpointQualifier: workspace.endpointQualifier,
-    deploymentMode: workspace.deploymentMode,
-    ...(workspace.capacityProviderArn === undefined ? {} : { capacityProviderArn: workspace.capacityProviderArn }),
-  }, workspace, invocation);
+  const outbox = outboxRecord(workspace, invocation);
   try {
     await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
       { Update: {
@@ -2191,12 +2173,7 @@ async function acceptPullRequestLifecycle(
         ...(remote.mergeCommit === undefined ? {} : { revertCommit: remote.mergeCommit }),
       },
     };
-    const outbox = outboxRecord({
-      runtimeArn: workspace.runtimeArn,
-      endpointQualifier: workspace.endpointQualifier,
-      deploymentMode: workspace.deploymentMode,
-      ...(workspace.capacityProviderArn === undefined ? {} : { capacityProviderArn: workspace.capacityProviderArn }),
-    }, workspace, invocation);
+    const outbox = outboxRecord(workspace, invocation);
     await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
       { Update: {
         TableName: dependencies.tableName,
@@ -2265,12 +2242,7 @@ async function acceptPullRequestLifecycle(
       ),
     },
   };
-  const outbox = outboxRecord({
-    runtimeArn: workspace.runtimeArn,
-    endpointQualifier: workspace.endpointQualifier,
-    deploymentMode: workspace.deploymentMode,
-    ...(workspace.capacityProviderArn === undefined ? {} : { capacityProviderArn: workspace.capacityProviderArn }),
-  }, workspace, invocation);
+  const outbox = outboxRecord(workspace, invocation);
   await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
     { Update: {
       TableName: dependencies.tableName,
@@ -2328,12 +2300,7 @@ async function acceptCancellation(
     callbackCapability: issueCapability(dependencies, workspaceId, operationId, workspace.fence),
     payload: { targetOperationId },
   };
-  const outbox = outboxRecord({
-    runtimeArn: workspace.runtimeArn,
-    endpointQualifier: workspace.endpointQualifier,
-    deploymentMode: workspace.deploymentMode,
-    ...(workspace.capacityProviderArn === undefined ? {} : { capacityProviderArn: workspace.capacityProviderArn }),
-  }, workspace, invocation);
+  const outbox = outboxRecord(workspace, invocation);
   await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
     { Update: {
       TableName: dependencies.tableName,
@@ -2359,11 +2326,20 @@ async function stopWorkspace(
   if (workspace.status !== "READY" || workspace.activeOperationId) {
     throw agentXError("WORKSPACE_BUSY", "cancel or finish active work before stopping compute");
   }
-  await dependencies.stopRuntimeSession({
-    runtimeArn: workspace.runtimeArn,
-    endpointQualifier: workspace.endpointQualifier,
-    runtimeSessionId: workspace.runtimeSessionId,
-  });
+  switch (workspace.deploymentMode) {
+    case "instances-ebs":
+    case "demo-microvm":
+      await dependencies.stopRuntimeSession({
+        runtimeArn: workspace.runtimeArn,
+        endpointQualifier: workspace.endpointQualifier,
+        runtimeSessionId: workspace.runtimeSessionId,
+      });
+      break;
+    case "ec2-ebs":
+      throw agentXError("RUNTIME_UNAVAILABLE", "stopping ec2-ebs compute is not supported yet");
+    default:
+      unhandledDeploymentMode(workspace);
+  }
   const updated = WorkspaceInstanceSchema.parse({ ...workspace, status: "STOPPED", updatedAt: new Date().toISOString() });
   await dependencies.documentClient.send(new PutCommand({ TableName: dependencies.tableName, Item: workspaceItem(updated) }));
   return publicWorkspace(updated);
@@ -3331,26 +3307,76 @@ function publicOperation(record: OperationRecord): Operation {
   });
 }
 
+/** Whether closing a workspace of this mode deletes its storage. */
+function closeReleasesStorage(workspace: WorkspaceInstance): boolean {
+  switch (workspace.deploymentMode) {
+    case "instances-ebs":
+    case "ec2-ebs":
+      return true;
+    case "demo-microvm":
+      return false;
+    default:
+      return unhandledDeploymentMode(workspace);
+  }
+}
+
+/** The workspace fields a project's runtime binding fixes. An ec2-ebs workspace keeps only its mode. */
+function workspaceRuntime(runtimeBinding: RuntimeBinding) {
+  switch (runtimeBinding.deploymentMode) {
+    case "instances-ebs":
+    case "demo-microvm":
+      return {
+        runtimeArn: runtimeBinding.runtimeArn,
+        endpointQualifier: runtimeBinding.endpointQualifier,
+        runtimeSessionId: randomUUID(),
+        deploymentMode: runtimeBinding.deploymentMode,
+        capacityProviderArn: runtimeBinding.capacityProviderArn,
+      };
+    case "ec2-ebs":
+      return { deploymentMode: runtimeBinding.deploymentMode };
+    default:
+      return unhandledDeploymentMode(runtimeBinding);
+  }
+}
+
+/** Routes to the workspace's own runtime unless a project binding is given. */
 function outboxRecord(
-  runtimeBinding: RuntimeBinding,
   workspace: WorkspaceInstance,
   invocation: WorkerInvocation,
+  routing: RuntimeBinding | WorkspaceInstance = workspace,
 ): DurableOutboxRecord & { pk: string; sk: string; createdAt: string } {
   const id = randomUUID();
-  return {
-    pk: `OUTBOX#${id}`,
-    sk: "OUTBOX",
+  const key = { pk: `OUTBOX#${id}`, sk: "OUTBOX" };
+  const common = {
     id,
     entityType: "OUTBOX",
     status: "PENDING",
     operationId: invocation.operationId,
     workspaceId: workspace.id,
-    runtimeArn: runtimeBinding.runtimeArn,
-    endpointQualifier: runtimeBinding.endpointQualifier,
-    runtimeSessionId: workspace.runtimeSessionId,
-    invocation,
-    createdAt: new Date().toISOString(),
-  };
+  } as const;
+  const mismatch = () => agentXError(
+    "CONFIG_INVALID",
+    `a ${workspace.deploymentMode} workspace cannot be routed to a ${routing.deploymentMode} runtime`,
+  );
+  switch (workspace.deploymentMode) {
+    case "instances-ebs":
+    case "demo-microvm":
+      if (routing.deploymentMode === "ec2-ebs") throw mismatch();
+      return {
+        ...key,
+        ...common,
+        runtimeArn: routing.runtimeArn,
+        endpointQualifier: routing.endpointQualifier,
+        runtimeSessionId: workspace.runtimeSessionId,
+        invocation,
+        createdAt: new Date().toISOString(),
+      };
+    case "ec2-ebs":
+      if (routing.deploymentMode !== "ec2-ebs") throw mismatch();
+      return { ...key, ...common, deploymentMode: "ec2-ebs", invocation, createdAt: new Date().toISOString() };
+    default:
+      return unhandledDeploymentMode(workspace);
+  }
 }
 
 function workspaceItem(workspace: WorkspaceInstance) {

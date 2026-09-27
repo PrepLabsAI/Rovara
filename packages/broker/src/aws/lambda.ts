@@ -1,11 +1,16 @@
 import { createHash } from "node:crypto";
 import {
+  Ec2RuntimeBindingSchema,
   WorkspaceDeploymentModeSchema,
   agentXError,
+  unhandledDeploymentMode,
+  type AgentCoreDeploymentMode,
+  type Ec2RuntimeBinding,
   type WorkerInvocation,
-  type WorkspaceDeploymentMode,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
+
+const AgentCoreDeploymentModeSchema = WorkspaceDeploymentModeSchema.exclude(["ec2-ebs"]);
 
 export interface HttpApiV2Event {
   version?: string;
@@ -34,24 +39,45 @@ export interface AdaptedHttpRequest {
   iamPrincipalArn?: string;
 }
 
-export interface RuntimeBinding {
+export interface AgentCoreRuntimeBinding {
   runtimeArn: string;
   endpointQualifier: string;
-  deploymentMode: WorkspaceDeploymentMode;
+  deploymentMode: AgentCoreDeploymentMode;
   capacityProviderArn?: string;
 }
 
-export interface DurableOutboxRecord {
+export type RuntimeBinding = AgentCoreRuntimeBinding | Ec2RuntimeBinding;
+
+/**
+ * PENDING → QUEUED (publisher) → DELIVERED or FAILED (dispatcher). An ec2-ebs record whose session
+ * is not ready waits in WAITING_FOR_SESSION; moving it back to PENDING makes the publisher, which
+ * re-publishes PENDING records on MODIFY, queue it again.
+ */
+export type OutboxStatus = "PENDING" | "QUEUED" | "WAITING_FOR_SESSION" | "DELIVERED" | "FAILED";
+
+interface OutboxRecordBase {
   id: string;
   entityType: "OUTBOX";
-  status: "PENDING" | "QUEUED" | "DELIVERED" | "FAILED";
+  status: OutboxStatus;
   operationId: string;
   workspaceId: string;
+  invocation: WorkerInvocation;
+}
+
+/** Records written before ec2-ebs existed have no deploymentMode, so its absence means AgentCore. */
+export interface AgentCoreOutboxRecord extends OutboxRecordBase {
+  deploymentMode?: undefined;
   runtimeArn: string;
   endpointQualifier: string;
   runtimeSessionId: string;
-  invocation: WorkerInvocation;
 }
+
+/** The dispatcher finds an ec2-ebs worker through the workspace's SESSION record. */
+export interface Ec2OutboxRecord extends OutboxRecordBase {
+  deploymentMode: "ec2-ebs";
+}
+
+export type DurableOutboxRecord = AgentCoreOutboxRecord | Ec2OutboxRecord;
 
 export function adaptHttpApiEvent(event: HttpApiV2Event): AdaptedHttpRequest {
   const rawPath = event.rawPath ?? "/";
@@ -117,6 +143,27 @@ export function parseRuntimeBinding(value: unknown): RuntimeBinding {
     throw agentXError("CONFIG_INVALID", "runtimeBinding must be an object");
   }
   const input = value as Record<string, unknown>;
+  return input.deploymentMode === "ec2-ebs" ? parseEc2RuntimeBinding(input) : parseAgentCoreRuntimeBinding(input);
+}
+
+function parseEc2RuntimeBinding(input: Record<string, unknown>): Ec2RuntimeBinding {
+  const parsed = Ec2RuntimeBindingSchema.safeParse(input);
+  if (!parsed.success) {
+    const problems = parsed.error.issues.map((issue) => `${issue.path.join(".") || "runtimeBinding"}: ${issue.message}`);
+    throw agentXError("CONFIG_INVALID", `ec2-ebs runtime binding is invalid: ${problems.join("; ")}`);
+  }
+  // A fixed key order, because registration compares stored and requested bindings as JSON.
+  const binding = parsed.data;
+  return {
+    deploymentMode: binding.deploymentMode,
+    launchTemplateId: binding.launchTemplateId,
+    subnets: binding.subnets.map((subnet) => ({ availabilityZone: subnet.availabilityZone, subnetId: subnet.subnetId })),
+    volumeSizeGiB: binding.volumeSizeGiB,
+    volumeType: binding.volumeType,
+  };
+}
+
+function parseAgentCoreRuntimeBinding(input: Record<string, unknown>): AgentCoreRuntimeBinding {
   const allowed = new Set([
     "runtimeArn",
     "endpointQualifier",
@@ -135,7 +182,7 @@ export function parseRuntimeBinding(value: unknown): RuntimeBinding {
   ) {
     throw agentXError("CONFIG_INVALID", "runtime binding ARN or endpoint qualifier is invalid");
   }
-  const deploymentMode = WorkspaceDeploymentModeSchema.parse(input.deploymentMode);
+  const deploymentMode = AgentCoreDeploymentModeSchema.parse(input.deploymentMode);
   const capacityProviderArn = input.capacityProviderArn;
   if (
     capacityProviderArn !== undefined &&
@@ -144,11 +191,19 @@ export function parseRuntimeBinding(value: unknown): RuntimeBinding {
   ) {
     throw agentXError("CONFIG_INVALID", "capacity provider ARN is invalid");
   }
-  if (deploymentMode === "instances-ebs" && capacityProviderArn === undefined) {
-    throw agentXError("CONFIG_INVALID", "instances-ebs runtime binding requires a capacity provider ARN");
-  }
-  if (deploymentMode === "demo-microvm" && capacityProviderArn !== undefined) {
-    throw agentXError("CONFIG_INVALID", "demo-microvm runtime binding must not have a capacity provider ARN");
+  switch (deploymentMode) {
+    case "instances-ebs":
+      if (capacityProviderArn === undefined) {
+        throw agentXError("CONFIG_INVALID", "instances-ebs runtime binding requires a capacity provider ARN");
+      }
+      break;
+    case "demo-microvm":
+      if (capacityProviderArn !== undefined) {
+        throw agentXError("CONFIG_INVALID", "demo-microvm runtime binding must not have a capacity provider ARN");
+      }
+      break;
+    default:
+      unhandledDeploymentMode(deploymentMode);
   }
   return {
     runtimeArn: input.runtimeArn,

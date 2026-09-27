@@ -1,19 +1,24 @@
 import {
   AgentXErrorCodeSchema,
+  Ec2RuntimeBindingSchema,
   ProjectDefinitionSchema,
   WorkspaceDeploymentModeSchema,
   agentXError,
+  unhandledDeploymentMode,
+  type AgentCoreDeploymentMode,
+  type Ec2RuntimeBinding,
   type ProjectDefinition,
-  type WorkspaceDeploymentMode,
 } from "@agentx/contracts";
 import { readJsonResponse, serverError } from "./http.js";
 
-export interface ProjectRuntimeBinding {
-  runtimeArn: string;
-  endpointQualifier: string;
-  deploymentMode: WorkspaceDeploymentMode;
-  capacityProviderArn?: string;
-}
+export type ProjectRuntimeBinding =
+  | {
+      runtimeArn: string;
+      endpointQualifier: string;
+      deploymentMode: AgentCoreDeploymentMode;
+      capacityProviderArn?: string;
+    }
+  | Ec2RuntimeBinding;
 
 export async function registerProject(
   options: {
@@ -25,12 +30,24 @@ export async function registerProject(
   fetchImplementation: typeof fetch = fetch,
 ): Promise<unknown> {
   const definition = ProjectDefinitionSchema.parse(options.definition);
-  const deploymentMode = WorkspaceDeploymentModeSchema.parse(options.runtimeBinding.deploymentMode);
-  if (deploymentMode === "instances-ebs" && options.runtimeBinding.capacityProviderArn === undefined) {
-    throw agentXError("CONFIG_INVALID", "instances-ebs registration requires --capacity-provider-arn");
-  }
-  if (deploymentMode === "demo-microvm" && options.runtimeBinding.capacityProviderArn !== undefined) {
-    throw agentXError("CONFIG_INVALID", "demo-microvm registration does not accept a capacity provider ARN");
+  WorkspaceDeploymentModeSchema.parse(options.runtimeBinding.deploymentMode);
+  const binding = options.runtimeBinding;
+  switch (binding.deploymentMode) {
+    case "instances-ebs":
+      if (binding.capacityProviderArn === undefined) {
+        throw agentXError("CONFIG_INVALID", "instances-ebs registration requires --capacity-provider-arn");
+      }
+      break;
+    case "demo-microvm":
+      if (binding.capacityProviderArn !== undefined) {
+        throw agentXError("CONFIG_INVALID", "demo-microvm registration does not accept a capacity provider ARN");
+      }
+      break;
+    case "ec2-ebs":
+      Ec2RuntimeBindingSchema.parse(binding);
+      break;
+    default:
+      unhandledDeploymentMode(binding);
   }
   const response = await fetchImplementation(`${options.controlPlaneUrl.replace(/\/$/, "")}/v1/admin/projects`, {
     method: "POST",
