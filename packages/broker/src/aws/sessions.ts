@@ -191,6 +191,12 @@ export class SessionManager {
     if (!moved && !(session?.state === "READY" && session.generation === generation)) {
       throw agentXError("STALE_FENCE", `session ${workspaceId} generation ${generation} is no longer provisioning`);
     }
+    return this.requeueParked(workspaceId, session);
+  }
+
+  /** Sends a READY session's parked outbox records back to PENDING; the publisher re-queues them. */
+  async requeueParked(workspaceId: string, current?: WorkspaceSession): Promise<{ requeued: string[] }> {
+    const session = current ?? await this.get(workspaceId);
     const requeued: string[] = [];
     for (const outboxId of session?.waitingOutboxIds ?? []) {
       // PENDING again: the outbox publisher re-queues a record on its MODIFY event.
@@ -324,6 +330,36 @@ export class SessionManager {
     ] });
   }
 
+  /**
+   * READY → STOPPED when the reconciler finds the READY session's instance gone. Holds only for the
+   * instance it saw, so a session that moved on (a new generation, a claim) is left alone.
+   */
+  async markLost(seen: WorkspaceSession): Promise<boolean> {
+    const lost = this.update(seen.workspaceId, {
+      set: { state: "STOPPED" },
+      remove: ["instanceId", "privateIp", "pingFailures"],
+      when: { state: "READY", generation: seen.generation },
+    });
+    return this.conditional({
+      ...lost,
+      ConditionExpression: `${lost.ConditionExpression} AND instanceId = :seenInstance`,
+      ExpressionAttributeValues: { ...lost.ExpressionAttributeValues, ":seenInstance": seen.instanceId },
+    });
+  }
+
+  /** Counts one more failed health probe of a READY session; returns the new count, or 0 if it moved on. */
+  async recordPingFailure(seen: WorkspaceSession): Promise<number> {
+    const counted = await this.conditional(this.update(seen.workspaceId, {
+      addPingFailure: true,
+      when: { state: "READY", generation: seen.generation },
+    }));
+    return counted ? (await this.get(seen.workspaceId))?.pingFailures ?? 0 : 0;
+  }
+
+  async clearPingFailures(seen: WorkspaceSession): Promise<void> {
+    await this.conditional(this.update(seen.workspaceId, { remove: ["pingFailures"], when: { state: "READY", generation: seen.generation } }));
+  }
+
   /** STOPPING → STOPPED once the instance is gone and the volume detached. Returns the session after. */
   async markStopped(workspaceId: string, generation: number): Promise<WorkspaceSession> {
     const moved = await this.conditional(this.update(workspaceId, {
@@ -435,6 +471,7 @@ export class SessionManager {
     set?: Partial<Record<keyof WorkspaceSession, unknown>>;
     remove?: Array<keyof WorkspaceSession>;
     addWaiting?: string;
+    addPingFailure?: boolean;
     when: { state: WorkspaceSessionState; generation: number };
     require?: Array<keyof WorkspaceSession>;
   }): UpdateCommandInput & { UpdateExpression: string } {
@@ -454,8 +491,11 @@ export class SessionManager {
     const clauses = [
       ...(sets.length === 0 ? [] : [`SET ${sets.join(", ")}`]),
       ...(change.remove === undefined || change.remove.length === 0 ? [] : [`REMOVE ${change.remove.join(", ")}`]),
-      ...(change.addWaiting === undefined ? [] : ["ADD waitingOutboxIds :waiting"]),
+      ...(change.addWaiting === undefined && !change.addPingFailure ? [] : [
+        `ADD ${[...(change.addWaiting === undefined ? [] : ["waitingOutboxIds :waiting"]), ...(change.addPingFailure ? ["pingFailures :one"] : [])].join(", ")}`,
+      ]),
     ];
+    if (change.addPingFailure) values[":one"] = 1;
     if (change.addWaiting !== undefined) values[":waiting"] = new Set([change.addWaiting]);
     const required = (change.require ?? []).map((field) => ` AND attribute_exists(${field})`).join("");
     return {

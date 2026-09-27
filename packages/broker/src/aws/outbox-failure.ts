@@ -1,4 +1,4 @@
-import { TransactWriteCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import { GetCommand, TransactWriteCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import type { DurableOutboxRecord } from "./lambda.js";
 
 /**
@@ -67,4 +67,57 @@ export async function failOutboxOperation(
       } },
     ],
   }));
+}
+
+/**
+ * Fails the workspace's active operation, whatever stage it reached, and releases the workspace:
+ * for the reconciler when a worker's compute is lost mid-operation (#86). Fenced on the operation's
+ * fence, so an operation that finished or was replaced meanwhile is left alone. Returns the failed
+ * operation's ID, or undefined when there was none to fail.
+ */
+export async function failActiveOperation(
+  documentClient: Pick<DynamoDBDocumentClient, "send">,
+  tableName: string,
+  workspaceId: string,
+  error: string,
+): Promise<string | undefined> {
+  const workspace = (await documentClient.send(new GetCommand({ TableName: tableName, Key: { pk: `WORKSPACE#${workspaceId}`, sk: "META" } }))).Item as { activeOperationId?: unknown } | undefined;
+  const operationId = workspace?.activeOperationId;
+  if (typeof operationId !== "string") return undefined;
+  const operation = (await documentClient.send(new GetCommand({
+    TableName: tableName,
+    Key: { pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}` },
+  }))).Item as { kind?: string; fence?: number; closePreviousStatus?: string } | undefined;
+  if (operation?.fence === undefined) return undefined;
+  const released = operation.kind === "prepare"
+    ? "PREPARATION_FAILED"
+    : operation.kind === "close" && typeof operation.closePreviousStatus === "string" ? operation.closePreviousStatus : "READY";
+  const now = new Date().toISOString();
+  try {
+    await documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { Update: {
+        TableName: tableName,
+        Key: { pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}` },
+        UpdateExpression: "SET #status = :failed, updatedAt = :now, #result = :result, #error = :error",
+        ConditionExpression: "(#status = :accepted OR #status = :dispatching OR #status = :running OR #status = :cancelRequested) AND fence = :fence",
+        ExpressionAttributeNames: { "#status": "status", "#result": "result", "#error": "error" },
+        ExpressionAttributeValues: {
+          ":failed": "FAILED", ":now": now, ":result": null, ":error": error, ":fence": operation.fence,
+          ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING", ":running": "RUNNING", ":cancelRequested": "CANCEL_REQUESTED",
+        },
+      } },
+      { Update: {
+        TableName: tableName,
+        Key: { pk: `WORKSPACE#${workspaceId}`, sk: "META" },
+        UpdateExpression: "SET #status = :released, updatedAt = :now REMOVE activeOperationId",
+        ConditionExpression: "activeOperationId = :operation AND fence = :fence",
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: { ":released": released, ":now": now, ":operation": operationId, ":fence": operation.fence },
+      } },
+    ] }));
+    return operationId;
+  } catch (failure) {
+    if (failure instanceof Error && failure.name === "TransactionCanceledException") return undefined;
+    throw failure;
+  }
 }
