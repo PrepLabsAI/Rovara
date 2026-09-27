@@ -33,6 +33,8 @@ export interface PiSessionHandle {
   conversationId: string;
   sessionFile: string;
   prompt(text: string): Promise<void>;
+  /** Queues a message the model reads before its next call, while a prompt runs. */
+  steer?(text: string): Promise<void>;
   abort(): Promise<void>;
   getModel(): { provider: string; modelId: string };
   getSessionStats(): SessionStats;
@@ -191,6 +193,7 @@ async function createDefaultSession(
       conversationId: conversationId ?? session.sessionId,
       sessionFile,
       prompt: async (text) => session.prompt(text, { expandPromptTemplates: false }),
+      steer: async (text) => session.steer(text),
       abort: async () => session.abort(),
       getModel: () => ({
         provider: session.model?.provider ?? resolved.model.provider,
