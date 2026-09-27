@@ -86,12 +86,21 @@ export class FakeDynamoDb {
   }
 
   private commit(actions: WriteAction[], errorName: string): void {
-    for (const action of actions) {
-      if (action.condition && !evaluateCondition(action.condition, this.items.get(action.key), action.names ?? {}, action.values ?? {})) {
-        const error = new Error(`condition failed: ${action.condition}`);
-        error.name = errorName;
-        throw error;
+    // Evaluate every action's condition against the current (pre-write) snapshot before applying
+    // anything, as DynamoDB does for a transaction: it is the full set of pass/fail results, not
+    // just the first failure, that a real TransactWriteItems reports back.
+    const passed = actions.map((action) =>
+      action.condition === undefined || evaluateCondition(action.condition, this.items.get(action.key), action.names ?? {}, action.values ?? {}));
+    const failedIndex = passed.findIndex((ok) => !ok);
+    if (failedIndex !== -1) {
+      const error = new Error(`condition failed: ${actions[failedIndex]!.condition}`) as Error & { CancellationReasons?: Array<{ Code: string }> };
+      error.name = errorName;
+      if (errorName === "TransactionCanceledException") {
+        // One entry per TransactItem, in order, "None" for items whose own condition held -- the
+        // shape real DynamoDB always reports on a cancelled TransactWriteItems.
+        error.CancellationReasons = passed.map((ok) => ({ Code: ok ? "None" : "ConditionalCheckFailed" }));
       }
+      throw error;
     }
     for (const action of actions) {
       if (action.kind === "ConditionCheck") continue;

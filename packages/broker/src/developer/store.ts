@@ -27,7 +27,7 @@ export type RefreshLookup =
 export const REFRESH_REUSE_GRACE_SECONDS = 60;
 
 interface CodeRecord { developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; codeChallenge: string; redirectUri: string; expiresAt: number; usedAt?: string }
-interface RefreshRecord { sessionId: string; expiresAt: number; usedAt?: string }
+interface RefreshRecord { sessionId: string; expiresAt: number; usedAt?: string; graceUsedAt?: string }
 interface CancellationReason { Code?: string }
 
 const META = "META";
@@ -35,8 +35,8 @@ const conditionFailed = (error: unknown) =>
   error instanceof Error && (error.name === "ConditionalCheckFailedException" || error.name === "TransactionCanceledException");
 
 /** Real DynamoDB always populates this on a cancelled TransactWriteItems, one entry per
- * TransactItem, ordered the same way, "None" for items not implicated. FakeDynamoDb does not
- * model it, so callers must tolerate it being absent. */
+ * TransactItem, ordered the same way, "None" for items not implicated (fix round 2, F4: FakeDynamoDb
+ * now models this too, so there is no other case to fall back to). */
 function cancellationReasons(error: unknown): CancellationReason[] | undefined {
   const reasons = (error as { CancellationReasons?: unknown } | null)?.CancellationReasons;
   return Array.isArray(reasons) ? (reasons as CancellationReason[]) : undefined;
@@ -203,8 +203,10 @@ export class DeveloperSignInStore {
     if (record.usedAt !== undefined) {
       // Fix round 1, F2 (owner ruling): inside the grace window, and only for a session that is
       // still healthy, a repeat presentation gets a fresh successor instead of being treated as
-      // theft. Past the window, or against a dead session, it's reused exactly as before.
-      const withinGrace = this.input.now() - Date.parse(record.usedAt) <= REFRESH_REUSE_GRACE_SECONDS * 1000;
+      // theft. Past the window, or against a dead session, it's reused exactly as before. Strict
+      // comparison (fix round 2, F5), matching the mint condition's strict `usedAt > :cutoff`: the
+      // boundary itself (exactly REFRESH_REUSE_GRACE_SECONDS elapsed) is outside the window.
+      const withinGrace = this.input.now() - Date.parse(record.usedAt) < REFRESH_REUSE_GRACE_SECONDS * 1000;
       if (withinGrace) {
         const session = await this.getSession(record.sessionId);
         if (session !== undefined && session.revokedAt === undefined && session.endsAt > this.seconds()) {
@@ -231,52 +233,69 @@ export class DeveloperSignInStore {
         ],
       }));
     } catch (error) {
-      return this.classifyRotationFailure(error, input.tokenHash, input.session.sessionId);
+      const classification = this.classifyRotationFailure(error);
+      // Fix round 2, F2: the real two-process race. Both processes see `active` and both call
+      // rotateRefresh with the same old token; the loser's old-token condition fails here. Rather
+      // than reporting that as reuse (which would make Task 6 revoke a perfectly healthy session),
+      // attempt the same grace mint rotateRecentlyUsed uses. Its own atomic condition (window, one
+      // mint per old token, session health) decides the real answer, so a genuine replay outside
+      // the window or past the cap still ends up `reused`.
+      if (!("reused" in classification)) return classification; // { ended: true }
+      return this.mintGraceSuccessor(input.tokenHash, input.session);
     }
     return { refreshToken };
   }
 
-  /** Fix round 1, F2 (owner ruling): mints a fresh successor for a token already used within
-   * REFRESH_REUSE_GRACE_SECONDS, atomically re-checking that window and the session's health so a
-   * caller can't be tricked by a stale lookup. Covers a lost response and a stale-lock race between
-   * two local processes refreshing at once, without weakening reuse detection past the window. */
+  /** Fix round 1, F2 (owner ruling); fix round 2, F1 and F3: mints a fresh successor for a token
+   * already used within REFRESH_REUSE_GRACE_SECONDS, atomically re-checking that window, the
+   * one-grace-mint-per-old-token cap, and the session's health, so a caller can't be tricked by a
+   * stale lookup. Covers a lost response and a stale-lock race between two local processes
+   * refreshing at once, without weakening reuse detection past the window or the cap. */
   async rotateRecentlyUsed(input: { session: SessionRecord; tokenHash: string }): Promise<{ refreshToken: string } | { reused: true }> {
+    const result = await this.mintGraceSuccessor(input.tokenHash, input.session);
+    // This method's signature predates the reused/ended split classifyRotationFailure makes for
+    // rotateRefresh; a dead session here still means "no grace, fall through to reused handling".
+    return "ended" in result ? { reused: true } : result;
+  }
+
+  /** Fix round 2, F2 and F3: one atomic transaction shared by rotateRefresh's internal fallback and
+   * rotateRecentlyUsed. Stamps the old token with `graceUsedAt` (condition: not already stamped, its
+   * `usedAt` within the window) so at most one grace successor can ever come from a given old token
+   * (the security ruling's "two lineages" cap) -- a second grace presentation, or one past the
+   * window, is `reused` just like an ordinary replay. The first successor (from the original
+   * rotation) is never touched or invalidated by this. */
+  private async mintGraceSuccessor(oldTokenHash: string, session: SessionRecord): Promise<{ refreshToken: string } | { reused: true } | { ended: true }> {
     const refreshToken = randomToken("agxr_");
     const at = this.iso();
     const cutoff = new Date(this.input.now() - REFRESH_REUSE_GRACE_SECONDS * 1000).toISOString();
     try {
       await this.input.documentClient.send(new TransactWriteCommand({
         TransactItems: [
-          { ConditionCheck: { TableName: this.input.tableName, Key: { pk: `REFRESH#${input.tokenHash}`, sk: META }, ConditionExpression: "attribute_exists(pk) AND attribute_exists(usedAt) AND usedAt > :cutoff", ExpressionAttributeValues: { ":cutoff": cutoff } } },
-          { Put: { TableName: this.input.tableName, Item: { pk: `REFRESH#${sha256Hex(refreshToken)}`, sk: META, entityType: "REFRESH_TOKEN", sessionId: input.session.sessionId, expiresAt: input.session.endsAt }, ConditionExpression: "attribute_not_exists(pk)" } },
-          { Update: { TableName: this.input.tableName, Key: { pk: `SESSION#${input.session.sessionId}`, sk: META }, UpdateExpression: "SET lastRefreshAt = :at", ConditionExpression: "attribute_exists(pk) AND attribute_not_exists(revokedAt) AND endsAt > :now", ExpressionAttributeValues: { ":at": at, ":now": this.seconds() } } },
+          { Update: { TableName: this.input.tableName, Key: { pk: `REFRESH#${oldTokenHash}`, sk: META }, UpdateExpression: "SET graceUsedAt = :at", ConditionExpression: "attribute_exists(pk) AND attribute_exists(usedAt) AND usedAt > :cutoff AND attribute_not_exists(graceUsedAt)", ExpressionAttributeValues: { ":at": at, ":cutoff": cutoff } } },
+          { Put: { TableName: this.input.tableName, Item: { pk: `REFRESH#${sha256Hex(refreshToken)}`, sk: META, entityType: "REFRESH_TOKEN", sessionId: session.sessionId, expiresAt: session.endsAt }, ConditionExpression: "attribute_not_exists(pk)" } },
+          { Update: { TableName: this.input.tableName, Key: { pk: `SESSION#${session.sessionId}`, sk: META }, UpdateExpression: "SET lastRefreshAt = :at", ConditionExpression: "attribute_exists(pk) AND attribute_not_exists(revokedAt) AND endsAt > :now", ExpressionAttributeValues: { ":at": at, ":now": this.seconds() } } },
         ],
       }));
     } catch (error) {
-      if (conditionFailed(error)) return { reused: true };
-      throw error;
+      return this.classifyRotationFailure(error);
     }
     return { refreshToken };
   }
 
-  /** Fix round 1, F1: a cancelled transaction must be read for which item's condition actually
-   * failed. ConditionalCheckFailed on the old token means reused; on the session, ended. Anything
-   * else (TransactionConflict, throttling, ...) is transient and gets rethrown so the caller can
-   * retry, instead of being folded into "reused" and signing the person out. Real DynamoDB always
-   * includes CancellationReasons on a cancelled transaction; FakeDynamoDb does not model it, so
-   * when it's absent this re-derives the answer from the table directly. */
-  private async classifyRotationFailure(error: unknown, tokenHash: string, sessionId: string): Promise<{ reused: true } | { ended: true }> {
+  /** Fix round 2, F4: a cancelled transaction must be read for which item's condition actually
+   * failed. ConditionalCheckFailed on index 0 (the old token's check, in both rotateRefresh's own
+   * transaction and mintGraceSuccessor's) means reused; on index 2 (the session's check), ended.
+   * Anything else (TransactionConflict, throttling, ...) is transient and gets rethrown so the
+   * caller can retry, instead of being folded into "reused" and signing the person out. Real
+   * DynamoDB always includes CancellationReasons on a cancelled transaction, and FakeDynamoDb now
+   * models that too, so a missing array only means a genuinely unmodeled failure -- treated as
+   * transient, not reused. */
+  private classifyRotationFailure(error: unknown): { reused: true } | { ended: true } {
     if (!conditionFailed(error)) throw error;
     const reasons = cancellationReasons(error);
-    if (reasons !== undefined) {
-      if (reasons[0]?.Code === "ConditionalCheckFailed") return { reused: true };
-      if (reasons[2]?.Code === "ConditionalCheckFailed") return { ended: true };
-      throw error;
-    }
-    const token = await this.get<RefreshRecord>(`REFRESH#${tokenHash}`);
-    if (token?.usedAt !== undefined) return { reused: true };
-    const session = await this.getSession(sessionId);
-    if (session === undefined || session.revokedAt !== undefined || session.endsAt <= this.seconds()) return { ended: true };
+    if (reasons === undefined) throw error;
+    if (reasons[0]?.Code === "ConditionalCheckFailed") return { reused: true };
+    if (reasons[2]?.Code === "ConditionalCheckFailed") return { ended: true };
     throw error;
   }
 

@@ -1,7 +1,7 @@
 // tests/contract/developer-signin-store.test.ts
 import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
-import { DeveloperSignInStore } from "../../packages/broker/src/developer/store.js";
+import { DeveloperSignInStore, REFRESH_REUSE_GRACE_SECONDS } from "../../packages/broker/src/developer/store.js";
 import { sha256Hex } from "../../packages/broker/src/developer/tokens.js";
 import { T0 } from "../support/developer-fakes.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -172,14 +172,6 @@ describe("sessions and refresh tokens (FR-005)", () => {
     expect(next).toMatchObject({ kind: "active", session: { endsAt: T0 / 1000 + 604_800 } });
   });
 
-  it("answer reused when the same token rotates twice (a race)", async () => {
-    const { refreshToken } = await store.createSession({ developerId, amr: "slack" });
-    const lookup = await store.lookupRefresh(refreshToken);
-    if (lookup.kind !== "active") throw new Error("expected active");
-    await store.rotateRefresh(lookup);
-    expect(await store.rotateRefresh(lookup)).toEqual({ reused: true });
-  });
-
   it("report ended after revocation and after 7 days, and unknown for a token never issued", async () => {
     const one = await store.createSession({ developerId, amr: "slack" });
     await store.revokeSession(one.session.sessionId, "refresh_token_reused");
@@ -289,5 +281,107 @@ describe("refresh reuse grace window", () => {
     clock += 1_000;
     expect(await store.lookupRefresh(refreshToken)).toEqual({ kind: "reused", sessionId: session.sessionId });
     expect(await store.rotateRecentlyUsed({ session: lookup.session, tokenHash: lookup.tokenHash })).toEqual({ reused: true });
+  });
+
+  // Fix round 2, F5: the window comparison must be strict (usedAt > now - window) in both
+  // lookupRefresh and the mint condition, so the boundary itself (exactly 60s elapsed) is outside.
+  it("treats exactly 60 seconds elapsed as outside the grace window (strict comparison)", async () => {
+    const { refreshToken } = await store.createSession({ developerId, amr: "slack" });
+    const lookup = await store.lookupRefresh(refreshToken);
+    if (lookup.kind !== "active") throw new Error("expected active");
+    await store.rotateRefresh(lookup);
+
+    clock += REFRESH_REUSE_GRACE_SECONDS * 1000; // exactly at the boundary, not inside it
+    expect(await store.lookupRefresh(refreshToken)).toEqual({ kind: "reused", sessionId: lookup.session.sessionId });
+  });
+});
+
+// Fix round 2, F2 and F3: the real two-process race, handled inside the store so Task 6 needs no
+// change. When rotateRefresh's old-token condition fails, the store itself checks whether that
+// token was used within the grace window and, if so, mints a successor internally (one grace mint
+// per old token, capped so a third presentation is reused).
+describe("rotateRefresh's internal grace mint (the real two-process race)", () => {
+  it("two concurrent rotateRefresh calls on one token both get a live successor, and the session is not revoked", async () => {
+    const { session, refreshToken } = await store.createSession({ developerId, amr: "slack" });
+    const lookup = await store.lookupRefresh(refreshToken);
+    if (lookup.kind !== "active") throw new Error("expected active");
+
+    const winner = await store.rotateRefresh(lookup);
+    if (!("refreshToken" in winner)) throw new Error("expected the winner to get a token");
+    const loser = await store.rotateRefresh(lookup); // same stale lookup, presented again immediately
+    if (!("refreshToken" in loser)) throw new Error("expected the loser to also get a token via an internal grace mint");
+
+    expect(winner.refreshToken).not.toBe(loser.refreshToken);
+    expect(await store.lookupRefresh(winner.refreshToken)).toMatchObject({ kind: "active" });
+    expect(await store.lookupRefresh(loser.refreshToken)).toMatchObject({ kind: "active" });
+    const finalSession = await store.getSession(session.sessionId);
+    expect(finalSession?.revokedAt).toBeUndefined();
+  });
+
+  it("outside the grace window, a second rotateRefresh on the same token is reused, not a grace mint", async () => {
+    const { refreshToken } = await store.createSession({ developerId, amr: "slack" });
+    const lookup = await store.lookupRefresh(refreshToken);
+    if (lookup.kind !== "active") throw new Error("expected active");
+    await store.rotateRefresh(lookup);
+
+    clock += 61_000;
+    expect(await store.rotateRefresh(lookup)).toEqual({ reused: true });
+  });
+
+  // Fix round 2, F3 (security ruling): one grace mint per old token caps it at two lineages. The
+  // first successor stays valid (invalidating it would break the two-process case above), but a
+  // third presentation of the original old token finds the grace mint already spent.
+  it("caps the grace mint at one per old token: a third presentation is reused", async () => {
+    const { refreshToken } = await store.createSession({ developerId, amr: "slack" });
+    const lookup = await store.lookupRefresh(refreshToken);
+    if (lookup.kind !== "active") throw new Error("expected active");
+
+    const first = await store.rotateRefresh(lookup); // the real rotation
+    if (!("refreshToken" in first)) throw new Error("expected the first rotation to succeed");
+    const second = await store.rotateRefresh(lookup); // the one allowed grace mint
+    if (!("refreshToken" in second)) throw new Error("expected the grace mint to succeed");
+    const third = await store.rotateRefresh(lookup); // no grace mints left
+
+    expect(third).toEqual({ reused: true });
+    // The first successor is untouched by the third (failed) presentation.
+    expect(await store.lookupRefresh(first.refreshToken)).toMatchObject({ kind: "active" });
+    expect(await store.lookupRefresh(second.refreshToken)).toMatchObject({ kind: "active" });
+  });
+});
+
+// Fix round 2, F1: rotateRecentlyUsed must classify a cancelled transaction the same way
+// classifyRotationFailure does, not blanket-treat any condition failure as reused (that would let a
+// transient conflict or a throttle on the grace path get revoked as if it were theft).
+describe("rotateRecentlyUsed classifies failures precisely", () => {
+  it("rethrows a transient conflict on the old-token check instead of reporting reuse", async () => {
+    const { refreshToken } = await store.createSession({ developerId, amr: "slack" });
+    const lookup = await store.lookupRefresh(refreshToken);
+    if (lookup.kind !== "active") throw new Error("expected active");
+    await store.rotateRefresh(lookup);
+    const replay = await store.lookupRefresh(refreshToken);
+    if (replay.kind !== "recently_rotated") throw new Error("expected recently_rotated");
+
+    const conflictStore = new DeveloperSignInStore({
+      documentClient: withTransactConflict(db, [{ Code: "TransactionConflict" }, { Code: "None" }, { Code: "None" }]),
+      tableName: "signin",
+      now: () => clock,
+    });
+    await expect(conflictStore.rotateRecentlyUsed(replay)).rejects.toThrow("simulated transaction cancellation");
+  });
+
+  it("folds a dead session's condition failure into reused, since its signature has no ended kind", async () => {
+    const { refreshToken } = await store.createSession({ developerId, amr: "slack" });
+    const lookup = await store.lookupRefresh(refreshToken);
+    if (lookup.kind !== "active") throw new Error("expected active");
+    await store.rotateRefresh(lookup);
+    const replay = await store.lookupRefresh(refreshToken);
+    if (replay.kind !== "recently_rotated") throw new Error("expected recently_rotated");
+
+    const endedStore = new DeveloperSignInStore({
+      documentClient: withTransactConflict(db, [{ Code: "None" }, { Code: "None" }, { Code: "ConditionalCheckFailed" }]),
+      tableName: "signin",
+      now: () => clock,
+    });
+    expect(await endedStore.rotateRecentlyUsed(replay)).toEqual({ reused: true });
   });
 });
