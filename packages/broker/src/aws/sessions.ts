@@ -1,11 +1,13 @@
 import {
   GetCommand,
+  QueryCommand,
   TransactWriteCommand,
   UpdateCommand,
   type DynamoDBDocumentClient,
   type UpdateCommandInput,
 } from "@aws-sdk/lib-dynamodb";
 import {
+  Ec2RuntimeBindingSchema,
   WORKSPACE_SESSION_STATE_INDEX,
   WorkspaceSessionSchema,
   agentXError,
@@ -280,6 +282,62 @@ export class SessionManager {
     throw agentXError("RUNTIME_UNAVAILABLE", "workspace session kept changing; retry the close");
   }
 
+  /** Every session in `state`, from the sparse state index. */
+  async listByState(state: WorkspaceSessionState): Promise<WorkspaceSession[]> {
+    const sessions: WorkspaceSession[] = [];
+    let exclusiveStartKey: Record<string, unknown> | undefined;
+    do {
+      const page = await this.dependencies.documentClient.send(new QueryCommand({
+        TableName: this.dependencies.tableName,
+        IndexName: WORKSPACE_SESSION_STATE_INDEX.name,
+        KeyConditionExpression: "#index = :state",
+        ExpressionAttributeNames: { "#index": WORKSPACE_SESSION_STATE_INDEX.partitionKey },
+        ExpressionAttributeValues: { ":state": state },
+        ...(exclusiveStartKey === undefined ? {} : { ExclusiveStartKey: exclusiveStartKey }),
+      }));
+      sessions.push(...(page.Items ?? []).map(sessionFromItem));
+      exclusiveStartKey = page.LastEvaluatedKey;
+    } while (exclusiveStartKey !== undefined);
+    return sessions;
+  }
+
+  /**
+   * READY → STOPPING for the idle reaper. Holds only if nothing touched the session since `seen`
+   * was read (a dispatch touches lastActivityAt) and the workspace has no active operation, both
+   * checked in one transaction, so a dispatch racing the reap always wins.
+   */
+  async claimStop(seen: WorkspaceSession): Promise<boolean> {
+    const claim = this.update(seen.workspaceId, { set: { state: "STOPPING" }, when: { state: "READY", generation: seen.generation } });
+    return this.conditional({ transaction: [
+      { Update: {
+        ...claim,
+        ConditionExpression: `${claim.ConditionExpression} AND lastActivityAt = :seenActivity`,
+        ExpressionAttributeValues: { ...claim.ExpressionAttributeValues, ":seenActivity": seen.lastActivityAt },
+      } },
+      { ConditionCheck: {
+        TableName: this.dependencies.tableName,
+        Key: { pk: `WORKSPACE#${seen.workspaceId}`, sk: "META" },
+        // Terminal transitions remove activeOperationId; some records store it as null instead.
+        ConditionExpression: "attribute_not_exists(activeOperationId) OR attribute_type(activeOperationId, :null)",
+        ExpressionAttributeValues: { ":null": "NULL" },
+      } },
+    ] });
+  }
+
+  /** STOPPING → STOPPED once the instance is gone and the volume detached. Returns the session after. */
+  async markStopped(workspaceId: string, generation: number): Promise<WorkspaceSession> {
+    const moved = await this.conditional(this.update(workspaceId, {
+      set: { state: "STOPPED" },
+      remove: ["instanceId", "privateIp"],
+      when: { state: "STOPPING", generation },
+    }));
+    const session = await this.get(workspaceId);
+    if (!moved && !(session?.state === "STOPPED" && session.generation === generation)) {
+      throw agentXError("STALE_FENCE", `session ${workspaceId} generation ${generation} is no longer stopping`);
+    }
+    return session!;
+  }
+
   /** DELETING → DELETED once the instance is gone and the volume is deleted. */
   async markDeleted(workspaceId: string): Promise<void> {
     const moved = await this.conditional({ update: {
@@ -439,6 +497,25 @@ export class SessionManager {
   private now(): string {
     return (this.dependencies.now?.() ?? new Date()).toISOString();
   }
+}
+
+/**
+ * The ec2-ebs runtime binding of a workspace's pinned project revision, or undefined when the
+ * workspace does not exist or is not ec2-ebs.
+ */
+export async function workspaceBinding(
+  documentClient: Pick<DynamoDBDocumentClient, "send">,
+  tableName: string,
+  workspaceId: string,
+): Promise<Ec2RuntimeBinding | undefined> {
+  const workspace = (await documentClient.send(new GetCommand({ TableName: tableName, Key: { pk: `WORKSPACE#${workspaceId}`, sk: "META" } }))).Item;
+  if (workspace?.deploymentMode !== "ec2-ebs" || typeof workspace.projectName !== "string" || typeof workspace.projectRevision !== "number") return undefined;
+  const project = (await documentClient.send(new GetCommand({
+    TableName: tableName,
+    Key: { pk: `PROJECT#${workspace.projectName}`, sk: `REV#${String(workspace.projectRevision).padStart(12, "0")}` },
+  }))).Item as { runtimeBinding?: unknown } | undefined;
+  const parsed = Ec2RuntimeBindingSchema.safeParse(project?.runtimeBinding);
+  return parsed.success ? parsed.data : undefined;
 }
 
 /** A stored SESSION item without its keys and index attribute, its waiting set as a sorted list. */

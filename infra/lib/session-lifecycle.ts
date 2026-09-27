@@ -14,6 +14,8 @@ import {
   type aws_kms as kms,
   type aws_lambda as lambda,
   aws_logs as logs,
+  aws_scheduler as scheduler,
+  aws_scheduler_targets as schedulerTargets,
   aws_stepfunctions as sfn,
 } from "aws-cdk-lib";
 import { Construct } from "constructs";
@@ -40,6 +42,7 @@ export class SessionLifecycle extends Construct {
   readonly provisioner: sfn.StateMachine;
   readonly deleter: sfn.StateMachine;
   readonly steps: lambda.Function;
+  readonly reaper: lambda.Function;
   private readonly naming: AgentXNaming;
 
   constructor(scope: Construct, id: string, props: SessionLifecycleProps) {
@@ -64,11 +67,14 @@ export class SessionLifecycle extends Construct {
       WORKER_LOG_GROUP_NAME: naming.ec2.workerLogGroupName,
     }, Duration.seconds(30), [[resolve(process.cwd(), "packages/worker/ec2/boot.sh"), "boot.sh"]]);
     // In the private subnets with the session manager's group: the only way to reach a worker's /ping.
-    (this.steps.node.defaultChild as lambda.CfnFunction).vpcConfig = {
-      subnetIds: Fn.split(",", privateSubnetIds.valueAsString),
-      securityGroupIds: [sessionManagerSecurityGroupId.valueAsString],
+    const inVpc = (fn: lambda.Function) => {
+      (fn.node.defaultChild as lambda.CfnFunction).vpcConfig = {
+        subnetIds: Fn.split(",", privateSubnetIds.valueAsString),
+        securityGroupIds: [sessionManagerSecurityGroupId.valueAsString],
+      };
+      fn.role!.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaVPCAccessExecutionRole"));
     };
-    this.steps.role!.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaVPCAccessExecutionRole"));
+    inVpc(this.steps);
     props.state.grantReadWriteData(this.steps);
     this.steps.addToRolePolicy(new iam.PolicyStatement({ actions: ["ssm:GetParameters"], resources: settingParameterArns }));
     this.steps.addToRolePolicy(new iam.PolicyStatement({ actions: ["kms:GetPublicKey"], resources: [props.invokeSigningKey.keyArn] }));
@@ -143,6 +149,41 @@ export class SessionLifecycle extends Construct {
         conditions: ownResources,
       }),
     ]);
+
+    // The idle reaper (#85): every minute, stops sessions idle over five minutes or older than 14
+    // days, and finishes stopping ones whose instance is gone.
+    this.reaper = packagedFunction(this, "Reaper", "packages/broker/src/aws/session-reaper.ts", {
+      STATE_TABLE_NAME: props.state.tableName,
+      PROVISIONER_ARN: this.provisioner.stateMachineArn,
+      DELETER_ARN: this.deleter.stateMachineArn,
+      AGENTX_METRICS_NAMESPACE: naming.metricsNamespace,
+    }, Duration.seconds(50));
+    inVpc(this.reaper);
+    // One run at a time; every transition is conditional anyway, so an overlap would only waste work.
+    (this.reaper.node.defaultChild as lambda.CfnFunction).reservedConcurrentExecutions = 1;
+    props.state.grantReadWriteData(this.reaper);
+    this.provisioner.grantStartExecution(this.reaper);
+    this.reaper.addToRolePolicy(new iam.PolicyStatement({ sid: "Describe", actions: ["ec2:DescribeInstances", "ec2:DescribeVolumes"], resources: ["*"] }));
+    this.reaper.addToRolePolicy(new iam.PolicyStatement({
+      sid: "TerminateOwn",
+      actions: ["ec2:TerminateInstances"],
+      resources: [ec2Arn("instance/*")],
+      conditions: ownResources,
+    }));
+    new scheduler.Schedule(this, "ReaperSchedule", {
+      description: "Runs the AgentX EC2 session idle reaper",
+      schedule: scheduler.ScheduleExpression.rate(Duration.minutes(1)),
+      target: new schedulerTargets.LambdaInvoke(this.reaper, {}),
+    });
+    new cloudwatch.Alarm(this, "ReaperErrorsAlarm", {
+      alarmName: naming.alarmName("SessionReaperErrors"),
+      alarmDescription: "The EC2 session idle reaper failed on every run for 15 minutes; idle workers are not being stopped. Check the reaper's logs.",
+      metric: this.reaper.metricErrors({ period: Duration.minutes(5), statistic: "Sum" }),
+      threshold: 1,
+      evaluationPeriods: 3,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(props.notifyOperator);
 
     new CfnOutput(stack, "SessionProvisionerArn", { value: this.provisioner.stateMachineArn });
     new CfnOutput(stack, "SessionDeleterArn", { value: this.deleter.stateMachineArn });
