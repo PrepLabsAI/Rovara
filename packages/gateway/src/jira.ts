@@ -7,7 +7,7 @@ import type { McpToolResult } from "./mcp-client.js";
 /** v2 is the endpoint that accepts API tokens; v1 ignores them. */
 export const JIRA_MCP_ENDPOINT = new URL("https://mcp.atlassian.com/v2/mcp");
 
-export interface JiraScope { alias: string; cloudId: string; projectKey?: string | undefined }
+export interface JiraScope { alias: string; cloudId: string; projectKey?: string | undefined; siteUrl?: string | undefined }
 
 const ISSUE_KEY = /^[A-Z][A-Z0-9_]{1,9}-[1-9][0-9]{0,9}$/;
 const NUMERIC_ID = /^[1-9][0-9]{0,17}$/;
@@ -244,22 +244,55 @@ const MAX_SEARCH_NOTE = 512;
 const SEND_THE_REST = "send only the rest of the query.";
 
 /**
- * The approvals as presented, with a sentence on a project-scoped search that says AgentX adds the
- * project filter, so a model that names another project learns why nothing matches. An admin
- * description override is left exactly as it is.
+ * Every approved tool that names, creates or returns a Jira issue, so its reply might need to link
+ * one. This is exactly the set the project guard already holds to a project (contracts.ts), because
+ * that is every tool that reads or writes one issue or more.
+ */
+const LINKABLE_JIRA_TOOLS = new Set<string>(Object.keys(JIRA_PROJECT_TOOL_ACCESS));
+
+const MAX_LINK_NOTE = 512;
+const UNKNOWN_SITE_NOTE = "AgentX does not know this Jira site's web address; give the issue key, and never write a link to it.";
+
+/**
+ * How the model should link a Jira issue in its reply (issue 061): the site's browse URL when every
+ * scope has one, one per alias when scopes use different sites, or a refusal to guess a host when
+ * any scope's site is unconfigured.
+ */
+function jiraSiteNote(scopes: readonly JiraScope[]): string {
+  if (scopes.some((scope) => scope.siteUrl === undefined)) return UNKNOWN_SITE_NOTE;
+  const sites = [...new Set(scopes.map((scope) => scope.siteUrl))];
+  if (sites.length === 1) return `Link a Jira issue as ${sites[0]}/browse/<KEY>.`;
+  let note = `Link a Jira issue using its target's site: ${scopes.map((scope) => `${scope.alias} ${scope.siteUrl}/browse/<KEY>`).join("; ")}.`;
+  if (note.length > MAX_LINK_NOTE) note = "Link a Jira issue using its target's own site plus /browse/<KEY>.";
+  return note;
+}
+
+/**
+ * The approvals as presented: every linkable tool gets a note on how to link an issue (issue 061),
+ * and a project-scoped search also keeps its sentence saying AgentX adds the project filter, so a
+ * model that names another project learns why nothing matches. The two are merged, never replacing
+ * each other. An admin description override is left exactly as it is.
  */
 export function jiraApprovals<Approval extends { name: string; description?: string | undefined }>(
   approvals: readonly Approval[],
   scopes: readonly JiraScope[],
 ): Array<Approval & { note?: string }> {
+  const siteNote = jiraSiteNote(scopes);
   const keyed = scopes.filter((scope): scope is JiraScope & { projectKey: string } => scope.projectKey !== undefined);
-  if (keyed.length === 0 || keyed.length !== scopes.length) return [...approvals];
-  const keys = [...new Set(keyed.map((scope) => scope.projectKey))];
-  let note = keys.length === 1
-    ? `AgentX limits every search to project ${keys[0]!}; ${SEND_THE_REST}`
-    : `AgentX limits every search to the project of the chosen target (${keyed.map((scope) => `${scope.alias}: ${scope.projectKey}`).join(", ")}); ${SEND_THE_REST}`;
-  if (note.length > MAX_SEARCH_NOTE) note = `AgentX limits every search to the project of the chosen target; ${SEND_THE_REST}`;
-  return approvals.map((approval) => approval.name === "searchJiraIssuesUsingJql" && approval.description === undefined ? { ...approval, note } : approval);
+  const projectScoped = keyed.length > 0 && keyed.length === scopes.length;
+  let searchNote: string | undefined;
+  if (projectScoped) {
+    const keys = [...new Set(keyed.map((scope) => scope.projectKey))];
+    searchNote = keys.length === 1
+      ? `AgentX limits every search to project ${keys[0]!}; ${SEND_THE_REST}`
+      : `AgentX limits every search to the project of the chosen target (${keyed.map((scope) => `${scope.alias}: ${scope.projectKey}`).join(", ")}); ${SEND_THE_REST}`;
+    if (searchNote.length > MAX_SEARCH_NOTE) searchNote = `AgentX limits every search to the project of the chosen target; ${SEND_THE_REST}`;
+  }
+  return approvals.map((approval) => {
+    if (approval.description !== undefined || !LINKABLE_JIRA_TOOLS.has(approval.name)) return approval;
+    const note = approval.name === "searchJiraIssuesUsingJql" && searchNote !== undefined ? `${siteNote} ${searchNote}` : siteNote;
+    return { ...approval, note };
+  });
 }
 
 export function jiraConnector(credentials: CredentialProvider<JiraScope>, options: { projectScoped: boolean }): ConnectorDefinition<JiraScope> {
