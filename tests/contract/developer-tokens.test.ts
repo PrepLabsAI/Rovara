@@ -1,12 +1,23 @@
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import { createLocalJWKSet, decodeProtectedHeader, jwtVerify } from "jose";
 import { describe, expect, it } from "vitest";
 import { issueAccessToken, kmsTokenSigner, pkceChallengeMatches, randomToken, sha256Hex } from "../../packages/broker/src/developer/tokens.js";
-import { ISSUER, T0, fakeKms } from "../support/developer-fakes.js";
+import { ISSUER, T0, fakeKms, rsaKeyPair } from "../support/developer-fakes.js";
 
 const KEY = "arn:aws:kms:us-east-1:123456789012:key/k1";
 const issue = (signer: ReturnType<typeof kmsTokenSigner>, now = T0) =>
   issueAccessToken(signer, { issuer: ISSUER, subject: "d".repeat(64), amr: "slack", env: "staging", sessionId: "s-1", now });
+
+/** Runs `publicJwk()` to rejection and returns the error, for asserting on its message. */
+async function publicJwkError(kms: { send(command: unknown): Promise<unknown> }): Promise<Error> {
+  try {
+    await kmsTokenSigner({ kms, keyId: KEY }).publicJwk();
+  } catch (error) {
+    expect(error).toBeInstanceOf(Error);
+    return error as Error;
+  }
+  throw new Error("expected publicJwk() to reject");
+}
 
 describe("developer access tokens", () => {
   it("are RS256 JWTs with a kid that a JWKS verifier (API Gateway's JWT authorizer) accepts", async () => {
@@ -41,10 +52,33 @@ describe("developer access tokens", () => {
     expect(signs[0]!.input).toMatchObject({ KeyId: KEY, MessageType: "RAW", SigningAlgorithm: "RSASSA_PKCS1_V1_5_SHA_256" });
   });
 
-  it("derive the kid from the public key, so it never reveals the key ARN", async () => {
-    const jwk = await kmsTokenSigner({ kms: fakeKms(), keyId: KEY }).publicJwk();
-    expect(jwk.kid).toMatch(/^[A-Za-z0-9_-]{16}$/);
-    expect(jwk.kid).not.toContain("k1");
+  it("derive the kid deterministically from the public key, so it never reveals the key ARN", async () => {
+    const keys = rsaKeyPair();
+    const der = keys.publicKey.export({ format: "der", type: "spki" });
+    const expectedKid = createHash("sha256").update(der).digest("base64url").slice(0, 16);
+
+    const jwk = await kmsTokenSigner({ kms: fakeKms(keys), keyId: KEY }).publicJwk();
+    expect(jwk.kid).toBe(expectedKid);
+    expect(jwk.kid).not.toContain(KEY);
+
+    // A second signer over the same key derives the same kid.
+    const jwk2 = await kmsTokenSigner({ kms: fakeKms(keys), keyId: KEY }).publicJwk();
+    expect(jwk2.kid).toBe(jwk.kid);
+  });
+
+  it("rejects a key whose KeyUsage is not SIGN_VERIFY, without naming the key", async () => {
+    const der = new Uint8Array(rsaKeyPair().publicKey.export({ format: "der", type: "spki" }));
+    const error = await publicJwkError({ send: async () => ({ KeyUsage: "ENCRYPT_DECRYPT", PublicKey: der }) });
+    expect(error.message).toMatch(/signing/i);
+    expect(error.message).not.toContain(KEY);
+  });
+
+  it("rejects an RSA key under 2048 bits, without naming the key", async () => {
+    const weakKey = generateKeyPairSync("rsa", { modulusLength: 1024 }).publicKey;
+    const der = new Uint8Array(weakKey.export({ format: "der", type: "spki" }));
+    const error = await publicJwkError({ send: async () => ({ KeyUsage: "SIGN_VERIFY", PublicKey: der }) });
+    expect(error.message).toMatch(/key size/i);
+    expect(error.message).not.toContain(KEY);
   });
 });
 

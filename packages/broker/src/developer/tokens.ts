@@ -18,11 +18,17 @@ export function kmsTokenSigner(input: { kms: { send(command: unknown): Promise<u
   return {
     publicJwk() {
       jwk ??= input.kms.send(new GetPublicKeyCommand({ KeyId: input.keyId })).then((response) => {
-        const der = (response as { PublicKey?: Uint8Array }).PublicKey;
+        const { PublicKey: der, KeyUsage: keyUsage } = response as { PublicKey?: Uint8Array; KeyUsage?: string };
         if (der === undefined) throw new Error("KMS returned no public key for the developer token key");
-        const exported = createPublicKey({ key: Buffer.from(der), format: "der", type: "spki" }).export({ format: "jwk" });
+        if (keyUsage !== "SIGN_VERIFY") throw new Error("the developer token key is not usable for signing");
+        const keyObject = createPublicKey({ key: Buffer.from(der), format: "der", type: "spki" });
+        const exported = keyObject.export({ format: "jwk" });
         if (exported.kty !== "RSA" || typeof exported.n !== "string" || typeof exported.e !== "string") {
           throw new Error("the developer token key is not an RSA key");
+        }
+        const modulusLength = keyObject.asymmetricKeyDetails?.modulusLength;
+        if (modulusLength === undefined || modulusLength < 2048) {
+          throw new Error("the developer token key does not meet the minimum key size");
         }
         const kid = createHash("sha256").update(Buffer.from(der)).digest("base64url").slice(0, 16);
         return { kty: "RSA" as const, n: exported.n, e: exported.e, kid, alg: "RS256" as const, use: "sig" as const };
