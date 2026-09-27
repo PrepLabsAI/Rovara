@@ -61,3 +61,23 @@ export function environmentSettingsPrefix(env: string): string {
 export function environmentConnectorSecretPrefix(env: string): string {
   return `agentx/${checked(env)}/connectors/`;
 }
+
+/** ECR pull-through cache rule prefix for `env`'s access stack. */
+export function environmentPullThroughPrefix(env: string): string {
+  return `agentx-${checked(env)}`;
+}
+
+/** The role CloudFormation assumes to deploy `env`'s stacks. */
+export function environmentCloudFormationRoleName(env: string): string {
+  return `agentx-${checked(env)}-cloudformation`;
+}
+
+/** The role an operator assumes to run `agentx` against `env`. */
+export function environmentOperatorRoleName(env: string): string {
+  return `agentx-${checked(env)}-operator`;
+}
+
+/** The AgentCore runtime name for `env` (letters, digits and underscores only). */
+export function environmentRuntimeName(env: string): string {
+  return `agentx_${checked(env).replaceAll("-", "_")}_worker`;
+}

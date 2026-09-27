@@ -6,7 +6,12 @@ import { join } from "node:path";
 import { Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
-import type { ReleaseManifest } from "@agentx/contracts";
+import {
+  defaultBoundaryArn,
+  environmentCloudFormationRoleName,
+  environmentOperatorRoleName,
+  type ReleaseManifest,
+} from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import type { DeployAnswers } from "../../packages/cli/src/deploy/deploy-environment.js";
 import { writeExportBundle } from "../../packages/cli/src/deploy/export-bundle.js";
@@ -18,6 +23,8 @@ const REGION = "us-east-1";
 const OTHER_REGION = "eu-west-1";
 const ACCOUNT = "123456789012";
 const STACK_NAME = `agentx-${ENV}-access`;
+const VERSION = "1.2.3";
+const DASHED_VERSION = "1-2-3";
 
 const RUNTIME_ASSET = "a".repeat(64);
 const CONTROL_PLANE_ASSET = "b".repeat(64);
@@ -31,6 +38,7 @@ let releaseDir: string;
  * policy's resources to match the actual role, policy and bucket names the access stack
  * synthesizes, not a hand-written stand-in for them. */
 let accessTemplateText: string;
+let accessTemplate: { Resources: Record<string, { Type: string; Properties?: Record<string, unknown> }> };
 const zipBytes: Record<string, Buffer> = {
   [RUNTIME_ASSET]: Buffer.from("runtime zip bytes"),
   [CONTROL_PLANE_ASSET]: Buffer.from("control plane zip bytes"),
@@ -48,6 +56,7 @@ beforeAll(async () => {
   const app = buildAgentXApp({ agentxEnv: ENV, agentxSynthesizer: "legacy" });
   const access = app.node.children.find((c): c is Stack => Stack.isStack(c) && c.stackName === STACK_NAME)!;
   accessTemplateText = JSON.stringify(Template.fromStack(access).toJSON());
+  accessTemplate = JSON.parse(accessTemplateText) as typeof accessTemplate;
 }, 240_000);
 
 function pkg(assetId: string, part: DeployPart) {
@@ -66,7 +75,7 @@ function pkg(assetId: string, part: DeployPart) {
 function fakeRelease(): LoadedRelease {
   const manifest: ReleaseManifest = {
     schemaVersion: 1,
-    version: "1.2.3",
+    version: VERSION,
     gitCommit: "c".repeat(40),
     environmentPlaceholder: "qqenv-placeholderqq",
     templates: [],
@@ -102,10 +111,20 @@ function cognitoAnswers(overrides: Partial<DeployAnswers> = {}): DeployAnswers &
   };
 }
 
-/** Converts an IAM ARN pattern (`*` wildcard only) into a regex that matches the same set of ARNs. */
-function arnPatternToRegex(pattern: string): RegExp {
+/** Converts an IAM ARN or action wildcard pattern (`*` only) into a regex matching the same set of strings. */
+function globToRegex(pattern: string): RegExp {
   const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
   return new RegExp(`^${escaped}$`);
+}
+
+type Statement = { Sid: string; Effect: string; Action: string[]; Resource: string | string[] };
+
+/** Whether `statement` (Allow only) grants `action`, and — when given — on a resource matching `resource`. */
+function statementAllows(statement: Statement, action: string, resource?: string): boolean {
+  if (statement.Effect !== "Allow") return false;
+  if (!statement.Action.some((pattern) => globToRegex(pattern).test(action))) return false;
+  if (resource === undefined) return true;
+  return [statement.Resource].flat().some((pattern) => globToRegex(pattern).test(resource));
 }
 
 async function allFiles(dir: string): Promise<string[]> {
@@ -115,7 +134,8 @@ async function allFiles(dir: string): Promise<string[]> {
 
 describe("writeExportBundle", () => {
   it("writes the documented layout for the environment and region", async () => {
-    const dir = join(await mkdtemp(join(tmpdir(), "agentx-export-out-")), "bundle");
+    const parent = await mkdtemp(join(tmpdir(), "agentx-export-out-"));
+    const dir = join(parent, "bundle");
     const result = await writeExportBundle({ dir, answers: cognitoAnswers(), release: fakeRelease() });
 
     const expected = [
@@ -143,6 +163,9 @@ describe("writeExportBundle", () => {
     ].sort();
     expect(result.files).toEqual(expected);
     expect((await allFiles(dir)).sort()).toEqual(expected);
+    // Atomic publish (item 4): only the final "bundle" directory exists next to it, no leftover
+    // scratch directory from the mkdtemp-sibling-then-rename write.
+    expect(await readdir(parent)).toEqual(["bundle"]);
 
     expect(await readFile(join(dir, "templates/access.template.json"), "utf8")).toBe(accessTemplateText);
     const foundationTemplate = JSON.parse(await readFile(join(dir, "templates/foundation.template.json"), "utf8")) as unknown;
@@ -154,6 +177,14 @@ describe("writeExportBundle", () => {
     expect(readmeText).toContain(ACCOUNT);
     expect(readmeText).toContain("agentx init --resume");
     expect(readmeText).toContain("access-deployer.json");
+    // Item 3: recovery is documented.
+    expect(readmeText).toContain("If it fails");
+    expect(readmeText).toContain("delete-change-set");
+    expect(readmeText).toContain("delete-stack");
+    expect(readmeText).toContain("ROLLBACK_COMPLETE");
+    // Item 8: the ECR pull-through scoping limitation is documented.
+    expect(readmeText).toMatch(/pull-through cache rule/i);
+    expect(readmeText).toMatch(/no resource-level scoping|no tighter scope/i);
 
     const sums = await readFile(join(dir, "packages/SHA256SUMS"), "utf8");
     // Sorted by asset id: RUNTIME_ASSET ("a"...) before CONTROL_PLANE_ASSET ("b"...).
@@ -212,7 +243,7 @@ describe("writeExportBundle", () => {
     }
   });
 
-  it("writes a deploy-access.sh that passes bash -n and names only the access stack", async () => {
+  it("writes a deploy-access.sh that passes bash -n, names only the access stack, and follows the pinned change-set-name format", async () => {
     const dir = join(await mkdtemp(join(tmpdir(), "agentx-export-out-")), "bundle");
     await writeExportBundle({ dir, answers: cognitoAnswers(), release: fakeRelease() });
 
@@ -243,6 +274,32 @@ describe("writeExportBundle", () => {
       expect(line).toMatch(/^--[\w-]+ "\$\{(STACK_NAME|CHANGE_SET_NAME)\}" ?\\?$/);
     }
 
+    // Spec: the pinned change-set-name format, same as templates-engine.ts:193.
+    expect(script).toContain(`CHANGE_SET_NAME="agentx-${DASHED_VERSION}-$(date +%s)"`);
+    expect(script).not.toContain(`CHANGE_SET_NAME="${STACK_NAME}`);
+
+    // Item 5: a y/N confirmation before executing, printing the changes with --query Changes, and
+    // a --yes escape hatch.
+    expect(script).toContain('read -r -p "Execute this change set? [y/N] " REPLY');
+    expect(script).toMatch(/--query\s+"Changes"/);
+    expect(script).toContain("--yes");
+    const executeIndex = script.indexOf("execute-change-set");
+    const describeIndex = script.indexOf('--query "Changes"');
+    const readIndex = script.indexOf("read -r -p");
+    expect(describeIndex).toBeGreaterThan(0);
+    expect(readIndex).toBeGreaterThan(describeIndex);
+    expect(executeIndex).toBeGreaterThan(readIndex);
+
+    // Item 3: failure guidance — the reason, then the recovery command, then a non-zero exit.
+    expect(script).toContain("trap on_failure ERR");
+    expect(script).toMatch(/--query\s+"StatusReason"/);
+    expect(script).toContain("describe-stack-events");
+    expect(script).toContain("REVIEW_IN_PROGRESS");
+    expect(script).toContain("ROLLBACK_COMPLETE");
+    expect(script).toContain("delete-change-set");
+    expect(script).toContain("delete-stack");
+    expect(script).toMatch(/exit\s+"\$\{exit_code\}"/);
+
     expect(() => execFileSync("bash", ["-n", scriptPath])).not.toThrow();
     const info = await stat(scriptPath);
     expect(info.mode & 0o111).not.toBe(0);
@@ -252,7 +309,8 @@ describe("writeExportBundle", () => {
     const dir = join(await mkdtemp(join(tmpdir(), "agentx-export-out-")), "bundle");
     await writeExportBundle({ dir, answers: cognitoAnswers(), release: fakeRelease() });
 
-    const readJson = async (relativePath: string) => JSON.parse(await readFile(join(dir, relativePath), "utf8")) as { Version: string; Statement: Array<{ Sid: string; Effect: string; Action: string[]; Resource: string | string[] }> };
+    const readJson = async (relativePath: string) =>
+      JSON.parse(await readFile(join(dir, relativePath), "utf8")) as { Version: string; Statement: Statement[] };
 
     for (const name of ["service-role", "operator-role", "default-boundary", "access-deployer"]) {
       const text = await readFile(join(dir, `policies/${name}.json`), "utf8");
@@ -263,8 +321,8 @@ describe("writeExportBundle", () => {
 
     const serviceRole = await readJson("policies/service-role.json");
     expect(serviceRole.Version).toBe("2012-10-17");
-    const iamRoles = serviceRole.Statement.find((s) => s.Sid === "IamRoles")!;
-    expect([iamRoles.Resource].flat()).toEqual([`arn:aws:iam::${ACCOUNT}:role/agentx/${ENV}/*`]);
+    const serviceIamRoles = serviceRole.Statement.find((s) => s.Sid === "IamRoles")!;
+    expect([serviceIamRoles.Resource].flat()).toEqual([`arn:aws:iam::${ACCOUNT}:role/agentx/${ENV}/*`]);
 
     const operatorRole = await readJson("policies/operator-role.json");
     const stacks = operatorRole.Statement.find((s) => s.Sid === "Stacks")!;
@@ -273,43 +331,117 @@ describe("writeExportBundle", () => {
     const defaultBoundary = await readJson("policies/default-boundary.json");
     expect(defaultBoundary.Statement.some((s) => s.Sid === "Services")).toBe(true);
 
-    // --- ruling (a): the access-deployer policy must cover every named IAM role, the managed
-    // policy, and the bucket the access stack's REAL synthesized template actually declares. ---
+    // --- Item 2: the access-deployer's role actions are an explicit list, scoped to the two real
+    // role ARNs — never PassRole, DeleteRolePermissionsBoundary, UpdateAssumeRolePolicy,
+    // CreateServiceLinkedRole, or any wildcard action. ---
     const accessDeployer = await readJson("policies/access-deployer.json");
-    const byName = (action: string, resource: string) =>
-      accessDeployer.Statement.some((s) => s.Effect === "Allow" && s.Action.includes(action) && [s.Resource].flat().some((r) => arnPatternToRegex(r).test(resource)));
-
-    const template = JSON.parse(accessTemplateText) as { Resources: Record<string, { Type: string; Properties?: Record<string, unknown> }> };
-    const roles = Object.values(template.Resources).filter((r) => r.Type === "AWS::IAM::Role");
-    expect(roles.length).toBeGreaterThan(0);
-    for (const role of roles) {
-      const roleName = role.Properties!.RoleName as string;
-      const roleArn = `arn:aws:iam::${ACCOUNT}:role/${roleName}`;
-      expect(byName("iam:CreateRole", roleArn) || accessDeployer.Statement.some((s) => [s.Resource].flat().some((r) => arnPatternToRegex(r).test(roleArn)) && s.Action.some((a) => a.includes("Role")))).toBe(true);
+    const cfnRoleArn = `arn:aws:iam::${ACCOUNT}:role/${environmentCloudFormationRoleName(ENV)}`;
+    const operatorRoleArn = `arn:aws:iam::${ACCOUNT}:role/${environmentOperatorRoleName(ENV)}`;
+    const iamRoles = accessDeployer.Statement.find((s) => s.Sid === "IamRoles")!;
+    expect([iamRoles.Resource].flat().sort()).toEqual([cfnRoleArn, operatorRoleArn].sort());
+    expect(iamRoles.Action.some((a) => a.includes("*"))).toBe(false);
+    for (const forbidden of ["iam:PassRole", "iam:DeleteRolePermissionsBoundary", "iam:UpdateAssumeRolePolicy", "iam:CreateServiceLinkedRole"]) {
+      expect(iamRoles.Action).not.toContain(forbidden);
+      expect(statementAllows(iamRoles, forbidden)).toBe(false);
+    }
+    // The exact, intentional grant the review asked for.
+    for (const expected of [
+      "iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:UpdateRole", "iam:UpdateRoleDescription",
+      "iam:TagRole", "iam:UntagRole", "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:GetRolePolicy",
+      "iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:PutRolePermissionsBoundary",
+      "iam:ListRolePolicies", "iam:ListAttachedRolePolicies",
+    ]) {
+      expect(iamRoles.Action).toContain(expected);
     }
 
-    const managedPolicies = Object.values(template.Resources).filter((r) => r.Type === "AWS::IAM::ManagedPolicy");
-    expect(managedPolicies.length).toBeGreaterThan(0);
-    for (const policy of managedPolicies) {
-      const name = policy.Properties!.ManagedPolicyName as string;
-      const path = policy.Properties!.Path as string;
-      const policyArn = `arn:aws:iam::${ACCOUNT}:policy${path}${name}`;
-      expect(accessDeployer.Statement.some((s) => [s.Resource].flat().some((r) => arnPatternToRegex(r).test(policyArn)) && s.Action.includes("iam:CreatePolicy"))).toBe(true);
+    // The managed-policy actions are scoped to the exact boundary ARN, not a path wildcard.
+    const boundaryArn = defaultBoundaryArn({ env: ENV, partition: "aws", account: ACCOUNT });
+    const iamManagedPolicy = accessDeployer.Statement.find((s) => s.Sid === "IamManagedPolicy")!;
+    expect([iamManagedPolicy.Resource].flat()).toEqual([boundaryArn]);
+    expect(iamManagedPolicy.Action).toContain("iam:CreatePolicy");
+
+    // --- Item 1: every resource type and property the REAL synthesized access template declares
+    // maps to actions the policy actually grants. ---
+    const SID_FOR_TYPE: Record<string, string> = {
+      "AWS::S3::Bucket": "ArtifactBucket",
+      "AWS::S3::BucketPolicy": "ArtifactBucket",
+      "AWS::ECR::PullThroughCacheRule": "PullThroughCache",
+      "AWS::IAM::Role": "IamRoles",
+      "AWS::IAM::ManagedPolicy": "IamManagedPolicy",
+    };
+    /**
+     * Actions each resource type's properties require, given what the CloudFormation resource
+     * schema `handlers` permissions AWS documents describe (create/read/update/delete/list) applied
+     * to the concrete properties access.ts sets. AWS does not expose the raw per-type handler
+     * permission list through documentation search, and this account has no `cloudformation:
+     * DescribeType` permission to read it from the registry directly (see task-6-report.md's "Fix
+     * round 1" section) — so where the exact list isn't independently confirmable, this is the
+     * documented general CloudFormation resource-provider pattern (create, then set and read back
+     * each property to stabilize; delete needs the same reads) applied to what's actually declared.
+     */
+    function requiredActionsFor(resource: { Type: string; Properties?: Record<string, unknown> }): string[] {
+      const props = resource.Properties ?? {};
+      switch (resource.Type) {
+        case "AWS::S3::Bucket": {
+          const actions = ["s3:CreateBucket", "s3:DeleteBucket", "s3:GetBucketLocation"];
+          if ("BucketEncryption" in props) actions.push("s3:PutEncryptionConfiguration", "s3:GetEncryptionConfiguration");
+          if ("VersioningConfiguration" in props) actions.push("s3:PutBucketVersioning", "s3:GetBucketVersioning");
+          if ("LifecycleConfiguration" in props) actions.push("s3:PutLifecycleConfiguration", "s3:GetLifecycleConfiguration");
+          if ("PublicAccessBlockConfiguration" in props) actions.push("s3:PutBucketPublicAccessBlock", "s3:GetBucketPublicAccessBlock");
+          if ("Tags" in props) actions.push("s3:PutBucketTagging", "s3:GetBucketTagging");
+          return actions;
+        }
+        case "AWS::S3::BucketPolicy":
+          return ["s3:PutBucketPolicy", "s3:GetBucketPolicy", "s3:DeleteBucketPolicy"];
+        case "AWS::ECR::PullThroughCacheRule":
+          return ["ecr:CreatePullThroughCacheRule", "ecr:DeletePullThroughCacheRule", "ecr:DescribePullThroughCacheRules"];
+        case "AWS::IAM::Role": {
+          const actions = ["iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:ListAttachedRolePolicies"];
+          if ("Tags" in props) actions.push("iam:TagRole", "iam:UntagRole");
+          if ("Description" in props) actions.push("iam:UpdateRoleDescription");
+          if ("Policies" in props) actions.push("iam:PutRolePolicy", "iam:GetRolePolicy", "iam:DeleteRolePolicy", "iam:ListRolePolicies");
+          if ("PermissionsBoundary" in props) actions.push("iam:PutRolePermissionsBoundary");
+          return actions;
+        }
+        case "AWS::IAM::ManagedPolicy":
+          return ["iam:CreatePolicy", "iam:DeletePolicy", "iam:GetPolicy", "iam:GetPolicyVersion", "iam:ListPolicyVersions"];
+        default:
+          return [];
+      }
+    }
+    function resourceArnFor(resource: { Type: string; Properties?: Record<string, unknown> }): string {
+      const props = resource.Properties ?? {};
+      if (resource.Type === "AWS::S3::Bucket" || resource.Type === "AWS::S3::BucketPolicy") return `arn:aws:s3:::${STACK_NAME}-000000000000`;
+      if (resource.Type === "AWS::ECR::PullThroughCacheRule") return "irrelevant-unscoped";
+      if (resource.Type === "AWS::IAM::Role") return `arn:aws:iam::${ACCOUNT}:role/${props.RoleName as string}`;
+      if (resource.Type === "AWS::IAM::ManagedPolicy") return `arn:aws:iam::${ACCOUNT}:policy${props.Path as string}${props.ManagedPolicyName as string}`;
+      throw new Error(`no resource ARN mapping for ${resource.Type}`);
     }
 
-    const buckets = Object.values(template.Resources).filter((r) => r.Type === "AWS::S3::Bucket");
-    expect(buckets.length).toBe(1);
+    const resources = Object.values(accessTemplate.Resources);
+    const seenTypes = new Set(resources.map((r) => r.Type));
+    expect([...seenTypes].every((type) => SID_FOR_TYPE[type] !== undefined)).toBe(true);
+    for (const resource of resources) {
+      const sid = SID_FOR_TYPE[resource.Type]!;
+      const statement = accessDeployer.Statement.find((s) => s.Sid === sid)!;
+      const resourceArn = resourceArnFor(resource);
+      for (const action of requiredActionsFor(resource)) {
+        expect(statementAllows(statement, action, resourceArn)).toBe(true);
+      }
+    }
+
     // The bucket declares no BucketName: CloudFormation names it itself at deploy time as
     // "<StackName>-<LogicalID>-<uniqueID>" (verified against the CloudFormation user guide), so its
-    // real name always starts with the stack's own name. The bucket statement's resource pattern
-    // must be exactly that prefix plus a wildcard for the policy to actually cover it.
+    // real name always starts with the stack's own name — the pattern the policy uses.
+    const buckets = resources.filter((r) => r.Type === "AWS::S3::Bucket");
+    expect(buckets).toHaveLength(1);
     expect(buckets[0]!.Properties?.BucketName).toBeUndefined();
     const bucketStatement = accessDeployer.Statement.find((s) => s.Sid === "ArtifactBucket")!;
-    expect(bucketStatement.Action).toEqual(expect.arrayContaining(["s3:CreateBucket*", "s3:PutBucket*"]));
     expect([bucketStatement.Resource].flat()).toEqual([`arn:aws:s3:::${STACK_NAME}-*`]);
 
     const pullThrough = accessDeployer.Statement.find((s) => s.Sid === "PullThroughCache")!;
-    expect(pullThrough.Action.sort()).toEqual(["ecr:CreatePullThroughCacheRule", "ecr:DeletePullThroughCacheRule"]);
+    expect(pullThrough.Action.sort()).toEqual(["ecr:CreatePullThroughCacheRule", "ecr:DeletePullThroughCacheRule", "ecr:DescribePullThroughCacheRules"]);
+    expect(pullThrough.Resource).toBe("*");
   });
 
   it("refuses a non-empty directory and an uncovered region, writing nothing", async () => {
@@ -321,6 +453,25 @@ describe("writeExportBundle", () => {
     const absentDir = join(await mkdtemp(join(tmpdir(), "agentx-export-absent-")), "bundle");
     await expect(writeExportBundle({ dir: absentDir, answers: cognitoAnswers({ region: OTHER_REGION }), release: fakeRelease() })).rejects.toThrow(/does not cover region eu-west-1/);
     await expect(readdir(absentDir)).rejects.toThrow();
+  });
+
+  it("leaves nothing at dir when a package's sha256 doesn't match, and a rerun works once it's fixed", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "agentx-export-atomic-"));
+    const dir = join(parent, "bundle");
+    const goodBytes = zipBytes[RUNTIME_ASSET]!;
+    await writeFile(join(releaseDir, `${RUNTIME_ASSET}.zip`), Buffer.from("corrupted, does not match release.json"));
+    try {
+      await expect(writeExportBundle({ dir, answers: cognitoAnswers(), release: fakeRelease() })).rejects.toThrow(/does not match release\.json/);
+      // Nothing at all is left next to where the bundle would have gone: no half-written `dir`,
+      // and no leftover scratch directory from the mkdtemp-sibling-then-rename write either.
+      expect(await readdir(parent)).toEqual([]);
+    } finally {
+      await writeFile(join(releaseDir, `${RUNTIME_ASSET}.zip`), goodBytes);
+    }
+
+    const result = await writeExportBundle({ dir, answers: cognitoAnswers(), release: fakeRelease() });
+    expect(result.files.length).toBeGreaterThan(0);
+    expect(await readdir(parent)).toEqual(["bundle"]);
   });
 
   it("makes no AWS calls at all", async () => {
