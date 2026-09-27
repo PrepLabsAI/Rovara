@@ -21,6 +21,7 @@
     "test:contract": "vitest run tests/contract",
     "test:integration": "vitest run tests/integration",
     "test:e2e": "vitest run tests/e2e",
+    "test:boot-script": "AGENTX_BOOT_SCRIPT_DOCKER=1 vitest run tests/live/ec2-boot-script.test.ts",
     "typecheck": "tsc -b --pretty false",
     "image:build:demo": "docker buildx build --platform linux/arm64 --load --tag agentx-worker:demo-arm64 --file environments/base/Dockerfile .",
     "release:demo": "tsx scripts/release-demo.ts",
