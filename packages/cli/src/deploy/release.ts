@@ -5,7 +5,7 @@
 import { readFileSync, realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
-import { ReleaseManifestSchema, renderTemplate, type ReleaseManifest } from "@agentx/contracts";
+import { agentXError, ReleaseManifestSchema, renderTemplate, type ReleaseManifest } from "@agentx/contracts";
 import { sha256Hex } from "./hash.js";
 import type { DeployPart } from "./parameters.js";
 
@@ -17,6 +17,22 @@ export interface LoadedRelease {
   /** Absolute path of a package zip. */
   packagePath(assetId: string): string;
   regions(): string[];
+}
+
+/** What `assertReleaseCoversRegion` reads from a release; a `LoadedRelease` is one. */
+export interface ReleaseCoverage {
+  manifest: { version: string };
+  regions(): readonly string[];
+}
+
+/** The templates engine can only deploy the templates a release was built for: refuses any other
+ * region, listing the ones it covers. The one place this check and its wording live, shared by
+ * `agentx deploy`, `agentx init`, the export bundle and the templates engine itself. */
+export function assertReleaseCoversRegion(release: ReleaseCoverage, region: string): void {
+  const regions = release.regions();
+  if (!regions.includes(region)) {
+    throw agentXError("CONFIG_INVALID", `release ${release.manifest.version} does not cover region ${region}; it covers: ${regions.join(", ") || "no region"}`);
+  }
 }
 
 /**

@@ -10,7 +10,6 @@
 import { chmod, mkdir, mkdtemp, readdir, readFile, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import {
-  agentXError,
   defaultBoundaryArn,
   defaultBoundaryStatements,
   environmentCloudFormationRoleName,
@@ -26,7 +25,7 @@ import {
 import type { DeployAnswers } from "./deploy-environment.js";
 import { sha256Hex } from "./hash.js";
 import { installOrder, stackParameters, type DeployPart, type InstallAnswers, type StackOutputs } from "./parameters.js";
-import type { LoadedRelease } from "./release.js";
+import { assertReleaseCoversRegion, type LoadedRelease } from "./release.js";
 import { callbackSigningKeySecretName } from "./signing-key.js";
 import { PROTECTED_PARTS } from "./deployer.js";
 
@@ -657,9 +656,7 @@ export async function writeExportBundle(input: ExportBundleInput): Promise<Expor
   const { env, region, account } = answers;
   const partition = answers.partition ?? "aws";
 
-  if (!release.regions().includes(region)) {
-    throw agentXError("CONFIG_INVALID", `release ${release.manifest.version} does not cover region ${region}; it covers: ${release.regions().join(", ") || "no region"}`);
-  }
+  assertReleaseCoversRegion(release, region);
   await assertClaimable(dir);
 
   const resolvedDir = resolve(dir);

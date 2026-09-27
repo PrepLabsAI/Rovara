@@ -13,7 +13,7 @@ import {
 import type { InitAnswers } from "../../packages/cli/src/init/install-state.js";
 import type { ParameterStore } from "../../packages/cli/src/environments/parameter-store.js";
 import type { CommandRunner } from "../../packages/cli/src/deploy/cdk-engine.js";
-import { passingChecks, sampleAnswers, scriptedPrompter } from "../support/init-fakes.js";
+import { fakeRelease, passingChecks, sampleAnswers, scriptedPrompter } from "../support/init-fakes.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 
 const caller = { account: "123456789012", arn: "arn:aws:sts::123456789012:assumed-role/Admin/alice" };
@@ -21,7 +21,7 @@ const awsError = (name: string, message: string) => Object.assign(new Error(mess
 
 async function run(answers: InitAnswers, checks = passingChecks(), prompter = scriptedPrompter([])) {
   const lines: string[] = [];
-  await checkPrerequisites({ answers, releaseRegions: ["us-east-1"], caller, checks, prompter, write: (line) => lines.push(line) });
+  await checkPrerequisites({ answers, release: fakeRelease(), caller, checks, prompter, write: (line) => lines.push(line) });
   return lines;
 }
 
@@ -37,7 +37,7 @@ describe("init prerequisites", () => {
   it("stops when the region has no AgentCore, saying nothing was created", async () => {
     const checks = passingChecks({ agentCore: async () => { throw Object.assign(new Error("getaddrinfo ENOTFOUND bedrock-agentcore-control.eu-north-1.amazonaws.com"), { code: "ENOTFOUND" }); } });
     await expect(run(sampleAnswers({ region: "eu-north-1" }), checks)).rejects.toThrow(
-      /init cannot start; nothing was created:\n- this release does not cover region eu-north-1; it covers: us-east-1\n- Amazon Bedrock AgentCore Runtime is not available in eu-north-1 \(or this machine cannot resolve bedrock-agentcore-control\.eu-north-1\.amazonaws\.com; check your network\)/,
+      /init cannot start; nothing was created:\n- release 1\.2\.3 does not cover region eu-north-1; it covers: us-east-1\n- Amazon Bedrock AgentCore Runtime is not available in eu-north-1 \(or this machine cannot resolve bedrock-agentcore-control\.eu-north-1\.amazonaws\.com; check your network\)/,
     );
   });
 
@@ -257,7 +257,7 @@ describe("fix round 1", () => {
     const checks = passingChecks({ cdkBootstrapped: async () => { throw new Error("AccessDenied: user is not authorized to perform ssm:GetParameter"); } });
     await expect(checkPrerequisites({
       answers: sampleAnswers({ engine: "cdk" }),
-      releaseRegions: ["us-east-1"],
+      release: fakeRelease(),
       caller,
       checks,
       prompter: scriptedPrompter([]),

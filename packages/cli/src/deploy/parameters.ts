@@ -38,6 +38,8 @@ export interface InstallAnswers {
   /** Testing only, until the first published release exists: a private-ECR image digest used as-is
    * instead of mapping the release's public image through the pull-through cache. */
   images?: { worker?: string; slack?: string };
+  /** the control plane's SlackAppPostedMessages (spec 014 FR-012); template default accept */
+  slackAppPostedMessages?: "accept" | "ignore";
 }
 
 /** The shortest callback signing key the control plane accepts. */
@@ -206,6 +208,7 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
         ...(answers.github.credentialRef === undefined ? {} : { GitHubAppCredentialRef: answers.github.credentialRef }),
         // The EC2 session lifecycle (#83) runs in the foundation's network with its key and role.
         ...Object.fromEntries(CONTROL_PLANE_FOUNDATION_PARAMETERS.map((name) => [name, required(outputs, "foundation", name, answers.env)])),
+        ...(answers.slackAppPostedMessages === undefined ? {} : { SlackAppPostedMessages: answers.slackAppPostedMessages }),
       };
     }
 

@@ -22,7 +22,7 @@ import { AgentXError, agentXError } from "@agentx/contracts";
 import type { DeployEvent, DeployRequest, StackDeployer, StackOutputs } from "./deployer.js";
 import { sha256Hex } from "./hash.js";
 import { SECRET_PARAMETERS } from "./parameters.js";
-import type { LoadedRelease } from "./release.js";
+import { assertReleaseCoversRegion, type LoadedRelease } from "./release.js";
 
 export interface TemplatesEngineClients {
   cloudFormation: CloudFormationClient;
@@ -180,9 +180,7 @@ export function templatesDeployer(input: {
 
   /** Uploads the template and returns where CreateChangeSet finds it; the access stack's goes inline. */
   async function templateSource(request: DeployRequest, emit: (event: DeployEvent) => void): Promise<{ TemplateURL: string } | { TemplateBody: string }> {
-    if (!release.regions().includes(region)) {
-      throw agentXError("CONFIG_INVALID", `release ${version} does not cover region ${region}; it covers: ${release.regions().join(", ") || "no region"}`);
-    }
+    assertReleaseCoversRegion(release, region);
     const text = release.template(request.part, region, env);
     if (request.part === "access") {
       if (Buffer.byteLength(text, "utf8") > MAX_INLINE_TEMPLATE_BYTES) throw new Error("the access template is too large to deploy inline");

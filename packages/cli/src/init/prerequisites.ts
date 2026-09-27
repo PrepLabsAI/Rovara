@@ -6,6 +6,7 @@ import { BedrockRuntimeClient, ConverseCommand } from "@aws-sdk/client-bedrock-r
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { agentXError, AgentXError } from "@agentx/contracts";
 import { assertCdkBootstrapped, type CommandRunner } from "../deploy/cdk-engine.js";
+import { assertReleaseCoversRegion, type ReleaseCoverage } from "../deploy/release.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import type { InitAnswers } from "./install-state.js";
 import type { Prompter } from "./prompts.js";
@@ -109,7 +110,7 @@ function nodeVersionOk(version: string): boolean {
  * and reported together (FR-015): a person fixing an account should not have to run init five
  * times to hear about a fifth thing wrong each time. */
 export async function checkPrerequisites(input: {
-  answers: InitAnswers; releaseRegions: readonly string[]; caller: { account: string; arn: string };
+  answers: InitAnswers; release: ReleaseCoverage; caller: { account: string; arn: string };
   checks: PrerequisiteChecks; prompter: Prompter; write: (line: string) => void;
 }): Promise<void> {
   const { answers, checks, write } = input;
@@ -118,10 +119,12 @@ export async function checkPrerequisites(input: {
   write(`AWS account ${input.caller.account} as ${input.caller.arn}`);
   write(DEDICATED_ACCOUNT_NOTE);
 
-  // Task 7 (F6) gives every command one shared `assertReleaseCoversRegion` helper; this check is
-  // deliberately kept to this one inline line rather than pre-empting that helper.
-  if (!input.releaseRegions.includes(region)) {
-    problems.push(`this release does not cover region ${region}; it covers: ${input.releaseRegions.join(", ") || "no region"}`);
+  // The same check and wording as agentx deploy's, collected with every other problem.
+  try {
+    assertReleaseCoversRegion(input.release, region);
+  } catch (error) {
+    if (!(error instanceof AgentXError)) throw error;
+    problems.push(error.message.slice(`${error.code}: `.length));
   }
 
   try {

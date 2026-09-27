@@ -22,6 +22,14 @@ describe("cost estimate", () => {
     expect(estimate.unpriced).toEqual([]);
   });
 
+  it("marks the Claude Haiku 4.5 classifier price as assumed, and only that one", () => {
+    const estimate = estimateMonthlyCost({ ...sampleAnswers().models, classifier: "us.anthropic.claude-haiku-4-5-20251001-v1:0" });
+    const classifier = estimate.lines.find((line) => line.item.startsWith("Classifier model"));
+    expect(classifier?.usd).toBe(2.5);
+    expect(classifier?.basis).toBe("1,000 checks at about $0.0025 each, assumed: no confirmed Bedrock rate");
+    expect(estimateMonthlyCost(sampleAnswers().models).lines.filter((line) => line.basis.includes("assumed"))).toEqual([]);
+  });
+
   it("prices GLM 4.7 lower, and names a model it has no price for instead of guessing", () => {
     expect(estimateMonthlyCost({ ...sampleAnswers().models, orchestrator: "zai.glm-4.7" }).totalUsd).toBe(134.78);
     const custom = estimateMonthlyCost({ ...sampleAnswers().models, worker: "us.amazon.nova-premier-v1:0" });

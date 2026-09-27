@@ -43,6 +43,8 @@ const ORCHESTRATOR_PER_TURN: Record<string, number> = { "us.anthropic.claude-son
  * Claude Haiku 4.5 is assumed to price on Bedrock the same as Anthropic's own list price
  * ($1/1M input, $5/1M output); this is an assumption, not a confirmed Bedrock rate. */
 const CLASSIFIER_PER_CHECK: Record<string, number> = { "amazon.nova-lite-v1:0": 0.00015, "us.anthropic.claude-haiku-4-5-20251001-v1:0": 0.0025 };
+/** The model ids whose price above is an assumption, not a confirmed Bedrock rate: the printed plan says so. */
+const ASSUMED_PRICES: ReadonlySet<string> = new Set(["us.anthropic.claude-haiku-4-5-20251001-v1:0"]);
 /** About 200,000 input and 10,000 output tokens per session. Nova Pro: $0.8/1M input, $3.2/1M
  * output (AWS Bedrock pricing). */
 const WORKER_PER_SESSION: Record<string, number> = { "amazon.nova-pro-v1:0": 0.192 };
@@ -65,7 +67,8 @@ export function estimateMonthlyCost(models: InitAnswers["models"], usage = STATE
       unpriced.push(id);
       return { item, usd: undefined, basis: `not estimated: no price on file for ${id}` };
     }
-    return priced(item, each * uses, `${count(uses)} ${what} at about $${each} each`);
+    const assumed = ASSUMED_PRICES.has(id) ? ", assumed: no confirmed Bedrock rate" : "";
+    return priced(item, each * uses, `${count(uses)} ${what} at about $${each} each${assumed}`);
   };
   const lines: CostLine[] = [
     priced("Two NAT gateways", 2 * PRICES.natGatewayHour * HOURS_PER_MONTH, `2 x $${PRICES.natGatewayHour}/hour, plus $0.045 per GB processed`),
