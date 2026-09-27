@@ -2,10 +2,10 @@ import { describe, expect, it } from "vitest";
 import { createCliProgram } from "../../packages/cli/src/main.js";
 
 describe("AgentX executable command surface", () => {
-  it("exposes administration only; developers work through Slack", () => {
+  it("exposes administration and developer sign-in; developer tasks come from AI tools", () => {
     const program = createCliProgram();
 
-    expect(program.commands.map((command) => command.name())).toEqual(["login", "admin", "env", "deploy", "init"]);
+    expect(program.commands.map((command) => command.name())).toEqual(["login", "logout", "whoami", "admin", "env", "deploy", "init"]);
 
     const admin = program.commands.find((command) => command.name() === "admin");
     expect(admin?.commands.map((command) => command.name())).toEqual(["project", "workspace", "slack", "credential", "turns"]);

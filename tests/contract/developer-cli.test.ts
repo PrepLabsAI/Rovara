@@ -1,0 +1,106 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { developerTokenKey, readDeveloperConfig, saveDeveloperEnvironment } from "../../packages/cli/src/developer/config.js";
+import { executeCli } from "../../packages/cli/src/main.js";
+import { InMemoryTokenStore } from "../../packages/cli/src/token-store.js";
+
+const URL_ = "https://abc123.execute-api.us-east-1.amazonaws.com";
+const ISSUER = `${URL_}/v1/auth`;
+const REFRESH = `agxr_${"a".repeat(43)}`;
+const entry = { url: URL_, issuer: ISSUER, tokenEndpoint: `${ISSUER}/token`, revocationEndpoint: `${ISSUER}/revoke` };
+const projects = {
+  developer: { id: "a".repeat(64), name: "Maya Chen", provider: "slack", slackUserId: "U0MAYA001" },
+  projects: [
+    { name: "payments-api", latestRevision: 7, access: "channel", channels: [{ channelId: "C0PAY0001" }] },
+    { name: "solo", latestRevision: 1, access: "granted", channels: [] },
+  ],
+  notices: [],
+};
+
+const urlOf = (input: string | URL | Request) => (typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+const formOf = (init: RequestInit | undefined) => new URLSearchParams(typeof init?.body === "string" ? init.body : "");
+
+const dirs: string[] = [];
+afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
+
+async function signedIn(options: { revoke?: () => Promise<Response> } = {}) {
+  const home = await mkdtemp(join(tmpdir(), "agentx-dev-cli-"));
+  dirs.push(home);
+  await saveDeveloperEnvironment(home, "staging", entry);
+  const tokenStore = new InMemoryTokenStore();
+  await tokenStore.set(developerTokenKey(ISSUER), { accessToken: "access", refreshToken: REFRESH, expiresAt: Date.now() + 3_600_000 });
+  const out: string[] = [];
+  const err: string[] = [];
+  const fetchImplementation = vi.fn<typeof fetch>(async (input, init) => {
+    const url = urlOf(input);
+    if (url === `${URL_}/v1/dev/projects`) {
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer access");
+      return Response.json(projects);
+    }
+    if (url === `${ISSUER}/revoke`) return options.revoke?.() ?? Response.json({});
+    throw new Error(`unexpected ${url}`);
+  });
+  const run = (argv: string[]) => executeCli(argv, { fetchImplementation, tokenStore, environments: { home }, stdout: { write: (text: string) => out.push(text) }, stderr: { write: (text: string) => err.push(text) } });
+  return { home, tokenStore, out, err, run, fetchImplementation };
+}
+
+describe("agentx whoami and logout (FR-011)", () => {
+  it("whoami shows the name, method, Slack link and projects with how each is allowed (US4 scenario 1)", async () => {
+    const h = await signedIn();
+    expect(await h.run(["whoami"])).toBe(0);
+    expect(h.out.join("")).toBe([
+      `Signed in to AgentX environment staging (${URL_}) as Maya Chen, with Slack (U0MAYA001).`,
+      "Projects you can use:",
+      "  payments-api  (you are in its Slack channel C0PAY0001)",
+      "  solo  (an admin granted you access)",
+      "",
+    ].join("\n"));
+  });
+
+  it("whoami --json prints the projects response", async () => {
+    const h = await signedIn();
+    expect(await h.run(["--json", "whoami"])).toBe(0);
+    expect(JSON.parse(h.out.join(""))).toEqual({ ok: true, data: { env: "staging", url: URL_, ...projects } });
+  });
+
+  it("whoami without a sign-in says how to sign in", async () => {
+    const h = await signedIn();
+    expect(await h.run(["--env", "other", "whoami"])).toBe(3);
+    expect(h.err.join("")).toContain("this computer is not signed in to AgentX environment other; run npx @charterarc/agentx login <your AgentX URL>");
+  });
+
+  it("logout revokes the session at the server and removes the tokens and the environment", async () => {
+    const h = await signedIn();
+    expect(await h.run(["logout"])).toBe(0);
+    const revoke = h.fetchImplementation.mock.calls.find(([input]) => urlOf(input) === `${ISSUER}/revoke`);
+    expect(revoke?.[1]?.method).toBe("POST");
+    expect(Object.fromEntries(formOf(revoke?.[1]))).toEqual({ token: REFRESH, client_id: "agentx-cli" });
+    expect(await h.tokenStore.get(developerTokenKey(ISSUER))).toBeUndefined();
+    expect(await readDeveloperConfig(h.home)).toEqual({ environments: {} });
+    expect(h.out.join("")).toBe("Signed out of AgentX environment staging.\n");
+    expect(h.out.join("") + h.err.join("")).not.toContain(REFRESH);
+  });
+
+  it("logout still removes the local tokens when the server cannot be reached, and says the server session may stay", async () => {
+    const h = await signedIn({ revoke: () => Promise.reject(new TypeError("fetch failed")) });
+    expect(await h.run(["logout"])).toBe(0);
+    expect(await h.tokenStore.get(developerTokenKey(ISSUER))).toBeUndefined();
+    expect(await readDeveloperConfig(h.home)).toEqual({ environments: {} });
+    expect(h.out.join("")).toContain("Signed out of AgentX environment staging on this computer");
+    expect(h.out.join("")).toContain("the server session may stay until it expires");
+  });
+
+  it("logout --json reports whether the server revoked the session", async () => {
+    const h = await signedIn({ revoke: () => Promise.resolve(Response.json({ error: "temporarily_unavailable" }, { status: 503 })) });
+    expect(await h.run(["--json", "logout"])).toBe(0);
+    expect(JSON.parse(h.out.join(""))).toEqual({ ok: true, data: { env: "staging", revoked: false } });
+  });
+
+  it("login refuses a URL together with --admin", async () => {
+    const h = await signedIn();
+    expect(await h.run(["login", URL_, "--admin"])).toBe(2);
+    expect(h.err.join("")).toContain("use either agentx login <url> (developer sign-in) or agentx login --admin, not both");
+  });
+});

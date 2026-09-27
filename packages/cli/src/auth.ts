@@ -90,7 +90,19 @@ export function tokenStoreKey(input: Pick<LoginOptions, "issuer" | "clientId" | 
     .digest("hex");
 }
 
-async function createCallbackListener(expectedState: string, timeoutMilliseconds: number, port: number): Promise<{
+/** Removes control characters (C0 and DEL) so a server-sent reason cannot rewrite the terminal. */
+function withoutControlCharacters(text: string): string {
+  return [...text].filter((character) => {
+    const code = character.charCodeAt(0);
+    return code > 0x1f && code !== 0x7f;
+  }).join("");
+}
+
+/**
+ * The loopback listener for an authorization-code redirect, on 127.0.0.1 only. A callback with the
+ * right state and an `error` rejects at once with the server's reason.
+ */
+export async function createCallbackListener(expectedState: string, timeoutMilliseconds: number, port: number): Promise<{
   redirectUri: string;
   code: Promise<string>;
   close: () => void;
@@ -101,6 +113,9 @@ async function createCallbackListener(expectedState: string, timeoutMilliseconds
     resolveCode = resolve;
     rejectCode = reject;
   });
+  // The caller awaits code after the browser step; this only stops Node reporting an early
+  // refusal as an unhandled rejection. The promise itself still rejects for the caller.
+  code.catch(() => undefined);
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
     if (url.pathname !== "/callback") {
@@ -109,6 +124,17 @@ async function createCallbackListener(expectedState: string, timeoutMilliseconds
     }
     const callbackState = url.searchParams.get("state");
     const authorizationCode = url.searchParams.get("code");
+    const failure = url.searchParams.get("error");
+    if (callbackState === expectedState && failure !== null) {
+      // The server refused or could not finish the sign-in: stop at once with its reason
+      // (Review Focus 1) instead of waiting for the timeout.
+      const description = withoutControlCharacters(url.searchParams.get("error_description") ?? failure).slice(0, 300);
+      response.writeHead(200, { "content-type": "text/plain; charset=utf-8" }).end(`AgentX sign-in did not finish: ${description}\nYou can close this window and return to the terminal.`);
+      rejectCode(failure === "temporarily_unavailable"
+        ? agentXError("RUNTIME_UNAVAILABLE", `sign-in could not finish: ${description}`)
+        : agentXError("AUTH_REQUIRED", `sign-in refused: ${description}`));
+      return;
+    }
     if (callbackState !== expectedState || !authorizationCode) {
       response.writeHead(400, { "content-type": "text/plain" }).end("Invalid authentication callback.");
       rejectCode(agentXError("AUTH_REQUIRED", "OIDC callback state or code is invalid"));

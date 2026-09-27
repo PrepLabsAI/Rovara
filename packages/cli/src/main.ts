@@ -27,6 +27,8 @@ import { stopWorkspace } from "./admin/stop.js";
 import { exportTurns, parseSince } from "./admin/turns.js";
 import { loginWithPkce, openSystemBrowser, tokenStoreKey } from "./auth.js";
 import { loadProjectConfig } from "./config.js";
+import { developerLogout, fetchDeveloperProjects, whoamiText } from "./developer/commands.js";
+import { developerLogin } from "./developer/login.js";
 import { loadDeploymentSettings, type DeploymentSettings } from "./deployment.js";
 import { resumeCommand, runDeploy, runInitExport, type DeployCliDependencies, type DeployCommandOptions } from "./deploy/commands.js";
 import { cloudFormationStackReader, stsCallerIdentity, type CallerIdentity, type StackReader } from "./environments/adopt.js";
@@ -162,9 +164,12 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     return { settings, accessToken: tokens.accessToken };
   }
 
+  /** The developer sign-in's session dependencies: this computer's home and token store. */
+  const developerSession = () => ({ home, tokenStore: services.tokenStore, fetch: services.fetchImplementation });
+
   const program = new Command()
     .name("agentx")
-    .description("Administration client for AgentX; developers work through the project's Slack channel")
+    .description("AgentX: sign in, and administer AgentX; developers hand off tasks from their AI tools or work in Slack")
     .version(CLI_VERSION)
     .option("--project <project-name>", "select a locally configured AgentX project")
     .option("--config-dir <directory>", "project configuration directory", join(homedir(), ".agentx/projects"))
@@ -190,10 +195,32 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
 
   program
     .command("login")
-    .description("authenticate with the selected project's OIDC provider")
+    .description("sign in: agentx login <url> for developers; agentx login --admin (or no URL) for administrators")
+    .argument("[url]", "your AgentX URL, for developer sign-in")
+    .option("--admin", "sign in as an administrator with the admin identity provider (the default when no URL is given)", false)
+    .option("--no-browser", "developer sign-in: print the sign-in link instead of opening a browser")
     .option("--callback-port <port>", "fixed loopback callback port registered with the OIDC client", parsePort, DEFAULT_CALLBACK_PORT)
-    .action(async (options: { callbackPort: number }, command: Command) => {
+    .action(async (url: string | undefined, options: { admin: boolean; browser: boolean; callbackPort: number }, command: Command) => {
       const globals = globalOptions(command);
+      if (url !== undefined && options.admin) {
+        throw agentXError("CONFIG_INVALID", "use either agentx login <url> (developer sign-in) or agentx login --admin, not both");
+      }
+      if (url !== undefined) {
+        const result = await developerLogin({
+          url,
+          allowLoopback: globals.allowLoopback,
+          browser: options.browser,
+          home,
+          tokenStore: services.tokenStore,
+          fetch: services.fetchImplementation,
+          write: (line) => { services.stderr.write(`${line}\n`); },
+          ...(command.getOptionValueSource("callbackPort") === "cli" ? { callbackPort: options.callbackPort } : {}),
+        });
+        const projects = await fetchDeveloperProjects(developerSession(), result.env);
+        services.stdout.write(globals.json ? formatSuccess({ env: projects.env, url: projects.url, ...projects.projects }, true) : whoamiText(projects));
+        return;
+      }
+      // A bare login (or --admin) is today's admin login, unchanged.
       const settings = await deploymentSettings(globals);
       await loginWithPkce({
         issuer: settings.auth.issuer,
@@ -204,6 +231,41 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         callbackPort: options.callbackPort,
       });
       services.stdout.write(formatSuccess({ controlPlaneUrl: settings.controlPlaneUrl, authenticated: true }, globals.json));
+    });
+
+  /** The developer environment: --env when typed, otherwise the default agentx login set. */
+  const developerEnv = (command: Command): string | undefined =>
+    command.getOptionValueSourceWithGlobals("env") === "cli" ? globalOptions(command).env : undefined;
+
+  program
+    .command("logout")
+    .description("sign out of AgentX on this computer and end the sign-in at the server; --admin signs out of the admin sign-in")
+    .option("--admin", "sign out of the administrator sign-in instead", false)
+    .action(async (options: { admin: boolean }, command: Command) => {
+      const globals = globalOptions(command);
+      if (options.admin) {
+        const settings = await deploymentSettings(globals);
+        await services.tokenStore.delete(tokenStoreKey(settings.auth));
+        services.stdout.write(globals.json ? formatSuccess({ env: globals.env, admin: true }, true) : `Signed out of the admin sign-in for ${globals.env}.\n`);
+        return;
+      }
+      const result = await developerLogout(developerSession(), developerEnv(command));
+      services.stdout.write(
+        globals.json
+          ? formatSuccess(result, true)
+          : result.revoked
+            ? `Signed out of AgentX environment ${result.env}.\n`
+            : `Signed out of AgentX environment ${result.env} on this computer. AgentX could not be reached to end the sign-in there, so the server session may stay until it expires.\n`,
+      );
+    });
+
+  program
+    .command("whoami")
+    .description("show who you are signed in as and which AgentX projects you can use")
+    .action(async (_options: unknown, command: Command) => {
+      const globals = globalOptions(command);
+      const result = await fetchDeveloperProjects(developerSession(), developerEnv(command));
+      services.stdout.write(globals.json ? formatSuccess({ env: result.env, url: result.url, ...result.projects }, true) : whoamiText(result));
     });
 
   const admin = program.command("admin").description("administrator workflows");
