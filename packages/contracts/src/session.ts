@@ -117,6 +117,17 @@ export const WorkspaceSessionSchema = z
     }
   });
 
+/**
+ * The state table's sparse index of SESSION items by state, for the idle reaper and reconciler.
+ * A SESSION item carries `sessionState` (a copy of `state`) only so that it appears here; no other
+ * item has that attribute. `state` itself cannot be the key: pull request records also have one.
+ */
+export const WORKSPACE_SESSION_STATE_INDEX = {
+  name: "bySessionState",
+  partitionKey: "sessionState",
+  sortKey: "workspaceId",
+} as const;
+
 export function workspaceSessionKey(workspaceId: string): { pk: string; sk: "SESSION" } {
   return { pk: `WORKSPACE#${workspaceId}`, sk: "SESSION" };
 }

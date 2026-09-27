@@ -166,11 +166,18 @@ describe("environment naming", () => {
 
   it("keeps a named environment's capacity provider, workspace key and flow logs retained: deleting the capacity provider deletes every workspace volume", () => {
     const template = Template.fromStack(new ProductionFoundationStack(new App(), "Foundation", { deploymentRegion: "us-east-1", naming: environmentNaming("staging") }));
-    for (const type of ["AWS::BedrockAgentCore::CapacityProvider", "AWS::KMS::Key", "AWS::Logs::LogGroup"]) {
-      const found = Object.values(template.toJSON().Resources as Record<string, { Type: string; DeletionPolicy?: string }>).filter((resource) => resource.Type === type);
+    const resources = template.toJSON().Resources as Record<string, { Type: string; DeletionPolicy?: string }>;
+    for (const type of ["AWS::BedrockAgentCore::CapacityProvider", "AWS::KMS::Key"]) {
+      const found = Object.values(resources).filter((resource) => resource.Type === type);
       expect(found.length).toBeGreaterThan(0);
       for (const resource of found) expect(resource.DeletionPolicy).toBe("Retain");
     }
+    const logGroups = Object.entries(resources).filter(([, resource]) => resource.Type === "AWS::Logs::LogGroup");
+    expect(logGroups.find(([id]) => id.startsWith("VpcFlowLogs"))?.[1].DeletionPolicy).toBe("Retain");
+    // The EC2 worker log group has a fixed name the boot script writes to; retaining it would stop
+    // the environment from being deployed again after a teardown.
+    expect(logGroups.find(([id]) => id.startsWith("Ec2WorkersWorkerLogs"))?.[1].DeletionPolicy).toBe("Delete");
+    expect(logGroups).toHaveLength(2);
   });
 
   it("scopes runtime ARNs and connector secrets to the environment", () => {

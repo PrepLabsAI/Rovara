@@ -77,6 +77,17 @@ const ROLE_ACTIONS = [
   "iam:ListAttachedRolePolicies",
 ];
 
+/** Instance profile management the service role needs for the EC2 workers' instance profile. */
+const INSTANCE_PROFILE_ACTIONS = [
+  "iam:CreateInstanceProfile",
+  "iam:DeleteInstanceProfile",
+  "iam:GetInstanceProfile",
+  "iam:AddRoleToInstanceProfile",
+  "iam:RemoveRoleFromInstanceProfile",
+  "iam:TagInstanceProfile",
+  "iam:UntagInstanceProfile",
+];
+
 /** The IAM path every role of an environment's stacks lives under, except the access stack's two roles. */
 export function environmentRolePath(env: string): string {
   return `/agentx/${env}/`;
@@ -105,6 +116,11 @@ function environmentRoles(scope: Pick<PolicyScope, "env" | "partition" | "accoun
   return `arn:${scope.partition}:iam::${scope.account}:role${environmentRolePath(scope.env)}*`;
 }
 
+/** Instance profiles under the environment's IAM path, like its roles. */
+function environmentInstanceProfiles(scope: Pick<PolicyScope, "env" | "partition" | "account">): string {
+  return `arn:${scope.partition}:iam::${scope.account}:instance-profile${environmentRolePath(scope.env)}*`;
+}
+
 /**
  * The inline policy of the role CloudFormation assumes to deploy this environment's stacks. The
  * boundary Deny statements name `permissionsBoundaryArn` when given, else the default boundary.
@@ -115,6 +131,7 @@ export function serviceRoleStatements(scope: PolicyScope): PolicyStatementJson[]
   return [
     { Sid: "Services", Effect: "Allow", Action: SERVICE_ROLE_SERVICES.map((s) => `${s}:*`), Resource: "*" },
     { Sid: "IamRoles", Effect: "Allow", Action: [...ROLE_ACTIONS], Resource: roles },
+    { Sid: "IamInstanceProfiles", Effect: "Allow", Action: [...INSTANCE_PROFILE_ACTIONS], Resource: environmentInstanceProfiles(scope) },
     {
       // Only actions that carry the iam:PermissionsBoundary key: CreateRole and
       // PutRolePermissionsBoundary as the boundary being set, the role policy actions as the
@@ -160,6 +177,7 @@ export function defaultBoundaryStatements(scope: Pick<PolicyScope, "env" | "part
     // The operator's identity check; the only STS action any AgentX role uses.
     { Sid: "CallerIdentity", Effect: "Allow", Action: ["sts:GetCallerIdentity"], Resource: "*" },
     { Sid: "IamRoles", Effect: "Allow", Action: [...ROLE_ACTIONS], Resource: roles },
+    { Sid: "IamInstanceProfiles", Effect: "Allow", Action: [...INSTANCE_PROFILE_ACTIONS], Resource: environmentInstanceProfiles(scope) },
     {
       // The operator passes the service role (root path) to CloudFormation; CloudFormation passes
       // the environment's roles to Lambda, ECS, AgentCore and the rest.

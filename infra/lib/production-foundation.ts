@@ -15,6 +15,7 @@ import {
   AGENTCORE_INSTANCES_REGIONS,
   AGENTX_WORKSPACE_VOLUME,
 } from "./agent-runtime.js";
+import { Ec2WorkerFoundation } from "./ec2-workers.js";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
 
 export const AGENTX_PRODUCTION_DEPLOYMENT_MODE = "instances-ebs";
@@ -335,6 +336,15 @@ export class ProductionFoundationStack extends Stack {
     }
     // Retained: deleting the capacity provider deletes every worker session's persistent workspace volume.
     capacityProvider.applyRemovalPolicy(RemovalPolicy.RETAIN);
+
+    // EC2 workers (#76) run beside AgentCore until the cutover (#87, #88).
+    new Ec2WorkerFoundation(this, "Ec2Workers", {
+      naming,
+      vpcId: vpc.ref,
+      privateSubnets,
+      workspaceKey,
+      instanceType: configuration.instanceType,
+    });
 
     this.capacityProviderArn = capacityProvider.attrArn;
     new CfnOutput(this, "CapacityProviderArn", { value: this.capacityProviderArn });

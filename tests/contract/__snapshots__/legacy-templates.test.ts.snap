@@ -22,6 +22,14 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         "Ref": "DispatchDeadLetterQueue3E30F4B8",
       },
     },
+    "InvokeSigningKeyArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "InvokeSigningKey2B33EC11",
+          "Arn",
+        ],
+      },
+    },
     "OperatorAlertsTopicArn": {
       "Value": {
         "Ref": "OperatorAlertsA2431256",
@@ -456,6 +464,20 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                     "Arn",
                   ],
                 },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "State1C20CC9A",
+                          "Arn",
+                        ],
+                      },
+                      "/index/*",
+                    ],
+                  ],
+                },
               ],
             },
             {
@@ -469,6 +491,20 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                   "Fn::GetAtt": [
                     "State1C20CC9A",
                     "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "State1C20CC9A",
+                          "Arn",
+                        ],
+                      },
+                      "/index/*",
+                    ],
                   ],
                 },
               ],
@@ -935,6 +971,20 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                     "Arn",
                   ],
                 },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "State1C20CC9A",
+                          "Arn",
+                        ],
+                      },
+                      "/index/*",
+                    ],
+                  ],
+                },
               ],
             },
             {
@@ -948,6 +998,20 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                   "Fn::GetAtt": [
                     "State1C20CC9A",
                     "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "State1C20CC9A",
+                          "Arn",
+                        ],
+                      },
+                      "/index/*",
+                    ],
                   ],
                 },
               ],
@@ -973,6 +1037,16 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                     },
                     ":runtime/*",
                   ],
+                ],
+              },
+            },
+            {
+              "Action": "kms:Sign",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "InvokeSigningKey2B33EC11",
+                  "Arn",
                 ],
               },
             },
@@ -1014,6 +1088,76 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         "ProtocolType": "HTTP",
       },
       "Type": "AWS::ApiGatewayV2::Api",
+    },
+    "InvokeSigningKey2B33EC11": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "Description": "Signs AgentX production invocations to EC2 workers",
+        "KeyPolicy": {
+          "Statement": [
+            {
+              "Action": "kms:*",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":iam::",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":root",
+                    ],
+                  ],
+                },
+              },
+              "Resource": "*",
+            },
+            {
+              "Action": "kms:Sign",
+              "Condition": {
+                "ArnNotEquals": {
+                  "aws:PrincipalArn": {
+                    "Fn::GetAtt": [
+                      "DispatcherServiceRole904BCD09",
+                      "Arn",
+                    ],
+                  },
+                },
+              },
+              "Effect": "Deny",
+              "Principal": {
+                "AWS": "*",
+              },
+              "Resource": "*",
+              "Sid": "SignOnlyAsDispatcher",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "KeySpec": "ECC_NIST_P256",
+        "KeyUsage": "SIGN_VERIFY",
+        "PendingWindowInDays": 7,
+      },
+      "Type": "AWS::KMS::Key",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "InvokeSigningKeyAliasB29C73C1": {
+      "Properties": {
+        "AliasName": "alias/agentx/production/invoke-signing",
+        "TargetKeyId": {
+          "Fn::GetAtt": [
+            "InvokeSigningKey2B33EC11",
+            "Arn",
+          ],
+        },
+      },
+      "Type": "AWS::KMS::Alias",
     },
     "JwtAuthorizer": {
       "Properties": {
@@ -1248,6 +1392,20 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                     "Arn",
                   ],
                 },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "State1C20CC9A",
+                          "Arn",
+                        ],
+                      },
+                      "/index/*",
+                    ],
+                  ],
+                },
               ],
             },
             {
@@ -1261,6 +1419,20 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                   "Fn::GetAtt": [
                     "State1C20CC9A",
                     "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "State1C20CC9A",
+                          "Arn",
+                        ],
+                      },
+                      "/index/*",
+                    ],
                   ],
                 },
               ],
@@ -2207,8 +2379,34 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             "AttributeName": "sk",
             "AttributeType": "S",
           },
+          {
+            "AttributeName": "sessionState",
+            "AttributeType": "S",
+          },
+          {
+            "AttributeName": "workspaceId",
+            "AttributeType": "S",
+          },
         ],
         "BillingMode": "PAY_PER_REQUEST",
+        "GlobalSecondaryIndexes": [
+          {
+            "IndexName": "bySessionState",
+            "KeySchema": [
+              {
+                "AttributeName": "sessionState",
+                "KeyType": "HASH",
+              },
+              {
+                "AttributeName": "workspaceId",
+                "KeyType": "RANGE",
+              },
+            ],
+            "Projection": {
+              "ProjectionType": "ALL",
+            },
+          },
+        ],
         "KeySchema": [
           {
             "AttributeName": "pk",
@@ -2360,6 +2558,89 @@ exports[`legacy production templates > AgentXProductionFoundation is unchanged 1
     "DeploymentMode": {
       "Value": "instances-ebs",
     },
+    "DispatcherSecurityGroupId": {
+      "Value": {
+        "Fn::GetAtt": [
+          "Ec2WorkersDispatcherSecurityGroup176319A7",
+          "GroupId",
+        ],
+      },
+    },
+    "Ec2WorkerInstanceProfileArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "Ec2WorkersInstanceProfile4393083F",
+          "Arn",
+        ],
+      },
+    },
+    "Ec2WorkerInstanceRoleArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "Ec2WorkersInstanceRoleAB9C5653",
+          "Arn",
+        ],
+      },
+    },
+    "Ec2WorkerLaunchTemplateId": {
+      "Value": {
+        "Ref": "Ec2WorkersLaunchTemplateDB220C83",
+      },
+    },
+    "Ec2WorkerLogGroupName": {
+      "Value": {
+        "Ref": "Ec2WorkersWorkerLogsFFDA1567",
+      },
+    },
+    "Ec2WorkerSecurityGroupId": {
+      "Value": {
+        "Fn::GetAtt": [
+          "Ec2WorkersWorkerSecurityGroupAD41E614",
+          "GroupId",
+        ],
+      },
+    },
+    "Ec2WorkerSubnets": {
+      "Value": {
+        "Fn::Join": [
+          ",",
+          [
+            {
+              "Fn::Join": [
+                "=",
+                [
+                  {
+                    "Fn::GetAtt": [
+                      "PrivateSubnet1",
+                      "AvailabilityZone",
+                    ],
+                  },
+                  {
+                    "Ref": "PrivateSubnet1",
+                  },
+                ],
+              ],
+            },
+            {
+              "Fn::Join": [
+                "=",
+                [
+                  {
+                    "Fn::GetAtt": [
+                      "PrivateSubnet2",
+                      "AvailabilityZone",
+                    ],
+                  },
+                  {
+                    "Ref": "PrivateSubnet2",
+                  },
+                ],
+              ],
+            },
+          ],
+        ],
+      },
+    },
     "PrivateSubnetIds": {
       "Value": {
         "Fn::Join": [
@@ -2373,6 +2654,14 @@ exports[`legacy production templates > AgentXProductionFoundation is unchanged 1
               "Ref": "PrivateSubnet2",
             },
           ],
+        ],
+      },
+    },
+    "SessionManagerSecurityGroupId": {
+      "Value": {
+        "Fn::GetAtt": [
+          "Ec2WorkersSessionManagerSecurityGroupF022FCD8",
+          "GroupId",
         ],
       },
     },
@@ -2599,6 +2888,487 @@ exports[`legacy production templates > AgentXProductionFoundation is unchanged 1
         ],
       },
       "Type": "AWS::IAM::Policy",
+    },
+    "Ec2WorkersDispatcherSecurityGroup176319A7": {
+      "Properties": {
+        "GroupDescription": "AgentX dispatcher: signed invocations to EC2 workers, HTTPS to AWS APIs",
+        "GroupName": "agentx-production-dispatcher",
+        "SecurityGroupEgress": [
+          {
+            "CidrIp": "0.0.0.0/0",
+            "Description": "HTTPS to DynamoDB, SQS, KMS, EC2 and Step Functions APIs",
+            "FromPort": 443,
+            "IpProtocol": "tcp",
+            "ToPort": 443,
+          },
+        ],
+        "Tags": [
+          {
+            "Key": "Application",
+            "Value": "AgentX",
+          },
+          {
+            "Key": "DeploymentMode",
+            "Value": "ec2-ebs",
+          },
+          {
+            "Key": "Environment",
+            "Value": "production",
+          },
+          {
+            "Key": "Name",
+            "Value": "agentx-production-dispatcher",
+          },
+        ],
+        "VpcId": {
+          "Ref": "Vpc",
+        },
+      },
+      "Type": "AWS::EC2::SecurityGroup",
+    },
+    "Ec2WorkersDispatcherSecurityGroupToWorkers1D56DCFA": {
+      "Properties": {
+        "Description": "Worker port 8080",
+        "DestinationSecurityGroupId": {
+          "Fn::GetAtt": [
+            "Ec2WorkersWorkerSecurityGroupAD41E614",
+            "GroupId",
+          ],
+        },
+        "FromPort": 8080,
+        "GroupId": {
+          "Fn::GetAtt": [
+            "Ec2WorkersDispatcherSecurityGroup176319A7",
+            "GroupId",
+          ],
+        },
+        "IpProtocol": "tcp",
+        "ToPort": 8080,
+      },
+      "Type": "AWS::EC2::SecurityGroupEgress",
+    },
+    "Ec2WorkersInstanceProfile4393083F": {
+      "Properties": {
+        "Roles": [
+          {
+            "Ref": "Ec2WorkersInstanceRoleAB9C5653",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::InstanceProfile",
+    },
+    "Ec2WorkersInstanceRoleAB9C5653": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId",
+                  },
+                },
+              },
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ec2.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Description": "AgentX production EC2 worker instances",
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "Ec2WorkersInstanceRoleDefaultPolicyA0334D47": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "ecr:BatchGetImage",
+                "ecr:GetDownloadUrlForLayer",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":ecr:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":repository/*",
+                  ],
+                ],
+              },
+              "Sid": "EcrImageAccess",
+            },
+            {
+              "Action": "ecr:GetAuthorizationToken",
+              "Effect": "Allow",
+              "Resource": "*",
+              "Sid": "EcrTokenAccess",
+            },
+            {
+              "Action": [
+                "bedrock:InvokeModel",
+                "bedrock:InvokeModelWithResponseStream",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":bedrock:*::foundation-model/*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":bedrock:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":*",
+                    ],
+                  ],
+                },
+              ],
+              "Sid": "BedrockModelInvocation",
+            },
+            {
+              "Action": [
+                "logs:CreateLogStream",
+                "logs:PutLogEvents",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "Ec2WorkersWorkerLogsFFDA1567",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "Ec2WorkersWorkerLogsFFDA1567",
+                          "Arn",
+                        ],
+                      },
+                      ":log-stream:*",
+                    ],
+                  ],
+                },
+              ],
+              "Sid": "WorkerLogs",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "Ec2WorkersInstanceRoleDefaultPolicyA0334D47",
+        "Roles": [
+          {
+            "Ref": "Ec2WorkersInstanceRoleAB9C5653",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "Ec2WorkersLaunchTemplateDB220C83": {
+      "Properties": {
+        "LaunchTemplateData": {
+          "BlockDeviceMappings": [
+            {
+              "DeviceName": "/dev/xvda",
+              "Ebs": {
+                "DeleteOnTermination": true,
+                "Encrypted": true,
+                "KmsKeyId": {
+                  "Fn::GetAtt": [
+                    "WorkspaceKey21BC864D",
+                    "Arn",
+                  ],
+                },
+                "VolumeSize": 30,
+                "VolumeType": "gp3",
+              },
+            },
+          ],
+          "IamInstanceProfile": {
+            "Arn": {
+              "Fn::GetAtt": [
+                "Ec2WorkersInstanceProfile4393083F",
+                "Arn",
+              ],
+            },
+          },
+          "ImageId": "resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64",
+          "InstanceInitiatedShutdownBehavior": "terminate",
+          "InstanceType": "m6g.medium",
+          "MetadataOptions": {
+            "HttpEndpoint": "enabled",
+            "HttpPutResponseHopLimit": 1,
+            "HttpTokens": "required",
+            "InstanceMetadataTags": "disabled",
+          },
+          "Monitoring": {
+            "Enabled": true,
+          },
+          "SecurityGroupIds": [
+            {
+              "Fn::GetAtt": [
+                "Ec2WorkersWorkerSecurityGroupAD41E614",
+                "GroupId",
+              ],
+            },
+          ],
+          "TagSpecifications": [
+            {
+              "ResourceType": "instance",
+              "Tags": [
+                {
+                  "Key": "Name",
+                  "Value": "agentx-production-worker",
+                },
+                {
+                  "Key": "Application",
+                  "Value": "AgentX",
+                },
+                {
+                  "Key": "DeploymentMode",
+                  "Value": "ec2-ebs",
+                },
+                {
+                  "Key": "Environment",
+                  "Value": "production",
+                },
+              ],
+            },
+            {
+              "ResourceType": "volume",
+              "Tags": [
+                {
+                  "Key": "Name",
+                  "Value": "agentx-production-worker-root",
+                },
+                {
+                  "Key": "Application",
+                  "Value": "AgentX",
+                },
+                {
+                  "Key": "DeploymentMode",
+                  "Value": "ec2-ebs",
+                },
+                {
+                  "Key": "Environment",
+                  "Value": "production",
+                },
+              ],
+            },
+          ],
+        },
+        "LaunchTemplateName": "agentx-production-worker",
+        "TagSpecifications": [
+          {
+            "ResourceType": "launch-template",
+            "Tags": [
+              {
+                "Key": "Name",
+                "Value": "agentx-production-worker",
+              },
+              {
+                "Key": "Application",
+                "Value": "AgentX",
+              },
+              {
+                "Key": "DeploymentMode",
+                "Value": "ec2-ebs",
+              },
+              {
+                "Key": "Environment",
+                "Value": "production",
+              },
+            ],
+          },
+        ],
+      },
+      "Type": "AWS::EC2::LaunchTemplate",
+    },
+    "Ec2WorkersSessionManagerSecurityGroupF022FCD8": {
+      "Properties": {
+        "GroupDescription": "AgentX session manager Lambdas: health probes to EC2 workers, HTTPS to AWS APIs",
+        "GroupName": "agentx-production-session-manager",
+        "SecurityGroupEgress": [
+          {
+            "CidrIp": "0.0.0.0/0",
+            "Description": "HTTPS to DynamoDB, SQS, KMS, EC2 and Step Functions APIs",
+            "FromPort": 443,
+            "IpProtocol": "tcp",
+            "ToPort": 443,
+          },
+        ],
+        "Tags": [
+          {
+            "Key": "Application",
+            "Value": "AgentX",
+          },
+          {
+            "Key": "DeploymentMode",
+            "Value": "ec2-ebs",
+          },
+          {
+            "Key": "Environment",
+            "Value": "production",
+          },
+          {
+            "Key": "Name",
+            "Value": "agentx-production-session-manager",
+          },
+        ],
+        "VpcId": {
+          "Ref": "Vpc",
+        },
+      },
+      "Type": "AWS::EC2::SecurityGroup",
+    },
+    "Ec2WorkersSessionManagerSecurityGroupToWorkersADF97013": {
+      "Properties": {
+        "Description": "Worker port 8080",
+        "DestinationSecurityGroupId": {
+          "Fn::GetAtt": [
+            "Ec2WorkersWorkerSecurityGroupAD41E614",
+            "GroupId",
+          ],
+        },
+        "FromPort": 8080,
+        "GroupId": {
+          "Fn::GetAtt": [
+            "Ec2WorkersSessionManagerSecurityGroupF022FCD8",
+            "GroupId",
+          ],
+        },
+        "IpProtocol": "tcp",
+        "ToPort": 8080,
+      },
+      "Type": "AWS::EC2::SecurityGroupEgress",
+    },
+    "Ec2WorkersWorkerLogsFFDA1567": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "LogGroupName": "/agentx/production/worker",
+        "RetentionInDays": 30,
+      },
+      "Type": "AWS::Logs::LogGroup",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "Ec2WorkersWorkerSecurityGroupAD41E614": {
+      "Properties": {
+        "GroupDescription": "AgentX EC2 workers: port 8080 from the dispatcher and session manager only, HTTPS egress",
+        "GroupName": "agentx-production-ec2-workers",
+        "SecurityGroupEgress": [
+          {
+            "CidrIp": "0.0.0.0/0",
+            "Description": "HTTPS to ECR, Bedrock, CloudWatch, the control plane, package repositories and Git providers",
+            "FromPort": 443,
+            "IpProtocol": "tcp",
+            "ToPort": 443,
+          },
+        ],
+        "Tags": [
+          {
+            "Key": "Application",
+            "Value": "AgentX",
+          },
+          {
+            "Key": "DeploymentMode",
+            "Value": "ec2-ebs",
+          },
+          {
+            "Key": "Environment",
+            "Value": "production",
+          },
+          {
+            "Key": "Name",
+            "Value": "agentx-production-ec2-workers",
+          },
+        ],
+        "VpcId": {
+          "Ref": "Vpc",
+        },
+      },
+      "Type": "AWS::EC2::SecurityGroup",
+    },
+    "Ec2WorkersWorkersFromDispatcherSecurityGroup0D5BAAF8": {
+      "Properties": {
+        "Description": "Worker port 8080 from agentx-production-dispatcher",
+        "FromPort": 8080,
+        "GroupId": {
+          "Fn::GetAtt": [
+            "Ec2WorkersWorkerSecurityGroupAD41E614",
+            "GroupId",
+          ],
+        },
+        "IpProtocol": "tcp",
+        "SourceSecurityGroupId": {
+          "Fn::GetAtt": [
+            "Ec2WorkersDispatcherSecurityGroup176319A7",
+            "GroupId",
+          ],
+        },
+        "ToPort": 8080,
+      },
+      "Type": "AWS::EC2::SecurityGroupIngress",
+    },
+    "Ec2WorkersWorkersFromSessionManagerSecurityGroupA0005A18": {
+      "Properties": {
+        "Description": "Worker port 8080 from agentx-production-session-manager",
+        "FromPort": 8080,
+        "GroupId": {
+          "Fn::GetAtt": [
+            "Ec2WorkersWorkerSecurityGroupAD41E614",
+            "GroupId",
+          ],
+        },
+        "IpProtocol": "tcp",
+        "SourceSecurityGroupId": {
+          "Fn::GetAtt": [
+            "Ec2WorkersSessionManagerSecurityGroupF022FCD8",
+            "GroupId",
+          ],
+        },
+        "ToPort": 8080,
+      },
+      "Type": "AWS::EC2::SecurityGroupIngress",
     },
     "InternetGateway": {
       "Properties": {
@@ -3531,6 +4301,17 @@ exports[`legacy production templates > AgentXProductionRuntime is unchanged 1`] 
         "Description": "Execution role for the AgentX production coding runtime",
       },
       "Type": "AWS::IAM::Role",
+    },
+    "WorkerImageParameter7CA9ADBB": {
+      "Properties": {
+        "Description": "AgentX worker image URI pinned by digest, for EC2 workers",
+        "Name": "/agentx/production/worker-image",
+        "Type": "String",
+        "Value": {
+          "Ref": "WorkerImageUri",
+        },
+      },
+      "Type": "AWS::SSM::Parameter",
     },
   },
   "Rules": {
