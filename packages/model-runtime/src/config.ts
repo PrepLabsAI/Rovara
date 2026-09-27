@@ -4,7 +4,7 @@ import { agentXError } from "@agentx/contracts";
 
 export type ModelRole = "worker" | "orchestrator" | "classifier";
 export const DEFAULT_BEDROCK_MODELS = {
-  worker: "amazon.nova-pro-v1:0",
+  worker: "us.anthropic.claude-sonnet-4-6",
   orchestrator: "us.anthropic.claude-sonnet-4-6",
   classifier: "amazon.nova-lite-v1:0",
 } as const;

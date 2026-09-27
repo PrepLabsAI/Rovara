@@ -23,3 +23,9 @@ unchanged and record the effective model in telemetry. This is an explicitly aut
 to the no-implicit-fallback policy. Access-denied, malformed credentials, transport failures and
 rate limits do not trigger this fallback. Init permits an omitted ARN and preflights the fallback
 Bedrock model when the OpenRouter secret is missing.
+
+## Bedrock default update (user clarification)
+
+Use Claude Sonnet 4.6 (`us.anthropic.claude-sonnet-4-6`) through Bedrock as the
+standard worker default and missing-secret fallback. Preserve explicit deployment/project
+model selections. The orchestrator fallback already uses Sonnet 4.6; the classifier remains Nova Lite.

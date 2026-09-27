@@ -21,3 +21,11 @@
 - [x] T010 Move worker secret-read IAM into the control plane without altering the foundation template; verify both role paths and baseline template equality.
 - [x] T011 Normalize secret whitespace before validation and test real transport authentication with LF/CRLF/space endings while rejecting embedded newlines.
 - [x] T012 Document remaining three-stack ARN drift and workspace credential exposure; require a dedicated key with a spending limit and describe the external-proxy boundary.
+
+## Phase 5: Bedrock Sonnet default
+
+- [x] T013 Set the shared worker default to Bedrock Sonnet 4.6, use shared defaults in CLI flags, update documentation, and verify init/export plus missing-secret fallback and explicit overrides.
+
+T013 verification: typecheck and lint passed; all 125 tests passed across init answers,
+init prerequisites, CLI deploy/export, worker model selection and OpenRouter runtime.
+No deployment or live inference was performed.

@@ -177,8 +177,8 @@ request or deployment was made during implementation.
 
 An omitted ARN, a Secrets Manager `ResourceNotFoundException`, or an empty secret value selects
 the default Bedrock model before opening the session. The worker uses its deployment's Bedrock
-default when one is configured. Otherwise the role defaults match init: Nova Pro for the worker,
-Claude Sonnet 4.6 for the orchestrator, and Nova Lite for the classifier. Logs emit `model_fallback`
+default when one is configured. Otherwise the role defaults match init: Claude Sonnet 4.6
+(`us.anthropic.claude-sonnet-4-6`) for the worker and orchestrator, and Nova Lite for the classifier. Logs emit `model_fallback`
 with the requested and effective model; session and usage records use the effective model. The
 project's selected OpenRouter model remains selected, so subsequent sessions can use it once the
 secret is populated. Restart the Slack service to reload the long-lived classifier.

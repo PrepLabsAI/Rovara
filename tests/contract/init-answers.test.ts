@@ -50,7 +50,7 @@ describe("init questions", () => {
     expect(answers).toEqual({
       schemaVersion: 1, env: "staging", region: "us-east-1", account: "123456789012", engine: "templates", releaseVersion: "1.2.3",
       identity: { mode: "cognito" },
-      models: { orchestrator: "us.anthropic.claude-sonnet-4-6", classifier: "amazon.nova-lite-v1:0", worker: "amazon.nova-pro-v1:0" },
+      models: { orchestrator: "us.anthropic.claude-sonnet-4-6", classifier: "amazon.nova-lite-v1:0", worker: "us.anthropic.claude-sonnet-4-6" },
       alert: { kind: "email", address: "ops@example.com" },
       github: { account: "acme", accountType: "organization", appName: "AgentX acme staging" },
       slack: { appName: "AgentX", appPostedMessages: "accept" },

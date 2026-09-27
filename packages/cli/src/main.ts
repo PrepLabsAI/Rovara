@@ -31,7 +31,7 @@ import { loadDeploymentSettings, type DeploymentSettings } from "./deployment.js
 import { resumeCommand, runDeploy, runInitExport, type DeployCliDependencies, type DeployCommandOptions } from "./deploy/commands.js";
 import { cloudFormationStackReader, stsCallerIdentity, type CallerIdentity, type StackReader } from "./environments/adopt.js";
 import { resolveDeploymentFile } from "./environments/cache.js";
-import type { InitFlags } from "./init/answers.js";
+import { DEFAULT_CLASSIFIER_MODEL, DEFAULT_ORCHESTRATOR_MODEL, DEFAULT_WORKER_MODEL, type InitFlags } from "./init/answers.js";
 import { runInit, type InitCliDependencies, type InitOptions } from "./init/commands.js";
 import type { SecretFlags } from "./init/context.js";
 import type { SecretSource } from "./init/prompts.js";
@@ -541,9 +541,9 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--worker-provider <provider>", "amazon-bedrock (default) or openrouter")
     .option("--openrouter-secret-arn <arn>", "Secrets Manager ARN containing the raw OpenRouter key; enables OpenRouter")
     .option("--openrouter-providers <slugs>", "comma-separated OpenRouter provider allowlist")
-    .option("--orchestrator-model <id>", "Provider model id for the Slack orchestrator", "us.anthropic.claude-sonnet-4-6")
-    .option("--classifier-model <id>", "Provider model id for the gate classifier", "amazon.nova-lite-v1:0")
-    .option("--worker-model <id>", "Provider model id for the runtime worker", "amazon.nova-pro-v1:0")
+    .option("--orchestrator-model <id>", "Provider model id for the Slack orchestrator", DEFAULT_ORCHESTRATOR_MODEL)
+    .option("--classifier-model <id>", "Provider model id for the gate classifier", DEFAULT_CLASSIFIER_MODEL)
+    .option("--worker-model <id>", "Provider model id for the runtime worker", DEFAULT_WORKER_MODEL)
     .option("--alert-email <address>", "email address AgentX sends alerts to")
     .option("--alert-webhook-file <path>", "file holding a PagerDuty or Opsgenie integration address (kept secret)")
     .option("--alert-webhook-env <NAME>", "environment variable holding a PagerDuty or Opsgenie integration address (kept secret)")
