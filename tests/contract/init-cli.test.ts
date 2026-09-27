@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { environmentStackName } from "@agentx/contracts";
+import { prepareDeployment } from "../../packages/cli/src/deploy/commands.js";
 import { executeCli } from "../../packages/cli/src/main.js";
 import { environmentCachePath } from "../../packages/cli/src/environments/cache.js";
 import { lockParameterName } from "../../packages/cli/src/environments/lock.js";
@@ -215,9 +216,58 @@ describe("agentx init", () => {
 
   it("without --release, a CLI built from source says to pass --release", async () => {
     const out: string[] = [];
-    const code = await executeCli(["--env", "staging", "init", "--region", "us-east-1"], { stdout: { write: (t: string) => out.push(t) }, stderr: { write: (t: string) => out.push(t) }, init: { releaseVersion: null } });
+    const home = await tmp("agentx-init-home-");
+    // Every AWS-facing dependency throws, so a change of order could never reach real AWS clients.
+    const unexpected = () => { throw new Error("test setup: AWS must not be called before the release is found"); };
+    const code = await executeCli(["--env", "staging", "init", "--region", "us-east-1"], {
+      stdout: { write: (t: string) => out.push(t) },
+      stderr: { write: (t: string) => out.push(t) },
+      environments: { home },
+      init: {
+        releaseVersion: null,
+        deploy: { identity: { get: unexpected }, store: { get: unexpected, put: unexpected, delete: unexpected, list: unexpected }, secrets: { get: unexpected, create: unexpected } },
+        initSecrets: { get: unexpected, create: unexpected, put: unexpected, arn: unexpected },
+        checks: passingChecks({ converse: unexpected, agentCore: unexpected }),
+        stackStatus: { status: unexpected },
+        fetch: unexpected,
+        prompter: scriptedPrompter([]),
+      },
+    });
     expect(code).toBe(2);
     expect(out.join("")).toContain("pass --release <dir>");
+    expect(out.join("")).not.toContain("test setup");
+  });
+
+  it("prints the completed run as JSON with --json", async () => {
+    const h = await harness();
+    expect(await h.run(["--json"], { prompter: scriptedPrompter([...FIRST_RUN, ...SLACK]) })).toBe(0);
+    expect(JSON.parse(h.out.join(""))).toMatchObject({
+      ok: true,
+      data: { status: "complete", env: "staging", resumed: false, controlPlaneUrl: "https://abc123.execute-api.us-east-1.amazonaws.com" },
+    });
+  });
+
+  it("keeps the step failure when removing temporary files fails too", async () => {
+    const h = await harness();
+    h.deployer.fail.set(environmentStackName("staging", "control-plane"), new Error("Resource limit exceeded"));
+    const prepare: InitCliDependencies["prepareDeployment"] = async (input) => ({
+      ...(await prepareDeployment(input)),
+      cleanup: async () => { throw new Error("directory busy"); },
+    });
+    expect(await h.run([], { prompter: scriptedPrompter(FIRST_RUN), prepareDeployment: prepare })).not.toBe(0);
+    expect(h.printed()).toContain('init stopped at "Deploy the control plane and runtime": Resource limit exceeded.');
+    expect(h.printed()).toContain("could not remove temporary files: directory busy");
+  });
+
+  it("keeps the result when removing temporary files fails after a finished run", async () => {
+    const h = await harness();
+    const prepare: InitCliDependencies["prepareDeployment"] = async (input) => ({
+      ...(await prepareDeployment(input)),
+      cleanup: async () => { throw new Error("directory busy"); },
+    });
+    expect(await h.run([], { prompter: scriptedPrompter([...FIRST_RUN, ...SLACK]), prepareDeployment: prepare })).toBe(0);
+    expect(h.printed()).toContain("AgentX environment staging is deployed.");
+    expect(h.printed()).toContain("could not remove temporary files: directory busy");
   });
 
   // F23: InitAnswers only takes x.y.z, so a prerelease would otherwise fail after the plan.

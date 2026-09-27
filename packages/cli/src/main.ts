@@ -526,7 +526,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .addOption(new Option("--engine <engine>", "deploy engine: published CloudFormation templates, or cdk from a source checkout").choices(["templates", "cdk"]))
     .option("--source <dir>", "git checkout of the release's source tag; required for --engine cdk")
     .option("--resume", "only continue an install already under way; never start a new one", false)
-    .option("--yes", "answer every question with its default or its flag, without asking; the plan is still printed", false)
+    .option("--yes", "answer every question with its default or its flag, without asking; the plan is still printed. Confirmations such as the Slack bot and workspace check and \"Request URL Verified?\" are answered yes, so check the printed summary afterwards", false)
     .option("--no-browser", "print every address to open instead of opening a browser")
     .addOption(new Option("--identity <mode>", "identity provider").choices(["cognito", "oidc"]).default("cognito"))
     .option("--oidc-issuer <url>", "your OIDC provider's issuer URL (required with --identity oidc)")

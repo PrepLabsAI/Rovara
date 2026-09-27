@@ -45,6 +45,8 @@ export interface InitCliDependencies {
   processEnv?: NodeJS.ProcessEnv;
   /** Overrides RELEASE_VERSION; null means a build from source. */
   releaseVersion?: string | null;
+  /** Overrides how the run's deployment is built (tests: a cleanup that fails). */
+  prepareDeployment?: typeof prepareDeployment;
 }
 
 export interface InitOptions {
@@ -271,7 +273,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     // against the answers' account, and no partition is passed, so prepareDeployment's "answers
     // file" account and partition errors cannot arise here.
     deployment: () => {
-      deployment ??= prepareDeployment({
+      deployment ??= (deps.prepareDeployment ?? prepareDeployment)({
         engine: finalAnswers.engine, env, region, account: finalAnswers.account, identityMode: finalAnswers.identity.mode, release,
         ...(options.source === undefined ? {} : { source: options.source }),
         deps: { ...deployDeps, store, secrets, identity: { get: async () => caller } },
@@ -308,6 +310,13 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     };
   } finally {
     // Whether init succeeded or failed; a deployment that failed to build has nothing to clean up.
-    if (deployment !== undefined) await deployment.then((prepared) => prepared.cleanup(), () => undefined);
+    // A failed cleanup is reported, never thrown: it must not replace the step's own error or result.
+    if (deployment !== undefined) {
+      try {
+        await deployment.then((prepared) => prepared.cleanup(), () => undefined);
+      } catch (error) {
+        write(`could not remove temporary files: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
   }
 }
