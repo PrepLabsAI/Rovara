@@ -35,8 +35,9 @@ import { cloudFormationStackReader, stsCallerIdentity, type CallerIdentity, type
 import { resolveDeploymentFile } from "./environments/cache.js";
 import { DEFAULT_CLASSIFIER_MODEL, DEFAULT_ORCHESTRATOR_MODEL, DEFAULT_WORKER_MODEL, type InitFlags } from "./init/answers.js";
 import { runInit, type InitCliDependencies, type InitOptions } from "./init/commands.js";
-import type { SecretFlags } from "./init/context.js";
+import { secretsManagerInitSecrets, type InitSecrets, type SecretFlags } from "./init/context.js";
 import type { SecretSource } from "./init/prompts.js";
+import { readSlackTeamIdFromSecret, slackWebApi } from "./init/slack-app.js";
 import { runEnvAdopt, runEnvList, runEnvUse } from "./environments/commands.js";
 import { ssmParameterStore, type ParameterStore } from "./environments/parameter-store.js";
 import { settingsParameterName } from "./environments/settings.js";
@@ -81,6 +82,8 @@ export interface CliDependencies {
      * also overrides the client's actual use, so that override can't quietly bypass the client.
      */
     ssmClient?: (region?: string) => SSMClient;
+    /** What `env adopt` reads the Slack secret through (it reads the bot token to call auth.test); Secrets Manager in --region by default. */
+    slackSecrets?: Pick<InitSecrets, "get">;
   };
   /** `agentx deploy` and `agentx init --export` overrides, for tests: never touch AWS. */
   deploy?: DeployCliDependencies;
@@ -515,6 +518,12 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         ...(options.clientId === undefined ? {} : { clientId: options.clientId }),
         stacks: dependencies.environments?.stacks ?? cloudFormationStackReader(clients.cloudFormation),
         identity: dependencies.environments?.sts ?? stsCallerIdentity(clients.sts),
+        slackTeamId: async (slackSecretArn) => (await readSlackTeamIdFromSecret({
+          secrets: dependencies.environments?.slackSecrets ?? secretsManagerInitSecrets(new SecretsManagerClient({ region: options.region })),
+          api: slackWebApi(services.fetchImplementation),
+          secretId: slackSecretArn,
+        })).teamId,
+        write: (line) => { services.stderr.write(`${line}\n`); },
       });
       services.stdout.write(
         globals.json

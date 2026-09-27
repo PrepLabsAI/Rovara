@@ -184,3 +184,35 @@ describe("agentx env adopt", () => {
     expect(settings.identity).toEqual({ mode: "oidc", issuer: "https://login.example.com", audience: "api://agentx", clientId: "cli-client" });
   });
 });
+
+describe("agentx env adopt records the Slack team ID (FR-006, R21)", () => {
+  const withSecret = { ...liveStacks, AgentXControlPlane: { ...liveStacks.AgentXControlPlane!, outputs: { ...liveStacks.AgentXControlPlane!.outputs, SlackSecretArn: "arn:aws:secretsmanager:us-east-1:944937319445:secret:SlackSecret-AbCdEf" } } };
+
+  it("writes /agentx/production/slack/teamId from the bot token's auth.test", async () => {
+    const store = new MemoryParameterStore();
+    const home = await mkdtemp(join(tmpdir(), "agentx-adopt-"));
+    const seen: string[] = [];
+    await adoptEnvironment({ env: "production", region: "us-east-1", stacks: reader(withSecret), identity, store, home, now, slackTeamId: async (arn) => { seen.push(arn); return "T0TEAM1"; } });
+    expect(seen).toEqual(["arn:aws:secretsmanager:us-east-1:944937319445:secret:SlackSecret-AbCdEf"]);
+    expect(store.values.get("/agentx/production/slack/teamId")).toBe("T0TEAM1");
+  });
+
+  it("reports a failure in one line and still adopts", async () => {
+    const store = new MemoryParameterStore();
+    const home = await mkdtemp(join(tmpdir(), "agentx-adopt-"));
+    const lines: string[] = [];
+    const settings = await adoptEnvironment({ env: "production", region: "us-east-1", stacks: reader(withSecret), identity, store, home, now, write: (line) => lines.push(line), slackTeamId: async () => { throw Object.assign(new Error("denied xoxb-should-not-print"), { name: "AccessDeniedException" }); } });
+    expect(settings.env).toBe("production");
+    expect(lines).toEqual(["Could not record the Slack team ID (AccessDeniedException); agentx signin check reports it, and agentx signin enable slack records it"]);
+    expect(store.values.has("/agentx/production/slack/teamId")).toBe(false);
+  });
+
+  it("asks for nothing when the control plane reports no Slack secret", async () => {
+    const store = new MemoryParameterStore();
+    const home = await mkdtemp(join(tmpdir(), "agentx-adopt-"));
+    const seen: string[] = [];
+    await adoptEnvironment({ env: "production", region: "us-east-1", stacks: reader(liveStacks), identity, store, home, now, slackTeamId: async (arn) => { seen.push(arn); return "T0TEAM1"; } });
+    expect(seen).toEqual([]);
+    expect(store.values.has("/agentx/production/slack/teamId")).toBe(false);
+  });
+});

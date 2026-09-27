@@ -9,6 +9,7 @@ import type { ParameterStore } from "../../packages/cli/src/environments/paramet
 import { writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import { environmentAdoptClients, environmentSsmClient, executeCli } from "../../packages/cli/src/main.js";
 import { InMemoryTokenStore } from "../../packages/cli/src/token-store.js";
+import { memoryInitSecrets } from "../support/init-fakes.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 import { stagingSettings } from "../support/environment-fixtures.js";
 
@@ -191,6 +192,45 @@ describe("agentx env adopt", () => {
       error: { code: "CONFIG_INVALID", message: expect.stringContaining("only the production environment can adopt") as unknown },
     });
     expect(store.calls).toEqual([]);
+  });
+
+  it("reads the stored bot token through the injected secrets and records the Slack team ID, never printing the token (F27)", async () => {
+    const arn = "arn:aws:secretsmanager:us-east-1:944937319445:secret:SlackSecret-AbCdEf";
+    const withSecret: StackReader = { describe: async (name) => (name === "AgentXControlPlane" ? { ...liveStacks[name]!, outputs: { ...liveStacks[name]!.outputs, SlackSecretArn: arn } } : liveStacks[name]) };
+    const token = "xoxb-1-2-adoptsecret";
+    const slackSecrets = memoryInitSecrets({ [arn]: JSON.stringify({ signingSecret: "a".repeat(32), botToken: token }) });
+    const seen: Array<{ url: string; authorization: string | null }> = [];
+    const fetchImplementation = (async (url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      seen.push({ url: typeof url === "string" ? url : url instanceof URL ? url.href : url.url, authorization: new Headers(init?.headers).get("authorization") });
+      return Response.json({ ok: true, team_id: "T0TEAM1", user_id: "U0BOT", bot_id: "B0BOT" });
+    }) as typeof fetch;
+    const store = new MemoryParameterStore();
+    const io = capture();
+    const code = await executeCli(
+      ["--env", "production", "env", "adopt", "--region", "us-east-1"],
+      { ...io, fetchImplementation, environments: { store, home: await home(), stacks: withSecret, sts: identity, slackSecrets } },
+    );
+    expect(code).toBe(0);
+    expect(seen).toEqual([{ url: "https://slack.com/api/auth.test", authorization: `Bearer ${token}` }]);
+    expect(store.values.get("/agentx/production/slack/teamId")).toBe("T0TEAM1");
+    expect(io.out.join("") + io.err.join("")).not.toContain(token);
+  });
+
+  it("still adopts, with one line on stderr, when the Slack secret has no bot token yet", async () => {
+    const arn = "arn:aws:secretsmanager:us-east-1:944937319445:secret:SlackSecret-AbCdEf";
+    const withSecret: StackReader = { describe: async (name) => (name === "AgentXControlPlane" ? { ...liveStacks[name]!, outputs: { ...liveStacks[name]!.outputs, SlackSecretArn: arn } } : liveStacks[name]) };
+    const slackSecrets = memoryInitSecrets({ [arn]: JSON.stringify({ signingSecret: "placeholder", botToken: "unset" }) });
+    const fetchImplementation = (async () => { throw new Error("test setup: Slack must not be called"); }) as typeof fetch;
+    const store = new MemoryParameterStore();
+    const io = capture();
+    const code = await executeCli(
+      ["--env", "production", "env", "adopt", "--region", "us-east-1"],
+      { ...io, fetchImplementation, environments: { store, home: await home(), stacks: withSecret, sts: identity, slackSecrets } },
+    );
+    expect(code).toBe(0);
+    expect(io.err.join("")).toBe("Could not record the Slack team ID (AgentXError); agentx signin check reports it, and agentx signin enable slack records it\n");
+    expect(store.values.has("/agentx/production/slack/teamId")).toBe(false);
+    expect(store.values.has("/agentx/production/settings")).toBe(true);
   });
 
   it("scopes env adopt's SSM, CloudFormation and STS clients to --region", async () => {

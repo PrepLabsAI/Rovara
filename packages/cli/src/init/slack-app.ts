@@ -7,19 +7,24 @@
 // itself, then asks the engineer to confirm the Event Subscriptions page shows Verified.
 import { createHmac, randomBytes } from "node:crypto";
 import { agentXError, environmentStackName } from "@agentx/contracts";
-import type { InitContext } from "./context.js";
+import type { InitContext, InitSecrets } from "./context.js";
 import { checkSlackBotToken, checkSlackSigningSecret, secretFromSource } from "./prompts.js";
 import type { InitStep, ProgressHandle } from "./steps.js";
 
-// channels:join, channels:read and groups:read serve 15d2's `channel add`; adding scopes later would force every workspace to reinstall the app.
-export const SLACK_BOT_SCOPES: readonly string[] = ["app_mentions:read", "channels:join", "channels:read", "chat:write", "groups:read", "users:read"];
+// channels:join, channels:read and groups:read serve 15d2's `channel add`; users:read.email and
+// im:write serve developer sign-in (spec 025 FR-044). Adding scopes later forces a reinstall (R10).
+export const SLACK_BOT_SCOPES: readonly string[] = ["app_mentions:read", "channels:join", "channels:read", "chat:write", "groups:read", "im:write", "users:read", "users:read.email"];
+/** Sign in with Slack (OpenID Connect). */
+export const SLACK_USER_SCOPES: readonly string[] = ["email", "openid", "profile"];
+/** What developer sign-in needs of the bot token: users.info, users.lookupByEmail, conversations.members, and 25e's DMs. */
+export const SIGN_IN_BOT_SCOPES: readonly string[] = ["channels:read", "groups:read", "im:write", "users:read", "users:read.email"];
 export const SLACK_PROBE_TIMEOUT_MS = 7 * 60 * 1000;
 const PROBE_POLL_MS = 15_000;
 
 export interface SlackManifest {
   display_information: { name: string; description: string };
   features: { bot_user: { display_name: string; always_online: boolean } };
-  oauth_config: { scopes: { bot: string[] } };
+  oauth_config: { redirect_urls: string[]; scopes: { bot: string[]; user: string[] } };
   settings: {
     event_subscriptions: { request_url: string; bot_events: string[] };
     interactivity: { is_enabled: boolean; request_url: string };
@@ -34,11 +39,11 @@ export function slackBotDisplayName(appName: string): string {
   return name === "" ? "agentx" : name;
 }
 
-export function slackAppManifest(input: { appName: string; eventsUrl: string; interactivityUrl: string }): SlackManifest {
+export function slackAppManifest(input: { appName: string; eventsUrl: string; interactivityUrl: string; signInCallbackUrl: string }): SlackManifest {
   return {
     display_information: { name: input.appName, description: "AgentX: ask in Slack, and AgentX works in your repositories and trackers." },
     features: { bot_user: { display_name: slackBotDisplayName(input.appName), always_online: true } },
-    oauth_config: { scopes: { bot: [...SLACK_BOT_SCOPES] } },
+    oauth_config: { redirect_urls: [input.signInCallbackUrl], scopes: { bot: [...SLACK_BOT_SCOPES], user: [...SLACK_USER_SCOPES] } },
     settings: {
       event_subscriptions: { request_url: input.eventsUrl, bot_events: ["app_mention"] },
       interactivity: { is_enabled: true, request_url: input.interactivityUrl },
@@ -49,12 +54,58 @@ export function slackAppManifest(input: { appName: string; eventsUrl: string; in
   };
 }
 
+/** Where Slack sends a developer back after Sign in with Slack: the control plane's callback route. */
+export function slackSignInCallbackUrl(apiEndpoint: string): string {
+  return `${apiEndpoint.replace(/\/+$/, "")}/v1/auth/callback/slack`;
+}
+
+/** The needed scopes the token was not granted; none when Slack did not report the granted scopes. */
+export function missingScopes(granted: readonly string[] | undefined, needed: readonly string[]): string[] {
+  if (granted === undefined) return [];
+  return needed.filter((scope) => !granted.includes(scope));
+}
+
 export function slackCreateAppUrl(manifest: SlackManifest): string {
   return `https://api.slack.com/apps?new_app=1&manifest_json=${encodeURIComponent(JSON.stringify(manifest))}`;
 }
 
 export function slackSecretName(env: string): string {
   return `agentx/${env}/slack`;
+}
+
+/** The Slack secret's JSON object; an empty one when it is missing, not JSON, or not an object. */
+function parsedSecret(existing: string | undefined): Record<string, unknown> {
+  try {
+    const value = JSON.parse(existing ?? "{}") as unknown;
+    return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** R11: a new bot token and signing secret, keeping the sign-in keys the developer sign-in step stored. */
+export function slackSecretWithBot(existing: string | undefined, bot: { signingSecret: string; botToken: string }): string {
+  const current = parsedSecret(existing);
+  const keep = Object.fromEntries(["clientId", "clientSecret"].filter((key) => typeof current[key] === "string").map((key) => [key, current[key]]));
+  return JSON.stringify({ ...keep, signingSecret: bot.signingSecret, botToken: bot.botToken });
+}
+
+/** The Sign in with Slack client credentials added to the Slack secret, keeping every other key. */
+export function slackSecretWithSignIn(existing: string | undefined, client: { clientId: string; clientSecret: string }): string {
+  return JSON.stringify({ ...parsedSecret(existing), clientId: client.clientId, clientSecret: client.clientSecret });
+}
+
+/** The workspace (team) ID and granted scopes of the bot token stored in the Slack secret. Never puts the token in an error. */
+export async function readSlackTeamIdFromSecret(input: { secrets: Pick<InitSecrets, "get">; api: SlackApi; secretId: string }): Promise<{ teamId: string; scopes?: string[] }> {
+  const token = parsedSecret(await input.secrets.get(input.secretId)).botToken;
+  if (typeof token !== "string" || !token.startsWith("xoxb-")) {
+    throw agentXError("CONFIG_INVALID", `secret ${input.secretId} has no Slack bot token yet; finish the Slack app step of agentx init first`);
+  }
+  const auth = await input.api.authTest(token);
+  if (!auth.ok || auth.team_id === undefined) {
+    throw agentXError("CONFIG_INVALID", `Slack refused the stored bot token (${auth.error ?? "no reason given"}); run the Slack app step of agentx init again`);
+  }
+  return { teamId: auth.team_id, ...(auth.scopes === undefined ? {} : { scopes: auth.scopes }) };
 }
 
 /** Slack's v0 request signature, the one the control plane's validSignature checks. */
@@ -128,23 +179,30 @@ export async function probeSlackUrls(input: {
 }
 
 export interface SlackApi {
-  authTest(token: string): Promise<{ ok: boolean; error?: string; user_id?: string; bot_id?: string; team_id?: string; team?: string; url?: string; user?: string }>;
+  /** `scopes` comes from the response's x-oauth-scopes header, when Slack sends it. */
+  authTest(token: string): Promise<{ ok: boolean; error?: string; user_id?: string; bot_id?: string; team_id?: string; team?: string; url?: string; user?: string; scopes?: string[] }>;
   botsInfo(token: string, botId: string): Promise<{ ok: boolean; error?: string; bot?: { app_id?: string } }>;
 }
 
 export function slackWebApi(fetchImplementation: typeof fetch): SlackApi {
-  const call = async (method: string, token: string, query = ""): Promise<unknown> => {
+  const call = async (method: string, token: string, query = ""): Promise<{ body: unknown; headers: Headers }> => {
     const response = await fetchImplementation(`https://slack.com/api/${method}${query}`, { method: "POST", headers: { authorization: `Bearer ${token}` } });
     if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `Slack ${method} failed with HTTP ${response.status}; try again in a minute`);
-    return response.json();
+    return { body: await response.json(), headers: response.headers };
   };
   return {
-    authTest: async (token) => (await call("auth.test", token)) as Awaited<ReturnType<SlackApi["authTest"]>>,
-    botsInfo: async (token, botId) => (await call("bots.info", token, `?bot=${encodeURIComponent(botId)}`)) as Awaited<ReturnType<SlackApi["botsInfo"]>>,
+    async authTest(token) {
+      const { body, headers } = await call("auth.test", token);
+      const header = headers.get("x-oauth-scopes");
+      const scopes = header === null ? {} : { scopes: header.split(",").map((scope) => scope.trim()).filter(Boolean) };
+      return { ...(body as Awaited<ReturnType<SlackApi["authTest"]>>), ...scopes };
+    },
+    botsInfo: async (token, botId) => (await call("bots.info", token, `?bot=${encodeURIComponent(botId)}`)).body as Awaited<ReturnType<SlackApi["botsInfo"]>>,
   };
 }
 
-async function controlPlaneSlackUrls(context: InitContext): Promise<{ eventsUrl: string; interactivityUrl: string }> {
+/** The Slack URLs, and the ApiEndpoint output when there is one: only the Slack app step requires it (F26). */
+async function controlPlaneSlackUrls(context: InitContext): Promise<{ stackName: string; eventsUrl: string; interactivityUrl: string; apiEndpoint?: string }> {
   const stackName = environmentStackName(context.env, "control-plane");
   const outputs = await (await context.deployment()).deployer.outputs(stackName);
   const eventsUrl = outputs?.SlackEventsUrl;
@@ -152,7 +210,8 @@ async function controlPlaneSlackUrls(context: InitContext): Promise<{ eventsUrl:
   if (eventsUrl === undefined || interactivityUrl === undefined) {
     throw agentXError("CONFIG_INVALID", `stack ${stackName} reports no Slack URLs; the control-plane step must finish first, so run agentx init again`);
   }
-  return { eventsUrl, interactivityUrl };
+  const apiEndpoint = outputs?.ApiEndpoint;
+  return { stackName, eventsUrl, interactivityUrl, ...(apiEndpoint === undefined ? {} : { apiEndpoint }) };
 }
 
 export function slackAppStep(api: SlackApi): InitStep<InitContext> {
@@ -162,9 +221,12 @@ export function slackAppStep(api: SlackApi): InitStep<InitContext> {
     async run(context, progress) {
       const { env } = context;
       const { appName } = context.answers.slack;
-      const urls = await controlPlaneSlackUrls(context);
+      const { stackName, eventsUrl, interactivityUrl, apiEndpoint } = await controlPlaneSlackUrls(context);
+      if (apiEndpoint === undefined) {
+        throw agentXError("CONFIG_INVALID", `stack ${stackName} reports no ApiEndpoint; the control-plane step must finish first, so run agentx init again`);
+      }
       const resuming = progress.current().steps["slack-app"]?.status === "waiting";
-      const url = slackCreateAppUrl(slackAppManifest({ appName, ...urls }));
+      const url = slackCreateAppUrl(slackAppManifest({ appName, eventsUrl, interactivityUrl, signInCallbackUrl: slackSignInCallbackUrl(apiEndpoint) }));
       if (resuming) {
         context.write(`Continuing with the Slack app "${appName}". Once an admin approves it, install it from its Install App page.`);
         context.write(`If you have not created the app yet, open: ${url}`);
@@ -207,7 +269,7 @@ export function slackAppStep(api: SlackApi): InitStep<InitContext> {
         throw agentXError("CONFIG_INVALID", "nothing was saved; copy the Bot User OAuth Token from the AgentX app in the right workspace, then run agentx init again");
       }
 
-      await context.secrets.put(slackSecretName(env), JSON.stringify({ signingSecret, botToken }));
+      await context.secrets.put(slackSecretName(env), slackSecretWithBot(await context.secrets.get(slackSecretName(env)), { signingSecret, botToken }));
       await progress.update({ slack: { appId, teamId: auth.team_id, botUserId: auth.user_id } });
       return { status: "done", note: `Slack app ${appId} in workspace ${auth.team_id}` };
     },
