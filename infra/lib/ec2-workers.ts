@@ -1,3 +1,4 @@
+import { grantOpenRouterSecret } from "./openrouter.js";
 import {
   Aws,
   CfnOutput,
@@ -82,6 +83,7 @@ export class Ec2WorkerFoundation extends Construct {
       }),
       description: `AgentX ${naming.environmentTagValue} EC2 worker instances`,
     });
+    grantOpenRouterSecret(this, this.instanceRole);
     this.instanceRole.addToPolicy(new iam.PolicyStatement({
       sid: "EcrImageAccess",
       actions: ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],

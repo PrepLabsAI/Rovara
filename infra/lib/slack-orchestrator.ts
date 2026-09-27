@@ -1,3 +1,4 @@
+import { openRouterParameters, openRouterRoutingParameter } from "./openrouter.js";
 import {
   Aws,
   CfnOutput,
@@ -54,12 +55,15 @@ export class SlackOrchestratorStack extends Stack {
       type: "List<AWS::EC2::Subnet::Id>",
       description: "Private subnets with NAT egress, such as AgentXProductionFoundation's PrivateSubnetIds",
     });
+    const openRouter = openRouterParameters(this);
+    const openRouterProviders = openRouterRoutingParameter(this);
+    const classifierProvider = new CfnParameter(this, "GateClassifierProvider", { type: "String", default: "amazon-bedrock", allowedValues: ["amazon-bedrock", "openrouter"] });
     const modelProvider = new CfnParameter(this, "ModelProvider", { type: "String", default: "amazon-bedrock" });
     const modelId = new CfnParameter(this, "ModelId", { type: "String", default: "amazon.nova-pro-v1:0" });
     const gateClassifierModelId = new CfnParameter(this, "GateClassifierModelId", {
       type: "String",
       default: "amazon.nova-lite-v1:0",
-      description: "Small Bedrock model the action gate asks whether a member asked for a change",
+      description: "Small model the action gate asks whether a member asked for a change",
     });
 
     const securityGroup = new ec2.CfnSecurityGroup(this, "SecurityGroup", {
@@ -168,6 +172,9 @@ export class SlackOrchestratorStack extends Stack {
           { name: "SLACK_SECRET_ARN", value: secretArn.valueAsString },
           { name: "AGENTX_ORCHESTRATOR_PROVIDER", value: modelProvider.valueAsString },
           { name: "AGENTX_ORCHESTRATOR_MODEL", value: modelId.valueAsString },
+          { name: "AGENTX_OPENROUTER_SECRET_ARN", value: openRouter.secretArn.valueAsString },
+          { name: "AGENTX_OPENROUTER_PROVIDERS", value: openRouterProviders.valueAsString },
+          { name: "AGENTX_GATE_CLASSIFIER_PROVIDER", value: classifierProvider.valueAsString },
           { name: "AGENTX_GATE_CLASSIFIER_MODEL", value: gateClassifierModelId.valueAsString },
         ],
         logConfiguration: {

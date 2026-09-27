@@ -85,9 +85,9 @@ export function estimateMonthlyCost(models: InitAnswers["models"], usage = STATE
     ),
     priced("Workspace volumes", usage.keptWorkspaces * PRICES.workspaceGiB * PRICES.gp3GbMonth, `${usage.keptWorkspaces} kept workspaces x ${PRICES.workspaceGiB} GiB gp3 at $${PRICES.gp3GbMonth}/GB-month`),
     priced("API Gateway, Lambda, DynamoDB, SQS, Secrets Manager, KMS (including the invocation-signing key) and CloudWatch", PRICES.smallServicesMonth, "about, at this usage"),
-    perUse(`Orchestrator model (${models.orchestrator})`, models.orchestrator, ORCHESTRATOR_PER_TURN, usage.turnsPerMonth, "turns"),
-    perUse(`Classifier model (${models.classifier})`, models.classifier, CLASSIFIER_PER_CHECK, usage.turnsPerMonth, "checks"),
-    perUse(`Worker model (${models.worker})`, models.worker, WORKER_PER_SESSION, usage.workerSessionsPerMonth, "sessions"),
+    perUse(`Orchestrator model (${models.orchestrator})`, models.orchestrator, models.providers?.orchestrator === "openrouter" ? {} : ORCHESTRATOR_PER_TURN, usage.turnsPerMonth, "turns"),
+    perUse(`Classifier model (${models.classifier})`, models.classifier, models.providers?.classifier === "openrouter" ? {} : CLASSIFIER_PER_CHECK, usage.turnsPerMonth, "checks"),
+    perUse(`Worker model (${models.worker})`, models.worker, models.providers?.worker === "openrouter" ? {} : WORKER_PER_SESSION, usage.workerSessionsPerMonth, "sessions"),
   ];
   const totalCents = lines.reduce((sum, line) => sum + (line.usd === undefined ? 0 : cents(line.usd)), 0);
   return { lines, totalUsd: totalCents / 100, unpriced };
@@ -111,7 +111,8 @@ export function installPlanText(answers: InitAnswers, estimate: CostEstimate, no
     `- Settings under /agentx/${env}/`,
     `- In GitHub: an app named "${answers.github.appName}" owned by ${answers.github.account}, with read and write access to contents, pull requests and issues, and read access to metadata. No webhook.`,
     `- In Slack: an app named "${answers.slack.appName}".`,
-    `- Models: orchestrator ${answers.models.orchestrator}, classifier ${answers.models.classifier}, worker ${answers.models.worker}`,
+    `- Models: orchestrator ${answers.models.providers?.orchestrator ?? "amazon-bedrock"}/${answers.models.orchestrator}, classifier ${answers.models.providers?.classifier ?? "amazon-bedrock"}/${answers.models.classifier}, worker ${answers.models.providers?.worker ?? "amazon-bedrock"}/${answers.models.worker}`,
+    ...(answers.models.openRouter ? [`- OpenRouter: read existing secret ${answers.models.openRouter.secretArn}; provider allowlist ${answers.models.openRouter.providers?.join(", ") ?? "router-selected"}; fallbacks disabled, data_collection=deny`] : []),
     `- Alerts (subscribed in a later AgentX release): ${alerts}`,
     `- AgentX never answers itself or other bots. Mentions people post through other apps: ${answers.slack.appPostedMessages} (slack.appPostedMessages).`,
     ...notes.map((note) => `Note: ${note}`),

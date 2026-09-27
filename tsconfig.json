@@ -2,6 +2,7 @@
   "files": [],
   "references": [
     { "path": "packages/contracts" },
+    { "path": "packages/model-runtime" },
     { "path": "packages/gateway" },
     { "path": "packages/broker" },
     { "path": "packages/worker" },

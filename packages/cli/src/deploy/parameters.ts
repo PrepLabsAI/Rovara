@@ -5,6 +5,8 @@
 import { CONTROL_PLANE_FOUNDATION_PARAMETERS, ImageDigest, environmentStackName } from "@agentx/contracts";
 import type { ReleaseManifest, StackPart } from "@agentx/contracts";
 
+import type { ModelsAnswers } from "./answer-schemas.js";
+
 export type StackOutputs = Record<string, string>;
 
 export type DeployPart = StackPart;
@@ -16,7 +18,7 @@ export interface InstallAnswers {
   /** default "aws" */
   partition?: string;
   release: ReleaseManifest;
-  models: { orchestrator: string; classifier: string; worker: string };
+  models: ModelsAnswers;
   identity:
     | { mode: "cognito" }
     | {
@@ -179,11 +181,15 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
     ...packageParameters(answers.release, part, outputs, answers.env),
   };
 
+  const openRouter = answers.models.openRouter;
+  const secret = openRouter ? { OpenRouterSecretArn: openRouter.secretArn } : {};
+  const routing = openRouter?.providers ? { OpenRouterProviders: openRouter.providers.join(",") } : {};
   switch (part) {
     case "access":
       return { ...base, OperatorPrincipalArn: answers.operatorPrincipalArn ?? "" };
 
     case "foundation":
+      return { ...base, ...secret };
     case "identity":
       return base;
 
@@ -198,6 +204,7 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
           : { issuer: answers.identity.issuer, audience: answers.identity.audience };
       return {
         ...base,
+        ...secret,
         OidcIssuer: oidc.issuer,
         OidcAudience: oidc.audience,
         ...adminParameters(answers.identity),
@@ -215,8 +222,9 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
       return {
         ...base,
         WorkerImageUri: resolvedImage(answers, "worker", outputs),
-        ModelProvider: "amazon-bedrock",
+        ModelProvider: answers.models.providers?.worker ?? "amazon-bedrock",
         ModelId: answers.models.worker,
+        ...secret, ...routing,
       };
     }
 
@@ -233,8 +241,10 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
         SlackSecretArn: required(outputs, "control-plane", "SlackSecretArn", answers.env),
         VpcId: required(outputs, "foundation", "VpcId", answers.env),
         PrivateSubnetIds: required(outputs, "foundation", "PrivateSubnetIds", answers.env),
-        ModelProvider: "amazon-bedrock",
+        ModelProvider: answers.models.providers?.orchestrator ?? "amazon-bedrock",
         ModelId: answers.models.orchestrator,
+        ...secret, ...routing,
+        ...(answers.models.providers?.classifier ? { GateClassifierProvider: answers.models.providers.classifier } : {}),
         GateClassifierModelId: answers.models.classifier,
       };
     }

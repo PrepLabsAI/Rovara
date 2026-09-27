@@ -1,6 +1,7 @@
 import { DescribeStacksCommand, type CloudFormationClient } from "@aws-sdk/client-cloudformation";
 import { GetCallerIdentityCommand, type STSClient } from "@aws-sdk/client-sts";
 import { agentXError, DEFAULT_ENVIRONMENT, type StackPart } from "@agentx/contracts";
+import { ModelsAnswersSchema } from "../deploy/answer-schemas.js";
 import { writeEnvironmentCache } from "./cache.js";
 import { withEnvironmentLock } from "./lock.js";
 import type { ParameterStore } from "./parameter-store.js";
@@ -121,6 +122,23 @@ export async function adoptEnvironment(input: {
     const slack = await healthyStack(input.stacks, names.slack);
     const issuer = required(control, names["control-plane"], "parameters", "OidcIssuer");
     const audience = required(control, names["control-plane"], "parameters", "OidcAudience");
+    const providers = {
+      orchestrator: slack.parameters.ModelProvider ?? "amazon-bedrock",
+      classifier: slack.parameters.GateClassifierProvider ?? "amazon-bedrock",
+      worker: runtime.parameters.ModelProvider ?? "amazon-bedrock",
+    };
+    const secretArn = slack.parameters.OpenRouterSecretArn || runtime.parameters.OpenRouterSecretArn;
+    const routing = slack.parameters.OpenRouterProviders || runtime.parameters.OpenRouterProviders;
+    if (slack.parameters.OpenRouterSecretArn && runtime.parameters.OpenRouterSecretArn && slack.parameters.OpenRouterSecretArn !== runtime.parameters.OpenRouterSecretArn) {
+      throw agentXError("CONFIG_INVALID", "OpenRouter secret references differ between worker and Slack stacks; align them before adopting");
+    }
+    const models = ModelsAnswersSchema.parse({
+      orchestrator: required(slack, names.slack, "parameters", "ModelId"),
+      classifier: required(slack, names.slack, "parameters", "GateClassifierModelId"),
+      worker: required(runtime, names.runtime, "parameters", "ModelId"),
+      ...(Object.values(providers).some((provider) => provider !== "amazon-bedrock") ? { providers } : {}),
+      ...(secretArn ? { openRouter: { secretArn, ...(routing ? { providers: routing.split(",") } : {}) } } : {}),
+    });
     const settings: EnvironmentSettings = {
       schemaVersion: 1,
       env: input.env,
@@ -132,11 +150,7 @@ export async function adoptEnvironment(input: {
       stacks: { ...names },
       controlPlaneUrl: required(control, names["control-plane"], "outputs", "ApiEndpoint"),
       identity: { mode: issuer.startsWith("https://cognito-idp.") ? "cognito" : "oidc", issuer, audience, clientId: input.clientId ?? audience },
-      models: {
-        orchestrator: required(slack, names.slack, "parameters", "ModelId"),
-        classifier: required(slack, names.slack, "parameters", "GateClassifierModelId"),
-        worker: required(runtime, names.runtime, "parameters", "ModelId"),
-      },
+      models,
       updatedAt: new Date(now()).toISOString(),
     };
     await writeEnvironmentSettings(input.store, settings, { createOnly: true });

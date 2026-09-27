@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ModelsAnswersSchema } from "../deploy/answer-schemas.js";
 import { agentXError, EnvironmentNameSchema, environmentSettingsPrefix } from "@agentx/contracts";
 import { ParameterExistsError, type ParameterStore } from "./parameter-store.js";
 
@@ -20,7 +21,7 @@ export const EnvironmentSettingsSchema = z.object({
     audience: z.string().min(1).max(256),
     clientId: z.string().min(1).max(256),
   }).strict(),
-  models: z.object({ orchestrator: z.string().min(1), classifier: z.string().min(1), worker: z.string().min(1) }).strict(),
+  models: ModelsAnswersSchema,
   alertAddress: z.string().min(1).optional(),
   access: z
     .object({

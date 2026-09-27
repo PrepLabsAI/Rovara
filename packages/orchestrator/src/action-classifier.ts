@@ -1,4 +1,5 @@
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { createModelRuntimeWithFallback } from "@agentx/model-runtime";
 
 /**
  * What the classifier sees: the members' own messages and the pending call. Never a tool result.
@@ -137,8 +138,10 @@ export async function createModelClassifier(options: {
   /** Throw here, rather than on every call, when the runtime does not know the model. */
   failOnUnknownModel?: boolean;
 }): Promise<ActionClassifier> {
-  const runtime = options.modelRuntime ?? await ModelRuntime.create({ refreshOnCreate: false });
-  const model = runtime.getModel(options.model.provider, options.model.modelId);
+  const resolved = options.modelRuntime ? { runtime: options.modelRuntime, model: options.model }
+    : await createModelRuntimeWithFallback(options.model, "classifier");
+  const runtime = resolved.runtime;
+  const model = runtime.getModel(resolved.model.provider, resolved.model.modelId);
   if (!model && options.failOnUnknownModel === true) throw new ClassifierError("the classifier model is unavailable");
   const timeoutMs = usableClassifierTimeout(options.timeoutMs);
   return async (input) => {

@@ -1,3 +1,4 @@
+import { grantOpenRouterSecret } from "./openrouter.js";
 import { resolve } from "node:path";
 import {
   ArnFormat,
@@ -285,6 +286,7 @@ export class ControlPlaneStack extends Stack {
       }),
       description: "Hosted AgentX Slack orchestrator; the only principal allowed on /v1/service routes",
     });
+    grantOpenRouterSecret(this, slackOrchestratorRole);
     slackRequestQueue.grantConsumeMessages(slackOrchestratorRole);
     slackThreads.grantReadWriteData(slackOrchestratorRole);
     threadSessions.grantReadWrite(slackOrchestratorRole);

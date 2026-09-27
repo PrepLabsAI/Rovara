@@ -1,16 +1,17 @@
+import { DEFAULT_BEDROCK_MODELS } from "@agentx/model-runtime/config";
 // FR-016's questions, each with a flag (FR-020). Only flags the engineer typed arrive here, so a
 // commander default never silently skips a question. An alert webhook carries its integration
 // key, so it is a secret: it is never a flag value and never stored in the answers.
 import { agentXError, ImageDigest } from "@agentx/contracts";
-import { AlertEmailSchema, GITHUB_LOGIN_PATTERN } from "../deploy/answer-schemas.js";
+import { AlertEmailSchema, GITHUB_LOGIN_PATTERN, ModelsAnswersSchema } from "../deploy/answer-schemas.js";
 import { SecretAlreadyExistsError } from "../deploy/signing-key.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import { writeInstallAnswers, type InitAnswers } from "./install-state.js";
 import { secretFromSource, type Prompter, type SecretSource } from "./prompts.js";
 
-export const DEFAULT_ORCHESTRATOR_MODEL = "us.anthropic.claude-sonnet-4-6";
-export const DEFAULT_CLASSIFIER_MODEL = "amazon.nova-lite-v1:0";
-export const DEFAULT_WORKER_MODEL = "amazon.nova-pro-v1:0";
+export const DEFAULT_ORCHESTRATOR_MODEL = DEFAULT_BEDROCK_MODELS.orchestrator;
+export const DEFAULT_CLASSIFIER_MODEL = DEFAULT_BEDROCK_MODELS.classifier;
+export const DEFAULT_WORKER_MODEL = DEFAULT_BEDROCK_MODELS.worker;
 const GLM = "zai.glm-4.7";
 const HAIKU = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
 
@@ -33,6 +34,8 @@ export interface InitFlags {
   identity?: "cognito" | "oidc";
   oidcIssuer?: string; oidcAudience?: string; oidcClientId?: string; adminClaim?: string; adminValues?: string;
   orchestratorModel?: string; classifierModel?: string; workerModel?: string;
+  orchestratorProvider?: string; classifierProvider?: string; workerProvider?: string;
+  openrouterSecretArn?: string; openrouterProviders?: string;
   permissionBoundary?: string; operatorPrincipal?: string;
   alertEmail?: string;
   /** --alert-webhook-file / --alert-webhook-env: there is deliberately no flag that takes the address itself. */
@@ -114,9 +117,30 @@ export async function collectInitAnswers(input: {
     identity = { mode: "oidc", issuer, audience, clientId, adminClaim, adminValues };
   }
 
-  const orchestrator = await modelChoice(prompter, flags.orchestratorModel, "Orchestrator model", "--orchestrator-model", ORCHESTRATOR_MODEL_CHOICES, DEFAULT_ORCHESTRATOR_MODEL);
-  const classifier = await modelChoice(prompter, flags.classifierModel, "Action-gate classifier model", "--classifier-model", CLASSIFIER_MODEL_CHOICES, DEFAULT_CLASSIFIER_MODEL);
-  const worker = flags.workerModel ?? (await prompter.ask("Worker model id", { flag: "--worker-model", defaultValue: DEFAULT_WORKER_MODEL }));
+  const providers = {
+    orchestrator: flags.orchestratorProvider ?? "amazon-bedrock",
+    classifier: flags.classifierProvider ?? "amazon-bedrock",
+    worker: flags.workerProvider ?? "amazon-bedrock",
+  };
+  if (Object.values(providers).some((value) => value !== "amazon-bedrock" && value !== "openrouter")) {
+    throw agentXError("CONFIG_INVALID", "model providers must be amazon-bedrock or openrouter");
+  }
+  const orchestrator = providers.orchestrator === "openrouter"
+    ? flags.orchestratorModel ?? await prompter.ask("OpenRouter orchestrator model id", { flag: "--orchestrator-model" })
+    : await modelChoice(prompter, flags.orchestratorModel, "Orchestrator model", "--orchestrator-model", ORCHESTRATOR_MODEL_CHOICES, DEFAULT_ORCHESTRATOR_MODEL);
+  const classifier = providers.classifier === "openrouter"
+    ? flags.classifierModel ?? await prompter.ask("OpenRouter classifier model id", { flag: "--classifier-model" })
+    : await modelChoice(prompter, flags.classifierModel, "Action-gate classifier model", "--classifier-model", CLASSIFIER_MODEL_CHOICES, DEFAULT_CLASSIFIER_MODEL);
+  const worker = flags.workerModel ?? await prompter.ask("Worker model id", { flag: "--worker-model", ...(providers.worker === "amazon-bedrock" ? { defaultValue: DEFAULT_WORKER_MODEL } : {}) });
+  const usesOpenRouter = Object.values(providers).includes("openrouter");
+  const secretArn = flags.openrouterSecretArn ?? (usesOpenRouter ? await prompter.ask("OpenRouter Secrets Manager ARN (leave blank to use the default Bedrock model)", { flag: "--openrouter-secret-arn", defaultValue: "" }) : undefined);
+  if (flags.openrouterProviders && !secretArn) throw agentXError("CONFIG_INVALID", "--openrouter-providers requires --openrouter-secret-arn");
+  const parsedModels = ModelsAnswersSchema.safeParse({ orchestrator, classifier, worker,
+    ...(usesOpenRouter ? { providers } : {}),
+    ...(secretArn ? { openRouter: { secretArn, ...(flags.openrouterProviders ? { providers: flags.openrouterProviders.split(",") } : {}) } } : {}),
+  });
+  if (!parsedModels.success) throw agentXError("CONFIG_INVALID", "invalid model configuration; check providers and the OpenRouter secret ARN/provider slugs");
+
   if (orchestrator === GLM) notes.push(GLM_NOTE);
   if (classifier === HAIKU) notes.push(HAIKU_NOTE);
 
@@ -183,7 +207,7 @@ export async function collectInitAnswers(input: {
     schemaVersion: 1,
     env: input.env, region: input.region, account: input.account, engine, releaseVersion: input.releaseVersion,
     identity,
-    models: { orchestrator, classifier, worker },
+    models: parsedModels.data,
     ...(boundary === "" ? {} : { permissionsBoundaryArn: boundary }),
     ...(operator === "" ? {} : { operatorPrincipalArn: operator }),
     ...(workerImage === undefined && slackImage === undefined
@@ -211,6 +235,11 @@ const RESUME_CHECKS: Array<{ flag: string; key: keyof InitFlags; kind?: ResumeCh
   { flag: "--admin-claim", key: "adminClaim", stored: (a) => (a.identity.mode === "oidc" ? a.identity.adminClaim : undefined) },
   { flag: "--orchestrator-model", key: "orchestratorModel", stored: (a) => a.models.orchestrator },
   { flag: "--classifier-model", key: "classifierModel", stored: (a) => a.models.classifier },
+  { flag: "--orchestrator-provider", key: "orchestratorProvider", stored: (a) => a.models.providers?.orchestrator ?? "amazon-bedrock" },
+  { flag: "--classifier-provider", key: "classifierProvider", stored: (a) => a.models.providers?.classifier ?? "amazon-bedrock" },
+  { flag: "--worker-provider", key: "workerProvider", stored: (a) => a.models.providers?.worker ?? "amazon-bedrock" },
+  { flag: "--openrouter-secret-arn", key: "openrouterSecretArn", stored: (a) => a.models.openRouter?.secretArn },
+  { flag: "--openrouter-providers", key: "openrouterProviders", stored: (a) => a.models.openRouter?.providers?.join(",") },
   { flag: "--worker-model", key: "workerModel", stored: (a) => a.models.worker },
   { flag: "--permission-boundary", key: "permissionBoundary", stored: (a) => a.permissionsBoundaryArn ?? "" },
   { flag: "--operator-principal", key: "operatorPrincipal", stored: (a) => a.operatorPrincipalArn ?? "" },

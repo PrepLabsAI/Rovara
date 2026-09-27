@@ -1,3 +1,5 @@
+import { CfnCondition, Fn } from "aws-cdk-lib";
+import { openRouterParameters, openRouterRoutingParameter } from "./openrouter.js";
 import { CfnParameter, Stack, type StackProps, aws_ssm as ssm } from "aws-cdk-lib";
 import type { Construct } from "constructs";
 import { WORKER_SETTING_PARAMETERS } from "@agentx/contracts";
@@ -43,7 +45,13 @@ export class WorkerSettingsStack extends Stack {
       stringValue: imageUri.valueAsString,
       description: "AgentX worker image URI pinned by digest, for EC2 workers",
     });
+    const { secretArn } = openRouterParameters(this);
+    const providers = openRouterRoutingParameter(this);
+    const hasSecret = new CfnCondition(this, "HasOpenRouterSecret", { expression: Fn.conditionNot(Fn.conditionEquals(secretArn.valueAsString, "")) });
+    const hasProviders = new CfnCondition(this, "HasOpenRouterProviders", { expression: Fn.conditionNot(Fn.conditionEquals(providers.valueAsString, "")) });
     const workerSettings: Array<[string, keyof typeof WORKER_SETTING_PARAMETERS, string]> = [
+      ["WorkerOpenRouterSecretParameter", "openRouterSecretArn", Fn.conditionIf(hasSecret.logicalId, secretArn.valueAsString, "none").toString()],
+      ["WorkerOpenRouterProvidersParameter", "openRouterProviders", Fn.conditionIf(hasProviders.logicalId, providers.valueAsString, "none").toString()],
       ["WorkerModelProviderParameter", "modelProvider", modelProvider.valueAsString],
       ["WorkerModelIdParameter", "modelId", modelId.valueAsString],
       ["WorkerPromptCacheRetentionParameter", "promptCacheRetention", promptCacheRetention.valueAsString],

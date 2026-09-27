@@ -111,7 +111,7 @@ function stats(details: TurnDetails): string {
 function usage(details: TurnDetails): string {
   if (details.usage !== undefined) {
     const tokens = details.usage.tokens;
-    return `${count(tokens.input)} input, ${count(tokens.output)} output, ${count(tokens.cacheRead)} cache-read tokens; $${details.usage.costUsd.toFixed(4)}`;
+    return `${count(tokens.input)} input, ${count(tokens.output)} output, ${count(tokens.cacheRead)} cache-read tokens; ${details.usage.costUsd === null ? "cost unavailable" : `$${details.usage.costUsd.toFixed(4)}${details.usage.costSource === "estimated" ? " (estimated)" : ""}`}`;
   }
   return details.usageError === undefined ? "not recorded" : "could not be read";
 }

@@ -33,6 +33,16 @@ async function run(stacks = liveStacks, store = new MemoryParameterStore()) {
 }
 
 describe("agentx env adopt", () => {
+  it("preserves deployed provider defaults and OpenRouter references in saved settings", async () => {
+    const stacks = structuredClone(liveStacks);
+    const secretArn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:openrouter-AbCdEf";
+    Object.assign(stacks.AgentXSlackOrchestrator!.parameters, { ModelProvider: "openrouter", OpenRouterSecretArn: secretArn, OpenRouterProviders: "anthropic" });
+    const { store, result } = await run(stacks);
+    const settings = await result;
+    expect(settings.models.providers).toEqual({ orchestrator: "openrouter", classifier: "amazon-bedrock", worker: "amazon-bedrock" });
+    expect(settings.models.openRouter).toEqual({ secretArn, providers: ["anthropic"] });
+    expect(await readEnvironmentSettings(store, "production")).toEqual(settings);
+  });
   it("uses the same stack names as the infra's legacy naming", () => {
     expect(ADOPTED_STACK_NAMES).toEqual(LEGACY_STACK_NAMES);
   });

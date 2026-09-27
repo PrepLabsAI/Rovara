@@ -1,3 +1,5 @@
+import { readOpenRouterKey, openRouterRouting, openRouterModel, MissingOpenRouterSecret, defaultBedrockModel } from "@agentx/model-runtime/config";
+import type { ModelsAnswers } from "../deploy/answer-schemas.js";
 // FR-015: everything init checks before it creates anything. Every problem is collected and
 // reported together, with what to change; cdk bootstrap (which creates the CDKToolkit stack) is
 // offered only when every other check has passed.
@@ -14,6 +16,7 @@ import type { Prompter } from "./prompts.js";
 export interface PrerequisiteChecks {
   /** A one-token Bedrock Converse call. */
   converse(modelId: string): Promise<void>;
+  openRouter?(modelId: string, config: NonNullable<ModelsAnswers["openRouter"]>): Promise<void>;
   /** A read-only AgentCore control-plane call in the region (ListAgentRuntimes, 1 result). */
   agentCore(): Promise<void>;
   /** The command's --version output, or undefined when it is not installed. */
@@ -146,8 +149,37 @@ export async function checkPrerequisites(input: {
   ];
   const seen = new Set<string>();
   for (const [role, modelId] of roles) {
-    if (seen.has(modelId)) continue;
-    seen.add(modelId);
+    const provider = answers.models.providers?.[role] ?? "amazon-bedrock";
+    const identifier = `${provider}/${modelId}`;
+    if (seen.has(identifier)) continue;
+    if (provider === "openrouter") {
+      try {
+        if (!answers.models.openRouter) {
+          openRouterModel(modelId);
+          throw new MissingOpenRouterSecret();
+        }
+        if (!checks.openRouter) throw new Error("OpenRouter check is not configured");
+        await checks.openRouter(modelId, answers.models.openRouter);
+        seen.add(identifier);
+        write(`ok ${identifier} supports tools and answers`);
+      } catch (error) {
+        if (error instanceof MissingOpenRouterSecret) {
+          const fallback = defaultBedrockModel(role);
+          try {
+            const fallbackKey = `${fallback.provider}/${fallback.modelId}`;
+            if (!seen.has(fallbackKey)) await checks.converse(fallback.modelId);
+            seen.add(fallbackKey);
+            write(`ok ${identifier}: OpenRouter secret missing; using default ${fallback.provider}/${fallback.modelId}`);
+          } catch (fallbackError) {
+            problems.push(modelCheckProblem({ modelId: fallback.modelId, role, region, error: fallbackError }));
+          }
+        } else {
+          problems.push(`${identifier}: OpenRouter preflight failed; check the model's tool support, secret read permission, key credits and routing allowlist`);
+        }
+      }
+      continue;
+    }
+    seen.add(identifier);
     try {
       try {
         await checks.converse(modelId);
@@ -253,6 +285,27 @@ export function awsPrerequisiteChecks(input: { region: string; account: string; 
   });
   const agentCore = new BedrockAgentCoreControlClient({ region: input.region });
   return {
+    async openRouter(modelId, config) {
+      openRouterModel(modelId);
+      const key = await readOpenRouterKey(config.secretArn);
+      const headers = { Authorization: `Bearer ${key}`, "Content-Type": "application/json" };
+      await withDeadline(async (signal) => {
+        const catalog = await input.fetch("https://openrouter.ai/api/v1/models", { headers, signal });
+        if (!catalog.ok) throw new Error("model catalog unavailable");
+        const body = await catalog.json() as { data?: Array<{ id: string; supported_parameters?: string[] }> };
+        if (!body.data?.some((model) => model.id === modelId && model.supported_parameters?.includes("tools"))) throw new Error("model must support tools");
+        const response = await input.fetch("https://openrouter.ai/api/v1/chat/completions", {
+          method: "POST", headers, signal,
+          body: JSON.stringify({ model: modelId, max_tokens: 16, messages: [{ role: "user", content: "Reply OK." }],
+            tools: [{ type: "function", function: { name: "ping", description: "Return OK", parameters: { type: "object", properties: {} } } }],
+            provider: openRouterRouting({ AGENTX_OPENROUTER_PROVIDERS: config.providers?.join(",") ?? "" }),
+          }),
+        });
+        if (!response.ok) throw new Error("model check failed");
+        const result = await response.json() as { choices?: unknown[]; error?: unknown };
+        if (result.error || !result.choices?.length) throw new Error("model returned no completion");
+      }, CONVERSE_DEADLINE_MS, "OpenRouter preflight timed out");
+    },
     async converse(modelId) {
       await withDeadline(
         (signal) => bedrock.send(new ConverseCommand({ modelId, messages: [{ role: "user", content: [{ text: "Reply with OK." }] }], inferenceConfig: { maxTokens: 1 } }), { abortSignal: signal }),

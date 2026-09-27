@@ -43,6 +43,18 @@ function harness() {
 }
 
 describe("Slack project model commands", () => {
+  it("distinguishes approved OpenRouter and Bedrock models by provider", async () => {
+    const h = harness();
+    const mixed = { ...options, approved: [options.approved[0]!, { provider: "openrouter", modelId: "balanced-v1", label: "Router" }] };
+    const api = h.dependencies.api;
+    h.dependencies.api = (...args) => ({ ...api(...args), listProjectModels: async () => mixed });
+    await processSlackRequest(message("<@UAGENTX> models"), h.dependencies, { finalAttempt: false });
+    expect(h.posts[0]).toContain("openrouter/balanced-v1");
+    await processSlackRequest(message("<@UAGENTX> use balanced-v1"), h.dependencies, { finalAttempt: false });
+    expect(h.selectProjectModel).not.toHaveBeenCalled();
+    await processSlackRequest(message("<@UAGENTX> use openrouter/balanced-v1"), h.dependencies, { finalAttempt: false });
+    expect(h.selectProjectModel).toHaveBeenCalledWith({ provider: "openrouter", modelId: "balanced-v1" });
+  });
   it("lists approved models without creating a workspace or invoking the orchestrator", async () => {
     const h = harness();
     await processSlackRequest(message("<@UAGENTX> models"), h.dependencies, { finalAttempt: false });

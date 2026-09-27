@@ -26,6 +26,19 @@ describe("EC2 worker infrastructure (issue #82), shown for a named environment",
     legacy = stacksOf(buildAgentXApp()).map((stack) => Template.fromStack(stack));
   }, 240_000);
 
+  it("grants OpenRouter secret access only when enabled and only to the configured ARN", () => {
+    for (const template of [foundation, controlPlane]) {
+      template.hasParameter("OpenRouterSecretArn", { Default: "" });
+      const policy = ofType(template, "AWS::IAM::Policy").find(([, resource]) => resource.Properties.PolicyName === "OpenRouterSecretRead")!;
+      expect(policy).toBeDefined();
+      expect(policy[1]).toHaveProperty("Condition");
+      expect(policy[1].Properties.PolicyDocument).toEqual({ Version: "2012-10-17", Statement: [{ Effect: "Allow", Action: "secretsmanager:GetSecretValue", Resource: { Ref: "OpenRouterSecretArn" } }] });
+    }
+    const serialized = JSON.stringify(runtime.toJSON());
+    expect(serialized).toContain("worker-openrouter-secret-arn");
+    expect(serialized).not.toContain("OPENROUTER_API_KEY");
+  });
+
   it("tags launched instances and root volumes for named environments only", () => {
     for (const [templates, env] of [[[foundation], "staging"], [legacy, undefined]] as const) {
       const launch = templates.flatMap((t) => ofType(t, "AWS::EC2::LaunchTemplate"))[0]![1];
@@ -49,6 +62,7 @@ describe("EC2 worker infrastructure (issue #82), shown for a named environment",
     ]);
     expect(all("AWS::SSM::Parameter").map((r) => r.Properties.Name).sort()).toEqual([
       "/agentx/production/worker-image", "/agentx/production/worker-model-id", "/agentx/production/worker-model-provider",
+      "/agentx/production/worker-openrouter-providers", "/agentx/production/worker-openrouter-secret-arn",
       "/agentx/production/worker-prompt-cache-retention",
     ]);
     expect(all("AWS::KMS::Alias").map((r) => r.Properties.AliasName).sort()).toEqual([
@@ -114,7 +128,7 @@ describe("EC2 worker infrastructure (issue #82), shown for a named environment",
     const actions = actionsOf(policies.flatMap(([, p]) => (p.Properties.PolicyDocument as { Statement: Array<{ Action: string | string[] }> }).Statement));
     expect(new Set(actions)).toEqual(new Set([
       "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:GetAuthorizationToken", "ecr:BatchImportUpstreamImage", "ecr:CreateRepository",
-      "bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream", "logs:CreateLogStream", "logs:PutLogEvents",
+      "bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream", "logs:CreateLogStream", "logs:PutLogEvents", "secretsmanager:GetSecretValue",
     ]));
     foundation.hasResourceProperties("AWS::Logs::LogGroup", { LogGroupName: "/agentx/staging/worker", RetentionInDays: 30 });
   });

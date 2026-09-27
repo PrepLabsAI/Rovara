@@ -1,10 +1,11 @@
 import { mkdir } from "node:fs/promises";
+import { createModelRuntimeWithFallback } from "@agentx/model-runtime";
 import { resolve } from "node:path";
 import {
   createAgentSessionFromServices,
   createAgentSessionRuntime,
   createAgentSessionServices,
-  ModelRuntime,
+  type ModelRuntime,
   SessionManager,
   type AgentSessionRuntime,
   type CreateAgentSessionRuntimeFactory,
@@ -83,7 +84,10 @@ export const MAX_VISIBLE_TOOLS = 40;
 export async function createOrchestratorRuntime(options: OrchestratorOptions): Promise<AgentSessionRuntime> {
   // Directories first, then the model check, then discovery: the order this function always had.
   await stateDirectories(options.stateDirectory);
-  const modelRuntime = options.modelRuntime ?? await ModelRuntime.create({ refreshOnCreate: false });
+  const resolved = options.modelRuntime ? { runtime: options.modelRuntime, model: options.model }
+    : await createModelRuntimeWithFallback(options.model, "orchestrator");
+  options = { ...options, model: resolved.model };
+  const modelRuntime = resolved.runtime;
   if (!modelRuntime.getModel(options.model.provider, options.model.modelId)) {
     throw agentXError("RUNTIME_UNAVAILABLE", "configured orchestrator model is unavailable");
   }
@@ -228,7 +232,7 @@ export async function createPiSessionRuntime(options: PiSessionOptions): Promise
       sessionManager,
       ...(sessionStartEvent === undefined ? {} : { sessionStartEvent }),
       model: selectedModel,
-      thinkingLevel: options.model.thinkingLevel ?? "medium",
+      thinkingLevel: options.model.thinkingLevel ?? (selectedModel.reasoning ? "medium" : "off"),
       noTools: "all",
       tools: options.customTools.map(({ name }) => name),
       customTools: options.customTools,

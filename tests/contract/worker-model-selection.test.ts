@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 import { resolveTaskModel } from "../../packages/worker/src/task-model.js";
 
 describe("worker task model resolution", () => {
+  it("lets Pi choose supported reasoning for an OpenRouter project model", () => {
+    expect(resolveTaskModel({ provider: "openrouter", modelId: "qwen/qwen3-coder" }, {})).not.toHaveProperty("thinkingLevel");
+  });
+
   it("uses the broker-resolved model while keeping deployment-owned session settings", () => {
     expect(resolveTaskModel(
       { provider: "amazon-bedrock", modelId: "project-model" },

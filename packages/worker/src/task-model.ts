@@ -9,7 +9,7 @@ export function resolveTaskModel(
   return {
     provider: selected?.provider ?? required(environment, "AGENTX_MODEL_PROVIDER"),
     modelId: selected?.modelId ?? required(environment, "AGENTX_MODEL_ID"),
-    thinkingLevel: "medium",
+    ...((selected?.provider ?? environment.AGENTX_MODEL_PROVIDER) === "openrouter" ? {} : { thinkingLevel: "medium" as const }),
     cacheRetention: effectiveCacheRetention(environment.PI_CACHE_RETENTION),
   };
 }
