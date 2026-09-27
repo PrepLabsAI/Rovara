@@ -1,6 +1,7 @@
 // Shared fakes for `agentx init` tests. Nothing here reaches AWS, GitHub or Slack.
 import type { Prompter } from "../../packages/cli/src/init/prompts.js";
 import type { InitAnswers } from "../../packages/cli/src/init/install-state.js";
+import type { PrerequisiteChecks } from "../../packages/cli/src/init/prerequisites.js";
 
 /** A complete, valid set of `agentx init` answers, for tests that round-trip or size-check them
  * rather than exercising the prompts that collect them. */
@@ -62,5 +63,22 @@ export function scriptedPrompter(script: ScriptedAnswer[]): Prompter & { asked: 
       if (typeof answer !== "string") throw new Error(`test setup: "${question}" wants text`);
       return answer;
     },
+  };
+}
+
+/** Every prerequisite passes; override one method to make it fail. Records every model checked. */
+export function passingChecks(overrides: Partial<PrerequisiteChecks> = {}): PrerequisiteChecks & { models: string[]; bootstraps: number } {
+  const state = { models: [] as string[], bootstraps: 0 };
+  return {
+    get models() { return state.models; },
+    get bootstraps() { return state.bootstraps; },
+    converse: async (modelId) => { state.models.push(modelId); },
+    agentCore: async () => undefined,
+    commandVersion: async (command) => (command === "node" ? "v22.20.0" : "10.9.0"),
+    cdkBootstrapped: async () => true,
+    runCdkBootstrap: async () => { state.bootstraps += 1; },
+    oidcDiscovery: async (issuer) => ({ issuer }),
+    sleep: async () => undefined,
+    ...overrides,
   };
 }
