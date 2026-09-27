@@ -212,7 +212,8 @@ describe("outdir context (buildAgentXApp forwards it to `new App({ outdir })`)",
     // Two apps built with no outdir context each get their own ephemeral directory: proof this is
     // still App's own default, not something buildAgentXApp now pins by accident.
     expect(first.outdir).not.toBe(second.outdir);
-  });
+    // Two named-environment syntheses bundle every Lambda twice; under full-suite load that passes 10 s.
+  }, 120_000);
 
   it("honors an explicit outdir context key", () => {
     const outdir = mkdtempSync(join(tmpdir(), "agentx-outdir-context-"));
