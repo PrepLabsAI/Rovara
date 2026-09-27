@@ -6,7 +6,7 @@
 // checks the interactivity URL, so AgentX sends both URLs a correctly signed Slack-style request
 // itself, then asks the engineer to confirm the Event Subscriptions page shows Verified.
 import { createHmac, randomBytes } from "node:crypto";
-import { agentXError, environmentStackName } from "@agentx/contracts";
+import { AgentXError, agentXError, environmentStackName, errorStatus } from "@agentx/contracts";
 import type { InitContext, InitSecrets } from "./context.js";
 import { checkSlackBotToken, checkSlackSigningSecret, secretFromSource } from "./prompts.js";
 import type { InitStep, ProgressHandle } from "./steps.js";
@@ -83,6 +83,22 @@ function parsedSecret(existing: string | undefined): Record<string, unknown> {
   }
 }
 
+/**
+ * Why the team ID could not be read, as a fixed phrase that never holds secret content, and what
+ * to do next. `env adopt` prints these instead of the message.
+ */
+export class SlackTeamIdError extends AgentXError {
+  constructor(message: string, readonly reason: string, readonly nextStep: string) {
+    super("CONFIG_INVALID", message, errorStatus("CONFIG_INVALID"));
+  }
+}
+
+/** A Slack error code as Slack documents them (lower case, digits, underscores); anything else is not echoed. */
+function safeSlackErrorCode(code: string | undefined): string {
+  if (code === undefined) return "no reason given";
+  return /^[a-z0-9_]{1,64}$/.test(code) ? code : "unrecognized error";
+}
+
 /** R11: a new bot token and signing secret, keeping the sign-in keys the developer sign-in step stored. */
 export function slackSecretWithBot(existing: string | undefined, bot: { signingSecret: string; botToken: string }): string {
   const current = parsedSecret(existing);
@@ -99,11 +115,26 @@ export function slackSecretWithSignIn(existing: string | undefined, client: { cl
 export async function readSlackTeamIdFromSecret(input: { secrets: Pick<InitSecrets, "get">; api: SlackApi; secretId: string }): Promise<{ teamId: string; scopes?: string[] }> {
   const token = parsedSecret(await input.secrets.get(input.secretId)).botToken;
   if (typeof token !== "string" || !token.startsWith("xoxb-")) {
-    throw agentXError("CONFIG_INVALID", `secret ${input.secretId} has no Slack bot token yet; finish the Slack app step of agentx init first`);
+    throw new SlackTeamIdError(
+      `secret ${input.secretId} has no Slack bot token yet; finish the Slack app step of agentx init first`,
+      "no bot token in the Slack secret",
+      "finish the Slack app step of agentx init, then run agentx signin enable slack",
+    );
   }
-  const auth = await input.api.authTest(token);
+  let auth: Awaited<ReturnType<SlackApi["authTest"]>>;
+  try {
+    auth = await input.api.authTest(token);
+  } catch {
+    // A network failure or an HTTP error from Slack; the underlying message is not kept.
+    throw new SlackTeamIdError("Slack auth.test could not be reached; try again in a minute", "Slack could not be reached", "check this computer's network access to slack.com, then run agentx signin enable slack");
+  }
   if (!auth.ok || auth.team_id === undefined) {
-    throw agentXError("CONFIG_INVALID", `Slack refused the stored bot token (${auth.error ?? "no reason given"}); run the Slack app step of agentx init again`);
+    const code = safeSlackErrorCode(auth.error);
+    throw new SlackTeamIdError(
+      `Slack refused the stored bot token (${code}); run the Slack app step of agentx init again`,
+      `Slack refused the bot token (${code})`,
+      "reinstall the Slack app and store its new token with the Slack app step of agentx init, then run agentx signin enable slack",
+    );
   }
   return { teamId: auth.team_id, ...(auth.scopes === undefined ? {} : { scopes: auth.scopes }) };
 }
@@ -269,6 +300,8 @@ export function slackAppStep(api: SlackApi): InitStep<InitContext> {
         throw agentXError("CONFIG_INVALID", "nothing was saved; copy the Bot User OAuth Token from the AgentX app in the right workspace, then run agentx init again");
       }
 
+      // Read, merge, write: a concurrent writer (this step alongside `agentx signin enable slack`)
+      // could lose an update. Left for admins to avoid by running one at a time.
       await context.secrets.put(slackSecretName(env), slackSecretWithBot(await context.secrets.get(slackSecretName(env)), { signingSecret, botToken }));
       await progress.update({ slack: { appId, teamId: auth.team_id, botUserId: auth.user_id } });
       return { status: "done", note: `Slack app ${appId} in workspace ${auth.team_id}` };

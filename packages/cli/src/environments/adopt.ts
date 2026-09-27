@@ -2,6 +2,7 @@ import { DescribeStacksCommand, type CloudFormationClient } from "@aws-sdk/clien
 import { GetCallerIdentityCommand, type STSClient } from "@aws-sdk/client-sts";
 import { agentXError, DEFAULT_ENVIRONMENT, type StackPart } from "@agentx/contracts";
 import { ModelsAnswersSchema } from "../deploy/answer-schemas.js";
+import { SlackTeamIdError } from "../init/slack-app.js";
 import { writeSlackTeamId } from "../signin/settings.js";
 import { writeEnvironmentCache } from "./cache.js";
 import { withEnvironmentLock } from "./lock.js";
@@ -174,8 +175,10 @@ export async function adoptEnvironment(input: {
       try {
         await writeSlackTeamId(input.store, input.env, await input.slackTeamId(slackSecretArn));
       } catch (error) {
-        // The error class only: a message could carry anything the Slack or AWS client put in it.
-        input.write?.(`Could not record the Slack team ID (${error instanceof Error ? error.name : "unknown error"}); agentx signin check reports it, and agentx signin enable slack records it`);
+        // A fixed reason, or else the error class only: a message could carry anything the Slack or AWS client put in it.
+        input.write?.(error instanceof SlackTeamIdError
+          ? `Could not record the Slack team ID (${error.reason}); ${error.nextStep}`
+          : `Could not record the Slack team ID (${error instanceof Error ? error.name : "unknown error"}); agentx signin check reports it, and agentx signin enable slack records it`);
       }
     }
     return settings;

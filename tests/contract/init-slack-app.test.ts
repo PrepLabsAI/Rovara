@@ -5,7 +5,7 @@ import { createSlackIngressHandler } from "../../packages/broker/src/aws/slack-i
 import { createSlackInteractivityHandler } from "../../packages/broker/src/aws/slack-interactivity.js";
 import {
   missingScopes, probeSlackUrls, readSlackTeamIdFromSecret, SIGN_IN_BOT_SCOPES, signSlackRequest, slackAppManifest, slackAppStep, slackBotDisplayName, slackCreateAppUrl,
-  slackSecretName, slackSecretWithBot, slackSecretWithSignIn, slackSignInCallbackUrl, slackWebApi, verifySlackUrls,
+  slackSecretName, slackSecretWithBot, SlackTeamIdError, slackSecretWithSignIn, slackSignInCallbackUrl, slackWebApi, verifySlackUrls,
 } from "../../packages/cli/src/init/slack-app.js";
 import { emptyProgress } from "../../packages/cli/src/init/install-state.js";
 import {
@@ -313,6 +313,15 @@ describe("Slack sign-in support in the app (FR-044, R10, R11)", () => {
     try { await readSlackTeamIdFromSecret({ secrets, api: refused, secretId: SLACK_SECRET }); } catch (error) { message = (error as Error).message; }
     expect(message).toContain("Slack refused the stored bot token (invalid_auth); run the Slack app step of agentx init again");
     expect(message).not.toContain(TEST_BOT_TOKEN);
+  });
+
+  it("reports an HTTP failure from Slack as unreachable, with a fixed reason (fix round 1)", async () => {
+    const secrets = memoryInitSecrets({ [SLACK_SECRET]: JSON.stringify({ signingSecret: TEST_SIGNING_SECRET, botToken: TEST_BOT_TOKEN }) });
+    const api = slackWebApi(async () => new Response("", { status: 503 }));
+    const error = await readSlackTeamIdFromSecret({ secrets, api, secretId: SLACK_SECRET }).then(() => undefined, (caught: unknown) => caught);
+    expect(error).toBeInstanceOf(SlackTeamIdError);
+    expect((error as SlackTeamIdError).reason).toBe("Slack could not be reached");
+    expect((error as SlackTeamIdError).message).not.toContain(TEST_BOT_TOKEN);
   });
 
   it("names the sign-in scopes the app is missing", () => {

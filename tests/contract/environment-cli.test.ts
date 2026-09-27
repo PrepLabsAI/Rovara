@@ -228,7 +228,7 @@ describe("agentx env adopt", () => {
       { ...io, fetchImplementation, environments: { store, home: await home(), stacks: withSecret, sts: identity, slackSecrets } },
     );
     expect(code).toBe(0);
-    expect(io.err.join("")).toBe("Could not record the Slack team ID (AgentXError); agentx signin check reports it, and agentx signin enable slack records it\n");
+    expect(io.err.join("")).toBe("Could not record the Slack team ID (no bot token in the Slack secret); finish the Slack app step of agentx init, then run agentx signin enable slack\n");
     expect(store.values.has("/agentx/production/slack/teamId")).toBe(false);
     expect(store.values.has("/agentx/production/settings")).toBe(true);
   });
