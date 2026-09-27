@@ -1,10 +1,17 @@
 // Shared fakes for the developer sign-in (spec 025 phase 25a). Nothing here reaches AWS, Slack or
 // any identity provider.
-import { generateKeyPairSync, sign as cryptoSign, type KeyObject } from "node:crypto";
+import { createHash, generateKeyPairSync, sign as cryptoSign, type KeyObject } from "node:crypto";
 import { GetPublicKeyCommand, SignCommand } from "@aws-sdk/client-kms";
 import { SignJWT, UnsecuredJWT, createLocalJWKSet, type JWTHeaderParameters, type JWTVerifyGetKey } from "jose";
+import type { HttpApiV2Event } from "../../packages/broker/src/aws/lambda.js";
+import { oidcSignInProvider, slackSignInProvider } from "../../packages/broker/src/developer/providers.js";
+import type { DeveloperIdentityDependencies, HttpResult } from "../../packages/broker/src/developer/server.js";
+import { createDeveloperIdentityHandler } from "../../packages/broker/src/developer/server.js";
+import { slackDirectory } from "../../packages/broker/src/developer/slack-directory.js";
+import { DeveloperSignInStore } from "../../packages/broker/src/developer/store.js";
 import type { PublicSigningJwk, TokenSigner } from "../../packages/broker/src/developer/tokens.js";
 import { kmsTokenSigner } from "../../packages/broker/src/developer/tokens.js";
+import { FakeDynamoDb } from "./fake-dynamodb.js";
 
 export const T0 = Date.parse("2026-09-27T12:00:00.000Z");
 export const API = "https://abc123.execute-api.us-east-1.amazonaws.com";
@@ -103,7 +110,8 @@ const form = (init: RequestInit | undefined) => new URLSearchParams(typeof init?
 export interface FakeSlackUser { userId: string; teamId?: string; name: string; email?: string; emailVerified?: boolean; deleted?: boolean; isBot?: boolean; enterpriseTeams?: string[] }
 
 /** Slack's OpenID Connect and Web API, as far as the sign-in uses them. */
-export function fakeSlack(options: { users: FakeSlackUser[]; channels?: Record<string, string[]>; scopes?: string[] }) {
+export function fakeSlack(options: { users: FakeSlackUser[]; channels?: Record<string, string[]>; scopes?: string[]; now?: () => number }) {
+  const issuedAt = () => Math.floor((options.now ?? Date.now)() / 1000);
   const signer = signingKey();
   const codes = new Map<string, { user: FakeSlackUser; nonce: string; redirectUri: string; teamId: string; idToken?: string }>();
   const state = { down: false, rateLimited: false, secretSeen: [] as string[], botError: undefined as string | undefined };
@@ -130,7 +138,7 @@ export function fakeSlack(options: { users: FakeSlackUser[]; channels?: Record<s
         ...(grant.user.email === undefined ? {} : { email: grant.user.email, email_verified: grant.user.emailVerified ?? true }),
         "https://slack.com/user_id": grant.user.userId, "https://slack.com/team_id": grant.teamId,
       }).setProtectedHeader({ alg: "RS256", kid: signer.kid }).setIssuer("https://slack.com").setAudience(SLACK_CLIENT_ID)
-        .setSubject(grant.user.userId).setIssuedAt().setExpirationTime("5m").sign(signer.keys.privateKey);
+        .setSubject(grant.user.userId).setIssuedAt(issuedAt()).setExpirationTime(issuedAt() + 300).sign(signer.keys.privateKey);
       return Response.json({ ok: true, access_token: "xoxp-user-token-unused", id_token: idToken });
     }
     if (bearer !== `Bearer ${BOT_TOKEN}`) return Response.json({ ok: false, error: "invalid_auth" });
@@ -186,7 +194,8 @@ export function fakeSlack(options: { users: FakeSlackUser[]; channels?: Record<s
 export interface FakeOidcUser { sub: string; name?: string; email?: string; email_verified?: boolean; groups?: string[] }
 
 /** A company OIDC provider with discovery, a token endpoint (client_secret_basic) and keys. */
-export function fakeOidc(options: { users: FakeOidcUser[]; clientSecret?: string }) {
+export function fakeOidc(options: { users: FakeOidcUser[]; clientSecret?: string; now?: () => number }) {
+  const issuedAt = () => Math.floor((options.now ?? Date.now)() / 1000);
   const signer = signingKey();
   const codes = new Map<string, { user: FakeOidcUser; nonce: string; redirectUri: string; idToken?: string }>();
   const state = { down: false, authorizations: [] as string[] };
@@ -208,7 +217,7 @@ export function fakeOidc(options: { users: FakeOidcUser[]; clientSecret?: string
       if (grant.idToken !== undefined) return Response.json({ access_token: "unused", token_type: "Bearer", id_token: grant.idToken });
       const { sub, ...claims } = grant.user;
       const idToken = await new SignJWT({ ...claims, nonce: grant.nonce }).setProtectedHeader({ alg: "RS256", kid: signer.kid })
-        .setIssuer(OIDC_ISSUER).setAudience(OIDC_CLIENT_ID).setSubject(sub).setIssuedAt().setExpirationTime("5m").sign(signer.keys.privateKey);
+        .setIssuer(OIDC_ISSUER).setAudience(OIDC_CLIENT_ID).setSubject(sub).setIssuedAt(issuedAt()).setExpirationTime(issuedAt() + 300).sign(signer.keys.privateKey);
       return Response.json({ access_token: "unused", token_type: "Bearer", id_token: idToken });
     }
     return undefined;
@@ -228,6 +237,98 @@ export function fakeOidc(options: { users: FakeOidcUser[]; clientSecret?: string
       const redirectUri = url.searchParams.get("redirect_uri") ?? "";
       codes.set(code, { user: found, nonce: url.searchParams.get("nonce") ?? "", redirectUri, ...(overrides.idToken === undefined ? {} : { idToken: overrides.idToken }) });
       return `${redirectUri}?code=${code}&state=${url.searchParams.get("state") ?? ""}`;
+    },
+  };
+}
+
+export function httpEvent(method: "GET" | "POST", pathAndQuery: string, body?: Record<string, string>): HttpApiV2Event {
+  const url = new URL(pathAndQuery, API);
+  return {
+    version: "2.0",
+    rawPath: url.pathname,
+    rawQueryString: url.search.slice(1),
+    headers: body === undefined ? {} : { "content-type": "application/x-www-form-urlencoded" },
+    ...(body === undefined ? {} : { body: Buffer.from(new URLSearchParams(body).toString()).toString("base64"), isBase64Encoded: true }),
+    requestContext: { requestId: "req-1", http: { method } },
+  };
+}
+
+export const CLI_REDIRECT = "http://127.0.0.1:49152/callback";
+export const VERIFIER = "v".repeat(64);
+export const CHALLENGE = createHash("sha256").update(VERIFIER).digest("base64url");
+
+export function authorizeQuery(overrides: Record<string, string> = {}): string {
+  return `/v1/auth/authorize?${new URLSearchParams({
+    response_type: "code", client_id: "agentx-cli", redirect_uri: CLI_REDIRECT, code_challenge: CHALLENGE, code_challenge_method: "S256", state: "cli-state", ...overrides,
+  }).toString()}`;
+}
+
+/** The sign-in server with fake Slack, fake OIDC, fake DynamoDB and the fake KMS signer. */
+export function identityHarness(options: {
+  slack?: boolean; teamId?: string | undefined; oidc?: { requiredClaim?: string; requiredValues?: string[] };
+  slackUsers?: FakeSlackUser[]; oidcUsers?: FakeOidcUser[]; channels?: Record<string, string[]>;
+  slackCredentials?: { clientId?: string; clientSecret?: string };
+} = {}) {
+  let clock = T0;
+  const now = () => clock;
+  const db = new FakeDynamoDb();
+  const slack = fakeSlack({ users: options.slackUsers ?? [], now, ...(options.channels ? { channels: options.channels } : {}) });
+  const oidc = fakeOidc({ users: options.oidcUsers ?? [], now });
+  const fetch = routeFetch(slack.handler, oidc.handler);
+  const signer = localSigner();
+  const logs: Array<Record<string, unknown>> = [];
+  const teamId = "teamId" in options ? options.teamId : TEAM;
+  const providers: DeveloperIdentityDependencies["providers"] = {
+    slack: slackSignInProvider({ teamId, credentials: async () => options.slackCredentials ?? { clientId: SLACK_CLIENT_ID, clientSecret: SLACK_CLIENT_SECRET }, fetch, jwks: slack.jwks, now }),
+    ...(options.oidc === undefined ? {} : {
+      oidc: oidcSignInProvider({
+        issuer: OIDC_ISSUER, clientId: OIDC_CLIENT_ID, clientSecret: async () => OIDC_CLIENT_SECRET,
+        ...(options.oidc.requiredClaim === undefined ? {} : { requiredClaim: options.oidc.requiredClaim }),
+        requiredValues: options.oidc.requiredValues ?? [], fetch, jwksFor: () => oidc.jwks, now,
+      }),
+    }),
+  };
+  const deps: DeveloperIdentityDependencies = {
+    config: {
+      env: "staging", issuer: ISSUER,
+      slack: { enabled: options.slack ?? true, ...(teamId === undefined ? {} : { teamId }) },
+      ...(options.oidc === undefined ? {} : { oidc: { displayName: "Okta" } }),
+    },
+    store: new DeveloperSignInStore({ documentClient: db, tableName: "signin", now }),
+    signer,
+    providers,
+    directory: slackDirectory({ teamId, botToken: async () => BOT_TOKEN, fetch, now }),
+    now,
+    log: (entry) => logs.push(entry),
+  };
+  const handler = createDeveloperIdentityHandler(deps);
+  const http = async (event: HttpApiV2Event) => handler(event) as Promise<HttpResult>;
+  return {
+    db, slack, oidc, fetch, signer, logs, deps, handler, http,
+    tick: (ms: number) => { clock += ms; },
+    now,
+    /** GET authorize, follow to the provider, approve as `who`, follow the callback: the CLI's loopback URL. */
+    async signIn(method: "slack" | "oidc", who: string, extra: { teamId?: string; query?: Record<string, string> } = {}): Promise<URL> {
+      let response = await http(httpEvent("GET", authorizeQuery(extra.query)));
+      if (response.statusCode === 200) {
+        const link = new RegExp(`href="([^"]*method=${method})"`).exec(response.body)?.[1];
+        if (link === undefined) throw new Error(`test setup: no ${method} link on the method page`);
+        response = await http(httpEvent("GET", link.replaceAll("&amp;", "&")));
+      }
+      if (response.statusCode !== 302) return new URL(`${API}/unexpected-${response.statusCode}`);
+      const providerUrl = response.headers.location!;
+      if (providerUrl.startsWith(CLI_REDIRECT)) return new URL(providerUrl);
+      const callback = method === "slack" ? slack.approve(providerUrl, who, extra.teamId === undefined ? {} : { teamId: extra.teamId }) : oidc.approve(providerUrl, who);
+      const back = await http(httpEvent("GET", callback));
+      return new URL(back.headers.location ?? `${API}/no-redirect-${back.statusCode}`);
+    },
+    async exchange(code: string, overrides: Record<string, string> = {}) {
+      const response = await http(httpEvent("POST", "/v1/auth/token", { grant_type: "authorization_code", client_id: "agentx-cli", code, code_verifier: VERIFIER, redirect_uri: CLI_REDIRECT, ...overrides }));
+      return { status: response.statusCode, body: JSON.parse(response.body) as Record<string, unknown> };
+    },
+    async refresh(refreshToken: string) {
+      const response = await http(httpEvent("POST", "/v1/auth/token", { grant_type: "refresh_token", client_id: "agentx-cli", refresh_token: refreshToken }));
+      return { status: response.statusCode, body: JSON.parse(response.body) as Record<string, unknown> };
     },
   };
 }
