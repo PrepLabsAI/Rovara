@@ -90,6 +90,7 @@ export class SessionLifecycle extends Construct {
       stepsFunctionArn: this.steps.functionArn,
       workspaceKeyArn: workspaceKmsKeyArn.valueAsString,
       environmentTag: naming.environmentTagValue,
+      ...(naming.env === undefined ? {} : { env: naming.env }),
       resourcePrefix: naming.resourcePrefix,
     };
     const ec2Arn = (resource: string) => `arn:${Aws.PARTITION}:ec2:${Aws.REGION}:${Aws.ACCOUNT_ID}:${resource}`;

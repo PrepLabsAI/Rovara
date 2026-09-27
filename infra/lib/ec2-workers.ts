@@ -51,6 +51,7 @@ export class Ec2WorkerFoundation extends Construct {
       { key: "Application", value: "AgentX" },
       { key: "DeploymentMode", value: "ec2-ebs" },
       { key: "Environment", value: naming.environmentTagValue },
+      ...(naming.env === undefined ? [] : [{ key: "agentx:env", value: naming.env }]),
     ];
 
     // Workers take no ingress but the worker port, and only from the two callers below.

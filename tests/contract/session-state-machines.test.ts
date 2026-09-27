@@ -34,6 +34,20 @@ describe.each([["provisioner", provisioner], ["deleter", deleter]] as const)("%s
 describe("provisioner", () => {
   const states = provisioner.States;
 
+  it.each(["staging", "production", undefined])("tags instance and workspace volume creation for environment %s", (env) => {
+    const definition = provisionerDefinition({ ...props, ...(env === undefined ? {} : { env }) }) as unknown as Definition;
+    for (const [stateName, resourceType] of [["CreateVolume", "volume"], ["RunInstance", "instance"]]) {
+      const specs = definition.States[stateName!]!.Arguments!.TagSpecifications as Array<{ ResourceType: string; Tags: Array<{ Key: string; Value: string }> }>;
+      const tags = specs.find((spec) => spec.ResourceType === resourceType)!.Tags;
+      expect(tags).toEqual(expect.arrayContaining([
+        { Key: "Environment", Value: props.environmentTag },
+        { Key: "DeploymentMode", Value: "ec2-ebs" },
+        { Key: "agentx:workspace", Value: "{% $workspaceId %}" },
+      ]));
+      expect(tags.filter((tag) => tag.Key === "agentx:env")).toEqual(env === undefined ? [] : [{ Key: "agentx:env", Value: env }]);
+    }
+  });
+
   it("creates the volume only when the session has none, idempotently per generation", () => {
     expect(states.HasVolume!.Choices![0]).toMatchObject({ Next: "CreateVolume" });
     expect(states.HasVolume!.Default).toBe("LaunchConfiguration");

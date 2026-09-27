@@ -26,6 +26,21 @@ describe("EC2 worker infrastructure (issue #82), shown for a named environment",
     legacy = stacksOf(buildAgentXApp()).map((stack) => Template.fromStack(stack));
   }, 240_000);
 
+  it("tags launched instances and root volumes for named environments only", () => {
+    for (const [templates, env] of [[[foundation], "staging"], [legacy, undefined]] as const) {
+      const launch = templates.flatMap((t) => ofType(t, "AWS::EC2::LaunchTemplate"))[0]![1];
+      const data = launch.Properties.LaunchTemplateData as { TagSpecifications: Array<{ ResourceType: string; Tags: Array<{ Key: string; Value: string }> }> };
+      expect(data.TagSpecifications.map((s) => s.ResourceType).sort()).toEqual(["instance", "volume"]);
+      for (const spec of data.TagSpecifications) {
+        expect(spec.Tags.filter((tag) => tag.Key === "agentx:env")).toEqual(env === undefined ? [] : [{ Key: "agentx:env", Value: env }]);
+      }
+    }
+    // Check the actual lifecycle wiring, not just the standalone definition helper.
+    const definitions = ofType(controlPlane, "AWS::StepFunctions::StateMachine").map(([, r]) => JSON.stringify(r.Properties.DefinitionString).replaceAll("\\", ""));
+    const provisioner = definitions.find((definition) => definition.includes("createVolume"))!;
+    expect(provisioner.match(/"Key":"agentx:env","Value":"staging"/g)).toHaveLength(2);
+  });
+
   it("gives production the same resources under its own names", () => {
     const all = (type: string) => legacy.flatMap((template) => ofType(template, type).map(([, r]) => r));
     expect(all("AWS::EC2::LaunchTemplate").map((r) => r.Properties.LaunchTemplateName)).toEqual(["agentx-production-worker"]);

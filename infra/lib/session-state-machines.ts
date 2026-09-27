@@ -12,6 +12,8 @@ export interface SessionStateMachineProps {
   workspaceKeyArn: string;
   /** Tag values every instance and volume carries; IAM scopes terminate, attach and delete by them. */
   environmentTag: string;
+  /** Named install environment; absent for legacy deployments, as in app-level tagging. */
+  env?: string;
   resourcePrefix: string;
 }
 
@@ -34,6 +36,7 @@ function tags(props: SessionStateMachineProps, name: string, extra: Array<{ Key:
     { Key: "Application", Value: "AgentX" },
     { Key: "DeploymentMode", Value: "ec2-ebs" },
     { Key: "Environment", Value: props.environmentTag },
+    ...(props.env === undefined ? [] : [{ Key: "agentx:env", Value: props.env }]),
     ...extra,
   ];
 }
