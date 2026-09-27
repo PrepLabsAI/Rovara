@@ -39,6 +39,8 @@ export interface OrchestratorOptions {
   refreshConnectors?: readonly string[];
   /** Told about each connector whose discovery failed this turn, so the host can log it. */
   onConnectorUnavailable?: (failure: ConnectorUnavailable) => void;
+  /** Receives safe extension failure metadata, never Pi's raw error message or stack. */
+  onExtensionError?: (failure: ExtensionFailure) => void;
   /** Where replies are shown. "slack" adds the Slack reply style; absent, the prompt is unchanged. */
   replySurface?: ReplySurface;
   /** Spec 014: present only for a thread whose compute is not prepared yet. */
@@ -52,6 +54,13 @@ export interface OrchestratorOptions {
 }
 
 export type ReplySurface = "slack";
+
+export interface ExtensionFailure {
+  extension: string;
+  event: string;
+  /** Pi exposes no structured error class; do not infer one from message/stack text. */
+  errorName: "unknown";
+}
 
 /** Reply style for Slack threads (spec 014 FR-023). Trusted text, placed before the project instructions. */
 export const SLACK_REPLY_INSTRUCTIONS: readonly string[] = [
@@ -166,6 +175,8 @@ export async function createOrchestratorRuntime(options: OrchestratorOptions): P
     systemPrompt: orchestratorSystemPrompt(options.projectInstructions, manifest, options.replySurface),
     customTools,
     extensions: [boundaryExtension, ...(gate === undefined ? [] : [gate]), ...(recorder === undefined ? [] : [recorder.extension()])],
+    ...(options.onExtensionError === undefined ? {} : { onExtensionError: options.onExtensionError }),
+    ...(recorder === undefined ? {} : { turnRecorder: recorder }),
   });
 }
 
@@ -177,6 +188,8 @@ export interface PiSessionOptions {
   systemPrompt: string;
   customTools: ToolDefinition[];
   extensions: readonly InlineExtension[];
+  onExtensionError?: (failure: ExtensionFailure) => void;
+  turnRecorder?: TurnRecorder;
 }
 
 async function stateDirectories(stateDirectory: string): Promise<{ cwd: string; agentDirectory: string; sessions: string }> {
@@ -210,17 +223,34 @@ export async function createPiSessionRuntime(options: PiSessionOptions): Promise
         systemPrompt: options.systemPrompt,
       },
     });
+    const created = await createAgentSessionFromServices({
+      services,
+      sessionManager,
+      ...(sessionStartEvent === undefined ? {} : { sessionStartEvent }),
+      model: selectedModel,
+      thinkingLevel: options.model.thinkingLevel ?? "medium",
+      noTools: "all",
+      tools: options.customTools.map(({ name }) => name),
+      customTools: options.customTools,
+    });
+    // Bind once per created session, before bindExtensions emits session_start. The factory also
+    // runs on replacement/resume, so the listener never remains attached only to an old session.
+    const extensionNames = new Map(options.extensions.map((extension) => [`<inline:${extension.name}>`, extension.name]));
+    await created.session.bindExtensions({
+      onError: (error) => {
+        const failure: ExtensionFailure = {
+          extension: extensionNames.get(error.extensionPath) ?? "unknown",
+          event: /^[a-z][a-z_]{0,47}$/.test(error.event) ? error.event : "unknown",
+          errorName: "unknown",
+        };
+        try { options.onExtensionError?.(failure); } catch { /* Reporting must not break a turn. */ }
+        try {
+          options.turnRecorder?.recordingFailed(`handler_failed:${failure.extension}:${failure.event}`);
+        } catch { /* Independent sinks: a broken recorder cannot suppress the log. */ }
+      },
+    });
     return {
-      ...(await createAgentSessionFromServices({
-        services,
-        sessionManager,
-        ...(sessionStartEvent === undefined ? {} : { sessionStartEvent }),
-        model: selectedModel,
-        thinkingLevel: options.model.thinkingLevel ?? "medium",
-        noTools: "all",
-        tools: options.customTools.map(({ name }) => name),
-        customTools: options.customTools,
-      })),
+      ...created,
       services,
       diagnostics: services.diagnostics,
     };
