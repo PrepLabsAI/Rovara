@@ -70,6 +70,9 @@ export function createDispatcherHandler(dependencies: {
           await dependencies.markDelivered(record.id);
           continue;
         }
+        if (record.deploymentMode === "ec2-ebs") {
+          throw agentXError("RUNTIME_UNAVAILABLE", "dispatch to ec2-ebs workers is not supported yet");
+        }
         const response = await dependencies.invoke({
           runtimeArn: record.runtimeArn,
           endpointQualifier: record.endpointQualifier,

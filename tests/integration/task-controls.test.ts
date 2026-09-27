@@ -68,6 +68,7 @@ describe("task and lifecycle controls", () => {
     projects.register(admin, project(1), memberships);
     projects.register(admin, project(2), memberships);
     const ready = await registry.createDefault(workspace(developer.ownerKey));
+    if (ready.deploymentMode === "ec2-ebs") throw new Error("expected an AgentCore workspace");
     const stopRuntimeSession = vi.fn(async () => undefined);
     const lifecycle = new LifecycleService({ registry, memberships, stopRuntimeSession });
     const stopped = await lifecycle.stop(admin, ready.id);

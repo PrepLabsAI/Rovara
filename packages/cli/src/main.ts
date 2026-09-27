@@ -228,6 +228,10 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       const definition = await projectFromFile(options.file, globals.allowLoopback);
       const { settings, accessToken } = await authenticate(globals, services.tokenStore);
       const deploymentMode = WorkspaceDeploymentModeSchema.parse(options.deploymentMode);
+      if (deploymentMode === "ec2-ebs") {
+        // Its binding names a launch template and subnets, which these AgentCore flags cannot express.
+        throw agentXError("CONFIG_INVALID", "ec2-ebs projects cannot be registered from the CLI yet");
+      }
       const result = await registerProject({
         controlPlaneUrl: settings.controlPlaneUrl,
         accessToken,

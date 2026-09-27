@@ -3,8 +3,8 @@ import {
   AgentXNameSchema,
   WorkerInvocationSchema,
   agentXError,
+  type AgentCoreDeploymentMode,
   type WorkerInvocation,
-  type WorkspaceDeploymentMode,
   type WorkspaceInstance,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "./auth.js";
@@ -18,7 +18,7 @@ export interface AllocatedRuntime {
   runtimeArn: string;
   endpointQualifier: string;
   runtimeSessionId: string;
-  deploymentMode: WorkspaceDeploymentMode;
+  deploymentMode: AgentCoreDeploymentMode;
   capacityProviderArn?: string;
 }
 

@@ -1,4 +1,4 @@
-import { agentXError, type WorkspaceInstance } from "@agentx/contracts";
+import { agentXError, unhandledDeploymentMode, type WorkspaceInstance } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "./auth.js";
 import { type ProjectMembership } from "./authorization.js";
 import { authorizeProjectAdministrator } from "./projects.js";
@@ -20,10 +20,19 @@ export class LifecycleService {
     if (workspace.status !== "READY" || workspace.activeOperationId) {
       throw agentXError("WORKSPACE_BUSY", "cancel or finish active work before stopping compute");
     }
-    await this.dependencies.stopRuntimeSession({
-      runtimeArn: workspace.runtimeArn,
-      runtimeSessionId: workspace.runtimeSessionId,
-    });
+    switch (workspace.deploymentMode) {
+      case "instances-ebs":
+      case "demo-microvm":
+        await this.dependencies.stopRuntimeSession({
+          runtimeArn: workspace.runtimeArn,
+          runtimeSessionId: workspace.runtimeSessionId,
+        });
+        break;
+      case "ec2-ebs":
+        throw agentXError("RUNTIME_UNAVAILABLE", "stopping ec2-ebs compute is not supported yet");
+      default:
+        unhandledDeploymentMode(workspace);
+    }
     return this.dependencies.registry.setLifecycleStatus(workspace.id, "STOPPED");
   }
 }
