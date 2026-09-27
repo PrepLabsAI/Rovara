@@ -5,8 +5,10 @@
 **Status**: Draft for review
 **Input**: The owner's decisions of 2026-09-27 (developer hand-off first, then admin tools; private
 by default with share to channel; Sign in with Slack and company sign-in; confirmed admin changes),
-the owner's later decisions on the laptop-first MCP server and the developer task flow, and a code
-reading of mainline at `6f6acf9`.
+the owner's later decisions on the laptop-first MCP server and the developer task flow, the owner's
+review of this spec on 2026-09-27 (two confirmation methods with a full audit trail, view-only or
+continue sharing, distinct project errors, admin-changeable workspace limits), and a code reading of
+mainline at `6f6acf9`.
 **Constitution**: Version 2.1.0. This feature needs an amendment to Principles I, II and III
 (FR-050). The amendment ships in phase 25a, before any `/v1/dev/*` route is deployed.
 
@@ -100,6 +102,9 @@ pull request. Then do the same live against a throwaway environment (see Testing
    instructions, **Then** they run in the same workspace, on the same branch.
 6. **Given** another developer, **When** they ask for this task by ID, **Then** they are told the
    task was not found.
+7. **Given** a project name that does not exist, **When** the developer starts a task, **Then** they
+   get `PROJECT_NOT_FOUND`; **given** a project that exists but that they may not use, **Then** they
+   get `PROJECT_ACCESS_DENIED`, which says how to get access (FR-049).
 
 ---
 
@@ -131,35 +136,52 @@ were sent. With a worker that takes 90 seconds, check that the call returns at 6
 
 ---
 
-### User Story 3 - Share a Task to the Channel; Admins Can Require Sharing (Priority: P2)
+### User Story 3 - Share a Task to the Channel, View Only or Open to the Channel (Priority: P2)
 
 A developer starts a task with `share_to_channel: true`. AgentX posts in the project's Slack
 channel: "@Maya started a task from Claude Code: Fix the flaky retry test". It adds replies as the
-task runs, ends, and opens a PR. For the `ledger` project, the admin has turned on required sharing
-for compliance, so every task started from an AI tool is shared, whatever the developer asks.
+task runs, ends, and opens a PR. When sharing, the developer picks **view only** (the channel
+watches) or **continue** (teammates may mention AgentX in the thread to steer the task). For the
+`ledger` project, the admin has turned on required sharing for compliance and allowed view only, so
+every task started from an AI tool is shared read-only, whatever the developer asks.
 
 **Why this priority**: Tasks are private by default (owner decision 3), so sharing is what keeps the
-team aware. Required sharing is a compliance need, but only for some projects.
+team aware, and "continue" lets a teammate pick up a task without a new hand-off. Required sharing
+and the view-only limit are compliance needs, but only for some projects.
 
-**Independent Test**: With a fake Slack API, start a shared task and check the thread's messages
-through the task's life. Register a revision with required sharing, start a task with
-`share_to_channel: false`, and check that it is shared and that the result says why.
+**Independent Test**: With a fake Slack API, start a shared task in each mode and check the thread's
+messages through the task's life. In continue mode, post two mentions from two teammates while the
+task runs and check that they run one at a time, in order, each attributed to its author. Register a
+revision with required sharing and view only, start a task with `share_to_channel: false` and
+`share_mode: continue`, and check that it is shared view only and that the result says why.
 
 **Acceptance Scenarios**:
 
 1. **Given** `share_to_channel: true` and a project with one bound channel, **When** the task
-   starts, **Then** AgentX posts the start message in that channel within 10 seconds and replies in
-   its thread at each status change listed in FR-032.
+   starts, **Then** AgentX posts the start message in that channel within 10 seconds, says which
+   mode the thread is in, and replies in its thread at each status change listed in FR-032.
 2. **Given** a project with required sharing, **When** a developer starts a task without asking to
    share, **Then** the task is shared, and the result says `shared: true` with the reason
    `required by project`.
 3. **Given** a private task, **When** it runs, **Then** nothing is posted in Slack, and the task
    still has a turn record admins can read.
-4. **Given** a shared task's thread, **When** someone mentions AgentX in a reply there, **Then**
-   AgentX answers with a fixed notice (at most once an hour per thread) that the task belongs to the developer's AI tool and that a new message in the
-   channel starts a new thread workspace.
-5. **Given** a private task, **When** the developer calls `agentx_share_task`, **Then** the thread is
-   started with the current status, and later updates follow.
+4. **Given** a view-only thread, **When** someone mentions AgentX in a reply there, **Then** AgentX
+   answers with a fixed notice (at most once an hour per thread) that the task is driven from the
+   developer's AI tool and that a new message in the channel starts a new thread workspace.
+5. **Given** a continue thread, **When** a teammate mentions AgentX with a request, **Then** it runs
+   as an ordinary Slack turn on the task's workspace, the reply names the teammate, and the
+   operation and turn record name the teammate as requester.
+6. **Given** a continue thread and two mentions while the task is busy, **When** they are handled,
+   **Then** they run one at a time in the order Slack delivered them, each after the previous one
+   and any worker operation it started have ended.
+7. **Given** a continue thread, **When** the developer calls `agentx_get_task`, **Then** they see the
+   channel's turns (author, time, request and outcome), and they can still continue, cancel, open a
+   PR, switch the thread to view only, or close the task.
+8. **Given** a project that does not allow continue, **When** a developer asks for continue, **Then**
+   the thread is view only and the result says `share_mode: view` with the reason
+   `continue not allowed by project`.
+9. **Given** a private task, **When** the developer calls `agentx_share_task`, **Then** the thread is
+   started with the current status and the chosen mode, and later updates follow.
 
 ---
 
@@ -235,26 +257,29 @@ last and carry the confirmation machinery.
 
 **Independent Test**: For each change tool, against a fake control plane: the call returns a plan
 and changes nothing; applying without a valid confirmation changes nothing; each confirmation method
-(elicitation, Slack button, one-time code) applies it exactly once; an expired or reused
-confirmation is refused.
+(elicitation, Slack button) applies it exactly once; an expired, declined or reused confirmation is
+refused; and every request, whatever its outcome, has a complete audit record.
 
 **Acceptance Scenarios**:
 
 1. **Given** a change tool call, **When** the control plane receives it, **Then** it stores a
-   pending change with the exact effect and changes nothing yet.
+   pending change with the exact effect, writes its audit record, and changes nothing yet.
 2. **Given** an MCP client that declared the elicitation capability, **When** the change needs
-   confirmation, **Then** the server shows the effect in an elicitation form, and the change applies
-   only if the person accepts.
-3. **Given** a client without elicitation and an admin linked to a Slack user, **When** the change
-   needs confirmation, **Then** AgentX sends that admin a Slack direct message with the effect and a
-   Confirm button, and the change applies only when that same Slack user presses it.
-4. **Given** neither of those, **When** the change needs confirmation, **Then** the tool result gives
-   a confirmation link, the admin opens it and signs in again, the page shows the effect and a
-   one-time code, and the change applies only when the admin types that code into the AI tool.
-5. **Given** a session where no confirmation method is available, **When** tools are listed,
-   **Then** only the admin read tools are offered.
-6. **Given** a pending change, **When** 10 minutes pass or the state it planned against changes,
+   confirmation, **Then** the server shows the effect in an elicitation pop-up, and the change
+   applies only if the person accepts.
+3. **Given** a client without elicitation (or elicitation switched off) and an admin linked to a
+   Slack user, **When** the change needs confirmation, **Then** AgentX sends that admin a Slack
+   direct message with the effect and Confirm and Cancel buttons, and the change applies only when
+   that same Slack user presses Confirm.
+4. **Given** a session where neither method is available, **When** tools are listed, **Then** only
+   the admin read tools are offered.
+5. **Given** a pending change, **When** 10 minutes pass or the state it planned against changes,
    **Then** it can no longer be applied, and the admin is told to ask again.
+6. **Given** any change request, **When** it ends confirmed, declined, expired or failed, **Then**
+   its audit record shows who asked, from which client, the exact change, the method, the outcome
+   with timestamps and the result, and `agentx_admin_changes` returns it.
+7. **Given** an admin who asks to set the per-person workspace limit to 5, **When** they confirm,
+   **Then** the next workspace creation uses 5, with no CloudFormation change.
 
 ---
 
@@ -318,8 +343,19 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   reads it with `agentx_get_task`.
 - **A pending admin change goes stale.** The state it was planned against changed (a newer project
   revision, a changed binding). Applying it is refused with `CHANGE_STALE`.
-- **An admin presses a Slack Confirm button for another admin's change.** It is refused, and the
-  change stays pending.
+- **An admin presses a Slack Confirm button for another admin's change.** It is refused, recorded
+  in the change's audit trail, and the change stays pending.
+- **The admin's Slack Confirm button is pressed after the tool call stopped waiting.** The change
+  still applies if it is within its 10 minutes; `agentx_admin_changes` shows the result.
+- **The developer continues a task while a channel turn is running.** They get `TASK_BUSY`, naming
+  the teammate driving it and how many channel messages are queued; they can wait, cancel the
+  current operation, or switch the thread to view only.
+- **The developer switches a continue thread to view only.** Channel messages already queued get
+  the fixed notice instead of running.
+- **A teammate in a continue thread is not a member of the bound channel** (for example, a Slack
+  Connect guest). The ingress drops the message as it does today for any Slack turn.
+- **An admin lowers a workspace limit below the current count.** Existing workspaces keep running;
+  new ones are refused until the count is under the limit.
 - **The same laptop is signed in to two environments.** Each environment keeps its own tokens; the
   MCP server uses the environment named by `--env` or the default set by `agentx login`.
 - **Enterprise Grid.** A Slack sign-in whose team ID is another team in the same Grid organization is
@@ -400,6 +436,8 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
 - **FR-014**: The project definition MUST accept `developerTasks`, with:
   - `enabled` (default true): whether AI-tool tasks are allowed at all;
   - `share` (`optional` by default, or `required`);
+  - `shareMode`, with `default` (`view` by default, or `continue`) and `allowContinue` (default
+    true); with `allowContinue` false every shared task is view only;
   - `channelMembersMayUse` (default true).
 
   It is part of the revision, so changing it is a revision registration.
@@ -422,7 +460,9 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   as each Slack thread does, and a developer can run several tasks at once. The control plane MUST
   keep a task index (`DEVELOPER#{developerId}` / `TASK#{createdAt}#{taskId}`) with the project,
   workspace ID, title, client name, status, share state and starting revision.
-- **FR-018**: `POST tasks` MUST, in order: check the token; check FR-013 and `developerTasks.enabled`;
+- **FR-018**: `POST tasks` MUST, in order: check the token; check that the project exists
+  (`PROJECT_NOT_FOUND`), that the developer may use it (FR-013, `PROJECT_ACCESS_DENIED`) and that
+  `developerTasks.enabled` is true (`PROJECT_TASKS_DISABLED`);
   check sharing (FR-031); check the workspace limit (FR-020); create the task index entry, the
   workspace with a `developer` membership for its owner key, and an idempotency record keyed by the
   client's request ID, in one transaction; and return `STARTING` with the task ID. Preparing the
@@ -432,8 +472,8 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
 - **FR-019**: The instructions MUST be sent to the worker as the task prompt, unchanged, with the
   existing 65,536-byte limit. No AgentX model reads, rewrites or plans them. The worker gets the same
   tools and limits as a Slack task's worker.
-- **FR-020**: A developer task MUST count against the same workspace limits as Slack threads
-  (`limits.workspacesPerMember` and `limits.workspacesPerOrg`). A developer linked to a Slack user
+- **FR-020**: A developer task MUST count against the same workspace limits as Slack threads (by
+  default 3 per person and 20 per organization, FR-053). A developer linked to a Slack user
   MUST share that user's counter; an unlinked developer MUST have their own counter with the same
   limit.
 - **FR-021**: The task routes MUST reuse the existing handlers for operations, events, artifacts,
@@ -477,15 +517,15 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   | Tool | Inputs | Output |
   |---|---|---|
   | `agentx_whoami` | none | environment, developer name, sign-in method, linked Slack user, admin (yes or no), server and control-plane versions, upgrade notice |
-  | `agentx_list_projects` | none | per project: name, description, bound channels, `share` policy, whether tasks are enabled |
-  | `agentx_start_task` | `project`; `instructions` (up to 65,536 bytes); `title` (optional, up to 120 characters, else the first line of the instructions); `share_to_channel` (optional, default false); `channel` (optional); `wait_seconds` (optional, 0 to 600, default 0); `request_id` (optional UUID, else generated) | task ID, status, project, starting revision, `shared` and reason, thread link if shared; with a wait, the same as `agentx_get_task` plus `timed_out` |
-  | `agentx_get_task` | `task_id`; `events` (optional, 0 to 50, default 10) | status, failure if any, title, project, times, latest events, and once ended: summary (up to 4,000 characters), changed files with line counts, artifacts (name, size), pull requests (URL, state) |
+  | `agentx_list_projects` | none | per project: name, description, bound channels, `share` policy, `shareMode` policy, whether tasks are enabled |
+  | `agentx_start_task` | `project`; `instructions` (up to 65,536 bytes); `title` (optional, up to 120 characters, else the first line of the instructions); `share_to_channel` (optional, default false); `share_mode` (optional, `view` or `continue`, else the project's default); `channel` (optional); `wait_seconds` (optional, 0 to 600, default 0); `request_id` (optional UUID, else generated) | task ID, status, project, starting revision, `shared`, `share_mode` and the reason for any policy override, thread link if shared; with a wait, the same as `agentx_get_task` plus `timed_out` |
+  | `agentx_get_task` | `task_id`; `events` (optional, 0 to 50, default 10) | status, failure if any, title, project, times, latest events, and once ended: summary (up to 4,000 characters), changed files with line counts, artifacts (name, size), pull requests (URL, state); in continue mode, the channel's turns (author, time, request up to 300 characters, outcome) |
   | `agentx_wait_for_task` | `task_id`; `wait_seconds` (1 to 600) | as `agentx_get_task`, plus `timed_out` |
   | `agentx_list_tasks` | `project` (optional); `status` (optional); `limit` (1 to 50, default 20) | the developer's tasks, newest first: ID, title, project, status, times, shared |
   | `agentx_continue_task` | `task_id`; `instructions`; `wait_seconds` (optional) | as `agentx_start_task` |
   | `agentx_cancel_task` | `task_id` | status after the request |
   | `agentx_close_task` | `task_id` | status `CLOSED`; the workspace is released and stops counting against limits |
-  | `agentx_share_task` | `task_id`; `channel` (optional) | thread link |
+  | `agentx_share_task` | `task_id`; `share_mode` (optional); `channel` (optional) | thread link and mode; on a task already shared, it changes the mode (within the project's policy) |
   | `agentx_open_pull_request` | `task_id`; `title`; `body` (optional); `repository` (optional when the project has one repository); `draft` (optional, default true) | operation status, then PR URL once published |
 
   **Admin read tools** (no confirmation)
@@ -499,9 +539,11 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   | `agentx_admin_list_projects` | none | per project: latest revision, registration time, repositories, runtime mode, connector names and types, `developerTasks` settings |
   | `agentx_admin_list_channels` | none | per binding: channel ID and name, project, updated time |
   | `agentx_admin_list_credentials` | none | per credential: reference, type, secret name, registered time |
-  | `agentx_admin_list_workspaces` | `project` (optional); `status` (optional); `limit` (1 to 100) | per workspace: ID, project, origin, owner (thread link or developer name), status, last activity |
+  | `agentx_admin_list_workspaces` | `project` (optional); `status` (optional); `limit` (1 to 100) | per workspace: ID, project, origin, owner (thread link or developer name), status, last activity; the current workspace limits and counts |
+  | `agentx_admin_changes` | `since` (default 7 days ago); `until` (optional); `admin` (optional); `outcome` (optional); `limit` (1 to 100); `cursor` (optional) | admin change audit records (FR-051), newest first, plus the next cursor |
 
-  **Admin change tools** (each returns a plan, then applies only after confirmation, FR-039)
+  **Admin change tools** (each call plans the change, gets the confirmation and, only when
+  confirmed, applies it, all within the one call; FR-039 to FR-041)
 
   | Tool | Inputs | What the plan shows |
   |---|---|---|
@@ -513,31 +555,51 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   | `agentx_admin_grant_project_access` | `project`; `developer` (developer ID, email or Slack user) | the developer, the project and their current access |
   | `agentx_admin_revoke_project_access` | `project`; `developer` | the developer, the project, and that running tasks keep running |
   | `agentx_admin_revoke_signin` | `developer` | the developer and their open sign-in sessions, which end at once |
-  | `agentx_admin_apply_change` | `change_id`; `code` (optional, the one-time code) | the applied result, or why it was not applied |
+  | `agentx_admin_set_workspace_limits` | `per_person` (optional, 1 to 50); `per_organization` (optional, 1 to 1,000) | the current and new limits, the current counts, and which people or the organization are already at or over the new limit |
+
+  Every change tool returns the change ID, the outcome (`applied`, `declined`, `expired`, `failed`
+  or `awaiting_confirmation` when a Slack wait ended first) and the result.
 
 - **FR-031**: Sharing: when `share_to_channel` is true or the project's `share` is `required`, the
   task MUST be shared. A shared task needs a bound channel: the named `channel`, or the only bound
   channel; otherwise the start MUST be refused (`CHANNEL_REQUIRED` or `CHANNEL_AMBIGUOUS`) before
-  anything starts. When the policy forced sharing, the result MUST say so.
-- **FR-032**: A shared task's thread MUST show, and nothing more:
+  anything starts. The share mode is the developer's `share_mode`, else the project's
+  `shareMode.default`; when `allowContinue` is false it MUST be `view`. When the policy forced
+  sharing or view only, the result MUST say so.
+- **FR-032**: A shared task's thread MUST show:
   - the start message: the developer (a Slack mention when linked, else their display name), the
-    client name, the title, the project, and a note that follow-ups happen in the developer's AI
-    tool;
-  - replies when the workspace is ready, when the task ends (status, and the summary up to 1,500
-    characters, redacted), when a pull request opens (its URL), and when the task is cancelled or
-    closed.
+    client name, the title, the project, and the mode: in view only, that follow-ups happen in the
+    developer's AI tool; in continue, that channel members may mention AgentX here to steer it;
+  - replies when the workspace is ready, when an operation the developer started ends (status, and
+    the summary up to 1,500 characters, redacted), when a pull request opens (its URL), when the
+    mode changes, and when the task is cancelled or closed;
+  - in continue mode, the ordinary Slack turn replies to teammates' mentions.
 
-  The instructions beyond the title, events, diffs and artifacts MUST NOT be posted.
+  The developer's instructions beyond the title, events, diffs and artifacts MUST NOT be posted.
 - **FR-033**: The client name MUST come from the MCP `initialize` request's `clientInfo.name`,
   mapped to `Claude Code`, `Codex` or `Cursor` for their known names, and otherwise to "an AI tool".
   It MUST be at most 40 characters and cleaned like Slack display names.
-- **FR-034**: Slack posts for shared tasks MUST be sent by a new `DeveloperTaskNotifier` function,
-  the only new role that may read the Slack secret, triggered by the task's status changes. Failed
-  posts MUST be retried for 1 hour and then counted in the failed Slack delivery metric (spec 015
-  FR-045).
-- **FR-035**: The Slack ingress MUST recognise a shared task's thread (a `SHARED_TASK#{team}/
-  {channel}/{threadTs}` record) and answer a mention in it with one fixed notice per hour per
-  thread, without creating a thread workspace.
+- **FR-034**: Slack posts for shared tasks and admin confirmations MUST be sent by a new
+  `DeveloperTaskNotifier` function, the only new role that may read the Slack secret, triggered by
+  the task's status changes and by new pending changes. Failed posts MUST be retried for 1 hour and
+  then counted in the failed Slack delivery metric (spec 015 FR-045). Replies to teammates' turns in
+  continue mode are posted by the Slack service, as for every Slack turn.
+- **FR-035**: The control plane MUST keep a record for each shared thread
+  (`SHARED_TASK#{team}/{channel}/{threadTs}`) with the task, its workspace owner key and the mode.
+  The Slack ingress MUST check it for every mention in a thread:
+  - in view only, it MUST answer with one fixed notice per hour per thread, without creating a
+    thread workspace or queueing a turn;
+  - in continue, it MUST queue the message exactly as it queues any thread message today: on the
+    Slack request FIFO queue, in the thread's message group, after the same checks (a person, a
+    member of the bound channel, the thread's rate limit).
+- **FR-054**: In continue mode, the Slack service MUST handle a queued message as an ordinary Slack
+  turn with the orchestrator model, the action gate and the thread's conversation, but acting on the
+  task's workspace: the broker's service identity MUST resolve a shared thread in continue mode to
+  the task's workspace owner key instead of the thread's own key, and record the teammate as the
+  requester of every operation the turn starts. A turn MUST start only when the task's workspace has
+  no active operation; it MUST wait up to 30 minutes for that, then answer that the task is still
+  busy. No new workspace is created and no workspace limit is charged. The developer's own
+  instructions still go straight to the worker (FR-019).
 
 **Visibility and audit**
 
@@ -549,49 +611,81 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   linked Slack user if any) and `client` in place of the Slack event ID and requester. They MUST be
   keyed `TASK#{taskId}`, keep the 30-day retention, hold the instructions redacted and capped as
   request text and the result summary as response text, and appear in `GET /v1/admin/turns` and
-  `agentx_admin_turns`.
+  `agentx_admin_turns`. Teammates' turns in continue mode are ordinary Slack turn records that also carry
+  `taskId`.
 - **FR-038**: The control plane MUST index each operation that ends `FAILED` or `INTERRUPTED`
   (`FAILURE#{yyyy-mm-dd}` / `{endedAt}#{operationId}`, 30-day expiry) for `agentx_admin_failed_tasks`.
   It MUST also serve `GET /v1/admin/projects`, `GET /v1/admin/slack/bindings`,
   `GET /v1/admin/workspaces`, `GET /v1/admin/failures`, `GET /v1/admin/usage`,
-  `GET /v1/admin/health` and `GET /v1/admin/me` for the admin read tools, with the same admin check as today.
+  `GET /v1/admin/health`, `GET /v1/admin/me` and `GET /v1/admin/changes` for the admin read tools,
+  with the same admin check as today.
 
 **Admin changes and confirmation (US6)**
 
-- **FR-039**: Every admin change tool MUST call `POST /v1/admin/changes` with the change. The
-  control plane MUST check the admin's rights, compute the exact effect against current state, and
-  store a pending change: its ID, the admin, the effect text, a hash of the state it was planned
-  against, the confirmation methods offered, and an expiry 10 minutes later. Nothing changes until
-  `POST /v1/admin/changes/{id}/apply` succeeds.
-- **FR-040**: `apply` MUST check, in one transaction, that the change is pending, unexpired, planned
-  by the same admin, confirmed by an accepted method, and that the state hash still matches. It MUST
-  then apply the change through the existing admin handler, mark it used, and write an audit record
-  (admin, change, method, time) kept for 1 year. A change MUST apply at most once.
+- **FR-039**: Every admin change tool MUST call `POST /v1/admin/changes` with the change and the
+  MCP session's details (FR-051's client fields). The control plane MUST check the admin's rights,
+  compute the exact effect against current state, and store a pending change: its ID, the admin,
+  the effect, a hash of the state it was planned against, the confirmation methods offered, and an
+  expiry 10 minutes later. It MUST write the change's audit record at the same time. Nothing changes
+  until the change is confirmed.
+- **FR-040**: A confirmed change MUST be applied in one transaction that checks that the change is
+  pending, unexpired, planned by the same admin, confirmed by an offered method, and that the state
+  hash still matches; it MUST then apply the change through the existing admin handler and mark it
+  used. A change MUST apply at most once. A declined change (the elicitation declined or cancelled,
+  or the Slack Cancel button) MUST be marked declined through `POST /v1/admin/changes/{id}/decline`
+  or the interactivity route.
 - **FR-041**: The confirmation methods, in order of preference:
-  1. **MCP elicitation**, when the client declared the `elicitation` capability and the environment
-     allows it (`mcp.confirm.elicitation`, default on). The server MUST send `elicitation/create`
-     with the effect text and one boolean field, and call `apply` only on `accept` with the field
-     true.
+  1. **MCP elicitation** (the client's pop-up), when the client declared the `elicitation`
+     capability and the environment allows it (`mcp.confirm.elicitation`, default on). The server
+     MUST send `elicitation/create` with the effect text and one boolean field, and call
+     `POST /v1/admin/changes/{id}/apply` only on `accept` with the field true.
   2. **Slack Confirm button**, when the admin's verified email claim matches one Slack user of the
-     environment's team (the lookup of FR-012). The notifier MUST
-     send that user a direct message with the effect and Confirm and Cancel buttons. The Slack
-     interactivity route MUST accept a press only from that Slack user, and it marks the change
-     confirmed. The tool call waits up to 5 minutes for it, with progress notifications.
-  3. **One-time code**, when the environment's `mcp.confirm.codePage` setting is on (default on;
-     `agentx init` registers the page's redirect URI with the admin issuer, FR-046). The tool
-     result MUST give a link to `GET /v1/confirm/{changeId}`. The page MUST make the admin sign in
-     again at the admin issuer (`prompt=login`), check that the ID token's subject is the planning
-     admin and its `auth_time` is under 5 minutes old, and then show the effect and a 6-digit code.
-     The admin types the code in the AI tool, which passes it to `agentx_admin_apply_change`. The
-     code MUST be stored only as a hash, work once, and allow 5 wrong tries before the change is
-     cancelled. No route reachable with a bearer token may return it.
+     environment's team (the lookup of FR-012). The notifier MUST send that user a direct message
+     with the effect and Confirm and Cancel buttons. The Slack interactivity route MUST accept a
+     press only from that Slack user; a press of Confirm applies the change at once, server side
+     (FR-040). The tool call waits up to 5 minutes for the press, with progress notifications, and
+     then returns `awaiting_confirmation` if none came.
 
-  The control plane MUST report which methods it offers in `/v1/auth/.well-known/agentx-configuration`
-  and, for the signed-in admin, in `GET /v1/admin/me`; the MCP server combines them with the
-  client's capabilities. When no method is available, the change tools MUST not be listed, and a direct call MUST return
-  `CONFIRMATION_UNAVAILABLE`.
+  There is no other method. The control plane MUST report whether each method is enabled in
+  `/v1/auth/.well-known/agentx-configuration` and whether the signed-in admin has a Slack link in
+  `GET /v1/admin/me`; the MCP server combines them with the client's capabilities. When neither
+  method is available, the change tools MUST not be listed, only the admin read tools, and a direct
+  call MUST return `CONFIRMATION_UNAVAILABLE`.
 - **FR-042**: The CLI's existing `agentx admin ...` commands MUST keep working unchanged, without
   this confirmation, because a person types them.
+- **FR-051**: Every admin change request MUST have one audit record, whatever its outcome, holding:
+  - who asked: the admin's issuer, subject and display name;
+  - the client: the AgentX CLI version running the MCP server, and the MCP client's
+    `clientInfo.name` and version;
+  - the exact proposed change: a field-level difference or a payload summary, passed through
+    `redactSecrets` so it holds no secret value;
+  - the confirmation method offered and the one used, with the Slack user who pressed a button;
+  - the outcome (`confirmed`, `declined`, `expired` or `failed`) with the time of each step:
+    proposed, confirmation requested, answered, applied or failed;
+  - the result: what the admin handler returned, or the redacted error;
+  - refused confirmation attempts (another person's press, a stale state hash);
+  - a trace ID.
+
+  An expired change MUST be recorded `expired` the next time it is touched, and every read after its
+  expiry MUST show it as expired. Audit records MUST be kept for the turn records' retention (30
+  days) and MUST NOT be changeable through any route.
+- **FR-052**: Admin change handling MUST be traceable end to end. The MCP server MUST send a trace
+  ID (`x-agentx-trace-id`) with every control-plane call; the control plane, the notifier, the Slack
+  interactivity route and the apply step MUST write it, with the change ID, in a structured log line
+  at each step; and the control plane MUST emit a metric per outcome. Admins MUST be able to read
+  the records through `GET /v1/admin/changes`, the `agentx_admin_changes` tool, and
+  `agentx admin changes --since <time> [--json]`, which exports them like `agentx admin turns`.
+- **FR-053**: The per-person and per-organization workspace limits MUST be changeable without a
+  CloudFormation change. The control plane MUST store them as a setting in its state table
+  (`SETTINGS` / `WORKSPACE_LIMITS`, with the admin and time of the last change). The broker MUST read
+  the setting at each workspace creation, with a consistent read, and use it in the existing limit
+  conditions; when the setting is absent it MUST use the stack parameters `SlackMemberWorkspaceLimit`
+  and `SlackOrganizationWorkspaceLimit` (defaults 3 and 20), which stay as the install-time
+  defaults. The per-person limit MUST NOT exceed the per-organization limit. Lowering a limit MUST
+  NOT stop existing workspaces. The admin change tool `agentx_admin_set_workspace_limits` changes the
+  setting with confirmation and audit (FR-039 to FR-052); spec 015 phase 15e's
+  `agentx config set limits.workspacesPerMember|limits.workspacesPerOrg` covers the same setting from
+  the CLI, and its plan MUST write this setting rather than the stack parameters.
 
 **Install and setup (US7)**
 
@@ -612,8 +706,7 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   the change before applying it. Disabling a method MUST revoke its open sessions.
 - **FR-046**: `agentx doctor` MUST check each enabled method: the Slack client ID and secret are set,
   the Slack redirect URL is registered (by a test authorize request), the team ID is set, and the
-  company issuer's discovery document is reachable. The identity stack's app client MUST add the
-  confirmation page's callback URL.
+  company issuer's discovery document is reachable.
 - **FR-047**: The install guide MUST cover, for each of Claude Code, Codex and Cursor: the install
   command, the manual configuration for each, signing in, a first task, and how to remove it.
 - **FR-048**: The control plane MUST report an API version in
@@ -631,14 +724,16 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   | `SIGN_IN_REQUIRED` | no token, refresh expired or revoked | run `npx @charterarc/agentx login <url>` |
   | `SIGN_IN_REJECTED` | wrong Slack team, missing group, deactivated user (at login) | contact an admin; names the reason |
   | `ADMIN_REQUIRED` | an admin tool without an admin token | run `npx @charterarc/agentx login --admin` |
-  | `PROJECT_NOT_AVAILABLE` | the project does not exist, or the developer may not use it, or its tasks are disabled | run `agentx_list_projects`; ask an admin or join the project's channel |
+  | `PROJECT_NOT_FOUND` | no project by that name exists | "project `x` doesn't exist in this AgentX"; run `agentx_list_projects` |
+  | `PROJECT_ACCESS_DENIED` | the project exists, but the developer may not use it (FR-013) | "you don't have access to `x`: join one of its channels or ask an admin", naming only the bound channels the person can see (public channels, and private channels they are in); when they can see none, or `channelMembersMayUse` is false, just "ask an admin" |
+  | `PROJECT_TASKS_DISABLED` | the project exists and the developer may use it, but `developerTasks.enabled` is false | use the project's Slack channel, or ask an admin |
   | `TASK_NOT_FOUND` | no such task for this developer | run `agentx_list_tasks` |
   | `CHANNEL_REQUIRED`, `CHANNEL_AMBIGUOUS` | sharing needs a bound channel, or one of several | names the bound channels, or asks an admin to bind one |
   | `WORKSPACE_LIMIT` | a workspace limit is reached | lists open tasks to close |
-  | `TASK_BUSY` | continue or open a PR while the task runs | wait, or cancel |
+  | `TASK_BUSY` | continue or open a PR while the task runs, including a channel turn in continue mode | names who is driving it and the queued channel messages; wait, cancel, or switch to view only |
   | `SLACK_UNAVAILABLE` | Slack could not be reached for a membership check or sign-in | try again; explicit grants still work |
-  | `CONFIRMATION_UNAVAILABLE` | no confirmation method in this session | use the CLI, or a client with elicitation |
-  | `CONFIRMATION_DECLINED`, `CONFIRMATION_EXPIRED`, `CODE_INVALID`, `CHANGE_STALE` | the change was not confirmed, timed out, the code was wrong, or state moved | ask for the change again |
+  | `CONFIRMATION_UNAVAILABLE` | no confirmation method in this session | use a client with elicitation, link a Slack user, or use the CLI |
+  | `CONFIRMATION_DECLINED`, `CONFIRMATION_EXPIRED`, `CHANGE_STALE` | the change was declined, timed out, or state moved | ask for the change again |
   | `UPGRADE_REQUIRED` | incompatible API version | the install command with the right version |
   | `CONTROL_PLANE_UNAVAILABLE` | network or 5xx after 3 tries | check the connection; `agentx_admin_health` for admins |
 
@@ -656,8 +751,9 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   - **Principle II**: a developer selects a registered project in Slack, or by name through the
     developer task API when they may use it (FR-013).
   - **Principle III**: a workspace is owned by a Slack thread or by one developer task. A developer
-    task's workspace is reachable only by the developer who started it. Personal workspaces not tied
-    to a task stay retired.
+    task's workspace is reachable only by the developer who started it, and, while the developer
+    shares it in continue mode, by the members of the bound channel who post in its shared thread.
+    Personal workspaces not tied to a task stay retired.
 
 ### Key Entities
 
@@ -670,10 +766,15 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
 - **Task workspace**: an ordinary workspace owned by the key of one developer task.
 - **Project access grant**: a `ProjectMembership` record with role `developer` for a developer ID.
 - **Developer task policy**: the project definition's `developerTasks` settings.
-- **Shared task thread**: the Slack thread a shared task posts to, and its record for the ingress.
-- **Pending admin change**: a planned change, its effect, state hash, offered methods, expiry,
-  confirmation state and code hash.
-- **Admin change audit record**: who applied what, when, and how it was confirmed.
+- **Share mode**: `view` or `continue`, chosen per shared task within the project's `shareMode`.
+- **Shared task thread**: the Slack thread a shared task posts to, and its record (task, owner key,
+  mode) for the ingress and the broker.
+- **Pending admin change**: a planned change, its effect, state hash, offered methods, expiry and
+  confirmation state.
+- **Admin change audit record**: one per change request: who asked, the client, the exact change,
+  the method, the outcome with timestamps, the result and a trace ID (FR-051).
+- **Workspace limits setting**: the per-person and per-organization limits, when an admin has
+  changed them from the stack parameters' defaults.
 - **AI-tool turn record**: a turn record with `origin: ai_tool`.
 
 ## Success Criteria *(mandatory)*
@@ -687,8 +788,8 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
 - **SC-004**: Zero secret values appear in any tool result, log line or Slack post, over a contract
   test suite that plants known secret values in every source the tools read.
 - **SC-005**: Zero admin changes apply without a valid confirmation, over contract tests that try
-  every change tool with no confirmation, a declined one, an expired one, a reused one, another
-  admin's Slack press and a wrong code.
+  every change tool with no confirmation, a declined one, an expired one, a reused one and another
+  person's Slack press.
 - **SC-006**: A shared task's start message appears within 10 seconds of the start, and its final
   update within 60 seconds of the task's end, in the live check.
 - **SC-007**: 100% of sign-ins from a Slack team other than the environment's are refused, in the
@@ -699,6 +800,13 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   binding.
 - **SC-010**: One tool definition module serves the stdio server, proved by a test that compares the
   listed tools with the module's exports.
+- **SC-011**: 100% of admin change requests in the contract tests and the live check (applied,
+  declined, expired and failed) have an audit record with every field of FR-051, and a trace ID that
+  appears in the log lines of each step.
+- **SC-012**: In continue mode, over a contract test of 20 mentions from 3 teammates sent in a burst,
+  zero turns overlap, all 20 run in delivery order, and each turn record names its author.
+- **SC-013**: A workspace limit changed with `agentx_admin_set_workspace_limits` takes effect on the
+  next workspace creation, with zero CloudFormation stack updates.
 
 ## Decisions
 
@@ -723,6 +831,36 @@ Owner decisions (binding):
   team works together. Co-owner Pratik is being asked to confirm; FR-050's amendment waits for his
   answer.
 
+Owner decisions from the review of this spec (binding, 2026-09-27):
+
+- **Project access: channel members automatically, plus admin grants; an admin can switch off the
+  automatic part per project** (the first draft's D2). FR-013 and `channelMembersMayUse`.
+- **One workspace per task, counted against the same limits as Slack threads: 3 per person and 20
+  per organization by default** (the first draft's D4 and D5). FR-017 and FR-020. Why one per task: a developer can
+  hand off several tasks at once, where the existing one default workspace per owner key and project
+  would block the second. Sharing the limits stops a person doubling their compute by using both.
+- **Admin tools need the separate admin sign-in** (the first draft's D6). `agentx login --admin` is today's login;
+  a Slack or company developer sign-in never grants admin.
+- **Developers need no AWS login** (the first draft's D15). They set up with `agentx login <url>`.
+- **Two confirmation methods only: MCP elicitation, then the Slack Confirm button by DM** (replaces
+  the first draft's D7 and D8). The one-time code is removed. With neither available, admins get the read-only tools.
+  Honest limit, kept on purpose: an elicitation answer is given in the client's own pop-up, which the
+  model cannot answer, but the control plane trusts the local MCP server's report of it. A model with
+  shell access and the admin's stored token could call the control plane directly; it can already
+  run `agentx admin ...` today. An environment that wants only control-plane-checked confirmations
+  sets `mcp.confirm.elicitation` off, which leaves the Slack button as the only method.
+- **Every admin change request is logged and traced, and admins can read the records** (FR-051,
+  FR-052). Records are kept like turn records (30 days).
+- **Sharing has two modes: view only, or let the channel continue it** (replaces the first draft's D9). In continue
+  mode teammates steer the task from the shared thread, one message at a time in order, each
+  attributed to its author; the developer keeps control from their AI tool; an admin sets a
+  per-project default and can force view only.
+- **Distinct project errors: `PROJECT_NOT_FOUND` and `PROJECT_ACCESS_DENIED`** (replaces the first draft's D11). The
+  owner chose clarity over hiding project names: a person learns that a project exists even when
+  they cannot use it. Channel names are shown only when the person can already see those channels.
+- **Admins can change the workspace limits without editing CloudFormation**, through an admin change
+  tool with confirmation and audit (FR-053).
+
 Decisions made in this spec, **for the owner to confirm in review**:
 
 - **D1. The control plane issues its own developer tokens** (recommended). It exchanges the Slack or
@@ -738,63 +876,62 @@ Decisions made in this spec, **for the owner to confirm in review**:
     OIDC, and costs per federated user;
   - one route prefix and JWT authorizer per provider: Slack's exchange problem remains, and each new
     provider needs new routes.
-- **D2. Project access: members of a bound channel, plus admin grants** (recommended). A developer
-  may use a project if they are in one of its bound channels or an admin granted them, and a project
-  can turn channel-based access off. Why: it matches who can already ask AgentX in Slack, so no new
-  admin work is needed on day one. Rejected: admin grants only (every developer needs an admin
-  action), and any signed-in person (too broad for private repositories).
-- **D3. Company sign-in users are linked to Slack by verified email** (recommended), for
+- **D2. Company sign-in users are linked to Slack by verified email** (recommended), for
   channel-based access, the shared-thread mention, the Slack Confirm button and the shared limit
   counter. Rejected: asking each person to also sign in with Slack (two sign-ins), and no link
-  (company users could use only granted projects).
-- **D4. One workspace per task** (recommended), owned by a key derived from the developer and the
-  task, like Slack threads. Why: a developer can hand off several tasks at once; the existing one
-  default workspace per owner key and project would block the second task. Rejected: one workspace
-  per developer and project (tasks queue behind each other and share a branch).
-- **D5. Developer tasks share the Slack workspace limits and counters** (recommended). Rejected: a
-  separate limit (a person could double their compute by using both).
-- **D6. Admin tools need the admin sign-in, separate from the developer sign-in** (recommended).
-  `agentx login --admin` is today's login. A Slack or company developer sign-in never grants admin.
-  Why: admin rights stay tied to the admin claim, as today. When the admin issuer is also the company
-  sign-in, the admin signs in through the same SSO twice, which is quick. Rejected: granting admin
-  from a Slack workspace role (Slack admins are not AgentX admins).
-- **D7. Confirmation order: elicitation, then Slack button, then one-time code** (recommended), as
-  in FR-041, and read-only admin tools when none is available. Honest limit: an elicitation answer
-  is given in the client's own window, which the model cannot answer, but the control plane trusts
-  the local MCP server's report of it. A model with shell access and the admin's stored token could
-  call the control plane directly; it can already run `agentx admin ...` today. The Slack button and
-  the one-time code are checked by the control plane. An environment that needs server-checked
-  confirmations only sets `mcp.confirm.elicitation` off. Rejected: code first (slower for the common
-  case), and elicitation only (Codex and Cursor sessions without it would have no change tools).
-- **D8. The one-time code is shown on a page that needs a fresh admin sign-in** (recommended), not in
-  any API reachable with a bearer token and not on a local page, because an AI tool with shell access
-  can read a local page or call the API with a stored token, but cannot complete a fresh browser
-  sign-in. Rejected: a local page served by the MCP server, and a code sent by email (needs an email
-  service AgentX does not run).
-- **D9. A shared thread is a mirror** (recommended). The developer drives the task from their AI
-  tool; a mention in the thread gets a fixed notice. Rejected: letting channel members continue the
-  task from Slack (two drivers of one private workspace, and the Slack model would act on a task the
-  developer owns).
-- **D10. Required sharing forces sharing instead of refusing** (recommended), and the result says
-  so. Rejected: refusing a start that did not ask to share (the AI tool would retry with the flag;
-  refusing adds a round trip and no protection).
-- **D11. One error for "no such project" and "no access"** (recommended): `PROJECT_NOT_AVAILABLE`.
-  Why: it does not reveal which private projects exist, as the broker's `NOT_FOUND` does today.
-- **D12. The turn record schema gains `origin`** (recommended), with the AI-tool fields in place of
-  the Slack event and requester, and records keyed by task. Rejected: a separate table (admins would
-  read two exports).
-- **D13. Waits are capped at 600 seconds, default no wait** (recommended), with progress every 15
+  (company users could use only granted projects, and company-signed-in admins would have no Slack
+  button).
+- **D3. Continue-mode messages go through the existing Slack thread machinery** (recommended): the
+  ingress queues them on the Slack request FIFO queue in the thread's message group, and the Slack
+  service runs an ordinary Slack turn with the orchestrator model, acting on the task's workspace
+  (FR-035, FR-054). Why: it reuses the per-thread ordering, the person and channel checks, the rate
+  limit, per-message attribution, the action gate, conversations and turn records as they are, and a
+  teammate's plain-language message is exactly what the orchestrator model already interprets.
+  Rejected: turning each mention into a direct follow-up to the worker (it would need a second
+  ordering mechanism, and raw Slack text would reach the worker with no model to ask for missing
+  details or refuse connector writes without confirmation). The owner's rule that AI-tool
+  instructions skip the model still holds: only teammates' Slack messages use it.
+- **D4. The developer's own follow-up does not queue behind channel turns** (recommended). While a
+  channel turn holds the workspace, `agentx_continue_task` returns `TASK_BUSY`, naming who is
+  driving and how many channel messages wait; the developer can wait, cancel the current operation,
+  or switch the thread to view only. Channel turns wait for the workspace to be free (up to 30
+  minutes). Why: the workspace already allows one active operation, so instructions cannot collide,
+  and it avoids passing developer requests through the Slack service. Rejected: queueing developer
+  follow-ups in the thread's FIFO group (the Slack service would carry AI-tool requests, which needs
+  a new signed message type).
+- **D5. Policy overrides downgrade instead of refusing** (recommended): required sharing shares a
+  task that did not ask to be shared, and `allowContinue: false` makes a continue request view only;
+  the result says which and why. Rejected: refusing the start (the AI tool would retry with other
+  flags; refusing adds a round trip and no protection).
+- **D6. The default share mode is view only** (recommended), so opening a task to the channel is a
+  deliberate choice. Rejected: continue by default (a developer who shares to inform the team would
+  hand the task to anyone in the channel).
+- **D7. A Slack Confirm press applies the change server side at once** (recommended), even if the
+  tool call has stopped waiting, within the 10-minute expiry. Why: the press is the confirmation, and
+  the control plane checks it itself. Rejected: making the admin call a second tool to apply (an
+  extra step the model would drive, and the button would not mean what it says).
+- **D8. Workspace limits live in a control-plane setting that the broker reads, not in a stack
+  update** (recommended). The stack parameters stay as install-time defaults (FR-053). Why: it is
+  simpler (one DynamoDB item the broker already has access to, read in the same place the limits are
+  checked), safer (no CloudFormation change set, no operator role, no chance of replacing a resource,
+  takes effect at once, and is recorded in the change audit), and it works from an AI tool, which has
+  no AWS credentials. Rejected: a parameter-only stack update (needs the operator role and
+  CloudFormation rights the admin's AI tool does not have, and takes minutes), and SSM (adds an SSM
+  read and IAM grant on the broker's hot path for no gain). Consequence: spec 015 FR-048 maps
+  `limits.workspacesPerMember` to the stack parameter today; phase 15e's plan must map both limit
+  keys to this setting instead.
+- **D9. The turn record schema gains `origin`** (recommended), with the AI-tool fields in place of
+  the Slack event and requester, and records keyed by task. Teammates' continue-mode turns are Slack
+  records that also carry the task ID. Rejected: a separate table (admins would read two exports).
+- **D10. Waits are capped at 600 seconds, default no wait** (recommended), with progress every 15
   seconds. Why: MCP clients time out long calls; a task that outlives the wait keeps running.
-- **D14. A new notifier function posts to Slack for shared tasks and admin confirmations**
+- **D11. A new notifier function posts to Slack for shared tasks and admin confirmations**
   (recommended), so the broker still cannot read the Slack secret. Rejected: giving the broker the
-  Slack secret, and sending posts through the Slack service's request queue (that service runs the
-  orchestrator model, which this flow must not use).
-- **D15. Developers set up with `agentx login <url>`**, with no AWS credentials (recommended).
-  Spec 015's `agentx env use` reads SSM, which developers cannot. Rejected: asking admins to hand out
-  a deployment file.
-- **D16. Admin CLI commands keep working without the new confirmation** (recommended): a person types
+  Slack secret, and sending the developer's status posts through the Slack service's request queue
+  (that service runs the orchestrator model, which the developer's own path must not use).
+- **D12. Admin CLI commands keep working without the new confirmation** (recommended): a person types
   them, and changing them is outside this spec.
-- **D17. Access tokens last 1 hour; refresh tokens rotate and end 7 days after sign-in; Slack users
+- **D13. Access tokens last 1 hour; refresh tokens rotate and end 7 days after sign-in; Slack users
   are rechecked at each refresh** (recommended). Rejected: 30-day sessions (a person who leaves keeps
   access too long for company sign-in, which is not rechecked).
 
@@ -818,10 +955,10 @@ Decisions made in this spec, **for the owner to confirm in review**:
     straight to the worker.
   - Linear, Jira, Asana and GitHub connector tools offered directly to AI tools. A possible
     follow-up, which would reuse the gateway and its action policy.
-  - The action gate for developer tasks. It confirms connector writes in Slack; developer tasks call
-    no connector tools.
+  - The action gate for the developer's own instructions: they call no connector tools. Teammates'
+    turns in continue mode are Slack turns, and the action gate applies to them as today.
   - Billing, and charging usage back to developers.
-  - Tasks started from Slack becoming private, or moving between Slack and an AI tool.
+  - Tasks started from Slack becoming private, or being handed to an AI tool.
   - Multiple Slack workspaces per environment, and Slack Enterprise Grid organization-wide sign-in.
   - Changing the admin CLI's confirmation behavior.
 
@@ -840,9 +977,13 @@ Decisions made in this spec, **for the owner to confirm in review**:
   - waits: early end, timeout, progress notifications, client cancellation;
   - redaction: planted secret values in operation results, events, errors, turn records and project
     definitions never reach a tool result, log or Slack post (SC-004);
-  - the confirmation flow: each method, each refusal of FR-040 and FR-041 (SC-005), code tries and
-    hashing;
-  - share rules and the thread's messages; the ingress notice for shared threads;
+  - the confirmation flow: each method, each refusal of FR-040 and FR-041 (SC-005); the audit record
+    for every outcome, redaction of the proposed change, and trace IDs in each step's logs (SC-011);
+  - the workspace limits setting: fallback to the stack parameters, validation, lowering below the
+    current count, and use in both Slack and developer limit checks (SC-013);
+  - share rules, modes and policy overrides; the thread's messages; the ingress notice in view only;
+    continue-mode routing to the task's workspace, ordering and attribution (SC-012);
+  - the project errors: not found, access denied with and without visible channels, tasks disabled;
   - `mcp install` for each client against a temporary home directory, leaving other entries alone;
   - the turn record schema: old Slack records still parse; AI-tool records round-trip.
 - **Contract tests (every PR, no network):**
@@ -858,7 +999,10 @@ Decisions made in this spec, **for the owner to confirm in review**:
     refused;
   - hand off a task and move on; check status; open a PR; continue it;
   - wait for a small task; let a wait time out;
-  - share a task; require sharing on a project; mention AgentX in the shared thread;
-  - as admin: read health, failures, turns and usage; bind and unbind a channel with each
-    confirmation method; see the change tools disappear in a client with none;
+  - share a task view only and mention AgentX in its thread; share one in continue mode and steer it
+    from the thread as a teammate, then continue it from Claude Code; require sharing on a project;
+  - as admin: read health, failures, turns and usage; bind and unbind a channel with elicitation and
+    with the Slack button; decline one change and let one expire; change a workspace limit; read all
+    of them back with `agentx_admin_changes` and `agentx admin changes`; see the change tools
+    disappear in a client with neither method;
   - measure SC-001, SC-002 and SC-006, and run on each worker mode the environment has.
