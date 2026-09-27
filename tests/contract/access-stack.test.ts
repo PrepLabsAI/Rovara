@@ -29,8 +29,9 @@ describe("access stack", () => {
     const serviceOf = (type: string) => type.split("::")[1]!.toLowerCase().replace("bedrockagentcore", "bedrock-agentcore").replace("apigatewayv2", "apigateway").replace("cognito", "cognito-idp").replace("applicationautoscaling", "application-autoscaling");
     const types = new Set(environmentResources().filter(({ stack }) => stack.stackName !== "agentx-staging-access").flatMap(({ resources }) => Object.values(resources).map((r) => r.Type)));
     // AWS::CDK::Metadata is a CDK pseudo-resource, not an AWS service call. Custom resources are
-    // backed by Lambda, so they need the lambda service. Roles and policies are IAM, checked by action.
-    return new Set([...types].filter((t) => t !== "AWS::CDK::Metadata" && t !== "AWS::IAM::Role" && t !== "AWS::IAM::Policy")
+    // backed by Lambda, so they need the lambda service. Roles, policies and instance profiles are
+    // IAM, checked by action.
+    return new Set([...types].filter((t) => !["AWS::CDK::Metadata", "AWS::IAM::Role", "AWS::IAM::Policy", "AWS::IAM::InstanceProfile"].includes(t))
       .map((t) => (t.startsWith("Custom::") || t === "AWS::CloudFormation::CustomResource" ? "lambda" : serviceOf(t))));
   };
   /**
@@ -138,6 +139,18 @@ describe("access stack", () => {
     // Nothing the roles never use: every wildcard service is a resource type's service or used by an action.
     const used = new Set([...neededServices, ...[...actions].map((a) => a.split(":")[0]!)]);
     expect([...allowedServices].filter((service) => !used.has(service!))).toEqual([]);
+  }, 240_000);
+
+  it("lets the service role and the boundary manage the EC2 workers' instance profile, by name and path", () => {
+    const hasProfile = environmentResources().some(({ resources }) => Object.values(resources).some((r) => r.Type === "AWS::IAM::InstanceProfile"));
+    expect(hasProfile).toBe(true);
+    const profileStatement = (statements: Statement[]) => statements.find((st) => st.Sid === "IamInstanceProfiles");
+    const service = profileStatement(roleStatements(template.toJSON().Resources as Record<string, Resource>))!;
+    const boundary = profileStatement(boundaryPolicies[0]![1].Properties.PolicyDocument.Statement as Statement[])!;
+    for (const statement of [service, boundary]) {
+      expect(statement.Action).toEqual(expect.arrayContaining(["iam:CreateInstanceProfile", "iam:AddRoleToInstanceProfile", "iam:DeleteInstanceProfile"]));
+      expect(JSON.stringify(statement.Resource)).toContain("instance-profile/agentx/staging/*");
+    }
   }, 240_000);
 
   it("lets only CloudFormation in this account assume the service role", () => {

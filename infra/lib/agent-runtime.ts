@@ -7,6 +7,7 @@ import {
   type StackProps,
   aws_bedrockagentcore as agentcore,
   aws_iam as iam,
+  aws_ssm as ssm,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
@@ -227,6 +228,16 @@ export class AgentRuntimeStack extends Stack {
     runtime.node.addDependency(runtimePolicy);
     // A named environment's runtime holds no data (workspaces live on the capacity provider), so it goes with its stack; legacy keeps Retain unchanged.
     runtime.applyRemovalPolicy(naming.env === undefined ? RemovalPolicy.RETAIN : RemovalPolicy.DESTROY);
+
+    // The EC2 session provisioner (#83) launches workers with the image a release last deployed
+    // here. Named environments only until the production cutover.
+    if (naming.env !== undefined) {
+      new ssm.StringParameter(this, "WorkerImageParameter", {
+        parameterName: naming.ec2.workerImageParameterName,
+        stringValue: imageUri.valueAsString,
+        description: "AgentX worker image URI pinned by digest, for EC2 workers",
+      });
+    }
 
     this.runtimeArn = runtime.attrAgentRuntimeArn;
     this.capacityProviderArn = capacityProviderArn.valueAsString;

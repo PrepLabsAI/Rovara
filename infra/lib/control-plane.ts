@@ -12,6 +12,7 @@ import {
   aws_cloudwatch_actions as cloudwatchActions,
   aws_dynamodb as dynamodb,
   aws_iam as iam,
+  aws_kms as kms,
   aws_lambda as lambda,
   aws_lambda_nodejs as lambdaNodejs,
   aws_logs as logs,
@@ -21,6 +22,7 @@ import {
   aws_sqs as sqs,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
+import { WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
 
 const MAX_DISPATCH_ATTEMPTS = 5;
@@ -187,6 +189,38 @@ export class ControlPlaneStack extends Stack {
       actions: ["bedrock-agentcore:InvokeAgentRuntime"],
       resources: [runtimeArn(this, naming)],
     }));
+    // EC2 workers (#76), named environments only until the production cutover.
+    if (naming.env !== undefined) {
+      // The idle reaper and reconciler find sessions by state through this sparse index.
+      state.addGlobalSecondaryIndex({
+        indexName: WORKSPACE_SESSION_STATE_INDEX.name,
+        partitionKey: { name: WORKSPACE_SESSION_STATE_INDEX.partitionKey, type: dynamodb.AttributeType.STRING },
+        sortKey: { name: WORKSPACE_SESSION_STATE_INDEX.sortKey, type: dynamodb.AttributeType.STRING },
+        projectionType: dynamodb.ProjectionType.ALL,
+      });
+      // The dispatcher signs each invocation to an EC2 worker; workers verify with the public key
+      // alone (#80). Only the dispatcher may sign: the key policy denies kms:Sign to every other
+      // principal, whatever its IAM policy grants.
+      const invokeSigningKey = new kms.Key(this, "InvokeSigningKey", {
+        alias: naming.ec2.invokeSigningKeyAlias,
+        description: `Signs AgentX ${naming.environmentTagValue} invocations to EC2 workers`,
+        keySpec: kms.KeySpec.ECC_NIST_P256,
+        keyUsage: kms.KeyUsage.SIGN_VERIFY,
+        pendingWindow: Duration.days(7),
+        // Tokens live 60 seconds and workers get the public key at boot, so nothing outlives the key.
+        removalPolicy: RemovalPolicy.DESTROY,
+      });
+      invokeSigningKey.grant(dispatcher, "kms:Sign");
+      invokeSigningKey.addToResourcePolicy(new iam.PolicyStatement({
+        sid: "SignOnlyAsDispatcher",
+        effect: iam.Effect.DENY,
+        principals: [new iam.AnyPrincipal()],
+        actions: ["kms:Sign"],
+        resources: ["*"],
+        conditions: { ArnNotEquals: { "aws:PrincipalArn": dispatcher.role!.roleArn } },
+      }));
+      new CfnOutput(this, "InvokeSigningKeyArn", { value: invokeSigningKey.keyArn });
+    }
     new lambda.EventSourceMapping(this, "DispatchQueueMapping", {
       target: dispatcher,
       eventSourceArn: dispatchQueue.queueArn,

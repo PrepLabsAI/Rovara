@@ -6,6 +6,7 @@ import {
   environmentOperatorRoleName,
   environmentPullThroughPrefix,
   environmentRuntimeName,
+  environmentSettingsPrefix,
   environmentStackName,
   type StackPart,
 } from "@agentx/contracts";
@@ -34,6 +35,19 @@ export interface AgentXNaming {
   readonly cloudFormationRoleName: string;
   /** The role an operator assumes to run `agentx` against this environment. */
   readonly operatorRoleName: string;
+  /** EC2 worker resources (issue #82). Named environments only, until the production cutover. */
+  readonly ec2: Ec2WorkerNaming;
+}
+
+export interface Ec2WorkerNaming {
+  readonly workerSecurityGroupName: string;
+  readonly dispatcherSecurityGroupName: string;
+  readonly sessionManagerSecurityGroupName: string;
+  readonly launchTemplateName: string;
+  readonly workerLogGroupName: string;
+  readonly invokeSigningKeyAlias: string;
+  /** SSM parameter holding the worker image URI pinned by digest. */
+  readonly workerImageParameterName: string;
 }
 
 /** The deployment that predates named environments has no access or identity stack. */
@@ -79,6 +93,9 @@ export function legacyNaming(): AgentXNaming {
     get operatorRoleName(): string {
       throw new Error(NO_NAMED_ENVIRONMENTS_MESSAGE);
     },
+    get ec2(): Ec2WorkerNaming {
+      throw new Error("EC2 workers exist only for named environments until the production cutover");
+    },
   };
 }
 
@@ -103,6 +120,15 @@ export function environmentNaming(env: string): AgentXNaming {
     pullThroughPrefix: environmentPullThroughPrefix(name),
     cloudFormationRoleName: environmentCloudFormationRoleName(name),
     operatorRoleName: environmentOperatorRoleName(name),
+    ec2: {
+      workerSecurityGroupName: `agentx-${name}-ec2-workers`,
+      dispatcherSecurityGroupName: `agentx-${name}-dispatcher`,
+      sessionManagerSecurityGroupName: `agentx-${name}-session-manager`,
+      launchTemplateName: `agentx-${name}-worker`,
+      workerLogGroupName: `/agentx/${name}/worker`,
+      invokeSigningKeyAlias: `alias/agentx/${name}/invoke-signing`,
+      workerImageParameterName: `${environmentSettingsPrefix(name)}worker-image`,
+    },
   };
 }
 

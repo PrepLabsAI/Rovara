@@ -21,6 +21,10 @@ describe("service role policy", () => {
       if (statement.Sid === "ServiceLinkedRoles") {
         expect(resources).toEqual(["arn:aws:iam::123456789012:role/aws-service-role/*"]);
         expect(statement.Condition?.StringLike?.["iam:AWSServiceName"]).toBeDefined();
+      } else if (statement.Sid === "IamInstanceProfiles") {
+        // The EC2 workers' instance profile, under the same path as the environment's roles.
+        expect(resources).toEqual(["arn:aws:iam::123456789012:instance-profile/agentx/staging/*"]);
+        expect(statement.Action.every((a) => /^iam:[A-Za-z]*InstanceProfile$/.test(a))).toBe(true);
       } else {
         // A path, not a name prefix: generated role names are truncated, and agentx-prod-* would
         // also match the prod-eu environment's roles.
