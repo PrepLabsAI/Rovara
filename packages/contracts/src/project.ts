@@ -5,6 +5,7 @@ import { GitHubMcpPolicySchema } from "./github-mcp.js";
 import { ConnectorsSchema, StoredConnectorsSchema } from "./connectors.js";
 import type { GitHubConnectorConfig } from "./connectors.js";
 import type { GitHubMcpPolicy } from "./github-mcp.js";
+import { ProjectModelsSchema } from "./models.js";
 
 import { AGENTX_NAME_PATTERN } from "./names.js";
 
@@ -143,6 +144,7 @@ function projectDefinitionObject<Connectors extends z.ZodTypeAny>(connectorsSche
       setup: z.array(ProjectCommandSchema).max(64),
       readiness: z.array(ProjectCommandSchema).max(64),
       orchestratorInstructions: z.string().min(1).max(32_768),
+      models: ProjectModelsSchema.optional(),
       integrations: z.object({
         githubMcp: GitHubMcpPolicySchema.optional(),
         connectors: connectorsSchema.optional(),

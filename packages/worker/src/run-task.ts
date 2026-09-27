@@ -61,6 +61,9 @@ export async function runTaskInvocation(
   const onDiagnostic = (message: string): void => {
     contextDiagnostics.push(message);
   };
+  if (invocation.payload.modelSelectionDiagnostic !== undefined) {
+    onDiagnostic(invocation.payload.modelSelectionDiagnostic);
+  }
   for (const message of modelChangeDiagnostics(registered, dependencies.model)) onDiagnostic(message);
 
   let session: PiSessionHandle;

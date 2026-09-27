@@ -144,7 +144,7 @@ const projectAdministrator = { subject: "admin-subject", admin: true };
 /** Registers project "payments" at a revision and, unless told not to, binds the test channel to it. */
 export async function registerSlackProject(
   handler: Handler,
-  options: { revision?: number; connectors?: unknown[]; bind?: boolean } = {},
+  options: { revision?: number; connectors?: unknown[]; models?: unknown; bind?: boolean } = {},
 ): Promise<void> {
   const revision = options.revision ?? 1;
   const registered = await call(handler, {
@@ -159,6 +159,7 @@ export async function registerSlackProject(
         setup: [],
         readiness: [],
         orchestratorInstructions: `Delegate work (revision ${revision}).`,
+        ...(options.models ? { models: options.models } : {}),
         ...(options.connectors ? { integrations: { connectors: options.connectors } } : {}),
       },
       runtimeBinding: {

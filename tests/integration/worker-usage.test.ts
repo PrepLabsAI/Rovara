@@ -95,6 +95,24 @@ describe("worker usage telemetry", () => {
       },
     })).rejects.toThrow("fixture task failed");
   });
+
+  it("publishes a control-plane model fallback diagnostic before the task runs", async () => {
+    const rootPath = await preparedRoot();
+    const invocation = taskInvocation();
+    invocation.payload.modelSelectionDiagnostic = "The selected model was removed; using the project default.";
+    const events: WorkerEvent[] = [];
+    await runTaskInvocation(invocation, {
+      rootPath,
+      model: { provider: "fixture", modelId: "default" },
+      piAdapter: usageAdapter(rootPath, invocation.operationId, "SUCCEEDED", new WorkerCancellationController()),
+      eventSink: async (batch) => { events.push(...batch); },
+      artifactSink: async () => undefined,
+    });
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "progress",
+      payload: { message: "The selected model was removed; using the project default." },
+    }));
+  });
 });
 
 function usageAdapter(

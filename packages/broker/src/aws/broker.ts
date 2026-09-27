@@ -31,6 +31,8 @@ import {
   PullRequestLifecycleResultSchema,
   PullRequestResultSchema,
   ProjectDefinitionSchema,
+  ProjectModelOptionsSchema,
+  ProjectModelSelectionRequestSchema,
   approvedToolCount,
   githubConnectorOf,
   presentedNameProblems,
@@ -67,8 +69,13 @@ import {
   type WorkspaceInstance,
   cleanDisplayName,
   DISPLAY_NAME_MAX_ENCODED_LENGTH,
+  modelKey,
+  type ModelIdentifier,
+  type ModelRef,
+  type ProjectModelOptions,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
+import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import { GitHubAppCredentialProvider, privateKeyFromSecret } from "../github-app.js";
 import { CatalogCache } from "@agentx/gateway";
 import { executeGitHubTool, toGitHubCatalog, type GitHubMcpDependencies } from "../github-mcp.js";
@@ -116,6 +123,15 @@ interface MembershipRecord {
   ownerKey: string;
   projectName: string;
   role: "developer" | "administrator";
+}
+
+interface ProjectModelSelectionRecord {
+  pk: string;
+  sk: "SELECTION";
+  entityType: "PROJECT_MODEL_SELECTION";
+  model: ModelIdentifier;
+  updatedAt: string;
+  updatedBy: SlackRequester;
 }
 
 interface OperationRecord extends Operation {
@@ -313,6 +329,12 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         }
         if (request.method === "POST" && serviceUrl.pathname === "/v1/threads/workspace/close/complete") {
           return json(await completeThreadWorkspaceClose(dependencies, identity, parseBody(request.body)), request.requestId);
+        }
+        if (request.method === "GET" && serviceUrl.pathname === "/v1/project/models") {
+          return json(await getProjectModels(dependencies, identity), request.requestId);
+        }
+        if (request.method === "PUT" && serviceUrl.pathname === "/v1/project/model") {
+          return json(await putProjectModel(dependencies, identity, parseBody(request.body)), request.requestId);
         }
         return await observeConnectorRoute(request.method, serviceUrl.pathname, () => routeWorkspaceRequest(dependencies, request, serviceUrl, identity));
       }
@@ -1759,6 +1781,7 @@ async function acceptTask(
   workspaceId: string,
   value: unknown,
 ): Promise<{ operation: Operation; duplicate: boolean }> {
+  assertNoUntrustedRoutingFields(value);
   const request = OperationRequestSchema.parse(value);
   const workspace = await requireOwnedWorkspace(dependencies, identity, workspaceId);
   await requireMembership(dependencies, identity.ownerKey, workspace.projectName);
@@ -1784,6 +1807,7 @@ async function acceptTask(
     throw agentXError(workspace.status === "BUSY" ? "WORKSPACE_BUSY" : "WORKSPACE_NOT_READY", `workspace is ${workspace.status}`);
   }
   const settings = await requireLatestProject(dependencies, workspace.projectName);
+  const resolvedModel = await resolveProjectModel(dependencies, settings);
   const now = new Date().toISOString();
   const operationId = randomUUID();
   const fence = workspace.fence + 1;
@@ -1809,7 +1833,13 @@ async function acceptTask(
     fence,
     projectRevision: workspace.projectRevision,
     callbackCapability: issueCapability(dependencies, workspaceId, operationId, fence),
-    payload: { conversationId: request.conversationId, prompt: request.prompt, conversationStarted },
+    payload: {
+      conversationId: request.conversationId,
+      prompt: request.prompt,
+      conversationStarted,
+      ...(resolvedModel.model === undefined ? {} : { model: resolvedModel.model }),
+      ...(resolvedModel.diagnostic === undefined ? {} : { modelSelectionDiagnostic: resolvedModel.diagnostic }),
+    },
   };
   const outbox = outboxRecord(
     {
@@ -3095,6 +3125,87 @@ async function requireLatestProject(
   const project = response.Items?.[0] as RegisteredProjectRecord | undefined;
   if (!project) throw agentXError("NOT_FOUND", "registered project not found");
   return project;
+}
+
+function projectModelSelectionKey(projectName: string) {
+  return { pk: `PROJECT#${projectName}`, sk: "SELECTION" as const };
+}
+
+async function getProjectModels(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+): Promise<ProjectModelOptions> {
+  const projectName = identity.slack?.binding.projectName;
+  if (!projectName) throw agentXError("FORBIDDEN", "Slack project binding is required");
+  const project = await requireLatestProject(dependencies, projectName);
+  const policy = project.definition.models;
+  if (!policy) throw agentXError("CONFIG_INVALID", "this project has no approved coding models; ask an administrator to configure models");
+  const selection = await getItem<ProjectModelSelectionRecord>(dependencies, projectModelSelectionKey(projectName));
+  const selected = selection === undefined
+    ? undefined
+    : policy.approved.find((candidate) => modelKey(candidate) === modelKey(selection.model));
+  const current = selected ?? approvedDefault(policy.default, policy.approved);
+  return ProjectModelOptionsSchema.parse({
+    projectName,
+    approved: policy.approved,
+    current,
+    source: selected === undefined ? "default" : "selection",
+  });
+}
+
+async function putProjectModel(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  value: unknown,
+): Promise<ProjectModelOptions> {
+  const projectName = identity.slack?.binding.projectName;
+  const requester = identity.slack?.requester;
+  if (!projectName || !requester) throw agentXError("FORBIDDEN", "Slack project binding and requester are required");
+  const requested = ProjectModelSelectionRequestSchema.parse(value);
+  const project = await requireLatestProject(dependencies, projectName);
+  const policy = project.definition.models;
+  if (!policy) throw agentXError("CONFIG_INVALID", "this project has no approved coding models; ask an administrator to configure models");
+  const selected = policy.approved.find((candidate) => modelKey(candidate) === modelKey(requested));
+  if (!selected) throw agentXError("CONFIG_INVALID", `model ${requested.provider}/${requested.modelId} is not approved for this project`);
+  const record: ProjectModelSelectionRecord = {
+    ...projectModelSelectionKey(projectName),
+    entityType: "PROJECT_MODEL_SELECTION",
+    model: { provider: selected.provider, modelId: selected.modelId },
+    updatedAt: new Date().toISOString(),
+    updatedBy: requester,
+  };
+  await dependencies.documentClient.send(new PutCommand({ TableName: dependencies.tableName, Item: record }));
+  return ProjectModelOptionsSchema.parse({
+    projectName,
+    approved: policy.approved,
+    current: selected,
+    source: "selection",
+  });
+}
+
+async function resolveProjectModel(
+  dependencies: AwsBrokerDependencies,
+  project: RegisteredProjectRecord,
+): Promise<{ model?: ModelIdentifier; diagnostic?: string }> {
+  const policy = project.definition.models;
+  if (!policy) return {};
+  const selection = await getItem<ProjectModelSelectionRecord>(dependencies, projectModelSelectionKey(project.definition.name));
+  const selected = selection === undefined
+    ? undefined
+    : policy.approved.find((candidate) => modelKey(candidate) === modelKey(selection.model));
+  const effective = selected ?? approvedDefault(policy.default, policy.approved);
+  return {
+    model: { provider: effective.provider, modelId: effective.modelId },
+    ...(selection !== undefined && selected === undefined
+      ? { diagnostic: `The project's selected coding model ${selection.model.provider}/${selection.model.modelId} is no longer approved. This task uses the project default ${effective.provider}/${effective.modelId}.` }
+      : {}),
+  };
+}
+
+function approvedDefault(defaultModel: ModelRef, approved: readonly ModelRef[]): ModelRef {
+  const model = approved.find((candidate) => modelKey(candidate) === modelKey(defaultModel));
+  if (!model) throw agentXError("CONFIG_INVALID", "project default model is not approved");
+  return model;
 }
 
 async function requireOperation(

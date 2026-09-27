@@ -49,6 +49,7 @@ describe("the Slack service's thread client", () => {
     await registerSlackProject(handler, { bind: false });
     await expect(threadApi(handler).ensureWorkspace(randomUUID())).rejects.toThrow(/^thread workspace request failed: FORBIDDEN /);
     await expect(threadApi(handler).prepareWorkspace!(randomUUID())).rejects.toThrow(/^thread workspace preparation failed: FORBIDDEN /);
+    await expect(threadApi(handler).listProjectModels!()).rejects.toThrow(/^project model list failed: FORBIDDEN /);
   });
 
   it("opts into lazy preparation, so a new thread gets a record without compute", async () => {
@@ -64,5 +65,19 @@ describe("the Slack service's thread client", () => {
     }]);
     expect(result).toMatchObject({ outcome: "WORKSPACE", status: "UNPREPARED", operationId: null, created: true });
     expect(db.find((item) => item.entityType === "OPERATION")).toHaveLength(0);
+  });
+
+  it("lists and selects the bound project's coding model through signed service routes", async () => {
+    const { handler } = createBroker();
+    await registerSlackProject(handler, { models: {
+      default: { provider: "amazon-bedrock", modelId: "balanced", label: "Balanced" },
+      approved: [
+        { provider: "amazon-bedrock", modelId: "balanced", label: "Balanced" },
+        { provider: "amazon-bedrock", modelId: "fast", label: "Fast" },
+      ],
+    } });
+    const api = threadApi(handler);
+    await expect(api.listProjectModels!()).resolves.toMatchObject({ source: "default", current: { label: "Balanced" } });
+    await expect(api.selectProjectModel!({ provider: "amazon-bedrock", modelId: "fast" })).resolves.toMatchObject({ source: "selection", current: { label: "Fast" } });
   });
 });

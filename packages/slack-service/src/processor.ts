@@ -15,6 +15,8 @@ import {
   type PendingConfirmation,
   type TurnObservation,
   type TurnRecord,
+  type ModelIdentifier,
+  type ProjectModelOptions,
 } from "@agentx/contracts";
 import type { WorkerAccess } from "@agentx/orchestrator";
 import type { GateSession } from "@agentx/orchestrator/action-gate";
@@ -25,6 +27,7 @@ import { createLazyWorker } from "./lazy-worker.js";
 import { NEW_WORKSPACE_MESSAGE, STILL_PREPARING_MESSAGE, limitMessage, preparationFailedMessage } from "./messages.js";
 import { escapeText, slackReplyText } from "./slack-format.js";
 import { buildTurnRecord, emitTurnMetrics, type TurnDraft, type TurnRecordSink } from "./turn-records.js";
+import { matchApprovedModel, modelName, modelOptionsMessage, parseModelCommand } from "./model-command.js";
 
 export interface ThreadServiceApi {
   ensureWorkspace(requestId: string): Promise<SlackThreadWorkspaceResult>;
@@ -34,6 +37,8 @@ export interface ThreadServiceApi {
   completeClose(requestId: string, operationId: string): Promise<SlackWorkspaceCloseCompleteResult>;
   waitForOperation(workspaceId: string, operationId: string, signal?: AbortSignal): Promise<{ status: string; error?: string | undefined; result?: unknown }>;
   createConversation(workspaceId: string): Promise<string>;
+  listProjectModels?(): Promise<ProjectModelOptions>;
+  selectProjectModel?(model: ModelIdentifier): Promise<ProjectModelOptions>;
 }
 
 export interface ThreadState {
@@ -156,6 +161,32 @@ export async function processSlackRequest(
   // Set when this turn waited for workspace setup up front, which the member was told about.
   let waitedForSetup = false;
   try {
+    const modelCommand = parseModelCommand(message.text);
+    if (modelCommand !== undefined) {
+      if (api.listProjectModels === undefined) throw new Error("project model selection is unavailable in this deployment");
+      const options = await api.listProjectModels();
+      if (modelCommand.kind === "list") {
+        draft.disposition = "model_list";
+        await post(modelOptionsMessage(options));
+      } else {
+        draft.disposition = "model_switch";
+        const matches = matchApprovedModel(modelCommand.selector, options.approved);
+        if (matches.length !== 1) {
+          const reason = modelCommand.selector.length === 0
+            ? "Tell me which approved coding model to use."
+            : matches.length === 0
+              ? `No approved coding model matches “${escapeText(modelCommand.selector)}”.`
+              : `“${escapeText(modelCommand.selector)}” matches more than one approved coding model.`;
+          await post(modelOptionsMessage(options, reason));
+        } else {
+          if (api.selectProjectModel === undefined) throw new Error("project model selection is unavailable in this deployment");
+          const selected = await api.selectProjectModel({ provider: matches[0]!.provider, modelId: matches[0]!.modelId });
+          await post(`Project \`${escapeText(selected.projectName)}\` now uses ${escapeText(modelName(selected.current))} (\`${escapeText(selected.current.provider)}/${escapeText(selected.current.modelId)}\`) for coding work. This applies to every Slack workspace in the project on its next turn.`);
+        }
+      }
+      finished = true;
+      return;
+    }
     if (isCloseWorkspaceRequest(message.text)) {
       draft.disposition = "workspace_close";
       const started = await api.startClose(deterministicUuid(`${message.eventId}:close`));
