@@ -1,4 +1,4 @@
-import { agentXError, environmentSettingsPrefix } from "@agentx/contracts";
+import { AgentXError, agentXError, environmentSettingsPrefix } from "@agentx/contracts";
 import { ParameterExistsError, type ParameterStore } from "./parameter-store.js";
 
 export interface LockRecord { holder: string; command: string; acquiredAt: string }
@@ -63,6 +63,23 @@ const releaseTakeoverMessage = (env: string, held: LockRecord | undefined) =>
   held === undefined
     ? `environment ${env}'s lock was removed by someone else while this command ran (the work finished, but there was no lock left to release)`
     : `environment ${env}'s lock was taken over by ${held.holder} while this command ran (the work finished, but its own lock had already been replaced)`;
+
+/**
+ * Releasing the lock itself failed (a store error, not a takeover we could detect and name), so we
+ * cannot promise it is gone. Tells the user exactly how to check: the parameter name, that
+ * `agentx init`/`agentx deploy` will offer to take over this same lock once it goes stale, and the
+ * raw `aws ssm delete-parameter` command as an immediate escape hatch.
+ */
+const lockMayRemainNote = (env: string, name: string) =>
+  `environment ${env}'s lock may remain at ${name}; run \`agentx init\` or \`agentx deploy\` again once it is stale to take over your own lock, or clear it now with \`aws ssm delete-parameter --name ${name} --region <region>\``;
+
+/** Adds a release-failure note to an error's message and, when it is not itself an AgentXError we already raised for a detected takeover, attaches the release failure as its cause. */
+function withLockMayRemainNote<E>(error: E, env: string, name: string, cause?: unknown): E {
+  if (!(error instanceof Error)) return error;
+  error.message = `${error.message} (${lockMayRemainNote(env, name)})`;
+  if (cause !== undefined) Object.assign(error, { cause });
+  return error;
+}
 
 export async function withEnvironmentLock<T>(input: {
   store: ParameterStore; env: string; holder: string; command: string;
@@ -131,20 +148,29 @@ export async function withEnvironmentLock<T>(input: {
       // remains: only release the lock if it still holds exactly what we wrote.
       const stored = await input.store.get(name);
       if (stored?.value === mineJson) await input.store.delete(name);
-    } catch {
-      /* the work's own error takes priority; a failed release is not reported over it */
+    } catch (releaseError) {
+      // The work's own error stays the one thrown, with its original code and message: we only add
+      // a note (and the release failure as its cause) rather than replacing it.
+      throw withLockMayRemainNote(workError, input.env, name, releaseError);
     }
     throw workError;
   }
 
-  // SSM has no conditional delete, so a small window between this check and the delete below
-  // remains: only release the lock if it still holds exactly what we wrote.
-  const stored = await input.store.get(name);
-  if (stored?.value !== mineJson) {
-    const held = stored === undefined ? undefined : parseLock(stored.value);
-    if (stored !== undefined && held === undefined) throw agentXError("CONFIG_INVALID", unreadableLockMessage(input.env, name));
-    throw agentXError("CONFIG_INVALID", releaseTakeoverMessage(input.env, held));
+  try {
+    // SSM has no conditional delete, so a small window between this check and the delete below
+    // remains: only release the lock if it still holds exactly what we wrote.
+    const stored = await input.store.get(name);
+    if (stored?.value !== mineJson) {
+      const held = stored === undefined ? undefined : parseLock(stored.value);
+      if (stored !== undefined && held === undefined) throw agentXError("CONFIG_INVALID", unreadableLockMessage(input.env, name));
+      throw agentXError("CONFIG_INVALID", releaseTakeoverMessage(input.env, held));
+    }
+    await input.store.delete(name);
+  } catch (releaseError) {
+    // A takeover we detected and named above is already fully explained (there is nothing of ours
+    // left to clear); only a plain store failure (get or delete) gets the "may remain" note.
+    if (releaseError instanceof AgentXError) throw releaseError;
+    throw withLockMayRemainNote(releaseError, input.env, name);
   }
-  await input.store.delete(name);
   return result;
 }

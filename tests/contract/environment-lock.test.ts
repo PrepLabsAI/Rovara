@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { AgentXError, agentXError } from "@agentx/contracts";
 import { STALE_LOCK_MS, lockParameterName, withEnvironmentLock } from "../../packages/cli/src/environments/lock.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 
@@ -167,20 +168,40 @@ describe("environment lock", () => {
     await expect(withEnvironmentLock({ ...base, store, now: () => t0 }, async () => 1)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
   });
 
-  it("rethrows the work's error even when releasing the lock also fails", async () => {
+  it("rethrows the work's error even when releasing the lock also fails, noting the release failure and how to clear the lock", async () => {
     const store = new MemoryParameterStore();
     const deleteError = new Error("ssm unavailable");
     vi.spyOn(store, "delete").mockRejectedValue(deleteError);
-    await expect(withEnvironmentLock({ ...base, store, now: () => t0 }, async () => { throw new Error("boom"); }))
-      .rejects.toThrow("boom");
+    const error = await withEnvironmentLock({ ...base, store, now: () => t0 }, async () => { throw agentXError("NOT_FOUND", "boom"); })
+      .catch((caught: unknown) => caught) as AgentXError;
+    // The work's own error stays the one thrown, with its original code and message intact.
+    expect(error).toBeInstanceOf(AgentXError);
+    expect(error.code).toBe("NOT_FOUND");
+    expect(error.message).toContain("boom");
+    // The release failure is not swallowed: it is reachable as the cause, and the user is told the
+    // lock may still be there plus the exact ways to clear it.
+    expect(error.cause).toBe(deleteError);
+    expect(error.message).toContain("/agentx/staging/lock");
+    expect(error.message).toMatch(/may remain|left behind|still (?:be )?there/);
+    expect(error.message).toContain("agentx init");
+    expect(error.message).toContain("agentx deploy");
+    expect(error.message).toContain("aws ssm delete-parameter");
+    expect(error.message).toContain("--region");
   });
 
-  it("surfaces the release failure when the work succeeded but the delete failed", async () => {
+  it("surfaces the release failure when the work succeeded but the delete failed, noting how to clear the lock", async () => {
     const store = new MemoryParameterStore();
     const deleteError = new Error("ssm unavailable");
     vi.spyOn(store, "delete").mockRejectedValue(deleteError);
-    await expect(withEnvironmentLock({ ...base, store, now: () => t0 }, async () => 1))
-      .rejects.toThrow("ssm unavailable");
+    const error = await withEnvironmentLock({ ...base, store, now: () => t0 }, async () => 1)
+      .catch((caught: unknown) => caught) as Error;
+    expect(error.message).toContain("ssm unavailable");
+    expect(error.message).toContain("/agentx/staging/lock");
+    expect(error.message).toMatch(/may remain|left behind|still (?:be )?there/);
+    expect(error.message).toContain("agentx init");
+    expect(error.message).toContain("agentx deploy");
+    expect(error.message).toContain("aws ssm delete-parameter");
+    expect(error.message).toContain("--region");
   });
 
   it("two commands racing to take over the same stale lock: exactly one wins", async () => {
