@@ -46,6 +46,10 @@ export interface DeployCliDependencies {
   deployer?: StackDeployer;
   /** The cdk engine's shell-out, and `assertSourceAtRelease`'s git calls. */
   commandRunner?: CommandRunner;
+  /** The cdk engine's stack-outputs reader (CloudFormation DescribeStacks by default). */
+  stackOutputs?: (stackName: string) => Promise<StackOutputs | undefined>;
+  /** The templates engine's AWS clients (real CloudFormation and S3 clients by default). */
+  templatesClients?: TemplatesEngineClients;
   /** Overrides the interactive y/N confirmation entirely (and so skips the stdin-is-a-terminal check below). */
   confirm?: ConfirmFn;
   /** Overrides the "is stdin a terminal" check the built-in interactive confirm needs. */
@@ -605,10 +609,10 @@ async function deployCommand(options: DeployCommandOptions, deps: DeployCliDepen
       region: answers.region,
       identityMode: answers.identity.mode,
       outputsDir: cdkOutputsDir,
-      outputs: cloudFormationOutputsReader(new CloudFormationClient({ region: answers.region })),
+      outputs: deps.stackOutputs ?? cloudFormationOutputsReader(new CloudFormationClient({ region: answers.region })),
     });
   } else {
-    const clients: TemplatesEngineClients = { cloudFormation: new CloudFormationClient({ region: answers.region }), s3: new S3Client({ region: answers.region }) };
+    const clients: TemplatesEngineClients = deps.templatesClients ?? { cloudFormation: new CloudFormationClient({ region: answers.region }), s3: new S3Client({ region: answers.region }) };
     deployer = buildTemplatesDeployer({ clients, release, env: answers.env, region: answers.region, partition });
   }
 

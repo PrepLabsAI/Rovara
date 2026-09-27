@@ -13,6 +13,7 @@ import type { DeployRequest, StackDeployer, StackOutputs } from "../../packages/
 import type { ParameterStore } from "../../packages/cli/src/environments/parameter-store.js";
 import type { SecretValueStore } from "../../packages/cli/src/deploy/signing-key.js";
 import type { DeployCliDependencies } from "../../packages/cli/src/deploy/commands.js";
+import type { TemplatesEngineClients } from "../../packages/cli/src/deploy/templates-engine.js";
 import { executeCli } from "../../packages/cli/src/main.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 
@@ -169,6 +170,11 @@ function safeDeployDeps(overrides: DeployCliDependencies = {}): DeployCliDepende
     secrets: {
       get: () => unexpectedAwsCall(),
       create: () => unexpectedAwsCall(),
+    },
+    stackOutputs: () => unexpectedAwsCall(),
+    templatesClients: {
+      cloudFormation: { send: () => unexpectedAwsCall() } as unknown as TemplatesEngineClients["cloudFormation"],
+      s3: { send: () => unexpectedAwsCall() } as unknown as TemplatesEngineClients["s3"],
     },
     ...overrides,
   };
@@ -904,7 +910,17 @@ describe("agentx deploy", () => {
 
     const code = await executeCli(
       ["deploy", "--mode", "install", "--engine", "cdk", "--release", releaseDir, "--answers", answersPath, "--source", "/some/source", "--parts", "access", "--yes"],
-      { ...io, deploy: safeDeployDeps({ identity: fakeIdentity, store, secrets: memorySecrets(), commandRunner: cleanCdkRunner(scriptedOutputs()) }) },
+      {
+        ...io,
+        deploy: safeDeployDeps({
+          identity: fakeIdentity,
+          store,
+          secrets: memorySecrets(),
+          commandRunner: cleanCdkRunner(scriptedOutputs()),
+          // A fresh install: none of the parts after access exist yet.
+          stackOutputs: async () => undefined,
+        }),
+      },
     );
 
     expect(code).toBe(0);
