@@ -13,6 +13,7 @@ import type { DeployRequest, StackDeployer, StackOutputs } from "../../packages/
 import type { ParameterStore } from "../../packages/cli/src/environments/parameter-store.js";
 import type { SecretValueStore } from "../../packages/cli/src/deploy/signing-key.js";
 import type { DeployCliDependencies } from "../../packages/cli/src/deploy/commands.js";
+import { assertReleaseCoversRegion, releaseRegionProblem } from "../../packages/cli/src/deploy/release.js";
 import type { TemplatesEngineClients } from "../../packages/cli/src/deploy/templates-engine.js";
 import { executeCli } from "../../packages/cli/src/main.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
@@ -315,13 +316,11 @@ describe("agentx init --export", () => {
     expect(files).toContain("templates");
   });
 
-  it("without --export explains how to proceed and exits non-zero", async () => {
+  it("init from a source build without --release says to pass --release, before touching AWS", async () => {
     const io = capture();
-
-    const code = await executeCli(["init"], { ...io });
-
+    const code = await executeCli(["--env", ENV, "init", "--region", REGION], { ...io, init: { deploy: safeDeployDeps(), releaseVersion: null } });
     expect(code).toBe(2);
-    expect(io.err.join("")).toContain("interactive install arrives in a later AgentX release; use agentx init --export or agentx deploy");
+    expect(io.err.join("")).toContain("this agentx was built from source and has no published release to download; pass --release <dir>");
   });
 
   it("without an explicit --env refuses: the default is the live production environment", async () => {
@@ -906,6 +905,27 @@ describe("agentx deploy", () => {
     );
   });
 
+  it("accepts slackAppPostedMessages in the answers file and refuses a value outside accept and ignore", async () => {
+    const io = capture();
+    const dir = await tmp("agentx-answers-");
+    const answersPath = join(dir, "answers.json");
+    await writeFile(answersPath, JSON.stringify(answersJson({ slackAppPostedMessages: "sometimes" })));
+    const code = await executeCli(["deploy", "--mode", "install", "--release", "/nonexistent-release", "--answers", answersPath, "--yes"], { ...io, deploy: safeDeployDeps() });
+    expect(code).toBe(2);
+    expect(io.err.join("")).toContain("slackAppPostedMessages");
+
+    const releaseDir = await emptyReleaseDir();
+    const validPath = await writeAnswers({ slackAppPostedMessages: "ignore" });
+    const deployer = progressFakeDeployer(scriptedOutputs());
+    const accepted = capture();
+    const acceptedCode = await executeCli(
+      ["deploy", "--mode", "install", "--release", releaseDir, "--answers", validPath, "--yes"],
+      { ...accepted, deploy: safeDeployDeps({ identity: fakeIdentity, store: new MemoryParameterStore(), secrets: memorySecrets(), deployer }) },
+    );
+    expect(acceptedCode).toBe(0);
+    expect(deployer.calls.find((request) => request.part === "control-plane")?.parameters.SlackAppPostedMessages).toBe("ignore");
+  });
+
   it("names the cdk engine and its source in the resume command", async () => {
     const releaseDir = await emptyReleaseDir();
     const answersPath = await writeAnswers();
@@ -932,5 +952,27 @@ describe("agentx deploy", () => {
     expect(io.out.join("")).toContain(
       `Resume with: agentx deploy --mode install --engine cdk --source /some/source --parts foundation,identity,control-plane,runtime,slack --release ${releaseDir} --answers ${answersPath} --yes\n`,
     );
+  });
+});
+
+describe("assertReleaseCoversRegion", () => {
+  const release = { manifest: { version: "1.2.3" }, regions: () => ["us-east-1", "us-west-2"] };
+
+  it("accepts a region the release covers", () => {
+    expect(() => assertReleaseCoversRegion(release, "us-west-2")).not.toThrow();
+  });
+
+  it("refuses any other region, listing the ones it covers", () => {
+    expect(() => assertReleaseCoversRegion(release, "eu-west-1")).toThrow("release 1.2.3 does not cover region eu-west-1; it covers: us-east-1, us-west-2");
+    expect(() => assertReleaseCoversRegion({ manifest: { version: "1.2.3" }, regions: () => [] }, "eu-west-1")).toThrow("it covers: no region");
+  });
+});
+
+describe("releaseRegionProblem", () => {
+  const release = { manifest: { version: "1.2.3" }, regions: () => ["us-east-1"] };
+
+  it("is undefined for a covered region and names the problem, without an error code, otherwise", () => {
+    expect(releaseRegionProblem(release, "us-east-1")).toBeUndefined();
+    expect(releaseRegionProblem(release, "eu-west-1")).toBe("release 1.2.3 does not cover region eu-west-1; it covers: us-east-1");
   });
 });

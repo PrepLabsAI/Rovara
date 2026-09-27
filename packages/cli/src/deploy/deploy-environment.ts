@@ -4,7 +4,7 @@
 // deployEnvironment; everything else (order, outputs feeding forward, the lock, settings) lives here.
 import { agentXError, environmentStackName } from "@agentx/contracts";
 import { PROTECTED_PARTS, type DeployEvent, type DeployRequest, type StackDeployer } from "./deployer.js";
-import { withEnvironmentLock } from "../environments/lock.js";
+import { currentLockHolder, withEnvironmentLock } from "../environments/lock.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import { readEnvironmentSettings, writeEnvironmentSettings, type EnvironmentSettings } from "../environments/settings.js";
 import { installOrder, stackParameters, upgradeOrder, type DeployPart, type InstallAnswers, type StackOutputs } from "./parameters.js";
@@ -34,6 +34,8 @@ export interface DeployEnvironmentInput {
   /** Passed through to every deploy request when given; only the templates engine consults it. */
   confirm?: DeployRequest["confirm"];
   now?: () => number;
+  /** The caller already holds the environment lock (agentx init's step runner): do not take it again. */
+  lockHeld?: boolean;
 }
 
 export interface DeployEnvironmentResult {
@@ -90,9 +92,10 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
     throw agentXError("CONFIG_INVALID", "bringing your own OIDC provider requires clientId to write environment settings (needed for agentx login)");
   }
 
-  return withEnvironmentLock({ store, env, holder, command: `deploy ${mode}`, now }, async () => {
-    // Settings may have changed in the window between the check above and taking the lock; the
-    // lock now held, this is the authoritative read the rest of the deploy is based on.
+  const work = async (): Promise<DeployEnvironmentResult> => {
+    // Settings may have changed in the window between the check above and taking the lock (or, with
+    // lockHeld, in whatever window the caller's own held lock does not cover); the lock now held (or
+    // already held by the caller), this is the authoritative read the rest of the deploy is based on.
     const existing = await readEnvironmentSettings(store, env);
     assertDeployAllowed(existing, mode, engine, input.parts, env);
 
@@ -209,7 +212,16 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
     };
     await writeEnvironmentSettings(store, settings);
     return { outputs, settingsWritten: true };
-  });
+  };
+
+  if (input.lockHeld === true) {
+    const holdingArn = await currentLockHolder(store, env);
+    if (holdingArn !== holder) {
+      throw agentXError("CONFIG_INVALID", `environment ${env}'s lock is not held by ${holder}; lockHeld only skips taking a lock the caller already holds, and this caller does not currently hold it`);
+    }
+    return work();
+  }
+  return withEnvironmentLock({ store, env, holder, command: `deploy ${mode}`, now }, work);
 }
 
 /**

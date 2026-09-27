@@ -136,6 +136,11 @@ describe("deploy parameters", () => {
     expect(params).not.toHaveProperty("AdminValues");
   });
 
+  it("passes SlackAppPostedMessages to the control plane only when chosen", () => {
+    expect(stackParameters("control-plane", { ...answers(), slackAppPostedMessages: "ignore" }, outputs).SlackAppPostedMessages).toBe("ignore");
+    expect(stackParameters("control-plane", answers(), outputs)).not.toHaveProperty("SlackAppPostedMessages");
+  });
+
   it("passes the GitHub App credential ref through when given", () => {
     const withRef = { ...answers(), github: { ...answers().github, credentialRef: "github-custom-ref" } };
     expect(stackParameters("control-plane", withRef, outputs)).toMatchObject({ GitHubAppCredentialRef: "github-custom-ref" });

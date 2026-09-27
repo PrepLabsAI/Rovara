@@ -10,7 +10,6 @@
 import { chmod, mkdir, mkdtemp, readdir, readFile, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import {
-  agentXError,
   defaultBoundaryArn,
   defaultBoundaryStatements,
   environmentCloudFormationRoleName,
@@ -26,7 +25,7 @@ import {
 import type { DeployAnswers } from "./deploy-environment.js";
 import { sha256Hex } from "./hash.js";
 import { installOrder, stackParameters, type DeployPart, type InstallAnswers, type StackOutputs } from "./parameters.js";
-import type { LoadedRelease } from "./release.js";
+import { assertReleaseCoversRegion, type LoadedRelease } from "./release.js";
 import { callbackSigningKeySecretName } from "./signing-key.js";
 import { PROTECTED_PARTS } from "./deployer.js";
 
@@ -449,6 +448,13 @@ function readme(input: { env: string; region: string; account: string; order: De
   const laterParts = order.filter((part) => part !== "access");
   const deleteOrder = [...order].reverse().map((part) => environmentStackName(env, part));
   const protectedStacks = order.filter((part) => PROTECTED_PARTS.has(part)).map((part) => environmentStackName(env, part));
+  // EC2 worker instances and volumes are launched by Step Functions, outside CloudFormation (#79-#97),
+  // so they survive every stack delete above and must be torn down by hand. They must go after the
+  // control-plane stack (whose Step Functions launch them) and before the foundation stack (whose
+  // worker security group a still-running instance would block from deleting).
+  const controlPlaneDeleteIndex = deleteOrder.indexOf(environmentStackName(env, "control-plane"));
+  const deleteOrderThroughControlPlane = deleteOrder.slice(0, controlPlaneDeleteIndex + 1);
+  const deleteOrderAfterControlPlane = deleteOrder.slice(controlPlaneDeleteIndex + 1);
   return `# AgentX access stack: platform-team deploy bundle
 
 This bundle deploys the **access stack** (\`${stackName}\`) for the \`${env}\` AgentX environment in
@@ -553,13 +559,36 @@ credentials that can delete every resource below.
    \`\`\`
    aws cloudformation update-termination-protection --no-enable-termination-protection --stack-name <stack> --region ${region}
    \`\`\`
-3. **Delete the stacks in reverse install order**, waiting for each one:
-   ${deleteOrder.join(", ")}.
+3. **Delete the stacks down through control-plane, in reverse install order**, waiting for each
+   one: ${deleteOrderThroughControlPlane.join(", ")}.
    \`\`\`
    aws cloudformation delete-stack --stack-name <stack> --region ${region}
    aws cloudformation wait stack-delete-complete --stack-name <stack> --region ${region}
    \`\`\`
-4. **Remove what survives stack deletion:**
+4. **Terminate the EC2 workers**, before the foundation stack below deletes. EC2 worker instances and
+   volumes are launched by Step Functions, outside CloudFormation (the control plane's own state
+   machines), so no stack delete removes them, and a worker instance still running in the worker security
+   group blocks the foundation stack's delete.
+   \`\`\`
+   aws ec2 describe-instances --region ${region} \\
+     --filters Name=tag:Environment,Values=${env} Name=tag:DeploymentMode,Values=ec2-ebs \\
+     --query "Reservations[].Instances[].InstanceId" --output text
+   aws ec2 terminate-instances --instance-ids <ids> --region ${region}
+   aws ec2 wait instance-terminated --instance-ids <ids> --region ${region}
+   aws ec2 describe-volumes --region ${region} \\
+     --filters Name=tag:Environment,Values=${env} Name=tag:DeploymentMode,Values=ec2-ebs \\
+     --query "Volumes[].VolumeId" --output text
+   aws ec2 delete-volume --volume-id <id> --region ${region}
+   \`\`\`
+   (\`describe-instances\` and \`describe-volumes\` can each list more than one id: terminate and wait
+   on every instance id together, then repeat \`delete-volume\` for each volume id.)
+5. **Delete the remaining stacks in reverse install order**, waiting for each one:
+   ${deleteOrderAfterControlPlane.join(", ")}.
+   \`\`\`
+   aws cloudformation delete-stack --stack-name <stack> --region ${region}
+   aws cloudformation wait stack-delete-complete --stack-name <stack> --region ${region}
+   \`\`\`
+6. **Remove what survives stack deletion:**
    - **The AgentCore capacity provider** (foundation's \`CapacityProviderArn\` output; the id is the
      part after \`capacity-provider/\`). **Warning:** deleting the capacity provider deletes every worker session's persistent workspace volume.
      Delete it only when no workspace is needed.
@@ -657,9 +686,7 @@ export async function writeExportBundle(input: ExportBundleInput): Promise<Expor
   const { env, region, account } = answers;
   const partition = answers.partition ?? "aws";
 
-  if (!release.regions().includes(region)) {
-    throw agentXError("CONFIG_INVALID", `release ${release.manifest.version} does not cover region ${region}; it covers: ${release.regions().join(", ") || "no region"}`);
-  }
+  assertReleaseCoversRegion(release, region);
   await assertClaimable(dir);
 
   const resolvedDir = resolve(dir);

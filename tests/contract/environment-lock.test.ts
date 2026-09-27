@@ -254,4 +254,32 @@ describe("environment lock", () => {
     ).rejects.toThrow("boom");
     expect(store.values.get(lockParameterName("staging"))).toBe(otherLock);
   });
+
+  it("offers a takeover of the caller's own fresh lock for the same command when takeOverOwn is set (Review Focus 1)", async () => {
+    const store = new MemoryParameterStore();
+    store.values.set("/agentx/staging/lock", JSON.stringify({ holder: base.holder, command: "init", acquiredAt: new Date(t0 - 60_000).toISOString() }));
+    const confirmTakeover = vi.fn(async () => true);
+    const result = await withEnvironmentLock({ ...base, command: "init", store, now: () => t0, takeOverOwn: true, confirmTakeover }, async () => 7);
+    expect(result).toBe(7);
+    expect(confirmTakeover).toHaveBeenCalledOnce();
+    expect(store.values.has("/agentx/staging/lock")).toBe(false);
+  });
+
+  it("refuses the caller's own fresh lock, saying how, when the takeover is declined", async () => {
+    const store = new MemoryParameterStore();
+    store.values.set("/agentx/staging/lock", JSON.stringify({ holder: base.holder, command: "init", acquiredAt: new Date(t0 - 60_000).toISOString() }));
+    await expect(withEnvironmentLock({ ...base, command: "init", store, now: () => t0, takeOverOwn: true, confirmTakeover: async () => false }, async () => 1))
+      .rejects.toThrow("(your own earlier \"init\"; confirm the takeover only if that run is no longer going)");
+  });
+
+  it("never offers a takeover of someone else's fresh lock, or of the caller's own lock for another command", async () => {
+    const confirmTakeover = vi.fn(async () => true);
+    const other = new MemoryParameterStore();
+    other.values.set("/agentx/staging/lock", JSON.stringify({ holder: "bob", command: "init", acquiredAt: new Date(t0 - 60_000).toISOString() }));
+    await expect(withEnvironmentLock({ ...base, command: "init", store: other, now: () => t0, takeOverOwn: true, confirmTakeover }, async () => 1)).rejects.toThrow("locked by bob");
+    const own = new MemoryParameterStore();
+    own.values.set("/agentx/staging/lock", JSON.stringify({ holder: base.holder, command: "deploy install", acquiredAt: new Date(t0 - 60_000).toISOString() }));
+    await expect(withEnvironmentLock({ ...base, command: "init", store: own, now: () => t0, takeOverOwn: true, confirmTakeover }, async () => 1)).rejects.toThrow("running \"deploy install\"");
+    expect(confirmTakeover).not.toHaveBeenCalled();
+  });
 });

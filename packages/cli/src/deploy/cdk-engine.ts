@@ -31,6 +31,8 @@ export interface CommandRunner {
        * `redactSecrets` below so a secret that a child process itself echoes back never leaks
        * through a thrown error the way `display` already keeps it out of the printed command. */
       redact?: (text: string) => string;
+      /** Captures stdout without echoing it (a long listing only our own code reads). */
+      quiet?: boolean;
     },
   ): Promise<{ stdout: string }>;
 }

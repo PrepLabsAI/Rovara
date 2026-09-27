@@ -1,0 +1,314 @@
+// FR-015: everything init checks before it creates anything. Every problem is collected and
+// reported together, with what to change; cdk bootstrap (which creates the CDKToolkit stack) is
+// offered only when every other check has passed.
+import { BedrockAgentCoreControlClient, ListAgentRuntimesCommand } from "@aws-sdk/client-bedrock-agentcore-control";
+import { BedrockRuntimeClient, ConverseCommand } from "@aws-sdk/client-bedrock-runtime";
+import { NodeHttpHandler } from "@smithy/node-http-handler";
+import { agentXError, AgentXError } from "@agentx/contracts";
+import { assertCdkBootstrapped, type CommandRunner } from "../deploy/cdk-engine.js";
+import { releaseRegionProblem, type ReleaseCoverage } from "../deploy/release.js";
+import type { ParameterStore } from "../environments/parameter-store.js";
+import type { InitAnswers } from "./install-state.js";
+import type { Prompter } from "./prompts.js";
+
+export interface PrerequisiteChecks {
+  /** A one-token Bedrock Converse call. */
+  converse(modelId: string): Promise<void>;
+  /** A read-only AgentCore control-plane call in the region (ListAgentRuntimes, 1 result). */
+  agentCore(): Promise<void>;
+  /** The command's --version output, or undefined when it is not installed. */
+  commandVersion(command: string): Promise<string | undefined>;
+  cdkBootstrapped(): Promise<boolean>;
+  runCdkBootstrap(): Promise<void>;
+  oidcDiscovery(issuer: string): Promise<unknown>;
+  sleep(ms: number): Promise<void>;
+}
+
+export type ModelRole = "orchestrator" | "classifier" | "worker";
+
+export const DEDICATED_ACCOUNT_NOTE =
+  "AgentX recommends a dedicated AWS account for each install: environments that share an account are not a security boundary against each other.";
+
+const errorName = (error: unknown) => (error instanceof Error ? error.name : "");
+const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
+/** True when the error means the service has no endpoint in the region: an SDK client refuses to
+ * even build a request (UnknownEndpoint / EndpointError), or DNS resolution for the regional
+ * hostname failed outright (ENOTFOUND), rather than the request reaching AWS and being refused. */
+export function endpointMissing(error: unknown): boolean {
+  for (let current: unknown = error, depth = 0; current !== undefined && current !== null && depth < 5; depth += 1) {
+    const record = current as { name?: unknown; code?: unknown; message?: unknown; cause?: unknown };
+    if (record.name === "UnknownEndpoint" || record.name === "EndpointError" || record.code === "ENOTFOUND") return true;
+    if (typeof record.message === "string" && /getaddrinfo ENOTFOUND/.test(record.message)) return true;
+    current = record.cause;
+  }
+  return false;
+}
+
+/** Names the inference-profile prefix a model id needs in `region`, or, where none can be guessed
+ * reliably (item 8), sends the person to the console instead of a wrong id: `ca-` and `sa-` regions
+ * are not covered by the `us.`/`eu.`/`apac.` cross-region profile families, so guessing would print
+ * an id that does not exist. */
+function inferenceProfileHint(modelId: string, region: string, role: ModelRole): string {
+  if (region.startsWith("us-gov-")) return `use us-gov.${modelId} instead (--${role}-model)`;
+  if (region.startsWith("eu-")) return `use eu.${modelId} instead (--${role}-model)`;
+  if (region.startsWith("ap-")) return `use apac.${modelId} instead (--${role}-model)`;
+  if (region.startsWith("ca-") || region.startsWith("sa-")) {
+    return `use the inference profile id listed in the Bedrock console for ${region} instead (--${role}-model)`;
+  }
+  return `use us.${modelId} instead (--${role}-model)`;
+}
+
+/** Turns a failed one-token Converse call into a message that says what to change, for the
+ * failures a new account hits in practice (Review Focus 5): the Anthropic one-time usage form, a
+ * model id that must be called through an inference profile, an id Bedrock does not recognize in
+ * this region, access denied for some other reason, a throttled check, a timed-out check, and a
+ * model that failed for no clear reason at all. Every branch ends by saying what to try next. */
+export function modelCheckProblem(input: { modelId: string; role: ModelRole; region: string; error: unknown }): string {
+  const { modelId, role, region, error } = input;
+  const name = errorName(error);
+  const message = errorMessage(error);
+  if (endpointMissing(error)) return `Amazon Bedrock is not available in ${region}; choose another region with --region`;
+  // Item 1: Bedrock reports the Anthropic one-time usage-form problem as AccessDeniedException in
+  // some accounts and ResourceNotFoundException in others; only the message says which problem
+  // this is, so it is checked before any check on the error's name.
+  if (/use case/i.test(message)) {
+    return `${modelId}: Anthropic models need a one-time usage form submitted in the Bedrock console. Open the Bedrock console in ${region}, Model catalog, choose the model and submit the form; submitting it in your organization's management account covers every member account. Then run agentx init again`;
+  }
+  if (name === "ValidationException" && /on-demand throughput/i.test(message)) {
+    return `${modelId} must be called through an inference profile in ${region}; ${inferenceProfileHint(modelId, region, role)}`;
+  }
+  if (name === "ResourceNotFoundException" || (name === "ValidationException" && /model identifier is invalid/i.test(message))) {
+    return `${modelId} is not a Bedrock model id available in ${region}; check the id, or choose another with --${role}-model`;
+  }
+  if (name === "AccessDeniedException") {
+    // Item 7: AWS retired the Bedrock console's "Model access" page (What's New, October 2025);
+    // serverless models are enabled automatically in commercial regions, so a plain access denial
+    // now means a role or SCP denies bedrock:InvokeModel, or (for a Marketplace model) the role
+    // is missing aws-marketplace:Subscribe.
+    return `${modelId}: this account or your credentials cannot call it in ${region} (${message}). Your role or an SCP may deny bedrock:InvokeModel for this model; for a Marketplace model, the role also needs aws-marketplace:Subscribe. Check your permissions, or choose another model with --${role}-model`;
+  }
+  if (name === "ThrottlingException") return `Bedrock throttled the check of ${modelId}; wait a minute and run agentx init again`;
+  // Item 2: awsPrerequisiteChecks' own withDeadline already builds this exact, complete message
+  // (naming the model, the region, and what to try), so it is returned as-is rather than wrapped
+  // a second time.
+  if (name === "TimeoutError") return message;
+  return `${modelId} did not answer a one-token test call in ${region}: ${message}; check your credentials or network, or choose another model with --${role}-model`;
+}
+
+function nodeVersionOk(version: string): boolean {
+  const match = /^v?(\d+)\.(\d+)/.exec(version.trim());
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  return major > 22 || (major === 22 && minor >= 19);
+}
+
+/** Everything `agentx init` must confirm before it creates a single resource: the account and
+ * region can run AgentCore, each distinct model answers, the identity provider (when self-hosted)
+ * agrees with itself, and the chosen engine's tooling is in place. Every problem found is collected
+ * and reported together (FR-015): a person fixing an account should not have to run init five
+ * times to hear about a fifth thing wrong each time. */
+export async function checkPrerequisites(input: {
+  answers: InitAnswers; release: ReleaseCoverage; caller: { account: string; arn: string };
+  checks: PrerequisiteChecks; prompter: Prompter; write: (line: string) => void;
+}): Promise<void> {
+  const { answers, checks, write } = input;
+  const { region } = answers;
+  const problems: string[] = [];
+  write(`AWS account ${input.caller.account} as ${input.caller.arn}`);
+  write(DEDICATED_ACCOUNT_NOTE);
+
+  // The same check and wording as agentx deploy's, collected with every other problem.
+  const regionProblem = releaseRegionProblem(input.release, region);
+  if (regionProblem !== undefined) problems.push(regionProblem);
+
+  try {
+    await checks.agentCore();
+    write(`ok AgentCore Runtime is available in ${region}`);
+  } catch (error) {
+    if (errorName(error).startsWith("AccessDenied")) write(`ok AgentCore Runtime answers in ${region}`);
+    else if (endpointMissing(error)) {
+      // Item 5: name the exact hostname this machine failed to resolve, so a DNS or network
+      // problem is not confused with the region genuinely lacking the service.
+      problems.push(`Amazon Bedrock AgentCore Runtime is not available in ${region} (or this machine cannot resolve bedrock-agentcore-control.${region}.amazonaws.com; check your network)`);
+    } else {
+      // Item 6: name a next step for a failure that is neither an access denial nor a missing
+      // endpoint (a network blip, a service error, and so on).
+      problems.push(`could not reach AgentCore Runtime in ${region}: ${errorMessage(error)}; check your credentials or network, or choose another region with --region`);
+    }
+  }
+
+  const roles: Array<[ModelRole, string]> = [
+    ["orchestrator", answers.models.orchestrator],
+    ["classifier", answers.models.classifier],
+    ["worker", answers.models.worker],
+  ];
+  const seen = new Set<string>();
+  for (const [role, modelId] of roles) {
+    if (seen.has(modelId)) continue;
+    seen.add(modelId);
+    try {
+      try {
+        await checks.converse(modelId);
+      } catch (error) {
+        if (errorName(error) !== "ThrottlingException") throw error;
+        await checks.sleep(2000);
+        await checks.converse(modelId);
+      }
+      write(`ok ${modelId} answers`);
+    } catch (error) {
+      problems.push(modelCheckProblem({ modelId, role, region, error }));
+    }
+  }
+
+  if (answers.identity.mode === "oidc") {
+    const issuer = answers.identity.issuer.replace(/\/$/, "");
+    const url = `${issuer}/.well-known/openid-configuration`;
+    try {
+      const document = (await checks.oidcDiscovery(answers.identity.issuer)) as { issuer?: unknown };
+      const named = typeof document.issuer === "string" ? document.issuer.replace(/\/$/, "") : undefined;
+      // Item 6: name a next step for a mismatched issuer too.
+      if (named !== issuer) problems.push(`the OIDC discovery document at ${url} names issuer ${named ?? "nothing"}, not ${issuer}; check --oidc-issuer`);
+      else write(`ok OIDC discovery at ${url}`);
+    } catch (error) {
+      // Item 3: awsPrerequisiteChecks' own oidcDiscovery already builds a complete message (naming
+      // the issuer/URL and saying to check --oidc-issuer) for every failure it can throw, so it is
+      // reported as-is rather than wrapped a second time.
+      problems.push(errorMessage(error));
+    }
+  }
+
+  let needsBootstrap = false;
+  if (answers.engine === "cdk") {
+    const node = await checks.commandVersion("node");
+    if (node === undefined || !nodeVersionOk(node)) problems.push(`the cdk engine needs Node 22.19 or later (found ${node?.trim() ?? "no node"})`);
+    if ((await checks.commandVersion("npx")) === undefined) problems.push("the cdk engine needs npx (it comes with npm)");
+    try {
+      needsBootstrap = !(await checks.cdkBootstrapped());
+    } catch (error) {
+      // Item 4: a failed read of the bootstrap parameter (anything other than "not bootstrapped",
+      // which cdkBootstrapped() already turns into `false`) is one more collected problem, not an
+      // early abort: every other check still runs, and cdk bootstrap is not offered this run.
+      problems.push(`could not check CDK bootstrap: ${errorMessage(error)}; check your credentials can read SSM`);
+    }
+  }
+
+  // cdk bootstrap creates the CDKToolkit stack (Review Focus 5's sibling concern): offered only
+  // once every other check has passed, so init never asks to create something before it is sure
+  // nothing else is going to stop the run anyway.
+  if (needsBootstrap && problems.length === 0) {
+    const target = `aws://${answers.account}/${region}`;
+    write(`CDK is not bootstrapped in ${region}. cdk bootstrap creates the CDKToolkit stack (an S3 bucket, an ECR repository and deploy roles) that the cdk engine needs.`);
+    if (await input.prompter.confirm(`Run cdk bootstrap ${target} now?`, { defaultValue: false })) {
+      await checks.runCdkBootstrap();
+      write(`ok CDK bootstrapped in ${region}`);
+    } else {
+      problems.push(`CDK is not bootstrapped in ${region}; run npx cdk bootstrap ${target}, or use --engine templates, which needs no bootstrap`);
+    }
+  }
+
+  if (problems.length > 0) {
+    throw agentXError("CONFIG_INVALID", `init cannot start; nothing was created:\n${problems.map((problem) => `- ${problem}`).join("\n")}`);
+  }
+}
+
+// Item 2: `maxAttempts: 1` turns off the SDK's own retry loop (checkPrerequisites already retries
+// once on throttling, so the call is attempted at most twice in total, not up to 2 x 3), and the
+// request handler's own timeouts bound a single attempt well inside CONVERSE_DEADLINE_MS below.
+export const CONVERSE_CLIENT_MAX_ATTEMPTS = 1;
+export const CONVERSE_REQUEST_HANDLER_OPTIONS = { requestTimeout: 15_000, connectionTimeout: 5_000 } as const;
+const CONVERSE_DEADLINE_MS = 20_000;
+const OIDC_DISCOVERY_TIMEOUT_MS = 10_000;
+
+/**
+ * Races `run(signal)` against a `ms` deadline: if the deadline wins, the signal handed to `run` is
+ * aborted and the returned promise rejects with a `TimeoutError` carrying `message`. Uses a plain
+ * `setTimeout` (not the native, non-fake-timer-friendly `AbortSignal.timeout`) so a hung call fails
+ * clearly and deterministically instead of hanging `agentx init` forever, and so this is directly
+ * testable with fake timers and a `run` that never resolves.
+ */
+export async function withDeadline<T>(run: (signal: AbortSignal) => Promise<T>, ms: number, message: string): Promise<T> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(Object.assign(new Error(message), { name: "TimeoutError" }));
+    }, ms);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([run(controller.signal), deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export function awsPrerequisiteChecks(input: { region: string; account: string; store: ParameterStore; runner: CommandRunner; fetch: typeof fetch }): PrerequisiteChecks {
+  const bedrock = new BedrockRuntimeClient({
+    region: input.region,
+    maxAttempts: CONVERSE_CLIENT_MAX_ATTEMPTS,
+    requestHandler: new NodeHttpHandler(CONVERSE_REQUEST_HANDLER_OPTIONS),
+  });
+  const agentCore = new BedrockAgentCoreControlClient({ region: input.region });
+  return {
+    async converse(modelId) {
+      await withDeadline(
+        (signal) => bedrock.send(new ConverseCommand({ modelId, messages: [{ role: "user", content: [{ text: "Reply with OK." }] }], inferenceConfig: { maxTokens: 1 } }), { abortSignal: signal }),
+        CONVERSE_DEADLINE_MS,
+        `${modelId} did not answer a one-token test call in ${input.region} within ${CONVERSE_DEADLINE_MS / 1000}s; check your credentials or network, or try again`,
+      );
+    },
+    async agentCore() {
+      await agentCore.send(new ListAgentRuntimesCommand({ maxResults: 1 }));
+    },
+    async commandVersion(command) {
+      try {
+        return (await input.runner.run(command, ["--version"], { cwd: process.cwd(), display: `${command} --version` })).stdout;
+      } catch {
+        return undefined;
+      }
+    },
+    async cdkBootstrapped() {
+      try {
+        await assertCdkBootstrapped({ store: input.store, region: input.region });
+        return true;
+      } catch (error) {
+        // F11: assertCdkBootstrapped throws this one AgentXError only when the bootstrap
+        // parameter itself was not found (never bootstrapped); every other failure it can throw
+        // (access denied, throttled, any other read error) is a plain Error that already carries
+        // its own context, and must be rethrown rather than read as "not bootstrapped" (reading it
+        // that way would send someone to run cdk bootstrap when what actually needs fixing is
+        // their credentials).
+        if (error instanceof AgentXError && error.code === "CONFIG_INVALID" && /is not bootstrapped/.test(error.message)) return false;
+        throw error;
+      }
+    },
+    async runCdkBootstrap() {
+      const target = `aws://${input.account}/${input.region}`;
+      await input.runner.run("npx", ["cdk", "bootstrap", target], { cwd: process.cwd(), display: `npx cdk bootstrap ${target}` });
+    },
+    async oidcDiscovery(issuer) {
+      // Item 3: bounded with its own deadline, parses the body itself (rather than trusting
+      // `response.json()`'s own error, which does not name the issuer), and every failure names
+      // the issuer/URL and says to check --oidc-issuer.
+      const url = `${issuer.replace(/\/$/, "")}/.well-known/openid-configuration`;
+      let response: Response;
+      try {
+        response = await input.fetch(url, { signal: AbortSignal.timeout(OIDC_DISCOVERY_TIMEOUT_MS) });
+      } catch (error) {
+        const detail = errorName(error) === "TimeoutError" ? `did not answer within ${OIDC_DISCOVERY_TIMEOUT_MS / 1000}s` : errorMessage(error);
+        throw new Error(`could not reach the OIDC discovery document at ${url} (${detail}); check --oidc-issuer`, { cause: error });
+      }
+      if (!response.ok) throw new Error(`the OIDC discovery document at ${url} answered HTTP ${response.status}; check --oidc-issuer`);
+      const text = await response.text();
+      try {
+        return JSON.parse(text) as unknown;
+      } catch {
+        throw new Error(`the OIDC discovery document at ${url} is not valid JSON; check --oidc-issuer`);
+      }
+    },
+    sleep: (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms)),
+  };
+}

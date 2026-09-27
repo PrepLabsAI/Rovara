@@ -216,9 +216,33 @@ describe("writeExportBundle", () => {
     expect(readmeText).toContain("agentx destroy");
     expect(readmeText).toContain("/aws/bedrock-agentcore/runtimes/<runtimeId>-DEFAULT");
     // Every AWS CLI line in the teardown names the region, so it cannot hit the shell's default one.
-    for (const line of readmeText.split("\n").filter((l) => /^\s*aws (s3api|s3) /.test(l))) {
+    for (const line of readmeText.split("\n").filter((l) => /^\s*aws (s3api|s3|ec2) /.test(l))) {
       expect(line).toContain("--region us-east-1");
     }
+    // Fix: EC2 worker instances and volumes are launched by Step Functions, outside CloudFormation,
+    // so they must be torn down by hand between the control-plane stack's delete and the foundation
+    // stack's delete (a running worker in the worker security group blocks the foundation delete).
+    const step3Index = readmeText.indexOf("3. **Delete the stacks down through control-plane");
+    const step4Index = readmeText.indexOf("4. **Terminate the EC2 workers**");
+    const step5Index = readmeText.indexOf("5. **Delete the remaining stacks");
+    expect(step3Index).toBeGreaterThan(-1);
+    expect(step4Index).toBeGreaterThan(step3Index);
+    expect(step5Index).toBeGreaterThan(step4Index);
+    const step3Body = readmeText.slice(step3Index, step4Index);
+    const step4Body = readmeText.slice(step4Index, step5Index);
+    const step5Body = readmeText.slice(step5Index);
+    expect(step3Body).toContain(`agentx-${ENV}-control-plane`);
+    expect(step5Body).toContain(`agentx-${ENV}-foundation`);
+    expect(step4Body).toContain("aws ec2 describe-instances");
+    expect(step4Body).toContain("aws ec2 terminate-instances");
+    expect(step4Body).toContain("aws ec2 wait instance-terminated");
+    expect(step4Body).toContain("aws ec2 describe-volumes");
+    expect(step4Body).toContain("aws ec2 delete-volume");
+    expect(step4Body).toContain("Name=tag:Environment,Values=staging");
+    expect(step4Body).toContain("Name=tag:DeploymentMode,Values=ec2-ebs");
+    // Normalize line wrapping before matching this sentence, so a reflow of the README's prose
+    // doesn't break the test.
+    expect(step4Body.replace(/\s+/g, " ")).toContain("worker security group blocks the foundation stack's delete");
     // M5: one recovery wording for a failed or refused change set on a new stack.
     const recovery = "delete the change set, then delete the stack only if it is still REVIEW_IN_PROGRESS with no resources";
     expect(readmeText.toLowerCase()).toContain(recovery.toLowerCase());

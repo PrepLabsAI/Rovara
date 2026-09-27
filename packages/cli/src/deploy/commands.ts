@@ -18,12 +18,13 @@ import { AgentXError, agentXError, environmentStackName, EnvironmentNameSchema, 
 import type { CallerIdentity } from "../environments/adopt.js";
 import { stsCallerIdentity } from "../environments/adopt.js";
 import { ssmParameterStore, type ParameterStore } from "../environments/parameter-store.js";
+import { ACCOUNT_PATTERN, IdentityAnswersSchema, ImagesAnswersSchema, ModelsAnswersSchema, REGION_PATTERN } from "./answer-schemas.js";
 import { assertCdkBootstrapped, assertSourceAtRelease, buildSource, cdkDeployer, type CommandRunner } from "./cdk-engine.js";
 import type { ChangeSetChange, DeployEvent, StackDeployer, StackOutputs } from "./deployer.js";
 import { deployEnvironment, type DeployAnswers, type DeployEnvironmentResult } from "./deploy-environment.js";
 import { writeExportBundle } from "./export-bundle.js";
 import { installOrder, type DeployPart } from "./parameters.js";
-import { loadRelease } from "./release.js";
+import { assertReleaseCoversRegion, loadRelease, type LoadedRelease } from "./release.js";
 import { CALLBACK_SIGNING_KEY_BYTES, secretsManagerValueStore, type SecretValueStore } from "./signing-key.js";
 import { templatesDeployer, type TemplatesEngineClients } from "./templates-engine.js";
 
@@ -58,20 +59,9 @@ export interface DeployCliDependencies {
 }
 
 // ---- DeployAnswersSchema: mirrors DeployAnswers (deploy-environment.ts), strict -----------------
-
-const IdentityAnswersSchema = z.discriminatedUnion("mode", [
-  z.object({ mode: z.literal("cognito") }).strict(),
-  z
-    .object({
-      mode: z.literal("oidc"),
-      issuer: z.string().url(),
-      audience: z.string().min(1),
-      adminClaim: z.string().min(1).optional(),
-      adminValues: z.array(z.string().min(1)).min(1).optional(),
-      clientId: z.string().min(1).optional(),
-    })
-    .strict(),
-]);
+// Identity, models, images and the region/account patterns live in answer-schemas.ts, shared with
+// `agentx init`'s own InitAnswersSchema (install-state.ts), so both answer files agree on what a
+// valid region, account, identity, models or images answer looks like.
 
 const GithubAnswersSchema = z
   .object({
@@ -82,15 +72,6 @@ const GithubAnswersSchema = z
     credentialRef: z.string().min(1).optional(),
   })
   .strict();
-
-const ModelsAnswersSchema = z.object({ orchestrator: z.string().min(1), classifier: z.string().min(1), worker: z.string().min(1) }).strict();
-
-const ImagesAnswersSchema = z.object({ worker: z.string().min(1).optional(), slack: z.string().min(1).optional() }).strict();
-
-/** Shared with `runInitExport`'s own `--region`/`--account` validation, so both commands refuse the
- * same malformed values the same way. */
-const REGION_PATTERN = /^[a-z]{2}(-[a-z]+)+-\d$/;
-const ACCOUNT_PATTERN = /^\d{12}$/;
 
 /** Your own OIDC provider must name who administers AgentX (adminClaim and adminValues) and the
  * client `agentx login` uses (clientId): without them the deploy either grants nobody admin or
@@ -121,6 +102,7 @@ export const DeployAnswersSchema = z
     permissionsBoundaryArn: z.string().min(1).optional(),
     operatorPrincipalArn: z.string().min(1).optional(),
     images: ImagesAnswersSchema.optional(),
+    slackAppPostedMessages: z.enum(["accept", "ignore"]).optional(),
   })
   .strict()
   .superRefine(requireOidcAdminAndClient);
@@ -132,27 +114,42 @@ function firstIssueMessage(prefix: string, error: z.ZodError): string {
   return `${prefix}: ${issue.path.join(".")} ${issue.message}`.trim();
 }
 
-/** `DeployAnswersSchema`'s parsed shape, rebuilt into `DeployAnswers` field by field (rather than
- * trusted as-is) because zod's `.optional()` infers `T | undefined`, which `exactOptionalPropertyTypes`
- * treats as a different type than an absent `T`-typed optional key. */
+// Parsed answers are rebuilt into `DeployAnswers` field by field (rather than trusted as-is) because
+// zod's `.optional()` infers `T | undefined`, which `exactOptionalPropertyTypes` treats as a different
+// type than an absent `T`-typed optional key. The identity and images rebuilds are shared with
+// `agentx init` (../init/deploy-steps.ts), whose saved answers use the same schemas.
+
+/** A parsed identity answer (answer-schemas.ts's IdentityAnswersSchema) as `DeployAnswers["identity"]`. */
+export function deployIdentityAnswers(identity: z.infer<typeof IdentityAnswersSchema>): DeployAnswers["identity"] {
+  if (identity.mode === "cognito") return { mode: "cognito" };
+  return {
+    mode: "oidc",
+    issuer: identity.issuer,
+    audience: identity.audience,
+    ...(identity.adminClaim === undefined ? {} : { adminClaim: identity.adminClaim }),
+    ...(identity.adminValues === undefined ? {} : { adminValues: identity.adminValues }),
+    ...(identity.clientId === undefined ? {} : { clientId: identity.clientId }),
+  };
+}
+
+/** A parsed images answer as `DeployAnswers["images"]`, or undefined when there is none. */
+export function deployImagesAnswers(images: { worker?: string | undefined; slack?: string | undefined } | undefined): DeployAnswers["images"] {
+  if (images === undefined) return undefined;
+  return {
+    ...(images.worker === undefined ? {} : { worker: images.worker }),
+    ...(images.slack === undefined ? {} : { slack: images.slack }),
+  };
+}
+
 function toDeployAnswers(parsed: z.infer<typeof DeployAnswersSchema>): DeployAnswers {
+  const images = deployImagesAnswers(parsed.images);
   return {
     env: parsed.env,
     region: parsed.region,
     account: parsed.account,
     ...(parsed.partition === undefined ? {} : { partition: parsed.partition }),
     models: parsed.models,
-    identity:
-      parsed.identity.mode === "cognito"
-        ? { mode: "cognito" as const }
-        : {
-            mode: "oidc" as const,
-            issuer: parsed.identity.issuer,
-            audience: parsed.identity.audience,
-            ...(parsed.identity.adminClaim === undefined ? {} : { adminClaim: parsed.identity.adminClaim }),
-            ...(parsed.identity.adminValues === undefined ? {} : { adminValues: parsed.identity.adminValues }),
-            ...(parsed.identity.clientId === undefined ? {} : { clientId: parsed.identity.clientId }),
-          },
+    identity: deployIdentityAnswers(parsed.identity),
     github: {
       account: parsed.github.account,
       appId: parsed.github.appId,
@@ -162,14 +159,8 @@ function toDeployAnswers(parsed: z.infer<typeof DeployAnswersSchema>): DeployAns
     },
     ...(parsed.permissionsBoundaryArn === undefined ? {} : { permissionsBoundaryArn: parsed.permissionsBoundaryArn }),
     ...(parsed.operatorPrincipalArn === undefined ? {} : { operatorPrincipalArn: parsed.operatorPrincipalArn }),
-    ...(parsed.images === undefined
-      ? {}
-      : {
-          images: {
-            ...(parsed.images.worker === undefined ? {} : { worker: parsed.images.worker }),
-            ...(parsed.images.slack === undefined ? {} : { slack: parsed.images.slack }),
-          },
-        }),
+    ...(images === undefined ? {} : { images }),
+    ...(parsed.slackAppPostedMessages === undefined ? {} : { slackAppPostedMessages: parsed.slackAppPostedMessages }),
   };
 }
 
@@ -356,7 +347,7 @@ export function realCommandRunner(stderr: Writer): CommandRunner {
         child.stdout?.on("data", (chunk: Buffer) => {
           const text = chunk.toString("utf8");
           stdout += text;
-          stdoutStream.push(text);
+          if (options.quiet !== true) stdoutStream.push(text);
         });
         child.stderr?.on("data", (chunk: Buffer) => {
           const text = chunk.toString("utf8");
@@ -549,13 +540,9 @@ async function deployCommand(options: DeployCommandOptions, deps: DeployCliDepen
   const parts = parseParts(options.parts);
   const release = await loadRelease(options.releaseDir);
   // The templates engine can only deploy the templates the release was built for; the cdk engine
-  // synthesizes its own. Refused here, before the caller's identity, the lock or the key.
-  if (options.engine === "templates" && !release.regions().includes(answers.region)) {
-    throw agentXError(
-      "CONFIG_INVALID",
-      `release ${release.manifest.version} does not cover region ${answers.region}; it covers: ${release.regions().join(", ") || "no region"}`,
-    );
-  }
+  // synthesizes its own. Refused here, before the confirmation setup, the caller's identity, the
+  // lock or the key (prepareDeployment checks it again for its other callers).
+  if (options.engine === "templates") assertReleaseCoversRegion(release, answers.region);
 
   let confirm: ConfirmFn | undefined;
   if (!options.yes) {
@@ -568,53 +555,18 @@ async function deployCommand(options: DeployCommandOptions, deps: DeployCliDepen
     }
   }
 
-  const identity = deps.identity ?? stsCallerIdentity(new STSClient({ region: answers.region }));
-  const caller = await identity.get();
-  if (caller.account !== answers.account) {
-    throw agentXError(
-      "CONFIG_INVALID",
-      `the answers file names account ${answers.account}, but the AWS credentials in use belong to account ${caller.account}; use credentials for ${answers.account} or fix the answers file`,
-    );
-  }
-  const holder = caller.arn;
-  const partition = partitionFromArn(caller.arn);
-  if (answers.partition !== undefined && answers.partition !== partition) {
-    throw agentXError(
-      "CONFIG_INVALID",
-      `the answers file declares partition ${answers.partition}, but the caller identity's own ARN (${caller.arn}) is in partition ${partition}`,
-    );
-  }
-
-  const store = deps.store ?? ssmParameterStore(new SSMClient({ region: answers.region }));
-  const secrets = deps.secrets ?? secretsManagerValueStore(new SecretsManagerClient({ region: answers.region }));
-
-  let deployer: StackDeployer;
-  let cdkOutputsDir: string | undefined;
-  if (deps.deployer !== undefined) {
-    deployer = deps.deployer;
-  } else if (options.engine === "cdk") {
-    // The engine==="cdk"+no-source guard above already refused when this is undefined.
-    const source = options.source as string;
-    const runner = deps.commandRunner ?? realCommandRunner(services.stderr);
-    await assertSourceAtRelease({ runner, source, version: release.manifest.version });
-    await assertCdkBootstrapped({ store, region: answers.region });
-    // After the cheap checks, before any cdk deploy: infra/dist is gitignored, so only a fresh
-    // install and build guarantees `cdk deploy` synthesizes the tagged source.
-    await buildSource({ runner, source });
-    cdkOutputsDir = await mkdtemp(join(tmpdir(), "agentx-cdk-outputs-"));
-    deployer = cdkDeployer({
-      runner,
-      source,
-      env: answers.env,
-      region: answers.region,
-      identityMode: answers.identity.mode,
-      outputsDir: cdkOutputsDir,
-      outputs: deps.stackOutputs ?? cloudFormationOutputsReader(new CloudFormationClient({ region: answers.region })),
-    });
-  } else {
-    const clients: TemplatesEngineClients = deps.templatesClients ?? { cloudFormation: new CloudFormationClient({ region: answers.region }), s3: new S3Client({ region: answers.region }) };
-    deployer = buildTemplatesDeployer({ clients, release, env: answers.env, region: answers.region, partition });
-  }
+  const prepared = await prepareDeployment({
+    engine: options.engine,
+    env: answers.env,
+    region: answers.region,
+    account: answers.account,
+    ...(answers.partition === undefined ? {} : { partition: answers.partition }),
+    identityMode: answers.identity.mode,
+    release,
+    ...(options.source === undefined ? {} : { source: options.source }),
+    deps,
+    stderr: services.stderr,
+  });
 
   const onEvent = (event: DeployEvent) => services.stderr.write(`${progressLine(event)}\n`);
 
@@ -624,10 +576,10 @@ async function deployCommand(options: DeployCommandOptions, deps: DeployCliDepen
       engine: options.engine,
       answers,
       release,
-      deployer,
-      store,
-      secrets,
-      holder,
+      deployer: prepared.deployer,
+      store: prepared.store,
+      secrets: prepared.secrets,
+      holder: prepared.holder,
       ...(parts === undefined ? {} : { parts }),
       onEvent,
       ...(confirm === undefined ? {} : { confirm }),
@@ -642,8 +594,104 @@ async function deployCommand(options: DeployCommandOptions, deps: DeployCliDepen
       missingParts: order.filter((part) => result.outputs[part] === undefined),
     };
   } finally {
-    if (cdkOutputsDir !== undefined) await rm(cdkOutputsDir, { recursive: true, force: true });
+    await prepared.cleanup();
   }
+}
+
+// ---- preparing a deployment: shared by agentx deploy and agentx init's deploy steps --------------
+
+export interface PreparedDeployment {
+  deployer: StackDeployer;
+  store: ParameterStore;
+  secrets: SecretValueStore;
+  /** The caller's own ARN: the environment lock's holder. */
+  holder: string;
+  partition: string;
+  /** Removes the cdk engine's outputs directory; a no-op for templates. */
+  cleanup(): Promise<void>;
+}
+
+/**
+ * Everything `agentx deploy` does between loading the answers and calling deployEnvironment: the
+ * region coverage check (templates engine), the caller's account and partition checks, the
+ * parameter and secret stores, and the engine (cdk: the source checkout at the release tag, the
+ * bootstrap check, the build and an outputs directory). `agentx init` builds its deployment here
+ * too, once per run, so both commands refuse and deploy identically.
+ */
+export async function prepareDeployment(input: {
+  engine: "templates" | "cdk";
+  env: string;
+  region: string;
+  account: string;
+  partition?: string;
+  identityMode: "cognito" | "oidc";
+  release: LoadedRelease;
+  source?: string;
+  deps: DeployCliDependencies;
+  stderr: Writer;
+}): Promise<PreparedDeployment> {
+  const { deps, release, region } = input;
+  if (input.engine === "templates") assertReleaseCoversRegion(release, region);
+
+  const identity = deps.identity ?? stsCallerIdentity(new STSClient({ region }));
+  const caller = await identity.get();
+  if (caller.account !== input.account) {
+    throw agentXError(
+      "CONFIG_INVALID",
+      `the answers file names account ${input.account}, but the AWS credentials in use belong to account ${caller.account}; use credentials for ${input.account} or fix the answers file`,
+    );
+  }
+  const holder = caller.arn;
+  const partition = partitionFromArn(caller.arn);
+  if (input.partition !== undefined && input.partition !== partition) {
+    throw agentXError(
+      "CONFIG_INVALID",
+      `the answers file declares partition ${input.partition}, but the caller identity's own ARN (${caller.arn}) is in partition ${partition}`,
+    );
+  }
+
+  const store = deps.store ?? ssmParameterStore(new SSMClient({ region }));
+  const secrets = deps.secrets ?? secretsManagerValueStore(new SecretsManagerClient({ region }));
+
+  let deployer: StackDeployer;
+  let cdkOutputsDir: string | undefined;
+  if (deps.deployer !== undefined) {
+    deployer = deps.deployer;
+  } else if (input.engine === "cdk") {
+    const source = input.source;
+    if (source === undefined) throw agentXError("CONFIG_INVALID", "--source is required for --engine cdk");
+    const runner = deps.commandRunner ?? realCommandRunner(input.stderr);
+    await assertSourceAtRelease({ runner, source, version: release.manifest.version });
+    await assertCdkBootstrapped({ store, region });
+    // After the cheap checks, before any cdk deploy: infra/dist is gitignored, so only a fresh
+    // install and build guarantees `cdk deploy` synthesizes the tagged source.
+    await buildSource({ runner, source });
+    cdkOutputsDir = await mkdtemp(join(tmpdir(), "agentx-cdk-outputs-"));
+    deployer = cdkDeployer({
+      runner,
+      source,
+      env: input.env,
+      region,
+      identityMode: input.identityMode,
+      outputsDir: cdkOutputsDir,
+      outputs: deps.stackOutputs ?? cloudFormationOutputsReader(new CloudFormationClient({ region })),
+    });
+  } else {
+    const clients: TemplatesEngineClients = deps.templatesClients ?? { cloudFormation: new CloudFormationClient({ region }), s3: new S3Client({ region }) };
+    deployer = buildTemplatesDeployer({ clients, release, env: input.env, region, partition });
+  }
+
+  const outputsDir = cdkOutputsDir;
+  return {
+    deployer,
+    store,
+    secrets,
+    holder,
+    partition,
+    async cleanup() {
+      if (outputsDir !== undefined) await rm(outputsDir, { recursive: true, force: true });
+    },
+  };
 }
 
 // ---- agentx init --export ------------------------------------------------------------------------

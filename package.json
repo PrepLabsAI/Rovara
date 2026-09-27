@@ -13,7 +13,7 @@
   "scripts": {
     "build": "tsc -b",
     "clean": "tsc -b --clean",
-    "lint": "eslint .",
+    "lint": "node --max-old-space-size=6144 node_modules/eslint/bin/eslint.js .",
     "agentx": "node packages/cli/dist/main.js",
     "preflight": "tsx scripts/preflight.ts",
     "eval": "tsx scripts/eval.ts",

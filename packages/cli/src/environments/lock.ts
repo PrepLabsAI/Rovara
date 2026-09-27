@@ -18,6 +18,15 @@ function parseLock(value: string): LockRecord | undefined {
   return undefined;
 }
 
+/** The ARN currently holding `env`'s lock, or undefined when there is none or it is unreadable.
+ * `deployEnvironment`'s `lockHeld` path uses this to confirm the caller passing `lockHeld` actually
+ * holds the lock, without duplicating `parseLock`'s parsing there. */
+export async function currentLockHolder(store: ParameterStore, env: string): Promise<string | undefined> {
+  const stored = await store.get(lockParameterName(env));
+  if (stored === undefined) return undefined;
+  return parseLock(stored.value)?.holder;
+}
+
 const unreadableLockMessage = (env: string, name: string) =>
   `environment ${env} is locked by an unreadable lock at ${name}; remove it only if no AgentX command is running`;
 
@@ -58,6 +67,11 @@ const releaseTakeoverMessage = (env: string, held: LockRecord | undefined) =>
 export async function withEnvironmentLock<T>(input: {
   store: ParameterStore; env: string; holder: string; command: string;
   now?: () => number; confirmTakeover?: (held: LockRecord) => Promise<boolean>;
+  /** Offers a takeover, without waiting for staleness, of a lock that is already this caller's own,
+   * for this same command: `agentx init` uses it, since a closed terminal leaves its own lock held
+   * (nothing releases it on process death) and the next `agentx init` run is otherwise refused for
+   * up to two hours even though it is clearly the same person resuming. */
+  takeOverOwn?: boolean;
 }, work: () => Promise<T>): Promise<T> {
   const now = input.now ?? Date.now;
   const name = lockParameterName(input.env);
@@ -74,15 +88,16 @@ export async function withEnvironmentLock<T>(input: {
     if (held === undefined) throw agentXError("CONFIG_INVALID", unreadableLockMessage(input.env, name));
 
     const stale = now() - Date.parse(held.acquiredAt) > STALE_LOCK_MS;
-    if (!stale) throw agentXError("CONFIG_INVALID", heldMessage(input.env, held));
+    const ownEarlierRun = input.takeOverOwn === true && held.holder === input.holder && held.command === input.command;
+    if (!stale && !ownEarlierRun) throw agentXError("CONFIG_INVALID", heldMessage(input.env, held));
+    const why = stale
+      ? "older than 2 hours"
+      : `your own earlier "${held.command}"; confirm the takeover only if that run is no longer going`;
     if (!input.confirmTakeover) {
-      throw agentXError(
-        "CONFIG_INVALID",
-        `${heldMessage(input.env, held)} (older than 2 hours; to clear it, delete ${name} once you are sure no AgentX command is running)`,
-      );
+      throw agentXError("CONFIG_INVALID", `${heldMessage(input.env, held)} (${why}; to clear it, delete ${name} once you are sure no AgentX command is running)`);
     }
     if (!(await input.confirmTakeover(held))) {
-      throw agentXError("CONFIG_INVALID", `${heldMessage(input.env, held)} (older than 2 hours; confirm to take it over)`);
+      throw agentXError("CONFIG_INVALID", `${heldMessage(input.env, held)} (${why})`);
     }
 
     // The lock may have changed while we waited for confirmation: it may have been released, or
