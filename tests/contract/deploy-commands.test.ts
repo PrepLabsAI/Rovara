@@ -8,7 +8,7 @@ import { spawn } from "node:child_process";
 import type * as ChildProcessModule from "node:child_process";
 import { describe, expect, it, vi } from "vitest";
 import { CALLBACK_SIGNING_KEY_BYTES } from "../../packages/cli/src/deploy/signing-key.js";
-import { realCommandRunner } from "../../packages/cli/src/deploy/commands.js";
+import { interactiveConfirm, realCommandRunner } from "../../packages/cli/src/deploy/commands.js";
 
 // Wraps the real `spawn` in a mock that calls through by default, so every other test here still
 // spawns a real process; only the one test below that needs a fully scripted child ever overrides
@@ -202,5 +202,24 @@ describe("the real CommandRunner", () => {
     await expect(promise).rejects.toThrow("flush-on-error could not start: spawn boom");
     expect(stderr.text()).toContain("partial line with no newline on stdout");
     expect(stderr.text()).toContain("partial line with no newline on stderr");
+  });
+});
+
+describe("the interactive change set confirmation", () => {
+  it("flags a Conditional replacement as well as a certain one", async () => {
+    const written: string[] = [];
+    const confirm = interactiveConfirm({ write: (text) => written.push(text) }, async () => "n");
+    await confirm({
+      stackName: "agentx-staging-runtime",
+      changes: [
+        { action: "Modify", logicalId: "Certain", type: "AWS::X", replacement: "True" },
+        { action: "Modify", logicalId: "Maybe", type: "AWS::X", replacement: "Conditional" },
+        { action: "Modify", logicalId: "InPlace", type: "AWS::X", replacement: "False" },
+      ],
+    });
+    const text = written.join("");
+    expect(text).toContain("  Modify Certain (AWS::X) [replacement]\n");
+    expect(text).toContain("  Modify Maybe (AWS::X) [replacement: conditional]\n");
+    expect(text).toContain("  Modify InPlace (AWS::X)\n");
   });
 });

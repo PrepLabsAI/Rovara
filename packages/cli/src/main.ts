@@ -28,7 +28,7 @@ import { exportTurns, parseSince } from "./admin/turns.js";
 import { loginWithPkce, openSystemBrowser, tokenStoreKey } from "./auth.js";
 import { loadProjectConfig } from "./config.js";
 import { loadDeploymentSettings, type DeploymentSettings } from "./deployment.js";
-import { runDeploy, runInitExport, type DeployCliDependencies } from "./deploy/commands.js";
+import { resumeCommand, runDeploy, runInitExport, type DeployCliDependencies, type DeployCommandOptions } from "./deploy/commands.js";
 import { cloudFormationStackReader, stsCallerIdentity, type CallerIdentity, type StackReader } from "./environments/adopt.js";
 import { resolveDeploymentFile } from "./environments/cache.js";
 import { runEnvAdopt, runEnvList, runEnvUse } from "./environments/commands.js";
@@ -488,25 +488,31 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       // answers file's own env when the operator actually typed --env, never against the silent
       // default, so an omitted --env keeps working unchanged (the answers file alone decides).
       const envGivenExplicitly = command.getOptionValueSourceWithGlobals("env") === "cli";
-      const result = await runDeploy(
-        {
-          mode: options.mode,
-          engine: options.engine,
-          releaseDir: options.release,
-          answersFile: options.answers,
-          yes: options.yes,
-          ...(options.parts === undefined ? {} : { parts: options.parts }),
-          ...(options.source === undefined ? {} : { source: options.source }),
-          ...(envGivenExplicitly ? { expectedEnv: globals.env } : {}),
-        },
-        dependencies.deploy ?? {},
-        { stderr: services.stderr },
-      );
-      services.stdout.write(
-        globals.json
-          ? formatSuccess(result, true)
-          : `${options.mode === "install" ? "Installed" : "Upgraded"} environment ${result.env}${result.settingsWritten ? "" : " (not every part is deployed yet)"}\n`,
-      );
+      const deployOptions: DeployCommandOptions = {
+        mode: options.mode,
+        engine: options.engine,
+        releaseDir: options.release,
+        answersFile: options.answers,
+        yes: options.yes,
+        ...(options.parts === undefined ? {} : { parts: options.parts }),
+        ...(options.source === undefined ? {} : { source: options.source }),
+        ...(envGivenExplicitly ? { expectedEnv: globals.env } : {}),
+      };
+      const result = await runDeploy(deployOptions, dependencies.deploy ?? {}, { stderr: services.stderr });
+      if (globals.json) {
+        services.stdout.write(formatSuccess(result, true));
+        return;
+      }
+      const lines = [`${options.mode === "install" ? "Installed" : "Upgraded"} environment ${result.env}${result.settingsWritten ? "" : " (not every part is deployed yet)"}`];
+      if (!result.settingsWritten) {
+        lines.push(
+          `Deployed parts: ${result.deployedParts.join(", ") || "none"}`,
+          `Missing parts: ${result.missingParts.join(", ") || "none"}`,
+          "Environment settings are written once every part is deployed.",
+        );
+        if (result.missingParts.length > 0) lines.push(`Resume with: ${resumeCommand(deployOptions, result.missingParts)}`);
+      }
+      services.stdout.write(`${lines.join("\n")}\n`);
     });
 
   program

@@ -14,7 +14,7 @@ import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SSMClient } from "@aws-sdk/client-ssm";
 import { STSClient } from "@aws-sdk/client-sts";
 import { z } from "zod";
-import { agentXError, environmentStackName, EnvironmentNameSchema, STACK_PARTS, type StackPart } from "@agentx/contracts";
+import { AgentXError, agentXError, environmentStackName, EnvironmentNameSchema, STACK_PARTS, type StackPart } from "@agentx/contracts";
 import type { CallerIdentity } from "../environments/adopt.js";
 import { stsCallerIdentity } from "../environments/adopt.js";
 import { ssmParameterStore, type ParameterStore } from "../environments/parameter-store.js";
@@ -22,7 +22,7 @@ import { assertCdkBootstrapped, assertSourceAtRelease, buildSource, cdkDeployer,
 import type { ChangeSetChange, DeployEvent, StackDeployer, StackOutputs } from "./deployer.js";
 import { deployEnvironment, type DeployAnswers, type DeployEnvironmentResult } from "./deploy-environment.js";
 import { writeExportBundle } from "./export-bundle.js";
-import type { DeployPart } from "./parameters.js";
+import { installOrder, type DeployPart } from "./parameters.js";
 import { loadRelease } from "./release.js";
 import { CALLBACK_SIGNING_KEY_BYTES, secretsManagerValueStore, type SecretValueStore } from "./signing-key.js";
 import { templatesDeployer, type TemplatesEngineClients } from "./templates-engine.js";
@@ -88,6 +88,23 @@ const ImagesAnswersSchema = z.object({ worker: z.string().min(1).optional(), sla
 const REGION_PATTERN = /^[a-z]{2}(-[a-z]+)+-\d$/;
 const ACCOUNT_PATTERN = /^\d{12}$/;
 
+/** Your own OIDC provider must name who administers AgentX (adminClaim and adminValues) and the
+ * client `agentx login` uses (clientId): without them the deploy either grants nobody admin or
+ * never writes environment settings, so the answers file is refused before anything is deployed. */
+function requireOidcAdminAndClient(answers: { identity: z.infer<typeof IdentityAnswersSchema> }, context: z.RefinementCtx): void {
+  if (answers.identity.mode !== "oidc") return;
+  const identity = answers.identity;
+  if (identity.adminClaim === undefined) {
+    context.addIssue({ code: "custom", path: ["identity", "adminClaim"], message: "is required with your own OIDC provider" });
+  }
+  if (identity.adminValues === undefined) {
+    context.addIssue({ code: "custom", path: ["identity", "adminValues"], message: "is required with your own OIDC provider" });
+  }
+  if (identity.clientId === undefined) {
+    context.addIssue({ code: "custom", path: ["identity", "clientId"], message: "is required with your own OIDC provider (agentx login needs it)" });
+  }
+}
+
 export const DeployAnswersSchema = z
   .object({
     env: EnvironmentNameSchema,
@@ -101,7 +118,8 @@ export const DeployAnswersSchema = z
     operatorPrincipalArn: z.string().min(1).optional(),
     images: ImagesAnswersSchema.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine(requireOidcAdminAndClient);
 
 /** The first zod issue's path and message, so a schema failure always names the field. */
 function firstIssueMessage(prefix: string, error: z.ZodError): string {
@@ -227,13 +245,21 @@ export function readlineAsk(): Ask {
   };
 }
 
+/** CloudFormation's Replacement is "True", "Conditional" (it depends on a value only known at
+ * deploy time) or "False"; both of the first two can replace the resource. */
+function replacementFlag(replacement: string): string {
+  if (replacement === "True") return " [replacement]";
+  if (replacement === "Conditional") return " [replacement: conditional]";
+  return "";
+}
+
 /** Prints a change set's changes (only action/logicalId/type/replacement — never a parameter value)
  * and asks y/N before executing it. */
 export function interactiveConfirm(io: Writer, ask: Ask): ConfirmFn {
   return async (event) => {
     io.write(`Changes for ${event.stackName}:\n`);
     for (const change of event.changes) {
-      io.write(`  ${change.action} ${change.logicalId} (${change.type})${change.replacement === "True" ? " [replacement]" : ""}\n`);
+      io.write(`  ${change.action} ${change.logicalId} (${change.type})${replacementFlag(change.replacement)}\n`);
     }
     const answer = await ask(`Execute this change set for ${event.stackName}? [y/N] `);
     return /^y(es)?$/i.test(answer.trim());
@@ -422,6 +448,40 @@ function buildTemplatesDeployer(input: { clients: TemplatesEngineClients; env: s
   };
 }
 
+// ---- AWS failures as CLI error codes -------------------------------------------------------------
+
+const CREDENTIAL_ERROR_NAMES = new Set(["CredentialsProviderError", "InvalidClientTokenId", "UnrecognizedClientException", "SignatureDoesNotMatch"]);
+
+function isCredentialFailure(error: Error): boolean {
+  return CREDENTIAL_ERROR_NAMES.has(error.name) || error.name.startsWith("ExpiredToken") || /session has expired/i.test(error.message);
+}
+
+function isAccessDenied(error: Error): boolean {
+  return error.name.startsWith("AccessDenied");
+}
+
+/** The error and every `cause` beneath it (bounded, in case of a cycle). */
+function causeChain(error: unknown): Error[] {
+  const chain: Error[] = [];
+  for (let current = error; current instanceof Error && chain.length < 10; current = current.cause) chain.push(current);
+  return chain;
+}
+
+/**
+ * Gives an AWS failure the CLI error code that says what to do about it: missing or expired
+ * credentials become AUTH_REQUIRED (sign in again) and an access denial FORBIDDEN (ask for the
+ * permission), checked on the error and anything it wraps as a cause. The outermost message is
+ * kept, since it carries our own context. An AgentXError keeps its own code; anything else is
+ * returned unchanged.
+ */
+export function cliErrorFor(error: unknown): unknown {
+  if (error instanceof AgentXError || !(error instanceof Error)) return error;
+  const chain = causeChain(error);
+  if (chain.some(isCredentialFailure)) return agentXError("AUTH_REQUIRED", `AWS credentials missing or expired: ${error.message}`);
+  if (chain.some(isAccessDenied)) return agentXError("FORBIDDEN", `AWS denied the request: ${error.message}`);
+  return error;
+}
+
 // ---- agentx deploy -------------------------------------------------------------------------------
 
 export interface DeployCommandOptions {
@@ -442,7 +502,34 @@ export interface DeployCommandServices {
   stderr: Writer;
 }
 
-export async function runDeploy(options: DeployCommandOptions, deps: DeployCliDependencies, services: DeployCommandServices): Promise<DeployEnvironmentResult & { env: string }> {
+export type DeployCommandResult = DeployEnvironmentResult & {
+  env: string;
+  /** The install order's parts that exist after this run, and those that still do not. */
+  deployedParts: DeployPart[];
+  missingParts: DeployPart[];
+};
+
+/** The exact `agentx deploy` command that deploys `missingParts` with the same release, answers and engine. */
+export function resumeCommand(options: DeployCommandOptions, missingParts: DeployPart[]): string {
+  return [
+    "agentx deploy --mode install",
+    ...(options.engine === "cdk" ? [`--engine cdk --source ${options.source ?? "<source>"}`] : []),
+    `--parts ${missingParts.join(",")}`,
+    `--release ${options.releaseDir}`,
+    `--answers ${options.answersFile}`,
+    ...(options.yes ? ["--yes"] : []),
+  ].join(" ");
+}
+
+export async function runDeploy(options: DeployCommandOptions, deps: DeployCliDependencies, services: DeployCommandServices): Promise<DeployCommandResult> {
+  try {
+    return await deployCommand(options, deps, services);
+  } catch (error) {
+    throw cliErrorFor(error);
+  }
+}
+
+async function deployCommand(options: DeployCommandOptions, deps: DeployCliDependencies, services: DeployCommandServices): Promise<DeployCommandResult> {
   if (options.engine === "cdk" && options.source === undefined) {
     throw agentXError("CONFIG_INVALID", "--source is required for --engine cdk");
   }
@@ -456,6 +543,14 @@ export async function runDeploy(options: DeployCommandOptions, deps: DeployCliDe
   }
   const parts = parseParts(options.parts);
   const release = await loadRelease(options.releaseDir);
+  // The templates engine can only deploy the templates the release was built for; the cdk engine
+  // synthesizes its own. Refused here, before the caller's identity, the lock or the key.
+  if (options.engine === "templates" && !release.regions().includes(answers.region)) {
+    throw agentXError(
+      "CONFIG_INVALID",
+      `release ${release.manifest.version} does not cover region ${answers.region}; it covers: ${release.regions().join(", ") || "no region"}`,
+    );
+  }
 
   let confirm: ConfirmFn | undefined;
   if (!options.yes) {
@@ -470,6 +565,12 @@ export async function runDeploy(options: DeployCommandOptions, deps: DeployCliDe
 
   const identity = deps.identity ?? stsCallerIdentity(new STSClient({ region: answers.region }));
   const caller = await identity.get();
+  if (caller.account !== answers.account) {
+    throw agentXError(
+      "CONFIG_INVALID",
+      `the answers file names account ${answers.account}, but the AWS credentials in use belong to account ${caller.account}; use credentials for ${answers.account} or fix the answers file`,
+    );
+  }
   const holder = caller.arn;
   const partition = partitionFromArn(caller.arn);
   if (answers.partition !== undefined && answers.partition !== partition) {
@@ -528,7 +629,13 @@ export async function runDeploy(options: DeployCommandOptions, deps: DeployCliDe
       ...(deps.now === undefined ? {} : { now: deps.now }),
     });
 
-    return { ...result, env: answers.env };
+    const order = installOrder(answers.identity.mode);
+    return {
+      ...result,
+      env: answers.env,
+      deployedParts: order.filter((part) => result.outputs[part] !== undefined),
+      missingParts: order.filter((part) => result.outputs[part] === undefined),
+    };
   } finally {
     if (cdkOutputsDir !== undefined) await rm(cdkOutputsDir, { recursive: true, force: true });
   }
@@ -586,6 +693,14 @@ function buildIdentityAnswers(options: InitExportOptions): DeployAnswers["identi
  * `DeployAnswersSchema` validates `agentx deploy`'s answers file with, since `writeExportBundle`
  * itself only ever refuses a region the release doesn't cover, not a malformed one. */
 export async function runInitExport(options: InitExportOptions, deps: DeployCliDependencies): Promise<InitExportResult> {
+  try {
+    return await initExport(options, deps);
+  } catch (error) {
+    throw cliErrorFor(error);
+  }
+}
+
+async function initExport(options: InitExportOptions, deps: DeployCliDependencies): Promise<InitExportResult> {
   if (!REGION_PATTERN.test(options.region)) {
     throw agentXError("CONFIG_INVALID", `--region ${options.region} must look like us-east-1`);
   }

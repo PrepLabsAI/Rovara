@@ -46,11 +46,19 @@ afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
-/** A release directory with no templates/packages: enough for `loadRelease` and for
- * `deployEnvironment` (which only reads `release.manifest.version`), never for the real templates
- * engine (which the fake `StackDeployer` below always replaces in these tests). */
+/** A release directory with no packages and one placeholder template per part for REGION only:
+ * enough for `loadRelease`, for `runDeploy`'s check that the release covers the answers' region,
+ * and for `deployEnvironment` (which only reads `release.manifest.version`), never for the real
+ * templates engine (which the fake `StackDeployer` below always replaces in these tests). */
 async function emptyReleaseDir(): Promise<string> {
   const dir = await tmp("agentx-deploy-cli-release-");
+  const templates = [];
+  await mkdir(join(dir, "templates", REGION), { recursive: true });
+  for (const part of ["access", "foundation", "identity", "control-plane", "runtime", "slack"]) {
+    const file = `templates/${REGION}/${part}.template.json`;
+    await writeFile(join(dir, file), "{}");
+    templates.push({ region: REGION, part, file, sha256: sha256("{}") });
+  }
   await writeFile(
     join(dir, "release.json"),
     JSON.stringify({
@@ -58,7 +66,7 @@ async function emptyReleaseDir(): Promise<string> {
       version: RELEASE_VERSION,
       gitCommit: "a".repeat(40),
       environmentPlaceholder: "qqenv-placeholderqq",
-      templates: [],
+      templates,
       packages: [],
       images: {},
     }),
@@ -366,6 +374,38 @@ describe("agentx init --export", () => {
     expect(io.err.join("")).toContain("--oidc-issuer and --oidc-audience are required with --identity oidc");
   });
 
+  it("maps missing AWS credentials while reading the caller's account to AUTH_REQUIRED", async () => {
+    const releaseDir = await fullReleaseDir();
+    const exportDir = join(await tmp("agentx-deploy-cli-export-"), "bundle");
+    const missing = Object.assign(new Error("Could not load credentials from any providers"), { name: "CredentialsProviderError" });
+    const io = capture();
+
+    const code = await executeCli(
+      ["--env", ENV, "init", "--export", exportDir, "--region", REGION, "--release", releaseDir],
+      { ...io, deploy: { identity: { async get() { throw missing; } } } },
+    );
+
+    expect(code).toBe(3);
+    expect(io.err.join("")).toBe("AgentX error [AUTH_REQUIRED]: AWS credentials missing or expired: Could not load credentials from any providers\n");
+    await expect(stat(exportDir)).rejects.toThrow();
+  });
+
+  it("refuses a region the release does not cover with CONFIG_INVALID", async () => {
+    const releaseDir = await fullReleaseDir();
+    const exportDir = join(await tmp("agentx-deploy-cli-export-"), "bundle");
+    const io = capture();
+
+    const code = await executeCli(
+      ["--env", ENV, "init", "--export", exportDir, "--region", "eu-west-1", "--account", ACCOUNT, "--release", releaseDir],
+      { ...io, deploy: { identity: throwingIdentity } },
+    );
+
+    expect(code).toBe(2);
+    expect(io.err.join("")).toContain("[CONFIG_INVALID]");
+    expect(io.err.join("")).toContain("eu-west-1");
+    await expect(stat(exportDir)).rejects.toThrow();
+  });
+
   it("refuses an invalid --region before writing anything", async () => {
     const releaseDir = await fullReleaseDir();
     const exportDir = join(await tmp("agentx-deploy-cli-export-"), "bundle");
@@ -651,5 +691,185 @@ describe("agentx deploy", () => {
     expect(code).not.toBe(0);
     expect(io.err.join("")).toContain("aws-us-gov");
     expect(io.err.join("")).toContain("aws");
+  });
+
+  /** A lock, key or deploy would each hit one of these: store and secrets throw on any call. */
+  function refusesBeforeAnyWrite(identity: CallerIdentity = fakeIdentity): DeployCliDependencies {
+    return safeDeployDeps({ identity, deployer: throwingDeployer });
+  }
+
+  it("refuses when the caller's account is not the answers file's account, naming both, before the lock, the key or any deploy", async () => {
+    const releaseDir = await emptyReleaseDir();
+    const answersPath = await writeAnswers({ account: "111111111111" });
+    const io = capture();
+
+    const code = await executeCli(["deploy", "--mode", "install", "--release", releaseDir, "--answers", answersPath, "--yes"], { ...io, deploy: refusesBeforeAnyWrite() });
+
+    expect(code).toBe(2);
+    const err = io.err.join("");
+    expect(err).toContain("[CONFIG_INVALID]");
+    expect(err).toContain("111111111111");
+    expect(err).toContain(ACCOUNT);
+  });
+
+  it("refuses a region the release does not cover, listing the supported regions, before the lock, the key or any deploy", async () => {
+    const releaseDir = await emptyReleaseDir(); // covers us-east-1 only
+    const answersPath = await writeAnswers({ region: "eu-west-1" });
+    const io = capture();
+
+    const code = await executeCli(
+      ["deploy", "--mode", "install", "--release", releaseDir, "--answers", answersPath, "--yes"],
+      { ...io, deploy: refusesBeforeAnyWrite(throwingIdentity) },
+    );
+
+    expect(code).toBe(2);
+    expect(io.err.join("")).toBe(`AgentX error [CONFIG_INVALID]: release ${RELEASE_VERSION} does not cover region eu-west-1; it covers: us-east-1\n`);
+  });
+
+  const oidcIdentity = { mode: "oidc", issuer: "https://idp.example.com", audience: "api://agentx", adminClaim: "groups", adminValues: ["agentx-admins"], clientId: "cli-client" };
+
+  for (const [label, identity, field] of [
+    ["no adminClaim", { ...oidcIdentity, adminClaim: undefined }, "identity.adminClaim"],
+    ["an empty adminClaim", { ...oidcIdentity, adminClaim: "" }, "identity.adminClaim"],
+    ["no adminValues", { ...oidcIdentity, adminValues: undefined }, "identity.adminValues"],
+    ["empty adminValues", { ...oidcIdentity, adminValues: [] }, "identity.adminValues"],
+    ["no clientId", { ...oidcIdentity, clientId: undefined }, "identity.clientId"],
+  ] as const) {
+    it(`refuses your own OIDC provider with ${label}, naming the field, before the lock, the key or any deploy`, async () => {
+      const releaseDir = await emptyReleaseDir();
+      const answersPath = await writeAnswers({ identity });
+      const io = capture();
+
+      const code = await executeCli(
+        ["deploy", "--mode", "install", "--release", releaseDir, "--answers", answersPath, "--yes"],
+        { ...io, deploy: refusesBeforeAnyWrite(throwingIdentity) },
+      );
+
+      expect(code).toBe(2);
+      expect(io.err.join("")).toContain(`answers file ${answersPath} is invalid: ${field}`);
+    });
+  }
+
+  it("accepts your own OIDC provider with adminClaim, adminValues and clientId", async () => {
+    const releaseDir = await emptyReleaseDir();
+    const answersPath = await writeAnswers({ identity: oidcIdentity });
+    const io = capture();
+
+    const code = await executeCli(
+      ["deploy", "--mode", "install", "--release", releaseDir, "--answers", answersPath, "--yes"],
+      { ...io, deploy: safeDeployDeps({ identity: fakeIdentity, store: new MemoryParameterStore(), secrets: memorySecrets(), deployer: progressFakeDeployer(scriptedOutputs()) }) },
+    );
+
+    expect(code).toBe(0);
+  });
+
+  for (const [label, error] of [
+    ["a missing credential chain", Object.assign(new Error("Could not load credentials from any providers"), { name: "CredentialsProviderError" })],
+    ["an expired token", Object.assign(new Error("The security token included in the request is expired"), { name: "ExpiredToken" })],
+    ["an expired token exception", Object.assign(new Error("token expired"), { name: "ExpiredTokenException" })],
+    ["an invalid access key", Object.assign(new Error("The security token included in the request is invalid."), { name: "InvalidClientTokenId" })],
+    ["an unrecognized client", Object.assign(new Error("The security token included in the request is invalid."), { name: "UnrecognizedClientException" })],
+    ["a bad signature", Object.assign(new Error("The request signature we calculated does not match"), { name: "SignatureDoesNotMatch" })],
+    ["an expired login session", new Error("Your session has expired. Please reauthenticate using 'aws login'.")],
+  ] as const) {
+    it(`maps ${label} to AUTH_REQUIRED`, async () => {
+      const releaseDir = await emptyReleaseDir();
+      const answersPath = await writeAnswers();
+      const io = capture();
+
+      const code = await executeCli(
+        ["deploy", "--mode", "install", "--release", releaseDir, "--answers", answersPath, "--yes"],
+        { ...io, deploy: refusesBeforeAnyWrite({ async get() { throw error; } }) },
+      );
+
+      expect(code).toBe(3);
+      expect(io.err.join("")).toBe(`AgentX error [AUTH_REQUIRED]: AWS credentials missing or expired: ${error.message}\n`);
+    });
+  }
+
+  it("maps a credential failure wrapped as another error's cause to AUTH_REQUIRED too", async () => {
+    const releaseDir = await emptyReleaseDir();
+    const answersPath = await writeAnswers();
+    const expired = Object.assign(new Error("The security token included in the request is expired"), { name: "ExpiredToken" });
+    const deployer: StackDeployer = {
+      deploy: async () => { throw new Error("could not read something: The security token included in the request is expired", { cause: expired }); },
+      outputs: async () => undefined,
+    };
+    const io = capture();
+
+    const code = await executeCli(
+      ["deploy", "--mode", "install", "--release", releaseDir, "--answers", answersPath, "--yes"],
+      { ...io, deploy: safeDeployDeps({ identity: fakeIdentity, store: new MemoryParameterStore(), secrets: memorySecrets(), deployer }) },
+    );
+
+    expect(code).toBe(3);
+    expect(io.err.join("")).toContain("[AUTH_REQUIRED]: AWS credentials missing or expired: could not read something");
+  });
+
+  it("maps an AWS access denial to FORBIDDEN", async () => {
+    const releaseDir = await emptyReleaseDir();
+    const answersPath = await writeAnswers();
+    const denied = Object.assign(new Error("User: arn:aws:iam::123456789012:user/alice is not authorized to perform: cloudformation:CreateChangeSet"), { name: "AccessDenied" });
+    const deployer: StackDeployer = { deploy: async () => { throw denied; }, outputs: async () => undefined };
+    const io = capture();
+
+    const code = await executeCli(
+      ["deploy", "--mode", "install", "--release", releaseDir, "--answers", answersPath, "--yes"],
+      { ...io, deploy: safeDeployDeps({ identity: fakeIdentity, store: new MemoryParameterStore(), secrets: memorySecrets(), deployer }) },
+    );
+
+    expect(code).toBe(4);
+    expect(io.err.join("")).toBe(`AgentX error [FORBIDDEN]: AWS denied the request: ${denied.message}\n`);
+  });
+
+  it("when settings were not written, prints the deployed and missing parts and the exact resume command", async () => {
+    const releaseDir = await emptyReleaseDir();
+    const answersPath = await writeAnswers();
+    const scripted = scriptedOutputs();
+    // Only the parts this run deploys exist: nothing else answers an outputs probe.
+    const deployed = new Set<string>();
+    const deployer: StackDeployer = {
+      async deploy(request) {
+        deployed.add(request.stackName);
+        return scripted[request.stackName]!;
+      },
+      async outputs(name) { return deployed.has(name) ? scripted[name] : undefined; },
+    };
+    const io = capture();
+
+    const code = await executeCli(
+      ["deploy", "--mode", "install", "--release", releaseDir, "--answers", answersPath, "--parts", "access,foundation", "--yes"],
+      { ...io, deploy: safeDeployDeps({ identity: fakeIdentity, store: new MemoryParameterStore(), secrets: memorySecrets(), deployer }) },
+    );
+
+    expect(code).toBe(0);
+    expect(io.out.join("")).toBe(
+      [
+        `Installed environment ${ENV} (not every part is deployed yet)`,
+        "Deployed parts: access, foundation",
+        "Missing parts: identity, control-plane, runtime, slack",
+        "Environment settings are written once every part is deployed.",
+        `Resume with: agentx deploy --mode install --parts identity,control-plane,runtime,slack --release ${releaseDir} --answers ${answersPath} --yes`,
+        "",
+      ].join("\n"),
+    );
+  });
+
+  it("names the cdk engine and its source in the resume command", async () => {
+    const releaseDir = await emptyReleaseDir();
+    const answersPath = await writeAnswers();
+    const store = new MemoryParameterStore();
+    await store.put("/cdk-bootstrap/hnb659fds/version", "21");
+    const io = capture();
+
+    const code = await executeCli(
+      ["deploy", "--mode", "install", "--engine", "cdk", "--release", releaseDir, "--answers", answersPath, "--source", "/some/source", "--parts", "access", "--yes"],
+      { ...io, deploy: safeDeployDeps({ identity: fakeIdentity, store, secrets: memorySecrets(), commandRunner: cleanCdkRunner(scriptedOutputs()) }) },
+    );
+
+    expect(code).toBe(0);
+    expect(io.out.join("")).toContain(
+      `Resume with: agentx deploy --mode install --engine cdk --source /some/source --parts foundation,identity,control-plane,runtime,slack --release ${releaseDir} --answers ${answersPath} --yes\n`,
+    );
   });
 });
