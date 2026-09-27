@@ -576,9 +576,9 @@ credentials that can delete every resource below.
      \`SlackThreadSessions\` bucket are versioned, so empty every object version and delete
      marker first; the control plane's \`Artifacts\` bucket is not versioned.
      \`\`\`
-     aws s3api delete-objects --bucket <bucket> --delete "$(aws s3api list-object-versions --bucket <bucket> \\
+     aws s3api delete-objects --region ${region} --bucket <bucket> --delete "$(aws s3api list-object-versions --region ${region} --bucket <bucket> \\
        --query '{Objects: [Versions, DeleteMarkers][][].{Key: Key, VersionId: VersionId}, Quiet: \`true\`}' --output json)"
-     aws s3 rb s3://<bucket> --force
+     aws s3 rb s3://<bucket> --force --region ${region}
      \`\`\`
      (\`delete-objects\` takes at most 1,000 keys per call: repeat until the listing is empty.)
    - **Three DynamoDB tables** (the control plane's \`State\`, \`SlackThreads\` and \`TurnRecords\`):

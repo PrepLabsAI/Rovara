@@ -477,8 +477,9 @@ function causeChain(error: unknown): Error[] {
 export function cliErrorFor(error: unknown): unknown {
   if (error instanceof AgentXError || !(error instanceof Error)) return error;
   const chain = causeChain(error);
-  if (chain.some(isCredentialFailure)) return agentXError("AUTH_REQUIRED", `AWS credentials missing or expired: ${error.message}`);
-  if (chain.some(isAccessDenied)) return agentXError("FORBIDDEN", `AWS denied the request: ${error.message}`);
+  // agentXError takes no cause, so it is attached afterwards: the SDK error (request id, status) stays reachable.
+  if (chain.some(isCredentialFailure)) return Object.assign(agentXError("AUTH_REQUIRED", `AWS credentials missing or expired: ${error.message}`), { cause: error });
+  if (chain.some(isAccessDenied)) return Object.assign(agentXError("FORBIDDEN", `AWS denied the request: ${error.message}`), { cause: error });
   return error;
 }
 

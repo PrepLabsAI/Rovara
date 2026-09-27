@@ -215,6 +215,10 @@ describe("writeExportBundle", () => {
     expect(readmeText).toContain("--force-delete-without-recovery");
     expect(readmeText).toContain("agentx destroy");
     expect(readmeText).toContain("/aws/bedrock-agentcore/runtimes/<runtimeId>-DEFAULT");
+    // Every AWS CLI line in the teardown names the region, so it cannot hit the shell's default one.
+    for (const line of readmeText.split("\n").filter((l) => /^\s*aws (s3api|s3) /.test(l))) {
+      expect(line).toContain("--region us-east-1");
+    }
     // M5: one recovery wording for a failed or refused change set on a new stack.
     const recovery = "delete the change set, then delete the stack only if it is still REVIEW_IN_PROGRESS with no resources";
     expect(readmeText.toLowerCase()).toContain(recovery.toLowerCase());

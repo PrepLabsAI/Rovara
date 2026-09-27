@@ -8,7 +8,8 @@ import { spawn } from "node:child_process";
 import type * as ChildProcessModule from "node:child_process";
 import { describe, expect, it, vi } from "vitest";
 import { CALLBACK_SIGNING_KEY_BYTES } from "../../packages/cli/src/deploy/signing-key.js";
-import { interactiveConfirm, realCommandRunner } from "../../packages/cli/src/deploy/commands.js";
+import type { AgentXError } from "@agentx/contracts";
+import { cliErrorFor, interactiveConfirm, realCommandRunner } from "../../packages/cli/src/deploy/commands.js";
 
 // Wraps the real `spawn` in a mock that calls through by default, so every other test here still
 // spawns a real process; only the one test below that needs a fully scripted child ever overrides
@@ -221,5 +222,20 @@ describe("the interactive change set confirmation", () => {
     expect(text).toContain("  Modify Certain (AWS::X) [replacement]\n");
     expect(text).toContain("  Modify Maybe (AWS::X) [replacement: conditional]\n");
     expect(text).toContain("  Modify InPlace (AWS::X)\n");
+  });
+});
+
+describe("cliErrorFor", () => {
+  it("keeps the AWS error as the cause when it maps a credential failure or an access denial", () => {
+    const expired = Object.assign(new Error("The security token included in the request is expired"), { name: "ExpiredTokenException" });
+    const denied = Object.assign(new Error("not authorized to perform: ssm:GetParameter"), { name: "AccessDeniedException" });
+
+    const auth = cliErrorFor(expired) as AgentXError;
+    const forbidden = cliErrorFor(denied) as AgentXError;
+
+    expect(auth.code).toBe("AUTH_REQUIRED");
+    expect(auth.cause).toBe(expired);
+    expect(forbidden.code).toBe("FORBIDDEN");
+    expect(forbidden.cause).toBe(denied);
   });
 });
