@@ -31,6 +31,10 @@ import { loadDeploymentSettings, type DeploymentSettings } from "./deployment.js
 import { resumeCommand, runDeploy, runInitExport, type DeployCliDependencies, type DeployCommandOptions } from "./deploy/commands.js";
 import { cloudFormationStackReader, stsCallerIdentity, type CallerIdentity, type StackReader } from "./environments/adopt.js";
 import { resolveDeploymentFile } from "./environments/cache.js";
+import type { InitFlags } from "./init/answers.js";
+import { runInit, type InitCliDependencies, type InitOptions } from "./init/commands.js";
+import type { SecretFlags } from "./init/context.js";
+import type { SecretSource } from "./init/prompts.js";
 import { runEnvAdopt, runEnvList, runEnvUse } from "./environments/commands.js";
 import { ssmParameterStore, type ParameterStore } from "./environments/parameter-store.js";
 import { settingsParameterName } from "./environments/settings.js";
@@ -78,6 +82,8 @@ export interface CliDependencies {
   };
   /** `agentx deploy` and `agentx init --export` overrides, for tests: never touch AWS. */
   deploy?: DeployCliDependencies;
+  /** `agentx init` overrides, for tests: never touch AWS, GitHub or Slack. */
+  init?: InitCliDependencies;
 }
 
 interface AuthenticatedDeployment {
@@ -512,11 +518,16 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
 
   program
     .command("init")
-    .description("bootstrap a new AgentX environment from a release")
+    .description("install AgentX in this AWS account, step by step, resuming where it stopped; --export writes a bundle for a platform team instead")
     .option("--export <dir>", "write a self-contained bundle a platform team deploys to create the access stack")
     .option("--region <region>", "AWS region to deploy into")
     .option("--account <account>", "AWS account id; defaults to the caller's own account (sts GetCallerIdentity, read-only)")
-    .option("--release <dir>", "release directory (agentx release build output)")
+    .option("--release <dir>", "release directory (agentx release build output); default: download the release matching this agentx")
+    .addOption(new Option("--engine <engine>", "deploy engine: published CloudFormation templates, or cdk from a source checkout").choices(["templates", "cdk"]))
+    .option("--source <dir>", "git checkout of the release's source tag; required for --engine cdk")
+    .option("--resume", "only continue an install already under way; never start a new one", false)
+    .option("--yes", "answer every question with its default or its flag, without asking; the plan is still printed", false)
+    .option("--no-browser", "print every address to open instead of opening a browser")
     .addOption(new Option("--identity <mode>", "identity provider").choices(["cognito", "oidc"]).default("cognito"))
     .option("--oidc-issuer <url>", "your OIDC provider's issuer URL (required with --identity oidc)")
     .option("--oidc-audience <audience>", "your OIDC provider's audience (required with --identity oidc)")
@@ -528,29 +539,43 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--orchestrator-model <id>", "Bedrock model id for the Slack orchestrator", "us.anthropic.claude-sonnet-4-6")
     .option("--classifier-model <id>", "Bedrock model id for the gate classifier", "amazon.nova-lite-v1:0")
     .option("--worker-model <id>", "Bedrock model id for the runtime worker", "amazon.nova-pro-v1:0")
+    .option("--alert-email <address>", "email address AgentX sends alerts to")
+    .option("--alert-webhook-file <path>", "file holding a PagerDuty or Opsgenie integration address (kept secret)")
+    .option("--alert-webhook-env <NAME>", "environment variable holding a PagerDuty or Opsgenie integration address (kept secret)")
+    .option("--no-alerts", "send alerts nowhere for now")
+    .option("--github-account <login>", "GitHub organization or user that will own the AgentX GitHub App")
+    .addOption(new Option("--github-account-type <type>", "whether --github-account is an organization or a personal account").choices(["organization", "user"]))
+    .option("--github-app-name <name>", "GitHub App name (unique on GitHub)")
+    .option("--github-app-id <id>", "a GitHub App made beforehand: its app id")
+    .option("--github-installation-id <id>", "a GitHub App made beforehand: its installation id")
+    .option("--github-private-key-file <path>", "a GitHub App made beforehand: its private key .pem file")
+    .option("--github-private-key-env <NAME>", "a GitHub App made beforehand: environment variable holding its private key")
+    .option("--slack-app-name <name>", "Slack app name")
+    .addOption(new Option("--slack-app-posted-messages <mode>", "answer mentions people post through other apps with their own Slack token").choices(["accept", "ignore"]))
+    .addOption(new Option("--slack-install <state>", "whether the Slack app is installed, or waits for an admin's approval (default with --yes: installed)").choices(["installed", "approval"]))
+    .option("--slack-bot-token-file <path>", "file holding the Slack Bot User OAuth Token")
+    .option("--slack-bot-token-env <NAME>", "environment variable holding the Slack Bot User OAuth Token")
+    .option("--slack-signing-secret-file <path>", "file holding the Slack signing secret")
+    .option("--slack-signing-secret-env <NAME>", "environment variable holding the Slack signing secret")
+    .option("--worker-image <digest-ref>", "worker image by digest (testing only)")
+    .option("--slack-image <digest-ref>", "Slack service image by digest (testing only)")
     .action(async (
-      options: {
-        export?: string;
-        region?: string;
-        account?: string;
-        release?: string;
-        identity: "cognito" | "oidc";
-        oidcIssuer?: string;
-        oidcAudience?: string;
-        oidcClientId?: string;
-        adminClaim?: string;
-        adminValues?: string;
-        permissionBoundary?: string;
-        operatorPrincipal?: string;
-        orchestratorModel: string;
-        classifierModel: string;
-        workerModel: string;
-      },
+      options: InitCommandOptions & { export?: string },
       command: Command,
     ) => {
       const globals = globalOptions(command);
       if (options.export === undefined) {
-        throw agentXError("CONFIG_INVALID", "interactive install arrives in a later AgentX release; use agentx init --export or agentx deploy");
+        const result = await runInit(initOptions(globals.env, options, command), dependencies.init ?? {}, { stderr: services.stderr, home });
+        if (globals.json) {
+          services.stdout.write(formatSuccess(result, true));
+          return;
+        }
+        if (result.status === "waiting") {
+          services.stdout.write(`${result.message}\n`);
+          return;
+        }
+        services.stdout.write(`AgentX environment ${result.env} is deployed. Control plane: ${result.controlPlaneUrl ?? "unknown"}\n${result.nextSteps ?? ""}\n`);
+        return;
       }
       // --env defaults to production (the live, legacy-adopted deployment): --export must never
       // silently write a bundle for it just because --env was left off.
@@ -655,6 +680,71 @@ function parsePort(value: string): number {
     throw agentXError("CONFIG_INVALID", "callback port must be from 1 through 65535");
   }
   return port;
+}
+
+interface InitCommandOptions {
+  region?: string; account?: string; release?: string; engine?: "templates" | "cdk"; source?: string;
+  resume: boolean; yes: boolean; browser: boolean;
+  identity: "cognito" | "oidc"; oidcIssuer?: string; oidcAudience?: string; oidcClientId?: string; adminClaim?: string; adminValues?: string;
+  permissionBoundary?: string; operatorPrincipal?: string; orchestratorModel: string; classifierModel: string; workerModel: string;
+  alertEmail?: string; alertWebhookFile?: string; alertWebhookEnv?: string; alerts: boolean;
+  githubAccount?: string; githubAccountType?: "organization" | "user"; githubAppName?: string;
+  githubAppId?: string; githubInstallationId?: string; githubPrivateKeyFile?: string; githubPrivateKeyEnv?: string;
+  slackAppName?: string; slackAppPostedMessages?: "accept" | "ignore"; slackInstall?: "installed" | "approval";
+  slackBotTokenFile?: string; slackBotTokenEnv?: string; slackSigningSecretFile?: string; slackSigningSecretEnv?: string;
+  workerImage?: string; slackImage?: string;
+}
+
+/** Keeps only the entries that have a value, so an optional property is absent rather than undefined. */
+function definedEntries<T extends object>(record: { [K in keyof T]: T[K] | undefined }): T {
+  return Object.fromEntries(Object.entries(record).filter(([, value]) => value !== undefined)) as T;
+}
+
+/** `agentx init`'s options, built from only what was typed: a commander default (the models,
+ * --identity, --no-alerts's true) must never silently answer a question init would otherwise ask. */
+function initOptions(env: string, options: InitCommandOptions, command: Command): InitOptions {
+  const typed = <T>(name: string, value: T): T | undefined => (command.getOptionValueSource(name) === "cli" ? value : undefined);
+  const source = (file?: string, envName?: string): SecretSource | undefined =>
+    file === undefined && envName === undefined ? undefined : { ...(file === undefined ? {} : { file }), ...(envName === undefined ? {} : { envName }) };
+  const flags = definedEntries<InitFlags>({
+    engine: options.engine,
+    identity: typed("identity", options.identity),
+    oidcIssuer: options.oidcIssuer, oidcAudience: options.oidcAudience, oidcClientId: options.oidcClientId,
+    adminClaim: options.adminClaim, adminValues: options.adminValues,
+    orchestratorModel: typed("orchestratorModel", options.orchestratorModel),
+    classifierModel: typed("classifierModel", options.classifierModel),
+    workerModel: typed("workerModel", options.workerModel),
+    permissionBoundary: options.permissionBoundary, operatorPrincipal: options.operatorPrincipal,
+    alertEmail: options.alertEmail,
+    alertWebhook: source(options.alertWebhookFile, options.alertWebhookEnv),
+    alerts: typed("alerts", options.alerts),
+    githubAccount: options.githubAccount, githubAccountType: options.githubAccountType, githubAppName: options.githubAppName,
+    slackAppName: options.slackAppName, slackAppPostedMessages: options.slackAppPostedMessages,
+    workerImage: options.workerImage, slackImage: options.slackImage,
+  });
+  const keySource = source(options.githubPrivateKeyFile, options.githubPrivateKeyEnv);
+  const { githubAppId: appId, githubInstallationId: installationId } = options;
+  const preMadeGiven = appId !== undefined || installationId !== undefined;
+  if (preMadeGiven && (appId === undefined || installationId === undefined || keySource === undefined)) {
+    throw agentXError("CONFIG_INVALID", "--github-app-id, --github-installation-id and --github-private-key-file (or --github-private-key-env) go together");
+  }
+  const secretFlags = definedEntries<SecretFlags>({
+    slackBotToken: source(options.slackBotTokenFile, options.slackBotTokenEnv),
+    slackSigningSecret: source(options.slackSigningSecretFile, options.slackSigningSecretEnv),
+    githubPrivateKey: keySource,
+  });
+  return {
+    env,
+    ...(options.region === undefined ? {} : { region: options.region }),
+    ...(options.account === undefined ? {} : { account: options.account }),
+    ...(options.release === undefined ? {} : { releaseDir: options.release }),
+    ...(options.source === undefined ? {} : { source: options.source }),
+    yes: options.yes, browser: options.browser, resume: options.resume,
+    flags,
+    secretFlags,
+    ...(appId === undefined || installationId === undefined ? {} : { preMadeGitHubApp: { appId, installationId } }),
+    ...(options.slackInstall === undefined ? {} : { slackInstall: options.slackInstall }),
+  };
 }
 
 function globalOptions(command: Command): GlobalOptions {

@@ -316,13 +316,11 @@ describe("agentx init --export", () => {
     expect(files).toContain("templates");
   });
 
-  it("without --export explains how to proceed and exits non-zero", async () => {
+  it("init from a source build without --release says to pass --release, before touching AWS", async () => {
     const io = capture();
-
-    const code = await executeCli(["init"], { ...io });
-
+    const code = await executeCli(["--env", ENV, "init", "--region", REGION], { ...io, init: { deploy: safeDeployDeps(), releaseVersion: null } });
     expect(code).toBe(2);
-    expect(io.err.join("")).toContain("interactive install arrives in a later AgentX release; use agentx init --export or agentx deploy");
+    expect(io.err.join("")).toContain("this agentx was built from source and has no published release to download; pass --release <dir>");
   });
 
   it("without an explicit --env refuses: the default is the live production environment", async () => {

@@ -148,4 +148,25 @@ describe("init step runner", () => {
     await expect(run(other, [step("access")], { confirmTakeover: notAsked })).rejects.toThrow("locked by arn:aws:sts::123456789012:assumed-role/Admin/bob");
     expect(notAsked).not.toHaveBeenCalled();
   });
+
+  // F14: agentx init saves its answers here, so two first runs cannot overwrite each other's.
+  it("runs beforeSteps under the lock, before any step, and runs no step when it fails", async () => {
+    const store = new MemoryParameterStore();
+    const order: string[] = [];
+    const access = step("access", async () => { order.push("access"); return { status: "done" }; });
+    await run(store, [access], {
+      beforeSteps: async () => {
+        expect(JSON.parse(store.values.get(LOCK)!)).toMatchObject({ holder: HOLDER, command: "init" });
+        order.push("before");
+      },
+    });
+    expect(order).toEqual(["before", "access"]);
+
+    const failing = new MemoryParameterStore();
+    const never = step("access");
+    await expect(run(failing, [never], { beforeSteps: async () => { throw agentXError("CONFIG_INVALID", "answers changed meanwhile"); } })).rejects.toThrow("answers changed meanwhile");
+    expect(never.run).not.toHaveBeenCalled();
+    expect(failing.values.has(LOCK)).toBe(false);
+    expect(failing.values.has(installProgressParameterName(ENV))).toBe(false);
+  });
 });

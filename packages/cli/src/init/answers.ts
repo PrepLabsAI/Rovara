@@ -241,7 +241,7 @@ function resumeMismatch(flagDisplay: string, was: string | undefined): never {
   );
 }
 
-function webhookFlagDisplay(source: SecretSource): string {
+export function webhookFlagDisplay(source: SecretSource): string {
   if (source.file !== undefined) return `--alert-webhook-file ${source.file}`;
   if (source.envName !== undefined) return `--alert-webhook-env ${source.envName}`;
   return "--alert-webhook";
@@ -295,15 +295,18 @@ export function assertResumeFlagsMatch(stored: InitAnswers, flags: InitFlags): v
 
 export interface AlertSecretWriter { create(name: string, value: string): Promise<void>; put(name: string, value: string): Promise<void> }
 
+/** Creates the alert webhook secret, or replaces its value when it already exists. */
+export async function storeAlertWebhook(secrets: AlertSecretWriter, secretName: string, address: string): Promise<void> {
+  try {
+    await secrets.create(secretName, address);
+  } catch (error) {
+    if (!(error instanceof SecretAlreadyExistsError)) throw error;
+    await secrets.put(secretName, address);
+  }
+}
+
 export async function persistInitAnswers(input: { store: ParameterStore; secrets: AlertSecretWriter; collected: CollectedAnswers }): Promise<void> {
   const { answers, alertWebhook } = input.collected;
-  if (alertWebhook !== undefined && answers.alert.kind === "webhook") {
-    try {
-      await input.secrets.create(answers.alert.secretName, alertWebhook);
-    } catch (error) {
-      if (!(error instanceof SecretAlreadyExistsError)) throw error;
-      await input.secrets.put(answers.alert.secretName, alertWebhook);
-    }
-  }
+  if (alertWebhook !== undefined && answers.alert.kind === "webhook") await storeAlertWebhook(input.secrets, answers.alert.secretName, alertWebhook);
   await writeInstallAnswers(input.store, answers);
 }

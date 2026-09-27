@@ -51,6 +51,9 @@ export async function runInitSteps<C>(input: {
   onEvent?: (event: InitEvent) => void;
   confirmTakeover?: (held: LockRecord) => Promise<boolean>;
   now?: () => number;
+  /** Runs under the lock before any step (init saves its answers here, so two first runs of the
+   * same environment cannot overwrite each other's). Its error is thrown as it is. */
+  beforeSteps?: () => Promise<void>;
 }): Promise<InitRunResult> {
   const now = input.now ?? Date.now;
   return withEnvironmentLock(
@@ -59,6 +62,7 @@ export async function runInitSteps<C>(input: {
       ...(input.confirmTakeover === undefined ? {} : { confirmTakeover: input.confirmTakeover }),
     },
     async () => {
+      await input.beforeSteps?.();
       let progress = (await readInstallProgress(input.store, input.env)) ?? emptyProgress(input.env, now());
       const save = async (next: InstallProgress) => {
         progress = { ...next, updatedAt: new Date(now()).toISOString() };
