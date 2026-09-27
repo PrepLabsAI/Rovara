@@ -221,19 +221,21 @@ const TEST_KEYS = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEn
 export const TEST_PRIVATE_KEY = TEST_KEYS.privateKey.trim();
 export const TEST_PUBLIC_KEY = TEST_KEYS.publicKey;
 
-/** A GitHub that converts any code into an app owned by `owner`, installs it after `installAfterPolls` polls, and reports repository counts in turn. */
-export function fakeGitHubApi(input: { owner?: string; ownerType?: string; installAfterPolls?: number; repositoryCounts?: number[]; installationId?: number } = {}): GitHubApi & { conversions: string[]; polls: () => number } {
+/** A GitHub that converts any code into an app owned by `owner`, installs it after `installAfterPolls` polls, and reports repository counts in turn. Installation tokens expire at `tokenExpiresAt` (default T0 plus one hour). */
+export function fakeGitHubApi(input: { owner?: string; ownerType?: string; installAfterPolls?: number; repositoryCounts?: number[]; installationId?: number; tokenExpiresAt?: number } = {}): GitHubApi & { conversions: string[]; polls: () => number; tokens: () => number } {
   const conversions: string[] = [];
   let polls = 0;
   const counts = [...(input.repositoryCounts ?? [1])];
+  let tokens = 0;
   const owner = { login: input.owner ?? "acme", type: input.ownerType ?? "Organization" };
   return {
     conversions,
     polls: () => polls,
     async convertManifest(code) { conversions.push(code); return { id: 424242, slug: "agentx-acme-staging", pem: TEST_PRIVATE_KEY, owner }; },
+    tokens: () => tokens,
     async getApp() { return { slug: "agentx-acme-staging", owner }; },
     async listInstallations() { polls += 1; return polls > (input.installAfterPolls ?? 0) ? [{ id: input.installationId ?? 777, account: { login: owner.login } }] : []; },
-    async installationToken() { return "ghs_installation-token-value"; },
+    async installationToken() { tokens += 1; return { token: "ghs_installation-token-value", expiresAt: input.tokenExpiresAt ?? T0 + 60 * 60 * 1000 }; },
     async repositoryCount() { return counts.length > 1 ? (counts.shift() as number) : (counts[0] as number); },
   };
 }

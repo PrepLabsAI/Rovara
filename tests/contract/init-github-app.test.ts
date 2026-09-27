@@ -1,4 +1,5 @@
 import { createVerify } from "node:crypto";
+import { createServer, request as httpRequest } from "node:http";
 import { rm } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -216,13 +217,13 @@ describe("GitHub REST client", () => {
     const { calls, fetchImplementation } = recordingFetch([
       { status: 201, body: { id: 1, slug: "s", pem: TEST_PRIVATE_KEY, owner: { login: "acme", type: "Organization" } } },
       { status: 200, body: { slug: "s", owner: { login: "acme", type: "Organization" } } },
-      { status: 201, body: { token: "ghs_x" } },
+      { status: 201, body: { token: "ghs_x", expires_at: "2026-09-27T01:00:00Z" } },
       { status: 200, body: { total_count: 3, repositories: [] } },
     ]);
     const api = githubRestApi(fetchImplementation);
     expect((await api.convertManifest("abc123def456")).id).toBe(1);
     expect((await api.getApp("jwt-value")).slug).toBe("s");
-    expect(await api.installationToken("jwt-value", "777")).toBe("ghs_x");
+    expect(await api.installationToken("jwt-value", "777")).toEqual({ token: "ghs_x", expiresAt: Date.parse("2026-09-27T01:00:00Z") });
     expect(await api.repositoryCount("ghs_x")).toBe(3);
     expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
       "POST https://api.github.com/app-manifests/abc123def456/conversions",
@@ -275,5 +276,102 @@ describe("GitHub App made beforehand", () => {
     expect(message).toContain("GitHub App 424242 belongs to someone-else, not acme; nothing was saved. Check --github-app-id and run agentx init again");
     expect(message).not.toContain("Delete it");
     expect(context.secrets.values.size).toBe(0);
+  });
+});
+
+describe("fix round 1 hardening", () => {
+  const getWithHost = (url: string, host: string) => new Promise<{ status: number; body: string }>((resolvePromise, reject) => {
+    const request = httpRequest(url, { headers: { host } }, (response) => {
+      let body = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk: string) => { body += chunk; });
+      response.on("end", () => resolvePromise({ status: response.statusCode ?? 0, body }));
+    });
+    request.on("error", reject);
+    request.end();
+  });
+
+  it("stops listening when its timeout passes, even though nobody awaited the code", async () => {
+    const listener = await startManifestListener({ state: "s1", page: () => "<p>form</p>", timeoutMs: 20 });
+    try {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 80));
+      await expect(fetch(listener.startUrl)).rejects.toThrow();
+    } finally {
+      listener.close();
+    }
+  });
+
+  it("refuses a request whose Host is not the listener's own address, without revealing the state", async () => {
+    const listener = await startManifestListener({ state: "0123abcd", page: (redirect) => `<p>${redirect}?state=0123abcd</p>`, timeoutMs: 60_000 });
+    try {
+      for (const host of ["evil.example", `evil.example:${listener.port}`, `localhost:${listener.port}`, "127.0.0.1"]) {
+        const start = await getWithHost(listener.startUrl, host);
+        expect(start.status).toBe(403);
+        expect(start.body).not.toContain("0123abcd");
+        expect((await getWithHost(`${listener.redirectUrl}?code=abc123def456&state=0123abcd`, host)).status).toBe(403);
+      }
+      expect((await getWithHost(listener.startUrl, `127.0.0.1:${listener.port}`)).status).toBe(200);
+    } finally {
+      listener.close();
+    }
+  });
+
+  it("says what to do when the loopback port cannot be opened", async () => {
+    const taken = createServer();
+    await new Promise<void>((resolvePromise) => taken.listen(0, "127.0.0.1", () => resolvePromise()));
+    const address = taken.address();
+    const port = typeof address === "object" && address !== null ? address.port : 0;
+    try {
+      await expect(startManifestListener({ state: "s1", page: () => "", timeoutMs: 60_000, port }))
+        .rejects.toThrow(/could not open a local port on 127\.0\.0\.1 for the GitHub App page \(EADDRINUSE\); .*run agentx init again/);
+    } finally {
+      taken.close();
+    }
+  });
+
+  it("refuses a pasted address with a code but no state, and still takes a bare code", () => {
+    expect(() => parseManifestCallback("http://127.0.0.1:1/github/created?code=abc123def456", "s1")).toThrow("that address has no state");
+    expect(parseManifestCallback("abc123def456", "s1")).toBe("abc123def456");
+  });
+
+  it("names the app and how to delete it when storing its key fails after the conversion", async () => {
+    const secrets = memoryInitSecrets();
+    secrets.create = async () => { throw Object.assign(new Error("User is not authorized to perform secretsmanager:CreateSecret"), { name: "AccessDeniedException" }); };
+    const context = initContext({ secrets, openBrowser: browserThatCreatesGitHubApp([]) });
+    homes.push(context.home);
+    let message = "";
+    try { await githubAppStep(fakeGitHubApi()).run(context, progressHandle()); } catch (error) { message = (error as Error).message; }
+    expect(message).toContain("could not store the private key of the new GitHub App agentx-acme-staging in agentx/staging/github-app (AccessDeniedException)");
+    expect(message).toContain("delete the app at https://github.com/organizations/acme/settings/apps/agentx-acme-staging/advanced and run agentx init again");
+    expect(message).not.toContain("PRIVATE KEY");
+    expect(context.lines.join("\n")).not.toContain("PRIVATE KEY");
+  });
+
+  it("refuses a leftover secret for a different app than --github-app-id", async () => {
+    const secrets = memoryInitSecrets({ [SECRET]: JSON.stringify({ appId: "111", slug: "agentx-acme-staging", account: "acme", privateKey: TEST_PRIVATE_KEY }) });
+    const context = initContext({ secrets, preMadeGitHubApp: { appId: "424242", installationId: "777" } });
+    homes.push(context.home);
+    const progress = progressHandle();
+    await expect(githubAppStep(fakeGitHubApi()).run(context, progress))
+      .rejects.toThrow("secret agentx/staging/github-app holds GitHub App 111, not 424242 from --github-app-id");
+    expect(progress.value().github).toBeUndefined();
+  });
+
+  it("creates one installation token for a wait of several polls", async () => {
+    const context = initContext({ openBrowser: browserThatCreatesGitHubApp([]) });
+    homes.push(context.home);
+    const api = fakeGitHubApi({ repositoryCounts: [0, 0, 0, 0, 2] });
+    await githubAppStep(api).run(context, progressHandle());
+    expect(api.tokens()).toBe(1);
+  });
+
+  it("creates a new installation token about five minutes before the old one expires", async () => {
+    const context = initContext({ openBrowser: browserThatCreatesGitHubApp([]) });
+    homes.push(context.home);
+    // Expires 6 minutes after T0, so from T0 + 1 minute on it is renewed; polls are 5 seconds apart.
+    const api = fakeGitHubApi({ repositoryCounts: [...Array<number>(14).fill(0), 2], tokenExpiresAt: T0 + 6 * 60_000 });
+    await githubAppStep(api).run(context, progressHandle());
+    expect(api.tokens()).toBeGreaterThan(1);
+    expect(api.tokens()).toBeLessThan(15);
   });
 });
