@@ -1,5 +1,6 @@
 // agentx whoami and agentx logout (FR-011).
 import { AGENTX_CLI_CLIENT_ID, DeveloperProjectsResponseSchema, agentXError, type DeveloperProjectsResponse } from "@agentx/contracts";
+import { sanitizeServerText } from "../auth.js";
 import { developerTokenKey, removeDeveloperEnvironment, resolveDeveloperEnvironment } from "./config.js";
 import { developerAccessToken, type DeveloperSessionDeps } from "./session.js";
 
@@ -22,7 +23,7 @@ export function whoamiText(result: { env: string; url: string; projects: Develop
   const { developer, projects, notices } = result.projects;
   const method = developer.provider === "slack" ? "Slack" : "your company sign-in";
   const link = developer.slackUserId === undefined ? "" : ` (${developer.slackUserId})`;
-  const lines = [`Signed in to AgentX environment ${result.env} (${result.url}) as ${developer.name}, with ${method}${link}.`];
+  const lines = [`Signed in to AgentX environment ${result.env} (${result.url}) as ${sanitizeServerText(developer.name)}, with ${method}${link}.`];
   if (projects.length === 0) {
     lines.push("You cannot use any project yet: join a project's Slack channel, or ask an admin for access.");
   } else {
@@ -36,24 +37,60 @@ export function whoamiText(result: { env: string; url: string; projects: Develop
   return `${lines.join("\n")}\n`;
 }
 
+/** How the logout went at the server: revoked, not answered at all, or answered without confirming. */
+export interface DeveloperLogoutResult {
+  env: string;
+  revoked: boolean;
+  problem?: "unreachable" | "not_confirmed";
+  /** The server's reason when it did not confirm, made safe to show. */
+  reason?: string;
+}
+
 /**
  * Ends the sign-in at the server (RFC 7009 revoke) and on this computer. The local tokens and
- * environment are removed even when the server cannot be reached; `revoked` says whether it was.
+ * environment are removed whatever the server answers; `revoked` and `problem` say how that went.
  */
-export async function developerLogout(deps: DeveloperSessionDeps, env: string | undefined): Promise<{ env: string; revoked: boolean }> {
+export async function developerLogout(deps: DeveloperSessionDeps, env: string | undefined): Promise<DeveloperLogoutResult> {
   const resolved = await resolveDeveloperEnvironment(deps.home, env);
   const key = developerTokenKey(resolved.entry.issuer);
   const tokens = await deps.tokenStore.get(key);
-  let revoked = false;
+  let outcome: Omit<DeveloperLogoutResult, "env"> = { revoked: false };
   if (tokens?.refreshToken !== undefined) {
-    revoked = await deps.fetch(resolved.entry.revocationEndpoint, {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ token: tokens.refreshToken, client_id: AGENTX_CLI_CLIENT_ID }).toString(),
-      signal: AbortSignal.timeout(5_000),
-    }).then((response) => response.ok, () => false);
+    let response: Response | undefined;
+    try {
+      response = await deps.fetch(resolved.entry.revocationEndpoint, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ token: tokens.refreshToken, client_id: AGENTX_CLI_CLIENT_ID }).toString(),
+        signal: AbortSignal.timeout(5_000),
+      });
+    } catch {
+      response = undefined;
+    }
+    if (response === undefined) {
+      outcome = { revoked: false, problem: "unreachable" };
+    } else if (response.ok) {
+      outcome = { revoked: true };
+    } else {
+      const body: unknown = await response.json().catch(() => undefined);
+      const description = typeof body === "object" && body !== null ? (body as Record<string, unknown>).error_description : undefined;
+      outcome = { revoked: false, problem: "not_confirmed", ...(typeof description === "string" ? { reason: sanitizeServerText(description) } : {}) };
+    }
   }
   await deps.tokenStore.delete(key);
   await removeDeveloperEnvironment(deps.home, resolved.env);
-  return { env: resolved.env, revoked };
+  return { env: resolved.env, ...outcome };
+}
+
+/** The text agentx logout prints. */
+export function logoutText(result: DeveloperLogoutResult): string {
+  const local = `Signed out of AgentX environment ${result.env}`;
+  if (result.problem === "unreachable") {
+    return `${local} on this computer. AgentX could not be reached to end the sign-in there, so the server session may stay until it expires.\n`;
+  }
+  if (result.problem === "not_confirmed") {
+    const reason = result.reason === undefined ? "" : ` (${result.reason})`;
+    return `${local} on this computer. AgentX did not confirm it ended the sign-in there${reason}, so the server session may stay until it expires.\n`;
+  }
+  return `${local}.\n`;
 }

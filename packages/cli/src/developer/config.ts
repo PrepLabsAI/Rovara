@@ -1,6 +1,6 @@
 // ~/.agentx/developer.yaml: which AgentX environments this computer has signed in to (FR-011).
 // Never holds a token: tokens live in the system token store.
-import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { AGENTX_CLI_CLIENT_ID, DEVELOPER_TOKEN_AUDIENCE, EnvironmentNameSchema, agentXError } from "@agentx/contracts";
 import YAML from "yaml";
@@ -38,6 +38,8 @@ export async function readDeveloperConfig(home: string): Promise<DeveloperConfig
 async function write(home: string, config: DeveloperConfig): Promise<void> {
   const path = developerConfigPath(home);
   await mkdir(join(home, ".agentx"), { recursive: true, mode: 0o700 });
+  // mkdir leaves an existing directory's mode alone: make it private either way.
+  await chmod(join(home, ".agentx"), 0o700);
   const temp = `${path}.${process.pid}.tmp`;
   const handle = await open(temp, "w", 0o600);
   try {

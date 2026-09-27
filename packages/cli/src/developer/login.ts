@@ -7,6 +7,9 @@ import { serverReason } from "./session.js";
 
 export interface DeveloperLoginOptions { url: string; allowLoopback: boolean; browser: boolean; home: string; tokenStore: TokenStore; fetch: typeof fetch; openBrowser?: (url: string) => Promise<void>; write: (line: string) => void; timeoutMs?: number; callbackPort?: number }
 
+/** The only hosts --allow-loopback lets use plain http (URL.hostname keeps the brackets on IPv6). */
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
 /** Reads and checks the environment's sign-in configuration before anything is sent to it. */
 async function readConfiguration(options: DeveloperLoginOptions, base: URL, url: string): Promise<AgentXConfiguration> {
   let configuration: AgentXConfiguration;
@@ -35,12 +38,19 @@ export async function developerLogin(options: DeveloperLoginOptions): Promise<{ 
   } catch {
     throw agentXError("CONFIG_INVALID", `${options.url} is not a URL; pass your AgentX URL, for example https://agentx.example.com`);
   }
-  if (base.protocol !== "https:" && !(options.allowLoopback && base.protocol === "http:")) throw agentXError("CONFIG_INVALID", "your AgentX URL must use https");
+  const loopbackHost = LOOPBACK_HOSTS.has(base.hostname);
+  if (base.protocol !== "https:" && !(options.allowLoopback && base.protocol === "http:" && loopbackHost)) {
+    throw agentXError("CONFIG_INVALID", "your AgentX URL must use https; plain http is allowed only for 127.0.0.1, localhost or ::1 with --allow-loopback");
+  }
   const url = base.origin + base.pathname.replace(/\/+$/, "");
   const configuration = await readConfiguration(options, base, url);
 
   const pkce = createPkceParameters();
-  const listener = await createCallbackListener(pkce.state, options.timeoutMs ?? 300_000, options.callbackPort ?? 0);
+  const again = `run npx @charterarc/agentx login ${url} again`;
+  const listener = await createCallbackListener(pkce.state, options.timeoutMs ?? 300_000, options.callbackPort ?? 0, {
+    timedOut: `sign-in timed out; ${again}`,
+    noAnswer: `the sign-in came back without an answer; ${again}`,
+  });
   try {
     const authorize = new URL(configuration.authorizationEndpoint);
     for (const [key, value] of Object.entries({

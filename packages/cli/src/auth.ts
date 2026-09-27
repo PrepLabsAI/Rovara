@@ -90,19 +90,41 @@ export function tokenStoreKey(input: Pick<LoginOptions, "issuer" | "clientId" | 
     .digest("hex");
 }
 
-/** Removes control characters (C0 and DEL) so a server-sent reason cannot rewrite the terminal. */
-function withoutControlCharacters(text: string): string {
-  return [...text].filter((character) => {
+/**
+ * Makes text a server sent safe to show: strips control characters (C0 and DEL) so it cannot
+ * rewrite the terminal, hides anything shaped like an AgentX refresh token or authorization code,
+ * and cuts it to 300 characters.
+ */
+export function sanitizeServerText(text: string): string {
+  const printable = [...text].filter((character) => {
     const code = character.charCodeAt(0);
     return code > 0x1f && code !== 0x7f;
   }).join("");
+  return printable.replace(/agx[rc]_[A-Za-z0-9_-]+/g, "[hidden]").slice(0, 300);
 }
+
+/** What the listener says when it gives up; the admin login keeps its original wording. */
+export interface CallbackListenerMessages {
+  timedOut: string;
+  noAnswer: string;
+}
+
+const ADMIN_LISTENER_MESSAGES: CallbackListenerMessages = {
+  timedOut: "OIDC login timed out",
+  noAnswer: "OIDC callback state or code is invalid",
+};
 
 /**
  * The loopback listener for an authorization-code redirect, on 127.0.0.1 only. A callback with the
- * right state and an `error` rejects at once with the server's reason.
+ * right state and an `error` rejects at once with the server's reason. A callback with any other
+ * state gets a 400 and is otherwise ignored, so no other web page can cancel a sign-in.
  */
-export async function createCallbackListener(expectedState: string, timeoutMilliseconds: number, port: number): Promise<{
+export async function createCallbackListener(
+  expectedState: string,
+  timeoutMilliseconds: number,
+  port: number,
+  messages: CallbackListenerMessages = ADMIN_LISTENER_MESSAGES,
+): Promise<{
   redirectUri: string;
   code: Promise<string>;
   close: () => void;
@@ -125,19 +147,24 @@ export async function createCallbackListener(expectedState: string, timeoutMilli
     const callbackState = url.searchParams.get("state");
     const authorizationCode = url.searchParams.get("code");
     const failure = url.searchParams.get("error");
-    if (callbackState === expectedState && failure !== null) {
+    if (callbackState !== expectedState) {
+      // Not from this sign-in (any web page can send the browser here): refuse it and keep waiting.
+      response.writeHead(400, { "content-type": "text/plain" }).end("Invalid authentication callback.");
+      return;
+    }
+    if (failure !== null) {
       // The server refused or could not finish the sign-in: stop at once with its reason
       // (Review Focus 1) instead of waiting for the timeout.
-      const description = withoutControlCharacters(url.searchParams.get("error_description") ?? failure).slice(0, 300);
+      const description = sanitizeServerText(url.searchParams.get("error_description") ?? failure);
       response.writeHead(200, { "content-type": "text/plain; charset=utf-8" }).end(`AgentX sign-in did not finish: ${description}\nYou can close this window and return to the terminal.`);
       rejectCode(failure === "temporarily_unavailable"
         ? agentXError("RUNTIME_UNAVAILABLE", `sign-in could not finish: ${description}`)
         : agentXError("AUTH_REQUIRED", `sign-in refused: ${description}`));
       return;
     }
-    if (callbackState !== expectedState || !authorizationCode) {
+    if (!authorizationCode) {
       response.writeHead(400, { "content-type": "text/plain" }).end("Invalid authentication callback.");
-      rejectCode(agentXError("AUTH_REQUIRED", "OIDC callback state or code is invalid"));
+      rejectCode(agentXError("AUTH_REQUIRED", messages.noAnswer));
       return;
     }
     response.writeHead(200, { "content-type": "text/plain" }).end("AgentX authentication complete. You can close this window.");
@@ -149,7 +176,7 @@ export async function createCallbackListener(expectedState: string, timeoutMilli
   });
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("OIDC callback listener did not bind TCP");
-  const timer = setTimeout(() => rejectCode(agentXError("AUTH_REQUIRED", "OIDC login timed out")), timeoutMilliseconds);
+  const timer = setTimeout(() => rejectCode(agentXError("AUTH_REQUIRED", messages.timedOut)), timeoutMilliseconds);
   timer.unref();
   return {
     redirectUri: `http://127.0.0.1:${address.port}/callback`,

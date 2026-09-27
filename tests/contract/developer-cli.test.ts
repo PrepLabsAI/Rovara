@@ -25,7 +25,7 @@ const formOf = (init: RequestInit | undefined) => new URLSearchParams(typeof ini
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
 
-async function signedIn(options: { revoke?: () => Promise<Response> } = {}) {
+async function signedIn(options: { revoke?: () => Promise<Response>; name?: string } = {}) {
   const home = await mkdtemp(join(tmpdir(), "agentx-dev-cli-"));
   dirs.push(home);
   await saveDeveloperEnvironment(home, "staging", entry);
@@ -37,7 +37,7 @@ async function signedIn(options: { revoke?: () => Promise<Response> } = {}) {
     const url = urlOf(input);
     if (url === `${URL_}/v1/dev/projects`) {
       expect(new Headers(init?.headers).get("authorization")).toBe("Bearer access");
-      return Response.json(projects);
+      return Response.json(options.name === undefined ? projects : { ...projects, developer: { ...projects.developer, name: options.name } });
     }
     if (url === `${ISSUER}/revoke`) return options.revoke?.() ?? Response.json({});
     throw new Error(`unexpected ${url}`);
@@ -92,10 +92,29 @@ describe("agentx whoami and logout (FR-011)", () => {
     expect(h.out.join("")).toContain("the server session may stay until it expires");
   });
 
+  it("logout says the server did not confirm when revoke answers an error, with its reason (fix 5)", async () => {
+    const h = await signedIn({ revoke: () => Promise.resolve(Response.json({ error: "temporarily_unavailable", error_description: "AgentX could not finish this just now\u001b[2J" }, { status: 503 })) });
+    expect(await h.run(["logout"])).toBe(0);
+    expect(await h.tokenStore.get(developerTokenKey(ISSUER))).toBeUndefined();
+    expect(h.out.join("")).toBe("Signed out of AgentX environment staging on this computer. AgentX did not confirm it ended the sign-in there (AgentX could not finish this just now[2J), so the server session may stay until it expires.\n");
+  });
+
   it("logout --json reports whether the server revoked the session", async () => {
-    const h = await signedIn({ revoke: () => Promise.resolve(Response.json({ error: "temporarily_unavailable" }, { status: 503 })) });
+    const h = await signedIn({ revoke: () => Promise.resolve(Response.json({}, { status: 500 })) });
     expect(await h.run(["--json", "logout"])).toBe(0);
-    expect(JSON.parse(h.out.join(""))).toEqual({ ok: true, data: { env: "staging", revoked: false } });
+    expect(JSON.parse(h.out.join(""))).toEqual({ ok: true, data: { env: "staging", revoked: false, problem: "not_confirmed" } });
+  });
+
+  it("logout --json names an unreachable server", async () => {
+    const h = await signedIn({ revoke: () => Promise.reject(new TypeError("fetch failed")) });
+    expect(await h.run(["--json", "logout"])).toBe(0);
+    expect(JSON.parse(h.out.join(""))).toEqual({ ok: true, data: { env: "staging", revoked: false, problem: "unreachable" } });
+  });
+
+  it("whoami strips terminal escapes from the developer's name (fix 3)", async () => {
+    const h = await signedIn({ name: "Maya\u001b[2J Chen" });
+    expect(await h.run(["whoami"])).toBe(0);
+    expect(h.out.join("")).toContain("as Maya[2J Chen, with Slack");
   });
 
   it("login refuses a URL together with --admin", async () => {

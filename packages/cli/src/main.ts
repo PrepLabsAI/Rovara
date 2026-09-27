@@ -27,7 +27,7 @@ import { stopWorkspace } from "./admin/stop.js";
 import { exportTurns, parseSince } from "./admin/turns.js";
 import { loginWithPkce, openSystemBrowser, tokenStoreKey } from "./auth.js";
 import { loadProjectConfig } from "./config.js";
-import { developerLogout, fetchDeveloperProjects, whoamiText } from "./developer/commands.js";
+import { developerLogout, fetchDeveloperProjects, logoutText, whoamiText } from "./developer/commands.js";
 import { developerLogin } from "./developer/login.js";
 import { loadDeploymentSettings, type DeploymentSettings } from "./deployment.js";
 import { resumeCommand, runDeploy, runInitExport, type DeployCliDependencies, type DeployCommandOptions } from "./deploy/commands.js";
@@ -250,13 +250,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         return;
       }
       const result = await developerLogout(developerSession(), developerEnv(command));
-      services.stdout.write(
-        globals.json
-          ? formatSuccess(result, true)
-          : result.revoked
-            ? `Signed out of AgentX environment ${result.env}.\n`
-            : `Signed out of AgentX environment ${result.env} on this computer. AgentX could not be reached to end the sign-in there, so the server session may stay until it expires.\n`,
-      );
+      services.stdout.write(globals.json ? formatSuccess(result, true) : logoutText(result));
     });
 
   program

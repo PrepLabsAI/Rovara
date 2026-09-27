@@ -1,8 +1,9 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { developerTokenKey, readDeveloperConfig } from "../../packages/cli/src/developer/config.js";
+import { developerTokenKey, readDeveloperConfig, saveDeveloperEnvironment } from "../../packages/cli/src/developer/config.js";
+import { createCallbackListener, sanitizeServerText } from "../../packages/cli/src/auth.js";
 import { developerLogin } from "../../packages/cli/src/developer/login.js";
 import { InMemoryTokenStore } from "../../packages/cli/src/token-store.js";
 
@@ -98,18 +99,55 @@ describe("agentx login <url> (FR-011)", () => {
     })).rejects.toThrow(/^RUNTIME_UNAVAILABLE: sign-in could not finish: Slack could not be reached/);
   });
 
-  it("does not take an error callback with the wrong state as the server's answer", async () => {
-    const result = developerLogin({
+  it("answers 400 to a callback with the wrong state and keeps waiting for the real one (fix 1)", async () => {
+    const statuses: number[] = [];
+    const result = await developerLogin({
       url: URL_, allowLoopback: false, browser: true, home: await home(), tokenStore: new InMemoryTokenStore(), fetch: server(), write: () => undefined, timeoutMs: 60_000,
       openBrowser: async (link) => {
-        const forged = new URL(new URL(link).searchParams.get("redirect_uri") ?? "");
-        forged.searchParams.set("state", "not-the-state");
-        forged.searchParams.set("error", "access_denied");
-        forged.searchParams.set("error_description", "forged reason");
-        await fetch(forged);
+        for (const answer of [{ error: "access_denied", error_description: "forged reason" }, { code: "agxc_forged" }]) {
+          const forged = new URL(new URL(link).searchParams.get("redirect_uri") ?? "");
+          forged.searchParams.set("state", "not-the-state");
+          for (const [key, value] of Object.entries(answer)) forged.searchParams.set(key, value);
+          statuses.push((await fetch(forged)).status);
+        }
+        await browser({ code: "agxc_code" })(link);
       },
     });
-    await expect(result).rejects.toThrow("AUTH_REQUIRED: OIDC callback state or code is invalid");
+    expect(statuses).toEqual([400, 400]);
+    expect(result.env).toBe("staging");
+  });
+
+  it("says in developer words when the sign-in timed out (fix 2)", async () => {
+    await expect(developerLogin({
+      url: URL_, allowLoopback: false, browser: true, home: await home(), tokenStore: new InMemoryTokenStore(), fetch: server(), write: () => undefined, timeoutMs: 50,
+      openBrowser: async () => undefined,
+    })).rejects.toThrow(`AUTH_REQUIRED: sign-in timed out; run npx @charterarc/agentx login ${URL_} again`);
+  });
+
+  it("says in developer words when the callback carries neither a code nor an error (fix 2)", async () => {
+    await expect(developerLogin({
+      url: URL_, allowLoopback: false, browser: true, home: await home(), tokenStore: new InMemoryTokenStore(), fetch: server(), write: () => undefined,
+      openBrowser: browser({}),
+    })).rejects.toThrow(`AUTH_REQUIRED: the sign-in came back without an answer; run npx @charterarc/agentx login ${URL_} again`);
+  });
+
+  it("keeps the admin listener's messages", async () => {
+    const listener = await createCallbackListener("state", 20, 0);
+    await expect(listener.code).rejects.toThrow("AUTH_REQUIRED: OIDC login timed out");
+    listener.close();
+    const second = await createCallbackListener("state", 60_000, 0);
+    const callback = new URL(second.redirectUri);
+    callback.searchParams.set("state", "state");
+    await fetch(callback);
+    await expect(second.code).rejects.toThrow("AUTH_REQUIRED: OIDC callback state or code is invalid");
+    second.close();
+  });
+
+  it("strips terminal escapes and hides planted tokens in a refused sign-in's reason (fix 3)", async () => {
+    await expect(developerLogin({
+      url: URL_, allowLoopback: false, browser: true, home: await home(), tokenStore: new InMemoryTokenStore(), fetch: server(), write: () => undefined,
+      openBrowser: browser({ error: "access_denied", error_description: `bad\u001b[2J news ${REFRESH} and agxc_${"c".repeat(43)}` }),
+    })).rejects.toThrow("AUTH_REQUIRED: sign-in refused: bad[2J news [hidden] and [hidden]");
   });
 
   it("prints the link and waits on the loopback with --no-browser", async () => {
@@ -135,6 +173,18 @@ describe("agentx login <url> (FR-011)", () => {
     await expect(developerLogin({ url: "http://abc123.example.test", allowLoopback: false, browser: true, home: await home(), tokenStore: new InMemoryTokenStore(), fetch: server(), write: () => undefined })).rejects.toThrow(/must use https/);
   });
 
+  it.each(["http://127.0.0.1:4010", "http://localhost:4010", "http://[::1]:4010"])("allows %s with --allow-loopback (fix 7)", async (url) => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => Response.json({}, { status: 404 }));
+    await expect(developerLogin({ url, allowLoopback: true, browser: true, home: await home(), tokenStore: new InMemoryTokenStore(), fetch: fetchImpl, write: () => undefined })).rejects.toThrow(/does not look like an AgentX environment/);
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it.each(["http://abc123.example.test", "http://127.0.0.2:4010", "http://localhost.example.test"])("refuses %s even with --allow-loopback (fix 7)", async (url) => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    await expect(developerLogin({ url, allowLoopback: true, browser: true, home: await home(), tokenStore: new InMemoryTokenStore(), fetch: fetchImpl, write: () => undefined })).rejects.toThrow(/must use https.*127\.0\.0\.1, localhost or ::1/);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("names the server's reason when the code exchange fails, and stores nothing", async () => {
     const dir = await home();
     const store = new InMemoryTokenStore();
@@ -153,5 +203,22 @@ describe("agentx login <url> (FR-011)", () => {
     expect(lines.join("\n")).not.toContain(REFRESH);
     expect(lines.join("\n")).not.toContain("access.jwt.value");
     expect(lines.join("\n")).not.toContain("agxc_code");
+  });
+});
+
+describe("sanitizeServerText (fix 3)", () => {
+  it("strips control characters, hides AgentX tokens and cuts to 300 characters", () => {
+    expect(sanitizeServerText(`a\u001b[31mred\u0007\u007f\n${REFRESH}!agxc_${"x".repeat(43)}`)).toBe("a[31mred[hidden]![hidden]");
+    expect(sanitizeServerText("y".repeat(400))).toHaveLength(300);
+  });
+});
+
+describe("the developer config directory (fix 4)", () => {
+  it("makes ~/.agentx private even when it already existed", async () => {
+    const dir = await home();
+    await mkdir(join(dir, ".agentx"), { mode: 0o755 });
+    await chmod(join(dir, ".agentx"), 0o755);
+    await saveDeveloperEnvironment(dir, "staging", { url: URL_, issuer: ISSUER, tokenEndpoint: `${ISSUER}/token`, revocationEndpoint: `${ISSUER}/revoke` });
+    expect((await stat(join(dir, ".agentx"))).mode & 0o777).toBe(0o700);
   });
 });

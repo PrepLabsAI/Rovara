@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -79,6 +79,24 @@ describe("developer access tokens on this machine", () => {
     const fetchImpl = vi.fn<typeof fetch>();
     await expect(developerAccessToken({ home, tokenStore, fetch: fetchImpl, now: () => T0, lockWaitMs: 100 }, "staging")).rejects.toThrow("RUNTIME_UNAVAILABLE: another agentx process is refreshing your sign-in to staging; try again in a moment");
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("leaves a lock that another process took over in place (fix 6)", async () => {
+    const { home, tokenStore } = await setup({ accessToken: "old", refreshToken: r("a"), expiresAt: T0 - 1 });
+    const lock = join(home, ".agentx", "locks", "developer-staging.lock");
+    const fetchImpl = vi.fn<typeof fetch>(async () => {
+      // Another process judged this lock stale and took it over while the refresh ran.
+      await writeFile(lock, "other-process");
+      return Response.json({ access_token: "new", token_type: "Bearer", expires_in: 3600, refresh_token: r("b") });
+    });
+    expect((await developerAccessToken({ home, tokenStore, fetch: fetchImpl, now: () => T0 }, "staging")).accessToken).toBe("new");
+    expect(await readFile(lock, "utf8")).toBe("other-process");
+  });
+
+  it("strips terminal escapes and hides planted tokens in the token endpoint's reason (fix 3)", async () => {
+    const { home, tokenStore } = await setup({ accessToken: "old", refreshToken: r("a"), expiresAt: T0 - 1 });
+    const fetchImpl = vi.fn<typeof fetch>(async () => Response.json({ error: "temporarily_unavailable", error_description: `try\u001b]0;pwned\u0007 later ${r("z")}` }, { status: 503 }));
+    await expect(developerAccessToken({ home, tokenStore, fetch: fetchImpl, now: () => T0 }, "staging")).rejects.toThrow("RUNTIME_UNAVAILABLE: try]0;pwned later [hidden]");
   });
 
   it("takes over a lock file left by a crashed process after 30 seconds", async () => {

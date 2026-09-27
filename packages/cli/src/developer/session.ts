@@ -1,9 +1,11 @@
 // The developer's AgentX tokens on this computer: used as long as they are valid, refreshed once,
 // under a lock file, when they are not (R19). A failed refresh deletes tokens only when the server
 // says the sign-in has ended (R18).
-import { mkdir, open, rm, stat } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, rm, stat } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { AGENTX_CLI_CLIENT_ID, DeveloperTokenResponseSchema, agentXError } from "@agentx/contracts";
+import { sanitizeServerText } from "../auth.js";
 import type { StoredTokens, TokenStore } from "../token-store.js";
 import { developerTokenKey, resolveDeveloperEnvironment, type DeveloperEnvironment } from "./config.js";
 
@@ -15,23 +17,26 @@ const EARLY_MS = 60_000;
 const STALE_LOCK_MS = 30_000;
 const LOCK_POLL_MS = 50;
 
-/** Cuts a server-sent reason to 300 characters and hides anything shaped like an AgentX secret. */
+/** A server-sent reason made safe to show (sanitizeServerText), or the fallback when there is none. */
 export function serverReason(value: unknown, fallback: string): string {
-  return typeof value === "string" ? value.replace(/agx[rc]_[A-Za-z0-9_-]+/g, "[hidden]").slice(0, 300) : fallback;
+  return typeof value === "string" ? sanitizeServerText(value) : fallback;
 }
 
 /** Runs work while holding ~/.agentx/locks/developer-<env>.lock, so two local processes never refresh at once. */
 async function withRefreshLock<T>(deps: DeveloperSessionDeps, env: string, work: () => Promise<T>): Promise<T> {
   const dir = join(deps.home, ".agentx", "locks");
   await mkdir(dir, { recursive: true, mode: 0o700 });
+  await chmod(dir, 0o700);
   const path = join(dir, `developer-${env}.lock`);
+  // Unique per call, not only per process, so two refreshes in one process are told apart too.
+  const owner = `${process.pid}:${randomUUID()}`;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const deadline = Date.now() + (deps.lockWaitMs ?? 15_000);
   for (;;) {
     try {
       const handle = await open(path, "wx", 0o600);
       try {
-        await handle.writeFile(String(process.pid));
+        await handle.writeFile(owner);
       } finally {
         await handle.close();
       }
@@ -50,7 +55,10 @@ async function withRefreshLock<T>(deps: DeveloperSessionDeps, env: string, work:
   try {
     return await work();
   } finally {
-    await rm(path, { force: true });
+    // Remove the lock only while it is still ours: another process may have judged it stale and
+    // taken it over, and removing its lock would let a third process refresh alongside it.
+    const holder = await readFile(path, "utf8").catch(() => undefined);
+    if (holder === owner) await rm(path, { force: true });
   }
 }
 
