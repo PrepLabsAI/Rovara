@@ -61,18 +61,37 @@ export interface DeployEnvironmentResult {
  */
 function controlPlaneParameterNames(release: LoadedRelease, env: string): ReadonlySet<string> | undefined {
   const [anyRegion] = release.regions();
+  // No region at all (a release meant only for the cdk engine, with no pre-synthesized templates
+  // recorded): there is nothing here to parse. `withDeclaredSignIn` below then passes every
+  // sign-in key through unfiltered rather than dropping them all; if the freshly cdk-synthesized
+  // template this deploy actually sends does not declare one of them, CloudFormation itself refuses
+  // the deploy loudly, which is far better than this code silently resetting stored sign-in.
   if (anyRegion === undefined) return undefined;
-  const template = JSON.parse(release.template("control-plane", anyRegion, env)) as { Parameters?: Record<string, unknown> };
+  let template: { Parameters?: Record<string, unknown> };
+  try {
+    template = JSON.parse(release.template("control-plane", anyRegion, env)) as { Parameters?: Record<string, unknown> };
+  } catch {
+    // Whether `release.template()` itself failed (a missing or unreadable file) or the text it
+    // returned was not valid JSON, a bare SyntaxError (or any other raw error) must never surface
+    // here: name the release version and region so the operator knows exactly what to re-fetch.
+    throw agentXError(
+      "CONFIG_INVALID",
+      `the release's control-plane template for ${anyRegion} could not be read; rebuild or re-download release ${release.manifest.version}`,
+    );
+  }
   return new Set(Object.keys(template.Parameters ?? {}));
 }
 
 /**
  * F24's actual "only the keys the template declares" enforcement: drops any of the seven sign-in
  * parameter names from `parameters` that `declared` does not list, leaving every other parameter
- * untouched. `declared === undefined` (no region to introspect — see `controlPlaneParameterNames`)
- * passes every sign-in key through unfiltered.
+ * untouched.
  */
 function withDeclaredSignIn(parameters: Record<string, string>, declared: ReadonlySet<string> | undefined): Record<string, string> {
+  // declared === undefined: no region to introspect (see controlPlaneParameterNames). Every
+  // sign-in key is passed through unfiltered here, deliberately — CloudFormation is left to refuse
+  // the deploy loudly if the actual template does not declare one of them, rather than this
+  // function silently resetting stored sign-in settings on the operator's behalf.
   if (declared === undefined) return parameters;
   const filtered = { ...parameters };
   for (const name of SIGN_IN_PARAMETER_NAMES) {

@@ -504,6 +504,42 @@ describe("deploy environment", () => {
     for (const name of SIGN_IN_PARAMETER_NAMES) expect(controlPlaneRequest.parameters).not.toHaveProperty(name);
   });
 
+  it("names the release version and region, instead of a bare SyntaxError, when the control-plane template cannot be read", async () => {
+    const store = new MemoryParameterStore();
+    const secrets = memorySecrets();
+    await store.put("/agentx/staging/slack/teamId", "T0TEAM1");
+    await store.put("/agentx/staging/signin", JSON.stringify({ schemaVersion: 1, env: "staging", slack: true, updatedAt: "2026-09-27T00:00:00.000Z", updatedBy: HOLDER }));
+
+    const corruptRelease: LoadedRelease = {
+      ...fakeRelease(),
+      regions: () => ["us-east-1"],
+      template: (part, region) => {
+        if (part !== "control-plane" || region !== "us-east-1") throw new Error(`test setup: template(${part}, ${region}) is not expected to be called`);
+        return "{ this is not valid json";
+      },
+    };
+    const { deployer } = fakeDeployer(scriptedOutputs());
+    await expect(
+      deployEnvironment({ mode: "install", engine: "templates", answers: baseAnswers(), release: corruptRelease, deployer, store, secrets, holder: HOLDER }),
+    ).rejects.toThrow("the release's control-plane template for us-east-1 could not be read; rebuild or re-download release 1.2.3");
+  });
+
+  it("passes every sign-in key through when the release covers no region at all, instead of silently dropping them all (F24 fallback)", async () => {
+    const store = new MemoryParameterStore();
+    const secrets = memorySecrets();
+    await store.put("/agentx/staging/slack/teamId", "T0TEAM1");
+    await store.put("/agentx/staging/signin", JSON.stringify({ schemaVersion: 1, env: "staging", slack: true, updatedAt: "2026-09-27T00:00:00.000Z", updatedBy: HOLDER }));
+
+    // fakeRelease()'s own template() always throws "not expected to be called by the orchestrator";
+    // an empty regions() must mean it is never even asked (see controlPlaneParameterNames).
+    const noRegionRelease: LoadedRelease = { ...fakeRelease(), regions: () => [] };
+    const { deployer, requests } = fakeDeployer(scriptedOutputs());
+    await deployEnvironment({ mode: "install", engine: "templates", answers: baseAnswers(), release: noRegionRelease, deployer, store, secrets, holder: HOLDER });
+
+    const controlPlaneRequest = requests.find((request) => request.part === "control-plane")!;
+    expect(controlPlaneRequest.parameters).toMatchObject({ SlackTeamId: "T0TEAM1", DeveloperSignInSlack: "enabled" });
+  });
+
   it("does not read sign-in settings for a deploy without the control plane", async () => {
     const store = new MemoryParameterStore();
     const { deployer } = fakeDeployer(scriptedOutputs());
