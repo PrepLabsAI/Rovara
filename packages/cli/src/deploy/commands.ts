@@ -347,7 +347,7 @@ export function realCommandRunner(stderr: Writer): CommandRunner {
         child.stdout?.on("data", (chunk: Buffer) => {
           const text = chunk.toString("utf8");
           stdout += text;
-          stdoutStream.push(text);
+          if (options.quiet !== true) stdoutStream.push(text);
         });
         child.stderr?.on("data", (chunk: Buffer) => {
           const text = chunk.toString("utf8");

@@ -35,6 +35,17 @@ describe("the real CommandRunner", () => {
     expect(stderr.text()).toContain("hello from child");
   });
 
+  it("with quiet, returns stdout without echoing it, and still streams stderr", async () => {
+    const stderr = capture();
+    const runner = realCommandRunner(stderr);
+
+    const result = await runner.run(process.execPath, ["-e", "console.log('listing line'); console.error('a warning')"], { cwd: process.cwd(), display: "node -e ...", quiet: true });
+
+    expect(result.stdout).toContain("listing line");
+    expect(stderr.text()).not.toContain("listing line");
+    expect(stderr.text()).toContain("a warning");
+  });
+
   it("throws an error naming the exit code, options.display and the stderr tail on a non-zero exit", async () => {
     const stderr = capture();
     const runner = realCommandRunner(stderr);

@@ -2,7 +2,7 @@
 // release.json and tarball. The extracted release.json must equal the published one byte for byte;
 // loadRelease then checks every file's sha256 against it. The tarball itself is untrusted until
 // its entries are checked for containment (assertArchiveEntriesAreSafe, assertExtractedTreeIsContained).
-import { mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, sep } from "node:path";
 import { agentXError } from "@agentx/contracts";
 import type { CommandRunner } from "../deploy/cdk-engine.js";
@@ -39,8 +39,9 @@ function unsafeArchiveError(version: string): Error {
  */
 async function assertArchiveEntriesAreSafe(input: { runner: CommandRunner; archive: string; cwd: string; archiveName: string; version: string }): Promise<void> {
   const { runner, archive, cwd, archiveName, version } = input;
-  const plain = await runner.run("tar", ["-tzf", archive], { cwd, display: `tar -tzf ${archiveName}` });
-  const verbose = await runner.run("tar", ["-tzvf", archive], { cwd, display: `tar -tzvf ${archiveName}` });
+  // quiet: the listings are for this check only, and a release lists thousands of files.
+  const plain = await runner.run("tar", ["-tzf", archive], { cwd, display: `tar -tzf ${archiveName}`, quiet: true });
+  const verbose = await runner.run("tar", ["-tzvf", archive], { cwd, display: `tar -tzvf ${archiveName}`, quiet: true });
   const names = plain.stdout.split("\n").filter((line) => line.length > 0);
   const details = verbose.stdout.split("\n").filter((line) => line.length > 0);
   // The plain and verbose listings come from the same tar reading the same archive back to back:
@@ -74,7 +75,24 @@ async function assertExtractedTreeIsContained(root: string, version: string): Pr
       if (entry.isDirectory()) await walk(path);
     }
   }
-  await walk(root);
+  try {
+    await walk(root);
+  } catch {
+    // Refused either way: an entry outside root, or a tree that cannot be read back (EACCES on a
+    // directory the archive made unreadable, say), which cannot be vouched for.
+    throw unsafeArchiveError(version);
+  }
+}
+
+/** chmod -R u+rwx, so an archive that extracted an unreadable or unwritable directory can still be
+ * removed. Best effort: whatever it cannot change, the rm after it reports. */
+async function makeRemovable(path: string): Promise<void> {
+  const stats = await lstat(path).catch(() => undefined);
+  if (stats === undefined || stats.isSymbolicLink()) return;
+  await chmod(path, (stats.mode & 0o7777) | 0o700).catch(() => undefined);
+  if (!stats.isDirectory()) return;
+  const entries = await readdir(path).catch(() => [] as string[]);
+  for (const entry of entries) await makeRemovable(join(path, entry));
 }
 
 /**
@@ -108,7 +126,8 @@ export async function fetchRelease(input: { version: string | undefined; home: s
     await writeFile(archive, tarball);
     await assertArchiveEntriesAreSafe({ runner: input.runner, archive, cwd: scratch, archiveName, version });
     await mkdir(extracted);
-    await input.runner.run("tar", ["-xzf", archive, "-C", extracted], { cwd: scratch, display: `tar -xzf ${archiveName}` });
+    // Never the archive's owners or permission bits: every file is ours, readable, and removable.
+    await input.runner.run("tar", ["--no-same-owner", "--no-same-permissions", "-xzf", archive, "-C", extracted], { cwd: scratch, display: `tar -xzf ${archiveName}` });
     await assertExtractedTreeIsContained(extracted, version);
     const inside = await readFile(join(extracted, "release.json")).catch(() => undefined);
     if (inside === undefined || !inside.equals(published)) {
@@ -118,6 +137,12 @@ export async function fetchRelease(input: { version: string | undefined; home: s
     await rename(extracted, dir);
     return dir;
   } finally {
-    await rm(scratch, { recursive: true, force: true });
+    // Reported, never thrown: a failed cleanup must not hide the fetch's own error or result.
+    try {
+      await makeRemovable(scratch);
+      await rm(scratch, { recursive: true, force: true });
+    } catch (error) {
+      input.write(`could not remove temporary files in ${scratch}: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 }

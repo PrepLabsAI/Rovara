@@ -2,13 +2,20 @@ import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { gzipSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
+import type { CommandRunner } from "../../packages/cli/src/deploy/cdk-engine.js";
 import { realCommandRunner } from "../../packages/cli/src/deploy/commands.js";
 import { fetchRelease, releaseAssetUrls, releaseCacheDir } from "../../packages/cli/src/init/release-fetch.js";
 import { CLI_VERSION, RELEASE_VERSION, isPrereleaseVersion } from "../../packages/cli/src/version.js";
 
 const dirs: string[] = [];
-afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
+/** A test that leaves a mode-000 directory behind must not stop the cleanup of the others. */
+const removeAll = async (dir: string) => {
+  execFileSync("chmod", ["-R", "u+rwx", dir], { stdio: "ignore" });
+  await rm(dir, { recursive: true, force: true });
+};
+afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => removeAll(dir).catch(() => undefined))); });
 const tmp = async (prefix: string) => { const dir = await mkdtemp(join(tmpdir(), prefix)); dirs.push(dir); return dir; };
 const runner = realCommandRunner({ write: () => undefined });
 const MANIFEST = JSON.stringify({ schemaVersion: 1, version: "1.2.3" });
@@ -52,6 +59,36 @@ async function tarballWithSymlinkEntry(): Promise<Buffer> {
   const out = join(await tmp("agentx-rel-evil-sym-tar-"), "agentx-1.2.3.tar.gz");
   execFileSync("tar", ["-czf", out, "-C", source, "."]);
   return readFile(out);
+}
+
+/** One ustar entry, written by hand so the archive is the same on every platform's tar (and a
+ * FIFO or a hard link needs no mkfifo or ln). Type "0" is a file, "1" a hard link, "5" a directory,
+ * "6" a FIFO. */
+function ustarEntry(input: { name: string; type: "0" | "1" | "5" | "6"; mode: number; body?: string; linkName?: string }): Buffer {
+  const body = Buffer.from(input.body ?? "");
+  const header = Buffer.alloc(512);
+  const put = (text: string, offset: number, length: number) => { header.write(text.slice(0, length), offset, "ascii"); };
+  const octal = (value: number, length: number) => `${value.toString(8).padStart(length - 1, "0")}\0`;
+  put(input.name, 0, 100);
+  put(octal(input.mode, 8), 100, 8);
+  put(octal(0, 8), 108, 8);
+  put(octal(0, 8), 116, 8);
+  put(octal(body.length, 12), 124, 12);
+  put(octal(1_790_000_000, 12), 136, 12);
+  put("        ", 148, 8);
+  put(input.type, 156, 1);
+  put(input.linkName ?? "", 157, 100);
+  put("ustar\0", 257, 6);
+  put("00", 263, 2);
+  let sum = 0;
+  for (const byte of header) sum += byte;
+  put(`${sum.toString(8).padStart(6, "0")}\0 `, 148, 8);
+  const padding = Buffer.alloc((512 - (body.length % 512)) % 512);
+  return Buffer.concat([header, body, padding]);
+}
+
+function ustarArchive(entries: Array<Parameters<typeof ustarEntry>[0]>): Buffer {
+  return gzipSync(Buffer.concat([...entries.map(ustarEntry), Buffer.alloc(1024)]));
 }
 
 function requestUrl(input: Parameters<typeof fetch>[0]): string {
@@ -126,6 +163,65 @@ describe("fetching the release for this CLI", () => {
     await expect(fetchRelease({ version: "1.2.3", home, fetch: github({ [urls.manifest]: MANIFEST, [urls.tarball]: await tarballWithSymlinkEntry() }), runner, write: () => undefined }))
       .rejects.toThrow("the release archive for 1.2.3 is unsafe and must not be used; try again later, or pass --release <dir>");
     await expect(readdir(join(home, ".agentx", "releases"))).resolves.toEqual([]);
+  });
+
+  it("refuses an archive entry that is a hard link, leaving nothing behind", async () => {
+    const home = await tmp("agentx-home-");
+    const urls = releaseAssetUrls("1.2.3");
+    const tarball = ustarArchive([
+      { name: "release.json", type: "0", mode: 0o644, body: MANIFEST },
+      { name: "evil-link", type: "1", mode: 0o644, linkName: "release.json" },
+    ]);
+    await expect(fetchRelease({ version: "1.2.3", home, fetch: github({ [urls.manifest]: MANIFEST, [urls.tarball]: tarball }), runner, write: () => undefined }))
+      .rejects.toThrow("the release archive for 1.2.3 is unsafe and must not be used; try again later, or pass --release <dir>");
+    await expect(readdir(join(home, ".agentx", "releases"))).resolves.toEqual([]);
+  });
+
+  it("refuses an archive entry that is a FIFO, leaving nothing behind", async () => {
+    const home = await tmp("agentx-home-");
+    const urls = releaseAssetUrls("1.2.3");
+    const tarball = ustarArchive([
+      { name: "release.json", type: "0", mode: 0o644, body: MANIFEST },
+      { name: "evil-fifo", type: "6", mode: 0o644 },
+    ]);
+    await expect(fetchRelease({ version: "1.2.3", home, fetch: github({ [urls.manifest]: MANIFEST, [urls.tarball]: tarball }), runner, write: () => undefined }))
+      .rejects.toThrow("the release archive for 1.2.3 is unsafe and must not be used; try again later, or pass --release <dir>");
+    await expect(readdir(join(home, ".agentx", "releases"))).resolves.toEqual([]);
+  });
+
+  it("extracts without the archive's owners or permission bits", async () => {
+    const home = await tmp("agentx-home-");
+    const urls = releaseAssetUrls("1.2.3");
+    const calls: string[][] = [];
+    const recording: CommandRunner = { run: (command, args, options) => { calls.push([command, ...args]); return runner.run(command, args, options); } };
+    await fetchRelease({ version: "1.2.3", home, fetch: github({ [urls.manifest]: MANIFEST, [urls.tarball]: await publishedRelease() }), runner: recording, write: () => undefined });
+    const extract = calls.find((call) => call.some((arg) => arg.startsWith("-x")));
+    expect(extract).toEqual(expect.arrayContaining(["--no-same-owner", "--no-same-permissions"]));
+  });
+
+  it("keeps the archive listings out of the terminal", async () => {
+    const home = await tmp("agentx-home-");
+    const urls = releaseAssetUrls("1.2.3");
+    const printed: string[] = [];
+    const echoing = realCommandRunner({ write: (text) => printed.push(text) });
+    await fetchRelease({ version: "1.2.3", home, fetch: github({ [urls.manifest]: MANIFEST, [urls.tarball]: await publishedRelease() }), runner: echoing, write: () => undefined });
+    expect(printed.join("")).not.toContain("access.template.json");
+  });
+
+  // Root reads a mode-000 directory anyway, so there is nothing to refuse.
+  it.skipIf(process.getuid?.() === 0)("refuses an archive whose tree cannot be read back, and still leaves nothing behind", async () => {
+    const home = await tmp("agentx-home-");
+    const urls = releaseAssetUrls("1.2.3");
+    const tarball = ustarArchive([
+      { name: "release.json", type: "0", mode: 0o644, body: MANIFEST },
+      { name: "locked/", type: "5", mode: 0o000 },
+      { name: "locked/inside.txt", type: "0", mode: 0o644, body: "x" },
+    ]);
+    const lines: string[] = [];
+    await expect(fetchRelease({ version: "1.2.3", home, fetch: github({ [urls.manifest]: MANIFEST, [urls.tarball]: tarball }), runner, write: (line) => lines.push(line) }))
+      .rejects.toThrow("the release archive for 1.2.3 is unsafe and must not be used; try again later, or pass --release <dir>");
+    await expect(readdir(join(home, ".agentx", "releases"))).resolves.toEqual([]);
+    expect(lines.join("\n")).not.toContain("could not remove");
   });
 
   it("names the address when the release is not published", async () => {

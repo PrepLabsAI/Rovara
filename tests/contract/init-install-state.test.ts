@@ -81,6 +81,18 @@ describe("install state", () => {
     expect(progress?.steps).toEqual({ access: { status: "done", at: "2026-09-27T00:00:00.000Z" } });
   });
 
+  it("still refuses a malformed record under a known step id once unknown ids are dropped", async () => {
+    const store = new MemoryParameterStore();
+    store.values.set(installProgressParameterName("staging"), JSON.stringify({
+      ...emptyProgress("staging", T0),
+      steps: {
+        access: { status: "finished", at: "2026-09-27T00:00:00.000Z" },
+        "admin-user": { status: "done", at: "2026-09-27T00:00:00.000Z" },
+      },
+    }));
+    await expect(readInstallProgress(store, "staging")).rejects.toThrow("install progress for environment staging is invalid or was written by a newer agentx; upgrade agentx and run it again");
+  });
+
   // F22: reading install state refuses when the stored env does not match the requested one, even
   // though the stored value is otherwise a perfectly well-formed answers/progress document (its own
   // `env` field is just a different, equally valid, environment name).
