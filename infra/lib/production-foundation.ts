@@ -337,18 +337,14 @@ export class ProductionFoundationStack extends Stack {
     // Retained: deleting the capacity provider deletes every worker session's persistent workspace volume.
     capacityProvider.applyRemovalPolicy(RemovalPolicy.RETAIN);
 
-    // EC2 workers (#76) run beside AgentCore in named environments only. The production deployment
-    // keeps an unchanged template until the cutover (#87, #88).
-    if (naming.env !== undefined) {
-      new Ec2WorkerFoundation(this, "Ec2Workers", {
-        naming,
-        env: naming.env,
-        vpcId: vpc.ref,
-        privateSubnets,
-        workspaceKey,
-        instanceType: configuration.instanceType,
-      });
-    }
+    // EC2 workers (#76) run beside AgentCore until the cutover (#87, #88).
+    new Ec2WorkerFoundation(this, "Ec2Workers", {
+      naming,
+      vpcId: vpc.ref,
+      privateSubnets,
+      workspaceKey,
+      instanceType: configuration.instanceType,
+    });
 
     this.capacityProviderArn = capacityProvider.attrArn;
     new CfnOutput(this, "CapacityProviderArn", { value: this.capacityProviderArn });

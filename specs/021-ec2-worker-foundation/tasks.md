@@ -6,4 +6,5 @@
 - [x] T004 Add the signing key and session index to the control plane, the image parameter to the runtime.
 - [x] T005 Add `tests/contract/ec2-worker-infrastructure.test.ts`; adjust access and naming tests.
 - [x] T006 Synthesize staging and production; run typecheck, lint and the full suite.
-- [ ] T007 Operator: update the environment's access stack, then deploy it with `--env`.
+- [x] T007 Target production: production names, re-recorded snapshots, live `cdk diff` shows additions only.
+- [ ] T008 Operator: deploy the production foundation from this branch, then merge; the pipeline deploys the control plane and runtime.

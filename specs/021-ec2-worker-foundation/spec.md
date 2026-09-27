@@ -7,19 +7,21 @@
 
 ## User Scenario
 
-### A named environment can host EC2 workers beside AgentCore (Priority: P1)
+### Production can host EC2 workers beside AgentCore (Priority: P1)
 
-An operator deploys a named environment with `agentx deploy --env <name>`. Besides today's AgentCore
-stacks it now holds everything the session provisioner (#83) needs to launch a worker: a launch
-template, an instance role, security groups, an invoke signing key, the worker image parameter and a
-sparse session index. The production deployment is unchanged until the cutover (#87, #88).
+Besides today's AgentCore stacks, production (and any named environment) holds everything the session
+provisioner (#83) needs to launch a worker: a launch template, an instance role, security groups, an
+invoke signing key, the worker image parameter and a sparse session index. Nothing uses them until
+#83 and #84, so AgentCore behavior is unchanged. There is no non-production environment; production
+is the target, decided 2026-09-27.
 
-**Independent Test**: Synthesize a named environment and the legacy production app, and inspect both.
+**Independent Test**: Synthesize production and a named environment, and diff production against the live stacks.
 
 ## Requirements
 
-- **FR-001**: Every resource below MUST be synthesized only for named environments. The legacy production
-  templates MUST stay byte-identical (their snapshots are not updated).
+- **FR-001**: Every resource below MUST be added to production under production names, and to named
+  environments under theirs. Existing production resources MUST NOT change, except that the table grants
+  of the broker, outbox publisher and dispatcher also cover the new index, and the dispatcher gains `kms:Sign`.
 - **FR-002**: Launch template: Amazon Linux 2023 arm64 resolved from its public SSM parameter at launch,
   `m6g.medium`, IMDSv2 required with hop limit 1, a 30 GiB gp3 root volume encrypted with the workspace
   key, terminate on instance-initiated shutdown, no user data (the provisioner sends the boot script).
@@ -36,6 +38,6 @@ sparse session index. The production deployment is unchanged until the cutover (
 
 ## Success Criteria
 
-- **SC-001**: Contract tests cover FR-001 to FR-008; legacy template snapshots pass unchanged.
+- **SC-001**: Contract tests cover FR-001 to FR-008; the re-recorded production snapshots differ only by FR-001's additions.
 - **SC-002**: `cdk synth` of a named environment and of production reports no new validation warnings.
-- **SC-003**: Deployed to a non-production environment with `--env` (run by the operator).
+- **SC-003**: `cdk diff` of the live production foundation shows additions only; the operator deploys it.

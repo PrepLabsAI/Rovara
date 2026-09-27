@@ -11,7 +11,7 @@ const resourcesOf = (template: Template) => template.toJSON().Resources as Recor
 const ofType = (template: Template, type: string) => Object.entries(resourcesOf(template)).filter(([, r]) => r.Type === type);
 const actionsOf = (statements: Array<{ Action: string | string[] }>) => statements.flatMap((s) => [s.Action].flat());
 
-describe("EC2 worker infrastructure (issue #82)", () => {
+describe("EC2 worker infrastructure (issue #82), shown for a named environment", () => {
   let foundation: Template;
   let controlPlane: Template;
   let runtime: Template;
@@ -26,14 +26,23 @@ describe("EC2 worker infrastructure (issue #82)", () => {
     legacy = stacksOf(buildAgentXApp()).map((stack) => Template.fromStack(stack));
   }, 240_000);
 
-  it("adds nothing to the production deployment before the cutover", () => {
-    for (const template of legacy) {
-      expect(ofType(template, "AWS::EC2::LaunchTemplate")).toEqual([]);
-      expect(ofType(template, "AWS::IAM::InstanceProfile")).toEqual([]);
-      expect(ofType(template, "AWS::SSM::Parameter")).toEqual([]);
-      expect(JSON.stringify(template.toJSON())).not.toContain(WORKSPACE_SESSION_STATE_INDEX.name);
-      expect(JSON.stringify(template.toJSON())).not.toContain("ECC_NIST_P256");
-    }
+  it("gives production the same resources under its own names", () => {
+    const all = (type: string) => legacy.flatMap((template) => ofType(template, type).map(([, r]) => r));
+    expect(all("AWS::EC2::LaunchTemplate").map((r) => r.Properties.LaunchTemplateName)).toEqual(["agentx-production-worker"]);
+    expect(all("AWS::EC2::SecurityGroup").map((r) => r.Properties.GroupName).filter((name) => name !== undefined).sort()).toEqual([
+      "agentx-production-dispatcher", "agentx-production-ec2-workers", "agentx-production-session-manager", "agentx-production-workers",
+    ]);
+    expect(all("AWS::SSM::Parameter").map((r) => r.Properties.Name)).toEqual(["/agentx/production/worker-image"]);
+    expect(all("AWS::KMS::Alias").map((r) => r.Properties.AliasName).sort()).toEqual([
+      "alias/agentx/production-workspaces", "alias/agentx/production/invoke-signing",
+    ]);
+    const logGroups = all("AWS::Logs::LogGroup").map((r) => r.Properties.LogGroupName).filter((name) => typeof name === "string");
+    expect(logGroups).toContain("/agentx/production/worker");
+    // Production's roles have no environment path, and it has no ECR pull-through cache.
+    const [profile] = all("AWS::IAM::InstanceProfile");
+    expect(profile!.Properties.Path).toBeUndefined();
+    expect(JSON.stringify(legacy.map((t) => t.toJSON()))).not.toContain("EcrPullThroughCache");
+    expect(JSON.stringify(legacy.map((t) => t.toJSON()))).toContain(WORKSPACE_SESSION_STATE_INDEX.name);
   });
 
   it("launches arm64 Amazon Linux 2023 m6g.medium with IMDSv2 at one hop and an encrypted root volume", () => {

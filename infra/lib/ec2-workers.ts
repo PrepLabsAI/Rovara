@@ -23,8 +23,6 @@ export const EC2_WORKER_ROOT_VOLUME_GIB = 30;
 
 export interface Ec2WorkerFoundationProps {
   naming: AgentXNaming;
-  /** The named environment; production has no EC2 workers until the cutover. */
-  env: string;
   vpcId: string;
   privateSubnets: readonly ec2.CfnSubnet[];
   workspaceKey: kms.IKey;
@@ -93,11 +91,15 @@ export class Ec2WorkerFoundation extends Construct {
       actions: ["ecr:GetAuthorizationToken"],
       resources: ["*"],
     }));
-    this.instanceRole.addToPolicy(new iam.PolicyStatement({
-      sid: "EcrPullThroughCache",
-      actions: ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchImportUpstreamImage", "ecr:CreateRepository"],
-      resources: [`arn:${Aws.PARTITION}:ecr:${Aws.REGION}:${Aws.ACCOUNT_ID}:repository/${naming.pullThroughPrefix}/*`],
-    }));
+    // A named environment pulls released images through its ECR pull-through cache; production
+    // pushes its own worker image and has no cache prefix.
+    if (naming.env !== undefined) {
+      this.instanceRole.addToPolicy(new iam.PolicyStatement({
+        sid: "EcrPullThroughCache",
+        actions: ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchImportUpstreamImage", "ecr:CreateRepository"],
+        resources: [`arn:${Aws.PARTITION}:ecr:${Aws.REGION}:${Aws.ACCOUNT_ID}:repository/${naming.pullThroughPrefix}/*`],
+      }));
+    }
     this.instanceRole.addToPolicy(new iam.PolicyStatement({
       sid: "BedrockModelInvocation",
       actions: ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
@@ -111,8 +113,9 @@ export class Ec2WorkerFoundation extends Construct {
       actions: ["logs:CreateLogStream", "logs:PutLogEvents"],
       resources: [logGroup.logGroupArn, `${logGroup.logGroupArn}:log-stream:*`],
     }));
+    // Under the environment's IAM path like its roles, which its CloudFormation role is scoped to.
     const instanceProfile = new iam.CfnInstanceProfile(this, "InstanceProfile", {
-      path: environmentRolePath(props.env),
+      ...(naming.env === undefined ? {} : { path: environmentRolePath(naming.env) }),
       roles: [this.instanceRole.roleName],
     });
 
