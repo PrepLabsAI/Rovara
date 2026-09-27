@@ -695,6 +695,12 @@ export async function writeExportBundle(input: ExportBundleInput): Promise<Expor
     }
 
     const order = installOrder(answers.identity.mode);
+    // F24: `bundleAnswers` never carries `developerSignIn` (`markerAnswers` does not set it), so
+    // `stackParameters`'s control-plane case adds none of the sign-in parameters here. That is
+    // correct, not an oversight: an export bundle is always a fresh install of a brand-new access
+    // stack (see this function's own doc comment — "everything a platform team needs to deploy the
+    // access stack themselves"), never a redeploy of an existing, already-configured environment, so
+    // there is no stored sign-in choice for it to carry and nothing it could ever reset.
     const bundleAnswers = markerAnswers(answers, release);
     const outputs = markerOutputs();
 

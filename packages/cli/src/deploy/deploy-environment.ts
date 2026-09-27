@@ -10,7 +10,7 @@ import { readEnvironmentSettings, writeEnvironmentSettings, type EnvironmentSett
 import { installOrder, stackParameters, upgradeOrder, type DeployPart, type InstallAnswers, type StackOutputs } from "./parameters.js";
 import type { LoadedRelease } from "./release.js";
 import { callbackSigningKey, type SecretValueStore } from "./signing-key.js";
-import { readStoredDeveloperSignIn } from "../signin/settings.js";
+import { readStoredDeveloperSignIn, SIGN_IN_PARAMETER_NAMES } from "../signin/settings.js";
 
 export type { SecretValueStore } from "./signing-key.js";
 
@@ -42,6 +42,43 @@ export interface DeployEnvironmentInput {
 export interface DeployEnvironmentResult {
   outputs: Partial<Record<DeployPart, StackOutputs>>;
   settingsWritten: boolean;
+}
+
+/**
+ * F24: the exact parameter names the release's control-plane template declares, so
+ * `withDeclaredSignIn` below can drop any stored sign-in key that template does not know about —
+ * concretely, an environment upgraded to a release built before phase 25a while sign-in settings
+ * from a later release are still stored in SSM. A CDK stack's parameter *names* do not vary by
+ * region (only default/output values do), so any region the release covers is used here, never
+ * `answers.region` specifically: the cdk engine in particular may target a region the release's own
+ * pre-synthesized templates do not cover at all (it synthesizes fresh from the checked-out source
+ * instead of deploying one of them), and requiring `answers.region` to be one of them here would be
+ * its own, unrelated failure. Returns undefined when the release covers no region at all
+ * (conceivable for a release meant only for the cdk engine, with no pre-synthesized templates
+ * recorded): there is nothing to parse, so the caller falls back to passing every sign-in key
+ * through, trusting the freshly cdk-synthesized template — built from that same checked-out source,
+ * which always declares them for a named environment — to accept them.
+ */
+function controlPlaneParameterNames(release: LoadedRelease, env: string): ReadonlySet<string> | undefined {
+  const [anyRegion] = release.regions();
+  if (anyRegion === undefined) return undefined;
+  const template = JSON.parse(release.template("control-plane", anyRegion, env)) as { Parameters?: Record<string, unknown> };
+  return new Set(Object.keys(template.Parameters ?? {}));
+}
+
+/**
+ * F24's actual "only the keys the template declares" enforcement: drops any of the seven sign-in
+ * parameter names from `parameters` that `declared` does not list, leaving every other parameter
+ * untouched. `declared === undefined` (no region to introspect — see `controlPlaneParameterNames`)
+ * passes every sign-in key through unfiltered.
+ */
+function withDeclaredSignIn(parameters: Record<string, string>, declared: ReadonlySet<string> | undefined): Record<string, string> {
+  if (declared === undefined) return parameters;
+  const filtered = { ...parameters };
+  for (const name of SIGN_IN_PARAMETER_NAMES) {
+    if (!declared.has(name)) delete filtered[name];
+  }
+  return filtered;
 }
 
 /** Throws the exact message a missing stack output must report, naming the real (`environment`-naming) stack name. */
@@ -104,11 +141,12 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
 
     const fullOrder = mode === "install" ? installOrder(answers.identity.mode) : upgradeOrder(answers.identity.mode);
     const deploySet = new Set(input.parts ?? fullOrder);
-    // F24: never carry stored sign-in into a legacy-named environment's control plane (its template
-    // never declares these parameters, and R3 keeps the legacy deployment untouched); `existing`
+    // Extra defense-in-depth, not itself the F24 "only the keys the template declares" fix (that is
+    // `withDeclaredSignIn`/`controlPlaneParameterNames` below): assertDeployAllowed above already
+    // refuses a legacy-named deploy outright, so this never actually triggers today. It stays as a
+    // second, explicit guard against ever reading stored sign-in for a legacy-named environment's
+    // control plane, in case a later change lets a legacy deploy reach this far. `existing`
     // undefined means a fresh install, which this orchestrator always writes as "environment" naming.
-    // assertDeployAllowed above already refuses a legacy-named deploy outright, so this check is a
-    // second, explicit line of defense rather than the only one.
     const environmentNamed = existing === undefined || existing.naming === "environment";
     // R7: a control-plane deploy always carries the stored developer sign-in, so no deploy resets it.
     const developerSignIn = answers.developerSignIn ?? (deploySet.has("control-plane") && environmentNamed ? await readStoredDeveloperSignIn(store, env) : undefined);
@@ -155,7 +193,12 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
     for (const part of fullOrder) {
       if (!deploySet.has(part)) continue;
       const stackName = environmentStackName(env, part);
-      const parameters = stackParameters(part, fullAnswers, outputs);
+      const rawParameters = stackParameters(part, fullAnswers, outputs);
+      // F24: only when this deploy is actually sending a stored sign-in choice to the control plane
+      // is the release's template even consulted (every other deploy never calls `release.template`).
+      const parameters = part === "control-plane" && developerSignIn !== undefined
+        ? withDeclaredSignIn(rawParameters, controlPlaneParameterNames(release, env))
+        : rawParameters;
       const roleArn = part === "access" ? undefined : requiredOutput(outputs, "access", "CloudFormationRoleArn", env);
       const request: DeployRequest = {
         part,

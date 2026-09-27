@@ -16,6 +16,13 @@ export interface ParameterUpdateInput {
 const NO_CHANGES = ["didn't contain changes", "No updates are to be performed"];
 const ENDED = new Set(["EXECUTE_COMPLETE", "EXECUTE_FAILED", "OBSOLETE"]);
 
+/** DescribeChangeSet's own "gone" error, once CloudFormation has cleaned it up after execution;
+ * mirrors templates-engine.ts's isChangeSetNotFound. Any other error while polling after execute
+ * (throttling, a transient network error, ...) must be rethrown, never treated as "finished". */
+function isChangeSetNotFound(error: unknown): boolean {
+  return error instanceof Error && (error.name === "ChangeSetNotFoundException" || error.name === "ChangeSetNotFound");
+}
+
 export async function updateStackParameters(input: ParameterUpdateInput): Promise<{ changed: boolean }> {
   const now = input.now ?? Date.now;
   const sleep = input.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
@@ -53,7 +60,7 @@ export async function updateStackParameters(input: ParameterUpdateInput): Promis
     UsePreviousTemplate: true,
     Capabilities: ["CAPABILITY_IAM", "CAPABILITY_NAMED_IAM"],
     RoleARN: input.roleArn,
-    Parameters: [...current.keys()].map((key) => (key in input.changes ? { ParameterKey: key, ParameterValue: input.changes[key] } : { ParameterKey: key, UsePreviousValue: true })),
+    Parameters: [...current.keys()].map((key) => (Object.hasOwn(input.changes, key) ? { ParameterKey: key, ParameterValue: input.changes[key] } : { ParameterKey: key, UsePreviousValue: true })),
   }));
   const deleteChangeSet = () => input.cloudFormation.send(new DeleteChangeSetCommand(id)).catch(() => undefined);
 
@@ -80,7 +87,10 @@ export async function updateStackParameters(input: ParameterUpdateInput): Promis
   await input.cloudFormation.send(new ExecuteChangeSetCommand({ ...id, ClientRequestToken: changeSetName }));
   input.write(`Updating ${stackName}; this usually takes one to three minutes`);
   for (;;) {
-    const executed = await input.cloudFormation.send(new DescribeChangeSetCommand(id)).catch(() => undefined) as { ExecutionStatus?: string } | undefined;
+    const executed = await input.cloudFormation.send(new DescribeChangeSetCommand(id)).catch((error: unknown) => {
+      if (isChangeSetNotFound(error)) return undefined;
+      throw error;
+    }) as { ExecutionStatus?: string } | undefined;
     const finished = executed === undefined || ENDED.has(executed.ExecutionStatus ?? "");
     const stackStatus = finished ? (await describe()).StackStatus ?? "" : "";
     if (finished && !stackStatus.endsWith("_IN_PROGRESS")) {

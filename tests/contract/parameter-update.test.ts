@@ -64,4 +64,53 @@ describe("parameter-only stack updates (R6)", () => {
     const cf = fakeCloudFormation({ changeSet: { status: "FAILED", reason: "The submitted information didn't contain changes." } });
     expect(await run(cf, { SlackTeamId: "T0TEAM1" })).toEqual({ changed: false });
   });
+
+  it("does not mistake an inherited Object.prototype member for a requested change (Object.hasOwn, not `in`)", async () => {
+    // A deployed parameter literally named "toString" is contrived, but `"toString" in changes` is
+    // true for any plain object even when `changes` never mentions it (it is inherited from
+    // Object.prototype), which would wrongly send it as a changed value instead of UsePreviousValue.
+    const cf = fakeCloudFormation({ parameters: { CallbackSigningKey: "****", SlackTeamId: "", toString: "unchanged" } });
+    await run(cf, { SlackTeamId: "T0TEAM1" });
+    const create = cf.calls.find((call) => call.name === "CreateChangeSetCommand")!.input;
+    expect(create.Parameters).toContainEqual({ ParameterKey: "toString", UsePreviousValue: true });
+  });
+
+  it("rethrows a non-ChangeSetNotFound error while polling execution, instead of treating it as done", async () => {
+    const cf = fakeCloudFormation();
+    let executed = false;
+    let afterExecuteDescribes = 0;
+    const flaky = {
+      async send(command: Parameters<typeof cf.send>[0]) {
+        const name = command.constructor.name;
+        if (name === "ExecuteChangeSetCommand") executed = true;
+        if (executed && name === "DescribeChangeSetCommand") {
+          afterExecuteDescribes++;
+          if (afterExecuteDescribes === 1) throw Object.assign(new Error("Rate exceeded"), { name: "ThrottlingException" });
+        }
+        return cf.send(command);
+      },
+    };
+    await expect(
+      updateStackParameters({ cloudFormation: flaky, stackName: STACK, roleArn: ROLE, changes: { SlackTeamId: "T0TEAM1" }, confirm: async () => true, write: () => undefined, sleep: async () => undefined, pollMs: 1 }),
+    ).rejects.toThrow("Rate exceeded");
+  });
+
+  it("treats a ChangeSetNotFound error after execute as finished, falling back to the stack's own status", async () => {
+    const cf = fakeCloudFormation();
+    let executed = false;
+    let afterExecuteDescribes = 0;
+    const flaky = {
+      async send(command: Parameters<typeof cf.send>[0]) {
+        const name = command.constructor.name;
+        if (name === "ExecuteChangeSetCommand") executed = true;
+        if (executed && name === "DescribeChangeSetCommand") {
+          afterExecuteDescribes++;
+          if (afterExecuteDescribes === 1) throw Object.assign(new Error("ChangeSet [agentx-signin/1] does not exist"), { name: "ChangeSetNotFoundException" });
+        }
+        return cf.send(command);
+      },
+    };
+    const result = await updateStackParameters({ cloudFormation: flaky, stackName: STACK, roleArn: ROLE, changes: { SlackTeamId: "T0TEAM1" }, confirm: async () => true, write: () => undefined, sleep: async () => undefined, pollMs: 1 });
+    expect(result).toEqual({ changed: true });
+  });
 });

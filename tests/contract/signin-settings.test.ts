@@ -39,6 +39,45 @@ describe("sign-in settings in SSM (FR-010, R7)", () => {
     await expect(writeSlackTeamId(store, "staging", "not-a-team")).rejects.toThrow(/team ID/);
     expect(await readStoredDeveloperSignIn(store, "staging")).toEqual({ slackTeamId: "T0TEAM1" });
   });
+
+  it("refuses an OIDC issuer longer than 512 characters", async () => {
+    const store = new MemoryParameterStore();
+    const longIssuer = { ...both, oidc: { ...both.oidc!, issuer: `https://acme.okta.com/${"a".repeat(500)}` } };
+    await expect(writeSignInSettings(store, longIssuer)).rejects.toThrow(/invalid/);
+    expect(store.values.has(signInParameterName("staging"))).toBe(false);
+  });
+
+  it("refuses settings whose JSON would exceed SSM's 4 KB limit for a standard parameter, saying what to shorten", async () => {
+    const store = new MemoryParameterStore();
+    const big: DeveloperSignInSettings = {
+      schemaVersion: 1, env: "staging", slack: true,
+      oidc: {
+        issuer: `https://acme.okta.com/${"a".repeat(480)}`,
+        clientId: "0oa1",
+        requiredClaim: "groups",
+        requiredValues: Array.from({ length: 20 }, () => "v".repeat(128)),
+        displayName: "Okta",
+        clientSecretName: "agentx/staging/developer-oidc",
+      },
+      updatedAt: "2026-09-27T00:00:00.000Z",
+      updatedBy: "x".repeat(2048),
+    };
+    await expect(writeSignInSettings(store, big)).rejects.toThrow(/4096-byte limit.*shorten/i);
+    expect(store.values.has(signInParameterName("staging"))).toBe(false);
+  });
+
+  it("requires requiredClaim and requiredValues together, or neither", async () => {
+    const store = new MemoryParameterStore();
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop the key
+    const { requiredValues: _values, ...claimOnly } = both.oidc!;
+    await expect(writeSignInSettings(store, { ...both, oidc: claimOnly })).rejects.toThrow(/requiredClaim and requiredValues/);
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop the key
+    const { requiredClaim: _claim, ...valuesOnly } = both.oidc!;
+    await expect(writeSignInSettings(store, { ...both, oidc: valuesOnly })).rejects.toThrow(/requiredClaim and requiredValues/);
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop the key
+    const { requiredClaim: _claim2, requiredValues: _values2, ...neither } = both.oidc!;
+    await expect(writeSignInSettings(store, { ...both, oidc: neither })).resolves.toBeUndefined();
+  });
 });
 
 describe("stack parameters from stored sign-in", () => {

@@ -8,6 +8,7 @@ import type { SecretValueStore } from "../../packages/cli/src/deploy/signing-key
 import { lockParameterName } from "../../packages/cli/src/environments/lock.js";
 import type { ParameterStore } from "../../packages/cli/src/environments/parameter-store.js";
 import { readEnvironmentSettings, settingsParameterName, writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
+import { SIGN_IN_PARAMETER_NAMES } from "../../packages/cli/src/signin/settings.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 import { stagingSettings } from "../support/environment-fixtures.js";
 
@@ -98,6 +99,25 @@ function fakeRelease(): LoadedRelease {
     },
     packagePath: () => {
       throw new Error("test setup: packagePath() is not expected to be called by the orchestrator");
+    },
+  };
+}
+
+/**
+ * A release whose control-plane template declares exactly `parameterNames` (F24: `deployEnvironment`
+ * parses this to decide which stored sign-in keys it may pass). Only `("control-plane", region)` is
+ * ever requested; any other request throws, matching `fakeRelease()`'s own "not expected to be
+ * called" contract for parts/regions a test does not exercise.
+ */
+function fakeReleaseWithControlPlaneParameters(parameterNames: readonly string[], region = "us-east-1"): LoadedRelease {
+  return {
+    ...fakeRelease(),
+    regions: () => [region],
+    template: (part, requestedRegion) => {
+      if (part !== "control-plane" || requestedRegion !== region) {
+        throw new Error(`test setup: template(${part}, ${requestedRegion}) is not expected to be called`);
+      }
+      return JSON.stringify({ Parameters: Object.fromEntries(parameterNames.map((name) => [name, { Type: "String" }])) });
     },
   };
 }
@@ -446,17 +466,42 @@ describe("deploy environment", () => {
     expect(store.values.has("/agentx/staging/lock")).toBe(false);
   });
 
-  it("passes the stored sign-in settings to every control-plane deploy (Review Focus 4, R7)", async () => {
+  it.each([
+    { label: "a full install with SSM already populated (init resume)", mode: "install" as const, seedInstall: false, parts: undefined },
+    { label: "a scoped upgrade naming only control-plane", mode: "upgrade" as const, seedInstall: true, parts: ["control-plane"] as DeployPart[] },
+    { label: "a full upgrade", mode: "upgrade" as const, seedInstall: true, parts: undefined },
+  ])("passes the stored sign-in settings to $label (Review Focus 4, R7)", async ({ mode, seedInstall, parts }) => {
     const store = new MemoryParameterStore();
     const secrets = memorySecrets();
-    const first = fakeDeployer(scriptedOutputs());
-    await deployEnvironment({ mode: "install", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer: first.deployer, store, secrets, holder: HOLDER });
+    // A release whose control-plane template declares every sign-in parameter, as any 25a+ release does.
+    const release = fakeReleaseWithControlPlaneParameters([...SIGN_IN_PARAMETER_NAMES]);
+    if (seedInstall) {
+      const seed = fakeDeployer(scriptedOutputs());
+      await deployEnvironment({ mode: "install", engine: "templates", answers: baseAnswers(), release, deployer: seed.deployer, store, secrets, holder: HOLDER });
+    }
     await store.put("/agentx/staging/slack/teamId", "T0TEAM1");
     await store.put("/agentx/staging/signin", JSON.stringify({ schemaVersion: 1, env: "staging", slack: true, updatedAt: "2026-09-27T00:00:00.000Z", updatedBy: HOLDER }));
 
-    const again = fakeDeployer(scriptedOutputs());
-    await deployEnvironment({ mode: "upgrade", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer: again.deployer, store, secrets, holder: HOLDER, parts: ["control-plane"] });
-    expect(again.requests.find((request) => request.part === "control-plane")!.parameters).toMatchObject({ SlackTeamId: "T0TEAM1", DeveloperSignInSlack: "enabled" });
+    const { deployer, requests } = fakeDeployer(scriptedOutputs());
+    await deployEnvironment({ mode, engine: "templates", answers: baseAnswers(), release, deployer, store, secrets, holder: HOLDER, ...(parts === undefined ? {} : { parts }) });
+    expect(requests.find((request) => request.part === "control-plane")!.parameters).toMatchObject({ SlackTeamId: "T0TEAM1", DeveloperSignInSlack: "enabled" });
+  });
+
+  it("filters stored sign-in down to the keys an older release's control-plane template actually declares (F24)", async () => {
+    const store = new MemoryParameterStore();
+    const secrets = memorySecrets();
+    await store.put("/agentx/staging/slack/teamId", "T0TEAM1");
+    await store.put("/agentx/staging/signin", JSON.stringify({ schemaVersion: 1, env: "staging", slack: true, updatedAt: "2026-09-27T00:00:00.000Z", updatedBy: HOLDER }));
+
+    // This release's control-plane template declares none of the sign-in parameters (a release from
+    // before phase 25a, or the legacy template) — the sign-in keys must be dropped, not sent to a
+    // template that would refuse them as unknown parameters.
+    const release = fakeReleaseWithControlPlaneParameters([]);
+    const { deployer, requests } = fakeDeployer(scriptedOutputs());
+    await deployEnvironment({ mode: "install", engine: "templates", answers: baseAnswers(), release, deployer, store, secrets, holder: HOLDER });
+
+    const controlPlaneRequest = requests.find((request) => request.part === "control-plane")!;
+    for (const name of SIGN_IN_PARAMETER_NAMES) expect(controlPlaneRequest.parameters).not.toHaveProperty(name);
   });
 
   it("does not read sign-in settings for a deploy without the control plane", async () => {

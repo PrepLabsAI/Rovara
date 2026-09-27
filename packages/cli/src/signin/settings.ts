@@ -9,13 +9,15 @@ export const DeveloperSignInSettingsSchema = z.object({
   env: EnvironmentNameSchema,
   slack: z.boolean(),
   oidc: z.object({
-    issuer: z.string().url().refine((value) => value.startsWith("https://"), "the company issuer must use https"),
+    issuer: z.string().url().max(512).refine((value) => value.startsWith("https://"), "the company issuer must use https"),
     clientId: z.string().min(1).max(256),
     requiredClaim: z.string().min(1).max(128).optional(),
     requiredValues: z.array(z.string().min(1).max(128)).min(1).max(20).optional(),
     displayName: z.string().min(1).max(40),
     clientSecretName: z.string().regex(/^agentx\/[a-z0-9-]+\/developer-oidc$/),
-  }).strict().optional(),
+  }).strict()
+    .refine((oidc) => (oidc.requiredClaim === undefined) === (oidc.requiredValues === undefined), "requiredClaim and requiredValues must be set together or not at all")
+    .optional(),
   updatedAt: z.iso.datetime(),
   updatedBy: z.string().min(1).max(2048),
 }).strict()
@@ -46,10 +48,21 @@ export async function readSignInSettings(store: ParameterStore, env: string): Pr
   return parsed.data;
 }
 
+/** SSM's size limit for a standard (non-advanced) String parameter. */
+const MAX_SSM_STANDARD_PARAMETER_BYTES = 4096;
+
 export async function writeSignInSettings(store: ParameterStore, settings: DeveloperSignInSettings): Promise<void> {
   const parsed = DeveloperSignInSettingsSchema.safeParse(settings);
   if (!parsed.success) throw agentXError("CONFIG_INVALID", `developer sign-in settings are invalid: ${firstIssue(parsed.error)}`);
-  await store.put(signInParameterName(parsed.data.env), JSON.stringify(parsed.data));
+  const json = JSON.stringify(parsed.data);
+  const bytes = Buffer.byteLength(json, "utf8");
+  if (bytes > MAX_SSM_STANDARD_PARAMETER_BYTES) {
+    throw agentXError(
+      "CONFIG_INVALID",
+      `developer sign-in settings are ${bytes} bytes, over SSM's ${MAX_SSM_STANDARD_PARAMETER_BYTES}-byte limit for a standard parameter; shorten the OIDC issuer, display name or required values`,
+    );
+  }
+  await store.put(signInParameterName(parsed.data.env), json);
 }
 
 export async function readSlackTeamId(store: ParameterStore, env: string): Promise<string | undefined> {
