@@ -27,13 +27,13 @@ async function run(answers: InitAnswers, checks = passingChecks(), prompter = sc
 }
 
 describe("init prerequisites", () => {
-  it("checks each role's fallback even when the same missing-credential OpenRouter model is selected", async () => {
+  it("checks each distinct fallback when the same missing-credential OpenRouter model is selected", async () => {
     const checks = passingChecks();
     const model = "qwen/qwen3-coder";
     await run(sampleAnswers({ models: { orchestrator: model, classifier: model, worker: model,
       providers: { orchestrator: "openrouter", classifier: "openrouter", worker: "openrouter" },
     } }), checks);
-    expect(checks.models).toEqual([DEFAULT_BEDROCK_MODELS.orchestrator, DEFAULT_BEDROCK_MODELS.classifier, DEFAULT_BEDROCK_MODELS.worker]);
+    expect(checks.models).toEqual([...new Set([DEFAULT_BEDROCK_MODELS.orchestrator, DEFAULT_BEDROCK_MODELS.classifier, DEFAULT_BEDROCK_MODELS.worker])]);
   });
   it("checks and reports the default Bedrock model when the OpenRouter secret is absent", async () => {
     for (const openRouter of [undefined, { secretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:missing-AbCdEf" }]) {

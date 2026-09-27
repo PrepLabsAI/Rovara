@@ -17,3 +17,7 @@ policy to both Slack and worker roles from the releasable control-plane stack; d
 role name from its existing ARN output with the foundation's legacy/named role path. Trim secret
 values before validation. Three application stacks still carry the secret reference for manual
 change sets; document alignment and workspace/IMDS credential exposure with mandatory key limits.
+
+Share the Sonnet 4.6 worker default across runtime fallback, interactive init and CLI export
+flags. Update default expectations and documentation; verify init/export, runtime fallback and
+explicit overrides with existing automated coverage. Existing deployments retain their configured models.
