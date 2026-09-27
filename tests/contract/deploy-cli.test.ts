@@ -12,6 +12,7 @@ import type { CallerIdentity } from "../../packages/cli/src/environments/adopt.j
 import type { DeployRequest, StackDeployer, StackOutputs } from "../../packages/cli/src/deploy/deployer.js";
 import type { ParameterStore } from "../../packages/cli/src/environments/parameter-store.js";
 import type { SecretValueStore } from "../../packages/cli/src/deploy/signing-key.js";
+import type { DeployCliDependencies } from "../../packages/cli/src/deploy/commands.js";
 import { executeCli } from "../../packages/cli/src/main.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 
@@ -130,14 +131,40 @@ const throwingStore: ParameterStore = {
   delete: () => { throw new Error("test setup: the parameter store must not be called"); },
   list: () => { throw new Error("test setup: the parameter store must not be called"); },
 };
-const throwingSecrets: SecretValueStore = {
-  get: () => { throw new Error("test setup: the secrets store must not be called"); },
-  create: () => { throw new Error("test setup: the secrets store must not be called"); },
-};
 const throwingDeployer: StackDeployer = {
   deploy: () => { throw new Error("test setup: the deployer must not be called"); },
   outputs: () => { throw new Error("test setup: the deployer must not be called"); },
 };
+
+function unexpectedAwsCall(): never {
+  throw new Error("unexpected AWS call in test");
+}
+
+/**
+ * `agentx deploy`'s dependency overrides, with `identity`, `store` and `secrets` always present and
+ * throwing "unexpected AWS call in test" by default: `runDeploy` falls back to constructing *real*
+ * STS/SSM/SecretsManager clients for whichever of these a test omits, so a deploy test that forgets
+ * one no longer silently risks reaching them (and, through them, real AWS) — it fails loudly instead,
+ * the moment that fake is actually invoked. `overrides` replaces any of these three, and adds
+ * whichever of `deployer`/`commandRunner`/`confirm`/`isInteractive`/`now` the test needs; every
+ * `describe("agentx deploy", ...)` test builds its dependencies through this helper.
+ */
+function safeDeployDeps(overrides: DeployCliDependencies = {}): DeployCliDependencies {
+  return {
+    identity: { get: () => unexpectedAwsCall() },
+    store: {
+      get: () => unexpectedAwsCall(),
+      put: () => unexpectedAwsCall(),
+      delete: () => unexpectedAwsCall(),
+      list: () => unexpectedAwsCall(),
+    },
+    secrets: {
+      get: () => unexpectedAwsCall(),
+      create: () => unexpectedAwsCall(),
+    },
+    ...overrides,
+  };
+}
 
 function memorySecrets(): SecretValueStore & { creates: Array<{ name: string; value: string }> } {
   const values = new Map<string, string>();
@@ -375,7 +402,7 @@ describe("agentx deploy", () => {
     const answersPath = await writeAnswers({ region: undefined });
     const io = capture();
 
-    const code = await executeCli(["deploy", "--mode", "install", "--release", "/nonexistent-release", "--answers", answersPath, "--yes"], { ...io });
+    const code = await executeCli(["deploy", "--mode", "install", "--release", "/nonexistent-release", "--answers", answersPath, "--yes"], { ...io, deploy: safeDeployDeps() });
 
     expect(code).toBe(2);
     expect(io.err.join("")).toBe(`AgentX error [CONFIG_INVALID]: answers file ${answersPath} is invalid: region Invalid input: expected string, received undefined\n`);
@@ -386,7 +413,7 @@ describe("agentx deploy", () => {
 
     const code = await executeCli(
       ["deploy", "--mode", "install", "--engine", "cdk", "--release", "/nonexistent", "--answers", "/nonexistent.json", "--yes"],
-      { ...io },
+      { ...io, deploy: safeDeployDeps() },
     );
 
     expect(code).not.toBe(0);
@@ -398,7 +425,7 @@ describe("agentx deploy", () => {
 
     const code = await executeCli(
       ["deploy", "--mode", "install", "--engine", "cdk", "--release", "/nonexistent", "--answers", "/nonexistent.json", "--source", "/nonexistent-source"],
-      { ...io },
+      { ...io, deploy: safeDeployDeps() },
     );
 
     expect(code).not.toBe(0);
@@ -412,7 +439,7 @@ describe("agentx deploy", () => {
 
     const code = await executeCli(
       ["deploy", "--mode", "install", "--release", releaseDir, "--answers", answersPath],
-      { ...io, deploy: { isInteractive: () => false, identity: throwingIdentity, store: throwingStore } },
+      { ...io, deploy: safeDeployDeps({ isInteractive: () => false }) },
     );
 
     expect(code).toBe(2);
@@ -432,7 +459,9 @@ describe("agentx deploy", () => {
 
     const code = await executeCli(
       ["deploy", "--mode", "install", "--engine", "cdk", "--release", releaseDir, "--answers", answersPath, "--source", "/some/source", "--yes"],
-      { ...io, deploy: { identity: fakeIdentity, store: new MemoryParameterStore(), commandRunner: dirtyRunner } },
+      // assertSourceAtRelease (a dirty tree) refuses before assertCdkBootstrapped ever reads the
+      // store: the default throwing store is never touched.
+      { ...io, deploy: safeDeployDeps({ identity: fakeIdentity, commandRunner: dirtyRunner }) },
     );
 
     expect(code).not.toBe(0);
@@ -455,7 +484,7 @@ describe("agentx deploy", () => {
 
     const code = await executeCli(
       ["deploy", "--mode", "install", "--engine", "cdk", "--release", releaseDir, "--answers", answersPath, "--source", "/some/source", "--yes"],
-      { ...io, deploy: { identity: fakeIdentity, store: new MemoryParameterStore(), commandRunner: cleanRunner } },
+      { ...io, deploy: safeDeployDeps({ identity: fakeIdentity, store: new MemoryParameterStore(), commandRunner: cleanRunner }) },
     );
 
     expect(code).not.toBe(0);
@@ -472,7 +501,7 @@ describe("agentx deploy", () => {
 
     const code = await executeCli(
       ["deploy", "--mode", "install", "--engine", "cdk", "--release", releaseDir, "--answers", answersPath, "--source", "/some/source", "--yes"],
-      { ...io, deploy: { identity: fakeIdentity, store, secrets: memorySecrets(), commandRunner: runner } },
+      { ...io, deploy: safeDeployDeps({ identity: fakeIdentity, store, secrets: memorySecrets(), commandRunner: runner }) },
     );
 
     expect(code).toBe(0);
@@ -490,7 +519,7 @@ describe("agentx deploy", () => {
 
     const code = await executeCli(
       ["deploy", "--mode", "install", "--release", releaseDir, "--answers", answersPath, "--yes"],
-      { ...io, deploy: { identity: fakeIdentity, store, secrets, deployer } },
+      { ...io, deploy: safeDeployDeps({ identity: fakeIdentity, store, secrets, deployer }) },
     );
 
     expect(code).toBe(0);
@@ -516,7 +545,7 @@ describe("agentx deploy", () => {
       ["deploy", "--mode", "install", "--release", releaseDir, "--answers", answersPath],
       {
         ...io,
-        deploy: {
+        deploy: safeDeployDeps({
           identity: fakeIdentity,
           store,
           secrets,
@@ -525,7 +554,7 @@ describe("agentx deploy", () => {
             confirmCalls.push(event.stackName);
             return event.stackName === stackName("access");
           },
-        },
+        }),
       },
     );
 
@@ -540,8 +569,10 @@ describe("agentx deploy", () => {
     const io = capture();
 
     const code = await executeCli(
+      // The mismatch is caught right after the answers file loads, before identity/store/secrets are
+      // ever touched: safeDeployDeps' throwing defaults prove that (no overrides needed at all).
       ["--env", "otherenv", "deploy", "--mode", "install", "--release", "/nonexistent-release", "--answers", answersPath, "--yes"],
-      { ...io, deploy: { identity: throwingIdentity, store: throwingStore } },
+      { ...io, deploy: safeDeployDeps() },
     );
 
     expect(code).not.toBe(0);
@@ -556,14 +587,14 @@ describe("agentx deploy", () => {
     const omitted = capture();
     const codeOmitted = await executeCli(
       ["deploy", "--mode", "install", "--release", releaseDir, "--answers", answersPath, "--yes"],
-      { ...omitted, deploy: { identity: fakeIdentity, store: new MemoryParameterStore(), secrets: memorySecrets(), deployer: progressFakeDeployer(scriptedOutputs()) } },
+      { ...omitted, deploy: safeDeployDeps({ identity: fakeIdentity, store: new MemoryParameterStore(), secrets: memorySecrets(), deployer: progressFakeDeployer(scriptedOutputs()) }) },
     );
     expect(codeOmitted).toBe(0);
 
     const matching = capture();
     const codeMatching = await executeCli(
       ["--env", ENV, "deploy", "--mode", "install", "--release", releaseDir, "--answers", answersPath, "--yes"],
-      { ...matching, deploy: { identity: fakeIdentity, store: new MemoryParameterStore(), secrets: memorySecrets(), deployer: progressFakeDeployer(scriptedOutputs()) } },
+      { ...matching, deploy: safeDeployDeps({ identity: fakeIdentity, store: new MemoryParameterStore(), secrets: memorySecrets(), deployer: progressFakeDeployer(scriptedOutputs()) }) },
     );
     expect(codeMatching).toBe(0);
   });
@@ -577,12 +608,10 @@ describe("agentx deploy", () => {
       ["deploy", "--mode", "install", "--release", releaseDir, "--answers", answersPath, "--yes"],
       {
         ...io,
-        deploy: {
-          identity: fakeIdentity, // arn:aws:... -> partition "aws"
-          store: throwingStore,
-          secrets: throwingSecrets,
-          deployer: throwingDeployer,
-        },
+        // The mismatch is caught right after identity resolves (needed for the real partition) but
+        // before store/secrets/deployer are ever touched: safeDeployDeps' throwing store/secrets
+        // defaults, plus an explicit throwing deployer, prove that.
+        deploy: safeDeployDeps({ identity: fakeIdentity, deployer: throwingDeployer }), // arn:aws:... -> partition "aws"
       },
     );
 

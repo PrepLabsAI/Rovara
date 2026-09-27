@@ -24,7 +24,7 @@ import { deployEnvironment, type DeployAnswers, type DeployEnvironmentResult } f
 import { writeExportBundle } from "./export-bundle.js";
 import type { DeployPart } from "./parameters.js";
 import { loadRelease } from "./release.js";
-import { secretsManagerValueStore, type SecretValueStore } from "./signing-key.js";
+import { CALLBACK_SIGNING_KEY_BYTES, secretsManagerValueStore, type SecretValueStore } from "./signing-key.js";
 import { templatesDeployer, type TemplatesEngineClients } from "./templates-engine.js";
 
 const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
@@ -243,6 +243,15 @@ export function interactiveConfirm(io: Writer, ask: Ask): ConfirmFn {
 // ---- the real CommandRunner (ruling b) ----------------------------------------------------------
 
 const STDERR_TAIL_LINES = 20;
+/** A single unbroken line (no newline) is never buffered past this many characters: past it, we
+ * force a cut rather than let a verbose or misbehaving child grow our own memory without bound. */
+const MAX_PENDING_LENGTH = 64 * 1024;
+/** The longest secret this runner ever redacts: a callback signing key, `CALLBACK_SIGNING_KEY_BYTES`
+ * random bytes base64url-encoded (the one real source of truth for that length, so this can never
+ * silently drift out of sync with it). A forced cut always keeps at least this many characters
+ * unemitted, so a secret of this length is never split across the cut with only part of it ever
+ * having reached `redact`. */
+const MAX_SECRET_LENGTH = Buffer.alloc(CALLBACK_SIGNING_KEY_BYTES).toString("base64url").length;
 
 function tail(text: string, n: number): string {
   const lines = text.split("\n");
@@ -255,6 +264,15 @@ function tail(text: string, n: number): string {
  * before `redact` ever sees it, rather than redacted chunk-by-chunk (which would miss it). `flush`
  * hands over whatever partial line remains — a child that never writes a final newline (or dies
  * mid-line) must still have its last line redacted, not silently dropped or left un-redacted.
+ *
+ * A single line that never ends (no newline, ever) would otherwise buffer without limit; past
+ * `MAX_PENDING_LENGTH`, `push` forces a cut instead. It redacts the *whole* buffered line first —
+ * so a secret entirely inside it is found and replaced regardless of where the cut below falls, and
+ * a secret that has only partly arrived (so `redact` can't match it yet, since some of its
+ * characters haven't been pushed) is left as raw text — then keeps at least `MAX_SECRET_LENGTH - 1`
+ * trailing characters unemitted: exactly enough that a not-yet-complete secret, which can only be
+ * that many characters long so far, is guaranteed to still be entirely in the retained tail, never
+ * straddling the cut with part of it already written out.
  */
 function lineBufferedRedactor(write: (text: string) => void, redact: (text: string) => string): { push(chunk: string): void; flush(): void } {
   let pending = "";
@@ -264,6 +282,12 @@ function lineBufferedRedactor(write: (text: string) => void, redact: (text: stri
       for (let index = pending.indexOf("\n"); index >= 0; index = pending.indexOf("\n")) {
         write(redact(pending.slice(0, index + 1)));
         pending = pending.slice(index + 1);
+      }
+      if (pending.length > MAX_PENDING_LENGTH) {
+        const redacted = redact(pending);
+        const cut = Math.max(0, redacted.length - (MAX_SECRET_LENGTH - 1));
+        write(redacted.slice(0, cut));
+        pending = redacted.slice(cut);
       }
     },
     flush() {
@@ -309,7 +333,14 @@ export function realCommandRunner(stderr: Writer): CommandRunner {
           stderrBuffer += text;
           stderrStream.push(text);
         });
-        child.on("error", (error) => reject(new Error(`${options.display} could not start: ${errorMessage(error)}`)));
+        child.on("error", (error) => {
+          // Symmetry with "close" below: anything already buffered (e.g. a child that wrote a
+          // partial line, then failed for an unrelated reason) still gets redacted and flushed
+          // out, rather than silently dropped.
+          stdoutStream.flush();
+          stderrStream.flush();
+          reject(new Error(`${options.display} could not start: ${errorMessage(error)}`));
+        });
         child.on("close", (code) => {
           stdoutStream.flush();
           stderrStream.flush();

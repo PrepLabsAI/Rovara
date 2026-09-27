@@ -5,8 +5,11 @@
 import { randomBytes } from "node:crypto";
 import { CreateSecretCommand, GetSecretValueCommand, type SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 
-/** The number of random bytes in a freshly created callback signing key (before base64url encoding). */
-const CALLBACK_SIGNING_KEY_BYTES = 48;
+/** The number of random bytes in a freshly created callback signing key (before base64url encoding).
+ * Exported so callers that must bound a buffer against "the longest secret we ever redact"
+ * (commands.ts's line-buffered stream redaction) can derive that length from the one real source
+ * of truth, instead of duplicating a magic number that could silently drift out of sync. */
+export const CALLBACK_SIGNING_KEY_BYTES = 48;
 
 const errorName = (error: unknown) => (error instanceof Error ? error.name : undefined);
 
