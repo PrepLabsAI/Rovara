@@ -36,6 +36,13 @@
   "devDependencies": {
     "@aws-sdk/client-bedrock-agentcore": "3.1134.0",
     "@aws-sdk/client-bedrock-agentcore-control": "3.1134.0",
+    "@aws-sdk/client-cloudformation": "3.1134.0",
+    "@aws-sdk/client-ec2": "3.1134.0",
+    "@aws-sdk/client-kms": "3.1134.0",
+    "@aws-sdk/client-lambda": "3.1134.0",
+    "@aws-sdk/client-service-quotas": "3.1134.0",
+    "@aws-sdk/client-sfn": "3.1134.0",
+    "@aws-sdk/client-ssm": "3.1134.0",
     "@aws-sdk/client-sts": "3.1134.0",
     "@eslint/js": "10.0.1",
     "@types/node": "22.20.3",
