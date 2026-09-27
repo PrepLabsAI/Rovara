@@ -1,6 +1,6 @@
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { ProjectDefinition } from "@agentx/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { listCredentials, registerCredential } from "../../packages/cli/src/admin/credential.js";
@@ -112,6 +112,38 @@ describe("project registration errors", () => {
     expect(parsed.error.message).toContain("project registration failed with HTTP 503");
     expect(exitCode).toBe(exitCodeForError("RUNTIME_UNAVAILABLE"));
     expect(exitCode).not.toBe(exitCodeForError("CONFIG_INVALID"));
+  });
+});
+
+describe("project registration file name", () => {
+  it("refuses a file name that cannot supply a valid project name, instead of a raw zod dump", async () => {
+    // issue #101: connectors-check.rev3.yaml derives "connectors-check.rev3" as the project name,
+    // which fails AgentXNameSchema's pattern (it contains dots).
+    const context = await administratorContext("agentx-cli-register-badname-");
+    const misnamed = join(dirname(context.projectFile), "connectors-check.rev3.yaml");
+    await writeFile(misnamed, JSON.stringify({ ...projectDefinition(), name: "connectors-check" }), "utf8");
+    const fetchImplementation = vi.fn<typeof fetch>();
+    const { exitCode, stderr } = await runRegister({ ...context, projectFile: misnamed }, fetchImplementation);
+    expect(fetchImplementation).not.toHaveBeenCalled();
+    expect(exitCode).not.toBe(0);
+    const parsed = JSON.parse(stderr) as { ok: boolean; error: { code: string; message: string } };
+    expect(parsed.error.code).toBe("CONFIG_INVALID");
+    expect(parsed.error.message).toContain("connectors-check.rev3.yaml");
+    expect(parsed.error.message).toContain("connectors-check.yaml");
+  });
+
+  it("refuses a well-formed file name that disagrees with the YAML's own name, naming both", async () => {
+    const context = await administratorContext("agentx-cli-register-mismatch-");
+    const misnamed = join(dirname(context.projectFile), "storefront.yaml");
+    await writeFile(misnamed, JSON.stringify({ ...projectDefinition(), name: "payments" }), "utf8");
+    const fetchImplementation = vi.fn<typeof fetch>();
+    const { exitCode, stderr } = await runRegister({ ...context, projectFile: misnamed }, fetchImplementation);
+    expect(fetchImplementation).not.toHaveBeenCalled();
+    expect(exitCode).not.toBe(0);
+    const parsed = JSON.parse(stderr) as { ok: boolean; error: { code: string; message: string } };
+    expect(parsed.error.code).toBe("CONFIG_INVALID");
+    expect(parsed.error.message).toContain("storefront.yaml");
+    expect(parsed.error.message).toContain("payments.yaml");
   });
 });
 
