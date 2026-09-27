@@ -72,6 +72,21 @@ describe("registration preflight", () => {
     expect(db.get("PROJECT#payments", "REV#000000000001")).toBeUndefined();
   });
 
+  it("refuses a devcontainer on an AgentCore binding and accepts it on ec2-ebs", async () => {
+    const { handler, db } = await createAdminBroker({});
+    const withDevcontainer = { devcontainer: { repository: "demo" } };
+    const refused = await register(handler, withDevcontainer);
+    expect(refused.status).toBe(400);
+    expect(refused.body).toMatchObject({ error: { code: "CONFIG_INVALID", message: "a devcontainer needs the ec2-ebs deployment mode, not instances-ebs" } });
+    expect(db.get("PROJECT#payments", "REV#000000000001")).toBeUndefined();
+    const accepted = await adminCall(handler, {
+      method: "POST",
+      path: "/v1/admin/projects",
+      body: { definition: definition(withDevcontainer), runtimeBinding: ec2Binding },
+    });
+    expect(accepted.status).toBe(201);
+  });
+
   it("reports a deployment without GitHub MCP as not connected", async () => {
     const { handler } = await createAdminBroker({});
     const registered = await register(handler, githubConnector(["list_issues"]), { preflight: true });
@@ -346,6 +361,14 @@ function definition(overrides: Overrides, repositories: string[] = ["demo"]): Re
     ...overrides,
   };
 }
+
+const ec2Binding = {
+  deploymentMode: "ec2-ebs",
+  launchTemplateId: "lt-0123456789abcdef0",
+  subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0aaaaaaaaaaaaaaaa" }],
+  volumeSizeGiB: 20,
+  volumeType: "gp3",
+};
 
 const runtimeBinding = {
   runtimeArn: `arn:aws:bedrock-agentcore:us-east-1:${account}:runtime/agentx_production_worker-YVirjlFgvk`,

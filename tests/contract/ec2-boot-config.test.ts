@@ -45,6 +45,14 @@ describe("EC2 worker user data", () => {
     expect(exported.sort()).toEqual(required.sort());
   });
 
+  it("gives the worker the host's Docker and keeps Docker's data on the workspace volume (#121)", () => {
+    expect(bootScript).toContain("readonly DOCKER_DATA_ROOT=$MOUNT_PATH/.docker");
+    expect(bootScript).toContain(`printf '{"data-root": "%s"}\\n' "$DOCKER_DATA_ROOT" >/etc/docker/daemon.json`);
+    // The daemon starts only after the workspace is mounted, so its data root is on the volume.
+    expect(bootScript.indexOf("mount_workspace \"$device\"")).toBeLessThan(bootScript.indexOf("  ensure_docker\n"));
+    expect(bootScript).toContain("--volume $MOUNT_PATH:$MOUNT_PATH --volume $DOCKER_SOCKET:$DOCKER_SOCKET --group-add $docker_gid");
+  });
+
   it("renders a script bash accepts", () => {
     const checked = spawnSync("bash", ["-n"], { input: ec2WorkerUserData(config, bootScript), encoding: "utf8" });
     expect(checked.status, checked.stderr).toBe(0);

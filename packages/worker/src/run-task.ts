@@ -1,8 +1,16 @@
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { WorkerInvocationSchema, agentXError, type WorkerInvocation } from "@agentx/contracts";
+import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { publishWorkspaceDiff, type ArtifactSink } from "./artifacts.js";
 import { WorkspaceConversationStore, type ConversationRecord } from "./conversations.js";
+import {
+  createDevcontainerCli,
+  devcontainerBashOperations,
+  ensureDevcontainer,
+  preparedDevcontainerTarget,
+  type DevcontainerCli,
+} from "./devcontainer.js";
 import { EventBatcher, redactCredentials, type EventBatchSink } from "./events.js";
 import {
   createWorkspacePiSession,
@@ -34,6 +42,7 @@ export async function runTaskInvocation(
     artifactSink: ArtifactSink;
     piAdapter?: PiSessionAdapter;
     cancellationController?: WorkerCancellationController;
+    devcontainerCli?: DevcontainerCli;
   },
 ): Promise<TaskInvocationResult> {
   const invocation = WorkerInvocationSchema.parse(untrustedInvocation);
@@ -43,6 +52,17 @@ export async function runTaskInvocation(
   ) as PreparationManifest;
   if (!manifest.complete || manifest.projectRevision !== invocation.projectRevision) {
     throw agentXError("WORKSPACE_NOT_READY", "workspace manifest is incomplete or revision-mismatched");
+  }
+
+  // The agent's shell runs in the project's devcontainer (#121), started first: on a resumed
+  // instance its containers are stopped.
+  const canonicalRoot = await realpath(resolve(dependencies.rootPath));
+  const devcontainer = preparedDevcontainerTarget(canonicalRoot, manifest);
+  let bashOperations: BashOperations | undefined;
+  if (devcontainer !== undefined) {
+    const cli = dependencies.devcontainerCli ?? createDevcontainerCli();
+    await ensureDevcontainer(cli, devcontainer);
+    bashOperations = devcontainerBashOperations(cli, devcontainer);
   }
 
   const conversationId = invocation.payload.conversationId;
@@ -75,12 +95,16 @@ export async function runTaskInvocation(
         conversationId,
         sessionFile: registered.sessionFile,
         onDiagnostic,
+        ...(bashOperations === undefined ? {} : { bashOperations }),
       },
       dependencies.piAdapter,
     );
   } else {
     session = await createWorkspacePiSession(
-      { rootPath: dependencies.rootPath, model: dependencies.model, conversationId, onDiagnostic },
+      {
+        rootPath: dependencies.rootPath, model: dependencies.model, conversationId, onDiagnostic,
+        ...(bashOperations === undefined ? {} : { bashOperations }),
+      },
       dependencies.piAdapter,
     );
   }

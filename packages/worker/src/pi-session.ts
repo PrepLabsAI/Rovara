@@ -2,7 +2,10 @@ import { mkdir, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import {
   createAgentSession,
+  createBashToolDefinition,
   DefaultResourceLoader,
+  type BashOperations,
+  type ToolDefinition,
   ModelRuntime,
   SessionManager,
   type SessionStats,
@@ -46,6 +49,8 @@ export interface PiSessionInput {
   model: WorkspaceModelConfiguration;
   /** Each prepared repository's own context file, which Pi cannot discover from the root. */
   contextFiles: RepositoryContextFile[];
+  /** Where the agent's shell runs instead of the worker: the project's devcontainer (#121). */
+  bashOperations?: BashOperations;
 }
 
 export interface PiSessionAdapter {
@@ -59,6 +64,7 @@ export async function createWorkspacePiSession(
     model: WorkspaceModelConfiguration;
     conversationId?: string;
     onDiagnostic?: (message: string) => void;
+    bashOperations?: BashOperations;
   },
   adapter: PiSessionAdapter = defaultPiSessionAdapter,
 ): Promise<PiSessionHandle> {
@@ -77,6 +83,7 @@ export async function createWorkspacePiSession(
     model: input.model,
     contextFiles,
     ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }),
+    ...(input.bashOperations === undefined ? {} : { bashOperations: input.bashOperations }),
   });
   assertContained(sessionDirectory, handle.sessionFile);
   return handle;
@@ -89,6 +96,7 @@ export async function openRegisteredWorkspacePiSession(
     conversationId: string;
     sessionFile: string;
     onDiagnostic?: (message: string) => void;
+    bashOperations?: BashOperations;
   },
   adapter: PiSessionAdapter = defaultPiSessionAdapter,
 ): Promise<PiSessionHandle> {
@@ -112,6 +120,7 @@ export async function openRegisteredWorkspacePiSession(
     contextFiles,
     conversationId: input.conversationId,
     sessionFile,
+    ...(input.bashOperations === undefined ? {} : { bashOperations: input.bashOperations }),
   });
   assertContained(sessionDirectory, handle.sessionFile);
   return handle;
@@ -167,6 +176,11 @@ async function createDefaultSession(
       model,
       thinkingLevel: input.model.thinkingLevel ?? "medium",
       tools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
+      // A custom tool named bash replaces the built-in one.
+      ...(input.bashOperations === undefined
+        ? {}
+        // The typed definition's render callbacks are narrower than customTools' generic slot.
+        : { customTools: [createBashToolDefinition(input.cwd, { operations: input.bashOperations }) as unknown as ToolDefinition] }),
       resourceLoader,
       sessionManager: manager,
     });

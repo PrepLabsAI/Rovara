@@ -622,6 +622,10 @@ async function registerProject(
   }
   const definition = ProjectDefinitionSchema.parse(input.definition);
   const runtimeBinding = parseRuntimeBinding(input.runtimeBinding);
+  // Nested containers need compute AgentX controls (#121); AgentCore sessions cannot run them.
+  if (definition.devcontainer && runtimeBinding.deploymentMode !== "ec2-ebs") {
+    throw agentXError("CONFIG_INVALID", `a devcontainer needs the ec2-ebs deployment mode, not ${runtimeBinding.deploymentMode}`);
+  }
   // Preflight contacts the vendor, so it runs only when the caller asks; older clients never do.
   const wantsPreflight = input.preflight === true;
   const budget = toolBudget(approvedToolCount(definition));

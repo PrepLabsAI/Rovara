@@ -498,6 +498,15 @@ export async function buildAndPushImage(
 }
 
 async function smokeTestWorker(runner: Runner, image: string): Promise<void> {
+  // The tools that run a project's devcontainer through the EC2 host's Docker (#121).
+  const tools = runner.capture("docker", [
+    "run", "--rm", "--entrypoint", "sh", image, "-c",
+    "docker --version && docker compose version && node node_modules/@devcontainers/cli/devcontainer.js --version",
+  ], true);
+  if (tools.status !== 0) {
+    process.stderr.write(tools.stderr);
+    throw new Error("worker image lacks the Docker CLI, Compose or the devcontainer CLI");
+  }
   const container = `agentx-worker-release-smoke-${process.pid}`;
   runner.run("docker", ["run", "--detach", "--rm", "--name", container, "--publish", "127.0.0.1::8080", image]);
   try {
