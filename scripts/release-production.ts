@@ -9,17 +9,14 @@ import {
   buildAndPushImage,
   buildAndPushWorker,
   describeStack,
-  ensureLogRetention,
   ensureRepository,
   optionalControlPlaneParameters,
   parseReleaseArgs,
   profileArgs,
-  runtimeIdFromArn,
   stackExists,
   stackOutput,
   stackParameter,
   verifyRepositoryImage,
-  waitForRuntime,
   type ReleaseManifest,
   type ReleaseOptions,
   type StackDescription,
@@ -27,8 +24,8 @@ import {
 
 const DEFAULT_REPOSITORY = "agentx-worker-production";
 const CONTROL_PLANE_STACK = "AgentXControlPlane";
-const DEMO_RUNTIME_STACK = "AgentXDemoRuntime";
 const FOUNDATION_STACK = "AgentXProductionFoundation";
+// Named for the AgentCore runtime it used to deploy; since #117 it holds only the EC2 worker settings.
 const RUNTIME_STACK = "AgentXProductionRuntime";
 export const SLACK_ORCHESTRATOR_STACK = "AgentXSlackOrchestrator";
 export const SLACK_ORCHESTRATOR_REPOSITORY = "agentx-slack-orchestrator";
@@ -77,9 +74,10 @@ export interface ProductionReleaseOptions extends ReleaseOptions {
   createSlackOrchestrator: boolean;
 }
 
-export interface ProductionReleaseManifest extends ReleaseManifest {
-  capacityProviderArn: string;
-  deploymentMode: "instances-ebs";
+export interface ProductionReleaseManifest extends Omit<ReleaseManifest, "runtimeArn" | "runtimeVersion"> {
+  deploymentMode: "ec2-ebs";
+  modelProvider: string;
+  modelId: string;
   slackOrchestratorImage?: string;
 }
 
@@ -90,11 +88,6 @@ interface DeployedImage {
   repository: string;
   repositoryUri: string;
   inputs: readonly string[];
-}
-
-interface CapacityProviderDescription {
-  status?: string;
-  statusReason?: string;
 }
 
 export function parseProductionReleaseArgs(
@@ -180,16 +173,6 @@ export function reusableImage(runner: Runner, options: ReleaseOptions, image: De
   return deployedImage;
 }
 
-export function capacityProviderIdFromArn(capacityProviderArn: string): string {
-  const marker = ":capacity-provider/";
-  const index = capacityProviderArn.lastIndexOf(marker);
-  const capacityProviderId = index < 0 ? "" : capacityProviderArn.slice(index + marker.length);
-  if (!/^[A-Za-z][A-Za-z0-9_]{0,47}-[A-Za-z0-9]{10}$/.test(capacityProviderId)) {
-    throw new Error(`invalid AgentCore capacity provider ARN: ${capacityProviderArn}`);
-  }
-  return capacityProviderId;
-}
-
 export async function releaseProduction(
   options: ProductionReleaseOptions,
 ): Promise<ProductionReleaseManifest | undefined> {
@@ -204,8 +187,8 @@ export async function releaseProduction(
       options.requireExistingFoundation
         ? "4. Refuse to continue unless the protected VPC/EBS capacity foundation already exists."
         : "4. Create the protected VPC/EBS capacity foundation only when it does not exist.",
-      "5. Refuse foundation drift on routine releases; update only the production runtime.",
-      "6. Update the control plane after the runtime is READY, then enforce 30-day log retention.",
+      "5. Refuse foundation drift on routine releases; publish the EC2 worker image and model settings to SSM.",
+      "6. Update the control plane after the worker settings.",
       options.createSlackOrchestrator
         ? "7. Build or reuse the Slack orchestrator image and create or update AgentXSlackOrchestrator."
         : "7. If AgentXSlackOrchestrator exists, build or reuse its image and update it; otherwise skip it.",
@@ -242,23 +225,15 @@ export async function releaseProduction(
 
   runner.run("npm", ["run", "build"]);
   if (!stackExists(runner, options.region, CONTROL_PLANE_STACK)) {
-    throw new Error("AgentXControlPlane must exist before the production runtime is released");
+    throw new Error("AgentXControlPlane must exist before the worker settings are released");
   }
-  const controlPlane = describeStack(runner, options.region, CONTROL_PLANE_STACK);
-  const controlPlaneUrl = stackOutput(controlPlane, "ApiEndpoint");
-  const existingRuntime = stackExists(runner, options.region, RUNTIME_STACK)
+  const existingSettings = stackExists(runner, options.region, RUNTIME_STACK)
     ? describeStack(runner, options.region, RUNTIME_STACK)
     : undefined;
-  // The retired demo runtime only supplies model defaults for the first production release.
-  const demoRuntime = !existingRuntime && stackExists(runner, options.region, DEMO_RUNTIME_STACK)
-    ? describeStack(runner, options.region, DEMO_RUNTIME_STACK)
-    : undefined;
   const modelProvider = process.env.AGENTX_MODEL_PROVIDER
-    ?? (existingRuntime ? stackParameter(existingRuntime, "ModelProvider") : undefined)
-    ?? (demoRuntime ? stackParameter(demoRuntime, "ModelProvider") : undefined);
+    ?? (existingSettings ? stackParameter(existingSettings, "ModelProvider") : undefined);
   const modelId = process.env.AGENTX_MODEL_ID
-    ?? (existingRuntime ? stackParameter(existingRuntime, "ModelId") : undefined)
-    ?? (demoRuntime ? stackParameter(demoRuntime, "ModelId") : undefined);
+    ?? (existingSettings ? stackParameter(existingSettings, "ModelId") : undefined);
   if (!modelProvider || !modelId) {
     throw new Error("AGENTX_MODEL_PROVIDER and AGENTX_MODEL_ID are required for the first production release");
   }
@@ -272,8 +247,6 @@ export async function releaseProduction(
     assertFoundationHasNoPendingChanges(runner, options);
   }
   const foundation = describeStack(runner, options.region, FOUNDATION_STACK);
-  const capacityProviderArn = stackOutput(foundation, "CapacityProviderArn");
-  await waitForCapacityProvider(runner, options.region, capacityProviderArn);
 
   runner.run("npx", [
     "cdk",
@@ -292,54 +265,31 @@ export async function releaseProduction(
     "--parameters",
     `${RUNTIME_STACK}:WorkerImageUri=${workerImage}`,
     "--parameters",
-    `${RUNTIME_STACK}:ControlPlaneUrl=${controlPlaneUrl}`,
-    "--parameters",
     `${RUNTIME_STACK}:ModelProvider=${modelProvider}`,
     "--parameters",
     `${RUNTIME_STACK}:ModelId=${modelId}`,
-    "--parameters",
-    `${RUNTIME_STACK}:CapacityProviderArn=${capacityProviderArn}`,
     "--outputs-file",
     "cdk.out/agentx-production-runtime-outputs.json",
   ]);
 
-  const runtimeStack = describeStack(runner, options.region, RUNTIME_STACK);
-  const runtimeArn = stackOutput(runtimeStack, "AgentRuntimeArn");
-  const runtimeId = runtimeIdFromArn(runtimeArn);
-  const runtime = await waitForRuntime(runner, options.region, runtimeId, workerImage);
-  ensureLogRetention(
-    runner,
-    options.region,
-    `/aws/bedrock-agentcore/runtimes/${runtimeId}-DEFAULT`,
-  );
-
   // The control plane goes last. The worker parses invocations strictly, so a broker that sends a
-  // field the running worker image does not know about fails every task until the runtime catches
-  // up. Deploying the runtime first means the new worker is always the tolerant side of the window.
+  // field an older worker image does not know about fails the task. Publishing the image first
+  // means every worker booted after this point is the tolerant side of the window; a worker
+  // already running keeps its image until the idle reaper stops it.
   deployControlPlane(runner, options, foundation);
-  const deployedControlPlaneUrl = stackOutput(
-    describeStack(runner, options.region, CONTROL_PLANE_STACK),
-    "ApiEndpoint",
-  );
-  if (deployedControlPlaneUrl !== controlPlaneUrl) {
-    throw new Error(
-      "the control-plane URL changed; rerun the production release so the runtime receives the new callback URL",
-    );
-  }
   const slackOrchestratorImage = await releaseSlackOrchestrator(runner, options, identity.Account, revision, foundation);
 
   const manifest: ProductionReleaseManifest = {
     releasedAt: new Date().toISOString(),
     gitRevision: revision,
     workerImage,
-    controlPlaneUrl,
-    runtimeArn,
-    runtimeVersion: runtime.agentRuntimeVersion ?? "unknown",
+    controlPlaneUrl: stackOutput(describeStack(runner, options.region, CONTROL_PLANE_STACK), "ApiEndpoint"),
     protocolVersion: AGENTX_PROTOCOL_VERSION,
     region: options.region,
     accountId: identity.Account,
-    capacityProviderArn,
-    deploymentMode: "instances-ebs",
+    deploymentMode: "ec2-ebs",
+    modelProvider,
+    modelId,
     ...(slackOrchestratorImage === undefined ? {} : { slackOrchestratorImage }),
   };
   mkdirSync(resolve("cdk.out"), { recursive: true });
@@ -476,35 +426,6 @@ function assertFoundationHasNoPendingChanges(runner: Runner, options: ReleaseOpt
       "production foundation drift detected; review and deploy it separately before releasing application code",
     );
   }
-}
-
-async function waitForCapacityProvider(
-  runner: Runner,
-  region: string,
-  capacityProviderArn: string,
-): Promise<void> {
-  const capacityProviderId = capacityProviderIdFromArn(capacityProviderArn);
-  for (let attempt = 0; attempt < 60; attempt += 1) {
-    const result = runner.aws([
-      "bedrock-agentcore-control",
-      "get-capacity-provider",
-      "--region",
-      region,
-      "--capacity-provider-id",
-      capacityProviderId,
-      "--output",
-      "json",
-    ]);
-    const capacityProvider = JSON.parse(result.stdout) as CapacityProviderDescription;
-    if (capacityProvider.status === "READY") return;
-    if (capacityProvider.status === "CREATE_FAILED" || capacityProvider.status === "UPDATE_FAILED") {
-      throw new Error(
-        `capacity provider entered ${capacityProvider.status}: ${capacityProvider.statusReason ?? "no reason returned"}`,
-      );
-    }
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10_000));
-  }
-  throw new Error("AgentCore capacity provider did not become READY within ten minutes");
 }
 
 function deployControlPlane(runner: Runner, options: ReleaseOptions, foundation: StackDescription): void {

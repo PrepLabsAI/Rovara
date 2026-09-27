@@ -3,10 +3,6 @@ import { Match, Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import {
-  AgentRuntimeStack,
-  validateAgentRuntimeConfiguration,
-} from "../../infra/lib/agent-runtime.js";
-import {
   DemoRuntimeStack,
   validateDemoRuntimeConfiguration,
 } from "../../infra/lib/demo-runtime.js";
@@ -15,6 +11,7 @@ import {
   defaultProductionAvailabilityZoneIds,
   validateProductionFoundationConfiguration,
 } from "../../infra/lib/production-foundation.js";
+import { WorkerSettingsStack } from "../../infra/lib/worker-settings.js";
 import {
   AGENTX_RELEASE_PROJECT_NAME,
   AGENTX_RELEASE_TRIGGER_PATHS,
@@ -293,60 +290,32 @@ describe("AgentCore Instances infrastructure", () => {
     expect(json).toContain('"RetentionInDays":30');
   });
 
-  it("synthesizes a separately releasable runtime mounted on the stable capacity provider", () => {
-    const app = new App();
-    const stack = new AgentRuntimeStack(app, "TestRuntime", {
-      deploymentRegion: "us-east-1",
+  it("releases only the EC2 worker settings, under the parameter logical IDs the runtime stack used", () => {
+    const template = Template.fromStack(new WorkerSettingsStack(new App(), "TestRuntime"));
+    const resources = template.toJSON().Resources as Record<string, { Type: string }>;
+    // The live stack's logical IDs, so CloudFormation updates these parameters in place; a new ID
+    // would try to create a second parameter with the same name and fail the release (#117).
+    expect(Object.entries(resources).filter(([, resource]) => resource.Type !== "AWS::CDK::Metadata").map(([id, resource]) => [id, resource.Type]).sort()).toEqual([
+      ["WorkerImageParameter7CA9ADBB", "AWS::SSM::Parameter"],
+      ["WorkerModelIdParameter02DE997A", "AWS::SSM::Parameter"],
+      ["WorkerModelProviderParameterFBA25A19", "AWS::SSM::Parameter"],
+      ["WorkerPromptCacheRetentionParameter7E1031C3", "AWS::SSM::Parameter"],
+    ]);
+    expect(Object.keys(template.toJSON().Parameters as object)).toEqual(expect.arrayContaining(["WorkerImageUri", "ModelProvider", "ModelId", "PromptCacheRetention"]));
+    expect(template.toJSON().Parameters).not.toHaveProperty("ControlPlaneUrl");
+    expect(template.toJSON().Parameters).not.toHaveProperty("CapacityProviderArn");
+    template.hasResourceProperties("AWS::SSM::Parameter", {
+      Name: "/agentx/production/worker-image",
+      Value: { Ref: "WorkerImageUri" },
     });
-    const template = Template.fromStack(stack);
-
-    template.resourceCountIs("AWS::BedrockAgentCore::CapacityProvider", 0);
-    template.resourceCountIs("AWS::EC2::VPC", 0);
-    template.resourceCountIs("AWS::BedrockAgentCore::Runtime", 1);
     template.hasParameter("PromptCacheRetention", {
       Type: "String",
       Default: "long",
       AllowedValues: ["short", "long"],
     });
-    template.hasResourceProperties("AWS::BedrockAgentCore::Runtime", {
-      AgentRuntimeName: "agentx_production_worker",
-      CapacityProviderConfiguration: { CapacityProviderArn: { Ref: "CapacityProviderArn" } },
-      FilesystemConfigurations: [{
-        CapacityProviderVolume: { VolumeName: "workspace", MountPath: "/mnt/workspace" },
-      }],
-      LifecycleConfiguration: {
-        IdleRuntimeSessionTimeout: 300,
-        MaxLifetime: 1_209_600,
-      },
-      EnvironmentVariables: {
-        AGENTX_WORKSPACE_ROOT: "/mnt/workspace",
-        AGENTX_CONTROL_PLANE_URL: { Ref: "ControlPlaneUrl" },
-        AGENTX_MODEL_PROVIDER: { Ref: "ModelProvider" },
-        AGENTX_MODEL_ID: { Ref: "ModelId" },
-        PI_CACHE_RETENTION: { Ref: "PromptCacheRetention" },
-      },
-      NetworkConfiguration: Match.absent(),
-    });
-    template.hasResource("AWS::BedrockAgentCore::Runtime", {
-      DeletionPolicy: "Retain",
-      UpdateReplacePolicy: "Retain",
-    });
   });
 
-  it("rejects unsupported regions and invalid lifecycle or AZ settings", () => {
-    const base = {
-      region: "us-east-1",
-      mountPath: "/mnt/workspace",
-      runtimeIdleSeconds: 900,
-      runtimeMaxLifetimeSeconds: 1_209_600,
-    };
-    expect(() => validateAgentRuntimeConfiguration({ ...base, region: "eu-north-1" })).toThrow(
-      /not supported/i,
-    );
-    expect(() =>
-      validateAgentRuntimeConfiguration({ ...base, runtimeIdleSeconds: 1_000, runtimeMaxLifetimeSeconds: 900 }),
-    ).toThrow(/idle/i);
-
+  it("rejects invalid AZ settings", () => {
     const foundation = {
       region: "us-east-1",
       availabilityZoneIds: defaultProductionAvailabilityZoneIds("us-east-1"),

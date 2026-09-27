@@ -108,10 +108,8 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
 
     if (existing !== undefined) {
       // Every part this environment already has settings for supplies its outputs by reading the
-      // existing stack, whether or not it is also being (re)deployed below: a part later in this
-      // mode's order can still need an earlier-installed part's current output before this run
-      // redeploys that part in its own turn (upgradeOrder deploys runtime before control-plane, but
-      // runtime's ControlPlaneUrl parameter still needs control-plane's current ApiEndpoint).
+      // existing stack, whether or not it is also being (re)deployed below: a part deployed on its
+      // own (`--parts slack`) still needs the current outputs of the parts it is not redeploying.
       for (const part of Object.keys(existing.stacks) as DeployPart[]) {
         const knownStackName = existing.stacks[part];
         if (knownStackName === undefined) continue;

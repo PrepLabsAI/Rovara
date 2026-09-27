@@ -288,8 +288,8 @@ describe("writeExportBundle", () => {
     expect(controlPlane[`AssetParameters${CONTROL_PLANE_ASSET}Hash`]).toBe(CONTROL_PLANE_ASSET);
 
     const runtime = await paramsOf("runtime");
-    expect(runtime.ControlPlaneUrl).toBe("{{output:control-plane.ApiEndpoint}}");
-    expect(runtime.CapacityProviderArn).toBe("{{output:foundation.CapacityProviderArn}}");
+    expect(runtime).not.toHaveProperty("ControlPlaneUrl");
+    expect(runtime).not.toHaveProperty("CapacityProviderArn");
     expect(runtime.WorkerImageUri).toContain("{{output:access.PullThroughPrefix}}");
     expect(runtime.WorkerImageUri).toContain(`sha256:${"a".repeat(64)}`);
 
