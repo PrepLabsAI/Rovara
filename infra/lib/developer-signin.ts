@@ -6,6 +6,8 @@ import { DEVELOPER_TOKEN_AUDIENCE } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
 import { packagedFunction } from "./control-plane.js";
 
+const SIGN_IN_ROUTE_KEY = "ANY /v1/auth/{proxy+}";
+
 export interface DeveloperSignInParameters {
   slackTeamId: CfnParameter; slack: CfnParameter; oidcIssuer: CfnParameter; oidcClientId: CfnParameter;
   oidcRequiredClaim: CfnParameter; oidcRequiredValues: CfnParameter; oidcDisplayName: CfnParameter;
@@ -33,6 +35,8 @@ export interface DeveloperSignInProps {
   /** The concrete Secret (F5): control-plane.ts passes a secretsmanager.Secret. */
   slackSecret: secretsmanager.Secret;
   parameters: DeveloperSignInParameters;
+  /** The API's default stage, which throttles the public /v1/auth routes. */
+  stage: apigwv2.CfnStage;
 }
 
 export class DeveloperSignIn extends Construct {
@@ -79,13 +83,18 @@ export class DeveloperSignIn extends Construct {
       DEVELOPER_OIDC_DISPLAY_NAME: p.oidcDisplayName.valueAsString,
       DEVELOPER_OIDC_SECRET_ID: oidcSecretName,
     }, Duration.seconds(15));
-    table.grantReadWriteData(fn);
+    // Exactly what DeveloperSignInStore sends: GetItem, PutItem, UpdateItem, and TransactWriteItems
+    // made of Put and Update items (IAM authorizes each item as PutItem or UpdateItem).
+    fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"],
+      resources: [table.tableArn],
+    }));
     tokenKey.grant(fn, "kms:Sign", "kms:GetPublicKey");
     tokenKey.addToResourcePolicy(new iam.PolicyStatement({
-      sid: "SignOnlyAsDeveloperIdentity",
+      sid: "SignAndGetPublicKeyOnlyAsDeveloperIdentity",
       effect: iam.Effect.DENY,
       principals: [new iam.AnyPrincipal()],
-      actions: ["kms:Sign"],
+      actions: ["kms:Sign", "kms:GetPublicKey"],
       resources: ["*"],
       conditions: { ArnNotEquals: { "aws:PrincipalArn": fn.role!.roleArn } },
     }));
@@ -99,9 +108,14 @@ export class DeveloperSignIn extends Construct {
     const integration = new apigwv2.CfnIntegration(this, "Integration", {
       apiId: props.api.ref, integrationType: "AWS_PROXY", integrationUri: fn.functionArn, payloadFormatVersion: "2.0",
     });
-    new apigwv2.CfnRoute(this, "AuthRoute", {
-      apiId: props.api.ref, routeKey: "ANY /v1/auth/{proxy+}", target: `integrations/${integration.ref}`, authorizationType: "NONE",
+    const authRoute = new apigwv2.CfnRoute(this, "AuthRoute", {
+      apiId: props.api.ref, routeKey: SIGN_IN_ROUTE_KEY, target: `integrations/${integration.ref}`, authorizationType: "NONE",
     });
+    // The sign-in routes are public, so the stage caps them: bursts of 50, 20 requests a second on
+    // average, across all callers. A developer signs in a few times a week, so this only bites a flood.
+    props.stage.routeSettings = { [SIGN_IN_ROUTE_KEY]: { ThrottlingBurstLimit: 50, ThrottlingRateLimit: 20 } };
+    // Route settings must name a route that already exists.
+    props.stage.addDependency(authRoute);
     fn.addPermission("ApiInvoke", {
       principal: new iam.ServicePrincipal("apigateway.amazonaws.com"),
       sourceArn: `arn:${stack.partition}:execute-api:${stack.region}:${stack.account}:${props.api.ref}/*/*/v1/auth/*`,

@@ -501,7 +501,7 @@ export class ControlPlaneStack extends Stack {
       target: `integrations/${integration.ref}`,
       authorizationType: "NONE",
     });
-    new apigwv2.CfnStage(this, "DefaultStage", {
+    const defaultStage = new apigwv2.CfnStage(this, "DefaultStage", {
       apiId: api.ref,
       stageName: "$default",
       autoDeploy: true,
@@ -552,7 +552,7 @@ export class ControlPlaneStack extends Stack {
     // Spec 025 phase 25a: developer sign-in, named environments only (R3).
     if (naming.env !== undefined && signInParameters !== undefined) {
       new DeveloperSignIn(this, "DeveloperSignIn", {
-        naming, env: naming.env, api, brokerIntegration: integration, broker, slackSecret, parameters: signInParameters,
+        naming, env: naming.env, api, stage: defaultStage, brokerIntegration: integration, broker, slackSecret, parameters: signInParameters,
       });
     }
 

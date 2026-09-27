@@ -168,7 +168,9 @@ describe("EC2 worker infrastructure (issue #82), shown for a named environment",
 
   it("signs invocations with a P-256 key only the dispatcher may use", () => {
     // Spec 025 adds the developer-token RSA key to named environments; this is the P-256 invocation key.
-    const [[keyId, key]] = ofType(controlPlane, "AWS::KMS::Key").filter(([, r]) => r.Properties.KeySpec === "ECC_NIST_P256") as [[string, Resource]];
+    const p256Keys = ofType(controlPlane, "AWS::KMS::Key").filter(([, r]) => r.Properties.KeySpec === "ECC_NIST_P256");
+    expect(p256Keys).toHaveLength(1);
+    const [[keyId, key]] = p256Keys as [[string, Resource]];
     const otherKeyIds = ofType(controlPlane, "AWS::KMS::Key").map(([id]) => id).filter((id) => id !== keyId);
     expect(key.Properties).toMatchObject({ KeySpec: "ECC_NIST_P256", KeyUsage: "SIGN_VERIFY" });
     const keyPolicy = (key.Properties.KeyPolicy as { Statement: Array<Record<string, unknown>> }).Statement;

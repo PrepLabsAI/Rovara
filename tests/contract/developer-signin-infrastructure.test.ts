@@ -16,15 +16,70 @@ const controlPlane = (app: ReturnType<typeof buildAgentXApp>, name: string) =>
   Template.fromStack(app.node.children.find((child): child is Stack => Stack.isStack(child) && child.stackName === name)!).toJSON() as TemplateJson;
 const ofType = (template: TemplateJson, type: string) => Object.entries(template.Resources).filter(([, resource]) => resource.Type === type);
 const actionsOf = (statement: Statement) => [statement.Action].flat();
-const statementsOf = (policy: Resource) => (policy.Properties.PolicyDocument as { Statement: Statement[] }).Statement;
-const rolesOf = (policy: Resource) => (policy.Properties.Roles as Ref[]).map((role) => role.Ref);
+const statementsIn = (document: unknown) => (document as { Statement: Statement[] }).Statement;
 /** Logical IDs end in an eight-character hash; drop it to compare names. */
 const withoutHash = (logicalId: string) => logicalId.replace(/[0-9A-F]{8}$/, "");
 const functionId = (template: TemplateJson, prefix: string) => ofType(template, "AWS::Lambda::Function").map(([id]) => id).find((id) => withoutHash(id) === prefix)!;
-/** Whether a statement's resources name this logical ID or are the wildcard "*". */
-const reaches = (statement: Statement, logicalId: string) => JSON.stringify(statement.Resource).includes(logicalId) || [statement.Resource].flat().includes("*");
-const roleNamesWith = (template: TemplateJson, matches: (statement: Statement) => boolean) =>
-  ofType(template, "AWS::IAM::Policy").filter(([, policy]) => statementsOf(policy).some(matches)).flatMap(([, policy]) => rolesOf(policy)).map(withoutHash).sort();
+
+/** Every identity-policy statement in the template, with the role (logical ID) it applies to:
+ * AWS::IAM::Policy, AWS::IAM::ManagedPolicy (by its Roles or a role's ManagedPolicyArns) and a
+ * role's inline Policies. */
+function grants(template: TemplateJson): Array<{ role: string; statement: Statement }> {
+  const found: Array<{ role: string; statement: Statement }> = [];
+  const add = (roles: string[], document: unknown) => { for (const role of roles) for (const statement of statementsIn(document)) found.push({ role, statement }); };
+  const refs = (value: unknown) => ((value ?? []) as Ref[]).map((ref) => ref.Ref);
+  for (const [, policy] of ofType(template, "AWS::IAM::Policy")) add(refs(policy.Properties.Roles), policy.Properties.PolicyDocument);
+  for (const [id, policy] of ofType(template, "AWS::IAM::ManagedPolicy")) {
+    const attachedBy = ofType(template, "AWS::IAM::Role").filter(([, role]) => refs(role.Properties.ManagedPolicyArns).includes(id)).map(([roleId]) => roleId);
+    add([...new Set([...refs(policy.Properties.Roles), ...attachedBy])], policy.Properties.PolicyDocument);
+  }
+  for (const [roleId, role] of ofType(template, "AWS::IAM::Role")) {
+    for (const inline of (role.Properties.Policies ?? []) as Array<{ PolicyDocument: unknown }>) add([roleId], inline.PolicyDocument);
+  }
+  return found;
+}
+
+/** An IAM-style pattern ("*" any run of characters, "?" one character) as a whole-string RegExp. */
+const globRegExp = (glob: string, flags = "") => new RegExp(`^${glob.replace(/[.+^${}()|[\]\\]/g, "\\$&").replaceAll("*", ".*").replaceAll("?", ".")}$`, flags);
+/** IAM action match (case-insensitive), honoring "*" and wildcards such as "kms:*" or "lambda:Invoke*". */
+const allows = (statement: Statement, action: string) => actionsOf(statement).some((pattern) => globRegExp(pattern, "i").test(action));
+/** Whether any of the statement's actions is in `service`, or a wildcard (such as "*") that covers it. */
+const touches = (statement: Statement, service: string) =>
+  actionsOf(statement).some((pattern) => pattern.toLowerCase().startsWith(`${service}:`) || globRegExp(pattern, "i").test(`${service}:AnyAction`));
+
+/** A resource as a glob: pseudo parameters (AWS::Region and so on) become "*"; a stack parameter
+ * is a specific value chosen at deploy time, so it stays an opaque token that matches nothing. */
+function asGlob(value: unknown): string {
+  if (typeof value === "string") return value;
+  const node = value as { Ref?: string; "Fn::Join"?: [string, unknown[]] };
+  if (typeof node.Ref === "string") return node.Ref.startsWith("AWS::") ? "*" : "\u0000";
+  if (node["Fn::Join"] !== undefined) return node["Fn::Join"][1].map(asGlob).join(node["Fn::Join"][0]);
+  // Any other intrinsic could produce anything: count it as a wildcard.
+  return "*";
+}
+
+/** Whether a statement's resources can reach the resource `logicalId`, whose ARN looks like
+ * `sampleArn`: by naming it, or by a pattern (including "*") that names no other logical ID and
+ * matches the sample. */
+function reaches(template: TemplateJson, statement: Statement, logicalId: string, sampleArn: string): boolean {
+  const others = Object.keys(template.Resources).filter((id) => id !== logicalId);
+  return [statement.Resource].flat().some((resource) => {
+    const text = JSON.stringify(resource);
+    if (text.includes(`"${logicalId}"`)) return true;
+    if (others.some((id) => text.includes(`"${id}"`))) return false;
+    return globRegExp(asGlob(resource)).test(sampleArn);
+  });
+}
+
+/** The roles (hash dropped, sorted, distinct) with a grant of `action` that reaches `logicalId`. */
+const rolesThatMay = (template: TemplateJson, action: string, logicalId: string, sampleArn: string) =>
+  [...new Set(grants(template).filter(({ statement }) => statement.Effect !== "Deny" && allows(statement, action) && reaches(template, statement, logicalId, sampleArn)).map(({ role }) => withoutHash(role)))].sort();
+const statementsOfRole = (template: TemplateJson, roleName: string) => grants(template).filter(({ role }) => withoutHash(role) === roleName).map(({ statement }) => statement);
+
+const SAMPLE_KEY_ARN = "arn:aws:kms:us-east-1:111122223333:key/0b8a3c2e-1111-2222-3333-444455556666";
+const SAMPLE_SLACK_SECRET_ARN = "arn:aws:secretsmanager:us-east-1:111122223333:secret:agentx/staging/slack-AbCdEf";
+const SAMPLE_FUNCTION_ARN = "arn:aws:lambda:us-east-1:111122223333:function:agentx-staging-control-p-DeveloperSignInFunction-AbCdEf";
+const SAMPLE_TABLE_ARN = "arn:aws:dynamodb:us-east-1:111122223333:table/agentx-staging-control-plane-DeveloperSignInTable-AbCdEf";
 
 beforeAll(() => {
   named = controlPlane(buildAgentXApp({ agentxEnv: "staging" }), "agentx-staging-control-plane");
@@ -75,32 +130,39 @@ describe("developer sign-in infrastructure (named environments)", () => {
     expect(keys).toHaveLength(1);
     const [keyId, key] = keys[0]!;
     expect(key.Properties.KeyUsage).toBe("SIGN_VERIFY");
-    const deny = (key.Properties.KeyPolicy as { Statement: Statement[] }).Statement.find((statement) => statement.Effect === "Deny")!;
-    expect(deny).toMatchObject({ Sid: "SignOnlyAsDeveloperIdentity", Action: "kms:Sign", Principal: { AWS: "*" }, Resource: "*" });
+    const denies = (key.Properties.KeyPolicy as { Statement: Statement[] }).Statement.filter((statement) => statement.Effect === "Deny");
+    expect(denies).toHaveLength(1);
+    const deny = denies[0]!;
+    expect(deny).toMatchObject({ Sid: "SignAndGetPublicKeyOnlyAsDeveloperIdentity", Principal: { AWS: "*" }, Resource: "*" });
+    expect(actionsOf(deny).sort()).toEqual(["kms:GetPublicKey", "kms:Sign"]);
     const exempt = (deny.Condition as { ArnNotEquals: Record<string, unknown> }).ArnNotEquals["aws:PrincipalArn"] as { "Fn::GetAtt": [string, string] };
     expect(withoutHash(exempt["Fn::GetAtt"][0])).toBe("DeveloperSignInFunctionServiceRole");
-    // The only identity policy that grants kms:Sign on this key (by name or wildcard) is DeveloperIdentity's.
-    expect(roleNamesWith(named, (s) => actionsOf(s).includes("kms:Sign") && reaches(s, keyId))).toEqual(["DeveloperSignInFunctionServiceRole"]);
+    expect(exempt["Fn::GetAtt"][1]).toBe("Arn");
+    // The only identity policies that grant kms:Sign or kms:GetPublicKey on this key (by name or pattern) are DeveloperIdentity's.
+    for (const action of ["kms:Sign", "kms:GetPublicKey"]) {
+      expect(rolesThatMay(named, action, keyId, SAMPLE_KEY_ARN)).toEqual(["DeveloperSignInFunctionServiceRole"]);
+    }
     const aliases = ofType(named, "AWS::KMS::Alias").map(([, resource]) => resource.Properties);
     expect(aliases.find((alias) => alias.AliasName === "alias/agentx/staging/developer-tokens")).toMatchObject({ TargetKeyId: { "Fn::GetAtt": [keyId, "Arn"] } });
   });
 
   it("lets only the ingress, the orchestrator task role and DeveloperIdentity read the Slack secret (R2)", () => {
     const [secretId] = ofType(named, "AWS::SecretsManager::Secret").find(([, resource]) => resource.Properties.Name === "agentx/staging/slack")!;
-    const readers = roleNamesWith(named, (s) => actionsOf(s).includes("secretsmanager:GetSecretValue") && reaches(s, secretId));
+    const readers = rolesThatMay(named, "secretsmanager:GetSecretValue", secretId, SAMPLE_SLACK_SECRET_ARN);
     expect(readers).toEqual(["DeveloperSignInFunctionServiceRole", "SlackIngressServiceRole", "SlackOrchestratorTaskRole"]);
   });
 
   it("lets DeveloperIdentity read only its own company sign-in secret besides the Slack secret", () => {
-    const role = ofType(named, "AWS::IAM::Policy").filter(([, policy]) => rolesOf(policy).some((id) => withoutHash(id) === "DeveloperSignInFunctionServiceRole"));
-    const reads = role.flatMap(([, policy]) => statementsOf(policy)).filter((s) => actionsOf(s).includes("secretsmanager:GetSecretValue"));
+    const reads = statementsOfRole(named, "DeveloperSignInFunctionServiceRole").filter((s) => allows(s, "secretsmanager:GetSecretValue"));
     expect(reads).toHaveLength(2);
     expect(JSON.stringify(reads.map((s) => s.Resource))).toContain(":secret:agentx/staging/developer-oidc-??????");
   });
 
   it("lets only the broker invoke DeveloperIdentity directly, and API Gateway only on /v1/auth/*", () => {
     const fnId = functionId(named, "DeveloperSignInFunction");
-    expect(roleNamesWith(named, (s) => actionsOf(s).some((action) => action.startsWith("lambda:Invoke")) && reaches(s, fnId))).toEqual(["BrokerServiceRole"]);
+    for (const action of ["lambda:InvokeFunction", "lambda:InvokeFunctionUrl"]) {
+      expect(rolesThatMay(named, action, fnId, SAMPLE_FUNCTION_ARN), action).toEqual(action === "lambda:InvokeFunction" ? ["BrokerServiceRole"] : []);
+    }
     const permissions = ofType(named, "AWS::Lambda::Permission").map(([, r]) => r.Properties).filter((properties) => JSON.stringify(properties.FunctionName).includes(fnId));
     expect(permissions).toHaveLength(1);
     expect(permissions[0]).toMatchObject({ Action: "lambda:InvokeFunction", Principal: "apigateway.amazonaws.com" });
@@ -108,13 +170,30 @@ describe("developer sign-in infrastructure (named environments)", () => {
   });
 
   it("gives the broker only session and developer reads on the sign-in table", () => {
-    const brokerPolicies = ofType(named, "AWS::IAM::Policy").filter(([, policy]) => rolesOf(policy).some((id) => withoutHash(id) === "BrokerServiceRole"));
-    const statements = brokerPolicies.flatMap(([, policy]) => statementsOf(policy));
     const [tableId] = ofType(named, "AWS::DynamoDB::Table").find(([logicalId]) => logicalId.startsWith("DeveloperSignInTable"))!;
-    const tableStatements = statements.filter((statement) => JSON.stringify(statement.Resource).includes(tableId));
+    const tableStatements = statementsOfRole(named, "BrokerServiceRole").filter((statement) => touches(statement, "dynamodb") && reaches(named, statement, tableId, SAMPLE_TABLE_ARN));
     expect(tableStatements).toHaveLength(1);
     expect(tableStatements[0]!.Action).toBe("dynamodb:GetItem");
     expect(tableStatements[0]!.Condition).toEqual({ "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "DEVELOPER#*"] } });
+  });
+
+  it("gives DeveloperIdentity exactly the item operations its store uses on the sign-in table, nothing table-wide", () => {
+    const [tableId] = ofType(named, "AWS::DynamoDB::Table").find(([logicalId]) => logicalId.startsWith("DeveloperSignInTable"))!;
+    const tableStatements = statementsOfRole(named, "DeveloperSignInFunctionServiceRole").filter((statement) => touches(statement, "dynamodb") && reaches(named, statement, tableId, SAMPLE_TABLE_ARN));
+    expect(tableStatements).toHaveLength(1);
+    // TransactWriteItems is authorized per item as PutItem and UpdateItem; the store never deletes or condition-checks.
+    expect(actionsOf(tableStatements[0]!).sort()).toEqual(["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]);
+    expect(tableStatements[0]!.Resource).toEqual({ "Fn::GetAtt": [tableId, "Arn"] });
+  });
+
+  it("throttles the public /v1/auth/* route on the default stage (burst 50, 20 requests a second)", () => {
+    const stages = ofType(named, "AWS::ApiGatewayV2::Stage");
+    expect(stages).toHaveLength(1);
+    const [, stage] = stages[0]!;
+    expect(stage.Properties.RouteSettings).toEqual({ "ANY /v1/auth/{proxy+}": { ThrottlingBurstLimit: 50, ThrottlingRateLimit: 20 } });
+    // A stage's route settings name a route that must already exist.
+    const [authRouteId] = ofType(named, "AWS::ApiGatewayV2::Route").find(([, r]) => r.Properties.RouteKey === "ANY /v1/auth/{proxy+}")!;
+    expect([(stage as Resource & { DependsOn?: string | string[] }).DependsOn].flat()).toContain(authRouteId);
   });
 
   it("keeps sign-in records in a retained, point-in-time recoverable table with a TTL", () => {
@@ -137,7 +216,11 @@ describe("developer sign-in infrastructure (named environments)", () => {
       "DEVELOPER_SIGNIN_SLACK", "DEVELOPER_OIDC_ISSUER", "DEVELOPER_OIDC_CLIENT_ID", "DEVELOPER_OIDC_REQUIRED_CLAIM", "DEVELOPER_OIDC_REQUIRED_VALUES",
       "DEVELOPER_OIDC_DISPLAY_NAME", "DEVELOPER_OIDC_SECRET_ID",
     ]));
-    expect(named.Outputs.DeveloperSignInIssuer!.Value).toEqual({ "Fn::Join": ["", [{ "Fn::GetAtt": [expect.stringMatching(/^HttpApi/) as unknown as string, "ApiEndpoint"] }, "/v1/auth"]] });
+    const [separator, [endpoint, suffix]] = (named.Outputs.DeveloperSignInIssuer!.Value as { "Fn::Join": [string, [{ "Fn::GetAtt": [string, string] }, string]] })["Fn::Join"];
+    expect(separator).toBe("");
+    expect(endpoint["Fn::GetAtt"][0]).toMatch(/^HttpApi/);
+    expect(endpoint["Fn::GetAtt"][1]).toBe("ApiEndpoint");
+    expect(suffix).toBe("/v1/auth");
   });
 });
 
@@ -149,5 +232,6 @@ describe("the legacy deployment (R3)", () => {
     }
     expect(ofType(legacy, "AWS::ApiGatewayV2::Authorizer")).toHaveLength(1);
     expect(ofType(legacy, "AWS::KMS::Key").map(([, r]) => r.Properties.KeySpec)).toEqual(["ECC_NIST_P256"]);
+    expect(ofType(legacy, "AWS::ApiGatewayV2::Stage").map(([, r]) => r.Properties.RouteSettings)).toEqual([undefined]);
   });
 });
