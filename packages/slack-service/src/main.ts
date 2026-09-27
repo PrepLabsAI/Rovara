@@ -213,6 +213,9 @@ async function runTurn(input: TurnInput): Promise<string> {
       onConnectorUnavailable: (failure) => log("connector.discovery_failed", {
         eventId: input.message.eventId, connector: failure.connector, cause: failure.cause, code: failure.code, message: failure.message,
       }),
+      onExtensionError: (failure) => log("extension.handler_failed", {
+        eventId: input.message.eventId, ...failure,
+      }),
       classifier,
       // The gate's own deadline follows the same setting, so a longer timeout is not cut at 8 seconds.
       classifierTimeoutMs: gateClassifierTimeoutMs,
