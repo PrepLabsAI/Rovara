@@ -15,6 +15,10 @@ readonly WORKER_GID=1000
 readonly WORKER_ENV_FILE=/etc/agentx/worker.env
 readonly WORKER_UNIT=agentx-worker.service
 readonly WORKER_CONTAINER=agentx-worker
+# Docker's data root, on the workspace volume so that a project's devcontainer images, containers
+# and named volumes survive an idle stop (#121). The worker's walks skip it (DOCKER_DATA_DIRECTORY).
+readonly DOCKER_DATA_ROOT=$MOUNT_PATH/.docker
+readonly DOCKER_SOCKET=/var/run/docker.sock
 # The provisioner attaches the volume after the instance is running, so it may appear late.
 readonly DEVICE_WAIT_SECONDS=${AGENTX_DEVICE_WAIT_SECONDS:-300}
 
@@ -92,7 +96,10 @@ mount_workspace() {
 
 ensure_docker() {
   command -v docker >/dev/null || dnf install -y docker
-  systemctl enable --now docker.service
+  install -d -m 0755 /etc/docker
+  printf '{"data-root": "%s"}\n' "$DOCKER_DATA_ROOT" >/etc/docker/daemon.json
+  systemctl enable docker.service
+  systemctl restart docker.service
 }
 
 pull_worker_image() {
@@ -121,10 +128,14 @@ EOF
 }
 
 # The container shares the host network, so the worker listens on the instance's port 8080 and
-# reaches the instance role's credentials through IMDS with a hop limit of 1.
+# reaches the instance role's credentials through IMDS with a hop limit of 1. It also gets the host's
+# Docker socket, to run the project's devcontainer (#121): root on this instance, which serves only
+# this workspace. The workspace is mounted at the same path as on the host, so the bind mounts the
+# devcontainer CLI asks the host's Docker for name the same files.
 write_worker_unit() {
-  local region=$1 instance_id=$2 docker
+  local region=$1 instance_id=$2 docker docker_gid
   docker=$(command -v docker)
+  docker_gid=$(stat -c %g "$DOCKER_SOCKET")
   cat >"/etc/systemd/system/$WORKER_UNIT" <<EOF
 [Unit]
 Description=AgentX worker for workspace $AGENTX_WORKSPACE_ID generation $AGENTX_SESSION_GENERATION
@@ -135,7 +146,7 @@ RequiresMountsFor=$MOUNT_PATH
 
 [Service]
 ExecStartPre=-$docker rm --force $WORKER_CONTAINER
-ExecStart=$docker run --rm --name $WORKER_CONTAINER --network host --env-file $WORKER_ENV_FILE --volume $MOUNT_PATH:$MOUNT_PATH --log-driver awslogs --log-opt awslogs-region=$region --log-opt awslogs-group=$AGENTX_LOG_GROUP --log-opt awslogs-stream=$AGENTX_WORKSPACE_ID/$AGENTX_SESSION_GENERATION/$instance_id $AGENTX_WORKER_IMAGE
+ExecStart=$docker run --rm --name $WORKER_CONTAINER --network host --env-file $WORKER_ENV_FILE --volume $MOUNT_PATH:$MOUNT_PATH --volume $DOCKER_SOCKET:$DOCKER_SOCKET --group-add $docker_gid --log-driver awslogs --log-opt awslogs-region=$region --log-opt awslogs-group=$AGENTX_LOG_GROUP --log-opt awslogs-stream=$AGENTX_WORKSPACE_ID/$AGENTX_SESSION_GENERATION/$instance_id $AGENTX_WORKER_IMAGE
 ExecStop=$docker stop $WORKER_CONTAINER
 Restart=always
 RestartSec=5

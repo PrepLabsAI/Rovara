@@ -18,6 +18,13 @@ import {
   type ProjectCommand,
   type StoredProjectDefinition,
 } from "@agentx/contracts";
+import {
+  createDevcontainerCli,
+  devcontainerTarget,
+  ensureDevcontainer,
+  runDevcontainerCommand,
+  type DevcontainerCli,
+} from "./devcontainer.js";
 import { evaluateReadiness, type CommandResult } from "./readiness.js";
 import { gitSafeEnvironment } from "./git.js";
 import { assertCredentialFreeRemote, runGitWithCredential } from "./git-auth.js";
@@ -29,6 +36,11 @@ import type {
 const execFileAsync = promisify(execFile);
 const MANIFEST_PATH = ".agentx/preparation-manifest.json";
 const MAX_COMMAND_OUTPUT_BYTES = 1_048_576;
+/**
+ * Docker's data root on an EC2 worker's workspace volume (#121), so images, containers and named
+ * volumes survive an idle stop. The boot script puts it there; it is root's, not the workspace's.
+ */
+export const DOCKER_DATA_DIRECTORY = ".docker";
 
 export interface PreparationManifest {
   schemaVersion: 2;
@@ -45,6 +57,13 @@ export interface PreparationManifest {
     completedAt: string;
   }>;
   completedSetupSteps: number[];
+  /** The project's devcontainer (#121), recorded once it has started. */
+  devcontainer?: {
+    repository: string;
+    configPath: string;
+    containerId: string;
+    startedAt: string;
+  };
   readinessResults: Array<{
     index: number;
     ready: boolean;
@@ -79,6 +98,7 @@ export interface PrepareWorkspaceOptions {
   materializer?: RepositoryMaterializer;
   credentialProvider?: RepositoryCredentialProvider;
   commandRunner?: PreparationCommandRunner;
+  devcontainerCli?: DevcontainerCli;
 }
 
 export async function prepareWorkspace(options: PrepareWorkspaceOptions): Promise<PreparationManifest> {
@@ -87,7 +107,13 @@ export async function prepareWorkspace(options: PrepareWorkspaceOptions): Promis
   await mkdir(rootPath, { recursive: true });
   const canonicalRoot = await realpath(rootPath);
   const materializer = options.materializer ?? cloneRepository;
-  const commandRunner = options.commandRunner ?? runProjectCommand;
+  const target = devcontainerTarget(canonicalRoot, project);
+  const devcontainerCli = target === undefined ? undefined : options.devcontainerCli ?? createDevcontainerCli();
+  // With a devcontainer, setup and readiness run in it, like the agent's shell.
+  const commandRunner = options.commandRunner
+    ?? (target === undefined || devcontainerCli === undefined
+      ? runProjectCommand
+      : (command: ProjectCommand) => runDevcontainerCommand(devcontainerCli, target, command));
   let manifest = await loadOrCreateManifest(
     canonicalRoot,
     project,
@@ -133,6 +159,20 @@ export async function prepareWorkspace(options: PrepareWorkspaceOptions): Promis
         completedAt: now,
       });
       manifest = await writeManifest(canonicalRoot, withoutFailure(manifest));
+    }
+
+    if (target !== undefined && devcontainerCli !== undefined && project.devcontainer !== undefined) {
+      // Also on a resumed preparation: a new instance starts with the containers stopped.
+      const started = await ensureDevcontainer(devcontainerCli, target);
+      manifest = await writeManifest(canonicalRoot, withoutFailure({
+        ...manifest,
+        devcontainer: {
+          repository: project.devcontainer.repository,
+          configPath: relative(canonicalRoot, target.configPath),
+          containerId: started.containerId,
+          startedAt: new Date().toISOString(),
+        },
+      }));
     }
 
     for (const [index, command] of project.setup.entries()) {
@@ -330,6 +370,7 @@ async function assertContainedSymlinks(rootPath: string, directory = rootPath): 
     throw error;
   }
   for (const entry of entries) {
+    if (directory === rootPath && entry.name === DOCKER_DATA_DIRECTORY) continue;
     const entryPath = resolve(directory, entry.name);
     const metadata = await lstat(entryPath);
     if (metadata.isSymbolicLink()) {

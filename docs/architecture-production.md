@@ -76,6 +76,26 @@ lifetime is 14 days, but the volume remains associated with the session across s
 administrator must explicitly delete the AgentCore session or capacity provider to delete its
 managed persistent volume.
 
+## Devcontainers
+
+A project may name a devcontainer (`devcontainer: { repository, configPath? }`, with `configPath`
+defaulting to `.devcontainer/devcontainer.json`). Only EC2 workers run one; registration refuses it
+on any other deployment mode. On an EC2 worker:
+
+- The worker container gets the host's Docker socket and runs the devcontainer CLI, so the
+  devcontainer and any Compose services it declares run on the instance's own Docker.
+- The whole workspace volume is mounted into the devcontainer at `/mnt/workspace`, the same path as
+  on the host and in the worker, so a path means the same file to the agent's file tools and to a
+  command in the container.
+- Preparation starts the devcontainer after cloning and runs `setup` and `readiness` in it. Every
+  task starts it again first, since a resumed instance has its containers stopped, and the agent's
+  shell runs in it.
+- Docker's data root is `/mnt/workspace/.docker`, so images, containers and named volumes (a
+  database, for example) survive an idle stop.
+
+The Docker socket makes the worker root on its instance. Each instance serves one workspace, so that
+reaches only this workspace's volume and the instance role, which the worker holds already.
+
 ## Hosted Slack orchestrator
 
 Slack requests are orchestrated in AWS rather than on a developer machine, and since the

@@ -127,6 +127,21 @@ export const RepositoryDefinitionSchema = z
   });
 
 /**
+ * The development container a project's commands run in (#121): `setup`, `readiness` and the
+ * agent's shell. `configPath` is relative to the repository and defaults to
+ * `.devcontainer/devcontainer.json`. Only EC2 workers can run one; registration refuses it on
+ * other deployment modes.
+ */
+export const DevcontainerDefinitionSchema = z
+  .object({
+    repository: AgentXNameSchema,
+    configPath: RelativeWorkspacePathSchema.optional(),
+  })
+  .strict();
+
+export const DEFAULT_DEVCONTAINER_CONFIG_PATH = ".devcontainer/devcontainer.json";
+
+/**
  * Fields the project definition carried while AgentX had a local client. `schemaVersion` marked a
  * file format, `controlPlaneUrl` and `auth` told that client where to connect, and
  * `environment.image` pinned nothing: the runtime runs the image the release deployed. Definitions
@@ -143,6 +158,7 @@ function projectDefinitionObject<Connectors extends z.ZodTypeAny>(connectorsSche
       repositories: z.array(RepositoryDefinitionSchema).min(1).max(32),
       setup: z.array(ProjectCommandSchema).max(64),
       readiness: z.array(ProjectCommandSchema).max(64),
+      devcontainer: DevcontainerDefinitionSchema.optional(),
       orchestratorInstructions: z.string().min(1).max(32_768),
       models: ProjectModelsSchema.optional(),
       integrations: z.object({
@@ -163,6 +179,7 @@ function projectDefinitionObject<Connectors extends z.ZodTypeAny>(connectorsSche
 function checkProjectDefinition(
   project: {
     repositories: ReadonlyArray<{ name: string; path: string }>;
+    devcontainer?: { repository: string } | undefined;
     integrations?: {
       githubMcp?: unknown;
       connectors?: ReadonlyArray<{ name: string; type: string; scopes?: unknown }> | undefined;
@@ -188,6 +205,9 @@ function checkProjectDefinition(
     if (previous && current && (current === previous || current.startsWith(`${previous}/`))) {
       context.addIssue({ code: "custom", path: ["repositories"], message: "repository paths overlap" });
     }
+  }
+  if (project.devcontainer && !names.has(project.devcontainer.repository)) {
+    context.addIssue({ code: "custom", path: ["devcontainer", "repository"], message: `devcontainer names unregistered repository ${project.devcontainer.repository}` });
   }
   if (project.integrations?.githubMcp && project.integrations.connectors) {
     context.addIssue({ code: "custom", path: ["integrations"], message: "use either integrations.githubMcp or integrations.connectors, not both" });
@@ -247,6 +267,7 @@ export type ProjectDefinition = z.infer<typeof ProjectDefinitionSchema>;
  * an entry of a type this release's schema does not know, passed through unexamined. */
 export type StoredProjectDefinition = z.infer<typeof StoredProjectDefinitionSchema>;
 export type ProjectCommand = z.infer<typeof ProjectCommandSchema>;
+export type DevcontainerDefinition = z.infer<typeof DevcontainerDefinitionSchema>;
 export type CodeBuildGateDefinition = z.infer<typeof CodeBuildGateDefinitionSchema>;
 
 export type RepositoryDefinition = z.infer<typeof RepositoryDefinitionSchema>;
