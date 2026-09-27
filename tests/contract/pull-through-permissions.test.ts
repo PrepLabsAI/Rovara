@@ -20,16 +20,17 @@ const grants = (stack: Stack, action: string) => statements(stack).filter((s) =>
 
 describe("pulling AgentX images through the cache", () => {
   const stacks = stacksOf(buildAgentXApp({ agentxEnv: "staging" }));
-  it.each(["agentx-staging-runtime", "agentx-staging-slack"])("%s may import upstream images into its cache prefix", (name) => {
+  // The foundation holds the EC2 worker instance role, which pulls the worker image (#117).
+  it.each(["agentx-staging-foundation", "agentx-staging-slack"])("%s may import upstream images into its cache prefix", (name) => {
     const stack = stacks.find((s) => s.stackName === name)!;
     for (const action of ["ecr:BatchImportUpstreamImage", "ecr:CreateRepository", "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]) {
       expect(grants(stack, action).some((r) => r.includes("repository/agentx-staging/*")), `${name} ${action}`).toBe(true);
     }
   }, 240_000);
 
-  it("names no literal region in the released runtime and slack templates' pull-through statements", () => {
+  it("names no literal region in the released foundation and slack templates' pull-through statements", () => {
     const released = buildAgentXApp({ agentxEnv: ENVIRONMENT_PLACEHOLDER, agentxSynthesizer: "legacy" }).synth();
-    for (const part of ["runtime", "slack"]) {
+    for (const part of ["foundation", "slack"]) {
       const pullThrough = findSid(released.getStackByName(`agentx-${ENVIRONMENT_PLACEHOLDER}-${part}`).template, "EcrPullThroughCache").map((st) => JSON.stringify(st));
       expect(pullThrough, part).toHaveLength(1);
       expect(pullThrough[0], part).not.toContain("us-east-1");

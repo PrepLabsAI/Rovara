@@ -3,7 +3,6 @@ import { App, Aspects, LegacyStackSynthesizer, Stack, Tags } from "aws-cdk-lib";
 import type { IReusableStackSynthesizer } from "aws-cdk-lib";
 import { CONTEXT_ENV, CONTEXT_OVERFLOW_LOCATION_ENV } from "aws-cdk-lib/cx-api";
 import { AccessStack } from "./access.js";
-import { AgentRuntimeStack } from "./agent-runtime.js";
 import { ControlPlaneStack } from "./control-plane.js";
 import { DemoRuntimeStack } from "./demo-runtime.js";
 import { IdentityStack } from "./identity.js";
@@ -13,6 +12,7 @@ import { ProductionFoundationStack } from "./production-foundation.js";
 import { ReleasePipelineStack } from "./release-pipeline.js";
 import { EnvironmentRolePath } from "./role-path.js";
 import { SlackOrchestratorStack } from "./slack-orchestrator.js";
+import { WorkerSettingsStack } from "./worker-settings.js";
 
 export function buildAgentXApp(context: Record<string, unknown> = {}): App {
   // The default stack synthesizer (and the assembly output directory, below) are
@@ -146,9 +146,9 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
         env: { region: deploymentRegion ?? "us-east-1" },
       });
     }
-    new AgentRuntimeStack(app, "AgentXProductionRuntime", {
-      description: "AgentX production coding runtime on stable EBS-backed capacity",
-      deploymentRegion: deploymentRegion ?? "us-east-1",
+    // Still named for the AgentCore runtime it used to deploy; it holds only the EC2 worker settings now.
+    new WorkerSettingsStack(app, "AgentXProductionRuntime", {
+      description: "AgentX worker image and model settings for EC2 workers",
       env: { region: deploymentRegion ?? "us-east-1" },
       terminationProtection: true,
       naming,

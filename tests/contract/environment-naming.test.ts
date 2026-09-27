@@ -4,7 +4,6 @@ import { describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { operatorRoleStatements } from "../../infra/lib/access-policies.js";
 import { environmentNaming, legacyNaming, namingFromContext } from "../../infra/lib/naming.js";
-import { AgentRuntimeStack } from "../../infra/lib/agent-runtime.js";
 import { ProductionFoundationStack } from "../../infra/lib/production-foundation.js";
 
 function productionStacks(app: App): Stack[] {
@@ -140,8 +139,8 @@ describe("environment naming", () => {
     Template.fromStack(foundation).hasResourceProperties("AWS::EC2::SecurityGroup", {
       Tags: Match.arrayWith([{ Key: "agentx:env", Value: "staging" }]),
     });
-    // CfnRuntime is tagged with a plain string map, not the {Key,Value} array most other resources use.
-    Template.fromStack(runtime).hasResourceProperties("AWS::BedrockAgentCore::Runtime", {
+    // SSM parameters are tagged with a plain string map, not the {Key,Value} array most other resources use.
+    Template.fromStack(runtime).hasResourceProperties("AWS::SSM::Parameter", {
       Tags: Match.objectLike({ "agentx:env": "staging" }),
     });
     Template.fromStack(control).hasResourceProperties("AWS::DynamoDB::Table", {
@@ -151,18 +150,6 @@ describe("environment naming", () => {
       Tags: Match.arrayWith([{ Key: "agentx:env", Value: "staging" }]),
     });
   }, 120_000);
-
-  it("deletes a named environment's AgentCore runtime with its stack, and keeps the legacy runtime retained", () => {
-    const resources = (stack: Stack) =>
-      Object.values(Template.fromStack(stack).toJSON().Resources as Record<string, { Type: string; DeletionPolicy?: string; UpdateReplacePolicy?: string }>)
-        .filter((resource) => resource.Type === "AWS::BedrockAgentCore::Runtime");
-    const staging = resources(new AgentRuntimeStack(new App(), "Runtime", { deploymentRegion: "us-east-1", naming: environmentNaming("staging") }));
-    expect(staging).toHaveLength(1);
-    expect(staging[0]).toMatchObject({ DeletionPolicy: "Delete", UpdateReplacePolicy: "Delete" });
-    const legacy = resources(new AgentRuntimeStack(new App(), "Runtime", { deploymentRegion: "us-east-1" }));
-    expect(legacy).toHaveLength(1);
-    expect(legacy[0]).toMatchObject({ DeletionPolicy: "Retain", UpdateReplacePolicy: "Retain" });
-  });
 
   it("keeps a named environment's capacity provider, workspace key and flow logs retained: deleting the capacity provider deletes every workspace volume", () => {
     const template = Template.fromStack(new ProductionFoundationStack(new App(), "Foundation", { deploymentRegion: "us-east-1", naming: environmentNaming("staging") }));
@@ -198,16 +185,16 @@ describe("environment naming", () => {
     expect(text).not.toContain("capacity-provider/*");
   }, 120_000);
 
-  it("does not leak the legacy production Environment tag onto foundation or runtime resources", () => {
+  it("does not leak the legacy production Environment tag onto foundation or worker settings resources", () => {
     const staging = productionStacks(buildAgentXApp({ agentxEnv: "staging" }));
     const foundation = staging.find((stack) => stack.stackName === "agentx-staging-foundation")!;
     const runtime = staging.find((stack) => stack.stackName === "agentx-staging-runtime")!;
     for (const stack of [foundation, runtime]) {
       const text = JSON.stringify(Template.fromStack(stack).toJSON());
-      expect(text).toContain('"Environment":"staging"');
       expect(text).not.toContain('"Environment":"production"');
       expect(text).not.toContain('"Key":"Environment","Value":"production"');
     }
+    expect(JSON.stringify(Template.fromStack(foundation).toJSON())).toContain('"Environment":"staging"');
   }, 120_000);
 
   it("tells the environment's broker its connector secret prefix, and leaves legacy unchanged", () => {

@@ -153,27 +153,26 @@ owns only the ECS service, and receives those values as parameters from the rele
 - The retained ARM64 capacity provider, `m6g.medium` compute policy, encrypted root volume, and a
   named 20 GiB gp3 `workspace` volume.
 
-`AgentXProductionRuntime` owns the changeable application layer:
+`AgentXProductionRuntime` owns the changeable application layer. It keeps the name of the AgentCore
+runtime it used to deploy, but since #117 it holds only the EC2 worker settings, as SSM parameters:
 
-- The immutable worker image digest.
-- The runtime execution role for ECR, Bedrock inference, logs, traces, and metrics.
-- Model and control-plane callback configuration.
-- The mount from the capacity provider's `workspace` volume to `/mnt/workspace`.
+- `/agentx/production/worker-image`: the immutable worker image digest.
+- `/agentx/production/worker-model-provider`, `worker-model-id` and `worker-prompt-cache-retention`.
 
-Updating the runtime creates a new AgentCore runtime version behind the same runtime resource and
-`DEFAULT` endpoint. It does not replace the capacity provider or change a workspace's session ID.
-Consequently, normal AgentX releases do not require registration or workspace preparation again.
+The session provisioner reads them when it boots a worker, so a release reaches each workspace the
+next time its compute starts; a worker already running keeps its image until the idle reaper stops
+it. Normal AgentX releases do not require registration or workspace preparation again.
 
 ## Deployment safety
 
-Both production stacks have CloudFormation termination protection. The capacity provider, runtime,
-KMS key, and flow-log group also use retain policies. The production release command creates the
+Both production stacks have CloudFormation termination protection. The capacity provider, KMS key,
+and flow-log group also use retain policies. The production release command creates the
 foundation only when absent. On later runs it fails if the synthesized foundation differs from the
 deployed foundation, requiring a separate review for any network, encryption, instance, lifecycle,
 or volume change.
 
 The production ECR repository uses immutable tags, scan-on-push, seven-day cleanup for untagged
-images, and bounded retention for releases and legacy tags. Runtime logs are retained for 30 days.
+images, and bounded retention for releases and legacy tags.
 
 ## One-time migration boundary
 

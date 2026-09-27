@@ -48,13 +48,13 @@ const MIN_CALLBACK_SIGNING_KEY_LENGTH = 32;
 /** The parameter names whose values must never be printed: every NoEcho template parameter. */
 export const SECRET_PARAMETERS: ReadonlySet<string> = new Set(["CallbackSigningKey"]);
 
-/** Fresh install order: the control plane needs the GitHub App before the runtime needs the control plane's URL. */
+/** Fresh install order: the control plane needs the GitHub App. The `runtime` part is the EC2 worker settings (#117); the control plane reads them only when it boots a worker. */
 export function installOrder(identityMode: "cognito" | "oidc"): DeployPart[] {
   const order: DeployPart[] = ["access", "foundation", "identity", "control-plane", "runtime", "slack"];
   return withoutIdentityWhenOidc(order, identityMode);
 }
 
-/** Upgrade order: the runtime deploys before the control plane, as the release pipeline does, so the worker (the tolerant side of the window) parses strictly first. */
+/** Upgrade order: the worker settings deploy before the control plane, as the release pipeline does, so workers booted from then on (the tolerant side of the window) run the new image first. */
 export function upgradeOrder(identityMode: "cognito" | "oidc"): DeployPart[] {
   const order: DeployPart[] = ["access", "foundation", "identity", "runtime", "control-plane", "slack"];
   return withoutIdentityWhenOidc(order, identityMode);
@@ -216,10 +216,8 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
       return {
         ...base,
         WorkerImageUri: resolvedImage(answers, "worker", outputs),
-        ControlPlaneUrl: required(outputs, "control-plane", "ApiEndpoint", answers.env),
         ModelProvider: "amazon-bedrock",
         ModelId: answers.models.worker,
-        CapacityProviderArn: required(outputs, "foundation", "CapacityProviderArn", answers.env),
       };
     }
 

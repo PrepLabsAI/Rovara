@@ -16,7 +16,6 @@ import {
   SLACK_ORCHESTRATOR_IMAGE_INPUTS,
   SLACK_ORCHESTRATOR_REPOSITORY,
   WORKER_IMAGE_INPUTS,
-  capacityProviderIdFromArn,
   parseProductionReleaseArgs,
   releaseRevisionFromTags,
   reusableWorkerImage,
@@ -98,13 +97,6 @@ describe("production release command", () => {
     expect(parseProductionReleaseArgs(["--repository", "custom"], {})).toMatchObject({
       repository: "custom",
     });
-  });
-
-  it("extracts a capacity provider ID and rejects malformed ARNs", () => {
-    expect(capacityProviderIdFromArn(
-      "arn:aws:bedrock-agentcore:us-east-1:944937319445:capacity-provider/agentx_production_capacity-1234567890",
-    )).toBe("agentx_production_capacity-1234567890");
-    expect(() => capacityProviderIdFromArn("not-an-arn")).toThrow(/invalid/i);
   });
 
   it("accepts pipeline-only flags that the demo release rejects", () => {

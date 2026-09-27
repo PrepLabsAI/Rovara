@@ -167,8 +167,12 @@ describe("deploy environment", () => {
     const accessRoleArn = scriptedOutputs()[stackName("access")]!.CloudFormationRoleArn;
     for (const request of requests.slice(1)) expect(request.roleArn).toBe(accessRoleArn);
 
+    const slackRequest = requests.find((request) => request.part === "slack")!;
+    expect(slackRequest.parameters.ControlPlaneUrl).toBe(scriptedOutputs()[stackName("control-plane")]!.ApiEndpoint);
+    // The runtime part is only the EC2 worker settings (#117): no AgentCore callback URL or capacity provider.
     const runtimeRequest = requests.find((request) => request.part === "runtime")!;
-    expect(runtimeRequest.parameters.ControlPlaneUrl).toBe(scriptedOutputs()[stackName("control-plane")]!.ApiEndpoint);
+    expect(runtimeRequest.parameters).not.toHaveProperty("ControlPlaneUrl");
+    expect(runtimeRequest.parameters).not.toHaveProperty("CapacityProviderArn");
 
     for (const request of requests) {
       expect(request.terminationProtection).toBe(PROTECTED_PARTS.has(request.part));
@@ -249,10 +253,10 @@ describe("deploy environment", () => {
     });
 
     // Upgrade order deploys runtime before control-plane (unlike install order); both requested parts
-    // are deployed, in that order, even though runtime's own parameters need control-plane's output.
+    // are deployed, in that order, and control-plane's parameters come from the foundation it does not deploy.
     expect(upgrade.requests.map((request) => request.part)).toEqual(["runtime", "control-plane"]);
-    const runtimeRequest = upgrade.requests.find((request) => request.part === "runtime")!;
-    expect(runtimeRequest.parameters.ControlPlaneUrl).toBe(scriptedOutputs()[stackName("control-plane")]!.ApiEndpoint);
+    const controlPlaneRequest = upgrade.requests.find((request) => request.part === "control-plane")!;
+    expect(controlPlaneRequest.parameters.PrivateSubnetIds).toBe(scriptedOutputs()[stackName("foundation")]!.PrivateSubnetIds);
     // access, foundation, identity and slack are not deployed this run: their outputs come from the existing stacks.
     expect(upgrade.outputCalls).toEqual(expect.arrayContaining([stackName("access"), stackName("foundation"), stackName("identity"), stackName("slack")]));
     expect(result.outputs.access).toEqual(scriptedOutputs()[stackName("access")]);
@@ -412,7 +416,7 @@ describe("deploy environment", () => {
       expect.arrayContaining([stackName("access"), stackName("foundation"), stackName("identity"), stackName("control-plane"), stackName("slack")]),
     );
     const runtimeRequest = resume.requests[0]!;
-    expect(runtimeRequest.parameters.CapacityProviderArn).toBe(scriptedOutputs()[stackName("foundation")]!.CapacityProviderArn);
+    expect(runtimeRequest.parameters.WorkerImageUri).toContain(scriptedOutputs()[stackName("access")]!.PullThroughPrefix);
     expect(runtimeRequest.roleArn).toBe(scriptedOutputs()[stackName("access")]!.CloudFormationRoleArn);
     expect(result.settingsWritten).toBe(true);
   });

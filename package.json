@@ -27,6 +27,7 @@
     "release:demo": "tsx scripts/release-demo.ts",
     "release:prod": "tsx scripts/release-production.ts",
     "session:e2e": "tsx scripts/session-e2e.ts",
+    "drain:agentcore": "tsx scripts/close-agentcore-workspaces.ts",
     "release:build": "tsx scripts/release/build.ts",
     "release:verify": "tsx scripts/release/verify.ts",
     "release:pack-cli": "tsx scripts/release/pack-cli.ts",
