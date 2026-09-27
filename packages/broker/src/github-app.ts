@@ -4,9 +4,7 @@ import type { RepositoryAccess, RepositoryCredential } from "./repository-access
 
 export interface GitHubAppCredentialProviderOptions {
   credentialRef: string;
-  account: string;
   appId: string;
-  installationId: string;
   getPrivateKey: () => Promise<string>;
   fetchImplementation?: typeof fetch;
   now?: () => number;
@@ -44,18 +42,26 @@ export interface GitHubPullRequestUpdate {
   state?: "open" | "closed";
 }
 
+/** A repository the App can reach: its installation, and the owner as GitHub spells it. */
+interface InstalledRepository {
+  owner: string;
+  name: string;
+  installationId: number;
+}
+
+/**
+ * Credentials from one GitHub App for repositories in every account it is installed on (#123).
+ * Each repository's installation is looked up by its owner and cached for the process's
+ * lifetime. There is no account allowlist: only administrators register repositories, and an
+ * installation's token reaches only that installation's repositories.
+ */
 export class GitHubAppCredentialProvider {
   private readonly fetchImplementation: typeof fetch;
   private readonly now: () => number;
+  private readonly installations = new Map<string, Promise<{ id: number; login: string }>>();
 
   constructor(private readonly options: GitHubAppCredentialProviderOptions) {
     if (!/^[1-9][0-9]*$/.test(options.appId)) throw new Error("GitHub App ID must be numeric");
-    if (!/^[1-9][0-9]*$/.test(options.installationId)) {
-      throw new Error("GitHub App installation ID must be numeric");
-    }
-    if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(options.account)) {
-      throw new Error("GitHub App account is invalid");
-    }
     this.fetchImplementation = options.fetchImplementation ?? fetch;
     this.now = options.now ?? Date.now;
   }
@@ -66,11 +72,16 @@ export class GitHubAppCredentialProvider {
     access: RepositoryAccess = "clone",
   ): Promise<RepositoryCredential> {
     if (credentialRef !== this.options.credentialRef) return {};
-    const repository = parseGitHubRepository(repositoryUrl, this.options.account);
-    const token = await this.createInstallationToken(repository.name, {
+    const token = await this.createInstallationToken(parseGitHubRepository(repositoryUrl), {
       contents: access === "push" ? "write" : "read",
     });
     return { username: "x-access-token", password: token };
+  }
+
+  /** Refuses, with CONFIG_INVALID, a repository of this App's credential that the App cannot reach. */
+  async checkRepository(repository: { credentialRef: string; url: string }): Promise<void> {
+    if (repository.credentialRef !== this.options.credentialRef) return;
+    await this.installed(parseGitHubRepository(repository.url));
   }
 
   async issueCredentials(
@@ -80,26 +91,27 @@ export class GitHubAppCredentialProvider {
     if (repository.credentialRef !== this.options.credentialRef) {
       throw agentXError("FORBIDDEN", "repository does not use the configured GitHub App");
     }
-    const parsed = parseGitHubRepository(repository.url, this.options.account);
-    const token = await this.createInstallationToken(parsed.name, { issues: access });
-    return { owner: this.options.account, repo: parsed.name, token };
+    const parsed = parseGitHubRepository(repository.url);
+    const installed = await this.installed(parsed);
+    const token = await this.createInstallationToken(parsed, { issues: access });
+    return { owner: installed.owner, repo: parsed.name, token };
   }
 
   async reconcilePullRequest(input: GitHubPullRequestInput): Promise<GitHubPullRequestResult> {
-    const repository = parseGitHubRepository(input.repositoryUrl, this.options.account);
+    const repository = await this.installed(parseGitHubRepository(input.repositoryUrl));
     // GitHub's pull-request endpoint needs to resolve the private repository's
     // base and head refs. Keep the token repository-scoped, but allow it to
     // read those refs in addition to creating the pull request.
-    const token = await this.createInstallationToken(repository.name, {
+    const token = await this.createInstallationToken(repository, {
       contents: "read",
       pull_requests: "write",
     });
-    const existing = await this.findOpenPullRequest(repository.name, input, token);
+    const existing = await this.findOpenPullRequest(repository, input, token);
     if (existing) return { ...existing, reconciled: true };
 
     try {
       const response = await this.fetchImplementation(
-        `https://api.github.com/repos/${encodeURIComponent(this.options.account)}/${encodeURIComponent(repository.name)}/pulls`,
+        `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/pulls`,
         {
           method: "POST",
           headers: githubHeaders(token),
@@ -111,25 +123,25 @@ export class GitHubAppCredentialProvider {
           }),
         },
       );
-      if (response.ok) return { ...parsePullRequest(await response.json(), this.options.account, repository.name), reconciled: false };
-      const afterFailure = await this.findOpenPullRequest(repository.name, input, token);
+      if (response.ok) return { ...parsePullRequest(await response.json(), repository), reconciled: false };
+      const afterFailure = await this.findOpenPullRequest(repository, input, token);
       if (afterFailure) return { ...afterFailure, reconciled: true };
       throw agentXError("RUNTIME_UNAVAILABLE", `GitHub pull request creation failed with HTTP ${response.status}`);
     } catch (error) {
       if (isAgentXError(error)) throw error;
-      const afterFailure = await this.findOpenPullRequest(repository.name, input, token);
+      const afterFailure = await this.findOpenPullRequest(repository, input, token);
       if (afterFailure) return { ...afterFailure, reconciled: true };
       throw agentXError("RUNTIME_UNAVAILABLE", "GitHub pull request creation outcome is unknown");
     }
   }
 
   async getPullRequest(repositoryUrl: string, number: number): Promise<GitHubPullRequestDetails> {
-    const repository = parseGitHubRepository(repositoryUrl, this.options.account);
-    const token = await this.createInstallationToken(repository.name, {
+    const repository = await this.installed(parseGitHubRepository(repositoryUrl));
+    const token = await this.createInstallationToken(repository, {
       contents: "read",
       pull_requests: "read",
     });
-    return this.getPullRequestWithToken(repository.name, number, token);
+    return this.getPullRequestWithToken(repository, number, token);
   }
 
   async updatePullRequest(
@@ -140,14 +152,14 @@ export class GitHubAppCredentialProvider {
     if (update.title === undefined && update.body === undefined && update.state === undefined) {
       throw agentXError("CONFIG_INVALID", "pull request update is empty");
     }
-    const repository = parseGitHubRepository(repositoryUrl, this.options.account);
-    const token = await this.createInstallationToken(repository.name, {
+    const repository = await this.installed(parseGitHubRepository(repositoryUrl));
+    const token = await this.createInstallationToken(repository, {
       contents: "read",
       pull_requests: "write",
     });
     try {
       const response = await this.fetchImplementation(
-        pullRequestUrl(this.options.account, repository.name, number),
+        pullRequestUrl(repository, number),
         {
           method: "PATCH",
           headers: githubHeaders(token),
@@ -155,59 +167,113 @@ export class GitHubAppCredentialProvider {
         },
       );
       if (response.ok) {
-        return parsePullRequestDetails(await response.json(), this.options.account, repository.name);
+        return parsePullRequestDetails(await response.json(), repository);
       }
-      const reconciled = await this.getPullRequestWithToken(repository.name, number, token);
+      const reconciled = await this.getPullRequestWithToken(repository, number, token);
       if (matchesUpdate(reconciled, update)) return reconciled;
       throw agentXError("RUNTIME_UNAVAILABLE", `GitHub pull request update failed with HTTP ${response.status}`);
     } catch (error) {
       if (isAgentXError(error)) throw error;
-      const reconciled = await this.getPullRequestWithToken(repository.name, number, token).catch(() => undefined);
+      const reconciled = await this.getPullRequestWithToken(repository, number, token).catch(() => undefined);
       if (reconciled && matchesUpdate(reconciled, update)) return reconciled;
       throw agentXError("RUNTIME_UNAVAILABLE", "GitHub pull request update outcome is unknown");
     }
   }
 
   private async getPullRequestWithToken(
-    repositoryName: string,
+    repository: InstalledRepository,
     number: number,
     token: string,
   ): Promise<GitHubPullRequestDetails> {
     const response = await this.fetchImplementation(
-      pullRequestUrl(this.options.account, repositoryName, number),
+      pullRequestUrl(repository, number),
       { headers: githubHeaders(token) },
     );
     if (!response.ok) {
       throw agentXError("RUNTIME_UNAVAILABLE", `GitHub pull request lookup failed with HTTP ${response.status}`);
     }
-    return parsePullRequestDetails(await response.json(), this.options.account, repositoryName);
+    return parsePullRequestDetails(await response.json(), repository);
   }
 
-  private async createInstallationToken(
-    repositoryName: string,
-    permissions: Record<string, "read" | "write">,
-  ): Promise<string> {
+  /** The repository's installation, cached by owner; a failed lookup is not cached. */
+  private async installed(repository: { owner: string; name: string }): Promise<InstalledRepository> {
+    const key = repository.owner.toLowerCase();
+    let installation = this.installations.get(key);
+    if (installation === undefined) {
+      installation = this.lookUpInstallation(repository);
+      this.installations.set(key, installation);
+      const pending = installation;
+      pending.catch(() => {
+        if (this.installations.get(key) === pending) this.installations.delete(key);
+      });
+    }
+    const { id, login } = await installation;
+    return { owner: login, name: repository.name, installationId: id };
+  }
+
+  private async lookUpInstallation(repository: { owner: string; name: string }): Promise<{ id: number; login: string }> {
+    const response = await this.fetchImplementation(
+      `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/installation`,
+      { headers: await this.appHeaders(), signal: AbortSignal.timeout(5_000), redirect: "error" },
+    );
+    if (response.status === 404) {
+      throw agentXError(
+        "CONFIG_INVALID",
+        `the GitHub App cannot access ${repository.owner}/${repository.name}; install it on ${repository.owner} with access to that repository`,
+      );
+    }
+    if (!response.ok) {
+      throw agentXError("RUNTIME_UNAVAILABLE", `GitHub App installation lookup failed with HTTP ${response.status}`);
+    }
+    const body: unknown = await response.json();
+    const id = body && typeof body === "object" && "id" in body ? body.id : undefined;
+    const account = body && typeof body === "object" && "account" in body ? body.account : undefined;
+    const login = account && typeof account === "object" && "login" in account ? account.login : undefined;
+    if (!Number.isSafeInteger(id) || (id as number) < 1 || typeof login !== "string" || login.toLowerCase() !== repository.owner.toLowerCase()) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid installation response");
+    }
+    return { id: id as number, login };
+  }
+
+  private async appHeaders(): Promise<Record<string, string>> {
     const privateKey = await this.options.getPrivateKey();
     const jwt = createGitHubAppJwt(this.options.appId, privateKey, this.now());
+    return {
+      accept: "application/vnd.github+json",
+      authorization: `Bearer ${jwt}`,
+      "content-type": "application/json",
+      "user-agent": "agentx-control-plane",
+      "x-github-api-version": "2022-11-28",
+    };
+  }
+
+  /**
+   * A token for one repository. When the cached installation is gone (the App was uninstalled
+   * and installed again, which gives it a new ID), the installation is looked up once more.
+   */
+  private async createInstallationToken(
+    repository: { owner: string; name: string },
+    permissions: Record<string, "read" | "write">,
+    retried = false,
+  ): Promise<string> {
+    const installed = await this.installed(repository);
     const response = await this.fetchImplementation(
-      `https://api.github.com/app/installations/${this.options.installationId}/access_tokens`,
+      `https://api.github.com/app/installations/${installed.installationId}/access_tokens`,
       {
         method: "POST",
-        headers: {
-          accept: "application/vnd.github+json",
-          authorization: `Bearer ${jwt}`,
-          "content-type": "application/json",
-          "user-agent": "agentx-control-plane",
-          "x-github-api-version": "2022-11-28",
-        },
+        headers: await this.appHeaders(),
         body: JSON.stringify({
-          repositories: [repositoryName],
+          repositories: [installed.name],
           permissions,
         }),
         signal: AbortSignal.timeout(5_000),
         redirect: "error",
       },
     );
+    if (response.status === 404 && !retried) {
+      this.installations.delete(installed.owner.toLowerCase());
+      return this.createInstallationToken(repository, permissions, true);
+    }
     if (!response.ok) {
       throw agentXError(
         "RUNTIME_UNAVAILABLE",
@@ -222,18 +288,18 @@ export class GitHubAppCredentialProvider {
   }
 
   private async findOpenPullRequest(
-    repositoryName: string,
+    repository: InstalledRepository,
     input: GitHubPullRequestInput,
     token: string,
   ): Promise<Omit<GitHubPullRequestResult, "reconciled"> | undefined> {
     const query = new URLSearchParams({
       state: "open",
-      head: `${this.options.account}:${input.headBranch}`,
+      head: `${repository.owner}:${input.headBranch}`,
       base: input.baseBranch,
       per_page: "2",
     });
     const response = await this.fetchImplementation(
-      `https://api.github.com/repos/${encodeURIComponent(this.options.account)}/${encodeURIComponent(repositoryName)}/pulls?${query.toString()}`,
+      `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/pulls?${query.toString()}`,
       { headers: githubHeaders(token) },
     );
     if (!response.ok) {
@@ -244,13 +310,13 @@ export class GitHubAppCredentialProvider {
       throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid pull request response");
     }
     if (value.length === 0) return undefined;
-    return parsePullRequest(value[0], this.options.account, repositoryName);
+    return parsePullRequest(value[0], repository);
   }
 }
 
-function pullRequestUrl(account: string, repositoryName: string, number: number): string {
+function pullRequestUrl(repository: InstalledRepository, number: number): string {
   if (!Number.isInteger(number) || number < 1) throw agentXError("CONFIG_INVALID", "pull request number is invalid");
-  return `https://api.github.com/repos/${encodeURIComponent(account)}/${encodeURIComponent(repositoryName)}/pulls/${number}`;
+  return `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/pulls/${number}`;
 }
 
 function matchesUpdate(details: GitHubPullRequestDetails, update: GitHubPullRequestUpdate): boolean {
@@ -271,8 +337,7 @@ function githubHeaders(token: string): Record<string, string> {
 
 function parsePullRequest(
   value: unknown,
-  account: string,
-  repositoryName: string,
+  repository: InstalledRepository,
 ): Omit<GitHubPullRequestResult, "reconciled"> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid pull request response");
@@ -281,7 +346,7 @@ function parsePullRequest(
   if (!Number.isInteger(candidate.number) || (candidate.number as number) < 1 || typeof candidate.html_url !== "string") {
     throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid pull request response");
   }
-  const expected = `https://github.com/${account}/${repositoryName}/pull/${String(candidate.number)}`;
+  const expected = `https://github.com/${repository.owner}/${repository.name}/pull/${String(candidate.number)}`;
   if (candidate.html_url !== expected) {
     throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned a non-canonical pull request URL");
   }
@@ -290,10 +355,9 @@ function parsePullRequest(
 
 function parsePullRequestDetails(
   value: unknown,
-  account: string,
-  repositoryName: string,
+  repository: InstalledRepository,
 ): GitHubPullRequestDetails {
-  const basic = parsePullRequest(value, account, repositoryName);
+  const basic = parsePullRequest(value, repository);
   const candidate = value as Record<string, unknown>;
   const head = candidate.head;
   const base = candidate.base;
@@ -360,7 +424,7 @@ export function privateKeyFromSecret(secret: string): string {
   throw agentXError("RUNTIME_UNAVAILABLE", "GitHub App private-key secret is not a PEM key");
 }
 
-function parseGitHubRepository(repositoryUrl: string, expectedAccount: string): { name: string } {
+function parseGitHubRepository(repositoryUrl: string): { owner: string; name: string } {
   let url: URL;
   try {
     url = new URL(repositoryUrl);
@@ -384,13 +448,14 @@ function parseGitHubRepository(repositoryUrl: string, expectedAccount: string): 
   const [owner, rawName] = segments;
   const name = rawName?.endsWith(".git") ? rawName.slice(0, -4) : rawName;
   if (
-    owner?.toLowerCase() !== expectedAccount.toLowerCase() ||
+    !owner ||
+    !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(owner) ||
     !name ||
     !/^[A-Za-z0-9_.-]{1,100}$/.test(name)
   ) {
-    throw agentXError("FORBIDDEN", "repository is outside the configured GitHub App account");
+    throw agentXError("CONFIG_INVALID", "credentialed repository must be a canonical GitHub HTTPS URL");
   }
-  return { name };
+  return { owner, name };
 }
 
 function base64urlJson(value: unknown): string {

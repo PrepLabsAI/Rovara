@@ -77,9 +77,7 @@ function markerAnswers(answers: DeployAnswers, release: LoadedRelease): InstallA
     release: release.manifest,
     callbackSigningKey: `{{secret:${callbackSigningKeySecretName(answers.env)}}}`,
     github: {
-      account: githubMarker("account"),
       appId: githubMarker("appId"),
-      installationId: githubMarker("installationId"),
       privateKeySecretArn: githubMarker("privateKeySecretArn"),
     },
   };

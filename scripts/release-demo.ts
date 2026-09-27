@@ -589,9 +589,7 @@ function controlPlaneParameterDefinitions(): Array<{ parameter: string; environm
     { parameter: "AdminValues", environment: "AGENTX_ADMIN_VALUES" },
     { parameter: "CallbackSigningKey", environment: "AGENTX_CALLBACK_SIGNING_KEY" },
     { parameter: "GitHubAppCredentialRef", environment: "AGENTX_GITHUB_APP_CREDENTIAL_REF" },
-    { parameter: "GitHubAppAccount", environment: "AGENTX_GITHUB_ACCOUNT" },
     { parameter: "GitHubAppId", environment: "AGENTX_GITHUB_APP_ID" },
-    { parameter: "GitHubAppInstallationId", environment: "AGENTX_GITHUB_INSTALLATION_ID" },
     { parameter: "GitHubAppPrivateKeySecretArn", environment: "AGENTX_GITHUB_PRIVATE_KEY_SECRET_ARN" },
   ];
 }
