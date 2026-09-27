@@ -1,5 +1,5 @@
 // Shared fakes for `agentx init` tests. Nothing here reaches AWS, GitHub or Slack.
-import { generateKeyPairSync, randomBytes } from "node:crypto";
+import { createHmac, generateKeyPairSync, randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { environmentStackName, type ReleaseManifest } from "@agentx/contracts";
@@ -12,6 +12,7 @@ import type { GitHubApi } from "../../packages/cli/src/init/github-app.js";
 import { emptyProgress, type InitAnswers, type InstallProgress } from "../../packages/cli/src/init/install-state.js";
 import type { PrerequisiteChecks } from "../../packages/cli/src/init/prerequisites.js";
 import type { Prompter } from "../../packages/cli/src/init/prompts.js";
+import type { SlackApi } from "../../packages/cli/src/init/slack-app.js";
 import type { ProgressHandle } from "../../packages/cli/src/init/steps.js";
 import { MemoryParameterStore } from "./memory-parameter-store.js";
 
@@ -225,14 +226,14 @@ export const TEST_PUBLIC_KEY = TEST_KEYS.publicKey;
 export function fakeGitHubApi(input: { owner?: string; ownerType?: string; installAfterPolls?: number; repositoryCounts?: number[]; installationId?: number; tokenExpiresAt?: number } = {}): GitHubApi & { conversions: string[]; polls: () => number; tokens: () => number } {
   const conversions: string[] = [];
   let polls = 0;
-  const counts = [...(input.repositoryCounts ?? [1])];
   let tokens = 0;
+  const counts = [...(input.repositoryCounts ?? [1])];
   const owner = { login: input.owner ?? "acme", type: input.ownerType ?? "Organization" };
   return {
     conversions,
     polls: () => polls,
-    async convertManifest(code) { conversions.push(code); return { id: 424242, slug: "agentx-acme-staging", pem: TEST_PRIVATE_KEY, owner }; },
     tokens: () => tokens,
+    async convertManifest(code) { conversions.push(code); return { id: 424242, slug: "agentx-acme-staging", pem: TEST_PRIVATE_KEY, owner }; },
     async getApp() { return { slug: "agentx-acme-staging", owner }; },
     async listInstallations() { polls += 1; return polls > (input.installAfterPolls ?? 0) ? [{ id: input.installationId ?? 777, account: { login: owner.login } }] : []; },
     async installationToken() { tokens += 1; return { token: "ghs_installation-token-value", expiresAt: input.tokenExpiresAt ?? T0 + 60 * 60 * 1000 }; },
@@ -249,4 +250,40 @@ export function browserThatCreatesGitHubApp(opened: string[], code = "0123456789
     const state = /[?&]state=([a-f0-9]+)/.exec(page)?.[1];
     await fetch(`${url.replace("/github/start", "/github/created")}?code=${code}&state=${state ?? "missing"}`);
   };
+}
+
+// ---- Slack fakes (Task 9) ------------------------------------------------------------------------
+
+export const TEST_BOT_TOKEN = "xoxb-1111-2222-SECRETbotTOKENvalue";
+export const TEST_SIGNING_SECRET = "0123456789abcdef0123456789abcdef";
+
+export function fakeSlackApi(overrides: Partial<SlackApi> = {}): SlackApi {
+  return {
+    authTest: async () => ({ ok: true, user_id: "U0BOT", bot_id: "B0BOT", team_id: "T0TEAM" }),
+    botsInfo: async () => ({ ok: true, bot: { app_id: "A0APP" } }),
+    ...overrides,
+  };
+}
+
+function requestUrl(input: Parameters<typeof fetch>[0]): string {
+  return typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+}
+
+/** Plays the control plane's Slack ingress: verifies the signature like validSignature does, answers 401 for the first `staleFor` calls (the cached old secret), then echoes challenges. */
+export function slackIngressFetch(input: { signingSecret: string; staleFor?: number }): typeof fetch & { calls: string[] } {
+  let seen = 0;
+  const calls: string[] = [];
+  const handler = async (url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const target = requestUrl(url);
+    calls.push(target);
+    seen += 1;
+    const headers = new Headers(init?.headers);
+    const body = typeof init?.body === "string" ? init.body : "";
+    const timestamp = headers.get("x-slack-request-timestamp") ?? "";
+    const expected = `v0=${createHmac("sha256", input.signingSecret).update(`v0:${timestamp}:${body}`).digest("hex")}`;
+    if (seen <= (input.staleFor ?? 0) || headers.get("x-slack-signature") !== expected) return new Response(JSON.stringify({ error: "invalid Slack signature" }), { status: 401 });
+    if (target.endsWith("/events")) return new Response(JSON.stringify({ challenge: (JSON.parse(body) as { challenge: string }).challenge }), { status: 200 });
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  };
+  return Object.assign(handler, { calls });
 }
