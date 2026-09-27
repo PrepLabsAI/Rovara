@@ -9,6 +9,7 @@
 #   ./run-probe.sh results     read the slow phase log
 #   ./run-probe.sh status      show what exists
 #   ./run-probe.sh down        delete everything and verify nothing survives
+#   ./run-probe.sh down <cp-id>  same, for a probe whose state file was lost
 #
 # State lives in .probe-state next to this script, so steps resume in a new shell.
 
@@ -199,26 +200,74 @@ cmd_status() {
 
 cmd_down() {
   load
+  # An explicit id recovers a probe whose state file is gone: read it from the instance tag
+  # `bedrock-agentcore:capacity-provider-id` in the EC2 console or describe-instances output.
+  if [ -n "${1:-}" ]; then
+    PROBE_CP_ID="$1"
+    info "using capacity provider $PROBE_CP_ID from the command line"
+  fi
   say "Tearing down"
-  # Runtimes must go before their capacity provider, or the delete is rejected.
+  local failed=0
+
+  # Runtimes must go before their capacity provider, and delete-agent-runtime is asynchronous,
+  # so the capacity provider delete is retried until the disassociation propagates.
   if [ -n "${PROBE_RT_ID:-}" ]; then
-    aws bedrock-agentcore-control delete-agent-runtime --region "$REGION" \
-      --agent-runtime-id "$PROBE_RT_ID" >/dev/null 2>&1 && info "runtime deleted" || info "runtime already gone"
+    if aws bedrock-agentcore-control delete-agent-runtime --region "$REGION" \
+         --agent-runtime-id "$PROBE_RT_ID" >/dev/null 2>"$HERE/.del-rt.txt"; then
+      info "runtime deleted"
+    elif grep -q 'ResourceNotFound' "$HERE/.del-rt.txt" 2>/dev/null; then
+      info "runtime already gone"
+    else
+      info "runtime delete FAILED: $(head -c 200 "$HERE/.del-rt.txt")"
+      failed=1
+    fi
+    rm -f "$HERE/.del-rt.txt"
   fi
+
   if [ -n "${PROBE_CP_ID:-}" ]; then
-    aws bedrock-agentcore-control delete-capacity-provider --region "$REGION" \
-      --capacity-provider-id "$PROBE_CP_ID" >/dev/null 2>&1 && info "capacity provider deleted (with its sessions and volumes)" || info "capacity provider already gone"
+    local deadline=$((SECONDS + 300)) done=0
+    while [ "$SECONDS" -lt "$deadline" ]; do
+      if aws bedrock-agentcore-control delete-capacity-provider --region "$REGION" \
+           --capacity-provider-id "$PROBE_CP_ID" >/dev/null 2>"$HERE/.del-cp.txt"; then
+        info "capacity provider deleted (with its sessions and volumes)"; done=1; break
+      fi
+      if grep -q 'ResourceNotFound' "$HERE/.del-cp.txt" 2>/dev/null; then
+        info "capacity provider already gone"; done=1; break
+      fi
+      info "capacity provider not deletable yet, retrying: $(head -c 120 "$HERE/.del-cp.txt")"
+      sleep 20
+    done
+    rm -f "$HERE/.del-cp.txt"
+    if [ "$done" -eq 0 ]; then
+      info "capacity provider delete FAILED after 5 minutes"
+      failed=1
+    fi
   fi
+
   aws ecr delete-repository --region "$REGION" --repository-name "$ECR_REPO" --force >/dev/null 2>&1 \
     && info "ECR repository deleted" || info "ECR repository already gone"
 
-  say "Verifying (deletion is asynchronous; give it a minute)"
-  sleep 45
-  info "Any instance below tagged with ${PROBE_CP_ID:-the probe} should disappear shortly."
-  aws ec2 describe-instances --region "$REGION" --include-managed-resources \
-    --filters "Name=tag-key,Values=bedrock-agentcore:capacity-provider-id" \
-    --query "Reservations[].Instances[?State.Name!='terminated'].[InstanceId,State.Name,Tags[?Key=='bedrock-agentcore:capacity-provider-id']|[0].Value]" \
-    --output table 2>/dev/null || true
+  say "Verifying (deletion is asynchronous)"
+  local deadline=$((SECONDS + 300)) remaining=""
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    remaining=$(aws ec2 describe-instances --region "$REGION" --include-managed-resources \
+      --filters "Name=tag-key,Values=bedrock-agentcore:capacity-provider-id" \
+      --query "Reservations[].Instances[?State.Name!='terminated' && State.Name!='shutting-down'].[InstanceId,State.Name,Tags[?Key=='bedrock-agentcore:capacity-provider-id']|[0].Value]" \
+      --output text 2>/dev/null | grep -F "${PROBE_CP_ID:-__none__}" || true)
+    [ -z "$remaining" ] && break
+    info "still running: $remaining"
+    sleep 20
+  done
+
+  if [ -n "$remaining" ]; then
+    printf '\n\033[31mNOT CLEAN: instances tagged %s are still running:\033[0m\n%s\n' "${PROBE_CP_ID:-?}" "$remaining"
+    info "State has been KEPT so you can retry: ./run-probe.sh down"
+    exit 1
+  fi
+
+  info "no probe instances remain"
+  [ "$failed" -eq 0 ] || { info "State KEPT because a delete failed. Retry: ./run-probe.sh down"; exit 1; }
+
   rm -f "$HERE"/.probe-state "$HERE"/.prod-cp.json "$HERE"/.probe-cp*.json "$HERE"/.probe-rt.json \
         "$HERE"/.payload.json "$HERE"/.response.json "$HERE"/.invoke-*.json "$HERE"/.invoke-error.txt \
         "$HERE"/.probe-cp-error.txt
@@ -232,6 +281,6 @@ case "${1:-}" in
   full)      cmd_full ;;
   results)   cmd_results ;;
   status)    cmd_status ;;
-  down)      cmd_down ;;
+  down)      shift || true; cmd_down "${1:-}" ;;
   *)         sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' ;;
 esac
