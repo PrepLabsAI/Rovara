@@ -39,6 +39,7 @@ export interface SessionLifecycleProps {
  * cross-stack export on the manually deployed foundation.
  */
 export class SessionLifecycle extends Construct {
+  readonly instanceRoleName: string;
   readonly provisioner: sfn.StateMachine;
   readonly deleter: sfn.StateMachine;
   readonly steps: lambda.Function;
@@ -63,6 +64,9 @@ export class SessionLifecycle extends Construct {
     this.privateSubnetIds = privateSubnetIds;
     const workspaceKmsKeyArn = parameter("WorkspaceKmsKeyArn", "The foundation's workspace volume KMS key");
     const instanceRoleArn = parameter("Ec2WorkerInstanceRoleArn", "The EC2 workers' instance role");
+    // Foundation roles use / for legacy deployments and /agentx/<env>/ for named environments.
+    // IAM inline-policy attachments require the name, without the role's path.
+    this.instanceRoleName = Fn.select(naming.env === undefined ? 1 : 3, Fn.split("/", instanceRoleArn.valueAsString));
     const launchTemplateId = parameter("Ec2WorkerLaunchTemplateId", "The EC2 workers' launch template");
 
     const settingParameterArns = Object.values(WORKER_SETTING_PARAMETERS).map((name) =>

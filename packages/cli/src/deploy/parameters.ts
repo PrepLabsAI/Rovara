@@ -189,7 +189,6 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
       return { ...base, OperatorPrincipalArn: answers.operatorPrincipalArn ?? "" };
 
     case "foundation":
-      return { ...base, ...secret };
     case "identity":
       return base;
 

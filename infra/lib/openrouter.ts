@@ -12,11 +12,11 @@ export function openRouterParameters(scope: Construct) {
   return { secretArn };
 }
 
-export function grantOpenRouterSecret(scope: Construct, role: iam.Role): void {
+export function grantOpenRouterSecret(scope: Construct, roleNames: string[]): void {
   const { secretArn } = openRouterParameters(scope);
   const enabled = new CfnCondition(scope, "OpenRouterEnabled", { expression: Fn.conditionNot(Fn.conditionEquals(secretArn.valueAsString, "")) });
   const policy = new iam.CfnPolicy(scope, "OpenRouterSecretRead", {
-    policyName: "OpenRouterSecretRead", roles: [role.roleName],
+    policyName: "OpenRouterSecretRead", roles: roleNames,
     policyDocument: { Version: "2012-10-17", Statement: [{ Effect: "Allow", Action: "secretsmanager:GetSecretValue", Resource: secretArn.valueAsString }] },
   });
   policy.cfnOptions.condition = enabled;

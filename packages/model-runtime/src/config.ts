@@ -31,9 +31,10 @@ export async function readOpenRouterKey(arn: string, readSecret?: (arn: string) 
       try { return (await client.send(new GetSecretValueCommand({ SecretId: id }))).SecretString; }
       finally { client.destroy(); }
     }))(arn);
-    if (!value?.trim()) throw new MissingOpenRouterSecret();
-    if (/[\r\n]/.test(value) || value.trim().length < 10) throw new Error("invalid key");
-    return value.trim();
+    const key = value?.trim();
+    if (!key) throw new MissingOpenRouterSecret();
+    if (/[\r\n]/.test(key) || key.length < 10) throw new Error("invalid key");
+    return key;
   } catch (error) {
     if (error instanceof MissingOpenRouterSecret || (error instanceof Error && error.name === "ResourceNotFoundException")) throw new MissingOpenRouterSecret();
     throw agentXError("RUNTIME_UNAVAILABLE", "OpenRouter credential could not be loaded; check the secret value and read permissions");

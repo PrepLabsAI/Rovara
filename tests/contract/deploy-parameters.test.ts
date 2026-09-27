@@ -58,7 +58,8 @@ describe("deploy parameters", () => {
     const configured = answers();
     configured.models.providers = { orchestrator: "openrouter", classifier: "amazon-bedrock", worker: "openrouter" };
     configured.models.openRouter = { secretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:openrouter-AbCdEf", providers: ["anthropic"] };
-    for (const part of ["foundation", "control-plane", "runtime", "slack"] as const) {
+    expect(stackParameters("foundation", configured, outputs)).not.toHaveProperty("OpenRouterSecretArn");
+    for (const part of ["control-plane", "runtime", "slack"] as const) {
       const params = stackParameters(part, configured, outputs);
       expect(params.OpenRouterSecretArn).toBe(configured.models.openRouter.secretArn);
       expect(Object.keys(params).filter((name) => !(name in templates.get(part)!.Parameters!))).toEqual([]);

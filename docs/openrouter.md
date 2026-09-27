@@ -9,7 +9,7 @@ Slack orchestrator, and action-gate classifier have independent defaults.
 Create a Secrets Manager secret containing the **raw OpenRouter API key**, not a JSON object.
 Use the AWS-managed Secrets Manager encryption key. Customer-managed encryption keys require
 an additional administrator-managed `kms:Decrypt` grant and key policy; AgentX does not add
-that grant. Use a key with an appropriate credit limit for your installation.
+that grant. Use a dedicated key for each installation and require a hard spending limit on that key before enabling OpenRouter. The $5 smoke-test cap is an example, not a production default.
 
 For `agentx init`, add these flags to your normal installation arguments:
 
@@ -52,11 +52,20 @@ Init checks the pinned Pi catalog, current OpenRouter model availability, tool s
 small completion (up to 16 output tokens). This check can incur an OpenRouter charge. OpenRouter
 roles with a usable secret do not run the Bedrock inference check. If the ARN or secret value is missing, init checks and reports the default Bedrock model instead. AWS hosting prerequisites are still checked.
 
-CloudFormation's `OpenRouterSecretArn` is passed to foundation, control-plane, worker-settings
-(`runtime`), and Slack stacks. `OpenRouterProviders` configures worker-settings and Slack routing.
+CloudFormation's `OpenRouterSecretArn` is passed to control-plane, worker-settings (`runtime`),
+and Slack stacks. The control plane owns the read policy for both the worker instance role
+(using the foundation's existing role ARN output) and the Slack task role. The protected
+foundation template has no OpenRouter settings or policies. `OpenRouterProviders` configures worker-settings and Slack routing.
 The Slack stack also accepts `GateClassifierProvider`, independently of `ModelProvider` and
-`GateClassifierModelId`. Direct CDK deployments must set the same secret reference in all four
+`GateClassifierModelId`. Direct CDK deployments must set the same secret reference in all three
 stacks. Do not use a CloudFormation dynamic reference that substitutes the actual secret value.
+
+For manual change sets, compare `OpenRouterSecretArn` in the control-plane, runtime, and Slack
+stack parameters before enabling models or rotating to a different ARN. `agentx deploy` supplies
+the same reference to all three; independently edited change sets can drift. A grant/configuration
+mismatch causes `AccessDenied` and is deliberately not treated as a missing secret. Repair the
+mismatched parameter and redeploy/restart the affected service. A single authoritative reference
+for manual deployments is not implemented in this release.
 
 Only the worker instance role and hosted Slack task role receive `GetSecretValue` for that ARN.
 Boot user data and the root-owned container environment file contain the ARN, never the key.
@@ -64,6 +73,20 @@ Pi receives the resolved key in an in-memory credential store. Worker sessions r
 opened; the long-lived classifier resolves it at service startup, so restart Slack tasks after
 rotating its key. Existing EC2 workers need to be stopped/resumed to receive changed boot settings.
 Deploy all stacks before enabling OpenRouter project choices.
+
+## Workspace credential exposure
+
+The worker instance role can read the OpenRouter secret. For projects running directly in the
+worker container, shell commands and dependency install scripts can reach IMDS over the host
+network, obtain that role's credentials, and call Secrets Manager themselves. The in-memory
+credential store prevents Pi from writing an auth file; it does **not** isolate the key from code
+executed in the workspace. A copied OpenRouter key can be used outside AWS.
+
+Use only trusted projects/dependencies with this mode, keep a dedicated key with a hard spending
+limit, monitor provider usage, and revoke/rotate it if exposure is suspected. Do not rely on a
+devcontainer as the credential security boundary. Stronger protection requires an inference proxy
+outside the worker that holds/injects the key, plus removal of the worker's secret-read permission
+and controls preventing bypass. That proxy is not included in this change.
 
 ## Select a coding model from Slack
 
@@ -122,7 +145,7 @@ They do not establish connectivity, billing, or live upstream compatibility.
 
 1. Choose a test environment, a secret reference, supported model IDs for all three roles, and
    a spending limit. Set a key credit limit in OpenRouter before running the test.
-2. Deploy this release with all three providers set to `openrouter`. Confirm the four stacks
+2. Deploy this release with all three providers set to `openrouter`. Confirm the three application stacks
    reference the same secret and that the key is absent from templates and boot user data.
 3. Approve two supported OpenRouter coding models in a disposable project. In Slack, request a
    small file change and its test. Check the tool result and repository diff.

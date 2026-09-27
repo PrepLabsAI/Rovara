@@ -27,6 +27,24 @@ async function runtime(transport: typeof fetch, onUsage = vi.fn()) {
 }
 
 describe("OpenRouter through the installed Pi transport", () => {
+  it.each(["\n", "\r\n", "  ", "\n  "])("accepts secret values ending with whitespace %j", async (suffix) => {
+    const value = `  ${secret}${suffix}`;
+    expect(await readOpenRouterKey(secretArn, async () => value)).toBe(secret);
+    const transport = vi.fn<typeof fetch>(async (_url, init) => {
+      expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${secret}`);
+      return response(textChunks);
+    });
+    const resolved = await createModelRuntimeWithFallback(selected, "orchestrator", {
+      environment, readSecret: async () => value, fetch: transport, onUsage: () => {},
+    });
+    expect(resolved.model).toEqual(selected);
+    await resolved.runtime.completeSimple(resolved.runtime.getModel(selected.provider, selected.modelId)!, context);
+    expect(transport).toHaveBeenCalledOnce();
+  });
+
+  it("refuses embedded newlines without exposing the malformed key", async () => {
+    await expect(readOpenRouterKey(secretArn, async () => `${secret}\nmore`)).rejects.toThrow("credential could not be loaded");
+  });
   it.each(["worker", "orchestrator", "classifier"] as const)("uses the %s default when no secret ARN is configured", async (role) => {
     const log = vi.spyOn(console, "info").mockImplementation(() => {});
     try {

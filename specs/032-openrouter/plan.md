@@ -11,3 +11,9 @@ and returns the role's default Bedrock model and runtime before creating a sessi
 requested project selection, use the effective model for usage, and log the fallback. Init allows
 missing ARN configuration and checks the corresponding Bedrock fallback. Do not fall back for
 permission or inference failures. Share standard role defaults with init.
+
+PR review correction: keep the protected foundation unchanged. Attach the conditional secret-read
+policy to both Slack and worker roles from the releasable control-plane stack; derive the worker
+role name from its existing ARN output with the foundation's legacy/named role path. Trim secret
+values before validation. Three application stacks still carry the secret reference for manual
+change sets; document alignment and workspace/IMDS credential exposure with mandatory key limits.

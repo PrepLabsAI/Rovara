@@ -28,3 +28,11 @@ model IDs are identical. Worker task resolution no longer forces reasoning on no
 OpenRouter models. Targeted tests, type checking, and lint pass; the full regression suite passes.
 Secrets remain cloud-managed; no local-key input is required to complete implementation, and no
 live secret or deployment was changed.
+
+## PR #129 independent-review fixes
+
+- Worker and Slack secret-read attachments now live together in the control-plane stack, using the worker role ARN already exported by the foundation. Both legacy root-path and named-environment role-name expressions are covered by synthesized-template tests. The production foundation snapshot exactly equals the pre-PR mainline baseline at bdd1b19; the foundation code has no diff against that baseline.
+- Secret values are trimmed before validation. LF, CRLF, and surrounding spaces successfully authenticate through the real Pi transport in scripted tests; embedded newlines remain invalid.
+- Manual deployment still has three secret-reference parameters. Docs describe alignment checks and the AccessDenied failure mode. Single-source configuration remains a future improvement.
+- Docs explicitly describe workspace/IMDS access to the secret, require a dedicated capped key, and explain why an external inference proxy would be a stronger boundary. No proxy or workspace credential isolation is claimed.
+- Validation: full suite 2,774 passed, 8 skipped; type checking, lint, and CDK synthesis pass. No AWS deployment or paid inference was performed.

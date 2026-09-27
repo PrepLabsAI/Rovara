@@ -286,7 +286,6 @@ export class ControlPlaneStack extends Stack {
       }),
       description: "Hosted AgentX Slack orchestrator; the only principal allowed on /v1/service routes",
     });
-    grantOpenRouterSecret(this, slackOrchestratorRole);
     slackRequestQueue.grantConsumeMessages(slackOrchestratorRole);
     slackThreads.grantReadWriteData(slackOrchestratorRole);
     threadSessions.grantReadWrite(slackOrchestratorRole);
@@ -560,6 +559,9 @@ export class ControlPlaneStack extends Stack {
     }));
 
     const sessions = new SessionLifecycle(this, "Sessions", { naming, state, invokeSigningKey, notifyOperator });
+    // Own both attachments in this releasable stack. Secret changes must never mutate the
+    // protected foundation template or require a separate foundation change set.
+    grantOpenRouterSecret(this, [slackOrchestratorRole.roleName, sessions.instanceRoleName]);
     sessions.steps.addEnvironment("CONTROL_PLANE_URL", api.attrApiEndpoint);
     sessions.connectDispatcher(dispatcher);
     sessions.connectBroker(broker);

@@ -15,3 +15,9 @@
 ## Phase 3: Missing-secret fallback
 
 - [x] T009 Resolve a missing OpenRouter secret to the role's default Bedrock model before session creation, preserving actual-model telemetry. Permit absent references in init and check the fallback. Cover missing/present/permission-denied secrets and update documentation.
+
+## Phase 4: PR review fixes
+
+- [x] T010 Move worker secret-read IAM into the control plane without altering the foundation template; verify both role paths and baseline template equality.
+- [x] T011 Normalize secret whitespace before validation and test real transport authentication with LF/CRLF/space endings while rejecting embedded newlines.
+- [x] T012 Document remaining three-stack ARN drift and workspace credential exposure; require a dedicated key with a spending limit and describe the external-proxy boundary.

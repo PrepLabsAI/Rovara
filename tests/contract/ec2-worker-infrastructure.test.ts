@@ -27,12 +27,24 @@ describe("EC2 worker infrastructure (issue #82), shown for a named environment",
   }, 240_000);
 
   it("grants OpenRouter secret access only when enabled and only to the configured ARN", () => {
-    for (const template of [foundation, controlPlane]) {
+    for (const template of [controlPlane]) {
       template.hasParameter("OpenRouterSecretArn", { Default: "" });
       const policy = ofType(template, "AWS::IAM::Policy").find(([, resource]) => resource.Properties.PolicyName === "OpenRouterSecretRead")!;
       expect(policy).toBeDefined();
       expect(policy[1]).toHaveProperty("Condition");
       expect(policy[1].Properties.PolicyDocument).toEqual({ Version: "2012-10-17", Statement: [{ Effect: "Allow", Action: "secretsmanager:GetSecretValue", Resource: { Ref: "OpenRouterSecretArn" } }] });
+    }
+    expect(JSON.stringify(foundation.toJSON())).not.toContain("OpenRouter");
+    // Both role attachments live in the control plane, including correct path removal for
+    // /agentx/<env>/ worker roles and the legacy production role at /.
+    for (const [templates, roleIndex] of [[[controlPlane], 3], [legacy, 1]] as const) {
+      const policies = templates.flatMap((template) => ofType(template, "AWS::IAM::Policy"))
+        .filter(([, policy]) => policy.Properties.PolicyName === "OpenRouterSecretRead");
+      expect(policies).toHaveLength(1);
+      expect(policies[0]![1].Properties.Roles).toEqual([
+        { Ref: expect.stringMatching(/^SlackOrchestratorTaskRole/) as unknown },
+        { "Fn::Select": [roleIndex, { "Fn::Split": ["/", { Ref: "Ec2WorkerInstanceRoleArn" }] }] },
+      ]);
     }
     const serialized = JSON.stringify(runtime.toJSON());
     expect(serialized).toContain("worker-openrouter-secret-arn");
@@ -128,7 +140,7 @@ describe("EC2 worker infrastructure (issue #82), shown for a named environment",
     const actions = actionsOf(policies.flatMap(([, p]) => (p.Properties.PolicyDocument as { Statement: Array<{ Action: string | string[] }> }).Statement));
     expect(new Set(actions)).toEqual(new Set([
       "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:GetAuthorizationToken", "ecr:BatchImportUpstreamImage", "ecr:CreateRepository",
-      "bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream", "logs:CreateLogStream", "logs:PutLogEvents", "secretsmanager:GetSecretValue",
+      "bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream", "logs:CreateLogStream", "logs:PutLogEvents",
     ]));
     foundation.hasResourceProperties("AWS::Logs::LogGroup", { LogGroupName: "/agentx/staging/worker", RetentionInDays: 30 });
   });

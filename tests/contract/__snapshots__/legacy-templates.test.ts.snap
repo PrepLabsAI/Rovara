@@ -1303,6 +1303,19 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
           {
             "Ref": "SlackOrchestratorTaskRole2372FE40",
           },
+          {
+            "Fn::Select": [
+              1,
+              {
+                "Fn::Split": [
+                  "/",
+                  {
+                    "Ref": "Ec2WorkerInstanceRoleArn",
+                  },
+                ],
+              },
+            ],
+          },
         ],
       },
       "Type": "AWS::IAM::Policy",
@@ -4923,20 +4936,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
 
 exports[`legacy production templates > AgentXProductionFoundation is unchanged 1`] = `
 {
-  "Conditions": {
-    "Ec2WorkersOpenRouterEnabled0DC0FB81": {
-      "Fn::Not": [
-        {
-          "Fn::Equals": [
-            {
-              "Ref": "OpenRouterSecretArn",
-            },
-            "",
-          ],
-        },
-      ],
-    },
-  },
   "Description": "Stable AgentX production network, encryption, and persistent workspace capacity",
   "Outputs": {
     "CapacityProviderArn": {
@@ -5084,12 +5083,6 @@ exports[`legacy production templates > AgentXProductionFoundation is unchanged 1
       "Default": "/cdk-bootstrap/hnb659fds/version",
       "Description": "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]",
       "Type": "AWS::SSM::Parameter::Value<String>",
-    },
-    "OpenRouterSecretArn": {
-      "AllowedPattern": "^$|^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$",
-      "Default": "",
-      "Description": "Optional Secrets Manager ARN containing the raw OpenRouter API key",
-      "Type": "String",
     },
   },
   "Resources": {
@@ -5621,30 +5614,6 @@ exports[`legacy production templates > AgentXProductionFoundation is unchanged 1
         ],
       },
       "Type": "AWS::EC2::LaunchTemplate",
-    },
-    "Ec2WorkersOpenRouterSecretReadE0FF91BF": {
-      "Condition": "Ec2WorkersOpenRouterEnabled0DC0FB81",
-      "Properties": {
-        "PolicyDocument": {
-          "Statement": [
-            {
-              "Action": "secretsmanager:GetSecretValue",
-              "Effect": "Allow",
-              "Resource": {
-                "Ref": "OpenRouterSecretArn",
-              },
-            },
-          ],
-          "Version": "2012-10-17",
-        },
-        "PolicyName": "OpenRouterSecretRead",
-        "Roles": [
-          {
-            "Ref": "Ec2WorkersInstanceRoleAB9C5653",
-          },
-        ],
-      },
-      "Type": "AWS::IAM::Policy",
     },
     "Ec2WorkersSessionManagerSecurityGroupF022FCD8": {
       "Properties": {
