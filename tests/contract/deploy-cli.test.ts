@@ -2,13 +2,15 @@
 // injected through CliDependencies.deploy (main.ts follows the same pattern env commands use). No
 // AWS is ever touched by any test here.
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { environmentStackName } from "@agentx/contracts";
+import type { CommandRunner } from "../../packages/cli/src/deploy/cdk-engine.js";
 import type { CallerIdentity } from "../../packages/cli/src/environments/adopt.js";
 import type { DeployRequest, StackDeployer, StackOutputs } from "../../packages/cli/src/deploy/deployer.js";
+import type { ParameterStore } from "../../packages/cli/src/environments/parameter-store.js";
 import type { SecretValueStore } from "../../packages/cli/src/deploy/signing-key.js";
 import { executeCli } from "../../packages/cli/src/main.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
@@ -29,11 +31,25 @@ function capture() {
   return { out, err, stdout: { write: (t: string) => out.push(t) }, stderr: { write: (t: string) => err.push(t) } };
 }
 
+// ---- temp directories: tracked and removed after every test -------------------------------------
+
+const tempDirs: string[] = [];
+
+async function tmp(prefix: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), prefix));
+  tempDirs.push(dir);
+  return dir;
+}
+
+afterEach(async () => {
+  await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+});
+
 /** A release directory with no templates/packages: enough for `loadRelease` and for
  * `deployEnvironment` (which only reads `release.manifest.version`), never for the real templates
  * engine (which the fake `StackDeployer` below always replaces in these tests). */
 async function emptyReleaseDir(): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), "agentx-deploy-cli-release-"));
+  const dir = await tmp("agentx-deploy-cli-release-");
   await writeFile(
     join(dir, "release.json"),
     JSON.stringify({
@@ -53,7 +69,7 @@ async function emptyReleaseDir(): Promise<string> {
  * reads every part's template and, for runtime/slack, a real image digest) to succeed with no
  * `StackDeployer` involved at all. */
 async function fullReleaseDir(): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), "agentx-deploy-cli-release-full-"));
+  const dir = await tmp("agentx-deploy-cli-release-full-");
   const parts = ["access", "foundation", "identity", "control-plane", "runtime", "slack"];
   const templates = [];
   await mkdir(join(dir, "templates", REGION), { recursive: true });
@@ -100,7 +116,7 @@ function answersJson(overrides: Record<string, unknown> = {}): Record<string, un
 }
 
 async function writeAnswers(overrides: Record<string, unknown> = {}): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), "agentx-deploy-cli-answers-"));
+  const dir = await tmp("agentx-deploy-cli-answers-");
   const path = join(dir, "answers.json");
   await writeFile(path, JSON.stringify(answersJson(overrides)));
   return path;
@@ -108,6 +124,20 @@ async function writeAnswers(overrides: Record<string, unknown> = {}): Promise<st
 
 const fakeIdentity: CallerIdentity = { async get() { return { account: ACCOUNT, arn: `arn:aws:iam::${ACCOUNT}:user/alice` }; } };
 const throwingIdentity: CallerIdentity = { async get() { throw new Error("test setup: sts must not be called"); } };
+const throwingStore: ParameterStore = {
+  get: () => { throw new Error("test setup: the parameter store must not be called"); },
+  put: () => { throw new Error("test setup: the parameter store must not be called"); },
+  delete: () => { throw new Error("test setup: the parameter store must not be called"); },
+  list: () => { throw new Error("test setup: the parameter store must not be called"); },
+};
+const throwingSecrets: SecretValueStore = {
+  get: () => { throw new Error("test setup: the secrets store must not be called"); },
+  create: () => { throw new Error("test setup: the secrets store must not be called"); },
+};
+const throwingDeployer: StackDeployer = {
+  deploy: () => { throw new Error("test setup: the deployer must not be called"); },
+  outputs: () => { throw new Error("test setup: the deployer must not be called"); },
+};
 
 function memorySecrets(): SecretValueStore & { creates: Array<{ name: string; value: string }> } {
   const values = new Map<string, string>();
@@ -195,11 +225,35 @@ function confirmingFakeDeployer(scripted: Record<string, StackOutputs>): StackDe
   };
 }
 
+/** A CommandRunner faking a clean checkout at the release's tag: `git status --porcelain` empty,
+ * `git tag --points-at HEAD` includes `v<RELEASE_VERSION>`. `npx cdk deploy ... --outputs-file <f>`
+ * writes `scripted` to whatever file it's asked for (a superset every time; `cdkDeployer.deploy`
+ * only ever reads its own stack's key back out), and records the outputs directory it saw so a test
+ * can confirm it's removed afterward. */
+function cleanCdkRunner(scripted: Record<string, StackOutputs>): CommandRunner & { outputsDir?: string } {
+  const runner: CommandRunner & { outputsDir?: string } = {
+    outputsDir: undefined,
+    async run(command, args) {
+      if (command === "git") {
+        if (args[0] === "status") return { stdout: "" };
+        return { stdout: `v${RELEASE_VERSION}\n` };
+      }
+      const outIndex = args.indexOf("--outputs-file");
+      if (outIndex >= 0) {
+        const outputsFile = args[outIndex + 1] as string;
+        runner.outputsDir = dirname(outputsFile);
+        await writeFile(outputsFile, JSON.stringify(scripted));
+      }
+      return { stdout: "" };
+    },
+  };
+  return runner;
+}
+
 describe("agentx init --export", () => {
   it("writes a bundle and makes no AWS write call", async () => {
     const releaseDir = await fullReleaseDir();
-    const parent = await mkdtemp(join(tmpdir(), "agentx-deploy-cli-export-"));
-    const exportDir = join(parent, "bundle");
+    const exportDir = join(await tmp("agentx-deploy-cli-export-"), "bundle");
     const io = capture();
 
     const code = await executeCli(
@@ -223,6 +277,97 @@ describe("agentx init --export", () => {
     expect(code).toBe(2);
     expect(io.err.join("")).toContain("interactive install arrives in a later AgentX release; use agentx init --export or agentx deploy");
   });
+
+  it("without an explicit --env refuses: the default is the live production environment", async () => {
+    const releaseDir = await fullReleaseDir();
+    const exportDir = join(await tmp("agentx-deploy-cli-export-"), "bundle");
+    const io = capture();
+
+    const code = await executeCli(
+      ["init", "--export", exportDir, "--region", REGION, "--account", ACCOUNT, "--release", releaseDir],
+      { ...io, deploy: { identity: throwingIdentity, store: throwingStore } },
+    );
+
+    expect(code).not.toBe(0);
+    expect(io.err.join("")).toContain("--env");
+    await expect(stat(exportDir)).rejects.toThrow();
+  });
+
+  it("refuses --env production explicitly: that name belongs to the legacy deployment", async () => {
+    const releaseDir = await fullReleaseDir();
+    const exportDir = join(await tmp("agentx-deploy-cli-export-"), "bundle");
+    const io = capture();
+
+    const code = await executeCli(
+      ["--env", "production", "init", "--export", exportDir, "--region", REGION, "--account", ACCOUNT, "--release", releaseDir],
+      { ...io, deploy: { identity: throwingIdentity, store: throwingStore } },
+    );
+
+    expect(code).not.toBe(0);
+    expect(io.err.join("")).toContain("production");
+    await expect(stat(exportDir)).rejects.toThrow();
+  });
+
+  it("takes the account from sts GetCallerIdentity when --account is omitted", async () => {
+    const releaseDir = await fullReleaseDir();
+    const exportDir = join(await tmp("agentx-deploy-cli-export-"), "bundle");
+    const stsAccount = "999999999999";
+    const identity: CallerIdentity = { async get() { return { account: stsAccount, arn: `arn:aws:iam::${stsAccount}:user/bot` }; } };
+    const io = capture();
+
+    const code = await executeCli(
+      ["--env", ENV, "init", "--export", exportDir, "--region", REGION, "--release", releaseDir],
+      { ...io, deploy: { identity } },
+    );
+
+    expect(code).toBe(0);
+    const policyText = await readFile(join(exportDir, "policies", "access-deployer.json"), "utf8");
+    expect(policyText).toContain(stsAccount);
+  });
+
+  it("--identity oidc without --oidc-issuer refuses", async () => {
+    const releaseDir = await fullReleaseDir();
+    const exportDir = join(await tmp("agentx-deploy-cli-export-"), "bundle");
+    const io = capture();
+
+    const code = await executeCli(
+      ["--env", ENV, "init", "--export", exportDir, "--region", REGION, "--account", ACCOUNT, "--release", releaseDir, "--identity", "oidc", "--oidc-audience", "api://agentx"],
+      { ...io, deploy: { identity: throwingIdentity } },
+    );
+
+    expect(code).not.toBe(0);
+    expect(io.err.join("")).toContain("--oidc-issuer and --oidc-audience are required with --identity oidc");
+  });
+
+  it("refuses an invalid --region before writing anything", async () => {
+    const releaseDir = await fullReleaseDir();
+    const exportDir = join(await tmp("agentx-deploy-cli-export-"), "bundle");
+    const io = capture();
+
+    const code = await executeCli(
+      ["--env", ENV, "init", "--export", exportDir, "--region", "not-a-region", "--account", ACCOUNT, "--release", releaseDir],
+      { ...io, deploy: { identity: throwingIdentity } },
+    );
+
+    expect(code).toBe(2);
+    expect(io.err.join("")).toContain("--region not-a-region");
+    await expect(stat(exportDir)).rejects.toThrow();
+  });
+
+  it("refuses an invalid --account before writing anything", async () => {
+    const releaseDir = await fullReleaseDir();
+    const exportDir = join(await tmp("agentx-deploy-cli-export-"), "bundle");
+    const io = capture();
+
+    const code = await executeCli(
+      ["--env", ENV, "init", "--export", exportDir, "--region", REGION, "--account", "not-an-account", "--release", releaseDir],
+      { ...io, deploy: { identity: throwingIdentity } },
+    );
+
+    expect(code).toBe(2);
+    expect(io.err.join("")).toContain("--account not-an-account");
+    await expect(stat(exportDir)).rejects.toThrow();
+  });
 });
 
 describe("agentx deploy", () => {
@@ -232,8 +377,8 @@ describe("agentx deploy", () => {
 
     const code = await executeCli(["deploy", "--mode", "install", "--release", "/nonexistent-release", "--answers", answersPath, "--yes"], { ...io });
 
-    expect(code).not.toBe(0);
-    expect(io.err.join("")).toContain("region");
+    expect(code).toBe(2);
+    expect(io.err.join("")).toBe(`AgentX error [CONFIG_INVALID]: answers file ${answersPath} is invalid: region Invalid input: expected string, received undefined\n`);
   });
 
   it("--engine cdk requires --source", async () => {
@@ -258,6 +403,81 @@ describe("agentx deploy", () => {
 
     expect(code).not.toBe(0);
     expect(io.err.join("")).toContain("--engine cdk has no change set review; pass --yes to deploy with cdk");
+  });
+
+  it("refuses when stdin is not a terminal and --yes is missing, before touching AWS", async () => {
+    const releaseDir = await emptyReleaseDir();
+    const answersPath = await writeAnswers();
+    const io = capture();
+
+    const code = await executeCli(
+      ["deploy", "--mode", "install", "--release", releaseDir, "--answers", answersPath],
+      { ...io, deploy: { isInteractive: () => false, identity: throwingIdentity, store: throwingStore } },
+    );
+
+    expect(code).toBe(2);
+    expect(io.err.join("")).toContain("agentx deploy needs --yes when stdin is not a terminal");
+  });
+
+  it("--engine cdk refuses a source checkout with uncommitted changes, before deploying anything", async () => {
+    const releaseDir = await emptyReleaseDir();
+    const answersPath = await writeAnswers();
+    const dirtyRunner: CommandRunner = {
+      async run(command, args) {
+        if (command === "git" && args[0] === "status") return { stdout: " M some/file.ts\n" };
+        return { stdout: "" };
+      },
+    };
+    const io = capture();
+
+    const code = await executeCli(
+      ["deploy", "--mode", "install", "--engine", "cdk", "--release", releaseDir, "--answers", answersPath, "--source", "/some/source", "--yes"],
+      { ...io, deploy: { identity: fakeIdentity, store: new MemoryParameterStore(), commandRunner: dirtyRunner } },
+    );
+
+    expect(code).not.toBe(0);
+    expect(io.err.join("")).toContain("has uncommitted changes");
+  });
+
+  it("--engine cdk refuses when CDK is not bootstrapped in the region", async () => {
+    const releaseDir = await emptyReleaseDir();
+    const answersPath = await writeAnswers();
+    const cleanRunner: CommandRunner = {
+      async run(command, args) {
+        if (command === "git") {
+          if (args[0] === "status") return { stdout: "" };
+          return { stdout: `v${RELEASE_VERSION}\n` };
+        }
+        return { stdout: "" };
+      },
+    };
+    const io = capture();
+
+    const code = await executeCli(
+      ["deploy", "--mode", "install", "--engine", "cdk", "--release", releaseDir, "--answers", answersPath, "--source", "/some/source", "--yes"],
+      { ...io, deploy: { identity: fakeIdentity, store: new MemoryParameterStore(), commandRunner: cleanRunner } },
+    );
+
+    expect(code).not.toBe(0);
+    expect(io.err.join("")).toContain("CDK is not bootstrapped in");
+  });
+
+  it("--engine cdk removes its outputs temp directory after the deploy finishes", async () => {
+    const releaseDir = await emptyReleaseDir();
+    const answersPath = await writeAnswers();
+    const store = new MemoryParameterStore();
+    await store.put("/cdk-bootstrap/hnb659fds/version", "21");
+    const runner = cleanCdkRunner(scriptedOutputs());
+    const io = capture();
+
+    const code = await executeCli(
+      ["deploy", "--mode", "install", "--engine", "cdk", "--release", releaseDir, "--answers", answersPath, "--source", "/some/source", "--yes"],
+      { ...io, deploy: { identity: fakeIdentity, store, secrets: memorySecrets(), commandRunner: runner } },
+    );
+
+    expect(code).toBe(0);
+    expect(runner.outputsDir).toBeDefined();
+    await expect(stat(runner.outputsDir as string)).rejects.toThrow();
   });
 
   it("prints progress and never a parameter value", async () => {
@@ -313,5 +533,61 @@ describe("agentx deploy", () => {
     expect(io.err.join("")).toContain("not executed; confirmation declined");
     expect(confirmCalls).toEqual([stackName("access"), stackName("foundation")]);
     expect(deployer.calls).toEqual(["access", "foundation"]);
+  });
+
+  it("refuses when --env does not match the answers file's environment, naming both", async () => {
+    const answersPath = await writeAnswers(); // env: "staging"
+    const io = capture();
+
+    const code = await executeCli(
+      ["--env", "otherenv", "deploy", "--mode", "install", "--release", "/nonexistent-release", "--answers", answersPath, "--yes"],
+      { ...io, deploy: { identity: throwingIdentity, store: throwingStore } },
+    );
+
+    expect(code).not.toBe(0);
+    expect(io.err.join("")).toContain("otherenv");
+    expect(io.err.join("")).toContain(ENV);
+  });
+
+  it("an omitted --env, or one that explicitly matches the answers file, still works", async () => {
+    const releaseDir = await emptyReleaseDir();
+    const answersPath = await writeAnswers();
+
+    const omitted = capture();
+    const codeOmitted = await executeCli(
+      ["deploy", "--mode", "install", "--release", releaseDir, "--answers", answersPath, "--yes"],
+      { ...omitted, deploy: { identity: fakeIdentity, store: new MemoryParameterStore(), secrets: memorySecrets(), deployer: progressFakeDeployer(scriptedOutputs()) } },
+    );
+    expect(codeOmitted).toBe(0);
+
+    const matching = capture();
+    const codeMatching = await executeCli(
+      ["--env", ENV, "deploy", "--mode", "install", "--release", releaseDir, "--answers", answersPath, "--yes"],
+      { ...matching, deploy: { identity: fakeIdentity, store: new MemoryParameterStore(), secrets: memorySecrets(), deployer: progressFakeDeployer(scriptedOutputs()) } },
+    );
+    expect(codeMatching).toBe(0);
+  });
+
+  it("refuses when the answers file's partition disagrees with the caller identity's own ARN partition", async () => {
+    const releaseDir = await emptyReleaseDir();
+    const answersPath = await writeAnswers({ partition: "aws-us-gov" });
+    const io = capture();
+
+    const code = await executeCli(
+      ["deploy", "--mode", "install", "--release", releaseDir, "--answers", answersPath, "--yes"],
+      {
+        ...io,
+        deploy: {
+          identity: fakeIdentity, // arn:aws:... -> partition "aws"
+          store: throwingStore,
+          secrets: throwingSecrets,
+          deployer: throwingDeployer,
+        },
+      },
+    );
+
+    expect(code).not.toBe(0);
+    expect(io.err.join("")).toContain("aws-us-gov");
+    expect(io.err.join("")).toContain("aws");
   });
 });

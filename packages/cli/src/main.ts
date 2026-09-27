@@ -484,6 +484,10 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--yes", "execute without an interactive change-set confirmation; required for --engine cdk", false)
     .action(async (options: { mode: "install" | "upgrade"; engine: "templates" | "cdk"; release: string; answers: string; parts?: string; source?: string; yes: boolean }, command: Command) => {
       const globals = globalOptions(command);
+      // --env is a global option (defaulting to production); only cross-check it against the
+      // answers file's own env when the operator actually typed --env, never against the silent
+      // default, so an omitted --env keeps working unchanged (the answers file alone decides).
+      const envGivenExplicitly = command.getOptionValueSourceWithGlobals("env") === "cli";
       const result = await runDeploy(
         {
           mode: options.mode,
@@ -493,6 +497,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
           yes: options.yes,
           ...(options.parts === undefined ? {} : { parts: options.parts }),
           ...(options.source === undefined ? {} : { source: options.source }),
+          ...(envGivenExplicitly ? { expectedEnv: globals.env } : {}),
         },
         dependencies.deploy ?? {},
         { stderr: services.stderr },
@@ -545,6 +550,14 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       const globals = globalOptions(command);
       if (options.export === undefined) {
         throw agentXError("CONFIG_INVALID", "interactive install arrives in a later AgentX release; use agentx init --export or agentx deploy");
+      }
+      // --env defaults to production (the live, legacy-adopted deployment): --export must never
+      // silently write a bundle for it just because --env was left off.
+      if (command.getOptionValueSourceWithGlobals("env") !== "cli") {
+        throw agentXError("CONFIG_INVALID", "agentx init --export requires an explicit --env (the default, production, is the live environment)");
+      }
+      if (globals.env === DEFAULT_ENVIRONMENT) {
+        throw agentXError("CONFIG_INVALID", `--env ${DEFAULT_ENVIRONMENT} belongs to the legacy deployment that predates environments; choose a different --env for the export bundle`);
       }
       if (options.region === undefined) throw agentXError("CONFIG_INVALID", "--region is required with --export");
       if (options.release === undefined) throw agentXError("CONFIG_INVALID", "--release is required with --export");

@@ -70,9 +70,76 @@ describe("the real CommandRunner", () => {
     expect(message).not.toContain(secret);
     expect(message).toContain("<redacted>");
     expect(message).toContain("npx cdk deploy AgentXControlPlane --parameters AgentXControlPlane:CallbackSigningKey=<redacted>");
-    // The child did echo the secret to its own stderr, which realCommandRunner streams live to ours
-    // exactly as it arrives (ruling b): the redaction only ever protects the *thrown error*, never
-    // pretends the child's own output was safe. Confirm that's the only place the secret shows up.
-    expect(stderr.text()).toContain(secret);
+  });
+
+  it("never lets a secret the child echoes reach our own stderr either: cdk -v/--debug can log CreateChangeSet parameters", async () => {
+    const stderr = capture();
+    const runner = realCommandRunner(stderr);
+    const secret = "s3cr3t-signing-key-value-should-never-leak";
+    const script = "console.error(process.argv[1]); process.exit(3);";
+
+    await runner
+      .run(process.execPath, ["-e", script, secret], {
+        cwd: process.cwd(),
+        display: "npx cdk deploy AgentXControlPlane --parameters AgentXControlPlane:CallbackSigningKey=<redacted>",
+        redact: (text) => text.split(secret).join("<redacted>"),
+      })
+      .then(
+        () => undefined,
+        (caught: unknown) => caught,
+      );
+
+    expect(stderr.text()).not.toContain(secret);
+    expect(stderr.text()).toContain("<redacted>");
+  });
+
+  it("redacts a secret split across two separate data chunks: it is buffered to a line boundary before redaction runs", async () => {
+    const stderr = capture();
+    const runner = realCommandRunner(stderr);
+    const secret = "s3cr3t-split-across-chunk-boundary-0123456789";
+    const half = Math.floor(secret.length / 2);
+    // A real gap between the two writes (a macrotask apart) makes the two `stderr.write` calls
+    // arrive as two separate `data` events on our side almost certainly, not one: exactly the case
+    // the line-buffering must survive, since neither half alone would match `redact`'s whole-secret
+    // needle.
+    const script = `
+      process.stderr.write(${JSON.stringify(secret.slice(0, half))});
+      setTimeout(() => {
+        process.stderr.write(${JSON.stringify(secret.slice(half))} + "\\n");
+        process.exitCode = 5;
+      }, 20);
+    `;
+
+    const error: unknown = await runner
+      .run(process.execPath, ["-e", script], { cwd: process.cwd(), display: "split-secret", redact: (text) => text.split(secret).join("<redacted>") })
+      .then(
+        () => undefined,
+        (caught: unknown) => caught,
+      );
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).not.toContain(secret);
+    expect((error as Error).message).toContain("<redacted>");
+    expect(stderr.text()).not.toContain(secret);
+    expect(stderr.text()).toContain("<redacted>");
+  });
+
+  it("wraps a spawn failure (e.g. a missing executable) in a sanitized error, never the raw spawn error whose spawnargs hold the secret", async () => {
+    const stderr = capture();
+    const runner = realCommandRunner(stderr);
+    const secret = "s3cr3t-that-must-never-reach-spawnargs";
+
+    const error: unknown = await runner
+      .run("/nonexistent/agentx-test-command-xyz", [secret], { cwd: process.cwd(), display: "safe-display-only" })
+      .then(
+        () => undefined,
+        (caught: unknown) => caught,
+      );
+
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).toContain("safe-display-only could not start");
+    expect(message).not.toContain(secret);
+    expect((error as NodeJS.ErrnoException).spawnargs).toBeUndefined();
   });
 });

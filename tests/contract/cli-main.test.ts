@@ -34,9 +34,16 @@ describe("AgentX executable command surface", () => {
     );
     expect(optionNames).not.toContain("--runtime-session-id");
     expect(optionNames).not.toContain("--prompt");
-    // --orchestrator-model reappears on `init --export`, but as an install-time Bedrock model
-    // choice, not the retired ad-hoc runtime-routing flag this guard was written against; it's
-    // scoped there deliberately (task-7-brief.md), not a reintroduction of the old developer flag.
+
+    // --orchestrator-model reappears, but only on `init` (an install-time Bedrock model choice, not
+    // the retired ad-hoc runtime-routing flag this guard was originally written against): every
+    // other command, including the root program itself, must never carry it.
+    for (const command of allCommands(program)) {
+      if (command.name() === "init") continue;
+      expect(command.options.map((option) => option.long)).not.toContain("--orchestrator-model");
+    }
+    const init = program.commands.find((command) => command.name() === "init");
+    expect(init?.options.map((option) => option.long)).toContain("--orchestrator-model");
   });
 });
 

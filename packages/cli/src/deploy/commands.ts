@@ -4,7 +4,7 @@
 // `DeployCliDependencies` (main.ts's `CliDependencies.deploy`), the same seam the `env` commands use
 // (`CliDependencies.environments`), so tests exercise the real wiring against fakes, never AWS.
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -83,11 +83,16 @@ const ModelsAnswersSchema = z.object({ orchestrator: z.string().min(1), classifi
 
 const ImagesAnswersSchema = z.object({ worker: z.string().min(1).optional(), slack: z.string().min(1).optional() }).strict();
 
+/** Shared with `runInitExport`'s own `--region`/`--account` validation, so both commands refuse the
+ * same malformed values the same way. */
+const REGION_PATTERN = /^[a-z]{2}(-[a-z]+)+-\d$/;
+const ACCOUNT_PATTERN = /^\d{12}$/;
+
 export const DeployAnswersSchema = z
   .object({
     env: EnvironmentNameSchema,
-    region: z.string().regex(/^[a-z]{2}(-[a-z]+)+-\d$/, "region must look like us-east-1"),
-    account: z.string().regex(/^\d{12}$/, "account must be a 12-digit AWS account id"),
+    region: z.string().regex(REGION_PATTERN, "region must look like us-east-1"),
+    account: z.string().regex(ACCOUNT_PATTERN, "account must be a 12-digit AWS account id"),
     partition: z.string().min(1).optional(),
     models: ModelsAnswersSchema,
     identity: IdentityAnswersSchema,
@@ -245,34 +250,73 @@ function tail(text: string, n: number): string {
 }
 
 /**
+ * Buffers `push`ed text to line boundaries before handing each complete line to `write` (redacted
+ * first): a secret split across two `data` chunks with no newline between them is assembled here
+ * before `redact` ever sees it, rather than redacted chunk-by-chunk (which would miss it). `flush`
+ * hands over whatever partial line remains — a child that never writes a final newline (or dies
+ * mid-line) must still have its last line redacted, not silently dropped or left un-redacted.
+ */
+function lineBufferedRedactor(write: (text: string) => void, redact: (text: string) => string): { push(chunk: string): void; flush(): void } {
+  let pending = "";
+  return {
+    push(chunk) {
+      pending += chunk;
+      for (let index = pending.indexOf("\n"); index >= 0; index = pending.indexOf("\n")) {
+        write(redact(pending.slice(0, index + 1)));
+        pending = pending.slice(index + 1);
+      }
+    },
+    flush() {
+      if (pending === "") return;
+      write(redact(pending));
+      pending = "";
+    },
+  };
+}
+
+/**
  * Shells out with `node:child_process` `spawn` (`shell: false`), streaming the child's own stdout
- * and stderr to `stderr` as it runs, and resolving with the captured stdout once it exits cleanly.
+ * and stderr to `stderr` as it runs — redacted through `options.redact`, buffered to line boundaries
+ * so a secret split across two `data` chunks is still caught (a verbose cdk run, `-v`/`--debug`/
+ * `CDK_DEBUG`, can log a CreateChangeSet call's parameters, including the callback signing key) —
+ * and resolving with the captured (unredacted; this value is never printed, only read back by our
+ * own code, e.g. `assertSourceAtRelease`'s git output) stdout once it exits cleanly.
+ *
  * On a non-zero exit, throws an error naming the exit code, `options.display` (never the raw argv,
  * which can carry the cdk engine's callback-signing-key parameter) and the last ~20 lines of stderr,
  * run through `options.redact` — the same redaction `options.display` itself was already built with.
+ * A failure to even start the child (e.g. the executable is missing) is wrapped the same way: the
+ * raw spawn error's `spawnargs` property carries the same unredacted argv, so it is never surfaced
+ * as-is.
  */
 export function realCommandRunner(stderr: Writer): CommandRunner {
   return {
     run(command, args, options) {
       return new Promise((resolvePromise, reject) => {
+        const redact = options.redact ?? ((text: string) => text);
         const child = spawn(command, args, { cwd: options.cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
         let stdout = "";
         let stderrBuffer = "";
+        const stdoutStream = lineBufferedRedactor((text) => stderr.write(text), redact);
+        const stderrStream = lineBufferedRedactor((text) => stderr.write(text), redact);
         child.stdout?.on("data", (chunk: Buffer) => {
-          stdout += chunk.toString("utf8");
-          stderr.write(chunk.toString("utf8"));
+          const text = chunk.toString("utf8");
+          stdout += text;
+          stdoutStream.push(text);
         });
         child.stderr?.on("data", (chunk: Buffer) => {
-          stderrBuffer += chunk.toString("utf8");
-          stderr.write(chunk.toString("utf8"));
+          const text = chunk.toString("utf8");
+          stderrBuffer += text;
+          stderrStream.push(text);
         });
-        child.on("error", (error) => reject(error));
+        child.on("error", (error) => reject(new Error(`${options.display} could not start: ${errorMessage(error)}`)));
         child.on("close", (code) => {
+          stdoutStream.flush();
+          stderrStream.flush();
           if (code === 0) {
             resolvePromise({ stdout });
             return;
           }
-          const redact = options.redact ?? ((text: string) => text);
           const tailed = tail(redact(stderrBuffer), STDERR_TAIL_LINES);
           reject(new Error(`${options.display} exited with code ${code ?? "unknown"}${tailed === "" ? "" : `:\n${tailed}`}`));
         });
@@ -357,6 +401,10 @@ export interface DeployCommandOptions {
   parts?: string;
   source?: string;
   yes: boolean;
+  /** The global `--env`, but only when it was actually given on the command line (main.ts checks
+   * this with commander's option-value-source API); omitted, the answers file's own `env` is
+   * authoritative and nothing is cross-checked. */
+  expectedEnv?: string;
 }
 
 export interface DeployCommandServices {
@@ -372,6 +420,9 @@ export async function runDeploy(options: DeployCommandOptions, deps: DeployCliDe
   }
 
   const answers = await loadDeployAnswers(options.answersFile);
+  if (options.expectedEnv !== undefined && options.expectedEnv !== answers.env) {
+    throw agentXError("CONFIG_INVALID", `--env ${options.expectedEnv} does not match the answers file's environment ${answers.env}`);
+  }
   const parts = parseParts(options.parts);
   const release = await loadRelease(options.releaseDir);
 
@@ -390,11 +441,18 @@ export async function runDeploy(options: DeployCommandOptions, deps: DeployCliDe
   const caller = await identity.get();
   const holder = caller.arn;
   const partition = partitionFromArn(caller.arn);
+  if (answers.partition !== undefined && answers.partition !== partition) {
+    throw agentXError(
+      "CONFIG_INVALID",
+      `the answers file declares partition ${answers.partition}, but the caller identity's own ARN (${caller.arn}) is in partition ${partition}`,
+    );
+  }
 
   const store = deps.store ?? ssmParameterStore(new SSMClient({ region: answers.region }));
   const secrets = deps.secrets ?? secretsManagerValueStore(new SecretsManagerClient({ region: answers.region }));
 
   let deployer: StackDeployer;
+  let cdkOutputsDir: string | undefined;
   if (deps.deployer !== undefined) {
     deployer = deps.deployer;
   } else if (options.engine === "cdk") {
@@ -403,14 +461,14 @@ export async function runDeploy(options: DeployCommandOptions, deps: DeployCliDe
     const runner = deps.commandRunner ?? realCommandRunner(services.stderr);
     await assertSourceAtRelease({ runner, source, version: release.manifest.version });
     await assertCdkBootstrapped({ store, region: answers.region });
-    const outputsDir = await mkdtemp(join(tmpdir(), "agentx-cdk-outputs-"));
+    cdkOutputsDir = await mkdtemp(join(tmpdir(), "agentx-cdk-outputs-"));
     deployer = cdkDeployer({
       runner,
       source,
       env: answers.env,
       region: answers.region,
       identityMode: answers.identity.mode,
-      outputsDir,
+      outputsDir: cdkOutputsDir,
       outputs: cloudFormationOutputsReader(new CloudFormationClient({ region: answers.region })),
     });
   } else {
@@ -420,22 +478,26 @@ export async function runDeploy(options: DeployCommandOptions, deps: DeployCliDe
 
   const onEvent = (event: DeployEvent) => services.stderr.write(`${progressLine(event)}\n`);
 
-  const result = await deployEnvironment({
-    mode: options.mode,
-    engine: options.engine,
-    answers,
-    release,
-    deployer,
-    store,
-    secrets,
-    holder,
-    ...(parts === undefined ? {} : { parts }),
-    onEvent,
-    ...(confirm === undefined ? {} : { confirm }),
-    ...(deps.now === undefined ? {} : { now: deps.now }),
-  });
+  try {
+    const result = await deployEnvironment({
+      mode: options.mode,
+      engine: options.engine,
+      answers,
+      release,
+      deployer,
+      store,
+      secrets,
+      holder,
+      ...(parts === undefined ? {} : { parts }),
+      onEvent,
+      ...(confirm === undefined ? {} : { confirm }),
+      ...(deps.now === undefined ? {} : { now: deps.now }),
+    });
 
-  return { ...result, env: answers.env };
+    return { ...result, env: answers.env };
+  } finally {
+    if (cdkOutputsDir !== undefined) await rm(cdkOutputsDir, { recursive: true, force: true });
+  }
 }
 
 // ---- agentx init --export ------------------------------------------------------------------------
@@ -485,10 +547,19 @@ function buildIdentityAnswers(options: InitExportOptions): DeployAnswers["identi
 }
 
 /** Writes the export bundle (export-bundle.ts). Makes no AWS call at all when `--account` is given;
- * otherwise reads (never writes) the caller's own account with sts GetCallerIdentity. */
+ * otherwise reads (never writes) the caller's own account with sts GetCallerIdentity. Validates
+ * `--region` and the account (whichever source it came from) with the same patterns
+ * `DeployAnswersSchema` validates `agentx deploy`'s answers file with, since `writeExportBundle`
+ * itself only ever refuses a region the release doesn't cover, not a malformed one. */
 export async function runInitExport(options: InitExportOptions, deps: DeployCliDependencies): Promise<InitExportResult> {
+  if (!REGION_PATTERN.test(options.region)) {
+    throw agentXError("CONFIG_INVALID", `--region ${options.region} must look like us-east-1`);
+  }
   const identityAnswers = buildIdentityAnswers(options);
   const account = options.account ?? (await (deps.identity ?? stsCallerIdentity(new STSClient({ region: options.region }))).get()).account;
+  if (!ACCOUNT_PATTERN.test(account)) {
+    throw agentXError("CONFIG_INVALID", `--account ${account} must be a 12-digit AWS account id`);
+  }
 
   const answers: DeployAnswers = {
     env: options.env,
