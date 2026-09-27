@@ -282,3 +282,54 @@ A public image `public.ecr.aws/<alias>/<repo>@sha256:<digest>` reaches the runti
 `<account>.dkr.ecr.<region>.amazonaws.com/agentx-<env>/<alias>/<repo>@sha256:<digest>`, private ECR
 in the account. `PermissionsBoundaryArn` is optional on every environment stack, access included;
 every `AWS::IAM::Role` in every environment stack carries the given boundary, else the default one.
+
+## Deploying an environment
+
+`agentx deploy` installs or upgrades one environment's stacks: access, foundation, identity (skipped when
+the environment brings its own OIDC), control-plane, runtime and slack, in that order for a fresh install;
+an upgrade deploys runtime before control-plane instead, so the worker (the tolerant side) parses strictly
+first. Access deploys first, with the caller's own AWS credentials; every later stack deploys through the
+service role the access stack creates.
+
+Two engines deploy the same release:
+- **templates** (the default). Deploys the release's pre-synthesized templates as a change set. Needs no
+  local checkout and no CDK bootstrap; use this for most installs and enterprise pipelines.
+- **cdk**. Runs `cdk deploy` from a real source checkout, one stack at a time; pick it for CDK's own drift
+  reconciliation or asset diffing. Requires `--source <path>` and `--yes` (there is no change-set review to
+  confirm), a clean checkout at tag `v<version>` for the release, and a region CDK has already been
+  bootstrapped in.
+
+With the templates engine, before executing, `agentx deploy` prints each stack's changes (action, logical
+id, resource type, whether it replaces the resource) and asks "Execute this change set? [y/N]", unless
+`--yes` is given; with no `--yes` and no terminal on stdin, it refuses rather than guessing. A change set
+that fails only because it has no changes is deleted and treated as success ("no changes"), and the stack's
+existing outputs are used as-is.
+
+**Recovering a stuck stack.** A stack in `ROLLBACK_COMPLETE` (its first create failed) must be deleted
+before deploying again; the error names the exact `delete-stack` command. A stack in `REVIEW_IN_PROGRESS` (a
+create change set made but never executed) needs no cleanup; deploy treats it as a fresh create. A failed
+install resumes with `--parts`, naming only the parts still needed. An environment adopted from the legacy
+deployment (fixed stack names, none of the `agentx-<env>-` naming) is refused by `agentx deploy`.
+
+**Regions.** A release only covers the regions it was built for (today: `us-east-1`), each with its own
+verified AgentCore availability-zone IDs and its own templates (`templates/<region>/<part>.template.json`).
+An uncovered region is refused, by name. Adding a region means adding its verified zone IDs to the release
+builder; nothing else about deploy changes.
+
+**The export bundle** (`agentx init --export`, requiring an explicit `--env` and refusing the name
+`production`) writes what a platform team needs to deploy the access stack themselves, with their own
+credentials and no AWS call ever made by our CLI: templates, parameters, a `deploy-access.sh` script, and
+the policy that principal needs. That policy is for creating the stack only; updating it later needs a
+broader principal, the operator's job. The ECR pull-through rule's create and delete actions cannot be
+scoped to a resource, so that statement stays on every resource (`*`). `deploy-access.sh` prompts for
+confirmation before executing (`--yes` skips it, same as `agentx deploy`), and prints the failure reason
+plus the exact recovery command on failure. Every later stack is then deployed by the AgentX operator,
+through the role the access stack created.
+
+**The callback signing key** lives only in Secrets Manager, at `agentx/<env>/callback-signing-key`, never in
+settings. The templates engine passes it to CloudFormation as a `NoEcho` parameter, never printed. The cdk
+engine can only pass it as a `cdk deploy --parameters` argument, so for that command's length it is visible
+in the operator's own machine's process list (the engines' one difference in secret handling); it stays
+redacted everywhere `agentx` itself prints anything, including the displayed command, any error, and the
+streamed output.
+

@@ -425,6 +425,11 @@ and the budget.
   code at release time, and a release check (FR-012) keeps them equal. Templates are the default
   because they need no bootstrap and are what enterprise pipelines deploy. An environment keeps its
   engine; switching is out of scope.
+- **The cdk engine passes parameters as `cdk deploy --parameters`** (2026-09-26, owner), including
+  the `NoEcho` callback signing key, which the CDK CLI only accepts as an argument. The runner never
+  logs or prints a secret value; its printed command replaces each one with `<redacted>`. The value
+  is visible only in the operator's own machine's process list, for the length of that command; this
+  is documented as the cdk engine's one difference from the templates engine in secret handling.
 - **Settings live in SSM, not on a laptop**, so any operator machine and the enterprise path read the
   same state.
 - **Admin once, then a narrow operator role**, with a CloudFormation service role, optional
@@ -470,6 +475,12 @@ and the budget.
   - The identity stack is skipped when the environment brings its own OIDC.
 - **Published templates are synthesized once for a reserved placeholder environment and rendered for
   the real environment at install, proven equal to a direct synthesis (FR-012).**
+- **Per-region templates** (2026-09-26, owner). The release builder synthesizes the placeholder
+  environment once for each region in `SUPPORTED_REGIONS`, exactly the regions with verified
+  AgentCore availability-zone IDs in `infra/lib/production-foundation.ts` (today: `us-east-1`).
+  Templates are written to `templates/<region>/<part>.template.json`; code packages are shared
+  across regions, since asset hashes do not depend on region. Adding a region means adding its
+  verified zone IDs; nothing else changes.
 - **npm package name and license** (owners, 2026-09-26). The CLI publishes as `@charterarc/agentx`
   (organization `charterarc`; AgentX stays the product name). The repository's license is
   FSL-1.1-ALv2 (Functional Source License, Apache-2.0 future license); the `LICENSE` file is added in
