@@ -2,7 +2,7 @@
 
 **Feature Branch**: `spec/025-mcp-server`
 **Created**: 2026-09-27
-**Status**: Draft for review
+**Status**: Approved (owner, 2026-09-27)
 **Input**: The owner's decisions of 2026-09-27 (developer hand-off first, then admin tools; private
 by default with share to channel; Sign in with Slack and company sign-in; confirmed admin changes),
 the owner's later decisions on the laptop-first MCP server and the developer task flow, the owner's
@@ -685,7 +685,7 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   NOT stop existing workspaces. The admin change tool `agentx_admin_set_workspace_limits` changes the
   setting with confirmation and audit (FR-039 to FR-052); spec 015 phase 15e's
   `agentx config set limits.workspacesPerMember|limits.workspacesPerOrg` covers the same setting from
-  the CLI, and its plan MUST write this setting rather than the stack parameters.
+  the CLI (spec 015 FR-048).
 
 **Install and setup (US7)**
 
@@ -861,9 +861,9 @@ Owner decisions from the review of this spec (binding, 2026-09-27):
 - **Admins can change the workspace limits without editing CloudFormation**, through an admin change
   tool with confirmation and audit (FR-053).
 
-Decisions made in this spec, **for the owner to confirm in review**:
+Decisions made in this spec, all owner-confirmed on 2026-09-27:
 
-- **D1. The control plane issues its own developer tokens** (recommended). It exchanges the Slack or
+- **D1. The control plane issues its own developer tokens** (owner-confirmed, 2026-09-27). It exchanges the Slack or
   company code server side and issues a 1-hour AgentX JWT and a 7-day rotating refresh token,
   verified by a second JWT authorizer on `/v1/dev/*`. Why: Slack's token exchange needs the client
   secret, which a laptop cannot hold; Slack's ID tokens live about five minutes; one issuer means one
@@ -876,12 +876,12 @@ Decisions made in this spec, **for the owner to confirm in review**:
     OIDC, and costs per federated user;
   - one route prefix and JWT authorizer per provider: Slack's exchange problem remains, and each new
     provider needs new routes.
-- **D2. Company sign-in users are linked to Slack by verified email** (recommended), for
+- **D2. Company sign-in users are linked to Slack by verified email** (owner-confirmed, 2026-09-27), for
   channel-based access, the shared-thread mention, the Slack Confirm button and the shared limit
   counter. Rejected: asking each person to also sign in with Slack (two sign-ins), and no link
   (company users could use only granted projects, and company-signed-in admins would have no Slack
   button).
-- **D3. Continue-mode messages go through the existing Slack thread machinery** (recommended): the
+- **D3. Continue-mode messages go through the existing Slack thread machinery** (owner-confirmed, 2026-09-27): the
   ingress queues them on the Slack request FIFO queue in the thread's message group, and the Slack
   service runs an ordinary Slack turn with the orchestrator model, acting on the task's workspace
   (FR-035, FR-054). Why: it reuses the per-thread ordering, the person and channel checks, the rate
@@ -891,7 +891,7 @@ Decisions made in this spec, **for the owner to confirm in review**:
   ordering mechanism, and raw Slack text would reach the worker with no model to ask for missing
   details or refuse connector writes without confirmation). The owner's rule that AI-tool
   instructions skip the model still holds: only teammates' Slack messages use it.
-- **D4. The developer's own follow-up does not queue behind channel turns** (recommended). While a
+- **D4. The developer's own follow-up does not queue behind channel turns** (owner-confirmed, 2026-09-27). While a
   channel turn holds the workspace, `agentx_continue_task` returns `TASK_BUSY`, naming who is
   driving and how many channel messages wait; the developer can wait, cancel the current operation,
   or switch the thread to view only. Channel turns wait for the workspace to be free (up to 30
@@ -899,40 +899,39 @@ Decisions made in this spec, **for the owner to confirm in review**:
   and it avoids passing developer requests through the Slack service. Rejected: queueing developer
   follow-ups in the thread's FIFO group (the Slack service would carry AI-tool requests, which needs
   a new signed message type).
-- **D5. Policy overrides downgrade instead of refusing** (recommended): required sharing shares a
+- **D5. Policy overrides downgrade instead of refusing** (owner-confirmed, 2026-09-27): required sharing shares a
   task that did not ask to be shared, and `allowContinue: false` makes a continue request view only;
   the result says which and why. Rejected: refusing the start (the AI tool would retry with other
   flags; refusing adds a round trip and no protection).
-- **D6. The default share mode is view only** (recommended), so opening a task to the channel is a
+- **D6. The default share mode is view only** (owner-confirmed, 2026-09-27), so opening a task to the channel is a
   deliberate choice. Rejected: continue by default (a developer who shares to inform the team would
   hand the task to anyone in the channel).
-- **D7. A Slack Confirm press applies the change server side at once** (recommended), even if the
+- **D7. A Slack Confirm press applies the change server side at once** (owner-confirmed, 2026-09-27), even if the
   tool call has stopped waiting, within the 10-minute expiry. Why: the press is the confirmation, and
   the control plane checks it itself. Rejected: making the admin call a second tool to apply (an
   extra step the model would drive, and the button would not mean what it says).
 - **D8. Workspace limits live in a control-plane setting that the broker reads, not in a stack
-  update** (recommended). The stack parameters stay as install-time defaults (FR-053). Why: it is
+  update** (owner-confirmed, 2026-09-27). The stack parameters stay as install-time defaults (FR-053). Why: it is
   simpler (one DynamoDB item the broker already has access to, read in the same place the limits are
   checked), safer (no CloudFormation change set, no operator role, no chance of replacing a resource,
   takes effect at once, and is recorded in the change audit), and it works from an AI tool, which has
   no AWS credentials. Rejected: a parameter-only stack update (needs the operator role and
   CloudFormation rights the admin's AI tool does not have, and takes minutes), and SSM (adds an SSM
-  read and IAM grant on the broker's hot path for no gain). Consequence: spec 015 FR-048 maps
-  `limits.workspacesPerMember` to the stack parameter today; phase 15e's plan must map both limit
-  keys to this setting instead.
-- **D9. The turn record schema gains `origin`** (recommended), with the AI-tool fields in place of
+  read and IAM grant on the broker's hot path for no gain). Spec 015 FR-048 maps both limit keys
+  to this setting.
+- **D9. The turn record schema gains `origin`** (owner-confirmed, 2026-09-27), with the AI-tool fields in place of
   the Slack event and requester, and records keyed by task. Teammates' continue-mode turns are Slack
   records that also carry the task ID. Rejected: a separate table (admins would read two exports).
-- **D10. Waits are capped at 600 seconds, default no wait** (recommended), with progress every 15
+- **D10. Waits are capped at 600 seconds, default no wait** (owner-confirmed, 2026-09-27), with progress every 15
   seconds. Why: MCP clients time out long calls; a task that outlives the wait keeps running.
 - **D11. A new notifier function posts to Slack for shared tasks and admin confirmations**
-  (recommended), so the broker still cannot read the Slack secret. Rejected: giving the broker the
+  (owner-confirmed, 2026-09-27), so the broker still cannot read the Slack secret. Rejected: giving the broker the
   Slack secret, and sending the developer's status posts through the Slack service's request queue
   (that service runs the orchestrator model, which the developer's own path must not use).
-- **D12. Admin CLI commands keep working without the new confirmation** (recommended): a person types
+- **D12. Admin CLI commands keep working without the new confirmation** (owner-confirmed, 2026-09-27): a person types
   them, and changing them is outside this spec.
 - **D13. Access tokens last 1 hour; refresh tokens rotate and end 7 days after sign-in; Slack users
-  are rechecked at each refresh** (recommended). Rejected: 30-day sessions (a person who leaves keeps
+  are rechecked at each refresh** (owner-confirmed, 2026-09-27). Rejected: 30-day sessions (a person who leaves keeps
   access too long for company sign-in, which is not rechecked).
 
 ## Assumptions and Scope
