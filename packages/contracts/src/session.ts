@@ -68,6 +68,8 @@ export const WorkspaceSessionSchema = z
      * PENDING; markFailed fails their operations. Stored as a DynamoDB string set.
      */
     waitingOutboxIds: z.array(z.string().uuid()).optional(),
+    /** Consecutive failed health probes of a READY worker, counted by the reconciler (#86). */
+    pingFailures: z.number().int().positive().optional(),
   })
   .strict()
   .superRefine((session, context) => {

@@ -135,9 +135,37 @@ describe("EC2 session lifecycle infrastructure (issue #83)", () => {
     expect(broker.Properties.VpcConfig).toBeUndefined();
   });
 
+  it("runs the reconciler every 10 minutes in the VPC, repairing only this environment's ec2-ebs resources (#86)", () => {
+    const [reconcilerId, reconciler] = ofType("AWS::Lambda::Function").find(([id]) => id.startsWith("SessionsReconciler"))!;
+    expect(reconciler.Properties.ReservedConcurrentExecutions).toBeUndefined();
+    expect(reconciler.Properties.VpcConfig).toEqual({
+      SubnetIds: { "Fn::Split": [",", { Ref: "PrivateSubnetIds" }] },
+      SecurityGroupIds: [{ Ref: "SessionManagerSecurityGroupId" }],
+    });
+    expect((reconciler.Properties.Environment as { Variables: Record<string, unknown> }).Variables).toMatchObject({ ENVIRONMENT_TAG: "production" });
+    const schedule = ofType("AWS::Scheduler::Schedule").find(([, r]) => JSON.stringify(r.Properties.Target).includes(reconcilerId))!;
+    expect(schedule[1].Properties.ScheduleExpression).toBe("rate(10 minutes)");
+    const roleId = (reconciler.Properties.Role as { "Fn::GetAtt": [string] })["Fn::GetAtt"][0];
+    const statements = roleStatements(roleId);
+    expect([...actions(statements)].filter((a) => a.endsWith(":*"))).toEqual([]);
+    for (const statement of statements.filter((st) => [st.Action].flat().some((a) => ["ec2:TerminateInstances", "ec2:DeleteVolume", "ec2:CreateTags"].includes(a)))) {
+      expect(statement.Condition?.StringEquals).toMatchObject({ "aws:ResourceTag/DeploymentMode": "ec2-ebs", "aws:ResourceTag/Environment": "production" });
+    }
+    const tagging = statements.find((st) => st.Sid === "QuarantineOwnVolumes")!;
+    expect(tagging.Condition?.["ForAllValues:StringEquals"]).toEqual({ "aws:TagKeys": ["agentx:quarantined"] });
+    expect([...actions(statements)]).toEqual(expect.arrayContaining(["states:DescribeExecution", "states:StartExecution"]));
+  });
+
+  it("alarms on quarantined volumes, lost instances and stuck provisioning (#86)", () => {
+    const names = ofType("AWS::CloudWatch::Alarm").map(([, a]) => a.Properties.AlarmName);
+    expect(names).toEqual(expect.arrayContaining(["AgentXReconcilerQuarantinedVolumes", "AgentXReconcilerLostInstances", "AgentXReconcilerStuckProvisioning"]));
+  });
+
   it("alarms the operator when either state machine fails or times out", () => {
     const alarms = ofType("AWS::CloudWatch::Alarm").filter(([, a]) => String(a.Properties.AlarmName).startsWith("AgentXSession"));
-    expect(alarms.map(([, a]) => a.Properties.AlarmName).sort()).toEqual(["AgentXSessionDeleterFailures", "AgentXSessionProvisionerFailures", "AgentXSessionReaperErrors"]);
+    expect(alarms.map(([, a]) => a.Properties.AlarmName).sort()).toEqual([
+      "AgentXSessionDeleterFailures", "AgentXSessionProvisionerFailures", "AgentXSessionReaperErrors", "AgentXSessionReconcilerErrors",
+    ]);
     for (const [, alarm] of alarms) expect(JSON.stringify(alarm.Properties.AlarmActions)).toContain("OperatorAlerts");
   });
 });

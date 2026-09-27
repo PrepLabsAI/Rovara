@@ -43,6 +43,7 @@ export class SessionLifecycle extends Construct {
   readonly deleter: sfn.StateMachine;
   readonly steps: lambda.Function;
   readonly reaper: lambda.Function;
+  readonly reconciler: lambda.Function;
   private readonly naming: AgentXNaming;
   private readonly dispatcherSecurityGroupId: CfnParameter;
   private readonly privateSubnetIds: CfnParameter;
@@ -188,6 +189,64 @@ export class SessionLifecycle extends Construct {
       metric: this.reaper.metricErrors({ period: Duration.minutes(5), statistic: "Sum" }),
       threshold: 1,
       evaluationPeriods: 3,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(props.notifyOperator);
+
+    // The reconciler (#86): every 10 minutes, repairs drift between this environment's ec2-ebs
+    // instances and volumes and their SESSION items. It never deletes a volume it cannot tie to a
+    // closed workspace; unclaimed ones are only tagged and alarmed (#22).
+    this.reconciler = packagedFunction(this, "Reconciler", "packages/broker/src/aws/session-reconciler.ts", {
+      STATE_TABLE_NAME: props.state.tableName,
+      PROVISIONER_ARN: this.provisioner.stateMachineArn,
+      DELETER_ARN: this.deleter.stateMachineArn,
+      ENVIRONMENT_TAG: naming.environmentTagValue,
+      AGENTX_METRICS_NAMESPACE: naming.metricsNamespace,
+    }, Duration.minutes(4));
+    inVpc(this.reconciler);
+    props.state.grantReadWriteData(this.reconciler);
+    this.provisioner.grantStartExecution(this.reconciler);
+    this.provisioner.grantRead(this.reconciler);
+    this.deleter.grantRead(this.reconciler);
+    this.reconciler.addToRolePolicy(new iam.PolicyStatement({ sid: "Describe", actions: ["ec2:DescribeInstances", "ec2:DescribeVolumes"], resources: ["*"] }));
+    this.reconciler.addToRolePolicy(new iam.PolicyStatement({
+      sid: "RepairOwn",
+      actions: ["ec2:TerminateInstances", "ec2:DeleteVolume"],
+      resources: [ec2Arn("instance/*"), ec2Arn("volume/*")],
+      conditions: ownResources,
+    }));
+    this.reconciler.addToRolePolicy(new iam.PolicyStatement({
+      sid: "QuarantineOwnVolumes",
+      actions: ["ec2:CreateTags"],
+      resources: [ec2Arn("volume/*")],
+      conditions: { ...ownResources, "ForAllValues:StringEquals": { "aws:TagKeys": ["agentx:quarantined"] } },
+    }));
+    new scheduler.Schedule(this, "ReconcilerSchedule", {
+      description: "Runs the AgentX EC2 session reconciler",
+      schedule: scheduler.ScheduleExpression.rate(Duration.minutes(10)),
+      target: new schedulerTargets.LambdaInvoke(this.reconciler, {}),
+    });
+    const findingAlarm = (id: string, metricName: string, description: string) => new cloudwatch.Alarm(this, id, {
+      alarmName: naming.alarmName(metricName),
+      alarmDescription: description,
+      metric: new cloudwatch.Metric({ namespace: naming.metricsNamespace, metricName, statistic: "Maximum", period: Duration.minutes(15) }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(props.notifyOperator);
+    findingAlarm("QuarantinedVolumesAlarm", "ReconcilerQuarantinedVolumes",
+      "An ec2-ebs workspace volume no session claims was tagged agentx:quarantined. It is never deleted automatically: find its workspace from its agentx:workspace tag and decide.");
+    findingAlarm("LostInstancesAlarm", "ReconcilerLostInstances",
+      "A READY EC2 worker's instance disappeared; its session was stopped and its running operation failed. Check the reconciler's logs and the instance's EC2 history.");
+    findingAlarm("StuckProvisioningAlarm", "ReconcilerStuckProvisioning",
+      "An EC2 session provisioning ended without finishing and was marked failed by the reconciler. Open the provisioner execution named in the reconciler's logs.");
+    new cloudwatch.Alarm(this, "ReconcilerErrorsAlarm", {
+      alarmName: naming.alarmName("SessionReconcilerErrors"),
+      alarmDescription: "The EC2 session reconciler failed twice in a row; drift is not being repaired. Check the reconciler's logs.",
+      metric: this.reconciler.metricErrors({ period: Duration.minutes(10), statistic: "Sum" }),
+      threshold: 1,
+      evaluationPeriods: 2,
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     }).addAlarmAction(props.notifyOperator);
