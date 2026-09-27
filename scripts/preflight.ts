@@ -1,14 +1,5 @@
-import {
-  BedrockAgentCoreClient,
-  InvokeAgentRuntimeCommand,
-  StopRuntimeSessionCommand,
-} from "@aws-sdk/client-bedrock-agentcore";
-import {
-  BedrockAgentCoreControlClient,
-  ListAgentRuntimesCommand,
-  ListCapacityProvidersCommand,
-} from "@aws-sdk/client-bedrock-agentcore-control";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
+import { evaluateEc2Preflight, gatherEc2Facts, type PreflightCheck } from "./ec2-preflight.js";
 
 const INSTANCE_REGIONS = new Set([
   "ap-northeast-1",
@@ -24,11 +15,12 @@ const INSTANCE_REGIONS = new Set([
 
 export interface PreflightResult {
   node: string;
-  region?: string;
+  region?: string | undefined;
   mode: "local" | "aws";
-  account?: string;
-  principalArn?: string;
-  agentCoreReachable?: boolean;
+  account?: string | undefined;
+  principalArn?: string | undefined;
+  /** EC2 worker prerequisites (#87); present with --aws. */
+  checks?: PreflightCheck[];
 }
 
 export function validateRuntimeSessionId(value: string): void {
@@ -49,8 +41,9 @@ export function validateInstanceRegion(region: string): void {
 export async function runPreflight(options: {
   aws?: boolean;
   region?: string;
+  env?: string;
 }): Promise<PreflightResult> {
-  const [major, minor] = process.versions.node.split(".").map(Number);
+  const [major = 0, minor = 0] = process.versions.node.split(".").map(Number);
   if (major < 22 || (major === 22 && minor < 19)) {
     throw new Error(`Node >=22.19.0 is required, found ${process.versions.node}`);
   }
@@ -65,16 +58,8 @@ export async function runPreflight(options: {
 
   const sts = new STSClient({ region });
   const identity = await sts.send(new GetCallerIdentityCommand({}));
-  const control = new BedrockAgentCoreControlClient({ region });
-  await Promise.all([
-    control.send(new ListAgentRuntimesCommand({ maxResults: 1 })),
-    control.send(new ListCapacityProvidersCommand({ maxResults: 1 })),
-  ]);
-
-  // Keep the data-plane command imports compile-checked without invoking or stopping a runtime.
-  void BedrockAgentCoreClient;
-  void InvokeAgentRuntimeCommand;
-  void StopRuntimeSessionCommand;
+  // Read-only: every check describes or reads; nothing is launched, signed or changed.
+  const checks = evaluateEc2Preflight(await gatherEc2Facts({ region, ...(options.env === undefined ? {} : { env: options.env }) }));
 
   return {
     node: process.versions.node,
@@ -82,21 +67,29 @@ export async function runPreflight(options: {
     mode: "aws",
     account: identity.Account,
     principalArn: identity.Arn,
-    agentCoreReachable: true,
+    checks,
   };
 }
 
-function parseArgs(argv: string[]): { aws: boolean; region?: string } {
+function parseArgs(argv: string[]): { aws: boolean; region?: string; env?: string } {
   const aws = argv.includes("--aws");
-  const regionIndex = argv.indexOf("--region");
-  const region = regionIndex >= 0 ? argv[regionIndex + 1] : undefined;
-  if (regionIndex >= 0 && !region) throw new Error("--region requires a value");
-  return { aws, region };
+  const value = (flag: string) => {
+    const index = argv.indexOf(flag);
+    const found = index >= 0 ? argv[index + 1] : undefined;
+    if (index >= 0 && !found) throw new Error(`${flag} requires a value`);
+    return found;
+  };
+  const region = value("--region");
+  const env = value("--env");
+  return { aws, ...(region === undefined ? {} : { region }), ...(env === undefined ? {} : { env }) };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   runPreflight(parseArgs(process.argv.slice(2)))
-    .then((result) => process.stdout.write(`${JSON.stringify(result, null, 2)}\n`))
+    .then((result) => {
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      if (result.checks?.some((check) => check.level === "fail")) process.exitCode = 1;
+    })
     .catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
       process.stderr.write(`Preflight failed: ${message}\n`);
