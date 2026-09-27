@@ -5,7 +5,6 @@ import {
   environmentConnectorSecretPrefix,
   environmentOperatorRoleName,
   environmentPullThroughPrefix,
-  environmentRuntimeName,
   environmentSettingsPrefix,
   environmentStackName,
   type StackPart,
@@ -15,12 +14,9 @@ export interface AgentXNaming {
   /** undefined for legacy naming. */
   readonly env: string | undefined;
   stackName(part: StackPart): string;
-  readonly workerSecurityGroupName: string;
   readonly apiName: string;
   /** Prefix of the foundation's `Name` tags. */
   readonly resourcePrefix: string;
-  readonly runtimeName: string;
-  readonly capacityProviderName: string;
   readonly workspaceKeyAlias: string;
   readonly alertsTopicName: string;
   alarmName(suffix: string): string;
@@ -72,11 +68,8 @@ export function legacyNaming(): AgentXNaming {
       if (part === "access") throw new Error(NO_NAMED_ENVIRONMENTS_MESSAGE);
       return LEGACY_STACK_NAMES[part];
     },
-    workerSecurityGroupName: "agentx-production-workers",
     apiName: "agentx-control-plane",
     resourcePrefix: "agentx-production",
-    runtimeName: "agentx_production_worker",
-    capacityProviderName: "agentx_production_capacity_v3",
     workspaceKeyAlias: "alias/agentx/production-workspaces",
     alertsTopicName: "AgentXOperatorAlerts",
     alarmName: (suffix) => `AgentX${suffix}`,
@@ -113,12 +106,8 @@ export function environmentNaming(env: string): AgentXNaming {
   return {
     env: name,
     stackName: (part) => environmentStackName(name, part),
-    workerSecurityGroupName: `agentx-${name}-workers`,
     apiName: `agentx-${name}-control-plane`,
     resourcePrefix: `agentx-${name}`,
-    // AgentCore runtime and capacity-provider names allow letters, digits and underscores only.
-    runtimeName: environmentRuntimeName(name),
-    capacityProviderName: `agentx_${name.replaceAll("-", "_")}_capacity`,
     workspaceKeyAlias: `alias/agentx/${name}/workspaces`,
     alertsTopicName: `agentx-${name}-alerts`,
     alarmName: (suffix) => `agentx-${name}-${suffix}`,

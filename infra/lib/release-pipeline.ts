@@ -153,25 +153,6 @@ export class ReleasePipelineStack extends Stack {
         actions: ["cloudformation:DescribeStacks"],
         resources: AGENTX_RELEASE_STACKS.map((name) => scoped("cloudformation", `stack/${name}/*`)),
       }),
-      new iam.PolicyStatement({
-        sid: "ReadProductionAgentCore",
-        actions: ["bedrock-agentcore:GetAgentRuntime", "bedrock-agentcore:GetCapacityProvider"],
-        resources: [
-          scoped("bedrock-agentcore", "runtime/agentx_production_worker-*"),
-          scoped("bedrock-agentcore", "capacity-provider/agentx_production_capacity_*"),
-        ],
-      }),
-      // DescribeLogGroups has no resource-level permissions; IAM denies any narrower resource.
-      new iam.PolicyStatement({
-        sid: "DescribeLogGroups",
-        actions: ["logs:DescribeLogGroups"],
-        resources: ["*"],
-      }),
-      new iam.PolicyStatement({
-        sid: "RuntimeLogRetention",
-        actions: ["logs:CreateLogGroup", "logs:PutRetentionPolicy"],
-        resources: [scoped("logs", "log-group:/aws/bedrock-agentcore/runtimes/*")],
-      }),
       useConnection,
     ];
     for (const policy of policies) project.addToRolePolicy(policy);

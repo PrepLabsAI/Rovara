@@ -15,7 +15,6 @@ import {
   environmentCloudFormationRoleName,
   environmentOperatorRoleName,
   environmentPullThroughPrefix,
-  environmentRuntimeName,
   environmentStackName,
   operatorRoleStatements,
   serviceRoleStatements,
@@ -587,12 +586,6 @@ credentials that can delete every resource below.
    aws cloudformation wait stack-delete-complete --stack-name <stack> --region ${region}
    \`\`\`
 6. **Remove what survives stack deletion:**
-   - **The AgentCore capacity provider** (foundation's \`CapacityProviderArn\` output; the id is the
-     part after \`capacity-provider/\`). **Warning:** deleting the capacity provider deletes every worker session's persistent workspace volume.
-     Delete it only when no workspace is needed.
-     \`\`\`
-     aws bedrock-agentcore-control delete-capacity-provider --capacity-provider-id <id> --region ${region}
-     \`\`\`
    - **The Cognito user pool** (identity), which has deletion protection:
      \`\`\`
      aws cognito-idp update-user-pool --user-pool-id <id> --deletion-protection INACTIVE --region ${region}
@@ -612,9 +605,7 @@ credentials that can delete every resource below.
      \`\`\`
      aws dynamodb delete-table --table-name <table> --region ${region}
      \`\`\`
-   - **Two log groups**: the foundation's VPC flow logs, and the log group AgentCore itself creates
-     for the runtime, \`/aws/bedrock-agentcore/runtimes/<runtimeId>-DEFAULT\` (\`<runtimeId>\` is the
-     last part of the runtime's ARN):
+   - **The foundation's VPC flow-log group**:
      \`\`\`
      aws logs delete-log-group --log-group-name <name> --region ${region}
      \`\`\`
@@ -737,7 +728,6 @@ export async function writeExportBundle(input: ExportBundleInput): Promise<Expor
       artifactBucketArn: `arn:${partition}:s3:::${environmentStackName(env, "access")}-*`,
       pullThroughPrefix: environmentPullThroughPrefix(env),
       cloudFormationRoleName: environmentCloudFormationRoleName(env),
-      runtimeName: environmentRuntimeName(env),
       ...(answers.permissionsBoundaryArn === undefined ? {} : { permissionsBoundaryArn: answers.permissionsBoundaryArn }),
     };
     await write("policies/service-role.json", policyDocument(serviceRoleStatements(policyScope)));

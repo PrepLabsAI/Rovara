@@ -595,54 +595,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
               ],
             },
             {
-              "Action": "bedrock-agentcore:StopRuntimeSession",
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::Join": [
-                  "",
-                  [
-                    "arn:",
-                    {
-                      "Ref": "AWS::Partition",
-                    },
-                    ":bedrock-agentcore:",
-                    {
-                      "Ref": "AWS::Region",
-                    },
-                    ":",
-                    {
-                      "Ref": "AWS::AccountId",
-                    },
-                    ":runtime/*",
-                  ],
-                ],
-              },
-            },
-            {
-              "Action": "bedrock-agentcore:DeleteCapacityProviderSession",
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::Join": [
-                  "",
-                  [
-                    "arn:",
-                    {
-                      "Ref": "AWS::Partition",
-                    },
-                    ":bedrock-agentcore:",
-                    {
-                      "Ref": "AWS::Region",
-                    },
-                    ":",
-                    {
-                      "Ref": "AWS::AccountId",
-                    },
-                    ":capacity-provider/*",
-                  ],
-                ],
-              },
-            },
-            {
               "Action": "secretsmanager:GetSecretValue",
               "Effect": "Allow",
               "Resource": {
@@ -1109,30 +1061,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                   ],
                 },
               ],
-            },
-            {
-              "Action": "bedrock-agentcore:InvokeAgentRuntime",
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::Join": [
-                  "",
-                  [
-                    "arn:",
-                    {
-                      "Ref": "AWS::Partition",
-                    },
-                    ":bedrock-agentcore:",
-                    {
-                      "Ref": "AWS::Region",
-                    },
-                    ":",
-                    {
-                      "Ref": "AWS::AccountId",
-                    },
-                    ":runtime/*",
-                  ],
-                ],
-              },
             },
             {
               "Action": "kms:Sign",
@@ -4938,16 +4866,8 @@ exports[`legacy production templates > AgentXProductionFoundation is unchanged 1
 {
   "Description": "Stable AgentX production network, encryption, and persistent workspace capacity",
   "Outputs": {
-    "CapacityProviderArn": {
-      "Value": {
-        "Fn::GetAtt": [
-          "AgentXProductionCapacityProvider",
-          "Arn",
-        ],
-      },
-    },
     "DeploymentMode": {
-      "Value": "instances-ebs",
+      "Value": "ec2-ebs",
     },
     "DispatcherSecurityGroupId": {
       "Value": {
@@ -5061,14 +4981,6 @@ exports[`legacy production templates > AgentXProductionFoundation is unchanged 1
         "Ref": "Vpc",
       },
     },
-    "WorkerSecurityGroupId": {
-      "Value": {
-        "Fn::GetAtt": [
-          "WorkerSecurityGroup",
-          "GroupId",
-        ],
-      },
-    },
     "WorkspaceKmsKeyArn": {
       "Value": {
         "Fn::GetAtt": [
@@ -5086,200 +4998,6 @@ exports[`legacy production templates > AgentXProductionFoundation is unchanged 1
     },
   },
   "Resources": {
-    "AgentXProductionCapacityProvider": {
-      "DeletionPolicy": "Retain",
-      "DependsOn": [
-        "PrivateDefaultRoute1",
-        "PrivateDefaultRoute2",
-      ],
-      "Properties": {
-        "ComputeConfiguration": {
-          "Ec2Configuration": {
-            "LaunchTemplateSource": {
-              "LaunchParameters": {
-                "InstanceRequirements": {
-                  "AllowedInstanceTypes": [
-                    "m6g.medium",
-                  ],
-                },
-                "Monitoring": "DETAILED",
-                "OperatingSystem": "LINUX_ARM64",
-                "PropagatedTags": {
-                  "Application": "AgentX",
-                  "DeploymentMode": "instances-ebs",
-                  "Environment": "production",
-                },
-              },
-            },
-            "LifecycleConfiguration": {
-              "IdleInstanceTimeout": 300,
-              "MaxLifetime": 1209600,
-            },
-            "RootVolume": {
-              "Encrypted": true,
-              "FreeSpaceGiB": 30,
-              "KmsKeyId": {
-                "Fn::GetAtt": [
-                  "WorkspaceKey21BC864D",
-                  "Arn",
-                ],
-              },
-              "VolumeType": "gp3",
-            },
-            "Volumes": [
-              {
-                "EbsConfiguration": {
-                  "Encrypted": true,
-                  "KmsKeyId": {
-                    "Fn::GetAtt": [
-                      "WorkspaceKey21BC864D",
-                      "Arn",
-                    ],
-                  },
-                  "Name": "workspace",
-                  "SizeGiB": 20,
-                  "VolumeType": "gp3",
-                },
-              },
-            ],
-            "VpcConfiguration": {
-              "SecurityGroups": [
-                {
-                  "Fn::GetAtt": [
-                    "WorkerSecurityGroup",
-                    "GroupId",
-                  ],
-                },
-              ],
-              "Subnets": [
-                {
-                  "Ref": "PrivateSubnet1",
-                },
-                {
-                  "Ref": "PrivateSubnet2",
-                },
-              ],
-            },
-          },
-        },
-        "Description": "Stable AgentX production compute and per-session EBS workspace boundary",
-        "Name": "agentx_production_capacity_v3",
-        "PermissionsConfiguration": {
-          "CapacityProviderOperatorRoleArn": {
-            "Fn::GetAtt": [
-              "CapacityProviderOperatorRole1D65CAE2",
-              "Arn",
-            ],
-          },
-        },
-        "Tags": [
-          {
-            "Key": "Application",
-            "Value": "AgentX",
-          },
-          {
-            "Key": "DeploymentMode",
-            "Value": "instances-ebs",
-          },
-          {
-            "Key": "Environment",
-            "Value": "production",
-          },
-        ],
-      },
-      "Type": "AWS::BedrockAgentCore::CapacityProvider",
-      "UpdateReplacePolicy": "Retain",
-    },
-    "CapacityProviderOperatorRole1D65CAE2": {
-      "Properties": {
-        "AssumeRolePolicyDocument": {
-          "Statement": [
-            {
-              "Action": "sts:AssumeRole",
-              "Condition": {
-                "ArnLike": {
-                  "aws:SourceArn": {
-                    "Fn::Join": [
-                      "",
-                      [
-                        "arn:",
-                        {
-                          "Ref": "AWS::Partition",
-                        },
-                        ":bedrock-agentcore:us-east-1:",
-                        {
-                          "Ref": "AWS::AccountId",
-                        },
-                        ":*",
-                      ],
-                    ],
-                  },
-                },
-                "StringEquals": {
-                  "aws:SourceAccount": {
-                    "Ref": "AWS::AccountId",
-                  },
-                },
-              },
-              "Effect": "Allow",
-              "Principal": {
-                "Service": "bedrock-agentcore.amazonaws.com",
-              },
-            },
-          ],
-          "Version": "2012-10-17",
-        },
-        "Description": "Allows AgentCore to operate the AgentX production capacity provider",
-        "ManagedPolicyArns": [
-          {
-            "Fn::Join": [
-              "",
-              [
-                "arn:",
-                {
-                  "Ref": "AWS::Partition",
-                },
-                ":iam::aws:policy/BedrockAgentCoreRuntimeInstancesOperatorRolePolicy",
-              ],
-            ],
-          },
-        ],
-      },
-      "Type": "AWS::IAM::Role",
-    },
-    "CapacityProviderOperatorRoleDefaultPolicy8C991BC8": {
-      "Properties": {
-        "PolicyDocument": {
-          "Statement": [
-            {
-              "Action": [
-                "kms:CreateGrant",
-                "kms:Decrypt",
-                "kms:DescribeKey",
-                "kms:Encrypt",
-                "kms:GenerateDataKey*",
-                "kms:ReEncrypt*",
-              ],
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::GetAtt": [
-                  "WorkspaceKey21BC864D",
-                  "Arn",
-                ],
-              },
-            },
-          ],
-          "Version": "2012-10-17",
-        },
-        "PolicyName": "CapacityProviderOperatorRoleDefaultPolicy8C991BC8",
-        "Roles": [
-          {
-            "Ref": "CapacityProviderOperatorRole1D65CAE2",
-          },
-        ],
-      },
-      "Type": "AWS::IAM::Policy",
-    },
     "Ec2WorkersDispatcherSecurityGroup176319A7": {
       "Properties": {
         "GroupDescription": "AgentX dispatcher: signed invocations to EC2 workers, HTTPS to AWS APIs",
@@ -6282,39 +6000,6 @@ exports[`legacy production templates > AgentXProductionFoundation is unchanged 1
       "Type": "AWS::Logs::LogGroup",
       "UpdateReplacePolicy": "Retain",
     },
-    "WorkerSecurityGroup": {
-      "Properties": {
-        "GroupDescription": "AgentX production workers: no ingress and HTTPS-only egress",
-        "GroupName": "agentx-production-workers",
-        "SecurityGroupEgress": [
-          {
-            "CidrIp": "0.0.0.0/0",
-            "Description": "HTTPS to Git providers, package registries, AWS APIs, and documentation",
-            "FromPort": 443,
-            "IpProtocol": "tcp",
-            "ToPort": 443,
-          },
-        ],
-        "Tags": [
-          {
-            "Key": "Application",
-            "Value": "AgentX",
-          },
-          {
-            "Key": "Environment",
-            "Value": "production",
-          },
-          {
-            "Key": "Name",
-            "Value": "agentx-production-workers",
-          },
-        ],
-        "VpcId": {
-          "Ref": "Vpc",
-        },
-      },
-      "Type": "AWS::EC2::SecurityGroup",
-    },
     "WorkspaceKey21BC864D": {
       "DeletionPolicy": "Retain",
       "Properties": {
@@ -7290,78 +6975,6 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                 },
               ],
               "Sid": "ReadReleaseStacks",
-            },
-            {
-              "Action": [
-                "bedrock-agentcore:GetAgentRuntime",
-                "bedrock-agentcore:GetCapacityProvider",
-              ],
-              "Effect": "Allow",
-              "Resource": [
-                {
-                  "Fn::Join": [
-                    "",
-                    [
-                      "arn:",
-                      {
-                        "Ref": "AWS::Partition",
-                      },
-                      ":bedrock-agentcore:us-east-1:",
-                      {
-                        "Ref": "AWS::AccountId",
-                      },
-                      ":runtime/agentx_production_worker-*",
-                    ],
-                  ],
-                },
-                {
-                  "Fn::Join": [
-                    "",
-                    [
-                      "arn:",
-                      {
-                        "Ref": "AWS::Partition",
-                      },
-                      ":bedrock-agentcore:us-east-1:",
-                      {
-                        "Ref": "AWS::AccountId",
-                      },
-                      ":capacity-provider/agentx_production_capacity_*",
-                    ],
-                  ],
-                },
-              ],
-              "Sid": "ReadProductionAgentCore",
-            },
-            {
-              "Action": "logs:DescribeLogGroups",
-              "Effect": "Allow",
-              "Resource": "*",
-              "Sid": "DescribeLogGroups",
-            },
-            {
-              "Action": [
-                "logs:CreateLogGroup",
-                "logs:PutRetentionPolicy",
-              ],
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::Join": [
-                  "",
-                  [
-                    "arn:",
-                    {
-                      "Ref": "AWS::Partition",
-                    },
-                    ":logs:us-east-1:",
-                    {
-                      "Ref": "AWS::AccountId",
-                    },
-                    ":log-group:/aws/bedrock-agentcore/runtimes/*",
-                  ],
-                ],
-              },
-              "Sid": "RuntimeLogRetention",
             },
             {
               "Action": [

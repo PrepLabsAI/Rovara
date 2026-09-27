@@ -3,10 +3,6 @@ import { Match, Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import {
-  DemoRuntimeStack,
-  validateDemoRuntimeConfiguration,
-} from "../../infra/lib/demo-runtime.js";
-import {
   ProductionFoundationStack,
   defaultProductionAvailabilityZoneIds,
   validateProductionFoundationConfiguration,
@@ -149,7 +145,7 @@ describe("hosted Slack orchestrator service", () => {
 });
 
 describe("control-plane infrastructure", () => {
-  it("synthesizes private storage, durable dispatch, JWT auth and a single runtime invoker", () => {
+  it("synthesizes private storage, durable dispatch and JWT auth", () => {
     const app = new App();
     const stack = new ControlPlaneStack(app, "TestControlPlane");
     const template = Template.fromStack(stack).toJSON();
@@ -159,7 +155,7 @@ describe("control-plane infrastructure", () => {
     expect(json).toContain("AWS::SQS::Queue");
     expect(json).toContain("AWS::S3::Bucket");
     expect(json).toContain("JWT");
-    expect(json.match(/bedrock-agentcore:InvokeAgentRuntime/g)).toHaveLength(1);
+    expect(json).not.toContain("bedrock-agentcore:InvokeAgentRuntime");
     Template.fromStack(stack).hasResourceProperties("AWS::ApiGatewayV2::Api", {
       Name: "agentx-control-plane",
       ProtocolType: "HTTP",
@@ -198,8 +194,8 @@ describe("control-plane infrastructure", () => {
     expect(json).toContain("codebuild:BatchGetBuilds");
     expect(json).toContain(":codebuild:");
     expect(json).toContain("project/agentx-*");
-    expect(json).toContain("bedrock-agentcore:DeleteCapacityProviderSession");
-    expect(json).toContain(":capacity-provider/*");
+    // AgentCore was removed (#118).
+    expect(json).not.toContain("bedrock-agentcore");
   });
 
   it("lets the broker read connector secrets under agentx/connectors/* and never every secret", () => {
@@ -234,8 +230,8 @@ describe("control-plane infrastructure", () => {
   });
 });
 
-describe("AgentCore Instances infrastructure", () => {
-  it("synthesizes a retained ARM64 capacity provider in a dedicated two-AZ VPC", () => {
+describe("production foundation and worker settings", () => {
+  it("synthesizes a dedicated two-AZ VPC, the retained workspace key and the EC2 workers, and nothing of AgentCore", () => {
     const app = new App();
     const stack = new ProductionFoundationStack(app, "TestFoundation", {
       deploymentRegion: "us-east-1",
@@ -249,45 +245,11 @@ describe("AgentCore Instances infrastructure", () => {
     template.resourceCountIs("AWS::EC2::FlowLog", 1);
     template.resourceCountIs("AWS::EC2::VPCEndpoint", 1);
     template.resourceCountIs("AWS::KMS::Key", 1);
-    template.resourceCountIs("AWS::BedrockAgentCore::CapacityProvider", 1);
-    template.resourceCountIs("AWS::BedrockAgentCore::Runtime", 0);
-    template.hasResourceProperties("AWS::EC2::SecurityGroup", {
-      GroupDescription: "AgentX production workers: no ingress and HTTPS-only egress",
-      SecurityGroupEgress: [{
-        IpProtocol: "tcp",
-        FromPort: 443,
-        ToPort: 443,
-        CidrIp: "0.0.0.0/0",
-        Description: Match.anyValue(),
-      }],
+    expect(Object.values(template.toJSON().Resources as Record<string, { Type: string }>).filter((resource) => resource.Type.startsWith("AWS::BedrockAgentCore::"))).toEqual([]);
+    expect(json).not.toContain("BedrockAgentCore");
+    template.hasResourceProperties("AWS::EC2::LaunchTemplate", {
+      LaunchTemplateData: Match.objectLike({ InstanceType: "m6g.medium" }),
     });
-    template.hasResourceProperties("AWS::BedrockAgentCore::CapacityProvider", {
-      Name: "agentx_production_capacity_v3",
-      ComputeConfiguration: {
-        Ec2Configuration: Match.objectLike({
-          LaunchTemplateSource: {
-            LaunchParameters: Match.objectLike({
-              OperatingSystem: "LINUX_ARM64",
-              InstanceRequirements: { AllowedInstanceTypes: ["m6g.medium"] },
-            }),
-          },
-          RootVolume: Match.objectLike({ Encrypted: true, VolumeType: "gp3" }),
-          Volumes: [{
-            EbsConfiguration: Match.objectLike({
-              Name: "workspace",
-              SizeGiB: 20,
-              VolumeType: "gp3",
-              Encrypted: true,
-            }),
-          }],
-        }),
-      },
-    });
-    template.hasResource("AWS::BedrockAgentCore::CapacityProvider", {
-      DeletionPolicy: "Retain",
-      UpdateReplacePolicy: "Retain",
-    });
-    expect(json).toContain("BedrockAgentCoreRuntimeInstancesOperatorRolePolicy");
     expect(json).toContain("alias/agentx/production-workspaces");
     expect(json).toContain('"RetentionInDays":30');
   });
@@ -323,9 +285,6 @@ describe("AgentCore Instances infrastructure", () => {
     const foundation = {
       region: "us-east-1",
       availabilityZoneIds: defaultProductionAvailabilityZoneIds("us-east-1"),
-      providerIdleSeconds: 300,
-      providerMaxLifetimeSeconds: 1_209_600,
-      volumeSizeGiB: 20,
       instanceType: "m6g.medium",
     };
     expect(validateProductionFoundationConfiguration(foundation)).toEqual(foundation);
@@ -416,7 +375,7 @@ describe("production release pipeline", () => {
     expect(actions.filter((action) => action === "*" || action.endsWith(":*"))).toEqual([]);
     expect(
       statements.filter((statement) => statement.Resource === "*").flatMap(actionsOf),
-    ).toEqual(["ecr:GetAuthorizationToken", "logs:DescribeLogGroups"]);
+    ).toEqual(["ecr:GetAuthorizationToken"]);
     const assume = statements.find((statement) => statement.Sid === "AssumeCdkBootstrapRoles");
     expect(JSON.stringify(assume?.Resource)).toContain(":role/cdk-hnb659fds-*-");
     const repository = statements.find((statement) => statement.Sid === "ProductionWorkerRepository");
@@ -426,68 +385,8 @@ describe("production release pipeline", () => {
     const stacks = statements.find((statement) => statement.Sid === "ReadReleaseStacks");
     expect(JSON.stringify(stacks?.Resource)).toContain("stack/AgentXSlackOrchestrator/*");
     expect(json).toContain("codeconnections:UseConnection");
-    expect(json).toContain("bedrock-agentcore:GetCapacityProvider");
+    expect(json).not.toContain("bedrock-agentcore");
     expect(actions).not.toContain("cloudformation:CreateStack");
-  });
-});
-
-describe("AgentCore VPC-free microVM demo infrastructure", () => {
-  it("uses PUBLIC networking and isolated session storage without a capacity provider", () => {
-    const app = new App();
-    const stack = new DemoRuntimeStack(app, "TestDemoRuntime", { deploymentRegion: "us-east-1" });
-    const template = Template.fromStack(stack);
-
-    template.resourceCountIs("AWS::BedrockAgentCore::CapacityProvider", 0);
-    template.resourceCountIs("AWS::EC2::VPC", 0);
-    template.resourceCountIs("AWS::BedrockAgentCore::Runtime", 1);
-    template.hasResourceProperties("AWS::BedrockAgentCore::Runtime", {
-      NetworkConfiguration: { NetworkMode: "PUBLIC" },
-      FilesystemConfigurations: [{ SessionStorage: { MountPath: "/mnt/workspace" } }],
-      LifecycleConfiguration: {
-        IdleRuntimeSessionTimeout: 900,
-        MaxLifetime: 28_800,
-      },
-      EnvironmentVariables: {
-        AGENTX_WORKSPACE_ROOT: "/mnt/workspace",
-        AGENTX_CONTROL_PLANE_URL: { Ref: "ControlPlaneUrl" },
-        AGENTX_MODEL_PROVIDER: { Ref: "ModelProvider" },
-        AGENTX_MODEL_ID: { Ref: "ModelId" },
-      },
-      CapacityProviderConfiguration: Match.absent(),
-    });
-    template.hasResourceProperties("AWS::IAM::Role", {
-      AssumeRolePolicyDocument: Match.objectLike({
-        Statement: Match.arrayWith([
-          Match.objectLike({ Principal: { Service: "bedrock-agentcore.amazonaws.com" } }),
-        ]),
-      }),
-    });
-    template.hasResource("AWS::BedrockAgentCore::Runtime", {
-      DependsOn: Match.arrayWith([Match.stringLikeRegexp("^RuntimeExecutionPolicy")]),
-    });
-    const json = JSON.stringify(template.toJSON());
-    expect(json).toContain("ecr:GetAuthorizationToken");
-    expect(json).toContain("bedrock:InvokeModel");
-    expect(json).not.toContain("GITHUB_APP_PRIVATE_KEY_SECRET_ARN");
-    expect(json).not.toContain("GITHUB_APP_ID");
-  });
-
-  it("enforces the microVM mount and eight-hour lifecycle ceiling", () => {
-    const base = {
-      mountPath: "/mnt/workspace",
-      idleSeconds: 900,
-      maxLifetimeSeconds: 28_800,
-    };
-    expect(validateDemoRuntimeConfiguration(base)).toEqual(base);
-    expect(() =>
-      validateDemoRuntimeConfiguration({ ...base, mountPath: "/mnt/shared" }),
-    ).toThrow(/workspace/i);
-    expect(() =>
-      validateDemoRuntimeConfiguration({ ...base, maxLifetimeSeconds: 28_801 }),
-    ).toThrow(/28800/i);
-    expect(() =>
-      validateDemoRuntimeConfiguration({ ...base, idleSeconds: 1_000, maxLifetimeSeconds: 900 }),
-    ).toThrow(/idle/i);
   });
 });
 

@@ -4,32 +4,25 @@ import {
   RemovalPolicy,
   Stack,
   type StackProps,
-  aws_bedrockagentcore as agentcore,
   aws_ec2 as ec2,
   aws_iam as iam,
   aws_kms as kms,
   aws_logs as logs,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
-import {
-  AGENTCORE_INSTANCES_REGIONS,
-  AGENTX_WORKSPACE_VOLUME,
-} from "./agent-runtime.js";
 import { Ec2WorkerFoundation } from "./ec2-workers.js";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
 
-export const AGENTX_PRODUCTION_DEPLOYMENT_MODE = "instances-ebs";
+export const AGENTX_PRODUCTION_DEPLOYMENT_MODE = "ec2-ebs";
 export const AGENTX_PRODUCTION_VPC_CIDR = "10.42.0.0/16";
 export const AGENTX_PRODUCTION_INSTANCE_TYPE = "m6g.medium";
-export const AGENTX_PRODUCTION_OPERATING_SYSTEM = "LINUX_ARM64";
 
 const DEFAULT_AZ_IDS: Readonly<Record<string, readonly [string, string]>> = {
   "us-east-1": ["use1-az1", "use1-az2"],
 };
 
 /**
- * The regions a release covers: exactly the regions with verified AgentCore Instances
- * availability-zone IDs above. Adding a region means adding its verified zone IDs to
+ * The regions a release covers: exactly the regions with verified availability-zone IDs above. Adding a region means adding its verified zone IDs to
  * `DEFAULT_AZ_IDS`; nothing else changes.
  */
 export const SUPPORTED_REGIONS: readonly string[] = Object.keys(DEFAULT_AZ_IDS).sort();
@@ -37,9 +30,6 @@ export const SUPPORTED_REGIONS: readonly string[] = Object.keys(DEFAULT_AZ_IDS).
 export interface ProductionFoundationConfiguration {
   region: string;
   availabilityZoneIds: readonly [string, string];
-  providerIdleSeconds: number;
-  providerMaxLifetimeSeconds: number;
-  volumeSizeGiB: number;
   instanceType: string;
 }
 
@@ -55,7 +45,7 @@ export function defaultProductionAvailabilityZoneIds(
   const availabilityZoneIds = DEFAULT_AZ_IDS[region];
   if (!availabilityZoneIds) {
     throw new Error(
-      `no verified AgentCore Instances availability-zone IDs are configured for ${region}`,
+      `no verified availability-zone IDs are configured for ${region}`,
     );
   }
   return availabilityZoneIds;
@@ -64,31 +54,12 @@ export function defaultProductionAvailabilityZoneIds(
 export function validateProductionFoundationConfiguration(
   configuration: ProductionFoundationConfiguration,
 ): ProductionFoundationConfiguration {
-  if (!AGENTCORE_INSTANCES_REGIONS.has(configuration.region)) {
-    throw new Error(`AgentCore Instances is not supported in region ${configuration.region}`);
-  }
   if (
     configuration.availabilityZoneIds.length !== 2 ||
     new Set(configuration.availabilityZoneIds).size !== 2 ||
     configuration.availabilityZoneIds.some((value) => !/^[a-z0-9-]+-az[0-9]+$/.test(value))
   ) {
     throw new Error("production requires two distinct availability-zone IDs");
-  }
-  if (
-    !Number.isInteger(configuration.providerIdleSeconds) ||
-    configuration.providerIdleSeconds < 60 ||
-    configuration.providerIdleSeconds > 1_209_600 ||
-    !Number.isInteger(configuration.providerMaxLifetimeSeconds) ||
-    configuration.providerMaxLifetimeSeconds < 60 ||
-    configuration.providerMaxLifetimeSeconds > 1_209_600
-  ) {
-    throw new Error("capacity provider lifecycle values must be integers from 60 through 1209600 seconds");
-  }
-  if (configuration.providerIdleSeconds > configuration.providerMaxLifetimeSeconds) {
-    throw new Error("capacity provider idle timeout cannot exceed its maximum lifetime");
-  }
-  if (!Number.isInteger(configuration.volumeSizeGiB) || configuration.volumeSizeGiB < 1) {
-    throw new Error("workspace volume size must be a positive GiB integer");
   }
   if (!/^[a-z][a-z0-9-]*\.[a-z0-9]+$/.test(configuration.instanceType)) {
     throw new Error("instance type is invalid");
@@ -97,8 +68,6 @@ export function validateProductionFoundationConfiguration(
 }
 
 export class ProductionFoundationStack extends Stack {
-  readonly capacityProviderArn: string;
-
   constructor(scope: Construct, id: string, props: ProductionFoundationStackProps) {
     super(scope, id, props);
     const naming = props.naming ?? legacyNaming();
@@ -107,10 +76,6 @@ export class ProductionFoundationStack extends Stack {
       availabilityZoneIds:
         props.configuration?.availabilityZoneIds ??
         defaultProductionAvailabilityZoneIds(props.deploymentRegion),
-      providerIdleSeconds: props.configuration?.providerIdleSeconds ?? 300,
-      providerMaxLifetimeSeconds:
-        props.configuration?.providerMaxLifetimeSeconds ?? 1_209_600,
-      volumeSizeGiB: props.configuration?.volumeSizeGiB ?? 20,
       instanceType: props.configuration?.instanceType ?? AGENTX_PRODUCTION_INSTANCE_TYPE,
     });
 
@@ -202,22 +167,6 @@ export class ProductionFoundationStack extends Stack {
       routeTableIds: privateRouteTables.map((routeTable) => routeTable.ref),
     });
 
-    const workerSecurityGroup = new ec2.CfnSecurityGroup(this, "WorkerSecurityGroup", {
-      groupDescription: "AgentX production workers: no ingress and HTTPS-only egress",
-      groupName: naming.workerSecurityGroupName,
-      securityGroupEgress: [
-        {
-          ipProtocol: "tcp",
-          fromPort: 443,
-          toPort: 443,
-          cidrIp: "0.0.0.0/0",
-          description: "HTTPS to Git providers, package registries, AWS APIs, and documentation",
-        },
-      ],
-      tags: resourceTags(naming.workerSecurityGroupName, naming),
-      vpcId: vpc.ref,
-    });
-
     const flowLogGroup = new logs.LogGroup(this, "VpcFlowLogs", {
       retention: logs.RetentionDays.ONE_MONTH,
       // Retained: flow logs are audit data that must outlive a stack deletion.
@@ -246,98 +195,8 @@ export class ProductionFoundationStack extends Stack {
       removalPolicy: RemovalPolicy.RETAIN,
     });
 
-    const operatorRole = new iam.Role(this, "CapacityProviderOperatorRole", {
-      assumedBy: new iam.ServicePrincipal("bedrock-agentcore.amazonaws.com", {
-        conditions: {
-          StringEquals: { "aws:SourceAccount": this.account },
-          ArnLike: {
-            "aws:SourceArn": `arn:${this.partition}:bedrock-agentcore:${props.deploymentRegion}:${this.account}:*`,
-          },
-        },
-      }),
-      description: "Allows AgentCore to operate the AgentX production capacity provider",
-      managedPolicies: [
-        iam.ManagedPolicy.fromAwsManagedPolicyName(
-          "BedrockAgentCoreRuntimeInstancesOperatorRolePolicy",
-        ),
-      ],
-    });
-    workspaceKey.grant(
-      operatorRole,
-      "kms:CreateGrant",
-      "kms:Decrypt",
-      "kms:DescribeKey",
-      "kms:Encrypt",
-      "kms:GenerateDataKey*",
-      "kms:ReEncrypt*",
-    );
-
-    const capacityProvider = new agentcore.CfnCapacityProvider(
-      this,
-      "AgentXProductionCapacityProvider",
-      {
-        name: naming.capacityProviderName,
-        description: "Stable AgentX production compute and per-session EBS workspace boundary",
-        permissionsConfiguration: {
-          capacityProviderOperatorRoleArn: operatorRole.roleArn,
-        },
-        computeConfiguration: {
-          ec2Configuration: {
-            launchTemplateSource: {
-              launchParameters: {
-                operatingSystem: AGENTX_PRODUCTION_OPERATING_SYSTEM,
-                instanceRequirements: {
-                  allowedInstanceTypes: [configuration.instanceType],
-                },
-                monitoring: "DETAILED",
-                propagatedTags: {
-                  Application: "AgentX",
-                  DeploymentMode: AGENTX_PRODUCTION_DEPLOYMENT_MODE,
-                  Environment: naming.environmentTagValue,
-                },
-              },
-            },
-            vpcConfiguration: {
-              subnets: privateSubnets.map((subnet) => subnet.ref),
-              securityGroups: [workerSecurityGroup.attrGroupId],
-            },
-            rootVolume: {
-              encrypted: true,
-              freeSpaceGiB: 30,
-              kmsKeyId: workspaceKey.keyArn,
-              volumeType: "gp3",
-            },
-            volumes: [
-              {
-                ebsConfiguration: {
-                  name: AGENTX_WORKSPACE_VOLUME,
-                  sizeGiB: configuration.volumeSizeGiB,
-                  volumeType: "gp3",
-                  encrypted: true,
-                  kmsKeyId: workspaceKey.keyArn,
-                },
-              },
-            ],
-            lifecycleConfiguration: {
-              idleInstanceTimeout: configuration.providerIdleSeconds,
-              maxLifetime: configuration.providerMaxLifetimeSeconds,
-            },
-          },
-        },
-        tags: [
-          { key: "Application", value: "AgentX" },
-          { key: "DeploymentMode", value: AGENTX_PRODUCTION_DEPLOYMENT_MODE },
-          { key: "Environment", value: naming.environmentTagValue },
-        ],
-      },
-    );
-    for (const privateRoute of privateRoutes) {
-      capacityProvider.addResourceDependency(privateRoute);
-    }
-    // Retained: deleting the capacity provider deletes every worker session's persistent workspace volume.
-    capacityProvider.applyRemovalPolicy(RemovalPolicy.RETAIN);
-
-    // EC2 workers (#76) run beside AgentCore until the cutover (#87, #88).
+    // The EC2 workers (#76). The AgentCore capacity provider, its operator role and its worker
+    // security group were removed in #118.
     new Ec2WorkerFoundation(this, "Ec2Workers", {
       naming,
       vpcId: vpc.ref,
@@ -346,13 +205,10 @@ export class ProductionFoundationStack extends Stack {
       instanceType: configuration.instanceType,
     });
 
-    this.capacityProviderArn = capacityProvider.attrArn;
-    new CfnOutput(this, "CapacityProviderArn", { value: this.capacityProviderArn });
     new CfnOutput(this, "VpcId", { value: vpc.ref });
     new CfnOutput(this, "PrivateSubnetIds", {
       value: privateSubnets.map((subnet) => subnet.ref).join(","),
     });
-    new CfnOutput(this, "WorkerSecurityGroupId", { value: workerSecurityGroup.attrGroupId });
     new CfnOutput(this, "WorkspaceKmsKeyArn", { value: workspaceKey.keyArn });
     new CfnOutput(this, "DeploymentMode", { value: AGENTX_PRODUCTION_DEPLOYMENT_MODE });
   }

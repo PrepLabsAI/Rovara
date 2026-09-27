@@ -13,12 +13,12 @@ function productionStacks(app: App): Stack[] {
 
 // Names AWS requires to be unique in an account and region. Resource "Name" keys (API names,
 // authorizer names) are checked separately: they are not unique-constrained, but must still differ.
-const PHYSICAL_NAME_KEYS = ["GroupName", "AgentRuntimeName", "TopicName", "AlarmName", "RoleName", "QueueName", "TableName", "BucketName", "LogGroupName", "AliasName", "Family"];
+const PHYSICAL_NAME_KEYS = ["GroupName", "TopicName", "AlarmName", "RoleName", "QueueName", "TableName", "BucketName", "LogGroupName", "AliasName", "Family"];
 
-// AWS::BedrockAgentCore::CapacityProvider and AWS::ApiGatewayV2::Api both use the generic "Name"
-// key, which most other resource types also carry for unrelated purposes (e.g. a tag's own "Name"
-// entry), so they are checked by resource type rather than added to PHYSICAL_NAME_KEYS.
-const NAME_PROPERTY_BY_TYPE = new Set(["AWS::ApiGatewayV2::Api", "AWS::BedrockAgentCore::CapacityProvider"]);
+// AWS::ApiGatewayV2::Api uses the generic "Name" key, which most other resource types also carry
+// for unrelated purposes (e.g. a tag's own "Name" entry), so it is checked by resource type rather
+// than added to PHYSICAL_NAME_KEYS.
+const NAME_PROPERTY_BY_TYPE = new Set(["AWS::ApiGatewayV2::Api"]);
 
 // AWS::Cognito::UserPoolGroup also carries a "GroupName" key, but (unlike every other resource
 // PHYSICAL_NAME_KEYS covers, e.g. an EC2 security group) it is unique only within its own user
@@ -53,11 +53,8 @@ describe("legacy naming", () => {
     expect(naming.stackName("runtime")).toBe("AgentXProductionRuntime");
     expect(naming.stackName("control-plane")).toBe("AgentXControlPlane");
     expect(naming.stackName("slack")).toBe("AgentXSlackOrchestrator");
-    expect(naming.workerSecurityGroupName).toBe("agentx-production-workers");
     expect(naming.apiName).toBe("agentx-control-plane");
     expect(naming.resourcePrefix).toBe("agentx-production");
-    expect(naming.runtimeName).toBe("agentx_production_worker");
-    expect(naming.capacityProviderName).toBe("agentx_production_capacity_v3");
     expect(naming.workspaceKeyAlias).toBe("alias/agentx/production-workspaces");
     expect(naming.alertsTopicName).toBe("AgentXOperatorAlerts");
     expect(naming.alarmName("ConnectorBroken")).toBe("AgentXConnectorBroken");
@@ -77,11 +74,8 @@ describe("environment naming", () => {
     const naming = environmentNaming("dev-2");
     expect(naming.env).toBe("dev-2");
     expect(naming.stackName("control-plane")).toBe("agentx-dev-2-control-plane");
-    expect(naming.workerSecurityGroupName).toBe("agentx-dev-2-workers");
     expect(naming.apiName).toBe("agentx-dev-2-control-plane");
     expect(naming.resourcePrefix).toBe("agentx-dev-2");
-    expect(naming.runtimeName).toBe("agentx_dev_2_worker");
-    expect(naming.capacityProviderName).toBe("agentx_dev_2_capacity");
     expect(naming.workspaceKeyAlias).toBe("alias/agentx/dev-2/workspaces");
     expect(naming.alertsTopicName).toBe("agentx-dev-2-alerts");
     expect(naming.alarmName("ConnectorBroken")).toBe("agentx-dev-2-ConnectorBroken");
@@ -151,14 +145,13 @@ describe("environment naming", () => {
     });
   }, 120_000);
 
-  it("keeps a named environment's capacity provider, workspace key and flow logs retained: deleting the capacity provider deletes every workspace volume", () => {
+  it("keeps a named environment's workspace key and flow logs retained, and has no AgentCore capacity provider", () => {
     const template = Template.fromStack(new ProductionFoundationStack(new App(), "Foundation", { deploymentRegion: "us-east-1", naming: environmentNaming("staging") }));
     const resources = template.toJSON().Resources as Record<string, { Type: string; DeletionPolicy?: string }>;
-    for (const type of ["AWS::BedrockAgentCore::CapacityProvider", "AWS::KMS::Key"]) {
-      const found = Object.values(resources).filter((resource) => resource.Type === type);
-      expect(found.length).toBeGreaterThan(0);
-      for (const resource of found) expect(resource.DeletionPolicy).toBe("Retain");
-    }
+    const keys = Object.values(resources).filter((resource) => resource.Type === "AWS::KMS::Key");
+    expect(keys.length).toBeGreaterThan(0);
+    for (const key of keys) expect(key.DeletionPolicy).toBe("Retain");
+    expect(Object.values(resources).filter((resource) => resource.Type.startsWith("AWS::BedrockAgentCore::"))).toEqual([]);
     const logGroups = Object.entries(resources).filter(([, resource]) => resource.Type === "AWS::Logs::LogGroup");
     expect(logGroups.find(([id]) => id.startsWith("VpcFlowLogs"))?.[1].DeletionPolicy).toBe("Retain");
     // The EC2 worker log group has a fixed name the boot script writes to; retaining it would stop
@@ -167,22 +160,13 @@ describe("environment naming", () => {
     expect(logGroups).toHaveLength(2);
   });
 
-  it("scopes runtime ARNs and connector secrets to the environment", () => {
+  it("scopes connector secrets to the environment, and grants nothing of AgentCore", () => {
     const staging = productionStacks(buildAgentXApp({ agentxEnv: "staging" }));
     const control = staging.find((stack) => stack.stackName === "agentx-staging-control-plane")!;
     const text = JSON.stringify(Template.fromStack(control).toJSON());
-    expect(text).toContain("runtime/agentx_staging_worker-*");
-    expect(text).not.toContain(":runtime/*");
+    expect(text).not.toContain("bedrock-agentcore");
     expect(text).toContain("secret:agentx/staging/connectors/*");
     expect(text).not.toContain("secret:agentx/connectors/*");
-  }, 120_000);
-
-  it("scopes the broker's capacity-provider session termination to the environment's capacity provider", () => {
-    const staging = productionStacks(buildAgentXApp({ agentxEnv: "staging" }));
-    const control = staging.find((stack) => stack.stackName === "agentx-staging-control-plane")!;
-    const text = JSON.stringify(Template.fromStack(control).toJSON());
-    expect(text).toContain("capacity-provider/agentx_staging_capacity-*");
-    expect(text).not.toContain("capacity-provider/*");
   }, 120_000);
 
   it("does not leak the legacy production Environment tag onto foundation or worker settings resources", () => {
@@ -194,7 +178,7 @@ describe("environment naming", () => {
       expect(text).not.toContain('"Environment":"production"');
       expect(text).not.toContain('"Key":"Environment","Value":"production"');
     }
-    expect(JSON.stringify(Template.fromStack(foundation).toJSON())).toContain('"Environment":"staging"');
+    expect(JSON.stringify(Template.fromStack(foundation).toJSON())).toContain('"Key":"Environment","Value":"staging"');
   }, 120_000);
 
   it("tells the environment's broker its connector secret prefix, and leaves legacy unchanged", () => {
@@ -212,7 +196,7 @@ describe("environment naming", () => {
     expect(secrets[0]!.Properties.Name).toBe("agentx/staging/slack");
     const operatorSecrets = operatorRoleStatements({
       env: "staging", partition: "aws", region: "us-east-1", account: "123456789012", artifactBucketArn: "arn:aws:s3:::b",
-      pullThroughPrefix: "agentx-staging", cloudFormationRoleName: "agentx-staging-cloudformation", runtimeName: "agentx_staging_worker",
+      pullThroughPrefix: "agentx-staging", cloudFormationRoleName: "agentx-staging-cloudformation",
     }).find((statement) => statement.Sid === "Secrets")!;
     // Secrets Manager appends a six-character suffix to the name in the secret's ARN.
     const secretArn = `arn:aws:secretsmanager:us-east-1:123456789012:secret:${secrets[0]!.Properties.Name}-AbCdEf`;

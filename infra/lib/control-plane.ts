@@ -121,14 +121,6 @@ export class ControlPlaneStack extends Stack {
     state.grantReadWriteData(broker);
     artifacts.grantReadWrite(broker);
     broker.addToRolePolicy(new iam.PolicyStatement({
-      actions: ["bedrock-agentcore:StopRuntimeSession"],
-      resources: [runtimeArn(this, naming)],
-    }));
-    broker.addToRolePolicy(new iam.PolicyStatement({
-      actions: ["bedrock-agentcore:DeleteCapacityProviderSession"],
-      resources: [capacityProviderArn(this, naming)],
-    }));
-    broker.addToRolePolicy(new iam.PolicyStatement({
       actions: ["secretsmanager:GetSecretValue"],
       resources: [githubAppPrivateKeySecretArn.valueAsString],
     }));
@@ -182,10 +174,6 @@ export class ControlPlaneStack extends Stack {
     );
     dispatchQueue.grantConsumeMessages(dispatcher);
     state.grantReadWriteData(dispatcher);
-    dispatcher.addToRolePolicy(new iam.PolicyStatement({
-      actions: ["bedrock-agentcore:InvokeAgentRuntime"],
-      resources: [runtimeArn(this, naming)],
-    }));
     // EC2 workers (#76): the idle reaper and reconciler find sessions by state through this sparse index.
     state.addGlobalSecondaryIndex({
       indexName: WORKSPACE_SESSION_STATE_INDEX.name,
@@ -618,17 +606,4 @@ export function packagedFunction(
       }),
     },
   });
-}
-
-function runtimeArn(stack: Stack, naming: AgentXNaming): string {
-  // AgentCore appends "-<id>" to the runtime name in the runtime's own ARN.
-  const resourceName = naming.env === undefined ? "*" : `${naming.runtimeName}-*`;
-  return `arn:${stack.partition}:bedrock-agentcore:${stack.region}:${stack.account}:runtime/${resourceName}`;
-}
-
-function capacityProviderArn(stack: Stack, naming: AgentXNaming): string {
-  // AgentCore appends "-<id>" to the capacity provider name in the live session ARN, e.g.
-  // agentx_production_capacity_v3-VwkM93EABZ.
-  const resourceName = naming.env === undefined ? "*" : `${naming.capacityProviderName}-*`;
-  return `arn:${stack.partition}:bedrock-agentcore:${stack.region}:${stack.account}:capacity-provider/${resourceName}`;
 }

@@ -82,7 +82,6 @@ export class AccessStack extends Stack {
       artifactBucketArn: bucket.bucketArn,
       pullThroughPrefix: naming.pullThroughPrefix,
       cloudFormationRoleName: naming.cloudFormationRoleName,
-      runtimeName: naming.runtimeName,
     };
     // The boundary Deny statements always apply and name the effective boundary.
     const serviceStatements = serviceRoleStatements({ ...policyScope, permissionsBoundaryArn: effectiveBoundaryArn });

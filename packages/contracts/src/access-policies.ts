@@ -10,8 +10,6 @@ export interface PolicyScope {
   artifactBucketArn: string;
   pullThroughPrefix: string;
   cloudFormationRoleName: string;
-  /** The AgentCore runtime name, whose log groups the operator may read. */
-  runtimeName: string;
   permissionsBoundaryArn?: string;
 }
 
@@ -26,7 +24,6 @@ export interface PolicyStatementJson {
 /** Services the service role may use with any resource; IAM is handled separately and name-scoped. */
 export const SERVICE_ROLE_SERVICES: readonly string[] = [
   "apigateway",
-  "bedrock-agentcore",
   "cloudformation",
   "cloudwatch",
   "cognito-idp",
@@ -48,16 +45,15 @@ export const SERVICE_ROLE_SERVICES: readonly string[] = [
 
 /**
  * Services the default permission boundary allows by wildcard: the service role's own, plus what
- * the environment's roles call (Bedrock models, X-Ray, CodeBuild, API Gateway invoke, and EC2 Auto
- * Scaling and EventBridge through the AgentCore capacity provider's AWS-managed policy). STS is
+ * the environment's roles call (Bedrock models, X-Ray, CodeBuild and API Gateway invoke). STS is
  * not here: sts:* would let a bounded role assume any same-account role that trusts the account,
  * escaping the boundary, so the boundary names sts:GetCallerIdentity alone. The generated test in
  * access-stack.test.ts keeps this list complete and free of unused services.
  */
-export const BOUNDARY_SERVICES: readonly string[] = [...SERVICE_ROLE_SERVICES, "autoscaling", "bedrock", "codebuild", "events", "execute-api", "xray"];
+export const BOUNDARY_SERVICES: readonly string[] = [...SERVICE_ROLE_SERVICES, "bedrock", "codebuild", "execute-api", "xray"];
 
-/** Service-linked roles the service role may create while deploying (ECS, AgentCore and its sub-services). */
-const SERVICE_LINKED_ROLE_SERVICES = ["ecs.amazonaws.com", "bedrock-agentcore.amazonaws.com", "*.bedrock-agentcore.amazonaws.com"];
+/** Service-linked roles the service role may create while deploying. */
+const SERVICE_LINKED_ROLE_SERVICES = ["ecs.amazonaws.com"];
 
 /** Role management the service role needs on this environment's roles. */
 const ROLE_ACTIONS = [
@@ -173,7 +169,6 @@ export function serviceRoleStatements(scope: PolicyScope): PolicyStatementJson[]
 export function defaultBoundaryStatements(scope: Pick<PolicyScope, "env" | "partition" | "account" | "cloudFormationRoleName">): PolicyStatementJson[] {
   const { partition, account } = scope;
   const roles = environmentRoles(scope);
-  const defaultInstanceRole = "AmazonBedrockAgentCoreCapacityProviderDefaultInstanceRole*";
   return [
     { Sid: "Services", Effect: "Allow", Action: BOUNDARY_SERVICES.map((s) => `${s}:*`), Resource: "*" },
     // The operator's identity check; the only STS action any AgentX role uses.
@@ -182,28 +177,18 @@ export function defaultBoundaryStatements(scope: Pick<PolicyScope, "env" | "part
     { Sid: "IamInstanceProfiles", Effect: "Allow", Action: [...INSTANCE_PROFILE_ACTIONS], Resource: environmentInstanceProfiles(scope) },
     {
       // The operator passes the service role (root path) to CloudFormation; CloudFormation passes
-      // the environment's roles to Lambda, ECS, AgentCore and the rest.
+      // the environment's roles to Lambda, ECS, EC2 and the rest.
       Sid: "PassRoles",
       Effect: "Allow",
       Action: ["iam:PassRole"],
       Resource: [roles, `arn:${partition}:iam::${account}:role/${scope.cloudFormationRoleName}`],
     },
     {
-      // Mirrors the AWS-managed BedrockAgentCoreRuntimeInstancesOperatorRolePolicy attached to the
-      // capacity provider's operator role: AgentCore launches instances with its default instance role.
-      Sid: "PassDefaultInstanceRole",
-      Effect: "Allow",
-      Action: ["iam:PassRole"],
-      Resource: [`arn:${partition}:iam::${account}:role/${defaultInstanceRole}`, `arn:${partition}:iam::${account}:role/service-role/${defaultInstanceRole}`],
-      Condition: { StringLike: { "iam:PassedToService": "ec2.*" } },
-    },
-    {
-      // The same managed policy creates the EC2 Auto Scaling service-linked role.
       Sid: "ServiceLinkedRoles",
       Effect: "Allow",
       Action: ["iam:CreateServiceLinkedRole"],
       Resource: `arn:${partition}:iam::${account}:role/aws-service-role/*`,
-      Condition: { StringLike: { "iam:AWSServiceName": [...SERVICE_LINKED_ROLE_SERVICES, "autoscaling.amazonaws.com"] } },
+      Condition: { StringLike: { "iam:AWSServiceName": [...SERVICE_LINKED_ROLE_SERVICES] } },
     },
     { Sid: "DenyAccountChanges", Effect: "Deny", Action: ["organizations:*", "account:*"], Resource: "*" },
     { Sid: "DenyUsersAndGroups", Effect: "Deny", Action: ["iam:*User*", "iam:*Group*"], Resource: "*" },
@@ -314,12 +299,8 @@ export function operatorRoleStatements(scope: PolicyScope): PolicyStatementJson[
       Effect: "Allow",
       Action: ["logs:FilterLogEvents", "logs:StartQuery"],
       // CloudFormation names the stacks' log groups <stack name>-<logical id>-<suffix>; each stack's
-      // exact name is the prefix, so no other environment's log groups match. The AgentCore runtime
-      // writes to its own service-named log groups.
-      Resource: [
-        ...deployedParts.map((part) => `arn:${partition}:logs:${region}:${account}:log-group:${environmentStackName(env, part)}-*`),
-        `arn:${partition}:logs:${region}:${account}:log-group:/aws/bedrock-agentcore/runtimes/${scope.runtimeName}-*`,
-      ],
+      // exact name is the prefix, so no other environment's log groups match.
+      Resource: deployedParts.map((part) => `arn:${partition}:logs:${region}:${account}:log-group:${environmentStackName(env, part)}-*`),
     },
     // GetQueryResults takes a query id and supports no resource type; DescribeLogGroups is a list
     // call that is authorized against every log group, so neither can be scoped by log group name.

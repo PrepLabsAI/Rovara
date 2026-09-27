@@ -6,7 +6,7 @@ import {
 const scope: PolicyScope = {
   env: "staging", partition: "aws", region: "us-east-1", account: "123456789012",
   artifactBucketArn: "arn:aws:s3:::agentx-staging-access-artifactbucket-abc", pullThroughPrefix: "agentx-staging",
-  cloudFormationRoleName: "agentx-staging-cloudformation", runtimeName: "agentx_staging_worker",
+  cloudFormationRoleName: "agentx-staging-cloudformation",
 };
 // Inline and attached policy actions on roles: the regex below catches them by name, but they are
 // role-scoped (the first test pins their resource to this environment's role path), not user, group or
@@ -61,11 +61,9 @@ describe("service role policy", () => {
     expect(serviceRoleStatements(scope).find((s) => s.Sid === "IamRoles")!.Action).toContain("iam:UpdateRoleDescription");
   });
 
-  it("creates only the ECS and AgentCore service-linked roles", () => {
+  it("creates only the ECS service-linked role", () => {
     const linked = serviceRoleStatements(scope).find((s) => s.Sid === "ServiceLinkedRoles")!;
-    expect(linked.Condition).toEqual({
-      StringLike: { "iam:AWSServiceName": ["ecs.amazonaws.com", "bedrock-agentcore.amazonaws.com", "*.bedrock-agentcore.amazonaws.com"] },
-    });
+    expect(linked.Condition).toEqual({ StringLike: { "iam:AWSServiceName": ["ecs.amazonaws.com"] } });
   });
 
   it("never grants iam:* or wildcard IAM user, group or policy management", () => {
@@ -123,10 +121,12 @@ describe("operator role policy", () => {
     expect(models.Action).toEqual(["bedrock:InvokeModel"]);
   });
 
-  it("reads this environment's runtime logs", () => {
+  it("reads only this environment's stacks' logs", () => {
     const logs = operatorRoleStatements(scope).find((s) => s.Sid === "Logs")!;
     expect(logs.Action).toEqual(["logs:FilterLogEvents", "logs:StartQuery"]);
-    expect([logs.Resource].flat()).toContain("arn:aws:logs:us-east-1:123456789012:log-group:/aws/bedrock-agentcore/runtimes/agentx_staging_worker-*");
+    const resources = [logs.Resource].flat();
+    expect(resources).toContain("arn:aws:logs:us-east-1:123456789012:log-group:agentx-staging-control-plane-*");
+    expect(resources.every((resource) => resource.includes(":log-group:agentx-staging-"))).toBe(true);
   });
 
   it("may turn on termination protection for the five stacks it deploys, and only those", () => {
@@ -180,20 +180,12 @@ describe("default permission boundary", () => {
       "arn:aws:iam::123456789012:role/agentx-staging-cloudformation",
     ]);
     expect(byId.PassRoles!.Action).toEqual(["iam:PassRole"]);
-    // The AWS-managed BedrockAgentCoreRuntimeInstancesOperatorRolePolicy on the capacity provider's
-    // operator role passes AgentCore's default instance role to EC2; the boundary allows exactly that.
-    expect(byId.PassDefaultInstanceRole).toEqual({
-      Sid: "PassDefaultInstanceRole", Effect: "Allow", Action: ["iam:PassRole"],
-      Resource: [
-        "arn:aws:iam::123456789012:role/AmazonBedrockAgentCoreCapacityProviderDefaultInstanceRole*",
-        "arn:aws:iam::123456789012:role/service-role/AmazonBedrockAgentCoreCapacityProviderDefaultInstanceRole*",
-      ],
-      Condition: { StringLike: { "iam:PassedToService": "ec2.*" } },
-    });
+    // No pass-role for AgentCore's default instance role: the capacity provider was removed (#118).
+    expect(byId.PassDefaultInstanceRole).toBeUndefined();
     expect(byId.ServiceLinkedRoles).toEqual({
       Sid: "ServiceLinkedRoles", Effect: "Allow", Action: ["iam:CreateServiceLinkedRole"],
       Resource: "arn:aws:iam::123456789012:role/aws-service-role/*",
-      Condition: { StringLike: { "iam:AWSServiceName": ["ecs.amazonaws.com", "bedrock-agentcore.amazonaws.com", "*.bedrock-agentcore.amazonaws.com", "autoscaling.amazonaws.com"] } },
+      Condition: { StringLike: { "iam:AWSServiceName": ["ecs.amazonaws.com"] } },
     });
   });
 
