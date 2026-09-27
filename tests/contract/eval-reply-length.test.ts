@@ -66,3 +66,40 @@ describe("reply length in the evaluation (spec 014 SC-006)", () => {
     }
   });
 });
+
+describe("Jira reply link guard, so the model never invents a site (issue 061)", () => {
+  const runWith = (response: string, jiraSites: "unknown" | string[]) => ({ tool: "jira__createJiraIssue", args: {}, response, jiraSites });
+
+  it("fails an invented Jira host and passes the case's real one", () => {
+    const sites = ["example.atlassian.net"];
+    expect(scoreRun(write, runWith("Created PAY-31: https://your-jira-instance.atlassian.net/browse/PAY-31", sites))).toMatchObject({ siteOk: false });
+    expect(scoreRun(write, runWith("Created PAY-31: https://example.atlassian.net/browse/PAY-31", sites))).toMatchObject({ siteOk: true });
+  });
+
+  it("fails any atlassian.net link when the case's site is unknown, but not a reply with no link", () => {
+    expect(scoreRun(write, runWith("Created PAY-31: https://example.atlassian.net/browse/PAY-31", "unknown"))).toMatchObject({ siteOk: false });
+    expect(scoreRun(write, runWith("Created PAY-31.", "unknown"))).toMatchObject({ siteOk: true });
+  });
+
+  it("passes a host that matches any of several configured sites, case-insensitively", () => {
+    const sites = ["example.atlassian.net", "other.atlassian.net"];
+    expect(scoreRun(write, runWith("See https://OTHER.atlassian.net/browse/PAY-31", sites))).toMatchObject({ siteOk: true });
+    expect(scoreRun(write, runWith("See https://third.atlassian.net/browse/PAY-31", sites))).toMatchObject({ siteOk: false });
+  });
+
+  it("fails the whole case when only the link is wrong, even though the tool and args are right", async () => {
+    const cases = (await loadCases()).filter((entry) => entry.id === "jira-create");
+    const { modelRuntime, faux } = await fauxModelRuntime();
+    const report = await runEvaluation(cases, {
+      model: FAUX_MODEL, modelRuntime, presentation: "new", repeat: 1,
+      beforeRun: (evalCase) => {
+        faux.setResponses([
+          () => fauxAssistantMessage([fauxToolCall(String(evalCase.expect.tool), evalCase.expect.argsSubset ?? {})], { stopReason: "toolUse" }),
+          fauxAssistantMessage("Created PAY-31: https://your-jira-instance.atlassian.net/browse/PAY-31"),
+        ]);
+      },
+    });
+    expect(report.summary).toMatchObject({ cases: 1, passed: 0, errors: 0 });
+    expect(report.cases[0]).toMatchObject({ passed: false, runs: [{ toolOk: true, argsOk: true, siteOk: false }] });
+  });
+});

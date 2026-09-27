@@ -21,7 +21,7 @@ integrations:
       type: jira
       credentialRef: jira-agentx-sa
       scopes:
-        - { alias: pay, cloudId: "4b8c2d1e-6f7a-4c3b-9e8d-1a2b3c4d5e6f", projectKey: PAY }
+        - { alias: pay, cloudId: "4b8c2d1e-6f7a-4c3b-9e8d-1a2b3c4d5e6f", projectKey: PAY, siteUrl: "https://example.atlassian.net" }
       tools:
         - { name: searchJiraIssuesUsingJql, access: read }
         - { name: getJiraIssue, access: read }

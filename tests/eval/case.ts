@@ -10,6 +10,7 @@ import {
 import type { ConnectorPolicy } from "../../packages/gateway/src/index.js";
 import {
   ConnectorNameSchema,
+  JiraConnectorSchema,
   StoredProjectDefinitionSchema,
   type ActionPolicy,
   type ProjectDefinition,
@@ -72,6 +73,8 @@ export interface EvalConnector {
   policy: ConnectorPolicy;
   approvals: ReadonlyArray<{ name: string; description?: string | undefined; examples?: ReadonlyArray<Record<string, unknown>> | undefined }>;
   connected: boolean;
+  /** For a jira connector only: each scope's configured siteUrl (undefined where a scope has none), for the reply-link guard (issue 061). */
+  jiraScopeSites?: Array<string | undefined>;
 }
 
 export interface EvalProject {
@@ -117,6 +120,9 @@ export const EvalProjectSchema = z.object({ eval: EvalSettingsSchema.optional() 
       context.addIssue({ code: "custom", message: `connector ${config.name} is unusable: ${resolved.unusable}` });
       continue;
     }
+    // Re-parsed here (not read off `resolved.scopes`, which is generic over Scope) only to recover
+    // each scope's siteUrl for the reply-link guard (issue 061); already validated once inside resolve.
+    const jira = config.type === "jira" ? JiraConnectorSchema.safeParse(config).data : undefined;
     connectors.push({
       name: resolved.name,
       type: resolved.type,
@@ -128,6 +134,7 @@ export const EvalProjectSchema = z.object({ eval: EvalSettingsSchema.optional() 
       policy: resolved.policy,
       approvals: resolved.approvals,
       connected: !notConnected.includes(resolved.name),
+      ...(jira === undefined ? {} : { jiraScopeSites: jira.scopes.map((scope) => scope.siteUrl) }),
     });
   }
   return {
@@ -142,6 +149,17 @@ export const EvalProjectSchema = z.object({ eval: EvalSettingsSchema.optional() 
 
 export type EvalCase = z.infer<typeof EvalCaseSchema>;
 export type UpstreamTool = z.infer<typeof UpstreamToolSchema>;
+
+/**
+ * The Jira site(s) a project configures, for the eval reply-link guard (issue 061): "unknown" when
+ * the project has no Jira connector, or any of its scopes lacks a siteUrl, so a reply naming any
+ * atlassian.net host is wrong; otherwise the distinct hosts a reply's link may legitimately name.
+ */
+export function jiraSiteHosts(project: EvalProject): "unknown" | string[] {
+  const sites = project.connectors.flatMap((connector) => connector.jiraScopeSites ?? []);
+  if (sites.length === 0 || sites.some((site) => site === undefined)) return "unknown";
+  return [...new Set(sites.map((site) => new URL(site!).host))];
+}
 
 export async function loadCases(directory = join(EVAL_ROOT, "cases")): Promise<EvalCase[]> {
   const files = (await readdir(directory)).filter((file) => file.endsWith(".jsonl")).sort();

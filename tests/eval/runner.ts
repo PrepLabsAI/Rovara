@@ -11,7 +11,7 @@ import { createGateSession, type ActionClassifier, type GateSession } from "../.
 import { TurnRecorder } from "../../packages/orchestrator/src/turn-recorder.js";
 import { slackReplyText } from "../../packages/slack-service/src/slack-format.js";
 import { FAUX_MODEL } from "../support/faux-model.js";
-import { EVAL_ROOT, loadCatalog, loadProject, type EvalCase, type UpstreamTool } from "./case.js";
+import { EVAL_ROOT, jiraSiteHosts, loadCatalog, loadProject, type EvalCase, type UpstreamTool } from "./case.js";
 import { legacyNotApplicable, legacyPresentation } from "./legacy-presentation.js";
 import { expectedVerdict } from "./offline.js";
 import { newPresentation } from "./presentation.js";
@@ -64,6 +64,13 @@ export const RunScoreSchema = z.object({
   /** For a case with expect.gate: the gate's decision on the first call (null when no call reached it), and whether it matches. */
   gate: z.enum(["allow", "ask", "deny"]).nullable().optional(),
   gateOk: z.boolean().optional(),
+  /**
+   * False when the reply names an atlassian.net host the case's project did not configure, or any
+   * such host at all when the project's Jira site is unknown; true otherwise, including a reply with
+   * no such host (issue 061, so the model never invents a Jira link). Optional only so a report
+   * recorded before this check keeps parsing.
+   */
+  siteOk: z.boolean().optional(),
 }).strict();
 /** `caseHash` identifies the case definition that was scored (see caseHash); SC-004 refuses baselines whose shared cases differ. */
 export const CaseResultSchema = z.object({ id: z.string(), caseHash: z.string().optional(), passed: z.boolean(), runs: z.array(RunScoreSchema) }).strict();
@@ -101,7 +108,11 @@ export type EvalReport = z.infer<typeof EvalReportSchema>;
 
 /** `stuck` marks a timed-out run whose work did not stop within the grace period. */
 /** `gate` is the gate's decision on the first call; absent when the run had no gate (legacy, or no expect.gate). */
-interface RunOutcome { tool: string | null; offered?: false; args: Record<string, unknown>; response: string; error?: string; timedOut?: true; stuck?: true; gate?: "allow" | "ask" | "deny" | null }
+/** `jiraSites` is the case's project's configured Jira site(s) (see jiraSiteHosts), absent only when the project never loaded. */
+interface RunOutcome {
+  tool: string | null; offered?: false; args: Record<string, unknown>; response: string; error?: string; timedOut?: true; stuck?: true;
+  gate?: "allow" | "ask" | "deny" | null; jiraSites?: "unknown" | string[];
+}
 
 /** The member a gate case runs for; a Slack member ID, never a real one. */
 const EVAL_REQUESTER = "U0EVAL00001";
@@ -147,10 +158,12 @@ async function runOnce(evalCase: EvalCase, run: number, catalogCache: Map<string
   let gate: GateSession | undefined;
   let timedOut = false;
   let cleanupError: string | undefined;
+  let jiraSites: "unknown" | string[] | undefined;
   const work = (async (): Promise<string> => {
     let stateDirectory: string | undefined;
     try {
       const project = await loadProject(evalCase.project);
+      jiraSites = jiraSiteHosts(project);
       for (const connector of project.connectors) {
         if (!catalogCache.has(connector.catalog)) catalogCache.set(connector.catalog, await loadCatalog(connector.catalog));
       }
@@ -246,6 +259,7 @@ async function runOnce(evalCase: EvalCase, run: number, catalogCache: Map<string
     tool: call?.tool ?? null, ...(unoffered ? { offered: false as const } : {}), args: call?.args ?? {}, response,
     // The gate decides calls in order, so its first decision is the first call's.
     ...(gate === undefined ? {} : { gate: gate.decisions[0]?.outcome ?? null }),
+    ...(jiraSites === undefined ? {} : { jiraSites }),
     ...(error === undefined ? {} : { error }), ...(stuck ? { stuck: true as const } : timedOut ? { timedOut: true as const } : {}),
   };
 }
@@ -280,6 +294,23 @@ function hasLiteralNewlineOutsideCode(formattedReply: string): boolean {
   return /\\n/u.test(formattedReply.replace(CODE_SPAN_OR_BLOCK, ""));
 }
 
+/** Every *.atlassian.net host a reply names, lowercased (issue 061: the model must never invent one). */
+const ATLASSIAN_LINK = /\bhttps?:\/\/([a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.atlassian\.net)\b/giu;
+
+function atlassianHosts(text: string): string[] {
+  return [...text.matchAll(ATLASSIAN_LINK)].map((match) => match[1]!.toLowerCase());
+}
+
+/**
+ * False when the reply names an atlassian.net host outside the case's configured Jira site(s), or
+ * any such host at all when that site is unknown; true when the reply names none (issue 061).
+ */
+function jiraLinkOk(hosts: readonly string[], sites: "unknown" | readonly string[] | undefined): boolean {
+  if (hosts.length === 0) return true;
+  if (sites === undefined || sites === "unknown") return false;
+  return hosts.every((host) => sites.includes(host));
+}
+
 /** An errored run, or a call to a tool that was not offered, never counts as the correct tool. */
 export function scoreRun(evalCase: EvalCase, run: RunOutcome): RunScore {
   const expected = evalCase.expect.tool;
@@ -294,8 +325,9 @@ export function scoreRun(evalCase: EvalCase, run: RunOutcome): RunScore {
   const phraseOk = refusalOk === null && containsOk === null ? null : refusalOk !== false && containsOk !== false;
   const formattedReply = evalCase.expect.maxLines === undefined ? undefined : slackReplyText(run.response);
   const replyLines = formattedReply === undefined ? undefined : formattedReply.split("\n").filter((line) => line.trim().length > 0).length;
+  const siteOk = jiraLinkOk(atlassianHosts(run.response), run.jiraSites);
   return {
-    tool: run.tool, ...(run.offered === false ? { offered: false as const } : {}), toolOk, argsOk, phraseOk, refusalOk, containsOk,
+    tool: run.tool, ...(run.offered === false ? { offered: false as const } : {}), toolOk, argsOk, phraseOk, refusalOk, containsOk, siteOk,
     ...(replyLines === undefined || formattedReply === undefined ? {} : {
       replyLines, linesOk: replyLines <= evalCase.expect.maxLines! && !hasLiteralNewlineOutsideCode(formattedReply),
     }),
@@ -347,7 +379,7 @@ export async function runEvaluation(cases: readonly EvalCase[], options: EvalOpt
       runs.push(scoreRun(evalCase, outcome));
       if (stopped !== undefined) break;
     }
-    results.push({ id: evalCase.id, caseHash: caseHash(evalCase), passed: runs.every((run) => run.toolOk && run.argsOk && run.phraseOk !== false && run.linesOk !== false && run.gateOk !== false && run.error === undefined), runs });
+    results.push({ id: evalCase.id, caseHash: caseHash(evalCase), passed: runs.every((run) => run.toolOk && run.argsOk && run.phraseOk !== false && run.linesOk !== false && run.gateOk !== false && run.siteOk !== false && run.error === undefined), runs });
     if (stopped !== undefined) {
       notRun = cases.slice(index + 1).map((entry) => entry.id);
       break;
