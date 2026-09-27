@@ -379,10 +379,10 @@ describe("production release pipeline", () => {
   const statements = policies.flatMap((policy) => policy.Properties.PolicyDocument.Statement);
   const actionsOf = (statement: Statement) => [statement.Action].flat();
 
-  it("starts a V2 pipeline only for filtered mainline pushes, with a full Git clone", () => {
+  it("starts a V2 pipeline only for filtered mainline pushes, with a full Git clone, releasing each merge in turn", () => {
     template.hasResourceProperties("AWS::CodePipeline::Pipeline", {
       PipelineType: "V2",
-      ExecutionMode: "SUPERSEDED",
+      ExecutionMode: "QUEUED",
       Triggers: [{
         ProviderType: "CodeStarSourceConnection",
         GitConfiguration: {

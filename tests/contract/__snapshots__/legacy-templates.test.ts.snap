@@ -6788,7 +6788,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
           },
           "Type": "S3",
         },
-        "ExecutionMode": "SUPERSEDED",
+        "ExecutionMode": "QUEUED",
         "Name": "AgentXProductionRelease",
         "PipelineType": "V2",
         "RestartExecutionOnUpdate": false,
