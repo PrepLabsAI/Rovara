@@ -154,17 +154,11 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Description": "The EC2 workers' launch template",
       "Type": "String",
     },
-    "GitHubAppAccount": {
-      "Type": "String",
-    },
     "GitHubAppCredentialRef": {
       "Default": "github-agentx-sdlc",
       "Type": "String",
     },
     "GitHubAppId": {
-      "Type": "String",
-    },
-    "GitHubAppInstallationId": {
       "Type": "String",
     },
     "GitHubAppPrivateKeySecretArn": {
@@ -354,17 +348,11 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             "DELETER_ARN": {
               "Ref": "SessionsDeleterB48741EA",
             },
-            "GITHUB_APP_ACCOUNT": {
-              "Ref": "GitHubAppAccount",
-            },
             "GITHUB_APP_CREDENTIAL_REF": {
               "Ref": "GitHubAppCredentialRef",
             },
             "GITHUB_APP_ID": {
               "Ref": "GitHubAppId",
-            },
-            "GITHUB_APP_INSTALLATION_ID": {
-              "Ref": "GitHubAppInstallationId",
             },
             "GITHUB_APP_PRIVATE_KEY_SECRET_ARN": {
               "Ref": "GitHubAppPrivateKeySecretArn",

@@ -30,7 +30,8 @@ export interface InstallAnswers {
          * your own OIDC provider means there is no identity stack's ClientId output to read it from instead. */
         clientId?: string;
       };
-  github: { account: string; appId: string; installationId: string; privateKeySecretArn: string; credentialRef?: string };
+  // account and installationId are what `agentx init` set up; the control plane no longer takes them (#123).
+  github: { account?: string; appId: string; installationId?: string; privateKeySecretArn: string; credentialRef?: string };
   /** The value; the caller reads it from Secrets Manager, never logs it. */
   callbackSigningKey: string;
   permissionsBoundaryArn?: string;
@@ -201,9 +202,7 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
         OidcAudience: oidc.audience,
         ...adminParameters(answers.identity),
         CallbackSigningKey: answers.callbackSigningKey,
-        GitHubAppAccount: answers.github.account,
         GitHubAppId: answers.github.appId,
-        GitHubAppInstallationId: answers.github.installationId,
         GitHubAppPrivateKeySecretArn: answers.github.privateKeySecretArn,
         ...(answers.github.credentialRef === undefined ? {} : { GitHubAppCredentialRef: answers.github.credentialRef }),
         // The EC2 session lifecycle (#83) runs in the foundation's network with its key and role.

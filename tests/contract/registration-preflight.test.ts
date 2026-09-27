@@ -56,6 +56,22 @@ describe("registration preflight", () => {
     expect(registered.body.preflight).toMatchObject({ connectors: [{ name: "github", status: "unavailable" }] });
   });
 
+  it("refuses a new revision whose repository the GitHub App cannot reach, and checks every repository", async () => {
+    const { agentXError } = await import("@agentx/contracts");
+    const checked: string[] = [];
+    const checkRepositoryAccess = vi.fn(async (repository: { credentialRef: string; url: string }) => {
+      checked.push(repository.url);
+      if (repository.url.includes("/docs")) throw agentXError("CONFIG_INVALID", "the GitHub App cannot access example/docs; install it on example with access to that repository");
+    });
+    const { handler, db } = await createAdminBroker({ checkRepositoryAccess });
+    const refused = await register(handler, githubConnector(["list_issues"]), { repositories: ["demo", "docs"] });
+    expect(refused.status).toBe(400);
+    expect(refused.body).toMatchObject({ error: { code: "CONFIG_INVALID" } });
+    expect((refused.body as { error: { message: string } }).error.message).toContain("cannot access example/docs");
+    expect(checked).toHaveLength(2);
+    expect(db.get("PROJECT#payments", "REV#000000000001")).toBeUndefined();
+  });
+
   it("reports a deployment without GitHub MCP as not connected", async () => {
     const { handler } = await createAdminBroker({});
     const registered = await register(handler, githubConnector(["list_issues"]), { preflight: true });

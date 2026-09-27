@@ -70,11 +70,8 @@ export class ControlPlaneStack extends Stack {
       type: "String",
       default: "github-agentx-sdlc",
     });
-    const githubAppAccount = new CfnParameter(this, "GitHubAppAccount", { type: "String" });
+    // No account or installation: the broker looks up the App's installation per repository owner (#123).
     const githubAppId = new CfnParameter(this, "GitHubAppId", { type: "String" });
-    const githubAppInstallationId = new CfnParameter(this, "GitHubAppInstallationId", {
-      type: "String",
-    });
     const githubAppPrivateKeySecretArn = new CfnParameter(this, "GitHubAppPrivateKeySecretArn", {
       type: "String",
       description: "Complete Secrets Manager ARN containing the GitHub App private key PEM",
@@ -117,9 +114,7 @@ export class ControlPlaneStack extends Stack {
       ADMIN_VALUES: adminValues.valueAsString,
       CALLBACK_SIGNING_KEY: callbackSigningKey.valueAsString,
       GITHUB_APP_CREDENTIAL_REF: githubAppCredentialRef.valueAsString,
-      GITHUB_APP_ACCOUNT: githubAppAccount.valueAsString,
       GITHUB_APP_ID: githubAppId.valueAsString,
-      GITHUB_APP_INSTALLATION_ID: githubAppInstallationId.valueAsString,
       GITHUB_APP_PRIVATE_KEY_SECRET_ARN: githubAppPrivateKeySecretArn.valueAsString,
     });
     state.grantReadWriteData(broker);

@@ -49,6 +49,7 @@ export async function createAdminBroker(options: {
   githubMcp?: GitHubMcpDependencies;
   connectorCredentials?: ConnectorCredentialsConfiguration;
   turnRecords?: TurnRecordExport;
+  checkRepositoryAccess?: (repository: { credentialRef: string; url: string }) => Promise<void>;
 } = {}): Promise<{ db: FakeDynamoDb; handler: AdminHandler; registry: CredentialRegistry | undefined }> {
   const { createAwsBrokerHandler, CredentialRegistry: Registry } = await loadBroker();
   const db = new FakeDynamoDb();
@@ -70,6 +71,7 @@ export async function createAdminBroker(options: {
     githubPullRequests: { reconcilePullRequest: vi.fn(), getPullRequest: vi.fn(), updatePullRequest: vi.fn() },
     codeBuild: { start: vi.fn(), status: vi.fn() },
     ...(options.githubMcp ? { githubMcp: options.githubMcp } : {}),
+    ...(options.checkRepositoryAccess ? { checkRepositoryAccess: options.checkRepositoryAccess } : {}),
     ...(options.connectorCredentials ? { connectorCredentials: options.connectorCredentials } : {}),
     ...(registry ? { credentialRegistry: registry } : {}),
     ...(options.turnRecords ? { turnRecords: options.turnRecords } : {}),

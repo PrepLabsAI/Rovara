@@ -240,6 +240,8 @@ interface AwsBrokerDependencies {
   callbackSigningKey: string;
   repositoryGrants: RepositoryGrantService;
   githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest">;
+  /** Refuses, with CONFIG_INVALID, a repository its credential cannot reach; checked at registration. */
+  checkRepositoryAccess?: (repository: { credentialRef: string; url: string }) => Promise<void>;
   codeBuild: CodeBuildGateway;
   slack?: SlackServiceConfiguration;
   githubMcp?: GitHubMcpDependencies;
@@ -651,6 +653,10 @@ async function registerProject(
   if (budget.refusal) throw agentXError("CONFIG_INVALID", budget.refusal);
   const credentialProblems = await credentialRefusals(connectors(), dependencies.credentialRegistry);
   if (credentialProblems.length > 0) throw agentXError("CONFIG_INVALID", credentialProblems.join("; "));
+  // A repository the GitHub App cannot reach would otherwise fail only at prepare (#123).
+  for (const repository of definition.repositories) {
+    await dependencies.checkRepositoryAccess?.(repository);
+  }
   let preflight: RegistrationPreflight | undefined;
   if (wantsPreflight) {
     const result = await preflightConnectors(connectors(), definition, identity.ownerKey);
@@ -3685,9 +3691,7 @@ const loadGitHubPrivateKey = (): Promise<string> => {
 };
 const githubCredentials = new GitHubAppCredentialProvider({
   credentialRef: requiredEnvironment("GITHUB_APP_CREDENTIAL_REF"),
-  account: requiredEnvironment("GITHUB_APP_ACCOUNT"),
   appId: requiredEnvironment("GITHUB_APP_ID"),
-  installationId: requiredEnvironment("GITHUB_APP_INSTALLATION_ID"),
   getPrivateKey: loadGitHubPrivateKey,
 });
 const repositoryGrantSigningKey = createHmac("sha256", requiredEnvironment("CALLBACK_SIGNING_KEY"))
@@ -3709,6 +3713,7 @@ export const handler = createAwsBrokerHandler({
   callbackSigningKey: requiredEnvironment("CALLBACK_SIGNING_KEY"),
   repositoryGrants,
   githubPullRequests: githubCredentials,
+  checkRepositoryAccess: (repository) => githubCredentials.checkRepository(repository),
   githubMcp: { credentials: (repository, access) => githubCredentials.issueCredentials(repository, access) },
   connectorCredentials: {
     secrets: secretsManagerSource(secretsManager, process.env.CONNECTOR_SECRET_PREFIX),

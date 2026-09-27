@@ -6,13 +6,25 @@ import {
   privateKeyFromSecret,
 } from "../../packages/broker/src/github-app.js";
 
+/** A provider whose installation lookups GitHub answers for any owner, as installation 163046162. */
+function appProvider(options: ConstructorParameters<typeof GitHubAppCredentialProvider>[0]): GitHubAppCredentialProvider {
+  const inner = options.fetchImplementation ?? fetch;
+  const answering = (async (url: string | URL | Request, init?: RequestInit) => {
+    const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+    const match = /^https:\/\/api\.github\.com\/repos\/([^/]+)\/[^/]+\/installation$/.exec(requestUrl);
+    if (match) return new Response(JSON.stringify({ id: 163046162, account: { login: decodeURIComponent(match[1]!) } }), { status: 200 });
+    return inner(url, init);
+  }) as typeof fetch;
+  return new GitHubAppCredentialProvider({ ...options, fetchImplementation: answering });
+}
+
 describe("GitHub App repository credentials", () => {
   it("mints fresh issue-only tokens for the selected repository and rejects unregistered credentials", async () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const getPrivateKey = vi.fn(async () => privateKey.export({ type: "pkcs8", format: "pem" }).toString());
     const fetchImplementation = vi.fn(async () => new Response(JSON.stringify({ token: "issue-token" }), { status: 201 }));
-    const provider = new GitHubAppCredentialProvider({
-      credentialRef: "github-app", account: "example", appId: "123", installationId: "456",
+    const provider = appProvider({
+      credentialRef: "github-app", appId: "123",
       getPrivateKey, fetchImplementation,
     });
     const repository = { credentialRef: "github-app", url: "https://github.com/example/demo.git" };
@@ -23,9 +35,9 @@ describe("GitHub App repository credentials", () => {
       }));
     }
     await expect(provider.issueCredentials({ ...repository, credentialRef: "unregistered" }, "write")).rejects.toThrow();
-    await expect(provider.issueCredentials({ ...repository, url: "https://github.com/another/demo" }, "read")).rejects.toThrow();
     expect(fetchImplementation).toHaveBeenCalledTimes(2);
-    expect(getPrivateKey).toHaveBeenCalledTimes(2);
+    // One installation lookup (then cached) and one token per call, each signed as the App.
+    expect(getPrivateKey).toHaveBeenCalledTimes(3);
   });
 
   it("mints a repository-scoped installation token", async () => {
@@ -40,11 +52,9 @@ describe("GitHub App repository credentials", () => {
         headers: { "content-type": "application/json" },
       });
     });
-    const provider = new GitHubAppCredentialProvider({
+    const provider = appProvider({
       credentialRef: "github-agentx-sdlc",
-      account: "ps06756",
       appId: "5002502",
-      installationId: "163046162",
       getPrivateKey: async () => pem,
       fetchImplementation,
       now: () => 1_800_000_000_000,
@@ -87,11 +97,9 @@ describe("GitHub App repository credentials", () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
     const bodies: unknown[] = [];
-    const provider = new GitHubAppCredentialProvider({
+    const provider = appProvider({
       credentialRef: "github-agentx-sdlc",
-      account: "ps06756",
       appId: "5002502",
-      installationId: "163046162",
       getPrivateKey: async () => pem,
       fetchImplementation: async (_url, init) => {
         if (typeof init?.body !== "string") throw new Error("expected JSON request body");
@@ -115,11 +123,9 @@ describe("GitHub App repository credentials", () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
     const requests: Array<{ url: string; init?: RequestInit }> = [];
-    const provider = new GitHubAppCredentialProvider({
+    const provider = appProvider({
       credentialRef: "github-agentx-sdlc",
-      account: "ps06756",
       appId: "5002502",
-      installationId: "163046162",
       getPrivateKey: async () => pem,
       fetchImplementation: async (url, init) => {
         const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
@@ -161,11 +167,9 @@ describe("GitHub App repository credentials", () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
     let mode: "existing" | "failure" = "existing";
-    const provider = new GitHubAppCredentialProvider({
+    const provider = appProvider({
       credentialRef: "github-agentx-sdlc",
-      account: "ps06756",
       appId: "5002502",
-      installationId: "163046162",
       getPrivateKey: async () => pem,
       fetchImplementation: async (url) => {
         const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
@@ -198,11 +202,9 @@ describe("GitHub App repository credentials", () => {
     const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
     let lookupCount = 0;
     let createCount = 0;
-    const provider = new GitHubAppCredentialProvider({
+    const provider = appProvider({
       credentialRef: "github-agentx-sdlc",
-      account: "ps06756",
       appId: "5002502",
-      installationId: "163046162",
       getPrivateKey: async () => pem,
       fetchImplementation: async (url, init) => {
         const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
@@ -235,11 +237,9 @@ describe("GitHub App repository credentials", () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
     const requests: Array<{ url: string; init?: RequestInit }> = [];
-    const provider = new GitHubAppCredentialProvider({
+    const provider = appProvider({
       credentialRef: "github-agentx-sdlc",
-      account: "ps06756",
       appId: "5002502",
-      installationId: "163046162",
       getPrivateKey: async () => pem,
       fetchImplementation: async (url, init) => {
         const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
@@ -275,11 +275,9 @@ describe("GitHub App repository credentials", () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
     const requests: Array<{ url: string; init?: RequestInit }> = [];
-    const provider = new GitHubAppCredentialProvider({
+    const provider = appProvider({
       credentialRef: "github-agentx-sdlc",
-      account: "ps06756",
       appId: "5002502",
-      installationId: "163046162",
       getPrivateKey: async () => pem,
       fetchImplementation: async (url, init) => {
         const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
@@ -313,11 +311,9 @@ describe("GitHub App repository credentials", () => {
   it("does not reflect GitHub bodies when pull request lookup or update fails", async () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-    const provider = new GitHubAppCredentialProvider({
+    const provider = appProvider({
       credentialRef: "github-agentx-sdlc",
-      account: "ps06756",
       appId: "5002502",
-      installationId: "163046162",
       getPrivateKey: async () => pem,
       fetchImplementation: async (url) => {
         const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
@@ -336,11 +332,9 @@ describe("GitHub App repository credentials", () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
     let patchCount = 0;
-    const provider = new GitHubAppCredentialProvider({
+    const provider = appProvider({
       credentialRef: "github-agentx-sdlc",
-      account: "ps06756",
       appId: "5002502",
-      installationId: "163046162",
       getPrivateKey: async () => pem,
       fetchImplementation: async (url, init) => {
         const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
@@ -362,24 +356,95 @@ describe("GitHub App repository credentials", () => {
     expect(patchCount).toBe(1);
   });
 
-  it("rejects cross-account URLs before contacting GitHub", async () => {
+  it("looks up each owner's installation once, and uses the owner as GitHub spells it", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const installations: Record<string, { id: number; login: string }> = {
+      ps06756: { id: 163046162, login: "ps06756" },
+      preplabsai: { id: 165573514, login: "PrepLabsAI" },
+    };
+    const urls: string[] = [];
+    const fetchImplementation = vi.fn(async (url: string | URL | Request) => {
+      const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+      urls.push(requestUrl);
+      const lookup = /\/repos\/([^/]+)\/[^/]+\/installation$/.exec(requestUrl);
+      if (lookup) {
+        const installation = installations[lookup[1]!.toLowerCase()]!;
+        return new Response(JSON.stringify({ id: installation.id, account: { login: installation.login } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ token: "token" }), { status: 201 });
+    });
+    const provider = new GitHubAppCredentialProvider({ credentialRef: "github-agentx-sdlc", appId: "5002502", getPrivateKey: async () => pem, fetchImplementation });
+
+    await provider.resolve("github-agentx-sdlc", "https://github.com/ps06756/personal-website-test.git");
+    await provider.resolve("github-agentx-sdlc", "https://github.com/ps06756/personal-website-test.git", "push");
+    await expect(provider.issueCredentials({ credentialRef: "github-agentx-sdlc", url: "https://github.com/preplabsai/Sample-Project-A.git" }, "read"))
+      .resolves.toEqual({ owner: "PrepLabsAI", repo: "Sample-Project-A", token: "token" });
+    expect(urls).toEqual([
+      "https://api.github.com/repos/ps06756/personal-website-test/installation",
+      "https://api.github.com/app/installations/163046162/access_tokens",
+      "https://api.github.com/app/installations/163046162/access_tokens",
+      "https://api.github.com/repos/preplabsai/Sample-Project-A/installation",
+      "https://api.github.com/app/installations/165573514/access_tokens",
+    ]);
+  });
+
+  it("refuses a repository the App cannot see, without caching the refusal", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    let installed = false;
+    const fetchImplementation = vi.fn(async () => installed
+      ? new Response(JSON.stringify({ id: 165573514, account: { login: "PrepLabsAI" } }), { status: 200 })
+      : new Response("{\"message\":\"Not Found\"}", { status: 404 }));
+    const provider = new GitHubAppCredentialProvider({ credentialRef: "github-agentx-sdlc", appId: "5002502", getPrivateKey: async () => pem, fetchImplementation });
+    const repository = { credentialRef: "github-agentx-sdlc", url: "https://github.com/PrepLabsAI/Sample-Project-A.git" };
+
+    await expect(provider.checkRepository(repository)).rejects.toThrow(/CONFIG_INVALID: the GitHub App cannot access PrepLabsAI\/Sample-Project-A; install it on PrepLabsAI/);
+    installed = true;
+    await expect(provider.checkRepository(repository)).resolves.toBeUndefined();
+    expect(fetchImplementation).toHaveBeenCalledTimes(2);
+  });
+
+  it("looks the installation up again when the App was reinstalled", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    let installationId = 111;
+    const urls: string[] = [];
+    const fetchImplementation = vi.fn(async (url: string | URL | Request) => {
+      const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+      urls.push(requestUrl);
+      if (requestUrl.endsWith("/installation")) return new Response(JSON.stringify({ id: installationId, account: { login: "ps06756" } }), { status: 200 });
+      return requestUrl.includes(`/installations/${installationId}/`)
+        ? new Response(JSON.stringify({ token: "token" }), { status: 201 })
+        : new Response("{}", { status: 404 });
+    });
+    const provider = new GitHubAppCredentialProvider({ credentialRef: "github-agentx-sdlc", appId: "5002502", getPrivateKey: async () => pem, fetchImplementation });
+    const url = "https://github.com/ps06756/personal-website-test.git";
+
+    await provider.resolve("github-agentx-sdlc", url);
+    installationId = 222;
+    await expect(provider.resolve("github-agentx-sdlc", url)).resolves.toEqual({ username: "x-access-token", password: "token" });
+    expect(urls.slice(2)).toEqual([
+      "https://api.github.com/app/installations/111/access_tokens",
+      "https://api.github.com/repos/ps06756/personal-website-test/installation",
+      "https://api.github.com/app/installations/222/access_tokens",
+    ]);
+  });
+
+  it("never asks GitHub about another credential's repository or a non-canonical URL", async () => {
     const fetchImplementation = vi.fn();
     const provider = new GitHubAppCredentialProvider({
       credentialRef: "github-agentx-sdlc",
-      account: "ps06756",
       appId: "5002502",
-      installationId: "163046162",
       getPrivateKey: async () => "not reached",
       fetchImplementation,
     });
 
-    await expect(
-      provider.resolve("github-agentx-sdlc", "https://github.com/another/private.git"),
-    ).rejects.toThrow(/outside/i);
+    await expect(provider.resolve("public-repositories", "https://github.com/another/public.git")).resolves.toEqual({});
+    await expect(provider.checkRepository({ credentialRef: "public-repositories", url: "https://github.com/another/public.git" })).resolves.toBeUndefined();
+    await expect(provider.resolve("github-agentx-sdlc", "https://github.com/another/private/tree/main")).rejects.toThrow(/canonical GitHub HTTPS URL/);
+    await expect(provider.resolve("github-agentx-sdlc", "https://gitlab.com/another/private.git")).rejects.toThrow(/canonical GitHub HTTPS URL/);
     expect(fetchImplementation).not.toHaveBeenCalled();
-    await expect(
-      provider.resolve("public-repositories", "https://github.com/another/public.git"),
-    ).resolves.toEqual({});
   });
 
   it("accepts raw or JSON-wrapped PEM secrets without reflecting invalid secret data", () => {

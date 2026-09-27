@@ -279,9 +279,9 @@ describe("writeExportBundle", () => {
     expect(controlPlane.CallbackSigningKey).toBe("{{secret:agentx/staging/callback-signing-key}}");
     expect(controlPlane.OidcIssuer).toBe("{{output:identity.Issuer}}");
     expect(controlPlane.OidcAudience).toBe("{{output:identity.Audience}}");
-    expect(controlPlane.GitHubAppAccount).toBe("{{github:account}}");
+    expect(controlPlane).not.toHaveProperty("GitHubAppAccount");
     expect(controlPlane.GitHubAppId).toBe("{{github:appId}}");
-    expect(controlPlane.GitHubAppInstallationId).toBe("{{github:installationId}}");
+    expect(controlPlane).not.toHaveProperty("GitHubAppInstallationId");
     expect(controlPlane.GitHubAppPrivateKeySecretArn).toBe("{{github:privateKeySecretArn}}");
     expect(controlPlane[`AssetParameters${CONTROL_PLANE_ASSET}Bucket`]).toBe("{{output:access.ArtifactBucketName}}");
     expect(controlPlane[`AssetParameters${CONTROL_PLANE_ASSET}Key`]).toBe(`packages/||${CONTROL_PLANE_ASSET}.zip`);

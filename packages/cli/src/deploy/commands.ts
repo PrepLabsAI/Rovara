@@ -65,9 +65,10 @@ export interface DeployCliDependencies {
 
 const GithubAnswersSchema = z
   .object({
-    account: z.string().min(1),
+    // Still accepted from answer files written before #123; the control plane no longer takes them.
+    account: z.string().min(1).optional(),
     appId: z.string().min(1),
-    installationId: z.string().min(1),
+    installationId: z.string().min(1).optional(),
     privateKeySecretArn: z.string().min(1),
     credentialRef: z.string().min(1).optional(),
   })
@@ -151,9 +152,9 @@ function toDeployAnswers(parsed: z.infer<typeof DeployAnswersSchema>): DeployAns
     models: parsed.models,
     identity: deployIdentityAnswers(parsed.identity),
     github: {
-      account: parsed.github.account,
+      ...(parsed.github.account === undefined ? {} : { account: parsed.github.account }),
       appId: parsed.github.appId,
-      installationId: parsed.github.installationId,
+      ...(parsed.github.installationId === undefined ? {} : { installationId: parsed.github.installationId }),
       privateKeySecretArn: parsed.github.privateKeySecretArn,
       ...(parsed.github.credentialRef === undefined ? {} : { credentialRef: parsed.github.credentialRef }),
     },

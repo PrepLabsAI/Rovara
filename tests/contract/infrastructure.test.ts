@@ -184,7 +184,9 @@ describe("control-plane infrastructure", () => {
     expect(json).toContain("CALLBACK_SIGNING_KEY");
     expect(json).toContain("ADMIN_CLAIM");
     expect(json).toContain("GITHUB_APP_PRIVATE_KEY_SECRET_ARN");
-    expect(json).toContain("GITHUB_APP_INSTALLATION_ID");
+    // The broker looks up the GitHub App's installation per repository owner (#123).
+    expect(json).not.toContain("GITHUB_APP_INSTALLATION_ID");
+    expect(json).not.toContain("GITHUB_APP_ACCOUNT");
     expect(json).toContain("secretsmanager:GetSecretValue");
     const githubSecretGrants = Object.values(template.findResources("AWS::IAM::Policy"))
       .flatMap((policy) => (policy as { Properties: { PolicyDocument: { Statement: Array<{ Resource: unknown }> } } })
