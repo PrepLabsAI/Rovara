@@ -32,12 +32,10 @@ export type InitRunResult =
   | { status: "complete"; ran: InitStepId[]; skipped: InitStepId[] }
   | { status: "waiting"; step: InitStepId; message: string; ran: InitStepId[]; skipped: InitStepId[] };
 
-const RESUME = "Run agentx init again to continue from this step.";
-
-export function initStepFailure(title: string, error: unknown): unknown {
+export function initStepFailure(title: string, error: unknown, where: { env: string; region: string }): unknown {
   const mapped = cliErrorFor(error);
   const message = mapped instanceof Error ? mapped.message.replace(/^[A-Z_]+: /, "") : String(mapped);
-  const text = `init stopped at "${title}": ${message}. ${RESUME}`;
+  const text = `init stopped at "${title}": ${message}. Run agentx init --env ${where.env} --region ${where.region} again to continue from this step.`;
   if (mapped instanceof AgentXError) {
     const refresh = mapped.code === "AUTH_REQUIRED" ? " Refresh your AWS session first (for example aws sso login or aws login)." : "";
     return Object.assign(agentXError(mapped.code, `${text}${refresh}`), { cause: error });
@@ -46,7 +44,8 @@ export function initStepFailure(title: string, error: unknown): unknown {
 }
 
 export async function runInitSteps<C>(input: {
-  env: string; store: ParameterStore; holder: string;
+  /** env and region name the resume command in a failed step's message. */
+  env: string; region: string; store: ParameterStore; holder: string;
   steps: ReadonlyArray<InitStep<C>>; context: C;
   onEvent?: (event: InitEvent) => void;
   confirmTakeover?: (held: LockRecord) => Promise<boolean>;
@@ -85,7 +84,7 @@ export async function runInitSteps<C>(input: {
         try {
           outcome = await step.run(input.context, handle);
         } catch (error) {
-          throw initStepFailure(step.title, error);
+          throw initStepFailure(step.title, error, { env: input.env, region: input.region });
         }
         const at = new Date(now()).toISOString();
         if (outcome.status === "waiting") {

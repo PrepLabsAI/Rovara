@@ -26,7 +26,7 @@ function step(id: InitStepId, run: () => Promise<StepOutcome> = async () => ({ s
 }
 
 const run = (store: MemoryParameterStore, steps: ReadonlyArray<InitStep<unknown>>, extra: Partial<Parameters<typeof runInitSteps>[0]> = {}) =>
-  runInitSteps({ env: ENV, store, holder: HOLDER, steps, context: {}, now: () => T0, ...extra });
+  runInitSteps({ env: ENV, region: "us-east-1", store, holder: HOLDER, steps, context: {}, now: () => T0, ...extra });
 
 describe("init step runner", () => {
   it("runs steps in order and records each as done in SSM", async () => {
@@ -44,7 +44,7 @@ describe("init step runner", () => {
   it("resumes at the first incomplete step and never re-runs a completed one", async () => {
     const store = new MemoryParameterStore();
     const first = [step("prerequisites"), step("access"), step("core", async () => { throw new Error("network lost"); })];
-    await expect(run(store, first)).rejects.toThrow('init stopped at "step core": network lost. Run agentx init again to continue from this step.');
+    await expect(run(store, first)).rejects.toThrow('init stopped at "step core": network lost. Run agentx init --env staging --region us-east-1 again to continue from this step.');
     const second = [step("prerequisites"), step("access"), step("core")];
     const result = await run(store, second);
     expect(result).toEqual({ status: "complete", ran: ["core"], skipped: ["prerequisites", "access"] });

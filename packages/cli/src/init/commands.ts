@@ -180,6 +180,10 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   const fetchImplementation = deps.fetch ?? fetch;
   const processEnv = deps.processEnv ?? process.env;
   const deployDeps = deps.deploy ?? {};
+  // A resume reads the install from the region's SSM, so --yes never guesses it.
+  if (options.yes && options.region === undefined) {
+    throw agentXError("CONFIG_INVALID", "agentx init needs to know the AWS region; with --yes, pass --region <region>");
+  }
   const runner = deployDeps.commandRunner ?? realCommandRunner(services.stderr);
 
   // The release comes first: a CLI built from source is told to pass --release before anything else.
@@ -200,7 +204,9 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   if (options.slackInstall !== undefined) prompter = answeringSlackInstall(prompter, options.slackInstall);
 
   const regions = release.regions();
-  const region = options.region ?? (await prompter.choose<string>("AWS region", regions.map((value) => ({ value, label: value })), { flag: "--region", defaultValue: regions[0] ?? "us-east-1" }));
+  // The AWS CLI's own region comes first, so a resume looks where the install started.
+  const environmentRegion = [processEnv.AWS_REGION, processEnv.AWS_DEFAULT_REGION].find((value) => value !== undefined && regions.includes(value));
+  const region = options.region ?? (await prompter.choose<string>("AWS region", regions.map((value) => ({ value, label: value })), { flag: "--region", defaultValue: environmentRegion ?? regions[0] ?? "us-east-1" }));
   assertReleaseCoversRegion(release, region);
 
   const store = deployDeps.store ?? ssmParameterStore(new SSMClient({ region }));
@@ -304,7 +310,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
 
   try {
     const result = await runInitSteps({
-      env, store, holder: caller.arn, context, now,
+      env, region, store, holder: caller.arn, context, now,
       steps: initSteps({ github: deps.github ?? githubRestApi(fetchImplementation), slack: deps.slack ?? slackWebApi(fetchImplementation) }),
       beforeSteps: saveAnswers,
       onEvent: (event) => write(eventLine(event)),

@@ -178,7 +178,7 @@ export function slackAppStep(api: SlackApi): InitStep<InitContext> {
         { value: "approval", label: "Not yet: a workspace admin must approve it first" },
       ], { flag: "--slack-install", defaultValue: "installed" });
       if (installed === "approval") {
-        return { status: "waiting", message: `Slack is waiting for a workspace admin to approve "${appName}". Once it is installed, run agentx init --env ${env} again; it continues here.` };
+        return { status: "waiting", message: `Slack is waiting for a workspace admin to approve "${appName}". Once it is installed, run agentx init --env ${env} --region ${context.answers.region} again; it continues here.` };
       }
 
       context.write("Copy the Bot User OAuth Token from OAuth & Permissions, and the Signing Secret from Basic Information, App Credentials.");

@@ -26,14 +26,16 @@ afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { 
 const tmp = async (prefix: string) => { const dir = await mkdtemp(join(tmpdir(), prefix)); dirs.push(dir); return dir; };
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 
-async function releaseDir(version = "1.2.3"): Promise<string> {
+async function releaseDir(version = "1.2.3", regions = ["us-east-1"]): Promise<string> {
   const dir = await tmp("agentx-init-release-");
-  await mkdir(join(dir, "templates", "us-east-1"), { recursive: true });
   const templates = [];
-  for (const part of ["access", "foundation", "identity", "control-plane", "runtime", "slack"]) {
-    const file = `templates/us-east-1/${part}.template.json`;
-    await writeFile(join(dir, file), "{}");
-    templates.push({ region: "us-east-1", part, file, sha256: sha256("{}") });
+  for (const region of regions) {
+    await mkdir(join(dir, "templates", region), { recursive: true });
+    for (const part of ["access", "foundation", "identity", "control-plane", "runtime", "slack"]) {
+      const file = `templates/${region}/${part}.template.json`;
+      await writeFile(join(dir, file), "{}");
+      templates.push({ region, part, file, sha256: sha256("{}") });
+    }
   }
   await writeFile(join(dir, "release.json"), JSON.stringify({
     schemaVersion: 1, version, gitCommit: "a".repeat(40), environmentPlaceholder: "qqenv-placeholderqq", templates, packages: [],
@@ -42,7 +44,7 @@ async function releaseDir(version = "1.2.3"): Promise<string> {
   return dir;
 }
 
-async function harness(options: { releaseVersion?: string } = {}) {
+async function harness(options: { releaseVersion?: string; regions?: string[] } = {}) {
   let clock = T0;
   const store = new MemoryParameterStore();
   // The control plane creates agentx/<env>/slack with a placeholder; the fake deployer does not, so it exists up front.
@@ -53,7 +55,7 @@ async function harness(options: { releaseVersion?: string } = {}) {
   const out: string[] = [];
   const err: string[] = [];
   const home = await tmp("agentx-init-home-");
-  const release = await releaseDir(options.releaseVersion);
+  const release = await releaseDir(options.releaseVersion, options.regions);
   const deps: InitCliDependencies = {
     deploy: { identity: { get: async () => ({ account: "123456789012", arn: HOLDER }) }, store, secrets, deployer },
     initSecrets: secrets,
@@ -67,14 +69,16 @@ async function harness(options: { releaseVersion?: string } = {}) {
     now: () => clock,
     processEnv: {},
   };
-  const run = (argv: string[], overrides: Partial<InitCliDependencies> = {}) =>
-    executeCli(["--env", "staging", "init", "--region", "us-east-1", "--release", release, ...argv], {
+  /** Without --region: the region comes from the prompt's default (or --yes refuses). */
+  const runWithoutRegion = (argv: string[], overrides: Partial<InitCliDependencies> = {}) =>
+    executeCli(["--env", "staging", "init", "--release", release, ...argv], {
       stdout: { write: (text: string) => out.push(text) },
       stderr: { write: (text: string) => err.push(text) },
       environments: { home },
       init: { ...deps, ...overrides },
     });
-  return { store, secrets, deployer, github, opened, out, err, home, release, run, printed: () => `${out.join("")}${err.join("")}` };
+  const run = (argv: string[], overrides: Partial<InitCliDependencies> = {}) => runWithoutRegion(["--region", "us-east-1", ...argv], overrides);
+  return { store, secrets, deployer, github, opened, out, err, home, release, run, runWithoutRegion, printed: () => `${out.join("")}${err.join("")}` };
 }
 
 type Harness = Awaited<ReturnType<typeof harness>>;
@@ -132,7 +136,7 @@ describe("agentx init", () => {
     const h = await harness();
     h.deployer.fail.set(environmentStackName("staging", "control-plane"), new Error("Resource limit exceeded"));
     expect(await h.run([], { prompter: scriptedPrompter(FIRST_RUN) })).not.toBe(0);
-    expect(h.printed()).toContain('init stopped at "Deploy the control plane and runtime": Resource limit exceeded. Run agentx init again to continue from this step.');
+    expect(h.printed()).toContain('init stopped at "Deploy the control plane and runtime": Resource limit exceeded. Run agentx init --env staging --region us-east-1 again to continue from this step.');
     expect(h.store.values.has(lockParameterName("staging"))).toBe(false);
     h.deployer.fail.clear();
     h.deployer.requests.length = 0;
@@ -185,6 +189,30 @@ describe("agentx init", () => {
     expect(h.printed()).toContain("could not open a browser; open the address above (or pass --no-browser)");
     expect(h.printed()).not.toContain("Refresh your AWS session");
     expect((await readInstallProgress(h.store, "staging"))?.steps["slack-service"]?.status).toBe("done");
+  });
+
+  it("defaults the region to AWS_REGION, then AWS_DEFAULT_REGION, when the release covers it", async () => {
+    const regions = ["us-east-1", "us-west-2"];
+    // Taking the region prompt's default ("") then --resume with nothing stored names the region it looked in.
+    const lookedIn = async (processEnv: NodeJS.ProcessEnv) => {
+      const h = await harness({ regions });
+      const prompter = scriptedPrompter([""]);
+      expect(await h.runWithoutRegion(["--resume"], { prompter, processEnv })).toBe(2);
+      expect(prompter.asked).toEqual(["AWS region"]);
+      return /resume in account 123456789012 \(([a-z0-9-]+)\)/.exec(h.printed())?.[1];
+    };
+    expect(await lookedIn({ AWS_REGION: "us-west-2", AWS_DEFAULT_REGION: "us-east-1" })).toBe("us-west-2");
+    expect(await lookedIn({ AWS_DEFAULT_REGION: "us-west-2" })).toBe("us-west-2");
+    expect(await lookedIn({ AWS_REGION: "eu-west-1", AWS_DEFAULT_REGION: "us-west-2" })).toBe("us-west-2");
+    expect(await lookedIn({ AWS_REGION: "eu-west-1" })).toBe("us-east-1");
+    expect(await lookedIn({})).toBe("us-east-1");
+  });
+
+  it("under --yes, refuses to guess the region", async () => {
+    const h = await harness();
+    expect(await h.runWithoutRegion([...UNATTENDED, "--alert-email", "ops@example.com"], { processEnv: { ...UNATTENDED_ENV, AWS_REGION: "us-east-1" } })).toBe(2);
+    expect(h.printed()).toContain("with --yes, pass --region <region>");
+    expect(h.store.calls).toEqual([]);
   });
 
   it("refuses to resume with a different answer", async () => {
