@@ -20,7 +20,7 @@ import {
   type ReleaseManifest,
   type ReleaseOptions,
   type StackDescription,
-} from "./release-demo.js";
+} from "./release-common.js";
 
 const DEFAULT_REPOSITORY = "agentx-worker-production";
 const CONTROL_PLANE_STACK = "AgentXControlPlane";
@@ -76,7 +76,7 @@ export interface ProductionReleaseOptions extends ReleaseOptions {
   createSlackOrchestrator: boolean;
 }
 
-export interface ProductionReleaseManifest extends Omit<ReleaseManifest, "runtimeArn" | "runtimeVersion"> {
+export interface ProductionReleaseManifest extends ReleaseManifest {
   deploymentMode: "ec2-ebs";
   modelProvider: string;
   modelId: string;

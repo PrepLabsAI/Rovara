@@ -209,12 +209,12 @@ describe("writeExportBundle", () => {
     expect(script).toContain("agentx deploy --mode install --parts foundation,identity,control-plane,runtime,slack");
     // deploy-access.sh never creates the callback signing key; agentx deploy does, on its first run.
     expect(readmeText).toMatch(/does not create the callback signing key/);
-    // I4: tearing down is documented, with the capacity provider warning.
+    // I4: tearing down is documented. No AgentCore capacity provider or runtime survives it (#118).
     expect(readmeText).toContain("## Tearing down an environment");
-    expect(readmeText).toMatch(/deletes every worker session's persistent workspace volume/);
+    expect(readmeText).not.toMatch(/capacity provider|bedrock-agentcore/);
     expect(readmeText).toContain("--force-delete-without-recovery");
     expect(readmeText).toContain("agentx destroy");
-    expect(readmeText).toContain("/aws/bedrock-agentcore/runtimes/<runtimeId>-DEFAULT");
+    expect(readmeText).toContain("The foundation's VPC flow-log group");
     // Every AWS CLI line in the teardown names the region, so it cannot hit the shell's default one.
     for (const line of readmeText.split("\n").filter((l) => /^\s*aws (s3api|s3|ec2) /.test(l))) {
       expect(line).toContain("--region us-east-1");

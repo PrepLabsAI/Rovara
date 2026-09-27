@@ -1,5 +1,5 @@
 import { Stack, type App } from "aws-cdk-lib";
-import { Match, Template } from "aws-cdk-lib/assertions";
+import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
 import { WORKSPACE_SESSION_STATE_INDEX } from "../../packages/contracts/src/session.js";
 import { buildAgentXApp } from "../../infra/lib/app.js";
@@ -70,7 +70,7 @@ describe("EC2 worker infrastructure (issue #82), shown for a named environment",
     const all = (type: string) => legacy.flatMap((template) => ofType(template, type).map(([, r]) => r));
     expect(all("AWS::EC2::LaunchTemplate").map((r) => r.Properties.LaunchTemplateName)).toEqual(["agentx-production-worker"]);
     expect(all("AWS::EC2::SecurityGroup").map((r) => r.Properties.GroupName).filter((name) => name !== undefined).sort()).toEqual([
-      "agentx-production-dispatcher", "agentx-production-ec2-workers", "agentx-production-session-manager", "agentx-production-workers",
+      "agentx-production-dispatcher", "agentx-production-ec2-workers", "agentx-production-session-manager",
     ]);
     expect(all("AWS::SSM::Parameter").map((r) => r.Properties.Name).sort()).toEqual([
       "/agentx/production/worker-image", "/agentx/production/worker-model-id", "/agentx/production/worker-model-provider",
@@ -126,8 +126,8 @@ describe("EC2 worker infrastructure (issue #82), shown for a named environment",
     }
   });
 
-  it("leaves the AgentCore workers' security group without ingress", () => {
-    foundation.hasResourceProperties("AWS::EC2::SecurityGroup", { GroupName: "agentx-staging-workers", SecurityGroupIngress: Match.absent() });
+  it("no longer has the AgentCore workers' security group (#118)", () => {
+    expect(ofType(foundation, "AWS::EC2::SecurityGroup").map(([, r]) => r.Properties.GroupName)).not.toContain("agentx-staging-workers");
   });
 
   it("gives instances ECR pull, Bedrock and their own log group, and nothing of AgentCore, KMS or SSM", () => {

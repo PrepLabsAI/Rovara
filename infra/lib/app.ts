@@ -4,7 +4,6 @@ import type { IReusableStackSynthesizer } from "aws-cdk-lib";
 import { CONTEXT_ENV, CONTEXT_OVERFLOW_LOCATION_ENV } from "aws-cdk-lib/cx-api";
 import { AccessStack } from "./access.js";
 import { ControlPlaneStack } from "./control-plane.js";
-import { DemoRuntimeStack } from "./demo-runtime.js";
 import { IdentityStack } from "./identity.js";
 import { namingFromContext } from "./naming.js";
 import { applyPermissionsBoundaryParameter } from "./permissions-boundary.js";
@@ -78,16 +77,9 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
   const deploymentRegion = app.node.tryGetContext("agentxRegion") as string | undefined;
   const deploymentMode =
     (app.node.tryGetContext("agentxDeploymentMode") as string | undefined) ?? "instances-ebs";
-  if (deploymentMode !== "instances-ebs" && deploymentMode !== "demo-microvm") {
-    throw new Error(
-      `unsupported agentxDeploymentMode ${deploymentMode}; expected instances-ebs or demo-microvm`,
-    );
-  }
-  // The demo microVM runtime is legacy-only: it predates named environments and has no environment-scoped naming.
-  if (naming.env !== undefined && deploymentMode === "demo-microvm") {
-    throw new Error(
-      `agentxDeploymentMode=demo-microvm is not supported with an agentxEnv context (got ${JSON.stringify(naming.env)})`,
-    );
+  // The release still passes instances-ebs; the AgentCore demo microVM runtime was removed (#118).
+  if (deploymentMode !== "instances-ebs") {
+    throw new Error(`unsupported agentxDeploymentMode ${deploymentMode}; the demo-microvm runtime was removed`);
   }
   const identityMode = app.node.tryGetContext("agentxIdentity") as string | undefined;
   if (identityMode !== undefined && identityMode !== "cognito" && identityMode !== "oidc") {
@@ -120,55 +112,47 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
     naming,
     ...(naming.env === undefined ? {} : { stackName: naming.stackName("control-plane") }),
   });
-  if (deploymentMode === "demo-microvm") {
-    new DemoRuntimeStack(app, "AgentXDemoRuntime", {
-      description: "AgentX VPC-free microVM demonstration runtime",
-      deploymentRegion: deploymentRegion ?? "us-east-1",
-      env: { region: deploymentRegion ?? "us-east-1" },
-    });
-  } else {
-    new ProductionFoundationStack(app, "AgentXProductionFoundation", {
-      description: "Stable AgentX production network, encryption, and persistent workspace capacity",
-      deploymentRegion: deploymentRegion ?? "us-east-1",
-      env: { region: deploymentRegion ?? "us-east-1" },
+  new ProductionFoundationStack(app, "AgentXProductionFoundation", {
+    description: "Stable AgentX production network, encryption, and persistent workspace capacity",
+    deploymentRegion: deploymentRegion ?? "us-east-1",
+    env: { region: deploymentRegion ?? "us-east-1" },
+    terminationProtection: true,
+    naming,
+    ...(naming.env === undefined ? {} : { stackName: naming.stackName("foundation") }),
+  });
+  // The identity stack is new with named environments; the legacy deployment brings its own OIDC
+  // provider instead. Skip it entirely when the environment opts out with agentxIdentity=oidc.
+  if (naming.env !== undefined && identityMode !== "oidc") {
+    new IdentityStack(app, "AgentXIdentity", {
+      description: "AgentX Cognito user pool, admin group and CLI app client for a named environment",
+      stackName: naming.stackName("identity"),
       terminationProtection: true,
       naming,
-      ...(naming.env === undefined ? {} : { stackName: naming.stackName("foundation") }),
-    });
-    // The identity stack is new with named environments; the legacy deployment brings its own OIDC
-    // provider instead. Skip it entirely when the environment opts out with agentxIdentity=oidc.
-    if (naming.env !== undefined && identityMode !== "oidc") {
-      new IdentityStack(app, "AgentXIdentity", {
-        description: "AgentX Cognito user pool, admin group and CLI app client for a named environment",
-        stackName: naming.stackName("identity"),
-        terminationProtection: true,
-        naming,
-        env: { region: deploymentRegion ?? "us-east-1" },
-      });
-    }
-    // Still named for the AgentCore runtime it used to deploy; it holds only the EC2 worker settings now.
-    new WorkerSettingsStack(app, "AgentXProductionRuntime", {
-      description: "AgentX worker image and model settings for EC2 workers",
       env: { region: deploymentRegion ?? "us-east-1" },
-      terminationProtection: true,
-      naming,
-      ...(naming.env === undefined ? {} : { stackName: naming.stackName("runtime") }),
-    });
-    // The release pipeline builds and deploys the live production stacks by their fixed legacy
-    // names; it has no meaning for a named environment.
-    if (naming.env === undefined) {
-      new ReleasePipelineStack(app, "AgentXReleasePipeline", {
-        description: "AgentX production release pipeline for the mainline branch",
-        env: { region: deploymentRegion ?? "us-east-1" },
-      });
-    }
-    new SlackOrchestratorStack(app, "AgentXSlackOrchestrator", {
-      description: "Hosted AgentX Slack orchestrator on ECS Fargate",
-      env: { region: deploymentRegion ?? "us-east-1" },
-      naming,
-      ...(naming.env === undefined ? {} : { stackName: naming.stackName("slack") }),
     });
   }
+  // Still named for the AgentCore runtime it used to deploy; it holds only the EC2 worker settings now.
+  new WorkerSettingsStack(app, "AgentXProductionRuntime", {
+    description: "AgentX worker image and model settings for EC2 workers",
+    env: { region: deploymentRegion ?? "us-east-1" },
+    terminationProtection: true,
+    naming,
+    ...(naming.env === undefined ? {} : { stackName: naming.stackName("runtime") }),
+  });
+  // The release pipeline builds and deploys the live production stacks by their fixed legacy
+  // names; it has no meaning for a named environment.
+  if (naming.env === undefined) {
+    new ReleasePipelineStack(app, "AgentXReleasePipeline", {
+      description: "AgentX production release pipeline for the mainline branch",
+      env: { region: deploymentRegion ?? "us-east-1" },
+    });
+  }
+  new SlackOrchestratorStack(app, "AgentXSlackOrchestrator", {
+    description: "Hosted AgentX Slack orchestrator on ECS Fargate",
+    env: { region: deploymentRegion ?? "us-east-1" },
+    naming,
+    ...(naming.env === undefined ? {} : { stackName: naming.stackName("slack") }),
+  });
   if (naming.env !== undefined) {
     Tags.of(app).add("agentx:env", naming.env);
     // Every environment role goes under /agentx/<env>/, the path the CloudFormation service role is

@@ -115,10 +115,7 @@ describe("access stack", () => {
     const MANAGED_POLICY_SERVICES: Record<string, string[]> = {
       AWSLambdaBasicExecutionRole: ["logs"],
       AWSLambdaVPCAccessExecutionRole: ["ec2", "logs"],
-      BedrockAgentCoreRuntimeInstancesOperatorRolePolicy: ["ec2", "autoscaling", "events", "iam"],
     };
-    // The IAM actions of those managed policies, checked by name like the inline ones below.
-    const MANAGED_POLICY_IAM_ACTIONS = ["iam:CreateServiceLinkedRole", "iam:PassRole"];
     const all = stacksOf(app).map(resourcesOf);
     const actions = usedActions();
     const managed = new Set(all.flatMap((resources) => Object.values(resources).filter((r) => r.Type === "AWS::IAM::Role")
@@ -133,7 +130,7 @@ describe("access stack", () => {
     const neededServices = new Set([...resourceTypeServices(), ...Object.values(MANAGED_POLICY_SERVICES).flat().filter((s) => s !== "iam")]);
     expect([...neededServices].filter((service) => !allowedServices.has(service))).toEqual([]);
     // Every action a role uses is allowed by its service's wildcard or by name (IAM and STS only by name).
-    const namedActions = [...actions, ...MANAGED_POLICY_IAM_ACTIONS];
+    const namedActions = [...actions];
     expect(namedActions.length).toBeGreaterThan(0);
     // The service role's own boundary Deny action (DeleteRolePermissionsBoundary) is never needed as an allow.
     expect(namedActions.filter((a) => a !== "iam:DeleteRolePermissionsBoundary" && !allowed.has(a) && !allowedServices.has(a.split(":")[0]))).toEqual([]);

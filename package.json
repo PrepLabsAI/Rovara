@@ -24,15 +24,13 @@
     "test:boot-script": "AGENTX_BOOT_SCRIPT_DOCKER=1 vitest run tests/live/ec2-boot-script.test.ts",
     "typecheck": "tsc -b --pretty false",
     "image:build:demo": "docker buildx build --platform linux/arm64 --load --tag agentx-worker:demo-arm64 --file environments/base/Dockerfile .",
-    "release:demo": "tsx scripts/release-demo.ts",
     "release:prod": "tsx scripts/release-production.ts",
     "session:e2e": "tsx scripts/session-e2e.ts",
     "drain:agentcore": "tsx scripts/close-agentcore-workspaces.ts",
     "release:build": "tsx scripts/release/build.ts",
     "release:verify": "tsx scripts/release/verify.ts",
     "release:pack-cli": "tsx scripts/release/pack-cli.ts",
-    "infra:synth": "npm run build --workspace @agentx/infra && cdk synth --app 'node infra/dist/bin/agentx.js'",
-    "infra:synth:demo": "npm run build --workspace @agentx/infra && cdk synth AgentXDemoRuntime --app 'node infra/dist/bin/agentx.js' -c agentxDeploymentMode=demo-microvm -c agentxRegion=us-east-1"
+    "infra:synth": "npm run build --workspace @agentx/infra && cdk synth --app 'node infra/dist/bin/agentx.js'"
   },
   "devDependencies": {
     "@aws-sdk/client-bedrock-agentcore": "3.1134.0",

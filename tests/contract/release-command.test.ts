@@ -9,9 +9,8 @@ import {
   assertDigestImage,
   parseReleaseArgs,
   releaseTag,
-  runtimeIdFromArn,
   type Runner,
-} from "../../scripts/release-demo.js";
+} from "../../scripts/release-common.js";
 import {
   SLACK_ORCHESTRATOR_IMAGE_INPUTS,
   SLACK_ORCHESTRATOR_REPOSITORY,
@@ -28,11 +27,11 @@ function dockerfileSources(path: string): string[] {
     .flatMap((line) => line.trim().split(/\s+/).slice(1, -1));
 }
 
-describe("demo release command", () => {
+describe("shared release helpers", () => {
   it("parses safe defaults and explicit deployment options", () => {
     expect(parseReleaseArgs([], {})).toEqual({
       region: "us-east-1",
-      repository: "agentx-worker-demo",
+      repository: "agentx-worker-production",
       allowDirty: false,
       skipChecks: false,
       dryRun: false,
@@ -57,18 +56,11 @@ describe("demo release command", () => {
   it("creates immutable release tags and validates digest-scoped images", () => {
     expect(releaseTag(new Date("2026-09-23T17:50:35.123Z"), "4f885bb4a8eaffff"))
       .toBe("release-20260923T175035Z-4f885bb4a8ea");
-    const repository = "944937319445.dkr.ecr.us-east-1.amazonaws.com/agentx-worker-demo";
+    const repository = "944937319445.dkr.ecr.us-east-1.amazonaws.com/agentx-worker-production";
     const image = `${repository}@sha256:${"a".repeat(64)}`;
     expect(() => assertDigestImage(image, repository)).not.toThrow();
     expect(() => assertDigestImage(`${repository}:latest`, repository)).toThrow(/immutable/);
     expect(() => assertDigestImage(image, `${repository}-other`)).toThrow(/belong/);
-  });
-
-  it("extracts the runtime ID and rejects malformed ARNs", () => {
-    expect(runtimeIdFromArn(
-      "arn:aws:bedrock-agentcore:us-east-1:944937319445:runtime/agentx_demo_worker-E4dYCR6f45",
-    )).toBe("agentx_demo_worker-E4dYCR6f45");
-    expect(() => runtimeIdFromArn("not-an-arn")).toThrow(/invalid/);
   });
 
   it("bounds ECR growth for untagged, release, and legacy image tags", () => {
@@ -225,17 +217,6 @@ describe("release ordering", () => {
   it("passes the control plane the foundation outputs its EC2 session lifecycle needs", () => {
     const source = readFileSync("scripts/release-production.ts", "utf8");
     expect(source).toContain("CONTROL_PLANE_FOUNDATION_PARAMETERS.flatMap((name) => [\"--parameters\", `${CONTROL_PLANE_STACK}:${name}=${stackOutput(foundation, name)}`])");
-  });
-
-  it("updates the demo runtime before the control plane once both stacks exist", () => {
-    const source = readFileSync("scripts/release-demo.ts", "utf8");
-    const update = source.indexOf("if (existingControlPlane && existingRuntime) {");
-    expect(update).toBeGreaterThan(-1);
-    const runtimeDeploy = source.indexOf("deployedRuntime = await deployRuntime(", update);
-    const controlPlaneDeploy = source.indexOf("deployControlPlane(runner, options, true);", update);
-    expect(runtimeDeploy).toBeGreaterThan(-1);
-    expect(controlPlaneDeploy).toBeGreaterThan(-1);
-    expect(runtimeDeploy).toBeLessThan(controlPlaneDeploy);
   });
 });
 

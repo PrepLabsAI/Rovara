@@ -1,14 +1,11 @@
+// Release helpers shared by the production release (release-production.ts) and its tests. The demo
+// release that used to live here went with the AgentCore demo runtime (#118).
 import { spawnSync, type SpawnSyncOptionsWithStringEncoding } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
-import { AGENTX_PROTOCOL_VERSION } from "../packages/contracts/src/protocol.js";
 
 const DEFAULT_REGION = "us-east-1";
-const DEFAULT_REPOSITORY = "agentx-worker-demo";
+const DEFAULT_REPOSITORY = "agentx-worker-production";
 const CONTROL_PLANE_STACK = "AgentXControlPlane";
-const RUNTIME_STACK = "AgentXDemoRuntime";
-const LOG_RETENTION_DAYS = 30;
 
 export interface ReleaseOptions {
   region: string;
@@ -25,8 +22,6 @@ export interface ReleaseManifest {
   gitRevision: string;
   workerImage: string;
   controlPlaneUrl: string;
-  runtimeArn: string;
-  runtimeVersion: string;
   protocolVersion: number;
   region: string;
   accountId: string;
@@ -35,12 +30,6 @@ export interface ReleaseManifest {
 export interface StackDescription {
   Parameters?: Array<{ ParameterKey?: string; ParameterValue?: string }>;
   Outputs?: Array<{ OutputKey?: string; OutputValue?: string }>;
-}
-
-export interface RuntimeDescription {
-  status?: string;
-  agentRuntimeVersion?: string;
-  agentRuntimeArtifact?: { containerConfiguration?: { containerUri?: string } };
 }
 
 interface CommandResult {
@@ -97,14 +86,6 @@ export function releaseTag(now: Date, revision: string): string {
   return `release-${timestamp}-${shortRevision}`;
 }
 
-export function runtimeIdFromArn(runtimeArn: string): string {
-  const marker = ":runtime/";
-  const index = runtimeArn.lastIndexOf(marker);
-  const runtimeId = index < 0 ? "" : runtimeArn.slice(index + marker.length);
-  if (!/^[A-Za-z0-9_-]+$/.test(runtimeId)) throw new Error(`invalid AgentCore runtime ARN: ${runtimeArn}`);
-  return runtimeId;
-}
-
 export function assertDigestImage(value: string, expectedRepositoryUri?: string): void {
   if (!/^.+@sha256:[a-f0-9]{64}$/.test(value)) {
     throw new Error("worker image must be an immutable sha256 digest URI");
@@ -156,188 +137,6 @@ export class Runner {
   aws(args: readonly string[], allowFailure = false): CommandResult {
     return this.capture("aws", [...args, ...profileArgs(this.options.profile)], allowFailure);
   }
-}
-
-export async function releaseDemo(options: ReleaseOptions): Promise<ReleaseManifest | undefined> {
-  if (options.dryRun) {
-    process.stdout.write([
-      "AgentX demo release plan:",
-      "1. Verify the working tree and run typecheck, lint and tests.",
-      "2. Apply immutable tags and infra/ecr-lifecycle-policy.json to ECR.",
-      "3. Build and smoke-test a linux/arm64 worker, then push a unique release tag.",
-      "4. Update an existing AgentXDemoRuntime before its control plane to avoid protocol skew.",
-      "5. Deploy AgentXControlPlane, preserving existing secrets and parameters.",
-      "6. Verify runtime READY, exact image digest, and 30-day runtime-log retention.",
-      "",
-    ].join("\n"));
-    return undefined;
-  }
-
-  const runner = new Runner(options);
-  const revision = runner.capture("git", ["rev-parse", "HEAD"]).stdout.trim();
-  if (!options.allowDirty) {
-    const dirty = runner.capture("git", ["status", "--porcelain"]).stdout.trim();
-    if (dirty) throw new Error("working tree is dirty; commit changes or pass --allow-dirty explicitly");
-  }
-  if (!options.skipChecks) {
-    runner.run("npm", ["run", "typecheck"]);
-    runner.run("npm", ["run", "lint"]);
-    runner.run("npm", ["test"]);
-  }
-
-  const identity = parseJson<{ Account?: string }>(
-    runner.aws(["sts", "get-caller-identity", "--output", "json"]).stdout,
-  );
-  if (!identity.Account) throw new Error("AWS did not return an account ID");
-  const repositoryUri = `${identity.Account}.dkr.ecr.${options.region}.amazonaws.com/${options.repository}`;
-  ensureRepository(runner, options);
-
-  const workerImage = options.workerImage ?? await buildAndPushWorker(runner, options, repositoryUri, revision);
-  assertDigestImage(workerImage, repositoryUri);
-  verifyRepositoryImage(runner, options, workerImage);
-
-  runner.run("npm", ["run", "build"]);
-  const controlPlaneExists = stackExists(runner, options.region, CONTROL_PLANE_STACK);
-  const runtimeExists = stackExists(runner, options.region, RUNTIME_STACK);
-  if (runtimeExists && !controlPlaneExists) {
-    throw new Error("runtime stack exists without its control plane; repair that partial deployment first");
-  }
-  const existingControlPlane = controlPlaneExists
-    ? describeStack(runner, options.region, CONTROL_PLANE_STACK)
-    : undefined;
-  const existingRuntime = runtimeExists
-    ? describeStack(runner, options.region, RUNTIME_STACK)
-    : undefined;
-  const modelProvider = process.env.AGENTX_MODEL_PROVIDER
-    ?? (existingRuntime ? stackParameter(existingRuntime, "ModelProvider") : undefined);
-  const modelId = process.env.AGENTX_MODEL_ID
-    ?? (existingRuntime ? stackParameter(existingRuntime, "ModelId") : undefined);
-  if (!modelProvider || !modelId) {
-    throw new Error("AGENTX_MODEL_PROVIDER and AGENTX_MODEL_ID are required for the first runtime deployment");
-  }
-
-  let controlPlaneUrl: string;
-  let deployedRuntime: { runtimeArn: string; runtime: RuntimeDescription };
-  if (existingControlPlane && existingRuntime) {
-    controlPlaneUrl = stackOutput(existingControlPlane, "ApiEndpoint");
-    deployedRuntime = await deployRuntime(
-      runner,
-      options,
-      workerImage,
-      controlPlaneUrl,
-      modelProvider,
-      modelId,
-    );
-    // Runtime first, then the control plane: a strictly parsed invocation field must reach a worker
-    // that already knows it. Creating both for the first time has no old worker, so it may differ.
-    deployControlPlane(runner, options, true);
-    const updatedUrl = stackOutput(describeStack(runner, options.region, CONTROL_PLANE_STACK), "ApiEndpoint");
-    if (updatedUrl !== controlPlaneUrl) {
-      controlPlaneUrl = updatedUrl;
-      deployedRuntime = await deployRuntime(
-        runner,
-        options,
-        workerImage,
-        controlPlaneUrl,
-        modelProvider,
-        modelId,
-      );
-    }
-  } else {
-    deployControlPlane(runner, options, controlPlaneExists);
-    controlPlaneUrl = stackOutput(describeStack(runner, options.region, CONTROL_PLANE_STACK), "ApiEndpoint");
-    deployedRuntime = await deployRuntime(
-      runner,
-      options,
-      workerImage,
-      controlPlaneUrl,
-      modelProvider,
-      modelId,
-    );
-  }
-
-  const { runtimeArn, runtime } = deployedRuntime;
-  const manifest: ReleaseManifest = {
-    releasedAt: new Date().toISOString(),
-    gitRevision: revision,
-    workerImage,
-    controlPlaneUrl,
-    runtimeArn,
-    runtimeVersion: runtime.agentRuntimeVersion ?? "unknown",
-    protocolVersion: AGENTX_PROTOCOL_VERSION,
-    region: options.region,
-    accountId: identity.Account,
-  };
-  mkdirSync(resolve("cdk.out"), { recursive: true });
-  writeFileSync(resolve("cdk.out/agentx-release.json"), `${JSON.stringify(manifest, null, 2)}\n`, {
-    mode: 0o600,
-  });
-  process.stdout.write(`\nAgentX release complete:\n${JSON.stringify(manifest, null, 2)}\n`);
-  return manifest;
-}
-
-function deployControlPlane(runner: Runner, options: ReleaseOptions, alreadyExists: boolean): void {
-  const controlPlaneParameters = alreadyExists
-    ? optionalControlPlaneParameters()
-    : requiredControlPlaneParameters();
-  runner.run("npx", [
-    "cdk",
-    "deploy",
-    CONTROL_PLANE_STACK,
-    "--app",
-    "node infra/dist/bin/agentx.js",
-    "--require-approval",
-    "never",
-    "-c",
-    "agentxDeploymentMode=demo-microvm",
-    "-c",
-    `agentxRegion=${options.region}`,
-    ...profileArgs(options.profile),
-    ...controlPlaneParameters,
-    "--outputs-file",
-    "cdk.out/agentx-control-plane-outputs.json",
-  ]);
-}
-
-async function deployRuntime(
-  runner: Runner,
-  options: ReleaseOptions,
-  workerImage: string,
-  controlPlaneUrl: string,
-  modelProvider: string,
-  modelId: string,
-): Promise<{ runtimeArn: string; runtime: RuntimeDescription }> {
-  runner.run("npx", [
-    "cdk",
-    "deploy",
-    RUNTIME_STACK,
-    "--app",
-    "node infra/dist/bin/agentx.js",
-    "--require-approval",
-    "never",
-    "-c",
-    "agentxDeploymentMode=demo-microvm",
-    "-c",
-    `agentxRegion=${options.region}`,
-    ...profileArgs(options.profile),
-    "--parameters",
-    `${RUNTIME_STACK}:WorkerImageUri=${workerImage}`,
-    "--parameters",
-    `${RUNTIME_STACK}:ControlPlaneUrl=${controlPlaneUrl}`,
-    "--parameters",
-    `${RUNTIME_STACK}:ModelProvider=${modelProvider}`,
-    "--parameters",
-    `${RUNTIME_STACK}:ModelId=${modelId}`,
-    "--outputs-file",
-    "cdk.out/agentx-demo-outputs.json",
-  ]);
-  const runtimeStack = describeStack(runner, options.region, RUNTIME_STACK);
-  const runtimeArn = stackOutput(runtimeStack, "AgentRuntimeArn");
-  const runtimeId = runtimeIdFromArn(runtimeArn);
-  const runtime = await waitForRuntime(runner, options.region, runtimeId, workerImage);
-  const logGroup = `/aws/bedrock-agentcore/runtimes/${runtimeId}-DEFAULT`;
-  ensureLogRetention(runner, options.region, logGroup);
-  return { runtimeArn, runtime };
 }
 
 export function ensureRepository(runner: Runner, options: ReleaseOptions): void {
@@ -580,16 +379,6 @@ export function optionalControlPlaneParameters(): string[] {
   });
 }
 
-function requiredControlPlaneParameters(): string[] {
-  const missing = controlPlaneParameterDefinitions()
-    .filter(({ environment }) => !process.env[environment])
-    .map(({ environment }) => environment);
-  if (missing.length > 0) {
-    throw new Error(`first control-plane deployment requires: ${missing.join(", ")}`);
-  }
-  return optionalControlPlaneParameters();
-}
-
 function controlPlaneParameterDefinitions(): Array<{ parameter: string; environment: string }> {
   return [
     { parameter: "OidcIssuer", environment: "AGENTX_OIDC_ISSUER" },
@@ -601,67 +390,6 @@ function controlPlaneParameterDefinitions(): Array<{ parameter: string; environm
     { parameter: "GitHubAppId", environment: "AGENTX_GITHUB_APP_ID" },
     { parameter: "GitHubAppPrivateKeySecretArn", environment: "AGENTX_GITHUB_PRIVATE_KEY_SECRET_ARN" },
   ];
-}
-
-export async function waitForRuntime(
-  runner: Runner,
-  region: string,
-  runtimeId: string,
-  expectedImage: string,
-): Promise<RuntimeDescription> {
-  for (let attempt = 0; attempt < 60; attempt += 1) {
-    const result = runner.aws([
-      "bedrock-agentcore-control",
-      "get-agent-runtime",
-      "--region",
-      region,
-      "--agent-runtime-id",
-      runtimeId,
-      "--output",
-      "json",
-    ]);
-    const runtime = parseJson<RuntimeDescription>(result.stdout);
-    if (runtime.status === "READY") {
-      const deployedImage = runtime.agentRuntimeArtifact?.containerConfiguration?.containerUri;
-      if (deployedImage !== expectedImage) {
-        throw new Error(`runtime READY with unexpected worker image ${deployedImage ?? "missing"}`);
-      }
-      return runtime;
-    }
-    if (runtime.status === "CREATE_FAILED" || runtime.status === "UPDATE_FAILED") {
-      throw new Error(`AgentCore runtime entered ${runtime.status}`);
-    }
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10_000));
-  }
-  throw new Error("AgentCore runtime did not become READY within ten minutes");
-}
-
-export function ensureLogRetention(runner: Runner, region: string, logGroup: string): void {
-  const describe = runner.aws([
-    "logs",
-    "describe-log-groups",
-    "--region",
-    region,
-    "--log-group-name-prefix",
-    logGroup,
-    "--query",
-    `logGroups[?logGroupName=='${logGroup}'].logGroupName | [0]`,
-    "--output",
-    "text",
-  ]);
-  if (describe.stdout.trim() !== logGroup) {
-    runner.aws(["logs", "create-log-group", "--region", region, "--log-group-name", logGroup]);
-  }
-  runner.aws([
-    "logs",
-    "put-retention-policy",
-    "--region",
-    region,
-    "--log-group-name",
-    logGroup,
-    "--retention-in-days",
-    String(LOG_RETENTION_DAYS),
-  ]);
 }
 
 export function profileArgs(profile: string | undefined): string[] {
@@ -679,29 +407,4 @@ function formatCommand(command: string, args: readonly string[]): string {
     if (parameter) return `${argument.slice(0, argument.indexOf("=") + 1)}<redacted>`;
     return /^[A-Za-z0-9_./:=@-]+$/.test(argument) ? argument : JSON.stringify(argument);
   }).join(" ");
-}
-
-function usage(): string {
-  return `Usage: npm run release:demo -- [options]\n\n` +
-    `Options:\n` +
-    `  --region <region>          AWS region (default: us-east-1)\n` +
-    `  --profile <profile>        AWS CLI/CDK profile\n` +
-    `  --repository <name>        ECR repository (default: agentx-worker-demo)\n` +
-    `  --worker-image <digest>    Deploy an already-published image from that repository\n` +
-    `  --allow-dirty              Explicitly allow releasing an uncommitted checkout\n` +
-    `  --skip-checks              Skip typecheck, lint, and tests\n` +
-    `  --dry-run                  Print the release stages without changing AWS\n` +
-    `  --help                     Show this help\n`;
-}
-
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  if (process.argv.includes("--help")) {
-    process.stdout.write(usage());
-  } else {
-    releaseDemo(parseReleaseArgs(process.argv.slice(2))).catch((error: unknown) => {
-      const message = error instanceof Error ? error.message : String(error);
-      process.stderr.write(`AgentX release failed: ${message}\n`);
-      process.exitCode = 1;
-    });
-  }
 }

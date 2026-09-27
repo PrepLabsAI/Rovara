@@ -167,11 +167,13 @@ owns only the ECS service, and receives those values as parameters from the rele
 
 - Dedicated `10.42.0.0/16` VPC across two supported availability-zone IDs.
 - Two public NAT subnets and two private worker subnets, with a NAT gateway in each AZ.
-- A worker security group with no ingress and outbound TCP 443 only.
 - A free S3 gateway endpoint and VPC flow logs retained for 30 days.
 - A rotating customer-managed KMS key retained for workspace recovery safety.
-- The retained ARM64 capacity provider, `m6g.medium` compute policy, encrypted root volume, and a
-  named 20 GiB gp3 `workspace` volume.
+- The EC2 worker foundation: the `m6g.medium` arm64 launch template, the worker instance role and
+  profile, and the worker, dispatcher and session-manager security groups.
+
+The AgentCore capacity provider, its operator role and its worker security group were removed in
+#118.
 
 `AgentXProductionRuntime` owns the changeable application layer. It keeps the name of the AgentCore
 runtime it used to deploy, but since #117 it holds only the EC2 worker settings, as SSM parameters:
@@ -185,8 +187,8 @@ it. Normal AgentX releases do not require registration or workspace preparation 
 
 ## Deployment safety
 
-Both production stacks have CloudFormation termination protection. The capacity provider, KMS key,
-and flow-log group also use retain policies. The production release command creates the
+Both production stacks have CloudFormation termination protection. The KMS key and flow-log group
+also use retain policies. The production release command creates the
 foundation only when absent. On later runs it fails if the synthesized foundation differs from the
 deployed foundation, requiring a separate review for any network, encryption, instance, lifecycle,
 or volume change.
@@ -444,11 +446,10 @@ instance-terminated`; then list and delete the volumes carrying the same tags wi
 and `aws ec2 delete-volume`. A worker instance still running in the worker security group blocks the
 foundation stack's delete. The export bundle's README lists the exact commands, each naming its region.
 
-Stack deletion keeps, on purpose: the capacity provider, the Cognito user pool (deletion protection), three
-S3 buckets (two versioned: empty every version and delete marker first), three DynamoDB tables, two log
-groups (VPC flow logs and `/aws/bedrock-agentcore/runtimes/<runtimeId>-DEFAULT`), and the KMS workspace key (schedule deletion; 7 days minimum). Two secrets live outside or beyond the
+Stack deletion keeps, on purpose: the Cognito user pool (deletion protection), three
+S3 buckets (two versioned: empty every version and delete marker first), three DynamoDB tables, the VPC
+flow-log group, and the KMS workspace key (schedule deletion; 7 days minimum). Two secrets live outside or beyond the
 stacks: `agentx/<env>/callback-signing-key` (created by the CLI) and `agentx/<env>/slack`; delete both with
-`--force-delete-without-recovery` so a new install can reuse the names. **Deleting the capacity provider
-deletes every worker session's persistent workspace volume** (AgentCore's runtime-instances data management).
+`--force-delete-without-recovery` so a new install can reuse the names.
 A failed create keeps its retained resources too, so "delete the stack and rerun" leaves them behind. The
 export bundle's README lists the exact command for each step.
