@@ -400,7 +400,7 @@ Use fake clients that record commands and answer from a scripted table. Build th
 `{ send(command) }` fake keyed on `command.constructor.name`; check first which one exists.
 
 ```ts
-// tests/contract/templates-engine.test.ts — shape of the tests (write them fully)
+// tests/contract/templates-engine.test.ts: shape of the tests (write them fully)
 // helpers: makeRelease() builds a small fake LoadedRelease (one package listed for control-plane,
 // template text "{}" per part); fakeClients(script) returns { cloudFormation, s3, calls } where
 // script maps command names to responses or errors in order.
@@ -623,7 +623,7 @@ Behaviour, exact:
 - [ ] **Step 1: Write the failing tests** (a fake `StackDeployer` that records requests and returns scripted outputs per part)
 
 ```ts
-// tests/contract/deploy-environment.test.ts — tests to write fully
+// tests/contract/deploy-environment.test.ts: tests to write fully
 it("installs every part in install order, feeding outputs forward and using the service role after access", ...)
 //  asserts request order access, foundation, identity, control-plane, runtime, slack; access has no roleArn; others roleArn = access CloudFormationRoleArn;
 //  runtime parameters ControlPlaneUrl == control-plane ApiEndpoint; terminationProtection true for access/foundation/identity/runtime only
@@ -706,11 +706,11 @@ Bundle layout, exact, under `dir` (which must be empty or absent):
 - [ ] **Step 1: Write the failing tests**
 
 ```ts
-// tests/contract/export-bundle.test.ts — tests to write fully
+// tests/contract/export-bundle.test.ts: tests to write fully
 it("writes the documented layout for the environment and region", ...)
 it("writes parameter files whose unknown values are markers, and never a secret value", ...)
 //  assert CallbackSigningKey == "{{secret:agentx/staging/callback-signing-key}}"; runtime ControlPlaneUrl == "{{output:control-plane.ApiEndpoint}}";
-//  grep every file in the bundle for any 40+ char base64url run matching a generated key pattern: none (there is no key to leak — assert no file contains "CallbackSigningKey\":\"" followed by a non-marker value)
+//  grep every file in the bundle for any 40+ char base64url run matching a generated key pattern: none (there is no key to leak: assert no file contains "CallbackSigningKey\":\"" followed by a non-marker value)
 it("writes a deploy-access.sh that passes bash -n and names only the access stack", ...)
 it("writes policies with concrete account and region, and the access deployer policy scoped to the environment", ...)
 it("refuses a non-empty directory and an uncovered region, writing nothing", ...)
@@ -767,7 +767,7 @@ git commit -m "feat(cli): export bundle for platform teams"
 - [ ] **Step 1: Write the failing tests** (executeCli with injected fakes; no AWS)
 
 ```ts
-// tests/contract/deploy-cli.test.ts — tests to write fully
+// tests/contract/deploy-cli.test.ts: tests to write fully
 it("init --export writes a bundle and makes no AWS write call", ...)
 it("init without --export explains how to proceed and exits non-zero", ...)
 it("deploy refuses answers that do not match the schema, naming the field", ...)

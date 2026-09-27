@@ -380,6 +380,24 @@ and the budget.
 - **FR-051**: `doctor --json` MUST print machine-readable results. `doctor` MUST exit non-zero when
   any check fails.
 
+**`agentx destroy` (US4)**
+
+- **FR-055**: `agentx destroy --env <name>` MUST remove one named environment (never the legacy
+  deployment):
+  - It MUST ask the operator to type the environment's name to confirm (no flag skips this).
+  - It MUST turn termination protection off, then delete the stacks in reverse install order
+    (slack, runtime, control-plane, identity, foundation, access), stopping at the first failure.
+  - It MUST then remove what the stacks retain: the capacity provider, the Cognito user pool
+    (turning its deletion protection off), the buckets (emptying every version and delete marker of
+    a versioned bucket first), the tables, the log groups, the KMS key (scheduled for deletion, 7
+    days minimum), and the secrets `agentx/<env>/callback-signing-key` and `agentx/<env>/slack`
+    (deleted without recovery, so the names can be reused).
+  - It MUST warn, before confirming, that deleting the capacity provider deletes every worker
+    session's persistent workspace volume.
+  - `--keep-data` MUST keep the tables, buckets, secrets, the Cognito user pool, the KMS key and
+    the capacity provider, and remove the rest.
+  - It MUST delete the environment's settings and lock last, and be safe to re-run after a failure.
+
 **Secrets and output**
 
 - **FR-052**: No secret value (GitHub key, Slack tokens, connector keys, OIDC tokens) MAY appear in
@@ -503,9 +521,12 @@ and the budget.
   prompt or the vendor's redirect into Secrets Manager.
 - **Alerts go to the company's tooling** (PagerDuty or Opsgenie integration address, or email)
   through one topic (2026-09-25, owner).
-- **Teardown and account moves are documented, not built** (2026-09-25, owner). Removing an
-  environment deletes data that cannot be recovered and needs careful safeguards. Tracked in #66 and
-  #67.
+- **Account moves are documented, not built** (2026-09-25, owner). Tracked in #67.
+- **`agentx destroy` is built in phase 15e** (2026-09-27, owner; was documented-only, #66). Removing
+  an environment deletes data that cannot be recovered, so it needs a typed confirmation, a fixed
+  delete order, emptied versioned buckets, and `--keep-data` (FR-055). Until then the manual
+  teardown guide (FR-054) is the way. A named environment's AgentCore runtime has DeletionPolicy
+  Delete; the capacity provider and data resources stay Retain.
 
 ## Assumptions and Scope
 
@@ -516,7 +537,7 @@ and the budget.
     maintainers' own `AgentXReleasePipeline` keeps deploying the authors' environment.
   - GitHub's manifest flow and Slack's "create from manifest" remain available.
 - **Out of scope:**
-  - `agentx destroy` (#66) and moving an environment to another account (#67).
+  - Moving an environment to another account (#67).
   - Switching an environment between engines.
   - The `demo-microvm` runtime mode.
   - Multiple Slack workspaces or GitHub App installations per environment.
@@ -544,5 +565,5 @@ and the budget.
   - an upgrade from the previous release with each engine, then `doctor`;
   - the enterprise path: export, deploy with plain CloudFormation, `init --resume`;
   - a live Slack reply, and `alerts test`;
-  - teardown by the manual guide, which also proves the guide.
+  - teardown by the manual guide, which also proves the guide, and by `agentx destroy`.
 - **Manual check (once, before this spec is done)**: SC-001.

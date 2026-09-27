@@ -6,7 +6,7 @@
 // can be reviewed as plain JSON). Every part's template and parameters are included, in install
 // order, so the bundle also documents the full deploy — even though only the access stack's is
 // meant to be run directly here; every later stack is deployed by the AgentX operator through the
-// service role the access stack creates (`agentx init --resume`, phase 15d).
+// service role the access stack creates (`agentx deploy --mode install --parts <every later part>`).
 import { chmod, mkdir, mkdtemp, readdir, readFile, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import {
@@ -28,6 +28,7 @@ import { sha256Hex } from "./hash.js";
 import { installOrder, stackParameters, type DeployPart, type InstallAnswers, type StackOutputs } from "./parameters.js";
 import type { LoadedRelease } from "./release.js";
 import { callbackSigningKeySecretName } from "./signing-key.js";
+import { PROTECTED_PARTS } from "./deployer.js";
 
 export interface ExportBundleInput {
   /** Must be empty or absent. */
@@ -299,7 +300,16 @@ function accessDeployerStatements(scope: { env: string; partition: string; regio
  * The access stack takes no secret parameters (its only parameters are `PermissionsBoundaryArn`
  * and `OperatorPrincipalArn`), so this script never reads or prints one. Every variable is quoted.
  */
-function deployAccessScript(scope: { env: string; region: string; version: string }): string {
+/** The command the AgentX operator runs once the access stack exists: every later part, never
+ * access itself (the operator role is denied change sets on the access stack). */
+function operatorResumeCommand(laterParts: DeployPart[]): string {
+  return `agentx deploy --mode install --parts ${laterParts.join(",")} --release <dir> --answers <file>`;
+}
+
+/** One wording for a failed or refused change set on a new stack, shared by the script and README. */
+const NEW_STACK_RECOVERY = "delete the change set, then delete the stack only if it is still REVIEW_IN_PROGRESS with no resources";
+
+function deployAccessScript(scope: { env: string; region: string; version: string; laterParts: DeployPart[] }): string {
   const stackName = environmentStackName(scope.env, "access");
   const dashedVersion = scope.version.replaceAll(".", "-");
   const region = scope.region;
@@ -309,12 +319,13 @@ set -euo pipefail
 # Deploys the access stack for the "${scope.env}" AgentX environment in ${region}: the one stack a
 # platform team deploys directly, with their own AWS credentials (policies/access-deployer.json
 # names exactly what that principal needs). Every later stack is deployed by the AgentX operator
-# through the CloudFormationServiceRole this stack creates, by running \`agentx init --resume\`
-# (see README.md). The access stack takes no secret parameters, so this script never reads or
-# prints one.
+# through the CloudFormationServiceRole this stack creates, by running (see README.md):
+#   ${operatorResumeCommand(scope.laterParts)}
+# The access stack takes no secret parameters, so this script never reads or prints one. It does
+# not create the callback signing key either: agentx deploy creates it on its first run.
 #
 # Pass --yes to execute the change set without the interactive prompt. If a step fails, see
-# README.md's "If it fails" section — this script prints the reason and the exact recovery command.
+# README.md's "If it fails" section; this script prints the reason and the exact recovery command.
 
 STACK_NAME="${stackName}"
 CHANGE_SET_NAME="agentx-${dashedVersion}-$(date +%s)"
@@ -334,17 +345,25 @@ on_failure() {
     local cs_reason
     cs_reason="$(aws cloudformation describe-change-set --stack-name "\${STACK_NAME}" --change-set-name "\${CHANGE_SET_NAME}" --region "${region}" --query "StatusReason" --output text 2>/dev/null || echo "unknown")"
     echo "Change set \${CHANGE_SET_NAME} failed: \${cs_reason}" >&2
-    echo "Recovery: delete the failed change set, then run this script again:" >&2
-    echo "  aws cloudformation delete-change-set --stack-name \\"\${STACK_NAME}\\" --change-set-name \\"\${CHANGE_SET_NAME}\\" --region \\"${region}\\"" >&2
   fi
 
   local stack_status
   stack_status="$(aws cloudformation describe-stacks --stack-name "\${STACK_NAME}" --region "${region}" --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "")"
-  if [ "\${stack_status}" = "REVIEW_IN_PROGRESS" ] || [ "\${stack_status}" = "ROLLBACK_COMPLETE" ]; then
-    echo "Stack \${STACK_NAME} is \${stack_status}." >&2
-    echo "Recovery: delete the stack, then run this script again:" >&2
+  if [ "\${stack_status}" = "REVIEW_IN_PROGRESS" ]; then
+    echo "Stack \${STACK_NAME} is REVIEW_IN_PROGRESS: nothing was created." >&2
+    echo "Recovery: ${NEW_STACK_RECOVERY}, then run this script again:" >&2
+    echo "  aws cloudformation delete-change-set --stack-name \\"\${STACK_NAME}\\" --change-set-name \\"\${CHANGE_SET_NAME}\\" --region \\"${region}\\"" >&2
+    echo "  aws cloudformation describe-stacks --stack-name \\"\${STACK_NAME}\\" --region \\"${region}\\" --query \\"Stacks[0].StackStatus\\"" >&2
     echo "  aws cloudformation delete-stack --stack-name \\"\${STACK_NAME}\\" --region \\"${region}\\"" >&2
-  elif [ -n "\${stack_status}" ]; then
+  elif [ "\${stack_status}" = "ROLLBACK_COMPLETE" ]; then
+    echo "Stack \${STACK_NAME} is ROLLBACK_COMPLETE: its create failed." >&2
+    echo "Recovery: delete the stack, then run this script again (resources the stack retains stay behind; see README.md):" >&2
+    echo "  aws cloudformation delete-stack --stack-name \\"\${STACK_NAME}\\" --region \\"${region}\\"" >&2
+  elif [ "\${cs_status}" = "FAILED" ]; then
+    echo "Recovery: delete the failed change set, then run this script again:" >&2
+    echo "  aws cloudformation delete-change-set --stack-name \\"\${STACK_NAME}\\" --change-set-name \\"\${CHANGE_SET_NAME}\\" --region \\"${region}\\"" >&2
+  fi
+  if [ -n "\${stack_status}" ] && [ "\${stack_status}" != "REVIEW_IN_PROGRESS" ] && [ "\${stack_status}" != "ROLLBACK_COMPLETE" ]; then
     echo "Stack \${STACK_NAME} is \${stack_status}. Recent failure reasons:" >&2
     aws cloudformation describe-stack-events --stack-name "\${STACK_NAME}" --region "${region}" \\
       --query "StackEvents[?ends_with(ResourceStatus, '_FAILED')].[LogicalResourceId,ResourceStatusReason]" \\
@@ -355,11 +374,12 @@ on_failure() {
 }
 trap on_failure ERR
 
-# Prints why nothing was executed and how to clean up, then exits 1 — deliberately not through
+# Prints why nothing was executed and how to clean up, then exits 1: deliberately not through
 # on_failure/exit_code above, since nothing here failed; the operator (or the absence of one) chose
 # not to proceed.
 not_executed() {
   echo "not executed; the change set \${CHANGE_SET_NAME} is left for review" >&2
+  echo "To clean up: ${NEW_STACK_RECOVERY}:" >&2
   echo "  aws cloudformation delete-change-set --stack-name \\"\${STACK_NAME}\\" --change-set-name \\"\${CHANGE_SET_NAME}\\" --region \\"${region}\\"" >&2
   echo "  aws cloudformation delete-stack --stack-name \\"\${STACK_NAME}\\" --region \\"${region}\\"" >&2
   exit 1
@@ -427,6 +447,8 @@ function readme(input: { env: string; region: string; account: string; order: De
   const { env, region, account, order } = input;
   const stackName = environmentStackName(env, "access");
   const laterParts = order.filter((part) => part !== "access");
+  const deleteOrder = [...order].reverse().map((part) => environmentStackName(env, part));
+  const protectedStacks = order.filter((part) => PROTECTED_PARTS.has(part)).map((part) => environmentStackName(env, part));
   return `# AgentX access stack: platform-team deploy bundle
 
 This bundle deploys the **access stack** (\`${stackName}\`) for the \`${env}\` AgentX environment in
@@ -436,27 +458,26 @@ pull-through cache rule, and the two IAM roles every later stack needs.
 
 ## What it creates
 
-- \`agentx-${env}-cloudformation\` — the role CloudFormation assumes to deploy every later AgentX
+- \`agentx-${env}-cloudformation\`: the role CloudFormation assumes to deploy every later AgentX
   stack for this environment.
-- \`agentx-${env}-operator\` — the role an AgentX operator assumes to run \`agentx\` against this
+- \`agentx-${env}-operator\`: the role an AgentX operator assumes to run \`agentx\` against this
   environment.
-- \`agentx-${env}-boundary\` (only when no permissions boundary ARN is given) — the default
+- \`agentx-${env}-boundary\` (only when no permissions boundary ARN is given): the default
   permission boundary applied to both roles above and every role the later stacks create.
 - An S3 bucket for release artifacts (templates and code packages) and an ECR pull-through cache
   rule prefixed \`agentx-${env}\`.
 
 **Note:** \`ecr:CreatePullThroughCacheRule\` and \`ecr:DeletePullThroughCacheRule\` support no
 resource-level scoping in IAM, so \`policies/access-deployer.json\` grants them on every resource
-(\`*\`) — whoever deploys this bundle can also create or delete another environment's pull-through
+(\`*\`). Whoever deploys this bundle can also create or delete another environment's pull-through
 cache rule. There is no tighter scope available today.
 
 **\`policies/access-deployer.json\` is for *creating* this stack only.** It grants exactly the
 CloudFormation registry's published \`create\`/\`read\`/\`delete\` handler permissions for this
-stack's resource types — never the \`update\` ones. Updating this stack later (for example, a
+stack's resource types, never the \`update\` ones. Updating this stack later (for example, a
 changed permissions boundary, which needs \`iam:UpdateAssumeRolePolicy\` and
 \`iam:DeleteRolePermissionsBoundary\` on the roles it created) needs a broader principal than this
-one; that's the AgentX operator's own path (\`agentx init --resume\`, phase 15d) or a separate,
-broader admin action outside this bundle, not something \`deploy-access.sh\` does.
+one: a separate, broader admin action outside this bundle, not something \`deploy-access.sh\` does.
 
 ## Deploying
 
@@ -470,27 +491,33 @@ executes unattended. It runs, in order:
 2. \`aws cloudformation wait change-set-create-complete\`
 3. \`aws cloudformation describe-change-set --query Changes\` (review the changes)
 4. Prompts \`Execute this change set? [y/N]\` (skipped with \`--yes\`; declining, or having no
-   terminal to prompt on, prints the change set's id and the \`delete-change-set\`/\`delete-stack\`
-   cleanup commands and exits 1, leaving the change set for review rather than executing it)
+   terminal to prompt on, prints the change set's id and the cleanup commands and exits 1, leaving
+   the change set for review rather than executing it)
 5. \`aws cloudformation execute-change-set\`
 6. \`aws cloudformation wait stack-create-complete\`
 7. \`aws cloudformation update-termination-protection --enable-termination-protection\`
 
 The access stack takes no secret parameters; the script never reads or prints one.
+\`deploy-access.sh\` does not create the callback signing key (\`agentx/${env}/callback-signing-key\`)
+either. That is deliberate: \`agentx deploy\` creates it on its first run, in Secrets Manager only.
 
 ## If it fails
 
-If \`deploy-access.sh\` fails partway through, it prints why — the change set's \`StatusReason\`, or
-the most recent failed stack events' reasons — and the exact command to recover, then exits
+If \`deploy-access.sh\` fails partway through, it prints why (the change set's \`StatusReason\`, or
+the most recent failed stack events' reasons) and the exact command to recover, then exits
 non-zero:
 
-- **A failed change set** (the stack is still \`REVIEW_IN_PROGRESS\`; nothing was actually created):
-  delete the change set, then run this script again.
+- **A failed or refused change set** (the stack is still \`REVIEW_IN_PROGRESS\`; nothing was
+  created): ${NEW_STACK_RECOVERY}. Then run this script again.
   \`\`\`
   aws cloudformation delete-change-set --stack-name ${stackName} --change-set-name <name> --region ${region}
+  aws cloudformation describe-stacks --stack-name ${stackName} --region ${region} --query "Stacks[0].StackStatus"
+  aws cloudformation delete-stack --stack-name ${stackName} --region ${region}
   \`\`\`
 - **A failed stack creation** (the stack rolled back to \`ROLLBACK_COMPLETE\`): delete the whole
-  stack, then run this script again from the start.
+  stack, then run this script again from the start. A failed create keeps the resources the stack
+  retains (here, the artifact bucket), so remove those too as described under "Tearing down an
+  environment".
   \`\`\`
   aws cloudformation delete-stack --stack-name ${stackName} --region ${region}
   \`\`\`
@@ -499,25 +526,102 @@ Either way, nothing from a failed attempt is reused; the next run always creates
 
 ## After this stack exists
 
-Every other stack — ${laterParts.join(", ")} — is deployed by the AgentX operator through the
-\`agentx-${env}-cloudformation\` role this stack creates, by running \`agentx init --resume\` (phase
-15d). The platform team's own credentials are never needed again.
+Every other stack (${laterParts.join(", ")}) is deployed by the AgentX operator through the
+\`agentx-${env}-cloudformation\` role this stack creates. The operator runs, with the operator role:
+
+\`\`\`
+${operatorResumeCommand(laterParts)}
+\`\`\`
+
+\`<dir>\` is this release's directory and \`<file>\` the deploy answers file. Access is not in
+\`--parts\`: the operator role is denied change sets on the access stack. The platform team's own
+credentials are never needed again. Use AWS credentials whose session lasts at least as long as the
+deploy (plan for about an hour).
+
+## Tearing down an environment
+
+\`agentx destroy\` is planned for phase 15e. Until then, tear an environment down by hand, with
+credentials that can delete every resource below.
+
+1. **Record what the stacks retain.** Stack deletion keeps some resources on purpose. Before you
+   delete anything, list them, for example:
+   \`\`\`
+   aws cloudformation list-stack-resources --stack-name <stack> --region ${region} \\
+     --query "StackResourceSummaries[].[ResourceType,PhysicalResourceId]" --output text
+   \`\`\`
+2. **Turn termination protection off** on ${protectedStacks.join(", ")}:
+   \`\`\`
+   aws cloudformation update-termination-protection --no-enable-termination-protection --stack-name <stack> --region ${region}
+   \`\`\`
+3. **Delete the stacks in reverse install order**, waiting for each one:
+   ${deleteOrder.join(", ")}.
+   \`\`\`
+   aws cloudformation delete-stack --stack-name <stack> --region ${region}
+   aws cloudformation wait stack-delete-complete --stack-name <stack> --region ${region}
+   \`\`\`
+4. **Remove what survives stack deletion:**
+   - **The AgentCore capacity provider** (foundation's \`CapacityProviderArn\` output; the id is the
+     part after \`capacity-provider/\`). **Warning:** deleting the capacity provider deletes every worker session's persistent workspace volume.
+     Delete it only when no workspace is needed.
+     \`\`\`
+     aws bedrock-agentcore-control delete-capacity-provider --capacity-provider-id <id> --region ${region}
+     \`\`\`
+   - **The Cognito user pool** (identity), which has deletion protection:
+     \`\`\`
+     aws cognito-idp update-user-pool --user-pool-id <id> --deletion-protection INACTIVE --region ${region}
+     aws cognito-idp delete-user-pool --user-pool-id <id> --region ${region}
+     \`\`\`
+     \`update-user-pool\` resets settings you leave out; since the pool is being deleted, that is fine.
+   - **Three S3 buckets**: the access stack's artifact bucket and the control plane's
+     \`SlackThreadSessions\` bucket are versioned, so empty every object version and delete
+     marker first; the control plane's \`Artifacts\` bucket is not versioned.
+     \`\`\`
+     aws s3api delete-objects --bucket <bucket> --delete "$(aws s3api list-object-versions --bucket <bucket> \\
+       --query '{Objects: [Versions, DeleteMarkers][][].{Key: Key, VersionId: VersionId}, Quiet: \`true\`}' --output json)"
+     aws s3 rb s3://<bucket> --force
+     \`\`\`
+     (\`delete-objects\` takes at most 1,000 keys per call: repeat until the listing is empty.)
+   - **Three DynamoDB tables** (the control plane's \`State\`, \`SlackThreads\` and \`TurnRecords\`):
+     \`\`\`
+     aws dynamodb delete-table --table-name <table> --region ${region}
+     \`\`\`
+   - **Two log groups**: the foundation's VPC flow logs, and the log group AgentCore itself creates
+     for the runtime (find it with \`aws logs describe-log-groups --log-group-name-prefix /aws/bedrock-agentcore/\`):
+     \`\`\`
+     aws logs delete-log-group --log-group-name <name> --region ${region}
+     \`\`\`
+   - **The KMS workspace key** (\`alias/agentx/${env}/workspaces\`): schedule its deletion (7 days is
+     the minimum) and delete the alias.
+     \`\`\`
+     aws kms schedule-key-deletion --key-id <key id> --pending-window-in-days 7 --region ${region}
+     aws kms delete-alias --alias-name alias/agentx/${env}/workspaces --region ${region}
+     \`\`\`
+   - **Two secrets**: \`agentx/${env}/callback-signing-key\` (created by \`agentx deploy\`, outside any
+     stack) and \`agentx/${env}/slack\`. Delete them without a recovery window, so the names can be
+     reused by a new install:
+     \`\`\`
+     aws secretsmanager delete-secret --secret-id agentx/${env}/callback-signing-key --force-delete-without-recovery --region ${region}
+     aws secretsmanager delete-secret --secret-id agentx/${env}/slack --force-delete-without-recovery --region ${region}
+     \`\`\`
+
+A failed create keeps its retained resources too, so "delete the stack and rerun" leaves them
+behind; remove them as above before a rerun needs their names.
 
 ## Files in this bundle
 
-- \`templates/<part>.template.json\` — every stack's CloudFormation template (${order.join(", ")}),
+- \`templates/<part>.template.json\`: every stack's CloudFormation template (${order.join(", ")}),
   already rendered for \`${env}\`.
-- \`parameters/<part>.json\` — that stack's parameters, as CloudFormation's
-  \`[{ "ParameterKey", "ParameterValue" }]\` array. A value only known once install begins — an
-  earlier stack's output, the control-plane's callback signing key, or the GitHub App — is written
+- \`parameters/<part>.json\`: that stack's parameters, as CloudFormation's
+  \`[{ "ParameterKey", "ParameterValue" }]\` array. A value only known once install begins (an
+  earlier stack's output, the control-plane's callback signing key, or the GitHub App) is written
   as a \`{{output:<part>.<Name>}}\`, \`{{secret:...}}\` or \`{{github:<field>}}\` marker instead of a
   real value.
-- \`packages/\` — the release's code packages, plus \`packages/SHA256SUMS\` to check them
+- \`packages/\`: the release's code packages, plus \`packages/SHA256SUMS\` to check them
   (\`sha256sum -c SHA256SUMS\` from inside that directory).
-- \`policies/service-role.json\`, \`policies/operator-role.json\`, \`policies/default-boundary.json\`
-  — the inline policies the later stacks' roles carry, with this environment's real account,
+- \`policies/service-role.json\`, \`policies/operator-role.json\`, \`policies/default-boundary.json\`:
+  the inline policies the later stacks' roles carry, with this environment's real account,
   region and partition.
-- \`policies/access-deployer.json\` — the policy for whoever runs \`deploy-access.sh\`.
+- \`policies/access-deployer.json\`: the policy for whoever runs \`deploy-access.sh\`.
 `;
 }
 
@@ -615,7 +719,7 @@ export async function writeExportBundle(input: ExportBundleInput): Promise<Expor
     await write("policies/default-boundary.json", policyDocument(defaultBoundaryStatements(policyScope)));
     await write("policies/access-deployer.json", policyDocument(accessDeployerStatements({ env, partition, region, account })));
 
-    await write("deploy-access.sh", deployAccessScript({ env, region, version: release.manifest.version }), { mode: 0o755 });
+    await write("deploy-access.sh", deployAccessScript({ env, region, version: release.manifest.version, laterParts: order.filter((part) => part !== "access") }), { mode: 0o755 });
     await write("README.md", readme({ env, region, account, order }));
 
     // Publish atomically: remove `dir` if it exists (assertClaimable already confirmed it's empty,

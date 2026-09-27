@@ -195,10 +195,32 @@ describe("writeExportBundle", () => {
     expect(foundationTemplate).toEqual({ part: "foundation", region: REGION, env: ENV });
 
     const readmeText = await readFile(join(dir, "README.md"), "utf8");
+    const script = await readFile(join(dir, "deploy-access.sh"), "utf8");
     expect(readmeText).toContain(STACK_NAME);
     expect(readmeText).toContain(REGION);
     expect(readmeText).toContain(ACCOUNT);
-    expect(readmeText).toContain("agentx init --resume");
+    // I6: the real resume path, run by the operator; access is excluded (the operator is denied
+    // change sets on access), and no command that does not exist is named.
+    expect(readmeText).toContain(
+      "agentx deploy --mode install --parts foundation,identity,control-plane,runtime,slack --release <dir> --answers <file>",
+    );
+    expect(readmeText).not.toContain("init --resume");
+    expect(script).not.toContain("init --resume");
+    expect(script).toContain("agentx deploy --mode install --parts foundation,identity,control-plane,runtime,slack");
+    // deploy-access.sh never creates the callback signing key; agentx deploy does, on its first run.
+    expect(readmeText).toMatch(/does not create the callback signing key/);
+    // I4: tearing down is documented, with the capacity provider warning.
+    expect(readmeText).toContain("## Tearing down an environment");
+    expect(readmeText).toMatch(/deletes every worker session's persistent workspace volume/);
+    expect(readmeText).toContain("--force-delete-without-recovery");
+    expect(readmeText).toContain("agentx destroy");
+    // M5: one recovery wording for a failed or refused change set on a new stack.
+    const recovery = "delete the change set, then delete the stack only if it is still REVIEW_IN_PROGRESS with no resources";
+    expect(readmeText.toLowerCase()).toContain(recovery.toLowerCase());
+    expect(script.toLowerCase()).toContain(recovery.toLowerCase());
+    // M7: no em dashes in anything the platform team reads.
+    expect(readmeText).not.toContain("\u2014");
+    expect(script).not.toContain("\u2014");
     expect(readmeText).toContain("access-deployer.json");
     // Item 3: recovery is documented.
     expect(readmeText).toContain("If it fails");
