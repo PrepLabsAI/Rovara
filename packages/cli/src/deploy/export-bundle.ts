@@ -7,7 +7,7 @@
 // order, so the bundle also documents the full deploy — even though only the access stack's is
 // meant to be run directly here; every later stack is deployed by the AgentX operator through the
 // service role the access stack creates (`agentx init --resume`, phase 15d).
-import { mkdir, mkdtemp, readdir, readFile, rename, rm, rmdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import {
   defaultBoundaryArn,
@@ -93,28 +93,48 @@ function policyDocument(statements: PolicyStatementJson[]): string {
 }
 
 /**
- * The policy a platform team attaches to whoever runs `deploy-access.sh`, scoped to exactly what
- * the access stack's own template declares (verified against the real synthesized template; see
- * requiredActionsFor below and task-6-report.md's "Fix round 1" section for what AWS documentation
- * this could and couldn't confirm):
+ * The policy a platform team attaches to whoever runs `deploy-access.sh`: exactly the actions the
+ * CloudFormation registry's own published `create`/`read`/`delete` handler permissions for the
+ * access stack's five resource types require (`AWS::S3::Bucket`, `AWS::S3::BucketPolicy`,
+ * `AWS::IAM::Role`, `AWS::IAM::ManagedPolicy`, `AWS::ECR::PullThroughCacheRule` — the only types the
+ * real synthesized access template contains), fetched from
+ * https://schema.cloudformation.us-east-1.amazonaws.com/CloudformationSchema.zip and checked into
+ * `tests/fixtures/cfn-handler-permissions.json`, which `export-bundle.test.ts`'s coverage test reads
+ * so these action lists can never silently drift from that authoritative source again.
  *
- * - CloudFormation on the access stack alone.
- * - IAM role management, scoped to the two roles' *exact* ARNs (known at export from the
- *   environment name alone) — never `iam:PassRole`, `iam:UpdateAssumeRolePolicy`,
- *   `iam:DeleteRolePermissionsBoundary` or `iam:CreateServiceLinkedRole`, none of which this
- *   principal (as opposed to the roles it creates) ever needs, and none of which a bare
- *   `iam:*Role*` wildcard could be trusted to exclude.
- * - IAM managed-policy management, scoped to the exact default-boundary ARN.
- * - The artifact bucket: created, configured (encryption, versioning, lifecycle, public-access
- *   block, its own bucket policy, tags) and — since a failed create can roll back, or the platform
- *   team may want to tear a stalled attempt down — read and deleted. The bucket's real name has a
- *   random suffix only CloudFormation assigns at deploy time (it declares no `BucketName`), but
- *   CloudFormation's own default physical-naming rule for an unnamed resource is
- *   "<StackName>-<LogicalID>-<uniqueID>" (docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/
- *   resources-section-structure.html#resources-section-physical-id), so the name always starts
- *   with the stack's own name — the pattern used here.
- * - The ECR pull-through cache rule: `*`, because neither action supports resource-level scoping
- *   (documented in README.md as the one place this policy can't be scoped down).
+ * `update` handler permissions are deliberately excluded (this principal only ever runs a `CREATE`
+ * change set; see `deployAccessScript`), which is why `iam:UpdateRole`, `iam:UpdateRoleDescription`,
+ * `iam:PutRolePermissionsBoundary`, `iam:UpdateAssumeRolePolicy`, `iam:DeleteRolePermissionsBoundary`
+ * and `iam:CreatePolicyVersion`/`iam:SetDefaultPolicyVersion` are all absent — `CreateRole` accepts
+ * both `Description` and `PermissionsBoundary` directly, so none of those are needed just to create
+ * the roles either. Documented in README.md: updating this stack needs more, and is the AgentX
+ * operator's or a broader admin's job, not this principal's.
+ *
+ * `iam:PassRole` is never granted anywhere in this policy, even though it appears in the S3 bucket
+ * and ECR pull-through-cache-rule handlers' own permission lists (for bucket replication and for a
+ * pull-through rule's `CredentialArn`/`CustomRoleArn`, respectively) — this template configures
+ * neither feature, so it's excluded, with the one IAM action the pull-through-cache-rule handler
+ * genuinely needs (`iam:CreateServiceLinkedRole`) granted in its own statement, scoped to a
+ * service-linked-role ARN and conditioned on `iam:AWSServiceName` = `ecr.amazonaws.com`.
+ * `secretsmanager:GetSecretValue` (also `CredentialArn`-only) is excluded the same way.
+ *
+ * IAM role and managed-policy actions are scoped to the *exact* resource ARNs (the two roles' names
+ * and the default boundary's ARN, all deterministic from the environment name), never a path or
+ * name wildcard.
+ *
+ * The artifact bucket's real name has a random suffix only CloudFormation assigns at deploy time
+ * (it declares no `BucketName`), but CloudFormation's own default physical-naming rule for an
+ * unnamed resource is "<StackName>-<LogicalID>-<uniqueID>" (docs.aws.amazon.com/AWSCloudFormation/
+ * latest/UserGuide/resources-section-structure.html#resources-section-physical-id), so the name
+ * always starts with the stack's own name — the pattern used here. The S3 handlers' full
+ * permission set includes some actions this bucket's own configuration never exercises (the
+ * `s3tables:*` table-bucket actions, in particular — a different feature and a different ARN
+ * format entirely) because the registry schema publishes the handler's whole permission set, not
+ * one filtered to a particular template's properties; granting them is inert here, not harmful.
+ *
+ * The ECR pull-through-cache-rule actions (aside from the service-linked-role one above) stay
+ * unscoped (`*`): neither action supports resource-level scoping (documented in README.md as the
+ * one place this policy can't be scoped down).
  */
 function accessDeployerStatements(scope: { env: string; partition: string; region: string; account: string }): PolicyStatementJson[] {
   const { env, partition, region, account } = scope;
@@ -125,59 +145,130 @@ function accessDeployerStatements(scope: { env: string; partition: string; regio
   ];
   const boundaryArn = defaultBoundaryArn({ env, partition, account });
   const bucketArn = `arn:${partition}:s3:::${environmentStackName(env, "access")}-*`;
+  const serviceLinkedRoleArn = `arn:${partition}:iam::${account}:role/aws-service-role/*`;
   return [
     { Sid: "AccessStack", Effect: "Allow", Action: ["cloudformation:*"], Resource: stackArn },
     {
+      // AWS::IAM::Role's create+read+delete handler permissions, verbatim (see the function doc
+      // comment) — never iam:PassRole, iam:UpdateAssumeRolePolicy, iam:DeleteRolePermissionsBoundary
+      // or a wildcard: those are update-only, or belong to the roles this principal creates, not to
+      // this principal itself.
       Sid: "IamRoles",
       Effect: "Allow",
       Action: [
+        "iam:AttachRolePolicy",
         "iam:CreateRole",
         "iam:DeleteRole",
+        "iam:DeleteRolePolicy",
+        "iam:DetachRolePolicy",
         "iam:GetRole",
-        "iam:UpdateRole",
-        "iam:UpdateRoleDescription",
+        "iam:GetRolePolicy",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListRolePolicies",
+        "iam:PutRolePolicy",
         "iam:TagRole",
         "iam:UntagRole",
-        "iam:PutRolePolicy",
-        "iam:DeleteRolePolicy",
-        "iam:GetRolePolicy",
-        "iam:AttachRolePolicy",
-        "iam:DetachRolePolicy",
-        "iam:PutRolePermissionsBoundary",
-        "iam:ListRolePolicies",
-        "iam:ListAttachedRolePolicies",
       ],
       Resource: roleArns,
     },
     {
+      // AWS::IAM::ManagedPolicy's create+read+delete handler permissions, verbatim.
       Sid: "IamManagedPolicy",
       Effect: "Allow",
       Action: [
+        "iam:AttachGroupPolicy",
+        "iam:AttachRolePolicy",
+        "iam:AttachUserPolicy",
         "iam:CreatePolicy",
         "iam:DeletePolicy",
+        "iam:DeletePolicyVersion",
+        "iam:DetachGroupPolicy",
+        "iam:DetachRolePolicy",
+        "iam:DetachUserPolicy",
         "iam:GetPolicy",
         "iam:GetPolicyVersion",
+        "iam:ListEntitiesForPolicy",
         "iam:ListPolicyVersions",
-        "iam:CreatePolicyVersion",
-        "iam:DeletePolicyVersion",
-        "iam:SetDefaultPolicyVersion",
-        "iam:TagPolicy",
-        "iam:UntagPolicy",
       ],
       Resource: boundaryArn,
     },
     {
+      // The one IAM action the ECR pull-through-cache-rule handler needs outside CredentialArn's
+      // own PassRole: creating the AWSServiceRoleForECR service-linked role, the first time any
+      // pull-through cache rule is created in the account. Scoped to service-linked roles only, and
+      // only for ECR — never a bare grant of iam:CreateServiceLinkedRole.
+      Sid: "EcrServiceLinkedRole",
+      Effect: "Allow",
+      Action: ["iam:CreateServiceLinkedRole"],
+      Resource: serviceLinkedRoleArn,
+      Condition: { StringEquals: { "iam:AWSServiceName": "ecr.amazonaws.com" } },
+    },
+    {
+      // AWS::S3::Bucket's (and, redundantly, AWS::S3::BucketPolicy's) create+read+delete handler
+      // permissions, verbatim, minus iam:PassRole (see the function doc comment).
       Sid: "ArtifactBucket",
       Effect: "Allow",
       Action: [
-        "s3:CreateBucket*",
-        "s3:PutBucket*",
-        "s3:GetBucket*",
-        "s3:DeleteBucket*",
-        "s3:PutEncryptionConfiguration",
+        "s3:CreateBucket",
+        "s3:CreateBucketMetadataTableConfiguration",
+        "s3:DeleteBucket",
+        "s3:DeleteBucketPolicy",
+        "s3:DeleteObject",
+        "s3:GetAccelerateConfiguration",
+        "s3:GetAnalyticsConfiguration",
+        "s3:GetBucketAbac",
+        "s3:GetBucketAcl",
+        "s3:GetBucketCORS",
+        "s3:GetBucketLogging",
+        "s3:GetBucketMetadataTableConfiguration",
+        "s3:GetBucketNotification",
+        "s3:GetBucketObjectLockConfiguration",
+        "s3:GetBucketOwnershipControls",
+        "s3:GetBucketPolicy",
+        "s3:GetBucketPublicAccessBlock",
+        "s3:GetBucketTagging",
+        "s3:GetBucketVersioning",
+        "s3:GetBucketWebsite",
         "s3:GetEncryptionConfiguration",
-        "s3:PutLifecycleConfiguration",
+        "s3:GetIntelligentTieringConfiguration",
+        "s3:GetInventoryConfiguration",
         "s3:GetLifecycleConfiguration",
+        "s3:GetMetricsConfiguration",
+        "s3:GetReplicationConfiguration",
+        "s3:ListBucket",
+        "s3:ListTagsForResource",
+        "s3:PutAccelerateConfiguration",
+        "s3:PutAnalyticsConfiguration",
+        "s3:PutBucketAbac",
+        "s3:PutBucketCORS",
+        "s3:PutBucketLogging",
+        "s3:PutBucketNotification",
+        "s3:PutBucketObjectLockConfiguration",
+        "s3:PutBucketOwnershipControls",
+        "s3:PutBucketPolicy",
+        "s3:PutBucketPublicAccessBlock",
+        "s3:PutBucketReplication",
+        "s3:PutBucketTagging",
+        "s3:PutBucketVersioning",
+        "s3:PutBucketWebsite",
+        "s3:PutEncryptionConfiguration",
+        "s3:PutIntelligentTieringConfiguration",
+        "s3:PutInventoryConfiguration",
+        "s3:PutLifecycleConfiguration",
+        "s3:PutMetricsConfiguration",
+        "s3:PutObjectAcl",
+        "s3:PutObjectLockConfiguration",
+        "s3:PutReplicationConfiguration",
+        "s3:TagResource",
+        "s3tables:CreateNamespace",
+        "s3tables:CreateTable",
+        "s3tables:CreateTableBucket",
+        "s3tables:GetTable",
+        "s3tables:GetTableMetadataLocation",
+        "s3tables:PutTableBucketPolicy",
+        "s3tables:PutTableEncryption",
+        "s3tables:PutTablePolicy",
+        "s3tables:UpdateTableMetadataLocation",
       ],
       Resource: bucketArn,
     },
@@ -198,6 +289,11 @@ function accessDeployerStatements(scope: { env: string; partition: string; regio
  * The change set name follows the same pinned format the templates deploy engine uses
  * (templates-engine.ts, `agentx-<version with . replaced by ->-<unix seconds>`), baked in from the
  * release version at export time.
+ *
+ * Never executes unattended: with no `--yes`, a declined prompt or no terminal to prompt on at all
+ * (stdin isn't a TTY — e.g. run from cron or a pipe) both print the change set's id, the exact
+ * `delete-change-set`/`delete-stack` cleanup commands, and exit 1, distinct from the generic
+ * `on_failure` message (nothing here actually failed).
  *
  * The access stack takes no secret parameters (its only parameters are `PermissionsBoundaryArn`
  * and `OperatorPrincipalArn`), so this script never reads or prints one. Every variable is quoted.
@@ -258,6 +354,16 @@ on_failure() {
 }
 trap on_failure ERR
 
+# Prints why nothing was executed and how to clean up, then exits 1 — deliberately not through
+# on_failure/exit_code above, since nothing here failed; the operator (or the absence of one) chose
+# not to proceed.
+not_executed() {
+  echo "not executed; the change set \${CHANGE_SET_NAME} is left for review" >&2
+  echo "  aws cloudformation delete-change-set --stack-name \\"\${STACK_NAME}\\" --change-set-name \\"\${CHANGE_SET_NAME}\\" --region \\"${region}\\"" >&2
+  echo "  aws cloudformation delete-stack --stack-name \\"\${STACK_NAME}\\" --region \\"${region}\\"" >&2
+  exit 1
+}
+
 cd "$(dirname "\${BASH_SOURCE[0]}")"
 
 echo "Creating change set \${CHANGE_SET_NAME} for stack \${STACK_NAME} in ${region}..."
@@ -284,11 +390,13 @@ aws cloudformation describe-change-set \\
   --query "Changes"
 
 if [ "\${YES}" = false ]; then
+  if [ ! -t 0 ]; then
+    # No terminal to prompt on, and --yes wasn't given: never execute a change set unattended.
+    not_executed
+  fi
   read -r -p "Execute this change set? [y/N] " REPLY
   if [[ ! "\${REPLY}" =~ ^[Yy]$ ]]; then
-    echo "Not executing. The change set \${CHANGE_SET_NAME} is ready; rerun with --yes, execute it yourself, or delete it:" >&2
-    echo "  aws cloudformation delete-change-set --stack-name \\"\${STACK_NAME}\\" --change-set-name \\"\${CHANGE_SET_NAME}\\" --region \\"${region}\\"" >&2
-    exit 0
+    not_executed
   fi
 fi
 
@@ -341,17 +449,28 @@ resource-level scoping in IAM, so \`policies/access-deployer.json\` grants them 
 (\`*\`) — whoever deploys this bundle can also create or delete another environment's pull-through
 cache rule. There is no tighter scope available today.
 
+**\`policies/access-deployer.json\` is for *creating* this stack only.** It grants exactly the
+CloudFormation registry's published \`create\`/\`read\`/\`delete\` handler permissions for this
+stack's resource types — never the \`update\` ones. Updating this stack later (for example, a
+changed permissions boundary, which needs \`iam:UpdateAssumeRolePolicy\` and
+\`iam:DeleteRolePermissionsBoundary\` on the roles it created) needs a broader principal than this
+one; that's the AgentX operator's own path (\`agentx init --resume\`, phase 15d) or a separate,
+broader admin action outside this bundle, not something \`deploy-access.sh\` does.
+
 ## Deploying
 
 Run \`./deploy-access.sh\` with AWS CLI credentials that can create the resources above (see
 \`policies/access-deployer.json\` for exactly what that principal needs). Pass \`--yes\` to skip the
-confirmation prompt. It runs, in order:
+confirmation prompt; without it, on a non-interactive shell (no terminal on stdin) the script never
+executes unattended. It runs, in order:
 
 1. \`aws cloudformation create-change-set\` (\`--change-set-type CREATE\`, the templates and
    parameters in this bundle, \`--capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM\`)
 2. \`aws cloudformation wait change-set-create-complete\`
 3. \`aws cloudformation describe-change-set --query Changes\` (review the changes)
-4. Prompts \`Execute this change set? [y/N]\` (skipped with \`--yes\`)
+4. Prompts \`Execute this change set? [y/N]\` (skipped with \`--yes\`; declining, or having no
+   terminal to prompt on, prints the change set's id and the \`delete-change-set\`/\`delete-stack\`
+   cleanup commands and exits 1, leaving the change set for review rather than executing it)
 5. \`aws cloudformation execute-change-set\`
 6. \`aws cloudformation wait stack-create-complete\`
 7. \`aws cloudformation update-termination-protection --enable-termination-protection\`
@@ -419,11 +538,13 @@ async function assertClaimable(dir: string): Promise<void> {
  * part's, for review, in install order), the deploy script, and the policy documents. Makes no AWS
  * call. Refuses (writing nothing) a non-empty `dir` or a region the release does not cover.
  *
- * Writes into a fresh directory next to `dir` (same parent, so the final move is a same-filesystem
- * rename) and only renames it onto `dir` once every file is written successfully — so a failure
- * partway through (a corrupt package, a release the region check somehow missed, anything) leaves
- * `dir` exactly as it was before the call, never a half-written bundle a rerun would then have to
- * fight past. The scratch directory is removed on any failure.
+ * Writes into a fresh directory next to `dir` (same parent, created first if missing, so the final
+ * move is a same-filesystem rename) and only renames it onto `dir` once every file is written
+ * successfully — so a failure partway through (a corrupt package, a release the region check
+ * somehow missed, anything) leaves `dir` exactly as it was before the call, never a half-written
+ * bundle a rerun would then have to fight past. The scratch directory is removed on any failure;
+ * on success, the final bundle directory is left `0755` (mkdtemp's own default, `0700`, would
+ * otherwise be unreadable to anyone but the caller).
  */
 export async function writeExportBundle(input: ExportBundleInput): Promise<ExportBundleResult> {
   const { dir, answers, release } = input;
@@ -436,7 +557,12 @@ export async function writeExportBundle(input: ExportBundleInput): Promise<Expor
   await assertClaimable(dir);
 
   const resolvedDir = resolve(dir);
-  const scratchDir = await mkdtemp(join(dirname(resolvedDir), `.${basename(resolvedDir)}.`));
+  const parentDir = dirname(resolvedDir);
+  // mkdtemp needs its parent to already exist; `dir` itself may be several levels deep in a path
+  // nothing has created yet (assertClaimable's ENOENT above only confirms `dir` itself is absent,
+  // not that its parent chain is).
+  await mkdir(parentDir, { recursive: true });
+  const scratchDir = await mkdtemp(join(parentDir, `.${basename(resolvedDir)}.`));
   try {
     const files: string[] = [];
     async function write(relativePath: string, content: string | Buffer, options: { mode?: number } = {}): Promise<void> {
@@ -500,6 +626,9 @@ export async function writeExportBundle(input: ExportBundleInput): Promise<Expor
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
     await rename(scratchDir, resolvedDir);
+    // mkdtemp creates its directory 0700 (owner-only); the platform team's own tooling should be
+    // able to read and traverse the bundle it just asked for.
+    await chmod(resolvedDir, 0o755);
 
     return { files: files.sort() };
   } catch (error) {

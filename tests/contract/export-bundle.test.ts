@@ -2,7 +2,8 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -39,12 +40,17 @@ let releaseDir: string;
  * synthesizes, not a hand-written stand-in for them. */
 let accessTemplateText: string;
 let accessTemplate: { Resources: Record<string, { Type: string; Properties?: Record<string, unknown> }> };
+/** The CloudFormation registry's own published handler permissions for this stack's resource
+ * types (tests/fixtures/cfn-handler-permissions.json), fetched from AWS's schema bundle. */
+let handlerPermissions: CfnHandlerPermissions;
 const zipBytes: Record<string, Buffer> = {
   [RUNTIME_ASSET]: Buffer.from("runtime zip bytes"),
   [CONTROL_PLANE_ASSET]: Buffer.from("control plane zip bytes"),
 };
 
 beforeAll(async () => {
+  const testDir = dirname(fileURLToPath(import.meta.url));
+  handlerPermissions = JSON.parse(await readFile(join(testDir, "../fixtures/cfn-handler-permissions.json"), "utf8")) as CfnHandlerPermissions;
   releaseDir = await mkdtemp(join(tmpdir(), "agentx-export-bundle-"));
   for (const [assetId, bytes] of Object.entries(zipBytes)) {
     await writeFile(join(releaseDir, `${assetId}.zip`), bytes);
@@ -117,7 +123,24 @@ function globToRegex(pattern: string): RegExp {
   return new RegExp(`^${escaped}$`);
 }
 
-type Statement = { Sid: string; Effect: string; Action: string[]; Resource: string | string[] };
+type Statement = { Sid: string; Effect: string; Action: string[]; Resource: string | string[]; Condition?: Record<string, Record<string, string | string[]>> };
+
+interface CfnHandlerPermissions {
+  types: Record<string, { create?: string[]; read?: string[]; update?: string[]; delete?: string[]; list?: string[] }>;
+}
+
+/** The exact permissions the CloudFormation registry's own schema publishes for `type`'s `create`,
+ * `read` and `delete` handlers (never `update`/`list` — see accessDeployerStatements' doc comment
+ * for why), minus `exclude`. Grounds the coverage test in
+ * tests/fixtures/cfn-handler-permissions.json instead of a hand-written, and previously circular,
+ * guess at what each handler needs. */
+function requiredActionsFor(fixture: CfnHandlerPermissions, type: string, exclude: readonly string[] = []): string[] {
+  const phases = fixture.types[type];
+  if (phases === undefined) throw new Error(`no fixture entry for ${type}`);
+  const union = new Set([...(phases.create ?? []), ...(phases.read ?? []), ...(phases.delete ?? [])]);
+  for (const excluded of exclude) union.delete(excluded);
+  return [...union];
+}
 
 /** Whether `statement` (Allow only) grants `action`, and — when given — on a resource matching `resource`. */
 function statementAllows(statement: Statement, action: string, resource?: string): boolean {
@@ -300,6 +323,18 @@ describe("writeExportBundle", () => {
     expect(script).toContain("delete-stack");
     expect(script).toMatch(/exit\s+"\$\{exit_code\}"/);
 
+    // Item 3 (round 2): declining the prompt, or having no terminal to prompt on at all with no
+    // --yes, prints a distinct "not executed" message (never the generic on_failure one) plus both
+    // cleanup commands, and exits 1 — not 0.
+    expect(script).toContain("not_executed()");
+    expect(script).toContain('echo "not executed; the change set ${CHANGE_SET_NAME} is left for review"');
+    expect(script).toMatch(/\[\s*!\s*-t\s+0\s*\]/);
+    expect(script).not.toMatch(/exit 0\b/);
+    const notExecutedBody = script.slice(script.indexOf("not_executed()"), script.indexOf("cd \"$(dirname"));
+    expect(notExecutedBody).toContain("delete-change-set");
+    expect(notExecutedBody).toContain("delete-stack");
+    expect(notExecutedBody).toMatch(/exit 1\b/);
+
     expect(() => execFileSync("bash", ["-n", scriptPath])).not.toThrow();
     const info = await stat(scriptPath);
     expect(info.mode & 0o111).not.toBe(0);
@@ -331,9 +366,9 @@ describe("writeExportBundle", () => {
     const defaultBoundary = await readJson("policies/default-boundary.json");
     expect(defaultBoundary.Statement.some((s) => s.Sid === "Services")).toBe(true);
 
-    // --- Item 2: the access-deployer's role actions are an explicit list, scoped to the two real
-    // role ARNs — never PassRole, DeleteRolePermissionsBoundary, UpdateAssumeRolePolicy,
-    // CreateServiceLinkedRole, or any wildcard action. ---
+    // --- Item 2: the access-deployer's role actions are scoped to the two real role ARNs — never
+    // PassRole, DeleteRolePermissionsBoundary, UpdateAssumeRolePolicy, CreateServiceLinkedRole (that
+    // one gets its own, conditioned statement below), or any wildcard action. ---
     const accessDeployer = await readJson("policies/access-deployer.json");
     const cfnRoleArn = `arn:aws:iam::${ACCOUNT}:role/${environmentCloudFormationRoleName(ENV)}`;
     const operatorRoleArn = `arn:aws:iam::${ACCOUNT}:role/${environmentOperatorRoleName(ENV)}`;
@@ -344,24 +379,35 @@ describe("writeExportBundle", () => {
       expect(iamRoles.Action).not.toContain(forbidden);
       expect(statementAllows(iamRoles, forbidden)).toBe(false);
     }
-    // The exact, intentional grant the review asked for.
-    for (const expected of [
-      "iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:UpdateRole", "iam:UpdateRoleDescription",
-      "iam:TagRole", "iam:UntagRole", "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:GetRolePolicy",
-      "iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:PutRolePermissionsBoundary",
-      "iam:ListRolePolicies", "iam:ListAttachedRolePolicies",
-    ]) {
-      expect(iamRoles.Action).toContain(expected);
-    }
 
     // The managed-policy actions are scoped to the exact boundary ARN, not a path wildcard.
     const boundaryArn = defaultBoundaryArn({ env: ENV, partition: "aws", account: ACCOUNT });
     const iamManagedPolicy = accessDeployer.Statement.find((s) => s.Sid === "IamManagedPolicy")!;
     expect([iamManagedPolicy.Resource].flat()).toEqual([boundaryArn]);
-    expect(iamManagedPolicy.Action).toContain("iam:CreatePolicy");
+    expect(iamManagedPolicy.Action.some((a) => a.includes("*"))).toBe(false);
 
-    // --- Item 1: every resource type and property the REAL synthesized access template declares
-    // maps to actions the policy actually grants. ---
+    // iam:PassRole is never granted anywhere in this policy, and secretsmanager: actions (both
+    // CredentialArn/CustomRoleArn-only, which this template sets neither of) are never granted at
+    // all — checked across every statement, not just IamRoles.
+    for (const statement of accessDeployer.Statement) {
+      expect(statementAllows(statement, "iam:PassRole")).toBe(false);
+      expect(statement.Action.some((a) => a.toLowerCase().startsWith("secretsmanager:"))).toBe(false);
+    }
+
+    // Item 1d: iam:CreateServiceLinkedRole — the one IAM action the ECR pull-through-cache-rule
+    // handler needs beyond PassRole/secretsmanager — is granted in its own statement, scoped to
+    // service-linked roles only and conditioned on the ECR service name; never unconditioned or on "*".
+    const ecrServiceLinkedRole = accessDeployer.Statement.find((s) => s.Action.includes("iam:CreateServiceLinkedRole"))!;
+    expect(ecrServiceLinkedRole).toBeDefined();
+    expect(ecrServiceLinkedRole.Action).toEqual(["iam:CreateServiceLinkedRole"]);
+    expect([ecrServiceLinkedRole.Resource].flat().every((r) => r !== "*")).toBe(true);
+    expect(ecrServiceLinkedRole.Condition).toEqual({ StringEquals: { "iam:AWSServiceName": "ecr.amazonaws.com" } });
+
+    // --- Item 1: every resource type in the REAL synthesized access template maps to actions the
+    // policy actually grants, and those actions come from the CloudFormation registry's own
+    // published handler permissions (tests/fixtures/cfn-handler-permissions.json), not a hand-written
+    // guess. Only create+read+delete: this principal only ever runs a CREATE change set (see
+    // deployAccessScript), and README.md says updating needs a broader principal. ---
     const SID_FOR_TYPE: Record<string, string> = {
       "AWS::S3::Bucket": "ArtifactBucket",
       "AWS::S3::BucketPolicy": "ArtifactBucket",
@@ -369,46 +415,11 @@ describe("writeExportBundle", () => {
       "AWS::IAM::Role": "IamRoles",
       "AWS::IAM::ManagedPolicy": "IamManagedPolicy",
     };
-    /**
-     * Actions each resource type's properties require, given what the CloudFormation resource
-     * schema `handlers` permissions AWS documents describe (create/read/update/delete/list) applied
-     * to the concrete properties access.ts sets. AWS does not expose the raw per-type handler
-     * permission list through documentation search, and this account has no `cloudformation:
-     * DescribeType` permission to read it from the registry directly (see task-6-report.md's "Fix
-     * round 1" section) — so where the exact list isn't independently confirmable, this is the
-     * documented general CloudFormation resource-provider pattern (create, then set and read back
-     * each property to stabilize; delete needs the same reads) applied to what's actually declared.
-     */
-    function requiredActionsFor(resource: { Type: string; Properties?: Record<string, unknown> }): string[] {
-      const props = resource.Properties ?? {};
-      switch (resource.Type) {
-        case "AWS::S3::Bucket": {
-          const actions = ["s3:CreateBucket", "s3:DeleteBucket", "s3:GetBucketLocation"];
-          if ("BucketEncryption" in props) actions.push("s3:PutEncryptionConfiguration", "s3:GetEncryptionConfiguration");
-          if ("VersioningConfiguration" in props) actions.push("s3:PutBucketVersioning", "s3:GetBucketVersioning");
-          if ("LifecycleConfiguration" in props) actions.push("s3:PutLifecycleConfiguration", "s3:GetLifecycleConfiguration");
-          if ("PublicAccessBlockConfiguration" in props) actions.push("s3:PutBucketPublicAccessBlock", "s3:GetBucketPublicAccessBlock");
-          if ("Tags" in props) actions.push("s3:PutBucketTagging", "s3:GetBucketTagging");
-          return actions;
-        }
-        case "AWS::S3::BucketPolicy":
-          return ["s3:PutBucketPolicy", "s3:GetBucketPolicy", "s3:DeleteBucketPolicy"];
-        case "AWS::ECR::PullThroughCacheRule":
-          return ["ecr:CreatePullThroughCacheRule", "ecr:DeletePullThroughCacheRule", "ecr:DescribePullThroughCacheRules"];
-        case "AWS::IAM::Role": {
-          const actions = ["iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:ListAttachedRolePolicies"];
-          if ("Tags" in props) actions.push("iam:TagRole", "iam:UntagRole");
-          if ("Description" in props) actions.push("iam:UpdateRoleDescription");
-          if ("Policies" in props) actions.push("iam:PutRolePolicy", "iam:GetRolePolicy", "iam:DeleteRolePolicy", "iam:ListRolePolicies");
-          if ("PermissionsBoundary" in props) actions.push("iam:PutRolePermissionsBoundary");
-          return actions;
-        }
-        case "AWS::IAM::ManagedPolicy":
-          return ["iam:CreatePolicy", "iam:DeletePolicy", "iam:GetPolicy", "iam:GetPolicyVersion", "iam:ListPolicyVersions"];
-        default:
-          return [];
-      }
-    }
+    // Excluded from the generic per-type check below, each for a documented, narrow reason (see
+    // accessDeployerStatements' doc comment) rather than folded silently into the required set.
+    const GLOBAL_EXCLUDE = ["iam:PassRole"];
+    const ECR_EXCLUDE = [...GLOBAL_EXCLUDE, "secretsmanager:GetSecretValue", "iam:CreateServiceLinkedRole"];
+
     function resourceArnFor(resource: { Type: string; Properties?: Record<string, unknown> }): string {
       const props = resource.Properties ?? {};
       if (resource.Type === "AWS::S3::Bucket" || resource.Type === "AWS::S3::BucketPolicy") return `arn:aws:s3:::${STACK_NAME}-000000000000`;
@@ -425,7 +436,8 @@ describe("writeExportBundle", () => {
       const sid = SID_FOR_TYPE[resource.Type]!;
       const statement = accessDeployer.Statement.find((s) => s.Sid === sid)!;
       const resourceArn = resourceArnFor(resource);
-      for (const action of requiredActionsFor(resource)) {
+      const exclude = resource.Type === "AWS::ECR::PullThroughCacheRule" ? ECR_EXCLUDE : GLOBAL_EXCLUDE;
+      for (const action of requiredActionsFor(handlerPermissions, resource.Type, exclude)) {
         expect(statementAllows(statement, action, resourceArn)).toBe(true);
       }
     }
@@ -472,6 +484,19 @@ describe("writeExportBundle", () => {
     const result = await writeExportBundle({ dir, answers: cognitoAnswers(), release: fakeRelease() });
     expect(result.files.length).toBeGreaterThan(0);
     expect(await readdir(parent)).toEqual(["bundle"]);
+  });
+
+  it("creates dir's missing parent directories, and leaves the final bundle directory world-readable (0755)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentx-export-parents-"));
+    // None of a/b/c exist yet: mkdtemp needs its parent to exist, which is exactly what regressed.
+    const dir = join(root, "a", "b", "c", "bundle");
+    const result = await writeExportBundle({ dir, answers: cognitoAnswers(), release: fakeRelease() });
+    expect(result.files.length).toBeGreaterThan(0);
+
+    const info = await stat(dir);
+    expect(info.isDirectory()).toBe(true);
+    // mkdtemp's own default (0700) would leave the bundle unreadable to anyone but the writer.
+    expect(info.mode & 0o777).toBe(0o755);
   });
 
   it("makes no AWS calls at all", async () => {

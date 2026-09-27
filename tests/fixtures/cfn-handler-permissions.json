@@ -1,0 +1,265 @@
+{
+  "_source": "https://schema.cloudformation.us-east-1.amazonaws.com/CloudformationSchema.zip",
+  "_files": [
+    "aws-ecr-pullthroughcacherule.json",
+    "aws-iam-managedpolicy.json",
+    "aws-iam-role.json",
+    "aws-s3-bucket.json",
+    "aws-s3-bucketpolicy.json"
+  ],
+  "_fetched": "2026-09-26",
+  "_note": "handlers.{create,read,update,delete,list}.permissions extracted verbatim from the named files in the CloudFormation registry schema bundle at _source, for the resource types infra/lib/access.ts declares (the access stack's real synthesized template contains no other resource type). Used by tests/contract/export-bundle.test.ts to ground the access-deployer policy's required actions in the authoritative CloudFormation handler permissions instead of a hand-written list.",
+  "types": {
+    "AWS::S3::Bucket": {
+      "read": [
+        "s3:GetAccelerateConfiguration",
+        "s3:GetAnalyticsConfiguration",
+        "s3:GetBucketAbac",
+        "s3:GetBucketCORS",
+        "s3:GetBucketLogging",
+        "s3:GetBucketMetadataTableConfiguration",
+        "s3:GetBucketNotification",
+        "s3:GetBucketObjectLockConfiguration",
+        "s3:GetBucketOwnershipControls",
+        "s3:GetBucketPublicAccessBlock",
+        "s3:GetBucketTagging",
+        "s3:GetBucketVersioning",
+        "s3:GetBucketWebsite",
+        "s3:GetEncryptionConfiguration",
+        "s3:GetIntelligentTieringConfiguration",
+        "s3:GetInventoryConfiguration",
+        "s3:GetLifecycleConfiguration",
+        "s3:GetMetricsConfiguration",
+        "s3:GetReplicationConfiguration",
+        "s3:ListBucket",
+        "s3:ListTagsForResource"
+      ],
+      "create": [
+        "iam:PassRole",
+        "s3:CreateBucket",
+        "s3:CreateBucketMetadataTableConfiguration",
+        "s3:DeleteObject",
+        "s3:GetBucketAcl",
+        "s3:GetBucketMetadataTableConfiguration",
+        "s3:ListBucket",
+        "s3:PutAccelerateConfiguration",
+        "s3:PutAnalyticsConfiguration",
+        "s3:PutBucketAbac",
+        "s3:PutBucketCORS",
+        "s3:PutBucketLogging",
+        "s3:PutBucketNotification",
+        "s3:PutBucketObjectLockConfiguration",
+        "s3:PutBucketOwnershipControls",
+        "s3:PutBucketPublicAccessBlock",
+        "s3:PutBucketReplication",
+        "s3:PutBucketTagging",
+        "s3:PutBucketVersioning",
+        "s3:PutBucketWebsite",
+        "s3:PutEncryptionConfiguration",
+        "s3:PutIntelligentTieringConfiguration",
+        "s3:PutInventoryConfiguration",
+        "s3:PutLifecycleConfiguration",
+        "s3:PutMetricsConfiguration",
+        "s3:PutObjectAcl",
+        "s3:PutObjectLockConfiguration",
+        "s3:PutReplicationConfiguration",
+        "s3:TagResource",
+        "s3tables:CreateNamespace",
+        "s3tables:CreateTable",
+        "s3tables:CreateTableBucket",
+        "s3tables:GetTable",
+        "s3tables:GetTableMetadataLocation",
+        "s3tables:PutTableBucketPolicy",
+        "s3tables:PutTableEncryption",
+        "s3tables:PutTablePolicy",
+        "s3tables:UpdateTableMetadataLocation"
+      ],
+      "update": [
+        "iam:PassRole",
+        "s3:CreateBucketMetadataTableConfiguration",
+        "s3:DeleteBucketAnalyticsConfiguration",
+        "s3:DeleteBucketCors",
+        "s3:DeleteBucketEncryption",
+        "s3:DeleteBucketLifecycle",
+        "s3:DeleteBucketMetadataTableConfiguration",
+        "s3:DeleteBucketMetricsConfiguration",
+        "s3:DeleteBucketReplication",
+        "s3:DeleteBucketWebsite",
+        "s3:GetBucketMetadataTableConfiguration",
+        "s3:ListBucket",
+        "s3:PutAccelerateConfiguration",
+        "s3:PutAnalyticsConfiguration",
+        "s3:PutBucketAbac",
+        "s3:PutBucketAcl",
+        "s3:PutBucketCORS",
+        "s3:PutBucketLogging",
+        "s3:PutBucketNotification",
+        "s3:PutBucketObjectLockConfiguration",
+        "s3:PutBucketOwnershipControls",
+        "s3:PutBucketPublicAccessBlock",
+        "s3:PutBucketReplication",
+        "s3:PutBucketTagging",
+        "s3:PutBucketVersioning",
+        "s3:PutBucketWebsite",
+        "s3:PutEncryptionConfiguration",
+        "s3:PutIntelligentTieringConfiguration",
+        "s3:PutInventoryConfiguration",
+        "s3:PutLifecycleConfiguration",
+        "s3:PutMetricsConfiguration",
+        "s3:PutObjectLockConfiguration",
+        "s3:PutReplicationConfiguration",
+        "s3:TagResource",
+        "s3:UntagResource",
+        "s3:UpdateBucketMetadataAnnotationTableConfiguration",
+        "s3:UpdateBucketMetadataInventoryTableConfiguration",
+        "s3:UpdateBucketMetadataJournalTableConfiguration",
+        "s3tables:CreateNamespace",
+        "s3tables:CreateTable",
+        "s3tables:CreateTableBucket",
+        "s3tables:GetTable",
+        "s3tables:GetTableMetadataLocation",
+        "s3tables:PutTableBucketPolicy",
+        "s3tables:PutTableEncryption",
+        "s3tables:PutTablePolicy",
+        "s3tables:UpdateTableMetadataLocation"
+      ],
+      "list": [
+        "s3:ListAllMyBuckets"
+      ],
+      "delete": [
+        "s3:DeleteBucket",
+        "s3:ListBucket"
+      ]
+    },
+    "AWS::S3::BucketPolicy": {
+      "create": [
+        "s3:GetBucketPolicy",
+        "s3:PutBucketPolicy"
+      ],
+      "read": [
+        "s3:GetBucketPolicy"
+      ],
+      "update": [
+        "s3:GetBucketPolicy",
+        "s3:PutBucketPolicy"
+      ],
+      "delete": [
+        "s3:DeleteBucketPolicy",
+        "s3:GetBucketPolicy"
+      ],
+      "list": [
+        "s3:GetBucketPolicy",
+        "s3:ListAllMyBuckets"
+      ]
+    },
+    "AWS::IAM::Role": {
+      "create": [
+        "iam:AttachRolePolicy",
+        "iam:CreateRole",
+        "iam:GetRole",
+        "iam:GetRolePolicy",
+        "iam:PutRolePolicy",
+        "iam:TagRole",
+        "iam:UntagRole"
+      ],
+      "read": [
+        "iam:GetRole",
+        "iam:GetRolePolicy",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListRolePolicies"
+      ],
+      "update": [
+        "iam:AttachRolePolicy",
+        "iam:DeleteRolePermissionsBoundary",
+        "iam:DeleteRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:PutRolePermissionsBoundary",
+        "iam:PutRolePolicy",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:UpdateRole",
+        "iam:UpdateRoleDescription"
+      ],
+      "delete": [
+        "iam:DeleteRole",
+        "iam:DeleteRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:GetRole",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListRolePolicies",
+        "iam:TagRole",
+        "iam:UntagRole"
+      ],
+      "list": [
+        "iam:ListRoles"
+      ]
+    },
+    "AWS::IAM::ManagedPolicy": {
+      "create": [
+        "iam:AttachGroupPolicy",
+        "iam:AttachRolePolicy",
+        "iam:AttachUserPolicy",
+        "iam:CreatePolicy"
+      ],
+      "read": [
+        "iam:GetPolicy",
+        "iam:GetPolicyVersion",
+        "iam:ListEntitiesForPolicy"
+      ],
+      "update": [
+        "iam:AttachGroupPolicy",
+        "iam:AttachRolePolicy",
+        "iam:AttachUserPolicy",
+        "iam:CreatePolicyVersion",
+        "iam:DeletePolicyVersion",
+        "iam:DetachGroupPolicy",
+        "iam:DetachRolePolicy",
+        "iam:DetachUserPolicy",
+        "iam:GetPolicy",
+        "iam:ListPolicyVersions"
+      ],
+      "delete": [
+        "iam:DeletePolicy",
+        "iam:DeletePolicyVersion",
+        "iam:DetachGroupPolicy",
+        "iam:DetachRolePolicy",
+        "iam:DetachUserPolicy",
+        "iam:GetPolicy",
+        "iam:ListEntitiesForPolicy",
+        "iam:ListPolicyVersions"
+      ],
+      "list": [
+        "iam:ListPolicies"
+      ]
+    },
+    "AWS::ECR::PullThroughCacheRule": {
+      "create": [
+        "ecr:CreatePullThroughCacheRule",
+        "ecr:DeletePullThroughCacheRule",
+        "ecr:DescribePullThroughCacheRules",
+        "iam:CreateServiceLinkedRole",
+        "iam:PassRole",
+        "secretsmanager:GetSecretValue"
+      ],
+      "read": [
+        "ecr:DescribePullThroughCacheRules"
+      ],
+      "update": [
+        "ecr:CreatePullThroughCacheRule",
+        "ecr:DeletePullThroughCacheRule",
+        "ecr:DescribePullThroughCacheRules",
+        "iam:CreateServiceLinkedRole",
+        "iam:PassRole",
+        "secretsmanager:GetSecretValue"
+      ],
+      "delete": [
+        "ecr:DeletePullThroughCacheRule",
+        "ecr:DescribePullThroughCacheRules"
+      ],
+      "list": [
+        "ecr:DescribePullThroughCacheRules"
+      ]
+    }
+  }
+}
