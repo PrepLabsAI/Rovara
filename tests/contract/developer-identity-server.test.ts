@@ -5,6 +5,7 @@ import {
   parseOidcClientSecret,
   parseSlackSignInSecret,
   remoteJwksCache,
+  unconfiguredProvider,
 } from "../../packages/broker/src/aws/developer-identity.js";
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 import { ProviderNotConfiguredError, slackSignInProvider } from "../../packages/broker/src/developer/providers.js";
@@ -424,6 +425,77 @@ describe("revocation and the channel-members invoke", () => {
     const h = identityHarness({ channels: { C0PAY0001: ["U0MAYA001"], C0LEDGER1: [] } });
     expect(await h.handler({ kind: "channel-members", slackUserId: "U0MAYA001", channelIds: ["C0PAY0001", "C0LEDGER1"] })).toEqual({ ok: true, memberOf: ["C0PAY0001"] });
   });
+
+  it("answers invalid_request, not slack_unavailable, for a malformed channel-members request", async () => {
+    const h = identityHarness();
+    expect(await h.handler({ kind: "channel-members", slackUserId: "not-a-user", channelIds: [] })).toEqual({ ok: false, error: "invalid_request" });
+  });
+});
+
+describe("failure answers (Task 6 fix round 1)", () => {
+  const commandName = (command: unknown) => (command as { constructor: { name: string } }).constructor.name;
+  const throttled = () => Object.assign(new Error("Rate exceeded"), { name: "ThrottlingException" });
+
+  it("answers any retryable store error in the refresh grant or revoke with 503, never 500", async () => {
+    const h = identityHarness({ slackUsers: [maya] });
+    const { body } = await h.exchange((await h.signIn("slack", maya.userId)).searchParams.get("code")!);
+    const refreshToken = String(body.refresh_token);
+    const send = h.db.send;
+    h.db.send = async (command) => {
+      if (commandName(command) === "GetCommand") throw throttled();
+      return send(command);
+    };
+    const refresh = await h.refresh(refreshToken);
+    expect(refresh.status).toBe(503);
+    expect(refresh.body.error).toBe("temporarily_unavailable");
+    const revoke = await h.http(httpEvent("POST", "/v1/auth/revoke", { token: refreshToken }));
+    expect(revoke.statusCode).toBe(503);
+    expect(json(revoke.body).error).toBe("temporarily_unavailable");
+    h.db.send = async (command) => {
+      if (commandName(command) === "UpdateCommand") throw throttled();
+      return send(command);
+    };
+    expect((await h.refresh(refreshToken)).status).toBe(200); // rotates: TransactWrite, not an UpdateCommand
+    h.tick(61_000);
+    expect((await h.refresh(refreshToken)).status).toBe(503); // reused past the window: revokeSession is throttled
+    h.db.send = send;
+    expect((await h.refresh(refreshToken)).body.error).toBe("invalid_grant");
+  });
+
+  it("sends an unexpected failure after the state was used back to the CLI as server_error", async () => {
+    const h = identityHarness({ slackUsers: [maya] });
+    h.deps.store.upsertDeveloper = () => Promise.reject(Object.assign(new Error(`boom ${KEY_ARN}`), { name: "InternalServerError" }));
+    const start = await h.http(httpEvent("GET", authorizeQuery()));
+    const response = await h.http(httpEvent("GET", h.slack.approve(start.headers.location!, maya.userId)));
+    expect(response.statusCode).toBe(302);
+    const location = new URL(response.headers.location!);
+    expect(`${location.origin}${location.pathname}`).toBe(CLI_REDIRECT);
+    expect(location.searchParams.get("error")).toBe("server_error");
+    expect(location.searchParams.get("state")).toBe("cli-state");
+    expect(response.headers.location + JSON.stringify(h.logs)).not.toContain(KEY_ARN);
+    expect(h.logs.some((entry) => entry.event === "signin.error" && entry.error === "InternalServerError")).toBe(true);
+  });
+
+  it("sends pragma: no-cache only with no-store, never beside a public cache-control", async () => {
+    const h = identityHarness();
+    for (const path of ["/v1/auth/.well-known/openid-configuration", "/v1/auth/.well-known/jwks.json"]) {
+      const response = await h.http(httpEvent("GET", path));
+      expect(response.headers["cache-control"]).toBe("public, max-age=300");
+      expect(response.headers.pragma).toBeUndefined();
+    }
+    const token = await h.http(httpEvent("POST", "/v1/auth/token", { grant_type: "password", client_id: "agentx-cli" }));
+    expect(token.headers["cache-control"]).toBe("no-store");
+    expect(token.headers.pragma).toBe("no-cache");
+  });
+
+  it("gives every expired-link page its own headers object", async () => {
+    const h = identityHarness();
+    const first = await h.http(httpEvent("GET", "/v1/auth/callback/slack?state=nope&code=x"));
+    const second = await h.http(httpEvent("GET", "/v1/auth/callback/slack?state=nope&code=x"));
+    expect(first.statusCode).toBe(400);
+    expect(first.headers).toEqual(second.headers);
+    expect(first.headers).not.toBe(second.headers);
+  });
 });
 
 describe("secrets never leave", () => {
@@ -455,7 +527,13 @@ describe("the Lambda's configuration", () => {
 
   it("reads its argument, not the process environment (F1)", () => {
     expect(() => developerIdentityConfigFromEnvironment({ DEVELOPER_TOKEN_ISSUER: ISSUER })).toThrow(/^AGENTX_ENV is required$/);
-    expect(() => developerIdentityConfigFromEnvironment({ ...base, DEVELOPER_OIDC_ISSUER: OIDC_ISSUER })).toThrow(/^DEVELOPER_OIDC_CLIENT_ID is required$/);
+  });
+
+  it("records a company sign-in problem instead of failing the whole Lambda", () => {
+    const missingClient = developerIdentityConfigFromEnvironment({ ...base, DEVELOPER_OIDC_ISSUER: OIDC_ISSUER, DEVELOPER_OIDC_DISPLAY_NAME: "Okta" });
+    expect(missingClient.oidc).toEqual({ displayName: "Okta" });
+    expect(missingClient.oidcSettings).toBeUndefined();
+    expect(missingClient.oidcProblem).toContain("DEVELOPER_OIDC_CLIENT_ID");
   });
 
   it("reads the company settings", () => {
@@ -463,12 +541,34 @@ describe("the Lambda's configuration", () => {
       .toMatchObject({ oidc: { displayName: "Okta" }, oidcSettings: { issuer: OIDC_ISSUER, clientId: "c", requiredClaim: "groups", requiredValues: ["engineering"] } });
   });
 
-  it("refuses required values without a required claim, and values that are not a JSON array of strings", () => {
+  it("refuses required values without a required claim, and values that are not a JSON array of strings, as a company sign-in problem", () => {
     const oidc = { ...base, DEVELOPER_OIDC_ISSUER: OIDC_ISSUER, DEVELOPER_OIDC_CLIENT_ID: "c" };
-    expect(() => developerIdentityConfigFromEnvironment({ ...oidc, DEVELOPER_OIDC_REQUIRED_VALUES: "[\"engineering\"]" })).toThrow(/DEVELOPER_OIDC_REQUIRED_CLAIM/);
+    const noClaim = developerIdentityConfigFromEnvironment({ ...oidc, DEVELOPER_OIDC_REQUIRED_VALUES: "[\"engineering\"]" });
+    expect(noClaim.oidcSettings).toBeUndefined();
+    expect(noClaim.oidcProblem).toContain("DEVELOPER_OIDC_REQUIRED_CLAIM");
     for (const values of ["{\"a\":1}", "not json", "[1]"]) {
-      expect(() => developerIdentityConfigFromEnvironment({ ...oidc, DEVELOPER_OIDC_REQUIRED_CLAIM: "groups", DEVELOPER_OIDC_REQUIRED_VALUES: values })).toThrow(/^DEVELOPER_OIDC_REQUIRED_VALUES must be a JSON array of strings$/);
+      const config = developerIdentityConfigFromEnvironment({ ...oidc, DEVELOPER_OIDC_REQUIRED_CLAIM: "groups", DEVELOPER_OIDC_REQUIRED_VALUES: values });
+      expect(config.oidcSettings).toBeUndefined();
+      expect(config.oidcProblem).toContain("DEVELOPER_OIDC_REQUIRED_VALUES must be a JSON array of strings");
     }
+    expect(developerIdentityConfigFromEnvironment({ ...oidc, DEVELOPER_OIDC_REQUIRED_CLAIM: "groups", DEVELOPER_OIDC_REQUIRED_VALUES: "[\"engineering\"]" }).oidcProblem).toBeUndefined();
+  });
+
+  it("keeps everything else working when the company sign-in settings are broken", async () => {
+    const config = developerIdentityConfigFromEnvironment({ ...base, DEVELOPER_SIGNIN_SLACK: "enabled", SLACK_TEAM_ID: TEAM, DEVELOPER_OIDC_ISSUER: OIDC_ISSUER, DEVELOPER_OIDC_CLIENT_ID: "c", DEVELOPER_OIDC_REQUIRED_VALUES: "[\"engineering\"]", DEVELOPER_OIDC_DISPLAY_NAME: "Okta" });
+    const h = identityHarness({ slackUsers: [maya], oidc: {}, channels: { C0PAY0001: ["U0MAYA001"] } });
+    h.deps.providers.oidc = unconfiguredProvider("oidc", config.oidcProblem!);
+    expect((await h.http(httpEvent("GET", "/v1/auth/.well-known/openid-configuration"))).statusCode).toBe(200);
+    expect((await h.http(httpEvent("GET", "/v1/auth/.well-known/jwks.json"))).statusCode).toBe(200);
+    const slack = await h.exchange((await h.signIn("slack", maya.userId)).searchParams.get("code")!);
+    expect(slack.status).toBe(200);
+    expect((await h.refresh(String(slack.body.refresh_token))).status).toBe(200);
+    expect(await h.handler({ kind: "channel-members", slackUserId: "U0MAYA001", channelIds: ["C0PAY0001"] })).toEqual({ ok: true, memberOf: ["C0PAY0001"] });
+    const company = await h.signIn("oidc", "nobody");
+    expect(`${company.origin}${company.pathname}`).toBe(CLI_REDIRECT);
+    expect(company.searchParams.get("error")).toBe("access_denied");
+    expect(company.searchParams.get("error_description")).toContain("not finished");
+    expect(company.searchParams.get("error_description")).toContain("DEVELOPER_OIDC_REQUIRED_CLAIM");
   });
 
   it("parses the Slack secret with or without the sign-in keys, and never echoes it", () => {

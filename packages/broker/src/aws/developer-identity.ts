@@ -7,8 +7,8 @@ import { KMSClient } from "@aws-sdk/client-kms";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { createRemoteJWKSet, type JWTVerifyGetKey } from "jose";
-import type { ChannelMembersRequest } from "@agentx/contracts";
-import { ProviderNotConfiguredError, oidcSignInProvider, slackSignInProvider } from "../developer/providers.js";
+import type { ChannelMembersRequest, DeveloperSignInMethod } from "@agentx/contracts";
+import { ProviderNotConfiguredError, oidcSignInProvider, slackSignInProvider, type SignInProvider } from "../developer/providers.js";
 import { createDeveloperIdentityHandler, type DeveloperIdentityConfig } from "../developer/server.js";
 import { slackDirectory } from "../developer/slack-directory.js";
 import { DeveloperSignInStore } from "../developer/store.js";
@@ -20,6 +20,9 @@ const SLACK_JWKS_URI = "https://slack.com/openid/connect/keys";
 
 export type DeveloperIdentityLambdaConfig = DeveloperIdentityConfig & {
   oidcSettings?: { issuer: string; clientId: string; requiredClaim?: string; requiredValues: string[] };
+  /** Set instead of oidcSettings when the company sign-in settings are unusable. Only that method
+   * then refuses ("not finished"); Slack sign-in, keys, refresh and the invoke keep working. */
+  oidcProblem?: string;
 };
 
 /** Reads the given environment (F1: never process.env directly), so it can be tested. */
@@ -50,16 +53,25 @@ export function developerIdentityConfigFromEnvironment(env: NodeJS.ProcessEnv): 
     slack: { enabled: env.DEVELOPER_SIGNIN_SLACK === "enabled", ...(teamId === "" ? {} : { teamId }) },
   };
   if (issuer === "") return config;
+  const withOidc = { ...config, oidc: { displayName: env.DEVELOPER_OIDC_DISPLAY_NAME || "Company sign-in" } };
+  const problem = (text: string) => ({ ...withOidc, oidcProblem: `${text}; ask an admin to run agentx signin enable oidc` });
+  const clientId = env.DEVELOPER_OIDC_CLIENT_ID ?? "";
+  if (clientId === "") return problem("DEVELOPER_OIDC_CLIENT_ID is not set");
   const requiredClaim = env.DEVELOPER_OIDC_REQUIRED_CLAIM ?? "";
-  const requiredValues = requiredValuesFrom(env.DEVELOPER_OIDC_REQUIRED_VALUES);
-  if (requiredValues.length > 0 && requiredClaim === "") {
-    throw new Error("DEVELOPER_OIDC_REQUIRED_VALUES is set but DEVELOPER_OIDC_REQUIRED_CLAIM is empty; set the claim with agentx signin enable oidc");
+  let requiredValues: string[];
+  try {
+    requiredValues = requiredValuesFrom(env.DEVELOPER_OIDC_REQUIRED_VALUES);
+  } catch (error) {
+    return problem((error as Error).message);
   }
-  return {
-    ...config,
-    oidc: { displayName: env.DEVELOPER_OIDC_DISPLAY_NAME || "Company sign-in" },
-    oidcSettings: { issuer, clientId: required(env, "DEVELOPER_OIDC_CLIENT_ID"), ...(requiredClaim === "" ? {} : { requiredClaim }), requiredValues },
-  };
+  if (requiredValues.length > 0 && requiredClaim === "") return problem("DEVELOPER_OIDC_REQUIRED_VALUES is set but DEVELOPER_OIDC_REQUIRED_CLAIM is empty");
+  return { ...withOidc, oidcSettings: { issuer, clientId, ...(requiredClaim === "" ? {} : { requiredClaim }), requiredValues } };
+}
+
+/** A provider an admin has not finished setting up: every call says so, with what to fix. */
+export function unconfiguredProvider(method: DeveloperSignInMethod, message: string): SignInProvider {
+  const refuse = () => Promise.reject(new ProviderNotConfiguredError(message));
+  return { method, authorizeUrl: refuse, complete: refuse };
 }
 
 function parseSecretObject(text: string, what: string): Record<string, unknown> {
@@ -131,7 +143,16 @@ function build(env: NodeJS.ProcessEnv): ReturnType<typeof createDeveloperIdentit
   const now = () => Date.now();
   const log = (entry: Record<string, unknown>) => console.log(JSON.stringify(entry));
   const jwksFor = remoteJwksCache();
-  const oidc = config.oidcSettings;
+  const oidcSettings = config.oidcSettings;
+  const oidcSecretId = env.DEVELOPER_OIDC_SECRET_ID ?? "";
+  const oidcProvider = (): SignInProvider | undefined => {
+    if (config.oidc === undefined) return undefined;
+    if (config.oidcProblem !== undefined) return unconfiguredProvider("oidc", config.oidcProblem);
+    if (oidcSettings === undefined || oidcSecretId === "") return unconfiguredProvider("oidc", "DEVELOPER_OIDC_SECRET_ID is not set; ask an admin to run agentx signin enable oidc");
+    return oidcSignInProvider({ ...oidcSettings, clientSecret: cachedSecret(secrets, oidcSecretId, parseOidcClientSecret), fetch, jwksFor, now });
+  };
+  const oidc = oidcProvider();
+  if (config.oidcProblem !== undefined) log({ event: "signin.not_configured", method: "oidc", detail: config.oidcProblem });
   return createDeveloperIdentityHandler({
     config,
     store: new DeveloperSignInStore({
@@ -142,13 +163,7 @@ function build(env: NodeJS.ProcessEnv): ReturnType<typeof createDeveloperIdentit
     signer: kmsTokenSigner({ kms: new KMSClient(region), keyId: required(env, "DEVELOPER_TOKEN_KEY_ARN") }),
     providers: {
       slack: slackSignInProvider({ teamId: config.slack.teamId, credentials: slackSecret, fetch, jwks: jwksFor(SLACK_JWKS_URI), now }),
-      ...(oidc === undefined ? {} : {
-        oidc: oidcSignInProvider({
-          ...oidc,
-          clientSecret: cachedSecret(secrets, required(env, "DEVELOPER_OIDC_SECRET_ID"), parseOidcClientSecret),
-          fetch, jwksFor, now,
-        }),
-      }),
+      ...(oidc === undefined ? {} : { oidc }),
     },
     directory: slackDirectory({
       teamId: config.slack.teamId, botToken: async () => (await slackSecret()).botToken, fetch, now,

@@ -15,7 +15,7 @@ import {
 import { adaptHttpApiEvent, ownerKeyForSubject, type HttpApiV2Event } from "../aws/lambda.js";
 import { ProviderNotConfiguredError, ProviderUnavailableError, type ProviderResult, type SignInProvider } from "./providers.js";
 import type { SlackDirectory } from "./slack-directory.js";
-import type { DeveloperSignInStore, SessionRecord } from "./store.js";
+import type { AuthRequestRecord, DeveloperSignInStore, SessionRecord } from "./store.js";
 import { issueAccessToken, type TokenSigner } from "./tokens.js";
 
 export interface DeveloperIdentityConfig { env: string; issuer: string; slack: { enabled: boolean; teamId?: string }; oidc?: { displayName: string } }
@@ -29,6 +29,8 @@ export interface DeveloperIdentityDependencies {
   log: (entry: Record<string, unknown>) => void;
 }
 export interface HttpResult { statusCode: number; headers: Record<string, string>; body: string }
+/** The invoke's answer: the broker's contract, plus a refusal for a request that is not one. */
+export type ChannelMembersResult = ChannelMembersResponse | { ok: false; error: "invalid_request" };
 
 const CHALLENGE = /^[A-Za-z0-9_-]{43,128}$/;
 const JSON_HEADERS = { "content-type": "application/json", "cache-control": "no-store", pragma: "no-cache" };
@@ -40,8 +42,8 @@ const HTML_HEADERS = {
   "x-content-type-options": "nosniff",
   "x-frame-options": "DENY",
 };
-/** DynamoDB errors that mean "try again": the store rethrows these instead of deciding reuse. */
-const RETRYABLE_STORE_ERRORS = new Set([
+/** AWS errors that mean "try again": the store rethrows these instead of deciding reuse. */
+const RETRYABLE_AWS_ERRORS = new Set([
   "TransactionCanceledException", "TransactionConflictException", "TransactionInProgressException", "ThrottlingException",
   "ProvisionedThroughputExceededException", "RequestLimitExceeded", "InternalServerError", "ServiceUnavailable", "TimeoutError",
 ]);
@@ -64,16 +66,18 @@ function page(statusCode: number, title: string, paragraphs: string[], links: Ar
   return { statusCode, headers: { ...HTML_HEADERS }, body };
 }
 
-const jsonResult = (statusCode: number, body: unknown, headers: Record<string, string> = {}): HttpResult =>
-  ({ statusCode, headers: { ...JSON_HEADERS, ...headers }, body: JSON.stringify(body) });
+const jsonResult = (statusCode: number, body: unknown): HttpResult => ({ statusCode, headers: { ...JSON_HEADERS }, body: JSON.stringify(body) });
+/** Public, cacheable documents (discovery, keys): no pragma, which belongs only beside no-store. */
+const publicJson = (body: unknown): HttpResult =>
+  ({ statusCode: 200, headers: { "content-type": "application/json", "cache-control": "public, max-age=300" }, body: JSON.stringify(body) });
 const redirect = (location: string): HttpResult => ({ statusCode: 302, headers: { location, "cache-control": "no-store", "referrer-policy": "no-referrer" }, body: "" });
 const oauthError = (status: number, error: string, description: string) => jsonResult(status, { error, error_description: description });
 const errorName = (error: unknown) => (error instanceof Error ? error.name : "unknown");
 
-function isRetryableStoreError(error: unknown): boolean {
+function isRetryableAwsError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   const meta = error as { $retryable?: unknown; $metadata?: { httpStatusCode?: number } };
-  return RETRYABLE_STORE_ERRORS.has(error.name) || meta.$retryable !== undefined || (meta.$metadata?.httpStatusCode ?? 0) >= 500;
+  return RETRYABLE_AWS_ERRORS.has(error.name) || meta.$retryable !== undefined || (meta.$metadata?.httpStatusCode ?? 0) >= 500;
 }
 
 function toClient(redirectUri: string, params: Record<string, string>): HttpResult {
@@ -82,7 +86,7 @@ function toClient(redirectUri: string, params: Record<string, string>): HttpResu
   return redirect(url.toString());
 }
 
-const EXPIRED = page(400, "This sign-in link has expired", ["Run agentx login again."]);
+const expired = () => page(400, "This sign-in link has expired", ["Run agentx login again."]);
 /** One answer for every code failure (unknown, used, expired, wrong verifier, wrong redirect URI). */
 const INVALID_CODE = ["invalid_grant", "the sign-in code is invalid, used or expired; run agentx login again"] as const;
 const SIGN_IN_ENDED = ["invalid_grant", "your AgentX sign-in has ended; run agentx login again"] as const;
@@ -114,7 +118,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       const method = query.get("method");
       if ((method !== "slack" && method !== "oidc") || !methods.includes(method)) return page(400, "Sign-in method not available", ["Run agentx login again."]);
       const request = await store.chooseMethod(requestId, method);
-      if (request === undefined) return EXPIRED;
+      if (request === undefined) return expired();
       return toProvider(request.id, request.nonce, method, request.clientRedirectUri, request.clientState);
     }
     const redirectUri = query.get("redirect_uri") ?? "";
@@ -133,7 +137,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     const request = await store.createAuthRequest({ clientRedirectUri: redirectUri, clientState, codeChallenge: challenge, nonce: randomBytes(32).toString("base64url") });
     if (methods.length === 1) {
       const method = methods[0]!;
-      if (await store.chooseMethod(request.id, method) === undefined) return EXPIRED;
+      if (await store.chooseMethod(request.id, method) === undefined) return expired();
       return toProvider(request.id, request.nonce, method, redirectUri, clientState);
     }
     return page(200, "Sign in to AgentX", [`Environment: ${config.env}`], methods.map((method) => ({
@@ -167,12 +171,21 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
   async function callback(method: DeveloperSignInMethod, query: URLSearchParams): Promise<HttpResult> {
     const state = query.get("state") ?? "";
     const pending = state === "" ? undefined : await store.getAuthRequest(state);
-    if (pending === undefined || pending.method !== method) return EXPIRED;
+    if (pending === undefined || pending.method !== method) return expired();
     // Single use: the state (and with it the nonce) is consumed before anything else happens.
     const request = await store.consumeAuthRequest(state, method);
     if (request === undefined) return page(400, "This sign-in link was already used", ["Run agentx login again."]);
+    try {
+      return await completeSignIn(method, request, query.get("code"));
+    } catch (error) {
+      // The state is spent, so tell the CLI now rather than leave it waiting for its timeout.
+      deps.log({ event: "signin.error", path: `/v1/auth/callback/${method}`, error: errorName(error) });
+      return toClient(request.clientRedirectUri, { error: "server_error", error_description: "sign-in failed on the AgentX server; run agentx login again", state: request.clientState });
+    }
+  }
+
+  async function completeSignIn(method: DeveloperSignInMethod, request: AuthRequestRecord, code: string | null): Promise<HttpResult> {
     const client = (params: Record<string, string>) => toClient(request.clientRedirectUri, { ...params, state: request.clientState });
-    const code = query.get("code");
     if (code === null) return client({ error: "access_denied", error_description: `the sign-in was cancelled at ${methodLabel(method)}; run agentx login again` });
     let result: ProviderResult;
     try {
@@ -248,14 +261,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     }
     // Signed before the rotation: a signing failure then leaves the presented token untouched.
     const access = await accessToken(session);
-    let rotated: { refreshToken: string } | { reused: true } | { ended: true };
-    try {
-      rotated = lookup.kind === "active" ? await store.rotateRefresh(lookup) : await store.rotateRecentlyUsed(lookup);
-    } catch (error) {
-      if (!isRetryableStoreError(error)) throw error;
-      deps.log({ event: "signin.refresh_retry", sessionId: session.sessionId, error: errorName(error) });
-      return oauthError(503, "temporarily_unavailable", "the sign-in could not be renewed just now; your sign-in is kept, try again in a moment");
-    }
+    const rotated = lookup.kind === "active" ? await store.rotateRefresh(lookup) : await store.rotateRecentlyUsed(lookup);
     if ("reused" in rotated) {
       await revoke(session.sessionId, "refresh_token_reused");
       return ended;
@@ -270,8 +276,19 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     const methods = enabledMethods(deps);
     const grant = form.get("grant_type");
     if (grant === "authorization_code") return authorizationCodeGrant(form, methods);
-    if (grant === "refresh_token") return refreshTokenGrant(form, methods);
+    if (grant === "refresh_token") return retryable("token", () => refreshTokenGrant(form, methods));
     return oauthError(400, "unsupported_grant_type", "use authorization_code or refresh_token");
+  }
+
+  /** A retryable AWS error anywhere in fn answers 503 and changes nothing more; others propagate. */
+  async function retryable(operation: string, fn: () => Promise<HttpResult>): Promise<HttpResult> {
+    try {
+      return await fn();
+    } catch (error) {
+      if (!isRetryableAwsError(error)) throw error;
+      deps.log({ event: "signin.retry", operation, error: errorName(error) });
+      return oauthError(503, "temporarily_unavailable", "AgentX could not finish this just now; your sign-in is kept, try again in a moment");
+    }
   }
 
   /** RFC 7009. A public client, so no client authentication; a known refresh token ends its session. */
@@ -280,10 +297,12 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     if (clientId !== null && clientId !== AGENTX_CLI_CLIENT_ID) return oauthError(401, "invalid_client", "unknown client; use the AgentX CLI");
     const presented = form.get("token");
     if (presented === null || presented === "") return oauthError(400, "invalid_request", "token is required");
-    const lookup = await store.lookupRefresh(presented);
-    if (lookup.kind === "active" || lookup.kind === "recently_rotated") await revoke(lookup.session.sessionId, "signed_out");
-    if (lookup.kind === "reused") await revoke(lookup.sessionId, "signed_out");
-    return jsonResult(200, {});
+    return retryable("revoke", async () => {
+      const lookup = await store.lookupRefresh(presented);
+      if (lookup.kind === "active" || lookup.kind === "recently_rotated") await revoke(lookup.session.sessionId, "signed_out");
+      if (lookup.kind === "reused") await revoke(lookup.sessionId, "signed_out");
+      return jsonResult(200, {});
+    });
   }
 
   const configuration = () => {
@@ -311,9 +330,9 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     if (method === "GET") {
       switch (pathname) {
         case "/v1/auth/.well-known/openid-configuration":
-          return jsonResult(200, discovery(), { "cache-control": "public, max-age=300" });
+          return publicJson(discovery());
         case "/v1/auth/.well-known/jwks.json":
-          return jsonResult(200, { keys: [await deps.signer.publicJwk()] }, { "cache-control": "public, max-age=300" });
+          return publicJson({ keys: [await deps.signer.publicJwk()] });
         case "/v1/auth/.well-known/agentx-configuration":
           return jsonResult(200, configuration());
         case "/v1/auth/authorize":
@@ -331,10 +350,10 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
 
   const isPage = (pathname: string) => pathname === "/v1/auth/authorize" || pathname.startsWith("/v1/auth/callback/");
 
-  return async (event: HttpApiV2Event | ChannelMembersRequest): Promise<HttpResult | ChannelMembersResponse> => {
+  return async (event: HttpApiV2Event | ChannelMembersRequest): Promise<HttpResult | ChannelMembersResult> => {
     if ("kind" in event) {
       const parsed = ChannelMembersRequestSchema.safeParse(event);
-      if (!parsed.success) return { ok: false, error: "slack_unavailable" };
+      if (!parsed.success) return { ok: false, error: "invalid_request" };
       return deps.directory.channelMembers(parsed.data.slackUserId, parsed.data.channelIds);
     }
     const request = adaptHttpApiEvent(event);
