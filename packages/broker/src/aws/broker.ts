@@ -16,6 +16,7 @@ import {
   type TransactWriteCommandInput,
 } from "@aws-sdk/lib-dynamodb";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
 import {
   GetSecretValueCommand,
   SecretsManagerClient,
@@ -90,6 +91,7 @@ import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
 import { RepositoryGrantService } from "../repository-access.js";
 import { publicWorkspace } from "../workspaces.js";
+import { SessionManager } from "./sessions.js";
 import {
   adaptHttpApiEvent,
   identityFromJwtClaims,
@@ -228,6 +230,8 @@ interface AwsBrokerDependencies {
     capacityProviderArn: string;
     runtimeSessionId: string;
   }) => Promise<void>;
+  /** Starts deleting an ec2-ebs workspace's instance and volume (#84). */
+  deleteEc2Session?: (workspaceId: string) => Promise<void>;
   tableName: string;
   artifactBucketName: string;
   issuer: string;
@@ -1050,9 +1054,19 @@ async function completeThreadWorkspaceClose(
     case "demo-microvm":
       break;
     case "ec2-ebs":
-      // Closing must delete the workspace's EBS volume. Until the Session Manager can, refuse
+      // The session deleter terminates the instance and deletes the volume; without it, refuse
       // rather than mark the workspace CLOSED and leak the volume.
-      throw agentXError("RUNTIME_UNAVAILABLE", "closing an ec2-ebs workspace is not supported yet");
+      if (dependencies.deleteEc2Session === undefined) {
+        throw agentXError("RUNTIME_UNAVAILABLE", "this control plane cannot delete ec2-ebs workspace storage");
+      }
+      try {
+        await dependencies.deleteEc2Session(workspace.id);
+      } catch (error) {
+        // Compute that is starting or stopping refuses with WORKSPACE_BUSY; the close is retried.
+        if (error instanceof AgentXError) throw error;
+        throw agentXError("RUNTIME_UNAVAILABLE", "workspace resource cleanup failed; retry the close request");
+      }
+      break;
     default:
       unhandledDeploymentMode(workspace);
   }
@@ -3637,6 +3651,19 @@ const s3 = new S3Client(awsClientConfiguration);
 const agentCore = new BedrockAgentCoreClient(awsClientConfiguration);
 const secretsManager = new SecretsManagerClient(awsClientConfiguration);
 const codeBuild = createCodeBuildGateway(awsClientConfiguration);
+const stepFunctions = new SFNClient(awsClientConfiguration);
+// The broker only deletes ec2-ebs sessions when a workspace closes (#84).
+const ec2Sessions = new SessionManager({
+  documentClient,
+  tableName: process.env.STATE_TABLE_NAME ?? "",
+  executions: {
+    provisionerArn: process.env.PROVISIONER_ARN ?? "",
+    deleterArn: process.env.DELETER_ARN ?? "",
+    async start(input) {
+      return (await stepFunctions.send(new StartExecutionCommand(input))).executionArn!;
+    },
+  },
+});
 const githubPrivateKeySecretArn = requiredEnvironment("GITHUB_APP_PRIVATE_KEY_SECRET_ARN");
 let githubPrivateKey: Promise<string> | undefined;
 const loadGitHubPrivateKey = (): Promise<string> => {
@@ -3715,5 +3742,8 @@ export const handler = createAwsBrokerHandler({
   },
   async deleteWorkspaceSession(input) {
     await deleteCapacityProviderWorkspaceSession(agentCore, input);
+  },
+  async deleteEc2Session(workspaceId) {
+    await ec2Sessions.deleteSession(workspaceId);
   },
 });

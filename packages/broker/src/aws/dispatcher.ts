@@ -3,10 +3,16 @@ import {
   InvokeAgentRuntimeCommand,
 } from "@aws-sdk/client-bedrock-agentcore";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { KMSClient, SignCommand } from "@aws-sdk/client-kms";
+import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
 import { DynamoDBDocumentClient, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { WorkerInvocationSchema, agentXError, type WorkerInvocation } from "@agentx/contracts";
-import { requiredEnvironment, type DurableOutboxRecord } from "./lambda.js";
+import { requiredEnvironment, type DurableOutboxRecord, type Ec2OutboxRecord } from "./lambda.js";
+import type { Ec2Delivery } from "./ec2-delivery.js";
 import { failOutboxOperation } from "./outbox-failure.js";
+import { createEc2Delivery } from "./ec2-delivery.js";
+import { appendOperationEvent } from "./operation-events.js";
+import { SessionManager, workspaceBinding } from "./sessions.js";
 
 const DEFAULT_MAX_DISPATCH_ATTEMPTS = 5;
 
@@ -53,6 +59,8 @@ export function createDispatcherHandler(dependencies: {
   markDispatching: (record: DurableOutboxRecord) => Promise<boolean | void>;
   markDelivered: (id: string) => Promise<void>;
   markFailed: (record: DurableOutboxRecord, error: string) => Promise<void>;
+  /** Delivers an ec2-ebs record; without it such records fail like any undeliverable one. */
+  deliverEc2?: (record: Ec2OutboxRecord, invocation: WorkerInvocation) => Promise<Ec2Delivery>;
   maxAttempts?: number;
   log?: (entry: DispatchLogEntry) => void;
 }) {
@@ -72,7 +80,10 @@ export function createDispatcherHandler(dependencies: {
           continue;
         }
         if (record.deploymentMode === "ec2-ebs") {
-          throw agentXError("RUNTIME_UNAVAILABLE", "dispatch to ec2-ebs workers is not supported yet");
+          if (dependencies.deliverEc2 === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "this dispatcher cannot reach ec2-ebs workers");
+          // A record parked until its session is ready is acknowledged without using an attempt.
+          if (await dependencies.deliverEc2(record, invocation) === "DELIVERED") await dependencies.markDelivered(record.id);
+          continue;
         }
         const response = await dependencies.invoke({
           runtimeArn: record.runtimeArn,
@@ -133,8 +144,55 @@ const tableName = process.env.STATE_TABLE_NAME;
 const awsClientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
 const agentCore = new BedrockAgentCoreClient(awsClientConfiguration);
 const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(awsClientConfiguration));
+const kms = new KMSClient(awsClientConfiguration);
+const sfn = new SFNClient(awsClientConfiguration);
+/** A worker answers /invocations as soon as it has journaled the operation. */
+const WORKER_POST_TIMEOUT_MS = 10_000;
+
+const deliverEc2 = createEc2Delivery({
+  sessions: new SessionManager({
+    documentClient,
+    tableName: tableName ?? "",
+    executions: {
+      provisionerArn: process.env.PROVISIONER_ARN ?? "",
+      deleterArn: process.env.DELETER_ARN ?? "",
+      async start(input) {
+        return (await sfn.send(new StartExecutionCommand(input))).executionArn!;
+      },
+    },
+  }),
+  binding: (workspaceId) => workspaceBinding(documentClient, tableName ?? requiredEnvironment("STATE_TABLE_NAME"), workspaceId),
+  async sign(message) {
+    const response = await kms.send(new SignCommand({
+      KeyId: requiredEnvironment("INVOKE_SIGNING_KEY_ARN"),
+      Message: message,
+      MessageType: "RAW",
+      SigningAlgorithm: "ECDSA_SHA_256",
+    }));
+    return response.Signature!;
+  },
+  async post(url, init) {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { authorization: init.authorization, "content-type": "application/json" },
+      body: init.body,
+      signal: AbortSignal.timeout(WORKER_POST_TIMEOUT_MS),
+    });
+    return { status: response.status, body: await response.text() };
+  },
+  async progress(record, message) {
+    await appendOperationEvent(documentClient, tableName ?? requiredEnvironment("STATE_TABLE_NAME"), {
+      workspaceId: record.workspaceId,
+      operationId: record.operationId,
+      fence: record.invocation.fence,
+      onceKey: `session-wait#${record.id}`,
+      event: { type: "progress", timestamp: new Date().toISOString(), payload: { message } },
+    });
+  },
+});
 
 export const handler = createDispatcherHandler({
+  deliverEc2,
   maxAttempts: parseMaximumAttempts(process.env.MAX_DISPATCH_ATTEMPTS),
   async invoke(input) {
     const response = await agentCore.send(new InvokeAgentRuntimeCommand({

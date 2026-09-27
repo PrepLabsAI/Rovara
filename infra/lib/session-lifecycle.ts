@@ -44,16 +44,22 @@ export class SessionLifecycle extends Construct {
   readonly steps: lambda.Function;
   readonly reaper: lambda.Function;
   private readonly naming: AgentXNaming;
+  private readonly dispatcherSecurityGroupId: CfnParameter;
+  private readonly privateSubnetIds: CfnParameter;
+  private readonly invokeSigningKey: kms.IKey;
 
   constructor(scope: Construct, id: string, props: SessionLifecycleProps) {
     super(scope, id);
     const stack = Stack.of(this);
     const { naming } = props;
     this.naming = naming;
+    this.invokeSigningKey = props.invokeSigningKey;
     // Parameter ids match the foundation outputs they are filled from.
     const parameter = (name: string, description: string) => new CfnParameter(stack, name, { type: "String", description });
     const privateSubnetIds = parameter("PrivateSubnetIds", "Comma-separated private subnet IDs of the foundation VPC");
     const sessionManagerSecurityGroupId = parameter("SessionManagerSecurityGroupId", "The foundation's session manager security group");
+    this.dispatcherSecurityGroupId = parameter("DispatcherSecurityGroupId", "The foundation's dispatcher security group");
+    this.privateSubnetIds = privateSubnetIds;
     const workspaceKmsKeyArn = parameter("WorkspaceKmsKeyArn", "The foundation's workspace volume KMS key");
     const instanceRoleArn = parameter("Ec2WorkerInstanceRoleArn", "The EC2 workers' instance role");
     const launchTemplateId = parameter("Ec2WorkerLaunchTemplateId", "The EC2 workers' launch template");
@@ -188,6 +194,33 @@ export class SessionLifecycle extends Construct {
 
     new CfnOutput(stack, "SessionProvisionerArn", { value: this.provisioner.stateMachineArn });
     new CfnOutput(stack, "SessionDeleterArn", { value: this.deleter.stateMachineArn });
+  }
+
+  /**
+   * The dispatcher delivers ec2-ebs work (#84): it runs in the private subnets with the foundation's
+   * dispatcher security group, the only other group a worker's port admits, and starts provisioning.
+   * AgentCore invocations still leave through the NAT gateways.
+   */
+  connectDispatcher(dispatcher: lambda.Function): void {
+    (dispatcher.node.defaultChild as lambda.CfnFunction).vpcConfig = {
+      subnetIds: Fn.split(",", this.privateSubnetIds.valueAsString),
+      securityGroupIds: [this.dispatcherSecurityGroupId.valueAsString],
+    };
+    dispatcher.role!.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaVPCAccessExecutionRole"));
+    this.connectExecutions(dispatcher);
+    dispatcher.addEnvironment("INVOKE_SIGNING_KEY_ARN", this.invokeSigningKey.keyArn);
+    this.provisioner.grantStartExecution(dispatcher);
+  }
+
+  /** The broker starts the deleter when an ec2-ebs workspace closes (#84). */
+  connectBroker(broker: lambda.Function): void {
+    this.connectExecutions(broker);
+    this.deleter.grantStartExecution(broker);
+  }
+
+  private connectExecutions(fn: lambda.Function): void {
+    fn.addEnvironment("PROVISIONER_ARN", this.provisioner.stateMachineArn);
+    fn.addEnvironment("DELETER_ARN", this.deleter.stateMachineArn);
   }
 
   private stateMachine(

@@ -21,7 +21,7 @@ import { STSClient } from "@aws-sdk/client-sts";
 import { Command, Option } from "commander";
 import { authorizeCredential, expectedAccountEmail, secretsManagerAuthorizeSecrets, type AuthorizeSecrets } from "./admin/authorize.js";
 import { listCredentials, registerCredential } from "./admin/credential.js";
-import { registerProject } from "./admin/register.js";
+import { cliRuntimeBinding, registerProject } from "./admin/register.js";
 import { bindSlackChannel, unbindSlackChannel } from "./admin/slack.js";
 import { stopWorkspace } from "./admin/stop.js";
 import { exportTurns, parseSince } from "./admin/turns.js";
@@ -213,37 +213,35 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .command("register")
     .description("register an immutable project revision and trusted runtime binding")
     .requiredOption("--file <path>", "project YAML file")
-    .requiredOption("--runtime-arn <arn>", "deployed AgentCore runtime ARN")
-    .requiredOption("--deployment-mode <mode>", "demo-microvm or instances-ebs")
-    .option("--endpoint-qualifier <qualifier>", "runtime endpoint qualifier", "DEFAULT")
+    .requiredOption("--deployment-mode <mode>", "demo-microvm, instances-ebs or ec2-ebs")
+    .option("--runtime-arn <arn>", "deployed AgentCore runtime ARN (AgentCore modes)")
+    .option("--endpoint-qualifier <qualifier>", "runtime endpoint qualifier (AgentCore modes)", "DEFAULT")
     .option("--capacity-provider-arn <arn>", "required for instances-ebs")
+    .option("--launch-template-id <id>", "EC2 worker launch template (ec2-ebs), the foundation's Ec2WorkerLaunchTemplateId")
+    .option("--subnets <pairs>", "availabilityZone=subnetId pairs, comma-separated (ec2-ebs), the foundation's Ec2WorkerSubnets")
+    .option("--volume-size-gib <size>", "workspace volume size in GiB (ec2-ebs)", "20")
+    .option("--volume-type <type>", "workspace volume type (ec2-ebs)", "gp3")
     .action(async (options: {
       file: string;
-      runtimeArn: string;
       deploymentMode: string;
+      runtimeArn?: string;
       endpointQualifier: string;
       capacityProviderArn?: string;
+      launchTemplateId?: string;
+      subnets?: string;
+      volumeSizeGib: string;
+      volumeType: string;
     }, command: Command) => {
       const globals = globalOptions(command);
+      const deploymentMode = WorkspaceDeploymentModeSchema.parse(options.deploymentMode);
+      const runtimeBinding = cliRuntimeBinding(deploymentMode, options);
       const definition = await projectFromFile(options.file, globals.allowLoopback);
       const { settings, accessToken } = await authenticate(globals, services.tokenStore);
-      const deploymentMode = WorkspaceDeploymentModeSchema.parse(options.deploymentMode);
-      if (deploymentMode === "ec2-ebs") {
-        // Its binding names a launch template and subnets, which these AgentCore flags cannot express.
-        throw agentXError("CONFIG_INVALID", "ec2-ebs projects cannot be registered from the CLI yet");
-      }
       const result = await registerProject({
         controlPlaneUrl: settings.controlPlaneUrl,
         accessToken,
         definition,
-        runtimeBinding: {
-          runtimeArn: options.runtimeArn,
-          endpointQualifier: options.endpointQualifier,
-          deploymentMode,
-          ...(options.capacityProviderArn === undefined
-            ? {}
-            : { capacityProviderArn: options.capacityProviderArn }),
-        },
+        runtimeBinding,
       }, services.fetchImplementation);
       services.stdout.write(formatSuccess(result, globals.json));
       for (const warning of registrationWarnings(result, definition)) services.stderr.write(`Warning: ${warning}\n`);

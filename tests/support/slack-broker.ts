@@ -53,6 +53,7 @@ export function createBroker(options: {
   slack?: boolean;
   githubMcp?: GitHubMcpDependencies;
   deleteWorkspaceSession?: () => Promise<void>;
+  deleteEc2Session?: (workspaceId: string) => Promise<void>;
   connectorTypes?: Record<string, ConnectorType>;
   connectorCredentials?: ConnectorCredentialsConfiguration;
   credentialRegistry?: CredentialRegistry;
@@ -65,6 +66,7 @@ export function createBroker(options: {
     s3: { send: vi.fn() },
     stopRuntimeSession: vi.fn(),
     deleteWorkspaceSession,
+    ...(options.deleteEc2Session ? { deleteEc2Session: options.deleteEc2Session } : {}),
     tableName: "state",
     artifactBucketName: "artifacts",
     issuer,

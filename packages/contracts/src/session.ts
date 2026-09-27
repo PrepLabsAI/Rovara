@@ -165,6 +165,7 @@ export const WORKER_SETTING_PARAMETERS = {
 export const CONTROL_PLANE_FOUNDATION_PARAMETERS = [
   "PrivateSubnetIds",
   "SessionManagerSecurityGroupId",
+  "DispatcherSecurityGroupId",
   "WorkspaceKmsKeyArn",
   "Ec2WorkerInstanceRoleArn",
   "Ec2WorkerLaunchTemplateId",

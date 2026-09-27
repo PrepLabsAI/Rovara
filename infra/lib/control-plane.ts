@@ -564,6 +564,8 @@ export class ControlPlaneStack extends Stack {
 
     const sessions = new SessionLifecycle(this, "Sessions", { naming, state, invokeSigningKey, notifyOperator });
     sessions.steps.addEnvironment("CONTROL_PLANE_URL", api.attrApiEndpoint);
+    sessions.connectDispatcher(dispatcher);
+    sessions.connectBroker(broker);
 
     new CfnOutput(this, "ApiEndpoint", { value: api.attrApiEndpoint });
     new CfnOutput(this, "StateTableName", { value: state.tableName });

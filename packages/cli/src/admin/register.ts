@@ -8,6 +8,7 @@ import {
   type AgentCoreDeploymentMode,
   type Ec2RuntimeBinding,
   type ProjectDefinition,
+  type WorkspaceDeploymentMode,
 } from "@agentx/contracts";
 import { readJsonResponse, serverError } from "./http.js";
 
@@ -19,6 +20,61 @@ export type ProjectRuntimeBinding =
       capacityProviderArn?: string;
     }
   | Ec2RuntimeBinding;
+
+/** The runtime binding the `admin project register` flags describe; each mode takes only its own flags. */
+export function cliRuntimeBinding(
+  deploymentMode: WorkspaceDeploymentMode,
+  options: {
+    runtimeArn?: string;
+    endpointQualifier: string;
+    capacityProviderArn?: string;
+    launchTemplateId?: string;
+    subnets?: string;
+    volumeSizeGib: string;
+    volumeType: string;
+  },
+): ProjectRuntimeBinding {
+  switch (deploymentMode) {
+    case "instances-ebs":
+    case "demo-microvm":
+      if (options.runtimeArn === undefined) throw agentXError("CONFIG_INVALID", `${deploymentMode} registration requires --runtime-arn`);
+      if (options.launchTemplateId !== undefined || options.subnets !== undefined) {
+        throw agentXError("CONFIG_INVALID", "--launch-template-id and --subnets apply to ec2-ebs only");
+      }
+      return {
+        runtimeArn: options.runtimeArn,
+        endpointQualifier: options.endpointQualifier,
+        deploymentMode,
+        ...(options.capacityProviderArn === undefined ? {} : { capacityProviderArn: options.capacityProviderArn }),
+      };
+    case "ec2-ebs": {
+      if (options.runtimeArn !== undefined || options.capacityProviderArn !== undefined) {
+        throw agentXError("CONFIG_INVALID", "--runtime-arn and --capacity-provider-arn apply to AgentCore modes only");
+      }
+      if (options.launchTemplateId === undefined || options.subnets === undefined) {
+        throw agentXError("CONFIG_INVALID", "ec2-ebs registration requires --launch-template-id and --subnets");
+      }
+      const subnets = options.subnets.split(",").map((pair) => {
+        const [availabilityZone, subnetId, extra] = pair.trim().split("=");
+        if (!availabilityZone || !subnetId || extra !== undefined) throw agentXError("CONFIG_INVALID", `--subnets entry ${JSON.stringify(pair)} is not availabilityZone=subnetId`);
+        return { availabilityZone, subnetId };
+      });
+      const parsed = Ec2RuntimeBindingSchema.safeParse({
+        deploymentMode,
+        launchTemplateId: options.launchTemplateId,
+        subnets,
+        volumeSizeGiB: Number(options.volumeSizeGib),
+        volumeType: options.volumeType,
+      });
+      if (!parsed.success) {
+        throw agentXError("CONFIG_INVALID", `ec2-ebs binding is invalid: ${parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`);
+      }
+      return parsed.data;
+    }
+    default:
+      return unhandledDeploymentMode(deploymentMode);
+  }
+}
 
 export async function registerProject(
   options: {
