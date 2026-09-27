@@ -152,6 +152,69 @@ export function workerInvokeToken(payload: string, signature: Uint8Array): strin
   return `${payload}.${Buffer.from(signature).toString("base64url")}`;
 }
 
+// Every boot value is interpolated into a shell script, so each pattern admits no quote,
+// whitespace or other shell metacharacter.
+const SHELL_SAFE = /^[A-Za-z0-9._:/@+=-]+$/;
+
+/**
+ * What an EC2 worker boots with. The provisioner renders it into user data with
+ * `ec2WorkerUserData`; `packages/worker/ec2/boot.sh` reads each field from the variable named here.
+ */
+export const Ec2WorkerBootConfigSchema = z
+  .object({
+    /** AGENTX_WORKSPACE_ID */
+    workspaceId: z.string().uuid(),
+    /** AGENTX_SESSION_GENERATION */
+    generation: z.number().int().positive(),
+    /** AGENTX_VOLUME_ID */
+    volumeId: z.string().regex(/^vol-[0-9a-f]{8,17}$/, "invalid volume ID"),
+    /** AGENTX_EXPECT_NEW_VOLUME: true only for a generation that created the volume. */
+    expectNewVolume: z.boolean(),
+    /** AGENTX_WORKER_IMAGE: an ECR image pinned by digest. */
+    workerImage: z
+      .string()
+      .regex(/^\d{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com\/[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$/, "worker image must be an ECR image pinned by digest"),
+    /** AGENTX_INVOKE_PUBLIC_KEY: base64 DER SPKI, as KMS GetPublicKey returns it. */
+    invokePublicKey: z.string().regex(/^[A-Za-z0-9+/]+={0,2}$/, "invoke public key must be base64").max(1_024),
+    /** AGENTX_CONTROL_PLANE_URL */
+    controlPlaneUrl: z.string().url().startsWith("https://").max(512).regex(SHELL_SAFE, "control plane URL has unsafe characters"),
+    /** AGENTX_MODEL_PROVIDER */
+    modelProvider: z.string().min(1).max(128).regex(SHELL_SAFE, "model provider has unsafe characters"),
+    /** AGENTX_MODEL_ID */
+    modelId: z.string().min(1).max(256).regex(SHELL_SAFE, "model ID has unsafe characters"),
+    /** PI_CACHE_RETENTION */
+    promptCacheRetention: z.enum(["short", "long"]),
+    /** AGENTX_LOG_GROUP: the CloudWatch Logs group the worker container writes to. */
+    logGroupName: z.string().regex(/^[A-Za-z0-9._/-]{1,512}$/, "invalid log group name"),
+  })
+  .strict();
+
+/** The boot script's user data: a validated configuration block, then the script itself. */
+export function ec2WorkerUserData(config: Ec2WorkerBootConfig, bootScript: string): string {
+  const parsed = Ec2WorkerBootConfigSchema.parse(config);
+  const variables: Array<[string, string]> = [
+    ["AGENTX_WORKSPACE_ID", parsed.workspaceId],
+    ["AGENTX_SESSION_GENERATION", String(parsed.generation)],
+    ["AGENTX_VOLUME_ID", parsed.volumeId],
+    ["AGENTX_EXPECT_NEW_VOLUME", String(parsed.expectNewVolume)],
+    ["AGENTX_WORKER_IMAGE", parsed.workerImage],
+    ["AGENTX_INVOKE_PUBLIC_KEY", parsed.invokePublicKey],
+    ["AGENTX_CONTROL_PLANE_URL", parsed.controlPlaneUrl],
+    ["AGENTX_MODEL_PROVIDER", parsed.modelProvider],
+    ["AGENTX_MODEL_ID", parsed.modelId],
+    ["PI_CACHE_RETENTION", parsed.promptCacheRetention],
+    ["AGENTX_LOG_GROUP", parsed.logGroupName],
+  ];
+  const body = bootScript.replace(/^#!.*\n/, "");
+  return [
+    "#!/bin/bash",
+    "# Rendered by ec2WorkerUserData (@agentx/contracts).",
+    ...variables.map(([name, value]) => `export ${name}='${value}'`),
+    body,
+  ].join("\n");
+}
+
+export type Ec2WorkerBootConfig = z.infer<typeof Ec2WorkerBootConfigSchema>;
 export type Ec2RuntimeBinding = z.infer<typeof Ec2RuntimeBindingSchema>;
 export type WorkspaceSessionState = z.infer<typeof WorkspaceSessionStateSchema>;
 export type WorkspaceSession = z.infer<typeof WorkspaceSessionSchema>;
