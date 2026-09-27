@@ -20,7 +20,12 @@ import type { InitStep } from "./steps.js";
 function combinedCredentials(slack: SignInCredentials | undefined, oidc: SignInCredentials | undefined): SignInCredentials | undefined {
   if (slack === undefined) return oidc;
   if (oidc === undefined) return slack;
-  return { secretName: `${slack.secretName} and ${oidc.secretName}`, store: async () => { await slack.store(); await oidc.store(); } };
+  return {
+    secretName: `${slack.secretName} and ${oidc.secretName}`,
+    store: async () => { await slack.store(); await oidc.store(); },
+    // Undoes both: each restore is a no-op for a secret its store never wrote.
+    restore: async () => `${await slack.restore()}; ${await oidc.restore()}`,
+  };
 }
 
 export function developerSignInStep(input: { slack: SlackApi }): InitStep<InitContext> {
@@ -64,7 +69,7 @@ export function developerSignInStep(input: { slack: SlackApi }): InitStep<InitCo
         ...(slackTeamId === undefined ? {} : { slackTeamId }),
         ...(credentials === undefined ? {} : { credentials }),
         confirm: async (text) => { context.write(text); return context.prompter.confirm("Apply this change?", { defaultValue: true }); },
-        write: context.write, now: context.now, sleep: context.sleep, lockHeld: true,
+        write: context.write, now: context.now, sleep: context.sleep, lockHeld: true, rerun: "agentx init",
       });
       context.write(`Developers sign in with: npx @charterarc/agentx login ${settings.controlPlaneUrl}`);
       return { status: "done", note: `developer sign-in: ${methods === "both" ? "Slack and company sign-in" : methods === "slack" ? "Slack" : "company sign-in"}` };

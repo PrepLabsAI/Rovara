@@ -6,6 +6,8 @@ import { HOLDER, fakeSlackApi, memoryInitSecrets, TEST_BOT_TOKEN, TEST_SIGNING_S
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 
 const API = "https://abc.execute-api.us-east-1.amazonaws.com";
+const CALLBACK = `${API}/v1/auth/callback/slack`;
+const redirectTo = (location: string) => new Response("", { status: 302, headers: { location } });
 const CLIENT_SECRET = "fedcba9876543210fedcba9876543210";
 const scopes = ["channels:read", "groups:read", "im:write", "users:read", "users:read.email"];
 
@@ -17,7 +19,7 @@ function fetchFor(options: { methods?: { slack: boolean; oidc: null | { displayN
     if (url.href === `${API}/v1/auth/.well-known/agentx-configuration`) {
       return Response.json({ env: "staging", apiVersion: "1.0", issuer: options.issuer ?? `${API}/v1/auth`, authorizationEndpoint: `${API}/v1/auth/authorize`, tokenEndpoint: `${API}/v1/auth/token`, revocationEndpoint: `${API}/v1/auth/revoke`, clientId: "agentx-cli", methods: options.methods ?? { slack: true, oidc: null } });
     }
-    if (url.origin + url.pathname === "https://slack.com/openid/connect/authorize") return options.slackAuthorize ?? new Response("", { status: 302, headers: { location: "https://acme.slack.com/signin" } });
+    if (url.origin + url.pathname === "https://slack.com/openid/connect/authorize") return options.slackAuthorize ?? redirectTo(`${CALLBACK}?code=abc&state=agentx-signin-check`);
     if (url.href === "https://acme.okta.com/.well-known/openid-configuration" && options.discovery !== false) {
       return Response.json({ issuer: "https://acme.okta.com", authorization_endpoint: "https://acme.okta.com/authorize", token_endpoint: "https://acme.okta.com/token", jwks_uri: "https://acme.okta.com/keys" });
     }
@@ -75,12 +77,33 @@ describe("agentx signin check (FR-046, R5)", () => {
     expect(checks.every((check, index) => index === 0 || !check.ok)).toBe(true);
   });
 
-  it("says plainly when Slack's answer to the test request does not settle the redirect URL", async () => {
+  async function redirectCheckFor(slackAuthorize: Response | undefined, fetchOverride?: typeof fetch) {
     const { store, secrets } = await setup(complete, { teamId: "T0TEAM" });
-    const checks = await checkDeveloperSignIn({ env: "staging", store, secrets, settings: stagingSettings, slackApi: api(), fetch: fetchFor({ slackAuthorize: new Response("busy", { status: 503 }) }) });
-    const redirect = checks.find((check) => check.name === "Slack redirect URL");
-    expect(redirect?.ok).toBe(false);
-    expect(redirect?.detail).toBe(`could not tell from Slack's answer to a test sign-in request (HTTP 503) whether ${API}/v1/auth/callback/slack is a redirect URL; check that OAuth & Permissions lists it, then try agentx login ${API}`);
+    const checks = await checkDeveloperSignIn({ env: "staging", store, secrets, settings: stagingSettings, slackApi: api(), fetch: fetchOverride ?? fetchFor(slackAuthorize === undefined ? {} : { slackAuthorize }) });
+    return checks.find((check) => check.name === "Slack redirect URL");
+  }
+  const unverified = (why: string) => ({ name: "Slack redirect URL", ok: true, warn: true, detail: `not verified: ${why}, so it does not show whether ${CALLBACK} is a redirect URL; run agentx login ${API} to confirm` });
+
+  it("counts a redirect back to the callback as registered, even with an error that is not about redirect_uri (fix round 1, I2)", async () => {
+    expect(await redirectCheckFor(redirectTo(`${CALLBACK}?error=access_denied&state=agentx-signin-check`))).toEqual({ name: "Slack redirect URL", ok: true, detail: `Slack sent a test sign-in request back to ${CALLBACK}, so it is a registered redirect URL` });
+  });
+
+  it("counts an error about redirect_uri as not registered, on a redirect or on Slack's error page", async () => {
+    const no = { name: "Slack redirect URL", ok: false, detail: `Slack does not list ${CALLBACK} as a redirect URL; add it on OAuth & Permissions` };
+    expect(await redirectCheckFor(redirectTo(`${CALLBACK}?error=invalid_redirect_uri`))).toEqual(no);
+    expect(await redirectCheckFor(new Response("<h1>Something went wrong</h1><p>bad_redirect_uri</p>", { status: 400 }))).toEqual(no);
+  });
+
+  it("warns, without failing, when Slack's answer does not settle the redirect URL", async () => {
+    expect(await redirectCheckFor(redirectTo("https://acme.slack.com/signin?redir=%2Fopenid%2Fconnect%2Fauthorize"))).toEqual(unverified("Slack sent the test sign-in request to https://acme.slack.com/signin"));
+    expect(await redirectCheckFor(new Response("<html>Sign in to your workspace</html>", { status: 200 }))).toEqual(unverified("Slack answered the test sign-in request with HTTP 200"));
+    // "invalid" alone, without a redirect_uri error, says nothing about the redirect URL.
+    expect(await redirectCheckFor(new Response("<p>redirect_uri ok, invalid team</p>", { status: 400 }))).toEqual(unverified("Slack answered the test sign-in request with HTTP 400"));
+    expect(await redirectCheckFor(undefined, async () => { throw new TypeError("fetch failed"); })).toMatchObject({ name: "Slack redirect URL", ok: true, warn: true });
+  });
+
+  it("prints a warning as warn, not ok or FAIL", () => {
+    expect(checkLines([{ name: "Slack redirect URL", ok: true, warn: true, detail: "not verified" }])).toEqual(["warn  Slack redirect URL: not verified"]);
   });
 
   it("compares the control plane's issuer with <ApiEndpoint>/v1/auth, the DeveloperSignInIssuer value (F22)", async () => {

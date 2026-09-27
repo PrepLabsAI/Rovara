@@ -18,8 +18,8 @@ const CLIENT_SECRET = "fedcba9876543210fedcba9876543210";
 const installed = { ...stagingSettings, controlPlaneUrl: "https://abc123.execute-api.us-east-1.amazonaws.com", access: { artifactBucket: "b", cloudFormationRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-cloudformation", operatorRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-operator", pullThroughPrefix: "agentx-staging" } };
 const withScopes = fakeSlackApi({ authTest: async () => ({ ok: true, team_id: "T0TEAM", user_id: "U0BOT", bot_id: "B0BOT", scopes: ["channels:read", "groups:read", "im:write", "users:read", "users:read.email"] }) });
 
-async function context(prompts: Array<string | boolean>) {
-  const cloudFormation = fakeCloudFormation({ parameters: SIGN_IN_PARAMETERS });
+async function context(prompts: Array<string | boolean>, finalStatus?: string) {
+  const cloudFormation = fakeCloudFormation({ parameters: SIGN_IN_PARAMETERS, ...(finalStatus === undefined ? {} : { finalStatus }) });
   const secrets = memoryInitSecrets({ "agentx/staging/slack": JSON.stringify({ signingSecret: TEST_SIGNING_SECRET, botToken: TEST_BOT_TOKEN }) });
   // F13: InitContext.store is a ParameterStore, which has no `calls`; a MemoryParameterStore made
   // here (rather than read back off ctx.store) keeps its concrete type, so tests can inspect calls.
@@ -51,6 +51,14 @@ describe("the developer-signin init step (FR-044)", () => {
     const { ctx, progress } = await context([""]);
     const otherTeam = fakeSlackApi({ authTest: async () => ({ ok: true, team_id: "T0OTHER", user_id: "U0BOT", bot_id: "B0BOT", scopes: [] }) });
     await expect(developerSignInStep({ slack: otherTeam }).run(ctx, progress)).rejects.toThrow("the stored bot token belongs to Slack workspace T0OTHER, but this install uses T0TEAM; nothing was saved");
+  });
+
+  it("puts the Slack secret back as it was when the stack update rolls back (Task 12 fix round 1)", async () => {
+    const { ctx, progress } = await context(["", "1111111111.2222222222222", CLIENT_SECRET, true], "UPDATE_ROLLBACK_COMPLETE");
+    const before = ctx.secrets.values.get("agentx/staging/slack");
+    await expect(developerSignInStep({ slack: withScopes }).run(ctx, progress)).rejects.toThrow("the previous client credentials were put back in agentx/staging/slack");
+    expect(ctx.secrets.values.get("agentx/staging/slack")).toBe(before);
+    expect(await readSignInSettings(ctx.store, "staging")).toBeUndefined();
   });
 
   it("is done at once when sign-in was already set up (a re-run after a crash)", async () => {

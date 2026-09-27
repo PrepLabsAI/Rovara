@@ -19,11 +19,11 @@ const discovery = (issuer: string): typeof fetch => async (input: string | URL |
 };
 const slackOn = { schemaVersion: 1 as const, env: "staging", slack: true, updatedAt: "2026-09-27T00:00:00.000Z", updatedBy: HOLDER };
 
-async function services(prompts: Array<string | boolean>, overrides: Partial<SigninServices> = {}, parameters: Record<string, string> = SIGN_IN_PARAMETERS) {
+async function services(prompts: Array<string | boolean>, overrides: Partial<SigninServices> = {}, parameters: Record<string, string> = SIGN_IN_PARAMETERS, stack: { finalStatus?: string; slackSecret?: Record<string, string> } = {}) {
   const store = new MemoryParameterStore();
   await writeEnvironmentSettings(store, installed);
-  const secrets = memoryInitSecrets({ "agentx/staging/slack": JSON.stringify({ signingSecret: TEST_SIGNING_SECRET, botToken: TEST_BOT_TOKEN }) });
-  const cloudFormation = fakeCloudFormation({ parameters });
+  const secrets = memoryInitSecrets({ "agentx/staging/slack": JSON.stringify(stack.slackSecret ?? { signingSecret: TEST_SIGNING_SECRET, botToken: TEST_BOT_TOKEN }) });
+  const cloudFormation = fakeCloudFormation({ parameters, ...(stack.finalStatus === undefined ? {} : { finalStatus: stack.finalStatus }) });
   const prompter = scriptedPrompter(prompts);
   const lines: string[] = [];
   const s: SigninServices = {
@@ -95,6 +95,58 @@ describe("agentx signin enable slack (FR-045)", () => {
     expect(h.store.values.has("/agentx/staging/lock")).toBe(false);
   });
 
+  it("puts the previous client credentials back when the stack update rolls back (fix round 1, I1)", async () => {
+    const OLD_SECRET = "00000000000000000000000000000000";
+    const before = { signingSecret: TEST_SIGNING_SECRET, botToken: TEST_BOT_TOKEN, clientId: "9999.8888", clientSecret: OLD_SECRET };
+    const h = await services(["1111111111.2222222222222", SLACK_CLIENT_SECRET, true], {}, SIGN_IN_PARAMETERS, { finalStatus: "UPDATE_ROLLBACK_COMPLETE", slackSecret: before });
+    const error = await runSigninEnable(h.s, "staging", "slack", {}, {}, false).then(() => undefined, (caught: unknown) => caught);
+    expect(error).toBeInstanceOf(Error);
+    const message = error instanceof Error ? error.message : "";
+    expect(message).toContain("ended in UPDATE_ROLLBACK_COMPLETE");
+    expect(message).toContain("the previous client credentials were put back in agentx/staging/slack");
+    expect(message).not.toContain(SLACK_CLIENT_SECRET);
+    expect(message).not.toContain(OLD_SECRET);
+    expect(JSON.parse(h.secrets.values.get("agentx/staging/slack")!)).toEqual(before);
+    expect(await readSignInSettings(h.store, "staging")).toBeUndefined();
+  });
+
+  it("says so, and never that sign-in did not change, when the previous credentials cannot be put back", async () => {
+    const h = await services(["1111111111.2222222222222", SLACK_CLIENT_SECRET, true], {}, SIGN_IN_PARAMETERS, { finalStatus: "UPDATE_ROLLBACK_COMPLETE" });
+    const put = h.secrets.put.bind(h.secrets);
+    let puts = 0;
+    h.secrets.put = async (name, value) => {
+      puts += 1;
+      if (puts > 1) throw Object.assign(new Error("Rate exceeded"), { name: "ThrottlingException" });
+      await put(name, value);
+    };
+    const error = await runSigninEnable(h.s, "staging", "slack", {}, {}, false).then(() => undefined, (caught: unknown) => caught);
+    const message = error instanceof Error ? error.message : "";
+    expect(message).toContain("putting the previous client credentials back in agentx/staging/slack failed too (Rate exceeded)");
+    expect(message).toContain("run agentx signin enable slack again");
+    expect(message).not.toContain("sign-in did not change");
+  });
+
+  it("writes the settings only once the stack has changed, and says how to record them when that write fails (fix round 1, minor 4)", async () => {
+    const h = await services(["1111111111.2222222222222", SLACK_CLIENT_SECRET, true]);
+    const put = h.store.put.bind(h.store);
+    h.store.put = async (name, value, options) => {
+      if (name === "/agentx/staging/signin") throw Object.assign(new Error("Rate exceeded"), { name: "ThrottlingException" });
+      await put(name, value, options);
+    };
+    await expect(runSigninEnable(h.s, "staging", "slack", {}, {}, false))
+      .rejects.toThrow("agentx-staging-control-plane was updated, but recording the sign-in settings at /agentx/staging/signin failed (Rate exceeded); run agentx signin enable slack again to record them");
+    expect(h.cloudFormation.parameters.DeveloperSignInSlack).toBe("enabled");
+  });
+
+  it("builds the change from the settings read under the lock (fix round 1, minor 3)", async () => {
+    const oidcOn = { ...slackOn, slack: false, oidc: { issuer: "https://acme.okta.com", clientId: "0oa1", displayName: "Okta", clientSecretName: "agentx/staging/developer-oidc" } };
+    const h = await services([true]);
+    // Another operator turns company sign-in on while this command asks its questions.
+    h.s.prompter.secret = async () => { await writeSignInSettings(h.store, oidcOn); return SLACK_CLIENT_SECRET; };
+    await runSigninEnable(h.s, "staging", "slack", { slackClientId: "1111111111.2222222222222" }, {}, false);
+    expect(await readSignInSettings(h.store, "staging")).toMatchObject({ slack: true, oidc: { issuer: "https://acme.okta.com" } });
+  });
+
   it("stores new client credentials after asking, even when the stack parameters stay the same", async () => {
     const h = await services(["1111111111.2222222222222", SLACK_CLIENT_SECRET, true], {}, { ...SIGN_IN_PARAMETERS, DeveloperSignInSlack: "enabled", SlackTeamId: "T0TEAM" });
     await writeSignInSettings(h.store, slackOn);
@@ -147,6 +199,15 @@ describe("agentx signin enable oidc (FR-004, FR-010, FR-045)", () => {
     await expect(runSigninEnable(h.s, "staging", "oidc", { oidcIssuer: "https://down.example.test", oidcClientId: "c" }, { oidcClientSecret: { envName: "OIDC_SECRET" } }, true))
       .rejects.toThrow("could not read https://down.example.test/.well-known/openid-configuration; check the issuer URL and that this computer can reach it");
     expect(h.secrets.values.has("agentx/staging/developer-oidc")).toBe(false);
+  });
+
+  it("leaves a company client secret that did not exist before in place when the stack rolls back, and says it is unused", async () => {
+    const h = await services([true], {}, SIGN_IN_PARAMETERS, { finalStatus: "UPDATE_ROLLBACK_COMPLETE" });
+    await writeSignInSettings(h.store, slackOn);
+    await writeSlackTeamId(h.store, "staging", "T0TEAM");
+    await expect(runSigninEnable(h.s, "staging", "oidc", { oidcIssuer: "https://acme.okta.com", oidcClientId: "0oa1", oidcRequiredClaim: "", oidcDisplayName: "Okta" }, { oidcClientSecret: { envName: "OIDC_SECRET" } }, false))
+      .rejects.toThrow("agentx/staging/developer-oidc did not exist before, so it stays, unused until company sign-in is on");
+    expect(h.secrets.values.has("agentx/staging/developer-oidc")).toBe(true);
   });
 
   it("stores no company client secret when the change is declined (F21)", async () => {

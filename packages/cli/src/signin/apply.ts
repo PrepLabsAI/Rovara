@@ -1,17 +1,22 @@
 // Show the sign-in change, confirm it, update the control plane's parameters, then record the
 // settings (spec 025 FR-045, R6, R7). Runs under the environment lock. Client secrets are written
 // only once the change is confirmed (F21), and are never printed.
-import { agentXError } from "@agentx/contracts";
+import { AgentXError, agentXError } from "@agentx/contracts";
 import { updateStackParameters } from "../deploy/parameter-update.js";
 import { withEnvironmentLock } from "../environments/lock.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import type { EnvironmentSettings } from "../environments/settings.js";
 import type { SignInCredentials } from "./collect.js";
-import { DeveloperSignInSettingsSchema, describeSignIn, readSignInSettings, readSlackTeamId, signInStackParameters, writeSignInSettings, writeSlackTeamId, type DeveloperSignInSettings } from "./settings.js";
+import { DeveloperSignInSettingsSchema, describeSignIn, readSignInSettings, readSlackTeamId, signInParameterName, signInStackParameters, writeSignInSettings, writeSlackTeamId, type DeveloperSignInSettings } from "./settings.js";
+
+export interface SignInChoice { slack: boolean; oidc?: NonNullable<DeveloperSignInSettings["oidc"]> }
 
 export interface ApplySignInInput {
   env: string; store: ParameterStore; cloudFormation: { send(command: unknown): Promise<unknown> }; holder: string; settings: EnvironmentSettings;
-  next: { slack: boolean; oidc?: NonNullable<DeveloperSignInSettings["oidc"]> }; slackTeamId?: string;
+  /** The methods to enable; a function builds them from the settings read under the lock, so a concurrent change is not lost. */
+  next: SignInChoice | ((current: DeveloperSignInSettings | undefined) => SignInChoice); slackTeamId?: string;
+  /** The command that finishes a half-done change, named in errors; the same agentx signin command by default. */
+  rerun?: string;
   /** Collected client credentials, stored only after the change is confirmed and before the stack changes. */
   credentials?: SignInCredentials;
   /** Shows `text` (the whole change) and answers whether to apply it; the question itself is the caller's. */
@@ -28,6 +33,9 @@ export function changeLine(before: string, after: string): string {
 
 const signedOut = (method: string) => `Everyone signed in with ${method} is signed out as soon as the update finishes: the control plane refuses their tokens and their refreshes.`;
 const shown = (value: string) => (value === "" ? "(empty)" : value);
+const reason = (error: unknown) => (error instanceof Error ? error.message : "no reason given");
+/** Keeps an AgentXError's code, so the exit-code mapping is unchanged. */
+const withMessage = (error: unknown, message: string) => (error instanceof AgentXError ? agentXError(error.code, message) : agentXError("RUNTIME_UNAVAILABLE", message));
 const notApplied = (stackName: string) => agentXError("CONFIG_INVALID", `the sign-in change to ${stackName} was not applied; nothing changed`);
 
 export async function applySignInChange(input: ApplySignInInput): Promise<{ changed: boolean; settings: DeveloperSignInSettings }> {
@@ -36,10 +44,12 @@ export async function applySignInChange(input: ApplySignInInput): Promise<{ chan
     throw agentXError("CONFIG_INVALID", `developer sign-in needs an environment installed with agentx init; ${input.env} uses the legacy stack names`);
   }
   const stackName = input.settings.stacks["control-plane"];
+  const rerun = input.rerun ?? "the same agentx signin command";
   const work = async () => {
     const current = await readSignInSettings(input.store, input.env);
+    const choice = typeof input.next === "function" ? input.next(current) : input.next;
     const parsed = DeveloperSignInSettingsSchema.safeParse({
-      schemaVersion: 1, env: input.env, slack: input.next.slack, ...(input.next.oidc === undefined ? {} : { oidc: input.next.oidc }),
+      schemaVersion: 1, env: input.env, slack: choice.slack, ...(choice.oidc === undefined ? {} : { oidc: choice.oidc }),
       updatedAt: new Date(input.now()).toISOString(), updatedBy: input.holder,
     });
     if (!parsed.success) throw agentXError("CONFIG_INVALID", `${parsed.error.issues[0]?.message ?? "developer sign-in settings are invalid"}; check the answers and run this again`);
@@ -57,6 +67,7 @@ export async function applySignInChange(input: ApplySignInInput): Promise<{ chan
     const credentialsLine = input.credentials === undefined ? [] : [`The client credentials will be stored in ${input.credentials.secretName}.`];
 
     let asked = false;
+    let stored = false;
     let storeFailure: Error | undefined;
     let changed: boolean;
     try {
@@ -81,6 +92,7 @@ export async function applySignInChange(input: ApplySignInInput): Promise<{ chan
           // failed write declines the change set (which deletes it), and its error is rethrown below.
           try {
             await input.credentials.store();
+            stored = true;
           } catch (error) {
             storeFailure = error instanceof Error ? error : agentXError("RUNTIME_UNAVAILABLE", `could not store the client credentials in ${input.credentials.secretName}; nothing changed, so run this again`);
             return false;
@@ -90,7 +102,16 @@ export async function applySignInChange(input: ApplySignInInput): Promise<{ chan
       }));
     } catch (error) {
       if (storeFailure !== undefined) throw storeFailure;
-      throw error;
+      if (!stored || input.credentials === undefined) throw error;
+      // The new credentials are stored but the stack did not take the change (a rollback or a
+      // timeout): put the previous ones back, so a method that is on keeps working.
+      let restored: string;
+      try {
+        restored = await input.credentials.restore();
+      } catch (restoreError) {
+        throw withMessage(error, `${reason(error).replace("; sign-in did not change", "")}; putting the previous client credentials back in ${input.credentials.secretName} failed too (${reason(restoreError)}), so sign-in may fail until you run ${rerun} again`);
+      }
+      throw withMessage(error, `${reason(error)}; ${restored}`);
     }
     if (!asked && input.credentials !== undefined) {
       // The stack already matches (new credentials for a method that is on): ask before replacing them.
@@ -99,8 +120,12 @@ export async function applySignInChange(input: ApplySignInInput): Promise<{ chan
       await input.credentials.store();
       changed = true;
     }
-    await writeSignInSettings(input.store, next);
-    if (input.slackTeamId !== undefined) await writeSlackTeamId(input.store, input.env, input.slackTeamId);
+    try {
+      await writeSignInSettings(input.store, next);
+      if (input.slackTeamId !== undefined) await writeSlackTeamId(input.store, input.env, input.slackTeamId);
+    } catch (error) {
+      throw withMessage(error, `${stackName} ${changed ? "was updated" : "already matched"}, but recording the sign-in settings at ${signInParameterName(input.env)} failed (${reason(error)}); run ${rerun} again to record them`);
+    }
     return { changed, settings: next };
   };
   return input.lockHeld === true ? work() : withEnvironmentLock({ store: input.store, env: input.env, holder: input.holder, command: "signin", now: input.now }, work);

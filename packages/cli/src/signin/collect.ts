@@ -109,8 +109,32 @@ export function oidcSignInCallbackUrl(apiEndpoint: string): string {
   return `${apiEndpoint.replace(/\/+$/, "")}/v1/auth/callback/oidc`;
 }
 
-/** Client credentials collected but not yet stored: where they go, and the write itself. */
-export interface SignInCredentials { secretName: string; store: () => Promise<void> }
+/**
+ * Client credentials collected but not yet stored: where they go, the write itself, and its undo.
+ * `store` remembers the secret's previous value; `restore` puts it back (for a secret that did not
+ * exist before, it leaves the new one in place) and returns what it did, in words for an error.
+ */
+export interface SignInCredentials { secretName: string; store: () => Promise<void>; restore: () => Promise<string> }
+
+/** `store` writes `write()`'s value into `name`, remembering what was there, so `restore` can put it back. */
+function undoableSecretWrite(input: { secrets: InitSecrets; name: string; write: (previous: string | undefined) => Promise<void>; unusedUntil: string }): SignInCredentials {
+  let stored = false;
+  let previous: string | undefined;
+  return {
+    secretName: input.name,
+    async store() {
+      previous = await input.secrets.get(input.name);
+      await input.write(previous);
+      stored = true;
+    },
+    async restore() {
+      if (!stored) return `nothing was written to ${input.name}`;
+      if (previous === undefined) return `${input.name} did not exist before, so it stays, unused until ${input.unusedUntil}`;
+      await input.secrets.put(input.name, previous);
+      return `the previous client credentials were put back in ${input.name}`;
+    },
+  };
+}
 
 export interface SignInQuestionsInput {
   env: string; apiEndpoint: string; secrets: InitSecrets; prompter: Prompter; processEnv: NodeJS.ProcessEnv;
@@ -128,7 +152,11 @@ export async function enableSlackSignIn(input: SignInQuestionsInput & { slackApi
   input.write(`Check that the Slack app's OAuth & Permissions page lists the redirect URL ${slackSignInCallbackUrl(input.apiEndpoint)} and the user scopes openid, email and profile.`);
   const client = await collectSlackClient(input);
   const name = slackSecretName(input.env);
-  return { teamId, credentials: { secretName: name, store: async () => { await input.secrets.put(name, slackSecretWithSignIn(await input.secrets.get(name), client)); } } };
+  const credentials = undoableSecretWrite({
+    secrets: input.secrets, name, unusedUntil: "Slack sign-in is on",
+    write: (previous) => input.secrets.put(name, slackSecretWithSignIn(previous, client)),
+  });
+  return { teamId, credentials };
 }
 
 /**
@@ -139,5 +167,9 @@ export async function enableSlackSignIn(input: SignInQuestionsInput & { slackApi
 export async function enableOidcSignIn(input: SignInQuestionsInput & { fetch: typeof fetch }): Promise<{ oidc: NonNullable<DeveloperSignInSettings["oidc"]>; credentials: SignInCredentials }> {
   const { oidc, clientSecret } = await collectOidc(input);
   input.write(`Register this redirect URI with your identity provider: ${oidcSignInCallbackUrl(input.apiEndpoint)}`);
-  return { oidc, credentials: { secretName: oidcSecretName(input.env), store: () => storeOidcSecret(input.secrets, input.env, clientSecret) } };
+  const credentials = undoableSecretWrite({
+    secrets: input.secrets, name: oidcSecretName(input.env), unusedUntil: "company sign-in is on",
+    write: () => storeOidcSecret(input.secrets, input.env, clientSecret),
+  });
+  return { oidc, credentials };
 }

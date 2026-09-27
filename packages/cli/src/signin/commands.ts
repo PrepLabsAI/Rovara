@@ -6,10 +6,10 @@ import { readEnvironmentSettings, type EnvironmentSettings } from "../environmen
 import type { InitSecrets } from "../init/context.js";
 import type { Prompter } from "../init/prompts.js";
 import type { SlackApi } from "../init/slack-app.js";
-import { applySignInChange, type ApplySignInInput } from "./apply.js";
+import { applySignInChange, type ApplySignInInput, type SignInChoice } from "./apply.js";
 import { agentXConfigurationUrl, apiBase, checkDeveloperSignIn, type SignInCheck } from "./check.js";
 import { enableOidcSignIn, enableSlackSignIn, type SigninFlags, type SigninSecretFlags } from "./collect.js";
-import { describeSignIn, readSignInSettings, readSlackTeamId } from "./settings.js";
+import { describeSignIn, readSignInSettings, readSlackTeamId, type DeveloperSignInSettings } from "./settings.js";
 
 export interface SigninServices {
   store: ParameterStore; secrets: InitSecrets; cloudFormation: { send(command: unknown): Promise<unknown> }; identity: CallerIdentity;
@@ -58,30 +58,32 @@ export async function runSigninShow(services: SigninServices, env: string): Prom
 export async function runSigninEnable(services: SigninServices, env: string, method: "slack" | "oidc", flags: SigninFlags, secretFlags: SigninSecretFlags, yes: boolean): Promise<{ changed: boolean }> {
   const settings = await installed(services, env);
   const holder = (await services.identity.get()).arn;
-  const current = await readSignInSettings(services.store, env);
   const questions = { env, apiEndpoint: settings.controlPlaneUrl, secrets: services.secrets, prompter: services.prompter, processEnv: services.processEnv, flags, secretFlags, write: services.write };
-  const common = { env, store: services.store, cloudFormation: services.cloudFormation, holder, settings, ...applyOptions(services, yes) };
+  const common = { env, store: services.store, cloudFormation: services.cloudFormation, holder, settings, rerun: `agentx signin enable ${method}`, ...applyOptions(services, yes) };
+  // Each `next` reads the settings under the lock, so a change made while the questions were asked is kept.
   if (method === "slack") {
     const { teamId, credentials } = await enableSlackSignIn({ ...questions, slackApi: services.slackApi });
-    const result = await applySignInChange({ ...common, next: { slack: true, ...(current?.oidc === undefined ? {} : { oidc: current.oidc }) }, slackTeamId: teamId, credentials });
+    const result = await applySignInChange({ ...common, next: (current) => ({ slack: true, ...(current?.oidc === undefined ? {} : { oidc: current.oidc }) }), slackTeamId: teamId, credentials });
     return { changed: result.changed };
   }
   const { oidc, credentials } = await enableOidcSignIn({ ...questions, fetch: services.fetch });
-  const result = await applySignInChange({ ...common, next: { slack: current?.slack ?? false, oidc }, credentials });
+  const result = await applySignInChange({ ...common, next: (current) => ({ slack: current?.slack ?? false, oidc }), credentials });
   return { changed: result.changed };
 }
 
 export async function runSigninDisable(services: SigninServices, env: string, method: "slack" | "oidc", yes: boolean): Promise<{ changed: boolean }> {
   const settings = await installed(services, env);
-  const current = await readSignInSettings(services.store, env);
-  if (current === undefined) throw agentXError("CONFIG_INVALID", "developer sign-in is not set up, so there is nothing to disable; run agentx signin show to see the settings");
-  const next = { slack: method === "slack" ? false : current.slack, ...(method === "oidc" || current.oidc === undefined ? {} : { oidc: current.oidc }) };
-  if (!next.slack && next.oidc === undefined) {
-    const other = method === "slack" ? "company sign-in first (agentx signin enable oidc)" : "Slack sign-in first (agentx signin enable slack)";
-    throw agentXError("CONFIG_INVALID", `${method === "slack" ? "Slack" : "Company"} sign-in is the only method enabled; enable ${other}, because at least one method must stay on`);
-  }
   const holder = (await services.identity.get()).arn;
-  const result = await applySignInChange({ env, store: services.store, cloudFormation: services.cloudFormation, holder, settings, next, ...applyOptions(services, yes) });
+  const next = (current: DeveloperSignInSettings | undefined): SignInChoice => {
+    if (current === undefined) throw agentXError("CONFIG_INVALID", "developer sign-in is not set up, so there is nothing to disable; run agentx signin show to see the settings");
+    const choice = { slack: method === "slack" ? false : current.slack, ...(method === "oidc" || current.oidc === undefined ? {} : { oidc: current.oidc }) };
+    if (!choice.slack && choice.oidc === undefined) {
+      const other = method === "slack" ? "company sign-in first (agentx signin enable oidc)" : "Slack sign-in first (agentx signin enable slack)";
+      throw agentXError("CONFIG_INVALID", `${method === "slack" ? "Slack" : "Company"} sign-in is the only method enabled; enable ${other}, because at least one method must stay on`);
+    }
+    return choice;
+  };
+  const result = await applySignInChange({ env, store: services.store, cloudFormation: services.cloudFormation, holder, settings, next, rerun: `agentx signin disable ${method}`, ...applyOptions(services, yes) });
   return { changed: result.changed };
 }
 

@@ -8,7 +8,8 @@ import { SIGN_IN_BOT_SCOPES, missingScopes, readSlackTeamIdFromSecret, slackSecr
 import { checkOidcDiscovery } from "./collect.js";
 import { oidcSecretName, readSignInSettings, readSlackTeamId } from "./settings.js";
 
-export interface SignInCheck { name: string; ok: boolean; detail: string }
+/** `warn`: ok, but not verified; shown as a warning, and it fails neither signin check nor doctor. */
+export interface SignInCheck { name: string; ok: boolean; warn?: boolean; detail: string }
 
 const parse = (text: string | undefined): Record<string, unknown> => {
   try {
@@ -23,15 +24,20 @@ const parse = (text: string | undefined): Record<string, unknown> => {
 export const apiBase = (settings: EnvironmentSettings) => settings.controlPlaneUrl.replace(/\/+$/, "");
 export const agentXConfigurationUrl = (settings: EnvironmentSettings) => `${apiBase(settings)}/v1/auth/.well-known/agentx-configuration`;
 
-type RedirectAnswer = { state: "yes" } | { state: "no" } | { state: "unknown"; status?: number };
+/** "Unverified" is ok (a healthy install must not fail doctor) and carries a warning. */
+type RedirectAnswer = { state: "registered" } | { state: "not registered" } | { state: "unverified"; why?: string };
+
+/** Slack's wording for a redirect_uri it does not know: on its error page, or as an OAuth error code. */
+const REDIRECT_URI_ERROR = /bad_redirect_uri|invalid_redirect_uri|redirect_uri_mismatch|redirect_uri[^<]{0,40}(did not match|does not match|not (?:registered|allowed))/i;
 
 /**
  * Whether Slack knows `redirectUri` for this client, read from how Slack answers a test authorize
- * request. This is inferred, not documented: for a registered URL Slack sends the browser on to
- * sign in (a redirect), and for an unregistered one it shows an error page naming redirect_uri.
- * Slack never redirects to an unregistered URL (RFC 6749 4.1.2.1), so a redirect back to the
- * callback proves it is registered. The live check (spec 025 Task 15) confirms this behavior;
- * anything else is reported as "could not tell", never as a pass.
+ * request. This is inferred, not documented, and the live check (spec 025 Task 15) confirms it:
+ * - a redirect to the callback proves it is registered, since Slack never redirects to an
+ *   unregistered URL (RFC 6749 4.1.2.1); an `error=` there still counts unless it names redirect_uri;
+ * - Slack's error page (or an error code) naming redirect_uri means it is not registered;
+ * - anything else, such as a redirect to Slack's own sign-in page (likely, as the request is signed
+ *   out) or any 200, settles nothing: "unverified", never a pass or a failure.
  */
 async function slackRedirectRegistered(fetchFn: typeof fetch, clientId: string, redirectUri: string): Promise<RedirectAnswer> {
   const url = new URL("https://slack.com/openid/connect/authorize");
@@ -40,22 +46,29 @@ async function slackRedirectRegistered(fetchFn: typeof fetch, clientId: string, 
   try {
     response = await fetchFn(url, { redirect: "manual", signal: AbortSignal.timeout(10_000) });
   } catch {
-    return { state: "unknown" };
+    return { state: "unverified" };
   }
-  if (response.status >= 300 && response.status < 400) return { state: "yes" };
+  if (response.status >= 300 && response.status < 400) {
+    const location = response.headers.get("location") ?? "";
+    let target: URL | undefined;
+    try { target = new URL(location); } catch { target = undefined; }
+    const error = `${target?.searchParams.get("error") ?? ""} ${target?.searchParams.get("error_description") ?? ""}`;
+    if (/redirect_uri/i.test(error) || REDIRECT_URI_ERROR.test(target?.href ?? location)) return { state: "not registered" };
+    if (target !== undefined && `${target.origin}${target.pathname}` === redirectUri) return { state: "registered" };
+    return { state: "unverified", why: `Slack sent the test sign-in request to ${target === undefined ? "an address it did not name" : `${target.origin}${target.pathname}`}` };
+  }
   const body = await response.text().catch(() => "");
-  if (/redirect_uri/i.test(body) && /(did not match|bad_redirect_uri|invalid)/i.test(body)) return { state: "no" };
-  return response.ok ? { state: "yes" } : { state: "unknown", status: response.status };
+  if (REDIRECT_URI_ERROR.test(body)) return { state: "not registered" };
+  return { state: "unverified", why: `Slack answered the test sign-in request with HTTP ${response.status}` };
 }
 
 function redirectCheck(answer: RedirectAnswer, callback: string, base: string): SignInCheck {
   const name = "Slack redirect URL";
-  if (answer.state === "yes") return { name, ok: true, detail: `Slack accepted a test sign-in request for ${callback}` };
-  if (answer.state === "no") return { name, ok: false, detail: `Slack does not list ${callback} as a redirect URL; add it on OAuth & Permissions` };
-  const next = `check that OAuth & Permissions lists it, then try agentx login ${base}`;
-  return answer.status === undefined
-    ? { name, ok: false, detail: `could not reach slack.com to send a test sign-in request, so ${callback} is not confirmed as a redirect URL; check this computer's network, ${next}` }
-    : { name, ok: false, detail: `could not tell from Slack's answer to a test sign-in request (HTTP ${answer.status}) whether ${callback} is a redirect URL; ${next}` };
+  if (answer.state === "registered") return { name, ok: true, detail: `Slack sent a test sign-in request back to ${callback}, so it is a registered redirect URL` };
+  if (answer.state === "not registered") return { name, ok: false, detail: `Slack does not list ${callback} as a redirect URL; add it on OAuth & Permissions` };
+  return answer.why === undefined
+    ? { name, ok: true, warn: true, detail: `not verified: could not reach slack.com to send a test sign-in request; run agentx login ${base} to confirm that ${callback} is a redirect URL` }
+    : { name, ok: true, warn: true, detail: `not verified: ${answer.why}, so it does not show whether ${callback} is a redirect URL; run agentx login ${base} to confirm` };
 }
 
 async function controlPlaneCheck(input: { settings: EnvironmentSettings; fetch: typeof fetch }, stored: { slack: boolean; oidcOn: boolean }): Promise<SignInCheck> {
@@ -139,5 +152,5 @@ export async function checkDeveloperSignIn(input: { env: string; store: Paramete
 }
 
 export function checkLines(checks: SignInCheck[]): string[] {
-  return checks.map((check) => `${check.ok ? "ok  " : "FAIL"}  ${check.name}: ${check.detail}`);
+  return checks.map((check) => `${check.warn === true ? "warn" : check.ok ? "ok  " : "FAIL"}  ${check.name}: ${check.detail}`);
 }
