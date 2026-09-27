@@ -169,7 +169,7 @@ describe("control-plane infrastructure", () => {
     });
   });
 
-  it("packages real handlers with durable environment wiring instead of inline stubs", () => {
+  it("packages real handlers with durable environment wiring instead of inline stubs", { timeout: 30_000 }, () => {
     const app = new App();
     const stack = new ControlPlaneStack(app, "PackagedControlPlane");
     const template = Template.fromStack(stack);

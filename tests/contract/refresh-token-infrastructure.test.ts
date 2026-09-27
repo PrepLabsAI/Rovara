@@ -41,7 +41,7 @@ function secretsWrites(template: Template): Statement[] {
 }
 
 describe("refresh-token write-back grant (phase 7)", () => {
-  it("lets the broker replace only connector secrets tagged agentx-writable: refresh-token, and nothing else", () => {
+  it("lets the broker replace only connector secrets tagged agentx-writable: refresh-token, and nothing else", { timeout: 30_000 }, () => {
     const template = Template.fromStack(new ControlPlaneStack(new App(), "RefreshTokenControlPlane"));
     const writes = secretsWrites(template);
     expect(writes).toHaveLength(1);

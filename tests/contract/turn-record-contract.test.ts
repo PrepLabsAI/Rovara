@@ -522,13 +522,37 @@ describe("secret redaction, fix round 3", () => {
     expect(redactArguments(deep)).toBe("[unrecordable arguments]");
   });
 
-  it("redactArguments handles a long argv array and many keys in linear time", () => {
-    const started = performance.now();
-    redactArguments(Array.from({ length: 50_000 }, () => "-p"));
-    redactArguments(Object.fromEntries(Array.from({ length: 20_000 }, (_, i) => [`key${i}`, `password=x${i}`])));
-    const elapsed = performance.now() - started;
-    console.log(`redactArguments 50,000-item argv and 20,000 keys: ${elapsed.toFixed(1)} ms`);
-    expect(elapsed).toBeLessThan(1_000);
+  it("redactArguments scales linearly for a long argv array and many keys", () => {
+    const inputs = (scale: number) => [
+      Array.from({ length: 25_000 * scale }, () => "-p"),
+      Object.fromEntries(Array.from({ length: 10_000 * scale }, (_, i) => [`key${i}`, `password=x${i}`])),
+    ] as const;
+    const small = inputs(1);
+    const large = inputs(2);
+    const duration = (input: ReturnType<typeof inputs>) => {
+      const started = performance.now();
+      for (const value of input) redactArguments(value);
+      return performance.now() - started;
+    };
+
+    // Warm JIT paths before measuring, then alternate order so either input can encounter a pause.
+    duration(small);
+    duration(large);
+    const ratios = Array.from({ length: 5 }, (_, index) => {
+      let smallDuration: number;
+      let largeDuration: number;
+      if (index % 2 === 0) {
+        smallDuration = duration(small);
+        largeDuration = duration(large);
+      } else {
+        largeDuration = duration(large);
+        smallDuration = duration(small);
+      }
+      return largeDuration / Math.max(smallDuration, 0.1);
+    }).sort((left, right) => left - right);
+    const medianRatio = ratios[Math.floor(ratios.length / 2)]!;
+    console.log(`redactArguments median 2N/N ratio: ${medianRatio.toFixed(2)} (${ratios.map((ratio) => ratio.toFixed(2)).join(", ")})`);
+    expect(medianRatio).toBeLessThan(3.25);
   });
 
   it("redactAndCap keeps content when the text past the ceiling has no whitespace", () => {
