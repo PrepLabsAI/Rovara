@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { ProviderNotConfiguredError, ProviderUnavailableError, oidcSignInProvider, slackSignInProvider } from "../../packages/broker/src/developer/providers.js";
 import {
-  ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, OIDC_ISSUER, SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, TEAM, fakeOidc, fakeSlack, routeFetch,
+  ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, OIDC_ISSUER, SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, TEAM, fakeOidc, fakeSlack, routeFetch, rsaKeyPair,
 } from "../support/developer-fakes.js";
+
+const REFUSED = { ok: false, reason: "the identity token could not be verified; run agentx login again" };
+const seconds = () => Math.floor(Date.now() / 1000);
+const publicKeyAsSecret = (key: { export(options: { format: "pem"; type: "spki" }): string | Buffer }) => new TextEncoder().encode(String(key.export({ format: "pem", type: "spki" })));
 
 const slackCallback = `${ISSUER}/callback/slack`;
 const oidcCallback = `${ISSUER}/callback/oidc`;
@@ -110,6 +114,49 @@ describe("Sign in with Slack (FR-003)", () => {
   });
 });
 
+describe("Slack identity token checks", () => {
+  const good = { sub: maya.userId, nonce: "n", name: maya.name, "https://slack.com/user_id": maya.userId };
+  async function withToken(mintToken: (fake: ReturnType<typeof fakeSlack>) => Promise<string>) {
+    const fake = fakeSlack({ users: [maya] });
+    const provider = slackSignInProvider({ teamId: TEAM, credentials: async () => ({ clientId: SLACK_CLIENT_ID, clientSecret: SLACK_CLIENT_SECRET }), fetch: routeFetch(fake.handler), jwks: fake.jwks, now });
+    const authorize = await provider.authorizeUrl({ state: "s", nonce: "n", redirectUri: slackCallback });
+    const idToken = await mintToken(fake);
+    return provider.complete({ code: await codeFrom(fake.approve(authorize, maya.userId, { idToken })), nonce: "n", redirectUri: slackCallback });
+  }
+
+  it("accepts a well-formed token minted by the test helper (so the refusals below mean something)", async () => {
+    expect((await withToken((fake) => fake.issue(good))).ok).toBe(true);
+  });
+
+  it("refuses alg none", async () => {
+    expect(await withToken((fake) => fake.issue(good, { alg: "none" }))).toEqual(REFUSED);
+  });
+
+  it("refuses HS256 signed with Slack's public key as the secret", async () => {
+    expect(await withToken((fake) => fake.issue(good, { alg: "HS256" }, publicKeyAsSecret(fake.publicKey)))).toEqual(REFUSED);
+  });
+
+  it("refuses a token for another audience", async () => {
+    expect(await withToken((fake) => fake.issue({ ...good, aud: "9999999999.8888888888888" }))).toEqual(REFUSED);
+  });
+
+  it("refuses a token from another issuer", async () => {
+    expect(await withToken((fake) => fake.issue({ ...good, iss: "https://evil.example.test" }))).toEqual(REFUSED);
+  });
+
+  it("refuses a token issued in the future (beyond 60 seconds of clock skew) or too long ago", async () => {
+    expect(await withToken((fake) => fake.issue({ ...good, iat: seconds() + 300, exp: seconds() + 900 }))).toEqual(REFUSED);
+    expect(await withToken((fake) => fake.issue({ ...good, iat: seconds() - 20 * 60, exp: seconds() + 300 }))).toEqual(REFUSED);
+    expect((await withToken((fake) => fake.issue({ ...good, iat: seconds() + 30 }))).ok).toBe(true);
+  });
+
+  it("refuses an azp that is not this app, and several audiences without azp", async () => {
+    expect(await withToken((fake) => fake.issue({ ...good, azp: "9999999999.8888888888888" }))).toEqual(REFUSED);
+    expect(await withToken((fake) => fake.issue({ ...good, aud: [SLACK_CLIENT_ID, "another-app"] }))).toEqual(REFUSED);
+    expect((await withToken((fake) => fake.issue({ ...good, aud: [SLACK_CLIENT_ID, "another-app"], azp: SLACK_CLIENT_ID }))).ok).toBe(true);
+  });
+});
+
 describe("company sign-in (FR-004)", () => {
   const users = [
     { sub: "okta-1", name: "Ravi", email: "ravi@example.com", email_verified: true, groups: ["engineering", "staff"] },
@@ -158,6 +205,55 @@ describe("company sign-in (FR-004)", () => {
     const result = await signIn(provider, fake, "okta-1");
     expect(result.ok).toBe(false);
     expect(JSON.stringify(result)).not.toContain("planted-wrong-oidc-secret");
+  });
+
+  describe("identity token checks", () => {
+    const good = { sub: "okta-1", nonce: "n", name: "Ravi" };
+    async function withToken(mintToken: (fake: ReturnType<typeof fakeOidc>) => Promise<string>, nonce = "n") {
+      const { fake, provider } = oidc();
+      const authorize = await provider.authorizeUrl({ state: "s", nonce, redirectUri: oidcCallback });
+      const idToken = await mintToken(fake);
+      return provider.complete({ code: await codeFrom(fake.approve(authorize, "okta-1", { idToken })), nonce, redirectUri: oidcCallback });
+    }
+
+    it("accepts a well-formed token minted by the test helper", async () => {
+      expect((await withToken((fake) => fake.issue(good))).ok).toBe(true);
+    });
+
+    it("refuses a nonce that does not match", async () => {
+      expect(await withToken((fake) => fake.issue({ ...good, nonce: "someone-elses" }))).toEqual({ ok: false, reason: "the identity token's nonce does not match this sign-in; run agentx login again" });
+    });
+
+    it("refuses a token signed by a key that is not the provider's", async () => {
+      expect(await withToken((fake) => fake.issue(good, {}, rsaKeyPair().privateKey))).toEqual(REFUSED);
+    });
+
+    it("refuses an expired token", async () => {
+      expect(await withToken((fake) => fake.issue({ ...good, iat: seconds() - 600, exp: seconds() - 120 }))).toEqual(REFUSED);
+    });
+
+    it("refuses alg none, HS256 with the public key, another audience and an azp that is not this app", async () => {
+      expect(await withToken((fake) => fake.issue(good, { alg: "none" }))).toEqual(REFUSED);
+      expect(await withToken((fake) => fake.issue(good, { alg: "HS256" }, publicKeyAsSecret(fake.publicKey)))).toEqual(REFUSED);
+      expect(await withToken((fake) => fake.issue({ ...good, aud: "someone-else" }))).toEqual(REFUSED);
+      expect(await withToken((fake) => fake.issue({ ...good, azp: "someone-else" }))).toEqual(REFUSED);
+    });
+  });
+
+  it("form-encodes the client ID and secret in the Basic header (RFC 6749 section 2.3.1)", async () => {
+    const secret = "s3cr et!'()*~";
+    const fake = fakeOidc({ users, clientSecret: secret });
+    const provider = oidcSignInProvider({ issuer: OIDC_ISSUER, clientId: OIDC_CLIENT_ID, clientSecret: async () => secret, requiredValues: [], fetch: routeFetch(fake.handler), jwksFor: () => fake.jwks, now });
+    const authorize = await provider.authorizeUrl({ state: "s", nonce: "n", redirectUri: oidcCallback });
+    const result = await provider.complete({ code: await codeFrom(fake.approve(authorize, "okta-1")), nonce: "n", redirectUri: oidcCallback });
+    expect(fake.state.authorizations).toEqual([`Basic ${Buffer.from("agentx-developers:s3cr+et%21%27%28%29*%7E").toString("base64")}`]);
+    expect(result.ok).toBe(true);
+  });
+
+  it("refuses required values without a required claim instead of letting everyone in", async () => {
+    const fake = fakeOidc({ users });
+    const provider = oidcSignInProvider({ issuer: OIDC_ISSUER, clientId: OIDC_CLIENT_ID, clientSecret: async () => OIDC_CLIENT_SECRET, requiredValues: ["engineering"], fetch: routeFetch(fake.handler), jwksFor: () => fake.jwks, now });
+    await expect(provider.authorizeUrl({ state: "s", nonce: "n", redirectUri: oidcCallback })).rejects.toBeInstanceOf(ProviderNotConfiguredError);
   });
 
   it("reports an unreachable provider as unavailable", async () => {

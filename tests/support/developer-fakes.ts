@@ -2,7 +2,7 @@
 // any identity provider.
 import { generateKeyPairSync, sign as cryptoSign, type KeyObject } from "node:crypto";
 import { GetPublicKeyCommand, SignCommand } from "@aws-sdk/client-kms";
-import { SignJWT, createLocalJWKSet, type JWTVerifyGetKey } from "jose";
+import { SignJWT, UnsecuredJWT, createLocalJWKSet, type JWTHeaderParameters, type JWTVerifyGetKey } from "jose";
 import type { PublicSigningJwk, TokenSigner } from "../../packages/broker/src/developer/tokens.js";
 import { kmsTokenSigner } from "../../packages/broker/src/developer/tokens.js";
 
@@ -75,6 +75,29 @@ function signingKey() {
   return { keys, kid, jwks: createLocalJWKSet({ keys: [jwk] }), jwk };
 }
 
+/**
+ * Mints any ID token for the negative tests. `claims` replace the defaults; `header` extends the
+ * protected header (alg "none" makes an unsecured token); `key` defaults to the fake's own key.
+ */
+function mint(signer: ReturnType<typeof signingKey>, defaults: Record<string, unknown>) {
+  return async (claims: Record<string, unknown> = {}, header: Partial<JWTHeaderParameters> = {}, key?: KeyObject | Uint8Array): Promise<string> => {
+    const seconds = Math.floor(Date.now() / 1000);
+    const payload = Object.fromEntries(Object.entries({ iat: seconds, exp: seconds + 300, ...defaults, ...claims }).filter(([, value]) => value !== undefined));
+    if (header.alg === "none") return new UnsecuredJWT(payload).encode();
+    return new SignJWT(payload).setProtectedHeader({ alg: "RS256", kid: signer.kid, ...header }).sign(key ?? signer.keys.privateKey);
+  };
+}
+
+/** RFC 6749 section 2.3.1 form encoding, written out independently of the code under test. */
+export function formEncodeForBasic(value: string): string {
+  return [...new TextEncoder().encode(value)].map((byte) => {
+    const char = String.fromCharCode(byte);
+    if (/[A-Za-z0-9*\-._]/.test(char)) return char;
+    if (char === " ") return "+";
+    return `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+  }).join("");
+}
+
 const form = (init: RequestInit | undefined) => new URLSearchParams(typeof init?.body === "string" ? init.body : init?.body instanceof URLSearchParams ? init.body.toString() : "");
 
 export interface FakeSlackUser { userId: string; teamId?: string; name: string; email?: string; emailVerified?: boolean; deleted?: boolean; isBot?: boolean; enterpriseTeams?: string[] }
@@ -82,8 +105,8 @@ export interface FakeSlackUser { userId: string; teamId?: string; name: string; 
 /** Slack's OpenID Connect and Web API, as far as the sign-in uses them. */
 export function fakeSlack(options: { users: FakeSlackUser[]; channels?: Record<string, string[]>; scopes?: string[] }) {
   const signer = signingKey();
-  const codes = new Map<string, { user: FakeSlackUser; nonce: string; redirectUri: string; teamId: string }>();
-  const state = { down: false, rateLimited: false, secretSeen: [] as string[] };
+  const codes = new Map<string, { user: FakeSlackUser; nonce: string; redirectUri: string; teamId: string; idToken?: string }>();
+  const state = { down: false, rateLimited: false, secretSeen: [] as string[], botError: undefined as string | undefined };
   const user = (id: string) => options.users.find((candidate) => candidate.userId === id);
   const userJson = (u: FakeSlackUser) => ({
     id: u.userId, team_id: u.teamId ?? TEAM, deleted: u.deleted === true, is_bot: u.isBot === true, real_name: u.name,
@@ -101,6 +124,7 @@ export function fakeSlack(options: { users: FakeSlackUser[]; channels?: Record<s
       const grant = codes.get(body.get("code") ?? "");
       if (grant === undefined || grant.redirectUri !== body.get("redirect_uri")) return Response.json({ ok: false, error: "invalid_code" });
       codes.delete(body.get("code") ?? "");
+      if (grant.idToken !== undefined) return Response.json({ ok: true, access_token: "xoxp-user-token-unused", id_token: grant.idToken });
       const idToken = await new SignJWT({
         nonce: grant.nonce, name: grant.user.name,
         ...(grant.user.email === undefined ? {} : { email: grant.user.email, email_verified: grant.user.emailVerified ?? true }),
@@ -110,6 +134,7 @@ export function fakeSlack(options: { users: FakeSlackUser[]; channels?: Record<s
       return Response.json({ ok: true, access_token: "xoxp-user-token-unused", id_token: idToken });
     }
     if (bearer !== `Bearer ${BOT_TOKEN}`) return Response.json({ ok: false, error: "invalid_auth" });
+    if (state.botError !== undefined) return Response.json({ ok: false, error: state.botError });
     if (url.pathname === "/api/auth.test") {
       return Response.json({ ok: true, team_id: TEAM, team: "Acme", user_id: "U0BOT0001", bot_id: "B0BOT0001" }, { headers: { "x-oauth-scopes": (options.scopes ?? []).join(",") } });
     }
@@ -135,8 +160,13 @@ export function fakeSlack(options: { users: FakeSlackUser[]; channels?: Record<s
     state,
     handler,
     jwks: signer.jwks as JWTVerifyGetKey,
-    /** What the browser does at Slack: `userId` approves the authorize URL; returns the callback URL. */
-    approve(authorizeUrl: string, userId: string, overrides: { teamId?: string } = {}): string {
+    publicKey: signer.keys.publicKey,
+    issue: mint(signer, { iss: "https://slack.com", aud: SLACK_CLIENT_ID, "https://slack.com/team_id": TEAM }),
+    /**
+     * What the browser does at Slack: `userId` approves the authorize URL; returns the callback URL.
+     * `idToken` makes the token endpoint answer with that token instead of a good one.
+     */
+    approve(authorizeUrl: string, userId: string, overrides: { teamId?: string; idToken?: string } = {}): string {
       const url = new URL(authorizeUrl);
       if (url.origin + url.pathname !== "https://slack.com/openid/connect/authorize") throw new Error(`test setup: not a Slack authorize URL: ${authorizeUrl}`);
       if (url.searchParams.get("client_id") !== SLACK_CLIENT_ID) throw new Error("test setup: wrong client_id");
@@ -144,7 +174,10 @@ export function fakeSlack(options: { users: FakeSlackUser[]; channels?: Record<s
       if (found === undefined) throw new Error(`test setup: no Slack user ${userId}`);
       const code = `slack-code-${Math.random().toString(36).slice(2)}`;
       const redirectUri = url.searchParams.get("redirect_uri") ?? "";
-      codes.set(code, { user: found, nonce: url.searchParams.get("nonce") ?? "", redirectUri, teamId: overrides.teamId ?? found.teamId ?? TEAM });
+      codes.set(code, {
+        user: found, nonce: url.searchParams.get("nonce") ?? "", redirectUri, teamId: overrides.teamId ?? found.teamId ?? TEAM,
+        ...(overrides.idToken === undefined ? {} : { idToken: overrides.idToken }),
+      });
       return `${redirectUri}?code=${code}&state=${url.searchParams.get("state") ?? ""}`;
     },
   };
@@ -153,10 +186,10 @@ export function fakeSlack(options: { users: FakeSlackUser[]; channels?: Record<s
 export interface FakeOidcUser { sub: string; name?: string; email?: string; email_verified?: boolean; groups?: string[] }
 
 /** A company OIDC provider with discovery, a token endpoint (client_secret_basic) and keys. */
-export function fakeOidc(options: { users: FakeOidcUser[] }) {
+export function fakeOidc(options: { users: FakeOidcUser[]; clientSecret?: string }) {
   const signer = signingKey();
-  const codes = new Map<string, { user: FakeOidcUser; nonce: string; redirectUri: string }>();
-  const state = { down: false };
+  const codes = new Map<string, { user: FakeOidcUser; nonce: string; redirectUri: string; idToken?: string }>();
+  const state = { down: false, authorizations: [] as string[] };
   const handler: Handler = async (url, init) => {
     if (url.origin !== OIDC_ISSUER) return undefined;
     if (state.down) throw new TypeError("fetch failed");
@@ -164,12 +197,15 @@ export function fakeOidc(options: { users: FakeOidcUser[] }) {
       return Response.json({ issuer: OIDC_ISSUER, authorization_endpoint: `${OIDC_ISSUER}/authorize`, token_endpoint: `${OIDC_ISSUER}/token`, jwks_uri: `${OIDC_ISSUER}/jwks` });
     }
     if (url.pathname === "/token") {
-      const expected = `Basic ${Buffer.from(`${encodeURIComponent(OIDC_CLIENT_ID)}:${encodeURIComponent(OIDC_CLIENT_SECRET)}`).toString("base64")}`;
-      if (new Headers(init?.headers).get("authorization") !== expected) return Response.json({ error: "invalid_client" }, { status: 401 });
+      const expected = `Basic ${Buffer.from(`${formEncodeForBasic(OIDC_CLIENT_ID)}:${formEncodeForBasic(options.clientSecret ?? OIDC_CLIENT_SECRET)}`).toString("base64")}`;
+      const authorization = new Headers(init?.headers).get("authorization") ?? "";
+      state.authorizations.push(authorization);
+      if (authorization !== expected) return Response.json({ error: "invalid_client" }, { status: 401 });
       const body = form(init);
       const grant = codes.get(body.get("code") ?? "");
       if (grant === undefined || grant.redirectUri !== body.get("redirect_uri")) return Response.json({ error: "invalid_grant" }, { status: 400 });
       codes.delete(body.get("code") ?? "");
+      if (grant.idToken !== undefined) return Response.json({ access_token: "unused", token_type: "Bearer", id_token: grant.idToken });
       const { sub, ...claims } = grant.user;
       const idToken = await new SignJWT({ ...claims, nonce: grant.nonce }).setProtectedHeader({ alg: "RS256", kid: signer.kid })
         .setIssuer(OIDC_ISSUER).setAudience(OIDC_CLIENT_ID).setSubject(sub).setIssuedAt().setExpirationTime("5m").sign(signer.keys.privateKey);
@@ -181,14 +217,16 @@ export function fakeOidc(options: { users: FakeOidcUser[] }) {
     state,
     handler,
     jwks: signer.jwks as JWTVerifyGetKey,
-    approve(authorizeUrl: string, sub: string): string {
+    publicKey: signer.keys.publicKey,
+    issue: mint(signer, { iss: OIDC_ISSUER, aud: OIDC_CLIENT_ID }),
+    approve(authorizeUrl: string, sub: string, overrides: { idToken?: string } = {}): string {
       const url = new URL(authorizeUrl);
       if (url.origin + url.pathname !== `${OIDC_ISSUER}/authorize`) throw new Error(`test setup: not the OIDC authorize URL: ${authorizeUrl}`);
       const found = options.users.find((candidate) => candidate.sub === sub);
       if (found === undefined) throw new Error(`test setup: no OIDC user ${sub}`);
       const code = `oidc-code-${Math.random().toString(36).slice(2)}`;
       const redirectUri = url.searchParams.get("redirect_uri") ?? "";
-      codes.set(code, { user: found, nonce: url.searchParams.get("nonce") ?? "", redirectUri });
+      codes.set(code, { user: found, nonce: url.searchParams.get("nonce") ?? "", redirectUri, ...(overrides.idToken === undefined ? {} : { idToken: overrides.idToken }) });
       return `${redirectUri}?code=${code}&state=${url.searchParams.get("state") ?? ""}`;
     },
   };

@@ -37,16 +37,30 @@ async function call(fetchFn: typeof fetch, url: string, init: RequestInit, what:
 /** Only the provider's short error code, never anything else it echoed back. */
 const errorCode = (error: unknown): string => (typeof error === "string" ? error.replace(/[^a-z_]/g, "").slice(0, 64) : "") || "no reason given";
 
+/**
+ * RFC 6749 section 2.3.1: the client ID and secret are form-encoded before they go in the Basic
+ * header. This is the WHATWG application/x-www-form-urlencoded serializer (space becomes "+", and
+ * everything but letters, digits and `*-._` is percent-encoded).
+ */
+const formEncode = (value: string): string => new URLSearchParams([["v", value]]).toString().slice(2);
+
+const NOT_VERIFIED = "the identity token could not be verified; run agentx login again";
+
 async function verifyIdToken(idToken: string, jwks: JWTVerifyGetKey, options: { issuer: string; audience: string; nonce: string; now: number }): Promise<{ ok: true; payload: JWTPayload } | { ok: false; reason: string }> {
+  let payload: JWTPayload;
   try {
-    const { payload } = await jwtVerify(idToken, jwks, {
-      issuer: options.issuer, audience: options.audience, currentDate: new Date(options.now), algorithms: ["RS256", "ES256"], requiredClaims: ["exp"],
-    });
-    if (payload.nonce !== options.nonce) return { ok: false, reason: "the identity token's nonce does not match this sign-in; run agentx login again" };
-    return { ok: true, payload };
-  } catch (error) {
-    return { ok: false, reason: `the identity token could not be verified (${error instanceof Error ? error.name : "invalid"}); run agentx login again` };
+    ({ payload } = await jwtVerify(idToken, jwks, {
+      issuer: options.issuer, audience: options.audience, currentDate: new Date(options.now), algorithms: ["RS256", "ES256"],
+      requiredClaims: ["exp", "iat"], clockTolerance: 60, maxTokenAge: "10m",
+    }));
+  } catch {
+    return { ok: false, reason: NOT_VERIFIED };
   }
+  // OIDC Core 3.1.3.7: with several audiences azp is required, and when present it must be us.
+  if (Array.isArray(payload.aud) && payload.aud.length > 1 && payload.azp === undefined) return { ok: false, reason: NOT_VERIFIED };
+  if (payload.azp !== undefined && payload.azp !== options.audience) return { ok: false, reason: NOT_VERIFIED };
+  if (payload.nonce !== options.nonce) return { ok: false, reason: "the identity token's nonce does not match this sign-in; run agentx login again" };
+  return { ok: true, payload };
 }
 
 const verifiedEmail = (payload: JWTPayload): string | undefined =>
@@ -109,6 +123,9 @@ export function oidcSignInProvider(input: {
   const issuer = input.issuer.replace(/\/+$/, "");
   let discovery: Promise<Discovery> | undefined;
   const discover = () => {
+    if (input.requiredClaim === undefined && input.requiredValues.length > 0) {
+      return Promise.reject(new ProviderNotConfiguredError("company sign-in lists required values but no claim to check them against; ask an admin to set DeveloperOidcRequiredClaim"));
+    }
     discovery ??= call(input.fetch, `${issuer}/.well-known/openid-configuration`, {}, "the company sign-in provider").then((value) => {
       const doc = value as Partial<Discovery>;
       if (typeof doc.issuer !== "string" || doc.issuer.replace(/\/+$/, "") !== issuer) {
@@ -136,7 +153,7 @@ export function oidcSignInProvider(input: {
     async complete({ code, nonce, redirectUri }) {
       const doc = await discover();
       const secret = await input.clientSecret();
-      const basic = Buffer.from(`${encodeURIComponent(input.clientId)}:${encodeURIComponent(secret)}`).toString("base64");
+      const basic = Buffer.from(`${formEncode(input.clientId)}:${formEncode(secret)}`).toString("base64");
       const body = await call(input.fetch, doc.token_endpoint, {
         method: "POST",
         headers: { "content-type": "application/x-www-form-urlencoded", authorization: `Basic ${basic}` },
