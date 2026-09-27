@@ -20,7 +20,18 @@ const errorMessage = (error: unknown): string => (error instanceof Error ? error
 /** What the cdk engine needs to run a shell command: the release pipeline's real implementation
  * shells out to `child_process`; tests record calls instead. */
 export interface CommandRunner {
-  run(command: string, args: string[], options: { cwd: string; display: string }): Promise<{ stdout: string }>;
+  run(
+    command: string,
+    args: string[],
+    options: {
+      cwd: string;
+      display: string;
+      /** Applied to a failed run's captured stderr before it is ever surfaced in an error; mirrors
+       * `redactSecrets` below so a secret that a child process itself echoes back never leaks
+       * through a thrown error the way `display` already keeps it out of the printed command. */
+      redact?: (text: string) => string;
+    },
+  ): Promise<{ stdout: string }>;
 }
 
 /** Every deploy part's CDK construct id, exactly as infra/lib/app.ts names them. */
@@ -162,7 +173,7 @@ export function cdkDeployer(input: {
       // run's result, so it is removed before `cdk deploy` runs; `force` makes a missing file a
       // no-op rather than an error.
       await rm(outputsFile, { force: true });
-      await input.runner.run("npx", args, { cwd: input.source, display });
+      await input.runner.run("npx", args, { cwd: input.source, display, redact: (text) => redactSecrets(text, request.parameters) });
 
       const outputs = await readOutputs(outputsFile, request.stackName);
       request.onEvent?.({ kind: "deployed", stackName: request.stackName });

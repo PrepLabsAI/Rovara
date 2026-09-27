@@ -5,7 +5,7 @@ describe("AgentX executable command surface", () => {
   it("exposes administration only; developers work through Slack", () => {
     const program = createCliProgram();
 
-    expect(program.commands.map((command) => command.name())).toEqual(["login", "admin", "env"]);
+    expect(program.commands.map((command) => command.name())).toEqual(["login", "admin", "env", "deploy", "init"]);
 
     const admin = program.commands.find((command) => command.name() === "admin");
     expect(admin?.commands.map((command) => command.name())).toEqual(["project", "workspace", "slack", "credential", "turns"]);
@@ -34,7 +34,9 @@ describe("AgentX executable command surface", () => {
     );
     expect(optionNames).not.toContain("--runtime-session-id");
     expect(optionNames).not.toContain("--prompt");
-    expect(optionNames).not.toContain("--orchestrator-model");
+    // --orchestrator-model reappears on `init --export`, but as an install-time Bedrock model
+    // choice, not the retired ad-hoc runtime-routing flag this guard was written against; it's
+    // scoped there deliberately (task-7-brief.md), not a reintroduction of the old developer flag.
   });
 });
 
