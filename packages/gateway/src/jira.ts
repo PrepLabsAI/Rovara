@@ -256,15 +256,16 @@ const UNKNOWN_SITE_NOTE = "AgentX does not know this Jira site's web address; gi
 /**
  * How the model should link a Jira issue in its reply (issue 061): the site's browse URL when every
  * scope has one, one per alias when scopes use different sites, or a refusal to guess a host when
- * any scope's site is unconfigured.
+ * any scope's site is unconfigured. A per-alias list too long to fit the note budget also falls back
+ * to that refusal: a hostless instruction to "link using its target's site" would still tell the
+ * model to write a link, so it would invent a host exactly as before issue 061.
  */
 function jiraSiteNote(scopes: readonly JiraScope[]): string {
   if (scopes.some((scope) => scope.siteUrl === undefined)) return UNKNOWN_SITE_NOTE;
   const sites = [...new Set(scopes.map((scope) => scope.siteUrl))];
   if (sites.length === 1) return `Link a Jira issue as ${sites[0]}/browse/<KEY>.`;
-  let note = `Link a Jira issue using its target's site: ${scopes.map((scope) => `${scope.alias} ${scope.siteUrl}/browse/<KEY>`).join("; ")}.`;
-  if (note.length > MAX_LINK_NOTE) note = "Link a Jira issue using its target's own site plus /browse/<KEY>.";
-  return note;
+  const note = `Link a Jira issue using its target's site: ${scopes.map((scope) => `${scope.alias} ${scope.siteUrl}/browse/<KEY>`).join("; ")}.`;
+  return note.length > MAX_LINK_NOTE ? UNKNOWN_SITE_NOTE : note;
 }
 
 /**

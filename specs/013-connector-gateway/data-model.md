@@ -20,7 +20,11 @@ connector. Bindings by type:
 - `github`: `scopes` is `all-repositories` or a list of registered repository names; each
   repository is a scope aliased by its name. A name that is not registered refuses registration.
 - `linear`: `teamId` (Linear team UUID).
-- `jira`: `cloudId` (Atlassian site UUID), `projectKey` optional (`^[A-Z][A-Z0-9_]{1,9}$`), on
+- `jira`: `cloudId` (Atlassian site UUID), `siteUrl` optional
+  (`^https:\/\/[a-z0-9](?:[a-z0-9-]{0,60}[a-z0-9])?\.atlassian\.net$`: exactly the site's web
+  address, no path, no trailing slash, lowercase, no leading or trailing hyphen in the site name) so
+  a reply can link an issue; without it the model is told to give only the key and never a link
+  (issue 061), `projectKey` optional (`^[A-Z][A-Z0-9_]{1,9}$`), on
   every scope of a connector or on none; with `projectKey`, only the six project-guarded Jira tools
   may be approved. The Jira project guard checks requests, not responses: reply contents (for
   example linked, parent or subtask summaries from other projects) are not filtered.

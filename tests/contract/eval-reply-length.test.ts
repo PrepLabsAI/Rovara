@@ -87,6 +87,21 @@ describe("Jira reply link guard, so the model never invents a site (issue 061)",
     expect(scoreRun(write, runWith("See https://third.atlassian.net/browse/PAY-31", sites))).toMatchObject({ siteOk: false });
   });
 
+  it("catches a host with no scheme when it is followed by /browse/, but not a bare mention", () => {
+    const sites = ["example.atlassian.net"];
+    expect(scoreRun(write, runWith("See example.atlassian.net/browse/PAY-31", sites))).toMatchObject({ siteOk: true });
+    expect(scoreRun(write, runWith("See your-jira-instance.atlassian.net/browse/PAY-31", sites))).toMatchObject({ siteOk: false });
+    // A bare mention with no scheme and no /browse/ after it is not a link, so it is not flagged.
+    expect(scoreRun(write, runWith("Filed under the example.atlassian.net workspace.", "unknown"))).toMatchObject({ siteOk: true });
+  });
+
+  it("recognises a multi-label host such as a.b.atlassian.net", () => {
+    const sites = ["a.b.atlassian.net"];
+    expect(scoreRun(write, runWith("See https://a.b.atlassian.net/browse/PAY-31", sites))).toMatchObject({ siteOk: true });
+    expect(scoreRun(write, runWith("See https://x.y.atlassian.net/browse/PAY-31", sites))).toMatchObject({ siteOk: false });
+    expect(scoreRun(write, runWith("See a.b.atlassian.net/browse/PAY-31", sites))).toMatchObject({ siteOk: true });
+  });
+
   it("fails the whole case when only the link is wrong, even though the tool and args are right", async () => {
     const cases = (await loadCases()).filter((entry) => entry.id === "jira-create");
     const { modelRuntime, faux } = await fauxModelRuntime();
@@ -101,5 +116,30 @@ describe("Jira reply link guard, so the model never invents a site (issue 061)",
     });
     expect(report.summary).toMatchObject({ cases: 1, passed: 0, errors: 0 });
     expect(report.cases[0]).toMatchObject({ passed: false, runs: [{ toolOk: true, argsOk: true, siteOk: false }] });
+  });
+
+  it("loads and scores the no-siteUrl fixture correctly: the key alone passes, any link fails", async () => {
+    const cases = (await loadCases()).filter((entry) => entry.id === "jira-create-nosite");
+    expect(cases).toHaveLength(1);
+    const { modelRuntime, faux } = await fauxModelRuntime();
+    const reply = async (response: string) => {
+      const report = await runEvaluation(cases, {
+        model: FAUX_MODEL, modelRuntime, presentation: "new", repeat: 1,
+        beforeRun: (evalCase) => {
+          faux.setResponses([
+            () => fauxAssistantMessage([fauxToolCall(String(evalCase.expect.tool), evalCase.expect.argsSubset ?? {})], { stopReason: "toolUse" }),
+            fauxAssistantMessage(response),
+          ]);
+        },
+      });
+      return report;
+    };
+    const keyOnly = await reply("Created PAY-42.");
+    expect(keyOnly.summary).toMatchObject({ cases: 1, passed: 1, errors: 0 });
+    expect(keyOnly.cases[0]).toMatchObject({ passed: true, runs: [{ toolOk: true, siteOk: true }] });
+
+    const invented = await reply("Created PAY-42: https://your-jira-instance.atlassian.net/browse/PAY-42");
+    expect(invented.summary).toMatchObject({ cases: 1, passed: 0, errors: 0 });
+    expect(invented.cases[0]).toMatchObject({ passed: false, runs: [{ toolOk: true, siteOk: false }] });
   });
 });

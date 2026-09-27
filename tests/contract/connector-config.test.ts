@@ -134,6 +134,7 @@ describe("jira connectors", () => {
     ["a non-atlassian host", "https://example.com"],
     ["a bare host with no site name", "https://.atlassian.net"],
     ["a query string", "https://example.atlassian.net?x=1"],
+    ["a trailing hyphen in the label", "https://foo-.atlassian.net"],
   ])("refuses siteUrl with %s", (_label, siteUrl) => {
     expect(issues(project({ connectors: [jira({ scopes: [{ alias: "pay", cloudId: CLOUD, projectKey: "PAY", siteUrl }] })] })).length).toBeGreaterThan(0);
   });

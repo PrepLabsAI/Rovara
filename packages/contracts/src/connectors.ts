@@ -59,8 +59,8 @@ const JiraScopeSchema = z.object({
    * it guessing a host. Strictly `https://<site>.atlassian.net`: no path, no trailing slash, and a
    * lowercase host. Optional so a stored config from before this field keeps working.
    */
-  siteUrl: z.string().regex(/^https:\/\/[a-z0-9][a-z0-9-]{0,61}\.atlassian\.net$/,
-    "siteUrl must be exactly https://<site>.atlassian.net, with no path, no trailing slash and a lowercase host").optional(),
+  siteUrl: z.string().regex(/^https:\/\/[a-z0-9](?:[a-z0-9-]{0,60}[a-z0-9])?\.atlassian\.net$/,
+    "siteUrl must be exactly https://<site>.atlassian.net, with no path, no trailing slash, a lowercase host and no leading or trailing hyphen in the site name").optional(),
   /** Jira project keys are 2 to 10 characters; a longer key is refused. */
   projectKey: z.string().regex(/^[A-Z][A-Z0-9_]{1,9}$/).optional(),
 }).strict();

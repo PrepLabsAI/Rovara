@@ -294,11 +294,18 @@ function hasLiteralNewlineOutsideCode(formattedReply: string): boolean {
   return /\\n/u.test(formattedReply.replace(CODE_SPAN_OR_BLOCK, ""));
 }
 
-/** Every *.atlassian.net host a reply names, lowercased (issue 061: the model must never invent one). */
-const ATLASSIAN_LINK = /\bhttps?:\/\/([a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.atlassian\.net)\b/giu;
+/**
+ * Every *.atlassian.net host a reply names, lowercased (issue 061: the model must never invent
+ * one). A host label may repeat with dots, so a subdomain such as a.b.atlassian.net is caught too.
+ * The scheme is required in general, but optional right before "/browse/", since that is a link
+ * either way; a bare host mention with neither a scheme nor "/browse/" after it is not a link and is
+ * not flagged.
+ */
+const ATLASSIAN_HOST = "(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\.)+atlassian\\.net";
+const ATLASSIAN_LINK = new RegExp(`\\bhttps?:\\/\\/(${ATLASSIAN_HOST})\\b|\\b(${ATLASSIAN_HOST})(?=\\/browse\\/)`, "giu");
 
 function atlassianHosts(text: string): string[] {
-  return [...text.matchAll(ATLASSIAN_LINK)].map((match) => match[1]!.toLowerCase());
+  return [...text.matchAll(ATLASSIAN_LINK)].map((match) => (match[1] ?? match[2])!.toLowerCase());
 }
 
 /**
