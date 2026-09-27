@@ -599,7 +599,7 @@ and the budget.
   - Switching an environment between engines.
   - The `demo-microvm` runtime mode.
   - Multiple Slack workspaces or GitHub App installations per environment.
-  - The AgentX MCP server for Claude Code (spec 016).
+  - The AgentX MCP server for Claude Code (spec 025).
 
 ## Testing
 
