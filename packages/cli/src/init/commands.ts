@@ -39,7 +39,8 @@ export interface InitCliDependencies {
   slack?: SlackApi;
   stackStatus?: StackStatusReader;
   fetch?: typeof fetch;
-  openBrowser?: (url: string) => Promise<void>;
+  /** May throw (no xdg-open, Windows): init reports it and carries on. Its result is ignored. */
+  openBrowser?: (url: string) => Promise<unknown>;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
   processEnv?: NodeJS.ProcessEnv;
@@ -116,6 +117,20 @@ export function nextStepsText(settings: EnvironmentSettings): string {
 }
 
 const realSleep = (ms: number) => new Promise<void>((resolvePromise) => setTimeout(resolvePromise, ms));
+
+/** A browser that will not open (no xdg-open on CloudShell, SSH hosts and containers; Windows)
+ * never stops init: the failure is reported once and the step carries on without it. */
+function neverThrowingBrowser(open: (url: string) => Promise<unknown>, write: (line: string) => void): (url: string) => Promise<boolean> {
+  return async (url) => {
+    try {
+      await open(url);
+      return true;
+    } catch {
+      write("could not open a browser; open the address above (or pass --no-browser)");
+      return false;
+    }
+  };
+}
 
 export async function runInit(options: InitOptions, deps: InitCliDependencies, services: { stderr: Writer; home: string }): Promise<InitResult> {
   try {
@@ -262,7 +277,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     secrets,
     prompter: activePrompter,
     write,
-    ...(options.browser ? { openBrowser: deps.openBrowser ?? openSystemBrowser } : {}),
+    ...(options.browser ? { openBrowser: neverThrowingBrowser(deps.openBrowser ?? openSystemBrowser, write) } : {}),
     now,
     sleep,
     fetch: fetchImplementation,

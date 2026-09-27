@@ -198,7 +198,7 @@ export function initContext(overrides: Partial<Omit<InitContext, "secrets">> & {
     secrets,
     prompter: scriptedPrompter([]),
     write: (line) => { lines.push(line); },
-    openBrowser: async (url) => { opened.push(url); },
+    openBrowser: async (url) => { opened.push(url); return true; },
     now: () => clock,
     sleep: async (ms) => { clock += ms; },
     fetch: async () => { throw new Error("test setup: fetch not expected"); },
@@ -242,13 +242,14 @@ export function fakeGitHubApi(input: { owner?: string; ownerType?: string; insta
 }
 
 /** A browser that, given the local form page, plays GitHub: it redirects back with `code` and the page's state. */
-export function browserThatCreatesGitHubApp(opened: string[], code = "0123456789abcdef0123"): (url: string) => Promise<void> {
+export function browserThatCreatesGitHubApp(opened: string[], code = "0123456789abcdef0123"): (url: string) => Promise<true> {
   return async (url) => {
     opened.push(url);
-    if (!url.startsWith("http://127.0.0.1:")) return;
+    if (!url.startsWith("http://127.0.0.1:")) return true;
     const page = await (await fetch(url)).text();
     const state = /[?&]state=([a-f0-9]+)/.exec(page)?.[1];
     await fetch(`${url.replace("/github/start", "/github/created")}?code=${code}&state=${state ?? "missing"}`);
+    return true;
   };
 }
 

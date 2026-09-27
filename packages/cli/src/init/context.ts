@@ -70,8 +70,9 @@ export interface InitContext {
   prompter: Prompter;
   /** One progress line (to stderr). */
   write: (line: string) => void;
-  /** Absent with --no-browser. */
-  openBrowser?: (url: string) => Promise<void>;
+  /** Absent with --no-browser. Never throws: false means no browser opened (init already said so),
+   * and the step carries on without it. */
+  openBrowser?: (url: string) => Promise<boolean>;
   now: () => number;
   sleep: (ms: number) => Promise<void>;
   fetch: typeof fetch;

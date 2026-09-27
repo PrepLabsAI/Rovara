@@ -198,11 +198,15 @@ async function createWithManifest(context: InitContext, api: GitHubApi): Promise
   try {
     context.write(`Create the GitHub App "${appName}" for ${account}: GitHub opens with everything filled in; press Create GitHub App.`);
     let code: string;
+    let opened = false;
     if (context.openBrowser !== undefined) {
       context.write(`If no browser opens, open ${listener.startUrl}`);
-      await context.openBrowser(listener.startUrl);
+      opened = await context.openBrowser(listener.startUrl);
+    }
+    if (opened) {
       code = await listener.code;
     } else {
+      // --no-browser, or a browser that would not open: the engineer opens the page and pastes the redirect.
       context.write(`Open ${listener.startUrl} in a browser on this machine. From another machine, first run: ssh -L ${listener.port}:127.0.0.1:${listener.port} <this host>`);
       context.write("After GitHub creates the app it sends your browser to a 127.0.0.1 address. If that page does not load, copy the address from the address bar.");
       code = parseManifestCallback(await context.prompter.ask("Paste that address (or just its code)", { flag: "--github-app-id, --github-installation-id and --github-private-key-file (a GitHub App made beforehand)" }), state);

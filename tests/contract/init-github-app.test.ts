@@ -190,6 +190,21 @@ describe("manifest listener, every path closes it", () => {
     await expect(fetch(opened[0]!)).rejects.toThrow();
   });
 
+  it("falls back to the pasted address when the browser cannot open, and still closes the listener", async () => {
+    const opened: string[] = [];
+    const api = fakeGitHubApi();
+    const context = initContext({ openBrowser: async (url) => { opened.push(url); return false; }, prompter: scriptedPrompter(["0123456789abcdef0123"]) });
+    homes.push(context.home);
+    const progress = progressHandle();
+    expect((await githubAppStep(api).run(context, progress)).status).toBe("done");
+    expect(api.conversions).toEqual(["0123456789abcdef0123"]);
+    expect(context.lines.join("\n")).toContain("ssh -L");
+    // The install page is offered too; a browser that fails there does not stop the step.
+    expect(opened).toContain("https://github.com/apps/agentx-acme-staging/installations/new");
+    expect(progress.value().github?.installationId).toBe("777");
+    await expect(fetch(opened[0]!)).rejects.toThrow();
+  });
+
   it("closes the listener when the pasted address is refused", async () => {
     const context = initContext({ prompter: scriptedPrompter(["http://127.0.0.1:1/github/created?code=abc123def456&state=other"]) });
     delete (context as { openBrowser?: unknown }).openBrowser;

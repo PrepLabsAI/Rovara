@@ -172,6 +172,21 @@ describe("agentx init", () => {
     expect((await readInstallProgress(h.store, "staging"))?.steps["slack-service"]?.status).toBe("done");
   });
 
+  it("carries on when no browser can be opened: GitHub takes the pasted address, Slack just prints its link", async () => {
+    const h = await harness();
+    const tried: string[] = [];
+    // xdg-open missing (CloudShell, SSH hosts, containers), or Windows, where openSystemBrowser throws AUTH_REQUIRED.
+    const openBrowser = async (url: string) => { tried.push(url); throw Object.assign(new Error("spawn xdg-open ENOENT"), { code: "ENOENT" }); };
+    const prompter = scriptedPrompter([...FIRST_RUN, "0123456789abcdef0123", ...SLACK]);
+    expect(await h.run([], { prompter, openBrowser })).toBe(0);
+    expect(prompter.remaining()).toBe(0);
+    expect(h.github.conversions).toEqual(["0123456789abcdef0123"]);
+    expect(tried.some((url) => url.startsWith("https://api.slack.com/apps?new_app=1"))).toBe(true);
+    expect(h.printed()).toContain("could not open a browser; open the address above (or pass --no-browser)");
+    expect(h.printed()).not.toContain("Refresh your AWS session");
+    expect((await readInstallProgress(h.store, "staging"))?.steps["slack-service"]?.status).toBe("done");
+  });
+
   it("refuses to resume with a different answer", async () => {
     const h = await harness();
     await h.run([], { prompter: scriptedPrompter([...FIRST_RUN, "approval"]) });

@@ -189,6 +189,14 @@ describe("Slack app step", () => {
     expect(resumed.lines.some((line) => line.includes("https://api.slack.com/apps?new_app=1&manifest_json="))).toBe(true);
   });
 
+  it("prints the link and carries on when the browser cannot open", async () => {
+    const opened: string[] = [];
+    const context = slackContext(["installed", TEST_BOT_TOKEN, TEST_SIGNING_SECRET, true], { openBrowser: async (url) => { opened.push(url); return false; } });
+    expect(await slackAppStep(fakeSlackApi()).run(context, progressHandle())).toMatchObject({ status: "done" });
+    expect(opened).toHaveLength(1);
+    expect(context.lines).toContain(`If no browser opens, open: ${opened[0]!}`);
+  });
+
   it("refuses a user token before storing anything", async () => {
     const context = slackContext(["installed", "xoxp-1-2-3-user", TEST_SIGNING_SECRET]);
     await expect(slackAppStep(fakeSlackApi()).run(context, progressHandle())).rejects.toThrow("that is a user token (xoxp-)");
