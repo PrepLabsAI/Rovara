@@ -103,7 +103,7 @@ export function installPlanText(answers: InitAnswers, estimate: CostEstimate, no
     `- In GitHub: an app named "${answers.github.appName}" owned by ${answers.github.account}, with read and write access to contents, pull requests and issues, and read access to metadata. No webhook.`,
     `- In Slack: an app named "${answers.slack.appName}".`,
     `- Models: orchestrator ${answers.models.orchestrator}, classifier ${answers.models.classifier}, worker ${answers.models.worker}`,
-    `- Alerts: ${alerts}`,
+    `- Alerts (subscribed in a later AgentX release): ${alerts}`,
     `- AgentX never answers itself or other bots. Mentions people post through other apps: ${answers.slack.appPostedMessages} (slack.appPostedMessages).`,
     ...notes.map((note) => `Note: ${note}`),
     "",

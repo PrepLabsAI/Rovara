@@ -155,6 +155,11 @@ describe("secret shapes", () => {
     expect(() => checkSlackSigningSecret("0123456789abcdef")).toThrow("a Slack signing secret is 32 lowercase hexadecimal characters (Basic Information, App Credentials, Signing Secret)");
   });
 
+  it("accepts a PEM saved with Windows line endings, storing it with plain ones", () => {
+    const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIB\nAAAA\n-----END RSA PRIVATE KEY-----";
+    expect(checkPrivateKeyPem(pem.replaceAll("\n", "\r\n"))).toBe(pem);
+  });
+
   it("accepts a PEM private key only", () => {
     const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----";
     expect(checkPrivateKeyPem(pem)).toBe(pem);

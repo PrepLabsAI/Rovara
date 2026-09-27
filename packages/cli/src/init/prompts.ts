@@ -234,9 +234,11 @@ export function checkSlackSigningSecret(value: string): string {
   return value;
 }
 
+/** Returns the key with plain line endings: a .pem saved on Windows has CRLF ones. */
 export function checkPrivateKeyPem(value: string): string {
-  if (!/^-----BEGIN [A-Z ]*PRIVATE KEY-----\n[\s\S]+\n-----END [A-Z ]*PRIVATE KEY-----$/.test(value)) {
+  const pem = value.replaceAll("\r\n", "\n");
+  if (!/^-----BEGIN [A-Z ]*PRIVATE KEY-----\n[\s\S]+\n-----END [A-Z ]*PRIVATE KEY-----$/.test(pem)) {
     throw agentXError("CONFIG_INVALID", "the GitHub App private key must be the .pem file GitHub gave you (it starts with -----BEGIN)");
   }
-  return value;
+  return pem;
 }

@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { environmentStackName } from "@agentx/contracts";
+import { agentXError, environmentStackName } from "@agentx/contracts";
 import { prepareDeployment } from "../../packages/cli/src/deploy/commands.js";
 import { executeCli } from "../../packages/cli/src/main.js";
 import { environmentCachePath } from "../../packages/cli/src/environments/cache.js";
@@ -213,6 +213,18 @@ describe("agentx init", () => {
     expect(await h.runWithoutRegion([...UNATTENDED, "--alert-email", "ops@example.com"], { processEnv: { ...UNATTENDED_ENV, AWS_REGION: "us-east-1" } })).toBe(2);
     expect(h.printed()).toContain("with --yes, pass --region <region>");
     expect(h.store.calls).toEqual([]);
+  });
+
+  // Init deploys through agentx deploy's engine, but its errors must never send the engineer to agentx deploy or an answers file.
+  it("reports an engine error in a deploy step without mentioning agentx deploy or an answers file", async () => {
+    const h = await harness();
+    h.deployer.fail.set(environmentStackName("staging", "access"), agentXError("CONFIG_INVALID", "stack agentx-staging-access failed to create earlier and must be deleted before it can be deployed again (aws cloudformation delete-stack --stack-name agentx-staging-access --region us-east-1)"));
+    expect(await h.run([], { prompter: scriptedPrompter(FIRST_RUN) })).toBe(2);
+    const printed = h.printed();
+    expect(printed).toContain('init stopped at "Deploy the access stack (IAM roles, artifact bucket, image cache)": stack agentx-staging-access failed to create earlier');
+    expect(printed).toContain("Run agentx init --env staging --region us-east-1 again to continue from this step.");
+    expect(printed).not.toContain("agentx deploy");
+    expect(printed).not.toContain("answers file");
   });
 
   it("refuses to resume with a different answer", async () => {

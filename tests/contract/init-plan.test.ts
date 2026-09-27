@@ -52,7 +52,7 @@ describe("install plan", () => {
       "Settings under /agentx/staging/",
       "In GitHub: an app named \"AgentX acme staging\" owned by acme, with read and write access to contents, pull requests and issues, and read access to metadata. No webhook.",
       "In Slack: an app named \"AgentX\".",
-      "Alerts: email to ops@example.com",
+      "Alerts (subscribed in a later AgentX release): email to ops@example.com",
       "AgentX never answers itself or other bots. Mentions people post through other apps: accept (slack.appPostedMessages).",
       "Estimated monthly total: $152.78 at 1,000 turns, 100 worker sessions and 60 worker instance-hours a month",
       "Deleting the capacity provider deletes every workspace volume.",
@@ -67,7 +67,7 @@ describe("install plan", () => {
     });
     const text = installPlanText(answers, estimateMonthlyCost(answers.models), ["a note"]);
     expect(text).toContain("the permission boundary arn:aws:iam::123456789012:policy/CompanyBoundary");
-    expect(text).toContain("Alerts: https://events.pagerduty.com/... (the full address is kept in agentx/staging/alert-endpoint)");
+    expect(text).toContain("Alerts (subscribed in a later AgentX release): https://events.pagerduty.com/... (the full address is kept in agentx/staging/alert-endpoint)");
     expect(text).toContain("agentx/staging/alert-endpoint");
     expect(text).not.toContain("agentx-staging-identity");
     expect(text).toContain("a note");

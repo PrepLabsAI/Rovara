@@ -148,6 +148,29 @@ describe("GitHub App step", () => {
     expect(context.lines.join("\n")).toContain("ssh -L");
   });
 
+  it("stores a GitHub App key given with Windows line endings with plain ones", async () => {
+    const context = initContext({
+      preMadeGitHubApp: { appId: "424242", installationId: "777" },
+      secretFlags: { githubPrivateKey: { envName: "GH_KEY" } },
+      processEnv: { GH_KEY: `${TEST_PRIVATE_KEY.replaceAll("\n", "\r\n")}\r\n` },
+    });
+    homes.push(context.home);
+    await githubAppStep(fakeGitHubApi()).run(context, progressHandle());
+    expect((JSON.parse(context.secrets.values.get(SECRET)!) as { privateKey: string }).privateKey).toBe(TEST_PRIVATE_KEY);
+  });
+
+  it("on resume, refuses --github-app-id for a different app than the one this install recorded", async () => {
+    const api = fakeGitHubApi({ installationId: 555 });
+    const secrets = memoryInitSecrets({ [SECRET]: JSON.stringify({ appId: "424242", slug: "agentx-acme-staging", account: "acme", privateKey: TEST_PRIVATE_KEY }) });
+    const context = initContext({ secrets, preMadeGitHubApp: { appId: "999999", installationId: "555" }, secretFlags: { githubPrivateKey: { envName: "GH_KEY" } }, processEnv: { GH_KEY: TEST_PRIVATE_KEY } });
+    homes.push(context.home);
+    const progress = progressHandle({ ...emptyProgress("staging", T0), github: { account: "acme", appId: "424242", slug: "agentx-acme-staging", privateKeySecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/github-app-AbCdEf" } });
+    await expect(githubAppStep(api).run(context, progress))
+      .rejects.toThrow("this install already uses GitHub App 424242, not 999999 from --github-app-id; pass --github-app-id 424242, or leave the GitHub App flags off to continue with the recorded app");
+    expect(progress.value().github?.installationId).toBeUndefined();
+    expect(api.polls()).toBe(0);
+  });
+
   it("uses a GitHub App made beforehand, checking its owner and installation", async () => {
     const api = fakeGitHubApi({ installationId: 555 });
     const context = initContext({

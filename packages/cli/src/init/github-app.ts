@@ -243,6 +243,9 @@ export function githubAppStep(api: GitHubApi): InitStep<InitContext> {
       let app = progress.current().github;
       let privateKey: string | undefined;
       const preMade = context.preMadeGitHubApp;
+      if (app !== undefined && preMade !== undefined && app.appId !== preMade.appId) {
+        throw agentXError("CONFIG_INVALID", `this install already uses GitHub App ${app.appId}, not ${preMade.appId} from --github-app-id; pass --github-app-id ${app.appId}, or leave the GitHub App flags off to continue with the recorded app`);
+      }
       if (app === undefined) {
         const leftover = await context.secrets.get(name);
         if (leftover !== undefined) {

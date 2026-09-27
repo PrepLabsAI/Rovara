@@ -24,8 +24,9 @@ const AlertAnswersSchema = z.discriminatedUnion("kind", [
 ]);
 
 /** A webhook's secretName must be this environment's own alert-endpoint secret: nothing stops a
- * hand-edited or copied answers file from naming another environment's secret otherwise, and
- * `deployEnvironment` trusts this field as-is when it resolves the webhook URL at deploy time. */
+ * hand-edited or copied answers file from naming another environment's secret otherwise. Nothing
+ * reads the address from it yet (a later AgentX release subscribes it to the alerts topic), and
+ * that reader will trust this field as-is. */
 function requireWebhookSecretMatchesEnv(answers: { env: string; alert: z.infer<typeof AlertAnswersSchema> }, context: z.RefinementCtx): void {
   if (answers.alert.kind !== "webhook") return;
   const expected = `agentx/${answers.env}/alert-endpoint`;
