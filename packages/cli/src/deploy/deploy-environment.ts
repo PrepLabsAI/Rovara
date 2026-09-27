@@ -31,6 +31,8 @@ export interface DeployEnvironmentInput {
   /** A subset of the mode's order, in that order; default: the whole order for the mode. */
   parts?: DeployPart[];
   onEvent?: (event: DeployEvent) => void;
+  /** Passed through to every deploy request when given; only the templates engine consults it. */
+  confirm?: DeployRequest["confirm"];
   now?: () => number;
 }
 
@@ -150,6 +152,7 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
         parameters,
         terminationProtection: PROTECTED_PARTS.has(part),
         ...(input.onEvent === undefined ? {} : { onEvent: input.onEvent }),
+        ...(input.confirm === undefined ? {} : { confirm: input.confirm }),
         ...(roleArn === undefined ? {} : { roleArn }),
       };
       outputs[part] = await deployer.deploy(request);

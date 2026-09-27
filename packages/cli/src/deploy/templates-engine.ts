@@ -339,7 +339,17 @@ export function templatesDeployer(input: {
       throw new Error(failure);
     }
 
-    emit({ kind: "changes", stackName, changes: describedChanges(changeSet.Changes ?? []) });
+    const changes = describedChanges(changeSet.Changes ?? []);
+    emit({ kind: "changes", stackName, changes });
+    if (request.confirm !== undefined) {
+      const proceed = await request.confirm({ stackName, changes });
+      if (!proceed) {
+        // Best effort: whether or not the delete itself succeeds, the deploy was declined, and that
+        // (not the delete's own outcome) is the whole story here.
+        await attemptChangeSetDelete();
+        throw new Error(`deploy of ${stackName} not executed; confirmation declined`);
+      }
+    }
     // Every stack event this execution causes carries this token, which picks out its failures later.
     const token = changeSetName;
     await cloudFormation.send(new ExecuteChangeSetCommand({ ...changeSetId, ClientRequestToken: token }));

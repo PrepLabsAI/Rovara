@@ -232,6 +232,51 @@ describe("templates engine", () => {
     ]);
   });
 
+  it("asks for confirmation after the changes event, and executes when it accepts", async () => {
+    const fake = fakeClients({
+      HeadObject: [{ Metadata: { sha256: sha256(zipBytes[CONTROL_PLANE_ASSET]!) } }],
+      PutObject: [{}],
+      DescribeStacks: [stackAbsent("agentx-staging-control-plane"), stack("CREATE_COMPLETE", { ApiEndpoint: "https://api" })],
+      CreateChangeSet: [{}],
+      DescribeChangeSet: [ready([{ Type: "Resource", ResourceChange: { Action: "Add", LogicalResourceId: "Foo", ResourceType: "AWS::X" } }]), executed()],
+      ExecuteChangeSet: [{}],
+    });
+    const seen: Array<{ stackName: string; changes: unknown }> = [];
+    const req = request("control-plane", {
+      confirm: async (event) => {
+        seen.push(event);
+        return true;
+      },
+    });
+
+    await expect(deployer(fake).deploy(req)).resolves.toEqual({ ApiEndpoint: "https://api" });
+
+    expect(seen).toEqual([
+      { stackName: "agentx-staging-control-plane", changes: [{ action: "Add", logicalId: "Foo", type: "AWS::X", replacement: "" }] },
+    ]);
+    expect(fake.inputs("DeleteChangeSet")).toEqual([]);
+    expect(fake.inputs("ExecuteChangeSet")).toHaveLength(1);
+    expect(req.events.map((event) => event.kind)).toEqual(["uploading", "changes", "deploying", "deployed"]);
+  });
+
+  it("deletes the change set and refuses the deploy when confirmation is declined", async () => {
+    const fake = fakeClients({
+      HeadObject: [{ Metadata: { sha256: sha256(zipBytes[CONTROL_PLANE_ASSET]!) } }],
+      PutObject: [{}],
+      DescribeStacks: [stackAbsent("agentx-staging-control-plane")],
+      CreateChangeSet: [{}],
+      DescribeChangeSet: [ready([{ Type: "Resource", ResourceChange: { Action: "Add", LogicalResourceId: "Foo", ResourceType: "AWS::X" } }])],
+      DeleteChangeSet: [{}],
+    });
+    const req = request("control-plane", { confirm: async () => false });
+
+    await expect(deployer(fake).deploy(req)).rejects.toThrow("deploy of agentx-staging-control-plane not executed; confirmation declined");
+
+    expect(fake.inputs("DeleteChangeSet")).toEqual([{ StackName: "agentx-staging-control-plane", ChangeSetName: CHANGE_SET }]);
+    expect(fake.inputs("ExecuteChangeSet")).toEqual([]);
+    expect(req.events.map((event) => event.kind)).toEqual(["uploading", "changes"]);
+  });
+
   it("does not protect a new stack whose request does not ask for termination protection", async () => {
     const fake = fakeClients({
       HeadObject: [{ Metadata: { sha256: sha256(zipBytes[CONTROL_PLANE_ASSET]!) } }],
