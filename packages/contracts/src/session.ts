@@ -63,6 +63,11 @@ export const WorkspaceSessionSchema = z
     readyAt: z.string().datetime().optional(),
     lastActivityAt: z.string().datetime().optional(),
     executionArn: z.string().startsWith("arn:aws:states:").optional(),
+    /**
+     * Outbox records parked in WAITING_FOR_SESSION for this session. markReady sends each back to
+     * PENDING; markFailed fails their operations. Stored as a DynamoDB string set.
+     */
+    waitingOutboxIds: z.array(z.string().uuid()).optional(),
   })
   .strict()
   .superRefine((session, context) => {
@@ -130,6 +135,44 @@ export const WORKSPACE_SESSION_STATE_INDEX = {
 
 export function workspaceSessionKey(workspaceId: string): { pk: string; sk: "SESSION" } {
   return { pk: `WORKSPACE#${workspaceId}`, sk: "SESSION" };
+}
+
+/**
+ * The provisioner execution for one generation. Starting an execution again under the same name and
+ * input returns the running one, so a retried start never launches a second instance. Also the
+ * ClientToken of that generation's CreateVolume and RunInstances calls.
+ */
+export function sessionProvisioningName(workspaceId: string, generation: number): string {
+  return `ws-${workspaceId}-gen-${generation}`;
+}
+
+/**
+ * SSM parameters under the environment's settings prefix (`/agentx/<env>/`) that each release sets
+ * in the runtime stack, and the session provisioner reads to boot an EC2 worker.
+ */
+export const WORKER_SETTING_PARAMETERS = {
+  workerImage: "worker-image",
+  modelProvider: "worker-model-provider",
+  modelId: "worker-model-id",
+  promptCacheRetention: "worker-prompt-cache-retention",
+} as const;
+
+/**
+ * Foundation outputs the control plane takes as stack parameters of the same name, for the EC2
+ * session lifecycle. Parameters rather than cross-stack exports, so the manually deployed foundation
+ * never has to change for them. The release and `agentx deploy` both pass them.
+ */
+export const CONTROL_PLANE_FOUNDATION_PARAMETERS = [
+  "PrivateSubnetIds",
+  "SessionManagerSecurityGroupId",
+  "WorkspaceKmsKeyArn",
+  "Ec2WorkerInstanceRoleArn",
+  "Ec2WorkerLaunchTemplateId",
+] as const;
+
+/** The deleter execution for a workspace; a workspace is deleted once. */
+export function sessionDeletionName(workspaceId: string): string {
+  return `ws-${workspaceId}-delete`;
 }
 
 /**

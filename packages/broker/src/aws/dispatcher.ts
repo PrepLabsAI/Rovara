@@ -3,9 +3,10 @@ import {
   InvokeAgentRuntimeCommand,
 } from "@aws-sdk/client-bedrock-agentcore";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { WorkerInvocationSchema, agentXError, type WorkerInvocation } from "@agentx/contracts";
 import { requiredEnvironment, type DurableOutboxRecord } from "./lambda.js";
+import { failOutboxOperation } from "./outbox-failure.js";
 
 const DEFAULT_MAX_DISPATCH_ATTEMPTS = 5;
 
@@ -185,53 +186,7 @@ export const handler = createDispatcherHandler({
     }));
   },
   async markFailed(record, error) {
-    const now = new Date().toISOString();
-    const releaseWorkspace = record.invocation.kind !== "cancel";
-    const workspaceStatus = record.invocation.kind === "prepare" ? "PREPARATION_FAILED" : "READY";
-    await documentClient.send(new TransactWriteCommand({
-      TransactItems: [
-        { Update: {
-          TableName: tableName ?? requiredEnvironment("STATE_TABLE_NAME"),
-          Key: { pk: `WORKSPACE#${record.workspaceId}`, sk: `OPERATION#${record.operationId}` },
-          UpdateExpression: "SET #status = :failed, updatedAt = :now, #result = :result, #error = :error",
-          ConditionExpression: "(#status = :accepted OR #status = :dispatching) AND fence = :fence",
-          ExpressionAttributeNames: {
-            "#status": "status",
-            "#result": "result",
-            "#error": "error",
-          },
-          ExpressionAttributeValues: {
-            ":failed": "FAILED",
-            ":accepted": "ACCEPTED",
-            ":dispatching": "DISPATCHING",
-            ":now": now,
-            ":result": null,
-            ":error": error,
-            ":fence": record.invocation.fence,
-          },
-        } },
-        ...(releaseWorkspace ? [{ Update: {
-          TableName: tableName ?? requiredEnvironment("STATE_TABLE_NAME"),
-          Key: { pk: `WORKSPACE#${record.workspaceId}`, sk: "META" },
-          UpdateExpression: "SET #status = :workspaceStatus, updatedAt = :now REMOVE activeOperationId",
-          ConditionExpression: "activeOperationId = :operation AND fence = :fence",
-          ExpressionAttributeNames: { "#status": "status" },
-          ExpressionAttributeValues: {
-            ":workspaceStatus": workspaceStatus,
-            ":now": now,
-            ":operation": record.operationId,
-            ":fence": record.invocation.fence,
-          },
-        } }] : []),
-        { Update: {
-          TableName: tableName ?? requiredEnvironment("STATE_TABLE_NAME"),
-          Key: { pk: `OUTBOX#${record.id}`, sk: "OUTBOX" },
-          UpdateExpression: "SET #status = :failed, failedAt = :now, #error = :error",
-          ExpressionAttributeNames: { "#status": "status", "#error": "error" },
-          ExpressionAttributeValues: { ":failed": "FAILED", ":now": now, ":error": error },
-        } },
-      ],
-    }));
+    await failOutboxOperation(documentClient, tableName ?? requiredEnvironment("STATE_TABLE_NAME"), record, error);
   },
 });
 

@@ -2,7 +2,7 @@
 // It turns the operator's answers, a release manifest, and the stack outputs collected so far into
 // the exact CloudFormation Parameters map for one environment stack. The caller (phase 15d's `agentx
 // init`/`agentx upgrade`) reads secrets and calls CloudFormation; this file only computes values.
-import { ImageDigest, environmentStackName } from "@agentx/contracts";
+import { CONTROL_PLANE_FOUNDATION_PARAMETERS, ImageDigest, environmentStackName } from "@agentx/contracts";
 import type { ReleaseManifest, StackPart } from "@agentx/contracts";
 
 export type StackOutputs = Record<string, string>;
@@ -204,6 +204,8 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
         GitHubAppInstallationId: answers.github.installationId,
         GitHubAppPrivateKeySecretArn: answers.github.privateKeySecretArn,
         ...(answers.github.credentialRef === undefined ? {} : { GitHubAppCredentialRef: answers.github.credentialRef }),
+        // The EC2 session lifecycle (#83) runs in the foundation's network with its key and role.
+        ...Object.fromEntries(CONTROL_PLANE_FOUNDATION_PARAMETERS.map((name) => [name, required(outputs, "foundation", name, answers.env)])),
       };
     }
 

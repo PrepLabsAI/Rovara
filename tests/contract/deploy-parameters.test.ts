@@ -38,7 +38,11 @@ const answers = (): InstallAnswers => ({
 });
 const outputs = {
   access: { ArtifactBucketName: "agentx-staging-access-artifactbucket-abc", CloudFormationRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-cloudformation", OperatorRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-operator", PullThroughPrefix: "agentx-staging" },
-  foundation: { CapacityProviderArn: "arn:aws:bedrock-agentcore:us-east-1:123456789012:capacity-provider/agentx_staging_capacity-AbCdEfGhIj", VpcId: "vpc-0123456789abcdef0", PrivateSubnetIds: "subnet-1,subnet-2" },
+  foundation: {
+    CapacityProviderArn: "arn:aws:bedrock-agentcore:us-east-1:123456789012:capacity-provider/agentx_staging_capacity-AbCdEfGhIj", VpcId: "vpc-0123456789abcdef0", PrivateSubnetIds: "subnet-1,subnet-2",
+    SessionManagerSecurityGroupId: "sg-0123456789abcdef0", WorkspaceKmsKeyArn: "arn:aws:kms:us-east-1:123456789012:key/k",
+    Ec2WorkerInstanceRoleArn: "arn:aws:iam::123456789012:role/agentx/staging/worker", Ec2WorkerLaunchTemplateId: "lt-0123456789abcdef0",
+  },
   identity: { Issuer: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_abc", Audience: "client123" },
   "control-plane": { ApiEndpoint: "https://abc.execute-api.us-east-1.amazonaws.com", SlackOrchestratorTaskRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-control-plane-SlackTask", SlackRequestQueueUrl: "https://sqs.us-east-1.amazonaws.com/123456789012/q.fifo", SlackThreadsTableName: "t", TurnRecordsTableName: "tr", SlackThreadSessionBucketName: "b", SlackSecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:SlackSecret-x" },
 };

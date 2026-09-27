@@ -2,6 +2,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { AGENTX_PROTOCOL_VERSION } from "../packages/contracts/src/protocol.js";
+import { CONTROL_PLANE_FOUNDATION_PARAMETERS } from "../packages/contracts/src/session.js";
 import {
   Runner,
   assertDigestImage,
@@ -315,7 +316,7 @@ export async function releaseProduction(
   // The control plane goes last. The worker parses invocations strictly, so a broker that sends a
   // field the running worker image does not know about fails every task until the runtime catches
   // up. Deploying the runtime first means the new worker is always the tolerant side of the window.
-  deployControlPlane(runner, options);
+  deployControlPlane(runner, options, foundation);
   const deployedControlPlaneUrl = stackOutput(
     describeStack(runner, options.region, CONTROL_PLANE_STACK),
     "ApiEndpoint",
@@ -506,7 +507,7 @@ async function waitForCapacityProvider(
   throw new Error("AgentCore capacity provider did not become READY within ten minutes");
 }
 
-function deployControlPlane(runner: Runner, options: ReleaseOptions): void {
+function deployControlPlane(runner: Runner, options: ReleaseOptions, foundation: StackDescription): void {
   runner.run("npx", [
     "cdk",
     "deploy",
@@ -522,6 +523,7 @@ function deployControlPlane(runner: Runner, options: ReleaseOptions): void {
     `agentxRegion=${options.region}`,
     ...profileArgs(options.profile),
     ...optionalControlPlaneParameters(),
+    ...CONTROL_PLANE_FOUNDATION_PARAMETERS.flatMap((name) => ["--parameters", `${CONTROL_PLANE_STACK}:${name}=${stackOutput(foundation, name)}`]),
     "--outputs-file",
     "cdk.out/agentx-control-plane-outputs.json",
   ]);

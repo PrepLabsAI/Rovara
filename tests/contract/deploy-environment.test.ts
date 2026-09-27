@@ -101,6 +101,10 @@ function scriptedOutputs(): Record<string, StackOutputs> {
       CapacityProviderArn: "arn:aws:bedrock-agentcore:us-east-1:123456789012:capacity-provider/agentx_staging_capacity-AbCdEfGhIj",
       VpcId: "vpc-0123456789abcdef0",
       PrivateSubnetIds: "subnet-1,subnet-2",
+      SessionManagerSecurityGroupId: "sg-0123456789abcdef0",
+      WorkspaceKmsKeyArn: "arn:aws:kms:us-east-1:123456789012:key/k",
+      Ec2WorkerInstanceRoleArn: "arn:aws:iam::123456789012:role/agentx/staging/worker",
+      Ec2WorkerLaunchTemplateId: "lt-0123456789abcdef0",
     },
     [stackName("identity")]: {
       Issuer: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_abc",

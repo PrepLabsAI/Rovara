@@ -24,6 +24,7 @@ import {
 import type { Construct } from "constructs";
 import { WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
+import { SessionLifecycle } from "./session-lifecycle.js";
 
 const MAX_DISPATCH_ATTEMPTS = 5;
 // Matches MAX_RECEIVE_COUNT in packages/slack-service, which reports the final attempt in the thread.
@@ -561,6 +562,9 @@ export class ControlPlaneStack extends Stack {
       resources: [`arn:${this.partition}:execute-api:${this.region}:${this.account}:${api.ref}/*/*/v1/service/*`],
     }));
 
+    const sessions = new SessionLifecycle(this, "Sessions", { naming, state, invokeSigningKey, notifyOperator });
+    sessions.steps.addEnvironment("CONTROL_PLANE_URL", api.attrApiEndpoint);
+
     new CfnOutput(this, "ApiEndpoint", { value: api.attrApiEndpoint });
     new CfnOutput(this, "StateTableName", { value: state.tableName });
     new CfnOutput(this, "ArtifactBucketName", { value: artifacts.bucketName });
@@ -578,12 +582,14 @@ export class ControlPlaneStack extends Stack {
   }
 }
 
-function packagedFunction(
+export function packagedFunction(
   scope: Construct,
   id: string,
   entry: string,
   environment: Record<string, string>,
   timeout = Duration.seconds(30),
+  /** Files copied beside the bundled handler, as [absolute source, name in the bundle]. */
+  extraFiles: ReadonlyArray<readonly [string, string]> = [],
 ): lambdaNodejs.NodejsFunction {
   return new lambdaNodejs.NodejsFunction(scope, id, {
     runtime: lambda.Runtime.NODEJS_22_X,
@@ -602,6 +608,13 @@ function packagedFunction(
       minify: true,
       sourceMap: true,
       target: "node22",
+      ...(extraFiles.length === 0 ? {} : {
+        commandHooks: {
+          beforeBundling: () => [],
+          beforeInstall: () => [],
+          afterBundling: (_inputDir: string, outputDir: string) => extraFiles.map(([source, name]) => `cp "${source}" "${outputDir}/${name}"`),
+        },
+      }),
     },
   });
 }

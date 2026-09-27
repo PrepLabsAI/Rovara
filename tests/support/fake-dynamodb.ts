@@ -274,7 +274,7 @@ function evaluateCondition(expression: string, item: Item | undefined, names: Na
 }
 
 function applyUpdate(item: Item, expression: string, names: Names, values: Values): Item {
-  const clauses = expression.split(/\b(SET|ADD|REMOVE)\b/).map((part) => part.trim()).filter(Boolean);
+  const clauses = expression.split(/\b(SET|ADD|REMOVE|DELETE)\b/).map((part) => part.trim()).filter(Boolean);
   for (let index = 0; index < clauses.length; index += 2) {
     const keyword = clauses[index];
     for (const action of splitTopLevel(clauses[index + 1] ?? "")) {
@@ -290,6 +290,12 @@ function applyUpdate(item: Item, expression: string, names: Names, values: Value
         else item[path] = ((current as number | undefined) ?? 0) + (value as number);
       } else if (keyword === "REMOVE") {
         delete item[path];
+      } else if (keyword === "DELETE") {
+        // Removes values from a set; DynamoDB drops a set attribute that becomes empty.
+        const value = parser.operand(item) as Set<unknown>;
+        const remaining = new Set([...((item[path] as Set<unknown> | undefined) ?? [])].filter((entry) => !value.has(entry)));
+        if (remaining.size === 0) delete item[path];
+        else item[path] = remaining;
       } else {
         throw new Error(`unsupported update keyword ${keyword}`);
       }

@@ -35,6 +35,16 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         "Ref": "OperatorAlertsA2431256",
       },
     },
+    "SessionDeleterArn": {
+      "Value": {
+        "Ref": "SessionsDeleterB48741EA",
+      },
+    },
+    "SessionProvisionerArn": {
+      "Value": {
+        "Ref": "SessionsProvisioner9C44055B",
+      },
+    },
     "SlackEventsUrl": {
       "Value": {
         "Fn::Join": [
@@ -132,6 +142,14 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "NoEcho": true,
       "Type": "String",
     },
+    "Ec2WorkerInstanceRoleArn": {
+      "Description": "The EC2 workers' instance role",
+      "Type": "String",
+    },
+    "Ec2WorkerLaunchTemplateId": {
+      "Description": "The EC2 workers' launch template",
+      "Type": "String",
+    },
     "GitHubAppAccount": {
       "Type": "String",
     },
@@ -153,6 +171,14 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Type": "String",
     },
     "OidcIssuer": {
+      "Type": "String",
+    },
+    "PrivateSubnetIds": {
+      "Description": "Comma-separated private subnet IDs of the foundation VPC",
+      "Type": "String",
+    },
+    "SessionManagerSecurityGroupId": {
+      "Description": "The foundation's session manager security group",
       "Type": "String",
     },
     "SlackAppPostedMessages": {
@@ -181,6 +207,10 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "ConstraintDescription": "must be a whole number from 1 to 60",
       "Default": "6",
       "Description": "Most requests one Slack thread may start in a minute; further requests pause the thread with one notice",
+      "Type": "String",
+    },
+    "WorkspaceKmsKeyArn": {
+      "Description": "The foundation's workspace volume KMS key",
       "Type": "String",
     },
   },
@@ -1552,6 +1582,1196 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         "TreatMissingData": "notBreaching",
       },
       "Type": "AWS::CloudWatch::Alarm",
+    },
+    "SessionsDeleterB48741EA": {
+      "DeletionPolicy": "Delete",
+      "DependsOn": [
+        "SessionsDeleterRoleDefaultPolicyFB89AE1E",
+        "SessionsDeleterRole5691AEAE",
+      ],
+      "Properties": {
+        "DefinitionString": {
+          "Fn::Join": [
+            "",
+            [
+              "{"Comment":"Deletes a closed ec2-ebs workspace's instance and volume","QueryLanguage":"JSONata","StartAt":"Start","States":{"Start":{"Type":"Pass","Assign":{"workspaceId":"{% $states.input.workspaceId %}","instanceId":"{% $states.input.instanceId %}","volumeId":"{% $states.input.volumeId %}","waits":0,"lastError":null},"Next":"HasInstance"},"HasInstance":{"Type":"Choice","Choices":[{"Condition":"{% $instanceId != null %}","Next":"TerminateInstance"}],"Default":"HasVolume"},"TerminateInstance":{"Type":"Task","Resource":"arn:aws:states:::aws-sdk:ec2:terminateInstances","Arguments":{"InstanceIds":["{% $instanceId %}"]},"Retry":[{"ErrorEquals":["States.ALL"],"IntervalSeconds":2,"MaxAttempts":3,"BackoffRate":2}],"Catch":[{"ErrorEquals":["States.ALL"],"Next":"InstanceAlreadyGone","Assign":{"lastError":"{% $states.errorOutput %}"}}],"Next":"WaitForTermination"},"InstanceAlreadyGone":{"Type":"Choice","Choices":[{"Condition":"{% $contains($string($lastError.Error) & ' ' & $string($lastError.Cause), 'InvalidInstanceID.NotFound') or $contains($string($lastError.Error) & ' ' & $string($lastError.Cause), 'does not exist') %}","Next":"HasVolume"}],"Default":"DeletionFailed"},"WaitForTermination":{"Type":"Wait","Seconds":10,"Next":"DescribeInstance"},"DescribeInstance":{"Type":"Task","Resource":"arn:aws:states:::aws-sdk:ec2:describeInstances","Arguments":{"InstanceIds":["{% $instanceId %}"]},"Assign":{"instanceState":"{% $states.result.Reservations[0].Instances[0].State.Name %}","waits":"{% $waits + 1 %}"},"Retry":[{"ErrorEquals":["States.ALL"],"IntervalSeconds":2,"MaxAttempts":3,"BackoffRate":2}],"Catch":[{"ErrorEquals":["States.ALL"],"Next":"InstanceAlreadyGone","Assign":{"lastError":"{% $states.errorOutput %}"}}],"Next":"InstanceTerminated"},"InstanceTerminated":{"Type":"Choice","Choices":[{"Condition":"{% $instanceState = 'terminated' %}","Next":"HasVolume"},{"Condition":"{% $waits < 60 %}","Next":"WaitForTermination"}],"Default":"DeletionFailed"},"HasVolume":{"Type":"Choice","Choices":[{"Condition":"{% $volumeId != null %}","Next":"ResetWaits"}],"Default":"MarkDeleted"},"ResetWaits":{"Type":"Pass","Assign":{"waits":0},"Next":"WaitForDetach"},"WaitForDetach":{"Type":"Wait","Seconds":5,"Next":"DescribeVolume"},"DescribeVolume":{"Type":"Task","Resource":"arn:aws:states:::aws-sdk:ec2:describeVolumes","Arguments":{"VolumeIds":["{% $volumeId %}"]},"Assign":{"volumeState":"{% $states.result.Volumes[0].State %}","waits":"{% $waits + 1 %}"},"Retry":[{"ErrorEquals":["States.ALL"],"IntervalSeconds":2,"MaxAttempts":3,"BackoffRate":2}],"Catch":[{"ErrorEquals":["States.ALL"],"Next":"VolumeAlreadyGone","Assign":{"lastError":"{% $states.errorOutput %}"}}],"Next":"VolumeDetached"},"VolumeAlreadyGone":{"Type":"Choice","Choices":[{"Condition":"{% $contains($string($lastError.Error) & ' ' & $string($lastError.Cause), 'InvalidVolume.NotFound') or $contains($string($lastError.Error) & ' ' & $string($lastError.Cause), 'does not exist') %}","Next":"MarkDeleted"}],"Default":"DeletionFailed"},"VolumeDetached":{"Type":"Choice","Choices":[{"Condition":"{% $volumeState = 'available' %}","Next":"DeleteVolume"},{"Condition":"{% $volumeState = 'deleted' or $volumeState = 'deleting' %}","Next":"MarkDeleted"},{"Condition":"{% $waits < 60 %}","Next":"WaitForDetach"}],"Default":"DeletionFailed"},"DeleteVolume":{"Type":"Task","Resource":"arn:aws:states:::aws-sdk:ec2:deleteVolume","Arguments":{"VolumeId":"{% $volumeId %}"},"Retry":[{"ErrorEquals":["States.ALL"],"IntervalSeconds":2,"MaxAttempts":3,"BackoffRate":2}],"Catch":[{"ErrorEquals":["States.ALL"],"Next":"VolumeAlreadyGone","Assign":{"lastError":"{% $states.errorOutput %}"}}],"Next":"MarkDeleted"},"MarkDeleted":{"Type":"Task","Resource":"arn:aws:states:::lambda:invoke","Arguments":{"FunctionName":"",
+              {
+                "Fn::GetAtt": [
+                  "SessionsSteps3B98DD2B",
+                  "Arn",
+                ],
+              },
+              "","Payload":{"action":"markDeleted","workspaceId":"{% $workspaceId %}"}},"Retry":[{"ErrorEquals":["States.ALL"],"IntervalSeconds":2,"MaxAttempts":3,"BackoffRate":2}],"Next":"Deleted"},"Deleted":{"Type":"Succeed"},"DeletionFailed":{"Type":"Fail","Error":"DeletionFailed","Cause":"{% $string($lastError) %}"}}}",
+            ],
+          ],
+        },
+        "LoggingConfiguration": {
+          "Destinations": [
+            {
+              "CloudWatchLogsLogGroup": {
+                "LogGroupArn": {
+                  "Fn::GetAtt": [
+                    "SessionsDeleterLogs661C84D6",
+                    "Arn",
+                  ],
+                },
+              },
+            },
+          ],
+          "IncludeExecutionData": false,
+          "Level": "ERROR",
+        },
+        "RoleArn": {
+          "Fn::GetAtt": [
+            "SessionsDeleterRole5691AEAE",
+            "Arn",
+          ],
+        },
+      },
+      "Type": "AWS::StepFunctions::StateMachine",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "SessionsDeleterFailuresAlarm55CFD4E0": {
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "OperatorAlertsA2431256",
+          },
+        ],
+        "AlarmDescription": "An EC2 session deleter execution failed or timed out. Open its execution in Step Functions for the failing step.",
+        "AlarmName": "AgentXSessionDeleterFailures",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "Metrics": [
+          {
+            "Expression": "FILL(failed, 0) + FILL(timedOut, 0)",
+            "Id": "expr_1",
+            "ReturnData": true,
+          },
+          {
+            "Id": "failed",
+            "MetricStat": {
+              "Metric": {
+                "Dimensions": [
+                  {
+                    "Name": "StateMachineArn",
+                    "Value": {
+                      "Ref": "SessionsDeleterB48741EA",
+                    },
+                  },
+                ],
+                "MetricName": "ExecutionsFailed",
+                "Namespace": "AWS/States",
+              },
+              "Period": 300,
+              "Stat": "Sum",
+            },
+            "ReturnData": false,
+          },
+          {
+            "Id": "timedOut",
+            "MetricStat": {
+              "Metric": {
+                "Dimensions": [
+                  {
+                    "Name": "StateMachineArn",
+                    "Value": {
+                      "Ref": "SessionsDeleterB48741EA",
+                    },
+                  },
+                ],
+                "MetricName": "ExecutionsTimedOut",
+                "Namespace": "AWS/States",
+              },
+              "Period": 300,
+              "Stat": "Sum",
+            },
+            "ReturnData": false,
+          },
+        ],
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
+    "SessionsDeleterLogs661C84D6": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "RetentionInDays": 30,
+      },
+      "Type": "AWS::Logs::LogGroup",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "SessionsDeleterRole5691AEAE": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId",
+                  },
+                },
+              },
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "states.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Description": "AgentX EC2 session deleter",
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "SessionsDeleterRoleDefaultPolicyFB89AE1E": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "ec2:TerminateInstances",
+                "ec2:DeleteVolume",
+              ],
+              "Condition": {
+                "StringEquals": {
+                  "aws:ResourceTag/DeploymentMode": "ec2-ebs",
+                  "aws:ResourceTag/Environment": "production",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ec2:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":instance/*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ec2:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":volume/*",
+                    ],
+                  ],
+                },
+              ],
+              "Sid": "DeleteOwn",
+            },
+            {
+              "Action": [
+                "ec2:DescribeVolumes",
+                "ec2:DescribeInstances",
+              ],
+              "Effect": "Allow",
+              "Resource": "*",
+              "Sid": "Describe",
+            },
+            {
+              "Action": "lambda:InvokeFunction",
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "SessionsSteps3B98DD2B",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "SessionsSteps3B98DD2B",
+                          "Arn",
+                        ],
+                      },
+                      ":*",
+                    ],
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "logs:CreateLogDelivery",
+                "logs:GetLogDelivery",
+                "logs:UpdateLogDelivery",
+                "logs:DeleteLogDelivery",
+                "logs:ListLogDeliveries",
+                "logs:PutResourcePolicy",
+                "logs:DescribeResourcePolicies",
+                "logs:DescribeLogGroups",
+              ],
+              "Effect": "Allow",
+              "Resource": "*",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "SessionsDeleterRoleDefaultPolicyFB89AE1E",
+        "Roles": [
+          {
+            "Ref": "SessionsDeleterRole5691AEAE",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "SessionsProvisioner9C44055B": {
+      "DeletionPolicy": "Delete",
+      "DependsOn": [
+        "SessionsProvisionerRoleDefaultPolicyDF8FD11A",
+        "SessionsProvisionerRole99939C5B",
+      ],
+      "Properties": {
+        "DefinitionString": {
+          "Fn::Join": [
+            "",
+            [
+              "{"Comment":"Provisions one generation of an ec2-ebs workspace session","QueryLanguage":"JSONata","StartAt":"Start","States":{"Start":{"Type":"Pass","Assign":{"workspaceId":"{% $states.input.workspaceId %}","generation":"{% $states.input.generation %}","availabilityZone":"{% $states.input.availabilityZone %}","subnetId":"{% $states.input.subnetId %}","launchTemplateId":"{% $states.input.launchTemplateId %}","volumeId":"{% $states.input.volumeId %}","volumeSizeGiB":"{% $states.input.volumeSizeGiB %}","volumeType":"{% $states.input.volumeType %}","clientToken":"{% 'ws-' & $states.input.workspaceId & '-gen-' & $string($states.input.generation) %}","expectNewVolume":false,"instanceId":null,"waits":0,"failure":null},"Next":"HasVolume"},"HasVolume":{"Type":"Choice","Choices":[{"Condition":"{% $volumeId = null %}","Next":"CreateVolume"}],"Default":"LaunchConfiguration"},"CreateVolume":{"Type":"Task","Resource":"arn:aws:states:::aws-sdk:ec2:createVolume","Arguments":{"AvailabilityZone":"{% $availabilityZone %}","Size":"{% $volumeSizeGiB %}","VolumeType":"{% $volumeType %}","Encrypted":true,"KmsKeyId":"",
+              {
+                "Ref": "WorkspaceKmsKeyArn",
+              },
+              "","ClientToken":"{% $clientToken %}","TagSpecifications":[{"ResourceType":"volume","Tags":[{"Key":"Name","Value":"agentx-production-workspace"},{"Key":"Application","Value":"AgentX"},{"Key":"DeploymentMode","Value":"ec2-ebs"},{"Key":"Environment","Value":"production"},{"Key":"agentx:workspace","Value":"{% $workspaceId %}"}]}]},"Assign":{"volumeId":"{% $states.result.VolumeId %}","expectNewVolume":true,"waits":0},"Retry":[{"ErrorEquals":["States.ALL"],"IntervalSeconds":2,"MaxAttempts":3,"BackoffRate":2}],"Catch":[{"ErrorEquals":["States.ALL"],"Next":"Cleanup","Assign":{"failure":"{% $states.errorOutput.Error & ': ' & $states.errorOutput.Cause %}"}}],"Next":"WaitForVolume"},"WaitForVolume":{"Type":"Wait","Seconds":5,"Next":"DescribeVolume"},"DescribeVolume":{"Type":"Task","Resource":"arn:aws:states:::aws-sdk:ec2:describeVolumes","Arguments":{"VolumeIds":["{% $volumeId %}"]},"Assign":{"volumeState":"{% $states.result.Volumes[0].State %}","waits":"{% $waits + 1 %}"},"Retry":[{"ErrorEquals":["States.ALL"],"IntervalSeconds":2,"MaxAttempts":3,"BackoffRate":2}],"Catch":[{"ErrorEquals":["States.ALL"],"Next":"Cleanup","Assign":{"failure":"{% $states.errorOutput.Error & ': ' & $states.errorOutput.Cause %}"}}],"Next":"VolumeAvailable"},"VolumeAvailable":{"Type":"Choice","Choices":[{"Condition":"{% $volumeState = 'available' %}","Next":"RecordVolume"},{"Condition":"{% $volumeState = 'creating' and $waits < 60 %}","Next":"WaitForVolume"}],"Default":"VolumeNotCreated"},"VolumeNotCreated":{"Type":"Pass","Assign":{"failure":"{% 'volume ' & $volumeId & ' did not become available (' & $volumeState & ')' %}"},"Next":"Cleanup"},"RecordVolume":{"Type":"Task","Resource":"arn:aws:states:::lambda:invoke","Arguments":{"FunctionName":"",
+              {
+                "Fn::GetAtt": [
+                  "SessionsSteps3B98DD2B",
+                  "Arn",
+                ],
+              },
+              "","Payload":{"action":"recordVolume","workspaceId":"{% $workspaceId %}","generation":"{% $generation %}","volumeId":"{% $volumeId %}"}},"Retry":[{"ErrorEquals":["States.ALL"],"IntervalSeconds":2,"MaxAttempts":3,"BackoffRate":2}],"Catch":[{"ErrorEquals":["States.ALL"],"Next":"Cleanup","Assign":{"failure":"{% $states.errorOutput.Error & ': ' & $states.errorOutput.Cause %}"}}],"Next":"LaunchConfiguration"},"LaunchConfiguration":{"Type":"Task","Resource":"arn:aws:states:::lambda:invoke","Arguments":{"FunctionName":"",
+              {
+                "Fn::GetAtt": [
+                  "SessionsSteps3B98DD2B",
+                  "Arn",
+                ],
+              },
+              "","Payload":{"action":"launchConfiguration","workspaceId":"{% $workspaceId %}","generation":"{% $generation %}","volumeId":"{% $volumeId %}","expectNewVolume":"{% $expectNewVolume %}"}},"Retry":[{"ErrorEquals":["States.ALL"],"IntervalSeconds":2,"MaxAttempts":3,"BackoffRate":2}],"Assign":{"userData":"{% $states.result.Payload.userData %}"},"Catch":[{"ErrorEquals":["States.ALL"],"Next":"Cleanup","Assign":{"failure":"{% $states.errorOutput.Error & ': ' & $states.errorOutput.Cause %}"}}],"Next":"RunInstance"},"RunInstance":{"Type":"Task","Resource":"arn:aws:states:::aws-sdk:ec2:runInstances","Arguments":{"LaunchTemplate":{"LaunchTemplateId":"{% $launchTemplateId %}","Version":"$Default"},"MinCount":1,"MaxCount":1,"SubnetId":"{% $subnetId %}","UserData":"{% $userData %}","ClientToken":"{% $clientToken %}","TagSpecifications":[{"ResourceType":"instance","Tags":[{"Key":"Name","Value":"agentx-production-worker"},{"Key":"Application","Value":"AgentX"},{"Key":"DeploymentMode","Value":"ec2-ebs"},{"Key":"Environment","Value":"production"},{"Key":"agentx:workspace","Value":"{% $workspaceId %}"},{"Key":"agentx:generation","Value":"{% $string($generation) %}"}]}]},"Assign":{"instanceId":"{% $states.result.Instances[0].InstanceId %}","privateIp":"{% $states.result.Instances[0].PrivateIpAddress %}","waits":0},"Retry":[{"ErrorEquals":["States.ALL"],"IntervalSeconds":2,"MaxAttempts":3,"BackoffRate":2}],"Catch":[{"ErrorEquals":["States.ALL"],"Next":"Cleanup","Assign":{"failure":"{% $states.errorOutput.Error & ': ' & $states.errorOutput.Cause %}"}}],"Next":"RecordInstance"},"RecordInstance":{"Type":"Task","Resource":"arn:aws:states:::lambda:invoke","Arguments":{"FunctionName":"",
+              {
+                "Fn::GetAtt": [
+                  "SessionsSteps3B98DD2B",
+                  "Arn",
+                ],
+              },
+              "","Payload":{"action":"recordInstance","workspaceId":"{% $workspaceId %}","generation":"{% $generation %}","instanceId":"{% $instanceId %}","privateIp":"{% $privateIp %}"}},"Retry":[{"ErrorEquals":["States.ALL"],"IntervalSeconds":2,"MaxAttempts":3,"BackoffRate":2}],"Catch":[{"ErrorEquals":["States.ALL"],"Next":"Cleanup","Assign":{"failure":"{% $states.errorOutput.Error & ': ' & $states.errorOutput.Cause %}"}}],"Next":"WaitForRunning"},"WaitForRunning":{"Type":"Wait","Seconds":5,"Next":"DescribeInstance"},"DescribeInstance":{"Type":"Task","Resource":"arn:aws:states:::aws-sdk:ec2:describeInstances","Arguments":{"InstanceIds":["{% $instanceId %}"]},"Assign":{"instanceState":"{% $states.result.Reservations[0].Instances[0].State.Name %}","waits":"{% $waits + 1 %}"},"Retry":[{"ErrorEquals":["States.ALL"],"IntervalSeconds":2,"MaxAttempts":3,"BackoffRate":2}],"Catch":[{"ErrorEquals":["States.ALL"],"Next":"Cleanup","Assign":{"failure":"{% $states.errorOutput.Error & ': ' & $states.errorOutput.Cause %}"}}],"Next":"InstanceRunning"},"InstanceRunning":{"Type":"Choice","Choices":[{"Condition":"{% $instanceState = 'running' %}","Next":"AttachVolume"},{"Condition":"{% $instanceState = 'pending' and $waits < 60 %}","Next":"WaitForRunning"}],"Default":"InstanceNotRunning"},"InstanceNotRunning":{"Type":"Pass","Assign":{"failure":"{% 'instance ' & $instanceId & ' did not reach running (' & $instanceState & ')' %}"},"Next":"Cleanup"},"AttachVolume":{"Type":"Task","Resource":"arn:aws:states:::aws-sdk:ec2:attachVolume","Arguments":{"Device":"/dev/sdf","InstanceId":"{% $instanceId %}","VolumeId":"{% $volumeId %}"},"Assign":{"waits":0},"Catch":[{"ErrorEquals":["States.ALL"],"Next":"Cleanup","Assign":{"failure":"{% $states.errorOutput.Error & ': ' & $states.errorOutput.Cause %}"}}],"Next":"WaitForAttachment"},"WaitForAttachment":{"Type":"Wait","Seconds":3,"Next":"DescribeAttachment"},"DescribeAttachment":{"Type":"Task","Resource":"arn:aws:states:::aws-sdk:ec2:describeVolumes","Arguments":{"VolumeIds":["{% $volumeId %}"]},"Assign":{"attachmentState":"{% $exists($states.result.Volumes[0].Attachments[0].State) ? $states.result.Volumes[0].Attachments[0].State : 'none' %}","waits":"{% $waits + 1 %}"},"Retry":[{"ErrorEquals":["States.ALL"],"IntervalSeconds":2,"MaxAttempts":3,"BackoffRate":2}],"Catch":[{"ErrorEquals":["States.ALL"],"Next":"Cleanup","Assign":{"failure":"{% $states.errorOutput.Error & ': ' & $states.errorOutput.Cause %}"}}],"Next":"VolumeAttached"},"VolumeAttached":{"Type":"Choice","Choices":[{"Condition":"{% $attachmentState = 'attached' %}","Next":"StartProbing"},{"Condition":"{% $waits < 60 %}","Next":"WaitForAttachment"}],"Default":"VolumeNotAttached"},"VolumeNotAttached":{"Type":"Pass","Assign":{"failure":"{% 'volume ' & $volumeId & ' did not attach (' & $attachmentState & ')' %}"},"Next":"Cleanup"},"StartProbing":{"Type":"Pass","Assign":{"probes":0},"Next":"WaitToProbe"},"WaitToProbe":{"Type":"Wait","Seconds":10,"Next":"ProbePing"},"ProbePing":{"Type":"Task","Resource":"arn:aws:states:::lambda:invoke","Arguments":{"FunctionName":"",
+              {
+                "Fn::GetAtt": [
+                  "SessionsSteps3B98DD2B",
+                  "Arn",
+                ],
+              },
+              "","Payload":{"action":"probePing","privateIp":"{% $privateIp %}"}},"Retry":[{"ErrorEquals":["States.ALL"],"IntervalSeconds":2,"MaxAttempts":3,"BackoffRate":2}],"Assign":{"healthy":"{% $states.result.Payload.healthy %}","probes":"{% $probes + 1 %}"},"Catch":[{"ErrorEquals":["States.ALL"],"Next":"Cleanup","Assign":{"failure":"{% $states.errorOutput.Error & ': ' & $states.errorOutput.Cause %}"}}],"Next":"WorkerHealthy"},"WorkerHealthy":{"Type":"Choice","Choices":[{"Condition":"{% $healthy %}","Next":"MarkReady"},{"Condition":"{% $probes < 60 %}","Next":"WaitToProbe"}],"Default":"ProbeTimedOut"},"ProbeTimedOut":{"Type":"Pass","Assign":{"failure":"worker did not answer /ping within 10 minutes"},"Next":"Cleanup"},"MarkReady":{"Type":"Task","Resource":"arn:aws:states:::lambda:invoke","Arguments":{"FunctionName":"",
+              {
+                "Fn::GetAtt": [
+                  "SessionsSteps3B98DD2B",
+                  "Arn",
+                ],
+              },
+              "","Payload":{"action":"markReady","workspaceId":"{% $workspaceId %}","generation":"{% $generation %}"}},"Retry":[{"ErrorEquals":["States.ALL"],"IntervalSeconds":2,"MaxAttempts":3,"BackoffRate":2}],"Catch":[{"ErrorEquals":["States.ALL"],"Next":"Cleanup","Assign":{"failure":"{% $states.errorOutput.Error & ': ' & $states.errorOutput.Cause %}"}}],"Next":"Provisioned"},"Provisioned":{"Type":"Succeed"},"Cleanup":{"Type":"Choice","Choices":[{"Condition":"{% $instanceId != null %}","Next":"TerminateInstance"}],"Default":"MarkFailed"},"TerminateInstance":{"Type":"Task","Resource":"arn:aws:states:::aws-sdk:ec2:terminateInstances","Arguments":{"InstanceIds":["{% $instanceId %}"]},"Retry":[{"ErrorEquals":["States.ALL"],"IntervalSeconds":2,"MaxAttempts":3,"BackoffRate":2}],"Catch":[{"ErrorEquals":["States.ALL"],"Next":"MarkFailed"}],"Next":"MarkFailed"},"MarkFailed":{"Type":"Task","Resource":"arn:aws:states:::lambda:invoke","Arguments":{"FunctionName":"",
+              {
+                "Fn::GetAtt": [
+                  "SessionsSteps3B98DD2B",
+                  "Arn",
+                ],
+              },
+              "","Payload":{"action":"markFailed","workspaceId":"{% $workspaceId %}","generation":"{% $generation %}","error":"{% $substring($string($failure), 0, 4000) %}"}},"Retry":[{"ErrorEquals":["States.ALL"],"IntervalSeconds":2,"MaxAttempts":3,"BackoffRate":2}],"Next":"ProvisioningFailed"},"ProvisioningFailed":{"Type":"Fail","Error":"ProvisioningFailed","Cause":"{% $string($failure) %}"}}}",
+            ],
+          ],
+        },
+        "LoggingConfiguration": {
+          "Destinations": [
+            {
+              "CloudWatchLogsLogGroup": {
+                "LogGroupArn": {
+                  "Fn::GetAtt": [
+                    "SessionsProvisionerLogs324B5521",
+                    "Arn",
+                  ],
+                },
+              },
+            },
+          ],
+          "IncludeExecutionData": false,
+          "Level": "ERROR",
+        },
+        "RoleArn": {
+          "Fn::GetAtt": [
+            "SessionsProvisionerRole99939C5B",
+            "Arn",
+          ],
+        },
+      },
+      "Type": "AWS::StepFunctions::StateMachine",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "SessionsProvisionerFailuresAlarmD13ED78D": {
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "OperatorAlertsA2431256",
+          },
+        ],
+        "AlarmDescription": "An EC2 session provisioner execution failed or timed out. Open its execution in Step Functions for the failing step.",
+        "AlarmName": "AgentXSessionProvisionerFailures",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "Metrics": [
+          {
+            "Expression": "FILL(failed, 0) + FILL(timedOut, 0)",
+            "Id": "expr_1",
+            "ReturnData": true,
+          },
+          {
+            "Id": "failed",
+            "MetricStat": {
+              "Metric": {
+                "Dimensions": [
+                  {
+                    "Name": "StateMachineArn",
+                    "Value": {
+                      "Ref": "SessionsProvisioner9C44055B",
+                    },
+                  },
+                ],
+                "MetricName": "ExecutionsFailed",
+                "Namespace": "AWS/States",
+              },
+              "Period": 300,
+              "Stat": "Sum",
+            },
+            "ReturnData": false,
+          },
+          {
+            "Id": "timedOut",
+            "MetricStat": {
+              "Metric": {
+                "Dimensions": [
+                  {
+                    "Name": "StateMachineArn",
+                    "Value": {
+                      "Ref": "SessionsProvisioner9C44055B",
+                    },
+                  },
+                ],
+                "MetricName": "ExecutionsTimedOut",
+                "Namespace": "AWS/States",
+              },
+              "Period": 300,
+              "Stat": "Sum",
+            },
+            "ReturnData": false,
+          },
+        ],
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
+    "SessionsProvisionerLogs324B5521": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "RetentionInDays": 30,
+      },
+      "Type": "AWS::Logs::LogGroup",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "SessionsProvisionerRole99939C5B": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId",
+                  },
+                },
+              },
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "states.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Description": "AgentX EC2 session provisioner",
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "SessionsProvisionerRoleDefaultPolicyDF8FD11A": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "ec2:CreateVolume",
+              "Condition": {
+                "StringEquals": {
+                  "aws:RequestTag/DeploymentMode": "ec2-ebs",
+                  "aws:RequestTag/Environment": "production",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":ec2:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":volume/*",
+                  ],
+                ],
+              },
+              "Sid": "CreateWorkspaceVolume",
+            },
+            {
+              "Action": "ec2:CreateTags",
+              "Condition": {
+                "StringEquals": {
+                  "ec2:CreateAction": [
+                    "CreateVolume",
+                    "RunInstances",
+                  ],
+                },
+              },
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ec2:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":volume/*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ec2:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":instance/*",
+                    ],
+                  ],
+                },
+              ],
+              "Sid": "TagOnCreate",
+            },
+            {
+              "Action": "ec2:RunInstances",
+              "Condition": {
+                "ArnEquals": {
+                  "ec2:LaunchTemplate": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "arn:",
+                        {
+                          "Ref": "AWS::Partition",
+                        },
+                        ":ec2:",
+                        {
+                          "Ref": "AWS::Region",
+                        },
+                        ":",
+                        {
+                          "Ref": "AWS::AccountId",
+                        },
+                        ":launch-template/",
+                        {
+                          "Ref": "Ec2WorkerLaunchTemplateId",
+                        },
+                      ],
+                    ],
+                  },
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":ec2:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":instance/*",
+                  ],
+                ],
+              },
+              "Sid": "LaunchFromTemplate",
+            },
+            {
+              "Action": "ec2:RunInstances",
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ec2:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":launch-template/",
+                      {
+                        "Ref": "Ec2WorkerLaunchTemplateId",
+                      },
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ec2:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":subnet/*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ec2:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":security-group/*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ec2:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":network-interface/*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ec2:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":volume/*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ec2:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      "::image/*",
+                    ],
+                  ],
+                },
+              ],
+              "Sid": "LaunchResources",
+            },
+            {
+              "Action": [
+                "ssm:GetParameters",
+                "ssm:GetParameter",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":ssm:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    "::parameter/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64",
+                  ],
+                ],
+              },
+              "Sid": "ResolveWorkerAmi",
+            },
+            {
+              "Action": "iam:PassRole",
+              "Condition": {
+                "StringEquals": {
+                  "iam:PassedToService": "ec2.amazonaws.com",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "Ec2WorkerInstanceRoleArn",
+              },
+              "Sid": "PassInstanceRole",
+            },
+            {
+              "Action": [
+                "ec2:AttachVolume",
+                "ec2:TerminateInstances",
+              ],
+              "Condition": {
+                "StringEquals": {
+                  "aws:ResourceTag/DeploymentMode": "ec2-ebs",
+                  "aws:ResourceTag/Environment": "production",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ec2:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":instance/*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ec2:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":volume/*",
+                    ],
+                  ],
+                },
+              ],
+              "Sid": "AttachAndTerminateOwn",
+            },
+            {
+              "Action": [
+                "kms:CreateGrant",
+                "kms:Decrypt",
+                "kms:DescribeKey",
+                "kms:GenerateDataKeyWithoutPlaintext",
+                "kms:ReEncrypt*",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "WorkspaceKmsKeyArn",
+              },
+              "Sid": "EncryptVolumes",
+            },
+            {
+              "Action": [
+                "ec2:DescribeVolumes",
+                "ec2:DescribeInstances",
+              ],
+              "Effect": "Allow",
+              "Resource": "*",
+              "Sid": "Describe",
+            },
+            {
+              "Action": "lambda:InvokeFunction",
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "SessionsSteps3B98DD2B",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "SessionsSteps3B98DD2B",
+                          "Arn",
+                        ],
+                      },
+                      ":*",
+                    ],
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "logs:CreateLogDelivery",
+                "logs:GetLogDelivery",
+                "logs:UpdateLogDelivery",
+                "logs:DeleteLogDelivery",
+                "logs:ListLogDeliveries",
+                "logs:PutResourcePolicy",
+                "logs:DescribeResourcePolicies",
+                "logs:DescribeLogGroups",
+              ],
+              "Effect": "Allow",
+              "Resource": "*",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "SessionsProvisionerRoleDefaultPolicyDF8FD11A",
+        "Roles": [
+          {
+            "Ref": "SessionsProvisionerRole99939C5B",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "SessionsSteps3B98DD2B": {
+      "DependsOn": [
+        "SessionsStepsServiceRoleDefaultPolicy9F4B87C9",
+        "SessionsStepsServiceRole56E0F785",
+      ],
+      "Properties": {
+        "Code": {
+          "S3Bucket": {
+            "Fn::Sub": "cdk-hnb659fds-assets-\${AWS::AccountId}-\${AWS::Region}",
+          },
+          "S3Key": "<asset-hash>.zip",
+        },
+        "Environment": {
+          "Variables": {
+            "CONTROL_PLANE_URL": {
+              "Fn::GetAtt": [
+                "HttpApi",
+                "ApiEndpoint",
+              ],
+            },
+            "INVOKE_SIGNING_KEY_ARN": {
+              "Fn::GetAtt": [
+                "InvokeSigningKey2B33EC11",
+                "Arn",
+              ],
+            },
+            "STATE_TABLE_NAME": {
+              "Ref": "State1C20CC9A",
+            },
+            "WORKER_LOG_GROUP_NAME": "/agentx/production/worker",
+            "WORKER_SETTINGS_PREFIX": "/agentx/production/",
+          },
+        },
+        "Handler": "index.handler",
+        "LoggingConfig": {
+          "LogGroup": {
+            "Ref": "SessionsStepsLogsF43730BC",
+          },
+        },
+        "MemorySize": 512,
+        "Role": {
+          "Fn::GetAtt": [
+            "SessionsStepsServiceRole56E0F785",
+            "Arn",
+          ],
+        },
+        "Runtime": "nodejs22.x",
+        "Timeout": 30,
+        "TracingConfig": {
+          "Mode": "Active",
+        },
+        "VpcConfig": {
+          "SecurityGroupIds": [
+            {
+              "Ref": "SessionManagerSecurityGroupId",
+            },
+          ],
+          "SubnetIds": {
+            "Fn::Split": [
+              ",",
+              {
+                "Ref": "PrivateSubnetIds",
+              },
+            ],
+          },
+        },
+      },
+      "Type": "AWS::Lambda::Function",
+    },
+    "SessionsStepsLogsF43730BC": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "RetentionInDays": 30,
+      },
+      "Type": "AWS::Logs::LogGroup",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "SessionsStepsServiceRole56E0F785": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+              ],
+            ],
+          },
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                ":iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole",
+              ],
+            ],
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "SessionsStepsServiceRoleDefaultPolicy9F4B87C9": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "xray:PutTraceSegments",
+                "xray:PutTelemetryRecords",
+              ],
+              "Effect": "Allow",
+              "Resource": "*",
+            },
+            {
+              "Action": [
+                "dynamodb:BatchGetItem",
+                "dynamodb:Query",
+                "dynamodb:GetItem",
+                "dynamodb:Scan",
+                "dynamodb:ConditionCheckItem",
+                "dynamodb:BatchWriteItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:DeleteItem",
+                "dynamodb:DescribeTable",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "State1C20CC9A",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "State1C20CC9A",
+                          "Arn",
+                        ],
+                      },
+                      "/index/*",
+                    ],
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "dynamodb:GetRecords",
+                "dynamodb:GetShardIterator",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "State1C20CC9A",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "State1C20CC9A",
+                          "Arn",
+                        ],
+                      },
+                      "/index/*",
+                    ],
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": "ssm:GetParameters",
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":parameter/agentx/production/worker-image",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":parameter/agentx/production/worker-model-provider",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":parameter/agentx/production/worker-model-id",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":parameter/agentx/production/worker-prompt-cache-retention",
+                    ],
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": "kms:GetPublicKey",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "InvokeSigningKey2B33EC11",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "SessionsStepsServiceRoleDefaultPolicy9F4B87C9",
+        "Roles": [
+          {
+            "Ref": "SessionsStepsServiceRole56E0F785",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
     },
     "SlackDeadLettersAlarm9EF9F079": {
       "Properties": {
@@ -4309,6 +5529,39 @@ exports[`legacy production templates > AgentXProductionRuntime is unchanged 1`] 
         "Type": "String",
         "Value": {
           "Ref": "WorkerImageUri",
+        },
+      },
+      "Type": "AWS::SSM::Parameter",
+    },
+    "WorkerModelIdParameter02DE997A": {
+      "Properties": {
+        "Description": "AgentX worker modelId for EC2 workers",
+        "Name": "/agentx/production/worker-model-id",
+        "Type": "String",
+        "Value": {
+          "Ref": "ModelId",
+        },
+      },
+      "Type": "AWS::SSM::Parameter",
+    },
+    "WorkerModelProviderParameterFBA25A19": {
+      "Properties": {
+        "Description": "AgentX worker modelProvider for EC2 workers",
+        "Name": "/agentx/production/worker-model-provider",
+        "Type": "String",
+        "Value": {
+          "Ref": "ModelProvider",
+        },
+      },
+      "Type": "AWS::SSM::Parameter",
+    },
+    "WorkerPromptCacheRetentionParameter7E1031C3": {
+      "Properties": {
+        "Description": "AgentX worker promptCacheRetention for EC2 workers",
+        "Name": "/agentx/production/worker-prompt-cache-retention",
+        "Type": "String",
+        "Value": {
+          "Ref": "PromptCacheRetention",
         },
       },
       "Type": "AWS::SSM::Parameter",

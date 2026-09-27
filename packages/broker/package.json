@@ -9,11 +9,15 @@
     "@aws-sdk/client-bedrock-agentcore": "3.1134.0",
     "@aws-sdk/client-codebuild": "3.1134.0",
     "@aws-sdk/client-dynamodb": "3.1134.0",
+    "@aws-sdk/client-kms": "3.1134.0",
     "@aws-sdk/client-s3": "3.1134.0",
     "@aws-sdk/client-secrets-manager": "3.1134.0",
+    "@aws-sdk/client-sfn": "3.1134.0",
     "@aws-sdk/client-sqs": "3.1134.0",
+    "@aws-sdk/client-ssm": "3.1134.0",
     "@aws-sdk/lib-dynamodb": "3.1134.0",
     "@aws-sdk/util-dynamodb": "3.996.9",
-    "jose": "6.2.12"
+    "jose": "6.2.12",
+    "zod": "4.6.5"
   }
 }
