@@ -1,6 +1,6 @@
 // Spec 025 FR-013: a developer may use a project granted to them, or, when the project allows it,
 // any project with a bound channel their linked Slack user is in. Slack failures fail closed.
-import type { ChannelMembersRequest, ChannelMembersResponse, SlackChannelBinding } from "@agentx/contracts";
+import { CHANNEL_MEMBERS_MAX_CHANNELS, type ChannelMembersRequest, type ChannelMembersResponse, type SlackChannelBinding } from "@agentx/contracts";
 
 export interface DeveloperAccessInput {
   grants: readonly string[];
@@ -20,9 +20,12 @@ export async function resolveDeveloperAccess(input: DeveloperAccessInput): Promi
   const candidates = [...channelsOf.keys()].filter((project) => !projects.has(project) && input.channelMembersMayUse(project));
   if (input.slackUserId === undefined || candidates.length === 0) return { projects: sorted(projects), slackUnavailable: false };
   const channelIds = [...new Set(candidates.flatMap((project) => channelsOf.get(project) ?? []))].sort();
-  const answer = await input.channelMembers({ kind: "channel-members", slackUserId: input.slackUserId, channelIds });
-  if (!answer.ok) return { projects: sorted(projects), slackUnavailable: true };
-  const member = new Set(answer.memberOf);
+  const member = new Set<string>();
+  for (let start = 0; start < channelIds.length; start += CHANNEL_MEMBERS_MAX_CHANNELS) {
+    const answer = await input.channelMembers({ kind: "channel-members", slackUserId: input.slackUserId, channelIds: channelIds.slice(start, start + CHANNEL_MEMBERS_MAX_CHANNELS) });
+    if (!answer.ok) return { projects: sorted(projects), slackUnavailable: true };
+    for (const channel of answer.memberOf) member.add(channel);
+  }
   for (const project of candidates) {
     const channels = channelsOf.get(project) ?? [];
     if (channels.some((channel) => member.has(channel))) projects.set(project, { access: "channel", channels });

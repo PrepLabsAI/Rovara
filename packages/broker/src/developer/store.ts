@@ -30,7 +30,7 @@ interface CodeRecord { developerId: string; amr: DeveloperSignInMethod; slackUse
 interface RefreshRecord { sessionId: string; expiresAt: number; usedAt?: string; graceUsedAt?: string }
 interface CancellationReason { Code?: string }
 
-const META = "META";
+export const META = "META";
 const conditionFailed = (error: unknown) =>
   error instanceof Error && (error.name === "ConditionalCheckFailedException" || error.name === "TransactionCanceledException");
 

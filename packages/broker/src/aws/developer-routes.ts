@@ -12,7 +12,7 @@ import {
   type SlackChannelBinding,
 } from "@agentx/contracts";
 import { resolveDeveloperAccess } from "../developer/access.js";
-import type { DeveloperRecord, SessionRecord } from "../developer/store.js";
+import { META, type DeveloperRecord, type SessionRecord } from "../developer/store.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 
 export interface DeveloperApiConfiguration {
@@ -22,6 +22,52 @@ export interface DeveloperApiConfiguration {
 }
 export interface DeveloperRouteDependencies { documentClient: { send(command: unknown): Promise<unknown> }; tableName: string; developer: DeveloperApiConfiguration; now: () => number }
 export interface DeveloperCaller { developerId: string; sessionId: string; amr: DeveloperSignInMethod; name: string; slackUserId?: string; email?: string }
+
+/** What the broker needs from a Lambda invoke; `@aws-sdk/client-lambda`'s InvokeCommand output fits. */
+export interface ChannelMembersInvokeResult { FunctionError?: string | undefined; Payload?: Uint8Array | undefined }
+
+/** One structured log line. Only event names, reasons and error names: never payloads or secrets. */
+function logDeveloperEvent(entry: Record<string, string>): void {
+  console.log(JSON.stringify({ component: "broker", ...entry }));
+}
+const errorName = (error: unknown) => (error instanceof Error ? error.name : "UnknownError");
+const SLACK_UNAVAILABLE: ChannelMembersResponse = { ok: false, error: "slack_unavailable" };
+
+/**
+ * The broker's channel-members check: a direct invoke of the DeveloperIdentity function, which
+ * holds the Slack token (the broker never reads the Slack secret). Every failure fails closed and
+ * is logged by its error name, FunctionError or reply error, never by payload.
+ */
+export function channelMembersThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: ChannelMembersRequest) => Promise<ChannelMembersResponse> {
+  const failed = (entry: Record<string, string>) => {
+    logDeveloperEvent({ event: "developer.channel_members_failed", ...entry });
+    return SLACK_UNAVAILABLE;
+  };
+  return async (request) => {
+    let response: ChannelMembersInvokeResult;
+    try {
+      response = await invoke(Buffer.from(JSON.stringify(request)));
+    } catch (error) {
+      return failed({ reason: "invoke_error", error: errorName(error) });
+    }
+    if (response.FunctionError !== undefined) return failed({ reason: "function_error", functionError: response.FunctionError });
+    if (response.Payload === undefined) return failed({ reason: "empty_reply" });
+    let reply: { ok?: unknown; memberOf?: unknown; error?: unknown };
+    try {
+      reply = JSON.parse(Buffer.from(response.Payload).toString("utf8")) as typeof reply;
+    } catch {
+      return failed({ reason: "unreadable_reply" });
+    }
+    if (reply.ok === true && Array.isArray(reply.memberOf)) {
+      return { ok: true, memberOf: reply.memberOf.filter((entry): entry is string => typeof entry === "string") };
+    }
+    if (reply.ok === false && reply.error === "invalid_request") {
+      logDeveloperEvent({ event: "developer.channel_members_invalid_request", reason: "the identity function refused the broker's request; this is a broker bug" });
+      return { ok: false, error: "invalid_request" };
+    }
+    return failed({ reason: "reply_error", error: reply.ok === false && reply.error === "slack_unavailable" ? "slack_unavailable" : "malformed_reply" });
+  };
+}
 
 const SIGN_IN_AGAIN = "your AgentX sign-in has ended; run agentx login <url> again";
 
@@ -41,7 +87,7 @@ export function developerClaims(claims: Record<string, unknown> | undefined, con
 }
 
 async function getSignIn<T>(deps: DeveloperRouteDependencies, pk: string): Promise<T | undefined> {
-  const response = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: { pk, sk: "META" }, ConsistentRead: true })) as { Item?: T };
+  const response = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: { pk, sk: META }, ConsistentRead: true })) as { Item?: T };
   return response.Item;
 }
 
@@ -61,33 +107,62 @@ export async function authenticateDeveloper(deps: DeveloperRouteDependencies, cl
   };
 }
 
-async function queryState<T>(deps: DeveloperRouteDependencies, pk: string, prefix: string, options: { newestFirst?: boolean; limit?: number } = {}): Promise<T[]> {
+/** Every item under `pk` with the sort key prefix, following LastEvaluatedKey through each page. */
+async function queryAll<T>(deps: DeveloperRouteDependencies, pk: string, prefix: string): Promise<T[]> {
+  const items: T[] = [];
+  let start: Record<string, unknown> | undefined;
+  do {
+    const response = await deps.documentClient.send(new QueryCommand({
+      TableName: deps.tableName,
+      KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
+      ExpressionAttributeValues: { ":pk": pk, ":prefix": prefix },
+      ...(start === undefined ? {} : { ExclusiveStartKey: start }),
+      ConsistentRead: true,
+    })) as { Items?: T[]; LastEvaluatedKey?: Record<string, unknown> };
+    items.push(...(response.Items ?? []));
+    start = response.LastEvaluatedKey;
+  } while (start !== undefined);
+  return items;
+}
+
+async function latestRevision(deps: DeveloperRouteDependencies, project: string): Promise<number | undefined> {
   const response = await deps.documentClient.send(new QueryCommand({
     TableName: deps.tableName,
     KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
-    ExpressionAttributeValues: { ":pk": pk, ":prefix": prefix },
-    ...(options.newestFirst ? { ScanIndexForward: false } : {}),
-    ...(options.limit === undefined ? {} : { Limit: options.limit }),
+    ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":prefix": "REV#" },
+    ScanIndexForward: false,
+    Limit: 1,
     ConsistentRead: true,
-  })) as { Items?: T[] };
-  return response.Items ?? [];
+  })) as { Items?: Array<{ definition: { revision: number } }> };
+  return response.Items?.[0]?.definition.revision;
 }
 
 async function listProjects(deps: DeveloperRouteDependencies, caller: DeveloperCaller): Promise<DeveloperProjectsResponse> {
-  const grants = (await queryState<{ projectName: string }>(deps, `MEMBER#${caller.developerId}`, "PROJECT#")).map((grant) => grant.projectName);
-  const bindings = deps.developer.slackTeamId === undefined ? [] : await queryState<SlackChannelBinding>(deps, `SLACK_BINDING#${deps.developer.slackTeamId}`, "CHANNEL#");
+  // FR-013: only `developer` rows are grants. A developer ID is built like an admin owner key, so an
+  // admin's `administrator` rows can sit under the same key when both sign in through one IdP.
+  const grants = (await queryAll<{ projectName: string; role?: string }>(deps, `MEMBER#${caller.developerId}`, "PROJECT#"))
+    .filter((membership) => membership.role === "developer")
+    .map((membership) => membership.projectName);
+  const bindings = deps.developer.slackTeamId === undefined ? [] : await queryAll<SlackChannelBinding>(deps, `SLACK_BINDING#${deps.developer.slackTeamId}`, "CHANNEL#");
   const access = await resolveDeveloperAccess({
     grants,
     bindings,
     ...(caller.slackUserId === undefined ? {} : { slackUserId: caller.slackUserId }),
     channelMembersMayUse: () => true, // R16: phase 25b reads the revision's developerTasks.channelMembersMayUse
-    channelMembers: (request) => deps.developer.channelMembers(request),
+    channelMembers: async (request) => {
+      try {
+        return await deps.developer.channelMembers(request);
+      } catch (error) {
+        logDeveloperEvent({ event: "developer.channel_members_failed", reason: "threw", error: errorName(error) });
+        return SLACK_UNAVAILABLE;
+      }
+    },
   });
   const projects: DeveloperProjectsResponse["projects"] = [];
   for (const [name, entry] of access.projects) {
-    const [latest] = await queryState<{ definition: { revision: number } }>(deps, `PROJECT#${name}`, "REV#", { newestFirst: true, limit: 1 });
-    if (latest === undefined) continue;
-    projects.push({ name, latestRevision: latest.definition.revision, access: entry.access, channels: entry.channels.map((channelId) => ({ channelId })) });
+    const revision = await latestRevision(deps, name);
+    if (revision === undefined) continue;
+    projects.push({ name, latestRevision: revision, access: entry.access, channels: entry.channels.map((channelId) => ({ channelId })) });
   }
   return {
     developer: {

@@ -85,12 +85,19 @@ export const DeveloperProjectsResponseSchema = z.object({
 });
 export type DeveloperProjectsResponse = z.infer<typeof DeveloperProjectsResponseSchema>;
 
+/** The most channels one channel-members request may name; callers split longer lists. */
+export const CHANNEL_MEMBERS_MAX_CHANNELS = 500;
+
 export const ChannelMembersRequestSchema = z
   .object({
     kind: z.literal("channel-members"),
     slackUserId: SlackUserIdSchema,
-    channelIds: z.array(SlackChannelIdSchema).max(500),
+    channelIds: z.array(SlackChannelIdSchema).max(CHANNEL_MEMBERS_MAX_CHANNELS),
   })
   .strict();
 export type ChannelMembersRequest = z.infer<typeof ChannelMembersRequestSchema>;
-export type ChannelMembersResponse = { ok: true; memberOf: string[] } | { ok: false; error: "slack_unavailable" };
+/** `invalid_request` means the caller sent a request the identity function refused: a caller bug. */
+export type ChannelMembersResponse =
+  | { ok: true; memberOf: string[] }
+  | { ok: false; error: "slack_unavailable" }
+  | { ok: false; error: "invalid_request" };

@@ -82,7 +82,7 @@ import { observeConnectorRoute } from "./connector-metrics.js";
 import { attributionDroppedLog, callConnector, connectorCatalogKey, discoverConnector, discoverLegacyGitHubScope, stripCode, type ConnectorContextBase, type ScopeDiscovery } from "./connector-routes.js";
 import { resolveConnectors, BUILT_IN_CONNECTOR_TYPES, type ConnectorType, type ConnectorTypeContext, type ResolvedConnector } from "./connector-types.js";
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
-import { routeDeveloperRequest, type DeveloperApiConfiguration } from "./developer-routes.js";
+import { channelMembersThroughLambda, routeDeveloperRequest, type DeveloperApiConfiguration } from "./developer-routes.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
@@ -3654,18 +3654,7 @@ function developerConfiguration(): DeveloperApiConfiguration | undefined {
     methods: { slack: process.env.DEVELOPER_SIGNIN_SLACK === "enabled", oidc: (process.env.DEVELOPER_OIDC_ISSUER ?? "") !== "" },
     ...(teamId === "" ? {} : { slackTeamId: teamId }),
     signInTableName: requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME"),
-    async channelMembers(request) {
-      try {
-        const response = await lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: Buffer.from(JSON.stringify(request)) }));
-        if (response.FunctionError !== undefined || response.Payload === undefined) return { ok: false, error: "slack_unavailable" };
-        const parsed = JSON.parse(Buffer.from(response.Payload).toString("utf8")) as { ok?: unknown; memberOf?: unknown };
-        return parsed.ok === true && Array.isArray(parsed.memberOf)
-          ? { ok: true, memberOf: parsed.memberOf.filter((entry): entry is string => typeof entry === "string") }
-          : { ok: false, error: "slack_unavailable" };
-      } catch {
-        return { ok: false, error: "slack_unavailable" };
-      }
-    },
+    channelMembers: channelMembersThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
   };
 }
 const developer = developerConfiguration();

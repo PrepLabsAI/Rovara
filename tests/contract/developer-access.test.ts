@@ -45,6 +45,38 @@ describe("project access (FR-013)", () => {
     expect(access.slackUnavailable).toBe(true);
   });
 
+  it("splits the channel check into requests of at most 500 channels, the contract's cap", async () => {
+    const many = Array.from({ length: 501 }, (_, index) => binding(`C0BIG${String(index).padStart(4, "0")}`, "big"));
+    const requests: ChannelMembersRequest[] = [];
+    const access = await resolveDeveloperAccess({
+      grants: [], bindings: many, slackUserId: "U0MAYA001", channelMembersMayUse: () => true,
+      channelMembers: async (request) => {
+        requests.push(request);
+        return { ok: true, memberOf: request.channelIds.includes("C0BIG0500") ? ["C0BIG0500"] : [] };
+      },
+    });
+    expect(requests.map((request) => request.channelIds.length)).toEqual([500, 1]);
+    expect(new Set(requests.flatMap((request) => request.channelIds)).size).toBe(501);
+    expect(access.projects.get("big")?.access).toBe("channel");
+  });
+
+  it("fails closed when a later channel request fails", async () => {
+    const many = Array.from({ length: 501 }, (_, index) => binding(`C0BIG${String(index).padStart(4, "0")}`, "big"));
+    let calls = 0;
+    const access = await resolveDeveloperAccess({
+      grants: ["ledger"], bindings: many, slackUserId: "U0MAYA001", channelMembersMayUse: () => true,
+      channelMembers: async () => (++calls === 1 ? { ok: true, memberOf: ["C0BIG0001"] } : { ok: false, error: "slack_unavailable" }),
+    });
+    expect([...access.projects.keys()]).toEqual(["ledger"]);
+    expect(access.slackUnavailable).toBe(true);
+  });
+
+  it("fails closed on an invalid_request reply too", async () => {
+    const access = await resolveDeveloperAccess({ grants: [], bindings, slackUserId: "U0MAYA001", channelMembersMayUse: () => true, channelMembers: async () => ({ ok: false, error: "invalid_request" }) });
+    expect(access.projects.size).toBe(0);
+    expect(access.slackUnavailable).toBe(true);
+  });
+
   it("lists a granted project that has no bound channel", async () => {
     const access = await resolveDeveloperAccess({ grants: ["solo"], bindings, channelMembersMayUse: () => true, channelMembers: vi.fn() });
     expect(access.projects.get("solo")).toEqual({ access: "granted", channels: [] });
