@@ -21,6 +21,8 @@ const rolesOf = (policy: Resource) => (policy.Properties.Roles as Ref[]).map((ro
 /** Logical IDs end in an eight-character hash; drop it to compare names. */
 const withoutHash = (logicalId: string) => logicalId.replace(/[0-9A-F]{8}$/, "");
 const functionId = (template: TemplateJson, prefix: string) => ofType(template, "AWS::Lambda::Function").map(([id]) => id).find((id) => withoutHash(id) === prefix)!;
+/** Whether a statement's resources name this logical ID or are the wildcard "*". */
+const reaches = (statement: Statement, logicalId: string) => JSON.stringify(statement.Resource).includes(logicalId) || [statement.Resource].flat().includes("*");
 const roleNamesWith = (template: TemplateJson, matches: (statement: Statement) => boolean) =>
   ofType(template, "AWS::IAM::Policy").filter(([, policy]) => statementsOf(policy).some(matches)).flatMap(([, policy]) => rolesOf(policy)).map(withoutHash).sort();
 
@@ -77,15 +79,15 @@ describe("developer sign-in infrastructure (named environments)", () => {
     expect(deny).toMatchObject({ Sid: "SignOnlyAsDeveloperIdentity", Action: "kms:Sign", Principal: { AWS: "*" }, Resource: "*" });
     const exempt = (deny.Condition as { ArnNotEquals: Record<string, unknown> }).ArnNotEquals["aws:PrincipalArn"] as { "Fn::GetAtt": [string, string] };
     expect(withoutHash(exempt["Fn::GetAtt"][0])).toBe("DeveloperSignInFunctionServiceRole");
-    // The only identity policy that grants kms:Sign on this key is DeveloperIdentity's.
-    expect(roleNamesWith(named, (s) => actionsOf(s).includes("kms:Sign") && JSON.stringify(s.Resource).includes(keyId))).toEqual(["DeveloperSignInFunctionServiceRole"]);
+    // The only identity policy that grants kms:Sign on this key (by name or wildcard) is DeveloperIdentity's.
+    expect(roleNamesWith(named, (s) => actionsOf(s).includes("kms:Sign") && reaches(s, keyId))).toEqual(["DeveloperSignInFunctionServiceRole"]);
     const aliases = ofType(named, "AWS::KMS::Alias").map(([, resource]) => resource.Properties);
     expect(aliases.find((alias) => alias.AliasName === "alias/agentx/staging/developer-tokens")).toMatchObject({ TargetKeyId: { "Fn::GetAtt": [keyId, "Arn"] } });
   });
 
   it("lets only the ingress, the orchestrator task role and DeveloperIdentity read the Slack secret (R2)", () => {
     const [secretId] = ofType(named, "AWS::SecretsManager::Secret").find(([, resource]) => resource.Properties.Name === "agentx/staging/slack")!;
-    const readers = roleNamesWith(named, (s) => actionsOf(s).includes("secretsmanager:GetSecretValue") && JSON.stringify(s.Resource).includes(secretId));
+    const readers = roleNamesWith(named, (s) => actionsOf(s).includes("secretsmanager:GetSecretValue") && reaches(s, secretId));
     expect(readers).toEqual(["DeveloperSignInFunctionServiceRole", "SlackIngressServiceRole", "SlackOrchestratorTaskRole"]);
   });
 
@@ -98,7 +100,7 @@ describe("developer sign-in infrastructure (named environments)", () => {
 
   it("lets only the broker invoke DeveloperIdentity directly, and API Gateway only on /v1/auth/*", () => {
     const fnId = functionId(named, "DeveloperSignInFunction");
-    expect(roleNamesWith(named, (s) => actionsOf(s).some((action) => action.startsWith("lambda:Invoke")) && JSON.stringify(s.Resource).includes(fnId))).toEqual(["BrokerServiceRole"]);
+    expect(roleNamesWith(named, (s) => actionsOf(s).some((action) => action.startsWith("lambda:Invoke")) && reaches(s, fnId))).toEqual(["BrokerServiceRole"]);
     const permissions = ofType(named, "AWS::Lambda::Permission").map(([, r]) => r.Properties).filter((properties) => JSON.stringify(properties.FunctionName).includes(fnId));
     expect(permissions).toHaveLength(1);
     expect(permissions[0]).toMatchObject({ Action: "lambda:InvokeFunction", Principal: "apigateway.amazonaws.com" });
