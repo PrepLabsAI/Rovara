@@ -35,6 +35,8 @@ const FORBIDDEN_ROUTING_FIELDS = new Set([
   "runtimeArn",
   "runtimeSessionId",
   "sessionId",
+  "provider",
+  "modelId",
 ]);
 
 export function assertNoUntrustedRoutingFields(value: unknown, path = "body"): void {

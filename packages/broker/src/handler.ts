@@ -64,7 +64,6 @@ export function createBrokerHandler(dependencies: {
       const token = bearerToken(request.headers.authorization);
       const identity = await dependencies.authenticator.authenticate(token);
       const body = parseBody(request.body);
-      assertNoUntrustedRoutingFields(body);
 
       if (request.method === "POST" && requestPath === "/v1/admin/projects") {
         if (!dependencies.projects) throw agentXError("NOT_FOUND", "route not configured");
@@ -72,6 +71,10 @@ export function createBrokerHandler(dependencies: {
         const registered = dependencies.projects.register(identity, definition, dependencies.memberships);
         return json(registered.duplicate ? 200 : 201, registered, requestId);
       }
+
+      // Project model policy is trusted administrator configuration. Every developer workflow
+      // below still rejects fields that try to choose identity, runtime, session, or model routing.
+      assertNoUntrustedRoutingFields(body);
 
       if (request.method === "POST" && requestPath === "/v1/admin/workspaces/prepare") {
         if (!dependencies.preparation) throw agentXError("NOT_FOUND", "route not configured");

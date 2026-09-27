@@ -3,6 +3,8 @@ import {
   SlackThreadWorkspaceResultSchema,
   SlackWorkspaceCloseCompleteResultSchema,
   SlackWorkspaceCloseStartResultSchema,
+  ProjectModelOptionsSchema,
+  ProjectModelSelectionRequestSchema,
 } from "@agentx/contracts";
 import { ControlPlaneApi } from "@agentx/orchestrator/control-plane-api";
 import { pollOperation } from "@agentx/orchestrator/event-client";
@@ -15,10 +17,13 @@ export function createThreadApi(options: { controlPlaneUrl: string; signedFetch:
   const client = (workspaceId: string) => new ControlPlaneApi(controlPlaneUrl, "slack-service", workspaceId, signedFetch);
 
   async function servicePost(path: string, body: unknown, failure: string): Promise<Record<string, unknown>> {
+    return serviceRequest("POST", path, body, failure);
+  }
+
+  async function serviceRequest(method: string, path: string, body: unknown, failure: string): Promise<Record<string, unknown>> {
     const response = await signedFetch(`${controlPlaneUrl}${path}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
+      method,
+      ...(body === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
     });
     const parsed = await response.json() as Record<string, unknown>;
     if (!response.ok) {
@@ -57,6 +62,13 @@ export function createThreadApi(options: { controlPlaneUrl: string; signedFetch:
     },
     async createConversation(workspaceId) {
       return (await client(workspaceId).createConversation()).id;
+    },
+    async listProjectModels() {
+      return ProjectModelOptionsSchema.parse(await serviceRequest("GET", "/v1/project/models", undefined, "project model list failed"));
+    },
+    async selectProjectModel(model) {
+      const body = ProjectModelSelectionRequestSchema.parse(model);
+      return ProjectModelOptionsSchema.parse(await serviceRequest("PUT", "/v1/project/model", body, "project model selection failed"));
     },
   };
 }

@@ -156,6 +156,25 @@ for the channel's bound project. Later mentions in that thread, by any channel m
 in the same workspace and Pi conversation. Requests in one thread run in order; different threads
 run in parallel.
 
+An administrator may add a `models` block to a project revision with a `default` model and up to
+16 `approved` provider/model pairs. The default must be in the approved list; optional labels must
+be unique. Verify that the worker role can use every approved model in the deployment account and
+region before registering the revision. For example:
+
+```yaml
+models:
+  default: { provider: amazon-bedrock, modelId: model-balanced, label: Balanced }
+  approved:
+    - { provider: amazon-bedrock, modelId: model-balanced, label: Balanced }
+    - { provider: amazon-bedrock, modelId: model-fast, label: Fast }
+```
+
+In the bound Slack channel, `@agentx models` lists the choices and `@agentx use Fast` selects one.
+The selection applies to every workspace in the project on its next coding turn, including existing
+threads. A removed selection falls back to the latest revision's default with a diagnostic. Projects
+without `models` continue to use the worker deployment's model settings. During a rolling release,
+deploy worker support before the broker begins sending the optional resolved-model field.
+
 #### GitHub MCP through hosted Slack
 
 The control plane connects to GitHub's hosted MCP server, discovers its tools with `tools/list`,

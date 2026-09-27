@@ -34,6 +34,8 @@ const DISPOSITIONS: Record<TurnDetails["disposition"], string> = {
   confirmation_refused: "confirmation refused, nothing ran",
   confirmation_cancelled: "confirmation cancelled",
   yes_to_all_granted: "yes to all granted",
+  model_list: "model list",
+  model_switch: "model selection",
 };
 
 /** Slack's three control characters; after this, record text cannot form a link, mention or alert. */

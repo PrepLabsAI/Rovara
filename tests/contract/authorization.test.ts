@@ -63,5 +63,7 @@ describe("authentication and authorization", () => {
     expect(() => assertNoUntrustedRoutingFields({ deploymentMode: "instances-ebs" })).toThrow(
       /deploymentMode/,
     );
+    expect(() => assertNoUntrustedRoutingFields({ nested: { provider: "bedrock" } })).toThrow(/provider/);
+    expect(() => assertNoUntrustedRoutingFields({ modelId: "server-choice" })).toThrow(/modelId/);
   });
 });

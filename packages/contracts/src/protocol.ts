@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { StoredProjectDefinitionSchema } from "./project.js";
+import { ModelIdentifierSchema } from "./models.js";
 
 export const AGENTX_PROTOCOL_VERSION = 1 as const;
 
@@ -25,6 +26,8 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         prompt: z.string().min(1).max(65_536),
         /** The control plane's record that this conversation already owns a saved session. */
         conversationStarted: z.boolean().optional(),
+        model: ModelIdentifierSchema.optional(),
+        modelSelectionDiagnostic: z.string().min(1).max(512).optional(),
       })
       .strict(),
   }).strict(),

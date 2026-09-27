@@ -76,6 +76,7 @@ export const TurnObservationSchema = z.object({
 export const TurnDispositionSchema = z.enum([
   "answered", "failed", "abandoned", "workspace_close", "workspace_limit", "workspace_closed", "workspace_unavailable",
   "confirmation_refused", "confirmation_cancelled", "yes_to_all_granted",
+  "model_list", "model_switch",
 ]);
 
 export const TurnRecordSchema = TurnObservationSchema.extend({
