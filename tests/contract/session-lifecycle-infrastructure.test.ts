@@ -108,6 +108,33 @@ describe("EC2 session lifecycle infrastructure (issue #83)", () => {
     expect([...actions(statements)].filter((a) => a.endsWith(":*"))).toEqual([]);
   });
 
+  it("runs the dispatcher in the VPC with the dispatcher's security group, able to sign and start provisioning (#84)", () => {
+    const [, dispatcher] = ofType("AWS::Lambda::Function").find(([id]) => id.startsWith("Dispatcher"))!;
+    expect(dispatcher.Properties.VpcConfig).toEqual({
+      SubnetIds: { "Fn::Split": [",", { Ref: "PrivateSubnetIds" }] },
+      SecurityGroupIds: [{ Ref: "DispatcherSecurityGroupId" }],
+    });
+    expect(Object.keys((dispatcher.Properties.Environment as { Variables: Record<string, unknown> }).Variables))
+      .toEqual(expect.arrayContaining(["PROVISIONER_ARN", "DELETER_ARN", "INVOKE_SIGNING_KEY_ARN"]));
+    const roleId = (dispatcher.Properties.Role as { "Fn::GetAtt": [string] })["Fn::GetAtt"][0];
+    const statements = roleStatements(roleId);
+    expect([...actions(statements)]).toEqual(expect.arrayContaining(["kms:Sign", "states:StartExecution", "bedrock-agentcore:InvokeAgentRuntime"]));
+    const start = statements.find((st) => [st.Action].flat().includes("states:StartExecution"))!;
+    expect(JSON.stringify(start.Resource)).toContain("SessionsProvisioner");
+    expect(JSON.stringify(start.Resource)).not.toContain("SessionsDeleter");
+  });
+
+  it("lets the broker start only the deleter, for ec2-ebs close (#84)", () => {
+    const [, broker] = ofType("AWS::Lambda::Function").find(([id]) => id.startsWith("Broker"))!;
+    expect(Object.keys((broker.Properties.Environment as { Variables: Record<string, unknown> }).Variables)).toEqual(expect.arrayContaining(["DELETER_ARN"]));
+    const roleId = (broker.Properties.Role as { "Fn::GetAtt": [string] })["Fn::GetAtt"][0];
+    const start = roleStatements(roleId).find((st) => [st.Action].flat().includes("states:StartExecution"))!;
+    expect(JSON.stringify(start.Resource)).toContain("SessionsDeleter");
+    expect(JSON.stringify(start.Resource)).not.toContain("SessionsProvisioner");
+    // The broker stays outside the VPC.
+    expect(broker.Properties.VpcConfig).toBeUndefined();
+  });
+
   it("alarms the operator when either state machine fails or times out", () => {
     const alarms = ofType("AWS::CloudWatch::Alarm").filter(([, a]) => String(a.Properties.AlarmName).startsWith("AgentXSession"));
     expect(alarms.map(([, a]) => a.Properties.AlarmName).sort()).toEqual(["AgentXSessionDeleterFailures", "AgentXSessionProvisionerFailures", "AgentXSessionReaperErrors"]);

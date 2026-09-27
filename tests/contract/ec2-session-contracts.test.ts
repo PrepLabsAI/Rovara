@@ -7,10 +7,12 @@ import {
   workspaceSessionKey,
 } from "../../packages/contracts/src/session.js";
 import { WorkspaceDeploymentModeSchema, WorkspaceInstanceSchema } from "../../packages/contracts/src/workspace.js";
+// The broker's copy of the contracts (the built package), so its instanceof AgentXError holds.
+import { agentXError } from "@agentx/contracts";
 import { parseRuntimeBinding } from "../../packages/broker/src/aws/lambda.js";
 import { createDispatcherHandler } from "../../packages/broker/src/aws/dispatcher.js";
 import { createOutboxPublisherHandler } from "../../packages/broker/src/aws/outbox-publisher.js";
-import { registerProject } from "../../packages/cli/src/admin/register.js";
+import { cliRuntimeBinding, registerProject } from "../../packages/cli/src/admin/register.js";
 import {
   SLACK_CHANNEL, SLACK_TEAM, account, call, createBroker, finishOperation, lazyEnsureWorkspace, loadSlackBroker, markReady,
   prepareThread, serviceCall,
@@ -132,6 +134,29 @@ describe("registering an ec2-ebs project from the CLI module", () => {
       controlPlaneUrl: "https://control.example.test", accessToken: "token", definition, runtimeBinding: { ...binding, subnets: [] },
     }, fetchImplementation)).rejects.toThrow();
     expect(fetchImplementation).not.toHaveBeenCalled();
+  });
+});
+
+describe("admin project register flags (#84)", () => {
+  const defaults = { endpointQualifier: "DEFAULT", volumeSizeGib: "20", volumeType: "gp3" };
+
+  it("builds an ec2-ebs binding from the foundation's launch template and subnet pairs", () => {
+    expect(cliRuntimeBinding("ec2-ebs", {
+      ...defaults, launchTemplateId: binding.launchTemplateId, subnets: "us-east-1a=subnet-0123456789abcdef0, us-east-1b=subnet-0fedcba9876543210",
+    })).toEqual(binding);
+  });
+
+  it("keeps each mode to its own flags", () => {
+    expect(() => cliRuntimeBinding("ec2-ebs", { ...defaults, launchTemplateId: binding.launchTemplateId })).toThrow(/requires --launch-template-id and --subnets/);
+    expect(() => cliRuntimeBinding("ec2-ebs", { ...defaults, launchTemplateId: binding.launchTemplateId, subnets: "us-east-1a", runtimeArn: agentCoreRuntime.runtimeArn }))
+      .toThrow(/AgentCore modes only/);
+    expect(() => cliRuntimeBinding("ec2-ebs", { ...defaults, launchTemplateId: binding.launchTemplateId, subnets: "us-east-1a" })).toThrow(/not availabilityZone=subnetId/);
+    expect(() => cliRuntimeBinding("ec2-ebs", { ...defaults, volumeSizeGib: "big", launchTemplateId: binding.launchTemplateId, subnets: "us-east-1a=subnet-0123456789abcdef0" }))
+      .toThrow(/volumeSizeGiB/);
+    expect(() => cliRuntimeBinding("demo-microvm", defaults)).toThrow(/requires --runtime-arn/);
+    expect(() => cliRuntimeBinding("demo-microvm", { ...defaults, runtimeArn: agentCoreRuntime.runtimeArn, subnets: "x=y" })).toThrow(/ec2-ebs only/);
+    expect(cliRuntimeBinding("demo-microvm", { ...defaults, runtimeArn: agentCoreRuntime.runtimeArn }))
+      .toEqual({ runtimeArn: agentCoreRuntime.runtimeArn, endpointQualifier: "DEFAULT", deploymentMode: "demo-microvm" });
   });
 });
 
@@ -271,8 +296,9 @@ describe("an ec2-ebs project in the broker", () => {
     return call(handler, { method: "POST", path: "/v1/admin/projects", user: admin, body: { definition, runtimeBinding } });
   }
 
-  it("registers idempotently, prepares with an ec2-ebs outbox record, and refuses to close without releasing the volume", async () => {
-    const { db, handler, deleteWorkspaceSession } = createBroker();
+  /** Registers, binds, prepares and runs a close preflight; returns the close completion response. */
+  async function closeEc2Workspace(deleteEc2Session?: (workspaceId: string) => Promise<void>) {
+    const { db, handler, deleteWorkspaceSession } = createBroker(deleteEc2Session === undefined ? {} : { deleteEc2Session });
     expect((await registerEc2Project(handler)).body).toMatchObject({ duplicate: false });
     const { deploymentMode, ...rest } = binding;
     expect((await registerEc2Project(handler, { ...rest, deploymentMode })).body).toMatchObject({ duplicate: true });
@@ -305,9 +331,27 @@ describe("an ec2-ebs project in the broker", () => {
     const completed = await serviceCall(handler, thread, member, "POST", "/v1/service/threads/workspace/close/complete", {
       requestId: randomUUID(), operationId: closeOperationId,
     });
-    expect(completed.status).toBe(503);
-    expect(JSON.stringify(completed.body)).toMatch(/ec2-ebs workspace is not supported yet/);
     expect(deleteWorkspaceSession).not.toHaveBeenCalled();
-    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "CLOSING" });
+    return { db, workspaceId, completed };
+  }
+
+  it("registers idempotently, prepares with an ec2-ebs outbox record, and deletes the session's instance and volume on close (#84)", async () => {
+    const deleteEc2Session = vi.fn<(workspaceId: string) => Promise<void>>(async () => undefined);
+    const { db, workspaceId, completed } = await closeEc2Workspace(deleteEc2Session);
+    expect(completed.status).toBe(200);
+    expect(completed.body).toMatchObject({ outcome: "CLOSED", workspaceId, storageReleased: true });
+    expect(deleteEc2Session).toHaveBeenCalledExactlyOnceWith(workspaceId);
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "CLOSED" });
+  });
+
+  it("refuses to close rather than leak the volume when the session cannot be deleted", async () => {
+    const refused = await closeEc2Workspace();
+    expect(refused.completed.status).toBe(503);
+    expect(JSON.stringify(refused.completed.body)).toMatch(/cannot delete ec2-ebs workspace storage/);
+    expect(refused.db.get(`WORKSPACE#${refused.workspaceId}`, "META")).toMatchObject({ status: "CLOSING" });
+
+    const busy = await closeEc2Workspace(async () => { throw agentXError("WORKSPACE_BUSY", "workspace compute is starting or stopping; retry the close"); });
+    expect(busy.completed.status).toBe(409);
+    expect(busy.db.get(`WORKSPACE#${busy.workspaceId}`, "META")).toMatchObject({ status: "CLOSING" });
   });
 });
