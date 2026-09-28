@@ -58,8 +58,8 @@ against `mainline`. No stacked PRs.
 
 ## Decisions recorded by this plan
 
-Each ruling is written into the code by the task named. The ones marked **(owner)** are also in
-Open questions, because they interpret or go beyond the spec's text.
+Each ruling is written into the code by the task named. The ones marked **(owner)** interpret or
+go beyond the spec's text; the owner decided each of them on 2026-09-28 (Owner decisions, below).
 
 - **R1. No constitution change.** Constitution 4.0.0 (25a) already admits the developer task API
   and one workspace per developer task (FR-050). Nothing in this phase changes a principle.
@@ -185,11 +185,14 @@ Open questions, because they interpret or go beyond the spec's text.
   notification after every poll when the client sent a progress token, so the gap is at most 5
   seconds (the spec's bound is 15). A cancelled tool call stops polling at once; the task keeps
   running. A wait that ends first returns `timed_out: true`, not an error. Task 15.
-- **R22. `agentx_open_pull_request` and `agentx_close_task` wait up to 120 seconds (owner)**, with
-  the same progress: for the PR URL, and for the close to finish or to report unpublished work.
-  They poll by posting the same `request_id` again, which the control plane answers without
-  writing anything. When the time is up they return what they know and `timed_out: true`. The PR
-  URL also appears in `agentx_get_task` later. Task 15.
+- **R22. `agentx_open_pull_request` and `agentx_close_task` return at once (owner, Owner decision 6).**
+  Neither tool waits. `agentx_open_pull_request` answers with the publish operation's ID and its
+  status (`ACCEPTED` when just started), and `agentx_close_task` with the task, `closing: true`,
+  while the worker checks for unpublished work. The AI tool checks back with `agentx_get_task`: the
+  PR's URL appears in `pull_requests` once it is published, a finished close shows `CLOSED`, and a
+  refused close shows `unpublished`, with each repository and why. A call repeated with the same
+  `request_id` returns the same operation and writes nothing, so a retried tool call is safe. The
+  task wait of R21 (off by default, at most 600 seconds) is the only wait. Tasks 11, 12 and 15.
 - **R23. API version 1.1.** `DEVELOPER_API_VERSION` becomes `"1.1"`. The MCP server needs the
   control plane's major version 1 and minor version 1 or more: a different major, or a control
   plane still on 1.0 (which has no task routes), gives `UPGRADE_REQUIRED`; a newer minor gives the
@@ -217,50 +220,44 @@ Open questions, because they interpret or go beyond the spec's text.
   project definition has none. The tool shows name, bound channels, policy and whether tasks are
   enabled. Task 15.
 
-## Open questions for the owner
+## Owner decisions (2026-09-28)
 
-Each has the plan's recommended answer. The plan is written to the recommendation, and Task 18
-records the answers in the spec once confirmed.
+The owner answered each question this plan raised. Eleven recommendations were accepted as
+written; one (6) was changed. The plan follows these answers, and Task 18 writes them into the spec.
 
-1. **The limits setting (R7).** The phase README puts "the workspace limits setting the broker
-   reads" in 25e, but the owner's decision for 25b is that the limits live in the state table.
-   *Recommended:* 25b reads the setting (with the stack parameters as the fallback), for Slack and
-   developer tasks alike; 25e adds the change tool that writes it. Amend the README's 25e row.
-2. **No Slack team ID (R6).** An environment with company sign-in only may have no Slack team ID,
-   so there is no Slack organization counter to share. *Recommended:* count those tasks on
-   `DEVELOPER_LIMIT#ORGANIZATION` with the same limit.
-3. **Audit records (R12).** FR-037 wants the result summary as response text, but records are
-   immutable and written when the action is accepted. *Recommended:* an `accepted` record with the
-   action and a `completed` record with the result, plus a `refused` record for refused starts;
-   amend FR-037.
-4. **`INVALID_REQUEST` (R20).** FR-049 has no code for input the control plane refuses.
-   *Recommended:* add it.
-5. **Closing with unpublished work (R15).** The spec does not say. *Recommended:* refuse to close,
-   list the repositories and reasons, and suggest opening a PR, or continuing the task with
-   instructions to discard the changes. No force flag.
-6. **Waiting for the PR URL and the close (R22).** FR-030 says "operation status, then PR URL once
-   published", and "status `CLOSED`" for a close, which needs a worker check first.
-   *Recommended:* both tools wait up to 120 seconds, then return `timed_out: true`.
-7. **`agentx_whoami`'s admin field (R24).** *Recommended:* whether this computer holds an unexpired
-   admin sign-in for the environment.
-8. **Project description (R28).** *Recommended:* drop "description" from FR-030's
-   `agentx_list_projects`, or add an optional `description` to the definition in a later spec.
-9. **SC-009 and AgentCore.** SC-009 asks for the contract tests "with both an AgentCore and an
-   `ec2-ebs` runtime binding", but AgentCore is gone (#118, #134, constitution 3.0.0 then 4.0.0).
-   *Recommended:* SC-009 becomes "the developer task contract tests pass with an `ec2-ebs` binding,
-   and no developer task code reads the deployment mode" (Task 10 has a test for the second part).
-   Also update the spec's Context item 11 and the Testing line that names AgentCore.
-10. **A Slack member at the limit because of AI-tool tasks.** The Slack refusal lists the member's
-    open threads, which will not include their AI-tool tasks, so a member with two tasks and one
-    thread is told they have one open thread. *Recommended:* accept this in 25b; 25c, which
-    changes the Slack service anyway, adds the open task count to the Slack reply.
-11. **Rolling back past 25b.** The project definition's schema is strict. A control plane rolled
-    back to a release before 25b cannot read a revision that has `developerTasks`, so every thread
-    on that project would fail. *Recommended:* say so in the release notes: before rolling back,
-    register a revision without `developerTasks`.
-12. **SC-008 and the API version.** `tests/contract/developer-contracts.test.ts` asserts
-    `DEVELOPER_API_VERSION` is `"1.0"`. R23 makes it `"1.1"`. *Recommended:* change that expected
-    value (Task 2), and read SC-008 as "no assertion removed or weakened", as 25a did.
+1. **The limits setting (R7). Accepted.** 25b reads `SETTINGS` / `WORKSPACE_LIMITS` (with the
+   stack parameters as the fallback), for Slack threads and developer tasks alike; 25e adds the
+   change tool that writes it. The README's 25e row is amended to say so.
+2. **No Slack team ID (R6). Accepted.** Developers in an environment with no Slack team ID count
+   on `DEVELOPER_LIMIT#ORGANIZATION`, with the same limit.
+3. **Audit records (R12). Accepted.** Three stages: an `accepted` record in the action's
+   transaction, a `completed` record with the result summary when the operation ends, and a
+   `refused` record for a start refused after its request parses. FR-037 is amended.
+4. **`INVALID_REQUEST` (R20). Accepted.** It is added to FR-049.
+5. **Closing with unpublished work (R15). Accepted.** The close is refused, listing each repository
+   and why. There is no force flag.
+6. **Waiting for the PR URL and the close (R22). Changed.** `agentx_open_pull_request` and
+   `agentx_close_task` do not wait. They return at once with a started status and the operation or
+   task reference, and the AI tool checks back with `agentx_get_task`. The task wait (off by
+   default, at most 600 seconds) stays exactly as it is.
+7. **`agentx_whoami`'s admin field (R24). Accepted.** It says whether this computer holds an
+   unexpired admin sign-in for the environment.
+8. **Project description (R28). Accepted.** "description" is dropped from FR-030's
+   `agentx_list_projects`.
+9. **SC-009 and AgentCore. Accepted.** SC-009 becomes "the developer task contract tests pass
+   with an `ec2-ebs` binding, and no developer task code reads the deployment mode" (Task 10 has a
+   test for the second part). The spec's Context item 11 and the Testing line that names AgentCore
+   are updated too.
+10. **A Slack member at the limit because of AI-tool tasks. Accepted.** The Slack refusal lists
+    only the member's open threads, so it undercounts when AI-tool tasks fill the limit. 25b
+    accepts this; the fix, adding the open task count to the Slack reply, is a known follow-up in
+    25c's README row.
+11. **Rolling back past 25b. Accepted.** The release notes say: before rolling back to a release
+    before 25b, register a revision without `developerTasks`, since the strict schema of an older
+    control plane cannot read it.
+12. **SC-008 and the API version. Accepted.** The expected `DEVELOPER_API_VERSION` in
+    `tests/contract/developer-contracts.test.ts` changes from `"1.0"` to `"1.1"` (Task 2). SC-008
+    means no assertion is removed or weakened.
 
 ## Global Constraints
 
@@ -296,7 +293,7 @@ records the answers in the spec once confirmed.
   - instructions at most 65,536 UTF-8 bytes; title at most 120 characters; client name at most 40;
     summary at most 4,000 characters; failure message at most 1,000; event text at most 300;
   - `wait_seconds` 0 to 600 (default 0 on start and continue), 1 to 600 on `agentx_wait_for_task`;
-    `events` 0 to 50, default 10; `limit` 1 to 50, default 20; the PR wait 120 seconds;
+    `events` 0 to 50, default 10; `limit` 1 to 50, default 20; no other tool waits (R22);
   - `DEVELOPER_API_VERSION = "1.1"`;
   - packages `@agentx/mcp` (workspace) and `@charterarc/agentx` (published CLI);
     `@modelcontextprotocol/sdk` at exactly `1.30.1`;
@@ -622,7 +619,7 @@ R23's API version, R10's `channel-info` request.
 - Modify: `packages/contracts/src/index.ts`
 - Modify: `packages/contracts/src/developer.ts`
 - Modify: `packages/orchestrator/src/control-plane-api.ts`
-- Modify: `tests/contract/developer-contracts.test.ts:28` (the version value only; Open question 12)
+- Modify: `tests/contract/developer-contracts.test.ts:28` (the version value only; Owner decision 12)
 - Test: `tests/contract/developer-task-shapes.test.ts`
 
 **Interfaces:**
@@ -901,6 +898,8 @@ export const DeveloperTaskViewSchema = z.object({
   changedFiles: z.array(z.object({ repository: z.string(), path: z.string(), added: z.number().int().nonnegative(), removed: z.number().int().nonnegative() })).optional(),
   artifacts: z.array(z.object({ name: z.string(), size: z.number().int().nonnegative().optional() })).optional(),
   pullRequests: z.array(PullRequestSummarySchema).optional(),
+  /** R22: what the latest close preflight found, when it refused to close. */
+  unpublished: z.array(z.object({ repository: z.string(), reasons: z.array(z.string()) })).optional(),
 });
 export type DeveloperTaskView = z.infer<typeof DeveloperTaskViewSchema>;
 
@@ -1082,7 +1081,7 @@ export type ChannelInfoResponse =
 ```
 
 In `tests/contract/developer-contracts.test.ts:28`, change the expected version `"1.0"` to
-`"1.1"` (the only existing assertion this plan changes; Open question 12). The fixtures that
+`"1.1"` (the only existing assertion this plan changes; Owner decision 12). The fixtures that
 report `apiVersion: "1.0"` in other suites stay as they are: they test the CLI against a 1.0
 server, which `apiVersionCompatible` still accepts.
 
@@ -4045,9 +4044,9 @@ R12's `completed` record, R16, R17, and US1 scenarios 4 and 5.
   - `POST /v1/dev/tasks/{taskId}/continue` with `ContinueDeveloperTaskRequest`, answering `{ task }`;
   - `POST /v1/dev/tasks/{taskId}/cancel` with `{ requestId }`, answering `{ task }`;
   - `POST /v1/dev/tasks/{taskId}/pull-requests` with `DeveloperPullRequestRequest`, answering
-    `DeveloperPullRequestResponse`. Posting the same `requestId` again returns the same operation
-    with its current status and, once published, `pullRequest`, and writes nothing: this is how
-    the MCP server waits for the URL (Task 15);
+    `DeveloperPullRequestResponse`. It answers at once with the publish operation's ID and status
+    (R22). Posting the same `requestId` again returns the same operation with its current status
+    and, once published, `pullRequest`, and writes nothing, so a retried call is safe;
   - `completedTurn(input: { task: DeveloperTaskRecord; pointer: DeveloperTaskPointerRecord; operation: Operation; status: OperationStatus; events: StoredEvent[]; now: string }): Record<string, unknown>`
     in `task-records.ts`, keyed by the operation's ID so a repeated result cannot write it twice.
 
@@ -4433,9 +4432,12 @@ counting against limits", R6's release of the charged counters, and R15.
     task's `closedAt`, the index row `CLOSED`; a lost race is not an error);
   - `resumeClose(deps, task): Promise<void>`: finishes a close whose preflight succeeded safe
     but whose completion did not land (called by the read and close routes);
-  - `POST /v1/dev/tasks/{taskId}/close` with `{ requestId }`, answering `DeveloperCloseResponse`.
-    Posting the same `requestId` again reports the preflight's outcome, which is how the MCP
-    server waits for the close (Task 15).
+  - `POST /v1/dev/tasks/{taskId}/close` with `{ requestId }`, answering `DeveloperCloseResponse`
+    at once, usually with `closing: true` while the worker checks (R22). Posting the same
+    `requestId` again reports the preflight's outcome and writes nothing, so a retried call is safe;
+  - `taskView` reports `unpublished` from the latest close preflight that refused, while no later
+    close is running and the task is not closed, so `agentx_get_task` shows why a close did not
+    happen (R22).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -4488,6 +4490,14 @@ describe("closing a task (R15)", () => {
     expect((await close(requestId)).body).toMatchObject({ closed: false, unpublished: [{ repository: "demo", reasons: ["worktree_changes"] }], task: { status: "SUCCEEDED" } });
     expect(db.get(`WORKSPACE#${task.workspaceId}`, "META")).toMatchObject({ status: "READY" });
     expect(member()).toMatchObject({ count: 1 });
+  });
+
+  it("shows the refused close on the task itself, so the AI tool can check back with agentx_get_task (R22)", async () => {
+    const { dev, close, task, taskId, active, finish } = await finished();
+    await close(randomUUID());
+    await finish(task.workspaceId, active(), "SUCCEEDED", { result: { safeToClose: false, repositories: [{ name: "demo", reasons: ["unpushed_head"] }] } });
+    expect((await dev(MAYA, "GET", `/v1/dev/tasks/${taskId}`)).body.task).toMatchObject({ status: "SUCCEEDED", unpublished: [{ repository: "demo", reasons: ["unpushed_head"] }] });
+    expect((await dev(MAYA, "GET", `/v1/dev/tasks/${taskId}`)).body.task).not.toHaveProperty("closing");
   });
 
   it("closes a task that never started at once", async () => {
@@ -4641,7 +4651,20 @@ async function closeTask(deps: DeveloperTaskRouteDependencies, caller: Developer
 `startClose` (Task 6) checks its idempotency record before the workspace status, so a repeated
 request finds its first close operation even after the preflight put the workspace back to
 `READY`. In `readTask`, call `await resumeClose(deps, task)` and reload the task before building
-the view. Add the route:
+the view. In `taskView`, after deriving the status, add the refused close (R22):
+
+```ts
+  const lastClose = operations.filter((operation) => operation.kind === "close").sort(byCreated).at(-1);
+  const refused = lastClose?.status === "SUCCEEDED" && !derived.closing && task.closedAt === undefined
+    ? WorkspaceClosePreflightResultSchema.safeParse(lastClose.result)
+    : undefined;
+  // ...and in the returned view:
+  ...(refused?.success === true && !refused.data.safeToClose
+    ? { unpublished: refused.data.repositories.map((repository) => ({ repository: repository.name, reasons: [...repository.reasons] })) }
+    : {}),
+```
+
+(`byCreated` is Task 10's; move it above `taskView`.) Add the route:
 
 ```ts
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "close") return closeTask(deps, caller, taskId, body(request));
@@ -5139,7 +5162,7 @@ git commit -m "feat(mcp): the @agentx/mcp package, its errors and control-plane 
 ### Task 15: The developer tools, waits and the MCP server
 
 FR-026 to FR-030 (developer tools), FR-048's MCP side, FR-049, US2, SC-004 and SC-010, and R19,
-R21, R22, R23, R28.
+R21, R22 (the PR and close tools return at once), R23, R28.
 
 **Files:**
 - Create: `packages/mcp/src/compatibility.ts`, `packages/mcp/src/wait.ts`,
@@ -5336,27 +5359,45 @@ describe("versions (FR-048, R23)", () => {
   });
 });
 
-describe("agentx_open_pull_request and agentx_close_task wait up to 120 seconds (R22)", () => {
-  it("posts the same request again until the PR is published, and returns its URL", async () => {
-    const pullRequest = { repository: "demo", number: 42, url: "https://github.com/example/demo/pull/42", state: "open" as const };
-    const openPullRequest = vi.fn()
-      .mockResolvedValueOnce({ task: view("RUNNING"), operationId: "55555555-5555-4555-8555-555555555555", operationStatus: "ACCEPTED" })
-      .mockResolvedValueOnce({ task: view("SUCCEEDED"), operationId: "55555555-5555-4555-8555-555555555555", operationStatus: "SUCCEEDED", pullRequest });
+describe("agentx_open_pull_request and agentx_close_task return at once (R22, Owner decision 6)", () => {
+  it("opens a draft and answers with the started operation, calling AgentX once", async () => {
+    const openPullRequest = vi.fn(async () => ({ task: view("RUNNING"), operationId: "55555555-5555-4555-8555-555555555555", operationStatus: "ACCEPTED" as const }));
     const result = await (await connect({ openPullRequest })).callTool({ name: "agentx_open_pull_request", arguments: { task_id: TASK, title: "Fix the retry test" } });
-    expect(result.structuredContent).toMatchObject({ operation_status: "SUCCEEDED", pull_request: pullRequest, timed_out: false });
-    expect(openPullRequest.mock.calls.map(([, request]) => (request as { requestId: string }).requestId)).toEqual(["33333333-3333-4333-8333-333333333333", "33333333-3333-4333-8333-333333333333"]);
-    expect(openPullRequest.mock.calls[0]?.[1]).toMatchObject({ draft: true });
+    expect(result.structuredContent).toMatchObject({ operation_id: "55555555-5555-4555-8555-555555555555", operation_status: "ACCEPTED", task: { task_id: TASK, status: "RUNNING" } });
+    expect(result.structuredContent).not.toHaveProperty("timed_out");
+    expect(openPullRequest).toHaveBeenCalledTimes(1);
+    expect(openPullRequest.mock.calls[0]?.[1]).toMatchObject({ requestId: "33333333-3333-4333-8333-333333333333", draft: true });
+    expect((result.content as Array<{ text: string }>)[0]?.text).toContain("agentx_get_task");
   });
 
-  it("reports unpublished work instead of closing", async () => {
-    const closeTask = vi.fn()
-      .mockResolvedValueOnce({ task: view("SUCCEEDED", { closing: true }), closed: false })
-      .mockResolvedValueOnce({ task: view("SUCCEEDED"), closed: false, unpublished: [{ repository: "demo", reasons: ["worktree_changes"] }] });
-    const result = await (await connect({ closeTask })).callTool({ name: "agentx_close_task", arguments: { task_id: TASK } });
-    expect(result.structuredContent).toMatchObject({ closed: false, unpublished: [{ repository: "demo", reasons: ["worktree_changes"] }], timed_out: false });
+  it("returns the PR's URL when a retried call finds it already published", async () => {
+    const pullRequest = { repository: "demo", number: 42, url: "https://github.com/example/demo/pull/42", state: "open" as const };
+    const openPullRequest = vi.fn(async () => ({ task: view("SUCCEEDED"), operationId: "55555555-5555-4555-8555-555555555555", operationStatus: "SUCCEEDED" as const, pullRequest }));
+    const result = await (await connect({ openPullRequest })).callTool({ name: "agentx_open_pull_request", arguments: { task_id: TASK, title: "x", request_id: "66666666-6666-4666-8666-666666666666" } });
+    expect(result.structuredContent).toMatchObject({ operation_status: "SUCCEEDED", pull_request: pullRequest });
   });
-});
-```
+
+  it("starts the close and answers at once with closing, calling AgentX once", async () => {
+    const closeTask = vi.fn(async () => ({ task: view("SUCCEEDED", { closing: true }), closed: false }));
+    const result = await (await connect({ closeTask })).callTool({ name: "agentx_close_task", arguments: { task_id: TASK } });
+    expect(result.structuredContent).toMatchObject({ task_id: TASK, closing: true, closed: false });
+    expect(result.structuredContent).not.toHaveProperty("timed_out");
+    expect(closeTask).toHaveBeenCalledTimes(1);
+    expect((result.content as Array<{ text: string }>)[0]?.text).toContain("agentx_get_task");
+  });
+
+  it("says why when a retried close finds unpublished work", async () => {
+    const closeTask = vi.fn(async () => ({ task: view("SUCCEEDED"), closed: false, unpublished: [{ repository: "demo", reasons: ["worktree_changes"] }] }));
+    const result = await (await connect({ closeTask })).callTool({ name: "agentx_close_task", arguments: { task_id: TASK } });
+    expect(result.structuredContent).toMatchObject({ closed: false, unpublished: [{ repository: "demo", reasons: ["worktree_changes"] }] });
+  });
+
+  it("shows a refused close in agentx_get_task", async () => {
+    const getTask = async () => view("SUCCEEDED", { unpublished: [{ repository: "demo", reasons: ["unpushed_head"] }] });
+    const result = await (await connect({ getTask })).callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
+    expect(result.structuredContent).toMatchObject({ unpublished: [{ repository: "demo", reasons: ["unpushed_head"] }] });
+  });
+});```
 
 - [ ] **Step 2: Run them to verify they fail**
 
@@ -5468,7 +5509,6 @@ export interface ToolDefinition {
   handler(context: ToolContext, input: Record<string, unknown>, call: ToolCall): Promise<ToolResult>;
 }
 
-const PR_WAIT_SECONDS = 120;
 const taskIdInput = z.string().min(1).max(100).describe("the task ID agentx_start_task returned");
 const requestIdInput = z.string().uuid().optional().describe("a UUID that makes a retried call safe; one is made when left out");
 const waitInput = (min: number) => z.number().int().min(min).max(DEVELOPER_WAIT_MAX_SECONDS);
@@ -5483,6 +5523,8 @@ const TaskShape = {
   changed_files: z.array(z.object({ repository: z.string(), path: z.string(), added: z.number(), removed: z.number() })).optional(),
   artifacts: z.array(z.object({ name: z.string(), size: z.number().optional() })).optional(),
   pull_requests: z.array(z.object({ repository: z.string(), number: z.number(), url: z.string(), state: z.string() })).optional(),
+  unpublished: z.array(z.object({ repository: z.string(), reasons: z.array(z.string()) })).optional(),
+  /** Only on start, continue and wait, which may wait (R21). */
   timed_out: z.boolean().optional(),
 };
 
@@ -5497,6 +5539,7 @@ function taskOutput(task: DeveloperTaskView, timedOut?: boolean): Record<string,
     ...(task.changedFiles === undefined ? {} : { changed_files: task.changedFiles }),
     ...(task.artifacts === undefined ? {} : { artifacts: task.artifacts }),
     ...(task.pullRequests === undefined ? {} : { pull_requests: task.pullRequests }),
+    ...(task.unpublished === undefined ? {} : { unpublished: task.unpublished }),
     ...(timedOut === undefined ? {} : { timed_out: timedOut }),
   };
 }
@@ -5521,20 +5564,6 @@ async function withWait(context: ToolContext, call: ToolCall, task: DeveloperTas
     ...(call.progress === undefined ? {} : { progress: (elapsed: number, total: number, message: string) => call.progress!(elapsed, total, message) }),
   });
   return { structured: taskOutput(waited.task, waited.timedOut), text: taskText(waited.task, waited.timedOut) };
-}
-
-/** R22: repeat an idempotent call until `done` says so or 120 seconds pass. */
-async function repeatUntil<T>(context: ToolContext, call: ToolCall, first: T, again: () => Promise<T>, done: (value: T) => boolean): Promise<{ value: T; timedOut: boolean }> {
-  const deadline = context.now() + PR_WAIT_SECONDS * 1_000;
-  let value = first;
-  while (!done(value)) {
-    if (context.now() >= deadline || call.signal.aborted) return { value, timedOut: true };
-    await call.progress?.(Math.round(PR_WAIT_SECONDS - (deadline - context.now()) / 1_000), PR_WAIT_SECONDS, "waiting for AgentX");
-    await context.sleep(3_000, call.signal);
-    if (call.signal.aborted) return { value, timedOut: true };
-    value = await again();
-  }
-  return { value, timedOut: false };
 }
 
 export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
@@ -5681,25 +5710,27 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
   {
     name: "agentx_close_task",
     title: "Close an AgentX task",
-    description: "Closes a task and releases its workspace, so it stops counting against your limit. AgentX first checks for unpublished work and will not close a task that has some.",
+    description: "Starts closing a task, which releases its workspace so it stops counting against your limit. AgentX first checks for unpublished work and will not close a task that has some. Returns at once; check the outcome with agentx_get_task: status CLOSED, or unpublished listing each repository and why.",
     inputSchema: { task_id: taskIdInput, request_id: requestIdInput },
-    outputSchema: { ...TaskShape, closed: z.boolean(), unpublished: z.array(z.object({ repository: z.string(), reasons: z.array(z.string()) })).optional() },
-    async handler(context, input, call) {
+    outputSchema: { ...TaskShape, closed: z.boolean() },
+    async handler(context, input) {
       const taskId = input.task_id as string;
-      const requestId = (input.request_id as string | undefined) ?? context.newRequestId();
-      const first = await context.client.closeTask(taskId, requestId);
-      const { value, timedOut } = await repeatUntil(context, call, first, () => context.client.closeTask(taskId, requestId), (answer) => answer.closed || answer.unpublished !== undefined || answer.task.closing !== true);
-      const unpublished = value.unpublished === undefined ? "" : ` Not closed: unpublished work in ${value.unpublished.map((entry) => `${entry.repository} (${entry.reasons.join(", ")})`).join("; ")}. Open a pull request first, or continue the task with instructions to discard the changes.`;
-      return {
-        structured: { ...taskOutput(value.task, timedOut), closed: value.closed, ...(value.unpublished === undefined ? {} : { unpublished: value.unpublished }) },
-        text: `${value.closed ? `Task ${taskId} is closed; its workspace is released.` : taskText(value.task, timedOut)}${unpublished}`,
-      };
+      // R22: no wait. A repeated request_id returns the same close and its outcome.
+      const answer = await context.client.closeTask(taskId, (input.request_id as string | undefined) ?? context.newRequestId());
+      const unpublished = answer.unpublished ?? answer.task.unpublished;
+      const task = unpublished === undefined ? answer.task : { ...answer.task, unpublished };
+      const text = answer.closed
+        ? `Task ${taskId} is closed; its workspace is released.`
+        : unpublished !== undefined
+          ? `Task ${taskId} was not closed: unpublished work in ${unpublished.map((entry) => `${entry.repository} (${entry.reasons.join(", ")})`).join("; ")}. Open a pull request first, or continue the task with instructions to discard the changes.`
+          : `Closing task ${taskId}: AgentX is checking the workspace for unpublished work. Check with agentx_get_task; it shows CLOSED when done.`;
+      return { structured: { ...taskOutput(task), closed: answer.closed }, text };
     },
   },
   {
     name: "agentx_open_pull_request",
     title: "Open a pull request from an AgentX task",
-    description: "Opens a pull request with the task's changes through AgentX's publication path, as a draft unless draft is false, and waits up to 120 seconds for its URL.",
+    description: "Starts opening a pull request with the task's changes through AgentX's publication path, as a draft unless draft is false. Returns at once with the operation; check with agentx_get_task, which lists the pull request's URL once it is published.",
     inputSchema: {
       task_id: taskIdInput, title: z.string().min(1).max(256), body: z.string().optional(),
       repository: z.string().max(63).optional().describe("needed only when the project has several repositories"),
@@ -5708,27 +5739,27 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
     outputSchema: {
       operation_id: z.string(), operation_status: z.string(),
       pull_request: z.object({ repository: z.string(), number: z.number(), url: z.string(), state: z.string() }).optional(),
-      timed_out: z.boolean(), task: z.object(TaskShape),
+      task: z.object(TaskShape),
     },
-    async handler(context, input, call) {
+    async handler(context, input) {
       const taskId = input.task_id as string;
-      const request = {
+      // R22: no wait. A repeated request_id returns the same operation, with the URL once published.
+      const answer = await context.client.openPullRequest(taskId, {
         requestId: (input.request_id as string | undefined) ?? context.newRequestId(),
         title: input.title as string,
         draft: (input.draft as boolean | undefined) ?? true,
         ...(input.body === undefined ? {} : { body: input.body as string }),
         ...(input.repository === undefined ? {} : { repository: input.repository as string }),
-      };
-      const first = await context.client.openPullRequest(taskId, request);
-      const ended = new Set(["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"]);
-      const { value, timedOut } = await repeatUntil(context, call, first, () => context.client.openPullRequest(taskId, request), (answer) => ended.has(answer.operationStatus));
+      });
       return {
         structured: {
-          operation_id: value.operationId, operation_status: value.operationStatus,
-          ...(value.pullRequest === undefined ? {} : { pull_request: value.pullRequest }),
-          timed_out: timedOut, task: taskOutput(value.task),
+          operation_id: answer.operationId, operation_status: answer.operationStatus,
+          ...(answer.pullRequest === undefined ? {} : { pull_request: answer.pullRequest }),
+          task: taskOutput(answer.task),
         },
-        text: value.pullRequest !== undefined ? `Opened ${value.pullRequest.url}.` : `The pull request is ${value.operationStatus}${timedOut ? "; it is still being published, check agentx_get_task later" : ""}.`,
+        text: answer.pullRequest !== undefined
+          ? `Opened ${answer.pullRequest.url}.`
+          : `Opening a pull request for task ${taskId} (operation ${answer.operationId}, ${answer.operationStatus}). Check with agentx_get_task; the URL appears there once it is published.`,
       };
     },
   },
@@ -5910,7 +5941,8 @@ describe("hand off a task from an AI tool and move on (US1)", () => {
     await harness.finish(workspaceId, activeOf(harness, workspaceId), "SUCCEEDED");
 
     const pr = await tool("agentx_open_pull_request", { task_id: taskId, title: "Fix the flaky retry test" });
-    expect(pr.value).toMatchObject({ operation_status: "ACCEPTED", timed_out: true });
+    expect(pr.value).toMatchObject({ operation_status: "ACCEPTED", task: { task_id: taskId } });
+    expect(pr.value).not.toHaveProperty("timed_out");
     const publication = harness.db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${String(pr.value.operation_id)}`) as { publication: { body: string; draft: boolean } };
     expect(publication.publication).toMatchObject({ draft: true, body: "Requested by `Maya Chen` via AgentX, started from Claude Code" });
 
@@ -6588,41 +6620,50 @@ git commit -m "feat(cli): agentx mcp install and the install guide (spec 025 FR-
 ---
 ### Task 18: Record the rulings in the spec
 
-This task changes no code. It runs after the owner has answered Open questions 1 to 12, and writes
-the answers into the spec so the spec and the code agree. Where the owner chose differently from
-the recommendation, stop and re-plan the affected task before this one.
+This task changes no code. It writes the Owner decisions of 2026-09-28 into the spec, exactly as
+recorded above (decision 6 as changed), so the spec and the code agree.
 
 **Files:**
 - Modify: `specs/025-mcp-server/spec.md`
 - Modify: `specs/025-mcp-server/plans/README.md`
 
-- [ ] **Step 1: Amend the spec (recommended answers shown; use the owner's)**
-  - FR-020: add "A task stores the counters it charged and its close releases those. An environment
-    without a Slack team ID counts tasks on its own organization counter with the same limit."
-  - FR-030: `agentx_list_projects` drops "description"; `agentx_open_pull_request` and
-    `agentx_close_task` wait up to 120 seconds; `agentx_whoami`'s admin field is "whether this
-    computer holds an unexpired admin sign-in for the environment".
-  - FR-037: "Each action writes an `accepted` record in its own transaction, and each task or
-    publish operation a `completed` record when it ends, holding the result summary; a start
-    refused after its request parses writes a `refused` record."
-  - FR-049: add the row `INVALID_REQUEST` | the control plane refuses the input (a reused request
-    ID, instructions over 65,536 bytes, a malformed ID) | fix the input the message names.
-  - FR-053: "The broker reads the setting from phase 25b on; its fields are `perPerson` and
-    `perOrganization`."
-  - SC-009: "The developer task contract tests pass with an `ec2-ebs` runtime binding, and no
-    developer task code reads the deployment mode." Update Context item 11 ("`ec2-ebs` is the only
-    worker mode since #118 and #134") and the Testing line "the same developer task flow with an
-    AgentCore runtime binding and an `ec2-ebs` one".
-  - SC-008: the reading of Open question 12 ("no assertion removed or weakened").
+- [ ] **Step 1: Amend the spec with the Owner decisions of 2026-09-28**
+  - FR-020 (decision 2): add "A task stores the counters it charged and its close releases those.
+    An environment without a Slack team ID counts developer tasks on `DEVELOPER_LIMIT#ORGANIZATION`,
+    with the same limit."
+  - FR-030 (decisions 6, 7, 8): `agentx_list_projects` drops "description";
+    `agentx_open_pull_request`'s output becomes "the publish operation's ID and status, at once;
+    the PR URL appears in `agentx_get_task` once published"; `agentx_close_task`'s output becomes
+    "the task with `closing` while AgentX checks for unpublished work, at once; `agentx_get_task`
+    then shows `CLOSED`, or `unpublished` with each repository and why"; add "Only
+    `agentx_start_task`, `agentx_continue_task` and `agentx_wait_for_task` wait"; `agentx_whoami`'s
+    admin field is "whether this computer holds an unexpired admin sign-in for the environment".
+  - FR-037 (decision 3): "Each action writes an `accepted` record in its own transaction, and each
+    task or publish operation a `completed` record, holding the result summary, when it ends; a
+    start refused after its request parses writes a `refused` record."
+  - FR-049 (decision 4): add the row `INVALID_REQUEST` | the control plane refuses the input (a
+    reused request ID, instructions over 65,536 bytes, a malformed ID) | fix the input the message
+    names.
+  - Add to the close edge cases (decision 5): "Closing a task with unpublished work is refused,
+    naming each repository and why; there is no force flag."
+  - FR-053 (decision 1): "The broker reads the setting from phase 25b on, for Slack threads and
+    developer tasks; its fields are `perPerson` and `perOrganization`. Phase 25e adds the change
+    tool that writes it."
+  - SC-009 (decision 9): "The developer task contract tests pass with an `ec2-ebs` runtime binding,
+    and no developer task code reads the deployment mode." Update Context item 11 ("`ec2-ebs` is
+    the only worker mode since #118 and #134") and the Testing line "the same developer task flow
+    with an AgentCore runtime binding and an `ec2-ebs` one".
+  - SC-008 (decision 12): "no assertion removed or weakened; lists of commands, error codes and
+    constants gain the new entries, and `DEVELOPER_API_VERSION` moves to 1.1".
+  - Assumptions (decision 11): "Rolling back to a release before 25b needs a project revision
+    without `developerTasks` first; the release notes say so."
   - Decisions: add **D18** (R2 and R3: three records beside an ordinary workspace, and the first
-    task queued in the prepare's result transaction) and **D19** (R12: the audit records), each one
-    paragraph, marked owner-confirmed with the date. Add Open question 11's rollback note to
-    Assumptions.
-- [ ] **Step 2: Update the phase README.**
-  - 25b's row: "Built, see PR #<n>." at the start of "What it delivers".
-  - 25e's row: "the admin change tools, including `agentx_admin_set_workspace_limits`, which writes
-    the workspace limits setting the broker reads since 25b".
-  - 25c's row: add "the Slack limit reply counting AI-tool tasks" (Open question 10).
+    task queued in the prepare's result transaction), **D19** (R12: the three audit stages) and
+    **D20** (R22: the PR and close tools return at once; the AI tool checks back), each one
+    paragraph, marked owner-confirmed, 2026-09-28.
+- [ ] **Step 2: Update the phase README.** 25b's row: "Built, see PR #<n>." at the start of "What
+  it delivers". (The 25e row, decision 1, and the 25c follow-up, decision 10, were amended with
+  this plan.)
 - [ ] **Step 3: Check the copy** with `grep -c "$(printf '\342\200\224')" specs/025-mcp-server/spec.md specs/025-mcp-server/plans/README.md` (prints 0 for each), then commit:
 
 ```bash
@@ -6685,12 +6726,15 @@ It uses a new environment, `live25b`, in `us-east-1`.
      `agentx_get_task` shows `RUNNING` with progress, then `SUCCEEDED` with the summary and the
      changed file;
   4. "continue it: also add the date to that line": a second run in the same workspace;
-  5. "open a draft pull request": `agentx_open_pull_request` returns the PR URL; on GitHub, the PR
-     is a draft and its body ends "Requested by `<name>` via AgentX, started from Claude Code". If it
+  5. "open a draft pull request": `agentx_open_pull_request` answers at once with the started
+     operation; a minute later, "is the PR ready?" makes Claude Code call `agentx_get_task`, which
+     lists the PR's URL. On GitHub, the PR is a draft and its body ends "Requested by `<name>` via AgentX, started from Claude Code". If it
      says "an AI tool", Claude Code's `clientInfo.name` did not match R25's pattern: record the real
      name (from `claude --debug`), fix the pattern with a failing test, and rerun;
-  6. "close the task": `agentx_close_task` reports closed; `whoami` and the limit are back to 0
-     open workspaces for the developer.
+  6. "close the task": `agentx_close_task` answers at once with `closing`; checking back with
+     `agentx_get_task` shows `CLOSED`, and the limit is back to 0 open workspaces for the developer.
+     On a second task with uncommitted changes, the close is refused and `agentx_get_task` lists the
+     repository and why.
 - [ ] **Step 6: Wait (US2).** Ask for a small task with a wait ("have AgentX run the tests of
   <project> and wait for the result"): the call shows progress and returns the finished task. Then
   start a longer one and "wait 5 seconds for it": the result says the wait ended first, and the task
@@ -6768,8 +6812,8 @@ await client.close();
 - **Phase 25c:** sharing: `share_to_channel` and `share_mode` taking effect, `agentx_share_task`,
   `POST /v1/dev/tasks/{taskId}/share`, the `DeveloperTaskNotifier`, the shared thread record, the
   ingress notice, continue-mode turns on the task's workspace, `TASK_BUSY` naming the teammate
-  driving a task, `CHANNEL_AMBIGUOUS`, and the Slack limit reply counting AI-tool tasks (Open
-  question 10). 25b leaves the `shared: false` fields and accepts the request fields, nothing more.
+  driving a task, `CHANNEL_AMBIGUOUS`, and the Slack limit reply counting AI-tool tasks (Owner
+  decision 10). 25b leaves the `shared: false` fields and accepts the request fields, nothing more.
 - **Phase 25d:** the admin read routes and tools, the admin token in the MCP server's tool list,
   `notifications/tools/list_changed`, and `agentx_admin_turns`'s `task_id` filter.
 - **Phase 25e:** pending changes and confirmations; `agentx_admin_set_workspace_limits`, which
@@ -6790,7 +6834,7 @@ await client.close();
   `agentx_share_task` (25c). FR-033: Tasks 2, 8. FR-036: Tasks 8, 10. FR-037: Tasks 3, 4, 8, 11, 13.
   FR-043, FR-047: Task 17. FR-048 (MCP side): Task 15. FR-049: Tasks 7, 8, 14, 15. FR-053's read:
   Task 5. US1, US2: Task 16's flow and Task 19; US7 scenarios 1, 2 and 5: Tasks 15, 17, 19.
-  SC-002 and SC-003: Task 19; SC-004: Tasks 10, 14, 15, 19; SC-009: Task 10's check (Open question
+  SC-002 and SC-003: Task 19; SC-004: Tasks 10, 14, 15, 19; SC-009: Task 10's check (Owner decision
   9); SC-010: Task 15.
 - **Placeholder scan.** No step says "handle errors" or "similar to"; every code step shows the
   code. The places that say "unchanged" name the exact lines they leave alone (Task 5 Step 4,
@@ -6803,3 +6847,11 @@ await client.close();
   `taskOutput` is the one place that converts.
 - **Review Focus.** Each of the five lines has its test in the owning task: 1 in Task 9, 2 in
   Task 15, 3 in Task 8 (and the MCP side in Task 15), 4 in Task 3, 5 in Task 17.
+- **Owner decision 6, rechecked.** No tool but `agentx_start_task`, `agentx_continue_task` and
+  `agentx_wait_for_task` waits or returns `timed_out`: `repeatUntil` and the 120-second constant are
+  gone from Task 15; the PR and close tools call AgentX once, and their tests assert one call and no
+  `timed_out`. Checking back works because Task 2's view carries `unpublished`, Task 12 fills it
+  from the refused preflight (with a test through `GET /v1/dev/tasks/{taskId}`), Task 10 already
+  lists `pullRequests`, and Task 15's `taskOutput` maps both. The idempotent repeat of the PR and
+  close routes (Tasks 11 and 12) stays, as retry safety, not as a wait. Task 16's flow test and Task
+  19's live steps check back with `agentx_get_task`. R21's task wait is unchanged.
