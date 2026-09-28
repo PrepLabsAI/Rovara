@@ -2,6 +2,7 @@
 // them all. init builds one SetupServices per run; the day-2 commands build one per command.
 import { AdminAddUserToGroupCommand, AdminCreateUserCommand, AdminGetUserCommand, AdminListGroupsForUserCommand } from "@aws-sdk/client-cognito-identity-provider";
 import type { LoginOptions } from "../auth.js";
+import type { StackOutputs } from "../deploy/parameters.js";
 import type { GitHubApi } from "../init/github-app.js";
 import type { StoredTokens, TokenStore } from "../token-store.js";
 import type { GitHubRepositoryApi } from "./project-files.js";
@@ -28,6 +29,11 @@ export interface SetupServices {
   repositories: GitHubRepositoryApi;
   /** Task 6: the installation token (15d1's GitHub API). */
   github: Pick<GitHubApi, "listInstallations" | "installationToken">;
+  /** Task 7: a stack's outputs (the foundation's EC2 worker outputs), or undefined when the stack
+   * does not exist. */
+  stackOutputs: (stackName: string) => Promise<StackOutputs | undefined>;
+  /** Task 7: where project files live (the global --config-dir, default ~/.agentx/projects). */
+  configDir: string;
 }
 
 const errorName = (error: unknown) => (error instanceof Error ? error.name : undefined);

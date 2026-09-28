@@ -47,6 +47,8 @@ import { runEnvAdopt, runEnvList, runEnvUse } from "./environments/commands.js";
 import { ssmParameterStore, type ParameterStore } from "./environments/parameter-store.js";
 import { settingsParameterName } from "./environments/settings.js";
 import { formatError, formatSuccess } from "./output.js";
+import { realSetupContext, type SetupCommandContext } from "./setup/command-context.js";
+import { registerSetupCommands } from "./setup/cli.js";
 import { addSignInOptions, definedEntries, registerSigninCommands, secretSource, signInFlags, type SignInCommandOptions } from "./signin/cli.js";
 import { SIGNIN_FLAG_NAMES, type SigninFlags } from "./signin/collect.js";
 import type { SigninServices } from "./signin/commands.js";
@@ -113,6 +115,9 @@ export interface CliDependencies {
   runCommand?: McpInstallDeps["run"];
   /** `agentx mcp install`'s Codex settings folder, for tests; CODEX_HOME by default. */
   codexHome?: string;
+  /** `agentx project add` and the other setup commands (phase 15d2), for tests: never touch AWS,
+   * GitHub, Slack or the control plane. */
+  setup?: SetupCommandContext;
 }
 
 interface AuthenticatedDeployment {
@@ -535,6 +540,10 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         throw exportFailure(error, written, "file");
       }
     });
+
+  registerSetupCommands(program, dependencies.setup ?? realSetupContext({
+    parameterStore, fetch: services.fetchImplementation, tokenStore: services.tokenStore, stdout: services.stdout, stderr: services.stderr,
+  }));
 
   const envCommand = program.command("env").description("AgentX environments in this AWS account and region");
   envCommand

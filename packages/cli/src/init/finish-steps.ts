@@ -5,6 +5,8 @@ import { AlertEmailSchema } from "../deploy/answer-schemas.js";
 import { readEnvironmentSettings, type EnvironmentSettings } from "../environments/settings.js";
 import { tokenClaimValues, userPoolId } from "../setup/admin-session.js";
 import { ensureCognitoAdmin } from "../setup/admin-user.js";
+import { addProject } from "../setup/project-add.js";
+import { installationToken } from "../setup/project-files.js";
 import type { InitContext } from "./context.js";
 import type { InitStep } from "./steps.js";
 
@@ -49,6 +51,31 @@ export function adminUserStep(): InitStep<InitContext> {
       const username = oidcAdminName(session.accessToken);
       await progress.update({ admin: { username, mode: "oidc" } });
       return { status: "done", note: `admin ${username} signed in with your OIDC provider` };
+    },
+  };
+}
+
+/** FR-040: the first project, on EC2 workers. Task 8 adds its channel. */
+export function firstProjectStep(): InitStep<InitContext> {
+  return {
+    id: "first-project",
+    title: "Set up the first project and its channel",
+    async run(context, progress) {
+      const session = await context.adminSession();
+      let project = progress.current().project;
+      if (project === undefined) {
+        const installationId = progress.current().github?.installationId;
+        const githubToken = await installationToken({
+          env: context.env, secrets: context.secrets, github: context.setup.github,
+          ...(installationId === undefined ? {} : { installationId }),
+          nowSeconds: Math.floor(context.now() / 1000),
+        });
+        const added = await addProject({ env: context.env, session, githubToken, prompter: context.prompter, write: context.write, services: context.setup, flags: context.flags });
+        project = { name: added.name, revision: added.revision };
+        await progress.update({ project });
+      }
+      // Task 8 binds the channel here.
+      return { status: "done", note: `project ${project.name}` };
     },
   };
 }

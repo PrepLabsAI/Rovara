@@ -1,6 +1,7 @@
 // agentx init (FR-015 to FR-020): find the release and region, read any install already under way,
 // ask and check and confirm on a first run, then run the steps. Every AWS, GitHub, Slack, browser
 // and clock dependency is overridable through InitCliDependencies (main.ts's CliDependencies.init).
+import { join } from "node:path";
 import { CloudFormationClient } from "@aws-sdk/client-cloudformation";
 import { CognitoIdentityProviderClient } from "@aws-sdk/client-cognito-identity-provider";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
@@ -8,7 +9,7 @@ import { SSMClient } from "@aws-sdk/client-ssm";
 import { STSClient } from "@aws-sdk/client-sts";
 import { agentXError } from "@agentx/contracts";
 import { loginWithPkce, openSystemBrowser } from "../auth.js";
-import { cliErrorFor, prepareDeployment, realCommandRunner, type DeployCliDependencies, type PreparedDeployment, type Writer } from "../deploy/commands.js";
+import { cliErrorFor, cloudFormationOutputsReader, prepareDeployment, realCommandRunner, type DeployCliDependencies, type PreparedDeployment, type Writer } from "../deploy/commands.js";
 import { assertReleaseCoversRegion, loadRelease } from "../deploy/release.js";
 import { stsCallerIdentity } from "../environments/adopt.js";
 import type { LockRecord } from "../environments/lock.js";
@@ -135,7 +136,7 @@ const realSleep = (ms: number) => new Promise<void>((resolvePromise) => setTimeo
 
 /** The real phase 15d2 services. Clients are only constructed here, never called, until a step
  * uses them. Tasks 7 to 13 add their fields. */
-export function realSetupServices(input: { region: string; fetch: typeof fetch; tokenStore?: TokenStore }): SetupServices {
+export function realSetupServices(input: { region: string; fetch: typeof fetch; configDir: string; tokenStore?: TokenStore }): SetupServices {
   return {
     tokenStore: input.tokenStore ?? new SystemCredentialTokenStore(),
     cognito: cognitoAdmin(new CognitoIdentityProviderClient({ region: input.region })),
@@ -145,6 +146,9 @@ export function realSetupServices(input: { region: string; fetch: typeof fetch; 
     // token an earlier call obtained; input.fetch carries no credential itself.
     repositories: githubRepositoryApi(input.fetch),
     github: githubRestApi(input.fetch),
+    // Task 7: the foundation's EC2 worker outputs, and where project files are written.
+    stackOutputs: cloudFormationOutputsReader(new CloudFormationClient({ region: input.region })),
+    configDir: input.configDir,
   };
 }
 
@@ -374,7 +378,8 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     }
   };
 
-  const setup = realSetupServices({ region, fetch: fetchImplementation });
+  // Task 13 passes the global --config-dir here; until then init writes to the default directory.
+  const setup = realSetupServices({ region, fetch: fetchImplementation, configDir: join(services.home, ".agentx", "projects") });
   const identity = finalAnswers.identity;
   // Your own OIDC's admin claim, when the answers name one (Task 13 refuses answers that do not).
   const adminClaim = identity.mode === "oidc" && identity.adminClaim !== undefined && identity.adminValues !== undefined

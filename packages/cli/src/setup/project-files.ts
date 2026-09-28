@@ -19,8 +19,10 @@ export interface GitHubRepositoryApi {
 }
 
 const API = "https://api.github.com";
-const SETUP_TIMEOUT = 900;
-const TEST_TIMEOUT = 1800;
+/** Seconds a setup command may run (the proposal's and a typed command's alike). */
+export const SETUP_TIMEOUT = 900;
+/** Seconds a test (readiness) command may run. */
+export const TEST_TIMEOUT = 1800;
 const NPM_PLACEHOLDER = /no test specified/;
 /** A repository's file is untrusted content: never hold more of it than this in memory. Every
  * build file this module reads (package.json, pyproject.toml, requirements.txt, a Makefile) states

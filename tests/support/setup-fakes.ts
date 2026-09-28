@@ -1,5 +1,8 @@
 // Fakes for the setup modules (phase 15d2). Nothing here reaches AWS, a vendor or the control plane.
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { tokenStoreKey, type LoginOptions } from "../../packages/cli/src/auth.js";
+import type { EnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import type { StoredTokens, TokenStore } from "../../packages/cli/src/token-store.js";
 import type { CognitoAdmin, SetupServices } from "../../packages/cli/src/setup/services.js";
 import type { GitHubRepositoryApi } from "../../packages/cli/src/setup/project-files.js";
@@ -7,6 +10,22 @@ import { fakeGitHubApi } from "./init-fakes.js";
 
 export const CONTROL_PLANE = "https://cp.example.test";
 export const ADMIN_EMAIL = "alice@example.com";
+
+/** A staging environment's settings (/agentx/staging/settings), with Cognito sign-in. */
+export const STAGING_SETTINGS: EnvironmentSettings = {
+  schemaVersion: 1, env: "staging", account: "123456789012", region: "us-east-1", engine: "templates", version: "1.2.3", naming: "environment",
+  stacks: { foundation: "agentx-staging-foundation", runtime: "agentx-staging-runtime", "control-plane": "agentx-staging-control-plane", slack: "agentx-staging-slack" },
+  controlPlaneUrl: CONTROL_PLANE,
+  identity: { mode: "cognito", issuer: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_AbCdEf123", audience: "client123", clientId: "client123" },
+  models: { orchestrator: "us.anthropic.claude-sonnet-4-6", classifier: "amazon.nova-lite-v1:0", worker: "amazon.nova-pro-v1:0" },
+  updatedAt: "2026-09-27T00:00:00.000Z",
+};
+
+/** The foundation stack's EC2 worker outputs, as the setupServices default answers them. */
+export const FOUNDATION_OUTPUTS = {
+  Ec2WorkerLaunchTemplateId: "lt-0123456789abcdef0",
+  Ec2WorkerSubnets: "us-east-1a=subnet-0aaa1111bbbb2222c,us-east-1b=subnet-0ddd3333eeee4444f",
+};
 
 /** A JWT-shaped token (unsigned) with the given payload: the CLI only reads claims, never verifies. */
 export function accessToken(payload: Record<string, unknown>): string {
@@ -118,6 +137,9 @@ export function setupServices(overrides: Partial<SetupServices> = {}): SetupServ
     fetch: plane.fetch,
     repositories: fakeRepositories({}),
     github: fakeGitHubApi(),
+    stackOutputs: async () => FOUNDATION_OUTPUTS,
+    // Tests that write project files pass their own directory.
+    configDir: join(tmpdir(), "agentx-setup-unused"),
     ...overrides,
   };
 }
