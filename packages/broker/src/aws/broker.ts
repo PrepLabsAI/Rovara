@@ -88,6 +88,7 @@ import { resolveConnectors, BUILT_IN_CONNECTOR_TYPES, type ConnectorType, type C
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
 import { developerTokenVerifier } from "../developer/verify-token.js";
 import { inertName } from "../developer/task-records.js";
+import { readWorkspaceLimits } from "../developer/limits.js";
 import { channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, routeDeveloperRequest, type DeveloperApiConfiguration } from "./developer-routes.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
@@ -1204,6 +1205,7 @@ async function ensureThreadWorkspace(
   if (lazyPreparation) {
     return createUnpreparedThreadWorkspace(dependencies, identity, requestId, project, include, includeSettingsRevision);
   }
+  const effective = await effectiveSlackLimits(dependencies, limits);
   const preparation = await newWorkspacePreparation(dependencies, identity, project, identity.ownerKey, requestId);
   const { teamId, userId } = slack.requester;
   try {
@@ -1220,7 +1222,7 @@ async function ensureThreadWorkspace(
         UpdateExpression: "SET #count = if_not_exists(#count, :zero) + :one, entityType = :entity",
         ConditionExpression: "attribute_not_exists(#count) OR #count < :limit",
         ExpressionAttributeNames: { "#count": "count" },
-        ExpressionAttributeValues: { ":zero": 0, ":one": 1, ":limit": limits.organizationWorkspaceLimit, ":entity": "SLACK_LIMIT" },
+        ExpressionAttributeValues: { ":zero": 0, ":one": 1, ":limit": effective.organizationWorkspaceLimit, ":entity": "SLACK_LIMIT" },
       } },
       { Update: {
         TableName: dependencies.tableName,
@@ -1231,7 +1233,7 @@ async function ensureThreadWorkspace(
         ExpressionAttributeValues: {
           ":zero": 0,
           ":one": 1,
-          ":limit": limits.memberWorkspaceLimit,
+          ":limit": effective.memberWorkspaceLimit,
           ":none": [],
           ":thread": [identity.subject],
           ":entity": "SLACK_LIMIT",
@@ -1244,7 +1246,7 @@ async function ensureThreadWorkspace(
     if (concurrent) {
       return existingThreadWorkspace(dependencies, identity, requestId, concurrent, include, includeSettingsRevision);
     }
-    return threadWorkspaceLimitRefusal(dependencies, teamId, userId, limits);
+    return threadWorkspaceLimitRefusal(dependencies, teamId, userId, effective);
   }
   await recordThreadRequester(dependencies, identity, preparation.workspace.id, true);
   return {
@@ -1376,6 +1378,7 @@ async function startThreadPreparation(
   if (workspace.status !== "UNPREPARED") {
     return { outcome: "WORKSPACE", workspaceId: workspace.id, status: workspace.status, operationId: workspace.activeOperationId, created: false };
   }
+  const effective = await effectiveSlackLimits(dependencies, limits);
   const pinned = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
   const now = new Date().toISOString();
   const operationId = randomUUID();
@@ -1434,7 +1437,7 @@ async function startThreadPreparation(
         UpdateExpression: "SET #count = if_not_exists(#count, :zero) + :one, entityType = :entity",
         ConditionExpression: "attribute_not_exists(#count) OR #count < :limit",
         ExpressionAttributeNames: { "#count": "count" },
-        ExpressionAttributeValues: { ":zero": 0, ":one": 1, ":limit": limits.organizationWorkspaceLimit, ":entity": "SLACK_LIMIT" },
+        ExpressionAttributeValues: { ":zero": 0, ":one": 1, ":limit": effective.organizationWorkspaceLimit, ":entity": "SLACK_LIMIT" },
       } },
       { Update: {
         TableName: dependencies.tableName,
@@ -1445,7 +1448,7 @@ async function startThreadPreparation(
         ExpressionAttributeValues: {
           ":zero": 0,
           ":one": 1,
-          ":limit": limits.memberWorkspaceLimit,
+          ":limit": effective.memberWorkspaceLimit,
           ":none": [],
           ":thread": [identity.subject],
           ":entity": "SLACK_LIMIT",
@@ -1477,7 +1480,7 @@ async function startThreadPreparation(
     // threadWorkspaceLimitRefusal throws its own WORKSPACE_BUSY, worded for creation, when no limit
     // is reached. Answer with this route's wording instead.
     try {
-      const refusal = await threadWorkspaceLimitRefusal(dependencies, teamId, userId, limits);
+      const refusal = await threadWorkspaceLimitRefusal(dependencies, teamId, userId, effective);
       if (refusal.outcome === "LIMIT_REACHED") return refusal;
     } catch (refusalError) {
       if (!(refusalError instanceof AgentXError) || refusalError.code !== "WORKSPACE_BUSY") throw refusalError;
@@ -1600,6 +1603,15 @@ async function threadWorkspaceLimitRefusal(
     return { outcome: "LIMIT_REACHED", limit: "ORGANIZATION", maximum: limits.organizationWorkspaceLimit, starterThreads: [] };
   }
   throw agentXError("WORKSPACE_BUSY", "thread workspace creation conflicted with another request; retry");
+}
+
+/** The Slack limits with the admin's setting applied (R7); read only when a workspace is created. */
+async function effectiveSlackLimits(dependencies: AwsBrokerDependencies, configured: SlackServiceConfiguration): Promise<SlackServiceConfiguration> {
+  const limits = await readWorkspaceLimits(dependencies.documentClient, dependencies.tableName, {
+    member: configured.memberWorkspaceLimit,
+    organization: configured.organizationWorkspaceLimit,
+  });
+  return { ...configured, memberWorkspaceLimit: limits.member, organizationWorkspaceLimit: limits.organization };
 }
 
 async function recordThreadRequester(
