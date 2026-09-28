@@ -133,20 +133,28 @@ export type ChargeConflict = "already_charged" | "member" | "organization";
  * 12) can tell a repeat charge of the same task (already applied; treat as success) apart from a
  * genuine limit refusal. Reads `error.CancellationReasons` positionally, the way
  * packages/broker/src/developer/store.ts's classifyRotationFailure does (chargeItems' TransactItems
- * are [organization, member], in that order): the organization item's condition never depends on a
- * task id, so its failure always means "organization" full. The member item's compound condition
- * can fail for either reason, so a consistent re-read of the member item disambiguates: a taskId
- * already present in `tasks` is a repeat (regardless of the current count, which may coincidentally
- * also be at the limit); otherwise it is a genuine "member" full. Anything else -- a missing
- * CancellationReasons array, or neither item reporting ConditionalCheckFailed -- is an unmodeled
- * failure and is rethrown, not folded into either outcome, so the caller can retry.
+ * are [organization, member], in that order).
+ *
+ * The repeat check comes first and wins outright (fix round 2): when a task was already charged,
+ * the member item's condition fails regardless of the organization's state, and by the time a
+ * caller retries, some other member may well have since pushed the organization item to its own
+ * limit too -- both items can report ConditionalCheckFailed at once. Checking the organization
+ * first (as fix round 1 did) would then wrongly refuse a task that already holds its slot. So: if
+ * the member item failed and a re-read shows the task is already in `tasks`, that is
+ * "already_charged", whatever the organization item says. Only once that is ruled out does the
+ * organization item's failure mean "organization" full, and the member item's own failure (not a
+ * repeat) mean "member" full. Anything else -- a missing CancellationReasons array, or neither item
+ * reporting ConditionalCheckFailed -- is an unmodeled failure and is rethrown, not folded into any
+ * outcome, so the caller can retry.
  */
 export async function chargeConflict(client: Client, tableName: string, charge: WorkspaceCharge, taskId: string, error: unknown): Promise<ChargeConflict> {
   const reasons = cancellationReasons(error);
   if (reasons === undefined) throw error;
+  const memberFailed = reasons[1]?.Code === "ConditionalCheckFailed";
+  if (memberFailed && (await hasTask(client, tableName, charge.member, taskId))) return "already_charged";
   if (reasons[0]?.Code === "ConditionalCheckFailed") return "organization";
-  if (reasons[1]?.Code !== "ConditionalCheckFailed") throw error;
-  return (await hasTask(client, tableName, charge.member, taskId)) ? "already_charged" : "member";
+  if (memberFailed) return "member";
+  throw error;
 }
 
 export type ReleaseConflict = "already_released";

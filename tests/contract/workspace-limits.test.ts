@@ -124,6 +124,24 @@ describe("developer counters (FR-020, R6)", () => {
     expect(await chargeConflict(db, "state", charge, "task-c", full)).toBe("organization");
   });
 
+  it("chargeConflict reports a repeat charge even when the organization has since reached its limit", async () => {
+    const db = new FakeDynamoDb();
+    const charge = developerCharge({ teamId: SLACK_TEAM, slackUserId: "U0MAYA001", developerId });
+    await db.send({ constructor: { name: "TransactWriteCommand" }, input: { TransactItems: chargeItems("state", charge, fallback, "task-x") } });
+    // Other members have since driven the organization counter to its limit.
+    db.set({ pk: `SLACK_LIMIT#${SLACK_TEAM}`, sk: "ORGANIZATION", count: 20 });
+    const repeat = await db.send({ constructor: { name: "TransactWriteCommand" }, input: { TransactItems: chargeItems("state", charge, fallback, "task-x") } }).catch((error: unknown) => error);
+    expect(await chargeConflict(db, "state", charge, "task-x", repeat)).toBe("already_charged");
+  });
+
+  it("chargeConflict still reports the organization limit for a genuine new task, not a repeat", async () => {
+    const db = new FakeDynamoDb();
+    db.set({ pk: `SLACK_LIMIT#${SLACK_TEAM}`, sk: "ORGANIZATION", count: 20 });
+    const charge = developerCharge({ teamId: SLACK_TEAM, slackUserId: "U0MAYA001", developerId });
+    const full = await db.send({ constructor: { name: "TransactWriteCommand" }, input: { TransactItems: chargeItems("state", charge, fallback, "task-y") } }).catch((error: unknown) => error);
+    expect(await chargeConflict(db, "state", charge, "task-y", full)).toBe("organization");
+  });
+
   it("a second release of one task does not touch a sibling task's slot", async () => {
     const db = new FakeDynamoDb();
     const charge = developerCharge({ teamId: SLACK_TEAM, slackUserId: "U0MAYA001", developerId });
