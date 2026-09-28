@@ -129,13 +129,33 @@ describe("agentx_start_task (US1, US2)", () => {
     expect(progress[0]).toMatchObject({ progress: 0, total: 60 });
   });
 
-  it("still answers with the started task when checking on it fails during the wait, so a retry starts nothing new", async () => {
+  it("still answers with the started task when checking on it fails during the wait, saying it was not a timeout", async () => {
+    const log = vi.fn();
     const getTask = vi.fn(async () => { throw new ToolError("CONTROL_PLANE_UNAVAILABLE", "could not reach AgentX"); });
-    const result = await (await connect({ startTask: async () => view("STARTING"), getTask })).callTool({ name: "agentx_start_task", arguments: { project: "payments", instructions: "x", wait_seconds: 30 } });
+    const result = await (await connect({ startTask: async () => view("STARTING"), getTask }, {}, "claude-code", log)).callTool({ name: "agentx_start_task", arguments: { project: "payments", instructions: "x", wait_seconds: 30 } });
     expect(result.isError).toBeFalsy();
-    expect(result.structuredContent).toMatchObject({ task_id: TASK, status: "STARTING", timed_out: true });
+    expect(result.structuredContent).toMatchObject({ task_id: TASK, status: "STARTING", timed_out: false, wait_failed: { code: "CONTROL_PLANE_UNAVAILABLE", message: "could not reach AgentX" } });
     expect(text(result)).toContain("could not reach AgentX");
     expect(text(result)).toContain("agentx_get_task");
+    expect(log).toHaveBeenCalledWith({ event: "tool.wait_failed", tool: "agentx_start_task", code: "CONTROL_PLANE_UNAVAILABLE" });
+  });
+
+  it("gives agentx_wait_for_task's failed check the same accurate answer", async () => {
+    const log = vi.fn();
+    const getTask = vi.fn().mockResolvedValueOnce(view("RUNNING")).mockRejectedValueOnce(new Error(`socket ${PLANTED}`));
+    const result = await (await connect({ getTask }, {}, "claude-code", log)).callTool({ name: "agentx_wait_for_task", arguments: { task_id: TASK, wait_seconds: 30 } });
+    expect(result.structuredContent).toMatchObject({ status: "RUNNING", timed_out: false, wait_failed: { code: "CONTROL_PLANE_UNAVAILABLE" } });
+    expect(JSON.stringify(result)).not.toContain(PLANTED);
+    expect(log).toHaveBeenCalledWith({ event: "tool.wait_failed", tool: "agentx_wait_for_task", code: "CONTROL_PLANE_UNAVAILABLE" });
+  });
+
+  it("does not read the task again at once after starting it", async () => {
+    const getTask = vi.fn(async () => view("SUCCEEDED"));
+    let now = 0;
+    const polls: number[] = [];
+    getTask.mockImplementation(async () => { polls.push(now); return view("SUCCEEDED"); });
+    await (await connect({ startTask: async () => view("STARTING"), getTask }, { now: () => now, sleep: async (ms) => { now += ms; } })).callTool({ name: "agentx_start_task", arguments: { project: "payments", instructions: "x", wait_seconds: 30 } });
+    expect(polls).toEqual([2_000]);
   });
 
   it("refuses instructions over 65,536 bytes as INVALID_REQUEST without calling AgentX", async () => {
@@ -149,6 +169,73 @@ describe("agentx_start_task (US1, US2)", () => {
     const mcp = await connect({ startTask: async () => { throw new ToolError("PROJECT_ACCESS_DENIED", "you don't have access to `payments`: ask an admin"); } });
     const result = await mcp.callTool({ name: "agentx_start_task", arguments: { project: "payments", instructions: "x" } });
     expect(toolError(result)).toEqual({ code: "PROJECT_ACCESS_DENIED", message: "you don't have access to `payments`: ask an admin", next_step: "join one of the project's Slack channels, or ask an admin for access" });
+  });
+});
+
+describe("request IDs when the AI tool leaves request_id out (Task 15 fix round 1)", () => {
+  const counter = () => { let next = 0; return () => `00000000-0000-4000-8000-${String(++next).padStart(12, "0")}`; };
+
+  it("sends the same requestId for a repeated identical start, even with another wait, and returns it", async () => {
+    const startTask = vi.fn(async () => view("SUCCEEDED"));
+    const mcp = await connect({ startTask }, { newRequestId: counter() });
+    const first = await mcp.callTool({ name: "agentx_start_task", arguments: { project: "payments", instructions: "Fix the flaky retry test" } });
+    await mcp.callTool({ name: "agentx_start_task", arguments: { project: "payments", instructions: "Fix the flaky retry test", wait_seconds: 30 } });
+    await mcp.callTool({ name: "agentx_start_task", arguments: { project: "payments", instructions: "Fix the other test" } });
+    const ids = startTask.mock.calls.map((call) => (call as unknown as [{ requestId: string }])[0].requestId);
+    expect(ids[0]).toBe(ids[1]);
+    expect(ids[2]).not.toBe(ids[0]);
+    expect(first.structuredContent).toMatchObject({ request_id: ids[0] });
+  });
+
+  it("gives the same instructions a fresh requestId after 15 minutes, so a deliberate repeat starts new work", async () => {
+    let now = 0;
+    const startTask = vi.fn(async () => view("STARTING"));
+    const mcp = await connect({ startTask }, { newRequestId: counter(), now: () => now });
+    const start = () => mcp.callTool({ name: "agentx_start_task", arguments: { project: "payments", instructions: "run the tests" } });
+    await start();
+    now = 14 * 60_000;
+    await start();
+    now = 15 * 60_000;
+    await start();
+    const ids = startTask.mock.calls.map((call) => (call as unknown as [{ requestId: string }])[0].requestId);
+    expect(ids[1]).toBe(ids[0]);
+    expect(ids[2]).not.toBe(ids[0]);
+  });
+
+  it("keeps the caller's own request_id, and tells projects, tools and tasks apart", async () => {
+    const startTask = vi.fn(async () => view("STARTING"));
+    const continueTask = vi.fn(async () => view("RUNNING"));
+    const mcp = await connect({ startTask, continueTask }, { newRequestId: counter() });
+    await mcp.callTool({ name: "agentx_start_task", arguments: { project: "payments", instructions: "x", request_id: "66666666-6666-4666-8666-666666666666" } });
+    await mcp.callTool({ name: "agentx_start_task", arguments: { project: "billing", instructions: "x" } });
+    await mcp.callTool({ name: "agentx_start_task", arguments: { project: "payments", instructions: "x" } });
+    await mcp.callTool({ name: "agentx_start_task", arguments: { project: "payments", instructions: "x", title: "Other" } });
+    const continued = await mcp.callTool({ name: "agentx_continue_task", arguments: { task_id: TASK, instructions: "x" } });
+    await mcp.callTool({ name: "agentx_continue_task", arguments: { task_id: TASK, instructions: "x", wait_seconds: 0 } });
+    const starts = startTask.mock.calls.map((call) => (call as unknown as [{ requestId: string }])[0].requestId);
+    const continues = continueTask.mock.calls.map((call) => (call as unknown as [string, { requestId: string }])[1].requestId);
+    expect(starts[0]).toBe("66666666-6666-4666-8666-666666666666");
+    expect(new Set([...starts, continues[0]]).size).toBe(5);
+    expect(continues[1]).toBe(continues[0]);
+    expect(continued.structuredContent).toMatchObject({ request_id: continues[0] });
+  });
+
+  it("repeats an identical pull request call with the same requestId, and returns it", async () => {
+    const openPullRequest = vi.fn(async () => ({ task: view("SUCCEEDED"), operationId: "55555555-5555-4555-8555-555555555555", operationStatus: "ACCEPTED" as const }));
+    const mcp = await connect({ openPullRequest }, { newRequestId: counter() });
+    const first = await mcp.callTool({ name: "agentx_open_pull_request", arguments: { task_id: TASK, title: "Fix", body: "b" } });
+    await mcp.callTool({ name: "agentx_open_pull_request", arguments: { task_id: TASK, title: "Fix", body: "b" } });
+    await mcp.callTool({ name: "agentx_open_pull_request", arguments: { task_id: TASK, title: "Fix", body: "other" } });
+    const ids = openPullRequest.mock.calls.map((call) => (call as unknown as [string, { requestId: string }])[1].requestId);
+    expect(ids[1]).toBe(ids[0]);
+    expect(ids[2]).not.toBe(ids[0]);
+    expect(first.structuredContent).toMatchObject({ request_id: ids[0] });
+  });
+
+  it("tells the AI tool how to retry safely", () => {
+    for (const name of ["agentx_start_task", "agentx_continue_task", "agentx_open_pull_request"]) {
+      expect(DEVELOPER_TOOLS.find((tool) => tool.name === name)?.description, name).toContain("send your own request_id, or repeat the call unchanged");
+    }
   });
 });
 
@@ -166,7 +253,7 @@ describe("the other task tools (FR-030)", () => {
     const result = await (await connect({ getTask })).callTool({ name: "agentx_wait_for_task", arguments: { task_id: TASK, wait_seconds: 10, events: 3 } });
     expect(result.isError).toBeFalsy();
     expect(result.structuredContent).toMatchObject({ status: "RUNNING", timed_out: true });
-    expect(getTask).toHaveBeenCalledWith(TASK, 3);
+    expect(getTask).toHaveBeenCalledWith(TASK, 3, expect.objectContaining({ deadlineMs: 10_000, signal: expect.any(AbortSignal) as unknown }));
     expect(text(result)).toContain("keeps running");
   });
 
@@ -248,6 +335,24 @@ describe("every tool result is redacted and capped (FR-029, SC-004)", () => {
     expect(structured.title.length).toBeLessThanOrEqual(4_000);
     expect(structured.changed_files.length).toBeLessThanOrEqual(200);
     expect(text(result).length).toBeLessThanOrEqual(20_000);
+  });
+});
+
+describe("the error and progress caps (Task 15 fix round 1)", () => {
+  it("cuts an error's text to 2,000 characters", async () => {
+    const mcp = await connect({ getTask: async () => { throw new ToolError("TASK_BUSY", "w".repeat(5_000)); } });
+    const result = await mcp.callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
+    expect(result.isError).toBe(true);
+    expect(text(result).startsWith("TASK_BUSY: www")).toBe(true);
+    expect(text(result).length).toBe(2_000);
+  });
+
+  it("cuts a progress message to 300 characters", async () => {
+    const getTask = vi.fn().mockResolvedValueOnce(view("RUNNING", { events: [{ at: "t", kind: "tool", text: "p".repeat(5_000) }] })).mockResolvedValueOnce(view("SUCCEEDED"));
+    const progress: Array<{ message?: string }> = [];
+    await (await connect({ getTask })).callTool({ name: "agentx_wait_for_task", arguments: { task_id: TASK, wait_seconds: 30 } }, undefined, { onprogress: (update) => progress.push(update as { message?: string }) });
+    expect(progress[0]?.message?.startsWith("RUNNING: ppp")).toBe(true);
+    expect(progress[0]?.message?.length).toBe(300);
   });
 });
 
@@ -339,6 +444,13 @@ describe("agentx_open_pull_request and agentx_close_task return at once (R22, Ow
     expect(result.structuredContent).not.toHaveProperty("timed_out");
     expect(closeTask).toHaveBeenCalledTimes(1);
     expect(text(result)).toContain("agentx_get_task");
+  });
+
+  it("uses AgentX's own words for a close that is not done, redacted", async () => {
+    const closeTask = vi.fn(async () => ({ task: view("SUCCEEDED", { closing: true }), closed: false, message: `the close preflight is running on demo ${PLANTED}; check back with agentx_get_task` }));
+    const result = await (await connect({ closeTask })).callTool({ name: "agentx_close_task", arguments: { task_id: TASK } });
+    expect(text(result)).toContain("the close preflight is running on demo");
+    expect(text(result)).not.toContain(PLANTED);
   });
 
   it("says why when a retried close finds unpublished work", async () => {

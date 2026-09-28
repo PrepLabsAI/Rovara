@@ -4,6 +4,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { DEVELOPER_TASK_SUMMARY_MAX, redactSecrets, redactText } from "@agentx/contracts";
 import { ToolError } from "./errors.js";
+import { RequestIdMemory } from "./request-ids.js";
 import { DEVELOPER_TOOLS, type ToolCall, type ToolContext } from "./tools.js";
 
 /** The longest string a result carries: the summary, the longest field AgentX sends. */
@@ -47,12 +48,16 @@ export function createAgentXMcpServer(options: {
   log?(entry: Record<string, unknown>): void;
 }): McpServer {
   const server = new McpServer({ name: "agentx", version: options.version });
+  // One memory per server (one per AI tool session), so a retried call reuses its request ID.
+  const requestIds = new RequestIdMemory();
   for (const tool of DEVELOPER_TOOLS) {
     server.registerTool(tool.name, { title: tool.title, description: tool.description, inputSchema: tool.inputSchema, outputSchema: tool.outputSchema }, async (input: Record<string, unknown>, extra) => {
       const context = options.context(server.server.getClientVersion()?.name);
       const progressToken = extra._meta?.progressToken;
       const call: ToolCall = {
         signal: extra.signal,
+        requestIds,
+        ...(options.log === undefined ? {} : { log: (entry: Record<string, unknown>) => options.log?.(entry) }),
         ...(progressToken === undefined ? {} : {
           progress: async (progress: number, total: number | undefined, message: string) => {
             await extra.sendNotification({ method: "notifications/progress", params: { progressToken, progress, ...(total === undefined ? {} : { total }), message: safeText(message, LONGEST_PROGRESS) } });

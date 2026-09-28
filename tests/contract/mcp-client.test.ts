@@ -125,6 +125,41 @@ describe("the control-plane client (FR-027)", () => {
     expect(sleep).not.toHaveBeenCalled();
   });
 
+  it("gives a wait's poll its own short deadline (Task 15 fix round 1)", async () => {
+    vi.useFakeTimers();
+    const started = Date.now();
+    const hanging = vi.fn((_url: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+    }));
+    let settledAt = 0;
+    const pending = httpControlPlaneClient({ session, fetch: hanging, traceId: () => "trace-1" })
+      .getTask(view.taskId, 10, { deadlineMs: 10_000 }).catch((caught: unknown) => { settledAt = Date.now(); return caught; });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(await pending).toMatchObject({ code: "CONTROL_PLANE_UNAVAILABLE" });
+    expect(settledAt - started).toBeLessThanOrEqual(10_000);
+    expect(hanging).toHaveBeenCalledTimes(1);
+  });
+
+  it("ends a call at once, without trying again, when its signal is aborted", async () => {
+    vi.useFakeTimers();
+    const hanging = vi.fn((_url: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+    }));
+    const controller = new AbortController();
+    let settled = false;
+    const pending = httpControlPlaneClient({ session, fetch: hanging, traceId: () => "trace-1" })
+      .getTask(view.taskId, 10, { signal: controller.signal }).catch((caught: unknown) => { settled = true; return caught; });
+    await vi.advanceTimersByTimeAsync(1_000);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toBe(true);
+    expect(await pending).toBeInstanceOf(ToolError);
+    expect(hanging).toHaveBeenCalledTimes(1);
+    // An already aborted signal sends nothing.
+    await expect(httpControlPlaneClient({ session, fetch: hanging, traceId: () => "trace-1" }).getTask(view.taskId, 10, { signal: controller.signal })).rejects.toBeInstanceOf(ToolError);
+    expect(hanging).toHaveBeenCalledTimes(1);
+  });
+
   it("refreshes the sign-in once after a 401, then tries once more", async () => {
     const hook = vi.fn(async (options?: { force?: boolean }) => ({ ...(await session()), accessToken: options?.force === true ? "fresh-access-token" : TOKEN }));
     const fetch = vi.fn().mockResolvedValueOnce(reply(401, { error: { code: "AUTH_REQUIRED", message: "expired" } })).mockResolvedValueOnce(reply(200, { task: view }));

@@ -23,12 +23,15 @@ import { NEXT_STEPS, ToolError, isMeaningfulCode, plainText, signInStep, toolErr
 
 export interface ControlPlaneSession { baseUrl: string; accessToken: string; signInCommand: string }
 
+/** For a read inside a wait: its own deadline, and the tool call's signal, so a cancel ends it at once. */
+export interface CallOptions { signal?: AbortSignal; deadlineMs?: number }
+
 export interface ControlPlaneClient {
   /** The environment's agentx-configuration, read without a token. */
   configuration(): Promise<{ env: string; apiVersion: string; baseUrl: string }>;
   projects(): Promise<DeveloperProjectsResponse>;
   startTask(request: StartDeveloperTaskRequest): Promise<DeveloperTaskView>;
-  getTask(taskId: string, events: number): Promise<DeveloperTaskView>;
+  getTask(taskId: string, events: number, options?: CallOptions): Promise<DeveloperTaskView>;
   listTasks(query: { project?: string; status?: DeveloperTaskStatus; limit: number }): Promise<DeveloperTaskListItem[]>;
   continueTask(taskId: string, request: ContinueDeveloperTaskRequest): Promise<DeveloperTaskView>;
   cancelTask(taskId: string, requestId: string): Promise<DeveloperTaskView>;
@@ -78,7 +81,7 @@ export function httpControlPlaneClient(options: {
   const sleep = (ms: number): Promise<void> => (options.sleep ? options.sleep(ms) : new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const now = (): number => (options.now ? options.now() : Date.now());
   const tries = Math.max(1, options.tries ?? 3);
-  const deadlineMs = options.deadlineMs ?? DEADLINE_MS;
+  const defaultDeadlineMs = options.deadlineMs ?? DEADLINE_MS;
 
   async function session(force = false): Promise<ControlPlaneSession> {
     try {
@@ -95,28 +98,34 @@ export function httpControlPlaneClient(options: {
     }
   }
 
-  async function send<T>(current: ControlPlaneSession, schema: z.ZodType<T>, method: string, path: string, body: unknown, authorized: boolean, refused: readonly string[] = []): Promise<T> {
+  async function send<T>(current: ControlPlaneSession, schema: z.ZodType<T>, method: string, path: string, body: unknown, authorized: boolean, refused: readonly string[] = [], call: CallOptions = {}): Promise<T> {
     const maxTries = repeatable(method, body) ? tries : 1;
     const started = now();
+    const deadlineMs = Math.min(call.deadlineMs ?? defaultDeadlineMs, defaultDeadlineMs);
+    const cancelled = () => new ToolError("CONTROL_PLANE_UNAVAILABLE", "the call was cancelled before AgentX answered");
+    const isCancelled = (): boolean => call.signal?.aborted === true;
     // The tokens sent, and any AgentX refused, never appear in what a tool returns.
     const secrets = authorized ? [current.accessToken, ...refused] : [];
     const unreachable = (attempt: number) =>
       new ToolError("CONTROL_PLANE_UNAVAILABLE", `could not reach AgentX at ${plainText(current.baseUrl, "its URL")}${attempt > 1 ? ` after ${attempt} tries` : ""}`);
     /** Waits before the next try, or answers false when there is no try left or no time for one. */
     const again = async (attempt: number): Promise<boolean> => {
-      if (attempt >= maxTries) return false;
+      if (attempt >= maxTries || isCancelled()) return false;
       const delay = Math.round(250 + Math.random() * 500 * attempt);
       if (now() - started + delay >= deadlineMs) return false;
       await sleep(delay);
       return true;
     };
     for (let attempt = 1; ; attempt += 1) {
+      if (isCancelled()) throw cancelled();
       const headers: Record<string, string> = { "x-agentx-trace-id": options.traceId?.() ?? randomUUID() };
       if (authorized) headers.authorization = `Bearer ${current.accessToken}`;
       if (body !== undefined) headers["content-type"] = "application/json";
       // Each try gets what is left of the deadline, at most 30 seconds, to answer in full.
       const abort = new AbortController();
       const timer = setTimeout(() => abort.abort(), Math.max(0, Math.min(REQUEST_TIMEOUT_MS, deadlineMs - (now() - started))));
+      const onCancel = () => abort.abort();
+      call.signal?.addEventListener("abort", onCancel, { once: true });
       let response: Response;
       let text: string;
       try {
@@ -125,10 +134,12 @@ export function httpControlPlaneClient(options: {
         });
         text = await response.text().catch(() => "");
       } catch {
+        if (isCancelled()) throw cancelled();
         if (await again(attempt)) continue;
         throw unreachable(attempt);
       } finally {
         clearTimeout(timer);
+        call.signal?.removeEventListener("abort", onCancel);
       }
       let value: unknown;
       try {
@@ -149,10 +160,10 @@ export function httpControlPlaneClient(options: {
     }
   }
 
-  async function call<T>(schema: z.ZodType<T>, method: string, path: string, body?: unknown, authorized = true): Promise<T> {
+  async function call<T>(schema: z.ZodType<T>, method: string, path: string, body?: unknown, authorized = true, options: CallOptions = {}): Promise<T> {
     const first = await session();
     try {
-      return await send(first, schema, method, path, body, authorized);
+      return await send(first, schema, method, path, body, authorized, [], options);
     } catch (error) {
       if (!(error instanceof Refused)) throw error;
     }
@@ -160,7 +171,7 @@ export function httpControlPlaneClient(options: {
     // means nothing was done, so sending the same request again is safe.
     const refreshed = await session(true);
     try {
-      return await send(refreshed, schema, method, path, body, authorized, [first.accessToken]);
+      return await send(refreshed, schema, method, path, body, authorized, [first.accessToken], options);
     } catch (error) {
       if (error instanceof Refused) throw error.error;
       throw error;
@@ -177,7 +188,7 @@ export function httpControlPlaneClient(options: {
     },
     projects: () => call(DeveloperProjectsResponseSchema, "GET", "/v1/dev/projects"),
     startTask: async (request) => task(await call(DeveloperTaskResponseSchema, "POST", "/v1/dev/tasks", request)),
-    getTask: async (taskId, events) => task(await call(DeveloperTaskResponseSchema, "GET", path(taskId, `?events=${events}`))),
+    getTask: async (taskId, events, options) => task(await call(DeveloperTaskResponseSchema, "GET", path(taskId, `?events=${events}`), undefined, true, options)),
     listTasks: async (query) => {
       const search = new URLSearchParams({ limit: String(query.limit) });
       if (query.project !== undefined) search.set("project", query.project);

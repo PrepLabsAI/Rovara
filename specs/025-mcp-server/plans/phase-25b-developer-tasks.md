@@ -188,8 +188,11 @@ go beyond the spec's text; the owner decided each of them on 2026-09-28 (Owner d
   14.
 - **R21. Waits.** The server polls the task every 2 seconds, growing to 5, and sends a progress
   notification after every poll when the client sent a progress token, so the gap is at most 5
-  seconds (the spec's bound is 15). A cancelled tool call stops polling at once; the task keeps
-  running. A wait that ends first returns `timed_out: true`, not an error. Task 15.
+  seconds (the spec's bound is 15). Each poll has its own 10-second deadline, a timer sends a
+  progress notification while a poll is slow (never more than 10 seconds apart), and a wait passes
+  its end by at most one poll. A cancelled tool call stops polling at once and aborts a poll in
+  flight; the task keeps running. A wait that ends first returns `timed_out: true`, not an error;
+  a poll that fails returns the last view with `wait_failed`, not a timeout. Task 15.
 - **R22. `agentx_open_pull_request` and `agentx_close_task` return at once (owner, Owner decision 6).**
   Neither tool waits. `agentx_open_pull_request` answers with the publish operation's ID and its
   status (`ACCEPTED` when just started), and `agentx_close_task` with the task, `closing: true`,

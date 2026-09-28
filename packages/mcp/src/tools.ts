@@ -8,7 +8,8 @@ import {
 import { z } from "zod";
 import type { ControlPlaneClient } from "./client.js";
 import type { Compatibility } from "./compatibility.js";
-import { ToolError } from "./errors.js";
+import { ToolError, plainText } from "./errors.js";
+import type { RequestIdMemory } from "./request-ids.js";
 import { waitForTask } from "./wait.js";
 
 export interface ToolContext {
@@ -22,7 +23,13 @@ export interface ToolContext {
   sleep(ms: number, signal: AbortSignal): Promise<void>;
   newRequestId(): string;
 }
-export interface ToolCall { signal: AbortSignal; progress?(progress: number, total: number | undefined, message: string): Promise<void> }
+export interface ToolCall {
+  signal: AbortSignal;
+  progress?(progress: number, total: number | undefined, message: string): Promise<void>;
+  /** The server's memory of request IDs made for calls that left request_id out. */
+  requestIds?: RequestIdMemory;
+  log?(entry: Record<string, unknown>): void;
+}
 export interface ToolResult { structured: Record<string, unknown>; text: string }
 export interface ToolDefinition {
   name: string;
@@ -34,7 +41,7 @@ export interface ToolDefinition {
 }
 
 const taskIdInput = z.string().min(1).max(100).describe("the task ID that agentx_start_task or agentx_list_tasks gave");
-const requestIdInput = z.string().uuid().optional().describe("a UUID; send the same one again to retry this call safely without repeating it. One is made when left out");
+const requestIdInput = z.string().uuid().optional().describe("a UUID of your choosing; send the same one again to retry this call safely. When left out, an identical call within 15 minutes counts as a retry of the first");
 const waitInput = (min: number) => z.number().int().min(min).max(DEVELOPER_WAIT_MAX_SECONDS);
 const eventsInput = z.number().int().min(0).max(DEVELOPER_EVENTS_MAX).optional().describe("how many recent progress events to show, 0 to 50; 10 by default");
 const instructionsInput = z.string().min(1).describe("complete instructions for the remote worker, at most 65,536 bytes; it gets them exactly as written and cannot see this conversation");
@@ -52,7 +59,12 @@ const TaskShape = {
   unpublished: z.array(z.object({ repository: z.string(), reasons: z.array(z.string()) })).optional(),
   /** Only on start, continue and wait, which may wait (R21). */
   timed_out: z.boolean().optional(),
+  /** A wait that stopped early because checking on the task failed; not a timeout. */
+  wait_failed: z.object({ code: z.string(), message: z.string() }).optional(),
 };
+/** Start and continue also say which request ID reached AgentX, for a retry. */
+const ActionShape = { ...TaskShape, request_id: z.string() };
+const RETRY = "If the call fails or times out, send your own request_id, or repeat the call unchanged: an identical call within 15 minutes is taken as the same request";
 
 /** The one place a wire view (camelCase) becomes a tool output (snake_case). */
 function taskOutput(task: DeveloperTaskView, timedOut?: boolean): Record<string, unknown> {
@@ -103,33 +115,43 @@ function instructions(value: unknown): string {
   return parsed.data;
 }
 
-const requestId = (context: ToolContext, input: Record<string, unknown>) => (input.request_id as string | undefined) ?? context.newRequestId();
+/**
+ * The caller's request_id, else one remembered for this call's content for 15 minutes, so an
+ * unchanged retry (after the AI tool's own timeout, say) reaches AgentX as the same request.
+ */
+function requestIdFor(context: ToolContext, call: ToolCall, input: Record<string, unknown>, content: readonly unknown[]): string {
+  const given = input.request_id as string | undefined;
+  if (given !== undefined) return given;
+  return call.requestIds === undefined ? context.newRequestId() : call.requestIds.idFor(content, context.now(), () => context.newRequestId());
+}
+const optional = (value: unknown) => value ?? null;
 const eventsOf = (input: Record<string, unknown>) => (input.events as number | undefined) ?? DEVELOPER_EVENTS_DEFAULT;
 
-async function wait(context: ToolContext, call: ToolCall, taskId: string, waitSeconds: number, events: number) {
-  return waitForTask({
+/**
+ * A wait's answer. A failed read during the wait still answers with the last view seen, marked
+ * as a failed check rather than a timeout: after a start or continue, an error would make the AI
+ * tool send the action again.
+ */
+async function waitResult(context: ToolContext, call: ToolCall, tool: string, taskId: string, waitSeconds: number, events: number, first?: DeveloperTaskView): Promise<ToolResult> {
+  const waited = await waitForTask({
     client: context.client, taskId, waitSeconds, events, signal: call.signal, now: () => context.now(), sleep: (ms, signal) => context.sleep(ms, signal),
+    ...(first === undefined ? {} : { first }),
     ...(call.progress === undefined ? {} : { progress: (elapsed: number, total: number, message: string) => call.progress!(elapsed, total, message) }),
   });
+  if (waited.failure === undefined) return { structured: taskOutput(waited.task, waited.timedOut), text: taskText(waited.task, waited.timedOut) };
+  const failure = waited.failure instanceof ToolError ? waited.failure : new ToolError("CONTROL_PLANE_UNAVAILABLE", "an unexpected problem");
+  call.log?.({ event: "tool.wait_failed", tool, code: failure.code });
+  const task = waited.task;
+  return {
+    structured: { ...taskOutput(task, false), wait_failed: { code: failure.code, message: failure.message } },
+    text: `Task ${task.taskId} "${task.title}" on ${task.project} was ${task.status} when the wait stopped early, because checking on it failed: ${failure.message}. This is not a timeout, and the task keeps running; check it with agentx_get_task.`,
+  };
 }
 
-/**
- * The optional wait after a start or continue. The action already happened, so a failed check
- * during the wait still answers with the task: an error here would make the AI tool try the
- * start again and start a second task.
- */
-async function afterAction(context: ToolContext, call: ToolCall, task: DeveloperTaskView, waitSeconds: number): Promise<ToolResult> {
-  if (waitSeconds === 0) return { structured: taskOutput(task), text: taskText(task) };
-  try {
-    const waited = await wait(context, call, task.taskId, waitSeconds, DEVELOPER_EVENTS_DEFAULT);
-    return { structured: taskOutput(waited.task, waited.timedOut), text: taskText(waited.task, waited.timedOut) };
-  } catch (error) {
-    const why = error instanceof ToolError ? error.message : "an unexpected problem";
-    return {
-      structured: taskOutput(task, true),
-      text: `Task ${task.taskId} "${task.title}" on ${task.project} was accepted, but the wait stopped early: ${why}. The task keeps running; check it with agentx_get_task.`,
-    };
-  }
+/** The optional wait after a start or continue, from the view the action returned. */
+async function afterAction(context: ToolContext, call: ToolCall, tool: string, task: DeveloperTaskView, waitSeconds: number, requestId: string): Promise<ToolResult> {
+  const result = waitSeconds === 0 ? { structured: taskOutput(task), text: taskText(task) } : await waitResult(context, call, tool, task.taskId, waitSeconds, DEVELOPER_EVENTS_DEFAULT, task);
+  return { structured: { ...result.structured, request_id: requestId }, text: result.text };
 }
 
 export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
@@ -195,7 +217,7 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
     name: "agentx_start_task",
     title: "Hand a coding task to AgentX",
     description:
-      "Hands a coding task to AgentX, which runs it in a private remote workspace on the project's repositories. The task is private to you. Write complete instructions: the remote worker gets them exactly as written and cannot see this conversation. By default it answers at once with a task ID while the task runs; then check it with agentx_get_task or wait with agentx_wait_for_task. To wait for a small task in the same call, set wait_seconds (up to 600); if the wait ends first, the result says timed_out and the task keeps running. If the call itself fails or times out, retry with the same request_id so no second task starts. When the task ends, open a pull request with agentx_open_pull_request or send more work with agentx_continue_task, and close it with agentx_close_task when done, since each open task counts against your limit.",
+      `Hands a coding task to AgentX, which runs it in a private remote workspace on the project's repositories. The task is private to you. Write complete instructions: the remote worker gets them exactly as written and cannot see this conversation. By default it answers at once with a task ID while the task runs; then check it with agentx_get_task or wait with agentx_wait_for_task. To wait for a small task in the same call, set wait_seconds (up to 600); if the wait ends first, the result says timed_out and the task keeps running. ${RETRY}, so no second task starts; to run the same instructions again as new work, send a new request_id. When the task ends, open a pull request with agentx_open_pull_request or send more work with agentx_continue_task, and close it with agentx_close_task when done, since each open task counts against your limit.`,
     inputSchema: {
       project: z.string().min(1).max(200).describe("the project's exact name, from agentx_list_projects"),
       instructions: instructionsInput,
@@ -206,12 +228,15 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
       wait_seconds: waitInput(0).optional().describe("seconds to wait for the task to end, 0 to 600; 0 (answer at once) by default"),
       request_id: requestIdInput,
     },
-    outputSchema: TaskShape,
+    outputSchema: ActionShape,
     async handler(context, input, call) {
+      const text = instructions(input.instructions);
+      // Everything but wait_seconds: a retry with another wait is still the same start.
+      const id = requestIdFor(context, call, input, ["agentx_start_task", input.project, text, optional(input.title), optional(input.share_to_channel), optional(input.share_mode), optional(input.channel)]);
       const task = await context.client.startTask({
-        requestId: requestId(context, input),
+        requestId: id,
         project: input.project as string,
-        instructions: instructions(input.instructions),
+        instructions: text,
         ...(input.title === undefined ? {} : { title: input.title as string }),
         // R25: sent as it came; the broker maps it to one of four fixed names.
         ...(context.clientName === undefined ? {} : { client: context.clientName.slice(0, 200) }),
@@ -219,7 +244,7 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
         ...(input.share_mode === undefined ? {} : { shareMode: input.share_mode as "view" | "continue" }),
         ...(input.channel === undefined ? {} : { channel: input.channel as string }),
       });
-      return afterAction(context, call, task, (input.wait_seconds as number | undefined) ?? 0);
+      return afterAction(context, call, "agentx_start_task", task, (input.wait_seconds as number | undefined) ?? 0, id);
     },
   },
   {
@@ -242,8 +267,7 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
     inputSchema: { task_id: taskIdInput, wait_seconds: waitInput(1).describe("seconds to wait for the task to end, 1 to 600"), events: eventsInput },
     outputSchema: TaskShape,
     async handler(context, input, call) {
-      const waited = await wait(context, call, input.task_id as string, input.wait_seconds as number, eventsOf(input));
-      return { structured: taskOutput(waited.task, waited.timedOut), text: taskText(waited.task, waited.timedOut) };
+      return waitResult(context, call, "agentx_wait_for_task", input.task_id as string, input.wait_seconds as number, eventsOf(input));
     },
   },
   {
@@ -273,17 +297,19 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
     name: "agentx_continue_task",
     title: "Continue an AgentX task",
     description:
-      "Sends more instructions to one of your tasks once it has ended. They run in the same workspace, on the same branch, exactly as written, so write them in full. Answers like agentx_start_task: at once by default, or after waiting up to wait_seconds (up to 600). A task that is still running answers TASK_BUSY: wait for it with agentx_wait_for_task first. A task whose setup failed cannot be continued: close it and start a new one.",
+      `Sends more instructions to one of your tasks once it has ended. They run in the same workspace, on the same branch, exactly as written, so write them in full. Answers like agentx_start_task: at once by default, or after waiting up to wait_seconds (up to 600). A task that is still running answers TASK_BUSY: wait for it with agentx_wait_for_task first. A task whose setup failed cannot be continued: close it and start a new one. ${RETRY}, so the instructions run once; to run the same instructions again, send a new request_id.`,
     inputSchema: {
       task_id: taskIdInput,
       instructions: instructionsInput,
       wait_seconds: waitInput(0).optional().describe("seconds to wait for the task to end, 0 to 600; 0 (answer at once) by default"),
       request_id: requestIdInput,
     },
-    outputSchema: TaskShape,
+    outputSchema: ActionShape,
     async handler(context, input, call) {
-      const task = await context.client.continueTask(input.task_id as string, { requestId: requestId(context, input), instructions: instructions(input.instructions) });
-      return afterAction(context, call, task, (input.wait_seconds as number | undefined) ?? 0);
+      const text = instructions(input.instructions);
+      const id = requestIdFor(context, call, input, ["agentx_continue_task", input.task_id, text]);
+      const task = await context.client.continueTask(input.task_id as string, { requestId: id, instructions: text });
+      return afterAction(context, call, "agentx_continue_task", task, (input.wait_seconds as number | undefined) ?? 0, id);
     },
   },
   {
@@ -294,7 +320,8 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
     inputSchema: { task_id: taskIdInput, request_id: requestIdInput },
     outputSchema: TaskShape,
     async handler(context, input) {
-      const task = await context.client.cancelTask(input.task_id as string, requestId(context, input));
+      // A fresh ID when left out: cancelling again later is a new request, and a repeat is harmless.
+      const task = await context.client.cancelTask(input.task_id as string, (input.request_id as string | undefined) ?? context.newRequestId());
       return { structured: taskOutput(task), text: taskText(task) };
     },
   },
@@ -308,14 +335,19 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
     async handler(context, input) {
       const taskId = input.task_id as string;
       // R22: no wait. A repeated request_id returns the same close and its outcome.
-      const answer = await context.client.closeTask(taskId, requestId(context, input));
+      // A fresh ID when left out: closing again after publishing is a new request, and a repeat
+      // on a closing task returns that close (Task 12).
+      const answer = await context.client.closeTask(taskId, (input.request_id as string | undefined) ?? context.newRequestId());
       const unpublished = answer.unpublished ?? answer.task.unpublished;
       const task = unpublished === undefined ? answer.task : { ...answer.task, unpublished };
+      // AgentX's own words, when it gives them, say why the task is not closed yet and what next.
       const text = answer.closed
         ? `Task ${taskId} is closed; its workspace is released.`
-        : unpublished !== undefined
-          ? `Task ${taskId} was not closed: unpublished work in ${unpublished.map((entry) => `${entry.repository} (${entry.reasons.join(", ")})`).join("; ")}. Open a pull request with agentx_open_pull_request first, or continue the task with instructions to discard the changes, then close it again.`
-          : `Closing task ${taskId}: AgentX is checking the workspace for unpublished work. Check with agentx_get_task; it shows CLOSED when done.`;
+        : answer.message !== undefined
+          ? `Task ${taskId}: ${plainText(answer.message, "AgentX has not closed it yet; check with agentx_get_task")}`
+          : unpublished !== undefined
+            ? `Task ${taskId} was not closed: unpublished work in ${unpublished.map((entry) => `${entry.repository} (${entry.reasons.join(", ")})`).join("; ")}. Open a pull request with agentx_open_pull_request first, or continue the task with instructions to discard the changes, then close it again.`
+            : `Closing task ${taskId}: AgentX is checking the workspace for unpublished work. Check with agentx_get_task; it shows CLOSED when done.`;
       return { structured: { ...taskOutput(task), closed: answer.closed }, text };
     },
   },
@@ -323,7 +355,7 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
     name: "agentx_open_pull_request",
     title: "Open a pull request from an AgentX task",
     description:
-      "Opens a pull request with one of your task's changes, through AgentX's GitHub App, as a draft unless draft is false. Use it once the task has ended and you have read its summary and changed files. Answers at once with the publish operation's ID and status (ACCEPTED when just started): check with agentx_get_task, whose pull_requests lists the URL once it is published. If the call fails or times out, retry with the same request_id to get the same operation, never a second pull request. repository is needed only when the project has several repositories.",
+      `Opens a pull request with one of your task's changes, through AgentX's GitHub App, as a draft unless draft is false. Use it once the task has ended and you have read its summary and changed files. Answers at once with the publish operation's ID and status (ACCEPTED when just started): check with agentx_get_task, whose pull_requests lists the URL once it is published. ${RETRY}, so it gives the same operation, never a second pull request. repository is needed only when the project has several repositories.`,
     inputSchema: {
       task_id: taskIdInput,
       title: z.string().min(1).max(256).describe("the pull request's title"),
@@ -336,14 +368,17 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
       operation_id: z.string(), operation_status: z.string(),
       pull_request: z.object({ repository: z.string(), number: z.number(), url: z.string(), state: z.string() }).optional(),
       task: z.object(TaskShape),
+      request_id: z.string(),
     },
-    async handler(context, input) {
+    async handler(context, input, call) {
       const taskId = input.task_id as string;
+      const draft = (input.draft as boolean | undefined) ?? true;
+      const id = requestIdFor(context, call, input, ["agentx_open_pull_request", taskId, input.title, optional(input.body), optional(input.repository), draft]);
       // R22: no wait. A repeated request_id returns the same operation, with the URL once published.
       const answer = await context.client.openPullRequest(taskId, {
-        requestId: requestId(context, input),
+        requestId: id,
         title: input.title as string,
-        draft: (input.draft as boolean | undefined) ?? true,
+        draft,
         ...(input.body === undefined ? {} : { body: input.body as string }),
         ...(input.repository === undefined ? {} : { repository: input.repository as string }),
       });
@@ -352,6 +387,7 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
           operation_id: answer.operationId, operation_status: answer.operationStatus,
           ...(answer.pullRequest === undefined ? {} : { pull_request: answer.pullRequest }),
           task: taskOutput(answer.task),
+          request_id: id,
         },
         text: answer.pullRequest !== undefined
           ? `The pull request for task ${taskId} is ${answer.pullRequest.url} (${answer.pullRequest.state}).`
