@@ -9,7 +9,6 @@ import {
   QueryCommand,
   TransactWriteCommand,
   UpdateCommand,
-  type TransactWriteCommandInput,
 } from "@aws-sdk/lib-dynamodb";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
@@ -53,6 +52,7 @@ import {
   workspaceProjectIndexAttributes,
   workspaceRecordFields,
   type Operation,
+  type OperationRequester,
   type OperationStatus,
   type CodeBuildCheckResult,
   type CodeBuildGateDefinition,
@@ -87,9 +87,10 @@ import { attributionDroppedLog, callConnector, connectorCatalogKey, discoverConn
 import { resolveConnectors, BUILT_IN_CONNECTOR_TYPES, type ConnectorType, type ConnectorTypeContext, type ResolvedConnector } from "./connector-types.js";
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
 import { developerTokenVerifier } from "../developer/verify-token.js";
-import { inertName } from "../developer/task-records.js";
+import { developerFooter, inertName } from "../developer/task-records.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
 import { channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, routeDeveloperRequest, type DeveloperApiConfiguration } from "./developer-routes.js";
+import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
@@ -156,6 +157,8 @@ interface OperationRecord extends Operation {
     baseBranch: string;
     title: string;
     body?: string;
+    /** Spec 025 FR-023: a developer's pull request opens as a draft unless they ask otherwise. */
+    draft?: boolean;
     mode?: "create" | "replace" | "revert";
     targetPullRequestNumber?: number;
     revertCommit?: string;
@@ -246,6 +249,8 @@ interface AwsBrokerDependencies {
   credentialRegistry?: CredentialRegistry;
   /** The administrator turn record export; absent when the deployment has no TurnRecords table. */
   turnRecords?: TurnRecordExport;
+  /** The TurnRecords table developer task audit records go to (spec 025); absent when there is none. */
+  turnRecordsTableName?: string;
   /** Connector types this deployment serves; the built-in types when absent. */
   connectorTypes?: Record<string, ConnectorType>;
 }
@@ -267,13 +272,12 @@ interface SlackServiceConfiguration {
   organizationWorkspaceLimit: number;
 }
 
-type TransactItems = NonNullable<TransactWriteCommandInput["TransactItems"]>;
-
 /** A "." or ".." path segment, also percent-encoded (%2e in any case). */
 const DOT_SEGMENT = /(?:^|\/)(?:\.|%2e){1,2}(?:\/|$)/i;
 const DEVELOPER_ROUTE_KEY = "ANY /v1/dev/{proxy+}";
 
-export function createAwsBrokerHandler(input: AwsBrokerInput) {
+/** The handler's dependencies from what callers supply (see AwsBrokerInput). */
+function brokerDependencies(input: AwsBrokerInput): AwsBrokerDependencies {
   // One cache per container: discovery per revision, connector and repository costs one vendor round trip.
   const { connectorCredentials, turnRecordsTableName, ...rest } = input;
   const credentialRegistry = input.credentialRegistry ?? (connectorCredentials
@@ -285,12 +289,77 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         projectOf: workspaceProjectReader(input.documentClient, input.tableName),
       })
     : undefined);
-  const dependencies: AwsBrokerDependencies = {
+  return {
     ...rest,
     catalogs: input.catalogs ?? new CatalogCache<ScopeDiscovery>({ ttlMs: 600_000, maxEntries: 256 }),
     ...(credentialRegistry ? { credentialRegistry } : {}),
     ...(turnRecords ? { turnRecords } : {}),
+    ...(turnRecordsTableName ? { turnRecordsTableName } : {}),
   };
+}
+
+/** The broker actions developer task routes call (spec 025); tests and the route wiring use this factory. */
+export function createDeveloperTaskActions(input: AwsBrokerInput): DeveloperTaskActions {
+  return developerTaskActions(brokerDependencies(input));
+}
+
+function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTaskActions {
+  const query = async (pk: string, prefix: string, extra: Record<string, unknown> = {}) => (await dependencies.documentClient.send(new QueryCommand({
+    TableName: dependencies.tableName,
+    KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
+    ExpressionAttributeValues: { ":pk": pk, ":prefix": prefix },
+    ConsistentRead: true,
+    ...extra,
+  }))).Items ?? [];
+  return {
+    tableName: dependencies.tableName,
+    ...(dependencies.turnRecordsTableName ? { turnRecordsTableName: dependencies.turnRecordsTableName } : {}),
+    limitDefaults: {
+      member: dependencies.slack?.memberWorkspaceLimit ?? 3,
+      organization: dependencies.slack?.organizationWorkspaceLimit ?? 20,
+    },
+    latestProject: (name) => requireLatestProject(dependencies, name).catch((error: unknown) => {
+      if (error instanceof AgentXError && error.code === "NOT_FOUND") return undefined;
+      throw error;
+    }),
+    preparation: (identity, project, requestId) => newWorkspacePreparation(dependencies, identity, project, identity.ownerKey, requestId),
+    workspace: (id) => requireWorkspace(dependencies, id),
+    operations: async (workspaceId) => (await query(`WORKSPACE#${workspaceId}`, "OPERATION#"))
+      .filter((item) => item.entityType === "OPERATION")
+      .map((item) => publicOperation(item as OperationRecord)),
+    eventsNewestFirst: async (operationId, limit) => (await query(`OPERATION#${operationId}`, "EVENT#", { ScanIndexForward: false, Limit: limit }))
+      .filter((item) => item.entityType === "EVENT")
+      .map((item) => parseStoredEvent(item)),
+    artifacts: async (workspaceId, operationId) => (await query(`WORKSPACE#${workspaceId}`, "ARTIFACT#"))
+      .filter((item) => item.operationId === operationId)
+      .map((item) => ({
+        id: String(item.id), operationId: String(item.operationId), name: String(item.name), mediaType: String(item.mediaType), objectKey: String(item.objectKey),
+        ...(typeof item.size === "number" ? { size: item.size } : {}),
+      })),
+    readArtifact: async (objectKey, maxBytes) => {
+      const object = await dependencies.s3.send(new GetObjectCommand({ Bucket: dependencies.artifactBucketName, Key: objectKey, Range: `bytes=0-${maxBytes - 1}` }));
+      return object.Body ? await object.Body.transformToString("utf8") : "";
+    },
+    pullRequests: async (workspaceId) => (await query(`WORKSPACE#${workspaceId}`, "PULL_REQUEST#"))
+      .map((item) => ({ repository: String(item.repository), number: Number(item.number), url: String(item.url), state: item.state as "open" | "closed" | "merged" })),
+    acceptTask: (identity, workspaceId, request, extra) => acceptTask(dependencies, identity, workspaceId, request, extra),
+    acceptPullRequest: (identity, workspaceId, request, extra) => acceptPullRequest(dependencies, identity, workspaceId, request, extra),
+    cancelRunning: async (identity, workspace, extra) => {
+      const result = await cancelRunningTask(dependencies, workspace, requesterOf(identity), extra);
+      return result.outcome === "CANCEL_REQUESTED"
+        ? { outcome: "CANCEL_REQUESTED", targetOperationId: result.targetOperationId, cancelOperationId: result.cancelOperationId }
+        : { outcome: "NOTHING_RUNNING" };
+    },
+    startClose: (identity, workspace, requestId, extra) => startTaskClose(dependencies, identity, workspace, requestId, extra),
+    deleteCompute: (workspace) => deleteWorkspaceCompute(dependencies, workspace),
+    transact: async (items) => {
+      await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: items }));
+    },
+  };
+}
+
+export function createAwsBrokerHandler(input: AwsBrokerInput) {
+  const dependencies = brokerDependencies(input);
   if (Buffer.byteLength(dependencies.callbackSigningKey, "utf8") < 32) {
     throw new Error("CALLBACK_SIGNING_KEY must contain at least 32 bytes");
   }
@@ -592,7 +661,7 @@ function connectorTypeContext(dependencies: AwsBrokerDependencies): ConnectorTyp
 }
 
 function connectorContext(identity: AuthenticatedIdentity, workspace: WorkspaceInstance, project: RegisteredProjectRecord): ConnectorContextBase {
-  return { workspaceId: workspace.id, ownerKey: identity.ownerKey, settingsRevision: project.definition.revision, ...requesterOf(identity) };
+  return { workspaceId: workspace.id, ownerKey: identity.ownerKey, settingsRevision: project.definition.revision, ...slackRequesterOf(identity) };
 }
 
 type GitHubConnector = NonNullable<ReturnType<typeof githubConnectorOf>>;
@@ -619,7 +688,7 @@ function gitHubContext(identity: AuthenticatedIdentity, workspace: WorkspaceInst
     repository,
     policy: github.policy,
     settingsRevision: project.definition.revision,
-    ...requesterOf(identity),
+    ...slackRequesterOf(identity),
   };
 }
 
@@ -939,6 +1008,42 @@ async function getSlackBinding(
   });
 }
 
+/** The close preflight's operation, worker invocation and outbox item: the Slack close's and a developer task's. */
+function closeOperationParts(
+  dependencies: AwsBrokerDependencies,
+  workspace: WorkspaceInstance,
+  requestId: string,
+  requester: { requestedBy?: OperationRequester },
+  now: string,
+): { operation: OperationRecord; outbox: ReturnType<typeof outboxRecord>; fence: number } {
+  const operationId = randomUUID();
+  const fence = workspace.fence + 1;
+  const operation = operationRecord({
+    id: operationId,
+    workspaceId: workspace.id,
+    kind: "close",
+    requestId,
+    payloadHash: hashJson({ action: "close", workspaceId: workspace.id }),
+    status: "ACCEPTED",
+    fence,
+    createdAt: now,
+    updatedAt: now,
+    ...requester,
+  });
+  if (workspace.status === "READY" || workspace.status === "STOPPED") operation.closePreviousStatus = workspace.status;
+  const invocation: WorkerInvocation = {
+    protocolVersion: 1,
+    kind: "close",
+    operationId,
+    workspaceId: workspace.id,
+    fence,
+    projectRevision: workspace.projectRevision,
+    callbackCapability: issueCapability(dependencies, workspace.id, operationId, fence),
+    payload: {},
+  };
+  return { operation, outbox: outboxRecord(workspace, invocation), fence };
+}
+
 async function startThreadWorkspaceClose(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
@@ -973,32 +1078,8 @@ async function startThreadWorkspaceClose(
   }
 
   const now = new Date().toISOString();
-  const operationId = randomUUID();
-  const fence = workspace.fence + 1;
-  const operation = operationRecord({
-    id: operationId,
-    workspaceId: workspace.id,
-    kind: "close",
-    requestId,
-    payloadHash: hashJson({ action: "close", workspaceId: workspace.id }),
-    status: "ACCEPTED",
-    fence,
-    createdAt: now,
-    updatedAt: now,
-    ...requesterOf(identity),
-  });
-  operation.closePreviousStatus = workspace.status;
-  const invocation: WorkerInvocation = {
-    protocolVersion: 1,
-    kind: "close",
-    operationId,
-    workspaceId: workspace.id,
-    fence,
-    projectRevision: workspace.projectRevision,
-    callbackCapability: issueCapability(dependencies, workspace.id, operationId, fence),
-    payload: {},
-  };
-  const outbox = outboxRecord(workspace, invocation);
+  const { operation, outbox, fence } = closeOperationParts(dependencies, workspace, requestId, requesterOf(identity), now);
+  const operationId = operation.id;
   try {
     await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
       { Update: {
@@ -1038,6 +1119,92 @@ async function startThreadWorkspaceClose(
   return { outcome: "PREFLIGHT", workspaceId: workspace.id, operationId, status: "ACCEPTED" };
 }
 
+/**
+ * A developer task's close preflight (spec 025): the Slack close's flow, keyed the same way, with
+ * no Slack `closedBy`, and with the task's extra items in the same transaction.
+ */
+async function startTaskClose(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  workspace: WorkspaceInstance,
+  requestId: string,
+  extra: ExtraItems,
+): Promise<{ operationId: string; duplicate: boolean }> {
+  if ((workspace.status === "CLOSING" || workspace.status === "CLOSED") && workspace.closeOperationId) {
+    return { operationId: workspace.closeOperationId, duplicate: true };
+  }
+  const idempotencyKey = {
+    pk: `IDEMPOTENCY#${identity.ownerKey}#CLOSE`,
+    sk: `REQUEST#${requestId}`,
+  };
+  const previous = await getItem<{ operationId: string }>(dependencies, idempotencyKey);
+  if (previous) return { operationId: previous.operationId, duplicate: true };
+  if ((workspace.status !== "READY" && workspace.status !== "STOPPED") || workspace.activeOperationId) {
+    throw agentXError("WORKSPACE_BUSY", `workspace is ${workspace.status}; wait for active work before closing it`);
+  }
+  const now = new Date().toISOString();
+  const { operation, outbox, fence } = closeOperationParts(dependencies, workspace, requestId, requesterOf(identity), now);
+  try {
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { Update: {
+        TableName: dependencies.tableName,
+        Key: workspaceKey(workspace.id),
+        UpdateExpression: "SET #status = :closing, activeOperationId = :operation, closeOperationId = :operation, fence = :fence, updatedAt = :now REMOVE closeError",
+        ConditionExpression: "ownerKey = :owner AND attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped)",
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: {
+          ":owner": identity.ownerKey,
+          ":closing": "CLOSING",
+          ":ready": "READY",
+          ":stopped": "STOPPED",
+          ":operation": operation.id,
+          ":fence": fence,
+          ":now": now,
+        },
+      } },
+      { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
+      { Put: { TableName: dependencies.tableName, Item: outbox, ConditionExpression: "attribute_not_exists(pk)" } },
+      { Put: {
+        TableName: dependencies.tableName,
+        Item: { ...idempotencyKey, entityType: "IDEMPOTENCY", operationId: operation.id, workspaceId: workspace.id },
+        ConditionExpression: "attribute_not_exists(pk)",
+      } },
+      ...extra(publicOperation(operation)),
+    ] }));
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+    const concurrent = await getItem<{ operationId: string }>(dependencies, idempotencyKey);
+    if (concurrent) return { operationId: concurrent.operationId, duplicate: true };
+    throw agentXError("WORKSPACE_BUSY", "another operation acquired the workspace before closure");
+  }
+  return { operationId: operation.id, duplicate: false };
+}
+
+/** Deletes a workspace's compute and storage by its deployment mode; the one place that switch lives (FR-024). */
+async function deleteWorkspaceCompute(dependencies: AwsBrokerDependencies, workspace: WorkspaceInstance): Promise<void> {
+  switch (workspace.deploymentMode) {
+    case "instances-ebs":
+    case "demo-microvm":
+      throw agentXError("RUNTIME_UNAVAILABLE", "retired workspace storage cannot be managed");
+    case "ec2-ebs":
+      // The session deleter terminates the instance and deletes the volume; without it, refuse
+      // rather than mark the workspace CLOSED and leak the volume.
+      if (dependencies.deleteEc2Session === undefined) {
+        throw agentXError("RUNTIME_UNAVAILABLE", "this control plane cannot delete ec2-ebs workspace storage");
+      }
+      try {
+        await dependencies.deleteEc2Session(workspace.id);
+      } catch (error) {
+        // Compute that is starting or stopping refuses with WORKSPACE_BUSY; the close is retried.
+        if (error instanceof AgentXError) throw error;
+        throw agentXError("RUNTIME_UNAVAILABLE", "workspace resource cleanup failed; retry the close request");
+      }
+      break;
+    default:
+      unhandledDeploymentMode(workspace);
+  }
+}
+
 async function completeThreadWorkspaceClose(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
@@ -1060,27 +1227,7 @@ async function completeThreadWorkspaceClose(
   const preflight = WorkspaceClosePreflightResultSchema.parse(operation.result);
   if (!preflight.safeToClose) throw agentXError("WORKSPACE_NOT_READY", "workspace contains unpublished work");
 
-  switch (workspace.deploymentMode) {
-    case "instances-ebs":
-    case "demo-microvm":
-      throw agentXError("RUNTIME_UNAVAILABLE", "retired workspace storage cannot be managed");
-    case "ec2-ebs":
-      // The session deleter terminates the instance and deletes the volume; without it, refuse
-      // rather than mark the workspace CLOSED and leak the volume.
-      if (dependencies.deleteEc2Session === undefined) {
-        throw agentXError("RUNTIME_UNAVAILABLE", "this control plane cannot delete ec2-ebs workspace storage");
-      }
-      try {
-        await dependencies.deleteEc2Session(workspace.id);
-      } catch (error) {
-        // Compute that is starting or stopping refuses with WORKSPACE_BUSY; the close is retried.
-        if (error instanceof AgentXError) throw error;
-        throw agentXError("RUNTIME_UNAVAILABLE", "workspace resource cleanup failed; retry the close request");
-      }
-      break;
-    default:
-      unhandledDeploymentMode(workspace);
-  }
+  await deleteWorkspaceCompute(dependencies, workspace);
   const storageReleased = closeReleasesStorage(workspace);
 
   const thread = await getItem<{ starterUserId?: string; closedAt?: string }>(dependencies, slackThreadKey(identity.ownerKey));
@@ -1647,11 +1794,17 @@ async function recordThreadRequester(
   }));
 }
 
-async function slackAttributedBody(
+/** A pull request body with who asked for it: the developer footer (FR-023) or the Slack thread. */
+async function attributedBody(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
   body: string | undefined,
 ): Promise<string | undefined> {
+  if (identity.developer) {
+    const footer = developerFooter(identity.developer.name, identity.developer.client);
+    const attributed = body ? `${body}\n\n---\n${footer}` : footer;
+    return Buffer.byteLength(attributed, "utf8") <= 32_768 ? attributed : body;
+  }
   const slack = identity.slack;
   if (!slack) return body;
   const thread = await getItem<{ requesters?: Iterable<string> }>(dependencies, slackThreadKey(identity.ownerKey));
@@ -1662,7 +1815,15 @@ async function slackAttributedBody(
   return Buffer.byteLength(attributed, "utf8") <= 32_768 ? attributed : body;
 }
 
-function requesterOf(identity: AuthenticatedIdentity): { requestedBy?: SlackRequester } {
+/** Who asked, for the operation record (FR-022): a Slack member or a developer. */
+function requesterOf(identity: AuthenticatedIdentity): { requestedBy?: OperationRequester } {
+  if (identity.slack) return { requestedBy: identity.slack.requester };
+  if (identity.developer) return { requestedBy: { kind: "developer", developerId: identity.developer.developerId, provider: identity.developer.provider } };
+  return {};
+}
+
+/** Connector calls come from Slack turns only; their context keeps the Slack requester alone (R13). */
+function slackRequesterOf(identity: AuthenticatedIdentity): { requestedBy?: SlackRequester } {
   return identity.slack ? { requestedBy: identity.slack.requester } : {};
 }
 
@@ -1807,11 +1968,56 @@ async function createConversation(
   return conversation;
 }
 
+/** A task operation, its worker invocation and outbox item: acceptTask's and the first developer task's (R3). */
+async function taskOperationParts(
+  dependencies: AwsBrokerDependencies,
+  workspace: WorkspaceInstance,
+  input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester } },
+  now: string,
+): Promise<{ operation: OperationRecord; outbox: ReturnType<typeof outboxRecord>; fence: number }> {
+  const settings = await requireLatestProject(dependencies, workspace.projectName);
+  const resolvedModel = await resolveProjectModel(dependencies, settings);
+  const operationId = randomUUID();
+  const fence = workspace.fence + 1;
+  const operation = operationRecord({
+    id: operationId,
+    workspaceId: workspace.id,
+    conversationId: input.conversationId,
+    kind: "task",
+    requestId: input.requestId,
+    payloadHash: hashJson({ conversationId: input.conversationId, prompt: input.prompt }),
+    status: "ACCEPTED",
+    fence,
+    createdAt: now,
+    updatedAt: now,
+    ...input.requester,
+  });
+  operation.settingsRevision = settings.definition.revision;
+  const invocation: WorkerInvocation = {
+    protocolVersion: 1,
+    kind: "task",
+    operationId,
+    workspaceId: workspace.id,
+    fence,
+    projectRevision: workspace.projectRevision,
+    callbackCapability: issueCapability(dependencies, workspace.id, operationId, fence),
+    payload: {
+      conversationId: input.conversationId,
+      prompt: input.prompt,
+      conversationStarted: input.conversationStarted,
+      ...(resolvedModel.model === undefined ? {} : { model: resolvedModel.model }),
+      ...(resolvedModel.diagnostic === undefined ? {} : { modelSelectionDiagnostic: resolvedModel.diagnostic }),
+    },
+  };
+  return { operation, outbox: outboxRecord(workspace, invocation), fence };
+}
+
 async function acceptTask(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
   workspaceId: string,
   value: unknown,
+  extra: ExtraItems = () => [],
 ): Promise<{ operation: Operation; duplicate: boolean }> {
   assertNoUntrustedRoutingFields(value);
   const request = OperationRequestSchema.parse(value);
@@ -1838,42 +2044,14 @@ async function acceptTask(
   if (!["READY", "STOPPED"].includes(workspace.status) || workspace.activeOperationId) {
     throw agentXError(workspace.status === "BUSY" ? "WORKSPACE_BUSY" : "WORKSPACE_NOT_READY", `workspace is ${workspace.status}`);
   }
-  const settings = await requireLatestProject(dependencies, workspace.projectName);
-  const resolvedModel = await resolveProjectModel(dependencies, settings);
   const now = new Date().toISOString();
-  const operationId = randomUUID();
-  const fence = workspace.fence + 1;
-  const operation = operationRecord({
-    id: operationId,
-    workspaceId,
-    conversationId: request.conversationId,
-    kind: "task",
+  const { operation, outbox, fence } = await taskOperationParts(dependencies, workspace, {
     requestId: request.requestId,
-    payloadHash: requestHash,
-    status: "ACCEPTED",
-    fence,
-    createdAt: now,
-    updatedAt: now,
-    ...requesterOf(identity),
-  });
-  operation.settingsRevision = settings.definition.revision;
-  const invocation: WorkerInvocation = {
-    protocolVersion: 1,
-    kind: "task",
-    operationId,
-    workspaceId,
-    fence,
-    projectRevision: workspace.projectRevision,
-    callbackCapability: issueCapability(dependencies, workspaceId, operationId, fence),
-    payload: {
-      conversationId: request.conversationId,
-      prompt: request.prompt,
-      conversationStarted,
-      ...(resolvedModel.model === undefined ? {} : { model: resolvedModel.model }),
-      ...(resolvedModel.diagnostic === undefined ? {} : { modelSelectionDiagnostic: resolvedModel.diagnostic }),
-    },
-  };
-  const outbox = outboxRecord(workspace, invocation);
+    conversationId: request.conversationId,
+    prompt: request.prompt,
+    conversationStarted,
+    requester: requesterOf(identity),
+  }, now);
   try {
     await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
       { Update: {
@@ -1882,11 +2060,12 @@ async function acceptTask(
         UpdateExpression: "SET #status = :busy, activeOperationId = :operation, fence = :fence, updatedAt = :now",
         ConditionExpression: "ownerKey = :owner AND attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped)",
         ExpressionAttributeNames: { "#status": "status" },
-        ExpressionAttributeValues: { ":owner": identity.ownerKey, ":busy": "BUSY", ":ready": "READY", ":stopped": "STOPPED", ":operation": operationId, ":fence": fence, ":now": now },
+        ExpressionAttributeValues: { ":owner": identity.ownerKey, ":busy": "BUSY", ":ready": "READY", ":stopped": "STOPPED", ":operation": operation.id, ":fence": fence, ":now": now },
       } },
       { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
       { Put: { TableName: dependencies.tableName, Item: outbox, ConditionExpression: "attribute_not_exists(pk)" } },
-      { Put: { TableName: dependencies.tableName, Item: { ...idempotencyKey, entityType: "IDEMPOTENCY", operationId, payloadHash: requestHash }, ConditionExpression: "attribute_not_exists(pk)" } },
+      { Put: { TableName: dependencies.tableName, Item: { ...idempotencyKey, entityType: "IDEMPOTENCY", operationId: operation.id, payloadHash: requestHash }, ConditionExpression: "attribute_not_exists(pk)" } },
+      ...extra(publicOperation(operation)),
     ] }));
   } catch (error) {
     if (isConditional(error)) {
@@ -1912,6 +2091,7 @@ async function acceptPullRequest(
   identity: AuthenticatedIdentity,
   workspaceId: string,
   value: unknown,
+  extra: ExtraItems = () => [],
 ): Promise<{ operation: Operation; duplicate: boolean }> {
   const request = PullRequestRequestSchema.parse(value);
   const workspace = await requireOwnedWorkspace(dependencies, identity, workspaceId);
@@ -1920,6 +2100,7 @@ async function acceptPullRequest(
     repository: request.repository,
     title: request.title,
     ...(request.body === undefined ? {} : { body: request.body }),
+    ...(request.draft === undefined ? {} : { draft: request.draft }),
   });
   const idempotencyKey = {
     pk: `IDEMPOTENCY#${identity.ownerKey}#${workspaceId}`,
@@ -1944,7 +2125,7 @@ async function acceptPullRequest(
   const { project, settingsRevision } = await publicationProject(dependencies, workspace);
   const repository = project.definition.repositories.find((candidate) => candidate.name === request.repository);
   if (!repository) throw agentXError("CONFIG_INVALID", "repository is not registered for this project");
-  const body = await slackAttributedBody(dependencies, identity, request.body);
+  const body = await attributedBody(dependencies, identity, request.body);
 
   const now = new Date().toISOString();
   const operationId = randomUUID();
@@ -1971,6 +2152,7 @@ async function acceptPullRequest(
     title: request.title,
     codeBuildGates: repository.codeBuildGates ?? [],
     ...(body === undefined ? {} : { body }),
+    ...(request.draft === undefined ? {} : { draft: request.draft }),
   };
   const invocation: WorkerInvocation = {
     protocolVersion: 1,
@@ -2024,6 +2206,7 @@ async function acceptPullRequest(
         Item: { ...idempotencyKey, entityType: "IDEMPOTENCY", operationId, payloadHash: requestHash },
         ConditionExpression: "attribute_not_exists(pk)",
       } },
+      ...extra(publicOperation(operation)),
     ] }));
   } catch (error) {
     if (isConditional(error)) {
@@ -2110,7 +2293,7 @@ async function acceptPullRequestLifecycle(
       ...(request.title === undefined ? {} : { title: request.title }),
       ...(request.body === undefined
         ? {}
-        : { body: (await slackAttributedBody(dependencies, identity, request.body)) ?? request.body }),
+        : { body: (await attributedBody(dependencies, identity, request.body)) ?? request.body }),
       ...(request.action === "close" ? { state: "closed" as const } : {}),
       ...(request.action === "reopen" ? { state: "open" as const } : {}),
     });
@@ -2167,7 +2350,7 @@ async function acceptPullRequestLifecycle(
     const baseBody = request.body ?? (request.action === "replace"
       ? `Clean replacement for #${record.number}.`
       : `Reverts merged pull request #${record.number}.`);
-    const body = (await slackAttributedBody(dependencies, identity, baseBody)) ?? baseBody;
+    const body = (await attributedBody(dependencies, identity, baseBody)) ?? baseBody;
     const headBranch = `agentx/${operationId}`;
     const operation = operationRecord({
       id: operationId, workspaceId, kind: "publish", requestId: request.requestId,
@@ -2321,7 +2504,8 @@ async function requestCancellation(
   dependencies: AwsBrokerDependencies,
   workspace: WorkspaceInstance,
   targetOperationId: string,
-  requester: { requestedBy?: SlackRequester },
+  requester: { requestedBy?: OperationRequester },
+  extra: ExtraItems = () => [],
 ) {
   const workspaceId = workspace.id;
   const target = await requireOperation(dependencies, workspaceId, targetOperationId);
@@ -2363,6 +2547,7 @@ async function requestCancellation(
     } },
     { Put: { TableName: dependencies.tableName, Item: operation } },
     { Put: { TableName: dependencies.tableName, Item: outbox } },
+    ...extra(publicOperation(operation)),
   ] }));
   return { operation: publicOperation(operation), duplicate: false };
 }
@@ -2391,7 +2576,8 @@ type TaskCancellation =
 async function cancelRunningTask(
   dependencies: AwsBrokerDependencies,
   workspace: WorkspaceInstance,
-  requester: { requestedBy?: SlackRequester },
+  requester: { requestedBy?: OperationRequester },
+  extra: ExtraItems = () => [],
 ): Promise<TaskCancellation> {
   const targetOperationId = workspace.activeOperationId;
   if (!targetOperationId) return { outcome: "NOTHING_RUNNING", workspaceId: workspace.id };
@@ -2399,7 +2585,7 @@ async function cancelRunningTask(
   if (!CANCELLABLE_KINDS.has(target.kind) || TERMINAL.has(target.status) || target.status === "CANCEL_REQUESTED") {
     return { outcome: "NOTHING_RUNNING", workspaceId: workspace.id };
   }
-  const result = await requestCancellation(dependencies, workspace, targetOperationId, requester);
+  const result = await requestCancellation(dependencies, workspace, targetOperationId, requester, extra);
   return { outcome: "CANCEL_REQUESTED", workspaceId: workspace.id, targetOperationId, cancelOperationId: result.operation.id };
 }
 
@@ -2741,6 +2927,7 @@ async function reconcilePullRequest(
     baseBranch: expected.baseBranch,
     title: expected.title,
     ...(expected.body === undefined ? {} : { body: expected.body }),
+    ...(expected.draft === undefined ? {} : { draft: expected.draft }),
   });
   const record: PullRequestRecord = {
     ...pullRequestKey(operation.workspaceId, expected.repository, pullRequest.number),
@@ -2951,6 +3138,7 @@ async function putArtifact(
       name: input.name,
       mediaType: input.mediaType,
       objectKey,
+      size: Buffer.byteLength(input.content, "utf8"),
       createdAt: new Date().toISOString(),
     },
     ConditionExpression: "attribute_not_exists(pk)",

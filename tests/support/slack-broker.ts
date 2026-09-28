@@ -3,6 +3,7 @@
 import { randomUUID } from "node:crypto";
 import { vi } from "vitest";
 import type { ConnectorType } from "../../packages/broker/src/aws/connector-types.js";
+import type { DeveloperApiConfiguration } from "../../packages/broker/src/aws/developer-routes.js";
 import type { ConnectorCredentialsConfiguration, CredentialRegistry } from "../../packages/broker/src/aws/credentials.js";
 import type { GitHubMcpDependencies } from "../../packages/broker/src/github-mcp.js";
 import { RepositoryGrantService } from "../../packages/broker/src/repository-access.js";
@@ -52,13 +53,17 @@ export function createBroker(options: {
   connectorTypes?: Record<string, ConnectorType>;
   connectorCredentials?: ConnectorCredentialsConfiguration;
   credentialRegistry?: CredentialRegistry;
+  developer?: DeveloperApiConfiguration;
+  turnRecordsTableName?: string;
+  /** Artifact storage; a bare mock that answers nothing when absent. */
+  s3?: { send: (command: never) => Promise<unknown> };
 } = {}) {
   if (!loaded) throw new Error("call loadSlackBroker() in a beforeAll before createBroker()");
   const db = new FakeDynamoDb();
   const deleteEc2Session = options.deleteEc2Session === null ? undefined : vi.fn(options.deleteEc2Session ?? (async () => undefined));
-  const handler = loaded.createAwsBrokerHandler({
+  const brokerInput = {
     documentClient: db,
-    s3: { send: vi.fn() },
+    s3: options.s3 ?? { send: vi.fn() },
     ...(deleteEc2Session ? { deleteEc2Session } : {}),
     tableName: "state",
     artifactBucketName: "artifacts",
@@ -73,6 +78,8 @@ export function createBroker(options: {
     ...(options.connectorTypes ? { connectorTypes: options.connectorTypes } : {}),
     ...(options.connectorCredentials ? { connectorCredentials: options.connectorCredentials } : {}),
     ...(options.credentialRegistry ? { credentialRegistry: options.credentialRegistry } : {}),
+    ...(options.developer ? { developer: options.developer } : {}),
+    ...(options.turnRecordsTableName ? { turnRecordsTableName: options.turnRecordsTableName } : {}),
     ...(options.slack === false
       ? {}
       : {
@@ -82,8 +89,9 @@ export function createBroker(options: {
             organizationWorkspaceLimit: options.organizationLimit ?? 20,
           },
         }),
-  } as never);
-  return { db, handler, deleteEc2Session };
+  };
+  const handler = loaded.createAwsBrokerHandler(brokerInput as never);
+  return { db, handler, deleteEc2Session, brokerInput };
 }
 
 export interface CallOptions {

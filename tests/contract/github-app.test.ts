@@ -456,6 +456,32 @@ describe("GitHub App repository credentials", () => {
       /could not sign/i,
     );
   });
+
+  it("opens a draft only when asked", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const created: unknown[] = [];
+    const provider = appProvider({
+      credentialRef: "github-agentx-sdlc", appId: "5002502", getPrivateKey: async () => pem,
+      fetchImplementation: async (url, init) => {
+        const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+        if (requestUrl.endsWith("/access_tokens")) return new Response(JSON.stringify({ token: "pr-token" }), { status: 201 });
+        if (init?.method === "POST") {
+          if (typeof init.body !== "string") throw new Error("expected JSON request body");
+          created.push(JSON.parse(init.body));
+          return new Response(JSON.stringify({ number: 43, html_url: "https://github.com/ps06756/personal-website-test/pull/43" }), { status: 201 });
+        }
+        return new Response("[]", { status: 200 });
+      },
+    });
+    const input = { repositoryUrl: "https://github.com/ps06756/personal-website-test.git", headBranch: "agentx/00000000-0000-4000-8000-000000000002", baseBranch: "main", title: "Draft change" };
+    await provider.reconcilePullRequest({ ...input, draft: true });
+    await provider.reconcilePullRequest(input);
+    expect(created).toEqual([
+      { title: "Draft change", head: input.headBranch, base: "main", draft: true },
+      { title: "Draft change", head: input.headBranch, base: "main" },
+    ]);
+  });
 });
 
 function pullRequestFixture(): Record<string, unknown> {

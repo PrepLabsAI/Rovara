@@ -18,6 +18,7 @@ import {
   type DeveloperTaskFailureCategory,
   type DeveloperTaskStatus,
 } from "@agentx/contracts";
+import type { AuthenticatedIdentity } from "../auth.js";
 
 export interface CounterKey { pk: string; sk: string }
 export interface WorkspaceCharge { member: CounterKey; organization: CounterKey }
@@ -294,4 +295,16 @@ export function inertName(name: string): string {
 /** FR-023. The client is one of the four names cleanClientName gives, so it needs no escaping. */
 export function developerFooter(name: string, client: string): string {
   return `Requested by ${inertName(name)} via AgentX, started from ${client}`;
+}
+
+/** The identity every workspace handler sees for a developer task: its own owner key (FR-021). */
+export function developerTaskIdentity(task: Pick<DeveloperTaskRecord, "taskId" | "developerId" | "provider" | "developerName" | "client">): AuthenticatedIdentity {
+  return {
+    issuer: DEVELOPER_TASK_OWNER_ISSUER,
+    subject: taskOwnerSubject(task.developerId, task.taskId),
+    ownerKey: taskOwnerKey(task.developerId, task.taskId),
+    isAdministrator: false,
+    claims: {},
+    developer: { developerId: task.developerId, provider: task.provider, name: task.developerName, client: task.client, taskId: task.taskId },
+  };
 }
