@@ -30,6 +30,8 @@ export const EvalCaseSchema = z.object({
     argsSubset: z.record(z.string(), z.unknown()).optional(),
     refusal: Phrase.optional(),
     contains: Phrase.optional(),
+    /** None of these phrases may appear in the reply, even when its required phrases match. */
+    notContains: Phrase.optional(),
     /** Most non-empty lines the reply may have once Slack formatting is applied (spec 014 SC-006); the run uses the Slack reply style. */
     maxLines: z.number().int().min(1).max(20).optional(),
     /** The action gate's decision on the turn's first call (spec 014 SC-004, SC-005); only the new presentation has the gate. */

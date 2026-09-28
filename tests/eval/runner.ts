@@ -45,7 +45,7 @@ export interface EvalOptions {
 /**
  * One scored run. `offered: false` marks a first call to a tool the presentation did not offer; it is
  * never the right tool. `refusalOk` and `containsOk` score each phrase group (null when the case has
- * none); `phraseOk` is false when either fails.
+ * none); `phraseOk` is false when a required phrase is missing or a forbidden phrase appears.
  */
 export const RunScoreSchema = z.object({
   tool: z.string().nullable(),
@@ -55,6 +55,8 @@ export const RunScoreSchema = z.object({
   phraseOk: z.boolean().nullable(),
   refusalOk: z.boolean().nullable(),
   containsOk: z.boolean().nullable(),
+  /** Whether all forbidden phrases were absent; omitted for older cases and reports. */
+  notContainsOk: z.boolean().optional(),
   /** The run hit its timeout and then stopped: model behaviour, a failed run, not an error that blocks the baseline. */
   timedOut: z.literal(true).optional(),
   error: z.string().optional(),
@@ -329,12 +331,18 @@ export function scoreRun(evalCase: EvalCase, run: RunOutcome): RunScore {
     phrase === undefined ? null : [phrase].flat().some((entry) => text.includes(normalisePhrase(entry)));
   const refusalOk = group(evalCase.expect.refusal);
   const containsOk = group(evalCase.expect.contains);
-  const phraseOk = refusalOk === null && containsOk === null ? null : refusalOk !== false && containsOk !== false;
+  // Formatting and line breaks must not hide a forbidden success claim from the evaluator.
+  const forbiddenText = (value: string) => normalisePhrase(slackReplyText(value)).replace(/[*_`]/gu, "").replace(/\s+/gu, " ").trim();
+  const notContainsOk = evalCase.expect.notContains === undefined ? undefined
+    : ![evalCase.expect.notContains].flat().some((phrase) => forbiddenText(run.response).includes(forbiddenText(phrase)));
+  const phraseOk = refusalOk === null && containsOk === null && notContainsOk === undefined ? null
+    : refusalOk !== false && containsOk !== false && notContainsOk !== false;
   const formattedReply = evalCase.expect.maxLines === undefined ? undefined : slackReplyText(run.response);
   const replyLines = formattedReply === undefined ? undefined : formattedReply.split("\n").filter((line) => line.trim().length > 0).length;
   const siteOk = jiraLinkOk(atlassianHosts(run.response), run.jiraSites);
   return {
     tool: run.tool, ...(run.offered === false ? { offered: false as const } : {}), toolOk, argsOk, phraseOk, refusalOk, containsOk, siteOk,
+    ...(notContainsOk === undefined ? {} : { notContainsOk }),
     ...(replyLines === undefined || formattedReply === undefined ? {} : {
       replyLines, linesOk: replyLines <= evalCase.expect.maxLines! && !hasLiteralNewlineOutsideCode(formattedReply),
     }),
