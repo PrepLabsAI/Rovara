@@ -90,6 +90,7 @@ import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConf
 import { developerTokenVerifier } from "../developer/verify-token.js";
 import { developerFooter, inertName } from "../developer/task-records.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
+import { hashJson, isConditional } from "./broker-shared.js";
 import { channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, routeDeveloperRequest, type DeveloperApiConfiguration } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings } from "./registration-preflight.js";
@@ -377,6 +378,8 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
   if (Buffer.byteLength(dependencies.callbackSigningKey, "utf8") < 32) {
     throw new Error("CALLBACK_SIGNING_KEY must contain at least 32 bytes");
   }
+  // Spec 025: the broker actions the developer task routes call, built once per handler.
+  const tasks = developerTaskActions(dependencies);
   return async (event: HttpApiV2Event | SlackStopTaskEvent): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
     if (isSlackStopTaskEvent(event)) {
       try {
@@ -449,7 +452,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       // verifies the developer token, then checks the method and session (FR-009).
       if (url.pathname.startsWith("/v1/dev/")) {
         if (!dependencies.developer) throw agentXError("NOT_FOUND", "developer sign-in is not set up in this deployment");
-        return json(await routeDeveloperRequest({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now }, request, url), request.requestId);
+        return json(await routeDeveloperRequest({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks }, request, url), request.requestId);
       }
 
       const identity = identityFromJwtClaims(request.jwtClaims, {
@@ -3843,10 +3846,6 @@ function positiveInteger(value: unknown, label: string): number {
   return value;
 }
 
-function hashJson(value: unknown): string {
-  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
-}
-
 function encodeCursor(sequence: number): string {
   return Buffer.from(String(sequence)).toString("base64url");
 }
@@ -3856,10 +3855,6 @@ function decodeCursor(cursor: string | undefined): number {
   const value = Number.parseInt(Buffer.from(cursor, "base64url").toString("utf8"), 10);
   if (!Number.isInteger(value) || value < 0) throw agentXError("CONFIG_INVALID", "event cursor is invalid");
   return value;
-}
-
-function isConditional(error: unknown): boolean {
-  return error instanceof Error && ["ConditionalCheckFailedException", "TransactionCanceledException"].includes(error.name);
 }
 
 /** The worker reports, once per conversation, that a saved session now exists for it. */

@@ -26,6 +26,8 @@ import {
 } from "@agentx/contracts";
 import { accessDeniedMessage, resolveDeveloperAccess } from "../developer/access.js";
 import { META, methodSince, startedBeforeMethodOn, type DeveloperRecord, type SessionRecord } from "../developer/store.js";
+import type { DeveloperTaskActions } from "./developer-task-actions.js";
+import { routeDeveloperTaskRequest } from "./developer-tasks.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 
 export interface DeveloperApiConfiguration {
@@ -41,7 +43,14 @@ export interface DeveloperApiConfiguration {
   /** Verifies the Authorization header's developer access token (D17; verify-token.ts) and returns its claims. */
   verifyAccessToken(authorization: string | undefined): Promise<Record<string, unknown>>;
 }
-export interface DeveloperRouteDependencies { documentClient: { send(command: unknown): Promise<unknown> }; tableName: string; developer: DeveloperApiConfiguration; now: () => number }
+export interface DeveloperRouteDependencies {
+  documentClient: { send(command: unknown): Promise<unknown> };
+  tableName: string;
+  developer: DeveloperApiConfiguration;
+  now: () => number;
+  /** The developer task routes' broker actions; without them /v1/dev/tasks* answers NOT_FOUND. */
+  tasks?: DeveloperTaskActions;
+}
 export interface DeveloperCaller { developerId: string; sessionId: string; amr: DeveloperSignInMethod; name: string; slackUserId?: string; email?: string }
 
 /** What the broker needs from a Lambda invoke; `@aws-sdk/client-lambda`'s InvokeCommand output fits. */
@@ -463,5 +472,16 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   const caller = await authenticateDeveloper(deps, await deps.developer.verifyAccessToken(request.headers.authorization));
   if (request.method === "GET" && url.pathname === "/v1/dev/projects") return listProjects(deps, caller);
   if (request.method === "GET" && url.pathname === "/v1/dev/workspaces") return listWorkspaces(deps, caller);
+  if (url.pathname === "/v1/dev/tasks" || url.pathname.startsWith("/v1/dev/tasks/")) {
+    if (deps.tasks === undefined) throw agentXError("NOT_FOUND", "developer tasks are not set up in this deployment");
+    return routeDeveloperTaskRequest({
+      documentClient: deps.documentClient,
+      tableName: deps.tableName,
+      ...(deps.developer.slackTeamId === undefined ? {} : { slackTeamId: deps.developer.slackTeamId }),
+      actions: deps.tasks,
+      checkAccess: (project) => checkProjectAccess(deps, caller, project),
+      now: deps.now,
+    }, caller, request, url);
+  }
   throw agentXError("NOT_FOUND", "route not found");
 }

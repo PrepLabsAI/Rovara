@@ -261,7 +261,7 @@ describe("the developer check on every /v1/dev request (FR-009, R12, R13)", () =
   });
 
   it("answers NOT_FOUND for a /v1/dev route this phase does not serve", async () => {
-    expect((await call("/v1/dev/tasks", claims(), "POST")).statusCode).toBe(404);
+    expect((await call("/v1/dev/not-a-route", claims(), "POST")).statusCode).toBe(404);
   });
 });
 
