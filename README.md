@@ -43,20 +43,83 @@ Every remote coding task also publishes a redacted `usage` operation event and p
 retention mode, input/output/cache token counts, cache-read ratio, and Pi's estimated cost. The
 production runtime exposes `PromptCacheRetention` as a CloudFormation parameter with `short` and
 `long` values; it defaults to `long` so Bedrock cache entries can survive normal gaps between
-Slack turns. Demo runtimes retain Pi's `short` fallback.
+Slack turns.
 
 Both roles currently use `@earendil-works/pi-coding-agent` 0.85.1. GitHub Spec Kit supplies the
 specification workflow and demo repository; it is not the coding-agent runtime.
 
-See the [deployed demo architecture](docs/architecture-deployed-demo.md) for the current request
-path and the [production architecture](docs/architecture-production.md) for the EBS-backed target.
+See the [production architecture](docs/architecture-production.md) for the EBS-backed platform,
+its request path, and how environments are installed and torn down.
+
+## Install AgentX in your AWS account
+
+`agentx init` installs a complete AgentX environment in your own AWS account, step by step: its
+stacks, its own GitHub App and Slack app, and developer sign-in. It prints everything it will
+create and an estimated monthly cost before it creates anything, and running it again resumes
+where it stopped.
+
+**Status:** no AgentX release is published yet (the public image registry and the npm package are
+waiting on owner setup; see [releases](docs/releases.md)). Until the first release, an install runs
+from a source checkout with a locally built release, and needs container images you have pushed
+yourself. When a release is published, the whole install is one command:
+`npx @charterarc/agentx init --env <name>`.
+
+You need:
+
+- AWS administrator credentials for the first run, ideally in an AWS account used only for
+  AgentX (environments that share an account are not a security boundary against each other).
+  Later day-2 commands use a narrower operator role that `init` creates.
+- A GitHub organization or personal account to own AgentX's GitHub App.
+- A Slack workspace where you can create and install apps.
+- Model access: Amazon Bedrock (the default) in the chosen region, or an OpenRouter API key.
+- Node.js 22.19 or newer within the Node 22 release line.
+
+From a source checkout today:
+
+```sh
+npm ci && npm run build
+npm run release:build -- --version <x.y.z> --out ./release \
+  --worker-image <worker repo@sha256:...> --slack-image <slack repo@sha256:...>
+
+export AWS_PROFILE=<an admin profile for the target account>
+node packages/cli/dist/main.js --env <name> init --region us-east-1 --release ./release \
+  --worker-image <worker repo@sha256:...> --slack-image <slack repo@sha256:...>
+```
+
+`init` asks its questions (every one has a flag, and `--yes` runs it unattended), then:
+
+1. checks prerequisites: the region, model access and EC2 quota;
+2. deploys the access, foundation and identity stacks;
+3. creates the GitHub App from a pre-filled page (one click), and you choose its repositories;
+4. deploys the control plane and runtime;
+5. creates the Slack app from AgentX's manifest; you install it and paste its tokens into hidden
+   prompts;
+6. deploys the Slack service and checks that Slack can reach it;
+7. sets up developer sign-in: Slack, your company's sign-in (OIDC), or both.
+
+Secrets never go on the command line: each comes from a hidden prompt, a file you point to, or an
+environment variable, and `init` stores it in AWS Secrets Manager, never in its own settings. A platform team that must review
+IAM first can use `agentx init --export <dir>` for a bundle they deploy themselves.
+
+Until a later release adds them to `init`, finish by hand: create your admin user, sign in with
+`agentx login --env <name>`, then register a project and bind its Slack channel (section 2 below).
+`init` prints these steps at the end.
+
+Developers then sign in from their own machines with `agentx login <control plane URL>`, with no
+AWS credentials; `agentx whoami` shows which projects they can use.
+
+The full guide, including resuming, unattended installs, developer sign-in settings
+(`agentx signin`), and tearing an environment down, is in
+[Installing with agentx init](docs/architecture-production.md#installing-with-agentx-init).
 
 ## Use AgentX
 
 ### 1. Install the administration client
 
-Developers install nothing: they work in Slack. The `agentx` executable is an administration
-client for registering projects, binding Slack channels, and stopping idle workspaces.
+Developers work in Slack, and can also sign in from their own machines (`agentx login <url>`,
+`agentx whoami`) to see which projects they can use. Everything else the `agentx` executable does is
+administration: installing environments, registering projects, binding Slack channels, choosing how
+developers sign in, and stopping idle workspaces.
 
 AgentX requires Node.js 22.19 or newer within the Node 22 release line:
 
@@ -93,7 +156,9 @@ Registering a file that still has them fails with those field names. See
 [`examples/deployment.yaml`](examples/deployment.yaml) and
 [`examples/projects/`](examples/projects/).
 
-Log in as an administrator, register the immutable revision, then bind the project's channel:
+Log in as an administrator, register the immutable revision, then bind the project's channel. For
+an environment installed with `agentx init`, add `--env <name>` to each command; `init` already
+wrote that environment's deployment settings, so no `deployment.yaml` is needed:
 
 ```sh
 agentx login --callback-port 8765
@@ -135,9 +200,11 @@ workspace takes the next request:
 agentx admin workspace cancel --workspace <workspace-id>
 ```
 
-Run `agentx --help` or `agentx <command> --help` for the complete surface: `login`,
-`admin project register`, `admin workspace cancel|stop`, and `admin slack bind|unbind`. There is no
-developer command; coding work happens only in Slack.
+Run `agentx --help` or `agentx <command> --help` for the complete surface: `init`, `deploy`,
+`env`, `signin`, `login`, `logout`, `whoami`, `admin project register`,
+`admin workspace cancel|stop`, and `admin slack bind|unbind`. Developer commands (`login <url>`,
+`whoami`, `logout`) only sign in and show access; coding work happens in Slack. Handing tasks to
+AgentX from an AI tool arrives in a later release (spec 025, phase 25b).
 
 An admin command's exit code names the kind of failure: 2 for invalid input, 3 when login is
 required, 4 for forbidden or not found, 6 when the control plane is unavailable.
@@ -252,6 +319,11 @@ above 20 tools it registers with a warning, because the model's tool choice gets
 past that point.
 
 #### One-time administrator setup
+
+This section and section 5 describe the maintainers' own production deployment, which uses fixed
+stack names (`AgentXControlPlane` and so on) and the `release:prod` script. An environment installed
+with `agentx init` needs none of it: `init` creates the Slack app, stores its secrets and deploys the
+Slack service itself.
 
 The production release creates the Slack ingress route, queue, and thread storage in
 `AgentXControlPlane`. Create the orchestrator service once with the release command's
