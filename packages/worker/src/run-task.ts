@@ -128,9 +128,13 @@ export async function runTaskInvocation(
   // A model repeating the same failing call is told once, then stopped (#127).
   const loopGuard = new ToolLoopGuard();
   let loopStop: Error | undefined;
+  // pi ends a turn normally even when its model call failed or was aborted; only the last assistant
+  // message says so (#136).
+  let lastAssistant: AssistantOutcome | undefined;
   const unsubscribe = session.subscribe((event) => {
     if (eventType(event) === "tool_end") toolEvidence.push(redactCredentials(event));
     void events.append(eventType(event), event).catch(() => undefined);
+    lastAssistant = assistantOutcome(event) ?? lastAssistant;
     if (loopStop !== undefined) return;
     const action = loopGuard.observe(event);
     if (action.kind === "warn") {
@@ -156,6 +160,8 @@ export async function runTaskInvocation(
       await session.prompt(invocation.payload.prompt);
       // An abort can end the prompt without an error; the guard's reason is the task's outcome.
       if (loopStop !== undefined) throw loopStop;
+      const modelFailure = failedTurn(lastAssistant);
+      if (modelFailure !== undefined) throw modelFailure;
       await publishWorkspaceDiff(dependencies.rootPath, dependencies.artifactSink);
       await dependencies.artifactSink({
         name: "test-and-tool-evidence.json",
@@ -221,6 +227,37 @@ export async function runTaskInvocation(
     unregisterCancellation?.();
     session.dispose();
   }
+}
+
+interface AssistantOutcome {
+  stopReason: string;
+  errorMessage?: string;
+}
+
+/** The outcome an assistant message_end event reports, or undefined for any other event. */
+function assistantOutcome(event: unknown): AssistantOutcome | undefined {
+  if (!event || typeof event !== "object") return undefined;
+  const value = event as { type?: unknown; message?: { role?: unknown; stopReason?: unknown; errorMessage?: unknown } };
+  if (value.type !== "message_end" || value.message?.role !== "assistant" || typeof value.message.stopReason !== "string") return undefined;
+  return {
+    stopReason: value.message.stopReason,
+    ...(typeof value.message.errorMessage === "string" ? { errorMessage: value.message.errorMessage } : {}),
+  };
+}
+
+/**
+ * A turn whose last model call failed or was aborted is not a success. The error message comes
+ * from pi or AgentX's OpenRouter transport, which already omit prompts and keys; it is still
+ * redacted and bounded before it becomes the task's error.
+ */
+function failedTurn(outcome: AssistantOutcome | undefined): Error | undefined {
+  if (outcome?.stopReason === "error") {
+    const detail = String(redactCredentials(outcome.errorMessage ?? "no error message")).slice(0, 1_000);
+    return agentXError("RUNTIME_UNAVAILABLE", `the model call failed: ${detail}`);
+  }
+  // The caller reports it as CANCELLED when a cancellation was requested, and as FAILED otherwise.
+  if (outcome?.stopReason === "aborted") return agentXError("OPERATION_INTERRUPTED", "the model call was aborted");
+  return undefined;
 }
 
 function asError(value: unknown): Error {
