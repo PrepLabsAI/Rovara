@@ -6,6 +6,7 @@ import { readSlackBotToken } from "../init/slack-app.js";
 import { definedEntries, secretSource } from "../signin/cli.js";
 import { addChannel } from "./channel-add.js";
 import type { SetupCommandContext } from "./command-context.js";
+import { addJira } from "./connectors/jira.js";
 import { addLinear } from "./connectors/linear.js";
 import type { ConnectorAddInput } from "./connectors/revision.js";
 import { addProject } from "./project-add.js";
@@ -84,5 +85,22 @@ export function registerSetupCommands(program: Command, context: SetupCommandCon
       });
       const result = await addLinear({ env: run.env, session: run.session, projectName, secrets: run.secrets, prompter: run.prompter, processEnv: process.env, write: run.write, services: run.services, flags });
       run.print(result, `Linear connected to ${projectName} (revision ${result.revision})\n`);
+    });
+
+  withRegion(connectorAdd.command("jira"))
+    .description("add Jira to a project: guide, service account token, project check, new revision")
+    .option("--jira-site <site>", "the <site> in <site>.atlassian.net")
+    .option("--jira-project <key>", "the Jira project key")
+    .option("--jira-token-file <path>", "file holding the API token")
+    .option("--jira-token-env <NAME>", "environment variable holding the API token")
+    .action(async (options: { jiraSite?: string; jiraProject?: string; jiraTokenFile?: string; jiraTokenEnv?: string }, command: Command) => {
+      const projectName = projectOption(command, "the project to connect Jira to");
+      const run = await context.open(command);
+      const flags = definedEntries<Pick<ConnectorAddInput["flags"], "jiraSite" | "jiraProject" | "jiraToken">>({
+        jiraSite: options.jiraSite, jiraProject: options.jiraProject, jiraToken: secretSource(options.jiraTokenFile, options.jiraTokenEnv),
+      });
+      const result = await addJira({ env: run.env, session: run.session, projectName, secrets: run.secrets, prompter: run.prompter, processEnv: process.env, write: run.write, services: run.services, flags });
+      // addJira already printed the warning, if any; the result (and --json) carry it too. Exit 0 either way.
+      run.print(result, `Jira connected to ${projectName} (revision ${result.revision})${result.warning === undefined ? "" : ", with the warning above"}\n`);
     });
 }

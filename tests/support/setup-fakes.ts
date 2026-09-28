@@ -158,8 +158,11 @@ export function fakeSlackChannels(channels: SlackChannel[], options: { visibleAf
 }
 
 /** `linearTeams` answers `vendors.linearTeams`; `linearRefuses` makes it throw the way a 401 or a
- * GraphQL error does (a VendorRefused-named Error, matched by name, never by message text). */
-export function fakeVendors(options: { linearTeams?: LinearTeam[]; linearRefuses?: boolean } = {}): VendorApi & { calls: string[] } {
+ * GraphQL error does (a VendorRefused-named Error, matched by name, never by message text).
+ * `jiraCloudId` answers `vendors.jiraCloudId`; `jiraInside`/`jiraOutside` answer `vendors.jiraSearch`
+ * depending on whether the JQL names the connected project or excludes it; `jiraRefuses` makes
+ * `jiraSearch` throw the same VendorRefused shape a 401 from Atlassian does. */
+export function fakeVendors(options: { linearTeams?: LinearTeam[]; linearRefuses?: boolean; jiraCloudId?: string; jiraInside?: string[]; jiraOutside?: string[]; jiraRefuses?: boolean } = {}): VendorApi & { calls: string[] } {
   const calls: string[] = [];
   return {
     calls,
@@ -167,6 +170,15 @@ export function fakeVendors(options: { linearTeams?: LinearTeam[]; linearRefuses
       calls.push("linearTeams");
       if (options.linearRefuses === true) throw Object.assign(new Error("401"), { name: "VendorRefused" });
       return options.linearTeams ?? [{ id: "c408e946-78aa-4db8-923e-f78053dd954f", key: "PAY", name: "Payments" }];
+    },
+    async jiraCloudId(siteUrl) {
+      calls.push(`jiraCloudId ${siteUrl}`);
+      return options.jiraCloudId ?? "0f1e2d3c-4b5a-4968-8776-655443322110";
+    },
+    async jiraSearch({ jql, maxResults }) {
+      calls.push(`jiraSearch ${jql} max ${maxResults}`);
+      if (options.jiraRefuses === true) throw Object.assign(new Error("401"), { name: "VendorRefused" });
+      return jql.includes("not in") ? options.jiraOutside ?? [] : options.jiraInside ?? ["PAY-1"];
     },
   };
 }
