@@ -656,3 +656,23 @@ describe("AI-tool turn records (spec 025 FR-037)", () => {
     expect(isSlackTurnRecord({ ...slack, origin: "slack" })).toBe(true);
   });
 });
+
+// Fix round 1 (review of spec 025 phase 25b, Task 4): TEXT_PATTERNS did not cover AgentX's own
+// minted tokens (packages/broker/src/developer/tokens.ts: randomToken("agxr_" | "agxc_")), so a
+// leaked refresh token or authorization code in free text was not redacted.
+describe("secret redaction, fix round 4 (AgentX's own tokens)", () => {
+  it.each([
+    [`agxr_${"A".repeat(43)}`],
+    [`agxc_${"B".repeat(43)}`],
+  ])("removes the AgentX token %s from free text", (token) => {
+    const redacted = redactText(`please use ${token} for this`);
+    expect(redacted).not.toContain(token);
+    expect(redacted).toContain("[REDACTED]");
+  });
+
+  it("does not overmatch the bare prefix in ordinary prose", () => {
+    expect(redactText("the agxr_ prefix marks a refresh token, agxc_ an authorization code")).toBe(
+      "the agxr_ prefix marks a refresh token, agxc_ an authorization code",
+    );
+  });
+});

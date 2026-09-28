@@ -8,6 +8,7 @@ import {
   DEVELOPER_TASK_OWNER_ISSUER,
   TURN_TEXT_LIMIT,
   aiToolTurnRecordKeys,
+  capText,
   lastAssistantResponse,
   redactAndCap,
   redactText,
@@ -119,7 +120,8 @@ export function failureCategory(kind: string, status: string, error: string | un
 
 const failureOf = (kind: string, status: string, error: string | undefined) => ({
   category: failureCategory(kind, status, error),
-  message: redactText(error ?? `the ${kind} operation ended ${status}`).slice(0, DEVELOPER_FAILURE_MESSAGE_MAX),
+  // redactAndCap redacts then caps surrogate-pair-safely (a plain .slice can split an emoji).
+  message: redactAndCap(error ?? `the ${kind} operation ended ${status}`, DEVELOPER_FAILURE_MESSAGE_MAX).text,
 });
 
 export interface DerivedStatus {
@@ -156,7 +158,8 @@ export function deriveTaskStatus(input: {
 
 export interface StoredEvent { sequence: number; type: string; timestamp: string; payload: unknown }
 
-const text = (value: string) => redactText(value).replace(/\s+/g, " ").trim().slice(0, DEVELOPER_EVENT_TEXT_MAX);
+// capText caps surrogate-pair-safely (a plain .slice can split an emoji at the boundary).
+const text = (value: string) => capText(redactText(value).replace(/\s+/g, " ").trim(), DEVELOPER_EVENT_TEXT_MAX).text;
 const field = (payload: unknown, name: string): unknown => (payload && typeof payload === "object" ? (payload as Record<string, unknown>)[name] : undefined);
 
 /** One worker event as a line the developer can read, or undefined for streaming noise. */

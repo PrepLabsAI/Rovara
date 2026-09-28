@@ -8,6 +8,7 @@ import {
   failureCategory,
   partyOfTask,
   recentTaskEvents,
+  taskEvent,
   taskOwnerKey,
   type DeveloperTaskRecord,
   type OperationFacts,
@@ -25,6 +26,11 @@ describe("the task's owner key (FR-017)", () => {
   it("is ownerKeyForSubject over agentx-developer-task and developer/task", () => {
     expect(taskOwnerKey(developerId, taskId)).toBe(ownerKeyForSubject("agentx-developer-task", `${developerId}/${taskId}`));
     expect(taskOwnerKey(developerId, taskId)).not.toBe(taskOwnerKey(developerId, "55555555-5555-4555-8555-555555555555"));
+  });
+
+  it("differs when the developer differs but the task is the same (fix round 1)", () => {
+    const otherDeveloper = "e".repeat(64);
+    expect(taskOwnerKey(developerId, taskId)).not.toBe(taskOwnerKey(otherDeveloper, taskId));
   });
 });
 
@@ -52,6 +58,15 @@ describe("task status (R4, FR-025)", () => {
   it("marks a close in progress without changing the status", () => {
     const derived = deriveTaskStatus({ workspaceStatus: "CLOSING", pointer: {}, operations: [op("task", "SUCCEEDED", "t2"), op("close", "RUNNING", "t3")] });
     expect(derived).toMatchObject({ status: "SUCCEEDED", closing: true });
+  });
+
+  it("caps the failure message without splitting a surrogate pair at the boundary (fix round 1)", () => {
+    // An emoji (a surrogate pair) straddles DEVELOPER_FAILURE_MESSAGE_MAX (1,000): a plain
+    // .slice(0, 1000) would keep only the lone high surrogate, an invalid string.
+    const long = `${"e".repeat(999)}\u{1F600}${"f".repeat(50)}`;
+    const derived = deriveTaskStatus({ workspaceStatus: "PREPARATION_FAILED", pointer: { pendingPrompt: "x" }, operations: [op("prepare", "FAILED", "t1", long)] });
+    expect(derived.failure?.message.length).toBe(999);
+    expect(/[\uD800-\uDFFF]/.test(derived.failure?.message ?? "")).toBe(false);
   });
 });
 
@@ -99,6 +114,15 @@ describe("task events", () => {
     expect(events.map((entry) => entry.text.split(" ").slice(0, 2).join(" "))).toEqual(["step 28", "step 29", "step 30"]);
     expect(events.every((entry) => entry.text.length <= 300)).toBe(true);
   });
+
+  it("caps event text without splitting a surrogate pair (emoji) at the boundary (fix round 1)", () => {
+    // An emoji (a surrogate pair) straddles DEVELOPER_EVENT_TEXT_MAX (300): a plain .slice(0, 300)
+    // would keep only the lone high surrogate at the end, an invalid string.
+    const long = `${"x".repeat(299)}\u{1F600}${"y".repeat(50)}`;
+    const readable = taskEvent(event(1, "progress", { message: long }));
+    expect(readable?.text.length).toBe(299);
+    expect(/[\uD800-\uDFFF]/.test(readable?.text ?? "")).toBe(false);
+  });
 });
 
 describe("AI-tool turn records (R12)", () => {
@@ -123,6 +147,15 @@ describe("AI-tool turn records (R12)", () => {
     });
     expect(record.requestText.length).toBe(40_000);
     expect(record.textTruncated).toBe(true);
+  });
+
+  it("redacts an AgentX refresh token carried in the request text (fix round 1)", () => {
+    const plantedRefreshToken = `agxr_${"A".repeat(43)}`;
+    const record = aiToolTurn({
+      party, turnId: "55555555-5555-4555-8555-555555555557", action: "continue", phase: "accepted", outcome: "accepted",
+      receivedAt: "2026-09-27T12:00:00.000Z", finishedAt: "2026-09-27T12:00:00.100Z", request: `retry with ${plantedRefreshToken}`, response: "STARTING",
+    });
+    expect(JSON.stringify(record)).not.toContain(plantedRefreshToken);
   });
 
   it("never collides the accepted, completed and refused records of one action (carried-forward review requirement)", () => {
