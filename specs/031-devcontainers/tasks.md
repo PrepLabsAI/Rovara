@@ -6,3 +6,4 @@
 - [x] T004 Local end-to-end with the real worker image and Sample-Project-A: prepare, integration test, timeout and abort leave no process, resume after stop.
 - [x] T005 Unit tests; typecheck, lint and tests pass.
 - [ ] T006 After the release and #123: Sample-Project-A from Slack, including resume after an idle stop.
+  2026-09-27: prepared in the Compose devcontainer; `npm test` and `npm run test:integration` passed inside it; resumed on replacement instances (generations 2 and 3) with the devcontainer started again. Not yet verified: Postgres data surviving an idle stop.
