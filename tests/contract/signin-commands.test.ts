@@ -244,6 +244,18 @@ describe("agentx signin enable slack (FR-045)", () => {
     expect(h.lines.join("\n")).toContain("the new client credentials replace the stored ones");
   });
 
+  it("says new client credentials take effect within 5 minutes when only they changed", async () => {
+    const h = await services(["1111111111.2222222222222", SLACK_CLIENT_SECRET, true], {}, { ...SIGN_IN_PARAMETERS, DeveloperSignInSlack: "enabled", SlackTeamId: "T0TEAM", DeveloperSignInSlackSince: "1700000000" });
+    await writeSignInSettings(h.store, { ...slackOn, since: { slack: 1700000000 } });
+    await writeSlackTeamId(h.store, "staging", "T0TEAM");
+    await runSigninEnable(h.s, "staging", "slack", {}, {}, false);
+    expect(h.lines).toContain("The new client credentials take effect within 5 minutes, once the control plane's cached copy expires.");
+    // A change that updates the stack restarts the functions, so the credentials apply at once and no delay is claimed.
+    const fresh = await services(["1111111111.2222222222222", SLACK_CLIENT_SECRET, true]);
+    await runSigninEnable(fresh.s, "staging", "slack", {}, {}, false);
+    expect(fresh.lines.join("\n")).not.toContain("within 5 minutes");
+  });
+
   it("never reads a secret from a flag value", async () => {
     const h = await services([]);
     await expect(runSigninEnable(h.s, "staging", "slack", { slackClientId: "1111111111.2222222222222" }, { slackClientSecret: { envName: "MISSING" } }, true)).rejects.toThrow(/environment variable MISSING/);

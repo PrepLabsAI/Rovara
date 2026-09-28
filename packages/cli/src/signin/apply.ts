@@ -189,6 +189,9 @@ export async function applySignInChange(input: ApplySignInInput): Promise<{ chan
       const confirmed = await input.confirm([...summary, `${stackName} does not change; the new client credentials replace the stored ones in ${input.credentials.secretName}.`].join("\n"));
       if (!confirmed) throw notApplied(stackName);
       await input.credentials.store();
+      // The control plane caches the secret for 5 minutes (developer-identity.ts SECRET_CACHE_MS);
+      // no stack change restarts it here, so the old credentials may be used until then.
+      input.write("The new client credentials take effect within 5 minutes, once the control plane's cached copy expires.");
       changed = true;
     } else {
       stackChanged = changed;
