@@ -184,3 +184,14 @@ describe("agentx env adopt", () => {
     expect(settings.identity).toEqual({ mode: "oidc", issuer: "https://login.example.com", audience: "api://agentx", clientId: "cli-client" });
   });
 });
+
+describe("agentx env adopt and the Slack team ID", () => {
+  it("never records a Slack team ID: the adopted deployment keeps the legacy names, which sign-in refuses", async () => {
+    const withSecret = { ...liveStacks, AgentXControlPlane: { ...liveStacks.AgentXControlPlane!, outputs: { ...liveStacks.AgentXControlPlane!.outputs, SlackSecretArn: "arn:aws:secretsmanager:us-east-1:944937319445:secret:SlackSecret-AbCdEf" } } };
+    const store = new MemoryParameterStore();
+    const home = await mkdtemp(join(tmpdir(), "agentx-adopt-"));
+    const settings = await adoptEnvironment({ env: "production", region: "us-east-1", stacks: reader(withSecret), identity, store, home, now });
+    expect(settings.naming).toBe("legacy");
+    expect(store.values.has("/agentx/production/slack/teamId")).toBe(false);
+  });
+});

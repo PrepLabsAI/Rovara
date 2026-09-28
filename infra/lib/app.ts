@@ -9,6 +9,7 @@ import { namingFromContext } from "./naming.js";
 import { applyPermissionsBoundaryParameter } from "./permissions-boundary.js";
 import { ProductionFoundationStack } from "./production-foundation.js";
 import { ReleasePipelineStack } from "./release-pipeline.js";
+import { RetainExceptOnCreate } from "./retention.js";
 import { EnvironmentRolePath } from "./role-path.js";
 import { SlackOrchestratorStack } from "./slack-orchestrator.js";
 import { WorkerSettingsStack } from "./worker-settings.js";
@@ -157,6 +158,8 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
     // Every environment role goes under /agentx/<env>/, the path the CloudFormation service role is
     // scoped to; the access stack's own roles are what that scoping protects, so they stay at root.
     Aspects.of(app).add(new EnvironmentRolePath(naming.env, new Set(accessStack === undefined ? [] : [accessStack])));
+    // A failed first create cleans up after itself, so a retry never trips over a kept fixed name.
+    Aspects.of(app).add(new RetainExceptOnCreate());
     // Every environment stack gets its own permission boundary parameter, condition, and aspect (the
     // given boundary, else the access stack's default boundary). The access stack already called
     // this itself (it creates the default boundary and needs the effective boundary for its roles'

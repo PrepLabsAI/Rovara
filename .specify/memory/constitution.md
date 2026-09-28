@@ -1,3 +1,13 @@
+<!-- Sync impact: 3.0.0 -> 4.0.0 (reverses spec 008's Slack-only rule for developers' AI tools).
+Principles modified: I. One orchestrator, remote coding (the Slack orchestrator stays the only
+orchestrator model; a second client, the developer task API, may drive coding work for a signed-in
+developer whose own AI tool writes the instructions); II. Administrator-prepared projects (a
+developer may also select a project by name through the developer task API); III. Shared
+definitions, isolated instances (a workspace is owned by a Slack thread or by one developer task).
+Sections modified: Scope and Operational Constraints (developer tasks are unattended too).
+Removed sections: none.
+Design and verification are recorded in specs/025-mcp-server/.
+Follow-up TODOs: none. -->
 <!-- Sync impact: 2.1.0 -> 3.0.0. Issue #119 retires old deployment modes for all installs,
 including self-hosted, as confirmed by the user on 2026-09-27. Historical records stay readable.
 Scope and operational constraints updated; design: specs/036-ec2-only-runtime/. -->
@@ -51,17 +61,23 @@ accept only requests that Slack has signed and that come from a member of the ch
 project. It MUST act through a service identity limited to Slack thread workspaces, and MUST record
 the requesting Slack user with every operation.
 
-No other client may drive coding work. The administration client authenticates an administrator and
-calls administration routes only; the control plane MUST refuse workspace, task, conversation,
-event, and publication requests that do not arrive through the hosted orchestrator's service
-identity.
+The hosted Slack orchestrator is the only AgentX orchestrator model. A second client, the developer
+task API, may drive coding work. It MUST authenticate a developer through the control plane's
+developer sign-in, and the developer's own AI tool writes the instructions, which reach the remote
+worker unchanged with no AgentX model in between.
+It MUST record the requesting developer with every operation.
+The administration client authenticates an administrator and calls administration routes only.
+The control plane MUST refuse workspace, task, conversation, event and publication requests that
+arrive neither through the hosted orchestrator's service identity nor through the developer task
+API with a developer sign-in.
 
 ### II. Administrator-prepared projects
 
 Administrators MUST define and prepare each product's fixed environment, repository layout,
 and setup procedure before any coding task. A developer selects a registered project by posting in
-the Slack channel bound to it. Preparing or resuming an isolated instance of that definition MUST
-complete before task acceptance. A coding task MUST NOT implicitly define or reconfigure a project.
+the Slack channel bound to it, or by name through the developer task API when they may use it.
+Preparing or resuming an isolated instance of that definition MUST complete before task acceptance.
+A coding task MUST NOT implicitly define or reconfigure a project.
 
 ### III. Shared definitions, isolated instances
 
@@ -71,11 +87,14 @@ instance. A client-supplied name or session identifier MUST NOT grant access. Ch
 available to colleagues through explicit repository publication and integration, never through a
 shared writable checkout.
 
-Every workspace is owned by its Slack thread (team, channel, and thread, as verified by Slack's
-signed request) and is intentionally shared by the channel members who post in that thread. It
-MUST NOT be reachable from any other thread or by a thread identifier supplied through any other
-client. Personal, per-developer workspaces are retired: the existing ones are stopped and kept,
-and no route creates another.
+Every workspace is owned by a Slack thread or by one developer task. A Slack thread's workspace is
+owned by its thread (team, channel and thread, as verified by Slack's signed request) and is
+intentionally shared by the channel members who post in that thread. A developer task's workspace
+is reachable only by the developer who started it, and, while the developer shares it in continue
+mode, by the members of the bound channel who post in its shared thread. No workspace is reachable
+from any other thread, task, or identifier supplied through any other client.
+Personal workspaces not tied to a task stay retired.
+The existing ones are stopped and kept, and no route creates another.
 
 ### IV. Durable working state, replaceable processes
 
@@ -102,8 +121,9 @@ workspace instances. Use a versioned development image and administrator-held Ag
 configuration.
 Dev Container metadata, automatic checkpoints, concurrent writers within one workspace,
 automatic merging, and deployment of generated applications are outside the initial release.
-These may be specified separately. All orchestration is unattended and runs in the hosted Slack
-orchestrator described in Principle I.
+These may be specified separately. All orchestration is unattended. It runs in the hosted Slack
+orchestrator, or, for developer tasks, in the remote worker with the developer's own instructions,
+as Principle I describes.
 
 Historical deployment modes remain readable for audit only. New registrations and execution MUST
 use `ec2-ebs` on every install, including self-hosted installs.
@@ -127,4 +147,4 @@ Amendments MUST identify changed principles and update affected specifications a
 Use semantic versioning: major for incompatible principles, minor for new principles, patch
 for clarifications. Reviewers MUST identify and resolve violations before declaring delivery complete.
 
-**Version**: 3.0.0 | **Ratified**: 2026-09-17 | **Last Amended**: 2026-09-27
+**Version**: 4.0.0 | **Ratified**: 2026-09-17 | **Last Amended**: 2026-09-27

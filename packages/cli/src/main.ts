@@ -28,6 +28,8 @@ import { cancelWorkspaceTask } from "./admin/cancel.js";
 import { exportTurns, parseSince } from "./admin/turns.js";
 import { loginWithPkce, openSystemBrowser, tokenStoreKey } from "./auth.js";
 import { loadProjectConfig } from "./config.js";
+import { developerLogout, fetchDeveloperProjects, logoutText, whoamiText } from "./developer/commands.js";
+import { developerLogin } from "./developer/login.js";
 import { loadDeploymentSettings, type DeploymentSettings } from "./deployment.js";
 import { resumeCommand, runDeploy, runInitExport, type DeployCliDependencies, type DeployCommandOptions } from "./deploy/commands.js";
 import { cloudFormationStackReader, stsCallerIdentity, type CallerIdentity, type StackReader } from "./environments/adopt.js";
@@ -35,11 +37,13 @@ import { resolveDeploymentFile } from "./environments/cache.js";
 import { DEFAULT_CLASSIFIER_MODEL, DEFAULT_ORCHESTRATOR_MODEL, DEFAULT_WORKER_MODEL, type InitFlags } from "./init/answers.js";
 import { runInit, type InitCliDependencies, type InitOptions } from "./init/commands.js";
 import type { SecretFlags } from "./init/context.js";
-import type { SecretSource } from "./init/prompts.js";
 import { runEnvAdopt, runEnvList, runEnvUse } from "./environments/commands.js";
 import { ssmParameterStore, type ParameterStore } from "./environments/parameter-store.js";
 import { settingsParameterName } from "./environments/settings.js";
 import { formatError, formatSuccess } from "./output.js";
+import { addSignInOptions, definedEntries, registerSigninCommands, secretSource, signInFlags, type SignInCommandOptions } from "./signin/cli.js";
+import { SIGNIN_FLAG_NAMES, type SigninFlags } from "./signin/collect.js";
+import type { SigninServices } from "./signin/commands.js";
 import { SystemCredentialTokenStore, type TokenStore } from "./token-store.js";
 import { CLI_VERSION } from "./version.js";
 
@@ -85,6 +89,8 @@ export interface CliDependencies {
   deploy?: DeployCliDependencies;
   /** `agentx init` overrides, for tests: never touch AWS, GitHub or Slack. */
   init?: InitCliDependencies;
+  /** `agentx signin` overrides, for tests: never touch AWS, Slack or an identity provider. */
+  signin?: Partial<SigninServices>;
 }
 
 interface AuthenticatedDeployment {
@@ -163,9 +169,12 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     return { settings, accessToken: tokens.accessToken };
   }
 
+  /** The developer sign-in's session dependencies: this computer's home and token store. */
+  const developerSession = () => ({ home, tokenStore: services.tokenStore, fetch: services.fetchImplementation });
+
   const program = new Command()
     .name("agentx")
-    .description("Administration client for AgentX; developers work through the project's Slack channel")
+    .description("AgentX: sign in, and administer AgentX; developers hand off tasks from their AI tools or work in Slack")
     .version(CLI_VERSION)
     .option("--project <project-name>", "select a locally configured AgentX project")
     .option("--config-dir <directory>", "project configuration directory", join(homedir(), ".agentx/projects"))
@@ -191,10 +200,32 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
 
   program
     .command("login")
-    .description("authenticate with the selected project's OIDC provider")
+    .description("sign in: agentx login <url> for developers; agentx login --admin (or no URL) for administrators")
+    .argument("[url]", "your AgentX URL, for developer sign-in")
+    .option("--admin", "sign in as an administrator with the admin identity provider (the default when no URL is given)", false)
+    .option("--no-browser", "developer sign-in: print the sign-in link instead of opening a browser")
     .option("--callback-port <port>", "fixed loopback callback port registered with the OIDC client", parsePort, DEFAULT_CALLBACK_PORT)
-    .action(async (options: { callbackPort: number }, command: Command) => {
+    .action(async (url: string | undefined, options: { admin: boolean; browser: boolean; callbackPort: number }, command: Command) => {
       const globals = globalOptions(command);
+      if (url !== undefined && options.admin) {
+        throw agentXError("CONFIG_INVALID", "use either agentx login <url> (developer sign-in) or agentx login --admin, not both");
+      }
+      if (url !== undefined) {
+        const result = await developerLogin({
+          url,
+          allowLoopback: globals.allowLoopback,
+          browser: options.browser,
+          home,
+          tokenStore: services.tokenStore,
+          fetch: services.fetchImplementation,
+          write: (line) => { services.stderr.write(`${line}\n`); },
+          ...(command.getOptionValueSource("callbackPort") === "cli" ? { callbackPort: options.callbackPort } : {}),
+        });
+        const projects = await fetchDeveloperProjects(developerSession(), result.env);
+        services.stdout.write(globals.json ? formatSuccess({ env: projects.env, url: projects.url, ...projects.projects }, true) : whoamiText(projects));
+        return;
+      }
+      // A bare login (or --admin) is today's admin login, unchanged.
       const settings = await deploymentSettings(globals);
       await loginWithPkce({
         issuer: settings.auth.issuer,
@@ -206,6 +237,40 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       });
       services.stdout.write(formatSuccess({ controlPlaneUrl: settings.controlPlaneUrl, authenticated: true }, globals.json));
     });
+
+  /** The developer environment: --env when typed, otherwise the default agentx login set. */
+  const developerEnv = (command: Command): string | undefined =>
+    command.getOptionValueSourceWithGlobals("env") === "cli" ? globalOptions(command).env : undefined;
+
+  program
+    .command("logout")
+    .description("sign out of AgentX on this computer and end the sign-in at the server; --admin signs out of the admin sign-in")
+    .option("--admin", "sign out of the administrator sign-in instead", false)
+    .action(async (options: { admin: boolean }, command: Command) => {
+      const globals = globalOptions(command);
+      if (options.admin) {
+        const settings = await deploymentSettings(globals);
+        await services.tokenStore.delete(tokenStoreKey(settings.auth));
+        services.stdout.write(globals.json ? formatSuccess({ env: globals.env, admin: true }, true) : `Signed out of the admin sign-in for ${globals.env}.\n`);
+        return;
+      }
+      const result = await developerLogout(developerSession(), developerEnv(command));
+      services.stdout.write(globals.json ? formatSuccess(result, true) : logoutText(result));
+    });
+
+  program
+    .command("whoami")
+    .description("show who you are signed in as and which AgentX projects you can use")
+    .action(async (_options: unknown, command: Command) => {
+      const globals = globalOptions(command);
+      const result = await fetchDeveloperProjects(developerSession(), developerEnv(command));
+      services.stdout.write(globals.json ? formatSuccess({ env: result.env, url: result.url, ...result.projects }, true) : whoamiText(result));
+    });
+
+  registerSigninCommands(program, {
+    ...(dependencies.signin === undefined ? {} : { overrides: dependencies.signin }),
+    parameterStore, fetch: services.fetchImplementation, stdout: services.stdout, stderr: services.stderr,
+  });
 
   const admin = program.command("admin").description("administrator workflows");
   const adminProject = admin.command("project").description("administer registered projects");
@@ -525,6 +590,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       services.stdout.write(`${lines.join("\n")}\n`);
     });
 
+  addSignInOptions(
   program
     .command("init")
     .description("install AgentX in this AWS account, step by step, resuming where it stopped; --export writes a bundle for a platform team instead")
@@ -575,7 +641,9 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--slack-signing-secret-file <path>", "file holding the Slack signing secret")
     .option("--slack-signing-secret-env <NAME>", "environment variable holding the Slack signing secret")
     .option("--worker-image <digest-ref>", "worker image by digest (testing only)")
-    .option("--slack-image <digest-ref>", "Slack service image by digest (testing only)")
+    .option("--slack-image <digest-ref>", "Slack service image by digest (testing only)"),
+  )
+    .addOption(new Option(`${SIGNIN_FLAG_NAMES.methods} <method>`, "how developers sign in: Slack (default), your company's sign-in (oidc), or both").choices(["slack", "oidc", "both"]))
     .action(async (
       options: InitCommandOptions & { export?: string },
       command: Command,
@@ -708,7 +776,7 @@ function parsePort(value: string): number {
   return port;
 }
 
-interface InitCommandOptions {
+interface InitCommandOptions extends SignInCommandOptions {
   region?: string; account?: string; release?: string; engine?: "templates" | "cdk"; source?: string;
   resume: boolean; yes: boolean; browser: boolean;
   identity: "cognito" | "oidc"; oidcIssuer?: string; oidcAudience?: string; oidcClientId?: string; adminClaim?: string; adminValues?: string;
@@ -721,19 +789,14 @@ interface InitCommandOptions {
   slackAppName?: string; slackAppPostedMessages?: "accept" | "ignore"; slackInstall?: "installed" | "approval";
   slackBotTokenFile?: string; slackBotTokenEnv?: string; slackSigningSecretFile?: string; slackSigningSecretEnv?: string;
   workerImage?: string; slackImage?: string;
-}
-
-/** Keeps only the entries that have a value, so an optional property is absent rather than undefined. */
-function definedEntries<T extends object>(record: { [K in keyof T]: T[K] | undefined }): T {
-  return Object.fromEntries(Object.entries(record).filter(([, value]) => value !== undefined)) as T;
+  /** --signin: which developer sign-in methods agentx init's developer-signin step enables. */
+  signin?: "slack" | "oidc" | "both";
 }
 
 /** `agentx init`'s options, built from only what was typed: a commander default (the models,
  * --identity, --no-alerts's true) must never silently answer a question init would otherwise ask. */
 function initOptions(env: string, options: InitCommandOptions, command: Command): InitOptions {
   const typed = <T>(name: string, value: T): T | undefined => (command.getOptionValueSource(name) === "cli" ? value : undefined);
-  const source = (file?: string, envName?: string): SecretSource | undefined =>
-    file === undefined && envName === undefined ? undefined : { ...(file === undefined ? {} : { file }), ...(envName === undefined ? {} : { envName }) };
   const flags = definedEntries<InitFlags>({
     engine: options.engine,
     identity: typed("identity", options.identity),
@@ -745,25 +808,28 @@ function initOptions(env: string, options: InitCommandOptions, command: Command)
     modelProvider: options.modelProvider,
     orchestratorProvider: options.orchestratorProvider, classifierProvider: options.classifierProvider, workerProvider: options.workerProvider,
     openrouterSecretArn: options.openrouterSecretArn, openrouterProviders: options.openrouterProviders,
-    openrouterKey: source(options.openrouterKeyFile, options.openrouterKeyEnv),
+    openrouterKey: secretSource(options.openrouterKeyFile, options.openrouterKeyEnv),
     permissionBoundary: options.permissionBoundary, operatorPrincipal: options.operatorPrincipal,
     alertEmail: options.alertEmail,
-    alertWebhook: source(options.alertWebhookFile, options.alertWebhookEnv),
+    alertWebhook: secretSource(options.alertWebhookFile, options.alertWebhookEnv),
     alerts: typed("alerts", options.alerts),
     githubAccount: options.githubAccount, githubAccountType: options.githubAccountType, githubAppName: options.githubAppName,
     slackAppName: options.slackAppName, slackAppPostedMessages: options.slackAppPostedMessages,
     workerImage: options.workerImage, slackImage: options.slackImage,
   });
-  const keySource = source(options.githubPrivateKeyFile, options.githubPrivateKeyEnv);
+  const keySource = secretSource(options.githubPrivateKeyFile, options.githubPrivateKeyEnv);
   const { githubAppId: appId, githubInstallationId: installationId } = options;
   const preMadeGiven = appId !== undefined || installationId !== undefined;
   if (preMadeGiven && (appId === undefined || installationId === undefined || keySource === undefined)) {
     throw agentXError("CONFIG_INVALID", "--github-app-id, --github-installation-id and --github-private-key-file (or --github-private-key-env) go together");
   }
+  const signin = signInFlags(options);
   const secretFlags = definedEntries<SecretFlags>({
-    slackBotToken: source(options.slackBotTokenFile, options.slackBotTokenEnv),
-    slackSigningSecret: source(options.slackSigningSecretFile, options.slackSigningSecretEnv),
+    slackBotToken: secretSource(options.slackBotTokenFile, options.slackBotTokenEnv),
+    slackSigningSecret: secretSource(options.slackSigningSecretFile, options.slackSigningSecretEnv),
     githubPrivateKey: keySource,
+    slackClientSecret: signin.secretFlags.slackClientSecret,
+    oidcClientSecret: signin.secretFlags.oidcClientSecret,
   });
   return {
     env,
@@ -774,6 +840,7 @@ function initOptions(env: string, options: InitCommandOptions, command: Command)
     yes: options.yes, browser: options.browser, resume: options.resume,
     flags,
     secretFlags,
+    signinFlags: definedEntries<SigninFlags>({ methods: options.signin, ...signin.flags }),
     ...(appId === undefined || installationId === undefined ? {} : { preMadeGitHubApp: { appId, installationId } }),
     ...(options.slackInstall === undefined ? {} : { slackInstall: options.slackInstall }),
   };

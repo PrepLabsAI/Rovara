@@ -6,6 +6,7 @@ import type { PreparedDeployment } from "../deploy/commands.js";
 import type { LoadedRelease } from "../deploy/release.js";
 import { secretsManagerValueStore, type SecretValueStore } from "../deploy/signing-key.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
+import type { SigninFlags } from "../signin/collect.js";
 import type { InitAnswers } from "./install-state.js";
 import type { Prompter, SecretSource } from "./prompts.js";
 
@@ -55,7 +56,10 @@ export function cloudFormationStatusReader(client: CloudFormationClient): StackS
   };
 }
 
-export interface SecretFlags { slackBotToken?: SecretSource; slackSigningSecret?: SecretSource; githubPrivateKey?: SecretSource }
+export interface SecretFlags {
+  slackBotToken?: SecretSource; slackSigningSecret?: SecretSource; githubPrivateKey?: SecretSource;
+  slackClientSecret?: SecretSource; oidcClientSecret?: SecretSource;
+}
 export interface PreMadeGitHubApp { appId: string; installationId: string }
 
 // write, now and sleep are function-typed properties rather than methods, so steps can pass them
@@ -78,6 +82,10 @@ export interface InitContext {
   fetch: typeof fetch;
   processEnv: NodeJS.ProcessEnv;
   secretFlags: SecretFlags;
+  /** The developer sign-in change to apply (spec 025 R6): one CloudFormation client, shared by the
+   * developer-signin step and reused by nothing else. */
+  cloudFormation: { send(command: unknown): Promise<unknown> };
+  signinFlags: SigninFlags;
   preMadeGitHubApp?: PreMadeGitHubApp;
   /** Built on first use and reused by every deploy step in this run. */
   deployment(): Promise<PreparedDeployment>;

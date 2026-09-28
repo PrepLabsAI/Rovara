@@ -193,6 +193,27 @@ describe("agentx env adopt", () => {
     expect(store.calls).toEqual([]);
   });
 
+  it("never reads the Slack secret or records the Slack team ID for the legacy production deployment (sign-in refuses legacy environments)", async () => {
+    const arn = "arn:aws:secretsmanager:us-east-1:944937319445:secret:SlackSecret-AbCdEf";
+    const withSecret: StackReader = { describe: async (name) => (name === "AgentXControlPlane" ? { ...liveStacks[name]!, outputs: { ...liveStacks[name]!.outputs, SlackSecretArn: arn } } : liveStacks[name]) };
+    const slack: string[] = [];
+    const fetchImplementation = (async (url: Parameters<typeof fetch>[0]) => {
+      slack.push(typeof url === "string" ? url : url instanceof URL ? url.href : url.url);
+      throw new Error("test setup: Slack must not be called");
+    }) as typeof fetch;
+    const store = new MemoryParameterStore();
+    const io = capture();
+    const code = await executeCli(
+      ["--env", "production", "env", "adopt", "--region", "us-east-1"],
+      { ...io, fetchImplementation, environments: { store, home: await home(), stacks: withSecret, sts: identity } },
+    );
+    expect(code).toBe(0);
+    expect(slack).toEqual([]);
+    expect(io.err.join("")).toBe("");
+    expect(store.values.has("/agentx/production/slack/teamId")).toBe(false);
+    expect(store.values.has("/agentx/production/settings")).toBe(true);
+  });
+
   it("scopes env adopt's SSM, CloudFormation and STS clients to --region", async () => {
     const clients = environmentAdoptClients("eu-west-2");
     expect(await clients.ssm.config.region()).toBe("eu-west-2");

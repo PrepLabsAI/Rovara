@@ -1,0 +1,120 @@
+// agentx whoami and agentx logout (FR-011).
+import { AGENTX_CLI_CLIENT_ID, AgentXError, DeveloperProjectsResponseSchema, agentXError, type DeveloperProjectsResponse } from "@agentx/contracts";
+import { sanitizeServerText } from "../auth.js";
+import { developerTokenKey, removeDeveloperEnvironment, resolveDeveloperEnvironment } from "./config.js";
+import { developerAccessToken, type DeveloperSessionDeps } from "./session.js";
+
+export async function fetchDeveloperProjects(deps: DeveloperSessionDeps, env: string | undefined): Promise<{ env: string; url: string; projects: DeveloperProjectsResponse }> {
+  const session = await developerAccessToken(deps, env);
+  let response: Response;
+  try {
+    response = await deps.fetch(`${session.entry.url}/v1/dev/projects`, { headers: { authorization: `Bearer ${session.accessToken}` }, signal: AbortSignal.timeout(20_000) });
+  } catch {
+    throw agentXError("RUNTIME_UNAVAILABLE", `could not reach AgentX at ${session.entry.url}; check your connection and try again`);
+  }
+  if (response.status === 401) {
+    const reason = refusalReason(await response.json().catch(() => undefined));
+    throw agentXError("AUTH_REQUIRED", `your AgentX sign-in for ${session.env} has ended${reason === undefined ? "" : ` (${reason})`}; run npx @charterarc/agentx login ${session.entry.url}`);
+  }
+  if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `AgentX answered HTTP ${response.status}; try again`);
+  const parsed = DeveloperProjectsResponseSchema.safeParse(await response.json().catch(() => undefined));
+  if (!parsed.success) throw agentXError("RUNTIME_UNAVAILABLE", "AgentX answered with something unexpected; try again, or upgrade: npx @charterarc/agentx@latest whoami");
+  return { env: session.env, url: session.entry.url, projects: parsed.data };
+}
+
+/**
+ * The broker's own words for a refusal (error.message), without its trailing hint, made safe to
+ * show. Every one describes a token that was already verified (a bad token gets one generic line),
+ * so it tells a caller only about their own sign-in.
+ */
+function refusalReason(body: unknown): string | undefined {
+  const message = typeof body === "object" && body !== null ? (body as { error?: { message?: unknown } }).error?.message : undefined;
+  if (typeof message !== "string") return undefined;
+  const reason = sanitizeServerText(message.split("; ")[0] ?? "").trim();
+  return reason === "" ? undefined : reason;
+}
+
+export function whoamiText(result: { env: string; url: string; projects: DeveloperProjectsResponse }): string {
+  const { developer, projects, notices } = result.projects;
+  const method = developer.provider === "slack" ? "Slack" : "your company sign-in";
+  const link = developer.slackUserId === undefined ? "" : ` (${developer.slackUserId})`;
+  const lines = [`Signed in to AgentX environment ${result.env} (${result.url}) as ${sanitizeServerText(developer.name)}, with ${method}${link}.`];
+  if (projects.length === 0) {
+    lines.push("You cannot use any project yet: join a project's Slack channel, or ask an admin for access.");
+  } else {
+    lines.push("Projects you can use:");
+    for (const project of projects) {
+      const how = project.access === "granted" ? "an admin granted you access" : `you are in its Slack channel ${project.channels.map((channel) => channel.channelId).join(", ")}`;
+      lines.push(`  ${project.name}  (${how})`);
+    }
+  }
+  if (notices.includes("slack_unavailable")) lines.push("Slack could not be reached, so projects you use through a Slack channel are not listed; try again later.");
+  return `${lines.join("\n")}\n`;
+}
+
+/** How the logout went at the server: revoked, not answered at all, or answered without confirming. */
+export interface DeveloperLogoutResult {
+  env: string;
+  revoked: boolean;
+  problem?: "unreachable" | "not_confirmed";
+  /** The server's reason when it did not confirm, made safe to show. */
+  reason?: string;
+}
+
+/**
+ * Ends the sign-in at the server (RFC 7009 revoke) and on this computer. The local tokens and
+ * environment are removed whatever the server answers; `revoked` and `problem` say how that went.
+ */
+export async function developerLogout(deps: DeveloperSessionDeps, env: string | undefined): Promise<DeveloperLogoutResult> {
+  let resolved: Awaited<ReturnType<typeof resolveDeveloperEnvironment>>;
+  try {
+    resolved = await resolveDeveloperEnvironment(deps.home, env);
+  } catch (error) {
+    // No developer sign-in here: the person may mean the admin one, which --admin ends.
+    if (error instanceof AgentXError && error.code === "AUTH_REQUIRED") {
+      throw agentXError("AUTH_REQUIRED", `${error.message.slice(error.code.length + 2)}; for the admin login, run agentx logout --admin`);
+    }
+    throw error;
+  }
+  const key = developerTokenKey(resolved.entry.issuer);
+  const tokens = await deps.tokenStore.get(key);
+  let outcome: Omit<DeveloperLogoutResult, "env"> = { revoked: false };
+  if (tokens?.refreshToken !== undefined) {
+    let response: Response | undefined;
+    try {
+      response = await deps.fetch(resolved.entry.revocationEndpoint, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ token: tokens.refreshToken, client_id: AGENTX_CLI_CLIENT_ID }).toString(),
+        signal: AbortSignal.timeout(5_000),
+      });
+    } catch {
+      response = undefined;
+    }
+    if (response === undefined) {
+      outcome = { revoked: false, problem: "unreachable" };
+    } else if (response.ok) {
+      outcome = { revoked: true };
+    } else {
+      const body: unknown = await response.json().catch(() => undefined);
+      const description = typeof body === "object" && body !== null ? (body as Record<string, unknown>).error_description : undefined;
+      outcome = { revoked: false, problem: "not_confirmed", ...(typeof description === "string" ? { reason: sanitizeServerText(description) } : {}) };
+    }
+  }
+  await deps.tokenStore.delete(key);
+  await removeDeveloperEnvironment(deps.home, resolved.env);
+  return { env: resolved.env, ...outcome };
+}
+
+/** The text agentx logout prints. */
+export function logoutText(result: DeveloperLogoutResult): string {
+  const local = `Signed out of AgentX environment ${result.env}`;
+  if (result.problem === "unreachable") {
+    return `${local} on this computer. AgentX could not be reached to end the sign-in there, so the server session may stay until it expires.\n`;
+  }
+  if (result.problem === "not_confirmed") {
+    const reason = result.reason === undefined ? "" : ` (${result.reason})`;
+    return `${local} on this computer. AgentX did not confirm it ended the sign-in there${reason}, so the server session may stay until it expires.\n`;
+  }
+  return `${local}.\n`;
+}

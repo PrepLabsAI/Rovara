@@ -167,15 +167,24 @@ describe("EC2 worker infrastructure (issue #82), shown for a named environment",
   });
 
   it("signs invocations with a P-256 key only the dispatcher may use", () => {
-    const [[keyId, key]] = ofType(controlPlane, "AWS::KMS::Key") as [[string, Resource]];
+    // Spec 025 adds the developer-token RSA key to named environments; this is the P-256 invocation key.
+    const p256Keys = ofType(controlPlane, "AWS::KMS::Key").filter(([, r]) => r.Properties.KeySpec === "ECC_NIST_P256");
+    expect(p256Keys).toHaveLength(1);
+    const [[keyId, key]] = p256Keys as [[string, Resource]];
+    const otherKeyIds = ofType(controlPlane, "AWS::KMS::Key").map(([id]) => id).filter((id) => id !== keyId);
     expect(key.Properties).toMatchObject({ KeySpec: "ECC_NIST_P256", KeyUsage: "SIGN_VERIFY" });
     const keyPolicy = (key.Properties.KeyPolicy as { Statement: Array<Record<string, unknown>> }).Statement;
     const deny = keyPolicy.find((s) => s.Sid === "SignOnlyAsDispatcher")!;
     expect(deny).toMatchObject({ Effect: "Deny", Principal: { AWS: "*" }, Action: "kms:Sign", Resource: "*" });
     const dispatcherRole = JSON.stringify((deny.Condition as { ArnNotEquals: Record<string, unknown> }).ArnNotEquals["aws:PrincipalArn"]);
     expect(dispatcherRole).toMatch(/DispatcherServiceRole/);
-    // No identity policy but the dispatcher's grants kms:Sign.
-    const signers = ofType(controlPlane, "AWS::IAM::Policy").filter(([, p]) => actionsOf((p.Properties.PolicyDocument as { Statement: Array<{ Action: string | string[] }> }).Statement).includes("kms:Sign"));
+    // No identity policy but the dispatcher's grants kms:Sign on this key. A kms:Sign grant counts
+    // unless its resources name only another key of this template (so a wildcard still counts).
+    const signsThisKey = (s: { Action: string | string[]; Resource?: unknown }) => {
+      const resource = JSON.stringify(s.Resource);
+      return actionsOf([s]).includes("kms:Sign") && (resource.includes(keyId) || !otherKeyIds.some((id) => resource.includes(id)));
+    };
+    const signers = ofType(controlPlane, "AWS::IAM::Policy").filter(([, p]) => (p.Properties.PolicyDocument as { Statement: Array<{ Action: string | string[]; Resource?: unknown }> }).Statement.some(signsThisKey));
     expect(signers.map(([, p]) => JSON.stringify(p.Properties.Roles))).toEqual([expect.stringMatching(/DispatcherServiceRole/)]);
     expect(JSON.stringify(signers[0]![1].Properties.PolicyDocument)).toContain(keyId);
     controlPlane.hasResourceProperties("AWS::KMS::Alias", { AliasName: "alias/agentx/staging/invoke-signing" });

@@ -14,6 +14,7 @@ import type { PrerequisiteChecks } from "../../packages/cli/src/init/prerequisit
 import type { Prompter } from "../../packages/cli/src/init/prompts.js";
 import type { SlackApi } from "../../packages/cli/src/init/slack-app.js";
 import type { ProgressHandle } from "../../packages/cli/src/init/steps.js";
+import { fakeCloudFormation, SIGN_IN_PARAMETERS } from "./fake-cloudformation.js";
 import { MemoryParameterStore } from "./memory-parameter-store.js";
 
 /** A complete, valid set of `agentx init` answers, for tests that round-trip or size-check them
@@ -209,6 +210,8 @@ export function initContext(overrides: Partial<Omit<InitContext, "secrets">> & {
     fetch: async () => { throw new Error("test setup: fetch not expected"); },
     processEnv: {},
     secretFlags: {},
+    cloudFormation: fakeCloudFormation({ parameters: SIGN_IN_PARAMETERS }),
+    signinFlags: {},
     // Read at call time, so an overridden store or secrets is the one deploys use.
     deployment: async () => ({ deployer, store: context.store, secrets: context.secrets, holder: HOLDER, partition: "aws", cleanup: async () => undefined }),
     stackStatus: { status: async () => undefined },

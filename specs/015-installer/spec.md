@@ -373,12 +373,16 @@ and the budget.
   - `slack.appPostedMessages`;
   - `alerts.address` and `alerts.slowTurnMinutes` (default 5).
 
-  Each key maps to one stack parameter or one SSM value, listed in the docs (for example,
-  `limits.workspacesPerMember` is `SlackMemberWorkspaceLimit`).
+  Each key maps to one stack parameter, one SSM value or one control-plane setting, listed in the
+  docs (for example, `limits.threadTurnsPerMinute` is `SlackThreadTurnsPerMinute`).
+  `limits.workspacesPerMember` and `limits.workspacesPerOrg` map to the control plane's workspace
+  limits setting in its state table (spec 025 FR-053 and decision D8), not to the stack parameters
+  `SlackMemberWorkspaceLimit` and `SlackOrganizationWorkspaceLimit`, which stay as install-time
+  defaults.
 
   Unknown keys and invalid values MUST be refused.
 - **FR-049**: `config set` MUST show the change before applying it. Stack-parameter keys apply with a
-  parameter-only stack update; SSM keys apply at once. Model keys MUST pass the one-token test call
+  parameter-only stack update; SSM keys and control-plane settings apply at once. Model keys MUST pass the one-token test call
   first.
 
 **`agentx doctor` (US4)**
@@ -599,7 +603,7 @@ and the budget.
   - Switching an environment between engines.
   - The `demo-microvm` runtime mode.
   - Multiple Slack workspaces or GitHub App installations per environment.
-  - The AgentX MCP server for Claude Code (spec 016).
+  - The AgentX MCP server for Claude Code (spec 025).
 
 ## Testing
 

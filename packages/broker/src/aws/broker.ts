@@ -1,5 +1,6 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import {
   DeleteCommand,
   DynamoDBDocumentClient,
@@ -83,6 +84,8 @@ import { observeConnectorRoute } from "./connector-metrics.js";
 import { attributionDroppedLog, callConnector, connectorCatalogKey, discoverConnector, discoverLegacyGitHubScope, stripCode, type ConnectorContextBase, type ScopeDiscovery } from "./connector-routes.js";
 import { resolveConnectors, BUILT_IN_CONNECTOR_TYPES, type ConnectorType, type ConnectorTypeContext, type ResolvedConnector } from "./connector-types.js";
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
+import { developerTokenVerifier } from "../developer/verify-token.js";
+import { channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, routeDeveloperRequest, type DeveloperApiConfiguration } from "./developer-routes.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
@@ -232,6 +235,8 @@ interface AwsBrokerDependencies {
   checkRepositoryAccess?: (repository: { credentialRef: string; url: string }) => Promise<void>;
   codeBuild: CodeBuildGateway;
   slack?: SlackServiceConfiguration;
+  /** Spec 025 developer sign-in; absent when the deployment has none, and /v1/dev/* answers NOT_FOUND. */
+  developer?: DeveloperApiConfiguration;
   githubMcp?: GitHubMcpDependencies;
   catalogs: CatalogCache<ScopeDiscovery>;
   credentialRegistry?: CredentialRegistry;
@@ -259,6 +264,10 @@ interface SlackServiceConfiguration {
 }
 
 type TransactItems = NonNullable<TransactWriteCommandInput["TransactItems"]>;
+
+/** A "." or ".." path segment, also percent-encoded (%2e in any case). */
+const DOT_SEGMENT = /(?:^|\/)(?:\.|%2e){1,2}(?:\/|$)/i;
+const DEVELOPER_ROUTE_KEY = "ANY /v1/dev/{proxy+}";
 
 export function createAwsBrokerHandler(input: AwsBrokerInput) {
   // One cache per container: discovery per revision, connector and repository costs one vendor round trip.
@@ -294,7 +303,12 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
     }
     const request = adaptHttpApiEvent(event);
     try {
+      // Checked on the raw path, before URL parsing normalizes it: /v1/dev/../v1/admin/x reaches
+      // the broker through the authorizer-free /v1/dev route (D17), so it must never be resolved.
+      if (DOT_SEGMENT.test(event.rawPath ?? "/")) throw agentXError("NOT_FOUND", "route not found");
       const url = new URL(request.path, "https://agentx.invalid");
+      // The /v1/dev route has no API Gateway authorizer, so what it carries goes to the developer API or nowhere.
+      if (event.routeKey === DEVELOPER_ROUTE_KEY && !url.pathname.startsWith("/v1/dev/")) throw agentXError("NOT_FOUND", "route not found");
       // Internal worker routes authenticate with operation-scoped capabilities; user JWT auth starts below them.
       const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|pull-request|pull-request-update|codebuild)$/.exec(
         url.pathname,
@@ -342,6 +356,13 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
           return json(await putProjectModel(dependencies, identity, parseBody(request.body)), request.requestId);
         }
         return await observeConnectorRoute(request.method, serviceUrl.pathname, () => routeWorkspaceRequest(dependencies, request, serviceUrl, identity));
+      }
+
+      // Spec 025: the developer API. /v1/dev/* has no API Gateway authorizer (D17): the broker
+      // verifies the developer token, then checks the method and session (FR-009).
+      if (url.pathname.startsWith("/v1/dev/")) {
+        if (!dependencies.developer) throw agentXError("NOT_FOUND", "developer sign-in is not set up in this deployment");
+        return json(await routeDeveloperRequest({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now }, request, url), request.requestId);
       }
 
       const identity = identityFromJwtClaims(request.jwtClaims, {
@@ -3729,6 +3750,31 @@ const repositoryGrants = new RepositoryGrantService(
   (credentialRef, repositoryUrl, access) => githubCredentials.resolve(credentialRef, repositoryUrl, access),
 );
 
+const lambdaClient = new LambdaClient(awsClientConfiguration);
+/** Set only in named environments with developer sign-in (infra/lib/developer-signin.ts). */
+function developerConfiguration(): DeveloperApiConfiguration | undefined {
+  const issuer = process.env.DEVELOPER_TOKEN_ISSUER;
+  if (!issuer) return undefined;
+  const functionName = requiredEnvironment("DEVELOPER_IDENTITY_FUNCTION_ARN");
+  const teamId = process.env.SLACK_TEAM_ID ?? "";
+  return {
+    issuer,
+    env: requiredEnvironment("AGENTX_ENV"),
+    methods: { slack: process.env.DEVELOPER_SIGNIN_SLACK === "enabled", oidc: (process.env.DEVELOPER_OIDC_ISSUER ?? "") !== "" },
+    ...(teamId === "" ? {} : { slackTeamId: teamId }),
+    since: developerSinceFromEnvironment(process.env),
+    signInTableName: requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME"),
+    channelMembers: channelMembersThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
+    // D17: kept for the Lambda's lifetime; an unknown kid refetches at most once a minute.
+    verifyAccessToken: developerTokenVerifier({
+      issuer,
+      keys: developerKeysThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
+      now: Date.now,
+    }),
+  };
+}
+const developer = developerConfiguration();
+
 export const handler = createAwsBrokerHandler({
   documentClient,
   s3,
@@ -3748,6 +3794,7 @@ export const handler = createAwsBrokerHandler({
     ...(process.env.CONNECTOR_SECRET_PREFIX ? { connectorSecretPrefix: process.env.CONNECTOR_SECRET_PREFIX } : {}),
   },
   codeBuild,
+  ...(developer ? { developer } : {}),
   ...(process.env.TURN_RECORDS_TABLE_NAME ? { turnRecordsTableName: process.env.TURN_RECORDS_TABLE_NAME } : {}),
   ...(process.env.SLACK_ORCHESTRATOR_ROLE_ARN
     ? {

@@ -95,6 +95,8 @@ function required(stack: StackDescription, stackName: string, kind: "outputs" | 
  * the fixed legacy stack names as environment `<env>`, reading its CloudFormation stacks and
  * writing settings to SSM. Never changes any stack. Refuses, writing nothing, when a stack is
  * missing or unhealthy, an output or parameter is missing, or the environment already has settings.
+ * The adopted deployment keeps the legacy stack names, which developer sign-in refuses, so adopt
+ * never reads its Slack secret or records a Slack team ID.
  */
 export async function adoptEnvironment(input: {
   env: string;
