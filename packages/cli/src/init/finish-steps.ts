@@ -1,7 +1,8 @@
-// The init steps after developer sign-in (phase 15d2): each is a thin wrapper around a setup/
-// module, so agentx init and the day-2 commands behave the same.
+// The init steps after developer sign-in (phase 15d2), and the message init ends with. Each step
+// is a thin wrapper around a setup/ module, so agentx init and the day-2 commands behave the same.
 import { agentXError } from "@agentx/contracts";
 import { AlertEmailSchema } from "../deploy/answer-schemas.js";
+import type { ParameterStore } from "../environments/parameter-store.js";
 import { readEnvironmentSettings, type EnvironmentSettings } from "../environments/settings.js";
 import { tokenClaimValues, userPoolId } from "../setup/admin-session.js";
 import { ensureCognitoAdmin } from "../setup/admin-user.js";
@@ -12,16 +13,23 @@ import { addJira } from "../setup/connectors/jira.js";
 import { addLinear } from "../setup/connectors/linear.js";
 import { addProject } from "../setup/project-add.js";
 import { installationToken } from "../setup/project-files.js";
+import { waitForThreadedReply } from "../setup/reply-watch.js";
 import { BUDGET_TAG_NOTE, checkAlertWebhook } from "./answers.js";
 import type { InitContext } from "./context.js";
-import { CONNECTOR_TYPES, type ConnectorType } from "./install-state.js";
+import { CONNECTOR_TYPES, type ConnectorType, type InstallProgress } from "./install-state.js";
 import { readSlackBotToken } from "./slack-app.js";
 import type { InitStep } from "./steps.js";
 
-export async function requireSettings(context: InitContext): Promise<EnvironmentSettings> {
-  const settings = await readEnvironmentSettings(context.store, context.env);
-  if (settings === undefined) throw agentXError("CONFIG_INVALID", `environment ${context.env} has no settings yet; the Slack service step must finish first, so run agentx init again`);
+/** The environment's settings, which the Slack service step writes; every finishing step and the
+ * admin session need them (F21: one message, used by both). */
+export async function readSettingsOrThrow(store: ParameterStore, env: string): Promise<EnvironmentSettings> {
+  const settings = await readEnvironmentSettings(store, env);
+  if (settings === undefined) throw agentXError("CONFIG_INVALID", `environment ${env} has no settings yet; the Slack service step must finish first, so run agentx init again`);
   return settings;
+}
+
+export function requireSettings(context: InitContext): Promise<EnvironmentSettings> {
+  return readSettingsOrThrow(context.store, context.env);
 }
 
 /** Who signed in with your own OIDC provider, from the token's email claim or else its sub (F24). */
@@ -54,6 +62,12 @@ export function adminUserStep(): InitStep<InitContext> {
         }
         await context.adminSession();
         return { status: "done", note: `admin ${email}` };
+      }
+      // F13 and C6 (FR-021): with your own OIDC, the admin claim is what makes someone an AgentX
+      // administrator, so an install whose answers name none is refused, never signed in unchecked.
+      const identity = context.answers.identity;
+      if (identity.mode !== "oidc" || identity.adminClaim === undefined || identity.adminValues === undefined) {
+        throw agentXError("CONFIG_INVALID", `the install's answers name no admin claim; AgentX cannot check that you are an administrator of your own OIDC provider, and an install's answers cannot change halfway. Start a new install with another --env, passing --admin-claim and --admin-values`);
       }
       const session = await context.adminSession();
       const username = oidcAdminName(session.accessToken);
@@ -186,4 +200,48 @@ async function requireWebhook(context: InitContext, name: string): Promise<strin
   const value = await context.secrets.get(name);
   if (value === undefined) throw agentXError("CONFIG_INVALID", `secret ${name} is missing; run agentx init with --alert-webhook-file or --alert-webhook-env to store it again`);
   return checkAlertWebhook(value.trim());
+}
+
+/** FR-018 step 11 (owner decision 7): a person mentions the bot in the bound channel, and init
+ * watches the turn records for AgentX's threaded reply. */
+export function e2eStep(): InitStep<InitContext> {
+  return {
+    id: "e2e",
+    title: "Check that AgentX answers in Slack",
+    async run(context, progress) {
+      const { project, slack } = progress.current();
+      if (project?.channelId === undefined || project.channelName === undefined || slack === undefined) {
+        throw agentXError("CONFIG_INVALID", "install progress has no bound channel; the first-project step must finish first, so run agentx init again");
+      }
+      const reply = await waitForThreadedReply({
+        session: await context.adminSession(), fetch: context.setup.fetch, teamId: slack.teamId, channelId: project.channelId,
+        channelName: project.channelName, botUserId: slack.botUserId, rerun: "agentx init", write: context.write, sleep: context.sleep, now: context.now,
+      });
+      return { status: "done", note: `a mention in #${project.channelName} got a threaded reply in ${reply.seconds} seconds` };
+    },
+  };
+}
+
+/** admin-user, first-project, connectors, alerts, e2e, in that order. */
+export function finishSteps(): InitStep<InitContext>[] {
+  return [adminUserStep(), firstProjectStep(), connectorsStep(), alertsStep(), e2eStep()];
+}
+
+/** The message a finished agentx init ends with: where to talk to AgentX, and the day-2 commands.
+ * `controlPlaneUrl` is not printed; --json callers get it beside this text. */
+export function readyText(input: { env: string; controlPlaneUrl: string; progress: InstallProgress }): string {
+  const { env, progress } = input;
+  const cli = `agentx --env ${env}`;
+  const { project, slack } = progress;
+  const connectors = progress.connectors ?? [];
+  const connected = connectors.map((entry) => CONNECTOR_LABELS[entry.type]);
+  return [
+    `AgentX environment ${env} is ready.`,
+    ...(project?.channelName === undefined || slack === undefined ? [] : [`  Talk to it: mention <@${slack.botUserId}> in #${project.channelName} (project ${project.name}, revision ${project.revision}).`]),
+    ...(project === undefined ? [] : [`  ${connected.length === 0 ? "No connectors yet." : `Connected: ${connected.join(", ")}.`} Add ${connected.length === 0 ? "one" : "more"} with ${cli} connector add linear|jira|asana --project ${project.name}.`]),
+    // Owner decision 6: a connector saved with a warning says so again at the end.
+    ...connectors.flatMap((entry) => (entry.warning === undefined ? [] : [`  Warning (${CONNECTOR_LABELS[entry.type]}): ${entry.warning}.`])),
+    `  More projects: ${cli} project add, then ${cli} channel add.`,
+    `  Send a test alarm any time: ${cli} alerts test.`,
+  ].join("\n");
 }

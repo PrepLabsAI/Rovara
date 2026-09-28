@@ -1,7 +1,6 @@
 // agentx init (FR-015 to FR-020): find the release and region, read any install already under way,
 // ask and check and confirm on a first run, then run the steps. Every AWS, GitHub, Slack, browser
 // and clock dependency is overridable through InitCliDependencies (main.ts's CliDependencies.init).
-import { join } from "node:path";
 import { BudgetsClient } from "@aws-sdk/client-budgets";
 import { CloudFormationClient } from "@aws-sdk/client-cloudformation";
 import { CloudWatchClient } from "@aws-sdk/client-cloudwatch";
@@ -32,8 +31,11 @@ import {
   assertResumeFlagsMatch, checkAlertWebhook, collectInitAnswers, openRouterSecretName, persistInitAnswers, readOpenRouterKeyAnswer, storeAlertWebhook,
   webhookDisplay, webhookFlagDisplay, type CollectedAnswers, type InitFlags,
 } from "./answers.js";
-import { cloudFormationStatusReader, secretsManagerInitSecrets, type InitContext, type InitSecrets, type PreMadeGitHubApp, type SecretFlags, type StackStatusReader } from "./context.js";
+import {
+  cloudFormationStatusReader, secretsManagerInitSecrets, type FinishFlags, type InitContext, type InitSecrets, type PreMadeGitHubApp, type SecretFlags, type StackStatusReader,
+} from "./context.js";
 import { deployStep } from "./deploy-steps.js";
+import { finishSteps, readSettingsOrThrow, readyText } from "./finish-steps.js";
 import { githubAppStep, githubRestApi, type GitHubApi } from "./github-app.js";
 import { readInstallAnswers, readInstallProgress, type InitAnswers } from "./install-state.js";
 import { confirmInstallPlan } from "./plan.js";
@@ -66,6 +68,8 @@ export interface InitCliDependencies {
   releaseVersion?: string | null;
   /** Overrides how the run's deployment is built (tests: a cleanup that fails). */
   prepareDeployment?: typeof prepareDeployment;
+  /** Overrides the finishing steps' services (phase 15d2); every field not given is the real one. */
+  setup?: Partial<SetupServices>;
 }
 
 export interface InitOptions {
@@ -87,9 +91,14 @@ export interface InitOptions {
   preMadeGitHubApp?: PreMadeGitHubApp;
   /** --slack-install: answers the Slack step's "is it installed?" question (for --yes). */
   slackInstall?: "installed" | "approval";
+  /** The finishing steps' answers (--admin-email, --repository, --channel, --connectors, ...). */
+  finishFlags: FinishFlags;
+  /** The global --config-dir, where the first project's file is written. */
+  configDir: string;
 }
 
-export type InitResult = InitRunResult & { env: string; resumed: boolean; controlPlaneUrl?: string; nextSteps?: string };
+/** `ready` is the message a finished install ends with (readyText). */
+export type InitResult = InitRunResult & { env: string; resumed: boolean; controlPlaneUrl?: string; ready?: string };
 
 export function initSteps(input: { github: GitHubApi; slack: SlackApi }): InitStep<InitContext>[] {
   return [
@@ -108,6 +117,7 @@ export function initSteps(input: { github: GitHubApi; slack: SlackApi }): InitSt
     slackAppStep(input.slack),
     deployStep({ id: "slack-service", title: "Deploy the Slack service", after: verifySlackUrls }),
     developerSignInStep({ slack: input.slack }),
+    ...finishSteps(),
   ];
 }
 
@@ -120,29 +130,10 @@ function eventLine(event: InitEvent): string {
   }
 }
 
-export function nextStepsText(settings: EnvironmentSettings): string {
-  const { env, region } = settings;
-  const admin = settings.identity.mode === "cognito"
-    ? (() => {
-      const pool = settings.identity.issuer.split("/").at(-1) ?? "<user pool id>";
-      return [
-        `  1. Create your admin user: aws cognito-idp admin-create-user --user-pool-id ${pool} --username <your email> --region ${region}`,
-        `     then: aws cognito-idp admin-add-user-to-group --user-pool-id ${pool} --username <your email> --group-name agentx-admin --region ${region}`,
-      ];
-    })()
-    : ["  1. Make sure your own OIDC provider marks you as an AgentX administrator."];
-  return [
-    "Next, until agentx init does these too (a later AgentX release):",
-    ...admin,
-    `  2. agentx login --env ${env}`,
-    `  3. agentx admin project register and agentx admin slack bind, as in docs/architecture-production.md`,
-  ].join("\n");
-}
-
 const realSleep = (ms: number) => new Promise<void>((resolvePromise) => setTimeout(resolvePromise, ms));
 
 /** The real phase 15d2 services. Clients are only constructed here, never called, until a step
- * uses them. Tasks 7 to 13 add their fields. */
+ * uses them, so a test that overrides them (InitCliDependencies.setup) reaches no AWS. */
 export function realSetupServices(input: { region: string; fetch: typeof fetch; configDir: string; tokenStore?: TokenStore }): SetupServices {
   return {
     tokenStore: input.tokenStore ?? new SystemCredentialTokenStore(),
@@ -404,15 +395,14 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     }
   };
 
-  // Task 13 passes the global --config-dir here; until then init writes to the default directory.
-  const setup = realSetupServices({ region, fetch: fetchImplementation, configDir: join(services.home, ".agentx", "projects") });
+  const setup: SetupServices = { ...realSetupServices({ region, fetch: fetchImplementation, configDir: options.configDir }), ...deps.setup };
   const identity = finalAnswers.identity;
-  // Your own OIDC's admin claim, when the answers name one (Task 13 refuses answers that do not).
+  // F13: your own OIDC's admin claim, when the answers name both halves of it. The admin-user step
+  // refuses answers that do not (C6), before any session is opened.
   const adminClaim = identity.mode === "oidc" && identity.adminClaim !== undefined && identity.adminValues !== undefined
     ? { claim: identity.adminClaim, values: identity.adminValues } : undefined;
   const adminSession = async () => {
-    const settings = await readEnvironmentSettings(store, env);
-    if (settings === undefined) throw agentXError("CONFIG_INVALID", `environment ${env} has no settings yet; the Slack service step must finish first, so run agentx init again`);
+    const settings = await readSettingsOrThrow(store, env);
     return openAdminSession({
       settings, services: setup, write, now,
       ...(options.browser ? { openBrowser: neverThrowingBrowser(deps.openBrowser ?? openSystemBrowser, write) } : {}),
@@ -457,7 +447,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     runPrerequisites,
     setup,
     adminSession,
-    flags: {},
+    flags: options.finishFlags,
   };
 
   try {
@@ -477,9 +467,11 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
       }),
     });
     const settings = result.status === "complete" ? await readEnvironmentSettings(store, env) : undefined;
+    const progress = result.status === "complete" ? await readInstallProgress(store, env) : undefined;
     return {
       ...result, env, resumed: stored !== undefined,
-      ...(settings === undefined ? {} : { controlPlaneUrl: settings.controlPlaneUrl, nextSteps: nextStepsText(settings) }),
+      ...(settings === undefined ? {} : { controlPlaneUrl: settings.controlPlaneUrl }),
+      ...(settings === undefined || progress === undefined ? {} : { ready: readyText({ env, controlPlaneUrl: settings.controlPlaneUrl, progress }) }),
     };
   } finally {
     // Whether init succeeded or failed; a deployment that failed to build has nothing to clean up.

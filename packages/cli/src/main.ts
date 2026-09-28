@@ -42,7 +42,8 @@ import { cloudFormationStackReader, stsCallerIdentity, type CallerIdentity, type
 import { resolveDeploymentFile } from "./environments/cache.js";
 import { DEFAULT_CLASSIFIER_MODEL, DEFAULT_ORCHESTRATOR_MODEL, DEFAULT_WORKER_MODEL, type InitFlags } from "./init/answers.js";
 import { runInit, type InitCliDependencies, type InitOptions } from "./init/commands.js";
-import type { SecretFlags } from "./init/context.js";
+import type { FinishFlags, SecretFlags } from "./init/context.js";
+import { parseConnectorsFlag } from "./init/finish-steps.js";
 import { runEnvAdopt, runEnvList, runEnvUse } from "./environments/commands.js";
 import { ssmParameterStore, type ParameterStore } from "./environments/parameter-store.js";
 import { settingsParameterName } from "./environments/settings.js";
@@ -700,7 +701,26 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--slack-signing-secret-file <path>", "file holding the Slack signing secret")
     .option("--slack-signing-secret-env <NAME>", "environment variable holding the Slack signing secret")
     .option("--worker-image <digest-ref>", "worker image by digest (testing only)")
-    .option("--slack-image <digest-ref>", "Slack service image by digest (testing only)"),
+    .option("--slack-image <digest-ref>", "Slack service image by digest (testing only)")
+    .option("--admin-email <email>", "Cognito: your email, for the AgentX admin user")
+    .option("--repository <owner/name>", "the first project's repository")
+    .option("--project-name <name>", "the first project's name (default: the repository's)")
+    .option("--setup-command <command>", "the first project's setup command, or \"\" for none")
+    .option("--test-command <command>", "the first project's test command, or \"\" for none")
+    .option("--channel <name>", "the Slack channel for the first project")
+    .option("--connectors <list>", "connectors to add now: comma-separated linear, jira, asana, or none")
+    .option("--linear-key-file <path>", "file holding the Linear API key")
+    .option("--linear-key-env <NAME>", "environment variable holding the Linear API key")
+    .option("--linear-team <id or key>", "the Linear team the first project may use")
+    .option("--jira-site <site>", "the <site> in <site>.atlassian.net")
+    .option("--jira-project <key>", "the Jira project key")
+    .option("--jira-token-file <path>", "file holding the Jira service account's API token")
+    .option("--jira-token-env <NAME>", "environment variable holding the Jira service account's API token")
+    .option("--asana-client-id <id>", "the Asana MCP app's Client ID")
+    .option("--asana-client-secret-file <path>", "file holding the Asana app's Client secret")
+    .option("--asana-client-secret-env <NAME>", "environment variable holding the Asana app's Client secret")
+    .option("--asana-bot-email <email>", "the Asana bot user's email; a sign-in by any other account is refused")
+    .option("--asana-project <gid>", "the Asana project's GID"),
   )
     .addOption(new Option(`${SIGNIN_FLAG_NAMES.methods} <method>`, "how developers sign in: Slack (default), your company's sign-in (oidc), or both").choices(["slack", "oidc", "both"]))
     .action(async (
@@ -709,7 +729,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     ) => {
       const globals = globalOptions(command);
       if (options.export === undefined) {
-        const result = await runInit(initOptions(globals.env, options, command), dependencies.init ?? {}, { stderr: services.stderr, home });
+        const result = await runInit(initOptions(globals, options, command), dependencies.init ?? {}, { stderr: services.stderr, home });
         if (globals.json) {
           services.stdout.write(formatSuccess(result, true));
           return;
@@ -718,7 +738,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
           services.stdout.write(`${result.message}\n`);
           return;
         }
-        services.stdout.write(`AgentX environment ${result.env} is deployed. Control plane: ${result.controlPlaneUrl ?? "unknown"}\n${result.nextSteps ?? ""}\n`);
+        services.stdout.write(`${result.ready ?? `AgentX environment ${result.env} is deployed. Control plane: ${result.controlPlaneUrl ?? "unknown"}`}\n`);
         return;
       }
       // --env defaults to production (the live, legacy-adopted deployment): --export must never
@@ -908,11 +928,26 @@ interface InitCommandOptions extends SignInCommandOptions {
   workerImage?: string; slackImage?: string;
   /** --signin: which developer sign-in methods agentx init's developer-signin step enables. */
   signin?: "slack" | "oidc" | "both";
+  adminEmail?: string; repository?: string; projectName?: string; setupCommand?: string; testCommand?: string; channel?: string; connectors?: string;
+  linearKeyFile?: string; linearKeyEnv?: string; linearTeam?: string;
+  jiraSite?: string; jiraProject?: string; jiraTokenFile?: string; jiraTokenEnv?: string;
+  asanaClientId?: string; asanaClientSecretFile?: string; asanaClientSecretEnv?: string; asanaBotEmail?: string; asanaProject?: string;
 }
 
 /** `agentx init`'s options, built from only what was typed: a commander default (the models,
  * --identity, --no-alerts's true) must never silently answer a question init would otherwise ask. */
-function initOptions(env: string, options: InitCommandOptions, command: Command): InitOptions {
+function initOptions(globals: GlobalOptions, options: InitCommandOptions, command: Command): InitOptions {
+  const { env } = globals;
+  // A --connectors typo fails here, before anything is asked or deployed.
+  if (options.connectors !== undefined) parseConnectorsFlag(options.connectors);
+  const finishFlags = definedEntries<FinishFlags>({
+    adminEmail: options.adminEmail, repository: options.repository, projectName: options.projectName,
+    setupCommand: options.setupCommand, testCommand: options.testCommand, channel: options.channel, connectors: options.connectors,
+    linearKey: secretSource(options.linearKeyFile, options.linearKeyEnv), linearTeam: options.linearTeam,
+    jiraSite: options.jiraSite, jiraProject: options.jiraProject, jiraToken: secretSource(options.jiraTokenFile, options.jiraTokenEnv),
+    asanaClientId: options.asanaClientId, asanaClientSecret: secretSource(options.asanaClientSecretFile, options.asanaClientSecretEnv),
+    asanaBotEmail: options.asanaBotEmail, asanaProject: options.asanaProject,
+  });
   const typed = <T>(name: string, value: T): T | undefined => (command.getOptionValueSource(name) === "cli" ? value : undefined);
   const flags = definedEntries<InitFlags>({
     engine: options.engine,
@@ -962,6 +997,8 @@ function initOptions(env: string, options: InitCommandOptions, command: Command)
     signinFlags: definedEntries<SigninFlags>({ methods: options.signin, ...signin.flags }),
     ...(appId === undefined || installationId === undefined ? {} : { preMadeGitHubApp: { appId, installationId } }),
     ...(options.slackInstall === undefined ? {} : { slackInstall: options.slackInstall }),
+    finishFlags,
+    configDir: globals.configDir,
   };
 }
 

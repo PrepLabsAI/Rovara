@@ -392,6 +392,19 @@ describe("the admin-user init step", () => {
     expect(progress.value().admin).toEqual({ username: "00u1abcd", mode: "oidc" });
   });
 
+  it("refuses your own OIDC install whose answers name no admin claim, before any sign-in (F13, C6)", async () => {
+    const login = fakeLogin({ accessToken: accessToken({ sub: "00u1abcd", email: "bob@example.com" }), expiresAt: T0 + 3_600_000 });
+    context = initContext({
+      answers: sampleAnswers({ identity: { mode: "oidc", issuer: "https://login.example.com", audience: "agentx", clientId: "cli" } }),
+      setup: setupServices({ login }),
+    });
+    (context.store as MemoryParameterStore).values.set("/agentx/staging/settings", JSON.stringify(oidcSettings));
+    const progress = progressHandle();
+    await expect(adminUserStep().run(context, progress)).rejects.toThrow("the install's answers name no admin claim; ");
+    expect(login.calls).toEqual([]);
+    expect(progress.value().admin).toBeUndefined();
+  });
+
   it("refuses to run before the environment has settings, saying what to do", async () => {
     context = initContext({ prompter: scriptedPrompter([]) });
     await expect(adminUserStep().run(context, progressHandle())).rejects.toThrow("environment staging has no settings yet; the Slack service step must finish first, so run agentx init again");
