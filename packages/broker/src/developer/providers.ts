@@ -4,7 +4,9 @@ import { jwtVerify, type JWTPayload, type JWTVerifyGetKey } from "jose";
 import { SLACK_OIDC_ISSUER, SlackTeamIdSchema, SlackUserIdSchema, cleanDisplayName, type DeveloperSignInMethod } from "@agentx/contracts";
 
 export interface ProviderIdentity { method: DeveloperSignInMethod; issuer: string; subject: string; displayName: string; email?: string; slackUserId?: string }
-export type ProviderResult = { ok: true; identity: ProviderIdentity } | { ok: false; reason: string };
+/** `wrongAccount`: the person signed in fine but is not one AgentX accepts (another Slack workspace,
+ * or without the required claim), so signing in as someone else may help. */
+export type ProviderResult = { ok: true; identity: ProviderIdentity } | { ok: false; reason: string; wrongAccount?: true };
 /** The provider could not be reached; try again. */
 export class ProviderUnavailableError extends Error { override name = "ProviderUnavailableError"; }
 /** An admin must finish setting the provider up. */
@@ -97,7 +99,7 @@ export function slackSignInProvider(input: {
       const verified = await verifyIdToken(body.id_token, input.jwks, { issuer: SLACK_OIDC_ISSUER, audience: clientId, nonce, now: input.now() });
       if (!verified.ok) return verified;
       const team = verified.payload["https://slack.com/team_id"];
-      if (team !== teamId) return { ok: false, reason: `you signed in to Slack workspace ${SlackTeamIdSchema.safeParse(team).data ?? "unknown"}, but this AgentX serves ${teamId}` };
+      if (team !== teamId) return { ok: false, wrongAccount: true, reason: `you signed in to Slack workspace ${SlackTeamIdSchema.safeParse(team).data ?? "unknown"}, but this AgentX serves ${teamId}` };
       const userId = SlackUserIdSchema.safeParse(verified.payload["https://slack.com/user_id"]);
       if (!userId.success) return { ok: false, reason: "Slack's identity token names no Slack user; run agentx login again" };
       const email = verifiedEmail(verified.payload);
@@ -169,7 +171,7 @@ export function oidcSignInProvider(input: {
         const raw = payload[input.requiredClaim];
         const values = Array.isArray(raw) ? raw.filter((entry): entry is string => typeof entry === "string") : typeof raw === "string" ? raw.split(/[\s,]+/) : [];
         if (!input.requiredValues.some((value) => values.includes(value))) {
-          return { ok: false, reason: `this AgentX requires the ${input.requiredClaim} claim to include ${input.requiredValues.join(" or ")}` };
+          return { ok: false, wrongAccount: true, reason: `this AgentX requires the ${input.requiredClaim} claim to include ${input.requiredValues.join(" or ")}` };
         }
       }
       if (typeof payload.sub !== "string" || payload.sub === "") return { ok: false, reason: "the identity token has no subject; ask an admin to check the company sign-in app" };

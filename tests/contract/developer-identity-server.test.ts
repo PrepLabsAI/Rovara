@@ -155,7 +155,8 @@ describe("Sign in with Slack end to end (US4 scenario 1, FR-003, FR-005, FR-008)
     const back = await h.signIn("slack", maya.userId, { teamId: "T0OTHER1" });
     expect(back.searchParams.get("code")).toBeNull();
     expect(back.searchParams.get("error")).toBe("access_denied");
-    expect(back.searchParams.get("error_description")).toBe(`you signed in to Slack workspace T0OTHER1, but this AgentX serves ${TEAM}`);
+    // The hint matters: a provider that silently reuses the refused account's session refuses again.
+    expect(back.searchParams.get("error_description")).toBe(`you signed in to Slack workspace T0OTHER1, but this AgentX serves ${TEAM}. If you signed in with the wrong account, sign out of Slack or use a private window, then try again.`);
     expect(h.db.get(`DEVELOPER#${mayaId}`, "META")).toBeUndefined();
     expect(h.logs.some((entry) => entry.event === "signin.refused" && entry.method === "slack")).toBe(true);
   });
@@ -206,7 +207,7 @@ describe("company sign-in (US4 scenario 3, FR-004, FR-012)", () => {
   it("refuses a person outside the required group, naming it", async () => {
     const h = identityHarness({ slack: false, oidc: { requiredClaim: "groups", requiredValues: ["engineering"] }, oidcUsers: [sam] });
     const back = await h.signIn("oidc", "okta-sam");
-    expect(back.searchParams.get("error_description")).toBe("this AgentX requires the groups claim to include engineering");
+    expect(back.searchParams.get("error_description")).toBe("this AgentX requires the groups claim to include engineering. If you signed in with the wrong account, sign out of Okta or use a private window, then try again.");
   });
 
   it("links a company user to the Slack user with the same verified email", async () => {

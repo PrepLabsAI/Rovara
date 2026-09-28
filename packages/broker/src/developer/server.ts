@@ -212,7 +212,9 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     }
     if (!result.ok) {
       deps.log({ event: "signin.refused", method, reason: result.reason });
-      return client({ error: "access_denied", error_description: result.reason });
+      // A provider may quietly reuse the refused account's session on the next try, so say how to switch.
+      const hint = result.wrongAccount === true ? `. If you signed in with the wrong account, sign out of ${methodLabel(method)} or use a private window, then try again.` : "";
+      return client({ error: "access_denied", error_description: `${result.reason}${hint}` });
     }
     const identity = result.identity;
     const developerId = ownerKeyForSubject(identity.issuer, identity.subject);

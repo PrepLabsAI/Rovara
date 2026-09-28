@@ -48,7 +48,7 @@ describe("Sign in with Slack (FR-003)", () => {
     const { fake, provider } = slack();
     const authorize = await provider.authorizeUrl({ state: "s1", nonce: "n1", redirectUri: slackCallback });
     const result = await provider.complete({ code: await codeFrom(fake.approve(authorize, maya.userId, { teamId: "T0OTHER1" })), nonce: "n1", redirectUri: slackCallback });
-    expect(result).toEqual({ ok: false, reason: `you signed in to Slack workspace T0OTHER1, but this AgentX serves ${TEAM}` });
+    expect(result).toEqual({ ok: false, wrongAccount: true, reason: `you signed in to Slack workspace T0OTHER1, but this AgentX serves ${TEAM}` });
   });
 
   it("refuses a nonce that does not match", async () => {
@@ -56,6 +56,8 @@ describe("Sign in with Slack (FR-003)", () => {
     const authorize = await provider.authorizeUrl({ state: "s1", nonce: "n1", redirectUri: slackCallback });
     const result = await provider.complete({ code: await codeFrom(fake.approve(authorize, maya.userId)), nonce: "other", redirectUri: slackCallback });
     expect(result.ok).toBe(false);
+    // Not the account's fault, so no "sign in with another account" hint.
+    expect(result).not.toHaveProperty("wrongAccount");
     expect(!result.ok && result.reason).toMatch(/nonce/);
   });
 
@@ -191,7 +193,7 @@ describe("company sign-in (FR-004)", () => {
 
   it("refuses a person outside the required group and names the group (US4 scenario 3)", async () => {
     const { fake, provider } = oidc("groups", ["engineering", "platform"]);
-    expect(await signIn(provider, fake, "okta-2")).toEqual({ ok: false, reason: "this AgentX requires the groups claim to include engineering or platform" });
+    expect(await signIn(provider, fake, "okta-2")).toEqual({ ok: false, wrongAccount: true, reason: "this AgentX requires the groups claim to include engineering or platform" });
   });
 
   it("drops an unverified email", async () => {
