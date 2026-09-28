@@ -6,6 +6,7 @@ export * from "./errors.js";
 export * from "./connectors.js";
 export * from "./credentials.js";
 export * from "./developer.js";
+export * from "./developer-tasks.js";
 export * from "./display-name.js";
 export * from "./environments.js";
 export * from "./github-mcp.js";
