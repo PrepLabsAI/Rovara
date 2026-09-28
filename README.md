@@ -128,8 +128,15 @@ An administrator can release a thread workspace's idle compute without losing it
 agentx admin workspace stop --workspace <workspace-id>
 ```
 
+An administrator can also stop any workspace's running coding task. The task ends CANCELLED and the
+workspace takes the next request:
+
+```sh
+agentx admin workspace cancel --workspace <workspace-id>
+```
+
 Run `agentx --help` or `agentx <command> --help` for the complete surface: `login`,
-`admin project register`, `admin workspace stop`, and `admin slack bind|unbind`. There is no
+`admin project register`, `admin workspace cancel|stop`, and `admin slack bind|unbind`. There is no
 developer command; coding work happens only in Slack.
 
 An admin command's exit code names the kind of failure: 2 for invalid input, 3 when login is
@@ -368,6 +375,17 @@ workspace over either limit, AgentX prepares nothing and says which limit was re
 member limit, it also links that member's existing threads. It still answers any part of the
 request that connectors can answer. An administrator can change the limits with the
 `AgentXControlPlane` parameters `SlackMemberWorkspaceLimit` and `SlackOrganizationWorkspaceLimit`.
+
+To stop the thread's running coding task, mention AgentX in the thread with just a stop request:
+
+```text
+@AgentX stop
+```
+
+`abort`, `halt`, `stop it`, `cancel the task` and `please stop` work too; only the whole message counts,
+so `@AgentX stop using tabs` is an ordinary request. A bare `@AgentX cancel` still declines a pending
+confirmation. Any member of the channel can stop the task. AgentX replies that it is stopping, and the
+task ends as cancelled. When nothing is running, the message goes to AgentX like any other request.
 
 To release a thread workspace, mention AgentX in that thread with an explicit close request:
 

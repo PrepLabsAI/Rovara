@@ -25,7 +25,9 @@ function harness(options: {
   failCount?: number;
   failRelease?: number;
   failDecrement?: number;
+  stop?: { outcome?: "CANCEL_REQUESTED" | "NOTHING_RUNNING"; throws?: boolean };
 } = {}) {
+  const stopCalls: Array<{ thread: unknown; userId: string }> = [];
   const memberChecks: string[] = [];
   const clock = { seconds: nowSeconds };
   const turnWindows: Array<{ subject: string; windowStart: number; expiresAt: number }> = [];
@@ -76,6 +78,13 @@ function harness(options: {
     },
     now: () => clock.seconds * 1_000,
     log: (event, fields) => logs.push({ event, fields }),
+    ...(options.stop === undefined ? {} : {
+      stopTask: async (thread: unknown, userId: string) => {
+        stopCalls.push({ thread, userId });
+        if (options.stop?.throws) throw new Error("broker unavailable");
+        return options.stop?.outcome ?? "CANCEL_REQUESTED";
+      },
+    }),
     ...(options.turnsPerMinute === undefined ? {} : {
       turnLimit: {
         perMinute: options.turnsPerMinute,
@@ -111,7 +120,7 @@ function harness(options: {
       },
     }),
   });
-  return { handler, queue, posts, pending, logs, memberChecks, clock, turnWindows, turnReleases };
+  return { handler, queue, posts, pending, logs, memberChecks, clock, turnWindows, turnReleases, stopCalls };
 }
 
 function signedEvent(payload: unknown, options: { timestamp?: number; signature?: string; base64?: boolean } = {}) {
@@ -614,5 +623,49 @@ describe("Slack ingress deployment settings (spec 014 FR-011, FR-012)", () => {
     [{ SLACK_THREAD_TURNS_PER_MINUTE: "" }, /1 to 60/],
   ])("refuses %j", (environment, message) => {
     expect(() => slackIngressSettings(environment)).toThrow(message);
+  });
+});
+
+describe("the stop command (#126)", () => {
+  const stopMention = (text: string, eventId = "EvStop00001") => signedEvent(mention({ eventId, event: { text: `<@${bot}> ${text}` } }));
+
+  it("stops the thread's running task before the queue, and says so in the thread", async () => {
+    const { handler, queue, posts, stopCalls, pending } = harness({ stop: { outcome: "CANCEL_REQUESTED" } });
+    expect((await send(handler, stopMention("stop"))).status).toBe(200);
+    expect(stopCalls).toHaveLength(1);
+    expect(stopCalls[0]?.userId).toBe(pratik);
+    expect(stopCalls[0]?.thread).toMatchObject({ teamId: team, channelId: channel });
+    expect(queue).toEqual([]);
+    expect([...pending.values()]).toEqual([]);
+    expect(posts.map((post) => post.text)).toEqual(["Stopping the running task. I'll reply here once it has stopped."]);
+  });
+
+  it("passes the message to the orchestrator when nothing is running", async () => {
+    const { handler, queue, posts, stopCalls } = harness({ stop: { outcome: "NOTHING_RUNNING" } });
+    await send(handler, stopMention("cancel it"));
+    expect(stopCalls).toHaveLength(1);
+    expect(queue.map((entry) => entry.message.text)).toEqual(["cancel it"]);
+    expect(posts.map((post) => post.text)).not.toContain("Stopping the running task. I'll reply here once it has stopped.");
+  });
+
+  it("treats only a whole-message stop as the command", async () => {
+    const { handler, queue, stopCalls } = harness({ stop: {} });
+    await send(handler, stopMention("stop using tabs in index.html", "EvStop00002"));
+    expect(stopCalls).toEqual([]);
+    expect(queue.map((entry) => entry.message.text)).toEqual(["stop using tabs in index.html"]);
+  });
+
+  it("tells the thread when the stop could not be requested, and does not queue it", async () => {
+    const { handler, queue, posts, logs } = harness({ stop: { throws: true } });
+    expect((await send(handler, stopMention("please stop the task"))).status).toBe(200);
+    expect(queue).toEqual([]);
+    expect(posts.map((post) => post.text)).toEqual(["I couldn't stop the running task. Try again in a moment."]);
+    expect(logs.map((entry) => entry.event)).toContain("stop.failed");
+  });
+
+  it("leaves stop as an ordinary request when the ingress has no stop wiring", async () => {
+    const { handler, queue } = harness();
+    await send(handler, stopMention("stop"));
+    expect(queue.map((entry) => entry.message.text)).toEqual(["stop"]);
   });
 });

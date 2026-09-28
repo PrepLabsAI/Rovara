@@ -3938,6 +3938,9 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         },
         "Environment": {
           "Variables": {
+            "BROKER_FUNCTION_NAME": {
+              "Ref": "BrokerE1355FD6",
+            },
             "SLACK_APP_POSTED_MESSAGES": {
               "Ref": "SlackAppPostedMessages",
             },
@@ -4191,6 +4194,32 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                   "Arn",
                 ],
               },
+            },
+            {
+              "Action": "lambda:InvokeFunction",
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "BrokerE1355FD6",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "BrokerE1355FD6",
+                          "Arn",
+                        ],
+                      },
+                      ":*",
+                    ],
+                  ],
+                },
+              ],
             },
             {
               "Action": [

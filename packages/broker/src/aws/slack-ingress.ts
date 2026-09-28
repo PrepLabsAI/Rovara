@@ -9,6 +9,7 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SendMessageCommand, SQSClient } from "@aws-sdk/client-sqs";
+import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import {
   SlackChannelBindingSchema,
   SlackChannelIdSchema,
@@ -16,6 +17,7 @@ import {
   SlackRequestMessageSchema,
   SlackTeamIdSchema,
   SlackUserIdSchema,
+  isStopCommand,
   parseConfirmationReply,
   queuedBehindAttributes,
   slackRequestText,
@@ -48,6 +50,11 @@ export interface SlackIngressDependencies {
   /** `queuedBehind` is how many earlier requests in the thread this one waits behind (spec 014 FR-026). */
   enqueue: (message: SlackRequestMessage, messageGroupId: string, queuedBehind: number) => Promise<void>;
   postMessage: (input: { channel: string; threadTs: string; text: string }) => Promise<void>;
+  /**
+   * The stop command (#126): cancels the thread's running task, which the thread's queued messages
+   * would otherwise wait behind. Absent: "stop" is an ordinary request.
+   */
+  stopTask?: (thread: SlackThread, userId: string) => Promise<"CANCEL_REQUESTED" | "NOTHING_RUNNING">;
   now?: () => number;
   log?: SlackIngressLog;
   /**
@@ -176,6 +183,22 @@ export function createSlackIngressHandler(dependencies: SlackIngressDependencies
       await post(dependencies, log, thread, "Please include a request after mentioning AgentX.");
       log("mention.empty", { eventId: mention.eventId });
       return respond(200, { ok: true });
+    }
+    if (dependencies.stopTask && isStopCommand(text)) {
+      let outcome: "CANCEL_REQUESTED" | "NOTHING_RUNNING";
+      try {
+        outcome = await dependencies.stopTask(thread, mention.userId);
+      } catch {
+        log("stop.failed", { eventId: mention.eventId });
+        await post(dependencies, log, thread, "I couldn't stop the running task. Try again in a moment.", "stop.notice_failed");
+        return respond(200, { ok: true });
+      }
+      log("stop.requested", { eventId: mention.eventId, outcome });
+      if (outcome === "CANCEL_REQUESTED") {
+        await post(dependencies, log, thread, "Stopping the running task. I'll reply here once it has stopped.", "stop.notice_failed");
+        return respond(200, { ok: true });
+      }
+      // Nothing is running: the request goes to the orchestrator like any other.
     }
     const message = SlackRequestMessageSchema.parse({
       version: 1,
@@ -374,10 +397,12 @@ function createAwsSlackIngressHandler() {
   });
   const sqs = new SQSClient(clientConfiguration);
   const secretsManager = new SecretsManagerClient(clientConfiguration);
+  const lambda = new LambdaClient(clientConfiguration);
   const stateTableName = requiredEnvironment("STATE_TABLE_NAME");
   const threadsTableName = requiredEnvironment("SLACK_THREADS_TABLE_NAME");
   const queueUrl = requiredEnvironment("SLACK_REQUEST_QUEUE_URL");
   const secretArn = requiredEnvironment("SLACK_SECRET_ARN");
+  const brokerFunctionName = process.env.BROKER_FUNCTION_NAME;
   const settings = slackIngressSettings(process.env);
   let cached: { secrets: Promise<SlackSecrets>; loadedAt: number } | undefined;
   const secrets = (): Promise<SlackSecrets> => {
@@ -476,6 +501,23 @@ function createAwsSlackIngressHandler() {
     async postMessage(input) {
       await postSlackMessage((await secrets()).botToken, input);
     },
+    ...(brokerFunctionName === undefined ? {} : {
+      // The broker holds the state table and callback key; this Lambda gets neither (#126).
+      async stopTask(thread: SlackThread, userId: string) {
+        const response = await lambda.send(new InvokeCommand({
+          FunctionName: brokerFunctionName,
+          InvocationType: "RequestResponse",
+          Payload: Buffer.from(JSON.stringify({ source: "agentx.slack-ingress", action: "stop-task", thread, userId })),
+        }));
+        if (response.FunctionError !== undefined || response.Payload === undefined) throw new Error("broker stop failed");
+        const reply = JSON.parse(Buffer.from(response.Payload).toString("utf8")) as { statusCode?: number; body?: string };
+        const body = JSON.parse(reply.body ?? "{}") as { outcome?: unknown };
+        if (reply.statusCode !== 200 || (body.outcome !== "CANCEL_REQUESTED" && body.outcome !== "NOTHING_RUNNING")) {
+          throw new Error("broker stop failed");
+        }
+        return body.outcome;
+      },
+    }),
     log(event, fields) {
       console.log(JSON.stringify({ component: "slack-ingress", event, ...fields }));
     },
