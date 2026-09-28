@@ -1,0 +1,89 @@
+// Spec 025 FR-049: every tool error has a stable code, a plain message and a next step.
+import { redactText } from "@agentx/contracts";
+
+export const TOOL_ERROR_CODES = [
+  "SIGN_IN_REQUIRED", "SIGN_IN_REJECTED", "ADMIN_REQUIRED", "PROJECT_NOT_FOUND", "PROJECT_ACCESS_DENIED",
+  "PROJECT_TASKS_DISABLED", "TASK_NOT_FOUND", "CHANNEL_REQUIRED", "CHANNEL_AMBIGUOUS", "WORKSPACE_LIMIT", "TASK_BUSY",
+  "SLACK_UNAVAILABLE", "CONFIRMATION_UNAVAILABLE", "CONFIRMATION_DECLINED", "CONFIRMATION_EXPIRED", "CHANGE_STALE",
+  "UPGRADE_REQUIRED", "CONTROL_PLANE_UNAVAILABLE", "INVALID_REQUEST",
+] as const;
+export type ToolErrorCode = (typeof TOOL_ERROR_CODES)[number];
+
+export const NEXT_STEPS: Record<ToolErrorCode, string> = {
+  SIGN_IN_REQUIRED: "run npx @charterarc/agentx login <your AgentX URL>",
+  SIGN_IN_REJECTED: "contact an AgentX admin; the message says why the sign-in was refused",
+  ADMIN_REQUIRED: "run npx @charterarc/agentx login --admin",
+  PROJECT_NOT_FOUND: "run agentx_list_projects to see the projects you can use",
+  PROJECT_ACCESS_DENIED: "join one of the project's Slack channels, or ask an admin for access",
+  PROJECT_TASKS_DISABLED: "use the project's Slack channel, or ask an admin",
+  TASK_NOT_FOUND: "run agentx_list_tasks to see your tasks",
+  CHANNEL_REQUIRED: "start the task without share_to_channel, or use the project's Slack channel",
+  CHANNEL_AMBIGUOUS: "name one of the project's channels",
+  WORKSPACE_LIMIT: "close a task you no longer need with agentx_close_task",
+  TASK_BUSY: "wait with agentx_wait_for_task, or stop the task with agentx_cancel_task",
+  SLACK_UNAVAILABLE: "try again in a few minutes; projects an admin granted you still work",
+  CONFIRMATION_UNAVAILABLE: "use a client that supports elicitation, link a Slack user, or use the agentx CLI",
+  CONFIRMATION_DECLINED: "ask for the change again",
+  CONFIRMATION_EXPIRED: "ask for the change again",
+  CHANGE_STALE: "ask for the change again",
+  UPGRADE_REQUIRED: "run npx -y @charterarc/agentx@latest mcp install --client <claude-code, codex or cursor>",
+  CONTROL_PLANE_UNAVAILABLE: "check your connection and try again",
+  INVALID_REQUEST: "fix the input the message names and try again",
+};
+
+/**
+ * Ruling S1: UPGRADE_REQUIRED's next step when the control plane, not this CLI, is too old
+ * (older than DEVELOPER_API_VERSION's minor, so it has no task routes).
+ */
+export const UPGRADE_AGENTX_STEP = "ask your AgentX admin to upgrade AgentX, or use an older CLI";
+
+export class ToolError extends Error {
+  constructor(readonly code: ToolErrorCode, message: string, readonly nextStep: string = NEXT_STEPS[code]) {
+    super(message);
+    this.name = "ToolError";
+  }
+}
+
+// eslint-disable-next-line no-control-regex
+const CONTROL = /[\u0000-\u001f\u007f-\u009f]/g;
+/** Server text made safe to show: credentials redacted, no control characters, at most 1,000 characters. */
+export function plainText(value: unknown, fallback: string): string {
+  if (typeof value !== "string") return fallback;
+  const clean = redactText(value.replace(CONTROL, " ")).trim().slice(0, 1_000);
+  return clean === "" ? fallback : clean;
+}
+
+/** Broker codes whose meaning, words and next step are the tool's too (P6: exactly these eight). */
+const PASSED_THROUGH = new Set<string>(["PROJECT_NOT_FOUND", "PROJECT_ACCESS_DENIED", "PROJECT_TASKS_DISABLED", "TASK_NOT_FOUND", "TASK_BUSY", "CHANNEL_REQUIRED", "WORKSPACE_LIMIT", "SLACK_UNAVAILABLE"]);
+/**
+ * A task that moved on under an action: the busy answers of the existing handlers, and a cancel
+ * that raced the task's own result (Task 11 passes both through with words naming the tool).
+ */
+const BUSY = new Set<string>(["WORKSPACE_BUSY", "WORKSPACE_NOT_READY", "STALE_FENCE"]);
+/** Owner decision 4 (P6): input the control plane refuses. */
+const INVALID = new Set<string>(["CONFIG_INVALID", "IDEMPOTENCY_CONFLICT"]);
+
+/** True when a control-plane error code is an answer to show, not an outage to try again. */
+export function isMeaningfulCode(code: string | undefined): boolean {
+  return code !== undefined && (PASSED_THROUGH.has(code) || BUSY.has(code) || INVALID.has(code) || code === "AUTH_REQUIRED");
+}
+
+// Ruling F16: the placeholder "<your AgentX URL>" is kept whole.
+const SIGN_IN = /\brun (npx @charterarc\/agentx login (?:<[^>]+>|\S+))/;
+
+/** The exact sign-in command from a message, else the session's own. */
+export function signInStep(message: string, fallback: string): string {
+  return `run ${SIGN_IN.exec(message)?.[1] ?? fallback}`;
+}
+
+/** A control-plane error answer as the tool error of FR-049. */
+export function toolErrorFromResponse(status: number, value: unknown, signInCommand: string): ToolError {
+  const error = typeof value === "object" && value !== null ? (value as { error?: { code?: unknown; message?: unknown } }).error : undefined;
+  const code = typeof error?.code === "string" ? error.code : undefined;
+  const message = plainText(error?.message, `AgentX answered HTTP ${status}`);
+  if (status === 401 || code === "AUTH_REQUIRED") return new ToolError("SIGN_IN_REQUIRED", message, `run ${signInCommand}`);
+  if (code !== undefined && PASSED_THROUGH.has(code)) return new ToolError(code as ToolErrorCode, message);
+  if (code !== undefined && BUSY.has(code)) return new ToolError("TASK_BUSY", message);
+  if (code !== undefined && INVALID.has(code)) return new ToolError("INVALID_REQUEST", message);
+  return new ToolError("CONTROL_PLANE_UNAVAILABLE", message);
+}
