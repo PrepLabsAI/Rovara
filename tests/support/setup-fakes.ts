@@ -5,6 +5,7 @@ import { tokenStoreKey, type LoginOptions } from "../../packages/cli/src/auth.js
 import type { EnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import type { StoredTokens, TokenStore } from "../../packages/cli/src/token-store.js";
 import type { CognitoAdmin, SetupServices } from "../../packages/cli/src/setup/services.js";
+import type { LinearTeam, VendorApi } from "../../packages/cli/src/setup/connectors/vendors.js";
 import type { GitHubRepositoryApi } from "../../packages/cli/src/setup/project-files.js";
 import { SlackRateLimitedError, type SlackChannel, type SlackChannelApi } from "../../packages/cli/src/setup/channel-add.js";
 import { fakeGitHubApi } from "./init-fakes.js";
@@ -156,6 +157,20 @@ export function fakeSlackChannels(channels: SlackChannel[], options: { visibleAf
   };
 }
 
+/** `linearTeams` answers `vendors.linearTeams`; `linearRefuses` makes it throw the way a 401 or a
+ * GraphQL error does (a VendorRefused-named Error, matched by name, never by message text). */
+export function fakeVendors(options: { linearTeams?: LinearTeam[]; linearRefuses?: boolean } = {}): VendorApi & { calls: string[] } {
+  const calls: string[] = [];
+  return {
+    calls,
+    async linearTeams() {
+      calls.push("linearTeams");
+      if (options.linearRefuses === true) throw Object.assign(new Error("401"), { name: "VendorRefused" });
+      return options.linearTeams ?? [{ id: "c408e946-78aa-4db8-923e-f78053dd954f", key: "PAY", name: "Payments" }];
+    },
+  };
+}
+
 /** Every SetupServices field has a default here, with no cast (F20): a task that adds a field must
  * add its fake, or this stops type-checking. */
 export function setupServices(overrides: Partial<SetupServices> = {}): SetupServices {
@@ -172,6 +187,7 @@ export function setupServices(overrides: Partial<SetupServices> = {}): SetupServ
     configDir: join(tmpdir(), "agentx-setup-unused"),
     slackChannels: fakeSlackChannels([]),
     slackIdentity: async () => ({ teamId: "T0123456789", botUserId: "U0BOT00001" }),
+    vendors: fakeVendors(),
     ...overrides,
   };
 }

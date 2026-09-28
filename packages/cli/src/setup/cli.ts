@@ -3,9 +3,11 @@
 import { agentXError, AgentXNameSchema } from "@agentx/contracts";
 import type { Command } from "commander";
 import { readSlackBotToken } from "../init/slack-app.js";
-import { definedEntries } from "../signin/cli.js";
+import { definedEntries, secretSource } from "../signin/cli.js";
 import { addChannel } from "./channel-add.js";
 import type { SetupCommandContext } from "./command-context.js";
+import { addLinear } from "./connectors/linear.js";
+import type { ConnectorAddInput } from "./connectors/revision.js";
 import { addProject } from "./project-add.js";
 import { installationToken } from "./project-files.js";
 import { waitForThreadedReply } from "./reply-watch.js";
@@ -64,5 +66,23 @@ export function registerSetupCommands(program: Command, context: SetupCommandCon
         });
       }
       run.print({ ...bound, projectName }, `Bound #${bound.channelName} to ${projectName}\n`);
+    });
+
+  // agentx connector add linear|jira|asana, the words FR-036 uses.
+  const connector = program.command("connector").description("connect a project to Linear, Jira or Asana");
+  const connectorAdd = connector.command("add").description("add a connector to a project");
+  withRegion(connectorAdd.command("linear"))
+    .description("add Linear to a project: guide, key, test read, team, new revision")
+    .option("--linear-key-file <path>", "file holding the Linear API key")
+    .option("--linear-key-env <NAME>", "environment variable holding the Linear API key")
+    .option("--linear-team <id or key>", "the team the project may use")
+    .action(async (options: { linearKeyFile?: string; linearKeyEnv?: string; linearTeam?: string }, command: Command) => {
+      const projectName = projectOption(command, "the project to connect Linear to");
+      const run = await context.open(command);
+      const flags = definedEntries<Pick<ConnectorAddInput["flags"], "linearTeam" | "linearKey">>({
+        linearTeam: options.linearTeam, linearKey: secretSource(options.linearKeyFile, options.linearKeyEnv),
+      });
+      const result = await addLinear({ env: run.env, session: run.session, projectName, secrets: run.secrets, prompter: run.prompter, processEnv: process.env, write: run.write, services: run.services, flags });
+      run.print(result, `Linear connected to ${projectName} (revision ${result.revision})\n`);
     });
 }

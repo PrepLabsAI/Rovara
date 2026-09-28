@@ -17,6 +17,7 @@ import { ssmParameterStore, type ParameterStore } from "../environments/paramete
 import { readEnvironmentSettings, type EnvironmentSettings } from "../environments/settings.js";
 import { openAdminSession } from "../setup/admin-session.js";
 import { slackChannelApi } from "../setup/channel-add.js";
+import { vendorApi } from "../setup/connectors/vendors.js";
 import { githubRepositoryApi } from "../setup/project-files.js";
 import { cognitoAdmin, type SetupServices } from "../setup/services.js";
 import type { SigninFlags } from "../signin/collect.js";
@@ -159,6 +160,8 @@ export function realSetupServices(input: { region: string; fetch: typeof fetch; 
       }
       return { teamId: answer.team_id, botUserId: answer.user_id };
     },
+    // Task 9: the one real read each connector's test read needs, before it is saved.
+    vendors: vendorApi(input.fetch),
   };
 }
 

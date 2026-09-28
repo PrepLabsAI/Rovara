@@ -6,6 +6,7 @@ import type { StackOutputs } from "../deploy/parameters.js";
 import type { GitHubApi } from "../init/github-app.js";
 import type { StoredTokens, TokenStore } from "../token-store.js";
 import type { SlackChannelApi } from "./channel-add.js";
+import type { VendorApi } from "./connectors/vendors.js";
 import type { GitHubRepositoryApi } from "./project-files.js";
 
 export interface AdminSession { controlPlaneUrl: string; accessToken: string }
@@ -39,6 +40,8 @@ export interface SetupServices {
   slackChannels: SlackChannelApi;
   /** Task 8: the bot token's workspace and bot user (15d1's auth.test). */
   slackIdentity: (botToken: string) => Promise<{ teamId: string; botUserId: string }>;
+  /** Tasks 9 to 11: the one real read each connector's test read needs, before it is saved. */
+  vendors: VendorApi;
 }
 
 const errorName = (error: unknown) => (error instanceof Error ? error.name : undefined);
