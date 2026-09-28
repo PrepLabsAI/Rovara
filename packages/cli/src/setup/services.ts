@@ -2,7 +2,9 @@
 // them all. init builds one SetupServices per run; the day-2 commands build one per command.
 import { AdminAddUserToGroupCommand, AdminCreateUserCommand, AdminGetUserCommand, AdminListGroupsForUserCommand } from "@aws-sdk/client-cognito-identity-provider";
 import type { LoginOptions } from "../auth.js";
+import type { GitHubApi } from "../init/github-app.js";
 import type { StoredTokens, TokenStore } from "../token-store.js";
+import type { GitHubRepositoryApi } from "./project-files.js";
 
 export interface AdminSession { controlPlaneUrl: string; accessToken: string }
 
@@ -22,6 +24,10 @@ export interface SetupServices {
   cognito: CognitoAdmin;
   login: (options: LoginOptions) => Promise<StoredTokens>;
   fetch: typeof fetch;
+  /** Task 6: the repositories the GitHub App sees, and their build files. */
+  repositories: GitHubRepositoryApi;
+  /** Task 6: the installation token (15d1's GitHub API). */
+  github: Pick<GitHubApi, "listInstallations" | "installationToken">;
 }
 
 const errorName = (error: unknown) => (error instanceof Error ? error.name : undefined);

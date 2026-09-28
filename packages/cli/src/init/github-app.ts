@@ -173,9 +173,9 @@ export function githubAppSecretName(env: string): string {
   return `agentx/${env}/github-app`;
 }
 
-interface AppSecret { appId: string; slug: string; account: string; privateKey: string }
+export interface AppSecret { appId: string; slug: string; account: string; privateKey: string }
 
-function parseAppSecret(raw: string, name: string): AppSecret {
+export function parseAppSecret(raw: string, name: string): AppSecret {
   try {
     const value = JSON.parse(raw) as Partial<AppSecret>;
     if (typeof value.appId === "string" && typeof value.slug === "string" && typeof value.account === "string" && typeof value.privateKey === "string") {

@@ -2,6 +2,8 @@
 import { tokenStoreKey, type LoginOptions } from "../../packages/cli/src/auth.js";
 import type { StoredTokens, TokenStore } from "../../packages/cli/src/token-store.js";
 import type { CognitoAdmin, SetupServices } from "../../packages/cli/src/setup/services.js";
+import type { GitHubRepositoryApi } from "../../packages/cli/src/setup/project-files.js";
+import { fakeGitHubApi } from "./init-fakes.js";
 
 export const CONTROL_PLANE = "https://cp.example.test";
 export const ADMIN_EMAIL = "alice@example.com";
@@ -92,6 +94,19 @@ export function fakeControlPlane(): FakeControlPlane {
   return plane;
 }
 
+/** `repositories` maps a full name ("owner/repo") to its default branch and build files. Every
+ * `file()` read is recorded in `reads` as "owner/repo:path", for tests that check what was fetched. */
+export function fakeRepositories(repositories: Record<string, { defaultBranch?: string; files: Record<string, string> }>): GitHubRepositoryApi & { reads: string[] } {
+  const reads: string[] = [];
+  return {
+    reads,
+    list: async () => Object.keys(repositories).map((fullName) => ({
+      fullName, name: fullName.split("/")[1]!, defaultBranch: repositories[fullName]!.defaultBranch ?? "main", cloneUrl: `https://github.com/${fullName}.git`,
+    })),
+    file: async (_token, fullName, path) => { reads.push(`${fullName}:${path}`); return repositories[fullName]?.files[path]; },
+  };
+}
+
 /** Every SetupServices field has a default here, with no cast (F20): a task that adds a field must
  * add its fake, or this stops type-checking. */
 export function setupServices(overrides: Partial<SetupServices> = {}): SetupServices {
@@ -101,6 +116,8 @@ export function setupServices(overrides: Partial<SetupServices> = {}): SetupServ
     cognito: fakeCognito(),
     login: fakeLogin({ accessToken: accessToken({ "cognito:groups": ["agentx-admin"] }), expiresAt: Date.parse("2026-09-27T01:00:00.000Z") }),
     fetch: plane.fetch,
+    repositories: fakeRepositories({}),
+    github: fakeGitHubApi(),
     ...overrides,
   };
 }

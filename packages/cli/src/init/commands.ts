@@ -15,6 +15,7 @@ import type { LockRecord } from "../environments/lock.js";
 import { ssmParameterStore, type ParameterStore } from "../environments/parameter-store.js";
 import { readEnvironmentSettings, type EnvironmentSettings } from "../environments/settings.js";
 import { openAdminSession } from "../setup/admin-session.js";
+import { githubRepositoryApi } from "../setup/project-files.js";
 import { cognitoAdmin, type SetupServices } from "../setup/services.js";
 import type { SigninFlags } from "../signin/collect.js";
 import { SystemCredentialTokenStore, type TokenStore } from "../token-store.js";
@@ -133,13 +134,17 @@ export function nextStepsText(settings: EnvironmentSettings): string {
 const realSleep = (ms: number) => new Promise<void>((resolvePromise) => setTimeout(resolvePromise, ms));
 
 /** The real phase 15d2 services. Clients are only constructed here, never called, until a step
- * uses them. Tasks 6 to 13 add their fields. */
+ * uses them. Tasks 7 to 13 add their fields. */
 export function realSetupServices(input: { region: string; fetch: typeof fetch; tokenStore?: TokenStore }): SetupServices {
   return {
     tokenStore: input.tokenStore ?? new SystemCredentialTokenStore(),
     cognito: cognitoAdmin(new CognitoIdentityProviderClient({ region: input.region })),
     login: loginWithPkce,
     fetch: input.fetch,
+    // Task 6: both read the GitHub App's own secret (github-app.ts) or use the installation id and
+    // token an earlier call obtained; input.fetch carries no credential itself.
+    repositories: githubRepositoryApi(input.fetch),
+    github: githubRestApi(input.fetch),
   };
 }
 
