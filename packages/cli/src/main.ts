@@ -39,6 +39,7 @@ import { installMcp, MCP_CLIENTS, runCommand, type McpClientKind, type McpInstal
 import { runMcpServer, type McpServeDeps } from "./mcp/serve.js";
 import { resumeCommand, runDeploy, runInitExport, type DeployCliDependencies, type DeployCommandOptions } from "./deploy/commands.js";
 import { cliErrorFor, resumeCommand, runDeploy, runInitExport, type DeployCliDependencies, type DeployCommandOptions } from "./deploy/commands.js";
+import { resumeCommand, runDeploy, runInitExport, type DeployCliDependencies, type DeployCommandOptions } from "./deploy/commands.js";
 import { cloudFormationStackReader, stsCallerIdentity, type CallerIdentity, type StackReader } from "./environments/adopt.js";
 import { resolveDeploymentFile } from "./environments/cache.js";
 import { DEFAULT_CLASSIFIER_MODEL, DEFAULT_ORCHESTRATOR_MODEL, DEFAULT_WORKER_MODEL, type InitFlags } from "./init/answers.js";
@@ -752,18 +753,6 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       if (options.release === undefined) throw agentXError("CONFIG_INVALID", "--release is required with --export");
       if (options.openrouterKeyFile !== undefined || options.openrouterKeyEnv !== undefined) {
         throw agentXError("CONFIG_INVALID", "--export stores no secret, so it takes no OpenRouter key; create the secret yourself and pass --openrouter-secret-arn");
-      }
-      // Spec decision (2026-09-27): any environment, production too, may be exported while nothing
-      // is installed there. Any value at its settings parameter counts as installed (read-only).
-      const exportStore = dependencies.deploy?.store ?? ssmParameterStore(new SSMClient({ region: options.region }));
-      let installed: unknown;
-      try {
-        installed = await exportStore.get(settingsParameterName(globals.env));
-      } catch (error) {
-        throw cliErrorFor(error);
-      }
-      if (installed !== undefined) {
-        throw agentXError("CONFIG_INVALID", `environment ${globals.env} is already installed in this account; export a bundle for a new --env`);
       }
       const exportProvider = (component?: string) => component ?? options.modelProvider;
       const result = await runInitExport(

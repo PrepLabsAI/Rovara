@@ -42,17 +42,28 @@ export function secretsManagerInitSecrets(client: SecretsManagerClient): InitSec
 export interface StackStatusReader {
   /** The stack's StackStatus, or undefined when it does not exist. */
   status(stackName: string): Promise<string | undefined>;
+  /** The stack's parameters, or undefined when it does not exist. Optional: a reader without it
+   * skips the checks that need it. */
+  parameters?(stackName: string): Promise<Record<string, string> | undefined>;
 }
 
 export function cloudFormationStatusReader(client: CloudFormationClient): StackStatusReader {
+  const describe = async (stackName: string) => {
+    try {
+      return (await client.send(new DescribeStacksCommand({ StackName: stackName }))).Stacks?.[0];
+    } catch (error) {
+      if (errorName(error) === "ValidationError" && /does not exist/.test((error as Error).message)) return undefined;
+      throw error;
+    }
+  };
   return {
     async status(stackName) {
-      try {
-        return (await client.send(new DescribeStacksCommand({ StackName: stackName }))).Stacks?.[0]?.StackStatus;
-      } catch (error) {
-        if (errorName(error) === "ValidationError" && /does not exist/.test((error as Error).message)) return undefined;
-        throw error;
-      }
+      return (await describe(stackName))?.StackStatus;
+    },
+    async parameters(stackName) {
+      const stack = await describe(stackName);
+      if (stack === undefined) return undefined;
+      return Object.fromEntries((stack.Parameters ?? []).map((parameter) => [parameter.ParameterKey ?? "", parameter.ParameterValue ?? ""]));
     },
   };
 }

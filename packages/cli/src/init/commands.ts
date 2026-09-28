@@ -303,6 +303,14 @@ async function assertBundleResumable(input: { bundle: BundleAnswers; bundleDir: 
       ? `the access stack ${accessStack} does not exist yet; ask your platform team to run deploy-access.sh from the bundle, then run this again`
       : `the access stack ${accessStack} is ${status}; ask your platform team to fix it (see the bundle's README, "If it fails"), then run this again`);
   }
+  // Every later stack's roles carry the bundle's boundary; refused now, not halfway through the
+  // deploy. The default boundary is an empty parameter.
+  const deployed = (await input.stackStatus.parameters?.(accessStack))?.PermissionsBoundaryArn;
+  const wanted = bundle.permissionsBoundaryArn ?? "";
+  if (deployed !== undefined && deployed !== wanted) {
+    const describe = (arn: string) => (arn === "" ? "AgentX's default boundary" : arn);
+    throw agentXError("CONFIG_INVALID", `the bundle's permission boundary (${describe(wanted)}) differs from the one the access stack ${accessStack} was deployed with (${describe(deployed)}); use the bundle the platform team deployed from`);
+  }
 }
 
 async function init(options: InitOptions, deps: InitCliDependencies, services: { stderr: Writer; home: string }, session: InitSession): Promise<InitResult> {
@@ -447,13 +455,17 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
       }
       // The saved answers carry the stored OpenRouter key's ARN, which every step reads.
       context.answers = await persistInitAnswers({ store, secrets, collected: firstRun });
-      if (bundle !== undefined) {
-        const progress = (await readInstallProgress(store, env)) ?? emptyProgress(env, now());
-        await writeInstallProgress(store, { ...progress, steps: { ...progress.steps, access: { status: "done", at: new Date(now()).toISOString(), note: PLATFORM_TEAM_ACCESS_NOTE } } });
-      }
     } else {
       if (rotatedWebhook !== undefined && finalAnswers.alert.kind === "webhook") await storeAlertWebhook(secrets, finalAnswers.alert.secretName, rotatedWebhook);
       if (rotatedOpenRouterKey !== undefined) await secrets.put(openRouterSecretName(env), rotatedOpenRouterKey);
+    }
+    // On every bundle run, not only the first: a run that stopped between saving the answers and
+    // this write would otherwise leave access pending, and the operator role refused on it.
+    if (bundle !== undefined) {
+      const progress = (await readInstallProgress(store, env)) ?? emptyProgress(env, now());
+      if (progress.steps.access?.status !== "done") {
+        await writeInstallProgress(store, { ...progress, steps: { ...progress.steps, access: { status: "done", at: new Date(now()).toISOString(), note: PLATFORM_TEAM_ACCESS_NOTE } } });
+      }
     }
   };
 

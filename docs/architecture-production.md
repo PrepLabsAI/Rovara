@@ -414,17 +414,22 @@ An uncovered region is refused, by name. Adding a region means adding its verifi
 `DEFAULT_AZ_IDS` in `infra/lib/production-foundation.ts`; the release builder picks the region up from
 there, and nothing else about deploy changes.
 
-**The export bundle** (`agentx init --export`, requiring an explicit `--env` and refusing the name
-`production`) writes what a platform team needs to deploy the access stack themselves, with their own
-credentials and no AWS call ever made by our CLI: templates, parameters, a `deploy-access.sh` script, and
-the policy that principal needs. That policy is for creating the stack only; updating it later needs a
+**The export bundle** (`agentx init --export`, requiring an explicit `--env`) writes what a platform team
+needs to deploy the access stack themselves, with their own credentials: templates, parameters, a
+`deploy-access.sh` script, the policy that principal needs, and `init-answers.json` (the answers the
+export knew, never a secret). Our CLI writes nothing to AWS here, but it makes two read-only calls, so it
+needs credentials for the target account: sts GetCallerIdentity (`--account`, when given, must match
+it) and that account's settings parameter in SSM. An environment already installed there, production
+included, is refused; any environment with nothing installed can be exported. That policy is for creating the stack only; updating it later needs a
 broader principal, the operator's job. The ECR pull-through rule's create and delete actions cannot be
 scoped to a resource, so that statement stays on every resource (`*`). `deploy-access.sh` prompts for
 confirmation before executing (`--yes` skips it, same as `agentx deploy`), and prints the failure reason
 plus the exact recovery command on failure. It does not create the callback signing key; `agentx deploy`
 creates it on its first run. Every later stack is then deployed by the AgentX operator, through the role the
-access stack created, with `agentx deploy --mode install --parts foundation,identity,control-plane,runtime,slack
---release <dir> --answers <file>` (never access: the operator role is denied change sets on it).
+access stack created, with `agentx init --resume --env <env> --region <region> --from-bundle <bundle dir>`.
+It reads `init-answers.json`, asks only the rest, checks the access stack exists (and was deployed with
+the bundle's permission boundary), records the `access` step as done, and goes on; it never deploys access
+(the operator role is denied change sets on it, and init refuses the `access` step under that role).
 
 **The callback signing key** lives only in Secrets Manager, at `agentx/<env>/callback-signing-key`, never in
 settings. The templates engine passes it to CloudFormation as a `NoEcho` parameter, never printed. The cdk

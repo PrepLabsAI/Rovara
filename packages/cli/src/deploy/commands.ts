@@ -18,6 +18,7 @@ import { AgentXError, agentXError, environmentStackName, EnvironmentNameSchema, 
 import type { CallerIdentity } from "../environments/adopt.js";
 import { stsCallerIdentity } from "../environments/adopt.js";
 import { ssmParameterStore, type ParameterStore } from "../environments/parameter-store.js";
+import { settingsParameterName } from "../environments/settings.js";
 import { ACCOUNT_PATTERN, BudgetAnswersSchema, IdentityAnswersSchema, ImagesAnswersSchema, ModelsAnswersSchema, REGION_PATTERN } from "./answer-schemas.js";
 import { assertCdkBootstrapped, assertSourceAtRelease, buildSource, cdkDeployer, type CommandRunner } from "./cdk-engine.js";
 import type { ChangeSetChange, DeployEvent, StackDeployer, StackOutputs } from "./deployer.js";
@@ -752,11 +753,13 @@ function buildIdentityAnswers(options: InitExportOptions): DeployAnswers["identi
   };
 }
 
-/** Writes the export bundle (export-bundle.ts). Makes no AWS call at all when `--account` is given;
- * otherwise reads (never writes) the caller's own account with sts GetCallerIdentity. Validates
- * `--region` and the account (whichever source it came from) with the same patterns
- * `DeployAnswersSchema` validates `agentx deploy`'s answers file with, since `writeExportBundle`
- * itself only ever refuses a region the release doesn't cover, not a malformed one. */
+/** Writes the export bundle (export-bundle.ts). Makes two read-only AWS calls, so it needs
+ * credentials for the target account: sts GetCallerIdentity (the account, which `--account`, when
+ * given, must match), then that account's settings parameter in SSM (an environment already
+ * installed there, production included, is refused). It writes nothing to AWS. Validates
+ * `--region` and `--account` with the same patterns `DeployAnswersSchema` validates
+ * `agentx deploy`'s answers file with, since `writeExportBundle` itself only ever refuses a region
+ * the release doesn't cover, not a malformed one. */
 export async function runInitExport(options: InitExportOptions, deps: DeployCliDependencies): Promise<InitExportResult> {
   try {
     return await initExport(options, deps);
@@ -770,9 +773,23 @@ async function initExport(options: InitExportOptions, deps: DeployCliDependencie
     throw agentXError("CONFIG_INVALID", `--region ${options.region} must look like us-east-1`);
   }
   const identityAnswers = buildIdentityAnswers(options);
-  const account = options.account ?? (await (deps.identity ?? stsCallerIdentity(new STSClient({ region: options.region }))).get()).account;
+  if (options.account !== undefined && !ACCOUNT_PATTERN.test(options.account)) {
+    throw agentXError("CONFIG_INVALID", `--account ${options.account} must be a 12-digit AWS account id`);
+  }
+  // The settings check below reads the credentials' own account, so --account must be that account:
+  // otherwise an installed environment (production included) in the exported account slips past.
+  const account = (await (deps.identity ?? stsCallerIdentity(new STSClient({ region: options.region }))).get()).account;
+  if (options.account !== undefined && options.account !== account) {
+    throw agentXError("CONFIG_INVALID", `--account ${options.account} does not match your AWS credentials, which are for account ${account}; use credentials for ${options.account}, or leave --account off`);
+  }
   if (!ACCOUNT_PATTERN.test(account)) {
     throw agentXError("CONFIG_INVALID", `--account ${account} must be a 12-digit AWS account id`);
+  }
+  // Spec decision (2026-09-27): any environment, production too, may be exported while nothing is
+  // installed there. Any value at its settings parameter counts as installed (read-only).
+  const store = deps.store ?? ssmParameterStore(new SSMClient({ region: options.region }));
+  if ((await store.get(settingsParameterName(options.env))) !== undefined) {
+    throw agentXError("CONFIG_INVALID", `environment ${options.env} is already installed in this account; export a bundle for a new --env`);
   }
 
   if (options.openrouterProviders && !options.openrouterSecretArn) throw agentXError("CONFIG_INVALID", "--openrouter-providers requires --openrouter-secret-arn");

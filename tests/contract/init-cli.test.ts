@@ -679,6 +679,40 @@ describe("init --resume --from-bundle (FR-026)", () => {
     expect(saved?.models.worker).toBe("amazon.nova-pro-v1:0");
   });
 
+  it("records access as done on a rerun whose first run saved the answers but stopped before the progress", async () => {
+    const h = await harness();
+    const dir = await bundleDir();
+    const deployer = scriptedDeployer(allStackOutputs(), [environmentStackName("staging", "access")]);
+    deployer.fail.set(environmentStackName("staging", "foundation"), new Error("stop after access"));
+    const deploy = { ...h.deps.deploy, deployer, identity: { get: async () => ({ account: "123456789012", arn: OPERATOR }) } };
+    expect(await h.run(["--resume", "--from-bundle", dir], { prompter: scriptedPrompter(BUNDLE_RUN), stackStatus: ACCESS_DEPLOYED, deploy })).not.toBe(0);
+    // A crash between saving the answers and recording access leaves answers and no progress.
+    h.store.values.delete(installProgressParameterName("staging"));
+    const mark = h.mark();
+    expect(await h.run(["--resume", "--from-bundle", dir], { prompter: scriptedPrompter([]), stackStatus: ACCESS_DEPLOYED, deploy })).not.toBe(0);
+    const rerun = h.printedSince(mark);
+    expect(rerun).not.toContain("you are using the AgentX operator role");
+    expect(rerun).toContain("already done: Deploy the access stack");
+    expect((await readInstallProgress(h.store, "staging"))?.steps.access).toMatchObject({ status: "done", note: "deployed by your platform team from the export bundle" });
+    expect(deployer.requests.map((request) => request.part)).toEqual(["foundation", "foundation"]);
+  });
+
+  it("refuses a bundle whose permission boundary differs from the deployed access stack's", async () => {
+    const h = await harness();
+    const boundary = "arn:aws:iam::123456789012:policy/team-boundary";
+    const stackStatus = { ...ACCESS_DEPLOYED, parameters: async () => ({ PermissionsBoundaryArn: "arn:aws:iam::123456789012:policy/other-boundary" }) };
+    const code = await h.run(["--resume", "--from-bundle", await bundleDir({ permissionsBoundaryArn: boundary })], { prompter: scriptedPrompter([]), stackStatus });
+    expect(code).not.toBe(0);
+    expect(h.printed()).toContain(`the bundle's permission boundary (${boundary}) differs from the one the access stack agentx-staging-access was deployed with (arn:aws:iam::123456789012:policy/other-boundary)`);
+    expect(h.store.values.has(installAnswersParameterName("staging"))).toBe(false);
+    // The default boundary is an empty parameter; a bundle with no boundary matches it.
+    const matching = { ...ACCESS_DEPLOYED, parameters: async () => ({ PermissionsBoundaryArn: "" }) };
+    const deployer = scriptedDeployer(allStackOutputs(), [environmentStackName("staging", "access")]);
+    deployer.fail.set(environmentStackName("staging", "foundation"), new Error("stop after access"));
+    expect(await h.run(["--resume", "--from-bundle", await bundleDir()], { prompter: scriptedPrompter(BUNDLE_RUN), stackStatus: matching, deploy: { ...h.deps.deploy, deployer } })).not.toBe(0);
+    expect(h.printed()).toContain("stop after access");
+  });
+
   it("refuses when the platform team has not deployed the access stack yet", async () => {
     const h = await harness();
     const code = await h.run(["--resume", "--from-bundle", await bundleDir()], { prompter: scriptedPrompter([]), stackStatus: { status: async () => undefined } });
@@ -735,11 +769,13 @@ describe("the access step under the operator role (FR-019)", () => {
   });
 });
 
+const EXPORTER = { get: async () => ({ account: "123456789012", arn: "arn:aws:iam::123456789012:user/exporter" }) };
+
 describe("init --export and production (spec decision, 2026-09-27)", () => {
   it("writes a bundle for production when nothing is installed there", async () => {
     const h = await harness();
     const out = await tmp("agentx-export-");
-    const code = await executeCli(["--env", "production", "init", "--export", join(out, "bundle"), "--region", "us-east-1", "--release", h.release, "--account", "123456789012"], { deploy: { store: new MemoryParameterStore() }, stdout: { write: () => true }, stderr: { write: () => true } });
+    const code = await executeCli(["--env", "production", "init", "--export", join(out, "bundle"), "--region", "us-east-1", "--release", h.release, "--account", "123456789012"], { deploy: { store: new MemoryParameterStore(), identity: EXPORTER }, stdout: { write: () => true }, stderr: { write: () => true } });
     expect(code).toBe(0);
   });
 
@@ -749,7 +785,7 @@ describe("init --export and production (spec decision, 2026-09-27)", () => {
     store.values.set("/agentx/production/settings", "{}");
     const err: string[] = [];
     const out = await tmp("agentx-export-");
-    const code = await executeCli(["--env", "production", "init", "--export", join(out, "bundle"), "--region", "us-east-1", "--release", h.release, "--account", "123456789012"], { deploy: { store }, stdout: { write: () => true }, stderr: { write: (text: string) => err.push(text) } });
+    const code = await executeCli(["--env", "production", "init", "--export", join(out, "bundle"), "--region", "us-east-1", "--release", h.release, "--account", "123456789012"], { deploy: { store, identity: EXPORTER }, stdout: { write: () => true }, stderr: { write: (text: string) => err.push(text) } });
     expect(code).not.toBe(0);
     expect(err.join("")).toContain("environment production is already installed in this account; export a bundle for a new --env");
   });

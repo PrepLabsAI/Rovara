@@ -135,6 +135,9 @@ async function writeAnswers(overrides: Record<string, unknown> = {}): Promise<st
 
 const fakeIdentity: CallerIdentity = { async get() { return { account: ACCOUNT, arn: `arn:aws:iam::${ACCOUNT}:user/alice` }; } };
 const throwingIdentity: CallerIdentity = { async get() { throw new Error("test setup: sts must not be called"); } };
+/** init --export reads the caller's account once (sts GetCallerIdentity), to check --account and
+ * to read the right account's settings. */
+const exportIdentity: CallerIdentity = { async get() { return { account: ACCOUNT, arn: `arn:aws:iam::${ACCOUNT}:user/exporter` }; } };
 const throwingStore: ParameterStore = {
   get: () => { throw new Error("test setup: the parameter store must not be called"); },
   put: () => { throw new Error("test setup: the parameter store must not be called"); },
@@ -147,7 +150,7 @@ const emptyReadOnlyStore: ParameterStore = {
   get: async () => undefined,
   put: () => { throw new Error("test setup: init --export must never write to the parameter store"); },
   delete: () => { throw new Error("test setup: init --export must never write to the parameter store"); },
-  list: () => { throw new Error("test setup: init --export must never write to the parameter store"); },
+  list: () => { throw new Error("test setup: init --export's parameter store list must not be called"); },
 };
 const throwingDeployer: StackDeployer = {
   deploy: () => { throw new Error("test setup: the deployer must not be called"); },
@@ -313,7 +316,7 @@ describe("agentx init --export", () => {
 
     const code = await executeCli(
       ["--env", ENV, "init", "--export", exportDir, "--region", REGION, "--account", ACCOUNT, "--release", releaseDir],
-      { ...io, deploy: { identity: throwingIdentity, store: emptyReadOnlyStore } },
+      { ...io, deploy: { identity: exportIdentity, store: emptyReadOnlyStore } },
     );
 
     expect(code).toBe(0);
@@ -357,7 +360,7 @@ describe("agentx init --export", () => {
 
     const code = await executeCli(
       ["--env", "production", "init", "--export", exportDir, "--region", REGION, "--account", ACCOUNT, "--release", releaseDir],
-      { ...io, deploy: { identity: throwingIdentity, store } },
+      { ...io, deploy: { identity: exportIdentity, store } },
     );
 
     expect(code).not.toBe(0);
@@ -430,10 +433,27 @@ describe("agentx init --export", () => {
 
     const code = await executeCli(
       ["--env", ENV, "init", "--export", exportDir, "--region", REGION, "--account", ACCOUNT, "--release", releaseDir, "--identity", "oidc", ...Object.entries(OIDC_FLAGS).flat()],
-      { ...io, deploy: { identity: throwingIdentity, store: emptyReadOnlyStore } },
+      { ...io, deploy: { identity: exportIdentity, store: emptyReadOnlyStore } },
     );
 
     expect(code).toBe(0);
+  });
+
+  it("refuses an --account other than the credentials' own, before reading any settings (production cannot slip past)", async () => {
+    const releaseDir = await fullReleaseDir();
+    const exportDir = join(await tmp("agentx-deploy-cli-export-"), "bundle");
+    const io = capture();
+    const store = new MemoryParameterStore();
+    store.values.set("/agentx/production/settings", "{}");
+
+    const code = await executeCli(
+      ["--env", "production", "init", "--export", exportDir, "--region", REGION, "--account", "999999999999", "--release", releaseDir],
+      { ...io, deploy: { identity: exportIdentity, store } },
+    );
+
+    expect(code).toBe(2);
+    expect(io.err.join("")).toContain(`--account 999999999999 does not match your AWS credentials, which are for account ${ACCOUNT}; use credentials for 999999999999, or leave --account off`);
+    await expect(stat(exportDir)).rejects.toThrow();
   });
 
   it("maps missing AWS credentials while checking the environment is not installed to AUTH_REQUIRED", async () => {
@@ -444,7 +464,7 @@ describe("agentx init --export", () => {
 
     const code = await executeCli(
       ["--env", ENV, "init", "--export", exportDir, "--region", REGION, "--account", ACCOUNT, "--release", releaseDir],
-      { ...io, deploy: { identity: throwingIdentity, store: { ...emptyReadOnlyStore, get: async () => { throw missing; } } } },
+      { ...io, deploy: { identity: exportIdentity, store: { ...emptyReadOnlyStore, get: async () => { throw missing; } } } },
     );
 
     expect(code).toBe(3);
@@ -475,7 +495,7 @@ describe("agentx init --export", () => {
 
     const code = await executeCli(
       ["--env", ENV, "init", "--export", exportDir, "--region", "eu-west-1", "--account", ACCOUNT, "--release", releaseDir],
-      { ...io, deploy: { identity: throwingIdentity, store: emptyReadOnlyStore } },
+      { ...io, deploy: { identity: exportIdentity, store: emptyReadOnlyStore } },
     );
 
     expect(code).toBe(2);
