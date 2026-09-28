@@ -1,4 +1,4 @@
-# Feature Specification: qedly.com, the Qedly website and AgentX docs
+# Feature Specification: The Qedly website (qedly.github.io) and AgentX docs
 
 **Feature Branch**: `docs/040-qedly-site`
 
@@ -64,7 +64,7 @@ A startup CTO arrives from a link or a search. From the hero alone they can say 
 
 ### User Story 2 - A developer goes from the README to a working install (Priority: P1)
 
-A developer finds AgentX on GitHub or Hacker News. The README tells them AgentX is Qedly Code and links to qedly.com. The Qedly Code page and the quickstart take them from nothing to a working Slack bot.
+A developer finds AgentX on GitHub or Hacker News. The README tells them AgentX is Qedly Code and links to qedly.github.io. The Qedly Code page and the quickstart take them from nothing to a working Slack bot.
 
 **Why this priority**: developers are the adoption channel, and the source-available release is the launch.
 
@@ -72,7 +72,7 @@ A developer finds AgentX on GitHub or Hacker News. The README tells them AgentX 
 
 **Acceptance Scenarios**:
 
-1. **Given** the AgentX README, **When** a developer reads its first screen, **Then** it says "AgentX is Qedly Code, the first product from Qedly" and links to `qedly.com/code` and `qedly.com/docs`.
+1. **Given** the AgentX README, **When** a developer reads its first screen, **Then** it says "AgentX is Qedly Code, the first product from Qedly" and links to `qedly.github.io/code` and `qedly.github.io/docs`.
 2. **Given** the quickstart, **When** it is followed on a clean AWS account, **Then** every command, prerequisite and cost statement matches the released `agentx init`.
 3. **Given** any docs page, **When** it is opened, **Then** it shows the release version it documents, and no link on it returns 404.
 
@@ -124,7 +124,8 @@ People searching "self-hosted AI coding agent", "AI agent CI gates", "Claude Tag
 
 ### Edge Cases
 
-- **The site is ready before the public release.** The site is deployed with `noindex` behind the GitHub Pages default address, and qedly.com is pointed at it only when the launch gate (FR-060) passes.
+- **The site is ready before the public release.** The site is deployed with `noindex` and is not announced until the launch gate (FR-060) passes.
+- **A custom domain is added later.** If the owners later buy a domain such as qedly.com, it is set as the GitHub Pages custom domain. GitHub then redirects `qedly.github.io` to it, so existing links and search rankings carry over.
 - **A documented feature changes after release.** The docs come from a release tag, so the site keeps documenting the release people can install until the next tag.
 - **The GitHub API rate-limits the build.** The receipts step uses an authenticated token and caches the last good result. The build fails rather than publishing an empty Receipts page.
 - **A receipt's check run was deleted by GitHub retention.** The receipt keeps the result recorded at build time and marks the link "check log expired".
@@ -171,11 +172,11 @@ People searching "self-hosted AI coding agent", "AI agent CI gates", "Claude Tag
 
 ### Build, hosting and discovery
 
-- **FR-040**: The site MUST be a static Astro site with Starlight for the docs, in the public repository `qedly/qedly.com` (the GitHub organisation `qedly`, to be claimed). It is published to GitHub Pages by a GitHub Action, with the custom domain `qedly.com` and HTTPS enforced.
+- **FR-040**: The site MUST be a static Astro site with Starlight for the docs, in the public repository `qedly/qedly.github.io`, inside the GitHub organisation `qedly` (to be claimed). A GitHub Action publishes it to GitHub Pages at `https://qedly.github.io` with HTTPS enforced. Canonical URLs, the sitemap and Open Graph URLs MUST come from one site setting, so adding a custom domain later is a one-line change.
 - **FR-041**: Pages MUST meet a Lighthouse score of at least 95 for performance, accessibility, best practices and SEO, on mobile and desktop.
 - **FR-042**: The site MUST ship `sitemap.xml`, `robots.txt`, per-page Open Graph images, structured data (US5), `/llms.txt`, `/llms-full.txt`, and a `.md` copy of every docs page.
 - **FR-043**: The site MUST set no cookies. If it measures traffic at launch, the measurement MUST be cookieless.
-- **FR-044**: The waitlist form for Workspace and Cloud MUST store emails with [NEEDS CLARIFICATION: a waitlist service, e.g. Buttondown, Formspree or a Google Form owned by PrepLabs] and show a confirmation on the page.
+- **FR-044**: The waitlist forms for Workspace and Cloud MUST add the email to a Buttondown list owned by PrepLabs, tagged with the product the visitor chose. They MUST show a confirmation on the page and set no cookies on the site.
 - **FR-045**: Themes MUST cover light and dark modes, and the docs and the marketing pages MUST share one theme.
 
 ### Brand assets
@@ -185,12 +186,11 @@ People searching "self-hosted AI coding agent", "AI agent CI gates", "Claude Tag
 
 ### Launch gate
 
-- **FR-060**: qedly.com MUST NOT be pointed at the site, and the site MUST stay `noindex`, until every one of these holds:
-  1. qedly.com is owned by PrepLabs.
-  2. The trademark search (UK, EU, US; classes 9 and 42) has cleared.
-  3. The first public AgentX release exists on npm (`@charterarc/agentx` or its renamed package) and ECR Public.
-  4. FR-032 is merged.
-  5. The Receipts page lists at least 20 Qedly Code PRs.
+- **FR-060**: The site MUST stay `noindex` and unannounced until every one of these holds:
+  1. The trademark search (UK, EU, US; classes 9 and 42) has cleared.
+  2. The first public AgentX release exists: the CLI on npm (`@charterarc/agentx` or its renamed package), both images on ECR Public, and the repository public. On 2026-09-28 none of these exist: npm returns 404 and there are no version tags.
+  3. FR-032 is merged.
+  4. The Receipts page lists at least 20 Qedly Code PRs.
 
 ### Key Entities
 
@@ -212,7 +212,7 @@ People searching "self-hosted AI coding agent", "AI agent CI gates", "Claude Tag
 
 ## Assumptions
 
-- The owners buy qedly.com ($100 on Spaceship when checked on 2026-09-28), qedly.dev, qedly.ai and qedley.com, and claim `qedly` on npm and GitHub. This spec does not buy anything.
+- The site launches at `qedly.github.io` with no custom domain (owner decision, 2026-09-28). The owners claim the GitHub organisation `qedly` and the npm name `qedly`. qedly.com was listed at $100 on Spaceship on 2026-09-28; the owners accept that someone else may buy it. This spec does not buy or register anything.
 - The site lives in its own public repository, because receipts must be clickable by anyone while the AgentX repository is private. Docs stay in the AgentX repository, so they change in the same PR as the code.
 - GitHub Pages hosting is free for a public repository. Cloudflare Pages remains an option if per-PR previews become necessary.
 - The open-source repository keeps the AgentX name at launch, with the Qedly Code pointer. Whether to rename the repository and CLI is a separate owners' decision.
