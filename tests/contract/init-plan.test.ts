@@ -105,6 +105,11 @@ describe("install plan", () => {
     expect(installPlanText(sampleAnswers(), estimateMonthlyCost(sampleAnswers().models), [])).toContain("- Budget: none");
   });
 
+  it("names the budget for the whole account when the scope is account", () => {
+    const text = installPlanText(sampleAnswers({ budget: { monthlyUsd: 250, scope: "account" } }), estimateMonthlyCost(sampleAnswers().models), []);
+    expect(text).toContain("- Budget agentx-staging-monthly: $250 a month for the whole account, alerting at 80% spent and 100% forecast");
+  });
+
   it("creates nothing when the engineer says no", async () => {
     const written: string[] = [];
     await expect(confirmInstallPlan({ answers: sampleAnswers(), notes: [], prompter: scriptedPrompter([false]), write: (text) => written.push(text) }))

@@ -166,7 +166,17 @@ describe("the budget question (FR-047)", () => {
 
   it("refuses a budget that is not a whole number of dollars", async () => {
     await expect(collectInitAnswers({ ...base, flags: { ...everyFlag, budget: "99.5" }, prompter: scriptedPrompter([]) }))
-      .rejects.toThrow("--budget must be a whole number of US dollars, or 0 for no budget");
+      .rejects.toThrow("--budget must be a whole number of US dollars from 1 to 1000000, or 0 for no budget");
+  });
+
+  it.each(["00", "-5", "12.5", "abc", "2000000"])("refuses a malformed or too-large budget (--budget %s), before the plan is shown", async (bad) => {
+    await expect(collectInitAnswers({ ...base, flags: { ...everyFlag, budget: bad }, prompter: scriptedPrompter([]) }))
+      .rejects.toThrow("--budget must be a whole number of US dollars from 1 to 1000000, or 0 for no budget");
+  });
+
+  it("accepts the maximum budget of $1,000,000 (BudgetAnswersSchema's own max)", async () => {
+    const result = await collectInitAnswers({ ...base, flags: { ...everyFlag, budget: "1000000", budgetScope: "tag" }, prompter: scriptedPrompter([]) });
+    expect(result.answers.budget).toEqual({ monthlyUsd: 1_000_000, scope: "tag" });
   });
 
   it("refuses a resume whose --budget differs from what the install started with", () => {

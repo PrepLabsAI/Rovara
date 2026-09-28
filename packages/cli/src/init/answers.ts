@@ -104,6 +104,16 @@ const optionalArn = (pattern: RegExp, what: string) => (value: string): string |
 
 const checkEmail = (value: string): string | undefined => (AlertEmailSchema.safeParse(value).success ? undefined : "must be an email address");
 
+/** FR-047's budget answer: the control plane's own `BudgetMonthlyUsd` template parameter pattern
+ * (no leading zero, "0" alone meaning no budget), and the same maximum as BudgetAnswersSchema
+ * (answer-schemas.ts), so a value the CLI accepts here can never be refused later by the schema
+ * once the plan has already been shown. */
+const MAX_BUDGET_USD = 1_000_000;
+const budgetProblem = (value: string): string | undefined =>
+  (/^(0|[1-9][0-9]{0,6})$/.test(value) && Number(value) <= MAX_BUDGET_USD)
+    ? undefined
+    : `must be a whole number of US dollars from 1 to ${MAX_BUDGET_USD}, or 0 for no budget`;
+
 async function modelChoice(prompter: Prompter, flagValue: string | undefined, question: string, flag: string, choices: ReadonlyArray<{ value: string; label: string }>, defaultValue: string): Promise<string> {
   if (flagValue !== undefined) return flagValue;
   const picked = await prompter.choose<string>(question, [...choices, { value: "other", label: "Another Bedrock model id" }], { flag, defaultValue });
@@ -240,12 +250,13 @@ export async function collectInitAnswers(input: {
   if (alert === undefined) throw new Error("unreachable: every alert branch sets alert");
   if (alert.kind === "none") notes.push(NO_ALERTS_NOTE);
 
-  const budgetFlag = "--budget (0 for none)";
+  const budgetFlag = "--budget";
   const rawBudget = flags.budget ?? (await prompter.ask("Monthly AWS budget for this environment, in US dollars (0 for none)", {
     flag: budgetFlag, defaultValue: "100",
-    validate: (value) => (/^\d{1,7}$/.test(value) ? undefined : "must be a whole number of US dollars, or 0"),
+    validate: budgetProblem,
   }));
-  if (!/^\d{1,7}$/.test(rawBudget)) throw agentXError("CONFIG_INVALID", "--budget must be a whole number of US dollars, or 0 for no budget");
+  const budgetIssue = budgetProblem(rawBudget);
+  if (budgetIssue !== undefined) throw agentXError("CONFIG_INVALID", `--budget ${budgetIssue}`);
   let budget: InitAnswers["budget"];
   if (Number(rawBudget) > 0) {
     const scope = flags.budgetScope ?? (await prompter.choose<"tag" | "account">("Which costs should the budget count?", [
