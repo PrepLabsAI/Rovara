@@ -87,6 +87,7 @@ import { attributionDroppedLog, callConnector, connectorCatalogKey, discoverConn
 import { resolveConnectors, BUILT_IN_CONNECTOR_TYPES, type ConnectorType, type ConnectorTypeContext, type ResolvedConnector } from "./connector-types.js";
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
 import { developerTokenVerifier } from "../developer/verify-token.js";
+import { inertName } from "../developer/task-records.js";
 import { channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, routeDeveloperRequest, type DeveloperApiConfiguration } from "./developer-routes.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
@@ -601,18 +602,6 @@ function withoutDeploymentAttribution(dependencies: GitHubMcpDependencies): Omit
   const rest = { ...dependencies };
   delete rest.attribution;
   return rest;
-}
-
-/**
- * Text as a GFM code span, which GitHub renders literally: no mention, link, autolink, HTML or
- * issue reference. Per CommonMark the fence is one backtick longer than the text's longest
- * backtick run, padded with a space when the text starts or ends with a backtick.
- */
-function inertName(name: string): string {
-  const longestRun = Math.max(0, ...(name.match(/`+/g) ?? []).map((run) => run.length));
-  const fence = "`".repeat(longestRun + 1);
-  const pad = name.startsWith("`") || name.endsWith("`") ? " " : "";
-  return `${fence}${pad}${name}${pad}${fence}`;
 }
 
 function attributionText(identity: AuthenticatedIdentity, connector: Pick<ResolvedConnector, "attribution">): string | undefined {
