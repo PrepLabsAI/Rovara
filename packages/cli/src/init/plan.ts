@@ -118,7 +118,10 @@ export function installPlanText(answers: InitAnswers, estimate: CostEstimate, no
     `- Models: orchestrator ${answers.models.providers?.orchestrator ?? "amazon-bedrock"}/${answers.models.orchestrator}, classifier ${answers.models.providers?.classifier ?? "amazon-bedrock"}/${answers.models.classifier}, worker ${answers.models.providers?.worker ?? "amazon-bedrock"}/${answers.models.worker}`,
     ...(answers.models.openRouter ? [`- OpenRouter: read existing secret ${answers.models.openRouter.secretArn}; ${routing(answers.models.openRouter.providers)}`] : []),
     ...(extras.storesOpenRouterKey === true ? [`- OpenRouter: your API key is stored in the new secret ${openRouterSecretName(env)}; ${routing(extras.openRouterProviders)}`] : []),
-    `- Alerts (subscribed in a later AgentX release): ${alerts}`,
+    `- Alerts: ${alerts}${answers.alert.kind === "none" ? "" : ", subscribed and tested at the end of init"}`,
+    answers.budget === undefined
+      ? "- Budget: none"
+      : `- Budget agentx-${env}-monthly: $${answers.budget.monthlyUsd} a month for ${answers.budget.scope === "tag" ? `costs tagged agentx:env=${env}` : "the whole account"}, alerting at 80% spent and 100% forecast`,
     `- AgentX never answers itself or other bots. Mentions people post through other apps: ${answers.slack.appPostedMessages} (slack.appPostedMessages).`,
     ...notes.map((note) => `Note: ${note}`),
     "",

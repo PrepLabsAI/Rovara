@@ -45,6 +45,7 @@ export function initDeployAnswers(answers: InitAnswers, progress: InstallProgres
     ...(answers.operatorPrincipalArn === undefined ? {} : { operatorPrincipalArn: answers.operatorPrincipalArn }),
     ...(images === undefined ? {} : { images }),
     slackAppPostedMessages: answers.slack.appPostedMessages,
+    ...(answers.budget === undefined ? {} : { budget: answers.budget }),
   };
 }
 

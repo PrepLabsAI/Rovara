@@ -62,7 +62,7 @@ describe("install plan", () => {
       "Settings under /agentx/staging/",
       "In GitHub: an app named \"AgentX acme staging\" owned by acme, with read and write access to contents, pull requests and issues, and read access to metadata. No webhook.",
       "In Slack: an app named \"AgentX\".",
-      "Alerts (subscribed in a later AgentX release): email to ops@example.com",
+      "- Alerts: email to ops@example.com, subscribed and tested at the end of init",
       "AgentX never answers itself or other bots. Mentions people post through other apps: accept (slack.appPostedMessages).",
       "Estimated monthly total: $152.98 at 1,000 turns, 100 worker sessions and 60 worker instance-hours a month",
       "EC2 worker volumes are deleted by the teardown steps.",
@@ -79,7 +79,7 @@ describe("install plan", () => {
     });
     const text = installPlanText(answers, estimateMonthlyCost(answers.models), ["a note"]);
     expect(text).toContain("the permission boundary arn:aws:iam::123456789012:policy/CompanyBoundary");
-    expect(text).toContain("Alerts (subscribed in a later AgentX release): https://events.pagerduty.com/... (the full address is kept in agentx/staging/alert-endpoint)");
+    expect(text).toContain("- Alerts: https://events.pagerduty.com/... (the full address is kept in agentx/staging/alert-endpoint), subscribed and tested at the end of init");
     expect(text).toContain("agentx/staging/alert-endpoint");
     expect(text).not.toContain("agentx-staging-identity");
     expect(text).toContain("a note");
@@ -96,6 +96,13 @@ describe("install plan", () => {
     const ownText = installPlanText(own, estimateMonthlyCost(own.models), []);
     expect(ownText).not.toContain("agentx/staging/openrouter");
     expect(ownText).toContain("- OpenRouter: read existing secret arn:aws:secretsmanager:us-east-1:123456789012:secret:mine-AbCdEf");
+  });
+
+  it("names the budget and says alerts are subscribed during init", () => {
+    const text = installPlanText(sampleAnswers({ budget: { monthlyUsd: 100, scope: "tag" } }), estimateMonthlyCost(sampleAnswers().models), []);
+    expect(text).toContain("- Alerts: email to ops@example.com, subscribed and tested at the end of init");
+    expect(text).toContain("- Budget agentx-staging-monthly: $100 a month for costs tagged agentx:env=staging, alerting at 80% spent and 100% forecast");
+    expect(installPlanText(sampleAnswers(), estimateMonthlyCost(sampleAnswers().models), [])).toContain("- Budget: none");
   });
 
   it("creates nothing when the engineer says no", async () => {

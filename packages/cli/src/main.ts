@@ -674,6 +674,8 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--alert-webhook-file <path>", "file holding a PagerDuty or Opsgenie integration address (kept secret)")
     .option("--alert-webhook-env <NAME>", "environment variable holding a PagerDuty or Opsgenie integration address (kept secret)")
     .option("--no-alerts", "send alerts nowhere for now")
+    .option("--budget <usd>", "monthly AWS budget in whole US dollars; 0 for none (default 100)")
+    .addOption(new Option("--budget-scope <scope>", "tag: costs tagged agentx:env; account: the whole account").choices(["tag", "account"]))
     .option("--github-account <login>", "GitHub organization or user that will own the AgentX GitHub App")
     .addOption(new Option("--github-account-type <type>", "whether --github-account is an organization or a personal account").choices(["organization", "user"]))
     .option("--github-app-name <name>", "GitHub App name (unique on GitHub)")
@@ -889,6 +891,7 @@ interface InitCommandOptions extends SignInCommandOptions {
   openrouterKeyFile?: string; openrouterKeyEnv?: string;
   permissionBoundary?: string; operatorPrincipal?: string; orchestratorModel: string; classifierModel: string; workerModel: string;
   alertEmail?: string; alertWebhookFile?: string; alertWebhookEnv?: string; alerts: boolean;
+  budget?: string; budgetScope?: "tag" | "account";
   githubAccount?: string; githubAccountType?: "organization" | "user"; githubAppName?: string;
   githubAppId?: string; githubInstallationId?: string; githubPrivateKeyFile?: string; githubPrivateKeyEnv?: string;
   slackAppName?: string; slackAppPostedMessages?: "accept" | "ignore"; slackInstall?: "installed" | "approval";
@@ -918,6 +921,7 @@ function initOptions(env: string, options: InitCommandOptions, command: Command)
     alertEmail: options.alertEmail,
     alertWebhook: secretSource(options.alertWebhookFile, options.alertWebhookEnv),
     alerts: typed("alerts", options.alerts),
+    budget: options.budget, budgetScope: options.budgetScope,
     githubAccount: options.githubAccount, githubAccountType: options.githubAccountType, githubAppName: options.githubAppName,
     slackAppName: options.slackAppName, slackAppPostedMessages: options.slackAppPostedMessages,
     workerImage: options.workerImage, slackImage: options.slackImage,

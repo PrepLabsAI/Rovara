@@ -93,8 +93,9 @@ async function everywhereButSecrets(h: Harness): Promise<string> {
 }
 
 // The questions a first run asks with every default taken (Task 4's order, with the model
-// provider question after sign-in), then the plan.
-const FIRST_RUN = ["", "", "", "", "", "", "", "", "", "ops@example.com", "acme", "", "", "", "", true];
+// provider question after sign-in, and the budget's amount and scope after the alert answers),
+// then the plan.
+const FIRST_RUN = ["", "", "", "", "", "", "", "", "", "ops@example.com", "", "", "acme", "", "", "", "", true];
 // The Slack step: installed, the token, the signing secret, "the right bot?"; then the Slack
 // service step's "Request URL Verified?" (Task 9's fix round added both confirms).
 const SLACK = ["installed", TEST_BOT_TOKEN, TEST_SIGNING_SECRET, true, true];

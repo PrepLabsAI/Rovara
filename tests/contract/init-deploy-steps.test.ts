@@ -31,6 +31,11 @@ describe("init deploy answers", () => {
     expect(later.github).toEqual({ account: "acme", appId: "42", installationId: "777", privateKeySecretArn: GITHUB.privateKeySecretArn });
   });
 
+  it("passes the budget to the control plane's deploy answers", () => {
+    const deploy = initDeployAnswers(sampleAnswers({ budget: { monthlyUsd: 100, scope: "account" } }), { ...emptyProgress("staging", T0), github: GITHUB }, ["control-plane"]);
+    expect(deploy.budget).toEqual({ monthlyUsd: 100, scope: "account" });
+  });
+
   it("carries your own OIDC provider's fields through unchanged", () => {
     const identity = { mode: "oidc" as const, issuer: "https://id.example.com", audience: "a", clientId: "c", adminClaim: "groups", adminValues: ["x"] };
     expect(initDeployAnswers(sampleAnswers({ identity }), emptyProgress("staging", T0), ["access"]).identity).toEqual(identity);

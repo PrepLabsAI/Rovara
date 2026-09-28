@@ -29,6 +29,12 @@ export const HAIKU_NOTE =
   "Claude Haiku 4.5 needs Anthropic model access in this account: a one-time use-case form in the Bedrock console. The prerequisite check below tests it.";
 const NO_ALERTS_NOTE = "No alert address: nobody is told when AgentX fails until you add one (agentx config set alerts.address, phase 15e).";
 
+/** FR-047: shown in the plan and repeated by the `alerts` step (Task 12) whenever the budget scope
+ * is "tag", since AWS Budgets reads $0 against a cost allocation tag until someone with billing
+ * rights activates it. */
+export const BUDGET_TAG_NOTE =
+  "The budget counts costs tagged agentx:env. Someone with billing rights must activate that tag once in Billing, Cost allocation tags; it appears there up to 24 hours after the first tagged resource is billed. Until then the budget reads $0. For an account used only by AgentX, --budget-scope account needs no tag.";
+
 export interface InitFlags {
   engine?: "templates" | "cdk";
   identity?: "cognito" | "oidc";
@@ -46,6 +52,9 @@ export interface InitFlags {
   alertWebhook?: SecretSource;
   /** false for --no-alerts */
   alerts?: boolean;
+  /** --budget: whole US dollars a month; "0" for none. */
+  budget?: string;
+  budgetScope?: "tag" | "account";
   githubAccount?: string; githubAccountType?: "organization" | "user"; githubAppName?: string;
   slackAppName?: string; slackAppPostedMessages?: "accept" | "ignore";
   workerImage?: string; slackImage?: string;
@@ -231,6 +240,22 @@ export async function collectInitAnswers(input: {
   if (alert === undefined) throw new Error("unreachable: every alert branch sets alert");
   if (alert.kind === "none") notes.push(NO_ALERTS_NOTE);
 
+  const budgetFlag = "--budget (0 for none)";
+  const rawBudget = flags.budget ?? (await prompter.ask("Monthly AWS budget for this environment, in US dollars (0 for none)", {
+    flag: budgetFlag, defaultValue: "100",
+    validate: (value) => (/^\d{1,7}$/.test(value) ? undefined : "must be a whole number of US dollars, or 0"),
+  }));
+  if (!/^\d{1,7}$/.test(rawBudget)) throw agentXError("CONFIG_INVALID", "--budget must be a whole number of US dollars, or 0 for no budget");
+  let budget: InitAnswers["budget"];
+  if (Number(rawBudget) > 0) {
+    const scope = flags.budgetScope ?? (await prompter.choose<"tag" | "account">("Which costs should the budget count?", [
+      { value: "tag", label: "Only this environment's (tagged agentx:env; the tag must be activated in Billing)" },
+      { value: "account", label: "The whole account (for an account used only by AgentX)" },
+    ], { flag: "--budget-scope", defaultValue: "tag" }));
+    budget = { monthlyUsd: Number(rawBudget), scope };
+    if (scope === "tag") notes.push(BUDGET_TAG_NOTE);
+  }
+
   const githubAccount = flags.githubAccount ?? (await prompter.ask("GitHub organization or user that will own the AgentX GitHub App", {
     flag: "--github-account", validate: (value) => (GITHUB_LOGIN_PATTERN.test(value) ? undefined : "must be a GitHub organization or user name"),
   }));
@@ -262,6 +287,7 @@ export async function collectInitAnswers(input: {
       ? {}
       : { images: { ...(workerImage === undefined ? {} : { worker: workerImage }), ...(slackImage === undefined ? {} : { slack: slackImage }) } }),
     alert,
+    ...(budget === undefined ? {} : { budget }),
     github: { account: githubAccount, accountType, appName },
     slack: { appName: slackAppName, appPostedMessages },
     createdAt: new Date(input.now()).toISOString(),
@@ -315,6 +341,8 @@ const RESUME_CHECKS: Array<{ flag: string; key: keyof InitFlags; kind?: ResumeCh
   { flag: "--permission-boundary", key: "permissionBoundary", stored: (a) => a.permissionsBoundaryArn ?? "" },
   { flag: "--operator-principal", key: "operatorPrincipal", stored: (a) => a.operatorPrincipalArn ?? "" },
   { flag: "--alert-email", key: "alertEmail", kind: "email", stored: (a) => (a.alert.kind === "email" ? a.alert.address : undefined) },
+  { flag: "--budget", key: "budget", stored: (a) => String(a.budget?.monthlyUsd ?? 0) },
+  { flag: "--budget-scope", key: "budgetScope", stored: (a) => a.budget?.scope },
   { flag: "--github-account", key: "githubAccount", kind: "login", stored: (a) => a.github.account },
   { flag: "--github-account-type", key: "githubAccountType", stored: (a) => a.github.accountType },
   { flag: "--github-app-name", key: "githubAppName", stored: (a) => a.github.appName },

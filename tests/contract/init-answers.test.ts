@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
-  alertWebhookSecretName, assertResumeFlagsMatch, collectInitAnswers, GLM_NOTE, HAIKU_NOTE, persistInitAnswers, type InitFlags,
+  alertWebhookSecretName, assertResumeFlagsMatch, BUDGET_TAG_NOTE, collectInitAnswers, GLM_NOTE, HAIKU_NOTE, persistInitAnswers, type InitFlags,
 } from "../../packages/cli/src/init/answers.js";
 import { readInstallAnswers } from "../../packages/cli/src/init/install-state.js";
 import { unattendedPrompter } from "../../packages/cli/src/init/prompts.js";
 import { GITHUB_LOGIN_PATTERN } from "../../packages/cli/src/deploy/answer-schemas.js";
 import { SecretAlreadyExistsError } from "../../packages/cli/src/deploy/signing-key.js";
-import { memoryInitSecrets, scriptedPrompter } from "../support/init-fakes.js";
+import { memoryInitSecrets, sampleAnswers, scriptedPrompter } from "../support/init-fakes.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 
 const T0 = Date.parse("2026-09-27T00:00:00.000Z");
@@ -18,6 +18,7 @@ const everyFlag: InitFlags = {
   orchestratorModel: "us.anthropic.claude-sonnet-4-6", classifierModel: "amazon.nova-lite-v1:0", workerModel: "amazon.nova-pro-v1:0",
   permissionBoundary: "", operatorPrincipal: "",
   alertEmail: "ops@example.com",
+  budget: "0",
   githubAccount: "acme", githubAccountType: "organization", githubAppName: "AgentX acme staging",
   slackAppName: "AgentX", slackAppPostedMessages: "accept",
 };
@@ -42,17 +43,18 @@ describe("init questions", () => {
     await expect(collectInitAnswers({ ...base, flags: { ...flags, openrouterSecretArn: "sk-raw-secret" }, prompter: scriptedPrompter([]) })).rejects.toThrow("invalid model configuration");
   });
   it("takes every default with Enter and asks for what has no default", async () => {
-    const prompter = scriptedPrompter(["", "", "", "", "", "", "", "", "", "ops@example.com", "acme", "", "", "", ""]);
+    const prompter = scriptedPrompter(["", "", "", "", "", "", "", "", "", "ops@example.com", "", "", "acme", "", "", "", ""]);
     const { answers, notes, alertWebhook } = await collectInitAnswers({ ...base, flags: {}, prompter });
     expect(prompter.remaining()).toBe(0);
     expect(prompter.asked[2]).toBe("Model provider");
     expect(alertWebhook).toBeUndefined();
-    expect(notes).toEqual([]);
+    expect(notes).toEqual([BUDGET_TAG_NOTE]);
     expect(answers).toEqual({
       schemaVersion: 1, env: "staging", region: "us-east-1", account: "123456789012", engine: "templates", releaseVersion: "1.2.3",
       identity: { mode: "cognito" },
       models: { orchestrator: "us.anthropic.claude-sonnet-4-6", classifier: "amazon.nova-lite-v1:0", worker: "us.anthropic.claude-sonnet-4-6" },
       alert: { kind: "email", address: "ops@example.com" },
+      budget: { monthlyUsd: 100, scope: "tag" },
       github: { account: "acme", accountType: "organization", appName: "AgentX acme staging" },
       slack: { appName: "AgentX", appPostedMessages: "accept" },
       createdAt: "2026-09-27T00:00:00.000Z",
@@ -144,6 +146,35 @@ describe("init questions", () => {
   });
 });
 
+describe("the budget question (FR-047)", () => {
+  it("defaults to $100 a month on the agentx:env tag, and says the tag must be activated", async () => {
+    const result = await collectInitAnswers({ ...base, flags: { ...everyFlag, budget: undefined } as InitFlags, prompter: scriptedPrompter(["", ""]) });
+    expect(result.answers.budget).toEqual({ monthlyUsd: 100, scope: "tag" });
+    expect(result.notes).toContain(BUDGET_TAG_NOTE);
+  });
+
+  it("takes --budget 0 as no budget, asking nothing", async () => {
+    const result = await collectInitAnswers({ ...base, flags: { ...everyFlag, budget: "0" }, prompter: scriptedPrompter([]) });
+    expect(result.answers.budget).toBeUndefined();
+  });
+
+  it("takes --budget 250 --budget-scope account without the tag note", async () => {
+    const result = await collectInitAnswers({ ...base, flags: { ...everyFlag, budget: "250", budgetScope: "account" }, prompter: scriptedPrompter([]) });
+    expect(result.answers.budget).toEqual({ monthlyUsd: 250, scope: "account" });
+    expect(result.notes).not.toContain(BUDGET_TAG_NOTE);
+  });
+
+  it("refuses a budget that is not a whole number of dollars", async () => {
+    await expect(collectInitAnswers({ ...base, flags: { ...everyFlag, budget: "99.5" }, prompter: scriptedPrompter([]) }))
+      .rejects.toThrow("--budget must be a whole number of US dollars, or 0 for no budget");
+  });
+
+  it("refuses a resume whose --budget differs from what the install started with", () => {
+    expect(() => assertResumeFlagsMatch(sampleAnswers({ budget: { monthlyUsd: 100, scope: "tag" } }), { budget: "200" }))
+      .toThrow("--budget 200 differs from what this install started with (100)");
+  });
+});
+
 const OPENROUTER_KEY = "sk-or-v1-0123456789abcdefKEYSECRET";
 
 /** Records which questions came through the hidden secret prompt. */
@@ -156,8 +187,8 @@ function recordingSecrets(prompter: ReturnType<typeof scriptedPrompter>) {
 }
 
 describe("OpenRouter from init", () => {
-  // engine, sign-in, provider, the three OpenRouter model ids, the key, boundary, operator, alerts, email, GitHub account, type, app name, Slack name, posted messages
-  const OPENROUTER_RUN = ["", "", "openrouter", "qwen/qwen3-coder", "qwen/qwen3-coder", "anthropic/claude-sonnet-4", OPENROUTER_KEY, "", "", "", "ops@example.com", "acme", "", "", "", ""];
+  // engine, sign-in, provider, the three OpenRouter model ids, the key, boundary, operator, alerts, email, budget amount, budget scope, GitHub account, type, app name, Slack name, posted messages
+  const OPENROUTER_RUN = ["", "", "openrouter", "qwen/qwen3-coder", "qwen/qwen3-coder", "anthropic/claude-sonnet-4", OPENROUTER_KEY, "", "", "", "ops@example.com", "", "", "acme", "", "", "", ""];
 
   it("choosing OpenRouter asks the three model ids and the key (hidden), and stores the raw key as agentx/<env>/openrouter with only its ARN in the answers", async () => {
     const scripted = scriptedPrompter(OPENROUTER_RUN);
@@ -204,7 +235,7 @@ describe("OpenRouter from init", () => {
 
   it("with --openrouter-secret-arn, asks for no key and stores nothing", async () => {
     const secretArn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:my-openrouter-AbCdEf";
-    const scripted = scriptedPrompter(["", "", "openrouter", "a/b", "a/b", "a/b", "", "", "", "ops@example.com", "acme", "", "", "", ""]);
+    const scripted = scriptedPrompter(["", "", "openrouter", "a/b", "a/b", "a/b", "", "", "", "ops@example.com", "", "", "acme", "", "", "", ""]);
     const { prompter, hidden } = recordingSecrets(scripted);
     const collected = await collectInitAnswers({ ...base, flags: { openrouterSecretArn: secretArn }, prompter });
     expect(scripted.remaining()).toBe(0);
