@@ -39,6 +39,8 @@ export const errorReason = (error: unknown) => (error instanceof AgentXError ? e
 /** Keeps an AgentXError's code, so the exit-code mapping is unchanged. */
 const withMessage = (error: unknown, message: string) => (error instanceof AgentXError ? agentXError(error.code, message) : agentXError("RUNTIME_UNAVAILABLE", message));
 /** The settled statuses in which the stack did not take the change, so the old credentials go back. */
+/** How far before now a newly enabled method's cutoff is set, for clock skew between laptop and AWS. */
+const CUTOFF_SKEW_SECONDS = 60;
 const RESTORE_ON = new Set(["UPDATE_ROLLBACK_COMPLETE", "UPDATE_FAILED"]);
 
 type StackOutcome =
@@ -80,8 +82,9 @@ export async function applySignInChange(input: ApplySignInInput): Promise<{ chan
     const current = await readSignInSettings(input.store, input.env);
     const choice = typeof input.next === "function" ? input.next(current) : input.next;
     // FR-045: a method going from off to on gets a new cutoff, so the sessions its disable ended
-    // (a laptop asleep through the disable never refreshed) stay ended. Otherwise it is kept.
-    const nowSeconds = Math.floor(input.now() / 1000);
+    // (a laptop asleep through the disable never refreshed) stay ended. Otherwise it is kept. It is a
+    // minute before now, so an admin clock running fast never refuses sessions that start just after.
+    const nowSeconds = Math.floor(input.now() / 1000) - CUTOFF_SKEW_SECONDS;
     const since = {
       ...current?.since,
       ...(choice.slack && current?.slack !== true ? { slack: nowSeconds } : {}),

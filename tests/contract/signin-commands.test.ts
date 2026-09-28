@@ -319,8 +319,10 @@ describe("agentx signin enable oidc (FR-004, FR-010, FR-045)", () => {
 });
 
 describe("each method's enabled-since cutoff (FR-045)", () => {
-  const T0_SECONDS = Math.floor(T0 / 1000);
-  it("sets a method's cutoff to now when it goes from off to on, so sessions its disable ended stay ended", async () => {
+  // The cutoff is set a minute before now, so an admin clock running fast never refuses sessions
+  // that start just after the enable.
+  const T0_SECONDS = Math.floor(T0 / 1000) - 60;
+  it("sets a method's cutoff to a minute before now when it goes from off to on, so sessions its disable ended stay ended", async () => {
     const h = await services(["1111111111.2222222222222", SLACK_CLIENT_SECRET, true]);
     await writeSignInSettings(h.store, { ...slackOn, slack: false, oidc: { issuer: "https://acme.okta.com", clientId: "0oa1", displayName: "Okta", clientSecretName: "agentx/staging/developer-oidc" }, since: { slack: 1700000000, oidc: 1700000100 } });
     await runSigninEnable(h.s, "staging", "slack", {}, {}, false);
