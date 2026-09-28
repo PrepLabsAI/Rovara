@@ -793,7 +793,7 @@ function initOptions(env: string, options: InitCommandOptions, command: Command)
     modelProvider: options.modelProvider,
     orchestratorProvider: options.orchestratorProvider, classifierProvider: options.classifierProvider, workerProvider: options.workerProvider,
     openrouterSecretArn: options.openrouterSecretArn, openrouterProviders: options.openrouterProviders,
-    openrouterKey: source(options.openrouterKeyFile, options.openrouterKeyEnv),
+    openrouterKey: secretSource(options.openrouterKeyFile, options.openrouterKeyEnv),
     permissionBoundary: options.permissionBoundary, operatorPrincipal: options.operatorPrincipal,
     alertEmail: options.alertEmail,
     alertWebhook: secretSource(options.alertWebhookFile, options.alertWebhookEnv),
