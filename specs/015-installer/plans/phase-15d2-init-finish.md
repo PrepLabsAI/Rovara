@@ -107,7 +107,10 @@ The phase map is in [README.md](README.md). This plan replaces the outline that 
     The engineer picks the team from that list, so the read and the pick are one step.
   - **Jira:** two searches through Atlassian's Rovo MCP server (`/v2`), with the token, before
     anything is stored: one inside the chosen project (must find at least one issue) and one
-    outside it (must find none). This automates the Jira guide's mandatory Step 8.
+    outside it. This automates the Jira guide's Step 8. If the outside search finds issues, the
+    connector is still saved, with a warning that names the other projects, says AgentX will be
+    able to read issues in them, and suggests narrowing the account (owner decision 6). `init`
+    records the warning in the install progress, so 15e's `doctor` can show it again.
   - **Asana:** the bot signs in once with 15d1's `authorizeCredential` (PKCE, `--no-browser` and
     `--expect-account` by default), then the CLI refreshes the token once and reads the chosen
     project with `get_project` before the project revision is saved.
@@ -128,46 +131,44 @@ The phase map is in [README.md](README.md). This plan replaces the outline that 
   records `access` as done with the note "deployed by your platform team", and continues. Under the
   operator role, a pending `access` step is refused with what to ask the platform team.
 
-## Open questions for the owner
+## Owner decisions (2026-09-28)
 
-Each has the plan's recommended answer. The plan is written to the recommendation, and Task 15
-records each one in the spec's Decisions for confirmation in the PR.
+The owner answered every open question on 2026-09-28. Six were accepted as recommended and one
+was changed. The plan is written to these answers, and Task 15 records each one in the spec's
+Decisions with that date.
 
-1. **Cognito scoping for the operator role.** *Recommended:* `cognito-idp:AdminCreateUser`,
+1. **Cognito scoping for the operator role: accepted.** `cognito-idp:AdminCreateUser`,
    `AdminGetUser` and `AdminAddUserToGroup` on `userpool/*` in the account and region, with
    `aws:ResourceTag/agentx:env` equal to the environment. The user pool carries that tag (15a's
-   `Tags.of(app)`), and an exact tag value cannot match a sibling environment. This plan could not
-   check the Service Authorization Reference from here, so Task 16 proves it with the IAM policy
-   simulator before the live run. If the tag condition is not supported for these actions, the
-   fallback is the exact pool ARN, passed from the identity stack's `UserPoolId` output into a new
-   operator-role policy the access stack cannot know at deploy time; that needs an access-stack
-   update and is a bigger change.
-2. **The budget when the `agentx:env` cost-allocation tag is not active yet.** A new tag key shows
-   up in Billing only after tagged resources are billed (up to 24 hours), and only someone with
-   billing rights can activate it. *Recommended:* the tag filter by default (it is what FR-047 asks
-   for), with a warning in the plan and in the `alerts` step that the budget reads $0 until the tag
-   is activated, and `--budget-scope account` offered for a dedicated account (which FR-015
-   recommends anyway). The alternative is account-wide by default.
-3. **Does `agentx alerts test` confirm by prompt only?** *Recommended:* prompt, plus two reads that
-   need no extra setup: before sending, the subscription must be confirmed (not
-   `PendingConfirmation`), and after sending, the alarm's state history must show the `ALARM`
-   change. SNS delivery-status logging would show whether the endpoint accepted it, but it needs an
-   IAM role and log group per topic; not worth it for a one-time check.
-4. **Budget in CloudFormation, not a CLI call.** *Recommended:* CloudFormation (this plan), so the
-   budget is reviewable in the templates, reaches the export bundle, and is removed with the stack.
-   The cost: the service role gains `budgets:*` (like its other services), and the budget is
-   answered before the control plane deploys. The alternative is a `budgets:CreateBudget` call in
-   the `alerts` step, with `budgets:ModifyBudget` on the operator role.
-5. **Where the project file lives.** *Recommended:* on disk, as `admin project register --file`
-   uses today. A second operator machine needs the file copied, or `project add` run again with a
-   higher revision. A read route for registered definitions belongs to a later phase.
-6. **A Jira service account that can see other projects.** *Recommended:* refuse to save it, naming
-   how many other issues it could read, as the Jira guide's Step 8 already requires. The engineer
-   fixes the permission schemes and runs the step again. The alternative is a warning and a
-   confirmation.
-7. **The test message for `channel add` (FR-041).** FR-041 says the CLI posts a test message. It
-   cannot get a reply to its own message. *Recommended:* the engineer mentions the bot, and the CLI
-   watches for the threaded reply. Amend FR-041's wording.
+   `Tags.of(app)`), and an exact tag value cannot match a sibling environment. Task 16 proves it with
+   the IAM policy simulator before the live run. If the tag condition turns out not to work for these
+   actions, the fallback is the exact pool ARN, from the identity stack's `UserPoolId` output, in an
+   operator-role policy. That needs an access-stack update.
+2. **The budget when the `agentx:env` cost-allocation tag is not active yet: accepted.** The budget
+   filters on the tag by default, with a warning in the plan and in the `alerts` step that it reads
+   $0 until the tag is activated, and the exact Billing step to activate it:
+   `BUDGET_TAG_NOTE`'s "Billing, Cost allocation tags". `--budget-scope account` is offered for a
+   dedicated account.
+3. **How `agentx alerts test` confirms: accepted.** It asks the engineer, and also makes two reads:
+   before sending, the subscription must be confirmed (not `PendingConfirmation`); after sending,
+   the alarm's history must show the change to `ALARM`. No SNS delivery-status logging.
+4. **The budget lives in CloudFormation: accepted.** It is answered with the other questions and
+   deployed with the control-plane stack; the service role gains `budgets:*`.
+5. **Where the project file lives: accepted.** On disk, at `~/.agentx/projects/<name>.yaml`, which
+   is what `admin project register --file` takes. A read route for registered definitions belongs to
+   a later phase.
+6. **A Jira service account that can see other projects: changed.** It is warned about and saved,
+   not refused. The warning:
+   - names the other projects it can see: up to 5 project keys, then "and N more";
+   - says AgentX will be able to read issues in them;
+   - suggests narrowing the account to the connected project (the Jira guide's Step 4).
+
+   Under `--yes` it saves with the same warning printed; it never asks. `init` records the warning
+   in the install progress (`connectors[].warning`), so a later `doctor` (15e) can show it. The day-2
+   `agentx connector add jira` prints it and exits 0. The check for at least one issue inside the
+   connected project still refuses when it finds none. Task 10 carries this, with Tasks 2, 12 and 15.
+7. **The test message for `channel add` (FR-041): accepted.** The engineer mentions the bot, the CLI
+   watches turn records for the threaded reply, and FR-041 is reworded.
 
 ## Spec conflicts found
 
@@ -178,7 +179,7 @@ These are also listed in the report and recorded by Task 15:
 - **FR-018 does not list `developer-signin`.** Spec 025 FR-044 added it as init's last step. It now
   runs after step 6 and before step 7. Task 15 adds this to the "init step order" decision.
 - **FR-041 asks the CLI to post a test message** that gets a threaded reply. The ingress ignores
-  bots, so a message the CLI posts can never be answered. Open question 7.
+  bots, so a message the CLI posts can never be answered. Owner decision 7.
 - **FR-015 still names AgentCore** ("the region supports AgentCore Runtime") and **FR-014 names
   `instances-ebs`.** The scope amendment at the top of the spec supersedes both, but the text was
   not changed. This phase touches neither; Task 15 notes them for 15e.
@@ -438,7 +439,7 @@ export type ConnectorType = "linear" | "jira" | "asana";
 // New optional InstallProgress fields:
 //   admin?: { username: string; mode: "cognito" | "oidc" }
 //   project?: { name: string; revision: number; channelName?: string; channelId?: string; teamId?: string }
-//   connectors?: Array<{ type: ConnectorType; ref: string }>
+//   connectors?: Array<{ type: ConnectorType; ref: string; warning?: string }>  // warning: owner decision 6
 //   alerts?: { subscribed: boolean; tested: boolean }
 export type ProgressPatch = Pick<Partial<InstallProgress>, "github" | "slack" | "admin" | "project" | "connectors" | "alerts">;
 // ProgressHandle.update(patch: ProgressPatch): Promise<void>
@@ -466,7 +467,7 @@ describe("15d2 install state", () => {
       ...emptyProgress("staging", T0),
       admin: { username: "alice@example.com", mode: "cognito" as const },
       project: { name: "payments", revision: 2, channelName: "payments", channelId: "C0123456789", teamId: "T0123456789" },
-      connectors: [{ type: "linear" as const, ref: "linear" }],
+      connectors: [{ type: "linear" as const, ref: "linear" }, { type: "jira" as const, ref: "jira", warning: "the Jira service account can also see issues in HR, FIN" }],
       alerts: { subscribed: true, tested: false },
     };
     await writeInstallProgress(store, progress);
@@ -543,7 +544,9 @@ Add to `InstallProgressSchema`'s object, after `slack`:
     channelId: z.string().regex(/^[CG][A-Z0-9]{8,}$/).optional(),
     teamId: z.string().regex(/^T[A-Z0-9]+$/).optional(),
   }).strict().optional(),
-  connectors: z.array(z.object({ type: z.enum(CONNECTOR_TYPES), ref: z.string().regex(AGENTX_NAME_PATTERN) }).strict()).max(3).optional(),
+  // warning: a connector saved with a caution (owner decision 6: a Jira account that sees other
+  // projects), kept so 15e's doctor can show it again. At most 300 characters, never a secret.
+  connectors: z.array(z.object({ type: z.enum(CONNECTOR_TYPES), ref: z.string().regex(AGENTX_NAME_PATTERN), warning: z.string().min(1).max(300).optional() }).strict()).max(3).optional(),
   alerts: z.object({ subscribed: z.boolean(), tested: z.boolean() }).strict().optional(),
 ```
 
@@ -3062,13 +3065,19 @@ git commit -m "feat(setup): agentx connector add linear, with a test read and a 
 // vendors.ts, VendorApi gains:
   /** GET https://<site>.atlassian.net/_edge/tenant_info: the site's cloudId, lowercase. */
   jiraCloudId(siteUrl: string): Promise<string>;
-  /** searchJiraIssuesUsingJql through Rovo MCP /v2 with the API token as Bearer: the issue keys found (at most 5). */
-  jiraSearch(input: { token: string; cloudId: string; jql: string }): Promise<string[]>;
+  /** searchJiraIssuesUsingJql through Rovo MCP /v2 with the API token as Bearer: the distinct issue keys found (at most maxResults issues). */
+  jiraSearch(input: { token: string; cloudId: string; jql: string; maxResults: number }): Promise<string[]>;
 // jira.ts
 export const JIRA_GUIDE: string;
 export const JIRA_TOOLS: ConnectorConfig["tools"];
+/** How many issues the outside search reads, to name the other projects (owner decision 6). */
+export const OUTSIDE_SAMPLE = 50;
 export function jiraSiteUrl(typed: string): string;
-export async function addJira(input: ConnectorAddInput): Promise<{ ref: string; revision: number }>;
+/** The project keys in `issueKeys` (PAY-1 -> PAY), distinct, in first-seen order. */
+export function projectKeys(issueKeys: readonly string[]): string[];
+/** Owner decision 6's warning, at most 300 characters: up to 5 keys, then "and N more". */
+export function widerAccessWarning(projectKey: string, others: readonly string[]): string;
+export async function addJira(input: ConnectorAddInput): Promise<{ ref: string; revision: number; warning?: string }>;
 ```
 
 - [ ] **Step 1: Write the failing tests**
@@ -3077,7 +3086,7 @@ export async function addJira(input: ConnectorAddInput): Promise<{ ref: string; 
 // tests/contract/setup-connector-jira.test.ts
 // (copy the imports, FOUNDATION, session, configDir, beforeEach, afterEach and input() from
 // Task 9's setup-connector-linear.test.ts verbatim; each test file stands alone)
-import { addJira, JIRA_GUIDE, jiraSiteUrl } from "../../packages/cli/src/setup/connectors/jira.js";
+import { addJira, JIRA_GUIDE, jiraSiteUrl, projectKeys, widerAccessWarning } from "../../packages/cli/src/setup/connectors/jira.js";
 
 const TOKEN = `ATATT${"t".repeat(187)}`; // about 192 characters, as Atlassian's are
 const CLOUD = "0f1e2d3c-4b5a-4968-8776-655443322110";
@@ -3092,7 +3101,7 @@ describe("the Jira site", () => {
 });
 
 describe("agentx connector add jira (FR-036 to FR-039)", () => {
-  it("proves the token sees the project and nothing else before storing it, then scopes it with siteUrl", async () => {
+  it("proves the token sees the project before storing it, then scopes it with siteUrl", async () => {
     const plane = fakeControlPlane();
     const vendors = fakeVendors({ jiraCloudId: CLOUD, jiraInside: ["PAY-1"], jiraOutside: [] });
     const secrets = memoryInitSecrets();
@@ -3100,7 +3109,7 @@ describe("agentx connector add jira (FR-036 to FR-039)", () => {
     // site, token, project key
     expect(await addJira(input({ plane, vendors, secrets, lines, script: ["acme", TOKEN, "PAY"] }))).toEqual({ ref: "jira", revision: 2 });
     expect(lines[0]).toBe(JIRA_GUIDE);
-    expect(vendors.calls).toEqual(["jiraCloudId https://acme.atlassian.net", "jiraSearch project = PAY", "jiraSearch project not in (PAY)"]);
+    expect(vendors.calls).toEqual(["jiraCloudId https://acme.atlassian.net", "jiraSearch project = PAY max 5", "jiraSearch project not in (PAY) max 50"]);
     expect(JSON.parse(secrets.values.get("agentx/staging/connectors/jira")!)).toEqual({ apiKey: TOKEN });
     const registered = plane.registered.at(-1) as { definition: { integrations: { connectors: Array<Record<string, unknown>> } } };
     expect(registered.definition.integrations.connectors[0]).toMatchObject({
@@ -3110,11 +3119,48 @@ describe("agentx connector add jira (FR-036 to FR-039)", () => {
     expect(lines.join("\n")).not.toContain(TOKEN);
   });
 
-  it("refuses a service account that can read other projects, storing nothing (open question 6)", async () => {
+  it("saves a service account that can see other projects, with a warning naming them (owner decision 6)", async () => {
+    const plane = fakeControlPlane();
     const secrets = memoryInitSecrets();
-    const vendors = fakeVendors({ jiraCloudId: CLOUD, jiraInside: ["PAY-1"], jiraOutside: ["HR-4", "FIN-2"] });
-    await expect(addJira(input({ vendors, secrets, script: ["acme", TOKEN, "PAY"] }))).rejects.toThrow("the service account can read issues outside PAY (HR-4, FIN-2); restrict it to PAY in each project's permission scheme (docs/connectors/jira.md, Step 4), then run this again. Nothing was stored");
-    expect(secrets.values.size).toBe(0);
+    const lines: string[] = [];
+    const vendors = fakeVendors({ jiraCloudId: CLOUD, jiraInside: ["PAY-1"], jiraOutside: ["HR-4", "FIN-2", "HR-9"] });
+    const result = await addJira(input({ plane, vendors, secrets, lines, script: ["acme", TOKEN, "PAY"] }));
+    const warning = "the Jira service account can also see issues in HR and FIN, so AgentX will be able to read issues in those projects too. Narrow the account to PAY in each other project's permission scheme (docs/connectors/jira.md, Step 4)";
+    expect(result).toEqual({ ref: "jira", revision: 2, warning });
+    expect(lines).toContain(`Warning: ${warning}`);
+    // Saved all the same: the secret, the credential and the revision.
+    expect(JSON.parse(secrets.values.get("agentx/staging/connectors/jira")!)).toEqual({ apiKey: TOKEN });
+    expect(plane.credentials).toContainEqual({ ref: "jira", type: "static-secret", secretName: "agentx/staging/connectors/jira" });
+    expect(plane.registered).toHaveLength(1);
+    // The outside search reads enough issues to name several projects.
+    expect(vendors.calls).toContain("jiraSearch project not in (PAY) max 50");
+  });
+
+  it("names the first five other projects and counts the rest", () => {
+    expect(widerAccessWarning("PAY", ["HR", "FIN", "OPS", "LEGAL", "SALES", "IT", "QA"])).toBe(
+      "the Jira service account can also see issues in HR, FIN, OPS, LEGAL, SALES and 2 more, so AgentX will be able to read issues in those projects too. Narrow the account to PAY in each other project's permission scheme (docs/connectors/jira.md, Step 4)",
+    );
+    expect(widerAccessWarning("PAY", ["HR"])).toContain("can also see issues in HR, so AgentX");
+    expect(widerAccessWarning("PAY", ["A".repeat(10), "B".repeat(10), "C".repeat(10), "D".repeat(10), "E".repeat(10), "F"]).length).toBeLessThanOrEqual(300);
+  });
+
+  it("finds project keys from issue keys, once each", () => {
+    expect(projectKeys(["HR-4", "FIN-2", "HR-9", "OPS_2-1"])).toEqual(["HR", "FIN", "OPS_2"]);
+  });
+
+  it("asks nothing more under --yes when the account sees other projects: the same warning, saved", async () => {
+    const lines: string[] = [];
+    const vendors = fakeVendors({ jiraCloudId: CLOUD, jiraInside: ["PAY-1"], jiraOutside: ["HR-4"] });
+    const env = { TOKEN_ENV: TOKEN };
+    const base = input({ vendors, lines, script: [] });
+    const result = await addJira({ ...base, processEnv: env, flags: { jiraSite: "acme", jiraProject: "PAY", jiraToken: { envName: "TOKEN_ENV" } } });
+    expect(result.warning).toContain("can also see issues in HR");
+    expect(lines.some((line) => line.startsWith("Warning: the Jira service account can also see issues in HR"))).toBe(true);
+  });
+
+  it("says nothing extra when the account sees only the connected project", async () => {
+    const result = await addJira(input({ vendors: fakeVendors({ jiraCloudId: CLOUD, jiraInside: ["PAY-1"], jiraOutside: [] }), script: ["acme", TOKEN, "PAY"] }));
+    expect(result).toEqual({ ref: "jira", revision: 2 });
   });
 
   it("asks for one issue in an empty project, so an empty answer is not mistaken for a blind one", async () => {
@@ -3137,8 +3183,8 @@ Add to `fakeVendors`'s options `jiraCloudId?: string; jiraInside?: string[]; jir
 
 ```ts
     async jiraCloudId(siteUrl) { calls.push(`jiraCloudId ${siteUrl}`); return options.jiraCloudId ?? "0f1e2d3c-4b5a-4968-8776-655443322110"; },
-    async jiraSearch({ jql }) {
-      calls.push(`jiraSearch ${jql}`);
+    async jiraSearch({ jql, maxResults }) {
+      calls.push(`jiraSearch ${jql} max ${maxResults}`);
       if (options.jiraRefuses) throw Object.assign(new Error("401"), { name: "VendorRefused" });
       return jql.includes("not in") ? options.jiraOutside ?? [] : options.jiraInside ?? ["PAY-1"];
     },
@@ -3161,7 +3207,7 @@ the object `vendorApi` returns:
       if (typeof body.cloudId !== "string") throw agentXError("CONFIG_INVALID", `${siteUrl} did not return a cloudId; check the site name`);
       return body.cloudId.toLowerCase();
     },
-    async jiraSearch({ token, cloudId, jql }) {
+    async jiraSearch({ token, cloudId, jql, maxResults }) {
       let connection;
       try {
         // /v2 is the endpoint that accepts API tokens; /v1 ignores them (spec 013 lessons).
@@ -3171,7 +3217,7 @@ the object `vendorApi` returns:
         throw error;
       }
       try {
-        const result = await connection.call("searchJiraIssuesUsingJql", { cloudId, jql, maxResults: 5 });
+        const result = await connection.call("searchJiraIssuesUsingJql", { cloudId, jql, maxResults });
         if (result.isError === true) throw new VendorRefused("Atlassian");
         const text = (result.content ?? []).map((part) => ("text" in part && typeof part.text === "string" ? part.text : "")).join("");
         return [...new Set(text.match(/\b[A-Z][A-Z0-9_]+-[0-9]+\b/g) ?? [])];
@@ -3181,7 +3227,9 @@ the object `vendorApi` returns:
     },
 ```
 
-This is the Jira guide's Step 8 check, in code. If `McpToolResult`'s content parts are typed
+This is the Jira guide's Step 8 check, in code. The outside search reads up to
+`OUTSIDE_SAMPLE` (50) issues so the warning can name several projects; the other projects are
+at least those found, so the warning says "can also see", never "can see only". If `McpToolResult`'s content parts are typed
 differently, follow `packages/gateway/src/mcp-client.ts`.
 
 - [ ] **Step 4: Implement the connector**
@@ -3189,8 +3237,9 @@ differently, follow `packages/gateway/src/mcp-client.ts`.
 ```ts
 // packages/cli/src/setup/connectors/jira.ts
 // agentx connector add jira (FR-036 to FR-039), from docs/connectors/jira.md: a service account's
-// API token against Rovo MCP /v2. The test read is the guide's mandatory Step 8: the token must
-// find an issue inside the project and none outside it, before anything is stored.
+// API token against Rovo MCP /v2. The test read is the guide's Step 8: the token must find an issue
+// inside the project before anything is stored. Issues it finds outside the project do not stop it
+// (owner decision 6, 2026-09-28): the connector is saved with a warning naming those projects.
 import { agentXError, type ConnectorConfig } from "@agentx/contracts";
 import { registerCredential } from "../../admin/credential.js";
 import { secretFromSource } from "../../init/prompts.js";
@@ -3221,7 +3270,24 @@ export function jiraSiteUrl(typed: string): string {
 
 const refused = (error: unknown) => error instanceof Error && error.name === "VendorRefused";
 
-export async function addJira(input: ConnectorAddInput): Promise<{ ref: string; revision: number }> {
+export const OUTSIDE_SAMPLE = 50;
+const NAMED = 5;
+const WARNING_LIMIT = 300;
+
+export function projectKeys(issueKeys: readonly string[]): string[] {
+  return [...new Set(issueKeys.map((key) => key.replace(/-[0-9]+$/, "")))];
+}
+
+export function widerAccessWarning(projectKey: string, others: readonly string[]): string {
+  const shown = others.slice(0, NAMED);
+  const rest = others.length - shown.length;
+  const list = rest > 0 ? `${shown.join(", ")} and ${rest} more` : shown.length > 1 ? `${shown.slice(0, -1).join(", ")} and ${shown.at(-1)!}` : shown[0]!;
+  const text = `the Jira service account can also see issues in ${list}, so AgentX will be able to read issues in those projects too. Narrow the account to ${projectKey} in each other project's permission scheme (docs/connectors/jira.md, Step 4)`;
+  // Project keys are at most 10 characters, so 5 of them always fit; the cut is only a guard.
+  return text.length <= WARNING_LIMIT ? text : text.slice(0, WARNING_LIMIT);
+}
+
+export async function addJira(input: ConnectorAddInput): Promise<{ ref: string; revision: number; warning?: string }> {
   input.write(JIRA_GUIDE);
   const siteUrl = jiraSiteUrl(input.flags.jiraSite ?? await input.prompter.ask("Your Jira site (the <site> in <site>.atlassian.net)", { flag: "--jira-site" }));
   const cloudId = await input.services.vendors.jiraCloudId(siteUrl);
@@ -3232,15 +3298,18 @@ export async function addJira(input: ConnectorAddInput): Promise<{ ref: string; 
   let inside: string[];
   let outside: string[];
   try {
-    inside = await input.services.vendors.jiraSearch({ token, cloudId, jql: `project = ${projectKey}` });
-    outside = await input.services.vendors.jiraSearch({ token, cloudId, jql: `project not in (${projectKey})` });
+    inside = await input.services.vendors.jiraSearch({ token, cloudId, jql: `project = ${projectKey}`, maxResults: 5 });
+    outside = await input.services.vendors.jiraSearch({ token, cloudId, jql: `project not in (${projectKey})`, maxResults: OUTSIDE_SAMPLE });
   } catch (error) {
     if (refused(error)) throw agentXError("AUTH_REQUIRED", "Atlassian refused the API token; check that Rovo MCP's Allow API token authentication is on (Step 1) and the token has all six scopes (Step 5). Nothing was stored");
     throw error;
   }
   if (inside.length === 0) throw agentXError("CONFIG_INVALID", `the search found no issue in ${projectKey}; if the project is empty, create one issue in it and run this again. If it has issues, the service account cannot see them: add it to the project (Step 4)`);
-  if (outside.length > 0) throw agentXError("CONFIG_INVALID", `the service account can read issues outside ${projectKey} (${outside.join(", ")}); restrict it to ${projectKey} in each project's permission scheme (docs/connectors/jira.md, Step 4), then run this again. Nothing was stored`);
-  input.write(`The token sees ${projectKey} (${inside.join(", ")}) and nothing outside it.`);
+  // Owner decision 6: warn and save, never refuse, and never ask (so --yes behaves the same).
+  const others = projectKeys(outside).filter((key) => key !== projectKey);
+  const warning = others.length === 0 ? undefined : widerAccessWarning(projectKey, others);
+  input.write(`The token sees ${projectKey} (${inside.join(", ")}).${warning === undefined ? " It sees no other project." : ""}`);
+  if (warning !== undefined) input.write(`Warning: ${warning}`);
 
   const secretName = connectorSecretName(input.env, "jira");
   await storeConnectorSecret(input.secrets, secretName, JSON.stringify({ apiKey: token }));
@@ -3249,7 +3318,7 @@ export async function addJira(input: ConnectorAddInput): Promise<{ ref: string; 
     env: input.env, session: input.session, projectName: input.projectName, write: input.write, services: input.services,
     connector: { name: "jira", type: "jira", credentialRef: "jira", scopes: [{ alias: scopeAlias(projectKey), cloudId, projectKey, siteUrl }], tools: JIRA_TOOLS },
   });
-  return { ref: "jira", revision };
+  return { ref: "jira", revision, ...(warning === undefined ? {} : { warning }) };
 }
 ```
 
@@ -3282,7 +3351,8 @@ In `setup/cli.ts`, add under `connector`:
           ...secretFlag("jiraToken", options.jiraTokenFile, options.jiraTokenEnv),
         },
       });
-      run.print(result, `Jira connected to ${options.project} (revision ${result.revision})\n`);
+      // The warning was already printed by addJira; --json carries it in the result too. Exit 0.
+      run.print(result, `Jira connected to ${options.project} (revision ${result.revision})${result.warning === undefined ? "" : ", with the warning above"}\n`);
     });
 ```
 
@@ -3295,7 +3365,7 @@ Expected: PASS.
 
 ```bash
 git add packages/cli/package.json package-lock.json packages/cli/src/setup tests/support/setup-fakes.ts tests/contract/setup-connector-jira.test.ts
-git commit -m "feat(setup): agentx connector add jira, proving the token sees only its project"
+git commit -m "feat(setup): agentx connector add jira, warning when the account sees other projects"
 ```
 
 ### Task 11: `agentx connector add asana`
@@ -3817,7 +3887,9 @@ export function connectorsStep(): InitStep<InitContext> {
         const session = await context.adminSession();
         const base = { env: context.env, session, projectName: project.name, secrets: context.secrets, prompter: context.prompter, processEnv: context.processEnv, write: context.write, services: context.setup, flags: context.flags };
         const result = type === "linear" ? await addLinear(base) : type === "jira" ? await addJira(base) : await addAsana(base);
-        await progress.update({ connectors: [...(progress.current().connectors ?? []), { type, ref: result.ref }], project: { ...project, revision: result.revision } });
+        // Owner decision 6: a Jira warning is kept in progress, for 15e's doctor.
+        const warning = "warning" in result ? result.warning : undefined;
+        await progress.update({ connectors: [...(progress.current().connectors ?? []), { type, ref: result.ref, ...(warning === undefined ? {} : { warning }) }], project: { ...project, revision: result.revision } });
       }
       const connected = (progress.current().connectors ?? []).map((entry) => CONNECTOR_LABELS[entry.type]);
       return { status: "done", note: connected.length === 0 ? "no connectors" : `connected ${connected.join(", ")}` };
@@ -3895,6 +3967,27 @@ describe("the alerts step", () => {
 });
 
 describe("the connectors step", () => {
+  it("records a Jira connector's wider-access warning in the install progress (owner decision 6)", async () => {
+    const configDir = await mkdtemp(join(tmpdir(), "agentx-projects-"));
+    await writeProjectFile(configDir, {
+      name: "payments-api", revision: 1,
+      repositories: [{ name: "payments-api", url: "https://github.com/acme/payments-api.git", path: "repo/payments-api", defaultBranch: "main", credentialRef: "github-agentx-sdlc" }],
+      setup: [], readiness: [], orchestratorInstructions: "Delegate every repository read, edit, build, and test to the remote AgentX worker.",
+    });
+    const vendors = fakeVendors({ jiraCloudId: "0f1e2d3c-4b5a-4968-8776-655443322110", jiraInside: ["PAY-1"], jiraOutside: ["HR-4"] });
+    const context = initContext({
+      prompter: scriptedPrompter([]),
+      flags: { connectors: "jira", jiraSite: "acme", jiraProject: "PAY", jiraToken: { envName: "JIRA" } },
+      processEnv: { JIRA: `ATATT${"t".repeat(187)}` },
+      setup: setupServices({ vendors, configDir, stackOutputs: async () => ({ Ec2WorkerLaunchTemplateId: "lt-0123456789abcdef0", Ec2WorkerSubnets: "us-east-1a=subnet-0aaa1111bbbb2222c" }) }),
+      adminSession: async () => ({ controlPlaneUrl: "https://cp.example.test", accessToken: "t" }),
+    });
+    const progress = progressHandle({ ...progressHandle().value(), project: { name: "payments-api", revision: 1 } });
+    await connectorsStep().run(context, progress);
+    expect(progress.value().connectors).toEqual([{ type: "jira", ref: "jira", warning: expect.stringContaining("can also see issues in HR") as unknown }]);
+    await rm(configDir, { recursive: true, force: true });
+  });
+
   it("connects nothing and asks three times when the engineer says no to each", async () => {
     const prompter = scriptedPrompter([false, false, false]);
     const context = initContext({ prompter });
@@ -3912,7 +4005,8 @@ describe("the connectors step", () => {
 ```
 
 (`settingsFixture` is the `cognitoSettings` object from `setup-admin.test.ts`; copy it, and
-import `initContext`, `progressHandle` and `setupServices`.)
+import `initContext`, `progressHandle`, `setupServices`, `fakeVendors`, `writeProjectFile`, and
+`mkdtemp`, `rm`, `tmpdir` and `join` from Node.)
 
 `setup/cli.ts`, add:
 
@@ -4019,6 +4113,15 @@ describe("the message init ends with", () => {
       "  Send a test alarm any time: agentx --env staging alerts test.",
     ].join("\n"));
   });
+
+  it("repeats a connector's warning at the end (owner decision 6)", () => {
+    const text = readyText({ env: "staging", controlPlaneUrl: "https://cp.example.test", progress: {
+      ...emptyProgress("staging", T0),
+      project: { name: "payments-api", revision: 2 },
+      connectors: [{ type: "jira", ref: "jira", warning: "the Jira service account can also see issues in HR" }],
+    } });
+    expect(text).toContain("  Warning (Jira): the Jira service account can also see issues in HR.");
+  });
 });
 ```
 
@@ -4102,6 +4205,8 @@ export function readyText(input: { env: string; controlPlaneUrl: string; progres
     `AgentX environment ${env} is ready.`,
     ...(project?.channelName === undefined || progress.slack === undefined ? [] : [`  Talk to it: mention <@${progress.slack.botUserId}> in #${project.channelName} (project ${project.name}, revision ${project.revision}).`]),
     ...(project === undefined ? [] : [`  ${connected.length === 0 ? "No connectors yet." : `Connected: ${connected.join(", ")}.`} Add ${connected.length === 0 ? "one" : "more"} with ${cli} connector add linear|jira|asana --project ${project.name}.`]),
+    // Owner decision 6: a connector saved with a warning says so again at the end.
+    ...(progress.connectors ?? []).filter((entry) => entry.warning !== undefined).map((entry) => `  Warning (${LABELS[entry.type]}): ${entry.warning!}.`),
     `  More projects: ${cli} project add, then ${cli} channel add.`,
     `  Send a test alarm any time: ${cli} alerts test.`,
   ].join("\n");
@@ -4556,7 +4661,12 @@ At the top of each of the three guides, add one paragraph: "`agentx connector ad
 <name>` walks you through this guide, reads the credential from a hidden prompt, tests it, and
 registers the project's next revision. The steps below are what it does, for doing it by hand or
 understanding it." In `jira.md`, say that the command runs Step 8's inside and outside check
-itself. In `asana.md`, say that the command signs the bot in with `--no-browser` and
+itself, and reword Step 8 to match owner decision 6 (2026-09-28): `inside` must still be more than
+0; when `outside` is more than 0, AgentX still saves the connector, warns you with the other
+projects it found (up to 5, then "and N more"), and warns that it will be able to read issues in
+them. Keep Step 4's advice to narrow the account, and replace "Do not register the project until
+`outside` is 0" with "Narrow the account until `outside` is 0 if AgentX must not read those
+projects; `agentx init` keeps the warning, and `agentx doctor` shows it again". In `asana.md`, say that the command signs the bot in with `--no-browser` and
 `--expect-account` already set. Change each guide's secret name examples to
 `agentx/<env>/connectors/<name>` for a named environment, keeping `agentx/connectors/` for the
 legacy one. Replace the Linear guide's `--runtime-arn <runtime ARN> --deployment-mode <mode>` with
@@ -4565,27 +4675,42 @@ legacy one. Replace the Linear guide's `--runtime-arn <runtime ARN> --deployment
 
 - [ ] **Step 3: The spec's Decisions**
 
-Under Decisions, add these entries dated 2026-09-27, marked "phase 15d2 plan; the owner confirms
-in the PR":
+Under Decisions, add these entries, each dated 2026-09-28 and marked "phase 15d2 plan; owner
+decision" with "accepted" or "changed" as below. They carry the owner's exact answers:
 - **The finishing steps run after developer sign-in.** The order is FR-018's steps 1 to 6, then
   `developer-signin` (spec 025 FR-044), then steps 7 to 11. The new step ids are appended to
   `INIT_STEP_IDS`, so resume never re-runs a done step.
-- **The operator role's additions:** Cognito admin-user actions on the pool tagged with the
-  environment; subscribe and list on the environment's alert topic; `SetAlarmState` on the test
-  alarm only; `budgets:ViewBudget` on the environment's budget; `servicequotas:GetServiceQuota`.
-- **The test alarm is a CloudWatch alarm** that `agentx alerts test` flips, so PagerDuty and
-  Opsgenie get a real alarm; confirmation is the subscription's state, the alarm's history, and the
-  engineer's answer.
-- **The budget is part of the control-plane stack,** answered with the other questions, on the
-  `agentx:env` tag by default (`--budget-scope account` for a dedicated account).
-- **Connector test reads:** Linear lists the key's teams; Jira searches inside and outside the
-  project (outside must be empty); Asana reads the project with `get_project` as the bot; then the
-  registration preflight must report `connected`.
-- **Project files stay on disk,** as `admin project register --file` takes them.
-- **FR-041's test message is posted by a person.** The ingress never answers a bot, so the CLI
-  watches turn records for the reply. Change FR-041's text to: "`agentx channel add` MUST bind a
-  channel to a project, invite the bot (or wait for a person to invite it to a private channel),
-  and ask the engineer to mention the bot, then wait for a threaded reply."
+- **Cognito scoping for the operator role (accepted).** `cognito-idp:AdminCreateUser`,
+  `AdminGetUser` and `AdminAddUserToGroup` on `userpool/*`, with `aws:ResourceTag/agentx:env`
+  equal to the environment, proven with the IAM policy simulator in the live check; the fallback is
+  the exact pool ARN. The operator role also gains subscribe and list on the environment's alert
+  topic, `SetAlarmState` on the test alarm only, `budgets:ViewBudget` on the environment's budget,
+  and `servicequotas:GetServiceQuota`.
+- **The budget filters on the `agentx:env` tag by default (accepted),** with a warning that it
+  reads $0 until the tag is activated and the exact Billing step to activate it (Billing, Cost
+  allocation tags); `--budget-scope account` is for a dedicated account.
+- **`agentx alerts test` (accepted)** flips a CloudWatch test alarm, so PagerDuty and Opsgenie get a
+  real alarm. It checks that the subscription is confirmed and that the alarm's history shows
+  `ALARM`, then asks the engineer. No SNS delivery-status logging.
+- **The budget lives in CloudFormation (accepted),** in the control-plane stack, answered with the
+  other questions; the service role gains `budgets` permissions.
+- **Project files stay at `~/.agentx/projects/<name>.yaml` (accepted),** as `admin project register
+  --file` takes them.
+- **A Jira service account that can see other projects is warned about and saved, not refused
+  (changed).** The warning names the other projects it can see (up to 5, then "and N more"), says
+  AgentX will be able to read issues in them, and suggests narrowing the account. Under `--yes` it
+  saves with the same warning printed. `init` records the warning in the install progress
+  (`connectors[].warning`) so `agentx doctor` (15e) can show it. An account that finds no issue in
+  the connected project is still refused.
+- **Connector test reads:** Linear lists the key's teams; Jira searches inside the project (must
+  find an issue) and outside it (warns, as above); Asana reads the project with `get_project` as the
+  bot; then the registration preflight must report `connected`.
+- **FR-041's test message is posted by a person (accepted).** The engineer mentions the bot and the
+  CLI watches turn records for the threaded reply. Change FR-041's text to: "`agentx channel add`
+  MUST bind a channel to a project, invite the bot (or wait for a person to invite it to a private
+  channel), and ask the engineer to mention the bot, then wait for a threaded reply."
+- **FR-050, for phase 15e:** add "each connector's saved warning (for example, a Jira account that
+  can see other projects)" to `doctor`'s checks.
 - Under the existing "init step order follows the deploy order" decision, add one sentence:
   "Spec 025's `developer-signin` runs after step 6."
 - Note, without changing them, that FR-014 (`instances-ebs`) and FR-015 (AgentCore Runtime) are
@@ -4628,11 +4753,11 @@ path), in account 944937319445, `us-east-1`. It never touches a production stack
     `aws ssm get-parameters-by-path --path /agentx/live15e2e --recursive --region us-east-1` and
     the same for `live15exp` return no parameters.
   - Check the EC2 vCPU quota (`L-1216C47A`) allows at least one worker instance.
-  - Prove open question 1 with the policy simulator, since root cannot assume the operator role
+  - Prove owner decision 1 with the policy simulator, since root cannot assume the operator role
     (owner memory): after the access stack exists in Step 3, run
     `aws iam simulate-principal-policy --policy-source-arn <agentx-live15e2e-operator ARN> --action-names cognito-idp:AdminCreateUser --resource-arns <the live pool ARN> --context-entries Key=aws:ResourceTag/agentx:env,Values=live15e2e,Type=string`.
     Expected: `allowed`. With `Values=other`, expected: `implicitDeny`. If the first is not
-    allowed, stop and take the fallback in open question 1 to the owner.
+    allowed, stop and take the fallback in owner decision 1 to the owner.
 
 - [ ] **Step 2: Owner approval**
 
@@ -4657,7 +4782,10 @@ Record:
   install without connectors; count connector actions separately);
 - the Cognito email arriving, and the first sign-in's new-password page;
 - the proposed setup and test commands for the test repository;
-- the Jira inside and outside counts, the Asana "Signed in to Asana as" line and project name;
+- the Jira inside and outside counts, and, if the test service account can see a second project,
+  the warning's exact text (owner decision 6) and that it appears again at the end of init and in
+  `/agentx/live15e2e/install/progress`;
+- the Asana "Signed in to Asana as" line and project name;
 - the AWS Notifications email, and the test alarm's arrival (email subject and time);
 - the time from the mention to the threaded reply.
 
@@ -4769,7 +4897,8 @@ changes a decision above as a finding for the owner, before the PR is merged.
 
 In phase 15e:
 - `agentx upgrade`, `config` (including `alerts.address`, `alerts.slowTurnMinutes` and the budget),
-  `doctor` (including the alert subscription and budget checks FR-050 lists) and `destroy`, which
+  `doctor` (including the alert subscription and budget checks FR-050 lists, and showing each
+  connector's saved warning from the install progress, owner decision 6) and `destroy`, which
   must also remove the connector secrets, the project files' environment, and worker instances
   and volumes;
 - rewording FR-014 and FR-015 for EC2;
@@ -4803,3 +4932,20 @@ Later:
   Tasks 7 to 13 read.
 - **Review Focus.** Each of the five lines has a test in its task: 1 and 2 in Task 5, 3 and 4 in
   Task 8, 5 in Task 6.
+- **Owner decision 6, re-checked (2026-09-28).** Everything the change touches:
+  - Task 2: `connectors[].warning` (at most 300 characters) in `InstallProgressSchema`, with a
+    round-trip test;
+  - Task 10: `addJira` no longer refuses on outside issues, returns `warning`, prints it as
+    `Warning: ...`, never prompts (so `--yes` behaves the same), and still refuses when nothing is
+    found inside; `jiraSearch` takes `maxResults` (5 inside, 50 outside); `projectKeys` and
+    `widerAccessWarning` have their own tests, including the 5-then-"and N more" rule and the
+    300-character cap;
+  - Task 12: the connectors step writes the warning into progress, with a test;
+  - Task 13: `readyText` repeats it, with a test;
+  - Task 15: the Jira guide's Step 8 and the spec decision;
+  - Task 16: the live check records the warning if the test account sees a second project.
+
+  No other task reads the outside search. The warning is built only from project keys, so it
+  cannot carry a secret into progress or output. `widerAccessWarning`'s result fits the 300
+  characters the schema allows: 5 keys of at most 10 characters plus the fixed text come to about
+  290, and the function cuts at 300 as a guard.
