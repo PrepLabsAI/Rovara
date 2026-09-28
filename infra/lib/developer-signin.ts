@@ -42,6 +42,11 @@ export interface DeveloperSignInProps {
   parameters: DeveloperSignInParameters;
   /** The API's default stage, which throttles the public /v1/auth routes. */
   stage: apigwv2.CfnStage;
+  /** The TurnRecords table (control-plane.ts), so the broker may write AI-tool audit records.
+   * The concrete Table (as with slackSecret above): dynamodb.ITable's tableStreamArn is an
+   * optional string, but Table's getter returns string | undefined, which this repo's
+   * exactOptionalPropertyTypes rejects as an ITable. */
+  turnRecords: dynamodb.Table;
 }
 
 export class DeveloperSignIn extends Construct {
@@ -152,6 +157,14 @@ export class DeveloperSignIn extends Construct {
       actions: ["dynamodb:GetItem"],
       resources: [table.tableArn],
       conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "DEVELOPER#*"] } },
+    }));
+
+    // FR-037, R27: the developer task routes write immutable AI-tool turn records, only under TASK#.
+    // No update or delete: a record is written once with a condition and never changed.
+    broker.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["dynamodb:PutItem"],
+      resources: [props.turnRecords.tableArn],
+      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["TASK#*"] } },
     }));
 
     // The issuer the tokens carry and the broker checks, for operators and scripts to read.

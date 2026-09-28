@@ -252,3 +252,29 @@ describe("the legacy deployment (R3)", () => {
     expect(ofType(legacy, "AWS::ApiGatewayV2::Stage").map(([, r]) => r.Properties.RouteSettings)).toEqual([undefined]);
   });
 });
+
+describe("AI-tool turn records (spec 025 FR-037, R27)", () => {
+  const brokerRole = (template: TemplateJson) => {
+    const brokerFunction = template.Resources[functionId(template, "Broker")]!;
+    return ((brokerFunction.Properties.Role as { "Fn::GetAtt": [string, string] })["Fn::GetAtt"])[0];
+  };
+  const turnTable = (template: TemplateJson) => ofType(template, "AWS::DynamoDB::Table").map(([id]) => id).find((id) => withoutHash(id) === "TurnRecords")!;
+
+  it("lets the broker put items in TurnRecords only under TASK#", () => {
+    const puts = grants(named).filter(({ role, statement }) => role === brokerRole(named) && allows(statement, "dynamodb:PutItem") && JSON.stringify(statement.Resource).includes(turnTable(named)));
+    expect(puts).toHaveLength(1);
+    expect(puts[0]!.statement.Condition).toEqual({ "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["TASK#*"] } });
+    expect(actionsOf(puts[0]!.statement)).toEqual(["dynamodb:PutItem"]);
+  });
+
+  it("gives the broker no other write on TurnRecords, and no update or delete anywhere on it", () => {
+    for (const action of ["dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:BatchWriteItem"]) {
+      expect(grants(named).some(({ role, statement }) => role === brokerRole(named) && allows(statement, action) && JSON.stringify(statement.Resource ?? "").includes(turnTable(named)))).toBe(false);
+    }
+  });
+
+  it("adds nothing to the legacy templates", () => {
+    expect(grants(legacy).some(({ statement }) => (statement.Condition as Record<string, Record<string, unknown>> | undefined)?.["ForAllValues:StringLike"]?.["dynamodb:LeadingKeys"] !== undefined
+      && JSON.stringify(statement.Condition).includes("TASK#"))).toBe(false);
+  });
+});
