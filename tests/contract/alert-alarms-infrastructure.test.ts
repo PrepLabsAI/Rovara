@@ -71,10 +71,40 @@ describe("FR-047 budget in the control-plane stack (environment naming)", () => 
     expect(budget!.Properties.ResourceTags).toEqual([{ Key: "agentx:env", Value: "staging" }]);
   });
 
-  it("lets AWS Budgets publish to the topic, from this account only", () => {
-    const policies = JSON.stringify(controlPlane.findResources("AWS::SNS::TopicPolicy"));
-    expect(policies).toContain("budgets.amazonaws.com");
-    expect(policies).toContain("aws:SourceAccount");
+  it("filters by the agentx:env tag under tag scope, and nothing at all under account scope", () => {
+    const [budget] = Object.values(controlPlane.findResources("AWS::Budgets::Budget")) as Array<{ Properties: { Budget: { CostFilters: unknown } } }>;
+    expect(budget!.Properties.Budget.CostFilters).toEqual({
+      "Fn::If": ["BudgetByTag", { TagKeyValue: ["user:agentx:env$staging"] }, { Ref: "AWS::NoValue" }],
+    });
+  });
+
+  it("refuses anything but a plain integer (no leading zero) as the monthly budget amount", () => {
+    // "00" must not slip past the HasBudget condition's StringEquals check against the literal "0".
+    controlPlane.hasParameter("BudgetMonthlyUsd", { Type: "String", Default: "0", AllowedPattern: "^(0|[1-9][0-9]{0,6})$" });
+  });
+
+  it("makes the budget depend on the topic policy, so Budgets never publishes before it may", () => {
+    const [budget] = Object.values(controlPlane.findResources("AWS::Budgets::Budget")) as Array<{ DependsOn?: string | string[] }>;
+    const topicPolicyIds = Object.keys(controlPlane.findResources("AWS::SNS::TopicPolicy"));
+    expect(topicPolicyIds.length).toBeGreaterThan(0);
+    const dependsOn = [budget!.DependsOn].flat().filter((id): id is string => typeof id === "string");
+    expect(dependsOn.length).toBeGreaterThan(0);
+    expect(dependsOn.every((id) => topicPolicyIds.includes(id))).toBe(true);
+  });
+
+  it("lets AWS Budgets publish to the topic, from this account and only a Budgets ARN in it", () => {
+    // Finds the statement AWS Budgets actually gets, rather than searching the whole policy
+    // document as a string: the existing CloudWatch statement also carries "aws:SourceAccount" and
+    // would satisfy a plain string search even if the Budgets statement's own condition were wrong
+    // or missing.
+    const policies = Object.values(controlPlane.findResources("AWS::SNS::TopicPolicy")) as Array<{
+      Properties: { PolicyDocument: { Statement: Array<{ Principal?: { Service?: string }; Condition?: Record<string, unknown> }> } };
+    }>;
+    const statement = policies.flatMap((p) => p.Properties.PolicyDocument.Statement).find((s) => s.Principal?.Service === "budgets.amazonaws.com");
+    expect(statement).toBeDefined();
+    const condition = statement!.Condition as { StringEquals?: Record<string, unknown>; ArnLike?: Record<string, unknown> };
+    expect(condition.StringEquals).toEqual({ "aws:SourceAccount": { Ref: "AWS::AccountId" } });
+    expect(condition.ArnLike).toEqual({ "aws:SourceArn": { "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":budgets::", { Ref: "AWS::AccountId" }, ":*"]] } });
   });
 });
 

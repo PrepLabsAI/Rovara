@@ -351,14 +351,17 @@ export class ControlPlaneStack extends Stack {
     // FR-047, environment naming only. AWS Budgets publishes the budget's notifications to the
     // same topic, so the topic policy must allow it (enforceSSL left only a Deny).
     if (naming.env !== undefined) {
-      operatorAlerts.addToResourcePolicy(new iam.PolicyStatement({
+      const budgetsTopicPublish = operatorAlerts.addToResourcePolicy(new iam.PolicyStatement({
         principals: [new iam.ServicePrincipal("budgets.amazonaws.com")],
         actions: ["sns:Publish"],
         resources: [operatorAlerts.topicArn],
-        conditions: { StringEquals: { "aws:SourceAccount": this.account } },
+        conditions: {
+          StringEquals: { "aws:SourceAccount": this.account },
+          ArnLike: { "aws:SourceArn": `arn:${this.partition}:budgets::${this.account}:*` },
+        },
       }));
       const monthlyUsd = new CfnParameter(this, "BudgetMonthlyUsd", {
-        type: "String", default: "0", allowedPattern: "^[0-9]{1,7}$",
+        type: "String", default: "0", allowedPattern: "^(0|[1-9][0-9]{0,6})$",
         description: "The environment's monthly AWS budget in US dollars; 0 means no budget",
       });
       const scope = new CfnParameter(this, "BudgetScope", {
@@ -387,6 +390,10 @@ export class ControlPlaneStack extends Stack {
         resourceTags: [{ key: "agentx:env", value: naming.env }],
       });
       budget.cfnOptions.condition = hasBudget;
+      // AWS Budgets creates the notification's SNS subscriber as part of creating the budget, so the
+      // topic policy above must already allow budgets.amazonaws.com to publish before that happens;
+      // otherwise the subscription confirmation publish could race ahead of the policy statement.
+      if (budgetsTopicPublish.policyDependable !== undefined) budget.node.addDependency(budgetsTopicPublish.policyDependable);
     }
     const notifyOperator = new cloudwatchActions.SnsAction(operatorAlerts);
     // The broker publishes these in embedded metric format with a dimensionless series as well as a
