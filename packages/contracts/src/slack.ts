@@ -185,6 +185,22 @@ export function slackRequestText(text: string, botUserId?: string): string {
   return withoutMention.trim();
 }
 
+/**
+ * A whole-message request to stop the thread's running task (#126), such as "stop", "abort" or
+ * "please stop the task". Only the entire message counts, so "stop using tabs" is an ordinary
+ * request. A bare "cancel" stays a confirmation reply (it declines a pending action); "cancel it"
+ * or "cancel the task" is a stop.
+ */
+const STOP_OBJECT = "(?:it|that|this|now|working|everything|the\\s+task|this\\s+task|the\\s+current\\s+task|the\\s+running\\s+task)";
+const STOP_COMMAND = new RegExp(
+  `^(?:please\\s+)?(?:(?:stop|abort|halt)(?:\\s+${STOP_OBJECT})?|cancel\\s+${STOP_OBJECT})(?:\\s+please)?[.!]*$`,
+  "iu",
+);
+
+export function isStopCommand(text: string): boolean {
+  return STOP_COMMAND.test(text.trim().replace(/\s+/gu, " "));
+}
+
 export function splitSlackMessage(text: string): string[] {
   const chunks: string[] = [];
   let remaining = text.trim() || EMPTY_RESPONSE;

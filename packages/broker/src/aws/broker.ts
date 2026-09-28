@@ -40,6 +40,7 @@ import {
   SlackChannelBindingSchema,
   SlackChannelIdSchema,
   SlackRequesterSchema,
+  SlackThreadSchema,
   SlackTeamIdSchema,
   WorkspaceClosePreflightResultSchema,
   WorkspaceInstanceSchema,
@@ -57,6 +58,7 @@ import {
   type PullRequestLifecycleResult,
   type SlackChannelBinding,
   type SlackRequester,
+  type SlackThread,
   type SlackThreadPrepareResult,
   type SlackThreadWorkspaceResult,
   type SlackWorkspaceCloseCompleteResult,
@@ -279,7 +281,17 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
   if (Buffer.byteLength(dependencies.callbackSigningKey, "utf8") < 32) {
     throw new Error("CALLBACK_SIGNING_KEY must contain at least 32 bytes");
   }
-  return async (event: HttpApiV2Event): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
+  return async (event: HttpApiV2Event | SlackStopTaskEvent): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
+    if (isSlackStopTaskEvent(event)) {
+      try {
+        return json(await stopSlackThreadTask(dependencies, event), "slack-ingress");
+      } catch (error) {
+        if (error instanceof AgentXError) {
+          return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
+        }
+        return json({ error: { code: "CONFIG_INVALID", message: error instanceof Error ? error.message : "invalid request" } }, "slack-ingress", 400);
+      }
+    }
     const request = adaptHttpApiEvent(event);
     try {
       const url = new URL(request.path, "https://agentx.invalid");
@@ -363,6 +375,10 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       }
       if (slackBinding?.[1] && slackBinding[2] && request.method === "DELETE") {
         return json(await deleteSlackBinding(dependencies, identity, slackBinding[1], slackBinding[2]), request.requestId);
+      }
+      const cancelTask = /^\/v1\/admin\/workspaces\/([0-9a-f-]+)\/cancel$/.exec(url.pathname);
+      if (request.method === "POST" && cancelTask?.[1]) {
+        return json(await cancelWorkspaceTask(dependencies, identity, cancelTask[1]), request.requestId, 202);
       }
       const stop = /^\/v1\/admin\/workspaces\/([0-9a-f-]+)\/stop$/.exec(url.pathname);
       if (request.method === "POST" && stop?.[1]) {
@@ -2269,6 +2285,21 @@ async function acceptCancellation(
   targetOperationId: string,
 ) {
   const workspace = await requireOwnedWorkspace(dependencies, identity, workspaceId);
+  return requestCancellation(dependencies, workspace, targetOperationId, requesterOf(identity));
+}
+
+/**
+ * Asks the worker to cancel an operation: the target moves to CANCEL_REQUESTED and a cancel
+ * operation is queued for the worker. Callers authorize first (the workspace's owner, an
+ * administrator, or a member of the workspace's Slack thread).
+ */
+async function requestCancellation(
+  dependencies: AwsBrokerDependencies,
+  workspace: WorkspaceInstance,
+  targetOperationId: string,
+  requester: { requestedBy?: SlackRequester },
+) {
+  const workspaceId = workspace.id;
   const target = await requireOperation(dependencies, workspaceId, targetOperationId);
   if (TERMINAL.has(target.status)) return { operation: publicOperation(target), duplicate: true };
   if (workspace.activeOperationId !== targetOperationId) throw agentXError("STALE_FENCE", "operation no longer owns the workspace");
@@ -2284,7 +2315,7 @@ async function acceptCancellation(
     fence: workspace.fence,
     createdAt: now,
     updatedAt: now,
-    ...requesterOf(identity),
+    ...requester,
   }, targetOperationId);
   const invocation: WorkerInvocation = {
     protocolVersion: 1,
@@ -2323,6 +2354,74 @@ async function stopWorkspace(
     throw agentXError("WORKSPACE_BUSY", "cancel or finish active work before stopping compute");
   }
   throw agentXError("RUNTIME_UNAVAILABLE", "manual compute stop is not supported; idle sessions stop automatically");
+}
+
+/** Only a coding task is cancelled: stopping a prepare or a publish midway could leave half a clone or push. */
+const CANCELLABLE_KINDS: ReadonlySet<string> = new Set(["task"]);
+
+type TaskCancellation =
+  | { outcome: "CANCEL_REQUESTED"; workspaceId: string; targetOperationId: string; cancelOperationId: string }
+  | { outcome: "NOTHING_RUNNING"; workspaceId?: string };
+
+/** Cancels the workspace's running task, if it has one (#126). */
+async function cancelRunningTask(
+  dependencies: AwsBrokerDependencies,
+  workspace: WorkspaceInstance,
+  requester: { requestedBy?: SlackRequester },
+): Promise<TaskCancellation> {
+  const targetOperationId = workspace.activeOperationId;
+  if (!targetOperationId) return { outcome: "NOTHING_RUNNING", workspaceId: workspace.id };
+  const target = await requireOperation(dependencies, workspace.id, targetOperationId);
+  if (!CANCELLABLE_KINDS.has(target.kind) || TERMINAL.has(target.status) || target.status === "CANCEL_REQUESTED") {
+    return { outcome: "NOTHING_RUNNING", workspaceId: workspace.id };
+  }
+  const result = await requestCancellation(dependencies, workspace, targetOperationId, requester);
+  return { outcome: "CANCEL_REQUESTED", workspaceId: workspace.id, targetOperationId, cancelOperationId: result.operation.id };
+}
+
+/** An administrator cancels any workspace's running task (#126). */
+async function cancelWorkspaceTask(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  workspaceId: string,
+): Promise<TaskCancellation> {
+  const workspace = await requireWorkspace(dependencies, workspaceId);
+  await requireAdministrator(dependencies, identity, workspace.projectName);
+  return cancelRunningTask(dependencies, workspace, {});
+}
+
+/**
+ * The Slack ingress's stop command (#126): a thread's messages queue behind its running task, so a
+ * "stop" in the thread is handled before the queue, here. Invoked by the ingress Lambda only, never
+ * through API Gateway. Any member of the bound channel may stop the thread's task, as any member
+ * may start one.
+ */
+export interface SlackStopTaskEvent {
+  source: "agentx.slack-ingress";
+  action: "stop-task";
+  thread: SlackThread;
+  userId: string;
+}
+
+export function isSlackStopTaskEvent(event: unknown): event is SlackStopTaskEvent {
+  if (!event || typeof event !== "object") return false;
+  const value = event as Record<string, unknown>;
+  // API Gateway always sets requestContext, so a request from outside can never take this path.
+  return value.source === "agentx.slack-ingress" && value.action === "stop-task" && value.requestContext === undefined;
+}
+
+async function stopSlackThreadTask(dependencies: AwsBrokerDependencies, event: SlackStopTaskEvent): Promise<TaskCancellation> {
+  const thread = SlackThreadSchema.parse(event.thread);
+  const requester = SlackRequesterSchema.parse({ teamId: thread.teamId, userId: event.userId });
+  if (!await getSlackBinding(dependencies, thread.teamId, thread.channelId)) {
+    throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
+  }
+  const ownerKey = ownerKeyForSubject(SLACK_THREAD_OWNER_ISSUER, slackThreadSubject(thread));
+  const record = await getItem<{ workspaceId?: string; closedAt?: string }>(dependencies, slackThreadKey(ownerKey));
+  if (typeof record?.workspaceId !== "string" || record.closedAt !== undefined) return { outcome: "NOTHING_RUNNING" };
+  const workspace = await requireWorkspace(dependencies, record.workspaceId);
+  if (workspace.ownerKey !== ownerKey) throw agentXError("FORBIDDEN", "workspace does not belong to this thread");
+  return cancelRunningTask(dependencies, workspace, { requestedBy: requester });
 }
 
 async function handleCallback(

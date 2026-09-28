@@ -24,6 +24,7 @@ import { listCredentials, registerCredential } from "./admin/credential.js";
 import { cliRuntimeBinding, registerProject } from "./admin/register.js";
 import { bindSlackChannel, unbindSlackChannel } from "./admin/slack.js";
 import { stopWorkspace } from "./admin/stop.js";
+import { cancelWorkspaceTask } from "./admin/cancel.js";
 import { exportTurns, parseSince } from "./admin/turns.js";
 import { loginWithPkce, openSystemBrowser, tokenStoreKey } from "./auth.js";
 import { loadProjectConfig } from "./config.js";
@@ -241,6 +242,20 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     });
 
   const adminWorkspace = admin.command("workspace").description("administer AgentX workspaces");
+  adminWorkspace
+    .command("cancel")
+    .description("cancel the workspace's running coding task; its conversation keeps what finished before")
+    .requiredOption("--workspace <workspace-id>", "workspace whose task to cancel")
+    .action(async (options: { workspace: string }, command: Command) => {
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      const result = await cancelWorkspaceTask({
+        controlPlaneUrl: settings.controlPlaneUrl,
+        accessToken,
+        workspaceId: options.workspace,
+      }, services.fetchImplementation);
+      services.stdout.write(formatSuccess(result, globals.json));
+    });
   adminWorkspace
     .command("stop")
     .description("stop idle compute while retaining workspace storage")

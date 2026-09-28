@@ -446,6 +446,10 @@ export class ControlPlaneStack extends Stack {
     }));
     slackThreads.grantReadWriteData(slackIngress);
     slackRequestQueue.grantSendMessages(slackIngress);
+    // The stop command (#126): the broker cancels the thread's running task for the ingress, which
+    // itself gets no write access to the state table and no callback key.
+    slackIngress.addEnvironment("BROKER_FUNCTION_NAME", broker.functionName);
+    broker.grantInvoke(slackIngress);
     slackSecret.grantRead(slackIngress);
     // The Details view (spec 014 FR-024): Slack's interactivity request runs on this Lambda and must
     // open the modal within 3 seconds, so it reads the one turn record the clicked button names, by
