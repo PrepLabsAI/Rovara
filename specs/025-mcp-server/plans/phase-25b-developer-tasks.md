@@ -178,8 +178,11 @@ go beyond the spec's text; the owner decided each of them on 2026-09-28 (Owner d
   6 and 10.
 - **R19. Tool results.** Every tool declares an output schema and returns `structuredContent` plus
   a one-line text summary. Output fields use snake_case, like the inputs (`task_id`). An error is
-  a result with `isError: true` and `{ code, message, next_step }`. Every result passes through
-  `redactSecrets` (FR-029). Task 15.
+  a result with `isError: true`, no `structuredContent`, and its code, message and next step in
+  the text content as `CODE: message. Next step: step.` (ruling F3: SDK 1.30.1's client checks
+  any `structuredContent` against the tool's output schema once it has listed the tools, even on
+  an error). Every result, error and progress message passes through `redactSecrets` or
+  `redactText` (FR-029), and then a cap, since it all reaches the AI tool's model. Task 15.
 - **R20. `INVALID_REQUEST` is added to FR-049 (owner)** for input the control plane refuses (a
   reused request ID with other content, instructions over 65,536 bytes, a malformed task ID). Task
   14.
