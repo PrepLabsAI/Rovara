@@ -5,3 +5,4 @@
 - [x] T003 Remove `GitHubAppAccount` and `GitHubAppInstallationId` from the control plane, release and `agentx deploy`.
 - [x] T004 Tests and snapshot; typecheck, lint and tests pass.
 - [ ] T005 After the release: `personal-website` still prepares and pushes; a `PrepLabsAI/Sample-Project-A` project registers.
+  2026-09-27: `sample-project-a` (PrepLabsAI) registered, prepared and published PrepLabsAI/Sample-Project-A#1 and #2. Not yet verified: a `ps06756` repository pushing after this release.
