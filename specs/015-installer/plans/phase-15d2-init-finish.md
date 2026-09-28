@@ -128,8 +128,9 @@ The phase map is in [README.md](README.md). This plan replaces the outline that 
   warning. The default is $100 a month on the `agentx:env` tag; `--budget 0` means none.
 - **Operator-role resume after an export** reads the bundle's `init-answers.json` (the answers the
   export knew), asks the rest (GitHub, Slack, alerts, budget), checks the access stack exists,
-  records `access` as done with the note "deployed by your platform team", and continues. Under the
-  operator role, a pending `access` step is refused with what to ask the platform team.
+  records `access` as done with the note "deployed by your platform team from the export bundle",
+  and continues. Under the operator role, a pending `access` step is refused with what to ask the
+  platform team.
 
 ## Owner decisions (2026-09-28)
 

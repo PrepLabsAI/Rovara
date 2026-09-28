@@ -9,10 +9,11 @@ import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SNSClient } from "@aws-sdk/client-sns";
 import { SSMClient } from "@aws-sdk/client-ssm";
 import { STSClient } from "@aws-sdk/client-sts";
-import { agentXError } from "@agentx/contracts";
+import { agentXError, environmentOperatorRoleName, environmentStackName } from "@agentx/contracts";
 import { authorizeCredential, secretsManagerAuthorizeSecrets } from "../admin/authorize.js";
 import { loginWithPkce, openSystemBrowser } from "../auth.js";
 import { cliErrorFor, cloudFormationOutputsReader, prepareDeployment, realCommandRunner, type DeployCliDependencies, type PreparedDeployment, type Writer } from "../deploy/commands.js";
+import { readBundleAnswers, type BundleAnswers } from "../deploy/export-bundle.js";
 import { assertReleaseCoversRegion, loadRelease } from "../deploy/release.js";
 import { stsCallerIdentity } from "../environments/adopt.js";
 import type { LockRecord } from "../environments/lock.js";
@@ -37,7 +38,7 @@ import {
 import { deployStep } from "./deploy-steps.js";
 import { finishSteps, readSettingsOrThrow, readyText } from "./finish-steps.js";
 import { githubAppStep, githubRestApi, type GitHubApi } from "./github-app.js";
-import { readInstallAnswers, readInstallProgress, type InitAnswers } from "./install-state.js";
+import { emptyProgress, readInstallAnswers, readInstallProgress, writeInstallProgress, type InitAnswers } from "./install-state.js";
 import { confirmInstallPlan } from "./plan.js";
 import { awsPrerequisiteChecks, checkPrerequisites, type PrerequisiteChecks } from "./prerequisites.js";
 import { processPrompter, secretFromSource, unattendedPrompter, type Prompter } from "./prompts.js";
@@ -95,10 +96,36 @@ export interface InitOptions {
   finishFlags: FinishFlags;
   /** The global --config-dir, where the first project's file is written. */
   configDir: string;
+  /** --from-bundle: with --resume, an export bundle whose access stack a platform team deployed. */
+  fromBundle?: string;
 }
 
 /** `ready` is the message a finished install ends with (readyText). */
 export type InitResult = InitRunResult & { env: string; resumed: boolean; controlPlaneUrl?: string; ready?: string };
+
+/** True when `callerArn` is a session of this environment's AgentX operator role (FR-019). */
+export function isOperatorRole(callerArn: string, env: string): boolean {
+  return new RegExp(`:assumed-role/${environmentOperatorRoleName(env)}/`).test(callerArn);
+}
+
+export const OPERATOR_ACCESS_REFUSAL =
+  "the access stack needs admin rights, and you are using the AgentX operator role; ask your platform team to deploy it (agentx init --export, then deploy-access.sh), or run agentx init with admin credentials";
+
+/** The note an `access` step deployed by a platform team from an export bundle is recorded with. */
+export const PLATFORM_TEAM_ACCESS_NOTE = "deployed by your platform team from the export bundle";
+
+/** The access stack's deploy step, refused up front under the operator role: the operator role
+ * cannot create IAM roles, so the deploy would only fail later on IAM. */
+function accessStep(): InitStep<InitContext> {
+  const deploy = deployStep({ id: "access", title: "Deploy the access stack (IAM roles, artifact bucket, image cache)" });
+  return {
+    ...deploy,
+    async run(context, progress) {
+      if (isOperatorRole(context.holder, context.env)) throw agentXError("CONFIG_INVALID", OPERATOR_ACCESS_REFUSAL);
+      return deploy.run(context, progress);
+    },
+  };
+}
 
 export function initSteps(input: { github: GitHubApi; slack: SlackApi }): InitStep<InitContext>[] {
   return [
@@ -110,7 +137,7 @@ export function initSteps(input: { github: GitHubApi; slack: SlackApi }): InitSt
         return { status: "done" };
       },
     },
-    deployStep({ id: "access", title: "Deploy the access stack (IAM roles, artifact bucket, image cache)" }),
+    accessStep(),
     deployStep({ id: "core", title: "Deploy the foundation and identity stacks" }),
     githubAppStep(input.github),
     deployStep({ id: "control-plane", title: "Deploy the control plane and runtime" }),
@@ -261,6 +288,23 @@ async function resumedOpenRouterKey(input: { flags: InitFlags; processEnv: NodeJ
   return readOpenRouterKeyAnswer({ source: input.flags.openrouterKey, processEnv: input.processEnv, prompter: input.prompter });
 }
 
+/** A bundle resume goes on only in the bundle's own account and release, once the platform team's
+ * access stack exists and finished. */
+async function assertBundleResumable(input: { bundle: BundleAnswers; bundleDir: string; account: string; releaseVersion: string; stackStatus: StackStatusReader }): Promise<void> {
+  const { bundle } = input;
+  if (bundle.account !== input.account) throw agentXError("CONFIG_INVALID", `the bundle is for account ${bundle.account}, but your AWS credentials are for account ${input.account}`);
+  if (bundle.releaseVersion !== input.releaseVersion) {
+    throw agentXError("CONFIG_INVALID", `the bundle is for release ${bundle.releaseVersion}; run npx @charterarc/agentx@${bundle.releaseVersion} init --resume --from-bundle ${input.bundleDir}`);
+  }
+  const accessStack = environmentStackName(bundle.env, "access");
+  const status = await input.stackStatus.status(accessStack);
+  if (status === undefined || !status.endsWith("_COMPLETE") || status.startsWith("ROLLBACK") || status.startsWith("DELETE")) {
+    throw agentXError("CONFIG_INVALID", status === undefined
+      ? `the access stack ${accessStack} does not exist yet; ask your platform team to run deploy-access.sh from the bundle, then run this again`
+      : `the access stack ${accessStack} is ${status}; ask your platform team to fix it (see the bundle's README, "If it fails"), then run this again`);
+  }
+}
+
 async function init(options: InitOptions, deps: InitCliDependencies, services: { stderr: Writer; home: string }, session: InitSession): Promise<InitResult> {
   const { env } = options;
   const { write } = session;
@@ -269,8 +313,12 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   const fetchImplementation = deps.fetch ?? fetch;
   const processEnv = deps.processEnv ?? process.env;
   const deployDeps = deps.deploy ?? {};
-  // A resume reads the install from the region's SSM, so --yes never guesses it.
-  if (options.yes && options.region === undefined) {
+  if (options.fromBundle !== undefined && !options.resume) throw agentXError("CONFIG_INVALID", "--from-bundle goes with --resume");
+  // Read first, so a bad bundle is refused before anything is asked or downloaded.
+  const bundle = options.fromBundle === undefined ? undefined : await readBundleAnswers(options.fromBundle);
+  if (bundle !== undefined && bundle.env !== env) throw agentXError("CONFIG_INVALID", `the bundle is for environment ${bundle.env}; pass --env ${bundle.env}`);
+  // A resume reads the install from the region's SSM, so --yes never guesses it (a bundle names it).
+  if (options.yes && options.region === undefined && bundle === undefined) {
     throw agentXError("CONFIG_INVALID", "agentx init needs to know the AWS region; with --yes, pass --region <region>");
   }
   const runner = deployDeps.commandRunner ?? realCommandRunner(services.stderr);
@@ -313,7 +361,9 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   const regions = release.regions();
   // The AWS CLI's own region comes first, so a resume looks where the install started.
   const environmentRegion = [processEnv.AWS_REGION, processEnv.AWS_DEFAULT_REGION].find((value) => value !== undefined && regions.includes(value));
-  const region = options.region ?? (await prompter.choose<string>("AWS region", regions.map((value) => ({ value, label: value })), { flag: "--region", defaultValue: environmentRegion ?? regions[0] ?? "us-east-1" }));
+  // A bundle names its region, so a bundle resume never asks it.
+  const region = options.region ?? bundle?.region ?? (await prompter.choose<string>("AWS region", regions.map((value) => ({ value, label: value })), { flag: "--region", defaultValue: environmentRegion ?? regions[0] ?? "us-east-1" }));
+  if (bundle !== undefined && bundle.region !== region) throw agentXError("CONFIG_INVALID", `the bundle is for region ${bundle.region}; pass --region ${bundle.region}`);
   assertReleaseCoversRegion(release, region);
 
   const store = deployDeps.store ?? ssmParameterStore(new SSMClient({ region }));
@@ -323,6 +373,8 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     throw agentXError("CONFIG_INVALID", `--account ${options.account} does not match your AWS credentials, which are for account ${caller.account}; use credentials for ${options.account}, or leave --account off`);
   }
   const checks = deps.checks ?? awsPrerequisiteChecks({ region, account: caller.account, store, runner, fetch: fetchImplementation });
+  const stackStatus = deps.stackStatus ?? cloudFormationStatusReader(new CloudFormationClient({ region }));
+  if (bundle !== undefined) await assertBundleResumable({ bundle, bundleDir: options.fromBundle ?? "", account: caller.account, releaseVersion: release.manifest.version, stackStatus });
 
   const existingSettings = await readEnvironmentSettings(store, env);
   const stored = await readInstallAnswers(store, env);
@@ -331,15 +383,21 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
       ? `environment ${env} is the deployment adopted with fixed stack names; agentx init cannot install over it. Choose another --env`
       : `environment ${env} is already installed, but not by agentx init; there is nothing to resume. Choose another --env, or use agentx deploy --mode upgrade`);
   }
-  if (options.resume && stored === undefined) {
+  // With a bundle and no install yet, the bundle is what is resumed.
+  if (options.resume && stored === undefined && bundle === undefined) {
     throw agentXError("CONFIG_INVALID", `there is no install of environment ${env} to resume in account ${caller.account} (${region}); run agentx init without --resume to start one`);
   }
 
   let collected: CollectedAnswers | undefined;
   let answers: InitAnswers;
   if (stored === undefined) {
-    collected = await collectInitAnswers({ env, region, account: caller.account, releaseVersion: release.manifest.version, flags: options.flags, prompter, processEnv, now });
+    collected = await collectInitAnswers({
+      env, region, account: caller.account, releaseVersion: release.manifest.version, flags: options.flags, prompter, processEnv, now,
+      ...(bundle === undefined ? {} : { fixed: bundle }),
+    });
     answers = collected.answers;
+    // A typed flag must not contradict what the bundle already decided.
+    if (bundle !== undefined) assertResumeFlagsMatch(answers, options.flags);
   } else {
     answers = stored;
     if (answers.account !== caller.account) throw agentXError("CONFIG_INVALID", `the install of ${env} started in account ${answers.account}, but your AWS credentials are for account ${caller.account}; use credentials for ${answers.account}`);
@@ -389,6 +447,10 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
       }
       // The saved answers carry the stored OpenRouter key's ARN, which every step reads.
       context.answers = await persistInitAnswers({ store, secrets, collected: firstRun });
+      if (bundle !== undefined) {
+        const progress = (await readInstallProgress(store, env)) ?? emptyProgress(env, now());
+        await writeInstallProgress(store, { ...progress, steps: { ...progress.steps, access: { status: "done", at: new Date(now()).toISOString(), note: PLATFORM_TEAM_ACCESS_NOTE } } });
+      }
     } else {
       if (rotatedWebhook !== undefined && finalAnswers.alert.kind === "webhook") await storeAlertWebhook(secrets, finalAnswers.alert.secretName, rotatedWebhook);
       if (rotatedOpenRouterKey !== undefined) await secrets.put(openRouterSecretName(env), rotatedOpenRouterKey);
@@ -441,7 +503,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
       });
       return deployment;
     },
-    stackStatus: deps.stackStatus ?? cloudFormationStatusReader(new CloudFormationClient({ region })),
+    stackStatus,
     home: services.home,
     prerequisitesPassed,
     runPrerequisites,

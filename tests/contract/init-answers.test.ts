@@ -360,3 +360,26 @@ describe("resuming with flags", () => {
     expect(() => assertResumeFlagsMatch(webhookAnswers, { alerts: false })).toThrow("--no-alerts differs from what this install started with (webhook)");
   });
 });
+
+describe("the questions an export bundle already answered (FR-026)", () => {
+  const secretArn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:team/openrouter-AbCdEf";
+  const fixed = {
+    schemaVersion: 1 as const, env: "staging", region: "us-east-1", account: "123456789012", engine: "templates" as const, releaseVersion: "1.2.3",
+    identity: { mode: "oidc" as const, issuer: "https://idp.example.com", audience: "api://agentx", adminClaim: "groups", adminValues: ["admins"] },
+    models: { orchestrator: "zai.glm-4.7", classifier: "c", worker: "w", providers: { worker: "openrouter" as const }, openRouter: { secretArn } },
+    permissionsBoundaryArn: "arn:aws:iam::123456789012:policy/team-boundary",
+  };
+
+  it("asks only the alert, budget, GitHub and Slack questions, and takes the rest from the bundle", async () => {
+    const prompter = scriptedPrompter(["", "ops@example.com", "", "", "acme", "", "", "", ""]);
+    const collected = await collectInitAnswers({ ...base, flags: {}, prompter, fixed });
+    expect(prompter.remaining()).toBe(0);
+    for (const question of ["Deploy engine", "Sign-in", "Model provider", "Orchestrator model", "Worker model id"]) expect(prompter.asked).not.toContain(question);
+    expect(prompter.asked.some((question) => /Permission boundary|operator role|OpenRouter/.test(question))).toBe(false);
+    expect(collected.answers).toMatchObject({ engine: "templates", identity: fixed.identity, models: fixed.models, permissionsBoundaryArn: fixed.permissionsBoundaryArn });
+    expect(collected.answers.operatorPrincipalArn).toBeUndefined();
+    // The bundle's OpenRouter secret is the team's own: no key is read or stored.
+    expect(collected.openRouterKey).toBeUndefined();
+    expect(collected.notes).toContain(GLM_NOTE);
+  });
+});

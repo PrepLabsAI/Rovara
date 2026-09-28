@@ -4,6 +4,7 @@ import { DEFAULT_BEDROCK_MODELS, OPENROUTER_KEY_MIN_LENGTH } from "@agentx/model
 // key, so it is a secret: it is never a flag value and never stored in the answers.
 import { agentXError, ImageDigest } from "@agentx/contracts";
 import { AlertEmailSchema, GITHUB_LOGIN_PATTERN, ModelsAnswersSchema } from "../deploy/answer-schemas.js";
+import type { BundleAnswers } from "../deploy/export-bundle.js";
 import { SecretAlreadyExistsError } from "../deploy/signing-key.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import { writeInstallAnswers, type InitAnswers } from "./install-state.js";
@@ -126,97 +127,39 @@ function digestFlag(value: string | undefined, flag: string): string | undefined
   return value;
 }
 
+/** The engine, identity, models, boundary and operator principal: what an export bundle already
+ * knows (`fixed`), or asked here. */
+type PlatformAnswers = Pick<InitAnswers, "engine" | "identity" | "models" | "permissionsBoundaryArn" | "operatorPrincipalArn">;
+
 export async function collectInitAnswers(input: {
   env: string; region: string; account: string; releaseVersion: string;
   flags: InitFlags; prompter: Prompter; processEnv: NodeJS.ProcessEnv; now: () => number;
   readFile?: (path: string) => Promise<string>;
+  /** An export bundle's answers (`init --resume --from-bundle`): their questions are not asked. */
+  fixed?: BundleAnswers;
 }): Promise<CollectedAnswers> {
   const { flags, prompter } = input;
   const notes: string[] = [];
   const workerImage = digestFlag(flags.workerImage, "--worker-image");
   const slackImage = digestFlag(flags.slackImage, "--slack-image");
 
-  const engine = flags.engine ?? (await prompter.choose<"templates" | "cdk">("Deploy engine", [
-    { value: "templates", label: "templates: published CloudFormation templates, no CDK setup (recommended)" },
-    { value: "cdk", label: "cdk: deploy from AgentX's CDK code at the release tag" },
-  ], { flag: "--engine", defaultValue: "templates" }));
-
-  const identityMode = flags.identity ?? (await prompter.choose<"cognito" | "oidc">("Sign-in", [
-    { value: "cognito", label: "Create a Cognito user pool for AgentX (recommended)" },
-    { value: "oidc", label: "Use your own OIDC provider" },
-  ], { flag: "--identity", defaultValue: "cognito" }));
-  let identity: InitAnswers["identity"] = { mode: "cognito" };
-  if (identityMode === "oidc") {
-    const https = (value: string) => (/^https:\/\/\S+$/.test(value) ? undefined : "must be an https:// URL");
-    const issuer = flags.oidcIssuer ?? (await prompter.ask("OIDC issuer URL", { flag: "--oidc-issuer", validate: https }));
-    const audience = flags.oidcAudience ?? (await prompter.ask("OIDC audience", { flag: "--oidc-audience" }));
-    const clientId = flags.oidcClientId ?? (await prompter.ask("OIDC client id for agentx login", { flag: "--oidc-client-id" }));
-    const adminClaim = flags.adminClaim ?? (await prompter.ask("Claim that marks AgentX administrators", { flag: "--admin-claim", defaultValue: "groups" }));
-    const rawValues = flags.adminValues ?? (await prompter.ask("Values of that claim that mark an administrator, comma-separated", { flag: "--admin-values" }));
-    const adminValues = rawValues.split(",").map((value) => value.trim()).filter((value) => value !== "");
-    if (adminValues.length === 0) throw agentXError("CONFIG_INVALID", "--admin-values must name at least one value");
-    identity = { mode: "oidc", issuer, audience, clientId, adminClaim, adminValues };
+  let platform: PlatformAnswers;
+  let openRouterKey: string | undefined;
+  let openRouterProviders: string[] | undefined;
+  if (input.fixed === undefined) {
+    ({ platform, openRouterKey, openRouterProviders } = await askPlatformAnswers(input));
+  } else {
+    // The export took no OpenRouter key (it stores no secret), so a bundle's OpenRouter secret, if
+    // any, is one the team made itself: nothing is stored here.
+    const { engine, identity, models, permissionsBoundaryArn, operatorPrincipalArn } = input.fixed;
+    platform = {
+      engine, identity, models,
+      ...(permissionsBoundaryArn === undefined ? {} : { permissionsBoundaryArn }),
+      ...(operatorPrincipalArn === undefined ? {} : { operatorPrincipalArn }),
+    };
   }
-
-  // The provider question is asked only when no provider or model flag pins the answer already:
-  // a per-component flag keeps today's meaning (unset components stay on Bedrock), so mixed setups
-  // still come from flags.
-  const providerFlagGiven = [flags.orchestratorProvider, flags.classifierProvider, flags.workerProvider].some((value) => value !== undefined);
-  const modelFlagGiven = [flags.orchestratorModel, flags.classifierModel, flags.workerModel].some((value) => value !== undefined);
-  const allProvider = flags.modelProvider ?? (providerFlagGiven || modelFlagGiven ? "amazon-bedrock" : await prompter.choose<string>("Model provider", [
-    { value: "amazon-bedrock", label: "Amazon Bedrock (recommended)" },
-    { value: "openrouter", label: "OpenRouter" },
-  ], { flag: "--model-provider", defaultValue: "amazon-bedrock" }));
-  const providers = {
-    orchestrator: flags.orchestratorProvider ?? allProvider,
-    classifier: flags.classifierProvider ?? allProvider,
-    worker: flags.workerProvider ?? allProvider,
-  };
-  if (!Object.values(providers).every(isModelProvider)) {
-    throw agentXError("CONFIG_INVALID", "model providers must be amazon-bedrock or openrouter");
-  }
-  const orchestrator = providers.orchestrator === "openrouter"
-    ? flags.orchestratorModel ?? await prompter.ask("OpenRouter orchestrator model id", { flag: "--orchestrator-model" })
-    : await modelChoice(prompter, flags.orchestratorModel, "Orchestrator model", "--orchestrator-model", ORCHESTRATOR_MODEL_CHOICES, DEFAULT_ORCHESTRATOR_MODEL);
-  const classifier = providers.classifier === "openrouter"
-    ? flags.classifierModel ?? await prompter.ask("OpenRouter classifier model id", { flag: "--classifier-model" })
-    : await modelChoice(prompter, flags.classifierModel, "Action-gate classifier model", "--classifier-model", CLASSIFIER_MODEL_CHOICES, DEFAULT_CLASSIFIER_MODEL);
-  const worker = providers.worker === "openrouter"
-    ? flags.workerModel ?? await prompter.ask("OpenRouter worker model id", { flag: "--worker-model" })
-    : flags.workerModel ?? await prompter.ask("Worker model id", { flag: "--worker-model", defaultValue: DEFAULT_WORKER_MODEL });
-  const usesOpenRouter = Object.values(providers).includes("openrouter");
-  const secretArn = flags.openrouterSecretArn;
-  if (secretArn !== undefined && flags.openrouterKey !== undefined) {
-    throw agentXError("CONFIG_INVALID", "--openrouter-secret-arn names a secret you made yourself, so it cannot go with --openrouter-key-file or --openrouter-key-env; pass one or the other");
-  }
-  // Without a secret of your own, init asks for the key and stores it itself (openRouterSecretName).
-  const openRouterKey = secretArn === undefined && (usesOpenRouter || flags.openrouterKey !== undefined)
-    ? await readOpenRouterKeyAnswer({ source: flags.openrouterKey ?? {}, processEnv: input.processEnv, prompter, ...(input.readFile === undefined ? {} : { readFile: input.readFile }) })
-    : undefined;
-  if (flags.openrouterProviders && !secretArn && openRouterKey === undefined) {
-    throw agentXError("CONFIG_INVALID", "--openrouter-providers needs OpenRouter: choose it as a model provider, or pass --openrouter-secret-arn");
-  }
-  const openRouterProviders = flags.openrouterProviders ? flags.openrouterProviders.split(",") : undefined;
-  const modelsInput = { orchestrator, classifier, worker, ...(usesOpenRouter ? { providers } : {}) };
-  // The stored key's ARN is known only once init stores it, after the plan; a stand-in ARN checks
-  // the provider slugs now, so nothing is created for answers that would be refused.
-  const checkArn = secretArn ?? (openRouterKey === undefined ? undefined : `arn:aws:secretsmanager:${input.region}:${input.account}:secret:${openRouterSecretName(input.env)}-XXXXXX`);
-  const parsedModels = ModelsAnswersSchema.safeParse({
-    ...modelsInput,
-    ...(checkArn === undefined ? {} : { openRouter: { secretArn: checkArn, ...(openRouterProviders === undefined ? {} : { providers: openRouterProviders }) } }),
-  });
-  if (!parsedModels.success) throw agentXError("CONFIG_INVALID", "invalid model configuration; check providers and the OpenRouter secret ARN/provider slugs");
-  const models: InitAnswers["models"] = secretArn === undefined ? ModelsAnswersSchema.parse(modelsInput) : parsedModels.data;
-
-  if (orchestrator === GLM) notes.push(GLM_NOTE);
-  if (classifier === HAIKU) notes.push(HAIKU_NOTE);
-
-  const boundary = flags.permissionBoundary ?? (await prompter.ask("Permission boundary policy ARN (Enter for AgentX's default boundary)", {
-    flag: "--permission-boundary", defaultValue: "", validate: optionalArn(/^arn:aws[a-z-]*:iam::\d{12}:policy\/.+$/, "an IAM policy ARN"),
-  }));
-  const operator = flags.operatorPrincipal ?? (await prompter.ask("IAM principal allowed to assume the AgentX operator role (Enter for this account)", {
-    flag: "--operator-principal", defaultValue: "", validate: optionalArn(/^arn:aws[a-z-]*:(iam|sts)::\d{12}:.+$/, "an IAM principal ARN"),
-  }));
+  if (platform.models.orchestrator === GLM) notes.push(GLM_NOTE);
+  if (platform.models.classifier === HAIKU) notes.push(HAIKU_NOTE);
 
   let alert: InitAnswers["alert"] | undefined;
   let alertWebhook: string | undefined;
@@ -289,11 +232,11 @@ export async function collectInitAnswers(input: {
 
   const answers: InitAnswers = {
     schemaVersion: 1,
-    env: input.env, region: input.region, account: input.account, engine, releaseVersion: input.releaseVersion,
-    identity,
-    models,
-    ...(boundary === "" ? {} : { permissionsBoundaryArn: boundary }),
-    ...(operator === "" ? {} : { operatorPrincipalArn: operator }),
+    env: input.env, region: input.region, account: input.account, engine: platform.engine, releaseVersion: input.releaseVersion,
+    identity: platform.identity,
+    models: platform.models,
+    ...(platform.permissionsBoundaryArn === undefined ? {} : { permissionsBoundaryArn: platform.permissionsBoundaryArn }),
+    ...(platform.operatorPrincipalArn === undefined ? {} : { operatorPrincipalArn: platform.operatorPrincipalArn }),
     ...(workerImage === undefined && slackImage === undefined
       ? {}
       : { images: { ...(workerImage === undefined ? {} : { worker: workerImage }), ...(slackImage === undefined ? {} : { slack: slackImage }) } }),
@@ -306,6 +249,100 @@ export async function collectInitAnswers(input: {
   return {
     answers, notes,
     ...(alertWebhook === undefined ? {} : { alertWebhook }),
+    ...(openRouterKey === undefined ? {} : { openRouterKey, ...(openRouterProviders === undefined ? {} : { openRouterProviders }) }),
+  };
+}
+
+/** The questions an export bundle answers instead (engine, identity, models, boundary, operator). */
+async function askPlatformAnswers(
+  input: { env: string; region: string; account: string; flags: InitFlags; prompter: Prompter; processEnv: NodeJS.ProcessEnv; readFile?: (path: string) => Promise<string> },
+): Promise<{ platform: PlatformAnswers; openRouterKey?: string; openRouterProviders?: string[] }> {
+  const { flags, prompter } = input;
+  const engine = flags.engine ?? (await prompter.choose<"templates" | "cdk">("Deploy engine", [
+    { value: "templates", label: "templates: published CloudFormation templates, no CDK setup (recommended)" },
+    { value: "cdk", label: "cdk: deploy from AgentX's CDK code at the release tag" },
+  ], { flag: "--engine", defaultValue: "templates" }));
+
+  const identityMode = flags.identity ?? (await prompter.choose<"cognito" | "oidc">("Sign-in", [
+    { value: "cognito", label: "Create a Cognito user pool for AgentX (recommended)" },
+    { value: "oidc", label: "Use your own OIDC provider" },
+  ], { flag: "--identity", defaultValue: "cognito" }));
+  let identity: InitAnswers["identity"] = { mode: "cognito" };
+  if (identityMode === "oidc") {
+    const https = (value: string) => (/^https:\/\/\S+$/.test(value) ? undefined : "must be an https:// URL");
+    const issuer = flags.oidcIssuer ?? (await prompter.ask("OIDC issuer URL", { flag: "--oidc-issuer", validate: https }));
+    const audience = flags.oidcAudience ?? (await prompter.ask("OIDC audience", { flag: "--oidc-audience" }));
+    const clientId = flags.oidcClientId ?? (await prompter.ask("OIDC client id for agentx login", { flag: "--oidc-client-id" }));
+    const adminClaim = flags.adminClaim ?? (await prompter.ask("Claim that marks AgentX administrators", { flag: "--admin-claim", defaultValue: "groups" }));
+    const rawValues = flags.adminValues ?? (await prompter.ask("Values of that claim that mark an administrator, comma-separated", { flag: "--admin-values" }));
+    const adminValues = rawValues.split(",").map((value) => value.trim()).filter((value) => value !== "");
+    if (adminValues.length === 0) throw agentXError("CONFIG_INVALID", "--admin-values must name at least one value");
+    identity = { mode: "oidc", issuer, audience, clientId, adminClaim, adminValues };
+  }
+
+  // The provider question is asked only when no provider or model flag pins the answer already:
+  // a per-component flag keeps today's meaning (unset components stay on Bedrock), so mixed setups
+  // still come from flags.
+  const providerFlagGiven = [flags.orchestratorProvider, flags.classifierProvider, flags.workerProvider].some((value) => value !== undefined);
+  const modelFlagGiven = [flags.orchestratorModel, flags.classifierModel, flags.workerModel].some((value) => value !== undefined);
+  const allProvider = flags.modelProvider ?? (providerFlagGiven || modelFlagGiven ? "amazon-bedrock" : await prompter.choose<string>("Model provider", [
+    { value: "amazon-bedrock", label: "Amazon Bedrock (recommended)" },
+    { value: "openrouter", label: "OpenRouter" },
+  ], { flag: "--model-provider", defaultValue: "amazon-bedrock" }));
+  const providers = {
+    orchestrator: flags.orchestratorProvider ?? allProvider,
+    classifier: flags.classifierProvider ?? allProvider,
+    worker: flags.workerProvider ?? allProvider,
+  };
+  if (!Object.values(providers).every(isModelProvider)) {
+    throw agentXError("CONFIG_INVALID", "model providers must be amazon-bedrock or openrouter");
+  }
+  const orchestrator = providers.orchestrator === "openrouter"
+    ? flags.orchestratorModel ?? await prompter.ask("OpenRouter orchestrator model id", { flag: "--orchestrator-model" })
+    : await modelChoice(prompter, flags.orchestratorModel, "Orchestrator model", "--orchestrator-model", ORCHESTRATOR_MODEL_CHOICES, DEFAULT_ORCHESTRATOR_MODEL);
+  const classifier = providers.classifier === "openrouter"
+    ? flags.classifierModel ?? await prompter.ask("OpenRouter classifier model id", { flag: "--classifier-model" })
+    : await modelChoice(prompter, flags.classifierModel, "Action-gate classifier model", "--classifier-model", CLASSIFIER_MODEL_CHOICES, DEFAULT_CLASSIFIER_MODEL);
+  const worker = providers.worker === "openrouter"
+    ? flags.workerModel ?? await prompter.ask("OpenRouter worker model id", { flag: "--worker-model" })
+    : flags.workerModel ?? await prompter.ask("Worker model id", { flag: "--worker-model", defaultValue: DEFAULT_WORKER_MODEL });
+  const usesOpenRouter = Object.values(providers).includes("openrouter");
+  const secretArn = flags.openrouterSecretArn;
+  if (secretArn !== undefined && flags.openrouterKey !== undefined) {
+    throw agentXError("CONFIG_INVALID", "--openrouter-secret-arn names a secret you made yourself, so it cannot go with --openrouter-key-file or --openrouter-key-env; pass one or the other");
+  }
+  // Without a secret of your own, init asks for the key and stores it itself (openRouterSecretName).
+  const openRouterKey = secretArn === undefined && (usesOpenRouter || flags.openrouterKey !== undefined)
+    ? await readOpenRouterKeyAnswer({ source: flags.openrouterKey ?? {}, processEnv: input.processEnv, prompter, ...(input.readFile === undefined ? {} : { readFile: input.readFile }) })
+    : undefined;
+  if (flags.openrouterProviders && !secretArn && openRouterKey === undefined) {
+    throw agentXError("CONFIG_INVALID", "--openrouter-providers needs OpenRouter: choose it as a model provider, or pass --openrouter-secret-arn");
+  }
+  const openRouterProviders = flags.openrouterProviders ? flags.openrouterProviders.split(",") : undefined;
+  const modelsInput = { orchestrator, classifier, worker, ...(usesOpenRouter ? { providers } : {}) };
+  // The stored key's ARN is known only once init stores it, after the plan; a stand-in ARN checks
+  // the provider slugs now, so nothing is created for answers that would be refused.
+  const checkArn = secretArn ?? (openRouterKey === undefined ? undefined : `arn:aws:secretsmanager:${input.region}:${input.account}:secret:${openRouterSecretName(input.env)}-XXXXXX`);
+  const parsedModels = ModelsAnswersSchema.safeParse({
+    ...modelsInput,
+    ...(checkArn === undefined ? {} : { openRouter: { secretArn: checkArn, ...(openRouterProviders === undefined ? {} : { providers: openRouterProviders }) } }),
+  });
+  if (!parsedModels.success) throw agentXError("CONFIG_INVALID", "invalid model configuration; check providers and the OpenRouter secret ARN/provider slugs");
+  const models: InitAnswers["models"] = secretArn === undefined ? ModelsAnswersSchema.parse(modelsInput) : parsedModels.data;
+
+  const boundary = flags.permissionBoundary ?? (await prompter.ask("Permission boundary policy ARN (Enter for AgentX's default boundary)", {
+    flag: "--permission-boundary", defaultValue: "", validate: optionalArn(/^arn:aws[a-z-]*:iam::\d{12}:policy\/.+$/, "an IAM policy ARN"),
+  }));
+  const operator = flags.operatorPrincipal ?? (await prompter.ask("IAM principal allowed to assume the AgentX operator role (Enter for this account)", {
+    flag: "--operator-principal", defaultValue: "", validate: optionalArn(/^arn:aws[a-z-]*:(iam|sts)::\d{12}:.+$/, "an IAM principal ARN"),
+  }));
+
+  return {
+    platform: {
+      engine, identity, models,
+      ...(boundary === "" ? {} : { permissionsBoundaryArn: boundary }),
+      ...(operator === "" ? {} : { operatorPrincipalArn: operator }),
+    },
     ...(openRouterKey === undefined ? {} : { openRouterKey, ...(openRouterProviders === undefined ? {} : { openRouterProviders }) }),
   };
 }

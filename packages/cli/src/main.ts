@@ -38,6 +38,7 @@ import { loadDeploymentSettings, type DeploymentSettings } from "./deployment.js
 import { installMcp, MCP_CLIENTS, runCommand, type McpClientKind, type McpInstallDeps } from "./mcp/install.js";
 import { runMcpServer, type McpServeDeps } from "./mcp/serve.js";
 import { resumeCommand, runDeploy, runInitExport, type DeployCliDependencies, type DeployCommandOptions } from "./deploy/commands.js";
+import { cliErrorFor, resumeCommand, runDeploy, runInitExport, type DeployCliDependencies, type DeployCommandOptions } from "./deploy/commands.js";
 import { cloudFormationStackReader, stsCallerIdentity, type CallerIdentity, type StackReader } from "./environments/adopt.js";
 import { resolveDeploymentFile } from "./environments/cache.js";
 import { DEFAULT_CLASSIFIER_MODEL, DEFAULT_ORCHESTRATOR_MODEL, DEFAULT_WORKER_MODEL, type InitFlags } from "./init/answers.js";
@@ -657,6 +658,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .addOption(new Option("--engine <engine>", "deploy engine: published CloudFormation templates, or cdk from a source checkout").choices(["templates", "cdk"]))
     .option("--source <dir>", "git checkout of the release's source tag; required for --engine cdk")
     .option("--resume", "only continue an install already under way; never start a new one", false)
+    .option("--from-bundle <dir>", "with --resume: continue an install whose access stack a platform team deployed from this export bundle")
     .option("--yes", "answer every question with its default or its flag, without asking; the plan is still printed. Confirmations such as the Slack bot and workspace check and \"Request URL Verified?\" are answered yes, so check the printed summary afterwards", false)
     .option("--no-browser", "print every address to open instead of opening a browser")
     .option("--ui", "ask every question on a page on 127.0.0.1 instead of in the terminal")
@@ -746,13 +748,22 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       if (command.getOptionValueSourceWithGlobals("env") !== "cli") {
         throw agentXError("CONFIG_INVALID", "agentx init --export requires an explicit --env (the default, production, is the live environment)");
       }
-      if (globals.env === DEFAULT_ENVIRONMENT) {
-        throw agentXError("CONFIG_INVALID", `--env ${DEFAULT_ENVIRONMENT} belongs to the legacy deployment that predates environments; choose a different --env for the export bundle`);
-      }
       if (options.region === undefined) throw agentXError("CONFIG_INVALID", "--region is required with --export");
       if (options.release === undefined) throw agentXError("CONFIG_INVALID", "--release is required with --export");
       if (options.openrouterKeyFile !== undefined || options.openrouterKeyEnv !== undefined) {
         throw agentXError("CONFIG_INVALID", "--export stores no secret, so it takes no OpenRouter key; create the secret yourself and pass --openrouter-secret-arn");
+      }
+      // Spec decision (2026-09-27): any environment, production too, may be exported while nothing
+      // is installed there. Any value at its settings parameter counts as installed (read-only).
+      const exportStore = dependencies.deploy?.store ?? ssmParameterStore(new SSMClient({ region: options.region }));
+      let installed: unknown;
+      try {
+        installed = await exportStore.get(settingsParameterName(globals.env));
+      } catch (error) {
+        throw cliErrorFor(error);
+      }
+      if (installed !== undefined) {
+        throw agentXError("CONFIG_INVALID", `environment ${globals.env} is already installed in this account; export a bundle for a new --env`);
       }
       const exportProvider = (component?: string) => component ?? options.modelProvider;
       const result = await runInitExport(
@@ -912,7 +923,7 @@ function parsePort(value: string): number {
 
 interface InitCommandOptions extends SignInCommandOptions {
   region?: string; account?: string; release?: string; engine?: "templates" | "cdk"; source?: string;
-  resume: boolean; yes: boolean; browser: boolean;
+  resume: boolean; yes: boolean; browser: boolean; fromBundle?: string;
   /** --ui / --no-ui. Undefined when neither was given: in this release that is the terminal. */
   ui?: boolean;
   identity: "cognito" | "oidc"; oidcIssuer?: string; oidcAudience?: string; oidcClientId?: string; adminClaim?: string; adminValues?: string;
@@ -990,6 +1001,7 @@ function initOptions(globals: GlobalOptions, options: InitCommandOptions, comman
     ...(options.account === undefined ? {} : { account: options.account }),
     ...(options.release === undefined ? {} : { releaseDir: options.release }),
     ...(options.source === undefined ? {} : { source: options.source }),
+    ...(options.fromBundle === undefined ? {} : { fromBundle: options.fromBundle }),
     yes: options.yes, browser: options.browser, resume: options.resume,
     ...(options.ui === undefined ? {} : { ui: options.ui }),
     flags,

@@ -15,7 +15,7 @@ import {
 } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import type { DeployAnswers } from "../../packages/cli/src/deploy/deploy-environment.js";
-import { writeExportBundle } from "../../packages/cli/src/deploy/export-bundle.js";
+import { readBundleAnswers, writeExportBundle } from "../../packages/cli/src/deploy/export-bundle.js";
 import type { DeployPart } from "../../packages/cli/src/deploy/parameters.js";
 import type { LoadedRelease } from "../../packages/cli/src/deploy/release.js";
 
@@ -164,6 +164,7 @@ describe("writeExportBundle", () => {
     const expected = [
       "README.md",
       "deploy-access.sh",
+      "init-answers.json",
       "packages/SHA256SUMS",
       `packages/${CONTROL_PLANE_ASSET}.zip`,
       `packages/${RUNTIME_ASSET}.zip`,
@@ -199,14 +200,12 @@ describe("writeExportBundle", () => {
     expect(readmeText).toContain(STACK_NAME);
     expect(readmeText).toContain(REGION);
     expect(readmeText).toContain(ACCOUNT);
-    // I6: the real resume path, run by the operator; access is excluded (the operator is denied
-    // change sets on access), and no command that does not exist is named.
-    expect(readmeText).toContain(
-      "agentx deploy --mode install --parts foundation,identity,control-plane,runtime,slack --release <dir> --answers <file>",
-    );
-    expect(readmeText).not.toContain("init --resume");
-    expect(script).not.toContain("init --resume");
-    expect(script).toContain("agentx deploy --mode install --parts foundation,identity,control-plane,runtime,slack");
+    // I6, updated by phase 15d2 Task 14: the operator's resume path is now agentx init --resume
+    // --from-bundle (it deploys every later stack, never access), in the README and the script.
+    expect(readmeText).toContain("agentx init --resume --env staging --region us-east-1 --from-bundle <this directory>");
+    expect(readmeText).not.toContain("agentx deploy --mode install --parts");
+    expect(script).toContain("agentx init --resume --env staging --region us-east-1 --from-bundle <this directory>");
+    expect(script).not.toContain("agentx deploy --mode install --parts");
     // deploy-access.sh never creates the callback signing key; agentx deploy does, on its first run.
     expect(readmeText).toMatch(/does not create the callback signing key/);
     // I4: tearing down is documented. No retired runtime capacity provider or runtime survives it (#118).
@@ -264,6 +263,63 @@ describe("writeExportBundle", () => {
     // Sorted by asset id: RUNTIME_ASSET ("a"...) before CONTROL_PLANE_ASSET ("b"...).
     expect(sums).toBe(`${sha256(zipBytes[RUNTIME_ASSET]!)}  ${RUNTIME_ASSET}.zip\n${sha256(zipBytes[CONTROL_PLANE_ASSET]!)}  ${CONTROL_PLANE_ASSET}.zip\n`);
     expect(await readFile(join(dir, `packages/${RUNTIME_ASSET}.zip`))).toEqual(zipBytes[RUNTIME_ASSET]);
+  });
+
+  it("writes the answers the export knows, with no secret, for init --resume --from-bundle", async () => {
+    const dir = join(await mkdtemp(join(tmpdir(), "agentx-export-out-")), "bundle");
+    const answers = cognitoAnswers();
+    const release = fakeRelease();
+    const result = await writeExportBundle({ dir, answers, release });
+    expect(result.files).toContain("init-answers.json");
+    const text = await readFile(join(dir, "init-answers.json"), "utf8");
+    const saved = JSON.parse(text) as unknown;
+    expect(saved).toEqual({
+      schemaVersion: 1, env: "staging", region: "us-east-1", account: "123456789012", engine: "templates",
+      releaseVersion: release.manifest.version, identity: { mode: "cognito" }, models: answers.models,
+    });
+    expect(await readBundleAnswers(dir)).toEqual(saved);
+    // Answers only: never the GitHub App's key reference, the callback signing key or its marker,
+    // or any other secret-shaped value the deploy answers carry.
+    for (const secretish of ["github", "a-real-github-account", "privateKey", "secretsmanager", "signing", "{{"]) {
+      expect(text).not.toContain(secretish);
+    }
+  });
+
+  it("carries the boundary, operator principal and your own OpenRouter secret's ARN, and reads back an OIDC bundle", async () => {
+    const dir = join(await mkdtemp(join(tmpdir(), "agentx-export-out-")), "bundle");
+    const secretArn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:team/openrouter-AbCdEf";
+    const answers = cognitoAnswers({
+      identity: { mode: "oidc", issuer: "https://idp.example.com", audience: "api://agentx", clientId: "cli-client", adminClaim: "groups", adminValues: ["agentx-admins"] },
+      models: { orchestrator: "o", classifier: "c", worker: "w", providers: { orchestrator: "openrouter" }, openRouter: { secretArn } },
+      permissionsBoundaryArn: "arn:aws:iam::123456789012:policy/team-boundary",
+      operatorPrincipalArn: "arn:aws:iam::123456789012:role/platform-operator",
+    });
+    await writeExportBundle({ dir, answers, release: fakeRelease() });
+    expect(await readBundleAnswers(dir)).toMatchObject({
+      identity: answers.identity, models: answers.models,
+      permissionsBoundaryArn: "arn:aws:iam::123456789012:policy/team-boundary",
+      operatorPrincipalArn: "arn:aws:iam::123456789012:role/platform-operator",
+    });
+  });
+
+  it("refuses a bundle with no answers file, or an answers file that is not valid", async () => {
+    const empty = await mkdtemp(join(tmpdir(), "agentx-export-out-"));
+    await expect(readBundleAnswers(empty)).rejects.toThrow(`${empty} has no readable init-answers.json; pass the bundle agentx init --export wrote`);
+    await writeFile(join(empty, "init-answers.json"), JSON.stringify({ schemaVersion: 1, env: "staging", engine: "cdk" }));
+    await expect(readBundleAnswers(empty)).rejects.toThrow(`${empty}/init-answers.json is invalid`);
+    await writeFile(join(empty, "init-answers.json"), JSON.stringify({
+      schemaVersion: 1, env: "staging", region: "us-east-1", account: "123456789012", engine: "templates", releaseVersion: "1.2.3",
+      identity: { mode: "cognito" }, models: { orchestrator: "o", classifier: "c", worker: "w" }, alert: { kind: "none" },
+    }));
+    await expect(readBundleAnswers(empty)).rejects.toThrow("init-answers.json is invalid");
+  });
+
+  it("tells the operator to finish with init --resume --from-bundle", async () => {
+    const dir = join(await mkdtemp(join(tmpdir(), "agentx-export-out-")), "bundle");
+    await writeExportBundle({ dir, answers: cognitoAnswers(), release: fakeRelease() });
+    const readme = await readFile(join(dir, "README.md"), "utf8");
+    expect(readme).toContain("agentx init --resume --env staging --region us-east-1 --from-bundle <this directory>");
+    expect(readme).not.toContain("agentx deploy --mode install --parts");
   });
 
   it("writes parameter files whose unknown values are markers, and never a secret value", async () => {

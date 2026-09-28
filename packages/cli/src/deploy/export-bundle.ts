@@ -6,21 +6,27 @@
 // can be reviewed as plain JSON). Every part's template and parameters are included, in install
 // order, so the bundle also documents the full deploy — even though only the access stack's is
 // meant to be run directly here; every later stack is deployed by the AgentX operator through the
-// service role the access stack creates (`agentx deploy --mode install --parts <every later part>`).
+// service role the access stack creates (`agentx init --resume --from-bundle <this directory>`,
+// which reads the answers the export knew from `init-answers.json`).
 import { chmod, mkdir, mkdtemp, readdir, readFile, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
+import { z } from "zod";
 import {
+  agentXError,
   defaultBoundaryArn,
   defaultBoundaryStatements,
   environmentCloudFormationRoleName,
   environmentOperatorRoleName,
   environmentPullThroughPrefix,
   environmentStackName,
+  EnvironmentNameSchema,
   operatorRoleStatements,
   serviceRoleStatements,
   type PolicyScope,
   type PolicyStatementJson,
 } from "@agentx/contracts";
+import type { InitAnswers } from "../init/install-state.js";
+import { ACCOUNT_PATTERN, IdentityAnswersSchema, ModelsAnswersSchema, REGION_PATTERN } from "./answer-schemas.js";
 import type { DeployAnswers } from "./deploy-environment.js";
 import { sha256Hex } from "./hash.js";
 import { installOrder, stackParameters, type DeployPart, type InstallAnswers, type StackOutputs } from "./parameters.js";
@@ -33,6 +39,66 @@ export interface ExportBundleInput {
   dir: string;
   answers: DeployAnswers & { clientId?: string };
   release: LoadedRelease;
+}
+
+/** The answers an export knows, written to `init-answers.json` so the AgentX operator's
+ * `agentx init --resume --from-bundle` asks only the rest (alerts, budget, GitHub, Slack). Answers
+ * only, never a secret: the same fields `InitAnswers` holds, which never holds one either. */
+export type BundleAnswers = Pick<InitAnswers, "schemaVersion" | "env" | "region" | "account" | "engine" | "releaseVersion" | "identity" | "models" | "permissionsBoundaryArn" | "operatorPrincipalArn">;
+
+/** A bundle is always the templates engine: the platform team deploys published templates. The
+ * boundary and principal patterns are `InitAnswersSchema`'s, so a bundle answer the resume accepts
+ * is never refused later when the answers are saved. */
+export const BundleAnswersSchema: z.ZodType<BundleAnswers> = z.object({
+  schemaVersion: z.literal(1),
+  env: EnvironmentNameSchema,
+  region: z.string().regex(REGION_PATTERN),
+  account: z.string().regex(ACCOUNT_PATTERN),
+  engine: z.literal("templates"),
+  releaseVersion: z.string().regex(/^\d+\.\d+\.\d+$/),
+  identity: IdentityAnswersSchema,
+  models: ModelsAnswersSchema,
+  permissionsBoundaryArn: z.string().regex(/^arn:aws[a-z-]*:iam::\d{12}:policy\/.+$/).optional(),
+  operatorPrincipalArn: z.string().regex(/^arn:aws[a-z-]*:(iam|sts)::\d{12}:.+$/).optional(),
+}).strict();
+
+export const BUNDLE_ANSWERS_FILE = "init-answers.json";
+
+function invalidBundleAnswers(where: string, issues: z.core.$ZodIssue[]): Error {
+  return agentXError("CONFIG_INVALID", `${where} is invalid: ${issues[0]?.path.join(".") ?? ""} ${issues[0]?.message ?? ""}`.trim());
+}
+
+/** F5: derived here from the export's own inputs (no new input field), so every caller gets the
+ * file and it can never hold `undefined`. Parsed before it is written, so an export never writes a
+ * bundle its own resume would refuse. */
+function bundleAnswersFor(answers: DeployAnswers, release: LoadedRelease): BundleAnswers {
+  const parsed = BundleAnswersSchema.safeParse({
+    schemaVersion: 1,
+    env: answers.env,
+    region: answers.region,
+    account: answers.account,
+    engine: "templates",
+    releaseVersion: release.manifest.version,
+    identity: answers.identity,
+    models: answers.models,
+    ...(answers.permissionsBoundaryArn === undefined ? {} : { permissionsBoundaryArn: answers.permissionsBoundaryArn }),
+    ...(answers.operatorPrincipalArn === undefined ? {} : { operatorPrincipalArn: answers.operatorPrincipalArn }),
+  });
+  if (!parsed.success) throw invalidBundleAnswers(`the export's ${BUNDLE_ANSWERS_FILE}`, parsed.error.issues);
+  return parsed.data;
+}
+
+/** Reads and checks a bundle's `init-answers.json`. */
+export async function readBundleAnswers(dir: string): Promise<BundleAnswers> {
+  let json: unknown;
+  try {
+    json = JSON.parse(await readFile(join(dir, BUNDLE_ANSWERS_FILE), "utf8"));
+  } catch {
+    throw agentXError("CONFIG_INVALID", `${dir} has no readable ${BUNDLE_ANSWERS_FILE}; pass the bundle agentx init --export wrote`);
+  }
+  const parsed = BundleAnswersSchema.safeParse(json);
+  if (!parsed.success) throw invalidBundleAnswers(`${dir}/${BUNDLE_ANSWERS_FILE}`, parsed.error.issues);
+  return parsed.data;
 }
 
 export interface ExportBundleResult {
@@ -296,16 +362,16 @@ function accessDeployerStatements(scope: { env: string; partition: string; regio
  * The access stack takes no secret parameters (its only parameters are `PermissionsBoundaryArn`
  * and `OperatorPrincipalArn`), so this script never reads or prints one. Every variable is quoted.
  */
-/** The command the AgentX operator runs once the access stack exists: every later part, never
- * access itself (the operator role is denied change sets on the access stack). */
-function operatorResumeCommand(laterParts: DeployPart[]): string {
-  return `agentx deploy --mode install --parts ${laterParts.join(",")} --release <dir> --answers <file>`;
+/** The command the AgentX operator runs once the access stack exists: it deploys every later part,
+ * never access itself (the operator role is denied change sets on the access stack). */
+function operatorResumeCommand(env: string, region: string): string {
+  return `agentx init --resume --env ${env} --region ${region} --from-bundle <this directory>`;
 }
 
 /** One wording for a failed or refused change set on a new stack, shared by the script and README. */
 const NEW_STACK_RECOVERY = "delete the change set, then delete the stack only if it is still REVIEW_IN_PROGRESS with no resources";
 
-function deployAccessScript(scope: { env: string; region: string; version: string; laterParts: DeployPart[] }): string {
+function deployAccessScript(scope: { env: string; region: string; version: string }): string {
   const stackName = environmentStackName(scope.env, "access");
   const dashedVersion = scope.version.replaceAll(".", "-");
   const region = scope.region;
@@ -316,7 +382,7 @@ set -euo pipefail
 # platform team deploys directly, with their own AWS credentials (policies/access-deployer.json
 # names exactly what that principal needs). Every later stack is deployed by the AgentX operator
 # through the CloudFormationServiceRole this stack creates, by running (see README.md):
-#   ${operatorResumeCommand(scope.laterParts)}
+#   ${operatorResumeCommand(scope.env, region)}
 # The access stack takes no secret parameters, so this script never reads or prints one. It does
 # not create the callback signing key either: agentx deploy creates it on its first run.
 #
@@ -529,17 +595,20 @@ Either way, nothing from a failed attempt is reused; the next run always creates
 
 ## After this stack exists
 
-Every other stack (${laterParts.join(", ")}) is deployed by the AgentX operator through the
-\`agentx-${env}-cloudformation\` role this stack creates. The operator runs, with the operator role:
+The AgentX operator then runs, with the operator role, from a machine with a browser:
 
 \`\`\`
-${operatorResumeCommand(laterParts)}
+${operatorResumeCommand(env, region)}
 \`\`\`
 
-\`<dir>\` is this release's directory and \`<file>\` the deploy answers file. Access is not in
-\`--parts\`: the operator role is denied change sets on the access stack. The platform team's own
-credentials are never needed again. Use AWS credentials whose session lasts at least as long as the
-deploy (plan for about an hour).
+It deploys every other stack (${laterParts.join(", ")}) through the \`agentx-${env}-cloudformation\`
+role, creates the GitHub and Slack apps, the admin user, the first project and channel, and the
+alerts, and ends when AgentX answers in Slack.
+
+It reads the answers this export already knew from \`init-answers.json\` (no secret is in it) and
+asks only the rest. It never deploys the access stack: the operator role is denied change sets on
+it. The platform team's own credentials are never needed again. Use AWS credentials whose session
+lasts at least as long as the deploy (plan for about an hour).
 
 ## Tearing down an environment
 
@@ -642,6 +711,8 @@ whose deletion protection keeps it; its name is not unique, so it never blocks a
   the inline policies the later stacks' roles carry, with this environment's real account,
   region and partition.
 - \`policies/access-deployer.json\`: the policy for whoever runs \`deploy-access.sh\`.
+- \`init-answers.json\`: the answers this export knew, for the operator's
+  \`agentx init --resume --from-bundle\`. It holds no secret.
 `;
 }
 
@@ -678,6 +749,7 @@ export async function writeExportBundle(input: ExportBundleInput): Promise<Expor
 
   assertReleaseCoversRegion(release, region);
   await assertClaimable(dir);
+  const initAnswers = bundleAnswersFor(answers, release);
 
   const resolvedDir = resolve(dir);
   const parentDir = dirname(resolvedDir);
@@ -696,18 +768,18 @@ export async function writeExportBundle(input: ExportBundleInput): Promise<Expor
     }
 
     const order = installOrder(answers.identity.mode);
-    // F24: `bundleAnswers` never carries `developerSignIn` (`markerAnswers` does not set it), so
+    // F24: `parameterAnswers` never carries `developerSignIn` (`markerAnswers` does not set it), so
     // `stackParameters`'s control-plane case adds none of the sign-in parameters here. That is
     // correct, not an oversight: an export bundle is always a fresh install of a brand-new access
     // stack (see this function's own doc comment — "everything a platform team needs to deploy the
     // access stack themselves"), never a redeploy of an existing, already-configured environment, so
     // there is no stored sign-in choice for it to carry and nothing it could ever reset.
-    const bundleAnswers = markerAnswers(answers, release);
+    const parameterAnswers = markerAnswers(answers, release);
     const outputs = markerOutputs();
 
     for (const part of order) {
       await write(`templates/${part}.template.json`, release.template(part, region, env));
-      const parameters = stackParameters(part, bundleAnswers, outputs);
+      const parameters = stackParameters(part, parameterAnswers, outputs);
       await write(`parameters/${part}.json`, `${JSON.stringify(parameterList(parameters), null, 2)}\n`);
     }
 
@@ -742,8 +814,9 @@ export async function writeExportBundle(input: ExportBundleInput): Promise<Expor
     await write("policies/default-boundary.json", policyDocument(defaultBoundaryStatements(policyScope)));
     await write("policies/access-deployer.json", policyDocument(accessDeployerStatements({ env, partition, region, account })));
 
-    await write("deploy-access.sh", deployAccessScript({ env, region, version: release.manifest.version, laterParts: order.filter((part) => part !== "access") }), { mode: 0o755 });
+    await write("deploy-access.sh", deployAccessScript({ env, region, version: release.manifest.version }), { mode: 0o755 });
     await write("README.md", readme({ env, region, account, order }));
+    await write(BUNDLE_ANSWERS_FILE, `${JSON.stringify(initAnswers, null, 2)}\n`);
 
     // Publish atomically: remove `dir` if it exists (assertClaimable already confirmed it's empty,
     // and rmdir refuses a non-empty directory itself as a second, independent guard), then move the

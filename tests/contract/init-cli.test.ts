@@ -106,7 +106,7 @@ async function harness(options: { releaseVersion?: string; regions?: string[] } 
       init: { ...deps, ...overrides },
     });
   const run = (argv: string[], overrides: Partial<InitCliDependencies> = {}) => runWithoutRegion(["--region", "us-east-1", ...argv], overrides);
-  return { store, secrets, deployer, github, opened, out, err, home, release, plane, alerts, cognito, setup, run, runWithoutRegion,
+  return { store, secrets, deployer, github, opened, out, err, home, release, plane, alerts, cognito, setup, deps, run, runWithoutRegion,
     printed: () => `${out.join("")}${err.join("")}`,
     /** Where the output stands now, and everything printed since (one run's output, on a rerun). */
     mark: () => ({ out: out.length, err: err.length }),
@@ -634,5 +634,123 @@ describe("agentx init with OpenRouter", () => {
     expect(models?.providers).toBeUndefined();
     expect(models?.openRouter).toBeUndefined();
     expect(h.secrets.values.has("agentx/staging/openrouter")).toBe(false);
+  });
+});
+
+// The bundle's answers, as writeExportBundle writes them (Task 14's export-bundle test pins that).
+async function bundleDir(overrides: Record<string, unknown> = {}): Promise<string> {
+  const dir = await tmp("agentx-bundle-");
+  await writeFile(join(dir, "init-answers.json"), JSON.stringify({
+    schemaVersion: 1, env: "staging", region: "us-east-1", account: "123456789012", engine: "templates", releaseVersion: "1.2.3",
+    identity: { mode: "cognito" }, models: { orchestrator: "us.anthropic.claude-sonnet-4-6", classifier: "amazon.nova-lite-v1:0", worker: "amazon.nova-pro-v1:0" },
+    ...overrides,
+  }));
+  return dir;
+}
+const OPERATOR = "arn:aws:sts::123456789012:assumed-role/agentx-staging-operator/alice";
+// A bundle resume asks only: alert kind, alert email, budget, budget scope, GitHub account, account
+// type, app name, Slack app name, app-posted messages; then the plan.
+const BUNDLE_RUN = ["", "ops@example.com", "", "", "acme", "", "", "", "", true];
+const ACCESS_DEPLOYED = { status: async (name: string) => (name === "agentx-staging-access" ? "CREATE_COMPLETE" : undefined) };
+
+describe("init --resume --from-bundle (FR-026)", () => {
+  it("asks only what the export did not know, records access as done, and goes on with core", async () => {
+    const h = await harness();
+    const dir = await bundleDir();
+    // The platform team's access stack exists already, with its outputs.
+    const deployer = scriptedDeployer(allStackOutputs(), [environmentStackName("staging", "access")]);
+    deployer.fail.set(environmentStackName("staging", "foundation"), new Error("stop after access"));
+    const prompter = scriptedPrompter(BUNDLE_RUN);
+    const code = await h.run(["--resume", "--from-bundle", dir], {
+      prompter, stackStatus: ACCESS_DEPLOYED,
+      deploy: { ...h.deps.deploy, deployer, identity: { get: async () => ({ account: "123456789012", arn: OPERATOR }) } },
+    });
+    expect(code).not.toBe(0);
+    expect(h.printed()).toContain("stop after access");
+    expect(prompter.remaining()).toBe(0);
+    expect(prompter.asked).not.toContain("Deploy engine");
+    const progress = await readInstallProgress(h.store, "staging");
+    expect(progress?.steps.access).toMatchObject({ status: "done", note: "deployed by your platform team from the export bundle" });
+    expect(progress?.steps.prerequisites?.status).toBe("done");
+    expect(deployer.requests.map((request) => request.part)).toEqual(["foundation"]);
+    expect(h.deployer.requests).toEqual([]);
+    const saved = await readInstallAnswers(h.store, "staging");
+    expect(saved).toMatchObject({ engine: "templates", identity: { mode: "cognito" }, github: { account: "acme" }, alert: { kind: "email", address: "ops@example.com" } });
+    expect(saved?.models.worker).toBe("amazon.nova-pro-v1:0");
+  });
+
+  it("refuses when the platform team has not deployed the access stack yet", async () => {
+    const h = await harness();
+    const code = await h.run(["--resume", "--from-bundle", await bundleDir()], { prompter: scriptedPrompter([]), stackStatus: { status: async () => undefined } });
+    expect(code).not.toBe(0);
+    expect(h.printed()).toContain("the access stack agentx-staging-access does not exist yet; ask your platform team to run deploy-access.sh from the bundle, then run this again");
+  });
+
+  it("refuses an access stack that rolled back", async () => {
+    const h = await harness();
+    const code = await h.run(["--resume", "--from-bundle", await bundleDir()], { prompter: scriptedPrompter([]), stackStatus: { status: async () => "ROLLBACK_COMPLETE" } });
+    expect(code).not.toBe(0);
+    expect(h.printed()).toContain("the access stack agentx-staging-access is ROLLBACK_COMPLETE; ask your platform team to fix it");
+    expect(h.store.values.has(installAnswersParameterName("staging"))).toBe(false);
+  });
+
+  it("refuses a bundle for another account", async () => {
+    const h = await harness();
+    const code = await h.run(["--resume", "--from-bundle", await bundleDir({ account: "999999999999" })], { prompter: scriptedPrompter([]), stackStatus: { status: async () => "CREATE_COMPLETE" } });
+    expect(code).not.toBe(0);
+    expect(h.printed()).toContain("the bundle is for account 999999999999, but your AWS credentials are for account 123456789012");
+  });
+
+  it("refuses a bundle for another environment or region, and --from-bundle without --resume", async () => {
+    const h = await harness();
+    const options = { prompter: scriptedPrompter([]), stackStatus: ACCESS_DEPLOYED };
+    expect(await h.run(["--resume", "--from-bundle", await bundleDir({ env: "dev" })], options)).not.toBe(0);
+    expect(h.printed()).toContain("the bundle is for environment dev; pass --env dev");
+    expect(await h.run(["--resume", "--from-bundle", await bundleDir({ region: "eu-west-1" })], options)).not.toBe(0);
+    expect(h.printed()).toContain("the bundle is for region eu-west-1; pass --region eu-west-1");
+    expect(await h.run(["--from-bundle", await bundleDir()], options)).not.toBe(0);
+    expect(h.printed()).toContain("--from-bundle goes with --resume");
+    expect(h.store.values.has(installAnswersParameterName("staging"))).toBe(false);
+    expect(h.deployer.requests).toEqual([]);
+  });
+
+  it("refuses a flag that contradicts the bundle's answers", async () => {
+    const h = await harness();
+    const code = await h.run(["--resume", "--from-bundle", await bundleDir(), "--engine", "cdk", "--source", "/tmp/x"], { prompter: scriptedPrompter(BUNDLE_RUN), stackStatus: ACCESS_DEPLOYED });
+    expect(code).not.toBe(0);
+    expect(h.printed()).toContain("--engine cdk differs from what this install started with (templates)");
+    expect(h.store.values.has(installAnswersParameterName("staging"))).toBe(false);
+  });
+});
+
+describe("the access step under the operator role (FR-019)", () => {
+  it("refuses with what to ask the platform team, instead of failing on IAM", async () => {
+    const h = await harness();
+    const operator = { ...h.deps.deploy, identity: { get: async () => ({ account: "123456789012", arn: OPERATOR }) } };
+    // A first run as the operator: answers are saved, prerequisites pass, then access refuses.
+    const code = await h.run([], { prompter: scriptedPrompter([...FIRST_RUN]), deploy: operator });
+    expect(code).not.toBe(0);
+    expect(h.printed()).toContain("the access stack needs admin rights, and you are using the AgentX operator role; ask your platform team to deploy it (agentx init --export, then deploy-access.sh), or run agentx init with admin credentials");
+    expect(h.deployer.requests).toEqual([]);
+  });
+});
+
+describe("init --export and production (spec decision, 2026-09-27)", () => {
+  it("writes a bundle for production when nothing is installed there", async () => {
+    const h = await harness();
+    const out = await tmp("agentx-export-");
+    const code = await executeCli(["--env", "production", "init", "--export", join(out, "bundle"), "--region", "us-east-1", "--release", h.release, "--account", "123456789012"], { deploy: { store: new MemoryParameterStore() }, stdout: { write: () => true }, stderr: { write: () => true } });
+    expect(code).toBe(0);
+  });
+
+  it("refuses production when SSM already holds its settings", async () => {
+    const h = await harness();
+    const store = new MemoryParameterStore();
+    store.values.set("/agentx/production/settings", "{}");
+    const err: string[] = [];
+    const out = await tmp("agentx-export-");
+    const code = await executeCli(["--env", "production", "init", "--export", join(out, "bundle"), "--region", "us-east-1", "--release", h.release, "--account", "123456789012"], { deploy: { store }, stdout: { write: () => true }, stderr: { write: (text: string) => err.push(text) } });
+    expect(code).not.toBe(0);
+    expect(err.join("")).toContain("environment production is already installed in this account; export a bundle for a new --env");
   });
 });
