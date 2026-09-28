@@ -88,7 +88,7 @@ import { attributionDroppedLog, callConnector, connectorCatalogKey, discoverConn
 import { resolveConnectors, BUILT_IN_CONNECTOR_TYPES, type ConnectorType, type ConnectorTypeContext, type ResolvedConnector } from "./connector-types.js";
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
 import { developerTokenVerifier } from "../developer/verify-token.js";
-import { developerFooter, inertName, taskPointerKey, type DeveloperTaskPointerRecord } from "../developer/task-records.js";
+import { completedTurn, developerFooter, inertName, taskKey, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type StoredEvent } from "../developer/task-records.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
 import { hashJson, isConditional } from "./broker-shared.js";
 import { channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, routeDeveloperRequest, type DeveloperApiConfiguration } from "./developer-routes.js";
@@ -341,9 +341,7 @@ function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTas
     operations: async (workspaceId) => (await query(`WORKSPACE#${workspaceId}`, "OPERATION#"))
       .filter((item) => item.entityType === "OPERATION")
       .map((item) => publicOperation(item as OperationRecord)),
-    eventsNewestFirst: async (operationId, limit) => (await query(`OPERATION#${operationId}`, "EVENT#", { newestFirst: true, limit }))
-      .filter((item) => item.entityType === "EVENT")
-      .map((item) => parseStoredEvent(item)),
+    eventsNewestFirst: (operationId, limit) => operationEventsNewestFirst(dependencies, operationId, limit),
     artifacts: async (workspaceId, operationId) => (await query(`WORKSPACE#${workspaceId}`, "ARTIFACT#"))
       .filter((item) => item.operationId === operationId)
       .map((item) => ({
@@ -3240,21 +3238,21 @@ function isTransactionConflict(error: unknown): boolean {
  * Sends a terminal result. For a developer task's prepare (it has a pointer; a Slack workspace has
  * none) a success queues the first instructions in this same transaction (R3), and any other
  * outcome clears the raw instructions (controller ruling, Task 9 fix round 1). The pointer update
- * is always conditioned on the pointer existing, so it never creates one.
+ * is always conditioned on the pointer existing, so it never creates one. `taskPointer` is the
+ * caller's one read of the pointer for this decision (P39).
  */
 async function sendTerminalResult(
   dependencies: AwsBrokerDependencies,
   workspace: WorkspaceInstance,
   operation: OperationRecord,
+  taskPointer: DeveloperTaskPointerRecord | undefined,
   terminalStatus: OperationStatus,
   now: string,
   transactItems: TransactItems,
   workspaceUpdate: TransactItems[number],
   send: (items: TransactItems) => Promise<unknown>,
 ): Promise<void> {
-  const pointer = operation.kind === "prepare"
-    ? await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(workspace.id))
-    : undefined;
+  const pointer = operation.kind === "prepare" ? taskPointer : undefined;
   const withoutTask: TransactItems = pointer === undefined ? transactItems : [...transactItems, { Update: {
     TableName: dependencies.tableName,
     Key: taskPointerKey(workspace.id),
@@ -3280,6 +3278,77 @@ async function sendTerminalResult(
     if (again?.pendingPrompt !== undefined) throw queueError;
     await send(withoutTask);
   }
+}
+
+/** The operation kinds whose result may concern a developer task: one pointer read serves them all (P39). */
+const TASK_POINTER_KINDS: ReadonlySet<string> = new Set(["prepare", "task", "publish", "close", "cancel"]);
+
+/** What a successful cancel's result makes of its target, and what a failed one does. */
+const cancelledTargetStatus = (cancelStatus: OperationStatus): OperationStatus => (cancelStatus === "SUCCEEDED" ? "CANCELLED" : "INTERRUPTED");
+
+/** At most `limit` of an operation's events, newest first, across pages. */
+async function operationEventsNewestFirst(dependencies: AwsBrokerDependencies, operationId: string, limit: number): Promise<StoredEvent[]> {
+  const items: NonNullable<QueryCommandOutput["Items"]> = [];
+  let startKey: Record<string, unknown> | undefined;
+  do {
+    const page = await dependencies.documentClient.send(new QueryCommand({
+      TableName: dependencies.tableName,
+      KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
+      ExpressionAttributeValues: { ":pk": `OPERATION#${operationId}`, ":prefix": "EVENT#" },
+      ConsistentRead: true,
+      ScanIndexForward: false,
+      Limit: limit - items.length,
+      ...(startKey === undefined ? {} : { ExclusiveStartKey: startKey }),
+    }));
+    items.push(...(page.Items ?? []));
+    startKey = page.LastEvaluatedKey;
+  } while (startKey !== undefined && items.length < limit);
+  return items.filter((item) => item.entityType === "EVENT").map((item) => parseStoredEvent(item));
+}
+
+/**
+ * Spec 025 R12: the `completed` turn record of the developer task or publish operation this result
+ * ends, for the result's own transaction, so the record and the result land together or not at
+ * all. A task's own result ends it; a cancel's result ends its target (ruling F13: the target's
+ * own later result finds it terminal and writes nothing). A Slack workspace has no pointer and
+ * gets none.
+ */
+async function completedTurnItems(
+  dependencies: AwsBrokerDependencies,
+  operation: OperationRecord,
+  pointer: DeveloperTaskPointerRecord | undefined,
+  terminalStatus: OperationStatus,
+  outcome: { result: unknown; error: string | undefined },
+  now: string,
+): Promise<TransactItems> {
+  const table = dependencies.turnRecordsTableName;
+  if (pointer === undefined || table === undefined) return [];
+  let ended: { operation: OperationRecord; status: OperationStatus } | undefined;
+  if (operation.kind === "task" || operation.kind === "publish") {
+    ended = {
+      operation: { ...operation, ...(outcome.result === undefined ? {} : { result: outcome.result }), ...(outcome.error === undefined ? {} : { error: outcome.error }) },
+      status: terminalStatus,
+    };
+  } else if (operation.kind === "cancel" && operation.targetOperationId) {
+    const target = await getItem<OperationRecord>(dependencies, operationKey(operation.workspaceId, operation.targetOperationId));
+    if (target !== undefined && (target.kind === "task" || target.kind === "publish") && !TERMINAL.has(target.status)) {
+      ended = { operation: target, status: cancelledTargetStatus(terminalStatus) };
+    }
+  }
+  if (ended === undefined) return [];
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
+  if (task === undefined) {
+    // The pointer and the task are written in one transaction, so this is not expected.
+    console.log(JSON.stringify({ component: "broker", event: "developer.task_record_missing", taskId: pointer.taskId, operationId: ended.operation.id }));
+    return [];
+  }
+  // A task's summary is its last assistant message; a publish's is its pull request.
+  const events = ended.operation.kind === "task" ? (await operationEventsNewestFirst(dependencies, ended.operation.id, 500)).reverse() : [];
+  return [{ Put: {
+    TableName: table,
+    Item: completedTurn({ task, pointer, operation: ended.operation, status: ended.status, events, now }),
+    ConditionExpression: "attribute_not_exists(pk)",
+  } }];
 }
 
 async function recordTerminalResult(
@@ -3335,7 +3404,7 @@ async function recordTerminalResult(
       Key: terminalTarget,
       UpdateExpression: "SET #status = :status, updatedAt = :now",
       ExpressionAttributeNames: { "#status": "status" },
-      ExpressionAttributeValues: { ":status": terminalStatus === "SUCCEEDED" ? "CANCELLED" : "INTERRUPTED", ":now": now },
+      ExpressionAttributeValues: { ":status": cancelledTargetStatus(terminalStatus), ":now": now },
     } });
   }
   const workspaceUpdate: TransactItems[number] = { Update: {
@@ -3366,7 +3435,14 @@ async function recordTerminalResult(
   try {
     // A queuing transaction that met another one in flight (TransactionConflict, not a failed
     // condition) is decided again once from fresh reads before it counts as a stale callback.
-    const decideAndSend = () => sendTerminalResult(dependencies, workspace, operation, terminalStatus, now, transactItems, workspaceUpdate, send);
+    // Each decision reads the task pointer once (P39); a Slack workspace has none.
+    const decideAndSend = async () => {
+      const pointer = TASK_POINTER_KINDS.has(operation.kind)
+        ? await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(workspace.id))
+        : undefined;
+      const completed = await completedTurnItems(dependencies, operation, pointer, terminalStatus, { result, error }, now);
+      await sendTerminalResult(dependencies, workspace, operation, pointer, terminalStatus, now, [...transactItems, ...completed], workspaceUpdate, send);
+    };
     try {
       await decideAndSend();
     } catch (firstError) {

@@ -5,12 +5,16 @@ import { randomUUID } from "node:crypto";
 import { GetCommand, PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import {
   AgentXError,
+  ContinueDeveloperTaskRequestSchema,
   DEVELOPER_EVENTS_DEFAULT,
   DEVELOPER_EVENTS_MAX,
   DEVELOPER_TASK_LIST_DEFAULT,
   DEVELOPER_TASK_LIST_MAX,
   DEVELOPER_TASK_SUMMARY_MAX,
+  DeveloperPullRequestRequestSchema,
+  DeveloperTaskActionRequestSchema,
   DeveloperTaskStatusSchema,
+  PullRequestResultSchema,
   StartDeveloperTaskRequestSchema,
   agentXError,
   cleanClientName,
@@ -18,6 +22,7 @@ import {
   lastAssistantResponse,
   redactText,
   taskTitle,
+  type DeveloperPullRequestResponse,
   type DeveloperTaskListItem,
   type DeveloperTaskPolicy,
   type DeveloperTaskStatus,
@@ -32,6 +37,7 @@ import {
   byCreated,
   deriveTaskStatus,
   developerTaskIdentity,
+  partyOfTask,
   recentTaskEvents,
   startIdempotencyKey,
   taskIndexKey,
@@ -504,6 +510,172 @@ async function taskEvents(deps: DeveloperTaskRouteDependencies, caller: Develope
   return { events: (await taskView(deps, task, { events: whole(url.searchParams.get("limit"), DEVELOPER_EVENTS_DEFAULT, 1, DEVELOPER_EVENTS_MAX, "limit"), details: false })).events };
 }
 
+const CLOSED_TASK = "this task is closed; start a new one with agentx_start_task";
+const NEVER_STARTED = "this task never started; close it with agentx_close_task and start a new one";
+
+/**
+ * What continue and a pull request need before they touch the workspace: an open task that got
+ * past its setup (R17, for every setup failure, whatever its category), and the developer's
+ * access to the project, checked again because these are actions (controller ruling; reads and
+ * cancel do not check it). Callers load the owned task first.
+ */
+async function assertActionable(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord): Promise<void> {
+  if (task.closedAt !== undefined) throw agentXError("CONFIG_INVALID", CLOSED_TASK);
+  const workspace = await deps.actions.workspace(task.workspaceId);
+  if (workspace.status === "CLOSED") throw agentXError("CONFIG_INVALID", CLOSED_TASK);
+  if (workspace.status === "PREPARATION_FAILED") throw agentXError("CONFIG_INVALID", NEVER_STARTED);
+  await deps.checkAccess(task.project);
+}
+
+/** The existing handlers' busy answers, in the developer's words (FR-049's TASK_BUSY). */
+function busy(error: unknown, taskId: string): never {
+  if (error instanceof AgentXError && (error.code === "WORKSPACE_BUSY" || error.code === "WORKSPACE_NOT_READY")) {
+    throw agentXError("TASK_BUSY", `task ${taskId} is still working; wait for it with agentx_wait_for_task, or stop it with agentx_cancel_task`);
+  }
+  throw error;
+}
+
+async function continueTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
+  const request = parse(ContinueDeveloperTaskRequestSchema, value, deps, "continue");
+  const task = await loadOwnedTask(deps, caller, taskId);
+  const turns = turnTable(deps);
+  await assertActionable(deps, task);
+  const receivedAt = iso(deps);
+  try {
+    // acceptTask answers a repeated requestId with its first operation and writes nothing, and
+    // refuses a second running turn (TASK_BUSY) before anything is written.
+    await deps.actions.acceptTask(developerTaskIdentity(task), task.workspaceId, { requestId: request.requestId, conversationId: task.conversationId, prompt: request.instructions }, (operation) => [
+      // R12: the accepted record commits with the operation or not at all.
+      putNew(turns, aiToolTurn({
+        party: partyOfTask(task), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
+        request: request.instructions, response: `Continuing task ${taskId} as operation ${operation.id}.`, operationId: operation.id,
+      })),
+    ]);
+  } catch (error) {
+    busy(error, taskId);
+  }
+  const view = await taskView(deps, task, { events: 0, details: false });
+  await syncIndex(deps, task, view.status, view.updatedAt);
+  return { task: view };
+}
+
+/** The payload a cancel's idempotency item holds: a continue or PR with the same requestId conflicts. */
+const CANCEL_PAYLOAD_HASH = hashJson({ action: "cancel" });
+
+async function cancelTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
+  const request = parse(DeveloperTaskActionRequestSchema, value, deps, "cancel");
+  const task = await loadOwnedTask(deps, caller, taskId);
+  const turns = turnTable(deps);
+  const receivedAt = iso(deps);
+  // Ruling F14: the same key the task's other actions use, so one requestId names one action.
+  const idempotencyKey = { pk: `IDEMPOTENCY#${task.ownerKey}#${task.workspaceId}`, sk: `REQUEST#${request.requestId}` };
+  const repeated = async (): Promise<boolean> => {
+    const previous = await get<{ payloadHash: string }>(deps, idempotencyKey);
+    if (previous === undefined) return false;
+    if (previous.payloadHash !== CANCEL_PAYLOAD_HASH) throw agentXError("IDEMPOTENCY_CONFLICT", "this request_id was already used for another action on this task; use a new request_id");
+    return true;
+  };
+  const current = async () => ({ task: await taskView(deps, task, { events: 0, details: false }) });
+  // A repeated cancel answers with the task as it is now and writes nothing.
+  if (await repeated()) return current();
+  const marker = putNew(deps.tableName, { ...idempotencyKey, entityType: "IDEMPOTENCY", action: "cancel", payloadHash: CANCEL_PAYLOAD_HASH });
+  const record = (response: string, operationId?: string) => putNew(turns, aiToolTurn({
+    party: partyOfTask(task), turnId: randomUUID(), action: "cancel", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
+    request: "cancel", response, ...(operationId === undefined ? {} : { operationId }),
+  }));
+  let handled = false;
+  const pointer = await get<DeveloperTaskPointerRecord>(deps, taskPointerKey(task.workspaceId));
+  if (pointer?.pendingPrompt !== undefined) {
+    // R16, P45: before the instructions run, removing them is the whole cancel. Only the pointer
+    // changes; the workspace and the prepare are left to finish, and then queue nothing.
+    try {
+      await deps.actions.transact([
+        { Update: {
+          TableName: deps.tableName, Key: taskPointerKey(task.workspaceId),
+          UpdateExpression: "SET cancelledAt = :now REMOVE pendingPrompt", ConditionExpression: "attribute_exists(pendingPrompt)",
+          ExpressionAttributeValues: { ":now": receivedAt },
+        } },
+        marker,
+        record("Cancelled before the instructions ran."),
+      ]);
+      handled = true;
+    } catch (error) {
+      if (!isConditional(error)) throw error;
+      // The same cancel, sent again, committed first.
+      if (await repeated()) return current();
+      // The prepare's result queued the instructions meanwhile: cancel the running task instead.
+    }
+  }
+  if (!handled) {
+    let outcome: "CANCEL_REQUESTED" | "NOTHING_RUNNING";
+    try {
+      outcome = (await deps.actions.cancelRunning(developerTaskIdentity(task), await deps.actions.workspace(task.workspaceId), (operation) => [
+        record("Asked the worker to stop.", operation.id),
+        marker,
+      ])).outcome;
+    } catch (error) {
+      // The same cancel, sent again, committed first (its marker failed this transaction).
+      if (error instanceof AgentXError && error.code === "WORKSPACE_BUSY" && await repeated()) return current();
+      throw error;
+    }
+    if (outcome === "NOTHING_RUNNING") {
+      // R12's one exception (ruling F15): nothing ran, so there is no action transaction for the
+      // record to join. It is written with the cancel's idempotency item in its own transaction.
+      // A failed write is counted and logged, and never hides the answer.
+      try {
+        await deps.actions.transact([marker, record("Nothing was running.")]);
+      } catch (error) {
+        if (!isConditional(error)) turnRecordFailed(deps, error);
+      }
+    }
+  }
+  const view = await taskView(deps, task, { events: 0, details: false });
+  await syncIndex(deps, task, view.status, view.updatedAt);
+  return { task: view };
+}
+
+async function openPullRequest(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<DeveloperPullRequestResponse> {
+  const request = parse(DeveloperPullRequestRequestSchema, value, deps, "pull-request");
+  const task = await loadOwnedTask(deps, caller, taskId);
+  const turns = turnTable(deps);
+  await assertActionable(deps, task);
+  let repository = request.repository;
+  if (repository === undefined) {
+    const repositories = (await deps.actions.latestProject(task.project))?.definition.repositories.map((entry) => entry.name) ?? [];
+    if (repositories.length > 1) throw agentXError("CONFIG_INVALID", `this project has several repositories; name one of: ${repositories.join(", ")}`);
+    if (repositories.length === 0) throw agentXError("CONFIG_INVALID", `project \`${task.project}\` has no repositories; ask an admin`);
+    repository = repositories[0]!;
+  }
+  const receivedAt = iso(deps);
+  let accepted: Awaited<ReturnType<DeveloperTaskActions["acceptPullRequest"]>>;
+  try {
+    // R22: answers at once. A repeated requestId returns the same operation and writes nothing.
+    accepted = await deps.actions.acceptPullRequest(developerTaskIdentity(task), task.workspaceId, {
+      requestId: request.requestId, repository, title: request.title, draft: request.draft,
+      ...(request.body === undefined ? {} : { body: request.body }),
+    }, (operation) => [
+      putNew(turns, aiToolTurn({
+        party: partyOfTask(task), turnId: randomUUID(), action: "pull_request", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
+        request: `${request.title}\n\n${request.body ?? ""}`, response: `Opening a pull request on ${repository} as operation ${operation.id}.`, operationId: operation.id,
+      })),
+    ]);
+  } catch (error) {
+    busy(error, taskId);
+  }
+  const published = PullRequestResultSchema.safeParse(accepted.operation.result);
+  const pullRequest = accepted.operation.status === "SUCCEEDED" && published.success
+    ? { repository: published.data.repository, number: published.data.number, url: published.data.url, state: "open" as const }
+    : undefined;
+  const view = await taskView(deps, task, { events: 0, details: true });
+  await syncIndex(deps, task, view.status, view.updatedAt);
+  return {
+    task: view,
+    operationId: accepted.operation.id,
+    operationStatus: accepted.operation.status,
+    ...(pullRequest === undefined ? {} : { pullRequest }),
+  };
+}
+
 /** A path segment, decoded; a malformed escape is kept as is and then fails the task ID check. */
 function safeDecode(segment: string): string {
   try {
@@ -521,5 +693,8 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
   const taskId = route?.[1] === undefined ? undefined : safeDecode(route[1]);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === undefined) return readTask(deps, caller, taskId, url);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === "events") return taskEvents(deps, caller, taskId, url);
+  if (taskId !== undefined && request.method === "POST" && route?.[2] === "continue") return continueTask(deps, caller, taskId, body(request));
+  if (taskId !== undefined && request.method === "POST" && route?.[2] === "cancel") return cancelTask(deps, caller, taskId, body(request));
+  if (taskId !== undefined && request.method === "POST" && route?.[2] === "pull-requests") return openPullRequest(deps, caller, taskId, body(request));
   throw agentXError("NOT_FOUND", "route not found");
 }

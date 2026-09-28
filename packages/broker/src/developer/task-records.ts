@@ -6,6 +6,7 @@ import {
   DEVELOPER_EVENT_TEXT_MAX,
   DEVELOPER_FAILURE_MESSAGE_MAX,
   DEVELOPER_TASK_OWNER_ISSUER,
+  PullRequestResultSchema,
   TURN_TEXT_LIMIT,
   aiToolTurnRecordKeys,
   capText,
@@ -17,6 +18,7 @@ import {
   type DeveloperTaskEvent,
   type DeveloperTaskFailureCategory,
   type DeveloperTaskStatus,
+  type Operation,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 
@@ -278,6 +280,41 @@ export function aiToolTurn(input: {
     ...(input.errorCode === undefined ? {} : { error: { code: input.errorCode.slice(0, 64) } }),
   });
   return { ...aiToolTurnRecordKeys(record), ...record };
+}
+
+const OUTCOME: Record<string, AiToolTurnRecord["outcome"]> = { SUCCEEDED: "succeeded", FAILED: "failed", CANCELLED: "cancelled", INTERRUPTED: "interrupted" };
+
+/**
+ * R12: the result of a developer's task or publish operation. Its turnId and receivedAt are the
+ * operation's ID and creation time, so its key is fixed and a repeated result cannot write it
+ * twice. The response text is the result summary (FR-037), redacted and capped by aiToolTurn.
+ */
+export function completedTurn(input: {
+  task: DeveloperTaskRecord;
+  pointer: Pick<DeveloperTaskPointerRecord, "firstRequestId">;
+  operation: Pick<Operation, "id" | "kind" | "requestId" | "createdAt"> & { result?: unknown; error?: string | undefined };
+  status: string;
+  events: readonly StoredEvent[];
+  now: string;
+}): Record<string, unknown> & AiToolTurnRecord {
+  const { operation } = input;
+  const ended = `ended ${input.status}${operation.error ? `: ${operation.error}` : ""}`;
+  const published = operation.kind === "publish" ? PullRequestResultSchema.safeParse(operation.result) : undefined;
+  const response = operation.kind === "publish"
+    ? (published?.success ? `Pull request ${published.data.url}` : `The pull request ${ended}`)
+    : lastAssistantResponse(input.events) ?? `The task ${ended}`;
+  return aiToolTurn({
+    party: partyOfTask(input.task),
+    turnId: operation.id,
+    action: operation.kind === "publish" ? "pull_request" : operation.requestId === input.pointer.firstRequestId ? "start" : "continue",
+    phase: "completed",
+    outcome: OUTCOME[input.status] ?? "failed",
+    receivedAt: operation.createdAt,
+    finishedAt: input.now,
+    request: "",
+    response,
+    operationId: operation.id,
+  });
 }
 
 /**

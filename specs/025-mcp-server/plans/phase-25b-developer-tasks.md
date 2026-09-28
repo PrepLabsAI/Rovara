@@ -141,7 +141,9 @@ go beyond the spec's text; the owner decided each of them on 2026-09-28 (Owner d
 - **R12. Two audit records per action, and one per refusal (owner).** Turn records are written once
   and never changed:
   - an `accepted` record, in the same transaction as the action, with the request (the
-    instructions, redacted and capped) and the immediate answer;
+    instructions, redacted and capped) and the immediate answer. The one exception is a cancel
+    with nothing running: no action runs, so there is no action transaction to join, and its
+    record is written with the cancel's idempotency item in a transaction of its own (ruling F15);
   - a `completed` record, in the same transaction as the operation's result, with the result
     summary as response text (FR-037);
   - a `refused` record for a start refused after its request parses (by project, access, policy,
