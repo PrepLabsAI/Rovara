@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
-import { chargeItems, developerCharge, limitReached, readWorkspaceLimits, releaseItems } from "../../packages/broker/src/developer/limits.js";
+import { chargeConflict, chargeItems, developerCharge, limitReached, readWorkspaceLimits, releaseConflict, releaseItems } from "../../packages/broker/src/developer/limits.js";
 import { SLACK_CHANNEL, SLACK_TEAM, createBroker, ensureWorkspace, loadSlackBroker, registerSlackProject } from "../support/slack-broker.js";
 
 const fallback = { member: 3, organization: 20 };
@@ -29,6 +29,9 @@ describe("readWorkspaceLimits (FR-053, R7)", () => {
     [{ perPerson: 5, perOrganization: 4 }],
     [{ perPerson: "5", perOrganization: 20 }],
     [{ perOrganization: 20 }],
+    [{ perPerson: -1, perOrganization: 20 }],
+    [{ perPerson: 2.5, perOrganization: 20 }],
+    [{ perPerson: 5, perOrganization: 1001 }],
   ])("falls back to the parameters, and logs it, for a setting it cannot use: %j", async (fields) => {
     const db = new FakeDynamoDb();
     db.set({ pk: "SETTINGS", sk: "WORKSPACE_LIMITS", ...fields });
@@ -76,6 +79,69 @@ describe("developer counters (FR-020, R6)", () => {
     db.set({ pk: `SLACK_LIMIT#${SLACK_TEAM}`, sk: "ORGANIZATION", count: 20 });
     expect(await limitReached(db, "state", charge, fallback)).toBe("organization");
   });
+
+  it("a second charge of the same taskId doesn't bump the count", async () => {
+    const db = new FakeDynamoDb();
+    const charge = developerCharge({ teamId: SLACK_TEAM, slackUserId: "U0MAYA001", developerId });
+    await db.send({ constructor: { name: "TransactWriteCommand" }, input: { TransactItems: chargeItems("state", charge, fallback, "task-3") } });
+    await expect(db.send({ constructor: { name: "TransactWriteCommand" }, input: { TransactItems: chargeItems("state", charge, fallback, "task-3") } })).rejects.toMatchObject({ name: "TransactionCanceledException" });
+    expect(db.get(`SLACK_LIMIT#${SLACK_TEAM}`, "MEMBER#U0MAYA001")).toMatchObject({ count: 1, tasks: new Set(["task-3"]) });
+    expect(db.get(`SLACK_LIMIT#${SLACK_TEAM}`, "ORGANIZATION")).toMatchObject({ count: 1 });
+  });
+
+  it("a second release of the same taskId leaves count and tasks unchanged", async () => {
+    const db = new FakeDynamoDb();
+    const charge = developerCharge({ teamId: SLACK_TEAM, slackUserId: "U0MAYA001", developerId });
+    await db.send({ constructor: { name: "TransactWriteCommand" }, input: { TransactItems: chargeItems("state", charge, fallback, "task-5") } });
+    await db.send({ constructor: { name: "TransactWriteCommand" }, input: { TransactItems: releaseItems("state", charge, "task-5") } });
+    await expect(db.send({ constructor: { name: "TransactWriteCommand" }, input: { TransactItems: releaseItems("state", charge, "task-5") } })).rejects.toMatchObject({ name: "TransactionCanceledException" });
+    expect(db.get(`SLACK_LIMIT#${SLACK_TEAM}`, "MEMBER#U0MAYA001")).toMatchObject({ count: 0 });
+    expect(db.get(`SLACK_LIMIT#${SLACK_TEAM}`, "MEMBER#U0MAYA001")).not.toHaveProperty("tasks");
+    expect(db.get(`SLACK_LIMIT#${SLACK_TEAM}`, "ORGANIZATION")).toMatchObject({ count: 0 });
+  });
+
+  it("chargeConflict tells a repeat charge apart from a full counter", async () => {
+    const db = new FakeDynamoDb();
+    const charge = developerCharge({ teamId: SLACK_TEAM, slackUserId: "U0MAYA001", developerId });
+    await db.send({ constructor: { name: "TransactWriteCommand" }, input: { TransactItems: chargeItems("state", charge, fallback, "task-4") } });
+    const repeat = await db.send({ constructor: { name: "TransactWriteCommand" }, input: { TransactItems: chargeItems("state", charge, fallback, "task-4") } }).catch((error: unknown) => error);
+    expect(await chargeConflict(db, "state", charge, "task-4", repeat)).toBe("already_charged");
+  });
+
+  it("chargeConflict reports the member limit for a different task once the member is full", async () => {
+    const db = new FakeDynamoDb();
+    db.set({ pk: `SLACK_LIMIT#${SLACK_TEAM}`, sk: "MEMBER#U0MAYA001", count: 3, tasks: new Set(["task-a"]) });
+    const charge = developerCharge({ teamId: SLACK_TEAM, slackUserId: "U0MAYA001", developerId });
+    const full = await db.send({ constructor: { name: "TransactWriteCommand" }, input: { TransactItems: chargeItems("state", charge, fallback, "task-b") } }).catch((error: unknown) => error);
+    expect(await chargeConflict(db, "state", charge, "task-b", full)).toBe("member");
+  });
+
+  it("chargeConflict reports the organization limit", async () => {
+    const db = new FakeDynamoDb();
+    db.set({ pk: `SLACK_LIMIT#${SLACK_TEAM}`, sk: "ORGANIZATION", count: 20 });
+    const charge = developerCharge({ teamId: SLACK_TEAM, slackUserId: "U0MAYA001", developerId });
+    const full = await db.send({ constructor: { name: "TransactWriteCommand" }, input: { TransactItems: chargeItems("state", charge, fallback, "task-c") } }).catch((error: unknown) => error);
+    expect(await chargeConflict(db, "state", charge, "task-c", full)).toBe("organization");
+  });
+
+  it("a second release of one task does not touch a sibling task's slot", async () => {
+    const db = new FakeDynamoDb();
+    const charge = developerCharge({ teamId: SLACK_TEAM, slackUserId: "U0MAYA001", developerId });
+    await db.send({ constructor: { name: "TransactWriteCommand" }, input: { TransactItems: chargeItems("state", charge, fallback, "task-7") } });
+    await db.send({ constructor: { name: "TransactWriteCommand" }, input: { TransactItems: chargeItems("state", charge, fallback, "task-8") } });
+    await db.send({ constructor: { name: "TransactWriteCommand" }, input: { TransactItems: releaseItems("state", charge, "task-7") } });
+    await expect(db.send({ constructor: { name: "TransactWriteCommand" }, input: { TransactItems: releaseItems("state", charge, "task-7") } })).rejects.toMatchObject({ name: "TransactionCanceledException" });
+    expect(db.get(`SLACK_LIMIT#${SLACK_TEAM}`, "MEMBER#U0MAYA001")).toMatchObject({ count: 1, tasks: new Set(["task-8"]) });
+  });
+
+  it("releaseConflict recognizes a repeat release", async () => {
+    const db = new FakeDynamoDb();
+    const charge = developerCharge({ teamId: SLACK_TEAM, slackUserId: "U0MAYA001", developerId });
+    await db.send({ constructor: { name: "TransactWriteCommand" }, input: { TransactItems: chargeItems("state", charge, fallback, "task-6") } });
+    await db.send({ constructor: { name: "TransactWriteCommand" }, input: { TransactItems: releaseItems("state", charge, "task-6") } });
+    const repeat = await db.send({ constructor: { name: "TransactWriteCommand" }, input: { TransactItems: releaseItems("state", charge, "task-6") } }).catch((error: unknown) => error);
+    expect(await releaseConflict(db, "state", charge, "task-6", repeat)).toBe("already_released");
+  });
 });
 
 describe("Slack threads read the setting too (R7)", () => {
@@ -95,6 +161,14 @@ describe("Slack threads read the setting too (R7)", () => {
     db.set({ pk: "SETTINGS", sk: "WORKSPACE_LIMITS", perPerson: 1, perOrganization: 20 });
     expect((await ensureWorkspace(handler, thread(1), "U0PRATIK01")).body).toMatchObject({ outcome: "WORKSPACE", created: false });
     expect((await ensureWorkspace(handler, thread(3), "U0PRATIK01")).body).toMatchObject({ outcome: "LIMIT_REACHED", maximum: 1 });
+  });
+
+  it("refuses a Slack thread at the stack-parameter limit when the setting is malformed", async () => {
+    const { db, handler } = createBroker({ memberLimit: 1 });
+    await registerSlackProject(handler);
+    db.set({ pk: "SETTINGS", sk: "WORKSPACE_LIMITS", perPerson: 0, perOrganization: 20 });
+    expect((await ensureWorkspace(handler, thread(1), "U0PRATIK01")).body.created).toBe(true);
+    expect((await ensureWorkspace(handler, thread(2), "U0PRATIK01")).body).toMatchObject({ outcome: "LIMIT_REACHED", limit: "MEMBER", maximum: 1 });
   });
 
   it("does not read the setting for a thread that already has a workspace", async () => {

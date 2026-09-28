@@ -277,6 +277,19 @@ class Parser {
       const exists = item?.[path] !== undefined;
       return token === "attribute_exists" ? exists : !exists;
     }
+    if (token === "contains") {
+      this.next();
+      this.expect("(");
+      const path = this.path();
+      this.expect(",");
+      const operand = this.operand(item ?? {});
+      this.expect(")");
+      const value = item?.[path];
+      if (value instanceof Set) return value.has(operand);
+      if (typeof value === "string") return typeof operand === "string" && value.includes(operand);
+      if (Array.isArray(value)) return value.includes(operand);
+      return false;
+    }
     const left = this.operand(item ?? {});
     const comparator = this.next();
     const right = this.operand(item ?? {});

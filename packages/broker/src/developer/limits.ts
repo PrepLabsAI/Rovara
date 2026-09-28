@@ -48,6 +48,11 @@ const entityOf = (key: CounterKey) => (key.pk.startsWith("SLACK_LIMIT#") ? "SLAC
 /**
  * The same conditions as a Slack thread's charge. The task goes in a string set `tasks`; the
  * Slack limit refusal reads every `threads` entry as a thread subject, so tasks never go there.
+ *
+ * Self-guarding (fix round 1): the member item's condition also requires `NOT contains(#tasks,
+ * :taskId)`, so a repeated charge of the same task cancels the whole transaction instead of
+ * incrementing the count a second time. Callers classify a `TransactionCanceledException` with
+ * chargeConflict.
  */
 export function chargeItems(tableName: string, charge: WorkspaceCharge, limits: { member: number; organization: number }, taskId: string): TransactItems {
   return [
@@ -63,14 +68,21 @@ export function chargeItems(tableName: string, charge: WorkspaceCharge, limits: 
       TableName: tableName,
       Key: charge.member,
       UpdateExpression: "SET #count = if_not_exists(#count, :zero) + :one, entityType = :entity ADD #tasks :task",
-      ConditionExpression: "attribute_not_exists(#count) OR #count < :limit",
+      ConditionExpression: "(attribute_not_exists(#count) OR #count < :limit) AND NOT contains(#tasks, :taskId)",
       ExpressionAttributeNames: { "#count": "count", "#tasks": "tasks" },
-      ExpressionAttributeValues: { ":zero": 0, ":one": 1, ":limit": limits.member, ":entity": entityOf(charge.member), ":task": new Set([taskId]) },
+      ExpressionAttributeValues: { ":zero": 0, ":one": 1, ":limit": limits.member, ":entity": entityOf(charge.member), ":task": new Set([taskId]), ":taskId": taskId },
     } },
   ];
 }
 
-/** Releases what chargeItems took. The caller's transaction also marks the task closed, once. */
+/**
+ * Releases what chargeItems took. The caller's transaction also marks the task closed, once.
+ *
+ * Self-guarding (fix round 1): the member item's condition also requires `contains(#tasks,
+ * :taskId)`, so a repeated release of the same task (the task is no longer in the set) cancels
+ * the whole transaction instead of decrementing the count a second time. Callers classify a
+ * `TransactionCanceledException` with releaseConflict.
+ */
 export function releaseItems(tableName: string, charge: WorkspaceCharge, taskId: string): TransactItems {
   return [
     { Update: {
@@ -85,9 +97,9 @@ export function releaseItems(tableName: string, charge: WorkspaceCharge, taskId:
       TableName: tableName,
       Key: charge.member,
       UpdateExpression: "SET #count = #count - :one DELETE #tasks :task",
-      ConditionExpression: "#count >= :one",
+      ConditionExpression: "#count >= :one AND contains(#tasks, :taskId)",
       ExpressionAttributeNames: { "#count": "count", "#tasks": "tasks" },
-      ExpressionAttributeValues: { ":one": 1, ":task": new Set([taskId]) },
+      ExpressionAttributeValues: { ":one": 1, ":task": new Set([taskId]), ":taskId": taskId },
     } },
   ];
 }
@@ -101,4 +113,54 @@ export async function limitReached(client: Client, tableName: string, charge: Wo
   if (await count(charge.member) >= limits.member) return "member";
   if (await count(charge.organization) >= limits.organization) return "organization";
   return undefined;
+}
+
+const cancellationReasons = (error: unknown): Array<{ Code?: string }> | undefined => {
+  if (!(error instanceof Error) || error.name !== "TransactionCanceledException") return undefined;
+  const reasons = (error as { CancellationReasons?: unknown }).CancellationReasons;
+  return Array.isArray(reasons) ? reasons as Array<{ Code?: string }> : undefined;
+};
+
+const hasTask = async (client: Client, tableName: string, member: CounterKey, taskId: string): Promise<boolean> => {
+  const response = await client.send(new GetCommand({ TableName: tableName, Key: member, ConsistentRead: true })) as { Item?: { tasks?: Set<string> } };
+  return response.Item?.tasks?.has(taskId) === true;
+};
+
+export type ChargeConflict = "already_charged" | "member" | "organization";
+
+/**
+ * Classifies a `chargeItems` transaction's `TransactionCanceledException`, so a caller (Tasks 8 and
+ * 12) can tell a repeat charge of the same task (already applied; treat as success) apart from a
+ * genuine limit refusal. Reads `error.CancellationReasons` positionally, the way
+ * packages/broker/src/developer/store.ts's classifyRotationFailure does (chargeItems' TransactItems
+ * are [organization, member], in that order): the organization item's condition never depends on a
+ * task id, so its failure always means "organization" full. The member item's compound condition
+ * can fail for either reason, so a consistent re-read of the member item disambiguates: a taskId
+ * already present in `tasks` is a repeat (regardless of the current count, which may coincidentally
+ * also be at the limit); otherwise it is a genuine "member" full. Anything else -- a missing
+ * CancellationReasons array, or neither item reporting ConditionalCheckFailed -- is an unmodeled
+ * failure and is rethrown, not folded into either outcome, so the caller can retry.
+ */
+export async function chargeConflict(client: Client, tableName: string, charge: WorkspaceCharge, taskId: string, error: unknown): Promise<ChargeConflict> {
+  const reasons = cancellationReasons(error);
+  if (reasons === undefined) throw error;
+  if (reasons[0]?.Code === "ConditionalCheckFailed") return "organization";
+  if (reasons[1]?.Code !== "ConditionalCheckFailed") throw error;
+  return (await hasTask(client, tableName, charge.member, taskId)) ? "already_charged" : "member";
+}
+
+export type ReleaseConflict = "already_released";
+
+/**
+ * Classifies a `releaseItems` transaction's `TransactionCanceledException`. The member item's
+ * `contains(#tasks, :taskId)` clause no longer holds once a first release has already removed the
+ * task, so a repeat release fails there; a consistent re-read confirms the task is genuinely gone
+ * before reporting "already_released", rather than folding some other, unmodeled member-condition
+ * failure into it. Anything else is rethrown so the caller can retry.
+ */
+export async function releaseConflict(client: Client, tableName: string, charge: WorkspaceCharge, taskId: string, error: unknown): Promise<ReleaseConflict> {
+  const reasons = cancellationReasons(error);
+  if (reasons === undefined || reasons[1]?.Code !== "ConditionalCheckFailed") throw error;
+  if (await hasTask(client, tableName, charge.member, taskId)) throw error;
+  return "already_released";
 }
