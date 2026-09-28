@@ -124,4 +124,29 @@ describe("developer API 1.1 (R23)", () => {
     expect(ChannelInfoRequestSchema.parse({ kind: "channel-info", channelIds: ["C0123456789"] })).toEqual({ kind: "channel-info", channelIds: ["C0123456789"] });
     expect(ChannelInfoRequestSchema.safeParse({ kind: "channel-info", channelIds: Array.from({ length: 51 }, () => "C0123456789") }).success).toBe(false);
   });
+
+  it("F6: a newer control plane's task policy field parses, at the top level and nested inside shareMode", () => {
+    const withTopLevelField = DeveloperProjectSchema.safeParse({
+      name: "payments", latestRevision: 7, access: "channel",
+      channels: [{ channelId: "C0123456789" }],
+      tasks: {
+        enabled: true, share: "optional",
+        shareMode: { default: "view", allowContinue: true },
+        channelMembersMayUse: true,
+        futureTopLevelField: true,
+      },
+    });
+    expect(withTopLevelField.success).toBe(true);
+
+    const withNestedField = DeveloperProjectSchema.safeParse({
+      name: "payments", latestRevision: 7, access: "channel",
+      channels: [{ channelId: "C0123456789" }],
+      tasks: {
+        enabled: true, share: "optional",
+        shareMode: { default: "view", allowContinue: true, futureNestedField: 1 },
+        channelMembersMayUse: true,
+      },
+    });
+    expect(withNestedField.success).toBe(true);
+  });
 });

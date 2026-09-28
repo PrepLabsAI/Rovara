@@ -8,7 +8,6 @@ import {
   lastAssistantResponse,
   type Operation,
 } from "@agentx/contracts";
-export { lastAssistantResponse };
 import {
   pollOperation,
   type OperationPollingTransport,
@@ -16,6 +15,8 @@ import {
   type RemoteOperationStatus,
 } from "./event-client.js";
 import type { OrchestrationApi } from "./orchestration-tools.js";
+
+export { lastAssistantResponse };
 
 export class ControlPlaneApi implements OrchestrationApi, OperationPollingTransport {
   readonly baseUrl: string;
