@@ -1,4 +1,4 @@
-# The VPC-free AgentCore microVM profile builds this Dockerfile with --platform linux/arm64.
+# The EC2 worker image is built with --platform linux/arm64.
 # The production Instances profile controls architecture through its capacity provider.
 # Base images come from ECR Public by digest: CodeBuild's shared IPs hit Docker Hub pull limits.
 FROM public.ecr.aws/docker/library/node:22.23.2-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS build

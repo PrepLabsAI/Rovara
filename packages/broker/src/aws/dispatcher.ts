@@ -1,7 +1,3 @@
-import {
-  BedrockAgentCoreClient,
-  InvokeAgentRuntimeCommand,
-} from "@aws-sdk/client-bedrock-agentcore";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { KMSClient, SignCommand } from "@aws-sdk/client-kms";
 import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
@@ -15,18 +11,6 @@ import { appendOperationEvent } from "./operation-events.js";
 import { SessionManager, workspaceBinding } from "./sessions.js";
 
 const DEFAULT_MAX_DISPATCH_ATTEMPTS = 5;
-
-export interface AgentCoreInvocationInput {
-  runtimeArn: string;
-  endpointQualifier: string;
-  runtimeSessionId: string;
-  payload: WorkerInvocation;
-}
-
-export interface AgentCoreInvocationResult {
-  statusCode?: number;
-  error?: string;
-}
 
 interface SqsRecord {
   messageId: string;
@@ -55,7 +39,6 @@ export interface DispatchLogEntry {
 }
 
 export function createDispatcherHandler(dependencies: {
-  invoke: (input: AgentCoreInvocationInput) => Promise<AgentCoreInvocationResult>;
   markDispatching: (record: DurableOutboxRecord) => Promise<boolean | void>;
   markDelivered: (id: string) => Promise<void>;
   markFailed: (record: DurableOutboxRecord, error: string) => Promise<void>;
@@ -85,19 +68,7 @@ export function createDispatcherHandler(dependencies: {
           if (await dependencies.deliverEc2(record, invocation) === "DELIVERED") await dependencies.markDelivered(record.id);
           continue;
         }
-        const response = await dependencies.invoke({
-          runtimeArn: record.runtimeArn,
-          endpointQualifier: record.endpointQualifier,
-          runtimeSessionId: record.runtimeSessionId,
-          payload: invocation,
-        });
-        if (response.statusCode !== undefined && response.statusCode >= 300) {
-          throw agentXError(
-            "RUNTIME_UNAVAILABLE",
-            `AgentCore returned HTTP ${response.statusCode}${response.error ? `: ${sanitizeErrorMessage(response.error)}` : ""}`,
-          );
-        }
-        await dependencies.markDelivered(record.id);
+        throw agentXError("RUNTIME_UNAVAILABLE", "retired deployment mode cannot execute work; register an ec2-ebs project");
       } catch (error) {
         const terminal = record !== undefined && attempt >= maxAttempts;
         logDispatchFailure(dependencies.log, {
@@ -142,7 +113,6 @@ export function createDispatcherHandler(dependencies: {
 
 const tableName = process.env.STATE_TABLE_NAME;
 const awsClientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
-const agentCore = new BedrockAgentCoreClient(awsClientConfiguration);
 const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(awsClientConfiguration));
 const kms = new KMSClient(awsClientConfiguration);
 const sfn = new SFNClient(awsClientConfiguration);
@@ -194,26 +164,6 @@ const deliverEc2 = createEc2Delivery({
 export const handler = createDispatcherHandler({
   deliverEc2,
   maxAttempts: parseMaximumAttempts(process.env.MAX_DISPATCH_ATTEMPTS),
-  async invoke(input) {
-    const response = await agentCore.send(new InvokeAgentRuntimeCommand({
-      agentRuntimeArn: input.runtimeArn,
-      qualifier: input.endpointQualifier,
-      runtimeSessionId: input.runtimeSessionId,
-      contentType: "application/json",
-      accept: "application/json",
-      payload: Buffer.from(JSON.stringify(input.payload)),
-    }));
-    const body = response.response && "transformToByteArray" in response.response
-      ? Buffer.from(await response.response.transformToByteArray()).toString("utf8")
-      : undefined;
-    const runtimeError = response.statusCode !== undefined && response.statusCode >= 300
-      ? runtimeErrorMessage(body)
-      : undefined;
-    return {
-      ...(response.statusCode === undefined ? {} : { statusCode: response.statusCode }),
-      ...(runtimeError === undefined ? {} : { error: runtimeError }),
-    };
-  },
   async markDispatching(record) {
     try {
       await documentClient.send(new UpdateCommand({
@@ -270,7 +220,7 @@ function terminalDispatchError(error: unknown, attempts: number): string {
     fields.httpStatusCode === undefined ? undefined : `HTTP ${fields.httpStatusCode}`,
   ].filter((value): value is string => value !== undefined).join("/");
   return [
-    `RUNTIME_UNAVAILABLE: AgentCore dispatch failed after ${attempts} attempts${details ? ` (${details})` : ""}`,
+    `RUNTIME_UNAVAILABLE: worker dispatch failed after ${attempts} attempts${details ? ` (${details})` : ""}`,
     fields.errorMessage,
   ].filter((value): value is string => value !== undefined).join(": ").slice(0, 16_384);
 }
@@ -298,18 +248,6 @@ function sanitizeErrorMessage(message: string): string {
     .replace(/\b(?:xapp|xoxb|xoxp|xoxa|xoxr|AKIA)[A-Za-z0-9_-]+\b/gu, "<redacted>")
     .replace(/\bBearer\s+\S+/giu, "Bearer <redacted>")
     .slice(0, 512);
-}
-
-function runtimeErrorMessage(body: string | undefined): string | undefined {
-  if (!body) return undefined;
-  try {
-    const parsed: unknown = JSON.parse(body);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-    const error = (parsed as Record<string, unknown>).error;
-    return typeof error === "string" ? sanitizeErrorMessage(error) : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 function logDispatchFailure(

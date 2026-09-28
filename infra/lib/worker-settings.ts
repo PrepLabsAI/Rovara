@@ -12,7 +12,7 @@ export interface WorkerSettingsStackProps extends StackProps {
 /**
  * What a release publishes for EC2 workers (#117): the worker image and model settings, as SSM
  * parameters the session provisioner reads when it boots a worker. This stack used to deploy the
- * AgentCore runtime too, which is why it keeps the runtime's stack name and parameter names.
+ * retired runtime too; its stack and parameter names remain stable.
  */
 export class WorkerSettingsStack extends Stack {
   constructor(scope: Construct, id: string, props: WorkerSettingsStackProps = {}) {

@@ -1,18 +1,6 @@
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { evaluateEc2Preflight, gatherEc2Facts, type PreflightCheck } from "./ec2-preflight.js";
 
-const INSTANCE_REGIONS = new Set([
-  "ap-northeast-1",
-  "ap-south-1",
-  "ap-southeast-1",
-  "ap-southeast-2",
-  "eu-central-1",
-  "eu-west-1",
-  "us-east-1",
-  "us-east-2",
-  "us-west-2",
-]);
-
 export interface PreflightResult {
   node: string;
   region?: string | undefined;
@@ -21,21 +9,6 @@ export interface PreflightResult {
   principalArn?: string | undefined;
   /** EC2 worker prerequisites (#87); present with --aws. */
   checks?: PreflightCheck[];
-}
-
-export function validateRuntimeSessionId(value: string): void {
-  if (value.length < 33 || value.length > 256) {
-    throw new Error("AgentCore runtime session IDs must be between 33 and 256 characters");
-  }
-}
-
-export function validateInstanceRegion(region: string): void {
-  if (!INSTANCE_REGIONS.has(region)) {
-    throw new Error(
-      `AgentCore Runtime Instances are not recorded as supported in ${region}; ` +
-        "verify the current AWS region table before changing this guard",
-    );
-  }
 }
 
 export async function runPreflight(options: {
@@ -54,7 +27,6 @@ export async function runPreflight(options: {
 
   const region = options.region ?? process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION;
   if (!region) throw new Error("AWS_REGION or --region is required for AWS preflight");
-  validateInstanceRegion(region);
 
   const sts = new STSClient({ region });
   const identity = await sts.send(new GetCallerIdentityCommand({}));

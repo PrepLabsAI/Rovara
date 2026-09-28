@@ -10,7 +10,6 @@ import { adminCall, adminIssuer, createAdminBroker, type AdminHandler } from "..
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { trackerConnectorType } from "../support/tracker-connector.js";
 
-const account = "111122223333";
 
 describe("registration preflight", () => {
   it("does not contact the vendor unless the request asks for preflight", async () => {
@@ -72,13 +71,9 @@ describe("registration preflight", () => {
     expect(db.get("PROJECT#payments", "REV#000000000001")).toBeUndefined();
   });
 
-  it("refuses a devcontainer on an AgentCore binding and accepts it on ec2-ebs", async () => {
-    const { handler, db } = await createAdminBroker({});
+  it("accepts a devcontainer on ec2-ebs", async () => {
+    const { handler } = await createAdminBroker({});
     const withDevcontainer = { devcontainer: { repository: "demo" } };
-    const refused = await register(handler, withDevcontainer);
-    expect(refused.status).toBe(400);
-    expect(refused.body).toMatchObject({ error: { code: "CONFIG_INVALID", message: "a devcontainer needs the ec2-ebs deployment mode, not instances-ebs" } });
-    expect(db.get("PROJECT#payments", "REV#000000000001")).toBeUndefined();
     const accepted = await adminCall(handler, {
       method: "POST",
       path: "/v1/admin/projects",
@@ -363,18 +358,19 @@ function definition(overrides: Overrides, repositories: string[] = ["demo"]): Re
 }
 
 const ec2Binding = {
-  deploymentMode: "ec2-ebs",
+  deploymentMode: "ec2-ebs" as const,
   launchTemplateId: "lt-0123456789abcdef0",
   subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0aaaaaaaaaaaaaaaa" }],
   volumeSizeGiB: 20,
-  volumeType: "gp3",
+  volumeType: "gp3" as const,
 };
 
 const runtimeBinding = {
-  runtimeArn: `arn:aws:bedrock-agentcore:us-east-1:${account}:runtime/agentx_production_worker-YVirjlFgvk`,
-  endpointQualifier: "DEFAULT",
-  deploymentMode: "instances-ebs",
-  capacityProviderArn: `arn:aws:bedrock-agentcore:us-east-1:${account}:capacity-provider/agentx_production_capacity_v3-VwkM93EABZ`,
+  deploymentMode: "ec2-ebs" as const,
+  launchTemplateId: "lt-0123456789abcdef0",
+  subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0123456789abcdef0" }],
+  volumeSizeGiB: 20,
+  volumeType: "gp3" as const,
 };
 
 function register(handler: AdminHandler, overrides: Overrides, options: { preflight?: boolean; repositories?: string[] } = {}) {

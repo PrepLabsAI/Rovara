@@ -119,8 +119,8 @@ describe("EC2 session lifecycle infrastructure (issue #83)", () => {
     const roleId = (dispatcher.Properties.Role as { "Fn::GetAtt": [string] })["Fn::GetAtt"][0];
     const statements = roleStatements(roleId);
     expect([...actions(statements)]).toEqual(expect.arrayContaining(["kms:Sign", "states:StartExecution"]));
-    // The AgentCore dispatch grant was removed with AgentCore (#118).
-    expect([...actions(statements)].filter((action) => action.startsWith("bedrock-agentcore:"))).toEqual([]);
+    // The retired runtime dispatch grant was removed with retired runtime (#118).
+    expect([...actions(statements)].filter((action) => /bedrock-[a-z]+:/.test(action))).toEqual([]);
     const start = statements.find((st) => [st.Action].flat().includes("states:StartExecution"))!;
     expect(JSON.stringify(start.Resource)).toContain("SessionsProvisioner");
     expect(JSON.stringify(start.Resource)).not.toContain("SessionsDeleter");

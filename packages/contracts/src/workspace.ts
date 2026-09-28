@@ -17,7 +17,9 @@ export const WorkspaceStatusSchema = z.enum([
   "UNPREPARED",
 ]);
 
-export const WorkspaceDeploymentModeSchema = z.enum(["instances-ebs", "demo-microvm", "ec2-ebs"]);
+export const WorkspaceDeploymentModeSchema = z.enum(["ec2-ebs"]);
+/** Read compatibility for persisted workspace and project history only. */
+export const StoredDeploymentModeSchema = z.enum(["instances-ebs", "demo-microvm", "ec2-ebs"]);
 
 const WorkspaceRecordSchema = z
   .object({
@@ -25,11 +27,12 @@ const WorkspaceRecordSchema = z
     ownerKey: z.string().min(16).max(128),
     projectName: AgentXNameSchema,
     projectRevision: z.number().int().positive(),
-    runtimeArn: z.string().startsWith("arn:aws:bedrock-agentcore:").optional(),
+    // Retired routing is opaque audit data; validate ARN shape without depending on its service.
+    runtimeArn: z.string().regex(/^arn:aws:[a-z-]+:[a-z0-9-]+:\d{12}:/).optional(),
     endpointQualifier: z.string().min(1).max(64).optional(),
     runtimeSessionId: z.string().uuid().optional(),
-    deploymentMode: WorkspaceDeploymentModeSchema,
-    capacityProviderArn: z.string().startsWith("arn:aws:bedrock-agentcore:").optional(),
+    deploymentMode: StoredDeploymentModeSchema,
+    capacityProviderArn: z.string().regex(/^arn:aws:[a-z-]+:[a-z0-9-]+:\d{12}:/).optional(),
     rootPath: z.literal("/mnt/workspace"),
     status: WorkspaceStatusSchema,
     preparationManifest: z.string().max(1_024).optional(),
@@ -59,11 +62,11 @@ export const WorkspaceInstanceSchema = z.preprocess((value) => {
   return remaining;
 }, WorkspaceRecordSchema
   .superRefine((workspace, context) => {
-    const agentCoreFields = ["runtimeArn", "endpointQualifier", "runtimeSessionId"] as const;
+    const legacyFields = ["runtimeArn", "endpointQualifier", "runtimeSessionId"] as const;
     switch (workspace.deploymentMode) {
       case "instances-ebs":
       case "demo-microvm":
-        for (const field of agentCoreFields) {
+        for (const field of legacyFields) {
           if (workspace[field] === undefined) {
             context.addIssue({ code: "custom", path: [field], message: `${workspace.deploymentMode} workspaces require ${field}` });
           }
@@ -84,7 +87,7 @@ export const WorkspaceInstanceSchema = z.preprocess((value) => {
         }
         break;
       case "ec2-ebs":
-        for (const field of [...agentCoreFields, "capacityProviderArn"] as const) {
+        for (const field of [...legacyFields, "capacityProviderArn"] as const) {
           if (workspace[field] !== undefined) {
             context.addIssue({ code: "custom", path: [field], message: `ec2-ebs workspaces must not have ${field}` });
           }
@@ -135,17 +138,17 @@ export const WorkspaceClosePreflightResultSchema = z
 
 export type WorkspaceStatus = z.infer<typeof WorkspaceStatusSchema>;
 export type WorkspaceDeploymentMode = z.infer<typeof WorkspaceDeploymentModeSchema>;
-// Modes whose compute is a Bedrock AgentCore runtime session. ec2-ebs workspaces run on instances
-// the Session Manager launches, so they carry none of the AgentCore routing fields.
-export type AgentCoreDeploymentMode = Exclude<WorkspaceDeploymentMode, "ec2-ebs">;
+export type StoredDeploymentMode = z.infer<typeof StoredDeploymentModeSchema>;
+// Retired modes remain in persisted records for audit; they cannot allocate or execute compute.
+export type LegacyDeploymentMode = Exclude<z.infer<typeof StoredDeploymentModeSchema>, "ec2-ebs">;
 
 type WorkspaceInstanceBase = Omit<
   z.output<typeof WorkspaceRecordSchema>,
   "deploymentMode" | "runtimeArn" | "endpointQualifier" | "runtimeSessionId" | "capacityProviderArn"
 >;
 
-export interface AgentCoreWorkspaceInstance extends WorkspaceInstanceBase {
-  deploymentMode: AgentCoreDeploymentMode;
+export interface LegacyWorkspaceInstance extends WorkspaceInstanceBase {
+  deploymentMode: LegacyDeploymentMode;
   runtimeArn: string;
   endpointQualifier: string;
   runtimeSessionId: string;
@@ -157,7 +160,7 @@ export interface Ec2WorkspaceInstance extends WorkspaceInstanceBase {
   deploymentMode: "ec2-ebs";
 }
 
-export type WorkspaceInstance = AgentCoreWorkspaceInstance | Ec2WorkspaceInstance;
+export type WorkspaceInstance = LegacyWorkspaceInstance | Ec2WorkspaceInstance;
 export type WorkspaceCloseReason = z.infer<typeof WorkspaceCloseReasonSchema>;
 export type WorkspaceClosePreflightResult = z.infer<typeof WorkspaceClosePreflightResultSchema>;
 

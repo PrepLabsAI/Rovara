@@ -121,7 +121,6 @@ function scriptedOutputs(): Record<string, StackOutputs> {
       PullThroughPrefix: "agentx-staging",
     },
     [stackName("foundation")]: {
-      CapacityProviderArn: "arn:aws:bedrock-agentcore:us-east-1:123456789012:capacity-provider/agentx_staging_capacity-AbCdEfGhIj",
       VpcId: "vpc-0123456789abcdef0",
       PrivateSubnetIds: "subnet-1,subnet-2",
       SessionManagerSecurityGroupId: "sg-0123456789abcdef0",
@@ -169,7 +168,7 @@ describe("deploy environment", () => {
 
     const slackRequest = requests.find((request) => request.part === "slack")!;
     expect(slackRequest.parameters.ControlPlaneUrl).toBe(scriptedOutputs()[stackName("control-plane")]!.ApiEndpoint);
-    // The runtime part is only the EC2 worker settings (#117): no AgentCore callback URL or capacity provider.
+    // The runtime part is only the EC2 worker settings (#117): no retired runtime callback URL or capacity provider.
     const runtimeRequest = requests.find((request) => request.part === "runtime")!;
     expect(runtimeRequest.parameters).not.toHaveProperty("ControlPlaneUrl");
     expect(runtimeRequest.parameters).not.toHaveProperty("CapacityProviderArn");

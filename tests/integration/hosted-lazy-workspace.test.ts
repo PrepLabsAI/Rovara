@@ -188,7 +188,7 @@ describe("workspace only when needed, end to end", () => {
     await turnIn(s, 1, "what's open?", { coding: false });
     await turnIn(s, 1, "<@U0AGENTX01> close this workspace", { coding: false });
     expect(postsIn(s, 1).at(-1)).toBe("This thread does not have a workspace to close.");
-    expect(s.deleteWorkspaceSession).not.toHaveBeenCalled();
+    expect(s.deleteEc2Session).not.toHaveBeenCalled();
     await turnIn(s, 1, "what's open now?", { coding: false });
     expect(postsIn(s, 1).at(-1)).toBe(CONNECTOR_ANSWER);
     expect(s.db.find((item) => item.entityType === "WORKSPACE")[0]).toMatchObject({ status: "UNPREPARED" });

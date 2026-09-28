@@ -59,8 +59,6 @@ export async function createAdminBroker(options: {
   const handler = createAwsBrokerHandler({
     documentClient: db,
     s3: { send: vi.fn() },
-    stopRuntimeSession: vi.fn(),
-    deleteWorkspaceSession: vi.fn(async () => undefined),
     tableName: "state",
     artifactBucketName: "artifacts",
     issuer: adminIssuer,

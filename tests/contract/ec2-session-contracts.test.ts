@@ -19,19 +19,19 @@ import {
 } from "../support/slack-broker.js";
 
 const binding = {
-  deploymentMode: "ec2-ebs",
+  deploymentMode: "ec2-ebs" as const,
   launchTemplateId: "lt-0123456789abcdef0",
   subnets: [
     { availabilityZone: "us-east-1a", subnetId: "subnet-0123456789abcdef0" },
     { availabilityZone: "us-east-1b", subnetId: "subnet-0fedcba9876543210" },
   ],
   volumeSizeGiB: 20,
-  volumeType: "gp3",
+  volumeType: "gp3" as const,
 } as const;
 
 const now = new Date().toISOString();
-const agentCoreRuntime = {
-  runtimeArn: `arn:aws:bedrock-agentcore:us-east-1:${account}:runtime/agentx`,
+const legacyRuntime = {
+  runtimeArn: `arn:aws:retired:us-east-1:${account}:runtime/agentx`,
   endpointQualifier: "DEFAULT",
   runtimeSessionId: randomUUID(),
 };
@@ -48,30 +48,30 @@ const workspaceBase = {
 };
 
 describe("the ec2-ebs deployment mode", () => {
-  it("is a workspace deployment mode next to the AgentCore modes", () => {
-    expect(WorkspaceDeploymentModeSchema.options).toEqual(["instances-ebs", "demo-microvm", "ec2-ebs"]);
+  it("is the only mode accepted for new registrations", () => {
+    expect(WorkspaceDeploymentModeSchema.options).toEqual(["ec2-ebs"]);
   });
 
-  it("stores an ec2-ebs workspace without any AgentCore routing", () => {
+  it("stores an ec2-ebs workspace without any legacy routing", () => {
     const workspace = WorkspaceInstanceSchema.parse({ ...workspaceBase, deploymentMode: "ec2-ebs" });
-    expect(workspace).toMatchObject({ deploymentMode: "ec2-ebs", activeOperationId: null });
+    expect(workspace).toMatchObject({ deploymentMode: "ec2-ebs" as const, activeOperationId: null, });
     for (const field of ["runtimeArn", "endpointQualifier", "runtimeSessionId"] as const) {
       expect(() => WorkspaceInstanceSchema.parse({
-        ...workspaceBase, deploymentMode: "ec2-ebs", [field]: agentCoreRuntime[field],
+        ...workspaceBase, deploymentMode: "ec2-ebs" as const, [field]: legacyRuntime[field],
       })).toThrow(new RegExp(`ec2-ebs workspaces must not have ${field}`));
     }
     expect(() => WorkspaceInstanceSchema.parse({
       ...workspaceBase,
-      deploymentMode: "ec2-ebs",
-      capacityProviderArn: `arn:aws:bedrock-agentcore:us-east-1:${account}:capacity-provider/agentx`,
+      deploymentMode: "ec2-ebs" as const,
+      capacityProviderArn: `arn:aws:retired:us-east-1:${account}:capacity-provider/agentx`,
     })).toThrow(/must not have capacityProviderArn/);
   });
 
-  it("still requires the AgentCore routing of an AgentCore workspace", () => {
-    expect(WorkspaceInstanceSchema.parse({ ...workspaceBase, ...agentCoreRuntime, deploymentMode: "demo-microvm" }))
-      .toMatchObject(agentCoreRuntime);
+  it("still requires the legacy routing of a legacy workspace", () => {
+    expect(WorkspaceInstanceSchema.parse({ ...workspaceBase, ...legacyRuntime, deploymentMode: "demo-microvm" }))
+      .toMatchObject(legacyRuntime);
     for (const field of ["runtimeArn", "endpointQualifier", "runtimeSessionId"] as const) {
-      const rest: Partial<typeof agentCoreRuntime> = { ...agentCoreRuntime };
+      const rest: Partial<typeof legacyRuntime> = { ...legacyRuntime };
       delete rest[field];
       expect(() => WorkspaceInstanceSchema.parse({ ...workspaceBase, ...rest, deploymentMode: "demo-microvm" }))
         .toThrow(new RegExp(`demo-microvm workspaces require ${field}`));
@@ -80,20 +80,20 @@ describe("the ec2-ebs deployment mode", () => {
 });
 
 describe("the ec2-ebs runtime binding", () => {
-  it("parses a launch template, one subnet per zone, and the volume, with no AgentCore ARNs", () => {
+  it("parses a launch template, one subnet per zone, and the volume, with no legacy ARNs", () => {
     const reordered = {
-      volumeType: "gp3",
+      volumeType: "gp3" as const,
       volumeSizeGiB: 20,
       subnets: binding.subnets.map((subnet) => ({ subnetId: subnet.subnetId, availabilityZone: subnet.availabilityZone })),
       launchTemplateId: binding.launchTemplateId,
-      deploymentMode: "ec2-ebs",
+      deploymentMode: "ec2-ebs" as const,
     };
     // Registration compares bindings as JSON, so the parsed key order must not depend on the input's.
     expect(JSON.stringify(parseRuntimeBinding(reordered))).toBe(JSON.stringify(binding));
   });
 
-  it("refuses AgentCore fields, a zone with two subnets, and an unsupported volume", () => {
-    expect(() => parseRuntimeBinding({ ...binding, runtimeArn: agentCoreRuntime.runtimeArn })).toThrow(/CONFIG_INVALID/);
+  it("refuses legacy fields, a zone with two subnets, and an unsupported volume", () => {
+    expect(() => parseRuntimeBinding({ ...binding, runtimeArn: legacyRuntime.runtimeArn })).toThrow(/CONFIG_INVALID/);
     expect(() => parseRuntimeBinding({
       ...binding,
       subnets: [binding.subnets[0], { availabilityZone: "us-east-1a", subnetId: "subnet-0fedcba9876543210" }],
@@ -104,12 +104,11 @@ describe("the ec2-ebs runtime binding", () => {
     expect(() => Ec2RuntimeBindingSchema.parse({ ...binding, launchTemplateId: "template" })).toThrow(/launch template/);
   });
 
-  it("leaves AgentCore binding validation in its original order", () => {
-    // Unknown fields are reported before the mode is looked at, as before ec2-ebs existed.
+  it("rejects retired and unknown registration modes", () => {
     expect(() => parseRuntimeBinding({ deploymentMode: "instances-ebs", launchTemplateId: binding.launchTemplateId }))
-      .toThrow(/unknown fields/);
+      .toThrow(/CONFIG_INVALID/);
     expect(() => parseRuntimeBinding({ runtimeArn: "not-an-arn", endpointQualifier: "DEFAULT", deploymentMode: "bogus" }))
-      .toThrow(/ARN or endpoint qualifier/);
+      .toThrow(/CONFIG_INVALID/);
   });
 });
 
@@ -148,15 +147,13 @@ describe("admin project register flags (#84)", () => {
 
   it("keeps each mode to its own flags", () => {
     expect(() => cliRuntimeBinding("ec2-ebs", { ...defaults, launchTemplateId: binding.launchTemplateId })).toThrow(/requires --launch-template-id and --subnets/);
-    expect(() => cliRuntimeBinding("ec2-ebs", { ...defaults, launchTemplateId: binding.launchTemplateId, subnets: "us-east-1a", runtimeArn: agentCoreRuntime.runtimeArn }))
-      .toThrow(/AgentCore modes only/);
+    expect(() => cliRuntimeBinding("ec2-ebs", { ...defaults, launchTemplateId: binding.launchTemplateId, subnets: "us-east-1a", runtimeArn: legacyRuntime.runtimeArn }))
+      .toThrow(/no longer supported/);
     expect(() => cliRuntimeBinding("ec2-ebs", { ...defaults, launchTemplateId: binding.launchTemplateId, subnets: "us-east-1a" })).toThrow(/not availabilityZone=subnetId/);
     expect(() => cliRuntimeBinding("ec2-ebs", { ...defaults, volumeSizeGib: "big", launchTemplateId: binding.launchTemplateId, subnets: "us-east-1a=subnet-0123456789abcdef0" }))
       .toThrow(/volumeSizeGiB/);
-    expect(() => cliRuntimeBinding("demo-microvm", defaults)).toThrow(/requires --runtime-arn/);
-    expect(() => cliRuntimeBinding("demo-microvm", { ...defaults, runtimeArn: agentCoreRuntime.runtimeArn, subnets: "x=y" })).toThrow(/ec2-ebs only/);
-    expect(cliRuntimeBinding("demo-microvm", { ...defaults, runtimeArn: agentCoreRuntime.runtimeArn }))
-      .toEqual({ runtimeArn: agentCoreRuntime.runtimeArn, endpointQualifier: "DEFAULT", deploymentMode: "demo-microvm" });
+    expect(() => cliRuntimeBinding("demo-microvm", defaults)).toThrow(/only ec2-ebs/);
+    expect(() => cliRuntimeBinding("demo-microvm", { ...defaults, runtimeArn: legacyRuntime.runtimeArn, subnets: "x=y" })).toThrow(/only ec2-ebs/);
   });
 });
 
@@ -241,21 +238,19 @@ describe("ec2-ebs outbox records", () => {
     status: "QUEUED",
     operationId,
     workspaceId,
-    deploymentMode: "ec2-ebs",
+    deploymentMode: "ec2-ebs" as const,
     invocation: {
       protocolVersion: 1, operationId, workspaceId, kind: "resume", fence: 1, projectRevision: 1,
       callbackCapability: "c".repeat(64), payload: {},
     },
   } as const;
 
-  it("are never sent to AgentCore", async () => {
-    const invoke = vi.fn(async () => ({ statusCode: 200 }));
+  it("fail without an EC2 delivery adapter", async () => {
     const markDelivered = vi.fn(async () => undefined);
     const handler = createDispatcherHandler({
-      invoke, markDispatching: vi.fn(async () => true), markDelivered, markFailed: vi.fn(async () => undefined), log: () => undefined,
+      markDispatching: vi.fn(async () => true), markDelivered, markFailed: vi.fn(async () => undefined), log: () => undefined,
     });
     const result = await handler({ Records: [{ messageId: "m1", body: JSON.stringify(record) }] });
-    expect(invoke).not.toHaveBeenCalled();
     expect(markDelivered).not.toHaveBeenCalled();
     expect(result.batchItemFailures).toEqual([{ itemIdentifier: "m1" }]);
   });
@@ -298,7 +293,7 @@ describe("an ec2-ebs project in the broker", () => {
 
   /** Registers, binds, prepares and runs a close preflight; returns the close completion response. */
   async function closeEc2Workspace(deleteEc2Session?: (workspaceId: string) => Promise<void>) {
-    const { db, handler, deleteWorkspaceSession } = createBroker(deleteEc2Session === undefined ? {} : { deleteEc2Session });
+    const { db, handler } = createBroker({ deleteEc2Session: deleteEc2Session ?? null });
     expect((await registerEc2Project(handler)).body).toMatchObject({ duplicate: false });
     const { deploymentMode, ...rest } = binding;
     expect((await registerEc2Project(handler, { ...rest, deploymentMode })).body).toMatchObject({ duplicate: true });
@@ -310,7 +305,7 @@ describe("an ec2-ebs project in the broker", () => {
     expect(ensured.status).toBe(200);
     const workspaceId = ensured.body.workspaceId as string;
     const unprepared = db.get(`WORKSPACE#${workspaceId}`, "META");
-    expect(unprepared).toMatchObject({ deploymentMode: "ec2-ebs", status: "UNPREPARED" });
+    expect(unprepared).toMatchObject({ deploymentMode: "ec2-ebs" as const, status: "UNPREPARED", });
     for (const field of ["runtimeArn", "endpointQualifier", "runtimeSessionId", "capacityProviderArn"]) {
       expect(unprepared).not.toHaveProperty(field);
     }
@@ -331,7 +326,6 @@ describe("an ec2-ebs project in the broker", () => {
     const completed = await serviceCall(handler, thread, member, "POST", "/v1/service/threads/workspace/close/complete", {
       requestId: randomUUID(), operationId: closeOperationId,
     });
-    expect(deleteWorkspaceSession).not.toHaveBeenCalled();
     return { db, workspaceId, completed };
   }
 

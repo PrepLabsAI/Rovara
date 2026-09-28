@@ -11,17 +11,12 @@ import {
 function readyWorkspace() {
   const timestamp = new Date().toISOString();
   return {
+    deploymentMode: "ec2-ebs" as const,
     id: crypto.randomUUID(),
     ownerKey: "alice-owner-key-0000",
     projectName: "payments",
     projectRevision: 1,
     environmentDigest: `repo@sha256:${"a".repeat(64)}`,
-    runtimeArn: "arn:aws:bedrock-agentcore:us-west-2:123456789012:runtime/agentx",
-    endpointQualifier: "DEFAULT",
-    runtimeSessionId: crypto.randomUUID(),
-    deploymentMode: "instances-ebs" as const,
-    capacityProviderArn:
-      "arn:aws:bedrock-agentcore:us-west-2:123456789012:capacity-provider/agentx",
     rootPath: "/mnt/workspace" as const,
     status: "READY" as const,
     activeOperationId: null,

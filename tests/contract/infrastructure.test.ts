@@ -155,7 +155,7 @@ describe("control-plane infrastructure", () => {
     expect(json).toContain("AWS::SQS::Queue");
     expect(json).toContain("AWS::S3::Bucket");
     expect(json).toContain("JWT");
-    expect(json).not.toContain("bedrock-agentcore:InvokeAgentRuntime");
+    expect(json).not.toContain("InvokeAgentRuntime");
     Template.fromStack(stack).hasResourceProperties("AWS::ApiGatewayV2::Api", {
       Name: "agentx-control-plane",
       ProtocolType: "HTTP",
@@ -194,8 +194,8 @@ describe("control-plane infrastructure", () => {
     expect(json).toContain("codebuild:BatchGetBuilds");
     expect(json).toContain(":codebuild:");
     expect(json).toContain("project/agentx-*");
-    // AgentCore was removed (#118).
-    expect(json).not.toContain("bedrock-agentcore");
+    // retired runtime was removed (#118).
+    expect(json).not.toMatch(/bedrock-[a-z]+:/);
   });
 
   it("lets the broker read connector secrets under agentx/connectors/* and never every secret", () => {
@@ -231,7 +231,7 @@ describe("control-plane infrastructure", () => {
 });
 
 describe("production foundation and worker settings", () => {
-  it("synthesizes a dedicated two-AZ VPC, the retained workspace key and the EC2 workers, and nothing of AgentCore", () => {
+  it("synthesizes a dedicated two-AZ VPC, the retained workspace key and the EC2 workers, and nothing of retired runtime", () => {
     const app = new App();
     const stack = new ProductionFoundationStack(app, "TestFoundation", {
       deploymentRegion: "us-east-1",
@@ -245,8 +245,8 @@ describe("production foundation and worker settings", () => {
     template.resourceCountIs("AWS::EC2::FlowLog", 1);
     template.resourceCountIs("AWS::EC2::VPCEndpoint", 1);
     template.resourceCountIs("AWS::KMS::Key", 1);
-    expect(Object.values(template.toJSON().Resources as Record<string, { Type: string }>).filter((resource) => resource.Type.startsWith("AWS::BedrockAgentCore::"))).toEqual([]);
-    expect(json).not.toContain("BedrockAgentCore");
+    expect(Object.values(template.toJSON().Resources as Record<string, { Type: string }>).filter((resource) => resource.Type.startsWith("AWS::Bedrock"))).toEqual([]);
+    expect(json).not.toContain("AWS::Bedrock");
     template.hasResourceProperties("AWS::EC2::LaunchTemplate", {
       LaunchTemplateData: Match.objectLike({ InstanceType: "m6g.medium" }),
     });
@@ -385,7 +385,7 @@ describe("production release pipeline", () => {
     const stacks = statements.find((statement) => statement.Sid === "ReadReleaseStacks");
     expect(JSON.stringify(stacks?.Resource)).toContain("stack/AgentXSlackOrchestrator/*");
     expect(json).toContain("codeconnections:UseConnection");
-    expect(json).not.toContain("bedrock-agentcore");
+    expect(json).not.toMatch(/bedrock-[a-z]+:/);
     expect(actions).not.toContain("cloudformation:CreateStack");
   });
 });

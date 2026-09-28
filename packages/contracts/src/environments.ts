@@ -76,8 +76,3 @@ export function environmentCloudFormationRoleName(env: string): string {
 export function environmentOperatorRoleName(env: string): string {
   return `agentx-${checked(env)}-operator`;
 }
-
-/** The AgentCore runtime name for `env` (letters, digits and underscores only). */
-export function environmentRuntimeName(env: string): string {
-  return `agentx_${checked(env).replaceAll("-", "_")}_worker`;
-}

@@ -55,12 +55,18 @@ describe("authentication and authorization", () => {
     );
   });
 
-  it("rejects client-controlled identity and AgentCore routing fields at any depth", () => {
+  it("rejects client-controlled identity and retired runtime routing fields at any depth", () => {
     expect(() => assertNoUntrustedRoutingFields({ prompt: "ok", nested: { runtimeSessionId: "x" } })).toThrow(
       /runtimeSessionId/,
     );
     expect(() => assertNoUntrustedRoutingFields({ ownerSubject: "bob" })).toThrow(/ownerSubject/);
-    expect(() => assertNoUntrustedRoutingFields({ deploymentMode: "instances-ebs" })).toThrow(
+    expect(() => assertNoUntrustedRoutingFields({
+      deploymentMode: "ec2-ebs" as const,
+      launchTemplateId: "lt-0123456789abcdef0",
+      subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0123456789abcdef0" }],
+      volumeSizeGiB: 20,
+      volumeType: "gp3" as const,
+    })).toThrow(
       /deploymentMode/,
     );
     expect(() => assertNoUntrustedRoutingFields({ nested: { provider: "bedrock" } })).toThrow(/provider/);

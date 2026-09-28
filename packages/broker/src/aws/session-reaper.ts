@@ -6,7 +6,7 @@ import type { Ec2RuntimeBinding, WorkspaceSession } from "@agentx/contracts";
 import { requiredEnvironment } from "./lambda.js";
 import { SessionManager, workspaceBinding } from "./sessions.js";
 
-/** AgentCore's idle stop and maximum lifetime, which the reaper replaces (design in #76). */
+/** Idle stop and maximum compute lifetime (design in #76). */
 export const IDLE_STOP_MS = 5 * 60_000;
 export const MAX_LIFETIME_MS = 14 * 24 * 60 * 60_000;
 const WORKER_PORT = 8080;

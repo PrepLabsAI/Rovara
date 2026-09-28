@@ -1,80 +1,41 @@
 # AgentX production architecture
 
-This is the production target for AgentX. It replaces the demo runtime's temporary managed
-session storage with one isolated, encrypted EBS workspace per Slack thread. The
-control plane remains stateless at the request-processing layer; DynamoDB stores durable platform
-state and AgentCore owns compute-session lifecycle.
+Every install uses EC2 workers with one isolated, encrypted EBS volume per Slack thread.
+DynamoDB stores platform state; Step Functions manages compute and volume lifecycle.
 
 ```mermaid
 flowchart LR
-  subgraph SlackEdge[Slack]
-    Thread[Project channel thread]
-  end
-
-  subgraph Control[AgentX control plane]
-    API[API Gateway JWT API]
-    Broker[Broker Lambda]
-    Queue[SQS dispatch queue]
-    Dispatcher[Dispatcher Lambda]
-    State[(DynamoDB state)]
-    Artifacts[(S3 artifacts)]
-  end
-
-  subgraph Runtime[Bedrock AgentCore]
-    RuntimeApi[AgentX production runtime\nversioned worker image]
-    Capacity[Stable production\ncapacity provider]
-  end
-
-  subgraph VPC[Dedicated AgentX production VPC]
-    subgraph PrivateA[Private subnet / AZ 1]
-      InstanceA[Managed ARM64 EC2 session]
-      EbsA[(Encrypted gp3 EBS\nthread 1 + project A)]
-    end
-    subgraph PrivateB[Private subnet / AZ 2]
-      InstanceB[Managed ARM64 EC2 session]
-      EbsB[(Encrypted gp3 EBS\nthread 2 + project A)]
-    end
-    NatA[NAT gateway / AZ 1]
-    NatB[NAT gateway / AZ 2]
-  end
-
-  Bedrock[Amazon Bedrock model]
-  GitHub[GitHub / package registries / documentation]
-  CodeBuild[AWS CodeBuild gates]
-
-  Thread -->|signed event| Ingress[Slack ingress + hosted orchestrator]
-  Ingress -->|service identity| API --> Broker
-  Broker --> State
-  Broker --> Artifacts
-  Broker --> Queue --> Dispatcher
-  Dispatcher -->|runtime ARN + stable session ID| RuntimeApi
-  RuntimeApi --> Capacity
-  Capacity --> InstanceA
-  Capacity --> InstanceB
-  InstanceA --- EbsA
-  InstanceB --- EbsB
-  InstanceA --> Bedrock
-  InstanceB --> Bedrock
-  InstanceA --> NatA --> GitHub
-  InstanceB --> NatB --> GitHub
-  InstanceA -->|signed callback| API
-  InstanceB -->|signed callback| API
-  Broker --> CodeBuild
+  Slack[Slack thread] --> Orchestrator[Hosted orchestrator]
+  Orchestrator --> API[API Gateway] --> Broker[Broker Lambda]
+  Broker --> State[(DynamoDB)]
+  State --> Publisher[Outbox publisher] --> Queue[SQS] --> Dispatcher[Dispatcher Lambda]
+  Dispatcher --> Manager[Session manager]
+  Manager --> Provisioner[Step Functions provisioner]
+  Provisioner --> Worker[EC2 worker in private subnet]
+  Dispatcher -->|signed invocation| Worker
+  Worker --- Volume[(Encrypted EBS workspace)]
+  Worker --> Bedrock[Model provider]
+  Worker -->|NAT| GitHub[GitHub and package registries]
+  Worker -->|callback capability| API
+  Reaper[Idle reaper] --> Manager
+  Broker --> Deleter[Step Functions deleter]
+  Deleter --> Worker
+  Deleter --> Volume
 ```
 
 ## Isolation and persistence
 
-The control plane assigns a distinct AgentCore `runtimeSessionId` to every thread workspace.
-AgentCore routes the pair `(capacityProviderArn, runtimeSessionId)` to one managed EC2 session and
-one EBS workspace volume. Two threads therefore receive different instances and volumes even when
-they use the same shared project definition, and each thread's members see the other thread's work
-only through Git commits and remote branches.
+Each workspace has a SESSION record naming its EC2 instance, EBS volume, availability zone and
+session generation. The project binding supplies the launch template, private subnets and volume
+settings. A volume stays in its original availability zone across replacement instances.
 
-The instance stops after five idle minutes to bound EC2 cost. A later invocation using the same
-session ID starts managed compute and reattaches the existing EBS volume. The maximum compute
-lifetime is 14 days, but the volume remains associated with the session across stop/resume. An
-administrator must explicitly delete the AgentCore session or capacity provider to delete its
-managed persistent volume.
+The dispatcher signs each invocation for the workspace, generation, operation and fence. Work
+waits outside the dispatch queue while the session provisioner starts compute. The worker verifies
+the signature before accepting the invocation. Session generations fence stale workers.
+
+The reaper stops idle compute and enforces the maximum lifetime; the EBS volume remains for the
+next session. Closing a clean workspace invokes the deleter to terminate compute and delete its
+volume. Workspace and operation records remain as audit history.
 
 ## Devcontainers
 
@@ -100,7 +61,7 @@ reaches only this workspace's volume and the instance role, which the worker hol
 
 Slack requests are orchestrated in AWS rather than on a developer machine, and since the
 Slack-only retirement this is the only way coding work reaches AgentX. Each Slack thread is its own
-workspace owner, so a thread receives its own AgentCore session and EBS volume. Every channel
+workspace owner, so a thread receives its own EC2 session and EBS volume. Every channel
 member who posts in the thread shares that workspace.
 
 ```mermaid
@@ -122,7 +83,7 @@ flowchart LR
     Sessions[(S3 Pi session per thread)]
   end
 
-  Worker[AgentCore thread workspace\nremote Pi worker on EBS]
+  Worker[EC2 thread workspace\nremote Pi worker on EBS]
 
   Slack -->|signed app_mention| Route --> Ingress
   Ingress -->|binding lookup| State
@@ -172,11 +133,7 @@ owns only the ECS service, and receives those values as parameters from the rele
 - The EC2 worker foundation: the `m6g.medium` arm64 launch template, the worker instance role and
   profile, and the worker, dispatcher and session-manager security groups.
 
-The AgentCore capacity provider, its operator role and its worker security group were removed in
-#118.
-
-`AgentXProductionRuntime` owns the changeable application layer. It keeps the name of the AgentCore
-runtime it used to deploy, but since #117 it holds only the EC2 worker settings, as SSM parameters:
+`AgentXProductionRuntime` holds the EC2 worker settings as SSM parameters:
 
 - `/agentx/production/worker-image`: the immutable worker image digest.
 - `/agentx/production/worker-model-provider`, `worker-model-id` and `worker-prompt-cache-retention`.
@@ -196,35 +153,29 @@ or volume change.
 The production ECR repository uses immutable tags, scan-on-push, seven-day cleanup for untagged
 images, and bounded retention for releases and legacy tags.
 
-## One-time migration boundary
+## Historical records
 
-Deploying these stacks does not migrate anything. Migration begins only when an administrator
-binds a project revision/workspace to the production runtime and restores or re-clones its working
-state into the new EBS-backed session. Until then, existing demo runtime sessions and control-plane
-workspace records are unchanged and continue to operate.
-
-The migration procedure must inventory each current workspace, decide whether uncommitted demo
-changes need to be carried over, create or update the production binding, prepare the EBS-backed
-workspace, verify repository state and readiness, and only then retire the old demo session. Each
-of those actions is independently observable and reversible until the old session is explicitly
-deleted.
+Retired `instances-ebs` and `demo-microvm` records remain readable for audit, including closed
+workspaces, operations and project revisions. They cannot create or resume compute. Administrators
+register a new `ec2-ebs` project revision and users start a new Slack thread for new work.
+This policy applies to hosted and self-hosted installs, including `agentx init`.
 
 ## Environments
 
 AgentX can run more than one independent deployment (for example `production` and `staging`) in
 the same AWS account and region, selected everywhere with `--env <name>` (default `production`).
 Each gets its own physical names: stacks `agentx-<env>-access/-foundation/-runtime/-control-plane/-slack`,
-AgentCore runtime `agentx_<env>_worker`, alerts topic `agentx-<env>-alerts`, connector secrets
+alerts topic `agentx-<env>-alerts`, connector secrets
 `agentx/<env>/connectors/<name>`, metrics namespace `AgentX/<env>`, and SSM settings under
 `/agentx/<env>/`. The name `connectors` is reserved and cannot be used as an environment name.
 
 The deployment described above predates environments and keeps its fixed legacy names
 (`AgentXProductionFoundation`, `AgentXProductionRuntime`, `AgentXControlPlane`,
-`AgentXSlackOrchestrator`, runtime `agentx_production_worker`) forever. It must be adopted as the
+`AgentXSlackOrchestrator`) forever. It must be adopted as the
 `production` environment with `agentx --env production env adopt --region us-east-1`, which only
 reads its CloudFormation stacks and caller identity and writes settings to SSM; it never changes
 the stacks. A fresh `agentxEnv=production` install must never be deployed into the same account
-beside it: the two would collide on the AgentCore runtime name `agentx_production_worker`.
+beside it: the deployments share the production settings prefix.
 
 `agentx env list` shows the environments installed in this account and region; `agentx --env
 <name> env use` rebuilds this machine's local settings cache for `<name>` from SSM. Any command
@@ -260,8 +211,7 @@ access stack creates a default boundary, the managed policy `agentx-<env>-bounda
 role, the access stack's two roles included, carries it. The `EffectiveBoundaryArn` output names
 whichever boundary is in force. The default boundary allows the AWS services AgentX's roles use
 (a generated test keeps that list complete and adds nothing unused), role actions and `PassRole`
-only for roles under `/agentx/<env>/` (plus the service role itself, and AgentCore's default
-instance role, which the capacity provider's AWS-managed policy passes to EC2), and a few
+only for roles under `/agentx/<env>/` (plus the service role itself), and a few
 service-linked roles. It explicitly denies Organizations and Account changes, anything on IAM users
 or groups, creating, versioning or deleting managed policies, and changing the boundary itself. A
 company-supplied boundary replaces the default entirely, so it must allow every action AgentX's
@@ -297,7 +247,7 @@ stacks, by their exact names, and read all six (including the access stack). It 
 service role, and only to CloudFormation. It can read and write its environment's SSM settings
 (`/agentx/<env>/*`) and Secrets Manager secrets (`agentx/<env>/*`), read and write the artifact
 bucket, list cached images, call `bedrock:InvokeModel` as a model check, and read its stacks' and
-the AgentCore runtime's logs.
+the EC2 worker logs.
 
 A public image `public.ecr.aws/<alias>/<repo>@sha256:<digest>` reaches the runtime as
 `<account>.dkr.ecr.<region>.amazonaws.com/agentx-<env>/<alias>/<repo>@sha256:<digest>`, private ECR
@@ -339,7 +289,7 @@ bot token, the Slack signing secret) are never a flag's value: each comes from a
 Before creating anything, `init` prints every stack, role, secret and app it will create, and an
 estimated monthly cost for the chosen models at a stated usage (1,000 turns, 100 worker sessions, 60
 worker instance-hours, 10 kept workspaces a month, us-east-1 list prices). This is an estimate, not a
-bill: it does not include any separate AgentCore runtime charge, which has not been confirmed.
+bill; usage and regional pricing determine the actual cost.
 
 Running `agentx init --env <name>` again resumes at the first incomplete step; a completed step never
 runs again. When the Slack workspace needs an admin to approve new apps, the Slack app step exits with
@@ -407,7 +357,7 @@ environment adopted from the legacy deployment (fixed stack names, none of the `
 refused by `agentx deploy`.
 
 **Regions.** A release only covers the regions it was built for (today: `us-east-1`), each with its own
-verified AgentCore availability-zone IDs and its own templates (`templates/<region>/<part>.template.json`).
+verified availability-zone IDs and its own templates (`templates/<region>/<part>.template.json`).
 An uncovered region is refused, by name. Adding a region means adding its verified zone IDs to
 `DEFAULT_AZ_IDS` in `infra/lib/production-foundation.ts`; the release builder picks the region up from
 there, and nothing else about deploy changes.
@@ -435,8 +385,7 @@ streamed output.
 
 `agentx destroy` is planned for phase 15e; until then, teardown is by hand. Turn termination protection off
 on access, foundation, identity and runtime, then delete the stacks in reverse install order (slack, runtime,
-control-plane, identity, foundation, access). A named environment's AgentCore runtime is deleted with its
-stack; the legacy deployment's is retained.
+control-plane, identity, foundation, access).
 
 Between deleting the control-plane stack and the foundation stack, tear down the EC2 workers: they are
 launched by Step Functions, outside CloudFormation, so their instances and volumes survive every stack

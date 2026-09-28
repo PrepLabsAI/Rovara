@@ -1,5 +1,12 @@
 # Feature Specification: Installer
 
+> Scope amendment (2026-09-27, #99 / #119, user confirmed): every install, including self-hosted,
+> uses `ec2-ebs` for new projects. The first-project step uses `Ec2WorkerLaunchTemplateId` and
+> `Ec2WorkerSubnets`, plus volume size/type. Prerequisites check EC2 vCPU quota; there is no
+> separate retired-runtime charge or runtime/capacity-provider teardown. This supersedes the
+> legacy assumptions in US1 scenario 3, FR-014, FR-015, FR-040, FR-050, FR-055 and Decisions below.
+> Closed workspaces, operations and historical project revisions remain readable only.
+
 **Feature Branch**: `feat/015-installer`
 **Created**: 2026-09-25
 **Status**: Draft

@@ -161,7 +161,7 @@ describe("templates engine", () => {
       DescribeChangeSet: [
         { Status: "CREATE_IN_PROGRESS", ExecutionStatus: "UNAVAILABLE" },
         ready([
-          { Type: "Resource", ResourceChange: { Action: "Add", LogicalResourceId: "Worker", ResourceType: "AWS::BedrockAgentCore::Runtime" } },
+          { Type: "Resource", ResourceChange: { Action: "Add", LogicalResourceId: "Worker", ResourceType: "AWS::SSM::Parameter" } },
           { Type: "Resource", ResourceChange: { Action: "Modify", LogicalResourceId: "Role", ResourceType: "AWS::IAM::Role", Replacement: "False" } },
         ]),
         { Status: "CREATE_COMPLETE", ExecutionStatus: "AVAILABLE" },
@@ -223,7 +223,7 @@ describe("templates engine", () => {
         kind: "changes",
         stackName: "agentx-staging-runtime",
         changes: [
-          { action: "Add", logicalId: "Worker", type: "AWS::BedrockAgentCore::Runtime", replacement: "" },
+          { action: "Add", logicalId: "Worker", type: "AWS::SSM::Parameter", replacement: "" },
           { action: "Modify", logicalId: "Role", type: "AWS::IAM::Role", replacement: "False" },
         ],
       },

@@ -1,3 +1,6 @@
+<!-- Sync impact: 2.1.0 -> 3.0.0. Issue #119 retires old deployment modes for all installs,
+including self-hosted, as confirmed by the user on 2026-09-27. Historical records stay readable.
+Scope and operational constraints updated; design: specs/036-ec2-only-runtime/. -->
 <!-- Sync impact: 2.0.0 -> 2.1.0 (widens third-party issue tools to connector tools).
 Principles modified: I. One orchestrator, remote coding (administrator-enabled third-party tools are
 no longer limited to issue tools, so Linear, Jira and later connectors share one boundary; scope is
@@ -94,7 +97,7 @@ need; optional features MUST NOT delay the first complete coding workflow.
 
 ## Scope and Operational Constraints
 
-The production target is pi on Amazon Bedrock AgentCore Instances with persistent EBS-backed
+The production target is pi on Amazon EC2 with persistent EBS-backed
 workspace instances. Use a versioned development image and administrator-held AgentX project
 configuration.
 Dev Container metadata, automatic checkpoints, concurrent writers within one workspace,
@@ -102,13 +105,8 @@ automatic merging, and deployment of generated applications are outside the init
 These may be specified separately. All orchestration is unattended and runs in the hosted Slack
 orchestrator described in Principle I.
 
-A deployment mode named `demo-microvm` MAY use AgentCore microVM compute with public networking
-and managed session storage at `/mnt/workspace` to validate the first live workflow without a
-customer VPC. This mode MUST preserve per-owner session isolation, administrator preparation,
-the orchestration boundary, and ordinary stop/resume behavior. It MUST be labelled non-production
-and MUST expose its platform constraints: Preview storage, 1 GiB per session, deletion after 14
-idle days, reset on runtime-version update, and an eight-hour maximum compute lifecycle. Evidence
-from this mode MUST NOT satisfy production EBS durability or Instances acceptance criteria.
+Historical deployment modes remain readable for audit only. New registrations and execution MUST
+use `ec2-ebs` on every install, including self-hosted installs.
 
 Project files MUST contain credential references rather than secret values. Runtime access MUST
 validate project membership and workspace ownership before exposing files or invoking pi.
@@ -129,4 +127,4 @@ Amendments MUST identify changed principles and update affected specifications a
 Use semantic versioning: major for incompatible principles, minor for new principles, patch
 for clarifications. Reviewers MUST identify and resolve violations before declaring delivery complete.
 
-**Version**: 2.1.0 | **Ratified**: 2026-09-17 | **Last Amended**: 2026-09-24
+**Version**: 3.0.0 | **Ratified**: 2026-09-17 | **Last Amended**: 2026-09-27

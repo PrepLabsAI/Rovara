@@ -25,7 +25,7 @@ import {
 const DEFAULT_REPOSITORY = "agentx-worker-production";
 const CONTROL_PLANE_STACK = "AgentXControlPlane";
 const FOUNDATION_STACK = "AgentXProductionFoundation";
-// Named for the AgentCore runtime it used to deploy; since #117 it holds only the EC2 worker settings.
+// The runtime stack holds the EC2 worker settings.
 const RUNTIME_STACK = "AgentXProductionRuntime";
 export const SLACK_ORCHESTRATOR_STACK = "AgentXSlackOrchestrator";
 export const SLACK_ORCHESTRATOR_REPOSITORY = "agentx-slack-orchestrator";
@@ -260,7 +260,7 @@ export async function releaseProduction(
     "--require-approval",
     "never",
     "-c",
-    "agentxDeploymentMode=instances-ebs",
+    "agentxDeploymentMode=ec2-ebs",
     "-c",
     `agentxRegion=${options.region}`,
     ...profileArgs(options.profile),
@@ -353,7 +353,7 @@ async function releaseSlackOrchestrator(
     "--require-approval",
     "never",
     "-c",
-    "agentxDeploymentMode=instances-ebs",
+    "agentxDeploymentMode=ec2-ebs",
     "-c",
     `agentxRegion=${options.region}`,
     ...profileArgs(options.profile),
@@ -398,7 +398,7 @@ function deployFoundation(runner: Runner, options: ReleaseOptions): void {
     "--require-approval",
     "never",
     "-c",
-    "agentxDeploymentMode=instances-ebs",
+    "agentxDeploymentMode=ec2-ebs",
     "-c",
     `agentxRegion=${options.region}`,
     ...profileArgs(options.profile),
@@ -416,7 +416,7 @@ function assertFoundationHasNoPendingChanges(runner: Runner, options: ReleaseOpt
     "node infra/dist/bin/agentx.js",
     "--fail",
     "-c",
-    "agentxDeploymentMode=instances-ebs",
+    "agentxDeploymentMode=ec2-ebs",
     "-c",
     `agentxRegion=${options.region}`,
     ...profileArgs(options.profile),
@@ -441,7 +441,7 @@ function deployControlPlane(runner: Runner, options: ReleaseOptions, foundation:
     "--require-approval",
     "never",
     "-c",
-    "agentxDeploymentMode=instances-ebs",
+    "agentxDeploymentMode=ec2-ebs",
     "-c",
     `agentxRegion=${options.region}`,
     ...profileArgs(options.profile),

@@ -13,6 +13,7 @@ export class ResumeCoordinator {
     const workspace = await this.dependencies.registry.get(workspaceId);
     if (!workspace) throw agentXError("NOT_FOUND", "workspace not found");
     authorizeWorkspace(identity, workspace);
+    if (workspace.deploymentMode !== "ec2-ebs") throw agentXError("RUNTIME_UNAVAILABLE", "retired workspace cannot resume compute");
     if (workspace.status !== "STOPPED") throw agentXError("WORKSPACE_BUSY", `workspace is ${workspace.status}`);
     const project = this.dependencies.projects.get(workspace.projectName, workspace.projectRevision);
     if (!project) {

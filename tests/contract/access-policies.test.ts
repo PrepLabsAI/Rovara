@@ -180,7 +180,7 @@ describe("default permission boundary", () => {
       "arn:aws:iam::123456789012:role/agentx-staging-cloudformation",
     ]);
     expect(byId.PassRoles!.Action).toEqual(["iam:PassRole"]);
-    // No pass-role for AgentCore's default instance role: the capacity provider was removed (#118).
+    // No pass-role for retired runtime's default instance role: the capacity provider was removed (#118).
     expect(byId.PassDefaultInstanceRole).toBeUndefined();
     expect(byId.ServiceLinkedRoles).toEqual({
       Sid: "ServiceLinkedRoles", Effect: "Allow", Action: ["iam:CreateServiceLinkedRole"],

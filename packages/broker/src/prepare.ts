@@ -3,7 +3,6 @@ import {
   AgentXNameSchema,
   WorkerInvocationSchema,
   agentXError,
-  type AgentCoreDeploymentMode,
   type WorkerInvocation,
   type WorkspaceInstance,
 } from "@agentx/contracts";
@@ -15,11 +14,7 @@ import type { RepositoryGrantService } from "./repository-access.js";
 import type { InMemoryRegistry } from "./registry.js";
 
 export interface AllocatedRuntime {
-  runtimeArn: string;
-  endpointQualifier: string;
-  runtimeSessionId: string;
-  deploymentMode: AgentCoreDeploymentMode;
-  capacityProviderArn?: string;
+  deploymentMode: "ec2-ebs";
 }
 
 export interface PreparationDispatch {
@@ -79,6 +74,7 @@ export class PreparationCoordinator {
         "existing workspace is pinned to another project revision; migration is explicit",
       );
     }
+    if (workspace && workspace.deploymentMode !== "ec2-ebs") throw agentXError("RUNTIME_UNAVAILABLE", "retired workspace cannot prepare compute");
     if (workspace?.status === "READY") {
       const dispatch: PreparationDispatch = {
         operationId: randomUUID(),
@@ -102,11 +98,7 @@ export class PreparationCoordinator {
         ownerKey: input.targetOwnerKey,
         projectName: input.projectName,
         projectRevision: input.projectRevision,
-        runtimeArn: runtime.runtimeArn,
-        endpointQualifier: runtime.endpointQualifier,
-        runtimeSessionId: runtime.runtimeSessionId,
         deploymentMode: runtime.deploymentMode,
-        capacityProviderArn: runtime.capacityProviderArn,
         rootPath: "/mnt/workspace",
         status: "PREPARING",
         activeOperationId: null,

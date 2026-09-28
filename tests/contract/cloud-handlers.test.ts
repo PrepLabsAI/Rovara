@@ -36,15 +36,8 @@ describe("AWS control-plane handlers", () => {
     expect(identity.isAdministrator).toBe(true);
   });
 
-  it("validates administrator runtime bindings by deployment mode", () => {
-    const runtimeArn = "arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/agentx";
-    expect(parseRuntimeBinding({ runtimeArn, endpointQualifier: "DEFAULT", deploymentMode: "demo-microvm" }))
-      .toEqual({ runtimeArn, endpointQualifier: "DEFAULT", deploymentMode: "demo-microvm" });
-    expect(() => parseRuntimeBinding({
-      runtimeArn,
-      endpointQualifier: "DEFAULT",
-      deploymentMode: "instances-ebs",
-    })).toThrow(/capacity provider/i);
+  it.each(["instances-ebs", "demo-microvm"])("rejects retired %s bindings", (deploymentMode) => {
+    expect(() => parseRuntimeBinding({ deploymentMode })).toThrow(/CONFIG_INVALID/);
   });
 
   it("publishes only pending outbox stream images and marks them queued", async () => {
@@ -60,11 +53,11 @@ describe("AWS control-plane handlers", () => {
   });
 
   it("dispatches the stored invocation with server-owned runtime routing", async () => {
-    const invoke = vi.fn(async () => ({ statusCode: 200 }));
+    const deliverEc2 = vi.fn(async () => "DELIVERED" as const);
     const markDispatching = vi.fn(async () => undefined);
     const markDelivered = vi.fn(async () => undefined);
     const markFailed = vi.fn(async () => undefined);
-    const handler = createDispatcherHandler({ invoke, markDispatching, markDelivered, markFailed });
+    const handler = createDispatcherHandler({ deliverEc2, markDispatching, markDelivered, markFailed });
     const operationId = randomUUID();
     const workspaceId = randomUUID();
     const invocation = {
@@ -78,35 +71,30 @@ describe("AWS control-plane handlers", () => {
       payload: {},
     } as const;
     const outbox = {
+      deploymentMode: "ec2-ebs" as const,
       id: randomUUID(),
       entityType: "OUTBOX",
       status: "QUEUED",
       operationId,
       workspaceId,
-      runtimeArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/agentx",
-      endpointQualifier: "DEFAULT",
-      runtimeSessionId: randomUUID(),
       invocation,
     } as const;
 
     await handler({ Records: [{ messageId: "m1", body: JSON.stringify(outbox) }] });
-    expect(invoke).toHaveBeenCalledWith(expect.objectContaining({
-      runtimeSessionId: outbox.runtimeSessionId,
-      payload: invocation,
-    }));
+    expect(deliverEc2).toHaveBeenCalledWith(outbox, invocation);
     expect(markDispatching).toHaveBeenCalledWith(outbox);
     expect(markDelivered).toHaveBeenCalledWith(outbox.id);
     expect(markFailed).not.toHaveBeenCalled();
   });
 
   it("retries transient dispatch errors and terminally fails the final attempt", async () => {
-    const invoke = vi.fn(async () => ({ statusCode: 400, error: "worker rejected the invocation" }));
+    const deliverEc2 = vi.fn(async () => { throw new Error("worker rejected the invocation"); });
     const markDispatching = vi.fn(async () => undefined);
     const markDelivered = vi.fn(async () => undefined);
     const markFailed = vi.fn(async () => undefined);
     const log = vi.fn();
     const handler = createDispatcherHandler({
-      invoke,
+      deliverEc2,
       markDispatching,
       markDelivered,
       markFailed,
@@ -116,14 +104,12 @@ describe("AWS control-plane handlers", () => {
     const operationId = randomUUID();
     const workspaceId = randomUUID();
     const outbox = {
+      deploymentMode: "ec2-ebs" as const,
       id: randomUUID(),
       entityType: "OUTBOX",
       status: "QUEUED",
       operationId,
       workspaceId,
-      runtimeArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/agentx",
-      endpointQualifier: "DEFAULT",
-      runtimeSessionId: randomUUID(),
       invocation: {
         protocolVersion: 1,
         operationId,
@@ -159,7 +145,7 @@ describe("AWS control-plane handlers", () => {
       attempt: 3,
       maxAttempts: 3,
       terminal: true,
-      errorMessage: "RUNTIME_UNAVAILABLE: AgentCore returned HTTP 400: worker rejected the invocation",
+      errorMessage: "worker rejected the invocation",
     }));
   });
 
@@ -195,6 +181,7 @@ describe("AWS control-plane handlers", () => {
     const records = new Map<string, Record<string, unknown>>();
     const key = (pk: string, sk: string) => `${pk}\0${sk}`;
     records.set(key(`WORKSPACE#${workspaceId}`, "META"), {
+      deploymentMode: "ec2-ebs" as const,
       pk: `WORKSPACE#${workspaceId}`,
       sk: "META",
       entityType: "WORKSPACE",
@@ -203,10 +190,6 @@ describe("AWS control-plane handlers", () => {
       projectName: "demo",
       projectRevision: 1,
       environmentDigest: `example.test/agentx@sha256:${"a".repeat(64)}`,
-      runtimeArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/agentx",
-      endpointQualifier: "DEFAULT",
-      runtimeSessionId: randomUUID(),
-      deploymentMode: "demo-microvm",
       rootPath: "/mnt/workspace",
       status: "READY",
       activeOperationId: null,
@@ -255,9 +238,11 @@ describe("AWS control-plane handlers", () => {
         orchestratorInstructions: "Delegate work.",
       },
       runtimeBinding: {
-        runtimeArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/agentx",
-        endpointQualifier: "DEFAULT",
-        deploymentMode: "demo-microvm",
+        deploymentMode: "ec2-ebs" as const,
+        launchTemplateId: "lt-0123456789abcdef0",
+        subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0123456789abcdef0" }],
+        volumeSizeGiB: 20,
+        volumeType: "gp3" as const,
       },
       registeredBy: ownerKey,
       registeredAt: now,
@@ -285,9 +270,11 @@ describe("AWS control-plane handlers", () => {
         orchestratorInstructions: "Delegate work (revision 2).",
       },
       runtimeBinding: {
-        runtimeArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/agentx",
-        endpointQualifier: "DEFAULT",
-        deploymentMode: "demo-microvm",
+        deploymentMode: "ec2-ebs" as const,
+        launchTemplateId: "lt-0123456789abcdef0",
+        subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0123456789abcdef0" }],
+        volumeSizeGiB: 20,
+        volumeType: "gp3" as const,
       },
       registeredBy: ownerKey,
       registeredAt: now,
@@ -417,7 +404,6 @@ describe("AWS control-plane handlers", () => {
     const handler = createAwsBrokerHandler({
       documentClient: documentClient as never,
       s3: { send: vi.fn() } as never,
-      stopRuntimeSession: vi.fn(),
       tableName: "state",
       artifactBucketName: "artifacts",
       issuer: "https://identity.example.test",

@@ -100,9 +100,11 @@ describe("credential registry typeOf", () => {
 });
 
 const runtimeBinding = {
-  runtimeArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/agentx_production_worker-YVirjlFgvk",
-  endpointQualifier: "DEFAULT", deploymentMode: "instances-ebs",
-  capacityProviderArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:capacity-provider/agentx_production_capacity_v3-VwkM93EABZ",
+  deploymentMode: "ec2-ebs" as const,
+  launchTemplateId: "lt-0123456789abcdef0",
+  subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0123456789abcdef0" }],
+  volumeSizeGiB: 20,
+  volumeType: "gp3" as const,
 };
 const secretsFor = (types: Record<string, unknown>) => ({ read: vi.fn(async (name: string) => types[name] === undefined ? undefined : JSON.stringify(types[name])) });
 

@@ -76,10 +76,9 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
   const naming = namingFromContext(app);
   const deploymentRegion = app.node.tryGetContext("agentxRegion") as string | undefined;
   const deploymentMode =
-    (app.node.tryGetContext("agentxDeploymentMode") as string | undefined) ?? "instances-ebs";
-  // The release still passes instances-ebs; the AgentCore demo microVM runtime was removed (#118).
-  if (deploymentMode !== "instances-ebs") {
-    throw new Error(`unsupported agentxDeploymentMode ${deploymentMode}; the demo-microvm runtime was removed`);
+    (app.node.tryGetContext("agentxDeploymentMode") as string | undefined) ?? "ec2-ebs";
+  if (deploymentMode !== "ec2-ebs") {
+    throw new Error(`unsupported agentxDeploymentMode ${deploymentMode}; only ec2-ebs is supported`);
   }
   const identityMode = app.node.tryGetContext("agentxIdentity") as string | undefined;
   if (identityMode !== undefined && identityMode !== "cognito" && identityMode !== "oidc") {
@@ -131,7 +130,7 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
       env: { region: deploymentRegion ?? "us-east-1" },
     });
   }
-  // Still named for the AgentCore runtime it used to deploy; it holds only the EC2 worker settings now.
+  // The runtime stack holds EC2 worker settings.
   new WorkerSettingsStack(app, "AgentXProductionRuntime", {
     description: "AgentX worker image and model settings for EC2 workers",
     env: { region: deploymentRegion ?? "us-east-1" },

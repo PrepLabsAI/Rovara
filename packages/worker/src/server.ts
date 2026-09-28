@@ -31,7 +31,7 @@ export interface WorkerServerState {
   executor: WorkerExecutor;
   callbacks: WorkerServerCallbacks;
   activeOperations: Set<string>;
-  /** Present on EC2 workers, whose port is reachable over the network. AgentCore workers have none. */
+  /** Required by the deployed worker; injectable for in-process tests. */
   invokeAuthentication?: InvokeAuthentication;
 }
 

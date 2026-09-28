@@ -195,8 +195,7 @@ export class ProductionFoundationStack extends Stack {
       removalPolicy: RemovalPolicy.RETAIN,
     });
 
-    // The EC2 workers (#76). The AgentCore capacity provider, its operator role and its worker
-    // security group were removed in #118.
+    // EC2 worker launch template, role and security groups.
     new Ec2WorkerFoundation(this, "Ec2Workers", {
       naming,
       vpcId: vpc.ref,

@@ -172,8 +172,9 @@ async function runRegister(context: Awaited<ReturnType<typeof administratorConte
     "--json",
     "admin", "project", "register",
     "--file", context.projectFile,
-    "--runtime-arn", "arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/agentx_production_worker-YVirjlFgvk",
-    "--deployment-mode", "demo-microvm",
+    "--deployment-mode", "ec2-ebs",
+    "--launch-template-id", "lt-0123456789abcdef0",
+    "--subnets", "us-east-1a=subnet-0123456789abcdef0",
   ], {
     fetchImplementation,
     tokenStore: context.tokens,

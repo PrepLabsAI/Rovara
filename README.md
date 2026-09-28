@@ -1,26 +1,18 @@
 # AgentX
 
 A software factory with a hosted pi-based orchestrator in Slack and remote pi coding workers
-on Amazon Bedrock AgentCore. Administrators prepare shared product definitions and fixed
+on Amazon EC2 with persistent EBS storage. Administrators prepare shared product definitions and fixed
 development images. Every Slack thread owns an isolated persistent workspace instance.
 
 ## Current status
 
-The VPC-free `demo-microvm` profile is deployed and has been validated end to end in `us-east-1`:
-OIDC login, workspace preparation, control-plane dispatch, AgentCore managed session storage, Pi
-tool use, Amazon Bedrock inference, GitHub App authentication for private repositories, and
-result/artifact callbacks are working. Pull-request creation, safe existing-PR maintenance, clean
-replacement, merged-PR revert, and administrator-configured CodeBuild gates are deployed. Gates
-test the exact pushed candidate and block PR creation or PR-head advancement unless every gate
-succeeds. The release workflow deploys the control plane and worker together to prevent protocol
-version skew.
-The current demo uses Amazon Nova Pro.
+Every new workspace uses `ec2-ebs`, including self-hosted installs. Each Slack thread gets an
+isolated EC2 worker and encrypted EBS volume. The session manager provisions and resumes workers;
+the idle reaper stops compute while preserving workspace files and conversation state.
 
-The production `instances-ebs` infrastructure is implemented and locally validated. It uses a
-protected, retained capacity-provider foundation and a separately releasable runtime so routine
-backend releases do not recreate or refresh developer workspaces. The existing demo workspaces
-continue to serve traffic until the explicit one-time migration is performed. The existing
-directory name `Pi-Bedrock` is retained, but the product is named AgentX.
+Closed workspace and operation records and historical project revisions remain readable. Retired
+deployment modes cannot register projects or execute work. Start a new Slack thread against an
+EC2 project revision for new work.
 
 ## How AgentX is structured
 
@@ -108,9 +100,9 @@ agentx login --callback-port 8765
 
 agentx admin project register \
   --file "$HOME/.agentx/projects/payments.yaml" \
-  --runtime-arn <agentcore-runtime-arn> \
-  --deployment-mode instances-ebs \
-  --endpoint-qualifier DEFAULT
+  --deployment-mode ec2-ebs \
+  --launch-template-id <Ec2WorkerLaunchTemplateId> \
+  --subnets <Ec2WorkerSubnets>
 
 agentx --project payments admin slack bind --team T0123456789 --channel C0123456789
 ```
@@ -392,8 +384,8 @@ affected repositories in the thread and keeps the workspace intact. Publish or r
 then retry the close request. A running preparation, task, publication, maintenance, resume, or
 cancellation also blocks closure until it finishes.
 
-For a clean production workspace, AgentX deletes its AgentCore capacity-provider session, which
-releases the persistent EBS volume, and then confirms completion in the same Slack thread. It
+For a clean production workspace, AgentX terminates its EC2 instance and deletes
+the persistent EBS volume, and then confirms completion in the same Slack thread. It
 retains the workspace and operation records as a closed tombstone for audit and retry safety, but
 removes the hosted orchestrator conversation session and releases the organization's quota and that
 of the member who prepared the workspace. Later mentions in the closed thread do not create another
@@ -640,7 +632,7 @@ Delete any leftover `~/.agentx/state` directory and, if your OS credential store
 ### 4. Validate changes and create a pull request
 
 Pull-request creation is explicit; AgentX never publishes automatically after a coding task. The
-registered project's `readiness` commands run inside the AgentCore workspace before a candidate is
+registered project's `readiness` commands run inside the EC2 workspace before a candidate is
 pushed. Optional repository `codeBuildGates` then run remotely against that exact pushed commit.
 AgentX rejects an empty diff, merge conflicts, or any failed/timed-out check before creating a PR.
 
@@ -688,7 +680,7 @@ The installed GitHub App must have these repository permissions:
 Change them under **GitHub Settings → Developer settings → GitHub Apps → AgentX SDLC → Permissions
 & events → Repository permissions**. After saving, the installation owner must approve the updated
 permissions for the installation. The App private key stays in Secrets Manager; it is never sent to
-the AgentCore runtime. AgentX mints short-lived, single-repository tokens separately for clone,
+the worker. AgentX mints short-lived, single-repository tokens separately for clone,
 push, and PR operations.
 
 AgentX does not merge, approve, delete branches, add reviewers/labels, or force-push in this
@@ -722,7 +714,7 @@ repositories:
 Unit tests, backend integration tests, and Playwright commands belong in the CodeBuild project's
 buildspec. AgentX supplies only the exact Git commit as `sourceVersion`; it does not allow the
 worker to override the buildspec, image, role, environment, source, or artifacts. The broker owns
-`StartBuild`/`BatchGetBuilds` permission scoped to `agentx-*` projects, while AgentCore receives no
+`StartBuild`/`BatchGetBuilds` permission scoped to `agentx-*` projects, while the worker receives no
 CodeBuild AWS credentials. A failed new-PR build leaves its candidate branch for diagnosis but
 creates no PR. A failed existing-PR build leaves the PR head unchanged.
 
@@ -734,16 +726,7 @@ multiple candidate commits atomically.
 ### 5. Deploy and release
 
 Registering a project and binding its channel are covered in section 2. Workspaces are created by
-Slack threads, never by an administrator. A demo release is one command from a clean checkout:
-
-```sh
-npm run release:demo -- --profile agentx-deployer --region us-east-1
-```
-
-The command runs all quality gates, applies bounded ECR retention, builds and smoke-tests ARM64,
-pushes an immutable digest, deploys both stacks, verifies AgentCore `READY`, and enforces 30-day
-runtime-log retention. See the [VPC-free AWS runbook](docs/deployment-demo.md) for first-deployment
-environment variables, rollback options, and the manual procedure.
+Slack threads, never by an administrator.
 
 For the production EBS-backed platform, preview the release without changing AWS:
 
@@ -752,19 +735,16 @@ npm run release:prod -- --profile agentx-deployer --region us-east-1 --dry-run
 ```
 
 The first real production release creates the protected foundation (dedicated two-AZ VPC, two NAT
-gateways, KMS key, private worker security group, flow logs, and stable AgentCore capacity
-provider), then creates the production runtime. Later releases refuse to modify that foundation
+gateways, KMS key, private worker security group, flow logs, and an EC2 worker launch template), then creates worker settings. Later releases refuse to modify that foundation
 and update only the runtime and control plane:
 
 ```sh
 npm run release:prod -- --profile agentx-deployer --region us-east-1
 ```
 
-This command does not register a project, create a workspace, rewrite a workspace record, stop a
-demo session, or migrate data. Those are separate, explicit administrative operations. An
-`instances-ebs` workspace is identified by the stable capacity provider plus its thread's runtime
-session ID; updating the worker image on the production runtime does not change either
-identifier and therefore does not require a workspace refresh.
+The release updates worker settings and the control plane. Each workspace keeps its EBS volume;
+a new image takes effect the next time its compute starts. Project registration and workspace
+preparation are separate operations.
 
 #### Continuous production releases
 
@@ -963,7 +943,7 @@ Spec 014 phase 14d adds the **Details** button. Operator notes:
 - [Research](specs/001-agentx-foundation/research.md): decisions and primary sources.
 - [Deployed AWS architecture](docs/architecture-deployed-demo.md): current VPC-free demo resources
   and request flow.
-- [Production AWS architecture](docs/architecture-production.md): stable AgentCore Instances,
+- [Production AWS architecture](docs/architecture-production.md): EC2 workers and persistent EBS,
   per-session EBS, networking, release, isolation, and migration boundaries.
 - [Contracts](specs/001-agentx-foundation/contracts/): project config, control API and worker protocol.
 - [Validation guide](specs/001-agentx-foundation/quickstart.md).

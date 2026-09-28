@@ -16,14 +16,11 @@ describe("worker usage event compatibility", () => {
     const workspaceId = randomUUID();
     const now = new Date().toISOString();
     await registry.createDefault({
+      deploymentMode: "ec2-ebs" as const,
       id: workspaceId,
       ownerKey: owner.ownerKey,
       projectName: "usage",
       projectRevision: 1,
-      runtimeArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/agentx",
-      endpointQualifier: "DEFAULT",
-      runtimeSessionId: randomUUID(),
-      deploymentMode: "demo-microvm",
       rootPath: "/mnt/workspace",
       status: "READY",
       preparationManifest: ".agentx/preparation-manifest.json",
