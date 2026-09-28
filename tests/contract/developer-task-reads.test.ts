@@ -4,6 +4,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { MAYA, OMAR, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
+import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const PLANTED = "xoxb-2222222222-planted-secret";
 const DIFF = ["## demo", "", "### status", " M src/retry.ts", "### diff", "diff --git a/src/retry.ts b/src/retry.ts", "--- a/src/retry.ts", "+++ b/src/retry.ts", "@@ -1 +1,2 @@", "-old", "+new", "+more"].join("\n");
@@ -154,7 +155,9 @@ describe("reads of an owned task (R8, R11, FR-036)", () => {
 });
 
 describe("artifacts are read only from the task's own workspace (R18)", () => {
-  it("never reads a diff through a crafted artifact name", async () => {
+  // Names are only compared with "workspace.diff" and never become part of an object key; this
+  // case pins that. The key guard itself is exercised by the forged-record case below.
+  it("does not treat an artifact whose name climbs directories as the diff", async () => {
     const harness = await createDeveloperTaskBroker();
     const other = await startRunning(harness, "the other task");
     await harness.artifact(other.workspaceId, other.operationId, "workspace.diff", DIFF);
@@ -227,6 +230,103 @@ describe("the index row follows the task (R4)", () => {
     expect(harness.db.get(`DEVELOPER#${MAYA.developerId}`, `TASK#${record.createdAt}#${taskId}`)).toMatchObject({ status: "STARTING" });
     expect(((await harness.dev(MAYA, "GET", `/v1/dev/tasks/${taskId}`)).body.task as { status: string }).status).toBe("FAILED");
     expect(harness.db.get(`DEVELOPER#${MAYA.developerId}`, `TASK#${record.createdAt}#${taskId}`)).toMatchObject({ status: "FAILED" });
+  });
+});
+
+describe("the index row never leaves CLOSED (R4)", () => {
+  it("keeps a CLOSED index row when a racing read derives an earlier status", async () => {
+    const harness = await createDeveloperTaskBroker();
+    const task = await startRunning(harness, "my task");
+    await harness.finish(task.workspaceId, task.operationId, "SUCCEEDED");
+    const { createdAt } = harness.db.get(`DEVTASK#${task.taskId}`, "META") as { createdAt: string };
+    const row = harness.db.get(`DEVELOPER#${MAYA.developerId}`, `TASK#${createdAt}#${task.taskId}`)!;
+    // The close wrote the index row after this read derived its status from the task record.
+    harness.db.set({ ...row, status: "CLOSED" });
+    expect(((await harness.dev(MAYA, "GET", `/v1/dev/tasks/${task.taskId}`)).body.task as { status: string }).status).toBe("SUCCEEDED");
+    expect(harness.db.get(`DEVELOPER#${MAYA.developerId}`, `TASK#${createdAt}#${task.taskId}`)).toMatchObject({ status: "CLOSED" });
+  });
+
+  it("lists a re-derived row with the same updatedAt as the task view", async () => {
+    const harness = await createDeveloperTaskBroker();
+    const task = await startRunning(harness, "my task");
+    await harness.finish(task.workspaceId, task.operationId, "SUCCEEDED");
+    const listed = ((await harness.dev(MAYA, "GET", "/v1/dev/tasks")).body as { tasks: Array<{ status: string; updatedAt: string }> }).tasks[0]!;
+    const view = ((await harness.dev(MAYA, "GET", `/v1/dev/tasks/${task.taskId}`)).body as { task: { updatedAt: string } }).task;
+    expect(listed.status).toBe("SUCCEEDED");
+    expect(listed.updatedAt).toBe(view.updatedAt);
+    const { createdAt } = harness.db.get(`DEVTASK#${task.taskId}`, "META") as { createdAt: string };
+    expect(harness.db.get(`DEVELOPER#${MAYA.developerId}`, `TASK#${createdAt}#${task.taskId}`)).toMatchObject({ updatedAt: view.updatedAt });
+  });
+});
+
+describe("query parameters are plain whole numbers", () => {
+  it.each(["1e1", "0x10", " 5 ", "5.0", "+5", ""])("refuses %j", async (value) => {
+    const { read, dev } = await running();
+    expect(((await read(`?events=${encodeURIComponent(value)}`)) as { error?: { code: string } }).error?.code).toBe("CONFIG_INVALID");
+    expect(((await dev(MAYA, "GET", `/v1/dev/tasks?limit=${encodeURIComponent(value)}`)).body as { error?: { code: string } }).error?.code).toBe("CONFIG_INVALID");
+  });
+});
+
+describe("the fake DynamoDB start key", () => {
+  const table = () => {
+    const db = new FakeDynamoDb();
+    for (const sk of ["TASK#a", "TASK#b", "TASK#c", "ZZZ#d"]) db.set({ pk: "P", sk });
+    return db;
+  };
+  const query = (db: FakeDynamoDb, start: Record<string, unknown>) => db.send({
+    constructor: { name: "QueryCommand" },
+    input: { KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)", ExpressionAttributeValues: { ":pk": "P", ":prefix": "TASK#" }, ExclusiveStartKey: start },
+  });
+  it("resumes after a start key in range", async () => {
+    expect(await query(table(), { pk: "P", sk: "TASK#a" })).toEqual({ Items: [{ pk: "P", sk: "TASK#b" }, { pk: "P", sk: "TASK#c" }] });
+  });
+  it.each([[{ pk: "P" }], [{ pk: "P", sk: "ZZZ#d" }], [{ pk: "Q", sk: "TASK#a" }]])("refuses %j like DynamoDB", async (start) => {
+    await expect(query(table(), start)).rejects.toMatchObject({ name: "ValidationException" });
+  });
+});
+
+describe("result details survive storage trouble (R18)", () => {
+  it("answers the ended task without changed files, and still syncs the index, when the diff cannot be read", async () => {
+    const harness = await createDeveloperTaskBroker();
+    const task = await startRunning(harness, "my task");
+    await harness.artifact(task.workspaceId, task.operationId, "workspace.diff", DIFF);
+    await harness.finish(task.workspaceId, task.operationId, "SUCCEEDED");
+    const original = harness.s3.send.getMockImplementation()!;
+    harness.s3.send.mockImplementation(async (command) => {
+      if (command.constructor.name === "GetObjectCommand") throw Object.assign(new Error("Access Denied"), { name: "AccessDenied" });
+      return original(command);
+    });
+    const response = await harness.dev(MAYA, "GET", `/v1/dev/tasks/${task.taskId}`);
+    expect(response.status).toBe(200);
+    const view = (response.body as { task: Record<string, unknown> }).task;
+    expect(view).toMatchObject({ status: "SUCCEEDED", artifacts: [{ name: "workspace.diff" }] });
+    expect(view).not.toHaveProperty("changedFiles");
+    const { createdAt } = harness.db.get(`DEVTASK#${task.taskId}`, "META") as { createdAt: string };
+    expect(harness.db.get(`DEVELOPER#${MAYA.developerId}`, `TASK#${createdAt}#${task.taskId}`)).toMatchObject({ status: "SUCCEEDED" });
+  });
+
+  it("gives an empty diff no changed files, without reading it", async () => {
+    const harness = await createDeveloperTaskBroker();
+    const task = await startRunning(harness, "my task");
+    await harness.artifact(task.workspaceId, task.operationId, "workspace.diff", "");
+    await harness.finish(task.workspaceId, task.operationId, "SUCCEEDED");
+    harness.s3.send.mockClear();
+    const view = ((await harness.dev(MAYA, "GET", `/v1/dev/tasks/${task.taskId}`)).body as { task: Record<string, unknown> }).task;
+    expect(view).toMatchObject({ status: "SUCCEEDED", artifacts: [{ name: "workspace.diff", size: 0 }] });
+    expect(view).not.toHaveProperty("changedFiles");
+    expect(getKeys(harness)).toEqual([]);
+  });
+
+  it("redacts a secret planted in a changed file's path (SC-004)", async () => {
+    const harness = await createDeveloperTaskBroker();
+    const task = await startRunning(harness, "my task");
+    await harness.artifact(task.workspaceId, task.operationId, "workspace.diff", DIFF.replaceAll("src/retry.ts", `src/${PLANTED}.ts`));
+    await harness.finish(task.workspaceId, task.operationId, "SUCCEEDED");
+    const body = (await harness.dev(MAYA, "GET", `/v1/dev/tasks/${task.taskId}`)).body as { task: { changedFiles: Array<{ path: string; added: number }> } };
+    expect(body.task.changedFiles).toHaveLength(1);
+    expect(body.task.changedFiles[0]).toMatchObject({ added: 2, removed: 1 });
+    expect(body.task.changedFiles[0]!.path).not.toContain(PLANTED);
+    expect(JSON.stringify(body)).not.toContain(PLANTED);
   });
 });
 

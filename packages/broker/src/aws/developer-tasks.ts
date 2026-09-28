@@ -166,6 +166,23 @@ function ownArtifactKey(task: DeveloperTaskRecord, operationId: string, objectKe
   return objectKey.startsWith(prefix) && /^[A-Za-z0-9-]+$/.test(objectKey.slice(prefix.length));
 }
 
+/**
+ * The files the diff names, redacted. An empty diff has none (a ranged read of a zero-byte object
+ * is a 416 on S3, so callers skip size 0). Storage trouble must not break the read of an ended
+ * task, so a failed read logs the error name and leaves the changed files out.
+ */
+async function changedFiles(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord, objectKey: string): Promise<TaskDetails["changedFiles"]> {
+  let diff: string;
+  try {
+    diff = await deps.actions.readArtifact(objectKey, DIFF_READ_BYTES);
+  } catch (error) {
+    log(deps, { event: "developer.task_diff_read_failed", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
+    return undefined;
+  }
+  if (diff === "") return undefined;
+  return diffStat(diff).map((file) => ({ ...file, repository: redactText(file.repository), path: redactText(file.path) }));
+}
+
 /** R18: what the latest task operation left, and the task's pull requests. Callers load the owned task first. */
 async function taskDetails(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord, operations: readonly Operation[]): Promise<TaskDetails> {
   const pullRequests = await deps.actions.pullRequests(task.workspaceId);
@@ -177,10 +194,10 @@ async function taskDetails(deps: DeveloperTaskRouteDependencies, task: Developer
     const artifacts = await deps.actions.artifacts(task.workspaceId, lastTask.id);
     details.artifacts = artifacts.map((artifact) => ({ name: redactText(artifact.name).slice(0, ARTIFACT_NAME_MAX), ...(artifact.size === undefined ? {} : { size: artifact.size }) }));
     const diff = artifacts.find((artifact) => artifact.name === DIFF_ARTIFACT);
-    if (diff !== undefined) {
+    if (diff !== undefined && diff.size !== 0) {
       if (ownArtifactKey(task, lastTask.id, diff.objectKey)) {
-        details.changedFiles = diffStat(await deps.actions.readArtifact(diff.objectKey, DIFF_READ_BYTES))
-          .map((file) => ({ ...file, repository: redactText(file.repository), path: redactText(file.path) }));
+        const changed = await changedFiles(deps, task, diff.objectKey);
+        if (changed !== undefined) details.changedFiles = changed;
       } else {
         // The key is not logged: it names another workspace.
         log(deps, { event: "developer.task_artifact_key_refused", taskId: task.taskId, artifactId: diff.id });
@@ -368,17 +385,19 @@ async function startTask(deps: DeveloperTaskRouteDependencies, caller: Developer
 
 /**
  * R4: the index row keeps the last status the API saw, so the task list and WORKSPACE_LIMIT's
- * open-task list stay current. Best effort: a failed write only costs a stale index row.
+ * open-task list stay current. Best effort: a failed write only costs a stale index row. A CLOSED
+ * row never changes again: a read that derived its status before a close must not undo it.
+ * `updatedAt` is the task view's, so the list and the view agree.
  */
-export async function syncIndex(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord, status: DeveloperTaskStatus): Promise<void> {
+export async function syncIndex(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord, status: DeveloperTaskStatus, updatedAt: string = iso(deps)): Promise<void> {
   try {
     await deps.documentClient.send(new UpdateCommand({
       TableName: deps.tableName,
       Key: taskIndexKey(task.developerId, task.createdAt, task.taskId),
       UpdateExpression: "SET #status = :status, updatedAt = :now",
-      ConditionExpression: "attribute_exists(pk) AND #status <> :status",
+      ConditionExpression: "attribute_exists(pk) AND #status <> :status AND #status <> :closed",
       ExpressionAttributeNames: { "#status": "status" },
-      ExpressionAttributeValues: { ":status": status, ":now": iso(deps) },
+      ExpressionAttributeValues: { ":status": status, ":closed": "CLOSED", ":now": updatedAt },
     }));
   } catch (error) {
     if (!isConditional(error)) log(deps, { event: "developer.task_index_sync_failed", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
@@ -387,8 +406,8 @@ export async function syncIndex(deps: DeveloperTaskRouteDependencies, task: Deve
 
 const whole = (value: string | null, fallback: number, min: number, max: number, name: string): number => {
   if (value === null) return fallback;
-  const parsed = Number(value);
-  if (value.trim() === "" || !Number.isInteger(parsed) || parsed < min || parsed > max) throw agentXError("CONFIG_INVALID", `${name} must be a whole number from ${min} to ${max}`);
+  const parsed = /^\d{1,3}$/.test(value) ? Number(value) : Number.NaN;
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) throw agentXError("CONFIG_INVALID", `${name} must be a whole number from ${min} to ${max}`);
   return parsed;
 };
 
@@ -396,7 +415,7 @@ async function readTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperC
   // R8, R11: the owner always reads their own task; access is not checked again.
   const task = await loadOwnedTask(deps, caller, taskId);
   const view = await taskView(deps, task, { events: whole(url.searchParams.get("events"), DEVELOPER_EVENTS_DEFAULT, 0, DEVELOPER_EVENTS_MAX, "events"), details: true });
-  await syncIndex(deps, task, view.status);
+  await syncIndex(deps, task, view.status, view.updatedAt);
   return { task: view };
 }
 
@@ -406,9 +425,11 @@ const LIST_SCAN_MAX = 200;
 const encodeCursor = (sk: string) => Buffer.from(JSON.stringify({ sk }), "utf8").toString("base64url");
 
 /**
- * The list's position: the sort key of the last index row it looked at. Only a sort key is taken
- * from the client; the partition is always the caller's own, so a cursor copied from another
- * developer, or forged, can only move through the caller's own tasks.
+ * The list's position: the sort key of the last index row it looked at. The cursor is validated,
+ * not signed. That is enough because it grants nothing: only a sort key is taken from the client,
+ * it must have the index row's exact shape, and the partition is always the caller's own. A cursor
+ * copied from another developer, or forged, can only move through the caller's own tasks, and the
+ * worst a forged one does is start the caller's list at another point.
  */
 function decodeCursor(value: string | null): string | undefined {
   if (value === null) return undefined;
@@ -451,18 +472,23 @@ async function listTasks(deps: DeveloperTaskRouteDependencies, caller: Developer
     for (const [position, row] of rows.entries()) {
       scanned += 1;
       let current: DeveloperTaskStatus = row.status;
+      let updatedAt = row.updatedAt;
       // A closed task never changes again, so only open rows are derived afresh.
       if (row.status !== "CLOSED") {
         const task = await get<DeveloperTaskRecord>(deps, taskKey(row.taskId));
         if (task !== undefined && task.developerId === caller.developerId) {
-          current = (await taskView(deps, task, { events: 0, details: false })).status;
-          if (current !== row.status) await syncIndex(deps, task, current);
+          const view = await taskView(deps, task, { events: 0, details: false });
+          current = view.status;
+          if (current !== row.status) {
+            updatedAt = view.updatedAt;
+            await syncIndex(deps, task, current, updatedAt);
+          }
         }
       }
       const more = position < rows.length - 1 || response.LastEvaluatedKey !== undefined;
       const matches = (project === null || row.project === project) && (status === undefined || !status.success || current === status.data);
       if (matches) {
-        tasks.push({ taskId: row.taskId, title: row.title, project: row.project, status: current, shared: row.shared, createdAt: row.createdAt, updatedAt: row.updatedAt });
+        tasks.push({ taskId: row.taskId, title: row.title, project: row.project, status: current, shared: row.shared, createdAt: row.createdAt, updatedAt });
         if (tasks.length >= limit) return more ? { tasks, nextCursor: encodeCursor(row.sk) } : { tasks };
       }
       // One page of the list reads at most LIST_SCAN_MAX index rows; the cursor carries on from there.

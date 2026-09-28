@@ -82,9 +82,10 @@ export class FakeDynamoDb {
       .sort((left, right) => compareKeys(left.sk as string, right.sk as string));
     if (input.ScanIndexForward === false) items.reverse();
     // ExclusiveStartKey resumes after that key in the query's direction. DynamoDB refuses a start
-    // key from another partition, and so does this fake. (No LastEvaluatedKey is handed out.)
+    // key from another partition, without a sort key, or outside the key condition's range, and so
+    // does this fake. (No LastEvaluatedKey is handed out.)
     const start = input.ExclusiveStartKey as { pk?: unknown; sk?: unknown } | undefined;
-    if (start !== undefined && start.pk !== values[":pk"]) {
+    if (start !== undefined && (start.pk !== values[":pk"] || typeof start.sk !== "string" || !start.sk.startsWith(prefix))) {
       throw Object.assign(new Error("The provided starting key is invalid"), { name: "ValidationException" });
     }
     const after = start === undefined
