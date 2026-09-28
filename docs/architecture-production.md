@@ -354,8 +354,10 @@ with `AUTH_REQUIRED`, an AWS access denial with `FORBIDDEN`. Use credentials who
 long as the deploy (plan for about an hour): a session that expires partway leaves the rest undeployed.
 
 **Recovering a stuck stack.** A stack in `ROLLBACK_COMPLETE` (its first create failed) must be deleted
-before deploying again; the error names the exact `delete-stack` command. A failed create keeps the
-resources its stack retains, so remove those too (see "Tearing down an environment"). A failed or refused
+before deploying again; the error names the exact `delete-stack` command. In a named environment a failed
+first create deletes what it made (its kept resources use `RetainExceptOnCreate`), except a Cognito user
+pool, whose deletion protection keeps it; an orphaned pool never blocks a retry, so delete it when
+convenient. The legacy deployment keeps plain `Retain`. A failed or refused
 change set on a new stack leaves it in `REVIEW_IN_PROGRESS` with no resources: `agentx deploy` deletes its
 own change set and a rerun treats the stack as a fresh create; to clean up by hand (for example after
 `deploy-access.sh`), delete the change set, then delete the stack only if it is still REVIEW_IN_PROGRESS with
@@ -412,5 +414,7 @@ also has the secrets init stored itself: `agentx/<env>/github-app`, `agentx/<env
 webhook alert address only) and `agentx/<env>/openrouter` (OpenRouter without `--openrouter-secret-arn`
 only); delete them the same way. Revoke the OpenRouter key in OpenRouter too. A secret you made yourself
 for `--openrouter-secret-arn` is yours to keep or delete.
-A failed create keeps its retained resources too, so "delete the stack and rerun" leaves them behind. The
-export bundle's README lists the exact command for each step.
+In a named environment the retained resources are kept on a delete and on a replacing update, but a failed
+first create removes them (`RetainExceptOnCreate`), so "delete the stack and rerun" works; only an identity
+stack's user pool is left behind by a failed create. The export bundle's README lists the exact command for
+each step.

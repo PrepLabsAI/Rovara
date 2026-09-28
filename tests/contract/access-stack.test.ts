@@ -53,7 +53,8 @@ describe("access stack", () => {
       PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true },
       VersioningConfiguration: { Status: "Enabled" },
     });
-    template.hasResource("AWS::S3::Bucket", { DeletionPolicy: "Retain" });
+    // Kept on delete and on replacement; a failed first create removes it (named-retention.test.ts).
+    template.hasResource("AWS::S3::Bucket", { DeletionPolicy: "RetainExceptOnCreate", UpdateReplacePolicy: "Retain" });
   });
 
   it("creates the pull-through cache rule for ECR Public", () => {

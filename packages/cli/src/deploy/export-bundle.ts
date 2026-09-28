@@ -353,7 +353,7 @@ on_failure() {
     echo "  aws cloudformation delete-stack --stack-name \\"\${STACK_NAME}\\" --region \\"${region}\\"" >&2
   elif [ "\${stack_status}" = "ROLLBACK_COMPLETE" ]; then
     echo "Stack \${STACK_NAME} is ROLLBACK_COMPLETE: its create failed." >&2
-    echo "Recovery: delete the stack, then run this script again (resources the stack retains stay behind; see README.md):" >&2
+    echo "Recovery: delete the stack, then run this script again (the failed create already removed what it made; see README.md):" >&2
     echo "  aws cloudformation delete-stack --stack-name \\"\${STACK_NAME}\\" --region \\"${region}\\"" >&2
   elif [ "\${cs_status}" = "FAILED" ]; then
     echo "Recovery: delete the failed change set, then run this script again:" >&2
@@ -518,9 +518,9 @@ non-zero:
   aws cloudformation delete-stack --stack-name ${stackName} --region ${region}
   \`\`\`
 - **A failed stack creation** (the stack rolled back to \`ROLLBACK_COMPLETE\`): delete the whole
-  stack, then run this script again from the start. A failed create keeps the resources the stack
-  retains (here, the artifact bucket), so remove those too as described under "Tearing down an
-  environment".
+  stack, then run this script again from the start. A failed first create removes what it made,
+  the artifact bucket too (it is kept only on a delete or a replacing update), so nothing else needs
+  removing.
   \`\`\`
   aws cloudformation delete-stack --stack-name ${stackName} --region ${region}
   \`\`\`
@@ -623,8 +623,9 @@ credentials that can delete every resource below.
      aws secretsmanager delete-secret --secret-id agentx/${env}/slack --force-delete-without-recovery --region ${region}
      \`\`\`
 
-A failed create keeps its retained resources too, so "delete the stack and rerun" leaves them
-behind; remove them as above before a rerun needs their names.
+A failed first create removes what it made (the kept resources use RetainExceptOnCreate), so
+"delete the stack and rerun" works. The one exception is the identity stack's Cognito user pool,
+whose deletion protection keeps it; its name is not unique, so it never blocks a rerun.
 
 ## Files in this bundle
 

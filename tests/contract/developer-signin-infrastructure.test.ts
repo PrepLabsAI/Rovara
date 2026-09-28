@@ -4,7 +4,7 @@ import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 
-type Resource = { Type: string; Properties: Record<string, unknown>; DeletionPolicy?: string };
+type Resource = { Type: string; Properties: Record<string, unknown>; DeletionPolicy?: string; UpdateReplacePolicy?: string };
 type Statement = { Effect?: string; Sid?: string; Action: string | string[]; Resource?: unknown; Principal?: unknown; Condition?: Record<string, unknown> };
 type TemplateJson = { Parameters: Record<string, Record<string, unknown>>; Resources: Record<string, Resource>; Outputs: Record<string, { Value: unknown }> };
 type Ref = { Ref: string };
@@ -212,7 +212,8 @@ describe("developer sign-in infrastructure (named environments)", () => {
     expect(table.Properties.KeySchema).toEqual([{ AttributeName: "pk", KeyType: "HASH" }, { AttributeName: "sk", KeyType: "RANGE" }]);
     expect(table.Properties.BillingMode).toBe("PAY_PER_REQUEST");
     expect(table.Properties.PointInTimeRecoverySpecification).toEqual({ PointInTimeRecoveryEnabled: true });
-    expect(table.DeletionPolicy).toBe("Retain");
+    expect(table.DeletionPolicy).toBe("RetainExceptOnCreate");
+    expect(table.UpdateReplacePolicy).toBe("Retain");
   });
 
   it("passes the developer configuration to the broker and DeveloperIdentity", () => {
