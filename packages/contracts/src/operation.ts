@@ -2,6 +2,18 @@ import { Buffer } from "node:buffer";
 import { z } from "zod";
 import { SlackRequesterSchema } from "./slack.js";
 
+/** Spec 025 FR-022: an operation a developer started from an AI tool. */
+export const DeveloperRequesterSchema = z
+  .object({
+    kind: z.literal("developer"),
+    developerId: z.string().regex(/^[a-f0-9]{64}$/),
+    provider: z.enum(["slack", "oidc"]),
+  })
+  .strict();
+export const OperationRequesterSchema = z.union([SlackRequesterSchema, DeveloperRequesterSchema]);
+export type DeveloperRequester = z.infer<typeof DeveloperRequesterSchema>;
+export type OperationRequester = z.infer<typeof OperationRequesterSchema>;
+
 export const OperationKindSchema = z.enum([
   "prepare",
   "task",
@@ -55,6 +67,7 @@ export const PullRequestRequestSchema = z
       .refine((value) => !value.includes("\0"), "body contains a NUL character")
       .refine((value) => Buffer.byteLength(value, "utf8") <= 32_768, "body exceeds 32768 UTF-8 bytes")
       .optional(),
+    draft: z.boolean().optional(),
   })
   .strict();
 
@@ -194,7 +207,7 @@ export const OperationSchema = z
     updatedAt: z.string().datetime(),
     result: z.unknown().optional(),
     error: z.string().max(16_384).optional(),
-    requestedBy: SlackRequesterSchema.optional(),
+    requestedBy: OperationRequesterSchema.optional(),
   })
   .strict();
 
