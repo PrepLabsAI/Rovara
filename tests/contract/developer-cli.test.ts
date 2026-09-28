@@ -25,7 +25,7 @@ const formOf = (init: RequestInit | undefined) => new URLSearchParams(typeof ini
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
 
-async function signedIn(options: { revoke?: () => Promise<Response>; name?: string } = {}) {
+async function signedIn(options: { revoke?: () => Promise<Response>; name?: string; projects?: () => Response } = {}) {
   const home = await mkdtemp(join(tmpdir(), "agentx-dev-cli-"));
   dirs.push(home);
   await saveDeveloperEnvironment(home, "staging", entry);
@@ -37,6 +37,7 @@ async function signedIn(options: { revoke?: () => Promise<Response>; name?: stri
     const url = urlOf(input);
     if (url === `${URL_}/v1/dev/projects`) {
       expect(new Headers(init?.headers).get("authorization")).toBe("Bearer access");
+      if (options.projects !== undefined) return options.projects();
       return Response.json(options.name === undefined ? projects : { ...projects, developer: { ...projects.developer, name: options.name } });
     }
     if (url === `${ISSUER}/revoke`) return options.revoke?.() ?? Response.json({});
@@ -69,6 +70,20 @@ describe("agentx whoami and logout (FR-011)", () => {
     const h = await signedIn();
     expect(await h.run(["--env", "other", "whoami"])).toBe(3);
     expect(h.err.join("")).toContain("this computer is not signed in to AgentX environment other; run npx @charterarc/agentx login <your AgentX URL>");
+  });
+
+  it("whoami gives the server's reason when AgentX refuses the sign-in, made safe, with the login hint", async () => {
+    const refused = (message: unknown) => () => Response.json({ error: { code: "AUTH_REQUIRED", message } }, { status: 401 });
+    const h = await signedIn({ projects: refused("your sign-in ended when Slack was turned off\u001b[2J; sign in again with agentx login <url>") });
+    expect(await h.run(["whoami"])).toBe(3);
+    expect(h.err.join("")).toContain(`your AgentX sign-in for staging has ended (your sign-in ended when Slack was turned off[2J); run npx @charterarc/agentx login ${URL_}`);
+    // No reason, or one that is not text: the generic line, still with the hint.
+    const bare = await signedIn({ projects: () => new Response("", { status: 401 }) });
+    expect(await bare.run(["whoami"])).toBe(3);
+    expect(bare.err.join("")).toContain(`your AgentX sign-in for staging has ended; run npx @charterarc/agentx login ${URL_}`);
+    const odd = await signedIn({ projects: refused(7) });
+    expect(await odd.run(["whoami"])).toBe(3);
+    expect(odd.err.join("")).toContain(`your AgentX sign-in for staging has ended; run npx @charterarc/agentx login ${URL_}`);
   });
 
   it("logout revokes the session at the server and removes the tokens and the environment", async () => {
