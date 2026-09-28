@@ -126,11 +126,11 @@ describe("EC2 worker infrastructure (issue #82), shown for a named environment",
     }
   });
 
-  it("no longer has the AgentCore workers' security group (#118)", () => {
+  it("no longer has the retired runtime workers' security group (#118)", () => {
     expect(ofType(foundation, "AWS::EC2::SecurityGroup").map(([, r]) => r.Properties.GroupName)).not.toContain("agentx-staging-workers");
   });
 
-  it("gives instances ECR pull, Bedrock and their own log group, and nothing of AgentCore, KMS or SSM", () => {
+  it("gives instances ECR pull, Bedrock and their own log group, and nothing of retired runtime, KMS or SSM", () => {
     const [[, profile]] = ofType(foundation, "AWS::IAM::InstanceProfile") as [[string, Resource]];
     expect(profile.Properties.Path).toBe("/agentx/staging/");
     const roleId = (profile.Properties.Roles as Array<{ Ref: string }>)[0]!.Ref;

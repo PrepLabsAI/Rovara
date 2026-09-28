@@ -1,9 +1,4 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
-import {
-  BedrockAgentCoreClient,
-  DeleteCapacityProviderSessionCommand,
-  StopRuntimeSessionCommand,
-} from "@aws-sdk/client-bedrock-agentcore";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DeleteCommand,
@@ -221,15 +216,6 @@ interface CodeBuildRecord {
 interface AwsBrokerDependencies {
   documentClient: DynamoDBDocumentClient;
   s3: S3Client;
-  stopRuntimeSession: (input: {
-    runtimeArn: string;
-    endpointQualifier: string;
-    runtimeSessionId: string;
-  }) => Promise<void>;
-  deleteWorkspaceSession: (input: {
-    capacityProviderArn: string;
-    runtimeSessionId: string;
-  }) => Promise<void>;
   /** Starts deleting an ec2-ebs workspace's instance and volume (#84). */
   deleteEc2Session?: (workspaceId: string) => Promise<void>;
   tableName: string;
@@ -622,10 +608,6 @@ async function registerProject(
   }
   const definition = ProjectDefinitionSchema.parse(input.definition);
   const runtimeBinding = parseRuntimeBinding(input.runtimeBinding);
-  // Nested containers need compute AgentX controls (#121); AgentCore sessions cannot run them.
-  if (definition.devcontainer && runtimeBinding.deploymentMode !== "ec2-ebs") {
-    throw agentXError("CONFIG_INVALID", `a devcontainer needs the ec2-ebs deployment mode, not ${runtimeBinding.deploymentMode}`);
-  }
   // Preflight contacts the vendor, so it runs only when the caller asks; older clients never do.
   const wantsPreflight = input.preflight === true;
   const budget = toolBudget(approvedToolCount(definition));
@@ -1051,18 +1033,8 @@ async function completeThreadWorkspaceClose(
 
   switch (workspace.deploymentMode) {
     case "instances-ebs":
-      if (!workspace.capacityProviderArn) throw agentXError("CONFIG_INVALID", "workspace capacity provider is missing");
-      try {
-        await dependencies.deleteWorkspaceSession({
-          capacityProviderArn: workspace.capacityProviderArn,
-          runtimeSessionId: workspace.runtimeSessionId,
-        });
-      } catch {
-        throw agentXError("RUNTIME_UNAVAILABLE", "workspace resource cleanup failed; retry the close request");
-      }
-      break;
     case "demo-microvm":
-      break;
+      throw agentXError("RUNTIME_UNAVAILABLE", "retired workspace storage cannot be managed");
     case "ec2-ebs":
       // The session deleter terminates the instance and deletes the volume; without it, refuse
       // rather than mark the workspace CLOSED and leak the volume.
@@ -2350,23 +2322,7 @@ async function stopWorkspace(
   if (workspace.status !== "READY" || workspace.activeOperationId) {
     throw agentXError("WORKSPACE_BUSY", "cancel or finish active work before stopping compute");
   }
-  switch (workspace.deploymentMode) {
-    case "instances-ebs":
-    case "demo-microvm":
-      await dependencies.stopRuntimeSession({
-        runtimeArn: workspace.runtimeArn,
-        endpointQualifier: workspace.endpointQualifier,
-        runtimeSessionId: workspace.runtimeSessionId,
-      });
-      break;
-    case "ec2-ebs":
-      throw agentXError("RUNTIME_UNAVAILABLE", "stopping ec2-ebs compute is not supported yet");
-    default:
-      unhandledDeploymentMode(workspace);
-  }
-  const updated = WorkspaceInstanceSchema.parse({ ...workspace, status: "STOPPED", updatedAt: new Date().toISOString() });
-  await dependencies.documentClient.send(new PutCommand({ TableName: dependencies.tableName, Item: workspaceItem(updated) }));
-  return publicWorkspace(updated);
+  throw agentXError("RUNTIME_UNAVAILABLE", "manual compute stop is not supported; idle sessions stop automatically");
 }
 
 async function handleCallback(
@@ -3349,13 +3305,7 @@ function workspaceRuntime(runtimeBinding: RuntimeBinding) {
   switch (runtimeBinding.deploymentMode) {
     case "instances-ebs":
     case "demo-microvm":
-      return {
-        runtimeArn: runtimeBinding.runtimeArn,
-        endpointQualifier: runtimeBinding.endpointQualifier,
-        runtimeSessionId: randomUUID(),
-        deploymentMode: runtimeBinding.deploymentMode,
-        capacityProviderArn: runtimeBinding.capacityProviderArn,
-      };
+      throw agentXError("CONFIG_INVALID", "retired project revision cannot create workspaces; register an ec2-ebs revision");
     case "ec2-ebs":
       return { deploymentMode: runtimeBinding.deploymentMode };
     default:
@@ -3385,16 +3335,7 @@ function outboxRecord(
   switch (workspace.deploymentMode) {
     case "instances-ebs":
     case "demo-microvm":
-      if (routing.deploymentMode === "ec2-ebs") throw mismatch();
-      return {
-        ...key,
-        ...common,
-        runtimeArn: routing.runtimeArn,
-        endpointQualifier: routing.endpointQualifier,
-        runtimeSessionId: workspace.runtimeSessionId,
-        invocation,
-        createdAt: new Date().toISOString(),
-      };
+      throw agentXError("RUNTIME_UNAVAILABLE", "retired workspace cannot execute work");
     case "ec2-ebs":
       if (routing.deploymentMode !== "ec2-ebs") throw mismatch();
       return { ...key, ...common, deploymentMode: "ec2-ebs", invocation, createdAt: new Date().toISOString() };
@@ -3421,22 +3362,6 @@ function workspaceKey(id: string) {
 
 function operationKey(workspaceId: string, operationId: string) {
   return { pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}` };
-}
-
-export async function deleteCapacityProviderWorkspaceSession(
-  client: { send(command: DeleteCapacityProviderSessionCommand): Promise<unknown> },
-  input: { capacityProviderArn: string; runtimeSessionId: string },
-): Promise<void> {
-  const capacityProviderId = input.capacityProviderArn.split("/").at(-1);
-  if (!capacityProviderId) throw agentXError("CONFIG_INVALID", "capacity provider ARN is invalid");
-  try {
-    await client.send(new DeleteCapacityProviderSessionCommand({
-      capacityProviderId,
-      sessionId: input.runtimeSessionId,
-    }));
-  } catch (error) {
-    if (!(error instanceof Error && error.name === "ResourceNotFoundException")) throw error;
-  }
 }
 
 function pullRequestKey(workspaceId: string, repository: string, number: number) {
@@ -3658,7 +3583,6 @@ const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(awsClientC
   marshallOptions: { removeUndefinedValues: true },
 });
 const s3 = new S3Client(awsClientConfiguration);
-const agentCore = new BedrockAgentCoreClient(awsClientConfiguration);
 const secretsManager = new SecretsManagerClient(awsClientConfiguration);
 const codeBuild = createCodeBuildGateway(awsClientConfiguration);
 const stepFunctions = new SFNClient(awsClientConfiguration);
@@ -3741,17 +3665,6 @@ export const handler = createAwsBrokerHandler({
         },
       }
     : {}),
-  async stopRuntimeSession(input) {
-    await agentCore.send(new StopRuntimeSessionCommand({
-      agentRuntimeArn: input.runtimeArn,
-      qualifier: input.endpointQualifier,
-      runtimeSessionId: input.runtimeSessionId,
-      clientToken: randomUUID(),
-    }));
-  },
-  async deleteWorkspaceSession(input) {
-    await deleteCapacityProviderWorkspaceSession(agentCore, input);
-  },
   async deleteEc2Session(workspaceId) {
     await ec2Sessions.deleteSession(workspaceId);
   },

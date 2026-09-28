@@ -86,7 +86,7 @@ export function passingChecks(overrides: Partial<PrerequisiteChecks> = {}): Prer
     get models() { return state.models; },
     get bootstraps() { return state.bootstraps; },
     converse: async (modelId) => { state.models.push(modelId); },
-    agentCore: async () => undefined,
+    ec2Quota: async () => 32,
     commandVersion: async (command) => (command === "node" ? "v22.20.0" : "10.9.0"),
     cdkBootstrapped: async () => true,
     runCdkBootstrap: async () => { state.bootstraps += 1; },
@@ -130,7 +130,7 @@ export function allStackOutputs(env = "staging"): Record<string, StackOutputs> {
   const name = (part: Parameters<typeof environmentStackName>[1]) => environmentStackName(env, part);
   return {
     [name("access")]: { ArtifactBucketName: `agentx-${env}-access-artifactbucket-abc`, CloudFormationRoleArn: `arn:aws:iam::123456789012:role/agentx-${env}-cloudformation`, OperatorRoleArn: `arn:aws:iam::123456789012:role/agentx-${env}-operator`, PullThroughPrefix: `agentx-${env}` },
-    [name("foundation")]: { CapacityProviderArn: `arn:aws:bedrock-agentcore:us-east-1:123456789012:capacity-provider/agentx_${env}_capacity-AbCdEfGhIj`, VpcId: "vpc-0123456789abcdef0", PrivateSubnetIds: "subnet-1,subnet-2", SessionManagerSecurityGroupId: "sg-0123456789abcdef0", WorkspaceKmsKeyArn: "arn:aws:kms:us-east-1:123456789012:key/k", Ec2WorkerInstanceRoleArn: `arn:aws:iam::123456789012:role/agentx/${env}/worker`, Ec2WorkerLaunchTemplateId: "lt-0123456789abcdef0", ...foundationParameterDefaults() },
+    [name("foundation")]: { VpcId: "vpc-0123456789abcdef0", PrivateSubnetIds: "subnet-1,subnet-2", SessionManagerSecurityGroupId: "sg-0123456789abcdef0", WorkspaceKmsKeyArn: "arn:aws:kms:us-east-1:123456789012:key/k", Ec2WorkerInstanceRoleArn: `arn:aws:iam::123456789012:role/agentx/${env}/worker`, Ec2WorkerLaunchTemplateId: "lt-0123456789abcdef0", ...foundationParameterDefaults() },
     [name("identity")]: { Issuer: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_abc", Audience: "client123", ClientId: "client123" },
     [name("control-plane")]: {
       ApiEndpoint: "https://abc123.execute-api.us-east-1.amazonaws.com",

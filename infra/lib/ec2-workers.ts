@@ -74,7 +74,7 @@ export class Ec2WorkerFoundation extends Construct {
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
-    // Today's AgentCore runtime execution role, minus AgentCore: pull the worker image, call
+    // The worker execution role can pull the worker image, call
     // Bedrock models, write container logs.
     this.instanceRole = new iam.Role(this, "InstanceRole", {
       assumedBy: new iam.ServicePrincipal("ec2.amazonaws.com", {

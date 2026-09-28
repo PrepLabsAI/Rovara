@@ -2,11 +2,6 @@
 // init will create, and an estimated monthly cost at a stated usage, then ask. Prices are us-east-1
 // list prices checked on the date in PRICES_CHECKED; the orchestrator per-turn figures come from the
 // 2026-09-25 evaluation in the spec's Decisions.
-//
-// AgentCore may add its own charge on top of the EC2 and EBS lines below for the instances-ebs
-// capacity provider mode; that charge is not confirmed here (Task 6 is a plan estimate, not a
-// billed observation) and is called out in the plan text and the unpriced list. The real bill is
-// checked during the live test (phase 15d1's manual verification step), not assumed here.
 import {
   agentXError, defaultBoundaryName, environmentCloudFormationRoleName, environmentOperatorRoleName, environmentRolePath, environmentStackName,
 } from "@agentx/contracts";
@@ -120,9 +115,8 @@ export function installPlanText(answers: InitAnswers, estimate: CostEstimate, no
     "Estimated monthly cost:",
     ...estimate.lines.map((line) => `  ${line.usd === undefined ? "    n/a" : money(line.usd).padStart(8)}  ${line.item} (${line.basis})`),
     `Estimated monthly total: ${money(estimate.totalUsd)} at ${count(STATED_USAGE.turnsPerMonth)} turns, ${count(STATED_USAGE.workerSessionsPerMonth)} worker sessions and ${STATED_USAGE.workerInstanceHoursPerMonth} worker instance-hours a month (us-east-1 list prices, ${PRICES_CHECKED}; your bill will differ)${estimate.unpriced.length > 0 ? `, not counting ${estimate.unpriced.join(", ")}` : ""}.`,
-    "This does not include any separate AgentCore runtime charge on top of EC2 and EBS for the instances-ebs capacity provider mode; that applies to AgentCore workers only, has not been confirmed, and the live test checks the real bill.",
     "",
-    "To remove it later, follow the teardown guide (agentx destroy arrives in phase 15e). Deleting the capacity provider deletes every AgentCore workspace volume; EC2 worker volumes are separate and are deleted by the teardown steps.",
+    "To remove it later, follow the teardown guide (agentx destroy arrives in phase 15e). EC2 worker volumes are deleted by the teardown steps.",
   ];
   return `${lines.join("\n")}\n`;
 }

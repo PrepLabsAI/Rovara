@@ -17,10 +17,6 @@ export type Handler = (event: unknown) => Promise<{ statusCode: number; body: st
 
 export interface SlackBrokerModule {
   createAwsBrokerHandler: (dependencies: never) => Handler;
-  deleteCapacityProviderWorkspaceSession: (
-    client: { send(command: unknown): Promise<unknown> },
-    input: { capacityProviderArn: string; runtimeSessionId: string },
-  ) => Promise<void>;
 }
 
 let loaded: SlackBrokerModule | undefined;
@@ -52,21 +48,18 @@ export function createBroker(options: {
   organizationLimit?: number;
   slack?: boolean;
   githubMcp?: GitHubMcpDependencies;
-  deleteWorkspaceSession?: () => Promise<void>;
-  deleteEc2Session?: (workspaceId: string) => Promise<void>;
+  deleteEc2Session?: ((workspaceId: string) => Promise<void>) | null;
   connectorTypes?: Record<string, ConnectorType>;
   connectorCredentials?: ConnectorCredentialsConfiguration;
   credentialRegistry?: CredentialRegistry;
 } = {}) {
   if (!loaded) throw new Error("call loadSlackBroker() in a beforeAll before createBroker()");
   const db = new FakeDynamoDb();
-  const deleteWorkspaceSession = vi.fn(options.deleteWorkspaceSession ?? (async () => undefined));
+  const deleteEc2Session = options.deleteEc2Session === null ? undefined : vi.fn(options.deleteEc2Session ?? (async () => undefined));
   const handler = loaded.createAwsBrokerHandler({
     documentClient: db,
     s3: { send: vi.fn() },
-    stopRuntimeSession: vi.fn(),
-    deleteWorkspaceSession,
-    ...(options.deleteEc2Session ? { deleteEc2Session: options.deleteEc2Session } : {}),
+    ...(deleteEc2Session ? { deleteEc2Session } : {}),
     tableName: "state",
     artifactBucketName: "artifacts",
     issuer,
@@ -90,7 +83,7 @@ export function createBroker(options: {
           },
         }),
   } as never);
-  return { db, handler, deleteWorkspaceSession };
+  return { db, handler, deleteEc2Session };
 }
 
 export interface CallOptions {
@@ -165,10 +158,11 @@ export async function registerSlackProject(
         ...(options.connectors ? { integrations: { connectors: options.connectors } } : {}),
       },
       runtimeBinding: {
-        runtimeArn: `arn:aws:bedrock-agentcore:us-east-1:${account}:runtime/agentx_production_worker-YVirjlFgvk`,
-        endpointQualifier: "DEFAULT",
-        deploymentMode: "instances-ebs",
-        capacityProviderArn: `arn:aws:bedrock-agentcore:us-east-1:${account}:capacity-provider/agentx_production_capacity_v3-VwkM93EABZ`,
+        deploymentMode: "ec2-ebs" as const,
+        launchTemplateId: "lt-0123456789abcdef0",
+        subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0123456789abcdef0" }],
+        volumeSizeGiB: 20,
+        volumeType: "gp3" as const,
       },
     },
   });

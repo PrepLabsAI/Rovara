@@ -4,29 +4,19 @@ import {
   ProjectDefinitionSchema,
   WorkspaceDeploymentModeSchema,
   agentXError,
-  unhandledDeploymentMode,
-  type AgentCoreDeploymentMode,
   type Ec2RuntimeBinding,
   type ProjectDefinition,
-  type WorkspaceDeploymentMode,
 } from "@agentx/contracts";
 import { readJsonResponse, serverError } from "./http.js";
 
-export type ProjectRuntimeBinding =
-  | {
-      runtimeArn: string;
-      endpointQualifier: string;
-      deploymentMode: AgentCoreDeploymentMode;
-      capacityProviderArn?: string;
-    }
-  | Ec2RuntimeBinding;
+export type ProjectRuntimeBinding = Ec2RuntimeBinding;
 
 /** The runtime binding the `admin project register` flags describe; each mode takes only its own flags. */
 export function cliRuntimeBinding(
-  deploymentMode: WorkspaceDeploymentMode,
+  deploymentMode: string,
   options: {
     runtimeArn?: string;
-    endpointQualifier: string;
+    endpointQualifier?: string;
     capacityProviderArn?: string;
     launchTemplateId?: string;
     subnets?: string;
@@ -35,21 +25,9 @@ export function cliRuntimeBinding(
   },
 ): ProjectRuntimeBinding {
   switch (deploymentMode) {
-    case "instances-ebs":
-    case "demo-microvm":
-      if (options.runtimeArn === undefined) throw agentXError("CONFIG_INVALID", `${deploymentMode} registration requires --runtime-arn`);
-      if (options.launchTemplateId !== undefined || options.subnets !== undefined) {
-        throw agentXError("CONFIG_INVALID", "--launch-template-id and --subnets apply to ec2-ebs only");
-      }
-      return {
-        runtimeArn: options.runtimeArn,
-        endpointQualifier: options.endpointQualifier,
-        deploymentMode,
-        ...(options.capacityProviderArn === undefined ? {} : { capacityProviderArn: options.capacityProviderArn }),
-      };
     case "ec2-ebs": {
       if (options.runtimeArn !== undefined || options.capacityProviderArn !== undefined) {
-        throw agentXError("CONFIG_INVALID", "--runtime-arn and --capacity-provider-arn apply to AgentCore modes only");
+        throw agentXError("CONFIG_INVALID", "--runtime-arn and --capacity-provider-arn are no longer supported");
       }
       if (options.launchTemplateId === undefined || options.subnets === undefined) {
         throw agentXError("CONFIG_INVALID", "ec2-ebs registration requires --launch-template-id and --subnets");
@@ -72,7 +50,7 @@ export function cliRuntimeBinding(
       return parsed.data;
     }
     default:
-      return unhandledDeploymentMode(deploymentMode);
+      throw agentXError("CONFIG_INVALID", "only ec2-ebs registration is supported");
   }
 }
 
@@ -87,24 +65,7 @@ export async function registerProject(
 ): Promise<unknown> {
   const definition = ProjectDefinitionSchema.parse(options.definition);
   WorkspaceDeploymentModeSchema.parse(options.runtimeBinding.deploymentMode);
-  const binding = options.runtimeBinding;
-  switch (binding.deploymentMode) {
-    case "instances-ebs":
-      if (binding.capacityProviderArn === undefined) {
-        throw agentXError("CONFIG_INVALID", "instances-ebs registration requires --capacity-provider-arn");
-      }
-      break;
-    case "demo-microvm":
-      if (binding.capacityProviderArn !== undefined) {
-        throw agentXError("CONFIG_INVALID", "demo-microvm registration does not accept a capacity provider ARN");
-      }
-      break;
-    case "ec2-ebs":
-      Ec2RuntimeBindingSchema.parse(binding);
-      break;
-    default:
-      unhandledDeploymentMode(binding);
-  }
+  Ec2RuntimeBindingSchema.parse(options.runtimeBinding);
   const response = await fetchImplementation(`${options.controlPlaneUrl.replace(/\/$/, "")}/v1/admin/projects`, {
     method: "POST",
     headers: {

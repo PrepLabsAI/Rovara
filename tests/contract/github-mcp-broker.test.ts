@@ -26,11 +26,18 @@ describe("thread-authenticated GitHub MCP routes", () => {
     const records = new Map<string, Record<string, unknown>>();
     const key = (pk: string, sk: string) => `${pk}\0${sk}`;
     records.set(key(`WORKSPACE#${workspaceId}`, "META"), {
-      id: workspaceId, ownerKey, projectName: "demo", projectRevision: 2,
+      deploymentMode: "ec2-ebs" as const,
+      id: workspaceId,
+      ownerKey,
+      projectName: "demo",
+      projectRevision: 2,
       environmentDigest: `example.test/agentx@sha256:${"a".repeat(64)}`,
-      runtimeArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/agentx", endpointQualifier: "DEFAULT",
-      runtimeSessionId: randomUUID(), deploymentMode: "demo-microvm", rootPath: "/mnt/workspace", status: "READY",
-      activeOperationId: null, fence: 1, createdAt: now, updatedAt: now,
+      rootPath: "/mnt/workspace",
+      status: "READY",
+      activeOperationId: null,
+      fence: 1,
+      createdAt: now,
+      updatedAt: now,
     });
     const membershipKey = key(`MEMBER#${ownerKey}`, "PROJECT#demo");
     records.set(membershipKey, { ownerKey, projectName: "demo", role: "developer" });
@@ -74,7 +81,7 @@ describe("thread-authenticated GitHub MCP routes", () => {
       }, required: ["owner", "repo", "method"] } }], call, close: vi.fn(async () => undefined),
     }));
     const handler = createAwsBrokerHandler({
-      documentClient: documentClient as never, s3: {} as never, stopRuntimeSession: vi.fn(), tableName: "state", artifactBucketName: "artifacts",
+      documentClient: documentClient as never, s3: {} as never, tableName: "state", artifactBucketName: "artifacts",
       issuer, adminClaim: "groups", adminValues: ["admins"], callbackSigningKey: "c".repeat(64),
       repositoryGrants: new RepositoryGrantService({ resolve: async () => ({}) }),
       githubPullRequests: {} as never, codeBuild: {} as never, githubMcp: { credentials, connect },

@@ -115,15 +115,12 @@ describe("strict contracts", () => {
   it("drops the environment pin from a workspace record written before it was removed", () => {
     const now = new Date().toISOString();
     const workspace = WorkspaceInstanceSchema.parse({
+      deploymentMode: "ec2-ebs" as const,
       id: crypto.randomUUID(),
       ownerKey: "a".repeat(64),
       projectName: "payments",
       projectRevision: 1,
       environmentDigest: digest,
-      runtimeArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/agentx",
-      endpointQualifier: "DEFAULT",
-      runtimeSessionId: crypto.randomUUID(),
-      deploymentMode: "demo-microvm",
       rootPath: "/mnt/workspace",
       status: "READY",
       fence: 0,
@@ -218,17 +215,12 @@ describe("strict contracts", () => {
   it("rejects unsupported states and unknown workspace keys", () => {
     expect(() =>
       WorkspaceInstanceSchema.parse({
+        deploymentMode: "ec2-ebs" as const,
         id: crypto.randomUUID(),
         ownerKey: "owner",
         projectName: "payments",
         projectRevision: 1,
         environmentDigest: digest,
-        runtimeArn: "arn:aws:bedrock-agentcore:us-west-2:123456789012:runtime/agentx",
-        endpointQualifier: "DEFAULT",
-        runtimeSessionId: crypto.randomUUID(),
-        deploymentMode: "instances-ebs",
-        capacityProviderArn:
-          "arn:aws:bedrock-agentcore:us-west-2:123456789012:capacity-provider/agentx",
         rootPath: "/mnt/workspace",
         status: "MAGIC",
         activeOperationId: null,
@@ -240,44 +232,17 @@ describe("strict contracts", () => {
     ).toThrow();
   });
 
-  it("requires mode-appropriate private storage bindings", () => {
-    const base = {
-      id: crypto.randomUUID(),
-      ownerKey: "a".repeat(64),
-      projectName: "payments",
-      projectRevision: 1,
-      environmentDigest: digest,
-      runtimeArn: "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/agentx",
-      endpointQualifier: "DEFAULT",
-      runtimeSessionId: crypto.randomUUID(),
-      rootPath: "/mnt/workspace",
-      status: "READY",
-      activeOperationId: null,
-      fence: 0,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+  it("keeps EC2 workspace routing in the session record and reads the removed environment pin", () => {
+    const workspace = {
+      id: crypto.randomUUID(), ownerKey: "a".repeat(64), projectName: "payments", projectRevision: 1,
+      deploymentMode: "ec2-ebs" as const, rootPath: "/mnt/workspace", status: "READY", fence: 0,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), environmentDigest: digest,
     };
-
-    expect(
-      WorkspaceInstanceSchema.parse({ ...base, deploymentMode: "demo-microvm" }),
-    ).not.toHaveProperty("capacityProviderArn");
-    const withoutActiveOperation = Object.fromEntries(
-      Object.entries(base).filter(([key]) => key !== "activeOperationId"),
-    );
-    expect(
-      WorkspaceInstanceSchema.parse({ ...withoutActiveOperation, deploymentMode: "demo-microvm" }),
-    ).toHaveProperty("activeOperationId", null);
-    expect(() =>
-      WorkspaceInstanceSchema.parse({ ...base, deploymentMode: "instances-ebs" }),
-    ).toThrow(/capacity provider/i);
-    expect(() =>
-      WorkspaceInstanceSchema.parse({
-        ...base,
-        deploymentMode: "demo-microvm",
-        capacityProviderArn:
-          "arn:aws:bedrock-agentcore:us-east-1:123456789012:capacity-provider/agentx",
-      }),
-    ).toThrow(/must not have/i);
+    const parsed = WorkspaceInstanceSchema.parse(workspace);
+    expect(parsed).toHaveProperty("activeOperationId", null);
+    expect(parsed).not.toHaveProperty("environmentDigest");
+    expect(parsed).not.toHaveProperty("runtimeArn");
+    expect(() => WorkspaceInstanceSchema.parse({ ...workspace, endpointQualifier: "DEFAULT" })).toThrow(/must not have/);
   });
 
   it("limits prompts by UTF-8 bytes and rejects unknown operation fields", () => {

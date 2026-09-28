@@ -212,10 +212,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .command("register")
     .description("register an immutable project revision and trusted runtime binding")
     .requiredOption("--file <path>", "project YAML file")
-    .requiredOption("--deployment-mode <mode>", "demo-microvm, instances-ebs or ec2-ebs")
-    .option("--runtime-arn <arn>", "deployed AgentCore runtime ARN (AgentCore modes)")
-    .option("--endpoint-qualifier <qualifier>", "runtime endpoint qualifier (AgentCore modes)", "DEFAULT")
-    .option("--capacity-provider-arn <arn>", "required for instances-ebs")
+    .option("--deployment-mode <mode>", "ec2-ebs", "ec2-ebs")
     .option("--launch-template-id <id>", "EC2 worker launch template (ec2-ebs), the foundation's Ec2WorkerLaunchTemplateId")
     .option("--subnets <pairs>", "availabilityZone=subnetId pairs, comma-separated (ec2-ebs), the foundation's Ec2WorkerSubnets")
     .option("--volume-size-gib <size>", "workspace volume size in GiB (ec2-ebs)", "20")
@@ -223,9 +220,6 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .action(async (options: {
       file: string;
       deploymentMode: string;
-      runtimeArn?: string;
-      endpointQualifier: string;
-      capacityProviderArn?: string;
       launchTemplateId?: string;
       subnets?: string;
       volumeSizeGib: string;

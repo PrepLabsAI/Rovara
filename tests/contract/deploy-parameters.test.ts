@@ -39,7 +39,7 @@ const answers = (): InstallAnswers => ({
 const outputs = {
   access: { ArtifactBucketName: "agentx-staging-access-artifactbucket-abc", CloudFormationRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-cloudformation", OperatorRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-operator", PullThroughPrefix: "agentx-staging" },
   foundation: {
-    CapacityProviderArn: "arn:aws:bedrock-agentcore:us-east-1:123456789012:capacity-provider/agentx_staging_capacity-AbCdEfGhIj", VpcId: "vpc-0123456789abcdef0", PrivateSubnetIds: "subnet-1,subnet-2",
+    VpcId: "vpc-0123456789abcdef0", PrivateSubnetIds: "subnet-1,subnet-2",
     SessionManagerSecurityGroupId: "sg-0123456789abcdef0", DispatcherSecurityGroupId: "sg-0fedcba9876543210", WorkspaceKmsKeyArn: "arn:aws:kms:us-east-1:123456789012:key/k",
     Ec2WorkerInstanceRoleArn: "arn:aws:iam::123456789012:role/agentx/staging/worker", Ec2WorkerLaunchTemplateId: "lt-0123456789abcdef0",
   },

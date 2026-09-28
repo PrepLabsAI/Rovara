@@ -58,11 +58,7 @@ describe("workspace preparation coordination", () => {
       memberships,
       repositoryGrants: grants,
       allocateRuntime: async () => ({
-        runtimeArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/agentx",
-        endpointQualifier: "DEFAULT",
-        runtimeSessionId: randomUUID(),
-        deploymentMode: "instances-ebs",
-        capacityProviderArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:capacity-provider/agentx",
+        deploymentMode: "ec2-ebs" as const,
       }),
       createCallbackCapability: () => "c".repeat(64),
     });
@@ -85,7 +81,7 @@ describe("workspace preparation coordination", () => {
     expect(dispatch.alreadyReady).toBe(false);
     expect(duplicate.operationId).toBe(dispatch.operationId);
     expect(dispatch.workspace.ownerKey).toBe(targetOwnerKey);
-    expect(dispatch.workspace.deploymentMode).toBe("instances-ebs");
+    expect(dispatch.workspace.deploymentMode).toBe("ec2-ebs");
     expect(dispatch.invocation?.kind).toBe("prepare");
     if (dispatch.invocation?.kind !== "prepare") throw new Error("missing prepare invocation");
     const grant = dispatch.invocation.payload.repositoryGrant;
@@ -170,11 +166,7 @@ describe("workspace preparation coordination", () => {
         token: `resolved-${reference}`,
       })),
       allocateRuntime: async () => ({
-        runtimeArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/agentx",
-        endpointQualifier: "DEFAULT",
-        runtimeSessionId: randomUUID(),
-        deploymentMode: "instances-ebs",
-        capacityProviderArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:capacity-provider/agentx",
+        deploymentMode: "ec2-ebs" as const,
       }),
       createCallbackCapability: () => "c".repeat(64),
     });

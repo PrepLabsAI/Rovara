@@ -209,9 +209,9 @@ describe("writeExportBundle", () => {
     expect(script).toContain("agentx deploy --mode install --parts foundation,identity,control-plane,runtime,slack");
     // deploy-access.sh never creates the callback signing key; agentx deploy does, on its first run.
     expect(readmeText).toMatch(/does not create the callback signing key/);
-    // I4: tearing down is documented. No AgentCore capacity provider or runtime survives it (#118).
+    // I4: tearing down is documented. No retired runtime capacity provider or runtime survives it (#118).
     expect(readmeText).toContain("## Tearing down an environment");
-    expect(readmeText).not.toMatch(/capacity provider|bedrock-agentcore/);
+    expect(readmeText).not.toMatch(/capacity provider|delete-agent-runtime/);
     expect(readmeText).toContain("--force-delete-without-recovery");
     expect(readmeText).toContain("agentx destroy");
     expect(readmeText).toContain("The foundation's VPC flow-log group");

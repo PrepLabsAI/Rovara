@@ -7,7 +7,7 @@ import { z } from "zod";
 const AvailabilityZoneSchema = z.string().regex(/^[a-z]{2}(?:-[a-z]+)+-\d+[a-z]$/, "invalid availability zone");
 const SubnetIdSchema = z.string().regex(/^subnet-[0-9a-f]{8,17}$/, "invalid subnet ID");
 
-/** A project's trusted runtime binding for ec2-ebs. It carries no AgentCore ARNs. */
+/** A project's trusted EC2 launch template, subnet and volume settings. */
 export const Ec2RuntimeBindingSchema = z
   .object({
     deploymentMode: z.literal("ec2-ebs"),

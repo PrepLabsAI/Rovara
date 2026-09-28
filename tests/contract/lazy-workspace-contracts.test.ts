@@ -14,10 +14,16 @@ describe("a workspace with no compute", () => {
 
   it("stores a thread workspace record before its compute exists", () => {
     const record = WorkspaceInstanceSchema.parse({
-      id: workspaceId, ownerKey: "o".repeat(64), projectName: "payments", projectRevision: 1,
-      runtimeArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/agentx_production_worker-YVirjlFgvk",
-      endpointQualifier: "DEFAULT", runtimeSessionId: operationId, deploymentMode: "demo-microvm", rootPath: "/mnt/workspace",
-      status: "UNPREPARED", fence: 0, createdAt: "2026-09-25T10:00:00.000Z", updatedAt: "2026-09-25T10:00:00.000Z",
+      deploymentMode: "ec2-ebs" as const,
+      id: workspaceId,
+      ownerKey: "o".repeat(64),
+      projectName: "payments",
+      projectRevision: 1,
+      rootPath: "/mnt/workspace",
+      status: "UNPREPARED",
+      fence: 0,
+      createdAt: "2026-09-25T10:00:00.000Z",
+      updatedAt: "2026-09-25T10:00:00.000Z",
     });
     expect(record).toMatchObject({ status: "UNPREPARED", fence: 0, activeOperationId: null });
   });

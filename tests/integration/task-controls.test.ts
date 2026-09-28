@@ -56,7 +56,7 @@ describe("task and lifecycle controls", () => {
     });
   });
 
-  it("stops only idle compute and resumes the workspace's pinned revision after a newer registration", async () => {
+  it("refuses manual compute stop and resumes the workspace's pinned revision after a newer registration", async () => {
     const registry = new InMemoryRegistry();
     const admin = identity("c".repeat(64), true);
     const developer = identity("d".repeat(64), false);
@@ -68,15 +68,10 @@ describe("task and lifecycle controls", () => {
     projects.register(admin, project(1), memberships);
     projects.register(admin, project(2), memberships);
     const ready = await registry.createDefault(workspace(developer.ownerKey));
-    if (ready.deploymentMode === "ec2-ebs") throw new Error("expected an AgentCore workspace");
-    const stopRuntimeSession = vi.fn(async () => undefined);
-    const lifecycle = new LifecycleService({ registry, memberships, stopRuntimeSession });
-    const stopped = await lifecycle.stop(admin, ready.id);
-    expect(stopped.status).toBe("STOPPED");
-    expect(stopRuntimeSession).toHaveBeenCalledWith({
-      runtimeArn: ready.runtimeArn,
-      runtimeSessionId: ready.runtimeSessionId,
-    });
+    const lifecycle = new LifecycleService({ registry, memberships });
+    await expect(lifecycle.stop(admin, ready.id)).rejects.toThrow(/manual compute stop is not supported/);
+    // The idle reaper, rather than an administrator's stop request, stops EC2 compute.
+    await registry.setLifecycleStatus(ready.id, "STOPPED");
 
     const resume = new ResumeCoordinator({ registry, projects });
     const resuming = await resume.begin(developer, ready.id);
@@ -107,15 +102,11 @@ function request(prompt: string) {
 function workspace(ownerKey: string) {
   const now = new Date().toISOString();
   return {
+    deploymentMode: "ec2-ebs" as const,
     id: randomUUID(),
     ownerKey,
     projectName: "payments",
     projectRevision: 1,
-    runtimeArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/agentx",
-    endpointQualifier: "DEFAULT",
-    runtimeSessionId: randomUUID(),
-    deploymentMode: "instances-ebs" as const,
-    capacityProviderArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:capacity-provider/agentx",
     rootPath: "/mnt/workspace" as const,
     status: "READY" as const,
     preparationManifest: ".agentx/preparation-manifest.json",

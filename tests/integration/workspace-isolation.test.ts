@@ -110,16 +110,12 @@ function identity(key: string, isAdministrator = true): AuthenticatedIdentity {
 function workspace(ownerKey: string) {
   const now = new Date().toISOString();
   return {
+    deploymentMode: "ec2-ebs" as const,
     id: crypto.randomUUID(),
     ownerKey,
     projectName: "payments",
     projectRevision: 1,
     environmentDigest: `registry.example.test/worker@sha256:${"a".repeat(64)}`,
-    runtimeArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/agentx",
-    endpointQualifier: "DEFAULT",
-    runtimeSessionId: crypto.randomUUID(),
-    deploymentMode: "instances-ebs" as const,
-    capacityProviderArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:capacity-provider/agentx",
     rootPath: "/mnt/workspace" as const,
     status: "READY" as const,
     preparationManifest: ".agentx/preparation-manifest.json",

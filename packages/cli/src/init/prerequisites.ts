@@ -3,7 +3,7 @@ import type { ModelsAnswers } from "../deploy/answer-schemas.js";
 // FR-015: everything init checks before it creates anything. Every problem is collected and
 // reported together, with what to change; cdk bootstrap (which creates the CDKToolkit stack) is
 // offered only when every other check has passed.
-import { BedrockAgentCoreControlClient, ListAgentRuntimesCommand } from "@aws-sdk/client-bedrock-agentcore-control";
+import { ServiceQuotasClient, GetServiceQuotaCommand } from "@aws-sdk/client-service-quotas";
 import { BedrockRuntimeClient, ConverseCommand } from "@aws-sdk/client-bedrock-runtime";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { agentXError, AgentXError } from "@agentx/contracts";
@@ -17,8 +17,8 @@ export interface PrerequisiteChecks {
   /** A one-token Bedrock Converse call. */
   converse(modelId: string): Promise<void>;
   openRouter?(modelId: string, config: NonNullable<ModelsAnswers["openRouter"]>): Promise<void>;
-  /** A read-only AgentCore control-plane call in the region (ListAgentRuntimes, 1 result). */
-  agentCore(): Promise<void>;
+  /** Regional on-demand Standard EC2 vCPU quota. */
+  ec2Quota(): Promise<number>;
   /** The command's --version output, or undefined when it is not installed. */
   commandVersion(command: string): Promise<string | undefined>;
   cdkBootstrapped(): Promise<boolean>;
@@ -108,7 +108,7 @@ function nodeVersionOk(version: string): boolean {
 }
 
 /** Everything `agentx init` must confirm before it creates a single resource: the account and
- * region can run AgentCore, each distinct model answers, the identity provider (when self-hosted)
+ * region has EC2 capacity quota, each distinct model answers, the identity provider (when self-hosted)
  * agrees with itself, and the chosen engine's tooling is in place. Every problem found is collected
  * and reported together (FR-015): a person fixing an account should not have to run init five
  * times to hear about a fifth thing wrong each time. */
@@ -127,19 +127,12 @@ export async function checkPrerequisites(input: {
   if (regionProblem !== undefined) problems.push(regionProblem);
 
   try {
-    await checks.agentCore();
-    write(`ok AgentCore Runtime is available in ${region}`);
+    const quota = await checks.ec2Quota();
+    if (!Number.isFinite(quota) || quota < 1) {
+      problems.push(`EC2 Standard on-demand vCPU quota in ${region} must be at least 1 for an m6g.medium worker; request an increase in Service Quotas`);
+    } else write(`ok EC2 Standard on-demand vCPU quota is ${quota} in ${region}`);
   } catch (error) {
-    if (errorName(error).startsWith("AccessDenied")) write(`ok AgentCore Runtime answers in ${region}`);
-    else if (endpointMissing(error)) {
-      // Item 5: name the exact hostname this machine failed to resolve, so a DNS or network
-      // problem is not confused with the region genuinely lacking the service.
-      problems.push(`Amazon Bedrock AgentCore Runtime is not available in ${region} (or this machine cannot resolve bedrock-agentcore-control.${region}.amazonaws.com; check your network)`);
-    } else {
-      // Item 6: name a next step for a failure that is neither an access denial nor a missing
-      // endpoint (a network blip, a service error, and so on).
-      problems.push(`could not reach AgentCore Runtime in ${region}: ${errorMessage(error)}; check your credentials or network, or choose another region with --region`);
-    }
+    problems.push(`could not check EC2 vCPU quota in ${region}: ${errorMessage(error)}; check Service Quotas read permission and your network`);
   }
 
   const roles: Array<[ModelRole, string]> = [
@@ -283,7 +276,7 @@ export function awsPrerequisiteChecks(input: { region: string; account: string; 
     maxAttempts: CONVERSE_CLIENT_MAX_ATTEMPTS,
     requestHandler: new NodeHttpHandler(CONVERSE_REQUEST_HANDLER_OPTIONS),
   });
-  const agentCore = new BedrockAgentCoreControlClient({ region: input.region });
+  const quotas = new ServiceQuotasClient({ region: input.region });
   return {
     async openRouter(modelId, config) {
       openRouterModel(modelId);
@@ -313,8 +306,9 @@ export function awsPrerequisiteChecks(input: { region: string; account: string; 
         `${modelId} did not answer a one-token test call in ${input.region} within ${CONVERSE_DEADLINE_MS / 1000}s; check your credentials or network, or try again`,
       );
     },
-    async agentCore() {
-      await agentCore.send(new ListAgentRuntimesCommand({ maxResults: 1 }));
+    async ec2Quota() {
+      const response = await quotas.send(new GetServiceQuotaCommand({ ServiceCode: "ec2", QuotaCode: "L-1216C47A" }));
+      return response.Quota?.Value ?? 0;
     },
     async commandVersion(command) {
       try {

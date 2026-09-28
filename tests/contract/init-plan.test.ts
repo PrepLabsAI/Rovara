@@ -65,8 +65,7 @@ describe("install plan", () => {
       "Alerts (subscribed in a later AgentX release): email to ops@example.com",
       "AgentX never answers itself or other bots. Mentions people post through other apps: accept (slack.appPostedMessages).",
       "Estimated monthly total: $152.98 at 1,000 turns, 100 worker sessions and 60 worker instance-hours a month",
-      "Deleting the capacity provider deletes every AgentCore workspace volume; EC2 worker volumes are separate and are deleted by the teardown steps.",
-      "that applies to AgentCore workers only",
+      "EC2 worker volumes are deleted by the teardown steps.",
       "Worker root volumes (30 GiB gp3)",
       "KMS (including the invocation-signing key)",
     ]) expect(text).toContain(expected);

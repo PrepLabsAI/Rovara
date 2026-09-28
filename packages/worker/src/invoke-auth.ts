@@ -39,15 +39,12 @@ export type InvokeVerification =
 const ENVIRONMENT_KEYS = ["AGENTX_INVOKE_PUBLIC_KEY", "AGENTX_WORKSPACE_ID", "AGENTX_SESSION_GENERATION"] as const;
 
 /**
- * Reads the invoke authentication an EC2 boot passes in. None of the variables means an AgentCore
- * worker, which has no network ingress and is invoked only through AgentCore, so it returns
- * undefined. Some but not all of them is a broken boot, and the worker must not start.
+ * Reads required invoke authentication from the EC2 boot environment.
  */
 export function invokeAuthenticationFromEnvironment(
   environment: NodeJS.ProcessEnv = process.env,
-): InvokeAuthentication | undefined {
+): InvokeAuthentication {
   const present = ENVIRONMENT_KEYS.filter((key) => environment[key]);
-  if (present.length === 0) return undefined;
   if (present.length !== ENVIRONMENT_KEYS.length) {
     const missing = ENVIRONMENT_KEYS.filter((key) => !environment[key]);
     throw new Error(`invoke authentication is partly configured; missing ${missing.join(", ")}`);

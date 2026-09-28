@@ -166,7 +166,7 @@ async function createDefaultSession(
     const resolved = await createModelRuntimeWithFallback(input.model, "worker");
     const modelRuntime = resolved.runtime;
     if (resolved.model.provider === "amazon-bedrock") {
-      modelRuntime.registerNativeProvider(agentCoreBedrockProvider());
+      modelRuntime.registerNativeProvider(executionRoleBedrockProvider());
       await modelRuntime.refresh({ allowNetwork: false, providers: ["amazon-bedrock"] });
     }
     const model = modelRuntime.getModel(resolved.model.provider, resolved.model.modelId);
@@ -221,7 +221,7 @@ async function createDefaultSession(
     };
 }
 
-export function agentCoreBedrockProvider(): ReturnType<typeof amazonBedrockProvider> {
+export function executionRoleBedrockProvider(): ReturnType<typeof amazonBedrockProvider> {
   const provider = amazonBedrockProvider();
   const apiKey = provider.auth.apiKey;
   if (!apiKey) throw new Error("Amazon Bedrock provider lacks its ambient-credential adapter");
@@ -231,8 +231,8 @@ export function agentCoreBedrockProvider(): ReturnType<typeof amazonBedrockProvi
       ...provider.auth,
       apiKey: {
         ...apiKey,
-        check: async () => ({ type: "api_key", source: "AgentCore execution role" }),
-        resolve: async () => ({ auth: {}, source: "AgentCore execution role" }),
+        check: async () => ({ type: "api_key", source: "worker execution role" }),
+        resolve: async () => ({ auth: {}, source: "worker execution role" }),
       },
     },
   };

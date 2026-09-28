@@ -263,7 +263,6 @@ export class SessionLifecycle extends Construct {
   /**
    * The dispatcher delivers ec2-ebs work (#84): it runs in the private subnets with the foundation's
    * dispatcher security group, the only other group a worker's port admits, and starts provisioning.
-   * AgentCore invocations still leave through the NAT gateways.
    */
   connectDispatcher(dispatcher: lambda.Function): void {
     (dispatcher.node.defaultChild as lambda.CfnFunction).vpcConfig = {

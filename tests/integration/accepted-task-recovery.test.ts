@@ -8,16 +8,12 @@ describe("accepted task recovery", () => {
     const ownerKey = "a".repeat(64);
     const now = new Date().toISOString();
     const workspace = await registry.createDefault({
+      deploymentMode: "ec2-ebs" as const,
       id: randomUUID(),
       ownerKey,
       projectName: "payments",
       projectRevision: 1,
       environmentDigest: `registry.example.test/worker@sha256:${"a".repeat(64)}`,
-      runtimeArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/agentx",
-      endpointQualifier: "DEFAULT",
-      runtimeSessionId: randomUUID(),
-      deploymentMode: "instances-ebs",
-      capacityProviderArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:capacity-provider/agentx",
       rootPath: "/mnt/workspace",
       status: "READY",
       preparationManifest: ".agentx/preparation-manifest.json",

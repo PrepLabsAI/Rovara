@@ -129,20 +129,12 @@ describe("an EC2 worker authenticating invocations", () => {
   });
 });
 
-describe("an AgentCore worker", () => {
-  it("still accepts invocations without a token, since AgentCore is its only way in", async () => {
-    const { state } = await workerState();
-    const accepted = await handleWorkerRequest(post(invocationFor()), state);
-    expect(accepted.status).toBe(200);
-  });
-});
-
 describe("invoke authentication configuration", () => {
   const spki = signer.publicKey.export({ format: "der", type: "spki" }).toString("base64");
   const complete = { AGENTX_INVOKE_PUBLIC_KEY: spki, AGENTX_WORKSPACE_ID: workspaceId, AGENTX_SESSION_GENERATION: "3" };
 
-  it("is off with none of its variables and on with all of them", () => {
-    expect(invokeAuthenticationFromEnvironment({})).toBeUndefined();
+  it("requires all boot authentication variables", () => {
+    expect(() => invokeAuthenticationFromEnvironment({})).toThrow(/missing/);
     expect(invokeAuthenticationFromEnvironment(complete)).toMatchObject({ workspaceId, generation: 3 });
   });
 

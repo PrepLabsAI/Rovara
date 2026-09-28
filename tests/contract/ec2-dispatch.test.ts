@@ -14,11 +14,11 @@ const keys = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
 // What KMS Sign returns for ECDSA_SHA_256 on an ECC_NIST_P256 key: a DER signature over the message.
 const kmsSign = async (message: Uint8Array) => new Uint8Array(sign("sha256", message, keys.privateKey));
 const binding: Ec2RuntimeBinding = {
-  deploymentMode: "ec2-ebs",
+  deploymentMode: "ec2-ebs" as const,
   launchTemplateId: "lt-0123456789abcdef0",
   subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0aaaaaaaaaaaaaaaa" }],
   volumeSizeGiB: 20,
-  volumeType: "gp3",
+  volumeType: "gp3" as const,
 };
 
 function recordFor(workspaceId = randomUUID(), fence = 2): Ec2OutboxRecord {
@@ -26,7 +26,7 @@ function recordFor(workspaceId = randomUUID(), fence = 2): Ec2OutboxRecord {
   const invocation: WorkerInvocation = {
     protocolVersion: 1, kind: "resume", operationId, workspaceId, fence, projectRevision: 1, callbackCapability: "c".repeat(64), payload: {},
   };
-  return { id: randomUUID(), entityType: "OUTBOX", status: "QUEUED", operationId, workspaceId, deploymentMode: "ec2-ebs", invocation };
+  return { id: randomUUID(), entityType: "OUTBOX", status: "QUEUED", operationId, workspaceId, deploymentMode: "ec2-ebs" as const, invocation };
 }
 
 function delivery(overrides: Partial<Ec2DeliveryDependencies> = {}) {
@@ -82,19 +82,17 @@ describe("ec2-ebs delivery", () => {
 
 describe("the dispatcher with ec2-ebs records", () => {
   function dispatcher(deliverEc2: (record: Ec2OutboxRecord, invocation: WorkerInvocation) => Promise<Ec2Delivery>) {
-    const invoke = vi.fn(async () => ({ statusCode: 200 }));
     const markDelivered = vi.fn(async () => undefined);
     const markFailed = vi.fn(async () => undefined);
-    const handler = createDispatcherHandler({ invoke, markDispatching: async () => true, markDelivered, markFailed, deliverEc2, log: () => undefined });
-    return { handler, invoke, markDelivered, markFailed };
+    const handler = createDispatcherHandler({ markDispatching: async () => true, markDelivered, markFailed, deliverEc2, log: () => undefined });
+    return { handler, markDelivered, markFailed };
   }
 
   it("acknowledges a parked record without marking it delivered or using a retry", async () => {
-    const { handler, invoke, markDelivered } = dispatcher(async () => "WAITING_FOR_SESSION");
+    const { handler, markDelivered } = dispatcher(async () => "WAITING_FOR_SESSION");
     const record = recordFor();
     expect(await handler({ Records: [{ messageId: "m1", body: JSON.stringify(record) }] })).toEqual({ batchItemFailures: [] });
     expect(markDelivered).not.toHaveBeenCalled();
-    expect(invoke).not.toHaveBeenCalled();
   });
 
   it("marks a delivered record DELIVERED, and retries a failed delivery", async () => {
@@ -102,7 +100,6 @@ describe("the dispatcher with ec2-ebs records", () => {
     const record = recordFor();
     await delivered.handler({ Records: [{ messageId: "m1", body: JSON.stringify(record) }] });
     expect(delivered.markDelivered).toHaveBeenCalledWith(record.id);
-    expect(delivered.invoke).not.toHaveBeenCalled();
 
     const failing = dispatcher(async () => { throw new Error("connect ECONNREFUSED"); });
     expect(await failing.handler({ Records: [{ messageId: "m2", body: JSON.stringify(record), attributes: { ApproximateReceiveCount: "1" } }] }))
@@ -120,7 +117,7 @@ describe("ec2-ebs delivery through the real session manager", () => {
       executions: { provisionerArn: "arn:aws:states:us-east-1:111122223333:stateMachine:provisioner", deleterArn: "arn:aws:states:us-east-1:111122223333:stateMachine:deleter", start },
     });
     const record = recordFor();
-    db.set({ pk: `WORKSPACE#${record.workspaceId}`, sk: "META", entityType: "WORKSPACE", deploymentMode: "ec2-ebs", projectName: "ec2-test", projectRevision: 1, activeOperationId: record.operationId, fence: 2 });
+    db.set({ pk: `WORKSPACE#${record.workspaceId}`, sk: "META", entityType: "WORKSPACE", deploymentMode: "ec2-ebs" as const, projectName: "ec2-test", projectRevision: 1, activeOperationId: record.operationId, fence: 2 });
     db.set({ pk: "PROJECT#ec2-test", sk: "REV#000000000001", entityType: "PROJECT", runtimeBinding: binding });
     db.set({ pk: `WORKSPACE#${record.workspaceId}`, sk: `OPERATION#${record.operationId}`, status: "DISPATCHING", fence: 2, eventSequence: 0 });
     db.set({ pk: `OUTBOX#${record.id}`, sk: "OUTBOX", ...record });

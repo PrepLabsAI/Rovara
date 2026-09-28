@@ -1,16 +1,12 @@
 import { createHash } from "node:crypto";
 import {
   Ec2RuntimeBindingSchema,
-  WorkspaceDeploymentModeSchema,
   agentXError,
-  unhandledDeploymentMode,
-  type AgentCoreDeploymentMode,
+  type LegacyDeploymentMode,
   type Ec2RuntimeBinding,
   type WorkerInvocation,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
-
-const AgentCoreDeploymentModeSchema = WorkspaceDeploymentModeSchema.exclude(["ec2-ebs"]);
 
 export interface HttpApiV2Event {
   version?: string;
@@ -39,14 +35,14 @@ export interface AdaptedHttpRequest {
   iamPrincipalArn?: string;
 }
 
-export interface AgentCoreRuntimeBinding {
+export interface LegacyRuntimeBinding {
   runtimeArn: string;
   endpointQualifier: string;
-  deploymentMode: AgentCoreDeploymentMode;
+  deploymentMode: LegacyDeploymentMode;
   capacityProviderArn?: string;
 }
 
-export type RuntimeBinding = AgentCoreRuntimeBinding | Ec2RuntimeBinding;
+export type RuntimeBinding = LegacyRuntimeBinding | Ec2RuntimeBinding;
 
 /**
  * PENDING → QUEUED (publisher) → DELIVERED or FAILED (dispatcher). An ec2-ebs record whose session
@@ -64,8 +60,8 @@ interface OutboxRecordBase {
   invocation: WorkerInvocation;
 }
 
-/** Records written before ec2-ebs existed have no deploymentMode, so its absence means AgentCore. */
-export interface AgentCoreOutboxRecord extends OutboxRecordBase {
+/** Records written before ec2-ebs existed have no deploymentMode, so its absence marks a retired runtime. */
+export interface LegacyOutboxRecord extends OutboxRecordBase {
   deploymentMode?: undefined;
   runtimeArn: string;
   endpointQualifier: string;
@@ -77,7 +73,7 @@ export interface Ec2OutboxRecord extends OutboxRecordBase {
   deploymentMode: "ec2-ebs";
 }
 
-export type DurableOutboxRecord = AgentCoreOutboxRecord | Ec2OutboxRecord;
+export type DurableOutboxRecord = LegacyOutboxRecord | Ec2OutboxRecord;
 
 export function adaptHttpApiEvent(event: HttpApiV2Event): AdaptedHttpRequest {
   const rawPath = event.rawPath ?? "/";
@@ -138,12 +134,12 @@ export function ownerKeyForSubject(issuer: string, subject: string): string {
   return createHash("sha256").update(issuer).update("\0").update(subject).digest("hex");
 }
 
-export function parseRuntimeBinding(value: unknown): RuntimeBinding {
+export function parseRuntimeBinding(value: unknown): Ec2RuntimeBinding {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw agentXError("CONFIG_INVALID", "runtimeBinding must be an object");
   }
   const input = value as Record<string, unknown>;
-  return input.deploymentMode === "ec2-ebs" ? parseEc2RuntimeBinding(input) : parseAgentCoreRuntimeBinding(input);
+  return parseEc2RuntimeBinding(input);
 }
 
 function parseEc2RuntimeBinding(input: Record<string, unknown>): Ec2RuntimeBinding {
@@ -160,56 +156,6 @@ function parseEc2RuntimeBinding(input: Record<string, unknown>): Ec2RuntimeBindi
     subnets: binding.subnets.map((subnet) => ({ availabilityZone: subnet.availabilityZone, subnetId: subnet.subnetId })),
     volumeSizeGiB: binding.volumeSizeGiB,
     volumeType: binding.volumeType,
-  };
-}
-
-function parseAgentCoreRuntimeBinding(input: Record<string, unknown>): AgentCoreRuntimeBinding {
-  const allowed = new Set([
-    "runtimeArn",
-    "endpointQualifier",
-    "deploymentMode",
-    "capacityProviderArn",
-  ]);
-  if (Object.keys(input).some((key) => !allowed.has(key))) {
-    throw agentXError("CONFIG_INVALID", "runtimeBinding contains unknown fields");
-  }
-  if (
-    typeof input.runtimeArn !== "string" ||
-    !input.runtimeArn.startsWith("arn:aws:bedrock-agentcore:") ||
-    typeof input.endpointQualifier !== "string" ||
-    input.endpointQualifier.length < 1 ||
-    input.endpointQualifier.length > 64
-  ) {
-    throw agentXError("CONFIG_INVALID", "runtime binding ARN or endpoint qualifier is invalid");
-  }
-  const deploymentMode = AgentCoreDeploymentModeSchema.parse(input.deploymentMode);
-  const capacityProviderArn = input.capacityProviderArn;
-  if (
-    capacityProviderArn !== undefined &&
-    (typeof capacityProviderArn !== "string" ||
-      !capacityProviderArn.startsWith("arn:aws:bedrock-agentcore:"))
-  ) {
-    throw agentXError("CONFIG_INVALID", "capacity provider ARN is invalid");
-  }
-  switch (deploymentMode) {
-    case "instances-ebs":
-      if (capacityProviderArn === undefined) {
-        throw agentXError("CONFIG_INVALID", "instances-ebs runtime binding requires a capacity provider ARN");
-      }
-      break;
-    case "demo-microvm":
-      if (capacityProviderArn !== undefined) {
-        throw agentXError("CONFIG_INVALID", "demo-microvm runtime binding must not have a capacity provider ARN");
-      }
-      break;
-    default:
-      unhandledDeploymentMode(deploymentMode);
-  }
-  return {
-    runtimeArn: input.runtimeArn,
-    endpointQualifier: input.endpointQualifier,
-    deploymentMode,
-    ...(capacityProviderArn === undefined ? {} : { capacityProviderArn }),
   };
 }
 

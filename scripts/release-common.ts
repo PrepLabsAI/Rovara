@@ -1,6 +1,6 @@
-// Release helpers shared by the production release (release-production.ts) and its tests. The demo
-// release that used to live here went with the AgentCore demo runtime (#118).
+// Release helpers shared by the production release and its tests.
 import { spawnSync, type SpawnSyncOptionsWithStringEncoding } from "node:child_process";
+import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 
 const DEFAULT_REGION = "us-east-1";
@@ -307,7 +307,14 @@ async function smokeTestWorker(runner: Runner, image: string): Promise<void> {
     throw new Error("worker image lacks the Docker CLI, Compose or the devcontainer CLI");
   }
   const container = `agentx-worker-release-smoke-${process.pid}`;
-  runner.run("docker", ["run", "--detach", "--rm", "--name", container, "--publish", "127.0.0.1::8080", image]);
+  const publicKey = generateKeyPairSync("ec", { namedCurve: "prime256v1" }).publicKey
+    .export({ format: "der", type: "spki" }).toString("base64");
+  runner.run("docker", [
+    "run", "--detach", "--rm", "--name", container, "--publish", "127.0.0.1::8080",
+    "--env", `AGENTX_INVOKE_PUBLIC_KEY=${publicKey}`,
+    "--env", `AGENTX_WORKSPACE_ID=${randomUUID()}`,
+    "--env", "AGENTX_SESSION_GENERATION=1", image,
+  ]);
   try {
     let port = "";
     for (let attempt = 0; attempt < 20; attempt += 1) {

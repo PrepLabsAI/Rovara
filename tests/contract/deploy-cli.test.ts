@@ -201,7 +201,6 @@ function scriptedOutputs(): Record<string, StackOutputs> {
       PullThroughPrefix: "agentx-staging",
     },
     [stackName("foundation")]: {
-      CapacityProviderArn: `arn:aws:bedrock-agentcore:${REGION}:${ACCOUNT}:capacity-provider/agentx_staging_capacity-AbCdEfGhIj`,
       VpcId: "vpc-0123456789abcdef0",
       PrivateSubnetIds: "subnet-1,subnet-2",
       SessionManagerSecurityGroupId: "sg-0123456789abcdef0",

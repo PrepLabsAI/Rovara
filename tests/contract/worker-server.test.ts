@@ -10,7 +10,7 @@ import {
 } from "../../packages/worker/src/index.js";
 import { describe, expect, it, vi } from "vitest";
 
-describe("AgentCore worker HTTP contract", () => {
+describe("worker HTTP contract", () => {
   it("journals before acknowledging and reports HealthyBusy during background execution", async () => {
     const root = await mkdtemp(join(tmpdir(), "agentx-journal-"));
     const journal = new OperationJournal(root);

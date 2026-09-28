@@ -1,6 +1,6 @@
 import {
   agentXError,
-  type WorkspaceDeploymentMode,
+  type StoredDeploymentMode,
   type WorkspaceStatus,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "./auth.js";
@@ -12,7 +12,7 @@ export interface PublicWorkspace {
   id: string;
   projectName: string;
   projectRevision: number;
-  deploymentMode: WorkspaceDeploymentMode;
+  deploymentMode: StoredDeploymentMode;
   status: WorkspaceStatus;
   createdAt: string;
   updatedAt: string;
@@ -64,7 +64,7 @@ export function publicWorkspace(workspace: {
   id: string;
   projectName: string;
   projectRevision: number;
-  deploymentMode: WorkspaceDeploymentMode;
+  deploymentMode: StoredDeploymentMode;
   status: WorkspaceStatus;
   createdAt: string;
   updatedAt: string;

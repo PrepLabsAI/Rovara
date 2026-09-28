@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { CONTEXT_ENV, CONTEXT_OVERFLOW_LOCATION_ENV } from "aws-cdk-lib/cx-api";
 import { beforeAll, describe, expect, it } from "vitest";
-import { ENVIRONMENT_PLACEHOLDER, ENVIRONMENT_PLACEHOLDER_UNDERSCORED, EnvironmentNameSchema, renderTemplate } from "@agentx/contracts";
+import { ENVIRONMENT_PLACEHOLDER, EnvironmentNameSchema, renderTemplate } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 
 function templates(env: string): Map<string, string> {
@@ -58,7 +58,6 @@ describe("templates for any environment", () => {
 
   it("uses a placeholder that is a valid name and that no real environment can take", () => {
     expect(ENVIRONMENT_PLACEHOLDER).toBe("qqenv-placeholderqq");
-    expect(ENVIRONMENT_PLACEHOLDER_UNDERSCORED).toBe("qqenv_placeholderqq");
     expect(EnvironmentNameSchema.safeParse(ENVIRONMENT_PLACEHOLDER).success).toBe(true);
     expect(EnvironmentNameSchema.safeParse("myqqenv").success).toBe(false);
   });

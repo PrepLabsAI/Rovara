@@ -11,7 +11,7 @@ A release directory looks like this:
 - `release.json` — the manifest: version, git commit, and a checksum for every file below.
 - `templates/<region>/<part>.template.json`: one CloudFormation template per stack part
   (`access`, `foundation`, `identity`, `runtime`, `control-plane`, `slack`), for each region the
-  release covers. The covered regions are exactly the ones with verified AgentCore Instances
+  release covers. The covered regions are exactly the ones with verified EC2 worker
   availability-zone IDs (`SUPPORTED_REGIONS` in `infra/lib/production-foundation.ts`; today just
   `us-east-1`). Adding a region means adding its verified zone IDs there; nothing else changes.
 - `packages/<assetId>.zip` — the Lambda code each template references, one zip per package, named

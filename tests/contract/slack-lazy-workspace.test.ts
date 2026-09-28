@@ -93,12 +93,12 @@ describe("lazy thread workspace records", () => {
   });
 
   it("tells a connector-only thread there is nothing to close, and leaves it usable", async () => {
-    const { db, handler, deleteWorkspaceSession } = createBroker();
+    const { db, handler, deleteEc2Session } = createBroker();
     await registerSlackProject(handler);
     const workspaceId = (await lazyEnsureWorkspace(handler, threadOne, pratik)).body.workspaceId as string;
     const close = await serviceCall(handler, threadOne, bob, "POST", "/v1/service/threads/workspace/close", { requestId: randomUUID() });
     expect(close.body).toMatchObject({ outcome: "NOT_FOUND" });
-    expect(deleteWorkspaceSession).not.toHaveBeenCalled();
+    expect(deleteEc2Session).not.toHaveBeenCalled();
     expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "UNPREPARED" });
     expect(db.find((item) => item.entityType === "SLACK_LIMIT")).toHaveLength(0);
     expect((await lazyEnsureWorkspace(handler, threadOne, pratik)).body).toMatchObject({ workspaceId, status: "UNPREPARED", created: false });

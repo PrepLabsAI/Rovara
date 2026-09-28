@@ -113,15 +113,11 @@ describe("Slack contracts", () => {
       payload: {},
     }).kind).toBe("close");
     const workspace = {
+      deploymentMode: "ec2-ebs" as const,
       id: "11111111-1111-4111-8111-111111111111",
       ownerKey: "o".repeat(32),
       projectName: "payments",
       projectRevision: 1,
-      runtimeArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/example",
-      endpointQualifier: "DEFAULT",
-      runtimeSessionId: "33333333-3333-4333-8333-333333333333",
-      deploymentMode: "instances-ebs",
-      capacityProviderArn: "arn:aws:bedrock-agentcore:us-east-1:111122223333:capacity-provider/example",
       rootPath: "/mnt/workspace",
       status: "CLOSED",
       fence: 2,

@@ -4,7 +4,7 @@ import { isAssumedRoleOf } from "../../packages/broker/src/aws/lambda.js";
 import type { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import {
   account, call, createBroker, ensureWorkspace, issuer, loadSlackBroker, markReady, orchestratorPrincipal, orchestratorRoleArn,
-  type Handler, type SlackBrokerModule,
+  type Handler,
 } from "../support/slack-broker.js";
 import { GitHubMcpCatalogSchema, GitHubMcpResultSchema } from "../../packages/contracts/src/github-mcp.js";
 import { ConnectorCatalogSchema } from "../../packages/contracts/src/connectors.js";
@@ -23,10 +23,9 @@ const pratik = "U0123456789";
 const bob = "U0456789012";
 const carol = "U0789012345";
 
-let deleteCapacityProviderWorkspaceSession: SlackBrokerModule["deleteCapacityProviderWorkspaceSession"];
 
 beforeAll(async () => {
-  ({ deleteCapacityProviderWorkspaceSession } = await loadSlackBroker());
+  await loadSlackBroker();
 });
 
 const admin = { subject: "admin-subject", admin: true };
@@ -63,10 +62,11 @@ async function registerRevision(handler: Handler, revision: number, integrations
           : integrations ? { integrations } : {}),
       },
       runtimeBinding: {
-        runtimeArn: `arn:aws:bedrock-agentcore:us-east-1:${account}:runtime/agentx_production_worker-YVirjlFgvk`,
-        endpointQualifier: "DEFAULT",
-        deploymentMode: "instances-ebs",
-        capacityProviderArn: `arn:aws:bedrock-agentcore:us-east-1:${account}:capacity-provider/agentx_production_capacity_v3-VwkM93EABZ`,
+        deploymentMode: "ec2-ebs" as const,
+        launchTemplateId: "lt-0123456789abcdef0",
+        subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0123456789abcdef0" }],
+        volumeSizeGiB: 20,
+        volumeType: "gp3" as const,
       },
     },
   });
@@ -951,10 +951,11 @@ describe("project registration", () => {
           orchestratorInstructions: "Delegate work (revision 2).",
         },
         runtimeBinding: {
-          runtimeArn: `arn:aws:bedrock-agentcore:us-east-1:${account}:runtime/agentx_production_worker-YVirjlFgvk`,
-          endpointQualifier: "DEFAULT",
-          deploymentMode: "instances-ebs",
-          capacityProviderArn: `arn:aws:bedrock-agentcore:us-east-1:${account}:capacity-provider/agentx_production_capacity_v3-VwkM93EABZ`,
+          deploymentMode: "ec2-ebs" as const,
+          launchTemplateId: "lt-0123456789abcdef0",
+          subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0123456789abcdef0" }],
+          volumeSizeGiB: 20,
+          volumeType: "gp3" as const,
         },
       },
     });
@@ -1087,22 +1088,8 @@ describe("Slack thread workspaces", () => {
 });
 
 describe("Slack thread workspace closure", () => {
-  it("treats an already-absent capacity-provider session as idempotent cleanup", async () => {
-    const notFound = new Error("session is absent");
-    notFound.name = "ResourceNotFoundException";
-    const send = vi.fn(async () => Promise.reject(notFound));
-    await expect(deleteCapacityProviderWorkspaceSession(
-      { send },
-      {
-        capacityProviderArn: `arn:aws:bedrock-agentcore:us-east-1:${account}:capacity-provider/provider-1234567890`,
-        runtimeSessionId: "11111111-1111-4111-8111-111111111111",
-      },
-    )).resolves.toBeUndefined();
-    expect(send).toHaveBeenCalledTimes(1);
-  });
-
-  it("fences a clean workspace, deletes its capacity-provider session, releases quota, and retains a tombstone", async () => {
-    const { db, handler, deleteWorkspaceSession } = createBroker();
+  it("fences a clean workspace, deletes its EC2 session, releases quota, and retains a tombstone", async () => {
+    const { db, handler, deleteEc2Session } = createBroker();
     await registerProjectAndBind(handler);
     const created = await ensureWorkspace(handler, threadOne, pratik);
     const workspaceId = created.body.workspaceId as string;
@@ -1142,14 +1129,10 @@ describe("Slack thread workspace closure", () => {
     expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "CLOSING", closeOperationId: operationId });
     expect(db.get(`WORKSPACE#${workspaceId}`, "META")).not.toHaveProperty("activeOperationId");
 
-    const runtimeSessionId = db.get(`WORKSPACE#${workspaceId}`, "META")?.runtimeSessionId;
     const completed = await completeClose(handler, threadOne, bob, operationId);
     expect(completed.status).toBe(200);
     expect(completed.body).toMatchObject({ outcome: "CLOSED", workspaceId, operationId, storageReleased: true });
-    expect(deleteWorkspaceSession).toHaveBeenCalledExactlyOnceWith({
-      capacityProviderArn: `arn:aws:bedrock-agentcore:us-east-1:${account}:capacity-provider/agentx_production_capacity_v3-VwkM93EABZ`,
-      runtimeSessionId,
-    });
+    expect(deleteEc2Session).toHaveBeenCalledExactlyOnceWith(workspaceId);
     const closed = db.get(`WORKSPACE#${workspaceId}`, "META");
     expect(closed).toMatchObject({ status: "CLOSED" });
     expect(typeof closed?.closedAt).toBe("string");
@@ -1158,22 +1141,22 @@ describe("Slack thread workspace closure", () => {
 
     const repeated = await completeClose(handler, threadOne, pratik, operationId);
     expect(repeated.body).toMatchObject({ outcome: "CLOSED", workspaceId, operationId });
-    expect(deleteWorkspaceSession).toHaveBeenCalledTimes(1);
+    expect(deleteEc2Session).toHaveBeenCalledTimes(1);
     expect((await ensureWorkspace(handler, threadOne, pratik)).body).toMatchObject({ outcome: "CLOSED", workspaceId });
   });
 
   it("does not create a workspace for an empty thread and cannot close another thread's workspace", async () => {
-    const { db, handler, deleteWorkspaceSession } = createBroker();
+    const { db, handler, deleteEc2Session } = createBroker();
     await registerProjectAndBind(handler);
     const created = await ensureWorkspace(handler, threadOne, pratik);
     markReady(db, created.body.workspaceId as string);
     expect((await startClose(handler, threadTwo, bob)).body).toEqual(expect.objectContaining({ outcome: "NOT_FOUND" }));
-    expect(deleteWorkspaceSession).not.toHaveBeenCalled();
+    expect(deleteEc2Session).not.toHaveBeenCalled();
     expect(db.get(`WORKSPACE#${String(created.body.workspaceId)}`, "META")).toMatchObject({ status: "READY" });
   });
 
   it("refuses busy workspaces and restores an unsafe workspace without deleting storage", async () => {
-    const { db, handler, deleteWorkspaceSession } = createBroker();
+    const { db, handler, deleteEc2Session } = createBroker();
     await registerProjectAndBind(handler);
     const created = await ensureWorkspace(handler, threadOne, pratik);
     const workspaceId = created.body.workspaceId as string;
@@ -1187,16 +1170,16 @@ describe("Slack thread workspace closure", () => {
     });
     expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "READY", closeError: "workspace contains unpublished work" });
     expect((await completeClose(handler, threadOne, pratik, operationId)).status).toBe(409);
-    expect(deleteWorkspaceSession).not.toHaveBeenCalled();
+    expect(deleteEc2Session).not.toHaveBeenCalled();
     expect(db.get(`SLACK_LIMIT#${team}`, "ORGANIZATION")).toMatchObject({ count: 1 });
   });
 
   it("keeps a safe workspace closing when resource cleanup fails and succeeds on retry", async () => {
     let attempts = 0;
-    const { db, handler, deleteWorkspaceSession } = createBroker({
-      deleteWorkspaceSession: async () => {
+    const { db, handler, deleteEc2Session } = createBroker({
+      deleteEc2Session: async () => {
         attempts += 1;
-        if (attempts === 1) throw new Error("temporary AgentCore failure");
+        if (attempts === 1) throw new Error("temporary EC2 failure");
       },
     });
     await registerProjectAndBind(handler);
@@ -1213,7 +1196,7 @@ describe("Slack thread workspace closure", () => {
     expect(db.get(`SLACK_LIMIT#${team}`, "ORGANIZATION")).toMatchObject({ count: 1 });
 
     expect((await completeClose(handler, threadOne, pratik, operationId)).status).toBe(200);
-    expect(deleteWorkspaceSession).toHaveBeenCalledTimes(2);
+    expect(deleteEc2Session).toHaveBeenCalledTimes(2);
     expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "CLOSED" });
   });
 });

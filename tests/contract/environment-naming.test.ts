@@ -145,13 +145,13 @@ describe("environment naming", () => {
     });
   }, 120_000);
 
-  it("keeps a named environment's workspace key and flow logs retained, and has no AgentCore capacity provider", () => {
+  it("keeps a named environment's workspace key and flow logs retained, and has no retired runtime capacity provider", () => {
     const template = Template.fromStack(new ProductionFoundationStack(new App(), "Foundation", { deploymentRegion: "us-east-1", naming: environmentNaming("staging") }));
     const resources = template.toJSON().Resources as Record<string, { Type: string; DeletionPolicy?: string }>;
     const keys = Object.values(resources).filter((resource) => resource.Type === "AWS::KMS::Key");
     expect(keys.length).toBeGreaterThan(0);
     for (const key of keys) expect(key.DeletionPolicy).toBe("Retain");
-    expect(Object.values(resources).filter((resource) => resource.Type.startsWith("AWS::BedrockAgentCore::"))).toEqual([]);
+    expect(Object.values(resources).filter((resource) => resource.Type.startsWith("AWS::Bedrock"))).toEqual([]);
     const logGroups = Object.entries(resources).filter(([, resource]) => resource.Type === "AWS::Logs::LogGroup");
     expect(logGroups.find(([id]) => id.startsWith("VpcFlowLogs"))?.[1].DeletionPolicy).toBe("Retain");
     // The EC2 worker log group has a fixed name the boot script writes to; retaining it would stop
@@ -160,11 +160,11 @@ describe("environment naming", () => {
     expect(logGroups).toHaveLength(2);
   });
 
-  it("scopes connector secrets to the environment, and grants nothing of AgentCore", () => {
+  it("scopes connector secrets to the environment, and grants nothing of retired runtime", () => {
     const staging = productionStacks(buildAgentXApp({ agentxEnv: "staging" }));
     const control = staging.find((stack) => stack.stackName === "agentx-staging-control-plane")!;
     const text = JSON.stringify(Template.fromStack(control).toJSON());
-    expect(text).not.toContain("bedrock-agentcore");
+    expect(text).not.toMatch(/bedrock-[a-z]+:/);
     expect(text).toContain("secret:agentx/staging/connectors/*");
     expect(text).not.toContain("secret:agentx/connectors/*");
   }, 120_000);

@@ -282,7 +282,7 @@ describe("agentx init", () => {
         releaseVersion: null,
         deploy: { identity: { get: unexpected }, store: { get: unexpected, put: unexpected, delete: unexpected, list: unexpected }, secrets: { get: unexpected, create: unexpected } },
         initSecrets: { get: unexpected, create: unexpected, put: unexpected, arn: unexpected },
-        checks: passingChecks({ converse: unexpected, agentCore: unexpected }),
+        checks: passingChecks({ converse: unexpected, ec2Quota: unexpected }),
         stackStatus: { status: unexpected },
         fetch: unexpected,
         prompter: scriptedPrompter([]),

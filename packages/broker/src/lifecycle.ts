@@ -1,4 +1,4 @@
-import { agentXError, unhandledDeploymentMode, type WorkspaceInstance } from "@agentx/contracts";
+import { agentXError, type WorkspaceInstance } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "./auth.js";
 import { type ProjectMembership } from "./authorization.js";
 import { authorizeProjectAdministrator } from "./projects.js";
@@ -9,7 +9,6 @@ export class LifecycleService {
     private readonly dependencies: {
       registry: InMemoryRegistry;
       memberships: readonly ProjectMembership[];
-      stopRuntimeSession: (input: { runtimeArn: string; runtimeSessionId: string }) => Promise<void>;
     },
   ) {}
 
@@ -20,19 +19,6 @@ export class LifecycleService {
     if (workspace.status !== "READY" || workspace.activeOperationId) {
       throw agentXError("WORKSPACE_BUSY", "cancel or finish active work before stopping compute");
     }
-    switch (workspace.deploymentMode) {
-      case "instances-ebs":
-      case "demo-microvm":
-        await this.dependencies.stopRuntimeSession({
-          runtimeArn: workspace.runtimeArn,
-          runtimeSessionId: workspace.runtimeSessionId,
-        });
-        break;
-      case "ec2-ebs":
-        throw agentXError("RUNTIME_UNAVAILABLE", "stopping ec2-ebs compute is not supported yet");
-      default:
-        unhandledDeploymentMode(workspace);
-    }
-    return this.dependencies.registry.setLifecycleStatus(workspace.id, "STOPPED");
+    throw agentXError("RUNTIME_UNAVAILABLE", "manual compute stop is not supported; idle sessions stop automatically");
   }
 }

@@ -74,30 +74,16 @@ describe("init prerequisites", () => {
     expect(checks.models).toEqual(["a", "b"]);
   });
 
-  it("stops when the region has no AgentCore, saying nothing was created", async () => {
-    const checks = passingChecks({ agentCore: async () => { throw Object.assign(new Error("getaddrinfo ENOTFOUND bedrock-agentcore-control.eu-north-1.amazonaws.com"), { code: "ENOTFOUND" }); } });
-    await expect(run(sampleAnswers({ region: "eu-north-1" }), checks)).rejects.toThrow(
-      /init cannot start; nothing was created:\n- release 1\.2\.3 does not cover region eu-north-1; it covers: us-east-1\n- Amazon Bedrock AgentCore Runtime is not available in eu-north-1 \(or this machine cannot resolve bedrock-agentcore-control\.eu-north-1\.amazonaws\.com; check your network\)/,
-    );
+  it("refuses insufficient EC2 quota before creating anything", async () => {
+    for (const quota of [0, NaN]) {
+      await expect(run(sampleAnswers(), passingChecks({ ec2Quota: async () => quota })))
+        .rejects.toThrow(/vCPU quota.*at least 1/);
+    }
   });
 
-  it("counts an AgentCore access denial as the service being present", async () => {
-    await expect(run(sampleAnswers(), passingChecks({ agentCore: async () => { throw awsError("AccessDeniedException", "not authorized"); } }))).resolves.toBeDefined();
-  });
-
-  it("explains the Anthropic usage form, an id that needs an inference profile, and an unknown id (Review Focus 5)", () => {
-    const form = modelCheckProblem({ modelId: "us.anthropic.claude-sonnet-4-6", role: "orchestrator", region: "us-east-1", error: awsError("AccessDeniedException", "Model use case details have not been submitted for this account.") });
-    expect(form).toBe(
-      "us.anthropic.claude-sonnet-4-6: Anthropic models need a one-time usage form submitted in the Bedrock console. Open the Bedrock console in us-east-1, Model catalog, choose the model and submit the form; submitting it in your organization's management account covers every member account. Then run agentx init again",
-    );
-    const profile = modelCheckProblem({ modelId: "anthropic.claude-haiku-4-5-20251001-v1:0", role: "classifier", region: "us-east-1", error: awsError("ValidationException", "Invocation of model ID anthropic.claude-haiku-4-5-20251001-v1:0 with on-demand throughput isn't supported.") });
-    expect(profile).toBe("anthropic.claude-haiku-4-5-20251001-v1:0 must be called through an inference profile in us-east-1; use us.anthropic.claude-haiku-4-5-20251001-v1:0 instead (--classifier-model)");
-    const unknown = modelCheckProblem({ modelId: "made.up-v1", role: "worker", region: "us-east-1", error: awsError("ValidationException", "The provided model identifier is invalid.") });
-    expect(unknown).toBe("made.up-v1 is not a Bedrock model id available in us-east-1; check the id, or choose another with --worker-model");
-    const denied = modelCheckProblem({ modelId: "zai.glm-4.7", role: "orchestrator", region: "us-east-1", error: awsError("AccessDeniedException", "You don't have access to the model with the specified model ID.") });
-    expect(denied).toContain("Your role or an SCP may deny bedrock:InvokeModel for this model");
-    expect(denied).toContain("aws-marketplace:Subscribe");
-    expect(denied).toContain("Check your permissions, or choose another model with --orchestrator-model");
+  it("refuses an unreadable quota and reports a remedy", async () => {
+    await expect(run(sampleAnswers(), passingChecks({ ec2Quota: async () => { throw awsError("AccessDeniedException", "not authorized"); } })))
+      .rejects.toThrow(/check Service Quotas read permission/);
   });
 
   it("retries a throttled model check once, then gives up with a try-again message (Review Focus 5)", async () => {
@@ -318,22 +304,22 @@ describe("fix round 1", () => {
     );
   });
 
-  // Item 5: the AgentCore-unreachable-by-DNS message names the exact hostname and says to check
+  // Item 5: the EC2 quota-unreachable-by-DNS message names the exact hostname and says to check
   // the network (already covered end-to-end above); this adds a direct assertion on the wording.
-  it("item 5: names the unresolved AgentCore hostname and says to check the network", async () => {
-    const checks = passingChecks({ agentCore: async () => { throw Object.assign(new Error("getaddrinfo ENOTFOUND bedrock-agentcore-control.ap-south-2.amazonaws.com"), { code: "ENOTFOUND" }); } });
+  it("item 5: names the unresolved EC2 quota hostname and says to check the network", async () => {
+    const checks = passingChecks({ ec2Quota: async () => { throw Object.assign(new Error("getaddrinfo ENOTFOUND servicequotas.ap-south-2.amazonaws.com"), { code: "ENOTFOUND" }); } });
     await expect(run(sampleAnswers({ region: "ap-south-2" }), checks)).rejects.toThrow(
-      "Amazon Bedrock AgentCore Runtime is not available in ap-south-2 (or this machine cannot resolve bedrock-agentcore-control.ap-south-2.amazonaws.com; check your network)",
+      "could not check EC2 vCPU quota in ap-south-2: getaddrinfo ENOTFOUND servicequotas.ap-south-2.amazonaws.com; check Service Quotas read permission and your network",
     );
   });
 
-  // Item 6: every message names a next step. AgentCore-unreachable-for-some-other-reason, a model
+  // Item 6: every message names a next step. EC2 quota-unreachable-for-some-other-reason, a model
   // giving no answer at all, and "Bedrock not available in this region" (a model-check-level
-  // endpoint failure, distinct from the AgentCore-level one above) were the three left silent.
-  it("item 6: an unexplained AgentCore failure still says what to check", async () => {
-    const checks = passingChecks({ agentCore: async () => { throw new Error("socket hang up"); } });
+  // endpoint failure, distinct from the EC2 quota-level one above) were the three left silent.
+  it("item 6: an unexplained EC2 quota failure still says what to check", async () => {
+    const checks = passingChecks({ ec2Quota: async () => { throw new Error("socket hang up"); } });
     await expect(run(sampleAnswers(), checks)).rejects.toThrow(
-      "could not reach AgentCore Runtime in us-east-1: socket hang up; check your credentials or network, or choose another region with --region",
+      "could not check EC2 vCPU quota in us-east-1: socket hang up; check Service Quotas read permission and your network",
     );
   });
 

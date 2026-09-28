@@ -26,7 +26,7 @@ describe("access stack", () => {
   const environmentResources = () => stacksOf(app).map((stack) => ({ stack, resources: resourcesOf(stack) }));
   /** The AWS service each resource type in the non-access templates is created through. */
   const resourceTypeServices = () => {
-    const serviceOf = (type: string) => type.split("::")[1]!.toLowerCase().replace("bedrockagentcore", "bedrock-agentcore").replace("apigatewayv2", "apigateway").replace("cognito", "cognito-idp").replace("applicationautoscaling", "application-autoscaling").replace("stepfunctions", "states");
+    const serviceOf = (type: string) => type.split("::")[1]!.toLowerCase().replace("apigatewayv2", "apigateway").replace("cognito", "cognito-idp").replace("applicationautoscaling", "application-autoscaling").replace("stepfunctions", "states");
     const types = new Set(environmentResources().filter(({ stack }) => stack.stackName !== "agentx-staging-access").flatMap(({ resources }) => Object.values(resources).map((r) => r.Type)));
     // AWS::CDK::Metadata is a CDK pseudo-resource, not an AWS service call. Custom resources are
     // backed by Lambda, so they need the lambda service. Roles, policies and instance profiles are

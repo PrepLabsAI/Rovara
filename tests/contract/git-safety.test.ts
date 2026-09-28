@@ -6,7 +6,7 @@ import {
   runGitWithCredential,
 } from "../../packages/worker/src/git-auth.js";
 
-describe("AgentCore Git mount safety", () => {
+describe("workspace Git mount safety", () => {
   it("scopes safe.directory to the repository being operated on", () => {
     const environment = gitSafeEnvironment("/mnt/workspace/repo/example");
     expect(environment).toMatchObject({
