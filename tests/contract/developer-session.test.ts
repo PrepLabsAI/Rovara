@@ -144,4 +144,20 @@ describe("developer access tokens on this machine", () => {
     await expect(developerAccessToken({ home, tokenStore: new InMemoryTokenStore(), fetch: vi.fn<typeof fetch>(), now: () => T0 }, "staging")).rejects.toThrow("AUTH_REQUIRED: this computer is not signed in to AgentX environment staging; run npx @charterarc/agentx login <your AgentX URL>");
     expect(await readDeveloperConfig(home)).toEqual({ environments: {} });
   });
+  it("refreshes a still-valid token when asked to force it (an access token AgentX refused)", async () => {
+    const { home, tokenStore } = await setup({ accessToken: "refused", refreshToken: r("a"), expiresAt: T0 + 120_000 });
+    const fetchImpl = vi.fn<typeof fetch>(async () => Response.json({ access_token: "new", token_type: "Bearer", expires_in: 3600, refresh_token: r("b") }));
+    expect((await developerAccessToken({ home, tokenStore, fetch: fetchImpl, now: () => T0 }, "staging", { force: true })).accessToken).toBe("new");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(await tokenStore.get(developerTokenKey(ISSUER))).toEqual({ accessToken: "new", refreshToken: r("b"), expiresAt: T0 + 3_600_000 });
+  });
+
+  it("uses the token another process refreshed while a forced refresh waited for the lock", async () => {
+    const { home, tokenStore } = await setup({ accessToken: "refused", refreshToken: r("a"), expiresAt: T0 + 120_000 });
+    const newer = { accessToken: "newer", refreshToken: r("c"), expiresAt: T0 + 3_600_000 };
+    vi.spyOn(tokenStore, "get").mockResolvedValueOnce({ accessToken: "refused", refreshToken: r("a"), expiresAt: T0 + 120_000 }).mockResolvedValueOnce(newer);
+    const fetchImpl = vi.fn<typeof fetch>();
+    expect((await developerAccessToken({ home, tokenStore, fetch: fetchImpl, now: () => T0 }, "staging", { force: true })).accessToken).toBe("newer");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
 });

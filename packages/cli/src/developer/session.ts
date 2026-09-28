@@ -62,8 +62,12 @@ async function withRefreshLock<T>(deps: DeveloperSessionDeps, env: string, work:
   }
 }
 
-/** A valid access token for the environment named, or the default one; refreshes when needed. */
-export async function developerAccessToken(deps: DeveloperSessionDeps, env: string | undefined): Promise<{ env: string; entry: DeveloperEnvironment; accessToken: string }> {
+/**
+ * A valid access token for the environment named, or the default one; refreshes when needed.
+ * `force` refreshes even a token that looks valid (AgentX refused it), unless another process
+ * already replaced it while this one waited for the lock.
+ */
+export async function developerAccessToken(deps: DeveloperSessionDeps, env: string | undefined, options: { force?: boolean } = {}): Promise<{ env: string; entry: DeveloperEnvironment; accessToken: string }> {
   const now = deps.now ?? Date.now;
   const resolved = await resolveDeveloperEnvironment(deps.home, env);
   const key = developerTokenKey(resolved.entry.issuer);
@@ -72,12 +76,13 @@ export async function developerAccessToken(deps: DeveloperSessionDeps, env: stri
 
   const stored = await deps.tokenStore.get(key);
   if (stored === undefined) throw agentXError("AUTH_REQUIRED", `this computer is not signed in to AgentX environment ${resolved.env}; ${signIn}`);
-  if (fresh(stored)) return { ...resolved, accessToken: stored.accessToken };
+  if (options.force !== true && fresh(stored)) return { ...resolved, accessToken: stored.accessToken };
 
   return withRefreshLock(deps, resolved.env, async () => {
     // Another process may have refreshed while this one waited for the lock: use its tokens.
     const current = await deps.tokenStore.get(key);
-    if (current !== undefined && fresh(current)) return { ...resolved, accessToken: current.accessToken };
+    const replaced = options.force !== true || current?.accessToken !== stored.accessToken;
+    if (current !== undefined && fresh(current) && replaced) return { ...resolved, accessToken: current.accessToken };
     if (current?.refreshToken === undefined) throw agentXError("AUTH_REQUIRED", `your AgentX sign-in for ${resolved.env} has ended; ${signIn}`);
     let response: Response;
     try {

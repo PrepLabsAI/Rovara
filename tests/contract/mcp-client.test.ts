@@ -1,7 +1,7 @@
 // tests/contract/mcp-client.test.ts
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { agentXError } from "@agentx/contracts";
-import { NEXT_STEPS, TOOL_ERROR_CODES, ToolError, UPGRADE_AGENTX_STEP, httpControlPlaneClient, signInStep } from "../../packages/mcp/src/index.js";
+import { NEXT_STEPS, TOOL_ERROR_CODES, ToolError, UNEXPECTED_ANSWER_STEP, UPGRADE_AGENTX_STEP, httpControlPlaneClient, signInStep } from "../../packages/mcp/src/index.js";
 
 const TOKEN = "eyJhbGciOiJSUzI1NiJ9.planted-access-token.sig";
 const session = async () => ({ baseUrl: "https://agentx.example.test", accessToken: TOKEN, signInCommand: "npx @charterarc/agentx login https://agentx.example.test" });
@@ -10,6 +10,11 @@ const reply = (status: number, body: unknown) => new Response(JSON.stringify(bod
 const client = (fetch: typeof globalThis.fetch, overrides: Partial<Parameters<typeof httpControlPlaneClient>[0]> = {}) =>
   httpControlPlaneClient({ session, fetch, sleep: async () => undefined, traceId: () => "trace-1", ...overrides });
 const start = { requestId: "33333333-3333-4333-8333-333333333333", project: "payments", instructions: "Fix it", client: "claude-code" };
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 describe("the control-plane client (FR-027)", () => {
   it("sends the token and a trace ID, and parses a response with fields it does not know", async () => {
@@ -38,7 +43,8 @@ describe("the control-plane client (FR-027)", () => {
     expect((await client(flaky).getTask(view.taskId, 10)).taskId).toBe(view.taskId);
   });
 
-  it("tries a start again only with the same requestId, and waits longer each time", async () => {
+  it("tries a start again only with the same requestId, and waits longer each time, with jitter", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
     const sleep = vi.fn(async () => undefined);
     const fetch = vi.fn()
       .mockRejectedValueOnce(new TypeError("fetch failed"))
@@ -48,7 +54,7 @@ describe("the control-plane client (FR-027)", () => {
     expect(fetch).toHaveBeenCalledTimes(3);
     const bodies = fetch.mock.calls.map((call) => JSON.parse((call[1] as RequestInit).body as string) as { requestId: string });
     expect(bodies.map((body) => body.requestId)).toEqual([start.requestId, start.requestId, start.requestId]);
-    expect(sleep.mock.calls.map((call) => (call as unknown[])[0])).toEqual([500, 1000]);
+    expect(sleep.mock.calls.map((call) => (call as unknown[])[0])).toEqual([500, 750]);
   });
 
   it("never tries a write without a requestId twice", async () => {
@@ -77,6 +83,7 @@ describe("the control-plane client (FR-027)", () => {
     ["TASK_NOT_FOUND", 404, "TASK_NOT_FOUND"],
     ["TASK_BUSY", 409, "TASK_BUSY"],
     ["WORKSPACE_BUSY", 409, "TASK_BUSY"],
+    ["WORKSPACE_NOT_READY", 409, "TASK_BUSY"],
     ["STALE_FENCE", 409, "TASK_BUSY"],
     ["CHANNEL_REQUIRED", 409, "CHANNEL_REQUIRED"],
     ["WORKSPACE_LIMIT", 409, "WORKSPACE_LIMIT"],
@@ -91,6 +98,86 @@ describe("the control-plane client (FR-027)", () => {
     expect(error).toMatchObject({ code: toolCode });
     expect((error as ToolError).message).toContain("the broker's words");
     expect((error as ToolError).nextStep.length).toBeGreaterThan(0);
+  });
+
+  it("stops trying at the deadline when AgentX never answers", async () => {
+    vi.useFakeTimers();
+    const started = Date.now();
+    const hanging = vi.fn((_url: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+    }));
+    let settledAt = 0;
+    const pending = httpControlPlaneClient({ session, fetch: hanging, traceId: () => "trace-1" })
+      .getTask(view.taskId, 10).catch((caught: unknown) => { settledAt = Date.now(); return caught; });
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(await pending).toMatchObject({ code: "CONTROL_PLANE_UNAVAILABLE" });
+    expect(settledAt - started).toBeLessThanOrEqual(45_000);
+    expect(settledAt - started).toBeGreaterThanOrEqual(30_000);
+    expect(hanging).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not try again when the next wait would pass the deadline", async () => {
+    let clock = 0;
+    const slow = vi.fn(async () => { clock += 44_900; throw new TypeError("fetch failed"); });
+    const sleep = vi.fn(async () => undefined);
+    await expect(client(slow as unknown as typeof fetch, { now: () => clock, sleep }).projects()).rejects.toMatchObject({ code: "CONTROL_PLANE_UNAVAILABLE" });
+    expect(slow).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("refreshes the sign-in once after a 401, then tries once more", async () => {
+    const hook = vi.fn(async (options?: { force?: boolean }) => ({ ...(await session()), accessToken: options?.force === true ? "fresh-access-token" : TOKEN }));
+    const fetch = vi.fn().mockResolvedValueOnce(reply(401, { error: { code: "AUTH_REQUIRED", message: "expired" } })).mockResolvedValueOnce(reply(200, { task: view }));
+    expect((await client(fetch, { session: hook }).getTask(view.taskId, 10)).taskId).toBe(view.taskId);
+    expect(hook.mock.calls).toEqual([[], [{ force: true }]]);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(new Headers((fetch.mock.calls[1]![1] as RequestInit).headers).get("authorization")).toBe("Bearer fresh-access-token");
+  });
+
+  it("answers SIGN_IN_REQUIRED after one forced refresh, never looping", async () => {
+    const hook = vi.fn(session);
+    const refused = vi.fn(async () => reply(401, { error: { code: "AUTH_REQUIRED", message: "your AgentX sign-in has ended" } }));
+    const error = await client(refused, { session: hook }).startTask(start).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: "SIGN_IN_REQUIRED", nextStep: "run npx @charterarc/agentx login https://agentx.example.test" });
+    expect(refused).toHaveBeenCalledTimes(2);
+    expect(hook).toHaveBeenCalledTimes(2);
+    const ended = vi.fn(async (options?: { force?: boolean }) => {
+      if (options?.force === true) throw agentXError("AUTH_REQUIRED", "your AgentX sign-in for staging has ended; run npx @charterarc/agentx login https://agentx.example.test");
+      return session();
+    });
+    const once = vi.fn(async () => reply(401, {}));
+    expect(await client(once, { session: ended }).projects().catch((caught: unknown) => caught)).toMatchObject({ code: "SIGN_IN_REQUIRED", nextStep: "run npx @charterarc/agentx login https://agentx.example.test" });
+    expect(once).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides the refused token too when the try after the refresh fails", async () => {
+    const hook = vi.fn(async (options?: { force?: boolean }) => ({ ...(await session()), accessToken: options?.force === true ? "fresh-access-token" : TOKEN }));
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(reply(401, {}))
+      .mockResolvedValueOnce(reply(409, { error: { code: "TASK_BUSY", message: `old ${TOKEN} new fresh-access-token` } }));
+    const error = await client(fetch, { session: hook }).getTask(view.taskId, 10).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: "TASK_BUSY" });
+    expect((error as Error).message).not.toContain("planted-access-token");
+    expect((error as Error).message).not.toContain("fresh-access-token");
+  });
+
+  it.each([
+    [403, "FORBIDDEN"],
+    [429, "RATE_LIMITED"],
+    [418, undefined],
+  ] as const)("gives an unknown HTTP %i (%s) a next step that is not about the connection", async (status, code) => {
+    const error = await client(async () => reply(status, code === undefined ? {} : { error: { code, message: "no" } })).projects().catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: "CONTROL_PLANE_UNAVAILABLE", nextStep: UNEXPECTED_ANSWER_STEP });
+    expect(UNEXPECTED_ANSWER_STEP).toBe("ask your AgentX admin, or try again later");
+  });
+
+  it("removes the access token before the 1,000-character cap", async () => {
+    const opaque = "opaque0planted0access0token0value0000000000000000";
+    const fromOpaque = async () => ({ ...(await session()), accessToken: opaque });
+    const message = `${"a".repeat(990)}${opaque}`;
+    const error = await client(async () => reply(409, { error: { code: "TASK_BUSY", message } }), { session: fromOpaque }).projects().catch((caught: unknown) => caught);
+    expect((error as Error).message).not.toContain(opaque.slice(0, 10));
+    expect((error as Error).message.length).toBeLessThanOrEqual(1_000);
   });
 
   it("gives a cancel that raced the task a next step that names the tools", async () => {

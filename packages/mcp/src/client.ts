@@ -40,6 +40,16 @@ const ConfigurationSchema = z.object({ env: z.string(), apiVersion: z.string() }
 const UNREADABLE = "AgentX answered with something this version of the CLI cannot read; upgrade it";
 const DEFAULT_SIGN_IN = "npx @charterarc/agentx login <your AgentX URL>";
 const REQUEST_TIMEOUT_MS = 30_000;
+/** No call, retries included, takes longer than this. */
+const DEADLINE_MS = 45_000;
+
+/** A 401 on an authorized call: the caller refreshes the sign-in once and tries once more. */
+class Refused extends Error {
+  constructor(readonly error: ToolError) {
+    super(error.message);
+    this.name = "Refused";
+  }
+}
 
 /**
  * A call that is safe to send again: a read, or a write the control plane deduplicates by its
@@ -56,18 +66,23 @@ function errorCodeOf(value: unknown): string | undefined {
 }
 
 export function httpControlPlaneClient(options: {
-  session(): Promise<ControlPlaneSession>;
+  /** The signed-in session; `force` asks for a refreshed access token (AgentX refused the last one). */
+  session(options?: { force?: boolean }): Promise<ControlPlaneSession>;
   fetch: typeof fetch;
   traceId?(): string;
   sleep?(ms: number): Promise<void>;
   tries?: number;
+  now?(): number;
+  deadlineMs?: number;
 }): ControlPlaneClient {
   const sleep = (ms: number): Promise<void> => (options.sleep ? options.sleep(ms) : new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const now = (): number => (options.now ? options.now() : Date.now());
   const tries = Math.max(1, options.tries ?? 3);
+  const deadlineMs = options.deadlineMs ?? DEADLINE_MS;
 
-  async function session(): Promise<ControlPlaneSession> {
+  async function session(force = false): Promise<ControlPlaneSession> {
     try {
-      return await options.session();
+      return await (force ? options.session({ force: true }) : options.session());
     } catch (error) {
       if (error instanceof ToolError) throw error;
       if (error instanceof AgentXError && error.code === "AUTH_REQUIRED") {
@@ -80,25 +95,41 @@ export function httpControlPlaneClient(options: {
     }
   }
 
-  async function send<T>(current: ControlPlaneSession, schema: z.ZodType<T>, method: string, path: string, body: unknown, authorized: boolean): Promise<T> {
+  async function send<T>(current: ControlPlaneSession, schema: z.ZodType<T>, method: string, path: string, body: unknown, authorized: boolean, refused: readonly string[] = []): Promise<T> {
     const maxTries = repeatable(method, body) ? tries : 1;
+    const started = now();
+    // The tokens sent, and any AgentX refused, never appear in what a tool returns.
+    const secrets = authorized ? [current.accessToken, ...refused] : [];
+    const unreachable = (attempt: number) =>
+      new ToolError("CONTROL_PLANE_UNAVAILABLE", `could not reach AgentX at ${plainText(current.baseUrl, "its URL")}${attempt > 1 ? ` after ${attempt} tries` : ""}`);
+    /** Waits before the next try, or answers false when there is no try left or no time for one. */
+    const again = async (attempt: number): Promise<boolean> => {
+      if (attempt >= maxTries) return false;
+      const delay = Math.round(250 + Math.random() * 500 * attempt);
+      if (now() - started + delay >= deadlineMs) return false;
+      await sleep(delay);
+      return true;
+    };
     for (let attempt = 1; ; attempt += 1) {
       const headers: Record<string, string> = { "x-agentx-trace-id": options.traceId?.() ?? randomUUID() };
       if (authorized) headers.authorization = `Bearer ${current.accessToken}`;
       if (body !== undefined) headers["content-type"] = "application/json";
+      // Each try gets what is left of the deadline, at most 30 seconds, to answer in full.
+      const abort = new AbortController();
+      const timer = setTimeout(() => abort.abort(), Math.max(0, Math.min(REQUEST_TIMEOUT_MS, deadlineMs - (now() - started))));
       let response: Response;
+      let text: string;
       try {
         response = await options.fetch(`${current.baseUrl}${path}`, {
-          method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: abort.signal,
         });
+        text = await response.text().catch(() => "");
       } catch {
-        if (attempt < maxTries) {
-          await sleep(500 * attempt);
-          continue;
-        }
-        throw new ToolError("CONTROL_PLANE_UNAVAILABLE", `could not reach AgentX at ${plainText(current.baseUrl, "its URL")}${attempt > 1 ? ` after ${attempt} tries` : ""}`);
+        if (await again(attempt)) continue;
+        throw unreachable(attempt);
+      } finally {
+        clearTimeout(timer);
       }
-      const text = await response.text().catch(() => "");
       let value: unknown;
       try {
         value = JSON.parse(text) as unknown;
@@ -106,11 +137,12 @@ export function httpControlPlaneClient(options: {
         value = undefined;
       }
       // An outage is tried again; a 5xx that names what is wrong (SLACK_UNAVAILABLE) is the answer.
-      if (response.status >= 500 && attempt < maxTries && !isMeaningfulCode(errorCodeOf(value))) {
-        await sleep(500 * attempt);
-        continue;
+      if (response.status >= 500 && !isMeaningfulCode(errorCodeOf(value)) && await again(attempt)) continue;
+      if (!response.ok) {
+        const error = toolErrorFromResponse(response.status, value, current.signInCommand, secrets);
+        if (response.status === 401 && authorized) throw new Refused(error);
+        throw error;
       }
-      if (!response.ok) throw toolErrorFromResponse(response.status, value, current.signInCommand);
       const parsed = schema.safeParse(value);
       if (!parsed.success) throw new ToolError("CONTROL_PLANE_UNAVAILABLE", UNREADABLE, NEXT_STEPS.UPGRADE_REQUIRED);
       return parsed.data;
@@ -118,15 +150,19 @@ export function httpControlPlaneClient(options: {
   }
 
   async function call<T>(schema: z.ZodType<T>, method: string, path: string, body?: unknown, authorized = true): Promise<T> {
-    const current = await session();
+    const first = await session();
     try {
-      return await send(current, schema, method, path, body, authorized);
+      return await send(first, schema, method, path, body, authorized);
     } catch (error) {
-      // The access token never appears in what a tool returns, whatever the server echoed.
-      if (error instanceof ToolError && current.accessToken !== "") {
-        const hide = (text: string) => text.split(current.accessToken).join("[REDACTED]");
-        throw new ToolError(error.code, hide(error.message), hide(error.nextStep));
-      }
+      if (!(error instanceof Refused)) throw error;
+    }
+    // AgentX refused the access token: refresh it once and try once more, never in a loop. A 401
+    // means nothing was done, so sending the same request again is safe.
+    const refreshed = await session(true);
+    try {
+      return await send(refreshed, schema, method, path, body, authorized, [first.accessToken]);
+    } catch (error) {
+      if (error instanceof Refused) throw error.error;
       throw error;
     }
   }

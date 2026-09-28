@@ -37,6 +37,9 @@ export const NEXT_STEPS: Record<ToolErrorCode, string> = {
  */
 export const UPGRADE_AGENTX_STEP = "ask your AgentX admin to upgrade AgentX, or use an older CLI";
 
+/** CONTROL_PLANE_UNAVAILABLE's next step for a 4xx this CLI does not know: not a connection problem. */
+export const UNEXPECTED_ANSWER_STEP = "ask your AgentX admin, or try again later";
+
 export class ToolError extends Error {
   constructor(readonly code: ToolErrorCode, message: string, readonly nextStep: string = NEXT_STEPS[code]) {
     super(message);
@@ -46,10 +49,14 @@ export class ToolError extends Error {
 
 // eslint-disable-next-line no-control-regex
 const CONTROL = /[\u0000-\u001f\u007f-\u009f]/g;
-/** Server text made safe to show: credentials redacted, no control characters, at most 1,000 characters. */
-export function plainText(value: unknown, fallback: string): string {
+/**
+ * Server text made safe to show: the secrets named removed first (before the cap could cut one in
+ * two), credentials redacted, no control characters, at most 1,000 characters.
+ */
+export function plainText(value: unknown, fallback: string, secrets: readonly string[] = []): string {
   if (typeof value !== "string") return fallback;
-  const clean = redactText(value.replace(CONTROL, " ")).trim().slice(0, 1_000);
+  const hidden = secrets.reduce((text, secret) => (secret === "" ? text : text.split(secret).join("[REDACTED]")), value);
+  const clean = redactText(hidden.replace(CONTROL, " ")).trim().slice(0, 1_000);
   return clean === "" ? fallback : clean;
 }
 
@@ -76,14 +83,15 @@ export function signInStep(message: string, fallback: string): string {
   return `run ${SIGN_IN.exec(message)?.[1] ?? fallback}`;
 }
 
-/** A control-plane error answer as the tool error of FR-049. */
-export function toolErrorFromResponse(status: number, value: unknown, signInCommand: string): ToolError {
+/** A control-plane error answer as the tool error of FR-049; `secrets` never appear in its words. */
+export function toolErrorFromResponse(status: number, value: unknown, signInCommand: string, secrets: readonly string[] = []): ToolError {
   const error = typeof value === "object" && value !== null ? (value as { error?: { code?: unknown; message?: unknown } }).error : undefined;
   const code = typeof error?.code === "string" ? error.code : undefined;
-  const message = plainText(error?.message, `AgentX answered HTTP ${status}`);
+  const message = plainText(error?.message, `AgentX answered HTTP ${status}`, secrets);
   if (status === 401 || code === "AUTH_REQUIRED") return new ToolError("SIGN_IN_REQUIRED", message, `run ${signInCommand}`);
   if (code !== undefined && PASSED_THROUGH.has(code)) return new ToolError(code as ToolErrorCode, message);
   if (code !== undefined && BUSY.has(code)) return new ToolError("TASK_BUSY", message);
   if (code !== undefined && INVALID.has(code)) return new ToolError("INVALID_REQUEST", message);
+  if (status >= 400 && status < 500) return new ToolError("CONTROL_PLANE_UNAVAILABLE", message, UNEXPECTED_ANSWER_STEP);
   return new ToolError("CONTROL_PLANE_UNAVAILABLE", message);
 }
