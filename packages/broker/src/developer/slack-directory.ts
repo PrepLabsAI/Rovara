@@ -1,6 +1,6 @@
 // Spec 025 FR-007, FR-012 and FR-013 with the bot token. Every failure to reach Slack is
 // "unavailable": the caller fails closed for access and keeps sessions for refreshes (R18).
-import type { ChannelMembersResponse } from "@agentx/contracts";
+import { CHANNEL_MEMBERS_MAX_CHANNELS, type ChannelMembersResponse } from "@agentx/contracts";
 
 export type SlackUserStatus = "active" | "gone" | "unavailable";
 export interface SlackDirectory {
@@ -19,7 +19,8 @@ export interface SlackProblem { method: string; status: number | undefined; erro
 export const CHANNEL_MEMBERS_CACHE_MS = 600_000;
 const CACHE_CAP = 500;
 const TIMEOUT_MS = 5_000;
-const MAX_CALLS_PER_REQUEST = 100;
+/** Matched to the contract's batch: every channel of a full cold batch, twice (a second page each). */
+const MAX_CALLS_PER_REQUEST = 2 * CHANNEL_MEMBERS_MAX_CHANNELS;
 
 interface SlackUser { id?: string; team_id?: string; deleted?: boolean; is_bot?: boolean; enterprise_user?: { teams?: string[] } }
 type Reply = { status: number; body: Record<string, unknown> };

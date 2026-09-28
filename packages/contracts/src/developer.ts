@@ -85,8 +85,10 @@ export const DeveloperProjectsResponseSchema = z.object({
 });
 export type DeveloperProjectsResponse = z.infer<typeof DeveloperProjectsResponseSchema>;
 
-/** The most channels one channel-members request may name; callers split longer lists. */
-export const CHANNEL_MEMBERS_MAX_CHANNELS = 500;
+/** The most channels one channel-members request may name; callers split longer lists. The
+ * DeveloperIdentity function allows twice this many Slack calls per request, so a full batch of
+ * cold channels fits, with room for a second page of members each. */
+export const CHANNEL_MEMBERS_MAX_CHANNELS = 50;
 
 export const ChannelMembersRequestSchema = z
   .object({

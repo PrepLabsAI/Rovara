@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { CHANNEL_MEMBERS_MAX_CHANNELS } from "@agentx/contracts";
 import { slackDirectory } from "../../packages/broker/src/developer/slack-directory.js";
 import { BOT_TOKEN, T0, TEAM, fakeSlack, routeFetch } from "../support/developer-fakes.js";
 
@@ -111,6 +112,13 @@ describe("conversations.members (FR-013)", () => {
     const { dir, fetch } = directory([], { C0A000001: ["U01", "U02", "U03", "U04"], C0B000001: ["U05", "U06", "U07", "U0MAYA001"] }, { maxCallsPerRequest: 3 });
     expect(await dir.channelMembers("U0MAYA001", ["C0A000001", "C0B000001"])).toEqual({ ok: false, error: "slack_unavailable" });
     expect(membersCalls(fetch)).toBe(3);
+  });
+
+  it("answers a full batch of cold channels within one request's default call budget, with room for a second page each", async () => {
+    const channels = Object.fromEntries(Array.from({ length: CHANNEL_MEMBERS_MAX_CHANNELS }, (_, index) => [`C0CH${String(index).padStart(5, "0")}`, index === 7 ? ["U0MAYA001"] : ["U01"]]));
+    const { dir, fetch } = directory([], channels);
+    expect(await dir.channelMembers("U0MAYA001", Object.keys(channels))).toEqual({ ok: true, memberOf: ["C0CH00007"] });
+    expect(membersCalls(fetch)).toBe(CHANNEL_MEMBERS_MAX_CHANNELS);
   });
 
   it("fails closed when Slack cannot be reached or a channel cannot be read", async () => {

@@ -45,18 +45,18 @@ describe("project access (FR-013)", () => {
     expect(access.slackUnavailable).toBe(true);
   });
 
-  it("splits the channel check into requests of at most 500 channels, the contract's cap", async () => {
-    const many = Array.from({ length: 501 }, (_, index) => binding(`C0BIG${String(index).padStart(4, "0")}`, "big"));
+  it("splits the channel check into requests of at most 50 channels, so each fits one request's Slack call budget", async () => {
+    const many = Array.from({ length: 101 }, (_, index) => binding(`C0BIG${String(index).padStart(4, "0")}`, "big"));
     const requests: ChannelMembersRequest[] = [];
     const access = await resolveDeveloperAccess({
       grants: [], bindings: many, slackUserId: "U0MAYA001", channelMembersMayUse: () => true,
       channelMembers: async (request) => {
         requests.push(request);
-        return { ok: true, memberOf: request.channelIds.includes("C0BIG0500") ? ["C0BIG0500"] : [] };
+        return { ok: true, memberOf: request.channelIds.includes("C0BIG0100") ? ["C0BIG0100"] : [] };
       },
     });
-    expect(requests.map((request) => request.channelIds.length)).toEqual([500, 1]);
-    expect(new Set(requests.flatMap((request) => request.channelIds)).size).toBe(501);
+    expect(requests.map((request) => request.channelIds.length)).toEqual([50, 50, 1]);
+    expect(new Set(requests.flatMap((request) => request.channelIds)).size).toBe(101);
     expect(access.projects.get("big")?.access).toBe("channel");
   });
 
