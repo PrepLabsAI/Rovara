@@ -1,6 +1,7 @@
 // Every AWS and vendor interface the setup modules (phase 15d2) use, injected so tests replace
 // them all. init builds one SetupServices per run; the day-2 commands build one per command.
 import { AdminAddUserToGroupCommand, AdminCreateUserCommand, AdminGetUserCommand, AdminListGroupsForUserCommand } from "@aws-sdk/client-cognito-identity-provider";
+import type { AuthorizeInput, AuthorizeSecrets } from "../admin/authorize.js";
 import type { LoginOptions } from "../auth.js";
 import type { StackOutputs } from "../deploy/parameters.js";
 import type { GitHubApi } from "../init/github-app.js";
@@ -42,6 +43,11 @@ export interface SetupServices {
   slackIdentity: (botToken: string) => Promise<{ teamId: string; botUserId: string }>;
   /** Tasks 9 to 11: the one real read each connector's test read needs, before it is saved. */
   vendors: VendorApi;
+  /** Task 11: the bot user's one-time sign-in (admin/authorize.ts's authorizeCredential), which
+   * stores the refresh token beside the app's client, tags the secret and registers the credential. */
+  authorize: (input: AuthorizeInput) => Promise<unknown>;
+  /** Task 11: Secrets Manager with the administrator's AWS credentials, as the sign-in uses it. */
+  authorizeSecrets: AuthorizeSecrets;
 }
 
 const errorName = (error: unknown) => (error instanceof Error ? error.name : undefined);

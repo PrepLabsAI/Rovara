@@ -8,6 +8,7 @@ import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SSMClient } from "@aws-sdk/client-ssm";
 import { STSClient } from "@aws-sdk/client-sts";
 import { agentXError } from "@agentx/contracts";
+import { authorizeCredential, secretsManagerAuthorizeSecrets } from "../admin/authorize.js";
 import { loginWithPkce, openSystemBrowser } from "../auth.js";
 import { cliErrorFor, cloudFormationOutputsReader, prepareDeployment, realCommandRunner, type DeployCliDependencies, type PreparedDeployment, type Writer } from "../deploy/commands.js";
 import { assertReleaseCoversRegion, loadRelease } from "../deploy/release.js";
@@ -162,6 +163,9 @@ export function realSetupServices(input: { region: string; fetch: typeof fetch; 
     },
     // Task 9: the one real read each connector's test read needs, before it is saved.
     vendors: vendorApi(input.fetch),
+    // Task 11: the bot's sign-in, with the connector secret read and written in the environment's region.
+    authorize: authorizeCredential,
+    authorizeSecrets: secretsManagerAuthorizeSecrets(new SecretsManagerClient({ region: input.region })),
   };
 }
 

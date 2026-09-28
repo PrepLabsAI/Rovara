@@ -1,6 +1,7 @@
 // Fakes for the setup modules (phase 15d2). Nothing here reaches AWS, a vendor or the control plane.
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { AuthorizeSecrets } from "../../packages/cli/src/admin/authorize.js";
 import { tokenStoreKey, type LoginOptions } from "../../packages/cli/src/auth.js";
 import type { EnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import type { StoredTokens, TokenStore } from "../../packages/cli/src/token-store.js";
@@ -161,8 +162,14 @@ export function fakeSlackChannels(channels: SlackChannel[], options: { visibleAf
  * GraphQL error does (a VendorRefused-named Error, matched by name, never by message text).
  * `jiraCloudId` answers `vendors.jiraCloudId`; `jiraInside`/`jiraOutside` answer `vendors.jiraSearch`
  * depending on whether the JQL names the connected project or excludes it; `jiraRefuses` makes
- * `jiraSearch` throw the same VendorRefused shape a 401 from Atlassian does. */
-export function fakeVendors(options: { linearTeams?: LinearTeam[]; linearRefuses?: boolean; jiraCloudId?: string; jiraInside?: string[]; jiraOutside?: string[]; jiraRefuses?: boolean } = {}): VendorApi & { calls: string[] } {
+ * `jiraSearch` throw the same VendorRefused shape a 401 from Atlassian does. `asanaProject` answers
+ * `vendors.asanaProject` (pass `undefined` for a project the bot cannot see; absent means Payments);
+ * `asanaRotates` is the refresh token `asanaAccessToken` returns as rotated; `asanaRefuses` makes the
+ * refresh or the project read throw VendorRefused. */
+export function fakeVendors(options: {
+  linearTeams?: LinearTeam[]; linearRefuses?: boolean; jiraCloudId?: string; jiraInside?: string[]; jiraOutside?: string[]; jiraRefuses?: boolean;
+  asanaProject?: { name: string } | undefined; asanaRotates?: string; asanaRefuses?: "refresh" | "read";
+} = {}): VendorApi & { calls: string[] } {
   const calls: string[] = [];
   return {
     calls,
@@ -180,6 +187,28 @@ export function fakeVendors(options: { linearTeams?: LinearTeam[]; linearRefuses
       if (options.jiraRefuses === true) throw Object.assign(new Error("401"), { name: "VendorRefused" });
       return jql.includes("not in") ? options.jiraOutside ?? [] : options.jiraInside ?? ["PAY-1"];
     },
+    async asanaAccessToken() {
+      calls.push("asanaAccessToken");
+      if (options.asanaRefuses === "refresh") throw Object.assign(new Error("400"), { name: "VendorRefused" });
+      return { accessToken: "asana-access", ...(options.asanaRotates === undefined ? {} : { refreshToken: options.asanaRotates }) };
+    },
+    async asanaProject({ projectGid }) {
+      calls.push(`asanaProject ${projectGid}`);
+      if (options.asanaRefuses === "read") throw Object.assign(new Error("401"), { name: "VendorRefused" });
+      return "asanaProject" in options ? options.asanaProject : { name: "Payments" };
+    },
+  };
+}
+
+/** Secrets Manager as the bot's sign-in sees it (AuthorizeSecrets), in memory; `tags` records each tag call. */
+export function memoryAuthorizeSecrets(initial: Record<string, string> = {}): AuthorizeSecrets & { values: Map<string, string>; tags: string[] } {
+  const values = new Map(Object.entries(initial));
+  const tags: string[] = [];
+  return {
+    values, tags,
+    read: async (name) => values.get(name),
+    write: async (name, value) => { values.set(name, value); },
+    tag: async (name) => { tags.push(name); },
   };
 }
 
@@ -200,6 +229,9 @@ export function setupServices(overrides: Partial<SetupServices> = {}): SetupServ
     slackChannels: fakeSlackChannels([]),
     slackIdentity: async () => ({ teamId: "T0123456789", botUserId: "U0BOT00001" }),
     vendors: fakeVendors(),
+    // Task 11: a test that reaches the bot's sign-in passes its own authorize.
+    authorize: async () => { throw new Error("test setup: authorize not expected"); },
+    authorizeSecrets: memoryAuthorizeSecrets(),
     ...overrides,
   };
 }

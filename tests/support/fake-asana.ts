@@ -30,7 +30,9 @@ export interface FakeAsana {
   close(): Promise<void>;
 }
 
-export async function startFakeAsana(options: { clientId: string; clientSecret: string; refreshToken: string; tasks: Record<string, FakeAsanaTask> }): Promise<FakeAsana> {
+/** `projects` answers get_project by project_id (an error result for any other GID); without it,
+ * get_project answers an empty object as every unmodelled tool does. */
+export async function startFakeAsana(options: { clientId: string; clientSecret: string; refreshToken: string; tasks: Record<string, FakeAsanaTask>; projects?: Record<string, { name: string }> }): Promise<FakeAsana> {
   const tools = vendorTools("asana");
   const issued = new Set<string>();
   let validRefresh: string | undefined = options.refreshToken;
@@ -57,6 +59,13 @@ export async function startFakeAsana(options: { clientId: string; clientSecret: 
         memberships: task.projects.map((project) => ({ project: { gid: project, name: "Project" } })),
         parent: task.parent === undefined ? null : { gid: task.parent, name: "Parent" },
       } });
+    }
+    if (name === "get_project" && options.projects !== undefined) {
+      const project = options.projects[String(args.project_id)];
+      if (!project) return { isError: true, content: [{ type: "text", text: "Error: project not found" }] };
+      // The owner, with a name of its own, comes first: the project's name must be read from data.name,
+      // not from the first "name" in the text.
+      return text({ data: { gid: String(args.project_id), owner: { gid: "1210000000000555", name: "Project Owner" }, name: project.name, members: [{ gid: "1210000000000556", name: "Member" }] } });
     }
     if (name === "create_tasks") return text({ data: { succeeded: [{ gid: "1210000000000901", name: "created" }], failed: [] } });
     if (name === "add_comment") return text({ data: { gid: "1210000000000950", resource_subtype: "comment_added" } });

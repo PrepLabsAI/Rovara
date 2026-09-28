@@ -6,6 +6,7 @@ import { readSlackBotToken } from "../init/slack-app.js";
 import { definedEntries, secretSource } from "../signin/cli.js";
 import { addChannel } from "./channel-add.js";
 import type { SetupCommandContext } from "./command-context.js";
+import { addAsana } from "./connectors/asana.js";
 import { addJira } from "./connectors/jira.js";
 import { addLinear } from "./connectors/linear.js";
 import type { ConnectorAddInput } from "./connectors/revision.js";
@@ -102,5 +103,23 @@ export function registerSetupCommands(program: Command, context: SetupCommandCon
       const result = await addJira({ env: run.env, session: run.session, projectName, secrets: run.secrets, prompter: run.prompter, processEnv: process.env, write: run.write, services: run.services, flags });
       // addJira already printed the warning, if any; the result (and --json) carry it too. Exit 0 either way.
       run.print(result, `Jira connected to ${projectName} (revision ${result.revision})${result.warning === undefined ? "" : ", with the warning above"}\n`);
+    });
+
+  withRegion(connectorAdd.command("asana"))
+    .description("add Asana to a project: guide, app client, the bot user's sign-in (no browser opened here), project check, new revision")
+    .option("--asana-client-id <id>", "the Asana MCP app's Client ID")
+    .option("--asana-client-secret-file <path>", "file holding the app's Client secret")
+    .option("--asana-client-secret-env <NAME>", "environment variable holding the app's Client secret")
+    .option("--asana-bot-email <email>", "the bot user's email; a sign-in by any other account is refused")
+    .option("--asana-project <gid>", "the Asana project's GID")
+    .action(async (options: { asanaClientId?: string; asanaClientSecretFile?: string; asanaClientSecretEnv?: string; asanaBotEmail?: string; asanaProject?: string }, command: Command) => {
+      const projectName = projectOption(command, "the project to connect Asana to");
+      const run = await context.open(command);
+      const flags = definedEntries<Pick<ConnectorAddInput["flags"], "asanaClientId" | "asanaClientSecret" | "asanaBotEmail" | "asanaProject">>({
+        asanaClientId: options.asanaClientId, asanaClientSecret: secretSource(options.asanaClientSecretFile, options.asanaClientSecretEnv),
+        asanaBotEmail: options.asanaBotEmail, asanaProject: options.asanaProject,
+      });
+      const result = await addAsana({ env: run.env, session: run.session, projectName, secrets: run.secrets, prompter: run.prompter, processEnv: process.env, write: run.write, services: run.services, flags });
+      run.print(result, `Asana connected to ${projectName} (revision ${result.revision})\n`);
     });
 }
