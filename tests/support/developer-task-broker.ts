@@ -108,7 +108,7 @@ export async function createDeveloperTaskBroker(options: {
     return response.body;
   };
   return {
-    db, handler, actions, s3, deleteEc2Session, channelMembers, channelInfo, dev,
+    db, handler, actions, s3, brokerInput, deleteEc2Session, channelMembers, channelInfo, dev, callback,
     finish: (workspaceId: string, operationId: string, status: "SUCCEEDED" | "FAILED" | "CANCELLED" | "INTERRUPTED", detail: { result?: unknown; error?: string } = {}) =>
       callback(workspaceId, operationId, "result", { operationId, status, ...(detail.result === undefined ? {} : { result: detail.result }), ...(detail.error === undefined ? {} : { error: detail.error }) }),
     events: (workspaceId: string, operationId: string, events: Array<{ type: string; payload: unknown }>) =>

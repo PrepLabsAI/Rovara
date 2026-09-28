@@ -16,6 +16,11 @@ export type TaskCancellationResult =
   | { outcome: "CANCEL_REQUESTED"; targetOperationId: string; cancelOperationId: string }
   | { outcome: "NOTHING_RUNNING" };
 
+/**
+ * The broker actions a developer task route may call. The handlers that take an identity check
+ * the workspace's owner themselves; the reads, `deleteCompute` and `transact` do not, so callers
+ * must load the owned task and check project access first.
+ */
 export interface DeveloperTaskActions {
   tableName: string;
   turnRecordsTableName?: string;
@@ -23,17 +28,24 @@ export interface DeveloperTaskActions {
   limitDefaults: { member: number; organization: number };
   latestProject(projectName: string): Promise<RegisteredProjectRecord | undefined>;
   preparation(identity: AuthenticatedIdentity, project: RegisteredProjectRecord, requestId: string): Promise<{ workspace: WorkspaceInstance; operationId: string; items: TransactItems }>;
+  /** Unchecked: callers must load the owned task and check project access first. */
   workspace(workspaceId: string): Promise<WorkspaceInstance>;
+  /** Every operation of the workspace, across all pages. Unchecked: callers must load the owned task and check project access first. */
   operations(workspaceId: string): Promise<Operation[]>;
+  /** At most `limit` events, newest first. Unchecked: callers must load the owned task and check project access first. */
   eventsNewestFirst(operationId: string, limit: number): Promise<StoredEvent[]>;
+  /** The operation's artifacts, across all pages. Unchecked: callers must load the owned task and check project access first. */
   artifacts(workspaceId: string, operationId: string): Promise<StoredArtifact[]>;
+  /** The first `maxBytes` of an artifact. Unchecked: callers must load the owned task and check project access first. */
   readArtifact(objectKey: string, maxBytes: number): Promise<string>;
+  /** The workspace's pull requests, across all pages. Unchecked: callers must load the owned task and check project access first. */
   pullRequests(workspaceId: string): Promise<StoredPullRequest[]>;
   acceptTask(identity: AuthenticatedIdentity, workspaceId: string, request: OperationRequest, extra: ExtraItems): Promise<{ operation: Operation; duplicate: boolean }>;
   acceptPullRequest(identity: AuthenticatedIdentity, workspaceId: string, request: PullRequestRequest, extra: ExtraItems): Promise<{ operation: Operation; duplicate: boolean }>;
   cancelRunning(identity: AuthenticatedIdentity, workspace: WorkspaceInstance, extra: ExtraItems): Promise<TaskCancellationResult>;
   startClose(identity: AuthenticatedIdentity, workspace: WorkspaceInstance, requestId: string, extra: ExtraItems): Promise<{ operationId: string; duplicate: boolean }>;
-  /** Deletes the workspace's compute; the existing per-mode switch lives behind it (FR-024). */
+  /** Deletes the workspace's compute; the existing per-mode switch lives behind it (FR-024). Unchecked: callers must load the owned task and check project access first. */
   deleteCompute(workspace: WorkspaceInstance): Promise<void>;
+  /** Writes items in one transaction. Unchecked: callers must load the owned task and check project access first. */
   transact(items: TransactItems): Promise<void>;
 }

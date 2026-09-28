@@ -9,6 +9,7 @@ import {
   QueryCommand,
   TransactWriteCommand,
   UpdateCommand,
+  type QueryCommandOutput,
 } from "@aws-sdk/lib-dynamodb";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
@@ -304,13 +305,25 @@ export function createDeveloperTaskActions(input: AwsBrokerInput): DeveloperTask
 }
 
 function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTaskActions {
-  const query = async (pk: string, prefix: string, extra: Record<string, unknown> = {}) => (await dependencies.documentClient.send(new QueryCommand({
-    TableName: dependencies.tableName,
-    KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
-    ExpressionAttributeValues: { ":pk": pk, ":prefix": prefix },
-    ConsistentRead: true,
-    ...extra,
-  }))).Items ?? [];
+  /** Every page of a partition's items under a prefix, or the first `limit` of them. */
+  const query = async (pk: string, prefix: string, options: { newestFirst?: boolean; limit?: number } = {}) => {
+    const items: NonNullable<QueryCommandOutput["Items"]> = [];
+    let startKey: Record<string, unknown> | undefined;
+    do {
+      const page = await dependencies.documentClient.send(new QueryCommand({
+        TableName: dependencies.tableName,
+        KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
+        ExpressionAttributeValues: { ":pk": pk, ":prefix": prefix },
+        ConsistentRead: true,
+        ...(options.newestFirst ? { ScanIndexForward: false } : {}),
+        ...(options.limit === undefined ? {} : { Limit: options.limit - items.length }),
+        ...(startKey === undefined ? {} : { ExclusiveStartKey: startKey }),
+      }));
+      items.push(...(page.Items ?? []));
+      startKey = page.LastEvaluatedKey;
+    } while (startKey !== undefined && (options.limit === undefined || items.length < options.limit));
+    return items;
+  };
   return {
     tableName: dependencies.tableName,
     ...(dependencies.turnRecordsTableName ? { turnRecordsTableName: dependencies.turnRecordsTableName } : {}),
@@ -327,7 +340,7 @@ function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTas
     operations: async (workspaceId) => (await query(`WORKSPACE#${workspaceId}`, "OPERATION#"))
       .filter((item) => item.entityType === "OPERATION")
       .map((item) => publicOperation(item as OperationRecord)),
-    eventsNewestFirst: async (operationId, limit) => (await query(`OPERATION#${operationId}`, "EVENT#", { ScanIndexForward: false, Limit: limit }))
+    eventsNewestFirst: async (operationId, limit) => (await query(`OPERATION#${operationId}`, "EVENT#", { newestFirst: true, limit }))
       .filter((item) => item.entityType === "EVENT")
       .map((item) => parseStoredEvent(item)),
     artifacts: async (workspaceId, operationId) => (await query(`WORKSPACE#${workspaceId}`, "ARTIFACT#"))
@@ -345,6 +358,7 @@ function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTas
     acceptTask: (identity, workspaceId, request, extra) => acceptTask(dependencies, identity, workspaceId, request, extra),
     acceptPullRequest: (identity, workspaceId, request, extra) => acceptPullRequest(dependencies, identity, workspaceId, request, extra),
     cancelRunning: async (identity, workspace, extra) => {
+      if (workspace.ownerKey !== identity.ownerKey) throw agentXError("NOT_FOUND", "workspace not found");
       const result = await cancelRunningTask(dependencies, workspace, requesterOf(identity), extra);
       return result.outcome === "CANCEL_REQUESTED"
         ? { outcome: "CANCEL_REQUESTED", targetOperationId: result.targetOperationId, cancelOperationId: result.cancelOperationId }
@@ -1130,6 +1144,7 @@ async function startTaskClose(
   requestId: string,
   extra: ExtraItems,
 ): Promise<{ operationId: string; duplicate: boolean }> {
+  if (workspace.ownerKey !== identity.ownerKey) throw agentXError("NOT_FOUND", "workspace not found");
   if ((workspace.status === "CLOSING" || workspace.status === "CLOSED") && workspace.closeOperationId) {
     return { operationId: workspace.closeOperationId, duplicate: true };
   }
@@ -2536,19 +2551,27 @@ async function requestCancellation(
     payload: { targetOperationId },
   };
   const outbox = outboxRecord(workspace, invocation);
-  await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
-    { Update: {
-      TableName: dependencies.tableName,
-      Key: operationKey(workspaceId, targetOperationId),
-      UpdateExpression: "SET #status = :cancel, updatedAt = :now",
-      ConditionExpression: "fence = :fence",
-      ExpressionAttributeNames: { "#status": "status" },
-      ExpressionAttributeValues: { ":cancel": "CANCEL_REQUESTED", ":now": now, ":fence": workspace.fence },
-    } },
-    { Put: { TableName: dependencies.tableName, Item: operation } },
-    { Put: { TableName: dependencies.tableName, Item: outbox } },
-    ...extra(publicOperation(operation)),
-  ] }));
+  try {
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { Update: {
+        TableName: dependencies.tableName,
+        Key: operationKey(workspaceId, targetOperationId),
+        UpdateExpression: "SET #status = :cancel, updatedAt = :now",
+        ConditionExpression: "fence = :fence",
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: { ":cancel": "CANCEL_REQUESTED", ":now": now, ":fence": workspace.fence },
+      } },
+      { Put: { TableName: dependencies.tableName, Item: operation } },
+      { Put: { TableName: dependencies.tableName, Item: outbox } },
+      ...extra(publicOperation(operation)),
+    ] }));
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+    // The target finished while the cancel was being written: answer as for a finished target.
+    const current = await requireOperation(dependencies, workspaceId, targetOperationId);
+    if (TERMINAL.has(current.status)) return { operation: publicOperation(current), duplicate: true };
+    throw agentXError("WORKSPACE_BUSY", "the workspace changed while the cancel was being recorded; try again");
+  }
   return { operation: publicOperation(operation), duplicate: false };
 }
 
@@ -2586,6 +2609,8 @@ async function cancelRunningTask(
     return { outcome: "NOTHING_RUNNING", workspaceId: workspace.id };
   }
   const result = await requestCancellation(dependencies, workspace, targetOperationId, requester, extra);
+  // A duplicate here means the task finished before the cancel was recorded.
+  if (result.duplicate) return { outcome: "NOTHING_RUNNING", workspaceId: workspace.id };
   return { outcome: "CANCEL_REQUESTED", workspaceId: workspace.id, targetOperationId, cancelOperationId: result.operation.id };
 }
 
