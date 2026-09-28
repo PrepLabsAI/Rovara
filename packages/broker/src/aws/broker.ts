@@ -88,7 +88,7 @@ import { attributionDroppedLog, callConnector, connectorCatalogKey, discoverConn
 import { resolveConnectors, BUILT_IN_CONNECTOR_TYPES, type ConnectorType, type ConnectorTypeContext, type ResolvedConnector } from "./connector-types.js";
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
 import { developerTokenVerifier } from "../developer/verify-token.js";
-import { developerFooter, inertName } from "../developer/task-records.js";
+import { developerFooter, inertName, taskPointerKey, type DeveloperTaskPointerRecord } from "../developer/task-records.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
 import { hashJson, isConditional } from "./broker-shared.js";
 import { channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, routeDeveloperRequest, type DeveloperApiConfiguration } from "./developer-routes.js";
@@ -3174,6 +3174,55 @@ async function putArtifact(
   return artifactId;
 }
 
+/**
+ * Spec 025 R3: the first instructions of a developer task, queued in the prepare's own result
+ * transaction. Returns the workspace update that replaces the prepare's (PREPARING straight to
+ * BUSY) and the task's items. The pointer's condition makes a cancel that lands first win.
+ */
+async function queuedFirstTask(
+  dependencies: AwsBrokerDependencies,
+  workspace: WorkspaceInstance,
+  prepare: OperationRecord,
+  pointer: DeveloperTaskPointerRecord & { pendingPrompt: string },
+  now: string,
+): Promise<{ workspaceUpdate: TransactItems[number]; items: TransactItems }> {
+  const { operation, outbox, fence } = await taskOperationParts(dependencies, workspace, {
+    requestId: pointer.firstRequestId,
+    conversationId: pointer.conversationId,
+    prompt: pointer.pendingPrompt,
+    conversationStarted: false,
+    requester: { requestedBy: pointer.requester },
+  }, now);
+  return {
+    workspaceUpdate: { Update: {
+      TableName: dependencies.tableName,
+      Key: workspaceKey(workspace.id),
+      UpdateExpression: "SET #status = :busy, updatedAt = :now, preparationManifest = :manifest, activeOperationId = :task, fence = :taskFence",
+      ConditionExpression: "activeOperationId = :operation AND fence = :fence",
+      ExpressionAttributeNames: { "#status": "status" },
+      ExpressionAttributeValues: {
+        ":busy": "BUSY", ":now": now, ":manifest": ".agentx/preparation-manifest.json",
+        ":task": operation.id, ":taskFence": fence, ":operation": prepare.id, ":fence": prepare.fence,
+      },
+    } },
+    items: [
+      { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
+      { Put: { TableName: dependencies.tableName, Item: outbox, ConditionExpression: "attribute_not_exists(pk)" } },
+      { Put: {
+        TableName: dependencies.tableName,
+        Item: { pk: `IDEMPOTENCY#${workspace.ownerKey}#${workspace.id}`, sk: `REQUEST#${pointer.firstRequestId}`, entityType: "IDEMPOTENCY", operationId: operation.id, payloadHash: operation.payloadHash },
+        ConditionExpression: "attribute_not_exists(pk)",
+      } },
+      { Update: {
+        TableName: dependencies.tableName,
+        Key: taskPointerKey(workspace.id),
+        UpdateExpression: "REMOVE pendingPrompt",
+        ConditionExpression: "attribute_exists(pendingPrompt) AND attribute_not_exists(cancelledAt)",
+      } },
+    ],
+  };
+}
+
 async function recordTerminalResult(
   dependencies: AwsBrokerDependencies,
   operation: OperationRecord,
@@ -3211,7 +3260,7 @@ async function recordTerminalResult(
   const terminalTarget = operation.kind === "cancel" && operation.targetOperationId
     ? operationKey(operation.workspaceId, operation.targetOperationId)
     : undefined;
-  const transactItems: ConstructorParameters<typeof TransactWriteCommand>[0]["TransactItems"] = [
+  const transactItems: TransactItems = [
     { Update: {
       TableName: dependencies.tableName,
       Key: operationKey(operation.workspaceId, operation.id),
@@ -3230,33 +3279,55 @@ async function recordTerminalResult(
       ExpressionAttributeValues: { ":status": terminalStatus === "SUCCEEDED" ? "CANCELLED" : "INTERRUPTED", ":now": now },
     } });
   }
-  if (operation.kind !== "cancel" || terminalStatus === "SUCCEEDED") {
-    transactItems.push({ Update: {
-      TableName: dependencies.tableName,
-      Key: workspaceKey(workspace.id),
-      UpdateExpression: operation.kind === "prepare" && terminalStatus === "SUCCEEDED"
-        ? "SET #status = :status, updatedAt = :now, preparationManifest = :manifest REMOVE activeOperationId"
-        : operation.kind === "close" && closePreflight?.safeToClose !== true
-          ? "SET #status = :status, updatedAt = :now, closeError = :closeError REMOVE activeOperationId"
-          : "SET #status = :status, updatedAt = :now REMOVE activeOperationId, closeError",
-      ConditionExpression: operation.kind === "cancel"
-        ? "activeOperationId = :target AND fence = :fence"
-        : "activeOperationId = :operation AND fence = :fence",
-      ExpressionAttributeNames: { "#status": "status" },
-      ExpressionAttributeValues: {
-        ":status": workspaceStatus,
-        ":now": now,
-        ":fence": operation.fence,
-        ...(operation.kind === "cancel" ? { ":target": operation.targetOperationId } : { ":operation": operation.id }),
-        ...(operation.kind === "prepare" && terminalStatus === "SUCCEEDED" ? { ":manifest": ".agentx/preparation-manifest.json" } : {}),
-        ...(operation.kind === "close" && closePreflight?.safeToClose !== true
-          ? { ":closeError": error ?? (closePreflight ? "workspace contains unpublished work" : "workspace close preflight failed") }
-          : {}),
-      },
-    } });
-  }
+  const workspaceUpdate: TransactItems[number] = { Update: {
+    TableName: dependencies.tableName,
+    Key: workspaceKey(workspace.id),
+    UpdateExpression: operation.kind === "prepare" && terminalStatus === "SUCCEEDED"
+      ? "SET #status = :status, updatedAt = :now, preparationManifest = :manifest REMOVE activeOperationId"
+      : operation.kind === "close" && closePreflight?.safeToClose !== true
+        ? "SET #status = :status, updatedAt = :now, closeError = :closeError REMOVE activeOperationId"
+        : "SET #status = :status, updatedAt = :now REMOVE activeOperationId, closeError",
+    ConditionExpression: operation.kind === "cancel"
+      ? "activeOperationId = :target AND fence = :fence"
+      : "activeOperationId = :operation AND fence = :fence",
+    ExpressionAttributeNames: { "#status": "status" },
+    ExpressionAttributeValues: {
+      ":status": workspaceStatus,
+      ":now": now,
+      ":fence": operation.fence,
+      ...(operation.kind === "cancel" ? { ":target": operation.targetOperationId } : { ":operation": operation.id }),
+      ...(operation.kind === "prepare" && terminalStatus === "SUCCEEDED" ? { ":manifest": ".agentx/preparation-manifest.json" } : {}),
+      ...(operation.kind === "close" && closePreflight?.safeToClose !== true
+        ? { ":closeError": error ?? (closePreflight ? "workspace contains unpublished work" : "workspace close preflight failed") }
+        : {}),
+    },
+  } };
+  if (operation.kind !== "cancel" || terminalStatus === "SUCCEEDED") transactItems.push(workspaceUpdate);
+  const send = (items: TransactItems) => dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: items }));
+  // R3: a developer task's successful prepare queues its first instructions in this same
+  // transaction. The Slack path has no pointer, so it is unchanged.
+  const pointer = operation.kind === "prepare" && terminalStatus === "SUCCEEDED"
+    ? await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(workspace.id))
+    : undefined;
+  const queued = pointer?.pendingPrompt !== undefined && pointer.cancelledAt === undefined
+    ? await queuedFirstTask(dependencies, workspace, operation, { ...pointer, pendingPrompt: pointer.pendingPrompt }, now)
+    : undefined;
   try {
-    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }));
+    if (queued === undefined) {
+      await send(transactItems);
+    } else {
+      try {
+        await send([...transactItems.filter((item) => item !== workspaceUpdate), queued.workspaceUpdate, ...queued.items]);
+      } catch (queueError) {
+        if (!isConditional(queueError)) throw queueError;
+        // R16: a cancel that removed the instructions first wins; record the prepare without the task.
+        // A concurrent duplicate callback that already queued the task lands here too, and the plain
+        // write below then fails its fence condition and is answered by the handler after it.
+        const again = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(workspace.id));
+        if (again?.pendingPrompt !== undefined) throw queueError;
+        await send(transactItems);
+      }
+    }
   } catch (transactionError) {
     if (!isConditional(transactionError)) throw transactionError;
     const existing = await requireOperation(dependencies, operation.workspaceId, operation.id);
