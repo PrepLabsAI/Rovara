@@ -1,4 +1,5 @@
 // Fakes for the setup modules (phase 15d2). Nothing here reaches AWS, a vendor or the control plane.
+import { tokenStoreKey, type LoginOptions } from "../../packages/cli/src/auth.js";
 import type { StoredTokens, TokenStore } from "../../packages/cli/src/token-store.js";
 import type { CognitoAdmin, SetupServices } from "../../packages/cli/src/setup/services.js";
 
@@ -21,16 +22,32 @@ export function memoryTokenStore(initial: Record<string, StoredTokens> = {}): To
   };
 }
 
-export function fakeCognito(users: Record<string, string> = {}): CognitoAdmin & { created: string[]; grouped: string[] } {
+/** `users` maps a username to its status; `members` lists "username:group" memberships already made.
+ * `grouped` records every addToGroup call, and a call also makes the user a member. */
+export function fakeCognito(users: Record<string, string> = {}, members: string[] = []): CognitoAdmin & { created: string[]; grouped: string[] } {
   const status = new Map(Object.entries(users));
+  const membership = new Set(members);
   const created: string[] = [];
   const grouped: string[] = [];
   return {
     created, grouped,
     userStatus: async (_pool, username) => status.get(username),
     createUser: async (_pool, email) => { created.push(email); status.set(email, "FORCE_CHANGE_PASSWORD"); },
-    addToGroup: async (_pool, username, group) => { grouped.push(`${username}:${group}`); },
+    groups: async (_pool, username) => [...membership].filter((entry) => entry.startsWith(`${username}:`)).map((entry) => entry.slice(username.length + 1)),
+    addToGroup: async (_pool, username, group) => { grouped.push(`${username}:${group}`); membership.add(`${username}:${group}`); },
   };
+}
+
+/** A sign-in that answers with `tokens` and, like loginWithPkce, saves them in the token store first. */
+export function fakeLogin(tokens: StoredTokens | (() => StoredTokens)): ((options: LoginOptions) => Promise<StoredTokens>) & { calls: LoginOptions[] } {
+  const calls: LoginOptions[] = [];
+  const login = async (options: LoginOptions) => {
+    calls.push(options);
+    const answer = typeof tokens === "function" ? tokens() : tokens;
+    await options.tokenStore.set(tokenStoreKey(options), answer);
+    return answer;
+  };
+  return Object.assign(login, { calls });
 }
 
 export interface FakeControlPlane {
@@ -82,7 +99,7 @@ export function setupServices(overrides: Partial<SetupServices> = {}): SetupServ
   return {
     tokenStore: memoryTokenStore(),
     cognito: fakeCognito(),
-    login: async () => ({ accessToken: accessToken({ "cognito:groups": ["agentx-admin"] }), expiresAt: Date.parse("2026-09-27T01:00:00.000Z") }),
+    login: fakeLogin({ accessToken: accessToken({ "cognito:groups": ["agentx-admin"] }), expiresAt: Date.parse("2026-09-27T01:00:00.000Z") }),
     fetch: plane.fetch,
     ...overrides,
   };

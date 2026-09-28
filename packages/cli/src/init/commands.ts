@@ -132,8 +132,6 @@ export function nextStepsText(settings: EnvironmentSettings): string {
 
 const realSleep = (ms: number) => new Promise<void>((resolvePromise) => setTimeout(resolvePromise, ms));
 
-/** A browser that will not open (no xdg-open on CloudShell, SSH hosts and containers; Windows)
- * never stops init: the failure is reported once and the step carries on without it. */
 /** The real phase 15d2 services. Clients are only constructed here, never called, until a step
  * uses them. Tasks 6 to 13 add their fields. */
 export function realSetupServices(input: { region: string; fetch: typeof fetch; tokenStore?: TokenStore }): SetupServices {
@@ -145,6 +143,8 @@ export function realSetupServices(input: { region: string; fetch: typeof fetch; 
   };
 }
 
+/** A browser that will not open (no xdg-open on CloudShell, SSH hosts and containers; Windows)
+ * never stops init: the failure is reported once and the step carries on without it. */
 function neverThrowingBrowser(open: (url: string) => Promise<unknown>, write: (line: string) => void): (url: string) => Promise<boolean> {
   return async (url) => {
     try {

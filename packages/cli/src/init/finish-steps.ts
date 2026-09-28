@@ -36,7 +36,10 @@ export function adminUserStep(): InitStep<InitContext> {
           flag: "--admin-email", validate: (value) => (AlertEmailSchema.safeParse(value).success ? undefined : "must be an email address"),
         });
         if (recorded === undefined) {
-          await ensureCognitoAdmin({ cognito: context.setup.cognito, poolId: userPoolId(settings), email, write: context.write });
+          await ensureCognitoAdmin({
+            cognito: context.setup.cognito, poolId: userPoolId(settings), email, write: context.write,
+            confirm: (question) => context.prompter.confirm(question, { defaultValue: false }),
+          });
           await progress.update({ admin: { username: email, mode: "cognito" } });
         }
         await context.adminSession();

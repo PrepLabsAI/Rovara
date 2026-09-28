@@ -151,7 +151,7 @@ describe("operator role policy", () => {
 
   it("may create the environment's admin user only in a user pool tagged for this environment", () => {
     const admin = operatorRoleStatements(scope).find((s) => s.Sid === "AdminUser")!;
-    expect(admin.Action.sort()).toEqual(["cognito-idp:AdminAddUserToGroup", "cognito-idp:AdminCreateUser", "cognito-idp:AdminGetUser"]);
+    expect(admin.Action.sort()).toEqual(["cognito-idp:AdminAddUserToGroup", "cognito-idp:AdminCreateUser", "cognito-idp:AdminGetUser", "cognito-idp:AdminListGroupsForUser"]);
     expect(admin.Resource).toBe("arn:aws:cognito-idp:us-east-1:123456789012:userpool/*");
     expect(admin.Condition).toEqual({ StringEquals: { "aws:ResourceTag/agentx:env": "staging" } });
   });

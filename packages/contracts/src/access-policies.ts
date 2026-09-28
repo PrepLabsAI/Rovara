@@ -316,10 +316,11 @@ export function operatorRoleStatements(scope: PolicyScope): PolicyStatementJson[
     },
     {
       // FR-018 step 7: the admin user. The identity stack's user pool carries agentx:env (15a's
-      // Tags.of(app)); an exact tag value cannot match another environment.
+      // Tags.of(app)); an exact tag value cannot match another environment. AdminListGroupsForUser
+      // tells whether an existing user is already an administrator before init promotes it.
       Sid: "AdminUser",
       Effect: "Allow",
-      Action: ["cognito-idp:AdminGetUser", "cognito-idp:AdminCreateUser", "cognito-idp:AdminAddUserToGroup"],
+      Action: ["cognito-idp:AdminGetUser", "cognito-idp:AdminCreateUser", "cognito-idp:AdminAddUserToGroup", "cognito-idp:AdminListGroupsForUser"],
       Resource: `arn:${partition}:cognito-idp:${region}:${account}:userpool/*`,
       Condition: { StringEquals: { "aws:ResourceTag/agentx:env": env } },
     },
