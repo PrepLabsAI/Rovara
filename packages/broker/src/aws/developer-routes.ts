@@ -1,23 +1,30 @@
-// Spec 025 FR-009 and FR-016 (GET projects only in 25a). /v1/dev/* has no API Gateway authorizer
-// (D17): the broker verifies the developer access token itself, then checks the environment, the
-// method and the sign-in session on every request (R12, R13), so a revoked session stops at once.
+// Spec 025 FR-009, FR-013, FR-014 and FR-016: GET projects, and the project access check the task
+// routes use. /v1/dev/* has no API Gateway authorizer (D17): the broker verifies the developer
+// access token itself, then checks the environment, the method and the sign-in session on every
+// request (R12, R13), so a revoked session stops at once.
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import {
+  AgentXNameSchema,
+  CHANNEL_MEMBERS_MAX_CHANNELS,
   DEVELOPER_TOKEN_AUDIENCE,
   DEVELOPER_WORKSPACES_PER_PROJECT,
   WORKSPACE_PROJECT_INDEX,
   WorkspaceInstanceSchema,
   agentXError,
+  developerTaskPolicy,
   workspaceRecordFields,
+  type ChannelInfoRequest,
+  type ChannelInfoResponse,
   type ChannelMembersRequest,
   type ChannelMembersResponse,
   type DeveloperProjectsResponse,
   type DeveloperSignInMethod,
+  type DeveloperTaskPolicy,
   type DeveloperWorkspace,
   type DeveloperWorkspacesResponse,
   type SlackChannelBinding,
 } from "@agentx/contracts";
-import { resolveDeveloperAccess } from "../developer/access.js";
+import { accessDeniedMessage, resolveDeveloperAccess } from "../developer/access.js";
 import { META, methodSince, startedBeforeMethodOn, type DeveloperRecord, type SessionRecord } from "../developer/store.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 
@@ -27,6 +34,8 @@ export interface DeveloperApiConfiguration {
   since?: { slack?: number; oidc?: number };
   signInTableName: string;
   channelMembers(request: ChannelMembersRequest): Promise<ChannelMembersResponse>;
+  /** R10: bound channels' names and privacy, read by DeveloperIdentity. Optional: without it channels are listed by ID. */
+  channelInfo?: (request: ChannelInfoRequest) => Promise<ChannelInfoResponse>;
   /** Verifies the Authorization header's developer access token (D17; verify-token.ts) and returns its claims. */
   verifyAccessToken(authorization: string | undefined): Promise<Record<string, unknown>>;
 }
@@ -41,42 +50,68 @@ function logDeveloperEvent(entry: Record<string, string>): void {
   console.log(JSON.stringify({ component: "broker", ...entry }));
 }
 const errorName = (error: unknown) => (error instanceof Error ? error.name : "UnknownError");
-const SLACK_UNAVAILABLE: ChannelMembersResponse = { ok: false, error: "slack_unavailable" };
+const SLACK_UNAVAILABLE = { ok: false, error: "slack_unavailable" } as const;
+type IdentityRefusal = typeof SLACK_UNAVAILABLE | { ok: false; error: "invalid_request" };
 
 /**
- * The broker's channel-members check: a direct invoke of the DeveloperIdentity function, which
- * holds the Slack token (the broker never reads the Slack secret). Every failure fails closed and
- * is logged by its error name, FunctionError or reply error, never by payload.
+ * One direct invoke of the DeveloperIdentity function, which holds the Slack token (the broker
+ * never reads the Slack secret). `readReply` returns the good answer from the decoded reply, or
+ * undefined. Every failure fails closed as slack_unavailable with one `<event>_failed` log line;
+ * an invalid_request reply is a broker bug, logged as `<event>_invalid_request`. Lines carry only
+ * the reason, error name, FunctionError or reply error, never a payload.
  */
-export function channelMembersThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: ChannelMembersRequest) => Promise<ChannelMembersResponse> {
+async function identityInvoke<T>(
+  invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>,
+  request: ChannelMembersRequest | ChannelInfoRequest,
+  readReply: (reply: Record<string, unknown>) => T | undefined,
+  event: string,
+): Promise<T | IdentityRefusal> {
   const failed = (entry: Record<string, string>) => {
-    logDeveloperEvent({ event: "developer.channel_members_failed", ...entry });
+    logDeveloperEvent({ event: `${event}_failed`, ...entry });
     return SLACK_UNAVAILABLE;
   };
-  return async (request) => {
-    let response: ChannelMembersInvokeResult;
-    try {
-      response = await invoke(Buffer.from(JSON.stringify(request)));
-    } catch (error) {
-      return failed({ reason: "invoke_error", error: errorName(error) });
-    }
-    if (response.FunctionError !== undefined) return failed({ reason: "function_error", functionError: response.FunctionError });
-    if (response.Payload === undefined) return failed({ reason: "empty_reply" });
-    let reply: { ok?: unknown; memberOf?: unknown; error?: unknown };
-    try {
-      reply = JSON.parse(Buffer.from(response.Payload).toString("utf8")) as typeof reply;
-    } catch {
-      return failed({ reason: "unreadable_reply" });
-    }
-    if (reply.ok === true && Array.isArray(reply.memberOf)) {
-      return { ok: true, memberOf: reply.memberOf.filter((entry): entry is string => typeof entry === "string") };
-    }
-    if (reply.ok === false && reply.error === "invalid_request") {
-      logDeveloperEvent({ event: "developer.channel_members_invalid_request", reason: "the identity function refused the broker's request; this is a broker bug" });
-      return { ok: false, error: "invalid_request" };
-    }
-    return failed({ reason: "reply_error", error: reply.ok === false && reply.error === "slack_unavailable" ? "slack_unavailable" : "malformed_reply" });
-  };
+  let response: ChannelMembersInvokeResult;
+  try {
+    response = await invoke(Buffer.from(JSON.stringify(request)));
+  } catch (error) {
+    return failed({ reason: "invoke_error", error: errorName(error) });
+  }
+  if (response.FunctionError !== undefined) return failed({ reason: "function_error", functionError: response.FunctionError });
+  if (response.Payload === undefined) return failed({ reason: "empty_reply" });
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(Buffer.from(response.Payload).toString("utf8"));
+  } catch {
+    return failed({ reason: "unreadable_reply" });
+  }
+  const reply = typeof decoded === "object" && decoded !== null ? decoded as Record<string, unknown> : {};
+  const good = readReply(reply);
+  if (good !== undefined) return good;
+  if (reply.ok === false && reply.error === "invalid_request") {
+    logDeveloperEvent({ event: `${event}_invalid_request`, reason: "the identity function refused the broker's request; this is a broker bug" });
+    return { ok: false, error: "invalid_request" };
+  }
+  return failed({ reason: "reply_error", error: reply.ok === false && reply.error === "slack_unavailable" ? "slack_unavailable" : "malformed_reply" });
+}
+
+/** The broker's channel-members check (FR-013) through the DeveloperIdentity function. */
+export function channelMembersThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: ChannelMembersRequest) => Promise<ChannelMembersResponse> {
+  return (request) => identityInvoke(invoke, request, (reply) => (reply.ok === true && Array.isArray(reply.memberOf)
+    ? { ok: true as const, memberOf: reply.memberOf.filter((entry): entry is string => typeof entry === "string") }
+    : undefined), "developer.channel_members");
+}
+
+type ChannelEntry = { channelId: string; name: string; isPrivate: boolean };
+const isChannelEntry = (entry: unknown): entry is ChannelEntry => {
+  const candidate = entry as Partial<Record<keyof ChannelEntry, unknown>> | null;
+  return typeof candidate === "object" && candidate !== null && typeof candidate.channelId === "string" && typeof candidate.name === "string" && typeof candidate.isPrivate === "boolean";
+};
+
+/** R10: bound channels' names and privacy through the DeveloperIdentity function; keeps only well-formed entries. */
+export function channelInfoThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: ChannelInfoRequest) => Promise<ChannelInfoResponse> {
+  return (request) => identityInvoke(invoke, request, (reply) => (reply.ok === true && Array.isArray(reply.channels)
+    ? { ok: true as const, channels: reply.channels.filter(isChannelEntry).map(({ channelId, name, isPrivate }) => ({ channelId, name, isPrivate })) }
+    : undefined), "developer.channel_info");
 }
 
 /** The broker's copy of each method's enabled-since cutoff (FR-045), from its environment. */
@@ -180,7 +215,7 @@ async function queryAll<T>(deps: DeveloperRouteDependencies, pk: string, prefix:
   return items;
 }
 
-async function latestRevision(deps: DeveloperRouteDependencies, project: string): Promise<number | undefined> {
+async function latestDefinition(deps: DeveloperRouteDependencies, project: string): Promise<{ revision: number; developerTasks?: unknown } | undefined> {
   const response = await deps.documentClient.send(new QueryCommand({
     TableName: deps.tableName,
     KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
@@ -188,36 +223,91 @@ async function latestRevision(deps: DeveloperRouteDependencies, project: string)
     ScanIndexForward: false,
     Limit: 1,
     ConsistentRead: true,
-  })) as { Items?: Array<{ definition: { revision: number } }> };
-  return response.Items?.[0]?.definition.revision;
+  })) as { Items?: Array<{ definition: { revision: number; developerTasks?: unknown } }> };
+  return response.Items?.[0]?.definition;
+}
+
+/** Each named project's latest revision and task policy; projects with no revision are left out. */
+export async function projectsWithPolicy(deps: DeveloperRouteDependencies, names: readonly string[]): Promise<Map<string, { revision: number; policy: DeveloperTaskPolicy }>> {
+  const found = new Map<string, { revision: number; policy: DeveloperTaskPolicy }>();
+  for (const name of [...new Set(names)].sort()) {
+    const definition = await latestDefinition(deps, name);
+    // developerTaskPolicy fails closed: a policy that no longer parses turns tasks and channel access off.
+    if (definition !== undefined) found.set(name, { revision: definition.revision, policy: developerTaskPolicy(definition) });
+  }
+  return found;
+}
+
+/** The channel-members check, failing closed (and logged by error name) when it throws. */
+function safeChannelMembers(deps: DeveloperRouteDependencies): (request: ChannelMembersRequest) => Promise<ChannelMembersResponse> {
+  return async (request) => {
+    try {
+      return await deps.developer.channelMembers(request);
+    } catch (error) {
+      logDeveloperEvent({ event: "developer.channel_members_failed", reason: "threw", error: errorName(error) });
+      return SLACK_UNAVAILABLE;
+    }
+  };
+}
+
+/** Channel names and privacy, best effort: without them the channels are listed by ID (R10). */
+async function channelNames(deps: DeveloperRouteDependencies, channelIds: readonly string[]): Promise<Map<string, { name: string; isPrivate: boolean }>> {
+  const names = new Map<string, { name: string; isPrivate: boolean }>();
+  if (deps.developer.channelInfo === undefined || channelIds.length === 0) return names;
+  const unique = [...new Set(channelIds)].sort();
+  for (let start = 0; start < unique.length; start += CHANNEL_MEMBERS_MAX_CHANNELS) {
+    let answer: ChannelInfoResponse;
+    try {
+      answer = await deps.developer.channelInfo({ kind: "channel-info", channelIds: unique.slice(start, start + CHANNEL_MEMBERS_MAX_CHANNELS) });
+    } catch (error) {
+      logDeveloperEvent({ event: "developer.channel_info_failed", reason: "threw", error: errorName(error) });
+      return names;
+    }
+    if (!answer.ok) return names;
+    for (const channel of answer.channels) names.set(channel.channelId, { name: channel.name, isPrivate: channel.isPrivate });
+  }
+  return names;
+}
+
+/** A private channel is flagged by ID only: its name never leaves the control plane (R10). */
+const describeChannel = (channelId: string, names: Map<string, { name: string; isPrivate: boolean }>) => {
+  const known = names.get(channelId);
+  if (known === undefined) return { channelId };
+  return known.isPrivate ? { channelId, isPrivate: true } : { channelId, name: known.name, isPrivate: false };
+};
+
+/**
+ * FR-013: only `developer` rows are grants. A developer ID is built like an admin owner key, so an
+ * admin's `administrator` rows can sit under the same key when both sign in through one IdP.
+ */
+async function grantsOf(deps: DeveloperRouteDependencies, caller: DeveloperCaller): Promise<string[]> {
+  return (await queryAll<{ projectName: string; role?: string }>(deps, `MEMBER#${caller.developerId}`, "PROJECT#"))
+    .filter((membership) => membership.role === "developer")
+    .map((membership) => membership.projectName);
+}
+
+async function bindingsOf(deps: DeveloperRouteDependencies): Promise<SlackChannelBinding[]> {
+  return deps.developer.slackTeamId === undefined ? [] : queryAll<SlackChannelBinding>(deps, `SLACK_BINDING#${deps.developer.slackTeamId}`, "CHANNEL#");
 }
 
 async function listProjects(deps: DeveloperRouteDependencies, caller: DeveloperCaller): Promise<DeveloperProjectsResponse> {
-  // FR-013: only `developer` rows are grants. A developer ID is built like an admin owner key, so an
-  // admin's `administrator` rows can sit under the same key when both sign in through one IdP.
-  const grants = (await queryAll<{ projectName: string; role?: string }>(deps, `MEMBER#${caller.developerId}`, "PROJECT#"))
-    .filter((membership) => membership.role === "developer")
-    .map((membership) => membership.projectName);
-  const bindings = deps.developer.slackTeamId === undefined ? [] : await queryAll<SlackChannelBinding>(deps, `SLACK_BINDING#${deps.developer.slackTeamId}`, "CHANNEL#");
+  const grants = await grantsOf(deps, caller);
+  const bindings = await bindingsOf(deps);
+  const policies = await projectsWithPolicy(deps, [...grants, ...bindings.map((binding) => binding.projectName)]);
   const access = await resolveDeveloperAccess({
     grants,
     bindings,
     ...(caller.slackUserId === undefined ? {} : { slackUserId: caller.slackUserId }),
-    channelMembersMayUse: () => true, // R16: phase 25b reads the revision's developerTasks.channelMembersMayUse
-    channelMembers: async (request) => {
-      try {
-        return await deps.developer.channelMembers(request);
-      } catch (error) {
-        logDeveloperEvent({ event: "developer.channel_members_failed", reason: "threw", error: errorName(error) });
-        return SLACK_UNAVAILABLE;
-      }
-    },
+    // FR-013 with FR-014: a project's own switch decides whether channel members may use it.
+    channelMembersMayUse: (project) => policies.get(project)?.policy.channelMembersMayUse === true,
+    channelMembers: safeChannelMembers(deps),
   });
+  const listed = [...access.projects].filter(([name]) => policies.has(name));
+  const names = await channelNames(deps, listed.flatMap(([, entry]) => entry.channels));
   const projects: DeveloperProjectsResponse["projects"] = [];
-  for (const [name, entry] of access.projects) {
-    const revision = await latestRevision(deps, name);
-    if (revision === undefined) continue;
-    projects.push({ name, latestRevision: revision, access: entry.access, channels: entry.channels.map((channelId) => ({ channelId })) });
+  for (const [name, entry] of listed) {
+    const known = policies.get(name)!;
+    projects.push({ name, latestRevision: known.revision, access: entry.access, channels: entry.channels.map((channelId) => describeChannel(channelId, names)), tasks: known.policy });
   }
   return {
     developer: {
@@ -228,6 +318,38 @@ async function listProjects(deps: DeveloperRouteDependencies, caller: DeveloperC
     projects,
     notices: access.slackUnavailable ? ["slack_unavailable"] : [],
   };
+}
+
+/**
+ * FR-018's first three checks, in order, for one project; the start route calls it (Task 8), and
+ * every route must call it before a DeveloperTaskActions member that trusts its caller.
+ * PROJECT_NOT_FOUND, then PROJECT_ACCESS_DENIED (naming only public bound channels, R10), or
+ * SLACK_UNAVAILABLE when only a channel could have given access and Slack is down, then
+ * PROJECT_TASKS_DISABLED.
+ */
+export async function checkProjectAccess(deps: DeveloperRouteDependencies, caller: DeveloperCaller, project: string): Promise<{ revision: number; policy: DeveloperTaskPolicy; access: "granted" | "channel" }> {
+  const known = AgentXNameSchema.safeParse(project).success ? (await projectsWithPolicy(deps, [project])).get(project) : undefined;
+  if (known === undefined) throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist in this AgentX; run agentx_list_projects`);
+  const grants = (await grantsOf(deps, caller)).filter((name) => name === project);
+  const bindings = (await bindingsOf(deps)).filter((binding) => binding.projectName === project);
+  const access = await resolveDeveloperAccess({
+    grants,
+    bindings,
+    ...(caller.slackUserId === undefined ? {} : { slackUserId: caller.slackUserId }),
+    channelMembersMayUse: () => known.policy.channelMembersMayUse,
+    channelMembers: safeChannelMembers(deps),
+  });
+  const entry = access.projects.get(project);
+  if (entry === undefined) {
+    if (access.slackUnavailable) throw agentXError("SLACK_UNAVAILABLE", "Slack could not be reached to check your channel membership; try again, or ask an admin for access");
+    // Only a channel that would give access is worth naming, and only a public one (R10).
+    const visible = caller.slackUserId === undefined || !known.policy.channelMembersMayUse
+      ? []
+      : [...(await channelNames(deps, bindings.map((binding) => binding.channelId))).values()].filter((channel) => !channel.isPrivate).map((channel) => channel.name).sort();
+    throw agentXError("PROJECT_ACCESS_DENIED", accessDeniedMessage(project, visible));
+  }
+  if (!known.policy.enabled) throw agentXError("PROJECT_TASKS_DISABLED", `tasks from AI tools are turned off for \`${project}\`; use the project's Slack channel, or ask an admin`);
+  return { revision: known.revision, policy: known.policy, access: entry.access };
 }
 
 /**
@@ -277,7 +399,11 @@ async function projectWorkspaces(deps: DeveloperRouteDependencies, project: stri
   return workspaces;
 }
 
-/** FR-001: the projects the caller may use, with the workspaces in each of them. */
+/**
+ * FR-001: the projects the caller may use, with the workspaces in each of them. The projects come
+ * from listProjects itself, so this route applies exactly the same access rules (grants, and channel
+ * membership only where the project's developerTasks policy allows it, failing closed).
+ */
 async function listWorkspaces(deps: DeveloperRouteDependencies, caller: DeveloperCaller): Promise<DeveloperWorkspacesResponse> {
   const listing = await listProjects(deps, caller);
   const workspaces: DeveloperWorkspace[] = [];

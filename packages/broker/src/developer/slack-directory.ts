@@ -1,12 +1,14 @@
 // Spec 025 FR-007, FR-012 and FR-013 with the bot token. Every failure to reach Slack is
 // "unavailable": the caller fails closed for access and keeps sessions for refreshes (R18).
-import { CHANNEL_MEMBERS_MAX_CHANNELS, type ChannelMembersResponse } from "@agentx/contracts";
+import { CHANNEL_MEMBERS_MAX_CHANNELS, type ChannelInfoResponse, type ChannelMembersResponse } from "@agentx/contracts";
 
 export type SlackUserStatus = "active" | "gone" | "unavailable";
 export interface SlackDirectory {
   userStatus(userId: string): Promise<SlackUserStatus>;
   lookupByEmail(email: string): Promise<{ userId: string } | "none" | "unavailable">;
   channelMembers(userId: string, channelIds: readonly string[]): Promise<ChannelMembersResponse>;
+  /** R10: each channel's name and privacy, cached like members; a channel Slack does not know is left out. */
+  channelInfo(channelIds: readonly string[]): Promise<ChannelInfoResponse>;
 }
 
 /**
@@ -42,6 +44,7 @@ export function slackDirectory(input: {
   const maxCalls = input.maxCallsPerRequest ?? MAX_CALLS_PER_REQUEST;
   const members = new Map<string, { at: number; users: Set<string> }>();
   const loading = new Map<string, Promise<Set<string> | undefined>>();
+  const info = new Map<string, { at: number; name: string; isPrivate: boolean }>();
 
   const problem = (method: string, status: number | undefined, error: string): undefined => {
     input.report?.({ method, status, error });
@@ -149,6 +152,31 @@ export function slackDirectory(input: {
         if (users.has(userId)) memberOf.push(channelId);
       }
       return { ok: true, memberOf };
+    },
+    async channelInfo(channelIds) {
+      if (input.teamId === undefined) return { ok: false, error: "slack_unavailable" };
+      const channels: Array<{ channelId: string; name: string; isPrivate: boolean }> = [];
+      for (const channelId of [...new Set(channelIds)].sort()) {
+        const cached = info.get(channelId);
+        if (cached !== undefined && input.now() - cached.at < cacheMs) {
+          channels.push({ channelId, name: cached.name, isPrivate: cached.isPrivate });
+          continue;
+        }
+        const reply = await get("conversations.info", { channel: channelId });
+        if (reply === undefined) return { ok: false, error: "slack_unavailable" };
+        const channel = reply.body.channel as { name?: unknown; is_private?: unknown } | undefined;
+        if (reply.body.ok !== true || typeof channel?.name !== "string") {
+          // A channel Slack no longer knows is left out; any other refusal is about the token.
+          if (reply.body.error === "channel_not_found") continue;
+          refused("conversations.info", reply);
+          return { ok: false, error: "slack_unavailable" };
+        }
+        const entry = { at: input.now(), name: channel.name, isPrivate: channel.is_private === true };
+        if (info.size >= CACHE_CAP) info.delete(info.keys().next().value as string);
+        info.set(channelId, entry);
+        channels.push({ channelId, name: entry.name, isPrivate: entry.isPrivate });
+      }
+      return { ok: true, channels };
     },
   };
 }

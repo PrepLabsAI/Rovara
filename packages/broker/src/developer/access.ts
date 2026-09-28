@@ -34,3 +34,13 @@ export async function resolveDeveloperAccess(input: DeveloperAccessInput): Promi
 }
 
 const sorted = <V>(map: Map<string, V>) => new Map([...map].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+
+/**
+ * FR-049's PROJECT_ACCESS_DENIED text. The caller passes only public bound channels (R10): a
+ * person in any bound channel already has access when channelMembersMayUse is on, so those are the
+ * only bound channels they can see. No names means "ask an admin".
+ */
+export function accessDeniedMessage(project: string, channelNames: readonly string[]): string {
+  if (channelNames.length === 0) return `you don't have access to \`${project}\`: ask an admin`;
+  return `you don't have access to \`${project}\`: join one of its channels (${channelNames.map((name) => `#${name}`).join(", ")}) or ask an admin`;
+}

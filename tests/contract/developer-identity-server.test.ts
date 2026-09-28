@@ -455,6 +455,12 @@ describe("revocation and the channel-members invoke", () => {
     const h = identityHarness();
     expect(await h.handler({ kind: "channel-members", slackUserId: "not-a-user", channelIds: [] })).toEqual({ ok: false, error: "invalid_request" });
   });
+
+  it("answers the broker's channel-info request, and refuses a malformed one", async () => {
+    const h = identityHarness({ channelInfo: { C0PAY0001: { name: "payments-dev", isPrivate: false } } });
+    expect(await h.handler({ kind: "channel-info", channelIds: ["C0PAY0001"] })).toEqual({ ok: true, channels: [{ channelId: "C0PAY0001", name: "payments-dev", isPrivate: false }] });
+    expect(await h.handler({ kind: "channel-info", channelIds: ["not-a-channel"] })).toEqual({ ok: false, error: "invalid_request" });
+  });
 });
 
 describe("failure answers (Task 6 fix round 1)", () => {

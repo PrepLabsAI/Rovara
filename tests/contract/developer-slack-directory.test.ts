@@ -5,10 +5,10 @@ import { BOT_TOKEN, T0, TEAM, fakeSlack, routeFetch } from "../support/developer
 
 type Problem = { method: string; status: number | undefined; error: string };
 
-function directory(users: Parameters<typeof fakeSlack>[0]["users"], channels: Record<string, string[]> = {}, options: { maxCallsPerRequest?: number; botToken?: string } = {}) {
+function directory(users: Parameters<typeof fakeSlack>[0]["users"], channels: Record<string, string[]> = {}, options: { maxCallsPerRequest?: number; botToken?: string; channelInfo?: Record<string, { name: string; isPrivate: boolean }> } = {}) {
   let clock = T0;
   const problems: Problem[] = [];
-  const fake = fakeSlack({ users, channels });
+  const fake = fakeSlack({ users, channels, ...(options.channelInfo === undefined ? {} : { channelInfo: options.channelInfo }) });
   const fetch = routeFetch(fake.handler);
   const dir = slackDirectory({
     teamId: TEAM, botToken: async () => options.botToken ?? BOT_TOKEN, fetch, now: () => clock, report: (problem) => { problems.push(problem); },
@@ -133,5 +133,27 @@ describe("conversations.members (FR-013)", () => {
     const dir = slackDirectory({ teamId: undefined, botToken: async () => BOT_TOKEN, fetch: routeFetch(fake.handler), now: () => T0 });
     expect(await dir.channelMembers("U0MAYA001", ["C0PAY0001"])).toEqual({ ok: false, error: "slack_unavailable" });
     expect(await dir.userStatus("U0MAYA001")).toBe("unavailable");
+  });
+});
+
+describe("conversations.info for channel names (R10)", () => {
+  it("returns each channel's name and privacy, and caches them for 10 minutes", async () => {
+    const { dir, fetch, tick } = directory([], {}, { channelInfo: { C0PAY0001: { name: "payments-dev", isPrivate: false }, C0SEC0001: { name: "payments-sec", isPrivate: true } } });
+    expect(await dir.channelInfo(["C0PAY0001", "C0SEC0001"])).toEqual({ ok: true, channels: [
+      { channelId: "C0PAY0001", name: "payments-dev", isPrivate: false },
+      { channelId: "C0SEC0001", name: "payments-sec", isPrivate: true },
+    ] });
+    await dir.channelInfo(["C0PAY0001"]);
+    expect(fetch.calls.filter((call) => call.includes("conversations.info"))).toHaveLength(2);
+    tick(600_001);
+    await dir.channelInfo(["C0PAY0001"]);
+    expect(fetch.calls.filter((call) => call.includes("conversations.info"))).toHaveLength(3);
+  });
+
+  it("leaves out a channel Slack does not know, and is unavailable when Slack is down", async () => {
+    const { dir, fake } = directory([], {}, { channelInfo: { C0PAY0001: { name: "payments-dev", isPrivate: false } } });
+    expect(await dir.channelInfo(["C0PAY0001", "C0GONE001"])).toEqual({ ok: true, channels: [{ channelId: "C0PAY0001", name: "payments-dev", isPrivate: false }] });
+    fake.state.down = true;
+    expect(await dir.channelInfo(["C0OTHER01"])).toEqual({ ok: false, error: "slack_unavailable" });
   });
 });
