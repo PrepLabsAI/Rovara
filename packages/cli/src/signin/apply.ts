@@ -1,7 +1,7 @@
 // Show the sign-in change, confirm it, update the control plane's parameters, then record the
 // settings (spec 025 FR-045, R6, R7). Runs under the environment lock. Client secrets are written
 // only once the change is confirmed (F21), and are never printed.
-import { DescribeStacksCommand, type Stack } from "@aws-sdk/client-cloudformation";
+import { DescribeStacksCommand, ExecuteChangeSetCommand, type Stack } from "@aws-sdk/client-cloudformation";
 import { AgentXError, agentXError } from "@agentx/contracts";
 import { updateStackParameters } from "../deploy/parameter-update.js";
 import { withEnvironmentLock } from "../environments/lock.js";
@@ -38,21 +38,33 @@ const shown = (value: string) => (value === "" ? "(empty)" : value);
 export const errorReason = (error: unknown) => (error instanceof AgentXError ? error.message.slice(error.code.length + 2) : error instanceof Error ? error.message : "no reason given");
 /** Keeps an AgentXError's code, so the exit-code mapping is unchanged. */
 const withMessage = (error: unknown, message: string) => (error instanceof AgentXError ? agentXError(error.code, message) : agentXError("RUNTIME_UNAVAILABLE", message));
+/** The settled statuses in which the stack did not take the change, so the old credentials go back. */
+const RESTORE_ON = new Set(["UPDATE_ROLLBACK_COMPLETE", "UPDATE_FAILED"]);
+
+type StackOutcome =
+  | { kind: "unreadable"; problem: string }
+  | { kind: "running"; status: string }
+  | { kind: "applied" | "failed" | "other"; status: string };
+
 /**
- * Where a failed update left the stack: still "running" (in progress, or its status cannot be
- * read), settled with every changed parameter "applied", or settled without the change ("failed").
+ * Where a failed update left the stack. "failed" (restore) only for an allow-listed status, or
+ * when the change set never executed (the stack is untouched). Otherwise the new credentials are
+ * kept: "unreadable" (DescribeStacks failed), "running" (in progress), "applied" (settled with every
+ * changed parameter), or "other" (settled some other way, such as UPDATE_ROLLBACK_FAILED).
  */
-async function stackOutcome(cloudFormation: ApplySignInInput["cloudFormation"], stackName: string, changes: Record<string, string>): Promise<"running" | "applied" | "failed"> {
+async function stackOutcome(cloudFormation: ApplySignInInput["cloudFormation"], stackName: string, changes: Record<string, string>, executed: boolean): Promise<StackOutcome> {
   let stack: Stack | undefined;
   try {
     stack = ((await cloudFormation.send(new DescribeStacksCommand({ StackName: stackName }))) as { Stacks?: Stack[] }).Stacks?.[0];
-  } catch {
-    return "running";
+  } catch (error) {
+    return { kind: "unreadable", problem: errorReason(error) };
   }
   const status = stack?.StackStatus ?? "";
-  if (stack === undefined || status === "" || status.endsWith("_IN_PROGRESS")) return "running";
+  if (stack === undefined || status === "") return { kind: "unreadable", problem: "no status was returned" };
+  if (status.endsWith("_IN_PROGRESS")) return { kind: "running", status };
+  if (RESTORE_ON.has(status) || !executed) return { kind: "failed", status };
   const current = new Map((stack.Parameters ?? []).map((parameter) => [parameter.ParameterKey ?? "", parameter.ParameterValue ?? ""]));
-  return Object.entries(changes).every(([name, value]) => current.get(name) === value) ? "applied" : "failed";
+  return { kind: Object.entries(changes).every(([name, value]) => current.get(name) === value) ? "applied" : "other", status };
 }
 
 const notApplied = (stackName: string) => agentXError("CONFIG_INVALID", `the sign-in change to ${stackName} was not applied; nothing changed`);
@@ -89,10 +101,20 @@ export async function applySignInChange(input: ApplySignInInput): Promise<{ chan
     let stored = false;
     let storeFailure: Error | undefined;
     let changed: boolean;
+    let stackChanged = false;
+    let executed = false;
+    // Records whether ExecuteChangeSet was accepted, so a failure before it counts as "never executed".
+    const cloudFormation = {
+      send: async (command: unknown) => {
+        const result = await input.cloudFormation.send(command);
+        if (command instanceof ExecuteChangeSetCommand) executed = true;
+        return result;
+      },
+    };
     const parameterChanges = signInStackParameters({ settings: next, ...(teamId === undefined ? {} : { slackTeamId: teamId }) });
     try {
       ({ changed } = await updateStackParameters({
-        cloudFormation: input.cloudFormation,
+        cloudFormation,
         stackName,
         roleArn,
         changes: parameterChanges,
@@ -129,12 +151,21 @@ export async function applySignInChange(input: ApplySignInInput): Promise<{ chan
       // UPDATE_FAILED, or a change set that never executed). While it may still be updating (a
       // timeout, or a status that cannot be read), restoring could leave the new parameters on top
       // of the old secret, and sign-in would break unnoticed: keep the new credentials instead.
-      const outcome = await stackOutcome(input.cloudFormation, stackName, parameterChanges);
-      if (outcome === "running") {
-        throw withMessage(error, `the update of ${stackName} is still running (${errorReason(error)}); the new client credentials are kept in ${secretName}; check the stack's status in the CloudFormation console, then run ${rerun} again`);
+      const outcome = await stackOutcome(input.cloudFormation, stackName, parameterChanges, executed);
+      // Never "sign-in did not change" while the new credentials are kept.
+      const said = errorReason(error).replace("; sign-in did not change", "");
+      const checkThenRerun = `check the stack's status in the CloudFormation console, then run ${rerun} again`;
+      if (outcome.kind === "unreadable") {
+        throw withMessage(error, `${said}; the state of ${stackName} could not be confirmed (${outcome.problem}); the new client credentials are kept in ${secretName}; ${checkThenRerun}`);
       }
-      if (outcome === "applied") {
-        throw withMessage(error, `${errorReason(error)}; ${stackName} did take the change, so the new client credentials are kept in ${secretName}; run ${rerun} again to record the settings`);
+      if (outcome.kind === "running") {
+        throw withMessage(error, `the update of ${stackName} is still running (${said}); the new client credentials are kept in ${secretName}; ${checkThenRerun}`);
+      }
+      if (outcome.kind === "applied") {
+        throw withMessage(error, `${said}; ${stackName} did take the change, so the new client credentials are kept in ${secretName}; run ${rerun} again to record the settings`);
+      }
+      if (outcome.kind === "other") {
+        throw withMessage(error, `${said}; ${stackName} is ${outcome.status}, so the new client credentials are kept in ${secretName}; check the stack in the CloudFormation console, then run ${rerun} again`);
       }
       let restored: string;
       try {
@@ -150,12 +181,17 @@ export async function applySignInChange(input: ApplySignInInput): Promise<{ chan
       if (!confirmed) throw notApplied(stackName);
       await input.credentials.store();
       changed = true;
+    } else {
+      stackChanged = changed;
     }
     try {
       await writeSignInSettings(input.store, next);
       if (input.slackTeamId !== undefined) await writeSlackTeamId(input.store, input.env, input.slackTeamId);
     } catch (error) {
-      throw withMessage(error, `${stackName} ${changed ? "was updated" : "already matched"}, but recording the sign-in settings at ${signInParameterName(input.env)} failed (${errorReason(error)}); run ${rerun} again to record them`);
+      const what = stackChanged ? `${stackName} was updated`
+        : changed && input.credentials !== undefined ? `the client credentials in ${input.credentials.secretName} were replaced (${stackName} already matched)`
+          : `${stackName} already matched`;
+      throw withMessage(error, `${what}, but recording the sign-in settings at ${signInParameterName(input.env)} failed (${errorReason(error)}); run ${rerun} again to record them`);
     }
     return { changed, settings: next };
   };

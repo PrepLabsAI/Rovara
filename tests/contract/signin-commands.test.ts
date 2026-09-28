@@ -125,6 +125,77 @@ describe("agentx signin enable slack (FR-045)", () => {
     expect(JSON.parse(h.secrets.values.get("agentx/staging/slack")!)).toMatchObject({ clientId: "1111111111.2222222222222", clientSecret: SLACK_CLIENT_SECRET });
   });
 
+  describe("after a failed update, restores only on an allow-listed failure (fix round 2)", () => {
+    const OLD = { signingSecret: TEST_SIGNING_SECRET, botToken: TEST_BOT_TOKEN, clientId: "9999.8888", clientSecret: "00000000000000000000000000000000" };
+    const NEW = { clientId: "1111111111.2222222222222", clientSecret: SLACK_CLIENT_SECRET };
+    const PROMPTS = ["1111111111.2222222222222", SLACK_CLIENT_SECRET, true];
+    const failure = (promise: Promise<unknown>) => promise.then(() => "", (caught: unknown) => (caught instanceof Error ? caught.message : ""));
+    /** Wraps the fake so a test can fail one call; `executed` turns true once ExecuteChangeSet was sent. */
+    function intercept(h: Awaited<ReturnType<typeof services>>, fail: (name: string, executed: boolean) => Error | undefined) {
+      let executed = false;
+      h.s.cloudFormation = {
+        send: async (command: unknown) => {
+          const name = (command as { constructor: { name: string } }).constructor.name;
+          const error = fail(name, executed);
+          if (error !== undefined) throw error;
+          if (name === "ExecuteChangeSetCommand") executed = true;
+          return h.cloudFormation.send(command as Parameters<typeof h.cloudFormation.send>[0]);
+        },
+      };
+    }
+
+    it("keeps the new credentials on UPDATE_ROLLBACK_FAILED, naming the status", async () => {
+      const h = await services(PROMPTS, {}, SIGN_IN_PARAMETERS, { finalStatus: "UPDATE_ROLLBACK_FAILED", slackSecret: OLD });
+      const message = await failure(runSigninEnable(h.s, "staging", "slack", {}, {}, false));
+      expect(message).toContain("agentx-staging-control-plane is UPDATE_ROLLBACK_FAILED, so the new client credentials are kept in agentx/staging/slack; check the stack in the CloudFormation console, then run agentx signin enable slack again");
+      expect(message).not.toContain("sign-in did not change");
+      expect(JSON.parse(h.secrets.values.get("agentx/staging/slack")!)).toMatchObject(NEW);
+    });
+
+    it("says the state could not be confirmed, and keeps the credentials, when the stack cannot be read afterwards", async () => {
+      const h = await services(PROMPTS, {}, SIGN_IN_PARAMETERS, { finalStatus: "UPDATE_ROLLBACK_COMPLETE", slackSecret: OLD });
+      let readsAfterExecute = 0;
+      intercept(h, (name, executed) => (name === "DescribeStacksCommand" && executed && ++readsAfterExecute > 1 ? Object.assign(new Error("Rate exceeded"), { name: "ThrottlingException" }) : undefined));
+      const message = await failure(runSigninEnable(h.s, "staging", "slack", {}, {}, false));
+      expect(message).toContain("the state of agentx-staging-control-plane could not be confirmed (Rate exceeded); the new client credentials are kept in agentx/staging/slack; check the stack's status in the CloudFormation console, then run agentx signin enable slack again");
+      expect(message).not.toContain("sign-in did not change");
+      expect(message).not.toContain("still running");
+      expect(JSON.parse(h.secrets.values.get("agentx/staging/slack")!)).toMatchObject(NEW);
+    });
+
+    it("keeps the credentials, and says to record the settings, when the stack did take the change", async () => {
+      const h = await services(PROMPTS, {}, SIGN_IN_PARAMETERS, { slackSecret: OLD });
+      // The change set executes (and the fake applies it), then polling it fails.
+      intercept(h, (name, executed) => (name === "DescribeChangeSetCommand" && executed ? Object.assign(new Error("Rate exceeded"), { name: "ThrottlingException" }) : undefined));
+      const message = await failure(runSigninEnable(h.s, "staging", "slack", {}, {}, false));
+      expect(message).toContain("Rate exceeded; agentx-staging-control-plane did take the change, so the new client credentials are kept in agentx/staging/slack; run agentx signin enable slack again to record the settings");
+      expect(h.cloudFormation.parameters.DeveloperSignInSlack).toBe("enabled");
+      expect(JSON.parse(h.secrets.values.get("agentx/staging/slack")!)).toMatchObject(NEW);
+      expect(await readSignInSettings(h.store, "staging")).toBeUndefined();
+    });
+
+    it("puts the previous credentials back when the change set never executed", async () => {
+      const h = await services(PROMPTS, {}, SIGN_IN_PARAMETERS, { slackSecret: OLD });
+      intercept(h, (name) => (name === "ExecuteChangeSetCommand" ? Object.assign(new Error("Access denied"), { name: "AccessDeniedException" }) : undefined));
+      const message = await failure(runSigninEnable(h.s, "staging", "slack", {}, {}, false));
+      expect(message).toContain("Access denied; the previous client credentials were put back in agentx/staging/slack");
+      expect(JSON.parse(h.secrets.values.get("agentx/staging/slack")!)).toEqual(OLD);
+    });
+  });
+
+  it("says the credentials were replaced, not that the stack was updated, when only they changed and the settings write fails (fix round 2)", async () => {
+    const h = await services(["1111111111.2222222222222", SLACK_CLIENT_SECRET, true], {}, { ...SIGN_IN_PARAMETERS, DeveloperSignInSlack: "enabled", SlackTeamId: "T0TEAM" });
+    await writeSignInSettings(h.store, slackOn);
+    await writeSlackTeamId(h.store, "staging", "T0TEAM");
+    const put = h.store.put.bind(h.store);
+    h.store.put = async (name, value, options) => {
+      if (name === "/agentx/staging/signin") throw Object.assign(new Error("Rate exceeded"), { name: "ThrottlingException" });
+      await put(name, value, options);
+    };
+    await expect(runSigninEnable(h.s, "staging", "slack", {}, {}, false))
+      .rejects.toThrow("the client credentials in agentx/staging/slack were replaced (agentx-staging-control-plane already matched), but recording the sign-in settings at /agentx/staging/signin failed (Rate exceeded); run agentx signin enable slack again to record them");
+  });
+
   it("says so, and never that sign-in did not change, when the previous credentials cannot be put back", async () => {
     const h = await services(["1111111111.2222222222222", SLACK_CLIENT_SECRET, true], {}, SIGN_IN_PARAMETERS, { finalStatus: "UPDATE_ROLLBACK_COMPLETE" });
     const put = h.secrets.put.bind(h.secrets);
