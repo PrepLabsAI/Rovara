@@ -135,6 +135,41 @@ describe("operator role policy", () => {
     const stack = (part: string) => `arn:aws:cloudformation:us-east-1:123456789012:stack/agentx-staging-${part}/*`;
     expect([statements[0]!.Resource].flat()).toEqual(["foundation", "identity", "runtime", "control-plane", "slack"].map(stack));
   });
+
+  it("may create the environment's admin user only in a user pool tagged for this environment", () => {
+    const admin = operatorRoleStatements(scope).find((s) => s.Sid === "AdminUser")!;
+    expect(admin.Action.sort()).toEqual(["cognito-idp:AdminAddUserToGroup", "cognito-idp:AdminCreateUser", "cognito-idp:AdminGetUser"]);
+    expect(admin.Resource).toBe("arn:aws:cognito-idp:us-east-1:123456789012:userpool/*");
+    expect(admin.Condition).toEqual({ StringEquals: { "aws:ResourceTag/agentx:env": "staging" } });
+  });
+
+  it("may subscribe to and read only this environment's alert topic, and never publish or unsubscribe", () => {
+    const alerts = operatorRoleStatements(scope).find((s) => s.Sid === "Alerts")!;
+    expect(alerts.Action.sort()).toEqual(["sns:GetTopicAttributes", "sns:ListSubscriptionsByTopic", "sns:Subscribe"]);
+    expect(alerts.Resource).toBe("arn:aws:sns:us-east-1:123456789012:agentx-staging-alerts");
+    expect(actions(operatorRoleStatements(scope))).not.toContain("sns:Publish");
+    expect(actions(operatorRoleStatements(scope))).not.toContain("sns:Unsubscribe");
+  });
+
+  it("may flip only the test alarm, by its exact name", () => {
+    const alarm = operatorRoleStatements(scope).find((s) => s.Sid === "TestAlarm")!;
+    expect(alarm.Action.sort()).toEqual(["cloudwatch:DescribeAlarmHistory", "cloudwatch:SetAlarmState"]);
+    // Exact, never agentx-staging-*: that would also match a sibling environment named staging-eu.
+    expect(alarm.Resource).toBe("arn:aws:cloudwatch:us-east-1:123456789012:alarm:agentx-staging-TestAlarm");
+  });
+
+  it("may read only this environment's budget, and change none", () => {
+    const budget = operatorRoleStatements(scope).find((s) => s.Sid === "Budget")!;
+    expect(budget.Action).toEqual(["budgets:ViewBudget"]);
+    expect(budget.Resource).toBe("arn:aws:budgets::123456789012:budget/agentx-staging-monthly");
+    expect(actions(operatorRoleStatements(scope)).filter((a) => a.startsWith("budgets:"))).toEqual(["budgets:ViewBudget"]);
+  });
+
+  it("may read the EC2 vCPU quota, so prerequisites run on an operator resume", () => {
+    const quotas = operatorRoleStatements(scope).find((s) => s.Sid === "Quotas")!;
+    expect(quotas.Action).toEqual(["servicequotas:GetServiceQuota"]);
+    expect(quotas.Resource).toBe("*");
+  });
 });
 
 describe("default permission boundary", () => {
@@ -197,5 +232,13 @@ describe("default permission boundary", () => {
       { Action: ["iam:*Policy*"], Resource: "arn:aws:iam::123456789012:policy/agentx/staging/agentx-staging-boundary" },
     ]);
     expect(denies.every((s) => s.Condition === undefined)).toBe(true);
+  });
+
+  it("allows what the operator and service roles now use: budgets and the quota read", () => {
+    const services = defaultBoundaryStatements(scope).find((s) => s.Sid === "Services")!.Action;
+    expect(services).toContain("budgets:*");
+    expect(services).toContain("servicequotas:*");
+    expect(serviceRoleStatements(scope).find((s) => s.Sid === "Services")!.Action).toContain("budgets:*");
+    expect(serviceRoleStatements(scope).find((s) => s.Sid === "Services")!.Action).not.toContain("servicequotas:*");
   });
 });

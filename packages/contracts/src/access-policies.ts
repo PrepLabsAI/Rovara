@@ -24,6 +24,8 @@ export interface PolicyStatementJson {
 /** Services the service role may use with any resource; IAM is handled separately and name-scoped. */
 export const SERVICE_ROLE_SERVICES: readonly string[] = [
   "apigateway",
+  // The control-plane stack's monthly budget (phase 15d2, FR-047).
+  "budgets",
   "cloudformation",
   "cloudwatch",
   "cognito-idp",
@@ -45,12 +47,13 @@ export const SERVICE_ROLE_SERVICES: readonly string[] = [
 
 /**
  * Services the default permission boundary allows by wildcard: the service role's own, plus what
- * the environment's roles call (Bedrock models, X-Ray, CodeBuild and API Gateway invoke). STS is
- * not here: sts:* would let a bounded role assume any same-account role that trusts the account,
- * escaping the boundary, so the boundary names sts:GetCallerIdentity alone. The generated test in
- * access-stack.test.ts keeps this list complete and free of unused services.
+ * the environment's roles call (Bedrock models, X-Ray, CodeBuild, API Gateway invoke, and the
+ * operator's EC2 quota read). STS is not here: sts:* would let a bounded role assume any
+ * same-account role that trusts the account, escaping the boundary, so the boundary names
+ * sts:GetCallerIdentity alone. The generated test in access-stack.test.ts keeps this list complete
+ * and free of unused services.
  */
-export const BOUNDARY_SERVICES: readonly string[] = [...SERVICE_ROLE_SERVICES, "bedrock", "codebuild", "execute-api", "xray"];
+export const BOUNDARY_SERVICES: readonly string[] = [...SERVICE_ROLE_SERVICES, "bedrock", "codebuild", "execute-api", "servicequotas", "xray"];
 
 /** Service-linked roles the service role may create while deploying. */
 const SERVICE_LINKED_ROLE_SERVICES = ["ecs.amazonaws.com"];
@@ -293,6 +296,34 @@ export function operatorRoleStatements(scope: PolicyScope): PolicyStatementJson[
         `arn:${partition}:bedrock:${region}:${account}:inference-profile/*`,
       ],
     },
+    {
+      // FR-018 step 7: the admin user. The identity stack's user pool carries agentx:env (15a's
+      // Tags.of(app)); an exact tag value cannot match another environment.
+      Sid: "AdminUser",
+      Effect: "Allow",
+      Action: ["cognito-idp:AdminGetUser", "cognito-idp:AdminCreateUser", "cognito-idp:AdminAddUserToGroup"],
+      Resource: `arn:${partition}:cognito-idp:${region}:${account}:userpool/*`,
+      Condition: { StringEquals: { "aws:ResourceTag/agentx:env": env } },
+    },
+    {
+      // FR-045: subscribe the alert address. No Publish: the test alarm goes through CloudWatch.
+      Sid: "Alerts",
+      Effect: "Allow",
+      Action: ["sns:Subscribe", "sns:ListSubscriptionsByTopic", "sns:GetTopicAttributes"],
+      Resource: `arn:${partition}:sns:${region}:${account}:agentx-${env}-alerts`,
+    },
+    {
+      // FR-046: agentx alerts test flips this one alarm, named exactly.
+      Sid: "TestAlarm",
+      Effect: "Allow",
+      Action: ["cloudwatch:SetAlarmState", "cloudwatch:DescribeAlarmHistory"],
+      Resource: `arn:${partition}:cloudwatch:${region}:${account}:alarm:agentx-${env}-TestAlarm`,
+    },
+    // FR-047: the alerts step checks the budget CloudFormation made; it never changes it.
+    { Sid: "Budget", Effect: "Allow", Action: ["budgets:ViewBudget"], Resource: `arn:${partition}:budgets::${account}:budget/agentx-${env}-monthly` },
+    // prerequisites on an operator resume: read-only, and GetServiceQuota's quota ARN format is
+    // not one this plan could confirm, so it is not scoped.
+    { Sid: "Quotas", Effect: "Allow", Action: ["servicequotas:GetServiceQuota"], Resource: "*" },
     { Sid: "Identity", Effect: "Allow", Action: ["sts:GetCallerIdentity"], Resource: "*" },
     {
       Sid: "Logs",
