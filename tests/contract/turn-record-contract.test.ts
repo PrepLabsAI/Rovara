@@ -10,7 +10,7 @@ import {
   type TurnRecord,
 } from "../../packages/contracts/src/turns.js";
 import { TURN_ARGUMENT_LIMIT, redactArguments } from "../../packages/contracts/src/turns.js";
-import { AiToolTurnRecordSchema, aiToolTurnRecordKeys, type AiToolTurnRecord } from "../../packages/contracts/src/turns.js";
+import { AiToolTurnRecordSchema, aiToolTurnRecordKeys, isSlackTurnRecord, type AiToolTurnRecord } from "../../packages/contracts/src/turns.js";
 
 const record: TurnRecord = {
   ...EMPTY_TURN_OBSERVATION,
@@ -625,5 +625,34 @@ describe("AI-tool turn records (spec 025 FR-037)", () => {
     expect(slack).not.toHaveProperty("origin");
     expect(TurnRecordSchema.parse({ ...slack, origin: "slack" }).origin).toBe("slack");
     expect(TurnRecordSchema.safeParse({ ...slack, origin: "ai_tool" }).success).toBe(false);
+  });
+
+  it("round-trips a completed record carrying the result summary as response text (owner decision 3)", () => {
+    const completed: AiToolTurnRecord = {
+      ...aiRecord,
+      phase: "completed",
+      outcome: "succeeded",
+      responseText: "Fixed the flaky retry test and opened a pull request.",
+    };
+    expect(AiToolTurnRecordSchema.parse(completed)).toEqual(completed);
+  });
+
+  it("round-trips a refused record with an error code (owner decision 3)", () => {
+    const refused: AiToolTurnRecord = {
+      ...aiRecord,
+      phase: "refused",
+      outcome: "refused",
+      responseText: "The project's developer task limit is reached.",
+      error: { code: "WORKSPACE_LIMIT" },
+    };
+    expect(AiToolTurnRecordSchema.parse(refused)).toEqual(refused);
+  });
+
+  it("isSlackTurnRecord is false for an AI-tool record and true for a Slack record with or without origin", () => {
+    expect(isSlackTurnRecord(aiRecord)).toBe(false);
+    const slack = TurnRecordSchema.parse(record);
+    expect(slack).not.toHaveProperty("origin");
+    expect(isSlackTurnRecord(slack)).toBe(true);
+    expect(isSlackTurnRecord({ ...slack, origin: "slack" })).toBe(true);
   });
 });

@@ -156,15 +156,21 @@ export function redactArguments(value: unknown, limit = TURN_ARGUMENT_LIMIT): st
   }
 }
 
-export function turnRecordKeys(record: Pick<TurnRecord, "subject" | "receivedAt" | "eventId">) {
-  const at = `${record.receivedAt}#${record.eventId}`;
+/** The sk, export and expiry shape every turn record key shares; only pk differs between a
+ * Slack record's THREAD# and an AI-tool record's TASK#. */
+function timeIndexedKeys(pk: string, at: string, receivedAt: string) {
   return {
-    pk: `THREAD#${record.subject}`,
+    pk,
     sk: `TURN#${at}`,
     exportPk: TURN_EXPORT_PARTITION,
     exportSk: at,
-    expiresAt: Math.floor(Date.parse(record.receivedAt) / 1000) + TURN_RETENTION_DAYS * 86_400,
+    expiresAt: Math.floor(Date.parse(receivedAt) / 1000) + TURN_RETENTION_DAYS * 86_400,
   } as const;
+}
+
+export function turnRecordKeys(record: Pick<TurnRecord, "subject" | "receivedAt" | "eventId">) {
+  const at = `${record.receivedAt}#${record.eventId}`;
+  return timeIndexedKeys(`THREAD#${record.subject}`, at, record.receivedAt);
 }
 
 /** Spec 025 FR-037: one developer action from an AI tool, keyed by task, in the same table and export. */
@@ -211,11 +217,5 @@ export function isSlackTurnRecord(turn: ExportedTurnRecord): turn is TurnRecord 
 
 export function aiToolTurnRecordKeys(record: Pick<AiToolTurnRecord, "taskId" | "receivedAt" | "turnId">) {
   const at = `${record.receivedAt}#${record.turnId}`;
-  return {
-    pk: `TASK#${record.taskId}`,
-    sk: `TURN#${at}`,
-    exportPk: TURN_EXPORT_PARTITION,
-    exportSk: at,
-    expiresAt: Math.floor(Date.parse(record.receivedAt) / 1000) + TURN_RETENTION_DAYS * 86_400,
-  } as const;
+  return timeIndexedKeys(`TASK#${record.taskId}`, at, record.receivedAt);
 }
