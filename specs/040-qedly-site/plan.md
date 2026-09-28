@@ -78,7 +78,10 @@ These are owner actions. Tasks 2 onward depend on items 1 to 3.
 
 - [ ] **Step 1:** Create the GitHub organisation `qedly` (free plan) and the public repository `qedly/qedly.github.io`, with no template and a `main` branch.
 - [ ] **Step 2:** In the repository settings, go to Pages, set Source to "GitHub Actions" and turn on "Enforce HTTPS".
-- [ ] **Step 3:** Create a fine-grained GitHub token with read-only Contents and Pull requests access to `PrepLabsAI/AgentX` and `qedly/qedly.github.io`. Store it as the Actions secret `AGENTX_READ_TOKEN` in the site repository, and in AWS Secrets Manager as `qedly-site/github-readonly` for the CodeBuild gate.
+- [ ] **Step 3:** A fine-grained token can reach only one owner's repositories, so the site uses two:
+  - `AGENTX_READ_TOKEN`: a fine-grained token owned by `PrepLabsAI`, limited to `PrepLabsAI/AgentX`, with read-only Contents and Pull requests. The docs sync and the claims check use it. Store it as an Actions secret in `qedly/qedly.github.io`, and in AWS Secrets Manager as `qedly-site/agentx-readonly` for the CodeBuild gate.
+  - `SITE_READ_TOKEN`: for the receipts fetch on the site repository. In GitHub Actions this is the built-in `GITHUB_TOKEN`, so there is nothing to create. In CodeBuild the fetch runs without a token, because the repository is public.
+- [ ] **Step 3a:** Install the AgentX GitHub App (`agentx-sdlc`) on the `qedly` organisation for the `qedly.github.io` repository only, with Contents and Pull requests read and write. Spec 030 supports one App across several owners, but its live check (030 T005) is still open. This install is its first real use, so verify it in Task 2 step 7.
 - [ ] **Step 4:** Create a Buttondown account owned by PrepLabs, note the username, and enable tags `workspace` and `cloud`.
 - [ ] **Step 5:** Book the UK, EU and US trademark search for "Qedly" in classes 9 and 42.
 
@@ -217,9 +220,10 @@ git add -A && git commit -m "feat: scaffold Astro and Starlight site with one se
 ```
 
 - [ ] **Step 7: Dogfood switch-over (owner, with AgentX admin rights).**
-  1. Register `qedly/qedly.github.io` as the AgentX project `qedly-site`, using `readiness` `npm ci` and `npm test`, and a CodeBuild gate `agentx-qedly-site-build` whose buildspec is added in Task 11.
-  2. Create the Slack channel `#qedly-site` and bind it.
-  3. From Task 3 onward, request each task in that channel, and have a human review and merge each PR.
+  1. Confirm the Step 3a App install: registering a repository owned by `qedly` succeeds, and the first workspace clones and pushes. This closes spec 030 T005 for a second owner.
+  2. Register `qedly/qedly.github.io` as the AgentX project `qedly-site`, using `readiness` `npm ci` and `npm test`, and a CodeBuild gate `agentx-qedly-site-build` whose buildspec is added in Task 11.
+  3. Create the Slack channel `#qedly-site` and bind it.
+  4. From Task 3 onward, request each task in that channel, and have a human review and merge each PR.
 
 ### Task 3: Claims ledger and copy checks (FR-002, FR-003, FR-009, FR-013)
 
@@ -748,7 +752,7 @@ import { parse } from "yaml";
 import { SITE } from "../src/config/site";
 import { keepQedlyCode, mergeWithCache, toReceipt, type CheckRun, type PullRequest, type Receipt } from "../src/lib/receipts";
 
-const token = process.env.AGENTX_READ_TOKEN;
+const token = process.env.SITE_READ_TOKEN;
 const headers = { Accept: "application/vnd.github+json", ...(token ? { Authorization: `Bearer ${token}` } : {}) };
 const target = "src/data/receipts.json";
 const allowEmpty = process.env.RECEIPTS_ALLOW_EMPTY === "1";
@@ -998,7 +1002,7 @@ name: Deploy
 on:
   push: { branches: [main] }
   workflow_dispatch:
-permissions: { contents: read, pages: write, id-token: write }
+permissions: { contents: read, pages: write, id-token: write, pull-requests: read, checks: read }
 concurrency: { group: pages, cancel-in-progress: false }
 jobs:
   build:
@@ -1011,7 +1015,7 @@ jobs:
         with: { path: src/data/receipts.json, key: receipts-${{ github.run_id }}, restore-keys: receipts- }
       - run: npm ci && npm test
       - run: npm run build
-        env: { AGENTX_READ_TOKEN: "${{ secrets.AGENTX_READ_TOKEN }}" }
+        env: { AGENTX_READ_TOKEN: "${{ secrets.AGENTX_READ_TOKEN }}", SITE_READ_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
       - uses: actions/upload-pages-artifact@v3
         with: { path: dist }
   deploy:
@@ -1023,14 +1027,14 @@ jobs:
         uses: actions/deploy-pages@v4
 ```
 
-- [ ] **Step 2: The gate.** The CodeBuild project `agentx-qedly-site-build` gets `AGENTX_READ_TOKEN` from Secrets Manager `qedly-site/github-readonly`.
+- [ ] **Step 2: The gate.** The CodeBuild project `agentx-qedly-site-build` gets `AGENTX_READ_TOKEN` from Secrets Manager `qedly-site/agentx-readonly`. The receipts fetch there runs unauthenticated, which is enough for a public repository at gate frequency.
 
 ```yaml
 # buildspec.yml
 version: 0.2
 env:
   secrets-manager:
-    AGENTX_READ_TOKEN: qedly-site/github-readonly
+    AGENTX_READ_TOKEN: qedly-site/agentx-readonly
 phases:
   install:
     runtime-versions: { nodejs: 22 }
