@@ -13,7 +13,6 @@ describe("install state", () => {
   it("names its parameters under the environment's settings prefix", () => {
     expect(installAnswersParameterName("staging")).toBe("/agentx/staging/install/answers");
     expect(installProgressParameterName("staging")).toBe("/agentx/staging/install/progress");
-    expect(INIT_STEP_IDS).toEqual(["prerequisites", "access", "core", "github-app", "control-plane", "slack-app", "slack-service", "developer-signin"]);
   });
 
   it("round-trips answers and progress", async () => {
@@ -74,7 +73,7 @@ describe("install state", () => {
       ...emptyProgress("staging", T0),
       steps: {
         access: { status: "done", at: "2026-09-27T00:00:00.000Z" },
-        "admin-user": { status: "done", at: "2026-09-27T00:00:00.000Z" },
+        "future-step": { status: "done", at: "2026-09-27T00:00:00.000Z" },
       },
     }));
     const progress = await readInstallProgress(store, "staging");
@@ -87,7 +86,7 @@ describe("install state", () => {
       ...emptyProgress("staging", T0),
       steps: {
         access: { status: "finished", at: "2026-09-27T00:00:00.000Z" },
-        "admin-user": { status: "done", at: "2026-09-27T00:00:00.000Z" },
+        "future-step": { status: "done", at: "2026-09-27T00:00:00.000Z" },
       },
     }));
     await expect(readInstallProgress(store, "staging")).rejects.toThrow("install progress for environment staging is invalid or was written by a newer agentx; upgrade agentx and run it again");
@@ -160,5 +159,39 @@ describe("install state", () => {
     await expect(writeInstallProgress(store, huge)).rejects.toThrow(/internal limit/);
     await expect(writeInstallProgress(store, huge)).rejects.toThrow(/delete the install\/progress parameter/);
     await expect(writeInstallProgress(store, huge)).rejects.toThrow(/restart agentx init safely/);
+  });
+});
+
+describe("15d2 install state", () => {
+  it("appends the five finishing steps after developer-signin, moving no earlier id", () => {
+    expect(INIT_STEP_IDS).toEqual([
+      "prerequisites", "access", "core", "github-app", "control-plane", "slack-app", "slack-service", "developer-signin",
+      "admin-user", "first-project", "connectors", "alerts", "e2e",
+    ]);
+  });
+
+  it("round-trips the admin, project, connector and alert facts", async () => {
+    const store = new MemoryParameterStore();
+    const progress = {
+      ...emptyProgress("staging", T0),
+      admin: { username: "alice@example.com", mode: "cognito" as const },
+      project: { name: "payments", revision: 2, channelName: "payments", channelId: "C0123456789", teamId: "T0123456789" },
+      connectors: [{ type: "linear" as const, ref: "linear" }, { type: "jira" as const, ref: "jira", warning: "the Jira service account can also see issues in HR, FIN" }],
+      alerts: { subscribed: true, tested: false },
+    };
+    await writeInstallProgress(store, progress);
+    expect(await readInstallProgress(store, "staging")).toEqual(progress);
+  });
+
+  it("refuses a project name or channel id that could not have come from AgentX or Slack", async () => {
+    const store = new MemoryParameterStore();
+    await expect(writeInstallProgress(store, { ...emptyProgress("staging", T0), project: { name: "Payments!", revision: 1 } })).rejects.toThrow("install progress is invalid: project.name");
+    await expect(writeInstallProgress(store, { ...emptyProgress("staging", T0), project: { name: "payments", revision: 1, channelId: "D0123" } })).rejects.toThrow("project.channelId");
+  });
+
+  it("still reads progress an older agentx wrote, with none of the new fields", async () => {
+    const store = new MemoryParameterStore();
+    store.values.set("/agentx/staging/install/progress", JSON.stringify({ schemaVersion: 1, env: "staging", steps: { "developer-signin": { status: "done", at: "2026-09-27T00:00:00.000Z" } }, updatedAt: "2026-09-27T00:00:00.000Z" }));
+    expect((await readInstallProgress(store, "staging"))?.steps["developer-signin"]?.status).toBe("done");
   });
 });

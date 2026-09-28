@@ -3,12 +3,19 @@
 // written only by deployEnvironment once the Slack stack exists; these two let a stopped init
 // resume before that, from any machine with access to the account.
 import { z } from "zod";
-import { agentXError, EnvironmentNameSchema, environmentSettingsPrefix, ImageDigest } from "@agentx/contracts";
+import { agentXError, AGENTX_NAME_PATTERN, EnvironmentNameSchema, environmentSettingsPrefix, ImageDigest } from "@agentx/contracts";
 import { AlertEmailSchema, ACCOUNT_PATTERN, GITHUB_LOGIN_PATTERN, IdentityAnswersSchema, ModelsAnswersSchema, REGION_PATTERN } from "../deploy/answer-schemas.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 
-export const INIT_STEP_IDS = ["prerequisites", "access", "core", "github-app", "control-plane", "slack-app", "slack-service", "developer-signin"] as const;
+export const INIT_STEP_IDS = [
+  "prerequisites", "access", "core", "github-app", "control-plane", "slack-app", "slack-service", "developer-signin",
+  // Phase 15d2, appended so no earlier id moves (resume skips done steps in this order).
+  "admin-user", "first-project", "connectors", "alerts", "e2e",
+] as const;
 export type InitStepId = (typeof INIT_STEP_IDS)[number];
+
+export const CONNECTOR_TYPES = ["linear", "jira", "asana"] as const;
+export type ConnectorType = (typeof CONNECTOR_TYPES)[number];
 export const SSM_STANDARD_VALUE_LIMIT = 4096;
 
 const SECRET_ARN = /^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:\d{12}:secret:.+$/;
@@ -70,6 +77,18 @@ export const InstallProgressSchema = z.object({
     installationId: z.string().regex(/^\d+$/).optional(),
   }).strict().optional(),
   slack: z.object({ appId: z.string().regex(/^A[A-Z0-9]+$/), teamId: z.string().regex(/^T[A-Z0-9]+$/), botUserId: z.string().regex(/^[UW][A-Z0-9]+$/) }).strict().optional(),
+  admin: z.object({ username: z.string().min(3).max(128), mode: z.enum(["cognito", "oidc"]) }).strict().optional(),
+  project: z.object({
+    name: z.string().regex(AGENTX_NAME_PATTERN),
+    revision: z.number().int().positive(),
+    channelName: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,79}$/).optional(),
+    channelId: z.string().regex(/^[CG][A-Z0-9]{8,}$/).optional(),
+    teamId: z.string().regex(/^T[A-Z0-9]+$/).optional(),
+  }).strict().optional(),
+  // warning: a connector saved with a caution (owner decision 6: a Jira account that sees other
+  // projects), kept so 15e's doctor can show it again. At most 300 characters, never a secret.
+  connectors: z.array(z.object({ type: z.enum(CONNECTOR_TYPES), ref: z.string().regex(AGENTX_NAME_PATTERN), warning: z.string().min(1).max(300).optional() }).strict()).max(3).optional(),
+  alerts: z.object({ subscribed: z.boolean(), tested: z.boolean() }).strict().optional(),
   updatedAt: z.iso.datetime(),
 }).strict();
 

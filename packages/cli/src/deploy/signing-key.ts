@@ -22,6 +22,13 @@ export class SecretAlreadyExistsError extends Error {
   }
 }
 
+/** FR-047: every resource carries agentx:env. A secret the CLI creates under agentx/<env>/ is
+ * tagged with that environment; a name outside it (the legacy agentx/connectors/) is not. */
+export function secretTags(name: string): Array<{ Key: string; Value: string }> {
+  const match = /^agentx\/([a-z0-9-]{1,20})\//.exec(name);
+  return match === null || match[1] === "connectors" ? [] : [{ Key: "agentx:env", Value: match[1]! }];
+}
+
 /** What `callbackSigningKey` needs from Secrets Manager. */
 export interface SecretValueStore {
   /** The secret's current value, or undefined when it does not exist. */
@@ -45,7 +52,8 @@ export function secretsManagerValueStore(client: SecretsManagerClient): SecretVa
     },
     async create(name, value) {
       try {
-        await client.send(new CreateSecretCommand({ Name: name, SecretString: value }));
+        const tags = secretTags(name);
+        await client.send(new CreateSecretCommand({ Name: name, SecretString: value, ...(tags.length === 0 ? {} : { Tags: tags }) }));
       } catch (error) {
         if (errorName(error) === "ResourceExistsException") throw new SecretAlreadyExistsError(name);
         throw error;
