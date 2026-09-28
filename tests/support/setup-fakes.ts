@@ -6,6 +6,7 @@ import type { EnvironmentSettings } from "../../packages/cli/src/environments/se
 import type { StoredTokens, TokenStore } from "../../packages/cli/src/token-store.js";
 import type { CognitoAdmin, SetupServices } from "../../packages/cli/src/setup/services.js";
 import type { GitHubRepositoryApi } from "../../packages/cli/src/setup/project-files.js";
+import type { SlackChannel, SlackChannelApi } from "../../packages/cli/src/setup/channel-add.js";
 import { fakeGitHubApi } from "./init-fakes.js";
 
 export const CONTROL_PLANE = "https://cp.example.test";
@@ -126,6 +127,33 @@ export function fakeRepositories(repositories: Record<string, { defaultBranch?: 
   };
 }
 
+/** A turn record as the control plane exports it (TurnRecordSchema), with the given fields replaced. */
+export function turn(overrides: Record<string, unknown>): Record<string, unknown> {
+  return {
+    eventId: `Ev${Math.random().toString(36).slice(2, 10).toUpperCase()}`, subject: "T0123456789/C0PAY00001/1.1", receivedAt: "2026-09-27T00:00:01.000Z",
+    requestedBy: { teamId: "T0123456789", userId: "U0HUMAN001" }, disposition: "answered", startedAt: "2026-09-27T00:00:01.000Z", finishedAt: "2026-09-27T00:00:09.000Z",
+    durationMs: 8000, requestText: "hello", responseText: "hi", offeredTools: [], calls: [], emptyResponse: false, workerOperations: [], ...overrides,
+  };
+}
+
+/** The channels the bot can see. With `visibleAfterFinds`, finds before that count see nothing,
+ * as when a person has not invited the bot yet. `joined` records every join; `tokens` every token used. */
+export function fakeSlackChannels(channels: SlackChannel[], options: { visibleAfterFinds?: number } = {}): SlackChannelApi & { joined: string[]; tokens: string[]; finds: () => number } {
+  const joined: string[] = [];
+  const tokens: string[] = [];
+  let finds = 0;
+  return {
+    joined, tokens, finds: () => finds,
+    async find(token, name) {
+      tokens.push(token);
+      finds += 1;
+      if (options.visibleAfterFinds !== undefined && finds < options.visibleAfterFinds) return undefined;
+      return channels.find((channel) => channel.name === name);
+    },
+    async join(token, channelId) { tokens.push(token); joined.push(channelId); },
+  };
+}
+
 /** Every SetupServices field has a default here, with no cast (F20): a task that adds a field must
  * add its fake, or this stops type-checking. */
 export function setupServices(overrides: Partial<SetupServices> = {}): SetupServices {
@@ -140,6 +168,8 @@ export function setupServices(overrides: Partial<SetupServices> = {}): SetupServ
     stackOutputs: async () => FOUNDATION_OUTPUTS,
     // Tests that write project files pass their own directory.
     configDir: join(tmpdir(), "agentx-setup-unused"),
+    slackChannels: fakeSlackChannels([]),
+    slackIdentity: async () => ({ teamId: "T0123456789", botUserId: "U0BOT00001" }),
     ...overrides,
   };
 }

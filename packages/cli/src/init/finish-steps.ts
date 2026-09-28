@@ -5,9 +5,11 @@ import { AlertEmailSchema } from "../deploy/answer-schemas.js";
 import { readEnvironmentSettings, type EnvironmentSettings } from "../environments/settings.js";
 import { tokenClaimValues, userPoolId } from "../setup/admin-session.js";
 import { ensureCognitoAdmin } from "../setup/admin-user.js";
+import { addChannel } from "../setup/channel-add.js";
 import { addProject } from "../setup/project-add.js";
 import { installationToken } from "../setup/project-files.js";
 import type { InitContext } from "./context.js";
+import { readSlackBotToken } from "./slack-app.js";
 import type { InitStep } from "./steps.js";
 
 export async function requireSettings(context: InitContext): Promise<EnvironmentSettings> {
@@ -55,7 +57,7 @@ export function adminUserStep(): InitStep<InitContext> {
   };
 }
 
-/** FR-040: the first project, on EC2 workers. Task 8 adds its channel. */
+/** FR-040 and FR-041: the first project, on EC2 workers, and its Slack channel. */
 export function firstProjectStep(): InitStep<InitContext> {
   return {
     id: "first-project",
@@ -74,8 +76,17 @@ export function firstProjectStep(): InitStep<InitContext> {
         project = { name: added.name, revision: added.revision };
         await progress.update({ project });
       }
-      // Task 8 binds the channel here.
-      return { status: "done", note: `project ${project.name}` };
+      if (project.channelId === undefined) {
+        const slack = progress.current().slack;
+        if (slack === undefined) throw agentXError("CONFIG_INVALID", "install progress has no Slack app facts; the Slack app step must finish first, so run agentx init again");
+        const bound = await addChannel({
+          session, botToken: await readSlackBotToken(context.secrets, context.env), teamId: slack.teamId, botUserId: slack.botUserId, projectName: project.name,
+          prompter: context.prompter, write: context.write, sleep: context.sleep, now: context.now, services: context.setup, flags: context.flags,
+        });
+        project = { ...project, channelId: bound.channelId, channelName: bound.channelName, teamId: slack.teamId };
+        await progress.update({ project });
+      }
+      return { status: "done", note: `project ${project.name} in #${project.channelName ?? project.channelId}` };
     },
   };
 }

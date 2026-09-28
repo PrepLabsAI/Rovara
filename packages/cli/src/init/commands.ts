@@ -16,6 +16,7 @@ import type { LockRecord } from "../environments/lock.js";
 import { ssmParameterStore, type ParameterStore } from "../environments/parameter-store.js";
 import { readEnvironmentSettings, type EnvironmentSettings } from "../environments/settings.js";
 import { openAdminSession } from "../setup/admin-session.js";
+import { slackChannelApi } from "../setup/channel-add.js";
 import { githubRepositoryApi } from "../setup/project-files.js";
 import { cognitoAdmin, type SetupServices } from "../setup/services.js";
 import type { SigninFlags } from "../signin/collect.js";
@@ -149,6 +150,15 @@ export function realSetupServices(input: { region: string; fetch: typeof fetch; 
     // Task 7: the foundation's EC2 worker outputs, and where project files are written.
     stackOutputs: cloudFormationOutputsReader(new CloudFormationClient({ region: input.region })),
     configDir: input.configDir,
+    // Task 8: both use the bot token read from agentx/<env>/slack, only in the authorization header.
+    slackChannels: slackChannelApi(input.fetch),
+    slackIdentity: async (token) => {
+      const answer = await slackWebApi(input.fetch).authTest(token);
+      if (answer.ok !== true || answer.team_id === undefined || answer.user_id === undefined) {
+        throw agentXError("CONFIG_INVALID", "Slack refused the stored bot token; run agentx init again to store a new one");
+      }
+      return { teamId: answer.team_id, botUserId: answer.user_id };
+    },
   };
 }
 

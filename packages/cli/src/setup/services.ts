@@ -5,6 +5,7 @@ import type { LoginOptions } from "../auth.js";
 import type { StackOutputs } from "../deploy/parameters.js";
 import type { GitHubApi } from "../init/github-app.js";
 import type { StoredTokens, TokenStore } from "../token-store.js";
+import type { SlackChannelApi } from "./channel-add.js";
 import type { GitHubRepositoryApi } from "./project-files.js";
 
 export interface AdminSession { controlPlaneUrl: string; accessToken: string }
@@ -34,6 +35,10 @@ export interface SetupServices {
   stackOutputs: (stackName: string) => Promise<StackOutputs | undefined>;
   /** Task 7: where project files live (the global --config-dir, default ~/.agentx/projects). */
   configDir: string;
+  /** Task 8: finding and joining the project's Slack channel with the bot token. */
+  slackChannels: SlackChannelApi;
+  /** Task 8: the bot token's workspace and bot user (15d1's auth.test). */
+  slackIdentity: (botToken: string) => Promise<{ teamId: string; botUserId: string }>;
 }
 
 const errorName = (error: unknown) => (error instanceof Error ? error.name : undefined);

@@ -18,6 +18,8 @@ import type { AdminSession, SetupServices } from "./services.js";
 export interface SetupRun {
   env: string; settings: EnvironmentSettings; session: AdminSession; secrets: InitSecrets;
   services: SetupServices; prompter: Prompter; write: (line: string) => void;
+  /** Waiting for a person (a channel invite, a mention), injected so tests do not wait. */
+  sleep: (ms: number) => Promise<void>; now: () => number;
   /** The command's result: JSON with the global --json, otherwise `text`. */
   print: (result: unknown, text: string) => void;
 }
@@ -63,6 +65,8 @@ export function realSetupContext(input: {
       services: realSetupServices({ region: settings.region, fetch: input.fetch, configDir: globals.configDir, tokenStore: input.tokenStore }),
       prompter: process.stdin.isTTY === true ? processPrompter(input.stderr) : noTerminalPrompter(),
       write: (line) => { input.stderr.write(`${line}\n`); },
+      sleep: (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
+      now: Date.now,
       print: (result, text) => { input.stdout.write(globals.json ? formatSuccess(result, true) : text); },
     };
   };
@@ -71,7 +75,7 @@ export function realSetupContext(input: {
     async open(command) {
       const run = await openAws(command);
       const session = await openAdminSession({
-        settings: run.settings, services: run.services, write: run.write, now: Date.now,
+        settings: run.settings, services: run.services, write: run.write, now: run.now,
         // A browser that will not open (CloudShell, SSH) never stops the command: the address is
         // already printed.
         openBrowser: async (url) => {

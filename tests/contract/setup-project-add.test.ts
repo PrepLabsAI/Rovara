@@ -13,7 +13,7 @@ import { addProject, ec2Binding, registerRevision } from "../../packages/cli/src
 import { SETUP_TIMEOUT, TEST_TIMEOUT } from "../../packages/cli/src/setup/project-files.js";
 import { fakeGitHubApi, initContext, memoryInitSecrets, progressHandle, scriptedPrompter, TEST_PRIVATE_KEY, type TestInitContext } from "../support/init-fakes.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
-import { CONTROL_PLANE, STAGING_SETTINGS, accessToken, fakeControlPlane, fakeRepositories, memoryTokenStore, setupServices } from "../support/setup-fakes.js";
+import { CONTROL_PLANE, STAGING_SETTINGS, accessToken, fakeControlPlane, fakeRepositories, fakeSlackChannels, memoryTokenStore, setupServices } from "../support/setup-fakes.js";
 
 const FOUNDATION = { Ec2WorkerLaunchTemplateId: "lt-0123456789abcdef0", Ec2WorkerSubnets: "us-east-1a=subnet-0aaa1111bbbb2222c,us-east-1b=subnet-0ddd3333eeee4444f" };
 let configDir: string;
@@ -231,19 +231,25 @@ describe("the first-project init step", () => {
   let context: TestInitContext | undefined;
   afterEach(async () => { if (context !== undefined) await rm(context.home, { recursive: true, force: true }); });
 
-  const githubSecret = () => memoryInitSecrets({ "agentx/staging/github-app": JSON.stringify({ appId: "42", slug: "agentx-acme", account: "acme", privateKey: TEST_PRIVATE_KEY }) });
+  // Task 8: the step also binds the channel, from the recorded Slack facts and the stored bot token.
+  const githubSecret = () => memoryInitSecrets({
+    "agentx/staging/github-app": JSON.stringify({ appId: "42", slug: "agentx-acme", account: "acme", privateKey: TEST_PRIVATE_KEY }),
+    "agentx/staging/slack": JSON.stringify({ botToken: "xoxb-fake-bot-token-value" }),
+  });
+  const SLACK = { appId: "A0APP00001", teamId: "T0123456789", botUserId: "U0BOT00001" };
+  const slackChannels = () => fakeSlackChannels([{ id: "C0PAY00001", name: "payments", isPrivate: false, isMember: true }, { id: "C0DOCS0001", name: "docs", isPrivate: false, isMember: true }]);
 
   it("registers the first project with the recorded installation and records it", async () => {
     const plane = fakeControlPlane();
     const github = fakeGitHubApi({ installationId: 777 });
     context = initContext({
-      secrets: githubSecret(), prompter: scriptedPrompter(["acme/payments-api", "", true]),
-      setup: setupServices({ fetch: plane.fetch, repositories: repositoriesFake(), github, configDir, stackOutputs: async (name) => (name === "agentx-staging-foundation" ? FOUNDATION : undefined) }),
+      secrets: githubSecret(), prompter: scriptedPrompter(["acme/payments-api", "", true, "#payments"]),
+      setup: setupServices({ fetch: plane.fetch, repositories: repositoriesFake(), github, configDir, stackOutputs: async (name) => (name === "agentx-staging-foundation" ? FOUNDATION : undefined), slackChannels: slackChannels() }),
     });
     (context.store as MemoryParameterStore).values.set("/agentx/staging/settings", JSON.stringify(STAGING_SETTINGS));
-    const progress = progressHandle({ ...progressHandle().value(), github: { account: "acme", appId: "42", slug: "agentx-acme", privateKeySecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/github-app-AbCdEf", installationId: "777" } });
-    expect(await firstProjectStep().run(context, progress)).toEqual({ status: "done", note: "project payments-api" });
-    expect(progress.value().project).toEqual({ name: "payments-api", revision: 1 });
+    const progress = progressHandle({ ...progressHandle().value(), slack: SLACK, github: { account: "acme", appId: "42", slug: "agentx-acme", privateKeySecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/github-app-AbCdEf", installationId: "777" } });
+    expect(await firstProjectStep().run(context, progress)).toEqual({ status: "done", note: "project payments-api in #payments" });
+    expect(progress.value().project).toEqual({ name: "payments-api", revision: 1, channelId: "C0PAY00001", channelName: "payments", teamId: "T0123456789" });
     expect(github.polls()).toBe(0);
     expect(plane.registered).toHaveLength(1);
     expect(context.lines.join("\n")).toContain("Registered project payments-api, revision 1, on EC2 workers.");
@@ -254,22 +260,23 @@ describe("the first-project init step", () => {
     const plane = fakeControlPlane();
     context = initContext({
       secrets: githubSecret(), prompter: scriptedPrompter([]),
-      flags: { repository: "acme/docs", projectName: "docs", setupCommand: "", testCommand: "make check" },
-      setup: setupServices({ fetch: plane.fetch, repositories: repositoriesFake(), configDir, stackOutputs: async () => FOUNDATION }),
+      flags: { repository: "acme/docs", projectName: "docs", setupCommand: "", testCommand: "make check", channel: "docs" },
+      setup: setupServices({ fetch: plane.fetch, repositories: repositoriesFake(), configDir, stackOutputs: async () => FOUNDATION, slackChannels: slackChannels() }),
     });
     (context.store as MemoryParameterStore).values.set("/agentx/staging/settings", JSON.stringify(STAGING_SETTINGS));
-    const progress = progressHandle();
+    const progress = progressHandle({ ...progressHandle().value(), slack: SLACK });
     await firstProjectStep().run(context, progress);
-    expect(progress.value().project).toEqual({ name: "docs", revision: 1 });
+    expect(progress.value().project).toEqual({ name: "docs", revision: 1, channelId: "C0DOCS0001", channelName: "docs", teamId: "T0123456789" });
   });
 
   it("registers nothing again on a rerun that already recorded the project", async () => {
     const plane = fakeControlPlane();
     context = initContext({ prompter: scriptedPrompter([]), setup: setupServices({ fetch: plane.fetch, configDir }) });
     (context.store as MemoryParameterStore).values.set("/agentx/staging/settings", JSON.stringify(STAGING_SETTINGS));
-    const progress = progressHandle({ ...progressHandle().value(), project: { name: "payments-api", revision: 1 } });
-    expect(await firstProjectStep().run(context, progress)).toEqual({ status: "done", note: "project payments-api" });
+    const progress = progressHandle({ ...progressHandle().value(), project: { name: "payments-api", revision: 1, channelId: "C0PAY00001", channelName: "payments", teamId: "T0123456789" } });
+    expect(await firstProjectStep().run(context, progress)).toEqual({ status: "done", note: "project payments-api in #payments" });
     expect(plane.registered).toEqual([]);
+    expect(plane.bindings).toEqual([]);
   });
 });
 
@@ -283,6 +290,7 @@ describe("agentx project add on the command line", () => {
         secrets: memoryInitSecrets({ "agentx/staging/github-app": JSON.stringify({ appId: "42", slug: "agentx-acme", account: "acme", privateKey: TEST_PRIVATE_KEY }) }),
         services: setupServices({ fetch: plane.fetch, repositories: repositoriesFake(), configDir, stackOutputs: async () => FOUNDATION }),
         prompter: scriptedPrompter([]), write: () => undefined,
+        sleep: async () => undefined, now: () => Date.parse("2026-09-27T00:00:00.000Z"),
         print: () => undefined,
       };
     };
