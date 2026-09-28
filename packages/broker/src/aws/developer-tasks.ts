@@ -2,23 +2,34 @@
 // through the existing handlers (DeveloperTaskActions) with the task's owner key. Nothing here
 // reads the deployment mode (FR-024).
 import { randomUUID } from "node:crypto";
-import { GetCommand, PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
+import { GetCommand, PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import {
   AgentXError,
   DEVELOPER_EVENTS_DEFAULT,
+  DEVELOPER_EVENTS_MAX,
+  DEVELOPER_TASK_LIST_DEFAULT,
+  DEVELOPER_TASK_LIST_MAX,
+  DEVELOPER_TASK_SUMMARY_MAX,
+  DeveloperTaskStatusSchema,
   StartDeveloperTaskRequestSchema,
   agentXError,
   cleanClientName,
+  diffStat,
+  lastAssistantResponse,
   redactText,
   taskTitle,
+  type DeveloperTaskListItem,
   type DeveloperTaskPolicy,
+  type DeveloperTaskStatus,
   type DeveloperTaskView,
+  type Operation,
   type StartDeveloperTaskRequest,
 } from "@agentx/contracts";
 import type { z } from "zod";
 import { chargeConflict, chargeItems, developerCharge, limitReached, readWorkspaceLimits, type ChargeConflict, type WorkspaceLimits } from "../developer/limits.js";
 import {
   aiToolTurn,
+  byCreated,
   deriveTaskStatus,
   developerTaskIdentity,
   recentTaskEvents,
@@ -138,7 +149,49 @@ export async function loadOwnedTask(deps: DeveloperTaskRouteDependencies, caller
   return task;
 }
 
-/** The live view of a task (R4). Task 10 adds the result details. Callers load the owned task first. */
+const DIFF_READ_BYTES = 1_000_000;
+const ARTIFACT_NAME_MAX = 200;
+const DIFF_ARTIFACT = "workspace.diff";
+
+type TaskDetails = Pick<DeveloperTaskView, "summary" | "changedFiles" | "artifacts" | "pullRequests">;
+
+/**
+ * Whether an artifact's stored object key lies under this task's own workspace and operation.
+ * The key comes from the artifact record, never from the client, but the record's name came from
+ * the worker, so a key is read only when it has exactly the prefix the broker writes
+ * (`private/<ownerKey>/<workspaceId>/<operationId>/<artifactId>`) and no path segments after it.
+ */
+function ownArtifactKey(task: DeveloperTaskRecord, operationId: string, objectKey: string): boolean {
+  const prefix = `private/${task.ownerKey}/${task.workspaceId}/${operationId}/`;
+  return objectKey.startsWith(prefix) && /^[A-Za-z0-9-]+$/.test(objectKey.slice(prefix.length));
+}
+
+/** R18: what the latest task operation left, and the task's pull requests. Callers load the owned task first. */
+async function taskDetails(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord, operations: readonly Operation[]): Promise<TaskDetails> {
+  const pullRequests = await deps.actions.pullRequests(task.workspaceId);
+  const details: TaskDetails = {};
+  const lastTask = operations.filter((operation) => operation.kind === "task").sort(byCreated).at(-1);
+  if (lastTask !== undefined) {
+    const said = lastAssistantResponse((await deps.actions.eventsNewestFirst(lastTask.id, 500)).reverse());
+    if (said !== undefined) details.summary = redactText(said).slice(0, DEVELOPER_TASK_SUMMARY_MAX);
+    const artifacts = await deps.actions.artifacts(task.workspaceId, lastTask.id);
+    details.artifacts = artifacts.map((artifact) => ({ name: redactText(artifact.name).slice(0, ARTIFACT_NAME_MAX), ...(artifact.size === undefined ? {} : { size: artifact.size }) }));
+    const diff = artifacts.find((artifact) => artifact.name === DIFF_ARTIFACT);
+    if (diff !== undefined) {
+      if (ownArtifactKey(task, lastTask.id, diff.objectKey)) {
+        details.changedFiles = diffStat(await deps.actions.readArtifact(diff.objectKey, DIFF_READ_BYTES))
+          .map((file) => ({ ...file, repository: redactText(file.repository), path: redactText(file.path) }));
+      } else {
+        // The key is not logged: it names another workspace.
+        log(deps, { event: "developer.task_artifact_key_refused", taskId: task.taskId, artifactId: diff.id });
+      }
+    }
+  }
+  if (pullRequests.length > 0) details.pullRequests = pullRequests;
+  return details;
+}
+
+/** The live view of a task (R4), with the result details once it has ended. Callers load the owned task first. */
 export async function taskView(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord, options: { events: number; details: boolean }): Promise<DeveloperTaskView> {
   const [workspace, pointer, operations] = await Promise.all([
     deps.actions.workspace(task.workspaceId),
@@ -154,6 +207,7 @@ export async function taskView(deps: DeveloperTaskRouteDependencies, task: Devel
   const events = derived.current === undefined || options.events === 0
     ? []
     : recentTaskEvents(await deps.actions.eventsNewestFirst(derived.current.id, 200), options.events);
+  const details = options.details && derived.status !== "STARTING" && derived.status !== "RUNNING" ? await taskDetails(deps, task, operations) : {};
   return {
     taskId: task.taskId,
     title: task.title,
@@ -167,6 +221,7 @@ export async function taskView(deps: DeveloperTaskRouteDependencies, task: Devel
     createdAt: task.createdAt,
     updatedAt: derived.current?.createdAt ?? task.updatedAt,
     events,
+    ...details,
   };
 }
 
@@ -311,8 +366,134 @@ async function startTask(deps: DeveloperTaskRouteDependencies, caller: Developer
   return { task: await taskView(deps, task, { events: 0, details: false }) };
 }
 
+/**
+ * R4: the index row keeps the last status the API saw, so the task list and WORKSPACE_LIMIT's
+ * open-task list stay current. Best effort: a failed write only costs a stale index row.
+ */
+export async function syncIndex(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord, status: DeveloperTaskStatus): Promise<void> {
+  try {
+    await deps.documentClient.send(new UpdateCommand({
+      TableName: deps.tableName,
+      Key: taskIndexKey(task.developerId, task.createdAt, task.taskId),
+      UpdateExpression: "SET #status = :status, updatedAt = :now",
+      ConditionExpression: "attribute_exists(pk) AND #status <> :status",
+      ExpressionAttributeNames: { "#status": "status" },
+      ExpressionAttributeValues: { ":status": status, ":now": iso(deps) },
+    }));
+  } catch (error) {
+    if (!isConditional(error)) log(deps, { event: "developer.task_index_sync_failed", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
+  }
+}
+
+const whole = (value: string | null, fallback: number, min: number, max: number, name: string): number => {
+  if (value === null) return fallback;
+  const parsed = Number(value);
+  if (value.trim() === "" || !Number.isInteger(parsed) || parsed < min || parsed > max) throw agentXError("CONFIG_INVALID", `${name} must be a whole number from ${min} to ${max}`);
+  return parsed;
+};
+
+async function readTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, url: URL): Promise<{ task: DeveloperTaskView }> {
+  // R8, R11: the owner always reads their own task; access is not checked again.
+  const task = await loadOwnedTask(deps, caller, taskId);
+  const view = await taskView(deps, task, { events: whole(url.searchParams.get("events"), DEVELOPER_EVENTS_DEFAULT, 0, DEVELOPER_EVENTS_MAX, "events"), details: true });
+  await syncIndex(deps, task, view.status);
+  return { task: view };
+}
+
+const TASK_INDEX_SK = /^TASK#\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z#[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const CURSOR_MAX = 256;
+const LIST_SCAN_MAX = 200;
+const encodeCursor = (sk: string) => Buffer.from(JSON.stringify({ sk }), "utf8").toString("base64url");
+
+/**
+ * The list's position: the sort key of the last index row it looked at. Only a sort key is taken
+ * from the client; the partition is always the caller's own, so a cursor copied from another
+ * developer, or forged, can only move through the caller's own tasks.
+ */
+function decodeCursor(value: string | null): string | undefined {
+  if (value === null) return undefined;
+  const invalid = () => agentXError("CONFIG_INVALID", "cursor is not valid; list the tasks again without a cursor");
+  if (value.length > CURSOR_MAX || !/^[A-Za-z0-9_-]+$/.test(value)) throw invalid();
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+  } catch {
+    throw invalid();
+  }
+  if (typeof decoded !== "object" || decoded === null || Array.isArray(decoded)) throw invalid();
+  const fields = decoded as Record<string, unknown>;
+  if (Object.keys(fields).length !== 1 || typeof fields.sk !== "string" || !TASK_INDEX_SK.test(fields.sk)) throw invalid();
+  return fields.sk;
+}
+
+async function listTasks(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, url: URL): Promise<{ tasks: DeveloperTaskListItem[]; nextCursor?: string }> {
+  const limit = whole(url.searchParams.get("limit"), DEVELOPER_TASK_LIST_DEFAULT, 1, DEVELOPER_TASK_LIST_MAX, "limit");
+  const project = url.searchParams.get("project");
+  const statusParam = url.searchParams.get("status");
+  const status = statusParam === null ? undefined : DeveloperTaskStatusSchema.safeParse(statusParam);
+  if (status !== undefined && !status.success) throw agentXError("CONFIG_INVALID", `status must be one of ${DeveloperTaskStatusSchema.options.join(", ")}`);
+  const pk = `DEVELOPER#${caller.developerId}`;
+  const after = decodeCursor(url.searchParams.get("cursor"));
+  const tasks: DeveloperTaskListItem[] = [];
+  let start: Record<string, unknown> | undefined = after === undefined ? undefined : { pk, sk: after };
+  let scanned = 0;
+  do {
+    const response = await deps.documentClient.send(new QueryCommand({
+      TableName: deps.tableName,
+      KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
+      ExpressionAttributeValues: { ":pk": pk, ":prefix": "TASK#" },
+      ScanIndexForward: false,
+      Limit: 50,
+      ConsistentRead: true,
+      ...(start === undefined ? {} : { ExclusiveStartKey: start }),
+    })) as { Items?: DeveloperTaskIndexRecord[]; LastEvaluatedKey?: Record<string, unknown> };
+    const rows = response.Items ?? [];
+    for (const [position, row] of rows.entries()) {
+      scanned += 1;
+      let current: DeveloperTaskStatus = row.status;
+      // A closed task never changes again, so only open rows are derived afresh.
+      if (row.status !== "CLOSED") {
+        const task = await get<DeveloperTaskRecord>(deps, taskKey(row.taskId));
+        if (task !== undefined && task.developerId === caller.developerId) {
+          current = (await taskView(deps, task, { events: 0, details: false })).status;
+          if (current !== row.status) await syncIndex(deps, task, current);
+        }
+      }
+      const more = position < rows.length - 1 || response.LastEvaluatedKey !== undefined;
+      const matches = (project === null || row.project === project) && (status === undefined || !status.success || current === status.data);
+      if (matches) {
+        tasks.push({ taskId: row.taskId, title: row.title, project: row.project, status: current, shared: row.shared, createdAt: row.createdAt, updatedAt: row.updatedAt });
+        if (tasks.length >= limit) return more ? { tasks, nextCursor: encodeCursor(row.sk) } : { tasks };
+      }
+      // One page of the list reads at most LIST_SCAN_MAX index rows; the cursor carries on from there.
+      if (scanned >= LIST_SCAN_MAX) return more ? { tasks, nextCursor: encodeCursor(row.sk) } : { tasks };
+    }
+    start = response.LastEvaluatedKey;
+  } while (start !== undefined);
+  return { tasks };
+}
+
+async function taskEvents(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, url: URL): Promise<{ events: DeveloperTaskView["events"] }> {
+  const task = await loadOwnedTask(deps, caller, taskId);
+  return { events: (await taskView(deps, task, { events: whole(url.searchParams.get("limit"), DEVELOPER_EVENTS_DEFAULT, 1, DEVELOPER_EVENTS_MAX, "limit"), details: false })).events };
+}
+
+/** A path segment, decoded; a malformed escape is kept as is and then fails the task ID check. */
+function safeDecode(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+}
+
 /** Every developer task route answers 200 with its body; errors are AgentXErrors. */
 export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   if (request.method === "POST" && url.pathname === "/v1/dev/tasks") return startTask(deps, caller, body(request));
+  if (request.method === "GET" && url.pathname === "/v1/dev/tasks") return listTasks(deps, caller, url);
+  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests))?$/.exec(url.pathname);
+  const taskId = route?.[1] === undefined ? undefined : safeDecode(route[1]);
+  if (taskId !== undefined && request.method === "GET" && route?.[2] === undefined) return readTask(deps, caller, taskId, url);
+  if (taskId !== undefined && request.method === "GET" && route?.[2] === "events") return taskEvents(deps, caller, taskId, url);
   throw agentXError("NOT_FOUND", "route not found");
 }

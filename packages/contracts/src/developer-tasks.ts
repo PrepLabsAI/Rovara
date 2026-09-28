@@ -112,7 +112,8 @@ export type DeveloperTaskView = z.infer<typeof DeveloperTaskViewSchema>;
 
 export const DeveloperTaskListItemSchema = DeveloperTaskViewSchema.pick({ taskId: true, title: true, project: true, status: true, shared: true, createdAt: true, updatedAt: true });
 export type DeveloperTaskListItem = z.infer<typeof DeveloperTaskListItemSchema>;
-export const DeveloperTaskListResponseSchema = z.object({ tasks: z.array(DeveloperTaskListItemSchema) });
+/** `nextCursor` is opaque: pass it back as `cursor` for the next page; it is absent on the last page. */
+export const DeveloperTaskListResponseSchema = z.object({ tasks: z.array(DeveloperTaskListItemSchema), nextCursor: z.string().optional() });
 export const DeveloperTaskResponseSchema = z.object({ task: DeveloperTaskViewSchema });
 export const DeveloperCloseResponseSchema = z.object({
   task: DeveloperTaskViewSchema,
