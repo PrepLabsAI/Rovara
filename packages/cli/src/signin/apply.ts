@@ -1,6 +1,7 @@
 // Show the sign-in change, confirm it, update the control plane's parameters, then record the
 // settings (spec 025 FR-045, R6, R7). Runs under the environment lock. Client secrets are written
 // only once the change is confirmed (F21), and are never printed.
+import { DescribeStacksCommand, type Stack } from "@aws-sdk/client-cloudformation";
 import { AgentXError, agentXError } from "@agentx/contracts";
 import { updateStackParameters } from "../deploy/parameter-update.js";
 import { withEnvironmentLock } from "../environments/lock.js";
@@ -33,9 +34,27 @@ export function changeLine(before: string, after: string): string {
 
 const signedOut = (method: string) => `Everyone signed in with ${method} is signed out as soon as the update finishes: the control plane refuses their tokens and their refreshes.`;
 const shown = (value: string) => (value === "" ? "(empty)" : value);
-const reason = (error: unknown) => (error instanceof Error ? error.message : "no reason given");
+/** An error's own words, without AgentXError's "CODE: " prefix (a rewrapped error gets its code back). */
+const reason = (error: unknown) => (error instanceof AgentXError ? error.message.slice(error.code.length + 2) : error instanceof Error ? error.message : "no reason given");
 /** Keeps an AgentXError's code, so the exit-code mapping is unchanged. */
 const withMessage = (error: unknown, message: string) => (error instanceof AgentXError ? agentXError(error.code, message) : agentXError("RUNTIME_UNAVAILABLE", message));
+/**
+ * Where a failed update left the stack: still "running" (in progress, or its status cannot be
+ * read), settled with every changed parameter "applied", or settled without the change ("failed").
+ */
+async function stackOutcome(cloudFormation: ApplySignInInput["cloudFormation"], stackName: string, changes: Record<string, string>): Promise<"running" | "applied" | "failed"> {
+  let stack: Stack | undefined;
+  try {
+    stack = ((await cloudFormation.send(new DescribeStacksCommand({ StackName: stackName }))) as { Stacks?: Stack[] }).Stacks?.[0];
+  } catch {
+    return "running";
+  }
+  const status = stack?.StackStatus ?? "";
+  if (stack === undefined || status === "" || status.endsWith("_IN_PROGRESS")) return "running";
+  const current = new Map((stack.Parameters ?? []).map((parameter) => [parameter.ParameterKey ?? "", parameter.ParameterValue ?? ""]));
+  return Object.entries(changes).every(([name, value]) => current.get(name) === value) ? "applied" : "failed";
+}
+
 const notApplied = (stackName: string) => agentXError("CONFIG_INVALID", `the sign-in change to ${stackName} was not applied; nothing changed`);
 
 export async function applySignInChange(input: ApplySignInInput): Promise<{ changed: boolean; settings: DeveloperSignInSettings }> {
@@ -70,13 +89,15 @@ export async function applySignInChange(input: ApplySignInInput): Promise<{ chan
     let stored = false;
     let storeFailure: Error | undefined;
     let changed: boolean;
+    const parameterChanges = signInStackParameters({ settings: next, ...(teamId === undefined ? {} : { slackTeamId: teamId }) });
     try {
       ({ changed } = await updateStackParameters({
         cloudFormation: input.cloudFormation,
         stackName,
         roleArn,
-        changes: signInStackParameters({ settings: next, ...(teamId === undefined ? {} : { slackTeamId: teamId }) }),
+        changes: parameterChanges,
         write: input.write,
+        now: input.now,
         ...(input.sleep === undefined ? {} : { sleep: input.sleep }),
         ...(input.pollMs === undefined ? {} : { pollMs: input.pollMs }),
         confirm: async ({ parameters, changes }) => {
@@ -103,13 +124,23 @@ export async function applySignInChange(input: ApplySignInInput): Promise<{ chan
     } catch (error) {
       if (storeFailure !== undefined) throw storeFailure;
       if (!stored || input.credentials === undefined) throw error;
-      // The new credentials are stored but the stack did not take the change (a rollback or a
-      // timeout): put the previous ones back, so a method that is on keeps working.
+      const { secretName } = input.credentials;
+      // Restore only once the stack has settled without the change (UPDATE_ROLLBACK_COMPLETE,
+      // UPDATE_FAILED, or a change set that never executed). While it may still be updating (a
+      // timeout, or a status that cannot be read), restoring could leave the new parameters on top
+      // of the old secret, and sign-in would break unnoticed: keep the new credentials instead.
+      const outcome = await stackOutcome(input.cloudFormation, stackName, parameterChanges);
+      if (outcome === "running") {
+        throw withMessage(error, `the update of ${stackName} is still running (${reason(error)}); the new client credentials are kept in ${secretName}; check the stack's status in the CloudFormation console, then run ${rerun} again`);
+      }
+      if (outcome === "applied") {
+        throw withMessage(error, `${reason(error)}; ${stackName} did take the change, so the new client credentials are kept in ${secretName}; run ${rerun} again to record the settings`);
+      }
       let restored: string;
       try {
         restored = await input.credentials.restore();
       } catch (restoreError) {
-        throw withMessage(error, `${reason(error).replace("; sign-in did not change", "")}; putting the previous client credentials back in ${input.credentials.secretName} failed too (${reason(restoreError)}), so sign-in may fail until you run ${rerun} again`);
+        throw withMessage(error, `${reason(error).replace("; sign-in did not change", "")}; putting the previous client credentials back in ${secretName} failed too (${reason(restoreError)}), so sign-in may fail until you run ${rerun} again`);
       }
       throw withMessage(error, `${reason(error)}; ${restored}`);
     }

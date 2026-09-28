@@ -110,6 +110,21 @@ describe("agentx signin enable slack (FR-045)", () => {
     expect(await readSignInSettings(h.store, "staging")).toBeUndefined();
   });
 
+  it("keeps the new credentials, and says the update is still running, when the update times out (fix round 1 ruling)", async () => {
+    const OLD_SECRET = "00000000000000000000000000000000";
+    const before = { signingSecret: TEST_SIGNING_SECRET, botToken: TEST_BOT_TOKEN, clientId: "9999.8888", clientSecret: OLD_SECRET };
+    // Each clock read moves on 10 minutes, so the 30-minute wait runs out while the stack is still updating.
+    let clock = T0;
+    const h = await services(["1111111111.2222222222222", SLACK_CLIENT_SECRET, true], { now: () => (clock += 10 * 60_000) }, SIGN_IN_PARAMETERS, { finalStatus: "UPDATE_IN_PROGRESS", slackSecret: before });
+    const error = await runSigninEnable(h.s, "staging", "slack", {}, {}, false).then(() => undefined, (caught: unknown) => caught);
+    const message = error instanceof Error ? error.message : "";
+    expect(message).toContain("the update of agentx-staging-control-plane is still running");
+    expect(message).toContain("the new client credentials are kept in agentx/staging/slack");
+    expect(message).toContain("check the stack's status in the CloudFormation console, then run agentx signin enable slack again");
+    expect(message).not.toContain("put back");
+    expect(JSON.parse(h.secrets.values.get("agentx/staging/slack")!)).toMatchObject({ clientId: "1111111111.2222222222222", clientSecret: SLACK_CLIENT_SECRET });
+  });
+
   it("says so, and never that sign-in did not change, when the previous credentials cannot be put back", async () => {
     const h = await services(["1111111111.2222222222222", SLACK_CLIENT_SECRET, true], {}, SIGN_IN_PARAMETERS, { finalStatus: "UPDATE_ROLLBACK_COMPLETE" });
     const put = h.secrets.put.bind(h.secrets);

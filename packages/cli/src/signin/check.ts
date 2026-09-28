@@ -1,6 +1,6 @@
 // FR-046's checks. 15e's `agentx doctor` calls checkDeveloperSignIn unchanged (R5). Never prints
 // a secret: the Slack test request carries only the client ID and the callback URL.
-import { AgentXConfigurationSchema } from "@agentx/contracts";
+import { AgentXConfigurationSchema, AgentXError } from "@agentx/contracts";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import type { EnvironmentSettings } from "../environments/settings.js";
 import type { InitSecrets } from "../init/context.js";
@@ -10,6 +10,9 @@ import { oidcSecretName, readSignInSettings, readSlackTeamId } from "./settings.
 
 /** `warn`: ok, but not verified; shown as a warning, and it fails neither signin check nor doctor. */
 export interface SignInCheck { name: string; ok: boolean; warn?: boolean; detail: string }
+
+/** An error's own words, without AgentXError's "CODE: " prefix. */
+const plainMessage = (error: Error) => (error instanceof AgentXError ? error.message.slice(error.code.length + 2) : error.message);
 
 const parse = (text: string | undefined): Record<string, unknown> => {
   try {
@@ -107,7 +110,7 @@ async function slackChecks(input: { env: string; store: ParameterStore; secrets:
     live = await readSlackTeamIdFromSecret({ secrets: input.secrets, api: input.slackApi, secretId: secretName });
   } catch (error) {
     // readSlackTeamIdFromSecret never puts the token in its errors.
-    liveProblem = error instanceof Error ? error.message : undefined;
+    liveProblem = error instanceof Error ? plainMessage(error) : undefined;
   }
   checks.push(recorded === undefined
     ? { name: "Slack team ID", ok: false, detail: `no team ID is recorded at /agentx/${input.env}/slack/teamId; run agentx signin enable slack` }
@@ -140,7 +143,7 @@ export async function checkDeveloperSignIn(input: { env: string; store: Paramete
       await checkOidcDiscovery(input.fetch, stored.oidc.issuer);
       checks.push({ name: "company sign-in discovery", ok: true, detail: `${stored.oidc.issuer} publishes its discovery document` });
     } catch (error) {
-      checks.push({ name: "company sign-in discovery", ok: false, detail: error instanceof Error ? error.message : `could not read ${stored.oidc.issuer}'s discovery document` });
+      checks.push({ name: "company sign-in discovery", ok: false, detail: error instanceof Error ? plainMessage(error) : `could not read ${stored.oidc.issuer}'s discovery document` });
     }
     const secretName = oidcSecretName(input.env);
     const secret = parse(await input.secrets.get(secretName));

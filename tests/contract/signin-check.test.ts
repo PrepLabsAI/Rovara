@@ -120,7 +120,7 @@ describe("agentx signin check (FR-046, R5)", () => {
     const down = await checkDeveloperSignIn({ env: "staging", store, secrets, settings: stagingSettings, slackApi: api(), fetch: fetchFor({ methods: { slack: true, oidc: { displayName: "Okta" } }, discovery: false }) });
     const discovery = down.find((check) => check.name === "company sign-in discovery");
     expect(discovery?.ok).toBe(false);
-    expect(discovery?.detail).toContain("could not read https://acme.okta.com/.well-known/openid-configuration");
+    expect(discovery?.detail).toBe("could not read https://acme.okta.com/.well-known/openid-configuration; check the issuer URL and that this computer can reach it");
     expect(down.find((check) => check.name === "company sign-in secret")?.ok).toBe(true);
   });
 
