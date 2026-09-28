@@ -538,3 +538,75 @@ describe("the channel names through the DeveloperIdentity function (R10)", () =>
     expect(logs()).toEqual([{ component: "broker", event: "developer.channel_info_failed", reason: "threw", error: "Error" }]);
   });
 });
+
+describe("the projects list's cost and consistency (Task 7 fix round 1)", () => {
+  it("gives up on channel names at the deadline and lists the channels by ID", async () => {
+    const logs = captureLogs();
+    config.channelInfoDeadlineMs = 20;
+    config.channelInfo = vi.fn(() => new Promise<never>(() => undefined));
+    const response = await call("/v1/dev/projects", claims());
+    expect(response.statusCode).toBe(200);
+    const body = JSON.parse(response.body) as { projects: Array<{ name: string; channels: unknown }> };
+    expect(body.projects.find((project) => project.name === "payments-api")?.channels).toEqual([{ channelId: "C0PAY0001" }]);
+    expect(logs()).toEqual([{ component: "broker", event: "developer.channel_info_failed", reason: "deadline" }]);
+  });
+
+  it("does not name channels to a caller with no Slack link, like the access check", async () => {
+    config.methods.oidc = true;
+    db.set({ pk: "SESSION#s-1", sk: "META", sessionId: "s-1", developerId, amr: "oidc", startedAt: new Date(T0).toISOString(), endsAt: T0 / 1000 + 604_800 });
+    db.set({ pk: `DEVELOPER#${developerId}`, sk: "META", developerId, provider: "oidc", issuer: "https://login.example.test", subject: "maya", displayName: "Maya Chen", email: "maya@example.test", firstSignInAt: "x", lastSignInAt: "x", revoked: false });
+    db.set({ pk: `MEMBER#${developerId}`, sk: "PROJECT#ledger", entityType: "MEMBERSHIP", ownerKey: developerId, projectName: "ledger", role: "developer" });
+    const channelInfo = vi.fn(async (request: ChannelInfoRequest) => ({ ok: true as const, channels: request.channelIds.map((channelId) => ({ channelId, name: "ledger-dev", isPrivate: false })) }));
+    config.channelInfo = channelInfo;
+    const body = JSON.parse((await call("/v1/dev/projects", claims({ amr: "oidc" }))).body) as { projects: Array<{ name: string; channels: unknown }> };
+    expect(body.projects.find((project) => project.name === "ledger")?.channels).toEqual([{ channelId: "C0LEDGER1" }]);
+    expect(channelInfo).not.toHaveBeenCalled();
+  });
+
+  it("reads only the revision and policy of each latest revision, at most 8 at a time", async () => {
+    for (let index = 0; index < 20; index += 1) {
+      const name = `proj-${index}`;
+      db.set({ pk: "SLACK_BINDING#T0TEAM1", sk: `CHANNEL#C0PRJ${String(index).padStart(4, "0")}`, teamId: "T0TEAM1", channelId: `C0PRJ${String(index).padStart(4, "0")}`, projectName: name, updatedAt: "2026-09-27T00:00:00.000Z" });
+      db.set({ pk: `PROJECT#${name}`, sk: "REV#000000000001", entityType: "PROJECT", definition: { name, revision: 1 } });
+    }
+    const original = db.send;
+    const projectQueries: Array<Record<string, unknown>> = [];
+    let inFlight = 0;
+    let most = 0;
+    vi.spyOn(db, "send").mockImplementation(async (command) => {
+      const pk = (command.input.ExpressionAttributeValues as Record<string, unknown> | undefined)?.[":pk"];
+      if (command.constructor.name !== "QueryCommand" || typeof pk !== "string" || !pk.startsWith("PROJECT#")) return original(command);
+      projectQueries.push(command.input);
+      inFlight += 1;
+      most = Math.max(most, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      inFlight -= 1;
+      return original(command);
+    });
+    channelMembers.mockResolvedValueOnce({ ok: true, memberOf: ["C0PRJ0003"] });
+    const body = JSON.parse((await call("/v1/dev/projects", claims())).body) as { projects: Array<{ name: string; latestRevision: number }> };
+    expect(body.projects.map((project) => [project.name, project.latestRevision])).toEqual([["proj-3", 1], ["solo", 1]]);
+    expect(projectQueries).toHaveLength(23);
+    expect(most).toBe(8);
+    for (const input of projectQueries) {
+      expect(input).toMatchObject({
+        ProjectionExpression: "#definition.#revision, #definition.#developerTasks",
+        ExpressionAttributeNames: { "#definition": "definition", "#revision": "revision", "#developerTasks": "developerTasks" },
+        ScanIndexForward: false, Limit: 1, ConsistentRead: true,
+      });
+    }
+  });
+});
+
+describe("PROJECT_NOT_FOUND for a name that is not a project name (Task 7 fix round 1)", () => {
+  it("does not echo the raw input", async () => {
+    const maya: DeveloperCaller = { developerId, sessionId: "s-1", amr: "slack", name: "Maya Chen", slackUserId: "U0MAYA001" };
+    const raw = `${"x".repeat(200)}\`\nplanted-injection`;
+    const error = await checkProjectAccess({ documentClient: db, tableName: "state", developer: config, now: () => T0 }, maya, raw).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(AgentXError);
+    expect((error as AgentXError).code).toBe("PROJECT_NOT_FOUND");
+    expect((error as AgentXError).message).toBe("PROJECT_NOT_FOUND: that is not a valid AgentX project name; run agentx_list_projects to see the projects you can use");
+    expect((error as AgentXError).message).not.toContain("planted");
+    expect((error as AgentXError).message).not.toContain("xxxx");
+  });
+});

@@ -175,7 +175,8 @@ export const DEFAULT_DEVELOPER_TASK_POLICY: DeveloperTaskPolicy = DeveloperTaskP
  * parses turns tasks and channel access off, so a damaged record never widens access.
  */
 export function developerTaskPolicy(definition: { developerTasks?: unknown }): DeveloperTaskPolicy {
-  const parsed = DeveloperTaskPolicySchema.safeParse(definition.developerTasks ?? {});
+  // Only a missing value takes the defaults; a stored null is damaged and fails closed.
+  const parsed = DeveloperTaskPolicySchema.safeParse(definition.developerTasks === undefined ? {} : definition.developerTasks);
   return parsed.success ? parsed.data : { ...DEFAULT_DEVELOPER_TASK_POLICY, enabled: false, channelMembersMayUse: false };
 }
 

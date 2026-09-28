@@ -5,7 +5,7 @@ import { BOT_TOKEN, T0, TEAM, fakeSlack, routeFetch } from "../support/developer
 
 type Problem = { method: string; status: number | undefined; error: string };
 
-function directory(users: Parameters<typeof fakeSlack>[0]["users"], channels: Record<string, string[]> = {}, options: { maxCallsPerRequest?: number; botToken?: string; channelInfo?: Record<string, { name: string; isPrivate: boolean }> } = {}) {
+function directory(users: Parameters<typeof fakeSlack>[0]["users"], channels: Record<string, string[]> = {}, options: { maxCallsPerRequest?: number; botToken?: string; channelInfo?: Record<string, { name: string; isPrivate?: boolean }> } = {}) {
   let clock = T0;
   const problems: Problem[] = [];
   const fake = fakeSlack({ users, channels, ...(options.channelInfo === undefined ? {} : { channelInfo: options.channelInfo }) });
@@ -155,5 +155,43 @@ describe("conversations.info for channel names (R10)", () => {
     expect(await dir.channelInfo(["C0PAY0001", "C0GONE001"])).toEqual({ ok: true, channels: [{ channelId: "C0PAY0001", name: "payments-dev", isPrivate: false }] });
     fake.state.down = true;
     expect(await dir.channelInfo(["C0OTHER01"])).toEqual({ ok: false, error: "slack_unavailable" });
+  });
+});
+
+describe("conversations.info limits (Task 7 fix round 1)", () => {
+  const many = (count: number) => Object.fromEntries(Array.from({ length: count }, (_, index) => [`C0CH${String(index).padStart(5, "0")}`, { name: `chan-${index}`, isPrivate: false }]));
+  const infoCalls = (fetch: { calls: string[] }) => fetch.calls.filter((call) => call.includes("conversations.info")).length;
+
+  it("makes at most 20 cold calls per request and leaves the rest unnamed", async () => {
+    const channels = many(60);
+    const { dir, fetch, problems } = directory([], {}, { channelInfo: channels });
+    const answer = await dir.channelInfo(Object.keys(channels));
+    expect(infoCalls(fetch)).toBe(20);
+    expect(answer).toEqual({ ok: true, channels: Object.keys(channels).sort().slice(0, 20).map((channelId, index) => ({ channelId, name: `chan-${index}`, isPrivate: false })) });
+    expect(problems).toEqual([{ method: "conversations.info", status: undefined, error: "call_cap_reached" }]);
+    // Cached names cost nothing, so the next request names the next 20.
+    const next = await dir.channelInfo(Object.keys(channels));
+    expect(infoCalls(fetch)).toBe(40);
+    expect(next.ok && next.channels).toHaveLength(40);
+  });
+
+  it("returns the names gathered so far when Slack rate limits midway", async () => {
+    const channels = many(5);
+    const fake = fakeSlack({ users: [], channelInfo: channels });
+    let calls = 0;
+    const problems: Problem[] = [];
+    const fetch = routeFetch(async (url) => (url.pathname === "/api/conversations.info" && ++calls > 2 ? Response.json({ ok: false, error: "ratelimited" }, { status: 429 }) : undefined), fake.handler);
+    const dir = slackDirectory({ teamId: TEAM, botToken: async () => BOT_TOKEN, fetch, now: () => T0, report: (problem) => { problems.push(problem); } });
+    expect(await dir.channelInfo(Object.keys(channels))).toEqual({ ok: true, channels: [
+      { channelId: "C0CH00000", name: "chan-0", isPrivate: false },
+      { channelId: "C0CH00001", name: "chan-1", isPrivate: false },
+    ] });
+    expect(calls).toBe(3);
+    expect(problems).toEqual([{ method: "conversations.info", status: 429, error: "ratelimited" }]);
+  });
+
+  it("counts a channel with no is_private flag as private (fail closed)", async () => {
+    const { dir } = directory([], {}, { channelInfo: { C0PAY0001: { name: "payments-dev" } } });
+    expect(await dir.channelInfo(["C0PAY0001"])).toEqual({ ok: true, channels: [{ channelId: "C0PAY0001", name: "payments-dev", isPrivate: true }] });
   });
 });

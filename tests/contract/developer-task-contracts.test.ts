@@ -55,6 +55,11 @@ describe("developerTasks project policy (FR-014)", () => {
   it("fails closed on a stored value it cannot read: tasks off, channel access off", () => {
     expect(developerTaskPolicy({ developerTasks: { enabled: 1 } })).toEqual({ ...DEFAULT_DEVELOPER_TASK_POLICY, enabled: false, channelMembersMayUse: false });
   });
+
+  it("fails closed on a stored null: only a missing value takes the defaults", () => {
+    expect(developerTaskPolicy({ developerTasks: null })).toEqual({ ...DEFAULT_DEVELOPER_TASK_POLICY, enabled: false, channelMembersMayUse: false });
+    expect(developerTaskPolicy({ developerTasks: undefined })).toEqual(DEFAULT_DEVELOPER_TASK_POLICY);
+  });
 });
 
 describe("the developer requester on operations (FR-022)", () => {

@@ -36,6 +36,8 @@ export interface DeveloperApiConfiguration {
   channelMembers(request: ChannelMembersRequest): Promise<ChannelMembersResponse>;
   /** R10: bound channels' names and privacy, read by DeveloperIdentity. Optional: without it channels are listed by ID. */
   channelInfo?: (request: ChannelInfoRequest) => Promise<ChannelInfoResponse>;
+  /** How long one request waits for channel names in all; the rest stay unnamed. Default 5 seconds. */
+  channelInfoDeadlineMs?: number;
   /** Verifies the Authorization header's developer access token (D17; verify-token.ts) and returns its claims. */
   verifyAccessToken(authorization: string | undefined): Promise<Record<string, unknown>>;
 }
@@ -215,11 +217,33 @@ async function queryAll<T>(deps: DeveloperRouteDependencies, pk: string, prefix:
   return items;
 }
 
+/** Channel names are for display only: they never hold the projects list near a timeout. */
+const CHANNEL_NAMES_DEADLINE_MS = 5_000;
+const REVISION_READS_AT_ONCE = 8;
+
+/** `fn` over every item, at most `limit` at a time, results in the items' order. */
+async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      results[index] = await fn(items[index]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+/** The latest revision's number and task policy: the only fields read, so only they are fetched. */
 async function latestDefinition(deps: DeveloperRouteDependencies, project: string): Promise<{ revision: number; developerTasks?: unknown } | undefined> {
   const response = await deps.documentClient.send(new QueryCommand({
     TableName: deps.tableName,
     KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
     ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":prefix": "REV#" },
+    ProjectionExpression: "#definition.#revision, #definition.#developerTasks",
+    ExpressionAttributeNames: { "#definition": "definition", "#revision": "revision", "#developerTasks": "developerTasks" },
     ScanIndexForward: false,
     Limit: 1,
     ConsistentRead: true,
@@ -229,12 +253,14 @@ async function latestDefinition(deps: DeveloperRouteDependencies, project: strin
 
 /** Each named project's latest revision and task policy; projects with no revision are left out. */
 export async function projectsWithPolicy(deps: DeveloperRouteDependencies, names: readonly string[]): Promise<Map<string, { revision: number; policy: DeveloperTaskPolicy }>> {
+  const unique = [...new Set(names)].sort();
+  const definitions = await mapLimit(unique, REVISION_READS_AT_ONCE, (name) => latestDefinition(deps, name));
   const found = new Map<string, { revision: number; policy: DeveloperTaskPolicy }>();
-  for (const name of [...new Set(names)].sort()) {
-    const definition = await latestDefinition(deps, name);
+  unique.forEach((name, index) => {
+    const definition = definitions[index];
     // developerTaskPolicy fails closed: a policy that no longer parses turns tasks and channel access off.
     if (definition !== undefined) found.set(name, { revision: definition.revision, policy: developerTaskPolicy(definition) });
-  }
+  });
   return found;
 }
 
@@ -250,23 +276,39 @@ function safeChannelMembers(deps: DeveloperRouteDependencies): (request: Channel
   };
 }
 
-/** Channel names and privacy, best effort: without them the channels are listed by ID (R10). */
+/**
+ * Channel names and privacy, best effort: without them the channels are listed by ID (R10).
+ * Privacy comes from DeveloperIdentity's 10-minute cache. The whole lookup has one deadline.
+ */
 async function channelNames(deps: DeveloperRouteDependencies, channelIds: readonly string[]): Promise<Map<string, { name: string; isPrivate: boolean }>> {
   const names = new Map<string, { name: string; isPrivate: boolean }>();
-  if (deps.developer.channelInfo === undefined || channelIds.length === 0) return names;
+  const channelInfo = deps.developer.channelInfo;
+  if (channelInfo === undefined || channelIds.length === 0) return names;
   const unique = [...new Set(channelIds)].sort();
-  for (let start = 0; start < unique.length; start += CHANNEL_MEMBERS_MAX_CHANNELS) {
-    let answer: ChannelInfoResponse;
-    try {
-      answer = await deps.developer.channelInfo({ kind: "channel-info", channelIds: unique.slice(start, start + CHANNEL_MEMBERS_MAX_CHANNELS) });
-    } catch (error) {
-      logDeveloperEvent({ event: "developer.channel_info_failed", reason: "threw", error: errorName(error) });
-      return names;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<"deadline">((resolve) => {
+    timer = setTimeout(() => resolve("deadline"), deps.developer.channelInfoDeadlineMs ?? CHANNEL_NAMES_DEADLINE_MS);
+  });
+  try {
+    for (let start = 0; start < unique.length; start += CHANNEL_MEMBERS_MAX_CHANNELS) {
+      let answer: ChannelInfoResponse | "deadline";
+      try {
+        answer = await Promise.race([channelInfo({ kind: "channel-info", channelIds: unique.slice(start, start + CHANNEL_MEMBERS_MAX_CHANNELS) }), expired]);
+      } catch (error) {
+        logDeveloperEvent({ event: "developer.channel_info_failed", reason: "threw", error: errorName(error) });
+        return names;
+      }
+      if (answer === "deadline") {
+        logDeveloperEvent({ event: "developer.channel_info_failed", reason: "deadline" });
+        return names;
+      }
+      if (!answer.ok) return names;
+      for (const channel of answer.channels) names.set(channel.channelId, { name: channel.name, isPrivate: channel.isPrivate });
     }
-    if (!answer.ok) return names;
-    for (const channel of answer.channels) names.set(channel.channelId, { name: channel.name, isPrivate: channel.isPrivate });
+    return names;
+  } finally {
+    clearTimeout(timer);
   }
-  return names;
 }
 
 /** A private channel is flagged by ID only: its name never leaves the control plane (R10). */
@@ -303,7 +345,8 @@ async function listProjects(deps: DeveloperRouteDependencies, caller: DeveloperC
     channelMembers: safeChannelMembers(deps),
   });
   const listed = [...access.projects].filter(([name]) => policies.has(name));
-  const names = await channelNames(deps, listed.flatMap(([, entry]) => entry.channels));
+  // Like checkProjectAccess: a caller with no Slack link is never shown channel names.
+  const names = caller.slackUserId === undefined ? new Map<string, { name: string; isPrivate: boolean }>() : await channelNames(deps, listed.flatMap(([, entry]) => entry.channels));
   const projects: DeveloperProjectsResponse["projects"] = [];
   for (const [name, entry] of listed) {
     const known = policies.get(name)!;
@@ -328,7 +371,9 @@ async function listProjects(deps: DeveloperRouteDependencies, caller: DeveloperC
  * PROJECT_TASKS_DISABLED.
  */
 export async function checkProjectAccess(deps: DeveloperRouteDependencies, caller: DeveloperCaller, project: string): Promise<{ revision: number; policy: DeveloperTaskPolicy; access: "granted" | "channel" }> {
-  const known = AgentXNameSchema.safeParse(project).success ? (await projectsWithPolicy(deps, [project])).get(project) : undefined;
+  // A name that is not a project name is never echoed back: it could be long or carry markup.
+  if (!AgentXNameSchema.safeParse(project).success) throw agentXError("PROJECT_NOT_FOUND", "that is not a valid AgentX project name; run agentx_list_projects to see the projects you can use");
+  const known = (await projectsWithPolicy(deps, [project])).get(project);
   if (known === undefined) throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist in this AgentX; run agentx_list_projects`);
   const grants = (await grantsOf(deps, caller)).filter((name) => name === project);
   const bindings = (await bindingsOf(deps)).filter((binding) => binding.projectName === project);
