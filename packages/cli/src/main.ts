@@ -3,6 +3,7 @@ import { realpathSync } from "node:fs";
 import { open, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
+import type { Readable, Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import {
   AgentXError,
@@ -29,10 +30,12 @@ import { exportTurns, parseSince } from "./admin/turns.js";
 import { loginWithPkce, openSystemBrowser, tokenStoreKey } from "./auth.js";
 import { loadProjectConfig } from "./config.js";
 import { developerLogout, fetchDeveloperProjects, logoutText, whoamiText } from "./developer/commands.js";
+import { resolveDeveloperEnvironment } from "./developer/config.js";
 import { developerLogin } from "./developer/login.js";
 import { fetchDeveloperWorkspaces, type DeveloperWorkspacesResult } from "./developer/workspaces.js";
 import { runWorkspacesCommand } from "./workspaces-ui/index.js";
 import { loadDeploymentSettings, type DeploymentSettings } from "./deployment.js";
+import { runMcpServer, type McpServeDeps } from "./mcp/serve.js";
 import { resumeCommand, runDeploy, runInitExport, type DeployCliDependencies, type DeployCommandOptions } from "./deploy/commands.js";
 import { cloudFormationStackReader, stsCallerIdentity, type CallerIdentity, type StackReader } from "./environments/adopt.js";
 import { resolveDeploymentFile } from "./environments/cache.js";
@@ -101,6 +104,10 @@ export interface CliDependencies {
     isInteractive?: () => boolean;
     port?: number;
   };
+  /** `agentx mcp` reads MCP messages from here; process.stdin by default. */
+  stdin?: Readable;
+  /** `agentx mcp`'s clock for waits, for tests. */
+  mcpClock?: McpServeDeps["clock"];
 }
 
 interface AuthenticatedDeployment {
@@ -743,6 +750,45 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
           ? formatSuccess(result, true)
           : `Wrote export bundle to ${result.dir}\nNext: have your platform team run ${result.dir}/deploy-access.sh (see ${result.dir}/README.md) with their own AWS credentials to deploy the access stack.\n`,
       );
+    });
+
+  /** R24: whether this computer holds an unexpired admin sign-in for the developer's environment. */
+  const adminSignedIn = async (env: string | undefined): Promise<boolean> => {
+    try {
+      const name = (await resolveDeveloperEnvironment(home, env)).env;
+      const settings = await deploymentSettings({ ...globalOptions(program), env: name });
+      const tokens = await services.tokenStore.get(tokenStoreKey(settings.auth));
+      return tokens !== undefined && tokens.expiresAt > Date.now();
+    } catch {
+      return false;
+    }
+  };
+
+  program
+    .command("mcp")
+    .description("run the AgentX MCP server for your AI tool (stdio); add it with agentx mcp install")
+    .action(async (_options: unknown, command: Command) => {
+      // FR-026: stdout carries only MCP messages, so everything else this command says goes to stderr.
+      const env = developerEnv(command);
+      const shutdown = new AbortController();
+      const stop = () => shutdown.abort();
+      process.once("SIGTERM", stop);
+      process.once("SIGINT", stop);
+      try {
+        await runMcpServer({
+          ...developerSession(),
+          ...(env === undefined ? {} : { env }),
+          adminSignedIn,
+          stdin: dependencies.stdin ?? process.stdin,
+          stdout: (dependencies.stdout ?? process.stdout) as Writable,
+          stderr: services.stderr,
+          shutdown: shutdown.signal,
+          ...(dependencies.mcpClock === undefined ? {} : { clock: dependencies.mcpClock }),
+        });
+      } finally {
+        process.off("SIGTERM", stop);
+        process.off("SIGINT", stop);
+      }
     });
 
   return program;

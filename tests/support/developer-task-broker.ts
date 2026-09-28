@@ -49,6 +49,9 @@ async function bearer(who: Developer): Promise<string> {
   return `Bearer ${input}.${(await signer.sign(Buffer.from(input))).toString("base64url")}`;
 }
 
+/** A signed access token for `who`, as an `authorization` header value (Task 16 plants it in a token store). */
+export const bearerFor = bearer;
+
 export async function createDeveloperTaskBroker(options: {
   memberLimit?: number;
   organizationLimit?: number;
