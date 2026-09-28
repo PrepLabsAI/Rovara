@@ -138,8 +138,14 @@ describe("secrets the CLI creates carry agentx:env (FR-047)", () => {
     expect(input.Tags).toEqual([{ Key: "agentx:env", Value: "staging" }]);
   });
 
-  it("adds no tag to a name outside agentx/<env>/", () => {
+  it("adds no tag to the legacy connector secret name", () => {
     expect(secretTags("agentx/connectors/linear-payments")).toEqual([]);
-    expect(secretTags("something-else")).toEqual([]);
+  });
+
+  // Fix round 1: a name that is neither agentx/<env>/... nor the legacy agentx/connectors/... is a
+  // bug in the caller (a mistyped secret name), not a value to leave silently untagged.
+  it("refuses a malformed secret name instead of silently leaving it untagged", () => {
+    expect(() => secretTags("something-else")).toThrow("CONFIG_INVALID");
+    expect(() => secretTags("something-else")).toThrow("something-else");
   });
 });
