@@ -261,6 +261,11 @@ deployed AgentX environment with its own GitHub App and Slack app. For this firs
 credentials, a GitHub organization or personal account to own the GitHub App, and a Slack workspace where
 the engineer can create apps. Day-2 commands then use the narrower operator role.
 
+No AgentX release is published yet (see [releases](releases.md)). Until then, run `init` from a source
+checkout: build the CLI (`npm ci && npm run build`), build a release with `npm run release:build`, and pass
+it with `--release <dir>`, together with `--worker-image` and `--slack-image` for images you pushed
+yourself. The steps below are the same either way.
+
 `init` asks its questions, then checks prerequisites (the region, model access, and the chosen engine's
 tooling), shows the plan and an estimated cost, then runs its steps in order, recording each one in SSM
 as it finishes:
@@ -277,6 +282,11 @@ as it finishes:
    User OAuth Token and the Signing Secret into two hidden prompts.
 7. **slack-service**: the Slack service, a signed self-probe of both Slack URLs, then a request to
    confirm the app's Event Subscriptions page shows "Verified" (Slack has no API that reports this).
+8. **developer-signin**: how developers sign in to AgentX from their own machines. Choose Slack (the
+   default), your company's sign-in (OIDC), or both. For Slack, paste the Slack app's Client ID and Client
+   Secret (Basic Information, App Credentials); for company sign-in, give its issuer, client ID and client
+   secret, and optionally a claim a person must carry (such as a group). `init` shows the change to the
+   control plane and asks before applying it. See [Developer sign-in](#developer-sign-in) below.
 
 Every question has a flag (`--engine`, `--identity`, `--orchestrator-model`, `--github-account`, and so
 on). `--yes` answers every question with its default or its flag and accepts every confirmation except a
@@ -322,6 +332,38 @@ Until a later AgentX release adds them to `init` (phase 15d2), finish the instal
 admin user (Cognito: `aws cognito-idp admin-create-user` then `admin-add-user-to-group`; your own OIDC:
 mark yourself an administrator there), then `agentx login --env <name>`, then `agentx admin project
 register` and `agentx admin slack bind` to register a project and bind its channel.
+
+### Developer sign-in
+
+Developers sign in with their own identity, not the administrator's. An environment offers Slack sign-in,
+company sign-in (any OIDC provider, such as Okta or Entra ID), or both. `init` sets this up in its last
+step; an operator changes it later, with the operator role:
+
+```sh
+agentx --env <name> signin show            # which methods are on, and what the control plane offers
+agentx --env <name> signin enable slack    # or: enable oidc --signin-oidc-issuer <url> ...
+agentx --env <name> signin disable slack   # everyone signed in with Slack is signed out at once
+agentx --env <name> signin check           # checks every piece sign-in needs, and says what to fix
+```
+
+Turning a method off ends every session that used it, and turning it back on does not bring those sessions
+back: people sign in again. Company sign-in can require a claim, such as `--signin-oidc-required-claim
+groups --signin-oidc-required-values agentx-developers`; a person without it is refused with that reason.
+Register `<control plane URL>/v1/auth/callback/oidc` as a redirect URI with your identity provider.
+Environments installed before developer sign-in existed turn it on with `agentx signin enable`.
+
+A developer needs no AWS credentials:
+
+```sh
+npx @charterarc/agentx login <control plane URL>   # opens the browser: Slack or your company's sign-in
+npx @charterarc/agentx whoami                      # who you are, and which projects you can use
+npx @charterarc/agentx logout
+```
+
+Tokens are kept in the operating system's credential store; `~/.agentx/developer.yaml` holds only
+addresses. A developer can use a project when an administrator granted access or when they are a member
+of the project's bound Slack channel. Handing tasks to AgentX from an AI tool (`agentx mcp`) arrives in a
+later release (spec 025, phase 25b).
 
 ## Deploying an environment
 
