@@ -6,6 +6,7 @@ import type { LoginOptions } from "../auth.js";
 import type { StackOutputs } from "../deploy/parameters.js";
 import type { GitHubApi } from "../init/github-app.js";
 import type { StoredTokens, TokenStore } from "../token-store.js";
+import type { AlertsApi } from "./alerts.js";
 import type { SlackChannelApi } from "./channel-add.js";
 import type { VendorApi } from "./connectors/vendors.js";
 import type { GitHubRepositoryApi } from "./project-files.js";
@@ -48,6 +49,8 @@ export interface SetupServices {
   authorize: (input: AuthorizeInput) => Promise<unknown>;
   /** Task 11: Secrets Manager with the administrator's AWS credentials, as the sign-in uses it. */
   authorizeSecrets: AuthorizeSecrets;
+  /** Task 12: the alerts topic's subscriptions, the test alarm and the budget. */
+  alerts: AlertsApi;
 }
 
 const errorName = (error: unknown) => (error instanceof Error ? error.name : undefined);

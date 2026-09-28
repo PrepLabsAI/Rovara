@@ -34,7 +34,7 @@ add`, `agentx channel add`, `agentx connector add linear|jira|asana` and `agentx
 **Tech Stack:** TypeScript 5.9 strict (`exactOptionalPropertyTypes` on), Node 22.19 to 22.x, Zod 4,
 Vitest, commander 15, AWS CDK 2 (`aws-cdk-lib/aws-budgets`, `aws-cloudwatch`, `aws-logs`, `aws-sns`),
 AWS SDK v3 3.1134.0 (new in the CLI: `@aws-sdk/client-cognito-identity-provider`,
-`@aws-sdk/client-sns`, `@aws-sdk/client-cloudwatch`), `yaml` 2.9.1, and `@agentx/gateway`'s
+`@aws-sdk/client-sns`, `@aws-sdk/client-cloudwatch`, `@aws-sdk/client-budgets`), `yaml` 2.9.1, and `@agentx/gateway`'s
 `connectMcp` for the Jira and Asana test reads (bundled into the npm CLI by `pack-cli.ts`).
 
 **Spec:** [../spec.md](../spec.md). The FR numbers were re-checked against the current spec; FR-018's

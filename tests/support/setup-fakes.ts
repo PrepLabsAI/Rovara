@@ -5,6 +5,7 @@ import type { AuthorizeSecrets } from "../../packages/cli/src/admin/authorize.js
 import { tokenStoreKey, type LoginOptions } from "../../packages/cli/src/auth.js";
 import type { EnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import type { StoredTokens, TokenStore } from "../../packages/cli/src/token-store.js";
+import type { AlertsApi, Subscription } from "../../packages/cli/src/setup/alerts.js";
 import type { CognitoAdmin, SetupServices } from "../../packages/cli/src/setup/services.js";
 import type { LinearTeam, VendorApi } from "../../packages/cli/src/setup/connectors/vendors.js";
 import type { GitHubRepositoryApi } from "../../packages/cli/src/setup/project-files.js";
@@ -214,6 +215,34 @@ export function memoryAuthorizeSecrets(initial: Record<string, string> = {}): Au
   };
 }
 
+/** SNS, CloudWatch and Budgets as the alerts module sees them. `existing` subscriptions are on the
+ * topic from the start; a new one stays "PendingConfirmation" until `confirmAfterPolls` reads have
+ * passed since the subscribe, or until `confirmAll()`. `historyEmpty` makes the alarm history show
+ * no change to ALARM; `budgetUsd` answers `budget` (absent: no such budget). `subscribed` records
+ * each subscribe as "<protocol> <endpoint>", `states` each alarm change as "<alarm> <state>", and
+ * `reads` counts the subscription reads. */
+export function fakeAlerts(options: { existing?: Subscription[]; confirmAfterPolls?: number; historyEmpty?: boolean; budgetUsd?: number } = {}): AlertsApi & { subscribed: string[]; states: string[]; reads: () => number; confirmAll(): void } {
+  const subscribed: string[] = [];
+  const states: string[] = [];
+  const subscriptions = [...(options.existing ?? [])];
+  let polls = 0;
+  let reads = 0;
+  const confirmed = (entry: Subscription, index: number): Subscription => ({ ...entry, arn: `arn:aws:sns:us-east-1:123456789012:agentx-staging-alerts:${index + 1}` });
+  return {
+    subscribed, states, reads: () => reads,
+    confirmAll() { subscriptions.forEach((entry, index) => { if (entry.arn === "PendingConfirmation") subscriptions[index] = confirmed(entry, index); }); },
+    async subscriptions() {
+      polls += 1;
+      reads += 1;
+      return subscriptions.map((entry, index) => (entry.arn === "PendingConfirmation" && polls > (options.confirmAfterPolls ?? 0) ? confirmed(entry, index) : { ...entry }));
+    },
+    async subscribe(_topic, protocol, endpoint) { subscribed.push(`${protocol} ${endpoint}`); subscriptions.push({ arn: "PendingConfirmation", protocol, endpoint }); polls = 0; },
+    async setAlarmState(name, state) { states.push(`${name} ${state}`); },
+    async wentToAlarm() { return options.historyEmpty !== true; },
+    async budget() { return options.budgetUsd; },
+  };
+}
+
 /** Every SetupServices field has a default here, with no cast (F20): a task that adds a field must
  * add its fake, or this stops type-checking. */
 export function setupServices(overrides: Partial<SetupServices> = {}): SetupServices {
@@ -234,6 +263,8 @@ export function setupServices(overrides: Partial<SetupServices> = {}): SetupServ
     // Task 11: a test that reaches the bot's sign-in passes its own authorize.
     authorize: async () => { throw new Error("test setup: authorize not expected"); },
     authorizeSecrets: memoryAuthorizeSecrets(),
+    // Task 12: no subscriptions yet and no budget; tests that reach the alerts pass their own.
+    alerts: fakeAlerts(),
     ...overrides,
   };
 }

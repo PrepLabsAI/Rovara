@@ -2,9 +2,12 @@
 // ask and check and confirm on a first run, then run the steps. Every AWS, GitHub, Slack, browser
 // and clock dependency is overridable through InitCliDependencies (main.ts's CliDependencies.init).
 import { join } from "node:path";
+import { BudgetsClient } from "@aws-sdk/client-budgets";
 import { CloudFormationClient } from "@aws-sdk/client-cloudformation";
+import { CloudWatchClient } from "@aws-sdk/client-cloudwatch";
 import { CognitoIdentityProviderClient } from "@aws-sdk/client-cognito-identity-provider";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
+import { SNSClient } from "@aws-sdk/client-sns";
 import { SSMClient } from "@aws-sdk/client-ssm";
 import { STSClient } from "@aws-sdk/client-sts";
 import { agentXError } from "@agentx/contracts";
@@ -17,6 +20,7 @@ import type { LockRecord } from "../environments/lock.js";
 import { ssmParameterStore, type ParameterStore } from "../environments/parameter-store.js";
 import { readEnvironmentSettings, type EnvironmentSettings } from "../environments/settings.js";
 import { openAdminSession } from "../setup/admin-session.js";
+import { awsAlertsApi } from "../setup/alerts.js";
 import { slackChannelApi } from "../setup/channel-add.js";
 import { vendorApi } from "../setup/connectors/vendors.js";
 import { githubRepositoryApi } from "../setup/project-files.js";
@@ -166,6 +170,11 @@ export function realSetupServices(input: { region: string; fetch: typeof fetch; 
     // Task 11: the bot's sign-in, with the connector secret read and written in the environment's region.
     authorize: authorizeCredential,
     authorizeSecrets: secretsManagerAuthorizeSecrets(new SecretsManagerClient({ region: input.region })),
+    // Task 12: the topic and the test alarm are in the environment's region; AWS Budgets has one
+    // endpoint, in us-east-1.
+    alerts: awsAlertsApi({
+      sns: new SNSClient({ region: input.region }), cloudWatch: new CloudWatchClient({ region: input.region }), budgets: new BudgetsClient({ region: "us-east-1" }),
+    }),
   };
 }
 

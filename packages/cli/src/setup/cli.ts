@@ -4,6 +4,7 @@ import { agentXError, AgentXNameSchema } from "@agentx/contracts";
 import type { Command } from "commander";
 import { readSlackBotToken } from "../init/slack-app.js";
 import { definedEntries, secretSource } from "../signin/cli.js";
+import { alertsTopicArn, sendTestAlarm } from "./alerts.js";
 import { addChannel } from "./channel-add.js";
 import type { SetupCommandContext } from "./command-context.js";
 import { addAsana } from "./connectors/asana.js";
@@ -121,5 +122,20 @@ export function registerSetupCommands(program: Command, context: SetupCommandCon
       });
       const result = await addAsana({ env: run.env, session: run.session, projectName, secrets: run.secrets, prompter: run.prompter, processEnv: process.env, write: run.write, services: run.services, flags });
       run.print(result, `Asana connected to ${projectName} (revision ${result.revision})\n`);
+    });
+
+  // FR-046: needs no admin session, only AWS (SetAlarmState on this one alarm, Task 1), so openAws.
+  const alerts = program.command("alerts").description("AgentX alerts");
+  withRegion(alerts.command("test"))
+    .description("send a test alarm to the alert address and ask whether it arrived (FR-046)")
+    .action(async (_options: unknown, command: Command) => {
+      const run = await context.openAws(command);
+      const topicArn = await alertsTopicArn({
+        stackOutputs: run.services.stackOutputs, stackName: run.settings.stacks["control-plane"],
+        next: `run agentx init --env ${run.env} to update it, then run agentx alerts test`,
+      });
+      const shownAs = run.settings.alertAddress ?? "the alert address";
+      await sendTestAlarm({ api: run.services.alerts, topicArn, env: run.env, shownAs, prompter: run.prompter, write: run.write, sleep: run.sleep, now: run.now });
+      run.print({ sent: true }, "The test alarm arrived.\n");
     });
 }
