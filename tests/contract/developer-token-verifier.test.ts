@@ -118,7 +118,7 @@ describe("the broker's developer token check (D17)", () => {
     expect(h.fetches).toHaveLength(1);
   });
 
-  it("answers 503, not 401, when the keys cannot be fetched, and tries again on the next request", async () => {
+  it("answers 503, not 401, when the keys cannot be fetched, and tries again once the pause is over", async () => {
     let fail = true;
     const published: { jwk?: PublicSigningJwk } = {};
     const h = await setup({ keys: async () => { if (fail) throw new Error("arn:aws:lambda:planted ResourceNotFound"); return [published.jwk]; } });
@@ -128,7 +128,26 @@ describe("the broker's developer token check (D17)", () => {
     expect(error.code).toBe("RUNTIME_UNAVAILABLE");
     expect(error.message).not.toContain("planted");
     fail = false;
+    h.tick(10_000);
     expect(await h.verify(`Bearer ${token}`)).toMatchObject({ sid: "s-1" });
+  });
+
+  it("after a failed fetch, answers 503 without fetching again for 10 seconds, then fetches", async () => {
+    let fail = true;
+    const published: { jwk?: PublicSigningJwk } = {};
+    const h = await setup({ keys: async () => { if (fail) throw new Error("unavailable"); return [published.jwk]; } });
+    published.jwk = h.jwk;
+    const token = await h.sign(claims());
+    expect((await refusal(h.verify(`Bearer ${token}`))).code).toBe("RUNTIME_UNAVAILABLE");
+    fail = false;
+    h.tick(5_000);
+    expect((await refusal(h.verify(`Bearer ${token}`))).code).toBe("RUNTIME_UNAVAILABLE");
+    h.tick(4_000);
+    expect((await refusal(h.verify(`Bearer ${token}`))).code).toBe("RUNTIME_UNAVAILABLE");
+    expect(h.fetches).toHaveLength(1);
+    h.tick(1_000);
+    expect(await h.verify(`Bearer ${token}`)).toMatchObject({ sid: "s-1" });
+    expect(h.fetches).toHaveLength(2);
   });
 
   it("refetches once on an unknown kid, at most once a minute, and then accepts a rotated key", async () => {

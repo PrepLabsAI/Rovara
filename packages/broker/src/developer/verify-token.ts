@@ -18,6 +18,8 @@ export interface DeveloperTokenVerifierInput {
 const LEEWAY_SECONDS = 30;
 /** An unknown kid refetches the keys at most this often, so random kids cannot flood the fetch. */
 const REFETCH_MS = 60_000;
+/** After a failed fetch, requests answer 503 without invoking DeveloperIdentity for this long. */
+const FAILURE_PAUSE_MS = 10_000;
 const COMPACT_JWT = /^Bearer ([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*)$/;
 const STRING_CLAIMS = ["sub", "sid", "amr", "env"] as const;
 
@@ -40,12 +42,16 @@ export function developerTokenVerifier(input: DeveloperTokenVerifierInput): (aut
   let cached: Map<string, VerifyKey> | undefined;
   let fetchedAt = Number.NEGATIVE_INFINITY;
 
+  let failedAt = Number.NEGATIVE_INFINITY;
+
   async function load(): Promise<Map<string, VerifyKey>> {
+    if (input.now() - failedAt < FAILURE_PAUSE_MS) throw unavailable();
     fetchedAt = input.now();
     let keys: Map<string, VerifyKey>;
     try {
       keys = await importKeys(await input.keys());
     } catch {
+      failedAt = input.now();
       throw unavailable();
     }
     cached = keys;
