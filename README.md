@@ -580,8 +580,8 @@ What decides that a call is destructive or changes an item, so you can approve t
 
 The model that checks changes is a deployment setting: the `AgentXSlackOrchestrator` parameter
 `GateClassifierModelId`, default Amazon Nova Lite (`amazon.nova-lite-v1:0`). Claude Haiku 4.5
-(`us.anthropic.claude-haiku-4-5-20251001-v1:0`) is an alternative. The installer planned in spec 015
-(`agentx init`) will ask for it during installation. If the model is unavailable, errors, gives an
+(`us.anthropic.claude-haiku-4-5-20251001-v1:0`) is an alternative. `agentx init` asks for it during
+installation; `--classifier-model` sets it without a prompt. If the model is unavailable, errors, gives an
 answer that is not a plain verdict, or does not answer in time, AgentX asks. The time limit is 8
 seconds unless the service's `AGENTX_GATE_CLASSIFIER_TIMEOUT_MS` is a whole number of milliseconds
 from 1 to 60,000; the gate then waits exactly that long. Any other value, including a larger one,
@@ -610,8 +610,7 @@ replacement of the worker process, because neither touches the volume.
 It does not survive losing the volume. If the workspace is replaced, the next request in the thread
 fails with `CONVERSATION_STATE_LOST` rather than starting the thread over on top of files it has no
 memory of. Start a new thread to continue. There is no promised retention period beyond the life of
-the workspace, and the storage mode a thread runs on is what bounds it: the demo deployment's
-microVM storage is time-limited and is not production-durable.
+the workspace and its EBS volume.
 
 A conversation that was created before AgentX recorded this state has no transcript to reopen, so
 its next request starts one. If the deployed model changes between turns, the thread keeps its
@@ -1045,8 +1044,6 @@ Spec 014 phase 14d adds the **Details** button. Operator notes:
 - [Specification](specs/001-agentx-foundation/spec.md): agreed workflows and acceptance criteria.
 - [Plan](specs/001-agentx-foundation/plan.md): architecture, boundaries and delivery sequence.
 - [Research](specs/001-agentx-foundation/research.md): decisions and primary sources.
-- [Deployed AWS architecture](docs/architecture-deployed-demo.md): current VPC-free demo resources
-  and request flow.
 - [Production AWS architecture](docs/architecture-production.md): EC2 workers and persistent EBS,
   per-session EBS, networking, release, isolation, and migration boundaries.
 - [Contracts](specs/001-agentx-foundation/contracts/): project config, control API and worker protocol.
@@ -1085,8 +1082,6 @@ npm test
 npm run infra:synth
 ```
 
-The latest observed results are recorded in
-[docs/validation/agentx-foundation.md](docs/validation/agentx-foundation.md). Docker and AWS are
-not required for this local suite.
+Docker and AWS are not required for this local suite.
 
 For Bedrock/OpenRouter configuration, Slack model selection, and the live verification checklist, see [OpenRouter model access](docs/openrouter.md).

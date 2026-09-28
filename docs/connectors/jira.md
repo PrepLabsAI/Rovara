@@ -1,6 +1,6 @@
 # Jira connector
 
-AgentX is open source and self-hosted. There is no shared Atlassian account. Your organisation
+AgentX is source-available and self-hosted. There is no shared Atlassian account. Your organisation
 creates its own Atlassian service account and API token, stores the token in your own AWS Secrets
 Manager, and registers it with `agentx admin credential register`. This guide walks you through
 that, end to end, for one Jira Cloud site and one project.

@@ -166,8 +166,9 @@ People searching "self-hosted AI coding agent", "AI agent CI gates", "Claude Tag
 - **FR-032**: Before launch, the AgentX repository MUST:
   - replace "open source" with the licence wording from FR-004 in `README.md` and `docs/connectors/*.md`;
   - fix or remove README links to docs that do not exist (`docs/project-configuration.md`, `docs/architecture-deployed-demo.md`, `docs/validation/agentx-foundation.md`);
-  - update stale statements (microVM storage, the classifier-model prompt in init);
-  - open the README with the Qedly Code pointer from US2.
+  - update stale statements (microVM storage, the classifier-model prompt in init).
+  These fixes are in the same branch as this spec.
+- **FR-034**: The launch PR MUST open the README with the Qedly Code pointer from US2. It is left out until then because it links to the site and names the brand before the trademark search clears.
 - **FR-033**: Docs search MUST work offline in the static build.
 
 ### Build, hosting and discovery
@@ -189,7 +190,7 @@ People searching "self-hosted AI coding agent", "AI agent CI gates", "Claude Tag
 - **FR-060**: The site MUST stay `noindex` and unannounced until every one of these holds:
   1. The trademark search (UK, EU, US; classes 9 and 42) has cleared.
   2. The first public AgentX release exists: the CLI on npm (`@charterarc/agentx` or its renamed package), both images on ECR Public, and the repository public. On 2026-09-28 none of these exist: npm returns 404 and there are no version tags.
-  3. FR-032 is merged.
+  3. FR-032 is merged and the FR-034 pointer is ready in the launch PR.
   4. The Receipts page lists at least 20 Qedly Code PRs.
 
 ### Key Entities
