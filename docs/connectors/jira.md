@@ -5,6 +5,10 @@ creates its own Atlassian service account and API token, stores the token in you
 Manager, and registers it with `agentx admin credential register`. This guide walks you through
 that, end to end, for one Jira Cloud site and one project.
 
+`agentx connector add jira --project <name>` walks you through this guide, reads the credential from
+a hidden prompt, tests it, and registers the project's next revision. The steps below are what it
+does, for doing it by hand or understanding it.
+
 ## What you get
 
 AgentX can search, read, create and comment on Jira issues from Slack. It acts as one Atlassian
@@ -85,13 +89,15 @@ a guessed one.
 read -rs JIRA_TOKEN        # paste the token, press Enter; nothing is shown
 printf '%s' "$JIRA_TOKEN" | wc -c   # about 192; 128 means it was cut, start again
 jq -n --arg k "$JIRA_TOKEN" '{apiKey: $k}' | aws secretsmanager create-secret \
-  --name agentx/connectors/jira-agentx-sa --secret-string file:///dev/stdin
+  --name agentx/<env>/connectors/jira-agentx-sa --secret-string file:///dev/stdin
 unset JIRA_TOKEN
-aws secretsmanager get-secret-value --secret-id agentx/connectors/jira-agentx-sa \
+aws secretsmanager get-secret-value --secret-id agentx/<env>/connectors/jira-agentx-sa \
   --query SecretString --output text | jq -r '.apiKey | length'   # same number as above
 ```
 
-The name must start with `agentx/connectors/`. Use the default `aws/secretsmanager` key, or grant
+The name must start with `agentx/<env>/connectors/` for a named environment (add `--env <name>` to
+the commands on this page); the legacy default deployment, adopted before named environments
+existed, keeps `agentx/connectors/` instead. Use the default `aws/secretsmanager` key, or grant
 the broker role `kms:Decrypt` on your own key. If you keep the token in the macOS Keychain, add it
 with `security add-generic-password -a agentx -s jira-agentx-sa -w "$(pbpaste)"`, then clear the
 clipboard with `pbcopy </dev/null`. While that command runs, the token is briefly visible in the
@@ -100,14 +106,15 @@ the first 128 characters. Some other tools cut a stored
 secret the same way; whatever you use to store the token, check the stored length against the
 number Step 5 gave you.
 
-## Step 8: Prove the service account sees only its projects (mandatory)
+## Step 8: Check what the service account sees (mandatory)
 
-Run this from your AgentX checkout after `npm ci && npm run build`. Set `JIRA_PROJECTS` to the
-project keys AgentX may use, comma separated. It reads the token from Secrets Manager, so the
-token is never typed or shown:
+`agentx connector add jira` runs this check itself, as part of testing the credential; the steps
+below are for doing it by hand. Run this from your AgentX checkout after `npm ci && npm run build`.
+Set `JIRA_PROJECTS` to the project keys AgentX may use, comma separated. It reads the token from
+Secrets Manager, so the token is never typed or shown:
 
 ```sh
-JIRA_TOKEN="$(aws secretsmanager get-secret-value --secret-id agentx/connectors/jira-agentx-sa \
+JIRA_TOKEN="$(aws secretsmanager get-secret-value --secret-id agentx/<env>/connectors/jira-agentx-sa \
   --query SecretString --output text | jq -r .apiKey)" \
 JIRA_CLOUD_ID='<your cloudId>' JIRA_PROJECTS='PAY' \
 node --input-type=module -e '
@@ -127,17 +134,18 @@ try {
 } finally { await connection.close(); }'
 ```
 
-`inside` must be more than 0. If it is 0, create one issue in the project and run it again, so the
-check can tell an empty answer from a blind one. `outside` must be 0. Any other number means the
-service account can read other projects: go back to Step 4, fix the permission schemes it names,
-and run this again. Do not register the project until `outside` is 0. If you skip this, AgentX's
-own project check is the only thing holding the connector to the project.
+`inside` must still be more than 0. If it is 0, create one issue in the project and run it again, so
+the check can tell an empty answer from a blind one; a service account that finds no issue in the
+connected project is refused. `outside` no longer has to be 0: when it is more than 0, AgentX still
+saves the connector, warns you with the other projects it found (up to 5, then "and N more"), and
+warns that it will be able to read issues in them. Narrow the account until `outside` is 0 if AgentX
+must not read those projects; `agentx init` keeps the warning, and `agentx doctor` shows it again.
 
 ## Step 9: Register the credential
 
 ```sh
 agentx admin credential register --ref jira-agentx-sa --type static-secret \
-  --secret agentx/connectors/jira-agentx-sa
+  --secret agentx/<env>/connectors/jira-agentx-sa
 agentx admin credential list
 ```
 
@@ -297,7 +305,7 @@ actionPolicy:
 - **"Cloud id isn't explicitly granted".** You gave AgentX an OAuth token. Use an API token
   (Step 5) and `--type static-secret` (Step 9).
 - **Rotating the token.** Put the new value with `aws secretsmanager put-secret-value --secret-id
-  agentx/connectors/jira-agentx-sa --secret-string file:///dev/stdin` (same `jq` pipe as Step 7).
+  agentx/<env>/connectors/jira-agentx-sa --secret-string file:///dev/stdin` (same `jq` pipe as Step 7).
   No re-registration is needed; AgentX re-reads the secret within five minutes, or at once after
   Atlassian rejects the old one.
 - **An expired token** makes Jira calls fail as not connected until you rotate it.

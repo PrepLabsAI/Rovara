@@ -232,8 +232,8 @@ and the budget.
   - the alert address (PagerDuty or Opsgenie integration address, or an email).
 - **FR-017**: Before deploying, `init` MUST show everything it will create, the estimated monthly
   cost for the chosen models at a stated usage, and ask for confirmation.
-- **FR-018** (amended 2026-09-27; see Decisions): `init` MUST run these steps in order, recording
-  each step's completion in SSM:
+- **FR-018** (amended 2026-09-27 and 2026-09-28; see Decisions): `init` MUST run these steps in
+  order, recording each step's completion in SSM:
   1. prerequisites;
   2. access: the AgentX operator role, the CloudFormation service role and the access stack,
      deployed with the caller's own AWS credentials;
@@ -245,7 +245,8 @@ and the budget.
   8. the first project (FR-040);
   9. connectors (optional, FR-036 to FR-039);
   10. alerts and the budget (FR-045 to FR-047);
-  11. an end-to-end check: a test message in the chosen channel, waiting for a threaded reply.
+  11. an end-to-end check: a person mentions the bot in the chosen channel, and init waits for a
+      threaded reply.
 - **FR-019** (step count updated 2026-09-27 for FR-018's amended order): Re-running `init` MUST
   resume at the first incomplete step. Re-running a completed step MUST change nothing.
   `init --resume` MUST work under the operator role for steps 4 to 11.
@@ -335,8 +336,9 @@ and the budget.
   - propose setup and test commands from the repository's files (`package.json`, `pyproject.toml`,
     `Makefile`, and similar) for the engineer to confirm or edit;
   - register the project and ask for a channel.
-- **FR-041**: `agentx channel add` MUST bind a channel to a project, invite the bot, and post a
-  test message that must get a threaded reply.
+- **FR-041** (amended 2026-09-28; see Decisions): `agentx channel add` MUST bind a channel to a
+  project, invite the bot (or wait for a person to invite it to a private channel), and ask the
+  engineer to mention the bot, then wait for a threaded reply.
 
 **`agentx upgrade` (US4)**
 
@@ -550,6 +552,7 @@ and the budget.
   in the PR). FR-018 listed the operator and service roles (step 3) after the core stacks (step 2),
   and the GitHub App (step 4) after the control plane; the spec's own deploy-order decision needs
   access first, and the GitHub App before the control plane. FR-018's list is amended to that order.
+  Spec 025's `developer-signin` runs after step 6 (2026-09-28; phase 15d2 plan, the owner confirms).
 - **The GitHub App has no webhook and subscribes to no events** (2026-09-27; phase 15d1 plan, the
   owner confirms in the PR). AgentX handles no GitHub webhook, and the control plane does not exist
   yet when the app is created. The manifest asks only for contents, pull requests and issues (read
@@ -589,6 +592,49 @@ and the budget.
 - **`--yes` runs `cdk bootstrap` when the cdk engine needs it** (2026-09-27; phase 15d1 plan, the
   owner confirms in the PR). `--yes` means yes to every question, including this one, rather than
   needing a separate `--cdk-bootstrap` flag.
+- **The finishing steps run after developer sign-in** (2026-09-28; phase 15d2 plan, owner decision).
+  The order is FR-018's steps 1 to 6, then `developer-signin` (spec 025 FR-044), then steps 7 to 11.
+  The new step ids are appended to `INIT_STEP_IDS`, so resume never re-runs a done step.
+- **Cognito scoping for the operator role** (2026-09-28; phase 15d2 plan, owner decision; accepted).
+  `cognito-idp:AdminCreateUser`, `AdminGetUser` and `AdminAddUserToGroup` on `userpool/*`, with
+  `aws:ResourceTag/agentx:env` equal to the environment, proven with the IAM policy simulator in the
+  live check; the fallback is the exact pool ARN. The operator role also gains subscribe and list on
+  the environment's alert topic, `SetAlarmState` on the test alarm only, `budgets:ViewBudget` on the
+  environment's budget, and `servicequotas:GetServiceQuota`.
+- **The budget filters on the `agentx:env` tag by default** (2026-09-28; phase 15d2 plan, owner
+  decision; accepted), with a warning that it reads $0 until the tag is activated and the exact
+  Billing step to activate it (Billing, Cost allocation tags); `--budget-scope account` is for a
+  dedicated account.
+- **`agentx alerts test`** (2026-09-28; phase 15d2 plan, owner decision; accepted) flips a CloudWatch
+  test alarm, so PagerDuty and Opsgenie get a real alarm. It checks that the subscription is
+  confirmed and that the alarm's history shows `ALARM`, then asks the engineer. No SNS
+  delivery-status logging.
+- **The budget lives in CloudFormation** (2026-09-28; phase 15d2 plan, owner decision; accepted), in
+  the control-plane stack, answered with the other questions; the service role gains `budgets`
+  permissions.
+- **Project files stay at `~/.agentx/projects/<name>.yaml`** (2026-09-28; phase 15d2 plan, owner
+  decision; accepted), as `admin project register --file` takes them.
+- **A Jira service account that can see other projects is warned about and saved, not refused**
+  (2026-09-28; phase 15d2 plan, owner decision; changed). The warning names the other projects it
+  can see (up to 5, then "and N more"), says AgentX will be able to read issues in them, and
+  suggests narrowing the account. Under `--yes` it saves with the same warning printed. `init`
+  records the warning in the install progress (`connectors[].warning`) so `agentx doctor` (15e) can
+  show it. An account that finds no issue in the connected project is still refused.
+- **Connector test reads** (2026-09-28; phase 15d2 plan, owner decision): Linear lists the key's
+  teams; Jira searches inside the project (must find an issue) and outside it (warns, as above);
+  Asana reads the project with `get_project` as the bot; then the registration preflight must
+  report `connected`. For Asana, the sign-in itself stores and registers the credential before this
+  read (FR-038); only the project revision waits for `get_project`.
+- **FR-041's test message is posted by a person** (2026-09-28; phase 15d2 plan, owner decision;
+  accepted). The engineer mentions the bot and the CLI watches turn records for the threaded reply.
+  FR-018 step 11 and FR-041 are reworded to say so.
+- **FR-050, for phase 15e**: add "each connector's saved warning (for example, a Jira account that
+  can see other projects)" to `doctor`'s checks.
+- **FR-045's budget alarm is the AWS budget's notifications to the same topic** (80% actual, 100%
+  forecast) (2026-09-28; phase 15d2 plan).
+- **FR-014 (`instances-ebs`) and FR-015 (AgentCore Runtime) are superseded by the scope amendment**
+  (2026-09-28; phase 15d2 plan, note only). See the note at the top of Requirements; they should be
+  reworded in phase 15e, and are left unchanged here.
 
 ## Assumptions and Scope
 

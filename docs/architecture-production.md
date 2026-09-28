@@ -287,6 +287,16 @@ as it finishes:
    Secret (Basic Information, App Credentials); for company sign-in, give its issuer, client ID and client
    secret, and optionally a claim a person must carry (such as a group). `init` shows the change to the
    control plane and asks before applying it. See [Developer sign-in](#developer-sign-in) below.
+9. **admin-user**: Cognito creates your admin user from your email and emails a temporary password; a
+   browser opens the AgentX sign-in page (127.0.0.1:8765, so over SSH forward that port). Your own
+   OIDC provider: sign in; your token must carry the admin claim.
+10. **first-project**: pick a repository the GitHub App sees; confirm or edit the proposed setup and
+    test commands; the project runs on EC2 workers; pick its Slack channel (a private one needs
+    `/invite @<bot>`).
+11. **connectors**: Linear, Jira and Asana are each offered; say no to add them later.
+12. **alerts**: confirm the AWS Notifications email (a PagerDuty or Opsgenie address confirms on its
+    own); a test alarm is sent and you are asked whether it arrived.
+13. **e2e**: mention the bot in the channel; init ends when AgentX replies in the thread.
 
 Every question has a flag (`--engine`, `--identity`, `--orchestrator-model`, `--github-account`, and so
 on). `--yes` answers every question with its default or its flag and accepts every confirmation except a
@@ -296,10 +306,24 @@ when the release covers it. Secrets (an alert webhook, the GitHub App private ke
 bot token, the Slack signing secret, the OpenRouter API key) are never a flag's value: each comes from a
 hidden prompt, or from `--<name>-file <path>` or `--<name>-env <NAME>`.
 
+The finishing steps (9 to 13) take their own flags too, so `--yes` still needs no prompt: `--admin-email
+<email>` for the admin user; `--repository <owner/name>` for the first project (also `--project-name`,
+`--setup-command` and `--test-command`); `--channel <name>` for its Slack channel; `--connectors <list>`
+(comma-separated `linear`, `jira`, `asana`, or `none`) for which connectors to add now, plus each
+connector's own flags (`--linear-key-file` or `-env` and `--linear-team`; `--jira-site`, `--jira-project`
+and `--jira-token-file` or `-env`; `--asana-client-id`, `--asana-client-secret-file` or `-env`,
+`--asana-bot-email` and `--asana-project`).
+
 The model questions start with the provider: Amazon Bedrock (the default) or OpenRouter
 (`--model-provider`). OpenRouter asks for the orchestrator, classifier and worker model ids, then the
 OpenRouter API key in a hidden prompt (`--openrouter-key-file` or `--openrouter-key-env` with `--yes`).
 See [OpenRouter model access](openrouter.md).
+
+`init` also asks for a monthly AWS budget (`--budget <usd>`, default 100; `0` for none) and its scope
+(`--budget-scope tag`, the default, or `--budget-scope account`). The budget counts costs tagged
+`agentx:env`. Someone with billing rights must activate that tag once, in Billing, Cost allocation tags;
+it appears there up to 24 hours after the first tagged resource is billed. Until then the budget reads
+$0. For an account used only by AgentX, `--budget-scope account` needs no tag.
 
 Before creating anything, `init` prints every stack, role, secret and app it will create, and an
 estimated monthly cost for the chosen models at a stated usage (1,000 turns, 100 worker sessions, 60
@@ -328,10 +352,19 @@ Secrets Manager: `agentx/<env>/github-app`, `agentx/<env>/slack`, for a webhook 
 are stored just before the answers are saved, so a secret that fails to store leaves no answers and the
 next run asks again; once the answers are saved, a rerun resumes without asking.
 
-Until a later AgentX release adds them to `init` (phase 15d2), finish the install by hand: create your
-admin user (Cognito: `aws cognito-idp admin-create-user` then `admin-add-user-to-group`; your own OIDC:
-mark yourself an administrator there), then `agentx login --env <name>`, then `agentx admin project
-register` and `agentx admin slack bind` to register a project and bind its channel.
+The first project is also written to `~/.agentx/projects/<name>.yaml` (or under `--config-dir`, if
+given), the file `agentx admin project register --file` takes; it holds no secret, only credential
+references. `agentx connector add` reads this file and registers its next revision from it.
+
+Day-2, under the operator role `init` creates: `agentx project add` registers another project the same
+way; `agentx channel add --project <name>` binds another channel; `agentx connector add
+linear|jira|asana --project <name>` adds a connector later; `agentx alerts test` sends another test
+alarm.
+
+For a platform team that must deploy the access stack itself, `agentx init --export <dir>` writes a
+bundle instead of calling AWS; the platform team runs its `deploy-access.sh`, and the operator then
+continues with `agentx init --resume --env <env> --region <region> --from-bundle <dir>`. See
+[the export bundle](#deploying-an-environment) below.
 
 ### Developer sign-in
 
