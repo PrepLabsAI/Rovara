@@ -42,7 +42,7 @@ import { ssmParameterStore, type ParameterStore } from "./environments/parameter
 import { settingsParameterName } from "./environments/settings.js";
 import { formatError, formatSuccess } from "./output.js";
 import { addSignInOptions, definedEntries, registerSigninCommands, secretSource, signInFlags, type SignInCommandOptions } from "./signin/cli.js";
-import type { SigninFlags } from "./signin/collect.js";
+import { SIGNIN_FLAG_NAMES, type SigninFlags } from "./signin/collect.js";
 import type { SigninServices } from "./signin/commands.js";
 import { SystemCredentialTokenStore, type TokenStore } from "./token-store.js";
 import { CLI_VERSION } from "./version.js";
@@ -637,7 +637,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--worker-image <digest-ref>", "worker image by digest (testing only)")
     .option("--slack-image <digest-ref>", "Slack service image by digest (testing only)"),
   )
-    .addOption(new Option("--signin <method>", "how developers sign in: Slack (default), your company's sign-in (oidc), or both").choices(["slack", "oidc", "both"]))
+    .addOption(new Option(`${SIGNIN_FLAG_NAMES.methods} <method>`, "how developers sign in: Slack (default), your company's sign-in (oidc), or both").choices(["slack", "oidc", "both"]))
     .action(async (
       options: InitCommandOptions & { export?: string },
       command: Command,

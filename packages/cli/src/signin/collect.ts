@@ -15,6 +15,8 @@ export interface SigninSecretFlags { slackClientSecret?: SecretSource; oidcClien
  * A secret's flag takes `-file <path>` or `-env <NAME>` after it, never the value itself.
  */
 export const SIGNIN_FLAG_NAMES = {
+  /** agentx init only: which methods its developer-signin step enables. */
+  methods: "--signin",
   slackClientId: "--slack-client-id",
   slackClientSecret: "--slack-client-secret",
   oidcIssuer: "--signin-oidc-issuer",

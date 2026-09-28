@@ -35,7 +35,7 @@ export function changeLine(before: string, after: string): string {
 const signedOut = (method: string) => `Everyone signed in with ${method} is signed out as soon as the update finishes: the control plane refuses their tokens and their refreshes.`;
 const shown = (value: string) => (value === "" ? "(empty)" : value);
 /** An error's own words, without AgentXError's "CODE: " prefix (a rewrapped error gets its code back). */
-const reason = (error: unknown) => (error instanceof AgentXError ? error.message.slice(error.code.length + 2) : error instanceof Error ? error.message : "no reason given");
+export const errorReason = (error: unknown) => (error instanceof AgentXError ? error.message.slice(error.code.length + 2) : error instanceof Error ? error.message : "no reason given");
 /** Keeps an AgentXError's code, so the exit-code mapping is unchanged. */
 const withMessage = (error: unknown, message: string) => (error instanceof AgentXError ? agentXError(error.code, message) : agentXError("RUNTIME_UNAVAILABLE", message));
 /**
@@ -131,18 +131,18 @@ export async function applySignInChange(input: ApplySignInInput): Promise<{ chan
       // of the old secret, and sign-in would break unnoticed: keep the new credentials instead.
       const outcome = await stackOutcome(input.cloudFormation, stackName, parameterChanges);
       if (outcome === "running") {
-        throw withMessage(error, `the update of ${stackName} is still running (${reason(error)}); the new client credentials are kept in ${secretName}; check the stack's status in the CloudFormation console, then run ${rerun} again`);
+        throw withMessage(error, `the update of ${stackName} is still running (${errorReason(error)}); the new client credentials are kept in ${secretName}; check the stack's status in the CloudFormation console, then run ${rerun} again`);
       }
       if (outcome === "applied") {
-        throw withMessage(error, `${reason(error)}; ${stackName} did take the change, so the new client credentials are kept in ${secretName}; run ${rerun} again to record the settings`);
+        throw withMessage(error, `${errorReason(error)}; ${stackName} did take the change, so the new client credentials are kept in ${secretName}; run ${rerun} again to record the settings`);
       }
       let restored: string;
       try {
         restored = await input.credentials.restore();
       } catch (restoreError) {
-        throw withMessage(error, `${reason(error).replace("; sign-in did not change", "")}; putting the previous client credentials back in ${secretName} failed too (${reason(restoreError)}), so sign-in may fail until you run ${rerun} again`);
+        throw withMessage(error, `${errorReason(error).replace("; sign-in did not change", "")}; putting the previous client credentials back in ${secretName} failed too (${errorReason(restoreError)}), so sign-in may fail until you run ${rerun} again`);
       }
-      throw withMessage(error, `${reason(error)}; ${restored}`);
+      throw withMessage(error, `${errorReason(error)}; ${restored}`);
     }
     if (!asked && input.credentials !== undefined) {
       // The stack already matches (new credentials for a method that is on): ask before replacing them.
@@ -155,7 +155,7 @@ export async function applySignInChange(input: ApplySignInInput): Promise<{ chan
       await writeSignInSettings(input.store, next);
       if (input.slackTeamId !== undefined) await writeSlackTeamId(input.store, input.env, input.slackTeamId);
     } catch (error) {
-      throw withMessage(error, `${stackName} ${changed ? "was updated" : "already matched"}, but recording the sign-in settings at ${signInParameterName(input.env)} failed (${reason(error)}); run ${rerun} again to record them`);
+      throw withMessage(error, `${stackName} ${changed ? "was updated" : "already matched"}, but recording the sign-in settings at ${signInParameterName(input.env)} failed (${errorReason(error)}); run ${rerun} again to record them`);
     }
     return { changed, settings: next };
   };
