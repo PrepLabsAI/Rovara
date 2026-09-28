@@ -1,4 +1,4 @@
-// Spec 025 FR-001 and FR-005 (R1: RS256, because API Gateway's JWT authorizer accepts only RSA).
+// Spec 025 FR-001 and FR-005 (R1: RS256). The broker verifies these tokens itself (D17).
 // The private key never leaves KMS; this file builds the JWS signing input and asks KMS to sign it.
 import { createHash, createPublicKey, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { GetPublicKeyCommand, SignCommand } from "@aws-sdk/client-kms";

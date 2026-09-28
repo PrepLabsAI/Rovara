@@ -389,9 +389,9 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   `email` claim only when `email_verified` is true.
 - **FR-005**: After a successful provider sign-in, the control plane MUST issue:
   - an **AgentX access token**: a JWT signed with RS256 by a KMS RSA key the control plane owns
-    (API Gateway's JWT authorizer accepts only RSA algorithms), issuer `<api-endpoint>/v1/auth`,
-    audience `agentx-developer`, lifetime 1 hour, with claims `sub` (the developer ID, FR-008),
-    `amr` (`slack` or `oidc`) and `env`;
+    (RSA keeps the tokens verifiable by any standard JWT library; the broker verifies them itself,
+    D17), issuer `<api-endpoint>/v1/auth`, audience `agentx-developer`, lifetime 1 hour, with claims
+    `sub` (the developer ID, FR-008), `amr` (`slack` or `oidc`) and `env`;
   - a **refresh token**: an opaque random value, stored only as a SHA-256 hash, rotated on each use,
     valid for at most 7 days from the provider sign-in. A reused refresh token MUST revoke the whole
     sign-in session.
@@ -406,9 +406,11 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   as today's owner key (`ownerKeyForSubject`). The control plane MUST keep a developer record with
   the provider, display name, verified email if any, linked Slack user ID if any (FR-012), first and
   last sign-in times, and whether the developer is revoked.
-- **FR-009**: The API MUST verify AgentX access tokens with a second API Gateway JWT authorizer
-  (issuer `<api-endpoint>/v1/auth`, audience `agentx-developer`) on a new route
-  `ANY /v1/dev/{proxy+}`. The `/v1/auth/*` routes MUST have no authorizer. The existing JWT
+- **FR-009**: The broker MUST verify AgentX access tokens itself on a new route
+  `ANY /v1/dev/{proxy+}`, which has no API Gateway authorizer (D17): RS256 only, the key ID and
+  signature against the control plane's published keys, issuer `<api-endpoint>/v1/auth`, audience
+  `agentx-developer`, and `exp` and `nbf` with 30 seconds of leeway. Every failure MUST be the same
+  401. The `/v1/auth/*` routes MUST have no authorizer. The existing JWT
   authorizer and `ANY /{proxy+}` MUST stay as they are for admins. The broker MUST refuse an
   AgentX developer token on `/v1/admin/*` and an admin token on `/v1/dev/*` by checking the issuer
   and audience again.
@@ -873,9 +875,9 @@ Decisions made in this spec, all owner-confirmed on 2026-09-27:
 
 - **D1. The control plane issues its own developer tokens** (owner-confirmed, 2026-09-27). It exchanges the Slack or
   company code server side and issues a 1-hour AgentX JWT and a 7-day rotating refresh token,
-  verified by a second JWT authorizer on `/v1/dev/*`. Why: Slack's token exchange needs the client
+  verified by the broker on `/v1/dev/*` (D17; at first a second JWT authorizer). Why: Slack's token exchange needs the client
   secret, which a laptop cannot hold; Slack's ID tokens live about five minutes; one issuer means one
-  standard authorizer; revocation is in AgentX's hands; and the hosted MCP endpoint later needs an
+  standard token check; revocation is in AgentX's hands; and the hosted MCP endpoint later needs an
   OAuth authorization server, which this already is. Rejected:
   - a Lambda authorizer that accepts Slack and company tokens directly: it still cannot do Slack's
     exchange from a laptop, and puts custom code in front of every admin route;
@@ -962,6 +964,14 @@ Decisions made in this spec, all owner-confirmed on 2026-09-27:
   `sid`, the sign-in session's ID. The broker checks that session on every `/v1/dev/*` request, so a
   revoked or ended session (a reused refresh token, or a disabled sign-in method) stops access at
   once, instead of only once the access token next expires.
+
+- **D17. The broker verifies developer tokens itself** (owner-approved, 2026-09-27). The broker
+  verifies developer tokens itself, because API Gateway's JWT authorizer must reach the issuer's
+  discovery document at creation time and our issuer lives on the same API; found in the live check
+  on 2026-09-27. `ANY /v1/dev/{proxy+}` has no API Gateway authorizer and is throttled like
+  `/v1/auth/*`. The broker reads the public keys by invoking DeveloperIdentity's JWKS route (it may
+  not call `kms:GetPublicKey`), keeps them for the Lambda's lifetime, refetches at most once a minute
+  on an unknown key ID, and answers 503 when the keys cannot be read.
 
 ## Assumptions and Scope
 

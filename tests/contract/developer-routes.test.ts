@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChannelMembersRequest, ChannelMembersResponse } from "@agentx/contracts";
-import { channelMembersThroughLambda, developerSinceFromEnvironment, type DeveloperApiConfiguration } from "../../packages/broker/src/aws/developer-routes.js";
+import { channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, type DeveloperApiConfiguration } from "../../packages/broker/src/aws/developer-routes.js";
+import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
 import { adminIssuer, createAdminBroker, type AdminHandler } from "../support/admin-broker.js";
+import { identityHarness, localSigner } from "../support/developer-fakes.js";
 import type { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const ISSUER = "https://abc123.execute-api.us-east-1.amazonaws.com/v1/auth";
@@ -30,9 +32,23 @@ function captureLogs(): () => Array<Record<string, unknown>> {
   return () => spy.mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>);
 }
 
-const claims = (overrides: Record<string, unknown> = {}) => ({ iss: ISSUER, aud: "agentx-developer", sub: developerId, amr: "slack", env: "staging", sid: "s-1", ...overrides });
-const call = (path: string, jwt: Record<string, unknown>, method = "GET") =>
-  handler({ rawPath: path, requestContext: { requestId: "r", http: { method }, authorizer: { jwt: { claims: jwt } } } });
+const signer = localSigner();
+const claims = (overrides: Record<string, unknown> = {}) => ({
+  iss: ISSUER, aud: "agentx-developer", sub: developerId, amr: "slack", env: "staging", sid: "s-1", iat: T0 / 1000, nbf: T0 / 1000, exp: T0 / 1000 + 3600, ...overrides,
+});
+/** A developer access token for `jwt`, signed with the sign-in server's (fake KMS) key. */
+async function bearer(jwt: Record<string, unknown>): Promise<string> {
+  const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT", kid: (await signer.publicJwk()).kid })).toString("base64url");
+  const input = `${header}.${Buffer.from(JSON.stringify(jwt)).toString("base64url")}`;
+  return `Bearer ${input}.${(await signer.sign(Buffer.from(input))).toString("base64url")}`;
+}
+/** /v1/dev/* has no API Gateway authorizer (D17): the token is only in the Authorization header. On
+ * other routes the admin authorizer's claims are passed as API Gateway would. */
+const call = async (path: string, jwt: Record<string, unknown>, method = "GET") =>
+  handler({
+    rawPath: path, headers: { authorization: await bearer(jwt) },
+    requestContext: { requestId: "r", http: { method }, ...(path.startsWith("/v1/dev/") ? {} : { authorizer: { jwt: { claims: jwt } } }) },
+  });
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -41,7 +57,10 @@ afterEach(() => {
 beforeEach(async () => {
   vi.useFakeTimers({ now: T0, toFake: ["Date"] });
   channelMembers = vi.fn(async () => ({ ok: true as const, memberOf: ["C0PAY0001"] }));
-  config = { issuer: ISSUER, env: "staging", methods: { slack: true, oidc: false }, slackTeamId: "T0TEAM1", signInTableName: "signin", channelMembers };
+  config = {
+    issuer: ISSUER, env: "staging", methods: { slack: true, oidc: false }, slackTeamId: "T0TEAM1", signInTableName: "signin", channelMembers,
+    verifyAccessToken: developerTokenVerifier({ issuer: ISSUER, keys: async () => [await signer.publicJwk()], now: () => Date.now() }),
+  };
   ({ db, handler } = await createAdminBroker({ developer: config }));
   db.set({ pk: "SESSION#s-1", sk: "META", sessionId: "s-1", developerId, amr: "slack", slackUserId: "U0MAYA001", startedAt: new Date(T0).toISOString(), endsAt: T0 / 1000 + 604_800 });
   db.set({ pk: `DEVELOPER#${developerId}`, sk: "META", developerId, provider: "slack", issuer: "https://slack.com", subject: "U0MAYA001", displayName: "Maya Chen", slackUserId: "U0MAYA001", firstSignInAt: "x", lastSignInAt: "x", revoked: false });
@@ -162,6 +181,25 @@ describe("the developer check on every /v1/dev request (FR-009, R12, R13)", () =
     expect(JSON.parse(response.body)).toMatchObject({ error: { code: "AUTH_REQUIRED" } });
   });
 
+  it("verifies the token itself, ignoring any authorizer claims, since /v1/dev has no API Gateway authorizer (D17)", async () => {
+    const claimsOnly = await handler({ rawPath: "/v1/dev/projects", requestContext: { requestId: "r", http: { method: "GET" }, authorizer: { jwt: { claims: claims() } } } });
+    expect(claimsOnly.statusCode).toBe(401);
+    const forged = await bearer(claims());
+    const [header, payload] = forged.slice("Bearer ".length).split(".");
+    const unsigned = await handler({ rawPath: "/v1/dev/projects", headers: { authorization: `Bearer ${header}.${payload}.` }, requestContext: { requestId: "r", http: { method: "GET" } } });
+    expect(unsigned.statusCode).toBe(401);
+    expect(JSON.parse(unsigned.body)).toMatchObject({ error: { code: "AUTH_REQUIRED" } });
+    expect(unsigned.body).not.toContain(payload!);
+    expect((await call("/v1/dev/projects", claims())).statusCode).toBe(200);
+  });
+
+  it("answers 503, not 401, when the sign-in server's keys cannot be read", async () => {
+    config.verifyAccessToken = developerTokenVerifier({ issuer: ISSUER, keys: async () => { throw new Error("ResourceNotFoundException"); }, now: () => Date.now() });
+    const response = await call("/v1/dev/projects", claims());
+    expect(response.statusCode).toBe(503);
+    expect(JSON.parse(response.body)).toMatchObject({ error: { code: "RUNTIME_UNAVAILABLE" } });
+  });
+
   it("refuses an oidc token when company sign-in is turned off", async () => {
     db.set({ ...db.get("SESSION#s-1", "META")!, amr: "oidc" });
     const response = await call("/v1/dev/projects", claims({ amr: "oidc" }));
@@ -226,9 +264,32 @@ describe("admin and developer tokens stay apart (FR-009, FR-015)", () => {
 
   it("answers NOT_FOUND on /v1/dev/* when developer sign-in is not configured", async () => {
     const { handler: bare } = await createAdminBroker();
-    const response = await bare({ rawPath: "/v1/dev/projects", requestContext: { requestId: "r", http: { method: "GET" }, authorizer: { jwt: { claims: claims() } } } });
+    const response = await bare({ rawPath: "/v1/dev/projects", headers: { authorization: await bearer(claims()) }, requestContext: { requestId: "r", http: { method: "GET" } } });
     expect(response.statusCode).toBe(404);
     expect(response.body).toContain("developer sign-in is not set up");
+  });
+});
+
+describe("the sign-in keys through the DeveloperIdentity function (D17)", () => {
+  const encode = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
+
+  it("invokes the function's own JWKS route and returns its keys", async () => {
+    const identity = identityHarness();
+    const keys = await developerKeysThroughLambda(async (payload) => ({ Payload: encode(await identity.handler(JSON.parse(new TextDecoder().decode(payload)) as never)) }))();
+    expect(keys).toEqual((await identity.signer.jwks()).keys);
+  });
+
+  it.each([
+    ["a thrown invoke error", async () => { throw Object.assign(new Error("arn:aws:lambda:planted"), { name: "AccessDeniedException" }); }, { reason: "invoke_error", error: "AccessDeniedException" }],
+    ["a function error", async () => ({ FunctionError: "Unhandled", Payload: encode({ errorMessage: "planted" }) }), { reason: "function_error", functionError: "Unhandled" }],
+    ["an empty reply", async () => ({}), { reason: "empty_reply" }],
+    ["a 500 reply", async () => ({ Payload: encode({ statusCode: 500, body: "{}" }) }), { reason: "unreadable_reply" }],
+    ["no keys", async () => ({ Payload: encode({ statusCode: 200, body: JSON.stringify({ keys: [] }) }) }), { reason: "no_keys" }],
+  ])("throws, logging only the reason, on %s", async (_name, invoke, logged) => {
+    const logs = captureLogs();
+    await expect(developerKeysThroughLambda(invoke)()).rejects.toThrow(/the developer sign-in keys could not be read/);
+    expect(logs()).toEqual([{ component: "broker", event: "developer.jwks_failed", ...logged }]);
+    expect(JSON.stringify(logs())).not.toContain("planted");
   });
 });
 

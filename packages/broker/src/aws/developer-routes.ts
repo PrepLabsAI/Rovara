@@ -1,6 +1,6 @@
-// Spec 025 FR-009 and FR-016 (GET projects only in 25a). API Gateway's developer JWT authorizer
-// has already verified the token; the broker checks issuer, audience, method and the sign-in
-// session again on every request (R12, R13), so a revoked session stops at once.
+// Spec 025 FR-009 and FR-016 (GET projects only in 25a). /v1/dev/* has no API Gateway authorizer
+// (D17): the broker verifies the developer access token itself, then checks the environment, the
+// method and the sign-in session on every request (R12, R13), so a revoked session stops at once.
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import {
   DEVELOPER_TOKEN_AUDIENCE,
@@ -21,6 +21,8 @@ export interface DeveloperApiConfiguration {
   since?: { slack?: number; oidc?: number };
   signInTableName: string;
   channelMembers(request: ChannelMembersRequest): Promise<ChannelMembersResponse>;
+  /** Verifies the Authorization header's developer access token (D17; verify-token.ts) and returns its claims. */
+  verifyAccessToken(authorization: string | undefined): Promise<Record<string, unknown>>;
 }
 export interface DeveloperRouteDependencies { documentClient: { send(command: unknown): Promise<unknown> }; tableName: string; developer: DeveloperApiConfiguration; now: () => number }
 export interface DeveloperCaller { developerId: string; sessionId: string; amr: DeveloperSignInMethod; name: string; slackUserId?: string; email?: string }
@@ -76,6 +78,39 @@ export function developerSinceFromEnvironment(env: NodeJS.ProcessEnv): { slack?:
   const slack = methodSince(env.DEVELOPER_SIGNIN_SLACK_SINCE);
   const oidc = methodSince(env.DEVELOPER_OIDC_SINCE);
   return { ...(slack === undefined ? {} : { slack }), ...(oidc === undefined ? {} : { oidc }) };
+}
+
+/**
+ * The sign-in server's public keys, read by invoking the DeveloperIdentity function with its own
+ * JWKS route (D17): the broker may not call kms:GetPublicKey, which the key policy keeps to
+ * DeveloperIdentity. Any failure throws, and the verifier answers 503 for it.
+ */
+export function developerKeysThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): () => Promise<unknown[]> {
+  const request = { version: "2.0", rawPath: "/v1/auth/.well-known/jwks.json", requestContext: { requestId: "broker-jwks", http: { method: "GET" } } };
+  const failed = (reason: string, entry: Record<string, string> = {}) => {
+    logDeveloperEvent({ event: "developer.jwks_failed", reason, ...entry });
+    return new Error(`the developer sign-in keys could not be read (${reason})`);
+  };
+  return async () => {
+    let response: ChannelMembersInvokeResult;
+    try {
+      response = await invoke(Buffer.from(JSON.stringify(request)));
+    } catch (error) {
+      throw failed("invoke_error", { error: errorName(error) });
+    }
+    if (response.FunctionError !== undefined) throw failed("function_error", { functionError: response.FunctionError });
+    if (response.Payload === undefined) throw failed("empty_reply");
+    let keys: unknown;
+    try {
+      const reply = JSON.parse(Buffer.from(response.Payload).toString("utf8")) as { statusCode?: unknown; body?: unknown };
+      if (reply.statusCode !== 200 || typeof reply.body !== "string") throw new Error("not 200");
+      keys = (JSON.parse(reply.body) as { keys?: unknown }).keys;
+    } catch {
+      throw failed("unreadable_reply");
+    }
+    if (!Array.isArray(keys) || keys.length === 0) throw failed("no_keys");
+    return keys as unknown[];
+  };
 }
 
 const SIGN_IN_AGAIN = "your AgentX sign-in has ended; run agentx login <url> again";
@@ -190,7 +225,8 @@ async function listProjects(deps: DeveloperRouteDependencies, caller: DeveloperC
 }
 
 export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
-  const caller = await authenticateDeveloper(deps, request.jwtClaims);
+  // Never request.jwtClaims: no API Gateway authorizer runs on /v1/dev/* (D17).
+  const caller = await authenticateDeveloper(deps, await deps.developer.verifyAccessToken(request.headers.authorization));
   if (request.method === "GET" && url.pathname === "/v1/dev/projects") return listProjects(deps, caller);
   throw agentXError("NOT_FOUND", "route not found");
 }

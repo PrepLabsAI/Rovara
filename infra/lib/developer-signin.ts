@@ -2,11 +2,11 @@
 // (R3): the legacy deployment must not change.
 import { ArnFormat, CfnOutput, CfnParameter, Duration, RemovalPolicy, Stack, aws_apigatewayv2 as apigwv2, aws_dynamodb as dynamodb, aws_iam as iam, aws_kms as kms, type aws_lambda_nodejs as lambdaNodejs, type aws_secretsmanager as secretsmanager } from "aws-cdk-lib";
 import { Construct } from "constructs";
-import { DEVELOPER_TOKEN_AUDIENCE } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
 import { packagedFunction } from "./control-plane.js";
 
 const SIGN_IN_ROUTE_KEY = "ANY /v1/auth/{proxy+}";
+const DEV_ROUTE_KEY = "ANY /v1/dev/{proxy+}";
 
 export interface DeveloperSignInParameters {
   slackTeamId: CfnParameter; slack: CfnParameter; oidcIssuer: CfnParameter; oidcClientId: CfnParameter;
@@ -118,27 +118,24 @@ export class DeveloperSignIn extends Construct {
     const authRoute = new apigwv2.CfnRoute(this, "AuthRoute", {
       apiId: props.api.ref, routeKey: SIGN_IN_ROUTE_KEY, target: `integrations/${integration.ref}`, authorizationType: "NONE",
     });
-    // The sign-in routes are public, so the stage caps them: bursts of 50, 20 requests a second on
-    // average, across all callers. A developer signs in a few times a week, so this only bites a flood.
-    props.stage.routeSettings = { [SIGN_IN_ROUTE_KEY]: { ThrottlingBurstLimit: 50, ThrottlingRateLimit: 20 } };
-    // Route settings must name a route that already exists.
-    props.stage.addDependency(authRoute);
     fn.addPermission("ApiInvoke", {
       principal: new iam.ServicePrincipal("apigateway.amazonaws.com"),
       sourceArn: `arn:${stack.partition}:execute-api:${stack.region}:${stack.account}:${props.api.ref}/*/*/v1/auth/*`,
     });
 
-    const authorizer = new apigwv2.CfnAuthorizer(this, "Authorizer", {
-      apiId: props.api.ref,
-      authorizerType: "JWT",
-      identitySource: ["$request.header.Authorization"],
-      name: "agentx-developer-jwt",
-      jwtConfiguration: { audience: [DEVELOPER_TOKEN_AUDIENCE], issuer },
+    // D17: no API Gateway JWT authorizer. One would fetch <api>/v1/auth's discovery document when it
+    // is created, before this API exists, so a fresh install could never create it. The broker
+    // verifies the developer access token itself (packages/broker/src/developer/verify-token.ts).
+    const devRoute = new apigwv2.CfnRoute(this, "DevRoute", {
+      apiId: props.api.ref, routeKey: DEV_ROUTE_KEY, target: `integrations/${props.brokerIntegration.ref}`, authorizationType: "NONE",
     });
-    new apigwv2.CfnRoute(this, "DevRoute", {
-      apiId: props.api.ref, routeKey: "ANY /v1/dev/{proxy+}", target: `integrations/${props.brokerIntegration.ref}`,
-      authorizationType: "JWT", authorizerId: authorizer.ref,
-    });
+    // Both routes are public, so the stage caps each: bursts of 50, 20 requests a second on average,
+    // across all callers. A developer signs in a few times a week, so this only bites a flood.
+    const throttle = { ThrottlingBurstLimit: 50, ThrottlingRateLimit: 20 };
+    props.stage.routeSettings = { [SIGN_IN_ROUTE_KEY]: throttle, [DEV_ROUTE_KEY]: throttle };
+    // Route settings must name routes that already exist.
+    props.stage.addDependency(authRoute);
+    props.stage.addDependency(devRoute);
 
     const broker = props.broker;
     broker.addEnvironment("DEVELOPER_TOKEN_ISSUER", issuer);
@@ -157,7 +154,7 @@ export class DeveloperSignIn extends Construct {
       conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "DEVELOPER#*"] } },
     }));
 
-    // The issuer the developer authorizer and the tokens use, for operators and scripts to read.
+    // The issuer the tokens carry and the broker checks, for operators and scripts to read.
     new CfnOutput(stack, "DeveloperSignInIssuer", { value: issuer });
   }
 }

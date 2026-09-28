@@ -82,7 +82,8 @@ import { observeConnectorRoute } from "./connector-metrics.js";
 import { attributionDroppedLog, callConnector, connectorCatalogKey, discoverConnector, discoverLegacyGitHubScope, stripCode, type ConnectorContextBase, type ScopeDiscovery } from "./connector-routes.js";
 import { resolveConnectors, BUILT_IN_CONNECTOR_TYPES, type ConnectorType, type ConnectorTypeContext, type ResolvedConnector } from "./connector-types.js";
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
-import { channelMembersThroughLambda, developerSinceFromEnvironment, routeDeveloperRequest, type DeveloperApiConfiguration } from "./developer-routes.js";
+import { developerTokenVerifier } from "../developer/verify-token.js";
+import { channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, routeDeveloperRequest, type DeveloperApiConfiguration } from "./developer-routes.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
@@ -336,8 +337,8 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         return await observeConnectorRoute(request.method, serviceUrl.pathname, () => routeWorkspaceRequest(dependencies, request, serviceUrl, identity));
       }
 
-      // Spec 025: the developer API. API Gateway's second JWT authorizer guards /v1/dev/*; the
-      // broker checks issuer, audience, method and session again (FR-009).
+      // Spec 025: the developer API. /v1/dev/* has no API Gateway authorizer (D17): the broker
+      // verifies the developer token, then checks the method and session (FR-009).
       if (url.pathname.startsWith("/v1/dev/")) {
         if (!dependencies.developer) throw agentXError("NOT_FOUND", "developer sign-in is not set up in this deployment");
         return json(await routeDeveloperRequest({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now }, request, url), request.requestId);
@@ -3656,6 +3657,12 @@ function developerConfiguration(): DeveloperApiConfiguration | undefined {
     since: developerSinceFromEnvironment(process.env),
     signInTableName: requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME"),
     channelMembers: channelMembersThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
+    // D17: kept for the Lambda's lifetime; an unknown kid refetches at most once a minute.
+    verifyAccessToken: developerTokenVerifier({
+      issuer,
+      keys: developerKeysThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
+      now: Date.now,
+    }),
   };
 }
 const developer = developerConfiguration();

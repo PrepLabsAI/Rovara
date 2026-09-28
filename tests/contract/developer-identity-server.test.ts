@@ -134,7 +134,7 @@ describe("authorize (FR-001, FR-002)", () => {
 });
 
 describe("Sign in with Slack end to end (US4 scenario 1, FR-003, FR-005, FR-008)", () => {
-  it("issues a code to the loopback, then an access token the developer authorizer accepts and a refresh token", async () => {
+  it("issues a code to the loopback, then an access token the broker accepts and a refresh token", async () => {
     const h = identityHarness({ slackUsers: [maya] });
     const back = await h.signIn("slack", maya.userId);
     expect(`${back.origin}${back.pathname}`).toBe(CLI_REDIRECT);

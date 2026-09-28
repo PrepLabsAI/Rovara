@@ -20,7 +20,7 @@ async function publicJwkError(kms: { send(command: unknown): Promise<unknown> })
 }
 
 describe("developer access tokens", () => {
-  it("are RS256 JWTs with a kid that a JWKS verifier (API Gateway's JWT authorizer) accepts", async () => {
+  it("are RS256 JWTs with a kid that a JWKS verifier (the broker, D17) accepts", async () => {
     const signer = kmsTokenSigner({ kms: fakeKms(), keyId: KEY });
     const { token, expiresIn } = await issue(signer);
     expect(expiresIn).toBe(3600);
