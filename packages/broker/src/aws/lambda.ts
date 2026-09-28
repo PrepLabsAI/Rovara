@@ -10,6 +10,8 @@ import type { AuthenticatedIdentity } from "../auth.js";
 
 export interface HttpApiV2Event {
   version?: string;
+  /** The API Gateway route that matched, for example "ANY /v1/dev/{proxy+}". */
+  routeKey?: string;
   rawPath?: string;
   rawQueryString?: string;
   headers?: Record<string, string | undefined>;

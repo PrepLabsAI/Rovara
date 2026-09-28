@@ -193,6 +193,21 @@ describe("the developer check on every /v1/dev request (FR-009, R12, R13)", () =
     expect((await call("/v1/dev/projects", claims())).statusCode).toBe(200);
   });
 
+  it.each([
+    "/v1/dev/../v1/admin/x", "/v1/dev/%2e%2e/admin", "/v1/dev/%2E%2E/admin/turns", "/v1/dev/./projects", "/v1/dev/%2e/projects", "/v1/dev/.%2E/v1/admin/turns",
+  ])("answers 404 for %s, a path with dot segments, before anything normalizes it", async (rawPath) => {
+    const response = await handler({ rawPath, headers: { authorization: await bearer(claims()) }, requestContext: { requestId: "r", http: { method: "GET" }, authorizer: { jwt: { claims: { iss: adminIssuer, sub: "admin-subject", groups: ["admins"] } } } } });
+    expect(response.statusCode).toBe(404);
+    expect(JSON.parse(response.body)).toMatchObject({ error: { code: "NOT_FOUND" } });
+  });
+
+  it("routes by API Gateway's route key: the /v1/dev route never reaches another handler", async () => {
+    const response = await handler({ rawPath: "/v1/admin/turns", routeKey: "ANY /v1/dev/{proxy+}", headers: { authorization: await bearer(claims()) }, requestContext: { requestId: "r", http: { method: "GET" } } });
+    expect(response.statusCode).toBe(404);
+    const dev = await handler({ rawPath: "/v1/dev/projects", routeKey: "ANY /v1/dev/{proxy+}", headers: { authorization: await bearer(claims()) }, requestContext: { requestId: "r", http: { method: "GET" } } });
+    expect(dev.statusCode).toBe(200);
+  });
+
   it("answers 503, not 401, when the sign-in server's keys cannot be read", async () => {
     config.verifyAccessToken = developerTokenVerifier({ issuer: ISSUER, keys: async () => { throw new Error("ResourceNotFoundException"); }, now: () => Date.now() });
     const response = await call("/v1/dev/projects", claims());

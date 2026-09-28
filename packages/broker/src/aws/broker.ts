@@ -263,6 +263,10 @@ interface SlackServiceConfiguration {
 
 type TransactItems = NonNullable<TransactWriteCommandInput["TransactItems"]>;
 
+/** A "." or ".." path segment, also percent-encoded (%2e in any case). */
+const DOT_SEGMENT = /(?:^|\/)(?:\.|%2e){1,2}(?:\/|$)/i;
+const DEVELOPER_ROUTE_KEY = "ANY /v1/dev/{proxy+}";
+
 export function createAwsBrokerHandler(input: AwsBrokerInput) {
   // One cache per container: discovery per revision, connector and repository costs one vendor round trip.
   const { connectorCredentials, turnRecordsTableName, ...rest } = input;
@@ -287,7 +291,12 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
   return async (event: HttpApiV2Event): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
     const request = adaptHttpApiEvent(event);
     try {
+      // Checked on the raw path, before URL parsing normalizes it: /v1/dev/../v1/admin/x reaches
+      // the broker through the authorizer-free /v1/dev route (D17), so it must never be resolved.
+      if (DOT_SEGMENT.test(event.rawPath ?? "/")) throw agentXError("NOT_FOUND", "route not found");
       const url = new URL(request.path, "https://agentx.invalid");
+      // The /v1/dev route has no API Gateway authorizer, so what it carries goes to the developer API or nowhere.
+      if (event.routeKey === DEVELOPER_ROUTE_KEY && !url.pathname.startsWith("/v1/dev/")) throw agentXError("NOT_FOUND", "route not found");
       // Internal worker routes authenticate with operation-scoped capabilities; user JWT auth starts below them.
       const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|pull-request|pull-request-update|codebuild)$/.exec(
         url.pathname,
