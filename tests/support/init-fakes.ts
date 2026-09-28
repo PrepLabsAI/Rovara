@@ -7,6 +7,7 @@ import type { DeployRequest, StackDeployer, StackOutputs } from "../../packages/
 import type { LoadedRelease } from "../../packages/cli/src/deploy/release.js";
 import { SecretAlreadyExistsError } from "../../packages/cli/src/deploy/signing-key.js";
 import { lockParameterName } from "../../packages/cli/src/environments/lock.js";
+import { readEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import type { InitContext, InitSecrets } from "../../packages/cli/src/init/context.js";
 import type { GitHubApi } from "../../packages/cli/src/init/github-app.js";
 import { emptyProgress, type InitAnswers, type InstallProgress } from "../../packages/cli/src/init/install-state.js";
@@ -14,8 +15,10 @@ import type { PrerequisiteChecks } from "../../packages/cli/src/init/prerequisit
 import type { Prompter } from "../../packages/cli/src/init/prompts.js";
 import type { SlackApi } from "../../packages/cli/src/init/slack-app.js";
 import type { ProgressHandle } from "../../packages/cli/src/init/steps.js";
+import { openAdminSession } from "../../packages/cli/src/setup/admin-session.js";
 import { fakeCloudFormation, SIGN_IN_PARAMETERS } from "./fake-cloudformation.js";
 import { MemoryParameterStore } from "./memory-parameter-store.js";
+import { setupServices } from "./setup-fakes.js";
 
 /** A complete, valid set of `agentx init` answers, for tests that round-trip or size-check them
  * rather than exercising the prompts that collect them. */
@@ -218,6 +221,21 @@ export function initContext(overrides: Partial<Omit<InitContext, "secrets">> & {
     home: join(tmpdir(), `agentx-init-home-${randomBytes(6).toString("hex")}`),
     prerequisitesPassed: true,
     runPrerequisites: async () => undefined,
+    setup: setupServices(),
+    flags: {},
+    // Read at call time, as init builds it: the real openAdminSession over context.setup, with the
+    // context's browser (absent means --no-browser) and your own OIDC's admin claim when named.
+    adminSession: async () => {
+      const settings = await readEnvironmentSettings(context.store, context.env);
+      if (settings === undefined) throw new Error("test setup: no settings");
+      const identity = context.answers.identity;
+      return openAdminSession({
+        settings, services: context.setup, now: context.now, write: context.write,
+        ...(context.openBrowser === undefined ? {} : { openBrowser: context.openBrowser }),
+        ...(settings.identity.mode === "oidc" && identity.mode === "oidc" && identity.adminClaim !== undefined && identity.adminValues !== undefined
+          ? { adminClaim: { claim: identity.adminClaim, values: identity.adminValues } } : {}),
+      });
+    },
     ...overrides,
   };
   return Object.assign(context, { lines, deployer, opened }) as TestInitContext;

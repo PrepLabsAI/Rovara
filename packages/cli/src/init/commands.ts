@@ -2,18 +2,22 @@
 // ask and check and confirm on a first run, then run the steps. Every AWS, GitHub, Slack, browser
 // and clock dependency is overridable through InitCliDependencies (main.ts's CliDependencies.init).
 import { CloudFormationClient } from "@aws-sdk/client-cloudformation";
+import { CognitoIdentityProviderClient } from "@aws-sdk/client-cognito-identity-provider";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SSMClient } from "@aws-sdk/client-ssm";
 import { STSClient } from "@aws-sdk/client-sts";
 import { agentXError } from "@agentx/contracts";
-import { openSystemBrowser } from "../auth.js";
+import { loginWithPkce, openSystemBrowser } from "../auth.js";
 import { cliErrorFor, prepareDeployment, realCommandRunner, type DeployCliDependencies, type PreparedDeployment, type Writer } from "../deploy/commands.js";
 import { assertReleaseCoversRegion, loadRelease } from "../deploy/release.js";
 import { stsCallerIdentity } from "../environments/adopt.js";
 import type { LockRecord } from "../environments/lock.js";
 import { ssmParameterStore, type ParameterStore } from "../environments/parameter-store.js";
 import { readEnvironmentSettings, type EnvironmentSettings } from "../environments/settings.js";
+import { openAdminSession } from "../setup/admin-session.js";
+import { cognitoAdmin, type SetupServices } from "../setup/services.js";
 import type { SigninFlags } from "../signin/collect.js";
+import { SystemCredentialTokenStore, type TokenStore } from "../token-store.js";
 import { isPrereleaseVersion, RELEASE_VERSION } from "../version.js";
 import {
   assertResumeFlagsMatch, checkAlertWebhook, collectInitAnswers, openRouterSecretName, persistInitAnswers, readOpenRouterKeyAnswer, storeAlertWebhook,
@@ -130,6 +134,17 @@ const realSleep = (ms: number) => new Promise<void>((resolvePromise) => setTimeo
 
 /** A browser that will not open (no xdg-open on CloudShell, SSH hosts and containers; Windows)
  * never stops init: the failure is reported once and the step carries on without it. */
+/** The real phase 15d2 services. Clients are only constructed here, never called, until a step
+ * uses them. Tasks 6 to 13 add their fields. */
+export function realSetupServices(input: { region: string; fetch: typeof fetch; tokenStore?: TokenStore }): SetupServices {
+  return {
+    tokenStore: input.tokenStore ?? new SystemCredentialTokenStore(),
+    cognito: cognitoAdmin(new CognitoIdentityProviderClient({ region: input.region })),
+    login: loginWithPkce,
+    fetch: input.fetch,
+  };
+}
+
 function neverThrowingBrowser(open: (url: string) => Promise<unknown>, write: (line: string) => void): (url: string) => Promise<boolean> {
   return async (url) => {
     try {
@@ -354,6 +369,21 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     }
   };
 
+  const setup = realSetupServices({ region, fetch: fetchImplementation });
+  const identity = finalAnswers.identity;
+  // Your own OIDC's admin claim, when the answers name one (Task 13 refuses answers that do not).
+  const adminClaim = identity.mode === "oidc" && identity.adminClaim !== undefined && identity.adminValues !== undefined
+    ? { claim: identity.adminClaim, values: identity.adminValues } : undefined;
+  const adminSession = async () => {
+    const settings = await readEnvironmentSettings(store, env);
+    if (settings === undefined) throw agentXError("CONFIG_INVALID", `environment ${env} has no settings yet; the Slack service step must finish first, so run agentx init again`);
+    return openAdminSession({
+      settings, services: setup, write, now,
+      ...(options.browser ? { openBrowser: neverThrowingBrowser(deps.openBrowser ?? openSystemBrowser, write) } : {}),
+      ...(adminClaim === undefined ? {} : { adminClaim }),
+    });
+  };
+
   let deployment: Promise<PreparedDeployment> | undefined;
   const context: InitContext = {
     env,
@@ -389,6 +419,9 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     home: services.home,
     prerequisitesPassed,
     runPrerequisites,
+    setup,
+    adminSession,
+    flags: {},
   };
 
   try {

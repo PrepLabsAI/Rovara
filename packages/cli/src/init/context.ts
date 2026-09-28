@@ -6,6 +6,7 @@ import type { PreparedDeployment } from "../deploy/commands.js";
 import type { LoadedRelease } from "../deploy/release.js";
 import { secretsManagerValueStore, type SecretValueStore } from "../deploy/signing-key.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
+import type { AdminSession, SetupServices } from "../setup/services.js";
 import type { SigninFlags } from "../signin/collect.js";
 import type { InitAnswers } from "./install-state.js";
 import type { Prompter, SecretSource } from "./prompts.js";
@@ -62,6 +63,13 @@ export interface SecretFlags {
 }
 export interface PreMadeGitHubApp { appId: string; installationId: string }
 
+/** Phase 15d2's answers for the finishing steps, from flags (every one also has a prompt). */
+export interface FinishFlags {
+  adminEmail?: string; projectName?: string; repository?: string; setupCommand?: string; testCommand?: string; channel?: string;
+  connectors?: string; linearKey?: SecretSource; jiraToken?: SecretSource; jiraSite?: string; jiraProject?: string;
+  asanaClientId?: string; asanaClientSecret?: SecretSource; asanaBotEmail?: string; asanaProject?: string; linearTeam?: string;
+}
+
 // write, now and sleep are function-typed properties rather than methods, so steps can pass them
 // on (as `write: context.write`) without an unbound-method lint error.
 export interface InitContext {
@@ -94,4 +102,11 @@ export interface InitContext {
   /** True when this run already ran checkPrerequisites before the plan. */
   prerequisitesPassed: boolean;
   runPrerequisites(): Promise<void>;
+  /** Phase 15d2's injected interfaces (setup/services.ts). */
+  setup: SetupServices;
+  /** The admin's control-plane session: the stored token when still good, else a new sign-in.
+   * Not memoized: each call reads the token store and checks the admin route once. */
+  adminSession: () => Promise<AdminSession>;
+  /** Phase 15d2's answers for the finishing steps, from flags (every one also has a prompt). */
+  flags: FinishFlags;
 }

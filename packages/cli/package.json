@@ -10,6 +10,7 @@
     "@agentx/contracts": "0.1.0",
     "@aws-sdk/client-bedrock-runtime": "3.1134.0",
     "@aws-sdk/client-cloudformation": "3.1134.0",
+    "@aws-sdk/client-cognito-identity-provider": "3.1134.0",
     "@aws-sdk/client-s3": "3.1134.0",
     "@aws-sdk/client-secrets-manager": "3.1134.0",
     "@aws-sdk/client-ssm": "3.1134.0",
