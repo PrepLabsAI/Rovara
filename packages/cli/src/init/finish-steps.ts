@@ -66,7 +66,10 @@ export function adminUserStep(): InitStep<InitContext> {
       // F13 and C6 (FR-021): with your own OIDC, the admin claim is what makes someone an AgentX
       // administrator, so an install whose answers name none is refused, never signed in unchecked.
       const identity = context.answers.identity;
-      if (identity.mode !== "oidc" || identity.adminClaim === undefined || identity.adminValues === undefined) {
+      if (identity.mode !== "oidc") {
+        throw agentXError("CONFIG_INVALID", `the install's identity settings do not match its answers: /agentx/${context.env}/settings says your own OIDC provider, but the answers say Cognito; check which install wrote /agentx/${context.env}/settings, or start a new install with another --env`);
+      }
+      if (identity.adminClaim === undefined || identity.adminValues === undefined) {
         throw agentXError("CONFIG_INVALID", `the install's answers name no admin claim; AgentX cannot check that you are an administrator of your own OIDC provider, and an install's answers cannot change halfway. Start a new install with another --env, passing --admin-claim and --admin-values`);
       }
       const session = await context.adminSession();
@@ -227,8 +230,8 @@ export function finishSteps(): InitStep<InitContext>[] {
   return [adminUserStep(), firstProjectStep(), connectorsStep(), alertsStep(), e2eStep()];
 }
 
-/** The message a finished agentx init ends with: where to talk to AgentX, and the day-2 commands.
- * `controlPlaneUrl` is not printed; --json callers get it beside this text. */
+/** The message a finished agentx init ends with: where to talk to AgentX, how developers sign in,
+ * and the day-2 commands. */
 export function readyText(input: { env: string; controlPlaneUrl: string; progress: InstallProgress }): string {
   const { env, progress } = input;
   const cli = `agentx --env ${env}`;
@@ -238,6 +241,9 @@ export function readyText(input: { env: string; controlPlaneUrl: string; progres
   return [
     `AgentX environment ${env} is ready.`,
     ...(project?.channelName === undefined || slack === undefined ? [] : [`  Talk to it: mention <@${slack.botUserId}> in #${project.channelName} (project ${project.name}, revision ${project.revision}).`]),
+    // Repeated here: the developer-signin step prints it only on the run that executes it, and a
+    // resume (after the alert confirmation wait, say) finishes without that step.
+    `  Developers sign in with: npx @charterarc/agentx login ${input.controlPlaneUrl}`,
     ...(project === undefined ? [] : [`  ${connected.length === 0 ? "No connectors yet." : `Connected: ${connected.join(", ")}.`} Add ${connected.length === 0 ? "one" : "more"} with ${cli} connector add linear|jira|asana --project ${project.name}.`]),
     // Owner decision 6: a connector saved with a warning says so again at the end.
     ...connectors.flatMap((entry) => (entry.warning === undefined ? [] : [`  Warning (${CONNECTOR_LABELS[entry.type]}): ${entry.warning}.`])),

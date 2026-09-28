@@ -22,7 +22,7 @@ import { stagingSettings } from "../support/environment-fixtures.js";
 import { SIGN_IN_PARAMETERS, fakeCloudFormation } from "../support/fake-cloudformation.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 import type { SetupServices } from "../../packages/cli/src/setup/services.js";
-import { ADMIN_EMAIL, FOUNDATION_OUTPUTS, fakeAlerts, fakeControlPlane, fakeRepositories, fakeSlackChannels, setupServices, turn } from "../support/setup-fakes.js";
+import { ADMIN_EMAIL, FOUNDATION_OUTPUTS, fakeAlerts, fakeCognito, fakeControlPlane, fakeRepositories, fakeSlackChannels, setupServices, turn } from "../support/setup-fakes.js";
 
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
@@ -72,7 +72,9 @@ async function harness(options: { releaseVersion?: string; regions?: string[] } 
   const plane = fakeControlPlane();
   plane.turns = [turn({ subject: "T0TEAM/C0PAY00001/1790000000.000100", receivedAt: new Date(T0 + 86_400_000).toISOString() })];
   const alerts = fakeAlerts({ confirmAfterPolls: 0, budgetUsd: 100 });
+  const cognito = fakeCognito();
   const setup = setupServices({
+    cognito,
     fetch: plane.fetch,
     repositories: fakeRepositories({ "acme/payments-api": { files: { "go.mod": "module example.com/pay" } } }),
     slackChannels: fakeSlackChannels([{ id: "C0PAY00001", name: "payments", isPrivate: false, isMember: true }]),
@@ -104,7 +106,12 @@ async function harness(options: { releaseVersion?: string; regions?: string[] } 
       init: { ...deps, ...overrides },
     });
   const run = (argv: string[], overrides: Partial<InitCliDependencies> = {}) => runWithoutRegion(["--region", "us-east-1", ...argv], overrides);
-  return { store, secrets, deployer, github, opened, out, err, home, release, plane, alerts, setup, run, runWithoutRegion, printed: () => `${out.join("")}${err.join("")}` };
+  return { store, secrets, deployer, github, opened, out, err, home, release, plane, alerts, cognito, setup, run, runWithoutRegion,
+    printed: () => `${out.join("")}${err.join("")}`,
+    /** Where the output stands now, and everything printed since (one run's output, on a rerun). */
+    mark: () => ({ out: out.length, err: err.length }),
+    printedSince: (mark: { out: number; err: number }) => `${out.slice(mark.out).join("")}${err.slice(mark.err).join("")}`,
+  };
 }
 
 type Harness = Awaited<ReturnType<typeof harness>>;
@@ -145,25 +152,14 @@ describe("agentx init", () => {
   });
 
   it("a first run asks, checks, shows the plan, deploys every stack, creates both apps, writes settings and the local cache, and ends on a threaded Slack reply", async () => {
+    // The harness's finishing services (F15): one repository, the payments channel, a confirmed
+    // alert subscription and the $100 budget FIRST_RUN takes (F16), and a turn received a day later.
     const h = await harness();
-    const plane = fakeControlPlane();
-    // Received a day later: whatever the run's fake clock reads when the e2e step starts, this counts.
-    plane.turns = [turn({ subject: "T0TEAM/C0PAY00001/1790000000.000100", receivedAt: new Date(T0 + 86_400_000).toISOString() })];
-    const setup = setupServices({
-      fetch: plane.fetch,
-      repositories: fakeRepositories({ "acme/payments-api": { files: { "go.mod": "module example.com/pay" } } }),
-      slackChannels: fakeSlackChannels([{ id: "C0PAY00001", name: "payments", isPrivate: false, isMember: true }]),
-      // F16: FIRST_RUN takes the default $100 budget, so the alerts step reads one.
-      alerts: fakeAlerts({ confirmAfterPolls: 0, budgetUsd: 100 }),
-      stackOutputs: finishStackOutputs,
-      configDir: await tmp("agentx-projects-"),
-    });
-    // admin email; repository; project name; use the proposed commands; channel; three connector offers; the test alarm arrived
     const prompter = scriptedPrompter([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
-    expect(await h.run([], { prompter, setup })).toBe(0);
+    expect(await h.run([], { prompter })).toBe(0);
     expect(prompter.remaining()).toBe(0);
-    expect(plane.registered).toHaveLength(1);
-    expect(plane.bindings).toEqual(["T0TEAM/C0PAY00001"]);
+    expect(h.plane.registered).toHaveLength(1);
+    expect(h.plane.bindings).toEqual(["T0TEAM/C0PAY00001"]);
     expect(h.deployer.requests.map((request) => request.part)).toEqual(["access", "foundation", "identity", "control-plane", "runtime", "slack"]);
     const progress = await readInstallProgress(h.store, "staging");
     expect(INIT_STEP_IDS.every((id) => progress?.steps[id]?.status === "done")).toBe(true);
@@ -176,6 +172,7 @@ describe("agentx init", () => {
     // and bind a project) are gone: init did them.
     expect(printed).toContain("AgentX environment staging is ready.\n  Talk to it: mention <@U0BOT> in #payments (project payments-api, revision 1).");
     expect(printed).not.toContain("aws cognito-idp admin-create-user");
+    expect(printed).toContain("  Developers sign in with: npx @charterarc/agentx login https://abc123.execute-api.us-east-1.amazonaws.com\n");
     const everywhere = await everywhereButSecrets(h);
     expect(everywhere).toContain("abc123.execute-api");
     expect(everywhere).not.toContain("fedcba9876543210fedcba9876543210");
@@ -183,6 +180,43 @@ describe("agentx init", () => {
       expect(secret.length).toBeGreaterThan(10);
       expect(everywhere).not.toContain(secret);
     }
+  });
+
+  it("a resume that finishes after the alert confirmation wait still ends with the developer sign-in command", async () => {
+    const h = await harness();
+    const alerts = fakeAlerts({ confirmAfterPolls: 1_000, budgetUsd: 100 });
+    const setup = { ...h.setup, alerts };
+    // Everything up to the alerts step, which waits for the subscription to be confirmed.
+    expect(await h.run([], { prompter: scriptedPrompter([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH.slice(0, -1)]), setup })).toBe(0);
+    expect((await readInstallProgress(h.store, "staging"))?.steps.alerts?.status).toBe("waiting");
+    alerts.confirmAll();
+    const mark = h.mark();
+    const prompter = scriptedPrompter([true]);
+    expect(await h.run([], { prompter, setup })).toBe(0);
+    expect(prompter.remaining()).toBe(0);
+    const resumed = h.printedSince(mark);
+    expect(resumed).toContain("already done: Set up developer sign-in");
+    expect(resumed).toContain("AgentX environment staging is ready.");
+    expect(resumed).toContain("  Developers sign in with: npx @charterarc/agentx login https://abc123.execute-api.us-east-1.amazonaws.com\n");
+  });
+
+  it("a rerun after the e2e check failed repeats only that check: no second admin and no second project", async () => {
+    const h = await harness();
+    const answered = h.plane.turns;
+    h.plane.turns = [turn({ subject: "T0TEAM/C0PAY00001/1790000000.000100", receivedAt: new Date(T0 + 86_400_000).toISOString(), disposition: "error" })];
+    expect(await h.run([], { prompter: scriptedPrompter([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]) })).not.toBe(0);
+    expect(h.printed()).toContain("then run agentx init again");
+    h.plane.turns = answered;
+    const mark = h.mark();
+    const prompter = scriptedPrompter([]);
+    expect(await h.run([], { prompter })).toBe(0);
+    const rerun = h.printedSince(mark);
+    expect(rerun).toContain("already done: Create the admin user and sign in");
+    expect(rerun).toContain("already done: Set up the first project and its channel");
+    expect(rerun).toContain("AgentX environment staging is ready.");
+    expect(h.cognito.created).toEqual([ADMIN_EMAIL]);
+    expect(h.plane.registered).toHaveLength(1);
+    expect(h.plane.bindings).toEqual(["T0TEAM/C0PAY00001"]);
   });
 
   it("resumes at the step that failed and never creates a second GitHub App", async () => {
@@ -319,6 +353,15 @@ describe("agentx init", () => {
     expect((await readInstallProgress(h.store, "staging"))?.connectors ?? []).toEqual([]);
     expect(h.printed()).toContain("AgentX environment staging is ready.");
     expect(h.printed()).toContain("No connectors yet.");
+  });
+
+  it("prints the ready message in --json under --yes", async () => {
+    const h = await harness();
+    expect(await h.run([...UNATTENDED, "--alert-email", "ops@example.com", "--json"], { processEnv: UNATTENDED_ENV })).toBe(0);
+    const data = (JSON.parse(h.out.join("")) as { data: { status: string; ready?: string } }).data;
+    expect(data.status).toBe("complete");
+    expect(data.ready).toContain("AgentX environment staging is ready.");
+    expect(data.ready).toContain("Developers sign in with: npx @charterarc/agentx login https://abc123.execute-api.us-east-1.amazonaws.com");
   });
 
   it("refuses a --connectors typo before asking or deploying anything", async () => {

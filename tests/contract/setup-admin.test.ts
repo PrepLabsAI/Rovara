@@ -405,6 +405,14 @@ describe("the admin-user init step", () => {
     expect(progress.value().admin).toBeUndefined();
   });
 
+  it("refuses, naming the mismatch, when the settings say your own OIDC but the answers say Cognito", async () => {
+    const login = fakeLogin({ accessToken: accessToken({ sub: "00u1abcd" }), expiresAt: T0 + 3_600_000 });
+    context = initContext({ setup: setupServices({ login }) });
+    (context.store as MemoryParameterStore).values.set("/agentx/staging/settings", JSON.stringify(oidcSettings));
+    await expect(adminUserStep().run(context, progressHandle())).rejects.toThrow("the install's identity settings do not match its answers: /agentx/staging/settings says your own OIDC provider, but the answers say Cognito; ");
+    expect(login.calls).toEqual([]);
+  });
+
   it("refuses to run before the environment has settings, saying what to do", async () => {
     context = initContext({ prompter: scriptedPrompter([]) });
     await expect(adminUserStep().run(context, progressHandle())).rejects.toThrow("environment staging has no settings yet; the Slack service step must finish first, so run agentx init again");

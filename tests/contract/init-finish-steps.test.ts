@@ -52,6 +52,7 @@ describe("the message init ends with", () => {
     expect(text).toBe([
       "AgentX environment staging is ready.",
       "  Talk to it: mention <@U0BOT00001> in #payments (project payments-api, revision 2).",
+      "  Developers sign in with: npx @charterarc/agentx login https://cp.example.test",
       "  Connected: Linear. Add more with agentx --env staging connector add linear|jira|asana --project payments-api.",
       "  More projects: agentx --env staging project add, then agentx --env staging channel add.",
       "  Send a test alarm any time: agentx --env staging alerts test.",
