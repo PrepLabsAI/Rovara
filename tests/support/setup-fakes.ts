@@ -165,10 +165,11 @@ export function fakeSlackChannels(channels: SlackChannel[], options: { visibleAf
  * `jiraSearch` throw the same VendorRefused shape a 401 from Atlassian does. `asanaProject` answers
  * `vendors.asanaProject` (pass `undefined` for a project the bot cannot see; absent means Payments);
  * `asanaRotates` is the refresh token `asanaAccessToken` returns as rotated; `asanaRefuses` makes the
- * refresh or the project read throw VendorRefused. */
+ * refresh or the project read throw VendorRefused; `asanaReadError` makes the project read throw a
+ * plain Error with that message, as a raw SDK or MCP client error would. */
 export function fakeVendors(options: {
   linearTeams?: LinearTeam[]; linearRefuses?: boolean; jiraCloudId?: string; jiraInside?: string[]; jiraOutside?: string[]; jiraRefuses?: boolean;
-  asanaProject?: { name: string } | undefined; asanaRotates?: string; asanaRefuses?: "refresh" | "read";
+  asanaProject?: { name: string } | undefined; asanaRotates?: string; asanaRefuses?: "refresh" | "read"; asanaReadError?: string;
 } = {}): VendorApi & { calls: string[] } {
   const calls: string[] = [];
   return {
@@ -195,6 +196,7 @@ export function fakeVendors(options: {
     async asanaProject({ projectGid }) {
       calls.push(`asanaProject ${projectGid}`);
       if (options.asanaRefuses === "read") throw Object.assign(new Error("401"), { name: "VendorRefused" });
+      if (options.asanaReadError !== undefined) throw new Error(options.asanaReadError);
       return "asanaProject" in options ? options.asanaProject : { name: "Payments" };
     },
   };

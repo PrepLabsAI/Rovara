@@ -107,10 +107,14 @@ export async function addAsana(input: ConnectorAddInput & { services: ConnectorA
   } catch (error) {
     // F28: Asana MCP refusing the token, explained as Jira explains Atlassian's refusal.
     if (refused(error)) throw agentXError("AUTH_REQUIRED", `Asana MCP refused the bot user's access token, so the project was not changed; check the app type is Asana MCP (docs/connectors/asana.md, Step 2), then run ${rerun} again`);
-    throw error;
+    // Anything else (a raw MCP client or SDK error, a missing get_project tool) is named by its
+    // class only: its message can carry vendor text.
+    throw agentXError("RUNTIME_UNAVAILABLE", `could not read Asana project ${projectGid} through Asana MCP (${errorName(error)}), so the project was not changed; check that the Asana app type is Asana MCP (see the Asana guide, docs/connectors/asana.md, Step 2), then rerun ${rerun}`);
   }
   if (project === undefined) {
-    throw agentXError("CONFIG_INVALID", `the bot user cannot see Asana project ${projectGid}; invite ${botEmail} to that project as a guest with Editor access (docs/connectors/asana.md, Step 1), then run this again`);
+    // get_project answered with an error: most often the bot is not in the project, but Asana gives
+    // the same answer for a read that simply failed.
+    throw agentXError("CONFIG_INVALID", `the bot cannot see, or could not read, project ${projectGid}; invite it to the project (${botEmail}, as a guest with Editor access: docs/connectors/asana.md, Step 1) or try again: ${rerun}`);
   }
   input.write(`The bot user sees the Asana project ${project.name}.`);
   const { revision } = await addConnectorRevision({

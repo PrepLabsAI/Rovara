@@ -62,12 +62,14 @@ function fakeAuthorize(signedInAs = BOT) {
   };
 }
 
-function memoryAuthorizeSecrets(secrets: ReturnType<typeof memoryInitSecrets>) {
+/** AuthorizeSecrets over the same map as `secrets` (the InitSecrets the connector store writes), so
+ * the sign-in and the connector see one Secrets Manager. */
+function authorizeSecretsOver(secrets: ReturnType<typeof memoryInitSecrets>) {
   return { read: async (name: string) => secrets.values.get(name), write: async (name: string, value: string) => { secrets.values.set(name, value); }, tag: async () => undefined };
 }
 
 function withAuthorize(base: ReturnType<typeof input>, secrets: ReturnType<typeof memoryInitSecrets>, authorize = fakeAuthorize().authorize) {
-  return { ...base, services: { ...base.services, authorize, authorizeSecrets: memoryAuthorizeSecrets(secrets) } };
+  return { ...base, services: { ...base.services, authorize, authorizeSecrets: authorizeSecretsOver(secrets) } };
 }
 
 describe("agentx connector add asana (FR-036 to FR-039)", () => {
@@ -79,7 +81,7 @@ describe("agentx connector add asana (FR-036 to FR-039)", () => {
     const lines: string[] = [];
     // client id, client secret, bot email, project gid
     const base = input({ plane, vendors, secrets, lines, script: [CLIENT_ID, SECRET, BOT, GID] });
-    const result = await addAsana({ ...base, services: { ...base.services, authorize: auth.authorize, authorizeSecrets: memoryAuthorizeSecrets(secrets) } });
+    const result = await addAsana({ ...base, services: { ...base.services, authorize: auth.authorize, authorizeSecrets: authorizeSecretsOver(secrets) } });
     expect(result).toEqual({ ref: "asana", revision: 2 });
     expect(lines[0]).toBe(ASANA_GUIDE);
     // FR-037: no browser is opened, and only the bot's sign-in is accepted.
@@ -98,7 +100,7 @@ describe("agentx connector add asana (FR-036 to FR-039)", () => {
   it("writes back a refresh token Asana rotated during the test read", async () => {
     const secrets = memoryInitSecrets();
     const base = input({ secrets, vendors: fakeVendors({ asanaProject: { name: "Payments" }, asanaRotates: "refresh-2" }), script: [CLIENT_ID, SECRET, BOT, GID] });
-    await addAsana({ ...base, services: { ...base.services, authorize: fakeAuthorize().authorize, authorizeSecrets: memoryAuthorizeSecrets(secrets) } });
+    await addAsana({ ...base, services: { ...base.services, authorize: fakeAuthorize().authorize, authorizeSecrets: authorizeSecretsOver(secrets) } });
     expect(JSON.parse(secrets.values.get(SECRET_NAME)!)).toEqual({ clientId: CLIENT_ID, clientSecret: SECRET, refreshToken: "refresh-2" });
   });
 
@@ -106,24 +108,24 @@ describe("agentx connector add asana (FR-036 to FR-039)", () => {
     const plane = fakeControlPlane();
     const secrets = memoryInitSecrets();
     const base = input({ plane, secrets, vendors: fakeVendors({ asanaProject: undefined, asanaRotates: "refresh-2" }), script: [CLIENT_ID, SECRET, BOT, GID] });
-    await expect(addAsana(withAuthorize(base, secrets))).rejects.toThrow(/cannot see Asana project/);
+    await expect(addAsana(withAuthorize(base, secrets))).rejects.toThrow(/cannot see, or could not read, project/);
     expect((JSON.parse(secrets.values.get(SECRET_NAME)!) as { refreshToken?: string }).refreshToken).toBe("refresh-2");
     expect(plane.registered).toEqual([]);
   });
 
-  it("refuses when the bot user cannot see the project, before saving the revision", async () => {
+  it("refuses when the bot cannot see, or could not read, the project, before saving the revision", async () => {
     const plane = fakeControlPlane();
     const secrets = memoryInitSecrets();
     const base = input({ plane, secrets, vendors: fakeVendors({ asanaProject: undefined }), script: [CLIENT_ID, SECRET, BOT, GID] });
-    await expect(addAsana({ ...base, services: { ...base.services, authorize: fakeAuthorize().authorize, authorizeSecrets: memoryAuthorizeSecrets(secrets) } }))
-      .rejects.toThrow(`the bot user cannot see Asana project ${GID}; invite ${BOT} to that project as a guest with Editor access (docs/connectors/asana.md, Step 1), then run this again`);
+    await expect(addAsana({ ...base, services: { ...base.services, authorize: fakeAuthorize().authorize, authorizeSecrets: authorizeSecretsOver(secrets) } }))
+      .rejects.toThrow(`the bot cannot see, or could not read, project ${GID}; invite it to the project (${BOT}, as a guest with Editor access: docs/connectors/asana.md, Step 1) or try again: agentx connector add asana --project payments-api`);
     expect(plane.registered).toEqual([]);
   });
 
   it("passes on the refusal of a sign-in by the wrong account (FR-037)", async () => {
     const secrets = memoryInitSecrets();
     const base = input({ secrets, script: [CLIENT_ID, SECRET, BOT, GID] });
-    await expect(addAsana({ ...base, services: { ...base.services, authorize: fakeAuthorize("owner@example.com").authorize, authorizeSecrets: memoryAuthorizeSecrets(secrets) } }))
+    await expect(addAsana({ ...base, services: { ...base.services, authorize: fakeAuthorize("owner@example.com").authorize, authorizeSecrets: authorizeSecretsOver(secrets) } }))
       .rejects.toThrow("the sign-in was for owner@example.com, not agentx-bot@example.com");
   });
 
@@ -152,7 +154,7 @@ describe("agentx connector add asana (FR-036 to FR-039)", () => {
     });
     const lines: string[] = [];
     const base = input({ plane, secrets, vendors, lines, script: [CLIENT_ID, SECRET, BOT, GID] });
-    await expect(addAsana({ ...base, services: { ...base.services, fetch: fetchImplementation, authorize, authorizeSecrets: memoryAuthorizeSecrets(secrets) } }))
+    await expect(addAsana({ ...base, services: { ...base.services, fetch: fetchImplementation, authorize, authorizeSecrets: authorizeSecretsOver(secrets) } }))
       .rejects.toThrow("the sign-in was for Owner <owner@example.com>, not agentx-bot@example.com; nothing was stored or registered");
     expect(JSON.parse(secrets.values.get(SECRET_NAME)!)).toEqual({ clientId: CLIENT_ID, clientSecret: SECRET });
     expect(plane.credentials.map((entry) => entry.ref)).toEqual(["github-agentx-sdlc"]);
@@ -168,9 +170,9 @@ describe("agentx connector add asana (FR-036 to FR-039)", () => {
 
     /** addAsana with the real sign-in: the browser answers `callback`, Asana's token endpoint answers
      * the code exchange for `email`, and the control plane is the fake. */
-    async function rerun(options: { callback: (state: string) => string; email: string }) {
+    async function rerun(options: { callback: (state: string) => string; email: string; secrets?: ReturnType<typeof memoryInitSecrets> }) {
       const plane = fakeControlPlane();
-      const secrets = memoryInitSecrets({ [SECRET_NAME]: EXISTING });
+      const secrets = options.secrets ?? memoryInitSecrets({ [SECRET_NAME]: EXISTING });
       const vendors = fakeVendors({ asanaProject: { name: "Payments" } });
       let port = 0;
       const fetchImplementation: typeof fetch = async (url, init) => {
@@ -186,7 +188,7 @@ describe("agentx connector add asana (FR-036 to FR-039)", () => {
         },
       });
       const base = input({ plane, secrets, vendors, script: [CLIENT_ID, SECRET, BOT, GID] });
-      const run = addAsana({ ...base, services: { ...base.services, fetch: fetchImplementation, authorize, authorizeSecrets: memoryAuthorizeSecrets(secrets) } });
+      const run = addAsana({ ...base, services: { ...base.services, fetch: fetchImplementation, authorize, authorizeSecrets: authorizeSecretsOver(secrets) } });
       return { run, secrets, plane };
     }
 
@@ -209,6 +211,16 @@ describe("agentx connector add asana (FR-036 to FR-039)", () => {
       expect(await run).toEqual({ ref: "asana", revision: 2 });
       expect(JSON.parse(secrets.values.get(SECRET_NAME)!)).toEqual({ clientId: CLIENT_ID, clientSecret: SECRET, refreshToken: "refresh-new" });
     });
+
+    it("after a first run whose sign-in failed (a client-only secret), a successful rerun stores the client and the refresh token", async () => {
+      const secrets = memoryInitSecrets();
+      const first = await rerun({ secrets, callback: (state) => `error=access_denied&state=${state}`, email: BOT });
+      await expect(first.run).rejects.toThrow("the sign-in was refused or cancelled");
+      expect(JSON.parse(secrets.values.get(SECRET_NAME)!)).toEqual({ clientId: CLIENT_ID, clientSecret: SECRET });
+      const second = await rerun({ secrets, callback: (state) => `code=code-1&state=${state}`, email: BOT });
+      expect(await second.run).toEqual({ ref: "asana", revision: 2 });
+      expect(JSON.parse(secrets.values.get(SECRET_NAME)!)).toEqual({ clientId: CLIENT_ID, clientSecret: SECRET, refreshToken: "refresh-new" });
+    });
   });
 
   it("explains a refused refresh and saves no revision", async () => {
@@ -224,6 +236,17 @@ describe("agentx connector add asana (FR-036 to FR-039)", () => {
     const secrets = memoryInitSecrets();
     const base = input({ plane, secrets, vendors: fakeVendors({ asanaRefuses: "read" }), script: [CLIENT_ID, SECRET, BOT, GID] });
     await expect(addAsana(withAuthorize(base, secrets))).rejects.toThrow("Asana MCP refused the bot user's access token, so the project was not changed; check the app type is Asana MCP (docs/connectors/asana.md, Step 2), then run agentx connector add asana --project payments-api again");
+    expect(plane.registered).toEqual([]);
+  });
+
+  it("explains any other failure of the project read, with no vendor text, and saves no revision", async () => {
+    const plane = fakeControlPlane();
+    const secrets = memoryInitSecrets();
+    const raw = "MCP tool not allowed or unavailable: vendor said secret-ish things";
+    const base = input({ plane, secrets, vendors: fakeVendors({ asanaReadError: raw }), script: [CLIENT_ID, SECRET, BOT, GID] });
+    const failure = addAsana(withAuthorize(base, secrets));
+    await expect(failure).rejects.toThrow(`could not read Asana project ${GID} through Asana MCP (Error), so the project was not changed; check that the Asana app type is Asana MCP (see the Asana guide, docs/connectors/asana.md, Step 2), then rerun agentx connector add asana --project payments-api`);
+    await expect(failure).rejects.not.toThrow(/vendor said/);
     expect(plane.registered).toEqual([]);
   });
 
