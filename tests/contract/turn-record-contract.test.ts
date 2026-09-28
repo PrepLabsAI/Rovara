@@ -10,6 +10,7 @@ import {
   type TurnRecord,
 } from "../../packages/contracts/src/turns.js";
 import { TURN_ARGUMENT_LIMIT, redactArguments } from "../../packages/contracts/src/turns.js";
+import { AiToolTurnRecordSchema, aiToolTurnRecordKeys, type AiToolTurnRecord } from "../../packages/contracts/src/turns.js";
 
 const record: TurnRecord = {
   ...EMPTY_TURN_OBSERVATION,
@@ -581,5 +582,48 @@ describe("secret redaction, fix round 3", () => {
     const elapsed = performance.now() - started;
     console.log(`redactText ${name} (${input.length} chars): ${elapsed.toFixed(1)} ms`);
     expect(elapsed).toBeLessThan(500);
+  });
+});
+
+describe("AI-tool turn records (spec 025 FR-037)", () => {
+  const aiRecord: AiToolTurnRecord = {
+    origin: "ai_tool",
+    taskId: "44444444-4444-4444-8444-444444444444",
+    turnId: "55555555-5555-4555-8555-555555555555",
+    action: "start",
+    phase: "accepted",
+    developer: { developerId: "d".repeat(64), provider: "slack", displayName: "Maya Chen", slackUserId: "U0MAYA001" },
+    client: "Claude Code",
+    receivedAt: "2026-09-27T12:00:00.000Z",
+    project: "payments",
+    workspaceId: "22222222-2222-4222-8222-222222222222",
+    outcome: "accepted",
+    startedAt: "2026-09-27T12:00:00.000Z",
+    finishedAt: "2026-09-27T12:00:00.200Z",
+    durationMs: 200,
+    requestText: "Fix the flaky retry test",
+    responseText: "STARTING",
+  };
+
+  it("round-trips, with no Slack event ID or Slack requester", () => {
+    expect(AiToolTurnRecordSchema.parse(aiRecord)).toEqual(aiRecord);
+    expect(AiToolTurnRecordSchema.safeParse({ ...aiRecord, eventId: "EvX1234" }).success).toBe(false);
+  });
+
+  it("is keyed by task and exported on the same time index, kept 30 days", () => {
+    expect(aiToolTurnRecordKeys(aiRecord)).toEqual({
+      pk: "TASK#44444444-4444-4444-8444-444444444444",
+      sk: "TURN#2026-09-27T12:00:00.000Z#55555555-5555-4555-8555-555555555555",
+      exportPk: "TURNS",
+      exportSk: "2026-09-27T12:00:00.000Z#55555555-5555-4555-8555-555555555555",
+      expiresAt: Math.floor(Date.parse(aiRecord.receivedAt) / 1000) + 30 * 86_400,
+    });
+  });
+
+  it("still parses Slack records written before origin existed, and with origin slack", () => {
+    const slack = TurnRecordSchema.parse(record);
+    expect(slack).not.toHaveProperty("origin");
+    expect(TurnRecordSchema.parse({ ...slack, origin: "slack" }).origin).toBe("slack");
+    expect(TurnRecordSchema.safeParse({ ...slack, origin: "ai_tool" }).success).toBe(false);
   });
 });

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { EMPTY_TURN_OBSERVATION, type TurnRecord } from "../../packages/contracts/src/turns.js";
+import { aiToolTurnRecordKeys, type AiToolTurnRecord } from "../../packages/contracts/src/turns.js";
 import { TURN_EXPORT_PAGE_BYTES, TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader, type TurnRecordSource, type TurnRecordStartKey } from "../../packages/broker/src/aws/turns.js";
 import { adminCall, createAdminBroker } from "../support/admin-broker.js";
 
@@ -363,5 +364,42 @@ describe("turn record export skipped count", () => {
     const response = await adminCall(handler, { method: "GET", path: "/v1/admin/turns?since=2026-09-17T00:00:00.000Z" });
     expect(response.status).toBe(200);
     expect(response.body.skipped).toBe(1);
+  });
+});
+
+function aiTool(turnId: string, receivedAt: string): Record<string, unknown> {
+  const record: AiToolTurnRecord = {
+    origin: "ai_tool", taskId: "44444444-4444-4444-8444-444444444444", turnId, action: "start", phase: "accepted",
+    developer: { developerId: "d".repeat(64), provider: "oidc", displayName: "Maya Chen" }, client: "Codex", receivedAt, workspaceId,
+    outcome: "accepted", startedAt: receivedAt, finishedAt: receivedAt, durationMs: 0, requestText: "run the tests", responseText: "STARTING",
+  };
+  return { ...aiToolTurnRecordKeys(record), ...record };
+}
+
+describe("turn record export with AI-tool records (spec 025 FR-037)", () => {
+  it("returns Slack and AI-tool records together, newest first, with the project added", async () => {
+    const items = [aiTool("55555555-5555-4555-8555-555555555555", "2026-09-24T11:00:00.000Z"), stored("EvTURN00031", "2026-09-24T10:00:00.000Z")];
+    const { exporter: turns } = exporter({ page: async () => ({ items }) });
+    const result = await turns.page(new URLSearchParams({ since: "2026-09-17T00:00:00Z" }));
+    expect(result.turns.map((turn) => ("origin" in turn && turn.origin === "ai_tool" ? turn.turnId : turn.eventId))).toEqual(["55555555-5555-4555-8555-555555555555", "EvTURN00031"]);
+    expect(result.turns[0]).toMatchObject({ origin: "ai_tool", project: "payments" });
+  });
+
+  it("hands out and accepts a cursor that ends on an AI-tool record (Review Focus 4)", async () => {
+    const last = aiTool("66666666-6666-4666-8666-666666666666", "2026-09-24T09:00:00.000Z");
+    const lastEvaluatedKey = { pk: last.pk as string, sk: last.sk as string, exportPk: last.exportPk as string, exportSk: last.exportSk as string };
+    const page = vi.fn<TurnRecordSource["page"]>(async () => ({ items: [last], lastEvaluatedKey }));
+    const { exporter: turns } = exporter({ page });
+    const first = await turns.page(new URLSearchParams({ since: "2026-09-17T00:00:00Z" }));
+    expect(first.cursor).toBeDefined();
+    await turns.page(new URLSearchParams({ since: "2026-09-17T00:00:00Z", cursor: first.cursor! }));
+    expect(page).toHaveBeenLastCalledWith(expect.objectContaining({ exclusiveStartKey: lastEvaluatedKey }));
+  });
+
+  it("logs a malformed AI-tool record's field name, like a Slack one's", async () => {
+    const malformed = { ...aiTool("77777777-7777-4777-8777-777777777777", "2026-09-24T08:00:00.000Z"), outcome: "exploded" };
+    const { exporter: turns, log } = exporter({ page: async () => ({ items: [malformed] }) });
+    expect((await turns.page(new URLSearchParams({ since: "2026-09-17T00:00:00Z" }))).turns).toEqual([]);
+    expect(JSON.parse(String(log.mock.calls[0]?.[0]))).toMatchObject({ event: "turn_record.invalid", count: 1, fields: ["outcome"] });
   });
 });
