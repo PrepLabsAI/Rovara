@@ -483,6 +483,15 @@ describe("agentx init with OpenRouter", () => {
     expect(h.deployer.requests).toEqual([]);
   });
 
+  it("with --yes and only --worker-provider openrouter, refuses without a key or ARN and names the key flags", async () => {
+    const h = await harness();
+    expect(await h.run([...UNATTENDED, "--alert-email", "ops@example.com", "--worker-provider", "openrouter", "--worker-model", "qwen/qwen3-coder"], { processEnv: UNATTENDED_ENV })).toBe(2);
+    for (const flag of ["--openrouter-key-file", "--openrouter-key-env", "--openrouter-secret-arn"]) expect(h.printed()).toContain(flag);
+    expect(h.store.values.has(installAnswersParameterName("staging"))).toBe(false);
+    expect(h.secrets.values.has("agentx/staging/openrouter")).toBe(false);
+    expect(h.deployer.requests).toEqual([]);
+  });
+
   it("with --openrouter-secret-arn, asks for no key, stores none, and refuses a key flag on resume", async () => {
     const h = await harness();
     const own = "arn:aws:secretsmanager:us-east-1:123456789012:secret:my-openrouter-AbCdEf";

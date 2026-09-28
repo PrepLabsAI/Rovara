@@ -1,4 +1,4 @@
-import { DEFAULT_BEDROCK_MODELS } from "@agentx/model-runtime/config";
+import { DEFAULT_BEDROCK_MODELS, OPENROUTER_KEY_MIN_LENGTH } from "@agentx/model-runtime/config";
 // FR-016's questions, each with a flag (FR-020). Only flags the engineer typed arrive here, so a
 // commander default never silently skips a question. An alert webhook carries its integration
 // key, so it is a secret: it is never a flag value and never stored in the answers.
@@ -70,9 +70,6 @@ export function openRouterSecretName(env: string): string {
 const MODEL_PROVIDERS = ["amazon-bedrock", "openrouter"] as const;
 type ModelProvider = (typeof MODEL_PROVIDERS)[number];
 const isModelProvider = (value: string): value is ModelProvider => (MODEL_PROVIDERS as readonly string[]).includes(value);
-
-/** The runtime refuses a key shorter than this (model-runtime's readOpenRouterKey), so init does too. */
-const OPENROUTER_KEY_MIN_LENGTH = 10;
 
 export function alertWebhookSecretName(env: string): string {
   return `agentx/${env}/alert-endpoint`;
