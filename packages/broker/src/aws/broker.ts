@@ -3223,6 +3223,65 @@ async function queuedFirstTask(
   };
 }
 
+/** The queuing transaction met a transaction in flight; `cause` is DynamoDB's error. */
+class QueuingConflict extends Error {
+  constructor(override readonly cause: unknown) {
+    super("the first task's transaction met another transaction in flight");
+  }
+}
+
+function isTransactionConflict(error: unknown): boolean {
+  const reasons = error instanceof Error ? (error as Error & { CancellationReasons?: Array<{ Code?: string } | undefined> }).CancellationReasons : undefined;
+  return error instanceof Error && error.name === "TransactionCanceledException"
+    && Array.isArray(reasons) && reasons.some((reason) => reason?.Code === "TransactionConflict");
+}
+
+/**
+ * Sends a terminal result. For a developer task's prepare (it has a pointer; a Slack workspace has
+ * none) a success queues the first instructions in this same transaction (R3), and any other
+ * outcome clears the raw instructions (controller ruling, Task 9 fix round 1). The pointer update
+ * is always conditioned on the pointer existing, so it never creates one.
+ */
+async function sendTerminalResult(
+  dependencies: AwsBrokerDependencies,
+  workspace: WorkspaceInstance,
+  operation: OperationRecord,
+  terminalStatus: OperationStatus,
+  now: string,
+  transactItems: TransactItems,
+  workspaceUpdate: TransactItems[number],
+  send: (items: TransactItems) => Promise<unknown>,
+): Promise<void> {
+  const pointer = operation.kind === "prepare"
+    ? await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(workspace.id))
+    : undefined;
+  const withoutTask: TransactItems = pointer === undefined ? transactItems : [...transactItems, { Update: {
+    TableName: dependencies.tableName,
+    Key: taskPointerKey(workspace.id),
+    UpdateExpression: "REMOVE pendingPrompt",
+    ConditionExpression: "attribute_exists(pk)",
+  } }];
+  const queued = terminalStatus === "SUCCEEDED" && pointer?.pendingPrompt !== undefined && pointer.cancelledAt === undefined
+    ? await queuedFirstTask(dependencies, workspace, operation, { ...pointer, pendingPrompt: pointer.pendingPrompt }, now)
+    : undefined;
+  if (queued === undefined) {
+    await send(withoutTask);
+    return;
+  }
+  try {
+    await send([...transactItems.filter((item) => item !== workspaceUpdate), queued.workspaceUpdate, ...queued.items]);
+  } catch (queueError) {
+    if (!isConditional(queueError)) throw queueError;
+    if (isTransactionConflict(queueError)) throw new QueuingConflict(queueError);
+    // R16: a cancel that removed the instructions first wins; record the prepare without the task.
+    // A concurrent duplicate callback that already queued the task lands here too, and the plain
+    // write below then fails its fence condition and is answered by the caller's handler.
+    const again = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(workspace.id));
+    if (again?.pendingPrompt !== undefined) throw queueError;
+    await send(withoutTask);
+  }
+}
+
 async function recordTerminalResult(
   dependencies: AwsBrokerDependencies,
   operation: OperationRecord,
@@ -3304,29 +3363,17 @@ async function recordTerminalResult(
   } };
   if (operation.kind !== "cancel" || terminalStatus === "SUCCEEDED") transactItems.push(workspaceUpdate);
   const send = (items: TransactItems) => dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: items }));
-  // R3: a developer task's successful prepare queues its first instructions in this same
-  // transaction. The Slack path has no pointer, so it is unchanged.
-  const pointer = operation.kind === "prepare" && terminalStatus === "SUCCEEDED"
-    ? await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(workspace.id))
-    : undefined;
-  const queued = pointer?.pendingPrompt !== undefined && pointer.cancelledAt === undefined
-    ? await queuedFirstTask(dependencies, workspace, operation, { ...pointer, pendingPrompt: pointer.pendingPrompt }, now)
-    : undefined;
   try {
-    if (queued === undefined) {
-      await send(transactItems);
-    } else {
-      try {
-        await send([...transactItems.filter((item) => item !== workspaceUpdate), queued.workspaceUpdate, ...queued.items]);
-      } catch (queueError) {
-        if (!isConditional(queueError)) throw queueError;
-        // R16: a cancel that removed the instructions first wins; record the prepare without the task.
-        // A concurrent duplicate callback that already queued the task lands here too, and the plain
-        // write below then fails its fence condition and is answered by the handler after it.
-        const again = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(workspace.id));
-        if (again?.pendingPrompt !== undefined) throw queueError;
-        await send(transactItems);
-      }
+    // A queuing transaction that met another one in flight (TransactionConflict, not a failed
+    // condition) is decided again once from fresh reads before it counts as a stale callback.
+    const decideAndSend = () => sendTerminalResult(dependencies, workspace, operation, terminalStatus, now, transactItems, workspaceUpdate, send);
+    try {
+      await decideAndSend();
+    } catch (firstError) {
+      if (!(firstError instanceof QueuingConflict)) throw firstError;
+      await decideAndSend().catch((secondError: unknown) => {
+        throw secondError instanceof QueuingConflict ? secondError.cause : secondError;
+      });
     }
   } catch (transactionError) {
     if (!isConditional(transactionError)) throw transactionError;

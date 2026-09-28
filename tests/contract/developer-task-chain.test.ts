@@ -37,12 +37,14 @@ describe("the first task is queued by the prepare's result (R3, FR-018)", () => 
     expect(taskOutbox()).toHaveLength(1);
   });
 
-  it("queues nothing when the prepare fails, and keeps the instructions for the record", async () => {
-    const { db, finish, task, prepareId, taskOperations } = await started();
+  it("queues nothing when the prepare fails, and clears the raw instructions (controller ruling)", async () => {
+    const { db, finish, task, taskId, prepareId, taskOperations } = await started();
     await finish(task.workspaceId, prepareId, "FAILED", { error: "npm ci exited 1" });
     expect(taskOperations()).toHaveLength(0);
     expect(db.get(`WORKSPACE#${task.workspaceId}`, "META")).toMatchObject({ status: "PREPARATION_FAILED" });
-    expect(db.get(`WORKSPACE#${task.workspaceId}`, "DEVELOPER_TASK")).toHaveProperty("pendingPrompt");
+    expect(db.get(`WORKSPACE#${task.workspaceId}`, "DEVELOPER_TASK")).toMatchObject({ taskId });
+    expect(db.get(`WORKSPACE#${task.workspaceId}`, "DEVELOPER_TASK")).not.toHaveProperty("pendingPrompt");
+    expect(db.get(`WORKSPACE#${task.workspaceId}`, `OPERATION#${prepareId}`)).toMatchObject({ status: "FAILED" });
   });
 
   it("queues nothing when the task was cancelled before its instructions ran (R16)", async () => {
@@ -81,7 +83,7 @@ describe("the first task is queued by the prepare's result (R3, FR-018)", () => 
     const original = db.send;
     let queueAttempts = 0;
     db.send = async (command) => {
-      if (command.constructor.name === "TransactWriteCommand" && JSON.stringify(command.input).includes("REMOVE pendingPrompt")) queueAttempts += 1;
+      if (command.constructor.name === "TransactWriteCommand" && JSON.stringify(command.input).includes("attribute_exists(pendingPrompt)")) queueAttempts += 1;
       return original(command);
     };
     const results = await Promise.allSettled([finish(task.workspaceId, prepareId, "SUCCEEDED"), finish(task.workspaceId, prepareId, "SUCCEEDED")]);
@@ -89,6 +91,41 @@ describe("the first task is queued by the prepare's result (R3, FR-018)", () => 
     expect(results.map((result) => result.status)).toEqual(["fulfilled", "fulfilled"]);
     expect(taskOperations()).toHaveLength(1);
     expect(taskOutbox()).toHaveLength(1);
+    expect(db.get(`WORKSPACE#${task.workspaceId}`, "META")).toMatchObject({ status: "BUSY", activeOperationId: taskOperations()[0]?.id });
+    expect(db.get(`WORKSPACE#${task.workspaceId}`, `OPERATION#${prepareId}`)).toMatchObject({ status: "SUCCEEDED" });
+  });
+
+  it("retries the decision once when the queuing transaction meets a transaction in flight", async () => {
+    const { db, finish, task, prepareId, taskOperations, taskOutbox } = await started();
+    const original = db.send;
+    let conflicts = 0;
+    db.send = async (command) => {
+      if (conflicts === 0 && command.constructor.name === "TransactWriteCommand" && JSON.stringify(command.input).includes("attribute_exists(pendingPrompt)")) {
+        conflicts += 1;
+        const items = (command.input as { TransactItems: unknown[] }).TransactItems;
+        throw Object.assign(new Error("Transaction cancelled"), {
+          name: "TransactionCanceledException",
+          CancellationReasons: items.map((_, index) => ({ Code: index === 0 ? "TransactionConflict" : "None" })),
+        });
+      }
+      return original(command);
+    };
+    await finish(task.workspaceId, prepareId, "SUCCEEDED");
+    expect(conflicts).toBe(1);
+    expect(taskOperations()).toHaveLength(1);
+    expect(taskOutbox()).toHaveLength(1);
+    expect(db.get(`WORKSPACE#${task.workspaceId}`, "META")).toMatchObject({ status: "BUSY", activeOperationId: taskOperations()[0]?.id });
+    expect(db.get(`WORKSPACE#${task.workspaceId}`, `OPERATION#${prepareId}`)).toMatchObject({ status: "SUCCEEDED" });
+    expect(db.get(`WORKSPACE#${task.workspaceId}`, "DEVELOPER_TASK")).not.toHaveProperty("pendingPrompt");
+  });
+
+  it("a Slack thread's failed prepare creates no developer task pointer", async () => {
+    const { db, handler, finish } = await createDeveloperTaskBroker();
+    const thread = await ensureWorkspace(handler, `${SLACK_TEAM}/${SLACK_CHANNEL}/1695500000.000002`, "U0PRATIK01");
+    const workspaceId = String(thread.body.workspaceId);
+    await finish(workspaceId, String(thread.body.operationId), "FAILED", { error: "npm ci exited 1" });
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "PREPARATION_FAILED" });
+    expect(db.get(`WORKSPACE#${workspaceId}`, "DEVELOPER_TASK")).toBeUndefined();
   });
 
   it("leaves each outcome in the state R4 reads: RUNNING, setup_failed or CANCELLED", async () => {
