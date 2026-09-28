@@ -9,6 +9,7 @@ import {
 } from "../../packages/broker/src/aws/developer-identity.js";
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 import { ProviderNotConfiguredError, slackSignInProvider } from "../../packages/broker/src/developer/providers.js";
+import type { HttpResult } from "../../packages/broker/src/developer/server.js";
 import { kmsTokenSigner } from "../../packages/broker/src/developer/tokens.js";
 import {
   BOT_TOKEN, CLI_REDIRECT, ISSUER, OIDC_CLIENT_SECRET, OIDC_ISSUER, SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, TEAM, authorizeQuery, httpEvent, identityHarness,
@@ -497,6 +498,35 @@ describe("failure answers (Task 6 fix round 1)", () => {
     expect(location.searchParams.get("state")).toBe("cli-state");
     expect(response.headers.location + JSON.stringify(h.logs)).not.toContain(KEY_ARN);
     expect(h.logs.some((entry) => entry.event === "signin.error" && entry.error === "InternalServerError")).toBe(true);
+  });
+
+  it("sends any failure after /authorize validated the request back to the CLI as server_error, never a 500 page", async () => {
+    const expectServerError = (response: HttpResult) => {
+      expect(response.statusCode).toBe(302);
+      const location = new URL(response.headers.location!);
+      expect(`${location.origin}${location.pathname}`).toBe(CLI_REDIRECT);
+      expect(location.searchParams.get("error")).toBe("server_error");
+      expect(location.searchParams.get("state")).toBe("cli-state");
+      expect(response.headers.location).not.toContain(KEY_ARN);
+    };
+    // The Slack secret cannot be read (AccessDenied), with one method or from the method page.
+    const denied = () => Promise.reject(Object.assign(new Error(`not authorized on ${KEY_ARN}`), { name: "AccessDeniedException" }));
+    const one = identityHarness();
+    one.deps.providers.slack = { method: "slack", authorizeUrl: denied, complete: denied };
+    expectServerError(await one.http(httpEvent("GET", authorizeQuery())));
+    const two = identityHarness({ oidc: {} });
+    two.deps.providers.slack = { method: "slack", authorizeUrl: denied, complete: denied };
+    const page = await two.http(httpEvent("GET", authorizeQuery()));
+    const link = /href="([^"]*method=slack)"/.exec(page.body)![1]!.replaceAll("&amp;", "&");
+    expectServerError(await two.http(httpEvent("GET", link)));
+    // The store is throttled while recording the request.
+    const throttledStore = identityHarness();
+    throttledStore.deps.store.createAuthRequest = () => Promise.reject(throttled());
+    expectServerError(await throttledStore.http(httpEvent("GET", authorizeQuery())));
+    for (const h of [one, two, throttledStore]) {
+      expect(JSON.stringify(h.logs)).not.toContain(KEY_ARN);
+      expect(h.logs.some((entry) => entry.event === "signin.error")).toBe(true);
+    }
   });
 
   it("sends pragma: no-cache only with no-store, never beside a public cache-control", async () => {

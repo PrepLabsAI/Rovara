@@ -121,7 +121,11 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       if ((method !== "slack" && method !== "oidc") || !methods.includes(method)) return page(400, "Sign-in method not available", ["Run agentx login again."]);
       const request = await store.chooseMethod(requestId, method);
       if (request === undefined) return expired();
-      return toProvider(request.id, request.nonce, method, request.clientRedirectUri, request.clientState);
+      try {
+        return await toProvider(request.id, request.nonce, method, request.clientRedirectUri, request.clientState);
+      } catch (error) {
+        return serverError(error, "/v1/auth/authorize", request.clientRedirectUri, request.clientState);
+      }
     }
     const redirectUri = query.get("redirect_uri") ?? "";
     if (query.get("client_id") !== AGENTX_CLI_CLIENT_ID || !isLoopbackRedirectUri(redirectUri)) {
@@ -136,16 +140,28 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     if (methods.length === 0) {
       return toClient(redirectUri, { error: "access_denied", state: clientState, error_description: "developer sign-in is not enabled in this AgentX environment; ask an admin to run agentx signin enable slack" });
     }
-    const request = await store.createAuthRequest({ clientRedirectUri: redirectUri, clientState, codeChallenge: challenge, nonce: randomBytes(32).toString("base64url") });
-    if (methods.length === 1) {
-      const method = methods[0]!;
-      if (await store.chooseMethod(request.id, method) === undefined) return expired();
-      return toProvider(request.id, request.nonce, method, redirectUri, clientState);
+    let request: AuthRequestRecord;
+    try {
+      request = await store.createAuthRequest({ clientRedirectUri: redirectUri, clientState, codeChallenge: challenge, nonce: randomBytes(32).toString("base64url") });
+      if (methods.length === 1) {
+        const method = methods[0]!;
+        if (await store.chooseMethod(request.id, method) === undefined) return expired();
+        return await toProvider(request.id, request.nonce, method, redirectUri, clientState);
+      }
+    } catch (error) {
+      return serverError(error, "/v1/auth/authorize", redirectUri, clientState);
     }
     return page(200, "Sign in to AgentX", [`Environment: ${config.env}`], methods.map((method) => ({
       href: `${endpoint("/authorize")}?request=${encodeURIComponent(request.id)}&method=${method}`,
       label: `Sign in with ${methodLabel(method)}`,
     })));
+  }
+
+  /** Once the CLI's redirect URI and state are known, any failure goes back to the CLI, so it never
+   * waits out its timeout behind a 500 page. Only the error's name is logged. */
+  function serverError(error: unknown, path: string, clientRedirect: string, clientState: string): HttpResult {
+    deps.log({ event: "signin.error", path, error: errorName(error) });
+    return toClient(clientRedirect, { error: "server_error", error_description: "sign-in failed on the AgentX server; run agentx login again", state: clientState });
   }
 
   async function toProvider(requestId: string, nonce: string, method: DeveloperSignInMethod, clientRedirect: string, clientState: string): Promise<HttpResult> {
@@ -181,8 +197,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       return await completeSignIn(method, request, query.get("code"));
     } catch (error) {
       // The state is spent, so tell the CLI now rather than leave it waiting for its timeout.
-      deps.log({ event: "signin.error", path: `/v1/auth/callback/${method}`, error: errorName(error) });
-      return toClient(request.clientRedirectUri, { error: "server_error", error_description: "sign-in failed on the AgentX server; run agentx login again", state: request.clientState });
+      return serverError(error, `/v1/auth/callback/${method}`, request.clientRedirectUri, request.clientState);
     }
   }
 
