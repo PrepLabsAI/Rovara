@@ -42,6 +42,11 @@ executes nothing. For each case it records the first tool call, or none. Scores:
 - **Phrase match**: `refusal` and `contains` are scored separately and both must match; refusal
   accuracy counts only `refusal`. Matching ignores case, and curly apostrophes and quotes count as
   straight ones.
+- **Forbidden phrases**: optional `notContains` is one phrase or a non-empty list. Any match fails
+  the case, even when `contains` or `refusal` also matches. Matching ignores case, curly quote
+  differences, Slack emphasis/code markers and whitespace differences. Reports include
+  `notContainsOk` for these cases. This is a lexical regression check, not a semantic judge.
+  `commands.jsonl` covers unsupported workspace-close and model-selection requests (#104).
 - **Reply length** (spec 014 SC-006): a case may set `maxLines`. The run then uses the Slack reply
   style, and passes only when the reply, formatted as Slack shows it, has at most that many
   non-empty lines. Reply-length cases are in `tests/eval/cases/replies.jsonl`.
