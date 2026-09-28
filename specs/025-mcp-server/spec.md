@@ -372,7 +372,9 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   whose only allowed redirect URIs are `http://127.0.0.1:<port>/callback` on any port. Routes:
   `GET /v1/auth/authorize`, `POST /v1/auth/token`, `GET /v1/auth/callback/slack`,
   `GET /v1/auth/callback/oidc`, `GET /v1/auth/.well-known/openid-configuration`,
-  `GET /v1/auth/.well-known/jwks.json` and `GET /v1/auth/.well-known/agentx-configuration`.
+  `GET /v1/auth/.well-known/jwks.json`, `GET /v1/auth/.well-known/agentx-configuration` and
+  `POST /v1/auth/revoke` (RFC 7009), which `agentx logout` calls so a signed-out session cannot be
+  refreshed again.
 - **FR-002**: `GET /v1/auth/authorize` MUST show a page with the enabled methods, or go straight to
   the only enabled one. It MUST send the browser to the chosen provider with its own state and
   nonce, and on the provider's callback MUST exchange the code server side, using the client secret
@@ -386,9 +388,10 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   `groups` contains `engineering`), it MUST refuse sign-ins without them. It MUST record the
   `email` claim only when `email_verified` is true.
 - **FR-005**: After a successful provider sign-in, the control plane MUST issue:
-  - an **AgentX access token**: a JWT signed with ES256 by a KMS key the control plane owns, issuer
-    `<api-endpoint>/v1/auth`, audience `agentx-developer`, lifetime 1 hour, with claims `sub` (the
-    developer ID, FR-008), `amr` (`slack` or `oidc`) and `env`;
+  - an **AgentX access token**: a JWT signed with RS256 by a KMS RSA key the control plane owns
+    (API Gateway's JWT authorizer accepts only RSA algorithms), issuer `<api-endpoint>/v1/auth`,
+    audience `agentx-developer`, lifetime 1 hour, with claims `sub` (the developer ID, FR-008),
+    `amr` (`slack` or `oidc`) and `env`;
   - a **refresh token**: an opaque random value, stored only as a SHA-256 hash, rotated on each use,
     valid for at most 7 days from the provider sign-in. A reused refresh token MUST revoke the whole
     sign-in session.
@@ -418,7 +421,7 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   - `agentx login <url>`: reads `/v1/auth/.well-known/agentx-configuration`, stores the
     environment's URL and name in `~/.agentx/developer.yaml`, runs FR-001 with a loopback listener,
     and stores the tokens in the existing system token store. It needs no AWS credentials.
-  - `agentx login --admin`: today's admin PKCE login, unchanged.
+  - `agentx login --admin`, or `agentx login` with no URL: today's admin PKCE login, unchanged.
   - `agentx logout [--admin]` and `agentx whoami`.
   - `--no-browser` on `login`, which prints the link and waits on the loopback listener.
 
@@ -704,9 +707,12 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
 - **FR-045**: `agentx signin enable slack|oidc`, `agentx signin disable slack|oidc` and
   `agentx signin show` MUST change and show the settings of FR-010 under the operator role, showing
   the change before applying it. Disabling a method MUST revoke its open sessions.
-- **FR-046**: `agentx doctor` MUST check each enabled method: the Slack client ID and secret are set,
-  the Slack redirect URL is registered (by a test authorize request), the team ID is set, and the
-  company issuer's discovery document is reachable.
+- **FR-046**: `agentx doctor` (phase 15e) runs the checks of `agentx signin check`, which phase 25a
+  ships: for each enabled method, the Slack client ID and secret are set, the Slack redirect URL is
+  registered (by a test authorize request), the team ID is set, and the company issuer's discovery
+  document is reachable. When Slack's answer to the test request neither confirms nor denies that the
+  redirect URL is registered, the check MUST report the redirect URL as `warn` (ok, but not verified),
+  not as failed.
 - **FR-047**: The install guide MUST cover, for each of Claude Code, Codex and Cursor: the install
   command, the manual configuration for each, signing in, a first task, and how to remove it.
 - **FR-048**: The control plane MUST report an API version in
@@ -794,8 +800,8 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   update within 60 seconds of the task's end, in the live check.
 - **SC-007**: 100% of sign-ins from a Slack team other than the environment's are refused, in the
   contract tests and once live.
-- **SC-008**: The existing Slack, control-plane, ingress and CLI suites pass with no change to their
-  assertions.
+- **SC-008**: The existing Slack, control-plane, ingress and CLI suites pass with no assertion removed
+  or weakened; lists of commands, init steps and manifest scopes gain the new entries.
 - **SC-009**: The developer task contract tests pass with both an AgentCore and an `ec2-ebs` runtime
   binding.
 - **SC-010**: One tool definition module serves the stdio server, proved by a test that compares the
@@ -933,6 +939,27 @@ Decisions made in this spec, all owner-confirmed on 2026-09-27:
 - **D13. Access tokens last 1 hour; refresh tokens rotate and end 7 days after sign-in; Slack users
   are rechecked at each refresh** (owner-confirmed, 2026-09-27). Rejected: 30-day sessions (a person who leaves keeps
   access too long for company sign-in, which is not rechecked).
+- **D14. Sign-in exists only in named environments, until the owner decides about production**
+  (owner-confirmed, 2026-09-27). Every resource, parameter and environment variable this phase adds
+  is created only when the environment uses environment naming; the legacy templates, and so
+  production, do not change. Bringing developer sign-in to production needs production moved to
+  environment naming, or a separate owner decision; neither happens in this phase.
+- **D15. Sign-in settings reach the control plane by a parameter-only stack update, with SSM as
+  their source of truth** (owner-confirmed, 2026-09-27). The environment's Slack team ID and the
+  sign-in settings of FR-010 are stored at `/agentx/<env>/signin` and `/agentx/<env>/slack/teamId`.
+  `agentx init`'s `developer-signin` step and `agentx signin enable|disable` apply them with a
+  CloudFormation change set that keeps the existing template and every other parameter unchanged,
+  and every control-plane deploy reads the stored settings back, so a plain `agentx deploy` or a
+  later `init` run never resets sign-in to the template's disabled default. When applying new Slack
+  or company sign-in credentials, the previous secret is put back only once the stack update has
+  settled as failed (a rollback or a failed update); a stack update that is still running, or a check
+  that times out, keeps the new credentials in place and never restores the old ones, because the
+  update may still succeed.
+- **D16. Access tokens carry `sid`, and the broker checks the session on every request**
+  (owner-confirmed, 2026-09-27). Alongside FR-005's `sub`, `amr` and `env`, the JWT also carries
+  `sid`, the sign-in session's ID. The broker checks that session on every `/v1/dev/*` request, so a
+  revoked or ended session (a reused refresh token, or a disabled sign-in method) stops access at
+  once, instead of only once the access token next expires.
 
 ## Assumptions and Scope
 
@@ -942,9 +969,12 @@ Decisions made in this spec, all owner-confirmed on 2026-09-27:
     approval handling.
   - The company's IdP can register a confidential OIDC client with the control plane's callback URL.
   - Claude Code supports MCP elicitation; Codex and Cursor may not, and the fallbacks cover them.
-  - Spec 015 phase 15d (`agentx init`) is not built yet. Whichever of 15d and phase 25a merges second
-    adds FR-044's step to `init`.
+  - Phase 15d1 built `agentx init`; phase 25a added the `developer-signin` step.
   - Issue #88 may remove AgentCore. Nothing here depends on it staying (FR-024).
+  - **F15.** An environment installed before phase 25a never reaches the new `developer-signin`
+    `init` step on a later `agentx init` run, because `runInit` refuses to continue when the release
+    it was installed with differs from the CLI's own release. Such environments turn sign-in on with
+    `agentx signin enable` instead.
 - **In scope:** everything in the requirements above, delivered in the phases of
   [plans/README.md](plans/README.md).
 - **Out of scope:**
@@ -991,7 +1021,8 @@ Decisions made in this spec, all owner-confirmed on 2026-09-27:
   - the same developer task flow with an AgentCore runtime binding and an `ec2-ebs` one (SC-009);
   - the existing Slack, control-plane, ingress and CLI suites, unchanged (SC-008);
   - `cdk synth` with the second authorizer, the new routes and the notifier's permissions; a test that
-    only the notifier, the ingress and the orchestrator role can read the Slack secret.
+    only the notifier, the ingress, the orchestrator role and the `DeveloperIdentity` sign-in function
+    can read the Slack secret.
 - **Live check (once per phase that changes behavior, with the owner present):** in a throwaway
   environment, with a real Claude Code session:
   - sign in with Slack, and with a company OIDC test provider; a sign-in from another Slack team is
