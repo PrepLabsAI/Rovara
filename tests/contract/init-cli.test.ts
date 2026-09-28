@@ -428,7 +428,7 @@ describe("agentx init with OpenRouter", () => {
   it("asks for the key hidden, stores it raw in agentx/<env>/openrouter before any stack, and passes only its ARN on", async () => {
     const h = await harness();
     const { calls, checks } = recordingOpenRouterChecks();
-    const prompter = scriptedPrompter([...OPENROUTER_FIRST_RUN, ...SLACK]);
+    const prompter = scriptedPrompter([...OPENROUTER_FIRST_RUN, ...SLACK, ...SIGNIN]);
     const hidden: string[] = [];
     const recording = { ...prompter, secret: async (question: string, options: { flag: string; multiline?: boolean }) => { hidden.push(question); return prompter.secret(question, options); } };
     expect(await h.run([], { prompter: recording, checks })).toBe(0);
@@ -455,7 +455,7 @@ describe("agentx init with OpenRouter", () => {
     expect(await h.run([], { prompter: scriptedPrompter(OPENROUTER_FIRST_RUN), checks })).not.toBe(0);
     expect(h.secrets.values.get("agentx/staging/openrouter")).toBe(OPENROUTER_KEY);
     h.deployer.fail.clear();
-    const prompter = scriptedPrompter(SLACK);
+    const prompter = scriptedPrompter([...SLACK, ...SIGNIN]);
     expect(await h.run([], { prompter, checks })).toBe(0);
     expect(prompter.remaining()).toBe(0);
     expect(prompter.asked).not.toContain("OpenRouter API key");
