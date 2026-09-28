@@ -199,6 +199,16 @@ export const AiToolTurnRecordSchema = z.object({
 export type AiToolTurnRecord = z.infer<typeof AiToolTurnRecordSchema>;
 export type ExportedTurnRecord = TurnRecord | AiToolTurnRecord;
 
+/**
+ * Narrows a page of ExportedTurnRecord to the Slack shape: true unless origin is "ai_tool".
+ * A caller that only reads Slack turns (eventId, disposition, calls, and so on) filters with
+ * this first, rather than asserting the type or disabling the lint rule that would otherwise
+ * catch a Slack-only field read off an AI-tool record.
+ */
+export function isSlackTurnRecord(turn: ExportedTurnRecord): turn is TurnRecord {
+  return turn.origin !== "ai_tool";
+}
+
 export function aiToolTurnRecordKeys(record: Pick<AiToolTurnRecord, "taskId" | "receivedAt" | "turnId">) {
   const at = `${record.receivedAt}#${record.turnId}`;
   return {

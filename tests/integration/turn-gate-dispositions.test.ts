@@ -7,6 +7,7 @@ import {
   TURN_TEXT_LIMIT,
   TurnRecordSchema,
   EMPTY_TURN_OBSERVATION,
+  isSlackTurnRecord,
   type SlackRequestMessage,
   type SlackThreadWorkspaceResult,
   type TurnRecord,
@@ -169,11 +170,12 @@ describe("gate decisions in stored and exported turn records (spec 014 FR-021)",
     const page = await exporter.page(new URLSearchParams({ since: "2026-09-24T00:00:00Z" }));
     expect(page).not.toHaveProperty("skipped");
     expect(log).not.toHaveBeenCalled();
-    expect(page.turns.map((turn) => turn.calls.map((entry) => entry.gate))).toEqual([
+    const slackTurns = page.turns.filter(isSlackTurnRecord);
+    expect(slackTurns.map((turn) => turn.calls.map((entry) => entry.gate))).toEqual([
       [gate, { outcome: "allow", source: "default", kind: "read", reason: "reads run without asking" }],
       [undefined],
     ]);
-    expect(page.turns[1]!.calls[0]).not.toHaveProperty("gate");
+    expect(slackTurns[1]!.calls[0]).not.toHaveProperty("gate");
   });
 
   it("fits a record with every call decided, the longest reasons and texts, under the storage budget and keeps each decision", () => {

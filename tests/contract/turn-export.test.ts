@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { EMPTY_TURN_OBSERVATION, type TurnRecord } from "../../packages/contracts/src/turns.js";
+import { EMPTY_TURN_OBSERVATION, isSlackTurnRecord, type TurnRecord } from "../../packages/contracts/src/turns.js";
 import { aiToolTurnRecordKeys, type AiToolTurnRecord } from "../../packages/contracts/src/turns.js";
 import { TURN_EXPORT_PAGE_BYTES, TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader, type TurnRecordSource, type TurnRecordStartKey } from "../../packages/broker/src/aws/turns.js";
 import { adminCall, createAdminBroker } from "../support/admin-broker.js";
@@ -40,7 +40,7 @@ describe("turn record export", () => {
     const { exporter: turns, projectOf, log } = exporter({ page });
     const first = await turns.page(new URLSearchParams({ since: "2026-09-17T12:00:00Z" }));
     expect(page).toHaveBeenCalledWith({ since: "2026-09-17T12:00:00.000Z", limit: 100, nowSeconds: now / 1000 });
-    expect(first.turns.map((turn) => [turn.eventId, turn.project])).toEqual([["EvTURN00002", "payments"], ["EvTURN00001", "payments"]]);
+    expect(first.turns.filter(isSlackTurnRecord).map((turn) => [turn.eventId, turn.project])).toEqual([["EvTURN00002", "payments"], ["EvTURN00001", "payments"]]);
     expect(first.turns[0]).not.toHaveProperty("pk");
     expect(first.turns[0]).not.toHaveProperty("sk");
     expect(first.turns[0]).not.toHaveProperty("exportPk");
@@ -67,7 +67,7 @@ describe("turn record export", () => {
     const malformed = { ...stored("EvTURN00004", "2026-09-24T09:00:00.000Z"), disposition: "unheard-of" };
     const { exporter: turns, log } = exporter({ page: async () => ({ items: [expired, malformed, stored("EvTURN00005", "2026-09-24T08:00:00.000Z")] }) });
     const result = await turns.page(new URLSearchParams({ since: "2026-08-01T00:00:00Z" }));
-    expect(result.turns.map((turn) => turn.eventId)).toEqual(["EvTURN00005"]);
+    expect(result.turns.filter(isSlackTurnRecord).map((turn) => turn.eventId)).toEqual(["EvTURN00005"]);
     expect(result).not.toHaveProperty("cursor");
     expect(log).toHaveBeenCalledTimes(1);
     const line = JSON.parse(String(log.mock.calls[0]?.[0])) as Record<string, unknown>;
@@ -178,7 +178,7 @@ describe("turn record export", () => {
     expect(projectOf.mock.calls.map(([id]) => id)).toEqual([workspaceId, otherWorkspace]);
     pending.get(otherWorkspace)?.("billing");
     pending.get(workspaceId)?.("payments");
-    expect((await result).turns.map((turn) => [turn.eventId, turn.project])).toEqual([
+    expect((await result).turns.filter(isSlackTurnRecord).map((turn) => [turn.eventId, turn.project])).toEqual([
       ["EvTURN00040", "payments"], ["EvTURN00041", "billing"], ["EvTURN00042", "payments"],
     ]);
     expect(projectOf).toHaveBeenCalledTimes(2);
@@ -190,7 +190,7 @@ describe("turn record export", () => {
     const items = [stored("EvTURN00006", "2026-09-24T08:00:00.000Z"), stored("EvTURN00007", "2026-09-24T07:00:00.000Z")];
     const { exporter: turns, log } = exporter({ page: async () => ({ items }) }, projectOf);
     const result = await turns.page(new URLSearchParams({ since: "2026-09-17T00:00:00Z" }));
-    expect(result.turns.map((turn) => turn.eventId)).toEqual(["EvTURN00006", "EvTURN00007"]);
+    expect(result.turns.filter(isSlackTurnRecord).map((turn) => turn.eventId)).toEqual(["EvTURN00006", "EvTURN00007"]);
     expect(result.turns[0]?.project).toBeUndefined();
     expect(result.turns[0]).not.toHaveProperty("project");
     expect(projectOf).toHaveBeenCalledTimes(1);
@@ -318,7 +318,7 @@ describe("turn record export page size", () => {
       const result = await turns.page(new URLSearchParams({ since: "2026-09-17T00:00:00Z", ...(cursor === undefined ? {} : { cursor }) }));
       expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(TURN_EXPORT_PAGE_BYTES);
       expect(result.turns.length).toBeGreaterThan(0);
-      seen.push(...result.turns.map((turn) => turn.eventId));
+      seen.push(...result.turns.filter(isSlackTurnRecord).map((turn) => turn.eventId));
       cursor = result.cursor;
       pages += 1;
       expect(pages).toBeLessThan(50);
@@ -336,7 +336,7 @@ describe("turn record export skipped count", () => {
     const expired = { ...stored("EvSKIP00002", "2026-08-20T10:00:00.000Z"), expiresAt: now / 1000 - 1 };
     const { exporter: turns } = exporter({ page: async () => ({ items: [malformed, expired, stored("EvSKIP00003", "2026-09-24T08:00:00.000Z")] }) });
     const result = await turns.page(new URLSearchParams({ since: "2026-08-01T00:00:00Z" }));
-    expect(result.turns.map((turn) => turn.eventId)).toEqual(["EvSKIP00003"]);
+    expect(result.turns.filter(isSlackTurnRecord).map((turn) => turn.eventId)).toEqual(["EvSKIP00003"]);
     expect(result.skipped).toBe(1);
     const clean = await exporter({ page: async () => ({ items: [stored("EvSKIP00004", "2026-09-24T08:00:00.000Z")] }) }).exporter
       .page(new URLSearchParams({ since: "2026-09-17T00:00:00Z" }));
