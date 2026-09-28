@@ -755,7 +755,7 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
 **Governance**
 
 - **FR-050**: Before any `/v1/dev/*` route is deployed, the constitution MUST be amended (version
-  3.0.0):
+  4.0.0; mainline had already taken 3.0.0 for the EC2-only runtime, spec 036):
   - **Principle I**: the hosted Slack orchestrator stays the only AgentX orchestrator model. A second
     client, the developer task API, may drive coding work, authenticated by a developer sign-in, with
     the developer's own AI tool writing the instructions. It MUST record the requesting developer

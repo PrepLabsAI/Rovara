@@ -947,7 +947,7 @@ Spec 014 phase 14d adds the **Details** button. Operator notes:
   per-session EBS, networking, release, isolation, and migration boundaries.
 - [Contracts](specs/001-agentx-foundation/contracts/): project config, control API and worker protocol.
 - [Validation guide](specs/001-agentx-foundation/quickstart.md).
-- [Constitution](.specify/memory/constitution.md): project principles, version 3.0.0.
+- [Constitution](.specify/memory/constitution.md): project principles, version 4.0.0.
 
 ## GitHub Spec Kit
 

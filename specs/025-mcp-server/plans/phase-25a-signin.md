@@ -7,7 +7,7 @@ in the browser, and the control plane issues them AgentX tokens that a second AP
 authorizer accepts on `/v1/dev/*`; `agentx whoami` and `GET /v1/dev/projects` show which projects
 they may use (admin grants, or membership of a bound Slack channel). Admins choose the methods in
 `agentx init` or later with `agentx signin enable|disable|show|check`. The constitution is amended
-to 3.0.0 first.
+to 3.0.0 first. (Built as 4.0.0: mainline took 3.0.0 for the EC2-only runtime before this merged.)
 
 **Architecture:**
 - **One new Lambda, `DeveloperIdentity`, is the sign-in server** behind `ANY /v1/auth/{proxy+}`

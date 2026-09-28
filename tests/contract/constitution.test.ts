@@ -3,11 +3,11 @@ import { describe, expect, it } from "vitest";
 
 const read = () => readFile(new URL("../../.specify/memory/constitution.md", import.meta.url), "utf8");
 
-describe("constitution 3.0.0 (spec 025 FR-050)", () => {
-  it("is version 3.0.0 with a sync impact note naming Principles I, II and III", async () => {
+describe("constitution 4.0.0 (spec 025 FR-050)", () => {
+  it("is version 4.0.0 with a sync impact note naming Principles I, II and III", async () => {
     const text = await read();
-    expect(text).toMatch(/\*\*Version\*\*: 3\.0\.0 \| \*\*Ratified\*\*: 2026-09-17 \| \*\*Last Amended\*\*: \d{4}-\d{2}-\d{2}/);
-    expect(text).toMatch(/Sync impact: 2\.1\.0 -> 3\.0\.0/);
+    expect(text).toMatch(/\*\*Version\*\*: 4\.0\.0 \| \*\*Ratified\*\*: 2026-09-17 \| \*\*Last Amended\*\*: \d{4}-\d{2}-\d{2}/);
+    expect(text).toMatch(/Sync impact: 3\.0\.0 -> 4\.0\.0/);
     expect(text).toMatch(/Principles modified: I\. .*II\. .*III\./s);
   });
 
