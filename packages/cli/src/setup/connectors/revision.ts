@@ -32,6 +32,24 @@ export async function storeConnectorSecret(secrets: Pick<InitSecrets, "arn" | "c
   else await secrets.put(name, value);
 }
 
+/**
+ * A hand-written project file may still carry the pre-connectors `integrations.githubMcp` policy.
+ * Adding a connector on top of it would build a definition with both `githubMcp` and `connectors`
+ * set, which the control plane's (and `registerProject`'s own local) schema refuses with a raw
+ * "use either integrations.githubMcp or integrations.connectors, not both" error. Refuse here
+ * instead, with a message that says what to do, before a connector module stores or registers
+ * anything: every `addX` calls this first, ahead of storing its credential.
+ */
+export async function refuseLegacyGitHubMcp(input: { projectName: string; configDir: string }): Promise<void> {
+  const current = await loadProjectConfig({ projectName: input.projectName, configDirectory: input.configDir, allowLoopback: false });
+  if (current.integrations?.githubMcp !== undefined) {
+    throw agentXError(
+      "CONFIG_INVALID",
+      `project ${input.projectName} uses the older integrations.githubMcp setting; move it to integrations.connectors (see docs/project-configuration.md) before adding connectors`,
+    );
+  }
+}
+
 export async function addConnectorRevision(input: {
   env: string; session: AdminSession; projectName: string; connector: ConnectorConfig;
   services: Pick<SetupServices, "fetch" | "stackOutputs" | "configDir">; write: (line: string) => void;

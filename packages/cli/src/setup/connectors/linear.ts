@@ -4,7 +4,7 @@
 import { agentXError, type ConnectorConfig } from "@agentx/contracts";
 import { registerCredential } from "../../admin/credential.js";
 import { secretFromSource } from "../../init/prompts.js";
-import { addConnectorRevision, connectorSecretName, scopeAlias, storeConnectorSecret, type ConnectorAddInput } from "./revision.js";
+import { addConnectorRevision, connectorSecretName, refuseLegacyGitHubMcp, scopeAlias, storeConnectorSecret, type ConnectorAddInput } from "./revision.js";
 
 export const LINEAR_GUIDE = [
   "Linear: AgentX uses a Linear API key, which acts as the Linear user who made it.",
@@ -22,6 +22,7 @@ export const LINEAR_TOOLS: ConnectorConfig["tools"] = [
 ];
 
 export async function addLinear(input: ConnectorAddInput): Promise<{ ref: string; revision: number }> {
+  await refuseLegacyGitHubMcp({ projectName: input.projectName, configDir: input.services.configDir });
   input.write(LINEAR_GUIDE);
   const apiKey = await secretFromSource({ what: "Linear API key", flag: "--linear-key", source: input.flags.linearKey ?? {}, processEnv: input.processEnv, prompter: input.prompter });
   let teams;

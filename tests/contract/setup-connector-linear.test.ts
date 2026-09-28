@@ -95,6 +95,32 @@ describe("agentx connector add linear (FR-036 to FR-039)", () => {
     await expect(addLinear(input({ plane }))).rejects.toThrow(/could not be confirmed/);
   });
 
+  it("refuses a project that still uses the older integrations.githubMcp setting, before the key is stored", async () => {
+    // A hand-written project file may still carry the pre-connectors githubMcp policy. Adding a
+    // connector on top of it would build a definition with both githubMcp and connectors set,
+    // which the control plane's schema refuses with a raw "use either ... not both" error. The
+    // refusal must happen before anything is stored: no secret, no vendor read, nothing sent.
+    const legacyDir = await mkdtemp(join(tmpdir(), "agentx-projects-legacy-"));
+    try {
+      await writeProjectFile(legacyDir, {
+        name: "payments-api", revision: 1,
+        repositories: [{ name: "payments-api", url: "https://github.com/acme/payments-api.git", path: "repo/payments-api", defaultBranch: "main", credentialRef: "github-agentx-sdlc" }],
+        setup: [], readiness: [], orchestratorInstructions: "Delegate every repository read, edit, build, and test to the remote AgentX worker.",
+        integrations: { githubMcp: { tools: [{ name: "list_issues", access: "read" }] } },
+      });
+      const secrets = memoryInitSecrets();
+      const vendors = fakeVendors();
+      const testInput = input({ secrets, vendors });
+      await expect(addLinear({ ...testInput, services: { ...testInput.services, configDir: legacyDir } })).rejects.toThrow(
+        "project payments-api uses the older integrations.githubMcp setting; move it to integrations.connectors (see docs/project-configuration.md) before adding connectors",
+      );
+      expect(secrets.values.size).toBe(0);
+      expect(vendors.calls).toEqual([]);
+    } finally {
+      await rm(legacyDir, { recursive: true, force: true });
+    }
+  });
+
   it("replaces an earlier linear connector instead of adding a second one", async () => {
     const plane = fakeControlPlane();
     await addLinear(input({ plane }));
