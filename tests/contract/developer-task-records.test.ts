@@ -192,3 +192,14 @@ describe("the PR footer (FR-023, R14)", () => {
     expect(developerFooter("Maya @here Chen", "Claude Code")).toBe("Requested by `Maya @here Chen` via AgentX, started from Claude Code");
   });
 });
+
+describe("the current operation when two share a millisecond (Task 11 fix round 1)", () => {
+  it("is the one with the higher fence, whatever order the query returned them in", () => {
+    const at = "2026-09-28T10:00:00.000Z";
+    const first = { id: "a", kind: "task", status: "SUCCEEDED", createdAt: at, fence: 2 };
+    const next = { id: "b", kind: "publish", status: "RUNNING", createdAt: at, fence: 3 };
+    for (const operations of [[first, next], [next, first]]) {
+      expect(deriveTaskStatus({ workspaceStatus: "BUSY", pointer: {}, operations })).toMatchObject({ status: "RUNNING", current: { id: "b" } });
+    }
+  });
+});

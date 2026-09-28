@@ -3464,6 +3464,24 @@ async function recordTerminalResult(
     if (!isConditional(transactionError)) throw transactionError;
     const existing = await requireOperation(dependencies, operation.workspaceId, operation.id);
     if (existing.status === terminalStatus) return existing;
+    // A cancel whose target finished first (its own result, and for a developer task its
+    // completed record, committed meanwhile): decided again once, from a fresh read, the cancel
+    // records only its own result. The target, the workspace and the audit record stay as the
+    // target's result left them, so there is exactly one completed record and no worker retry.
+    if (operation.kind === "cancel" && operation.targetOperationId) {
+      const target = await requireOperation(dependencies, operation.workspaceId, operation.targetOperationId);
+      if (TERMINAL.has(target.status)) {
+        try {
+          await send([transactItems[0]!]);
+        } catch (ownError) {
+          if (!isConditional(ownError)) throw ownError;
+          const again = await requireOperation(dependencies, operation.workspaceId, operation.id);
+          if (again.status === terminalStatus) return again;
+          throw agentXError("STALE_FENCE", "terminal callback no longer owns the workspace");
+        }
+        return { ...operation, status: terminalStatus, updatedAt: now, ...(result === undefined ? {} : { result }), ...(error === undefined ? {} : { error }) };
+      }
+    }
     throw agentXError("STALE_FENCE", "terminal callback no longer owns the workspace");
   }
   return { ...operation, status: terminalStatus, updatedAt: now, ...(result === undefined ? {} : { result }), ...(error === undefined ? {} : { error }) };

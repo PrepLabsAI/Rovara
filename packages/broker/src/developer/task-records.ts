@@ -95,12 +95,17 @@ export function taskOwnerKey(developerId: string, taskId: string): string {
   return createHash("sha256").update(DEVELOPER_TASK_OWNER_ISSUER).update("\0").update(taskOwnerSubject(developerId, taskId)).digest("hex");
 }
 
-export interface OperationFacts { id: string; kind: string; status: string; error?: string | undefined; createdAt: string }
+export interface OperationFacts { id: string; kind: string; status: string; error?: string | undefined; createdAt: string; fence?: number | undefined }
 
 const LIVE = new Set(["ACCEPTED", "DISPATCHING", "RUNNING", "CANCEL_REQUESTED"]);
 
-/** F9: exported so Task 10 reuses it rather than redeclaring it. */
-export const byCreated = (left: OperationFacts, right: OperationFacts) => (left.createdAt < right.createdAt ? -1 : left.createdAt > right.createdAt ? 1 : 0);
+/**
+ * Oldest first. F9: exported so Task 10 reuses it rather than redeclaring it. Two operations can
+ * share a millisecond, so a tie goes to the fence: each writer operation takes the workspace's
+ * next fence, so the later one has the higher fence.
+ */
+export const byCreated = (left: OperationFacts, right: OperationFacts) =>
+  left.createdAt < right.createdAt ? -1 : left.createdAt > right.createdAt ? 1 : (left.fence ?? 0) - (right.fence ?? 0);
 
 /** The newest task or publish operation: what the developer last asked for (R4). */
 export function currentOperation(operations: readonly OperationFacts[]): OperationFacts | undefined {

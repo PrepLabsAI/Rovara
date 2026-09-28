@@ -27,7 +27,7 @@ export interface DeveloperTaskActions {
   /** The stack parameters: the limits when no admin setting exists (R7). */
   limitDefaults: { member: number; organization: number };
   latestProject(projectName: string): Promise<RegisteredProjectRecord | undefined>;
-  /** One registered revision of a project, or undefined when it does not exist. */
+  /** One registered revision of a project, or undefined when it does not exist. Unchecked: callers must load the owned task and check project access first. */
   projectRevision(projectName: string, revision: number): Promise<RegisteredProjectRecord | undefined>;
   preparation(identity: AuthenticatedIdentity, project: RegisteredProjectRecord, requestId: string): Promise<{ workspace: WorkspaceInstance; operationId: string; items: TransactItems }>;
   /** Unchecked: callers must load the owned task and check project access first. */

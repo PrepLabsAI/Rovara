@@ -226,7 +226,7 @@ export async function taskView(deps: DeveloperTaskRouteDependencies, task: Devel
     closedAt: task.closedAt,
     workspaceStatus: workspace.status,
     pointer,
-    operations: operations.map((operation) => ({ id: operation.id, kind: operation.kind, status: operation.status, error: operation.error, createdAt: operation.createdAt })),
+    operations: operations.map((operation) => ({ id: operation.id, kind: operation.kind, status: operation.status, error: operation.error, createdAt: operation.createdAt, fence: operation.fence })),
   });
   const events = derived.current === undefined || options.events === 0
     ? []
@@ -617,6 +617,10 @@ async function cancelTask(deps: DeveloperTaskRouteDependencies, caller: Develope
     } catch (error) {
       // The same cancel, sent again, committed first (its marker failed this transaction).
       if (error instanceof AgentXError && error.code === "WORKSPACE_BUSY" && await repeated()) return current();
+      // The task moved on while the cancel was written: the code stays, the words name the tool.
+      if (error instanceof AgentXError && (error.code === "WORKSPACE_BUSY" || error.code === "STALE_FENCE")) {
+        throw agentXError(error.code, "the task changed while cancelling; try agentx_cancel_task again");
+      }
       throw error;
     }
     if (outcome === "NOTHING_RUNNING") {
@@ -635,6 +639,10 @@ async function cancelTask(deps: DeveloperTaskRouteDependencies, caller: Develope
   return { task: view };
 }
 
+/**
+ * R22. A repeated requestId returns the same operation, except once the task is closed: the closed
+ * check comes first, so a repeat after the close answers "this task is closed" like any new call.
+ */
 async function openPullRequest(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<DeveloperPullRequestResponse> {
   const request = parse(DeveloperPullRequestRequestSchema, value, deps, "pull-request");
   const task = await loadOwnedTask(deps, caller, taskId);
@@ -644,7 +652,9 @@ async function openPullRequest(deps: DeveloperTaskRouteDependencies, caller: Dev
   if (repository === undefined) {
     // The revision the workspace was prepared from, which the publication pushes from: a
     // repository a newer revision added is not in this workspace.
-    const repositories = (await deps.actions.projectRevision(workspace.projectName, workspace.projectRevision))?.definition.repositories.map((entry) => entry.name) ?? [];
+    const pinned = await deps.actions.projectRevision(workspace.projectName, workspace.projectRevision);
+    if (pinned === undefined) throw agentXError("CONFIG_INVALID", "this task's project revision is no longer registered; ask an admin");
+    const repositories = pinned.definition.repositories.map((entry) => entry.name);
     if (repositories.length > 1) throw agentXError("CONFIG_INVALID", `this project has several repositories; name one of: ${repositories.join(", ")}`);
     if (repositories.length === 0) throw agentXError("CONFIG_INVALID", `project \`${task.project}\` has no repositories; ask an admin`);
     repository = repositories[0]!;

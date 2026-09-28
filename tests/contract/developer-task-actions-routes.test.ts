@@ -56,7 +56,21 @@ describe("continue (US1 scenario 5, FR-019)", () => {
     await post("continue", { requestId: randomUUID(), instructions: "one" });
     const busy = await post("continue", { requestId: randomUUID(), instructions: "two" });
     expect(busy.body.error).toMatchObject({ code: "TASK_BUSY" });
-    expect(String((busy.body.error as { message: string }).message)).toMatch(/agentx_wait_for_task|agentx_cancel_task/);
+    expect(String((busy.body.error as { message: string }).message)).toContain("agentx_wait_for_task");
+    expect(String((busy.body.error as { message: string }).message)).toContain("agentx_cancel_task");
+  });
+
+  it("gives two concurrent continues one RUNNING and one TASK_BUSY, and one new task operation", async () => {
+    const { db, post, task, turns } = await finished();
+    const answers = await Promise.all([
+      post("continue", { requestId: randomUUID(), instructions: "one" }),
+      post("continue", { requestId: randomUUID(), instructions: "two" }),
+    ]);
+    expect(answers.filter((answer) => (answer.body.task as { status?: string } | undefined)?.status === "RUNNING")).toHaveLength(1);
+    expect(answers.filter((answer) => (answer.body.error as { code?: string } | undefined)?.code === "TASK_BUSY")).toHaveLength(1);
+    // The first task and one continue.
+    expect(db.find((item) => item.entityType === "OPERATION" && item.workspaceId === task.workspaceId && item.kind === "task")).toHaveLength(2);
+    expect(turns().filter((item) => item.action === "continue" && item.phase === "accepted")).toHaveLength(1);
   });
 
   it("refuses a task that never started (R17)", async () => {
@@ -191,6 +205,26 @@ describe("cancel", () => {
     expect(harness.db.find(() => true)).toHaveLength(startingCount);
   });
 
+  it("answers a concurrent duplicate cancel with the task, writing one cancel", async () => {
+    const { db, post, turns } = await finished();
+    await post("continue", { requestId: randomUUID(), instructions: "long job" });
+    const requestId = randomUUID();
+    const answers = await Promise.all([post("cancel", { requestId }), post("cancel", { requestId })]);
+    for (const answer of answers) expect(answer.body.task).toMatchObject({ status: "RUNNING" });
+    expect(db.find((item) => item.entityType === "OPERATION" && item.kind === "cancel")).toHaveLength(1);
+    expect(db.find((item) => item.entityType === "OUTBOX" && (item.invocation as { kind?: string } | undefined)?.kind === "cancel")).toHaveLength(1);
+    expect(turns().filter((item) => item.action === "cancel")).toHaveLength(1);
+  });
+
+  it("answers a cancel that met a changing task in plain words, naming the tool, with the code kept", async () => {
+    const { db, post, task, active } = await finished();
+    await post("continue", { requestId: randomUUID(), instructions: "long job" });
+    // The running operation's fence moved on, so the cancel's transaction fails its condition.
+    (db.get(`WORKSPACE#${task.workspaceId}`, `OPERATION#${active()}`) as { fence: number }).fence += 1;
+    const response = await post("cancel", { requestId: randomUUID() });
+    expect(response.body.error).toEqual({ code: "WORKSPACE_BUSY", message: "the task changed while cancelling; try agentx_cancel_task again" });
+  });
+
   it("refuses a requestId already used for another action of the task", async () => {
     const { post } = await finished();
     const requestId = randomUUID();
@@ -263,6 +297,20 @@ describe("pull requests (US1 scenario 4, FR-023)", () => {
     expect(db.get(`WORKSPACE#${task.workspaceId}`, `OPERATION#${String(response.body.operationId)}`)).toMatchObject({ publication: { repository: "demo" } });
   });
 
+  it("says so when the task's own project revision is no longer registered", async () => {
+    const { db, post } = await finished();
+    for (const [key, item] of db.items) if (item.pk === "PROJECT#payments" && item.sk === `REV#${String(1).padStart(12, "0")}`) db.items.delete(key);
+    expect((await post("pull-requests", { requestId: randomUUID(), title: "x" })).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task's project revision is no longer registered; ask an admin" });
+  });
+
+  it("answers a repeated requestId after the task closed with the closed-task error", async () => {
+    const { db, post, taskId } = await finished();
+    const requestId = randomUUID();
+    await post("pull-requests", { requestId, title: "x" });
+    (db.get(`DEVTASK#${taskId}`, "META") as { closedAt?: string }).closedAt = new Date().toISOString();
+    expect((await post("pull-requests", { requestId, title: "x" })).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task is closed; start a new one with agentx_start_task" });
+  });
+
   it("answers TASK_BUSY while the task runs", async () => {
     const { post } = await finished();
     await post("continue", { requestId: randomUUID(), instructions: "one" });
@@ -325,6 +373,20 @@ describe("completed audit records (R12, FR-037)", () => {
     expect(logged).toMatchObject({ taskId, operationId: running, error: "ZodError" });
     expect(db.get(`WORKSPACE#${task.workspaceId}`, `OPERATION#${running}`)).toMatchObject({ status: "ACCEPTED" });
     expect(turns().filter((item) => item.phase === "completed" && item.operationId === running)).toHaveLength(0);
+  });
+
+  it("records the cancel's result when the target finished first, with the target's one completed record", async () => {
+    const { db, post, turns, finish, task, active } = await finished();
+    await post("continue", { requestId: randomUUID(), instructions: "long job" });
+    const running = active();
+    await post("cancel", { requestId: randomUUID() });
+    const cancelOperation = db.find((item) => item.entityType === "OPERATION" && item.kind === "cancel")[0]!;
+    await finish(task.workspaceId, running, "SUCCEEDED");
+    await finish(task.workspaceId, String(cancelOperation.id), "SUCCEEDED");
+    expect(db.get(`WORKSPACE#${task.workspaceId}`, `OPERATION#${String(cancelOperation.id)}`)).toMatchObject({ status: "SUCCEEDED" });
+    expect(db.get(`WORKSPACE#${task.workspaceId}`, `OPERATION#${running}`)).toMatchObject({ status: "SUCCEEDED" });
+    expect(db.get(`WORKSPACE#${task.workspaceId}`, "META")).toMatchObject({ status: "READY" });
+    expect(turns().filter((item) => item.phase === "completed" && item.operationId === running)).toEqual([expect.objectContaining({ outcome: "succeeded" })]);
   });
 
   it("records a task the cancel could not stop cleanly as interrupted (F13)", async () => {
