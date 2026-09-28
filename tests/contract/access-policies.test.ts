@@ -79,6 +79,19 @@ describe("service role policy", () => {
     expect(SERVICE_ROLE_SERVICES).not.toContain("organizations");
     expect(SERVICE_ROLE_SERVICES).not.toContain("sts");
   });
+
+  it("may create, update, delete and tag only this environment's monthly budget, never by wildcard", () => {
+    const budget = serviceRoleStatements(scope).find((s) => s.Sid === "Budget")!;
+    expect(budget.Action.sort()).toEqual(["budgets:ListTagsForResource", "budgets:ModifyBudget", "budgets:TagResource", "budgets:UntagResource", "budgets:ViewBudget"]);
+    // Exactly this one budget, never another: no wildcard suffix, no other environment's budget name.
+    expect(budget.Resource).toBe("arn:aws:budgets::123456789012:budget/agentx-staging-monthly");
+    expect(SERVICE_ROLE_SERVICES).not.toContain("budgets");
+    expect(serviceRoleStatements(scope).find((s) => s.Sid === "Services")!.Action).not.toContain("budgets:*");
+  });
+
+  it("never grants the service role servicequotas, even by wildcard", () => {
+    expect(serviceRoleStatements(scope).find((s) => s.Sid === "Services")!.Action).not.toContain("servicequotas:*");
+  });
 });
 
 describe("operator role policy", () => {
@@ -144,11 +157,19 @@ describe("operator role policy", () => {
   });
 
   it("may subscribe to and read only this environment's alert topic, and never publish or unsubscribe", () => {
-    const alerts = operatorRoleStatements(scope).find((s) => s.Sid === "Alerts")!;
-    expect(alerts.Action.sort()).toEqual(["sns:GetTopicAttributes", "sns:ListSubscriptionsByTopic", "sns:Subscribe"]);
-    expect(alerts.Resource).toBe("arn:aws:sns:us-east-1:123456789012:agentx-staging-alerts");
-    expect(actions(operatorRoleStatements(scope))).not.toContain("sns:Publish");
-    expect(actions(operatorRoleStatements(scope))).not.toContain("sns:Unsubscribe");
+    const statements = operatorRoleStatements(scope);
+    const snsResources = new Set(statements.filter((s) => s.Action.some((a) => a.startsWith("sns:"))).flatMap((s) => [s.Resource].flat()));
+    expect(snsResources).toEqual(new Set(["arn:aws:sns:us-east-1:123456789012:agentx-staging-alerts"]));
+    expect(actions(statements).filter((a) => a.startsWith("sns:")).sort()).toEqual(["sns:GetTopicAttributes", "sns:ListSubscriptionsByTopic", "sns:Subscribe"]);
+    expect(actions(statements)).not.toContain("sns:Publish");
+    expect(actions(statements)).not.toContain("sns:Unsubscribe");
+  });
+
+  it("may subscribe only email or the alert webhook to the topic, never sqs, lambda or sms", () => {
+    const subscribe = operatorRoleStatements(scope).find((s) => s.Action.includes("sns:Subscribe"))!;
+    expect(subscribe.Action).toEqual(["sns:Subscribe"]);
+    expect(subscribe.Resource).toBe("arn:aws:sns:us-east-1:123456789012:agentx-staging-alerts");
+    expect(subscribe.Condition).toEqual({ StringEquals: { "sns:Protocol": ["email", "https"] } });
   });
 
   it("may flip only the test alarm, by its exact name", () => {
@@ -165,10 +186,12 @@ describe("operator role policy", () => {
     expect(actions(operatorRoleStatements(scope)).filter((a) => a.startsWith("budgets:"))).toEqual(["budgets:ViewBudget"]);
   });
 
-  it("may read the EC2 vCPU quota, so prerequisites run on an operator resume", () => {
+  it("may read only the EC2 standard vCPU quota that prerequisites checks, not any other quota", () => {
     const quotas = operatorRoleStatements(scope).find((s) => s.Sid === "Quotas")!;
     expect(quotas.Action).toEqual(["servicequotas:GetServiceQuota"]);
-    expect(quotas.Resource).toBe("*");
+    // Exactly the quota code prerequisites.ts:318 checks (ServiceCode "ec2", QuotaCode "L-1216C47A"),
+    // never a wildcard: arn:partition:servicequotas:region:account:serviceCode/quotaCode.
+    expect(quotas.Resource).toBe("arn:aws:servicequotas:us-east-1:123456789012:ec2/L-1216C47A");
   });
 });
 
@@ -234,11 +257,16 @@ describe("default permission boundary", () => {
     expect(denies.every((s) => s.Condition === undefined)).toBe(true);
   });
 
-  it("allows what the operator and service roles now use: budgets and the quota read", () => {
+  it("keeps budgets as a wildcard ceiling: AWS Budgets' resource-level support for Modify/Tag is not independently confirmed", () => {
     const services = defaultBoundaryStatements(scope).find((s) => s.Sid === "Services")!.Action;
     expect(services).toContain("budgets:*");
-    expect(services).toContain("servicequotas:*");
-    expect(serviceRoleStatements(scope).find((s) => s.Sid === "Services")!.Action).toContain("budgets:*");
-    expect(serviceRoleStatements(scope).find((s) => s.Sid === "Services")!.Action).not.toContain("servicequotas:*");
+    expect(BOUNDARY_SERVICES).toContain("budgets");
+  });
+
+  it("names the EC2 quota read like sts:GetCallerIdentity: by name, never servicequotas:*", () => {
+    const services = defaultBoundaryStatements(scope).find((s) => s.Sid === "Services")!.Action;
+    expect(services).not.toContain("servicequotas:*");
+    expect(BOUNDARY_SERVICES).not.toContain("servicequotas");
+    expect(allows.find((s) => s.Sid === "Quotas")).toEqual({ Sid: "Quotas", Effect: "Allow", Action: ["servicequotas:GetServiceQuota"], Resource: "*" });
   });
 });

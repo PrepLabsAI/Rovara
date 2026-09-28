@@ -24,8 +24,6 @@ export interface PolicyStatementJson {
 /** Services the service role may use with any resource; IAM is handled separately and name-scoped. */
 export const SERVICE_ROLE_SERVICES: readonly string[] = [
   "apigateway",
-  // The control-plane stack's monthly budget (phase 15d2, FR-047).
-  "budgets",
   "cloudformation",
   "cloudwatch",
   "cognito-idp",
@@ -47,13 +45,20 @@ export const SERVICE_ROLE_SERVICES: readonly string[] = [
 
 /**
  * Services the default permission boundary allows by wildcard: the service role's own, plus what
- * the environment's roles call (Bedrock models, X-Ray, CodeBuild, API Gateway invoke, and the
- * operator's EC2 quota read). STS is not here: sts:* would let a bounded role assume any
- * same-account role that trusts the account, escaping the boundary, so the boundary names
- * sts:GetCallerIdentity alone. The generated test in access-stack.test.ts keeps this list complete
+ * the environment's roles call (Bedrock models, X-Ray, CodeBuild and API Gateway invoke). STS and
+ * Service Quotas are not here: sts:* would let a bounded role assume any same-account role that
+ * trusts the account, escaping the boundary, and servicequotas:* would let it read every quota in
+ * the account instead of only the one EC2 vCPU quota prerequisites checks; the boundary names
+ * sts:GetCallerIdentity and servicequotas:GetServiceQuota alone (see defaultBoundaryStatements).
+ * Budgets stays a wildcard here (phase 15d2, FR-047): the service role's own statement is scoped to
+ * the one monthly budget, but AWS Budgets' resource-level permission support for
+ * ModifyBudget/TagResource/UntagResource is not independently confirmed (the AWS MCP documentation
+ * tools and a live docs fetch were both unavailable this session), so the ceiling keeps the
+ * wildcard rather than risk silently blocking a legitimate deploy if the service does not honor a
+ * scoped ARN for those actions. The generated test in access-stack.test.ts keeps this list complete
  * and free of unused services.
  */
-export const BOUNDARY_SERVICES: readonly string[] = [...SERVICE_ROLE_SERVICES, "bedrock", "codebuild", "execute-api", "servicequotas", "xray"];
+export const BOUNDARY_SERVICES: readonly string[] = [...SERVICE_ROLE_SERVICES, "bedrock", "budgets", "codebuild", "execute-api", "xray"];
 
 /** Service-linked roles the service role may create while deploying. */
 const SERVICE_LINKED_ROLE_SERVICES = ["ecs.amazonaws.com"];
@@ -88,6 +93,14 @@ const INSTANCE_PROFILE_ACTIONS = [
   "iam:TagInstanceProfile",
   "iam:UntagInstanceProfile",
 ];
+
+/**
+ * What AWS::Budgets::Budget needs to create, update, delete and tag the monthly budget (phase
+ * 15d2, FR-047). AWS Budgets has no separate Create/Update/Delete action: ModifyBudget covers all
+ * three, and ViewBudget covers every read. No BudgetsAction permission: this is a plain budget with
+ * notifications, not the separate AWS::Budgets::BudgetsAction resource.
+ */
+const BUDGET_ACTIONS = ["budgets:ModifyBudget", "budgets:ViewBudget", "budgets:TagResource", "budgets:UntagResource", "budgets:ListTagsForResource"];
 
 /** The IAM path every role of an environment's stacks lives under, except the access stack's two roles. */
 export function environmentRolePath(env: string): string {
@@ -160,6 +173,8 @@ export function serviceRoleStatements(scope: PolicyScope): PolicyStatementJson[]
       Resource: `arn:${scope.partition}:iam::${scope.account}:role/aws-service-role/*`,
       Condition: { StringLike: { "iam:AWSServiceName": [...SERVICE_LINKED_ROLE_SERVICES] } },
     },
+    // FR-047: the control-plane stack's monthly budget, and only that one, never budgets:* on *.
+    { Sid: "Budget", Effect: "Allow", Action: [...BUDGET_ACTIONS], Resource: `arn:${scope.partition}:budgets::${scope.account}:budget/agentx-${scope.env}-monthly` },
   ];
 }
 
@@ -176,6 +191,9 @@ export function defaultBoundaryStatements(scope: Pick<PolicyScope, "env" | "part
     { Sid: "Services", Effect: "Allow", Action: BOUNDARY_SERVICES.map((s) => `${s}:*`), Resource: "*" },
     // The operator's identity check; the only STS action any AgentX role uses.
     { Sid: "CallerIdentity", Effect: "Allow", Action: ["sts:GetCallerIdentity"], Resource: "*" },
+    // The operator's EC2 quota read (prerequisites on a resume); named like CallerIdentity above,
+    // not scoped further, since a scoped ARN in the identity policy already limits it to one quota.
+    { Sid: "Quotas", Effect: "Allow", Action: ["servicequotas:GetServiceQuota"], Resource: "*" },
     { Sid: "IamRoles", Effect: "Allow", Action: [...ROLE_ACTIONS], Resource: roles },
     { Sid: "IamInstanceProfiles", Effect: "Allow", Action: [...INSTANCE_PROFILE_ACTIONS], Resource: environmentInstanceProfiles(scope) },
     {
@@ -306,11 +324,23 @@ export function operatorRoleStatements(scope: PolicyScope): PolicyStatementJson[
       Condition: { StringEquals: { "aws:ResourceTag/agentx:env": env } },
     },
     {
-      // FR-045: subscribe the alert address. No Publish: the test alarm goes through CloudWatch.
+      // FR-045: read the alert topic. No Publish: the test alarm goes through CloudWatch.
       Sid: "Alerts",
       Effect: "Allow",
-      Action: ["sns:Subscribe", "sns:ListSubscriptionsByTopic", "sns:GetTopicAttributes"],
+      Action: ["sns:ListSubscriptionsByTopic", "sns:GetTopicAttributes"],
       Resource: `arn:${partition}:sns:${region}:${account}:agentx-${env}-alerts`,
+    },
+    {
+      // FR-045: subscribe the alert address, but only email (the operator) or https (the alert
+      // webhook): sqs, lambda and sms would let a compromised operator session re-route alerts
+      // somewhere the platform team can't see. A separate statement because sns:Protocol is a
+      // Subscribe-only context key; on Alerts above it would be absent and the condition would
+      // deny those two read actions outright.
+      Sid: "AlertsSubscribe",
+      Effect: "Allow",
+      Action: ["sns:Subscribe"],
+      Resource: `arn:${partition}:sns:${region}:${account}:agentx-${env}-alerts`,
+      Condition: { StringEquals: { "sns:Protocol": ["email", "https"] } },
     },
     {
       // FR-046: agentx alerts test flips this one alarm, named exactly.
@@ -321,9 +351,16 @@ export function operatorRoleStatements(scope: PolicyScope): PolicyStatementJson[
     },
     // FR-047: the alerts step checks the budget CloudFormation made; it never changes it.
     { Sid: "Budget", Effect: "Allow", Action: ["budgets:ViewBudget"], Resource: `arn:${partition}:budgets::${account}:budget/agentx-${env}-monthly` },
-    // prerequisites on an operator resume: read-only, and GetServiceQuota's quota ARN format is
-    // not one this plan could confirm, so it is not scoped.
-    { Sid: "Quotas", Effect: "Allow", Action: ["servicequotas:GetServiceQuota"], Resource: "*" },
+    // prerequisites.ts:318 checks only the EC2 standard vCPU quota (ServiceCode "ec2", QuotaCode
+    // "L-1216C47A") on an operator resume; the servicequotas "quota" resource type's ARN format is
+    // arn:partition:servicequotas:region:account:serviceCode/quotaCode, so this scopes to exactly
+    // that one quota rather than every quota in the account.
+    {
+      Sid: "Quotas",
+      Effect: "Allow",
+      Action: ["servicequotas:GetServiceQuota"],
+      Resource: `arn:${partition}:servicequotas:${region}:${account}:ec2/L-1216C47A`,
+    },
     { Sid: "Identity", Effect: "Allow", Action: ["sts:GetCallerIdentity"], Resource: "*" },
     {
       Sid: "Logs",
