@@ -5,7 +5,7 @@
 import { agentXError, type ConnectorConfig } from "@agentx/contracts";
 import { registerCredential } from "../../admin/credential.js";
 import { secretFromSource } from "../../init/prompts.js";
-import { addConnectorRevision, connectorSecretName, scopeAlias, storeConnectorSecret, type ConnectorAddInput } from "./revision.js";
+import { addConnectorRevision, connectorSecretName, refuseLegacyGitHubMcp, scopeAlias, storeConnectorSecret, type ConnectorAddInput } from "./revision.js";
 
 export const JIRA_GUIDE = [
   "Jira: AgentX acts as an Atlassian service account, with an API token.",
@@ -53,6 +53,7 @@ export function widerAccessWarning(projectKey: string, others: readonly string[]
 }
 
 export async function addJira(input: ConnectorAddInput): Promise<{ ref: string; revision: number; warning?: string }> {
+  await refuseLegacyGitHubMcp({ projectName: input.projectName, configDir: input.services.configDir });
   input.write(JIRA_GUIDE);
   const siteUrl = jiraSiteUrl(input.flags.jiraSite ?? await input.prompter.ask("Your Jira site (the <site> in <site>.atlassian.net)", { flag: "--jira-site" }));
   const cloudId = await input.services.vendors.jiraCloudId(siteUrl);
