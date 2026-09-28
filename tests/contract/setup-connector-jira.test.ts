@@ -142,8 +142,14 @@ describe("agentx connector add jira (FR-036 to FR-039)", () => {
   });
 
   it("asks for one issue in an empty project, so an empty answer is not mistaken for a blind one", async () => {
+    const plane = fakeControlPlane();
+    const secrets = memoryInitSecrets();
     const vendors = fakeVendors({ jiraCloudId: CLOUD, jiraInside: [], jiraOutside: [] });
-    await expect(addJira(input({ vendors, script: ["acme", TOKEN, "PAY"] }))).rejects.toThrow("the search found no issue in PAY; if the project is empty, create one issue in it and run this again. If it has issues, the service account cannot see them: add it to the project (Step 4)");
+    await expect(addJira(input({ plane, secrets, vendors, script: ["acme", TOKEN, "PAY"] }))).rejects.toThrow("the search found no issue in PAY; if the project is empty, create one issue in it and run this again. If it has issues, the service account cannot see them: add it to the project (Step 4)");
+    // One Jira read, not two: the outside search never runs once the inside search comes back empty.
+    expect(vendors.calls).toEqual(["jiraCloudId https://acme.atlassian.net", "jiraSearch project = PAY max 5"]);
+    expect(secrets.values.size).toBe(0);
+    expect(plane.credentials).toHaveLength(1); // only the built-in github credential; none registered
   });
 
   it("explains a refused token: API token authentication off, a missing scope, or the /v1 endpoint", async () => {

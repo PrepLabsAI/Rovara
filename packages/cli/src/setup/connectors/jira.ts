@@ -32,6 +32,17 @@ export function jiraSiteUrl(typed: string): string {
 
 const refused = (error: unknown) => error instanceof Error && error.name === "VendorRefused";
 
+/** `vendors.jiraSearch`, with a VendorRefused caught and reworded (both searches read this way,
+ * one at a time: the inside search's result decides whether the outside search runs at all). */
+async function jiraSearch(vendors: ConnectorAddInput["services"]["vendors"], params: { token: string; cloudId: string; jql: string; maxResults: number }): Promise<string[]> {
+  try {
+    return await vendors.jiraSearch(params);
+  } catch (error) {
+    if (refused(error)) throw agentXError("AUTH_REQUIRED", "Atlassian refused the API token; check that Rovo MCP's Allow API token authentication is on (Step 1) and the token has all six scopes (Step 5). Nothing was stored");
+    throw error;
+  }
+}
+
 /** How many issues the outside search reads, to name the other projects (owner decision 6). */
 export const OUTSIDE_SAMPLE = 50;
 const NAMED = 5;
@@ -63,16 +74,11 @@ export async function addJira(input: ConnectorAddInput): Promise<{ ref: string; 
   // refused here first, before the token is ever stored.
   if (!/^[A-Z][A-Z0-9_]{1,9}$/.test(projectKey)) throw agentXError("CONFIG_INVALID", "a Jira project key is capital letters and digits, such as PAY");
 
-  let inside: string[];
-  let outside: string[];
-  try {
-    inside = await input.services.vendors.jiraSearch({ token, cloudId, jql: `project = ${projectKey}`, maxResults: 5 });
-    outside = await input.services.vendors.jiraSearch({ token, cloudId, jql: `project not in (${projectKey})`, maxResults: OUTSIDE_SAMPLE });
-  } catch (error) {
-    if (refused(error)) throw agentXError("AUTH_REQUIRED", "Atlassian refused the API token; check that Rovo MCP's Allow API token authentication is on (Step 1) and the token has all six scopes (Step 5). Nothing was stored");
-    throw error;
-  }
+  // The inside search decides everything: an empty project is refused here, one Jira read only,
+  // before the outside search (which exists only to build owner decision 6's warning) ever runs.
+  const inside = await jiraSearch(input.services.vendors, { token, cloudId, jql: `project = ${projectKey}`, maxResults: 5 });
   if (inside.length === 0) throw agentXError("CONFIG_INVALID", `the search found no issue in ${projectKey}; if the project is empty, create one issue in it and run this again. If it has issues, the service account cannot see them: add it to the project (Step 4)`);
+  const outside = await jiraSearch(input.services.vendors, { token, cloudId, jql: `project not in (${projectKey})`, maxResults: OUTSIDE_SAMPLE });
   // Owner decision 6: warn and save, never refuse, and never ask (so --yes behaves the same).
   const others = projectKeys(outside).filter((key) => key !== projectKey);
   const warning = others.length === 0 ? undefined : widerAccessWarning(projectKey, others);
