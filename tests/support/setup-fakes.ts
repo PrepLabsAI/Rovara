@@ -6,7 +6,7 @@ import type { EnvironmentSettings } from "../../packages/cli/src/environments/se
 import type { StoredTokens, TokenStore } from "../../packages/cli/src/token-store.js";
 import type { CognitoAdmin, SetupServices } from "../../packages/cli/src/setup/services.js";
 import type { GitHubRepositoryApi } from "../../packages/cli/src/setup/project-files.js";
-import type { SlackChannel, SlackChannelApi } from "../../packages/cli/src/setup/channel-add.js";
+import { SlackRateLimitedError, type SlackChannel, type SlackChannelApi } from "../../packages/cli/src/setup/channel-add.js";
 import { fakeGitHubApi } from "./init-fakes.js";
 
 export const CONTROL_PLANE = "https://cp.example.test";
@@ -137,8 +137,8 @@ export function turn(overrides: Record<string, unknown>): Record<string, unknown
 }
 
 /** The channels the bot can see. With `visibleAfterFinds`, finds before that count see nothing,
- * as when a person has not invited the bot yet. `joined` records every join; `tokens` every token used. */
-export function fakeSlackChannels(channels: SlackChannel[], options: { visibleAfterFinds?: number } = {}): SlackChannelApi & { joined: string[]; tokens: string[]; finds: () => number } {
+ * as when a person has not invited the bot yet; the first `rateLimitedFinds` are rate limited. `joined` records every join; `tokens` every token used. */
+export function fakeSlackChannels(channels: SlackChannel[], options: { visibleAfterFinds?: number; rateLimitedFinds?: number; retryAfterMs?: number } = {}): SlackChannelApi & { joined: string[]; tokens: string[]; finds: () => number } {
   const joined: string[] = [];
   const tokens: string[] = [];
   let finds = 0;
@@ -147,6 +147,8 @@ export function fakeSlackChannels(channels: SlackChannel[], options: { visibleAf
     async find(token, name) {
       tokens.push(token);
       finds += 1;
+      // The first `rateLimitedFinds` finds answer as Slack's HTTP 429 does.
+      if (options.rateLimitedFinds !== undefined && finds <= options.rateLimitedFinds) throw new SlackRateLimitedError("conversations.list", options.retryAfterMs ?? 30_000);
       if (options.visibleAfterFinds !== undefined && finds < options.visibleAfterFinds) return undefined;
       return channels.find((channel) => channel.name === name);
     },

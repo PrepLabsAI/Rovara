@@ -14,14 +14,17 @@ interface WatchedTurn { eventId: string; subject: string; receivedAt: string; di
 
 export async function waitForThreadedReply(input: {
   session: AdminSession; fetch: typeof fetch; teamId: string; channelId: string; channelName: string; botUserId: string;
+  /** The command to run again after fixing a problem, such as "agentx init" (as sign-in's `rerun`). */
+  rerun: string;
   write: (line: string) => void; sleep: (ms: number) => Promise<void>; now: () => number; timeoutMs?: number;
 }): Promise<{ eventId: string; seconds: number }> {
   const timeout = input.timeoutMs ?? REPLY_WAIT_MS;
-  const minutes = Math.round(timeout / 60_000);
+  const count = Math.round(timeout / 60_000);
+  const minutes = `${count} ${count === 1 ? "minute" : "minutes"}`;
   const started = input.now();
   const since = new Date(started - EARLY_MS).toISOString();
   const prefix = `${input.teamId}/${input.channelId}/`;
-  input.write(`In #${input.channelName}, post a message that mentions <@${input.botUserId}>, for example "<@${input.botUserId}> what can you do?". Waiting up to ${minutes} minutes for AgentX to reply in its thread.`);
+  input.write(`In #${input.channelName}, post a message that mentions <@${input.botUserId}>, for example "<@${input.botUserId}> what can you do?". Waiting up to ${minutes} for AgentX to reply in its thread.`);
   for (;;) {
     const turns: WatchedTurn[] = [];
     await exportTurns({ ...input.session, since, write: (line) => { turns.push(JSON.parse(line) as WatchedTurn); } }, input.fetch);
@@ -34,10 +37,10 @@ export async function waitForThreadedReply(input: {
     }
     const other = mine[0];
     if (other !== undefined) {
-      throw agentXError("RUNTIME_UNAVAILABLE", `AgentX replied in #${input.channelName}, but the turn ended as ${other.disposition}${other.error === undefined ? "" : ` (${other.error.name})`}; see agentx admin turns export --since 15m, fix it, then run agentx init again`);
+      throw agentXError("RUNTIME_UNAVAILABLE", `AgentX replied in #${input.channelName}, but the turn ended as ${other.disposition}${other.error === undefined ? "" : ` (${other.error.name})`}; see agentx admin turns export --since 15m, fix it, then run ${input.rerun} again`);
     }
     if (input.now() - started >= timeout) {
-      throw agentXError("RUNTIME_UNAVAILABLE", `no AgentX reply in #${input.channelName} within ${minutes} minutes; check that the message mentioned the bot, that Slack shows the Request URL as Verified, and agentx admin turns export --since 15m, then run agentx init again`);
+      throw agentXError("RUNTIME_UNAVAILABLE", `no AgentX reply in #${input.channelName} within ${minutes}; check that the message mentioned the bot, that Slack shows the Request URL as Verified, and agentx admin turns export --since 15m, then run ${input.rerun} again`);
     }
     await input.sleep(POLL_MS);
   }

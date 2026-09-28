@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { firstProjectStep } from "../../packages/cli/src/init/finish-steps.js";
 import { readSlackBotToken, SLACK_BOT_SCOPES } from "../../packages/cli/src/init/slack-app.js";
 import { executeCli } from "../../packages/cli/src/main.js";
-import { addChannel, channelName, slackChannelApi } from "../../packages/cli/src/setup/channel-add.js";
+import { addChannel, channelName, slackChannelApi, SlackRateLimitedError } from "../../packages/cli/src/setup/channel-add.js";
 import type { SetupCommandContext, SetupRun } from "../../packages/cli/src/setup/command-context.js";
 import { waitForThreadedReply } from "../../packages/cli/src/setup/reply-watch.js";
 import { initContext, memoryInitSecrets, progressHandle, scriptedPrompter, T0 } from "../support/init-fakes.js";
@@ -60,6 +60,28 @@ describe("agentx channel add (FR-041)", () => {
     expect(plane.bindings).toEqual([]);
   });
 
+  it("waits out a Slack rate limit and still finds the channel (fix round 1)", async () => {
+    const plane = fakeControlPlane();
+    const slack = fakeSlackChannels([{ id: "C0PAY00001", name: "payments", isPrivate: false, isMember: true }], { rateLimitedFinds: 1, retryAfterMs: 20_000 });
+    const time = clock();
+    const lines: string[] = [];
+    const result = await addChannel({ session, botToken: "xoxb-1", teamId: TEAM, botUserId: BOT, projectName: "p", prompter: scriptedPrompter([]), write: (line) => lines.push(line), ...time, services: { fetch: plane.fetch, slackChannels: slack }, flags: { channel: "payments" } });
+    expect(result.channelId).toBe("C0PAY00001");
+    expect(slack.finds()).toBe(2);
+    expect(time.now() - T0).toBe(20_000);
+    expect(lines).toContain("Slack is limiting how often AgentX may list channels; trying again in 20 seconds.");
+    expect(lines.join("\n")).not.toContain("/invite");
+  });
+
+  it("gives up at the deadline with the normal message when Slack keeps rate limiting (fix round 1)", async () => {
+    const slack = fakeSlackChannels([{ id: "C0PAY00001", name: "payments", isPrivate: false, isMember: true }], { rateLimitedFinds: Number.POSITIVE_INFINITY, retryAfterMs: 60_000 });
+    const time = clock();
+    await expect(addChannel({ session, botToken: "xoxb-1", teamId: TEAM, botUserId: BOT, projectName: "p", prompter: scriptedPrompter([]), write: () => undefined, ...time, services: { fetch: fakeControlPlane().fetch, slackChannels: slack }, flags: { channel: "payments" } }))
+      .rejects.toThrow("the bot cannot see a channel named #payments after 10 minutes; create it in Slack (or invite the bot to it, if it is private), then run this again");
+    expect(time.now() - T0).toBe(10 * 60_000);
+    expect(slack.finds()).toBe(11);
+  });
+
   it("refuses a typed name that is not a channel name, before asking Slack", async () => {
     const slack = fakeSlackChannels([]);
     await expect(addChannel({ session, botToken: "xoxb-1", teamId: TEAM, botUserId: BOT, projectName: "p", prompter: scriptedPrompter([]), write: () => undefined, ...clock(), services: { fetch: fakeControlPlane().fetch, slackChannels: slack }, flags: { channel: "no spaces here" } }))
@@ -69,6 +91,22 @@ describe("agentx channel add (FR-041)", () => {
 });
 
 describe("the Slack channel API", () => {
+  function rateLimited(retryAfter: string | undefined) {
+    return (async () => new Response("", { status: 429, headers: retryAfter === undefined ? {} : { "retry-after": retryAfter } })) as unknown as typeof globalThis.fetch;
+  }
+
+  it("reports HTTP 429 as a rate limit, honoring Retry-After: 30 s when missing or unreadable, at most 60 s (fix round 1)", async () => {
+    const wait = async (retryAfter: string | undefined) => {
+      const error = await slackChannelApi(rateLimited(retryAfter)).find(BOT_TOKEN, "payments").then(() => undefined, (caught: unknown) => caught);
+      expect(error).toBeInstanceOf(SlackRateLimitedError);
+      return (error as SlackRateLimitedError).retryAfterMs;
+    };
+    expect(await wait("7")).toBe(7_000);
+    expect(await wait(undefined)).toBe(30_000);
+    expect(await wait("soon")).toBe(30_000);
+    expect(await wait("600")).toBe(60_000);
+  });
+
   function fakeSlack(pages: Array<Record<string, unknown>>, joinAnswer: Record<string, unknown> = { ok: true }) {
     const calls: Array<{ url: URL; authorization: string | undefined }> = [];
     let page = 0;
@@ -149,7 +187,7 @@ describe("waiting for the threaded reply (FR-018 step 11)", () => {
     const plane = fakeControlPlane();
     const time = clock();
     const lines: string[] = [];
-    const pending = waitForThreadedReply({ session, fetch: plane.fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, write: (line) => lines.push(line), ...time,
+    const pending = waitForThreadedReply({ session, fetch: plane.fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, rerun: "agentx init", write: (line) => lines.push(line), ...time,
       sleep: async (ms) => { await time.sleep(ms); plane.turns = [turn({ subject: `${TEAM}/C0PAY00001/1790000000.000100`, receivedAt: new Date(time.now()).toISOString(), disposition: "answered" })]; } });
     expect((await pending).eventId).toMatch(/^Ev/);
     expect(lines[0]).toBe(`In #payments, post a message that mentions <@${BOT}>, for example "<@${BOT}> what can you do?". Waiting up to 10 minutes for AgentX to reply in its thread.`);
@@ -162,29 +200,43 @@ describe("waiting for the threaded reply (FR-018 step 11)", () => {
       turn({ subject: `${TEAM}/C0OTHER001/1.1`, receivedAt: new Date(T0 + 1000).toISOString(), disposition: "answered" }),
       turn({ subject: `${TEAM}/C0PAY00001/1.1`, receivedAt: new Date(T0 - 60_000).toISOString(), disposition: "answered" }),
     ];
-    await expect(waitForThreadedReply({ session, fetch: plane.fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, write: () => undefined, ...clock(), timeoutMs: 60_000 }))
-      .rejects.toThrow("no AgentX reply in #payments within 1 minutes");
+    await expect(waitForThreadedReply({ session, fetch: plane.fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, rerun: "agentx init", write: () => undefined, ...clock(), timeoutMs: 60_000 }))
+      .rejects.toThrow("no AgentX reply in #payments within 1 minute; check that the message mentioned the bot, that Slack shows the Request URL as Verified, and agentx admin turns export --since 15m, then run agentx init again");
   });
 
   it("gives up after 10 minutes by default, naming the next step", async () => {
     const plane = fakeControlPlane();
     const time = clock();
-    await expect(waitForThreadedReply({ session, fetch: plane.fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, write: () => undefined, ...time }))
+    await expect(waitForThreadedReply({ session, fetch: plane.fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, rerun: "agentx init", write: () => undefined, ...time }))
       .rejects.toThrow("no AgentX reply in #payments within 10 minutes; check that the message mentioned the bot, that Slack shows the Request URL as Verified, and agentx admin turns export --since 15m, then run agentx init again");
     expect(time.now() - T0).toBe(10 * 60_000);
+  });
+
+  it("says 1 minute, not 1 minutes, when it asks for the mention (fix round 1)", async () => {
+    const lines: string[] = [];
+    await expect(waitForThreadedReply({ session, fetch: fakeControlPlane().fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, rerun: "agentx init", write: (line) => lines.push(line), ...clock(), timeoutMs: 60_000 }))
+      .rejects.toThrow("within 1 minute;");
+    expect(lines[0]).toContain("Waiting up to 1 minute for AgentX to reply in its thread.");
+  });
+
+  it("names the command that is running as the one to run again (fix round 1)", async () => {
+    const plane = fakeControlPlane();
+    plane.turns = [turn({ subject: `${TEAM}/C0PAY00001/1.1`, receivedAt: new Date(T0 + 1000).toISOString(), disposition: "failed", error: { name: "WorkerUnavailable" } })];
+    await expect(waitForThreadedReply({ session, fetch: plane.fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, rerun: "agentx channel add --project payments-api --channel payments", write: () => undefined, ...clock() }))
+      .rejects.toThrow("fix it, then run agentx channel add --project payments-api --channel payments again");
   });
 
   it("does not pass on an error reply, naming the turn's disposition (Review Focus 4)", async () => {
     const plane = fakeControlPlane();
     plane.turns = [turn({ subject: `${TEAM}/C0PAY00001/1.1`, receivedAt: new Date(T0 + 1000).toISOString(), disposition: "failed", error: { name: "WorkerUnavailable" } })];
-    await expect(waitForThreadedReply({ session, fetch: plane.fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, write: () => undefined, ...clock() }))
+    await expect(waitForThreadedReply({ session, fetch: plane.fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, rerun: "agentx init", write: () => undefined, ...clock() }))
       .rejects.toThrow("AgentX replied in #payments, but the turn ended as failed (WorkerUnavailable); see agentx admin turns export --since 15m, fix it, then run agentx init again");
   });
 
   it("asks the export for turns since just before the prompt", async () => {
     const plane = fakeControlPlane();
     plane.turns = [turn({ subject: `${TEAM}/C0PAY00001/1.1`, receivedAt: new Date(T0 + 1000).toISOString() })];
-    await waitForThreadedReply({ session, fetch: plane.fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, write: () => undefined, ...clock() });
+    await waitForThreadedReply({ session, fetch: plane.fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, rerun: "agentx init", write: () => undefined, ...clock() });
     expect(plane.requests.map((request) => request.path)).toEqual(["/v1/admin/turns"]);
     expect(plane.requests[0]!.token).toBe("admin-token");
   });
@@ -251,6 +303,27 @@ describe("agentx channel add on the command line (F9)", () => {
     expect(result.code).toBe(0);
     expect(lines).toContain("AgentX replied in #payments in 8 seconds.");
     expect(plane.requests.some((request) => request.path === "/v1/admin/turns")).toBe(true);
+  });
+});
+
+describe("agentx channel add's next step (fix round 1)", () => {
+  it("tells the engineer to run agentx channel add again, not agentx init", async () => {
+    const plane = fakeControlPlane();
+    plane.turns = [turn({ subject: `${TEAM}/C0PAY00001/1.1`, receivedAt: new Date(T0 + 1000).toISOString(), disposition: "failed", error: { name: "WorkerUnavailable" } })];
+    const time = clock();
+    const setup: SetupCommandContext = {
+      open: async () => ({
+        env: "staging", settings: STAGING_SETTINGS, session, secrets: memoryInitSecrets({ "agentx/staging/slack": JSON.stringify({ botToken: BOT_TOKEN }) }),
+        services: setupServices({ fetch: plane.fetch, slackChannels: fakeSlackChannels([{ id: "C0PAY00001", name: "payments", isPrivate: false, isMember: true }]) }),
+        prompter: scriptedPrompter([]), write: () => undefined, ...time, print: () => undefined,
+      }),
+      openAws: async () => { throw new Error("test setup: openAws not expected"); },
+    };
+    const stderr: string[] = [];
+    const code = await executeCli(["--project", "payments-api", "channel", "add", "--env", "staging", "--channel", "#Payments"], { setup, stdout: { write: () => undefined }, stderr: { write: (text: string) => stderr.push(text) } });
+    expect(code).not.toBe(0);
+    expect(stderr.join("")).toContain("fix it, then run agentx channel add --project payments-api --channel payments again");
+    expect(stderr.join("")).not.toContain("agentx init");
   });
 });
 

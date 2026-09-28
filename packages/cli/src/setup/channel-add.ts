@@ -2,7 +2,7 @@
 // person to invite the bot (a bot cannot join a private channel), so the CLI waits for that.
 // Everything here needs only the manifest's channels:read, groups:read and channels:join
 // (SLACK_BOT_SCOPES in init/slack-app.ts). The bot token goes only in the authorization header.
-import { agentXError } from "@agentx/contracts";
+import { AgentXError, agentXError, errorStatus } from "@agentx/contracts";
 import { bindSlackChannel } from "../admin/slack.js";
 import type { Prompter } from "../init/prompts.js";
 import type { AdminSession, SetupServices } from "./services.js";
@@ -20,10 +20,26 @@ const FIND_POLL_MS = 10_000;
 const LIST_PAGE_SIZE = 1000;
 const MAX_LIST_PAGES = 50;
 const CHANNEL_NAME = /^#?[a-z0-9][a-z0-9_-]{0,79}$/i;
+const RETRY_AFTER_DEFAULT_MS = 30_000;
+const RETRY_AFTER_MAX_MS = 60_000;
+
+/** Slack answered HTTP 429: wait `retryAfterMs` before the next call. */
+export class SlackRateLimitedError extends AgentXError {
+  constructor(method: string, readonly retryAfterMs: number) {
+    super("RUNTIME_UNAVAILABLE", `Slack ${method} is rate limited; try again in ${Math.ceil(retryAfterMs / 1000)} seconds`, errorStatus("RUNTIME_UNAVAILABLE"));
+  }
+}
+
+/** Slack's Retry-After seconds, 30 s when missing or unreadable, at most 60 s. */
+function retryAfterMs(header: string | null): number {
+  const seconds = header === null || !/^\d{1,6}$/.test(header.trim()) ? undefined : Number(header.trim());
+  return seconds === undefined ? RETRY_AFTER_DEFAULT_MS : Math.min(seconds * 1000, RETRY_AFTER_MAX_MS);
+}
 
 export function slackChannelApi(fetchImplementation: typeof fetch): SlackChannelApi {
   const call = async (method: string, token: string, params: Record<string, string>): Promise<Record<string, unknown>> => {
     const response = await fetchImplementation(`https://slack.com/api/${method}?${new URLSearchParams(params).toString()}`, { method: "POST", headers: { authorization: `Bearer ${token}` } });
+    if (response.status === 429) throw new SlackRateLimitedError(method, retryAfterMs(response.headers.get("retry-after")));
     if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `Slack ${method} failed with HTTP ${response.status}; try again in a minute`);
     const body = (await response.json()) as Record<string, unknown>;
     if (body.ok !== true) {
@@ -68,16 +84,27 @@ export async function addChannel(input: {
   if (!CHANNEL_NAME.test(typed.trim())) throw agentXError("CONFIG_INVALID", "--channel must be a Slack channel name, such as payments");
   const name = channelName(typed);
   const deadline = input.now() + FIND_WAIT_MS;
-  let channel = await input.services.slackChannels.find(input.botToken, name);
-  if (channel === undefined) {
-    input.write(`The bot cannot see #${name} yet. If #${name} is private, type /invite <@${input.botUserId}> in it; if it does not exist, create it. Waiting up to 10 minutes.`);
-    while (channel === undefined) {
-      if (input.now() >= deadline) {
-        throw agentXError("CONFIG_INVALID", `the bot cannot see a channel named #${name} after 10 minutes; create it in Slack (or invite the bot to it, if it is private), then run this again`);
-      }
-      await input.sleep(FIND_POLL_MS);
+  let askedForInvite = false;
+  let channel: SlackChannel | undefined;
+  for (;;) {
+    let wait = FIND_POLL_MS;
+    try {
       channel = await input.services.slackChannels.find(input.botToken, name);
+    } catch (error) {
+      // A rate limit only delays the search; the overall deadline still holds.
+      if (!(error instanceof SlackRateLimitedError)) throw error;
+      wait = error.retryAfterMs;
+      input.write(`Slack is limiting how often AgentX may list channels; trying again in ${Math.ceil(wait / 1000)} seconds.`);
     }
+    if (channel !== undefined) break;
+    if (!askedForInvite && wait === FIND_POLL_MS) {
+      input.write(`The bot cannot see #${name} yet. If #${name} is private, type /invite <@${input.botUserId}> in it; if it does not exist, create it. Waiting up to 10 minutes.`);
+      askedForInvite = true;
+    }
+    if (input.now() >= deadline) {
+      throw agentXError("CONFIG_INVALID", `the bot cannot see a channel named #${name} after 10 minutes; create it in Slack (or invite the bot to it, if it is private), then run this again`);
+    }
+    await input.sleep(Math.min(wait, deadline - input.now()));
   }
   if (!channel.isMember) {
     // Only a public channel can be listed while the bot is not in it.
