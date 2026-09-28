@@ -27,7 +27,9 @@ const functionId = (template: TemplateJson, prefix: string) => ofType(template, 
 function grants(template: TemplateJson): Array<{ role: string; statement: Statement }> {
   const found: Array<{ role: string; statement: Statement }> = [];
   const add = (roles: string[], document: unknown) => { for (const role of roles) for (const statement of statementsIn(document)) found.push({ role, statement }); };
-  const refs = (value: unknown) => ((value ?? []) as Ref[]).map((ref) => ref.Ref);
+  // A role from outside the stack (such as the EC2 worker role, named from an ARN parameter) keeps
+  // a readable label, so its grants still count.
+  const refs = (value: unknown) => ((value ?? []) as unknown[]).map((ref) => (typeof (ref as Ref).Ref === "string" ? (ref as Ref).Ref : `external:${JSON.stringify(ref)}`));
   for (const [, policy] of ofType(template, "AWS::IAM::Policy")) add(refs(policy.Properties.Roles), policy.Properties.PolicyDocument);
   for (const [id, policy] of ofType(template, "AWS::IAM::ManagedPolicy")) {
     const attachedBy = ofType(template, "AWS::IAM::Role").filter(([, role]) => refs(role.Properties.ManagedPolicyArns).includes(id)).map(([roleId]) => roleId);
