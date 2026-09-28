@@ -336,6 +336,10 @@ function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTas
       if (error instanceof AgentXError && error.code === "NOT_FOUND") return undefined;
       throw error;
     }),
+    projectRevision: (name, revision) => requireProject(dependencies, name, revision).catch((error: unknown) => {
+      if (error instanceof AgentXError && error.code === "NOT_FOUND") return undefined;
+      throw error;
+    }),
     preparation: (identity, project, requestId) => newWorkspacePreparation(dependencies, identity, project, identity.ownerKey, requestId),
     workspace: (id) => requireWorkspace(dependencies, id),
     operations: async (workspaceId) => (await query(`WORKSPACE#${workspaceId}`, "OPERATION#"))
@@ -3344,11 +3348,16 @@ async function completedTurnItems(
   }
   // A task's summary is its last assistant message; a publish's is its pull request.
   const events = ended.operation.kind === "task" ? (await operationEventsNewestFirst(dependencies, ended.operation.id, 500)).reverse() : [];
-  return [{ Put: {
-    TableName: table,
-    Item: completedTurn({ task, pointer, operation: ended.operation, status: ended.status, events, now }),
-    ConditionExpression: "attribute_not_exists(pk)",
-  } }];
+  let item: Record<string, unknown>;
+  try {
+    item = completedTurn({ task, pointer, operation: ended.operation, status: ended.status, events, now });
+  } catch (error) {
+    // Together or not at all (R12): the result is not recorded either, and the worker's callback
+    // fails. The error name only: its message could quote the task's text.
+    console.log(JSON.stringify({ component: "broker", event: "developer.completed_turn_failed", taskId: task.taskId, operationId: ended.operation.id, error: error instanceof Error ? error.name : "unknown" }));
+    throw error;
+  }
+  return [{ Put: { TableName: table, Item: item, ConditionExpression: "attribute_not_exists(pk)" } }];
 }
 
 async function recordTerminalResult(

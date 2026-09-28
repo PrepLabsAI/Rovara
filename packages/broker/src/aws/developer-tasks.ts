@@ -29,6 +29,7 @@ import {
   type DeveloperTaskView,
   type Operation,
   type StartDeveloperTaskRequest,
+  type WorkspaceInstance,
 } from "@agentx/contracts";
 import type { z } from "zod";
 import { chargeConflict, chargeItems, developerCharge, limitReached, readWorkspaceLimits, type ChargeConflict, type WorkspaceLimits } from "../developer/limits.js";
@@ -515,16 +516,16 @@ const NEVER_STARTED = "this task never started; close it with agentx_close_task 
 
 /**
  * What continue and a pull request need before they touch the workspace: an open task that got
- * past its setup (R17, for every setup failure, whatever its category), and the developer's
- * access to the project, checked again because these are actions (controller ruling; reads and
- * cancel do not check it). Callers load the owned task first.
+ * past its setup (R17, for every setup failure, whatever its category). Access is not checked
+ * again (R11): a developer who left the project's channels can still continue and publish their
+ * own task. Callers load the owned task first, which is the ownership check.
  */
-async function assertActionable(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord): Promise<void> {
+async function actionableWorkspace(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord): Promise<WorkspaceInstance> {
   if (task.closedAt !== undefined) throw agentXError("CONFIG_INVALID", CLOSED_TASK);
   const workspace = await deps.actions.workspace(task.workspaceId);
   if (workspace.status === "CLOSED") throw agentXError("CONFIG_INVALID", CLOSED_TASK);
   if (workspace.status === "PREPARATION_FAILED") throw agentXError("CONFIG_INVALID", NEVER_STARTED);
-  await deps.checkAccess(task.project);
+  return workspace;
 }
 
 /** The existing handlers' busy answers, in the developer's words (FR-049's TASK_BUSY). */
@@ -539,7 +540,7 @@ async function continueTask(deps: DeveloperTaskRouteDependencies, caller: Develo
   const request = parse(ContinueDeveloperTaskRequestSchema, value, deps, "continue");
   const task = await loadOwnedTask(deps, caller, taskId);
   const turns = turnTable(deps);
-  await assertActionable(deps, task);
+  await actionableWorkspace(deps, task);
   const receivedAt = iso(deps);
   try {
     // acceptTask answers a repeated requestId with its first operation and writes nothing, and
@@ -638,10 +639,12 @@ async function openPullRequest(deps: DeveloperTaskRouteDependencies, caller: Dev
   const request = parse(DeveloperPullRequestRequestSchema, value, deps, "pull-request");
   const task = await loadOwnedTask(deps, caller, taskId);
   const turns = turnTable(deps);
-  await assertActionable(deps, task);
+  const workspace = await actionableWorkspace(deps, task);
   let repository = request.repository;
   if (repository === undefined) {
-    const repositories = (await deps.actions.latestProject(task.project))?.definition.repositories.map((entry) => entry.name) ?? [];
+    // The revision the workspace was prepared from, which the publication pushes from: a
+    // repository a newer revision added is not in this workspace.
+    const repositories = (await deps.actions.projectRevision(workspace.projectName, workspace.projectRevision))?.definition.repositories.map((entry) => entry.name) ?? [];
     if (repositories.length > 1) throw agentXError("CONFIG_INVALID", `this project has several repositories; name one of: ${repositories.join(", ")}`);
     if (repositories.length === 0) throw agentXError("CONFIG_INVALID", `project \`${task.project}\` has no repositories; ask an admin`);
     repository = repositories[0]!;

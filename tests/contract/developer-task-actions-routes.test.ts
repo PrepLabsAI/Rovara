@@ -1,15 +1,20 @@
 // Spec 025 Task 11: continue, cancel and pull requests on a developer task, and the completed audit
 // records (FR-016, FR-021, FR-023, FR-037, R12, R16, R17, US1 scenarios 4 and 5).
 import { randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ChannelMembersRequest, ChannelMembersResponse } from "@agentx/contracts";
 import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, call } from "../support/slack-broker.js";
 
 const said = (text: string) => ({ type: "progress", payload: { type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } } });
 
-async function finished(status: "SUCCEEDED" | "FAILED" = "SUCCEEDED", options: Parameters<typeof createDeveloperTaskBroker>[0] = {}) {
+async function finished(
+  status: "SUCCEEDED" | "FAILED" = "SUCCEEDED",
+  options: Parameters<typeof createDeveloperTaskBroker>[0] = {},
+  setup: (handler: Parameters<typeof call>[0]) => Promise<void> = async () => {},
+) {
   const harness = await createDeveloperTaskBroker(options);
+  await setup(harness.handler);
   const response = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix the flaky retry test", client: "claude-code" });
   const taskId = (response.body.task as { taskId: string }).taskId;
   const task = harness.db.get(`DEVTASK#${taskId}`, "META") as { workspaceId: string; conversationId: string };
@@ -76,16 +81,19 @@ describe("continue (US1 scenario 5, FR-019)", () => {
     }
   });
 
-  it("rechecks project access, because continuing is an action", async () => {
+  it("lets a developer who lost channel access continue and open a PR on their own task (R11, spec edge case)", async () => {
     let member = true;
     const channelMembers = async (request: ChannelMembersRequest): Promise<ChannelMembersResponse> => ({ ok: true, memberOf: member ? request.channelIds.filter((id) => id === SLACK_CHANNEL) : [] });
-    const { post, turns } = await finished("SUCCEEDED", { channelMembers });
+    const { post, turns, finish, task, active } = await finished("SUCCEEDED", { channelMembers });
     member = false;
-    const refused = await post("continue", { requestId: randomUUID(), instructions: "more" });
-    expect(refused.status).toBe(403);
-    expect(refused.body.error).toMatchObject({ code: "PROJECT_ACCESS_DENIED" });
-    expect((await post("pull-requests", { requestId: randomUUID(), title: "x" })).body.error).toMatchObject({ code: "PROJECT_ACCESS_DENIED" });
-    expect(turns().filter((item) => item.action === "continue" || item.action === "pull_request")).toHaveLength(0);
+    const continued = await post("continue", { requestId: randomUUID(), instructions: "more" });
+    expect(continued.status).toBe(200);
+    expect(continued.body.task).toMatchObject({ status: "RUNNING" });
+    await finish(task.workspaceId, active(), "SUCCEEDED");
+    const opened = await post("pull-requests", { requestId: randomUUID(), title: "x" });
+    expect(opened.status).toBe(200);
+    expect(opened.body).toMatchObject({ operationStatus: "ACCEPTED" });
+    expect(turns().filter((item) => (item.action === "continue" || item.action === "pull_request") && item.phase === "accepted")).toHaveLength(2);
   });
 
   it("refuses a closed task", async () => {
@@ -238,11 +246,21 @@ describe("pull requests (US1 scenario 4, FR-023)", () => {
     ]);
   });
 
-  it("asks for the repository when the project has several", async () => {
-    const { handler, post } = await finished();
-    await registerRevision(handler, 2, [{ name: "demo" }, { name: "docs" }]);
+  it("asks for the repository when the task's own revision has several", async () => {
+    // Changed from the brief (controller ruling): the list comes from the revision the task is
+    // pinned to and publishes from, so the revision with two repositories is registered first.
+    const { post, db, taskId } = await finished("SUCCEEDED", {}, (handler) => registerRevision(handler, 2, [{ name: "demo" }, { name: "docs" }]));
+    expect(db.get(`DEVTASK#${taskId}`, "META")).toMatchObject({ startingRevision: 2 });
     const response = await post("pull-requests", { requestId: randomUUID(), title: "x" });
     expect(response.body.error).toEqual({ code: "CONFIG_INVALID", message: "this project has several repositories; name one of: demo, docs" });
+  });
+
+  it("does not list a repository a newer revision added: the task publishes from its own", async () => {
+    const { db, handler, post, task } = await finished();
+    await registerRevision(handler, 2, [{ name: "demo" }, { name: "docs" }]);
+    const response = await post("pull-requests", { requestId: randomUUID(), title: "x" });
+    expect(response.body).toMatchObject({ operationStatus: "ACCEPTED" });
+    expect(db.get(`WORKSPACE#${task.workspaceId}`, `OPERATION#${String(response.body.operationId)}`)).toMatchObject({ publication: { repository: "demo" } });
   });
 
   it("answers TASK_BUSY while the task runs", async () => {
@@ -288,6 +306,25 @@ describe("completed audit records (R12, FR-037)", () => {
     expect(completed()).toHaveLength(1);
     // The cancel operation itself has no completed record: it is not a task or publish.
     expect(turns().filter((item) => item.operationId === cancelOperation.id && item.phase === "completed")).toHaveLength(0);
+  });
+
+  it("logs a completed record it cannot build with the task ID and error name, and records neither it nor the result", async () => {
+    const { db, post, finish, task, active, taskId, turns } = await finished();
+    await post("continue", { requestId: randomUUID(), instructions: "more" });
+    const running = active();
+    // A client name the turn record schema refuses (at most 40 characters).
+    (db.get(`DEVTASK#${taskId}`, "META") as { client: string }).client = "x".repeat(41);
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((line: unknown) => { lines.push(String(line)); });
+    try {
+      await expect(finish(task.workspaceId, running, "SUCCEEDED")).rejects.toThrow();
+    } finally {
+      spy.mockRestore();
+    }
+    const logged = lines.map((line) => { try { return JSON.parse(line) as Record<string, unknown>; } catch { return {}; } }).find((entry) => entry.event === "developer.completed_turn_failed");
+    expect(logged).toMatchObject({ taskId, operationId: running, error: "ZodError" });
+    expect(db.get(`WORKSPACE#${task.workspaceId}`, `OPERATION#${running}`)).toMatchObject({ status: "ACCEPTED" });
+    expect(turns().filter((item) => item.phase === "completed" && item.operationId === running)).toHaveLength(0);
   });
 
   it("records a task the cancel could not stop cleanly as interrupted (F13)", async () => {
