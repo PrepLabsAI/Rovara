@@ -149,11 +149,14 @@ export type ChargeConflict = "already_charged" | "member" | "organization";
  */
 export async function chargeConflict(client: Client, tableName: string, charge: WorkspaceCharge, taskId: string, error: unknown): Promise<ChargeConflict> {
   const reasons = cancellationReasons(error);
+  // Rethrow the caller's exact error object, never a wrapper: developer-tasks.ts's chargeFailure
+  // tells "not a charge failure" apart from a failed re-read by comparing identity.
   if (reasons === undefined) throw error;
   const memberFailed = reasons[1]?.Code === "ConditionalCheckFailed";
   if (memberFailed && (await hasTask(client, tableName, charge.member, taskId))) return "already_charged";
   if (reasons[0]?.Code === "ConditionalCheckFailed") return "organization";
   if (memberFailed) return "member";
+  // The same exact error object, for chargeFailure's identity check (see above).
   throw error;
 }
 

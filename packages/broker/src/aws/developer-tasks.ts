@@ -9,6 +9,7 @@ import {
   StartDeveloperTaskRequestSchema,
   agentXError,
   cleanClientName,
+  redactText,
   taskTitle,
   type DeveloperTaskPolicy,
   type DeveloperTaskView,
@@ -92,12 +93,21 @@ function turnRecordFailed(deps: DeveloperTaskRouteDependencies, error: unknown) 
   }));
 }
 
-function partyOf(caller: DeveloperCaller, taskId: string, client: string, extra: Partial<TurnParty> = {}): TurnParty {
+function partyOf(caller: DeveloperCaller, taskId: string, client: string): TurnParty {
   return {
     taskId, developerId: caller.developerId, provider: caller.amr, developerName: caller.name, client,
     ...(caller.slackUserId === undefined ? {} : { slackUserId: caller.slackUserId }),
-    ...extra,
   };
+}
+
+/**
+ * FR-030's title, redacted before taskTitle cuts it: the title is stored in the task and index
+ * rows, shown in views and listed in WORKSPACE_LIMIT messages, so a secret on the instructions'
+ * first line must not reach any of them. Redacting first means the cut cannot leave half a token
+ * the redactor would miss; taskTitle's cut counts code points, so it never splits an emoji.
+ */
+function redactedTitle(request: StartDeveloperTaskRequest): string {
+  return taskTitle(redactText(request.instructions), request.title === undefined ? undefined : redactText(request.title));
 }
 
 /**
@@ -235,6 +245,12 @@ async function startTask(deps: DeveloperTaskRouteDependencies, caller: Developer
   }
   const project = await deps.actions.latestProject(request.project);
   if (project === undefined) return refused(agentXError("PROJECT_NOT_FOUND", `project \`${request.project}\` doesn't exist in this AgentX; run agentx_list_projects`));
+  // The policy checked must be the policy started: a revision registered between the two reads
+  // could have turned tasks off or required sharing. Nothing was decided, so nothing is recorded.
+  if (project.definition.revision !== access.revision) {
+    log(deps, { event: "developer.task_start_revision_changed", checked: access.revision, latest: project.definition.revision });
+    throw agentXError("WORKSPACE_BUSY", "the project changed while starting; try again with the same request_id");
+  }
   const limits = await readWorkspaceLimits(deps.documentClient, deps.tableName, deps.actions.limitDefaults);
   const charge = developerCharge({ teamId: deps.slackTeamId, slackUserId: caller.slackUserId, developerId: caller.developerId });
   const full = await limitReached(deps.documentClient, deps.tableName, charge, limits);
@@ -245,7 +261,7 @@ async function startTask(deps: DeveloperTaskRouteDependencies, caller: Developer
   const workspaceId = preparation.workspace.id;
   const conversationId = randomUUID();
   const revision = project.definition.revision;
-  const title = taskTitle(request.instructions, request.title);
+  const title = redactedTitle(request);
   const task: DeveloperTaskRecord = {
     ...taskKey(taskId), entityType: "DEVELOPER_TASK", taskId, developerId: caller.developerId, provider: caller.amr, developerName: caller.name,
     ...(caller.slackUserId === undefined ? {} : { slackUserId: caller.slackUserId }),
