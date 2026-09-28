@@ -283,8 +283,13 @@ on). `--yes` answers every question with its default or its flag and accepts eve
 broken Slack probe, which still fails; it also needs `--region`, so a resumed run never looks in the
 wrong region. Without `--yes`, the region question defaults to `AWS_REGION`, then `AWS_DEFAULT_REGION`,
 when the release covers it. Secrets (an alert webhook, the GitHub App private key, the Slack
-bot token, the Slack signing secret) are never a flag's value: each comes from a hidden prompt, or from
-`--<name>-file <path>` or `--<name>-env <NAME>`.
+bot token, the Slack signing secret, the OpenRouter API key) are never a flag's value: each comes from a
+hidden prompt, or from `--<name>-file <path>` or `--<name>-env <NAME>`.
+
+The model questions start with the provider: Amazon Bedrock (the default) or OpenRouter
+(`--model-provider`). OpenRouter asks for the orchestrator, classifier and worker model ids, then the
+OpenRouter API key in a hidden prompt (`--openrouter-key-file` or `--openrouter-key-env` with `--yes`).
+See [OpenRouter model access](openrouter.md).
 
 Before creating anything, `init` prints every stack, role, secret and app it will create, and an
 estimated monthly cost for the chosen models at a stated usage (1,000 turns, 100 worker sessions, 60
@@ -307,8 +312,11 @@ the same machine, then paste back the address GitHub sent your browser to (or ju
 State lives in SSM beside the environment's settings: `/agentx/<env>/install/answers` (the answers, no
 secret) and `/agentx/<env>/install/progress` (step outcomes and the GitHub and Slack facts collected so
 far). `/agentx/<env>/settings` is written only once the Slack stack exists. Secrets go straight into
-Secrets Manager: `agentx/<env>/github-app`, `agentx/<env>/slack`, and, for a webhook alert address,
-`agentx/<env>/alert-endpoint`.
+Secrets Manager: `agentx/<env>/github-app`, `agentx/<env>/slack`, for a webhook alert address
+`agentx/<env>/alert-endpoint`, and, for OpenRouter without `--openrouter-secret-arn`,
+`agentx/<env>/openrouter` (the raw key; the answers hold only its ARN). The alert and OpenRouter secrets
+are stored just before the answers are saved, so a secret that fails to store leaves no answers and the
+next run asks again; once the answers are saved, a rerun resumes without asking.
 
 Until a later AgentX release adds them to `init` (phase 15d2), finish the install by hand: create your
 admin user (Cognito: `aws cognito-idp admin-create-user` then `admin-add-user-to-group`; your own OIDC:
@@ -399,6 +407,10 @@ Stack deletion keeps, on purpose: the Cognito user pool (deletion protection), t
 S3 buckets (two versioned: empty every version and delete marker first), three DynamoDB tables, the VPC
 flow-log group, and the KMS workspace key (schedule deletion; 7 days minimum). Two secrets live outside or beyond the
 stacks: `agentx/<env>/callback-signing-key` (created by the CLI) and `agentx/<env>/slack`; delete both with
-`--force-delete-without-recovery` so a new install can reuse the names.
+`--force-delete-without-recovery` so a new install can reuse the names. An install made with `agentx init`
+also has the secrets init stored itself: `agentx/<env>/github-app`, `agentx/<env>/alert-endpoint` (a
+webhook alert address only) and `agentx/<env>/openrouter` (OpenRouter without `--openrouter-secret-arn`
+only); delete them the same way. Revoke the OpenRouter key in OpenRouter too. A secret you made yourself
+for `--openrouter-secret-arn` is yours to keep or delete.
 A failed create keeps its retained resources too, so "delete the stack and rerun" leaves them behind. The
 export bundle's README lists the exact command for each step.

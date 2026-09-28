@@ -6,24 +6,51 @@ Slack orchestrator, and action-gate classifier have independent defaults.
 
 ## Configure an installation
 
-Create a Secrets Manager secret containing the **raw OpenRouter API key**, not a JSON object.
-Use the AWS-managed Secrets Manager encryption key. Customer-managed encryption keys require
-an additional administrator-managed `kms:Decrypt` grant and key policy; AgentX does not add
-that grant. Use a dedicated key for each installation and require a hard spending limit on that key before enabling OpenRouter. The $5 smoke-test cap is an example, not a production default.
+`agentx init` asks for the model provider first: `1. Amazon Bedrock (recommended) (default)`,
+`2. OpenRouter`. Choosing OpenRouter sets the orchestrator, classifier and worker providers to
+`openrouter`, asks for each one's OpenRouter model id (there is no default: pick models you have
+checked), then asks for your **OpenRouter API key** in a hidden prompt. Init stores the raw key, not
+a JSON object, in the Secrets Manager secret `agentx/<env>/openrouter`, with the AWS-managed
+encryption key, just before it saves its answers. The saved answers hold only the secret's ARN, never
+the key, and the plan lists the secret. A rerun after the key is stored resumes and does not ask again.
+Use a dedicated key for each installation and require a hard spending limit on that key before enabling OpenRouter. The $5 smoke-test cap is an example, not a production default.
 
-For `agentx init`, add these flags to your normal installation arguments:
+For an unattended run (`--yes`), give the key in a file or an environment variable, never as a flag's
+value; without either, `--yes` refuses before creating anything:
+
+```sh
+--model-provider openrouter \
+--orchestrator-model anthropic/claude-sonnet-4 --classifier-model anthropic/claude-sonnet-4 --worker-model anthropic/claude-sonnet-4 \
+--openrouter-key-file ./openrouter-key.txt \
+--openrouter-providers anthropic
+```
+
+`--openrouter-key-env <NAME>` reads the key from an environment variable instead. Rerunning the same
+command replaces the stored key with the one given, so an unattended rerun works unchanged; once the
+install has finished, restart the Slack service and stop/resume workers to pick up a replaced key, as
+for any rotation. The per-component flags `--orchestrator-provider`,
+`--classifier-provider` and `--worker-provider` win over `--model-provider`, so a mixed setup (for
+example an OpenRouter worker with Bedrock for the rest) still comes from flags. A provider or model
+flag also skips the provider question: a component no flag sets stays on Bedrock, as before. Init asks
+for the key whenever any provider is `openrouter`.
+
+To use a secret you made yourself instead, create it with the **raw OpenRouter API key** as its value
+and pass `--openrouter-secret-arn`; init then asks for no key and stores nothing. Use the AWS-managed
+Secrets Manager encryption key. Customer-managed encryption keys require an additional
+administrator-managed `kms:Decrypt` grant and key policy; AgentX does not add that grant.
 
 ```sh
 --orchestrator-provider openrouter --orchestrator-model anthropic/claude-sonnet-4 \
 --classifier-provider openrouter --classifier-model anthropic/claude-sonnet-4 \
 --worker-provider openrouter --worker-model anthropic/claude-sonnet-4 \
---openrouter-secret-arn arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/openrouter-AbCdEf \
+--openrouter-secret-arn arn:aws:secretsmanager:us-east-1:123456789012:secret:my-openrouter-key-AbCdEf \
 --openrouter-providers anthropic
 ```
 
 These are example IDs, not a cost or model recommendation. Each omitted provider defaults to
-`amazon-bedrock`; an OpenRouter role needs its own OpenRouter model ID. The secret ARN may be omitted until the secret is ready. `init --export` carries
-the same settings. A deploy answers file uses:
+`amazon-bedrock`; an OpenRouter role needs its own OpenRouter model ID. `init --export` stores no
+secret, so it takes `--openrouter-secret-arn` (a secret you made yourself), not a key; with
+`agentx deploy` the secret ARN may be omitted until the secret is ready. A deploy answers file uses:
 
 ```json
 {
@@ -160,6 +187,14 @@ They do not establish connectivity, billing, or live upstream compatibility.
    text; restore the test secret and restart Slack/worker sessions afterward.
 7. Compare OpenRouter's usage dashboard with the estimated/unknown telemetry, record actual
    spend and model/upstream IDs, then close the test workspace and remove test credentials.
+
+## Teardown
+
+Stack deletion does not remove the key init stored. Delete `agentx/<env>/openrouter` with
+`aws secretsmanager delete-secret --secret-id agentx/<env>/openrouter --force-delete-without-recovery`,
+so a new install can reuse the name, and revoke the key in OpenRouter. A secret you made yourself for
+`--openrouter-secret-arn` is yours to keep or delete. See "Tearing down an environment" in
+[architecture-production.md](architecture-production.md).
 
 Record environment/release, model pairs, routing allowlist, outcomes, log references, and spend
 without copying keys or private prompt contents. Live verification remains pending until this
