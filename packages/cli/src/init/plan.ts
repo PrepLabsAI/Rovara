@@ -7,6 +7,7 @@ import {
 } from "@agentx/contracts";
 import { installOrder } from "../deploy/parameters.js";
 import { callbackSigningKeySecretName } from "../deploy/signing-key.js";
+import { openRouterSecretName } from "./answers.js";
 import type { InitAnswers } from "./install-state.js";
 import type { Prompter } from "./prompts.js";
 
@@ -88,11 +89,19 @@ export function estimateMonthlyCost(models: InitAnswers["models"], usage = STATE
   return { lines, totalUsd: totalCents / 100, unpriced };
 }
 
-export function installPlanText(answers: InitAnswers, estimate: CostEstimate, notes: readonly string[]): string {
+/** What the plan must say beyond the answers: an OpenRouter key init stores itself has no ARN yet. */
+export interface PlanExtras { storesOpenRouterKey?: boolean; openRouterProviders?: readonly string[] }
+
+export function installPlanText(answers: InitAnswers, estimate: CostEstimate, notes: readonly string[], extras: PlanExtras = {}): string {
   const { env } = answers;
   const stacks = installOrder(answers.identity.mode).map((part) => environmentStackName(env, part));
   const boundary = answers.permissionsBoundaryArn ?? defaultBoundaryName(env);
-  const secrets = [callbackSigningKeySecretName(env), `agentx/${env}/github-app`, `agentx/${env}/slack`, ...(answers.alert.kind === "webhook" ? [answers.alert.secretName] : [])];
+  const secrets = [
+    callbackSigningKeySecretName(env), `agentx/${env}/github-app`, `agentx/${env}/slack`,
+    ...(answers.alert.kind === "webhook" ? [answers.alert.secretName] : []),
+    ...(extras.storesOpenRouterKey === true ? [openRouterSecretName(env)] : []),
+  ];
+  const routing = (providers: readonly string[] | undefined) => `provider allowlist ${providers?.join(", ") ?? "router-selected"}; fallbacks disabled, data_collection=deny`;
   const alerts = answers.alert.kind === "email"
     ? `email to ${answers.alert.address}`
     : answers.alert.kind === "webhook"
@@ -107,7 +116,8 @@ export function installPlanText(answers: InitAnswers, estimate: CostEstimate, no
     `- In GitHub: an app named "${answers.github.appName}" owned by ${answers.github.account}, with read and write access to contents, pull requests and issues, and read access to metadata. No webhook.`,
     `- In Slack: an app named "${answers.slack.appName}".`,
     `- Models: orchestrator ${answers.models.providers?.orchestrator ?? "amazon-bedrock"}/${answers.models.orchestrator}, classifier ${answers.models.providers?.classifier ?? "amazon-bedrock"}/${answers.models.classifier}, worker ${answers.models.providers?.worker ?? "amazon-bedrock"}/${answers.models.worker}`,
-    ...(answers.models.openRouter ? [`- OpenRouter: read existing secret ${answers.models.openRouter.secretArn}; provider allowlist ${answers.models.openRouter.providers?.join(", ") ?? "router-selected"}; fallbacks disabled, data_collection=deny`] : []),
+    ...(answers.models.openRouter ? [`- OpenRouter: read existing secret ${answers.models.openRouter.secretArn}; ${routing(answers.models.openRouter.providers)}`] : []),
+    ...(extras.storesOpenRouterKey === true ? [`- OpenRouter: your API key is stored in the new secret ${openRouterSecretName(env)}; ${routing(extras.openRouterProviders)}`] : []),
     `- Alerts (subscribed in a later AgentX release): ${alerts}`,
     `- AgentX never answers itself or other bots. Mentions people post through other apps: ${answers.slack.appPostedMessages} (slack.appPostedMessages).`,
     ...notes.map((note) => `Note: ${note}`),
@@ -121,8 +131,8 @@ export function installPlanText(answers: InitAnswers, estimate: CostEstimate, no
   return `${lines.join("\n")}\n`;
 }
 
-export async function confirmInstallPlan(input: { answers: InitAnswers; notes: readonly string[]; prompter: Prompter; write: (text: string) => void }): Promise<void> {
-  input.write(installPlanText(input.answers, estimateMonthlyCost(input.answers.models), input.notes));
+export async function confirmInstallPlan(input: { answers: InitAnswers; notes: readonly string[]; prompter: Prompter; write: (text: string) => void; extras?: PlanExtras }): Promise<void> {
+  input.write(installPlanText(input.answers, estimateMonthlyCost(input.answers.models), input.notes, input.extras));
   if (!(await input.prompter.confirm("Create all of this?", { defaultValue: false }))) {
     throw agentXError("CONFIG_INVALID", "install declined; nothing was created");
   }

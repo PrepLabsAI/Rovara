@@ -85,6 +85,19 @@ describe("install plan", () => {
     expect(text).toContain("a note");
   });
 
+  it("lists agentx/<env>/openrouter when init stores the OpenRouter key, and only reads a secret you made yourself", () => {
+    const openRouterModels = { orchestrator: "a/b", classifier: "a/b", worker: "a/b", providers: { orchestrator: "openrouter", classifier: "openrouter", worker: "openrouter" } } as const;
+    const answers = sampleAnswers({ models: openRouterModels });
+    const text = installPlanText(answers, estimateMonthlyCost(answers.models), [], { storesOpenRouterKey: true, openRouterProviders: ["deepinfra/turbo"] });
+    expect(text).toContain("Secrets agentx/staging/callback-signing-key, agentx/staging/github-app, agentx/staging/slack, agentx/staging/openrouter");
+    expect(text).toContain("- OpenRouter: your API key is stored in the new secret agentx/staging/openrouter; provider allowlist deepinfra/turbo; fallbacks disabled, data_collection=deny");
+
+    const own = sampleAnswers({ models: { ...openRouterModels, openRouter: { secretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:mine-AbCdEf" } } });
+    const ownText = installPlanText(own, estimateMonthlyCost(own.models), []);
+    expect(ownText).not.toContain("agentx/staging/openrouter");
+    expect(ownText).toContain("- OpenRouter: read existing secret arn:aws:secretsmanager:us-east-1:123456789012:secret:mine-AbCdEf");
+  });
+
   it("creates nothing when the engineer says no", async () => {
     const written: string[] = [];
     await expect(confirmInstallPlan({ answers: sampleAnswers(), notes: [], prompter: scriptedPrompter([false]), write: (text) => written.push(text) }))

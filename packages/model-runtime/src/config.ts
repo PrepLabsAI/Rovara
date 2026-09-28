@@ -20,6 +20,9 @@ export function defaultBedrockModel(role: ModelRole, environment: NodeJS.Process
     ? environment[idVariable] : DEFAULT_BEDROCK_MODELS[role] };
 }
 
+/** The shortest OpenRouter key accepted; init refuses a shorter one before storing it. */
+export const OPENROUTER_KEY_MIN_LENGTH = 10;
+
 export async function readOpenRouterKey(arn: string, readSecret?: (arn: string) => Promise<string | undefined>): Promise<string> {
   if (!arn) throw new MissingOpenRouterSecret();
   if (!/^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:\d{12}:secret:[A-Za-z0-9/_+=.@-]+$/.test(arn)) {
@@ -33,7 +36,7 @@ export async function readOpenRouterKey(arn: string, readSecret?: (arn: string) 
     }))(arn);
     const key = value?.trim();
     if (!key) throw new MissingOpenRouterSecret();
-    if (/[\r\n]/.test(key) || key.length < 10) throw new Error("invalid key");
+    if (/[\r\n]/.test(key) || key.length < OPENROUTER_KEY_MIN_LENGTH) throw new Error("invalid key");
     return key;
   } catch (error) {
     if (error instanceof MissingOpenRouterSecret || (error instanceof Error && error.name === "ResourceNotFoundException")) throw new MissingOpenRouterSecret();
