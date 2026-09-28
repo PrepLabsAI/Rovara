@@ -59,6 +59,16 @@ async function readCapped(response: Response, maxBytes: number): Promise<string>
   return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).subarray(0, maxBytes).toString("utf8");
 }
 
+/** A generous safety cap: 100 pages of 100 repositories each is 10,000 repositories, far more than
+ * one GitHub App installation realistically has. If it is ever hit, `list` fails loudly rather than
+ * silently returning a partial (and therefore misleading) list. */
+const MAX_REPOSITORY_PAGES = 100;
+
+const nextStepFor = (status: number, whatCannotBeSeen: string): string =>
+  status === 403
+    ? `check that the GitHub App is still installed and can see ${whatCannotBeSeen}`
+    : "try again, and check GitHub's status if it keeps failing";
+
 export function githubRepositoryApi(fetchImplementation: typeof fetch): GitHubRepositoryApi {
   const headers = (token: string, accept = "application/vnd.github+json") => ({
     accept, authorization: `Bearer ${token}`, "x-github-api-version": "2022-11-28", "user-agent": "agentx-cli",
@@ -66,19 +76,23 @@ export function githubRepositoryApi(fetchImplementation: typeof fetch): GitHubRe
   return {
     async list(token) {
       const all: RepositoryInfo[] = [];
-      for (let page = 1; page <= 10; page += 1) {
+      for (let page = 1; page <= MAX_REPOSITORY_PAGES; page += 1) {
         const response = await fetchImplementation(`${API}/installation/repositories?per_page=100&page=${page}`, { headers: headers(token) });
-        if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub repository list failed with HTTP ${response.status}`);
+        if (!response.ok) {
+          throw agentXError("RUNTIME_UNAVAILABLE", `GitHub repository list failed with HTTP ${response.status}; ${nextStepFor(response.status, "its repositories")}`);
+        }
         const body = (await response.json()) as { repositories: Array<{ full_name: string; name: string; default_branch: string; clone_url: string }> };
         all.push(...body.repositories.map((repo) => ({ fullName: repo.full_name, name: repo.name, defaultBranch: repo.default_branch, cloneUrl: repo.clone_url })));
-        if (body.repositories.length < 100) break;
+        if (body.repositories.length < 100) return all;
       }
-      return all;
+      throw agentXError("RUNTIME_UNAVAILABLE", `GitHub reports more than ${MAX_REPOSITORY_PAGES * 100} repositories for this installation; stopped after page ${MAX_REPOSITORY_PAGES} rather than silently drop the rest. Install the GitHub App on fewer repositories, then run this again`);
     },
     async file(token, fullName, path) {
       const response = await fetchImplementation(`${API}/repos/${fullName}/contents/${encodeURIComponent(path)}`, { headers: headers(token, "application/vnd.github.raw+json") });
       if (response.status === 404) return undefined;
-      if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub could not read ${path} in ${fullName} (HTTP ${response.status})`);
+      if (!response.ok) {
+        throw agentXError("RUNTIME_UNAVAILABLE", `GitHub could not read ${path} in ${fullName} (HTTP ${response.status}); ${nextStepFor(response.status, fullName)}`);
+      }
       return readCapped(response, MAX_FILE_BYTES);
     },
   };
