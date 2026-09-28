@@ -88,12 +88,20 @@ export async function registerRevision(input: {
   return { revision: input.definition.revision, preflight: preflight.success ? preflight.data.connectors : [], warnings, file };
 }
 
+const REPOSITORY_EXAMPLES = 5;
+
 async function chooseRepository(repositories: RepositoryInfo[], prompter: Prompter, flag: string | undefined): Promise<RepositoryInfo> {
   if (repositories.length === 0) throw agentXError("CONFIG_INVALID", "the GitHub App sees no repositories; choose at least one in the app's installation settings, then run this again");
-  const wanted = flag ?? await prompter.choose<string>("Which repository is the first project's?", repositories.map((repo) => ({ value: repo.fullName, label: repo.fullName })), { flag: "--repository", defaultValue: repositories[0]!.fullName });
+  const names = repositories.map((repo) => repo.fullName);
+  const examples = names.slice(0, REPOSITORY_EXAMPLES).join(", ") + (names.length > REPOSITORY_EXAMPLES ? `, and ${names.length - REPOSITORY_EXAMPLES} more` : "");
+  const wanted = flag ?? await prompter.choose<string>("Which repository is the first project's?", names.map((fullName) => ({ value: fullName, label: fullName })), {
+    flag: "--repository", defaultValue: names[0]!,
+    // With --yes (or no terminal) the first of several repositories is never guessed.
+    unattendedRefusal: `the GitHub App sees ${names.length} repositories (for example ${examples}); pass --repository <owner/name> to choose the first project's`,
+  });
   const found = repositories.find((repo) => repo.fullName.toLowerCase() === wanted.toLowerCase());
   if (found === undefined) {
-    throw agentXError("CONFIG_INVALID", `the GitHub App cannot see ${wanted}; it sees ${repositories.map((repo) => repo.fullName).join(", ")}. Add the repository to the app's installation, or choose one of those`);
+    throw agentXError("CONFIG_INVALID", `the GitHub App cannot see ${wanted}; it sees ${names.join(", ")}. Add the repository to the app's installation, or choose one of those`);
   }
   return found;
 }
@@ -101,12 +109,31 @@ async function chooseRepository(repositories: RepositoryInfo[], prompter: Prompt
 /** The project already written for `name`, or undefined when there is no file for it. A file is
  * written only after its revision registers, so an existing file means the project exists. */
 async function existingProject(configDir: string, name: string): Promise<ProjectDefinition | undefined> {
+  const path = projectFilePath(configDir, name);
   try {
-    await access(projectFilePath(configDir, name));
+    await access(path);
   } catch {
     return undefined;
   }
-  return loadProjectConfig({ projectName: name, configDirectory: configDir });
+  try {
+    return await loadProjectConfig({ projectName: name, configDirectory: configDir });
+  } catch {
+    throw agentXError("CONFIG_INVALID", `a file already exists at ${path} that is not an AgentX project file; move it or choose another --project-name`);
+  }
+}
+
+const cloneUrlOf = (fullName: string) => `https://github.com/${fullName}.git`.toLowerCase();
+
+/** What this rerun asks for that the existing project does not have. Only the answers given are
+ * compared (the repository, and any command flags); nothing is asked again and nothing is fetched. */
+function differences(existing: ProjectDefinition, wanted: { repositoryUrl?: string; setupCommand?: string; testCommand?: string }): string[] {
+  const repository = existing.repositories[0];
+  const typed = (line: string, timeout: number) => (line.trim() === "" ? [] : [parseCommandLine(line, repository?.path ?? ".", timeout)]);
+  const found: string[] = [];
+  if (wanted.repositoryUrl !== undefined && repository?.url.toLowerCase() !== wanted.repositoryUrl.toLowerCase()) found.push("repository");
+  if (wanted.setupCommand !== undefined && !isDeepStrictEqual(typed(wanted.setupCommand, SETUP_TIMEOUT), existing.setup)) found.push("setup command");
+  if (wanted.testCommand !== undefined && !isDeepStrictEqual(typed(wanted.testCommand, TEST_TIMEOUT), existing.readiness)) found.push("test command");
+  return found;
 }
 
 export async function addProject(input: {
@@ -115,15 +142,44 @@ export async function addProject(input: {
   flags: { projectName?: string; repository?: string; setupCommand?: string; testCommand?: string };
 }): Promise<{ name: string; revision: number; file: string }> {
   const { prompter, flags } = input;
-  const repository = await chooseRepository(await input.services.repositories.list(input.githubToken), prompter, flags.repository);
-  const repoName = agentxRepositoryName(repository.name);
+  const configDir = input.services.configDir;
   const nameProblem = (value: string) => (/^[a-z][a-z0-9-]{0,62}$/.test(value) ? undefined : "a project name is 1 to 63 lowercase letters, digits and hyphens, starting with a letter");
   if (flags.projectName !== undefined && nameProblem(flags.projectName) !== undefined) {
     throw agentXError("CONFIG_INVALID", `--project-name ${JSON.stringify(flags.projectName)} is not valid; ${nameProblem(flags.projectName)}`);
   }
-  const name = flags.projectName ?? await prompter.ask("Project name", { flag: "--project-name", defaultValue: repoName, validate: nameProblem });
+  // The name comes first when it is given, so an unchanged rerun asks GitHub and the control plane
+  // nothing. Otherwise its default is the chosen repository's name.
+  let repository: RepositoryInfo | undefined;
+  const chosenRepository = async () => chooseRepository(await input.services.repositories.list(input.githubToken), prompter, flags.repository);
+  let name = flags.projectName;
+  if (name === undefined) {
+    repository = await chosenRepository();
+    name = await prompter.ask("Project name", { flag: "--project-name", defaultValue: agentxRepositoryName(repository.name), validate: nameProblem });
+  }
+
+  // A rerun (init resumed after a crash, or the same command typed again) registers no second
+  // revision when nothing changed, and never silently replaces a project with different settings.
+  const existing = await existingProject(configDir, name);
+  if (existing !== undefined) {
+    const file = projectFilePath(configDir, name);
+    const wantedUrl = repository?.cloneUrl ?? (flags.repository === undefined ? undefined : cloneUrlOf(flags.repository));
+    const changed = differences(existing, {
+      ...(wantedUrl === undefined ? {} : { repositoryUrl: wantedUrl }),
+      ...(flags.setupCommand === undefined ? {} : { setupCommand: flags.setupCommand }),
+      ...(flags.testCommand === undefined ? {} : { testCommand: flags.testCommand }),
+    });
+    if (changed.length === 0) {
+      input.write(`Project ${name} is already registered (revision ${existing.revision}) with these settings; nothing to change. Its file is ${file}.`);
+      return { name, revision: existing.revision, file };
+    }
+    throw agentXError("CONFIG_INVALID", `project ${name} already exists (${file}) with a different ${changed.join(" and ")}; to change it, edit that file, raise its revision, and register it as its header says, or choose another --project-name`);
+  }
+
+  repository ??= await chosenRepository();
+  const repoName = agentxRepositoryName(repository.name);
   const cwd = `repo/${repoName}`;
-  const files = Object.fromEntries(await Promise.all(BUILD_FILES.map(async (file) => [file, await input.services.repositories.file(input.githubToken, repository.fullName, file)] as const)));
+  const source = repository;
+  const files = Object.fromEntries(await Promise.all(BUILD_FILES.map(async (file) => [file, await input.services.repositories.file(input.githubToken, source.fullName, file)] as const)));
   const proposed = proposeCommands(files, cwd);
   let setup = proposed.setup;
   let readiness = proposed.readiness;
@@ -146,19 +202,6 @@ export async function addProject(input: {
     repositories: [{ name: repoName, url: repository.cloneUrl, path: cwd, defaultBranch: repository.defaultBranch, credentialRef: await builtInGitHubRef(input.session, input.services.fetch) }],
     setup, readiness, orchestratorInstructions: DEFAULT_INSTRUCTIONS,
   });
-
-  // A rerun (init resumed after a crash, or the same command typed again) registers no second
-  // revision when nothing changed, and never silently replaces a project with different settings.
-  const existing = await existingProject(input.services.configDir, name);
-  if (existing !== undefined) {
-    const file = projectFilePath(input.services.configDir, name);
-    if (isDeepStrictEqual({ ...existing, revision: 1 }, definition)) {
-      input.write(`Project ${name} is already registered (revision ${existing.revision}) with these settings; nothing to change. Its file is ${file}.`);
-      return { name, revision: existing.revision, file };
-    }
-    throw agentXError("CONFIG_INVALID", `project ${name} already exists (${file}); to change it, edit that file, raise its revision, and register it as its header says, or choose another --project-name`);
-  }
-
   const registered = await registerRevision({ env: input.env, session: input.session, definition, services: input.services });
   input.write(`Registered project ${name}, revision 1, on EC2 workers. Its file is ${registered.file}.`);
   return { name, revision: 1, file: registered.file };

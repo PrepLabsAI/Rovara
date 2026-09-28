@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Command } from "commander";
@@ -8,6 +8,7 @@ import { loadProjectConfig } from "../../packages/cli/src/config.js";
 import { firstProjectStep } from "../../packages/cli/src/init/finish-steps.js";
 import { executeCli } from "../../packages/cli/src/main.js";
 import { realSetupContext, type SetupCommandContext, type SetupRun } from "../../packages/cli/src/setup/command-context.js";
+import { unattendedPrompter } from "../../packages/cli/src/init/prompts.js";
 import { addProject, ec2Binding, registerRevision } from "../../packages/cli/src/setup/project-add.js";
 import { SETUP_TIMEOUT, TEST_TIMEOUT } from "../../packages/cli/src/setup/project-files.js";
 import { fakeGitHubApi, initContext, memoryInitSecrets, progressHandle, scriptedPrompter, TEST_PRIVATE_KEY, type TestInitContext } from "../support/init-fakes.js";
@@ -139,22 +140,69 @@ describe("agentx project add (FR-040)", () => {
     expect(plane.registered).toEqual([]);
   });
 
-  it("registers no second revision when run again with the same answers", async () => {
+  it("registers no second revision when run again with the same answers, and asks GitHub and the control plane nothing (fix round 1)", async () => {
     const plane = fakeControlPlane();
-    const flags = { repository: "acme/payments-api", setupCommand: "npm ci", testCommand: "npm test" };
-    const first = await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([""]), write: () => undefined, services: services(plane), flags });
+    const flags = { repository: "acme/payments-api", projectName: "payments-api", setupCommand: "npm ci", testCommand: "npm test" };
+    const first = await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([]), write: () => undefined, services: services(plane), flags });
+    const requestsBefore = plane.requests.length;
+    const repositories = repositoriesFake();
+    let listed = 0;
+    const counting = { ...repositories, list: async (token: string) => { listed += 1; return repositories.list(token); } };
     const lines: string[] = [];
-    const again = await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([""]), write: (line) => lines.push(line), services: services(plane), flags });
+    const again = await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([]), write: (line) => lines.push(line), services: services(plane, counting), flags });
     expect(again).toEqual(first);
     expect(plane.registered).toHaveLength(1);
+    expect(plane.requests.length).toBe(requestsBefore);
+    expect(listed).toBe(0);
+    expect(repositories.reads).toEqual([]);
     expect(lines.join("\n")).toContain("Project payments-api is already registered (revision 1) with these settings; nothing to change.");
+  });
+
+  it("an interactive rerun names the same repository and project, and registers nothing", async () => {
+    const plane = fakeControlPlane();
+    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter(["acme/payments-api", "", true]), write: () => undefined, services: services(plane), flags: {} });
+    const again = await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter(["acme/payments-api", ""]), write: () => undefined, services: services(plane), flags: {} });
+    expect(again.revision).toBe(1);
+    expect(plane.registered).toHaveLength(1);
+  });
+
+  it("refuses when a file at the project's path is not an AgentX project file (fix round 1)", async () => {
+    const plane = fakeControlPlane();
+    await writeFile(join(configDir, "docs.yaml"), "just: some notes\n");
+    await expect(addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([]), write: () => undefined, services: services(plane), flags: { repository: "acme/docs", projectName: "docs", setupCommand: "", testCommand: "" } }))
+      .rejects.toThrow(`a file already exists at ${join(configDir, "docs.yaml")} that is not an AgentX project file; move it or choose another --project-name`);
+    expect(plane.registered).toEqual([]);
+  });
+
+  it("with --yes, refuses to guess among several repositories, naming --repository and some of them (fix round 1)", async () => {
+    const many = fakeRepositories(Object.fromEntries(["acme/a1", "acme/a2", "acme/a3", "acme/a4", "acme/a5", "acme/a6", "acme/a7"].map((name) => [name, { files: {} }])));
+    const plane = fakeControlPlane();
+    await expect(addProject({ env: "staging", session, githubToken: "ghs_x", prompter: unattendedPrompter(), write: () => undefined, services: services(plane, many), flags: {} }))
+      .rejects.toThrow("the GitHub App sees 7 repositories (for example acme/a1, acme/a2, acme/a3, acme/a4, acme/a5, and 2 more); pass --repository <owner/name> to choose the first project's");
+    expect(plane.registered).toEqual([]);
+  });
+
+  it("with --yes, takes the only repository the app sees", async () => {
+    const plane = fakeControlPlane();
+    const one = fakeRepositories({ "acme/docs": { files: {} } });
+    const result = await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: unattendedPrompter(), write: () => undefined, services: services(plane, one), flags: {} });
+    expect(result.name).toBe("docs");
+    expect(plane.registered).toHaveLength(1);
   });
 
   it("refuses to overwrite an existing project with different answers, saying how to change it", async () => {
     const plane = fakeControlPlane();
     await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([""]), write: () => undefined, services: services(plane), flags: { repository: "acme/payments-api", setupCommand: "npm ci", testCommand: "npm test" } });
     await expect(addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([""]), write: () => undefined, services: services(plane), flags: { repository: "acme/payments-api", setupCommand: "npm install", testCommand: "npm test" } }))
-      .rejects.toThrow(`project payments-api already exists (${join(configDir, "payments-api.yaml")}); to change it, edit that file, raise its revision, and register it as its header says, or choose another --project-name`);
+      .rejects.toThrow(`project payments-api already exists (${join(configDir, "payments-api.yaml")}) with a different setup command; to change it, edit that file, raise its revision, and register it as its header says, or choose another --project-name`);
+    expect(plane.registered).toHaveLength(1);
+  });
+
+  it("refuses a rerun that names a different repository for an existing project", async () => {
+    const plane = fakeControlPlane();
+    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([]), write: () => undefined, services: services(plane), flags: { repository: "acme/payments-api", projectName: "payments-api", setupCommand: "", testCommand: "" } });
+    await expect(addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([]), write: () => undefined, services: services(plane), flags: { repository: "acme/docs", projectName: "payments-api", setupCommand: "", testCommand: "" } }))
+      .rejects.toThrow("project payments-api already exists");
     expect(plane.registered).toHaveLength(1);
   });
 

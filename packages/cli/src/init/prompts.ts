@@ -9,7 +9,9 @@ export interface TextWriter { write(text: string): unknown }
 export interface PromptFlag { flag: string }
 export interface Prompter {
   ask(question: string, options: PromptFlag & { defaultValue?: string; validate?: (value: string) => string | undefined }): Promise<string>;
-  choose<T extends string>(question: string, choices: ReadonlyArray<{ value: T; label: string }>, options: PromptFlag & { defaultValue: T }): Promise<T>;
+  /** `unattendedRefusal`: with no one to ask (--yes, or no terminal) and more than one choice, refuse
+   * with this message instead of taking the default. */
+  choose<T extends string>(question: string, choices: ReadonlyArray<{ value: T; label: string }>, options: PromptFlag & { defaultValue: T; unattendedRefusal?: string }): Promise<T>;
   confirm(question: string, options: { defaultValue: boolean }): Promise<boolean>;
   /** Hidden answer: nothing typed is echoed. A multiline request is refused up front on an interactive prompt. */
   secret(question: string, options: PromptFlag & { multiline?: boolean }): Promise<string>;
@@ -28,7 +30,8 @@ export function unattendedPrompter(): Prompter {
       if (options.defaultValue !== undefined) return options.defaultValue;
       throw agentXError("CONFIG_INVALID", `${question} needs an answer; with --yes, pass ${options.flag}`);
     },
-    async choose(_question, _choices, options) {
+    async choose(_question, choices, options) {
+      if (options.unattendedRefusal !== undefined && choices.length > 1) throw agentXError("CONFIG_INVALID", options.unattendedRefusal);
       return options.defaultValue;
     },
     async confirm() {

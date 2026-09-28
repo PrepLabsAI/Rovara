@@ -37,9 +37,9 @@ function noTerminalPrompter(): Prompter {
     ask: (question, options) => unattended.ask(question, options),
     confirm: (question, options) => unattended.confirm(question, options),
     secret: (question, options) => unattended.secret(question, options),
-    async choose<T extends string>(question: string, choices: ReadonlyArray<{ value: T; label: string }>, options: { flag: string; defaultValue: T }): Promise<T> {
+    async choose<T extends string>(question: string, choices: ReadonlyArray<{ value: T; label: string }>, options: { flag: string; defaultValue: T; unattendedRefusal?: string }): Promise<T> {
       if (choices.length === 1) return options.defaultValue;
-      throw agentXError("CONFIG_INVALID", `${question} needs an answer; with no terminal, pass ${options.flag}`);
+      throw agentXError("CONFIG_INVALID", options.unattendedRefusal ?? `${question} needs an answer; with no terminal, pass ${options.flag}`);
     },
   };
 }
