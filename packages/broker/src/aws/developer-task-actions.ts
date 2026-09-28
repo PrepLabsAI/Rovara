@@ -4,7 +4,7 @@
 import type { TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
 import type { Operation, OperationRequest, PullRequestRequest, WorkspaceInstance } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
-import type { DeveloperTaskRecord, StoredEvent } from "../developer/task-records.js";
+import type { StoredEvent } from "../developer/task-records.js";
 import type { RegisteredProjectRecord } from "./broker.js";
 
 export type TransactItems = NonNullable<TransactWriteCommandInput["TransactItems"]>;
@@ -46,8 +46,6 @@ export interface DeveloperTaskActions {
   acceptPullRequest(identity: AuthenticatedIdentity, workspaceId: string, request: PullRequestRequest, extra: ExtraItems): Promise<{ operation: Operation; duplicate: boolean }>;
   cancelRunning(identity: AuthenticatedIdentity, workspace: WorkspaceInstance, extra: ExtraItems): Promise<TaskCancellationResult>;
   startClose(identity: AuthenticatedIdentity, workspace: WorkspaceInstance, requestId: string, extra: ExtraItems): Promise<{ operationId: string; duplicate: boolean }>;
-  /** A developer task's record, read consistently, or undefined. Unchecked: callers must load the owned task first. */
-  task(taskId: string): Promise<DeveloperTaskRecord | undefined>;
   /** Deletes the workspace's compute; the existing per-mode switch lives behind it (FR-024). Unchecked: callers must load the owned task and check project access first. */
   deleteCompute(workspace: WorkspaceInstance): Promise<void>;
   /** Writes items in one transaction. Unchecked: callers must load the owned task and check project access first. */

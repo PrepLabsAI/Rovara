@@ -369,7 +369,6 @@ function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTas
         : { outcome: "NOTHING_RUNNING" };
     },
     startClose: (identity, workspace, requestId, extra) => startTaskClose(dependencies, identity, workspace, requestId, extra),
-    task: (taskId) => getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId)),
     deleteCompute: (workspace) => deleteWorkspaceCompute(dependencies, workspace),
     transact: async (items) => {
       await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: items }));
@@ -3505,7 +3504,7 @@ async function finishDeveloperClose(dependencies: AwsBrokerDependencies, pointer
       console.log(JSON.stringify({ component: "broker", event: "developer.task_record_missing", taskId: pointer.taskId, operationId }));
       return;
     }
-    await finishTaskClose({ tableName: dependencies.tableName, actions: developerTaskActions(dependencies) }, task, operationId);
+    await finishTaskClose({ tableName: dependencies.tableName, actions: developerTaskActions(dependencies), documentClient: dependencies.documentClient }, task, operationId);
   } catch (error) {
     console.log(JSON.stringify({ component: "broker", event: "developer.task_close_failed", taskId: pointer.taskId, operationId, error: error instanceof Error ? error.name : "unknown" }));
   }

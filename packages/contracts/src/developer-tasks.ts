@@ -119,6 +119,8 @@ export const DeveloperCloseResponseSchema = z.object({
   task: DeveloperTaskViewSchema,
   closed: z.boolean(),
   unpublished: z.array(z.object({ repository: z.string(), reasons: z.array(z.string()) })).optional(),
+  /** Present whenever `closed` is false: why the task is not closed yet, and what to do next. */
+  message: z.string().optional(),
 });
 export type DeveloperCloseResponse = z.infer<typeof DeveloperCloseResponseSchema>;
 export const DeveloperPullRequestResponseSchema = z.object({
