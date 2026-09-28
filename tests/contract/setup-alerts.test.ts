@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { alertsStep, connectorsStep, parseConnectorsFlag } from "../../packages/cli/src/init/finish-steps.js";
 import { executeCli } from "../../packages/cli/src/main.js";
-import { ensureSubscribed, sendTestAlarm, testAlarmName } from "../../packages/cli/src/setup/alerts.js";
+import { awsAlertsApi, ensureSubscribed, sendTestAlarm, testAlarmName } from "../../packages/cli/src/setup/alerts.js";
 import type { SetupCommandContext, SetupRun } from "../../packages/cli/src/setup/command-context.js";
 import { writeProjectFile } from "../../packages/cli/src/setup/project-add.js";
 import { initContext, memoryInitSecrets, progressHandle, sampleAnswers, scriptedPrompter, T0 } from "../support/init-fakes.js";
@@ -68,6 +68,64 @@ describe("subscribing the alert address (FR-045)", () => {
     expect(failure).toBeInstanceOf(Error);
     expect((failure as Error).message).toContain("Invalid parameter: Endpoint https://events.pagerduty.com/...");
     expect(JSON.stringify(failure) + String((failure as Error).stack)).not.toContain("SECRETKEY123");
+  });
+});
+
+describe("the AWS calls behind the alerts (the operator role's IAM scope, Task 1)", () => {
+  /** A client that records each command's class name and input, and answers with `answer`. */
+  function recording(answer: (name: string) => unknown = () => ({})) {
+    const calls: Array<{ command: string; input: unknown }> = [];
+    return {
+      calls,
+      async send(command: unknown) {
+        const { constructor, input } = command as { constructor: { name: string }; input: unknown };
+        calls.push({ command: constructor.name, input });
+        return answer(constructor.name);
+      },
+    };
+  }
+
+  it("sends exactly the inputs the operator role allows: the one topic, email or https, the test alarm, and DescribeBudget", async () => {
+    const sns = recording((name) => (name === "ListSubscriptionsByTopicCommand" ? { Subscriptions: [{ SubscriptionArn: `${TOPIC}:1`, Protocol: "email", Endpoint: "ops@example.com" }] } : {}));
+    const cloudWatch = recording((name) => (name === "DescribeAlarmHistoryCommand" ? { AlarmHistoryItems: [{ HistorySummary: "Alarm updated from OK to ALARM" }] } : {}));
+    const budgets = recording(() => ({ Budget: { BudgetLimit: { Amount: "100.0", Unit: "USD" } } }));
+    const api = awsAlertsApi({ sns, cloudWatch, budgets });
+    const alarm = testAlarmName("staging");
+    const since = new Date(T0);
+
+    expect(await api.subscriptions(TOPIC)).toEqual([{ arn: `${TOPIC}:1`, protocol: "email", endpoint: "ops@example.com" }]);
+    await api.subscribe(TOPIC, "email", "ops@example.com");
+    await api.subscribe(TOPIC, "https", WEBHOOK);
+    await api.setAlarmState(alarm, "ALARM", "agentx alerts test: a test alarm, not a real problem");
+    await api.setAlarmState(alarm, "OK", "agentx alerts test: done");
+    expect(await api.wentToAlarm(alarm, since)).toBe(true);
+    expect(await api.budget("123456789012", "agentx-staging-monthly")).toBe(100);
+
+    expect(sns.calls).toEqual([
+      { command: "ListSubscriptionsByTopicCommand", input: { TopicArn: TOPIC } },
+      { command: "SubscribeCommand", input: { TopicArn: TOPIC, Protocol: "email", Endpoint: "ops@example.com" } },
+      { command: "SubscribeCommand", input: { TopicArn: TOPIC, Protocol: "https", Endpoint: WEBHOOK } },
+    ]);
+    expect(cloudWatch.calls).toEqual([
+      { command: "SetAlarmStateCommand", input: { AlarmName: "agentx-staging-TestAlarm", StateValue: "ALARM", StateReason: "agentx alerts test: a test alarm, not a real problem" } },
+      { command: "SetAlarmStateCommand", input: { AlarmName: "agentx-staging-TestAlarm", StateValue: "OK", StateReason: "agentx alerts test: done" } },
+      { command: "DescribeAlarmHistoryCommand", input: { AlarmName: "agentx-staging-TestAlarm", HistoryItemType: "StateUpdate", StartDate: since, MaxRecords: 10 } },
+    ]);
+    expect(budgets.calls).toEqual([{ command: "DescribeBudgetCommand", input: { AccountId: "123456789012", BudgetName: "agentx-staging-monthly" } }]);
+  });
+
+  it("pages the subscriptions with the same topic, and reads a missing budget as none", async () => {
+    const pages = [{ Subscriptions: [{ SubscriptionArn: "PendingConfirmation", Protocol: "email", Endpoint: "a@example.com" }], NextToken: "page-2" }, { Subscriptions: [{ SubscriptionArn: `${TOPIC}:2`, Protocol: "https", Endpoint: "https://hooks.example.com/x" }] }];
+    const sns = recording(() => pages.shift());
+    const budgets = { calls: [] as string[], async send(command: unknown) { budgets.calls.push((command as { constructor: { name: string } }).constructor.name); throw Object.assign(new Error("no such budget"), { name: "NotFoundException" }); } };
+    const api = awsAlertsApi({ sns, cloudWatch: recording(), budgets });
+    expect(await api.subscriptions(TOPIC)).toHaveLength(2);
+    expect(sns.calls).toEqual([
+      { command: "ListSubscriptionsByTopicCommand", input: { TopicArn: TOPIC } },
+      { command: "ListSubscriptionsByTopicCommand", input: { TopicArn: TOPIC, NextToken: "page-2" } },
+    ]);
+    expect(await api.budget("123456789012", "agentx-staging-monthly")).toBeUndefined();
+    expect(budgets.calls).toEqual(["DescribeBudgetCommand"]);
   });
 });
 
