@@ -58,6 +58,40 @@ describe("init prerequisites", () => {
     expect(openRouter).toHaveBeenCalledTimes(1);
   });
 
+  it("checks OpenRouter with the key init collected but has not stored yet, instead of falling back to Bedrock", async () => {
+    const openRouter = vi.fn(async () => {});
+    const checks = passingChecks({ openRouter });
+    const model = "qwen/qwen3-coder";
+    const answers = sampleAnswers({ models: { orchestrator: model, classifier: model, worker: model,
+      providers: { orchestrator: "openrouter", classifier: "openrouter", worker: "openrouter" },
+    } });
+    const lines: string[] = [];
+    await checkPrerequisites({ answers, release: fakeRelease(), caller, checks, prompter: scriptedPrompter([]), write: (line) => lines.push(line),
+      openRouterKey: { key: "sk-or-v1-pending-key-value", providers: ["deepinfra/turbo"] } });
+    expect(checks.models).toEqual([]);
+    expect(openRouter).toHaveBeenCalledTimes(1);
+    expect(openRouter).toHaveBeenCalledWith(model, { providers: ["deepinfra/turbo"] }, "sk-or-v1-pending-key-value");
+    expect(lines.join("\n")).not.toContain("sk-or-v1-pending-key-value");
+    expect(lines.join("\n")).toContain("ok openrouter/qwen/qwen3-coder supports tools and answers");
+  });
+
+  it("awsPrerequisiteChecks().openRouter sends a supplied key without reading any secret", async () => {
+    const seen: string[] = [];
+    const fakeFetch = (async (url: string, init?: RequestInit) => {
+      seen.push(`${url} ${new Headers(init?.headers).get("Authorization") ?? ""}`);
+      const body = url.endsWith("/models")
+        ? { data: [{ id: "qwen/qwen3-coder", supported_parameters: ["tools"] }] }
+        : { choices: [{ message: { content: "OK" } }] };
+      return new Response(JSON.stringify(body), { status: 200 });
+    }) as typeof fetch;
+    const checks = awsPrerequisiteChecks({ region: "us-east-1", account: "123456789012", store: new MemoryParameterStore(), runner: { run: async () => ({ stdout: "", stderr: "" }) }, fetch: fakeFetch });
+    await checks.openRouter?.("qwen/qwen3-coder", {}, "sk-or-v1-pending-key-value");
+    expect(seen).toEqual([
+      "https://openrouter.ai/api/v1/models Bearer sk-or-v1-pending-key-value",
+      "https://openrouter.ai/api/v1/chat/completions Bearer sk-or-v1-pending-key-value",
+    ]);
+  });
+
   it("does not print upstream errors or credentials when OpenRouter preflight fails", async () => {
     const checks = passingChecks({ openRouter: async () => { throw new Error("sk-secret and private prompt"); } });
     const answers = sampleAnswers({ models: { orchestrator: "model", classifier: "model", worker: "model",

@@ -12,7 +12,7 @@ import { executeCli } from "../../packages/cli/src/main.js";
 import { environmentCachePath } from "../../packages/cli/src/environments/cache.js";
 import { lockParameterName } from "../../packages/cli/src/environments/lock.js";
 import { readEnvironmentSettings, settingsParameterName } from "../../packages/cli/src/environments/settings.js";
-import { INIT_STEP_IDS, installAnswersParameterName, installProgressParameterName, readInstallProgress } from "../../packages/cli/src/init/install-state.js";
+import { INIT_STEP_IDS, installAnswersParameterName, installProgressParameterName, readInstallAnswers, readInstallProgress } from "../../packages/cli/src/init/install-state.js";
 import { initSteps, nextStepsText, type InitCliDependencies } from "../../packages/cli/src/init/commands.js";
 import {
   allStackOutputs, browserThatCreatesGitHubApp, fakeGitHubApi, fakeSlackApi, HOLDER, memoryInitSecrets, passingChecks, scriptedDeployer, scriptedPrompter,
@@ -90,8 +90,9 @@ async function everywhereButSecrets(h: Harness): Promise<string> {
   return [h.printed(), ...h.store.values.values(), cache].join("\n");
 }
 
-// The questions a first run asks with every default taken (Task 4's order), then the plan.
-const FIRST_RUN = ["", "", "", "", "", "", "", "", "ops@example.com", "acme", "", "", "", "", true];
+// The questions a first run asks with every default taken (Task 4's order, with the model
+// provider question after sign-in), then the plan.
+const FIRST_RUN = ["", "", "", "", "", "", "", "", "", "ops@example.com", "acme", "", "", "", "", true];
 // The Slack step: installed, the token, the signing secret, "the right bot?"; then the Slack
 // service step's "Request URL Verified?" (Task 9's fix round added both confirms).
 const SLACK = ["installed", TEST_BOT_TOKEN, TEST_SIGNING_SECRET, true, true];
@@ -402,6 +403,108 @@ describe("agentx init", () => {
     expect(h.printed()).toContain("--alert-webhook-env HOOK (https://api.opsgenie.com/...) differs from what this install started with (https://events.pagerduty.com/...)");
     expect(h.secrets.values.get("agentx/staging/alert-endpoint")).toBe(WEBHOOK);
     expect(h.printed()).not.toContain("SECRETother");
+  });
+});
+
+const OPENROUTER_KEY = "sk-or-v1-feedface0123456789OPENROUTERSECRET";
+const OPENROUTER_ARN = "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/openrouter-AbCdEf";
+// A first run choosing OpenRouter: engine, sign-in, provider, the three model ids, the key (hidden),
+// then the rest of FIRST_RUN from the permission boundary on (the plan's confirm included).
+const OPENROUTER_FIRST_RUN = ["", "", "openrouter", "qwen/qwen3-coder", "qwen/qwen3-coder", "anthropic/claude-sonnet-4", OPENROUTER_KEY, ...FIRST_RUN.slice(6)];
+const OPENROUTER_FLAGS = ["--model-provider", "openrouter", "--orchestrator-model", "qwen/qwen3-coder", "--classifier-model", "qwen/qwen3-coder", "--worker-model", "qwen/qwen3-coder"];
+
+function recordingOpenRouterChecks() {
+  const calls: Array<{ modelId: string; secretArn?: string; key?: string }> = [];
+  return { calls, checks: passingChecks({ openRouter: async (modelId, config, key) => { calls.push({ modelId, ...(config.secretArn === undefined ? {} : { secretArn: config.secretArn }), ...(key === undefined ? {} : { key }) }); } }) };
+}
+
+describe("agentx init with OpenRouter", () => {
+  it("asks for the key hidden, stores it raw in agentx/<env>/openrouter before any stack, and passes only its ARN on", async () => {
+    const h = await harness();
+    const { calls, checks } = recordingOpenRouterChecks();
+    const prompter = scriptedPrompter([...OPENROUTER_FIRST_RUN, ...SLACK]);
+    const hidden: string[] = [];
+    const recording = { ...prompter, secret: async (question: string, options: { flag: string; multiline?: boolean }) => { hidden.push(question); return prompter.secret(question, options); } };
+    expect(await h.run([], { prompter: recording, checks })).toBe(0);
+    expect(prompter.remaining()).toBe(0);
+    expect(hidden[0]).toBe("OpenRouter API key");
+    expect(h.secrets.values.get("agentx/staging/openrouter")).toBe(OPENROUTER_KEY);
+    // The preflight used the key before it was stored, so no Bedrock fallback was checked.
+    expect(checks.models).toEqual([]);
+    expect(calls.map((call) => call.key)).toEqual([OPENROUTER_KEY, OPENROUTER_KEY]);
+    expect(h.printed()).toContain("agentx/staging/openrouter");
+    expect((await readInstallAnswers(h.store, "staging"))?.models.openRouter).toEqual({ secretArn: OPENROUTER_ARN });
+    const openRouterParameters = h.deployer.requests.filter((request) => "OpenRouterSecretArn" in request.parameters);
+    expect(openRouterParameters.map((request) => request.part)).toEqual(["control-plane", "runtime", "slack"]);
+    expect(openRouterParameters.every((request) => request.parameters.OpenRouterSecretArn === OPENROUTER_ARN)).toBe(true);
+    const everywhere = await everywhereButSecrets(h);
+    expect(everywhere).not.toContain(OPENROUTER_KEY);
+    expect(JSON.stringify(h.deployer.requests.map((request) => request.parameters))).not.toContain(OPENROUTER_KEY);
+  });
+
+  it("a resume after the key was stored does not ask for it again", async () => {
+    const h = await harness();
+    const { checks } = recordingOpenRouterChecks();
+    h.deployer.fail.set(environmentStackName("staging", "control-plane"), new Error("Resource limit exceeded"));
+    expect(await h.run([], { prompter: scriptedPrompter(OPENROUTER_FIRST_RUN), checks })).not.toBe(0);
+    expect(h.secrets.values.get("agentx/staging/openrouter")).toBe(OPENROUTER_KEY);
+    h.deployer.fail.clear();
+    const prompter = scriptedPrompter(SLACK);
+    expect(await h.run([], { prompter, checks })).toBe(0);
+    expect(prompter.remaining()).toBe(0);
+    expect(prompter.asked).not.toContain("OpenRouter API key");
+    expect(await everywhereButSecrets(h)).not.toContain(OPENROUTER_KEY);
+  });
+
+  it("with --yes, takes the key from --openrouter-key-file, and a rerun of the same command replaces it and asks nothing", async () => {
+    const h = await harness();
+    const keyFile = join(await tmp("agentx-openrouter-key-"), "key");
+    await writeFile(keyFile, `${OPENROUTER_KEY}\n`);
+    const { checks } = recordingOpenRouterChecks();
+    h.deployer.fail.set(environmentStackName("staging", "control-plane"), new Error("Resource limit exceeded"));
+    const argv = [...UNATTENDED, "--alert-email", "ops@example.com", ...OPENROUTER_FLAGS, "--openrouter-key-file", keyFile];
+    expect(await h.run(argv, { processEnv: UNATTENDED_ENV, checks })).not.toBe(0);
+    expect(h.secrets.values.get("agentx/staging/openrouter")).toBe(OPENROUTER_KEY);
+    h.deployer.fail.clear();
+    const rotated = OPENROUTER_KEY.replace("feedface", "0ddba11x");
+    await writeFile(keyFile, rotated);
+    expect(await h.run(argv, { processEnv: UNATTENDED_ENV, checks })).toBe(0);
+    expect(h.secrets.values.get("agentx/staging/openrouter")).toBe(rotated);
+    const everywhere = await everywhereButSecrets(h);
+    for (const key of [OPENROUTER_KEY, rotated]) expect(everywhere).not.toContain(key);
+  });
+
+  it("with --yes and no key flag, refuses before creating anything and names the flags", async () => {
+    const h = await harness();
+    expect(await h.run([...UNATTENDED, "--alert-email", "ops@example.com", ...OPENROUTER_FLAGS], { processEnv: UNATTENDED_ENV })).toBe(2);
+    for (const flag of ["--openrouter-key-file", "--openrouter-key-env", "--openrouter-secret-arn"]) expect(h.printed()).toContain(flag);
+    expect(h.store.values.has(installAnswersParameterName("staging"))).toBe(false);
+    expect(h.secrets.values.has("agentx/staging/openrouter")).toBe(false);
+    expect(h.deployer.requests).toEqual([]);
+  });
+
+  it("with --openrouter-secret-arn, asks for no key, stores none, and refuses a key flag on resume", async () => {
+    const h = await harness();
+    const own = "arn:aws:secretsmanager:us-east-1:123456789012:secret:my-openrouter-AbCdEf";
+    const { calls, checks } = recordingOpenRouterChecks();
+    h.deployer.fail.set(environmentStackName("staging", "control-plane"), new Error("Resource limit exceeded"));
+    expect(await h.run([...UNATTENDED, "--alert-email", "ops@example.com", ...OPENROUTER_FLAGS, "--openrouter-secret-arn", own], { processEnv: UNATTENDED_ENV, checks })).not.toBe(0);
+    expect(h.secrets.values.has("agentx/staging/openrouter")).toBe(false);
+    expect(calls[0]).toEqual({ modelId: "qwen/qwen3-coder", secretArn: own });
+    expect((await readInstallAnswers(h.store, "staging"))?.models.openRouter).toEqual({ secretArn: own });
+    expect(await h.run([...UNATTENDED, "--openrouter-key-env", "OR_KEY"], { processEnv: { ...UNATTENDED_ENV, OR_KEY: OPENROUTER_KEY } })).toBe(2);
+    expect(h.printed()).toContain("--openrouter-key-env OR_KEY differs from what this install started with");
+    expect(h.printed()).not.toContain(OPENROUTER_KEY);
+  });
+
+  it("keeps Bedrock the default under --yes", async () => {
+    const h = await harness();
+    expect(await h.run([...UNATTENDED, "--alert-email", "ops@example.com"], { processEnv: UNATTENDED_ENV })).toBe(0);
+    const models = (await readInstallAnswers(h.store, "staging"))?.models;
+    expect(models?.orchestrator).toBe("us.anthropic.claude-sonnet-4-6");
+    expect(models?.providers).toBeUndefined();
+    expect(models?.openRouter).toBeUndefined();
+    expect(h.secrets.values.has("agentx/staging/openrouter")).toBe(false);
   });
 });
 

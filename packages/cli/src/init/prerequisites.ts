@@ -16,7 +16,9 @@ import type { Prompter } from "./prompts.js";
 export interface PrerequisiteChecks {
   /** A one-token Bedrock Converse call. */
   converse(modelId: string): Promise<void>;
-  openRouter?(modelId: string, config: NonNullable<ModelsAnswers["openRouter"]>): Promise<void>;
+  /** Checks an OpenRouter model. `key`, when given, is the key init collected but has not stored
+   * yet (the secret is created only after the plan); otherwise the key is read from config.secretArn. */
+  openRouter?(modelId: string, config: OpenRouterCheckConfig, key?: string): Promise<void>;
   /** Regional on-demand Standard EC2 vCPU quota. */
   ec2Quota(): Promise<number>;
   /** The command's --version output, or undefined when it is not installed. */
@@ -28,6 +30,9 @@ export interface PrerequisiteChecks {
 }
 
 export type ModelRole = "orchestrator" | "classifier" | "worker";
+export type OpenRouterCheckConfig = Partial<NonNullable<ModelsAnswers["openRouter"]>>;
+/** An OpenRouter key collected by init's questions, not yet stored in Secrets Manager. */
+export interface PendingOpenRouterKey { key: string; providers?: readonly string[] }
 
 export const DEDICATED_ACCOUNT_NOTE =
   "AgentX recommends a dedicated AWS account for each install: environments that share an account are not a security boundary against each other.";
@@ -115,6 +120,7 @@ function nodeVersionOk(version: string): boolean {
 export async function checkPrerequisites(input: {
   answers: InitAnswers; release: ReleaseCoverage; caller: { account: string; arn: string };
   checks: PrerequisiteChecks; prompter: Prompter; write: (line: string) => void;
+  openRouterKey?: PendingOpenRouterKey;
 }): Promise<void> {
   const { answers, checks, write } = input;
   const { region } = answers;
@@ -147,12 +153,14 @@ export async function checkPrerequisites(input: {
     if (seen.has(identifier)) continue;
     if (provider === "openrouter") {
       try {
-        if (!answers.models.openRouter) {
+        const pending = input.openRouterKey;
+        if (!answers.models.openRouter && pending === undefined) {
           openRouterModel(modelId);
           throw new MissingOpenRouterSecret();
         }
         if (!checks.openRouter) throw new Error("OpenRouter check is not configured");
-        await checks.openRouter(modelId, answers.models.openRouter);
+        if (answers.models.openRouter) await checks.openRouter(modelId, answers.models.openRouter);
+        else if (pending !== undefined) await checks.openRouter(modelId, pending.providers === undefined ? {} : { providers: [...pending.providers] }, pending.key);
         seen.add(identifier);
         write(`ok ${identifier} supports tools and answers`);
       } catch (error) {
@@ -278,9 +286,9 @@ export function awsPrerequisiteChecks(input: { region: string; account: string; 
   });
   const quotas = new ServiceQuotasClient({ region: input.region });
   return {
-    async openRouter(modelId, config) {
+    async openRouter(modelId, config, suppliedKey) {
       openRouterModel(modelId);
-      const key = await readOpenRouterKey(config.secretArn);
+      const key = suppliedKey ?? await readOpenRouterKey(config.secretArn ?? "");
       const headers = { Authorization: `Bearer ${key}`, "Content-Type": "application/json" };
       await withDeadline(async (signal) => {
         const catalog = await input.fetch("https://openrouter.ai/api/v1/models", { headers, signal });

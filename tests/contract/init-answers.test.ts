@@ -6,7 +6,7 @@ import { readInstallAnswers } from "../../packages/cli/src/init/install-state.js
 import { unattendedPrompter } from "../../packages/cli/src/init/prompts.js";
 import { GITHUB_LOGIN_PATTERN } from "../../packages/cli/src/deploy/answer-schemas.js";
 import { SecretAlreadyExistsError } from "../../packages/cli/src/deploy/signing-key.js";
-import { scriptedPrompter } from "../support/init-fakes.js";
+import { memoryInitSecrets, scriptedPrompter } from "../support/init-fakes.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 
 const T0 = Date.parse("2026-09-27T00:00:00.000Z");
@@ -42,9 +42,10 @@ describe("init questions", () => {
     await expect(collectInitAnswers({ ...base, flags: { ...flags, openrouterSecretArn: "sk-raw-secret" }, prompter: scriptedPrompter([]) })).rejects.toThrow("invalid model configuration");
   });
   it("takes every default with Enter and asks for what has no default", async () => {
-    const prompter = scriptedPrompter(["", "", "", "", "", "", "", "", "ops@example.com", "acme", "", "", "", ""]);
+    const prompter = scriptedPrompter(["", "", "", "", "", "", "", "", "", "ops@example.com", "acme", "", "", "", ""]);
     const { answers, notes, alertWebhook } = await collectInitAnswers({ ...base, flags: {}, prompter });
     expect(prompter.remaining()).toBe(0);
+    expect(prompter.asked[2]).toBe("Model provider");
     expect(alertWebhook).toBeUndefined();
     expect(notes).toEqual([]);
     expect(answers).toEqual({
@@ -140,6 +141,102 @@ describe("init questions", () => {
     expect(GITHUB_LOGIN_PATTERN.test("-bad")).toBe(false);
     await expect(collectInitAnswers({ ...base, flags: { ...everyFlag, githubAccount: "-bad" }, prompter: scriptedPrompter([]) }))
       .rejects.toThrow("--github-account -bad is not a GitHub organization or user name");
+  });
+});
+
+const OPENROUTER_KEY = "sk-or-v1-0123456789abcdefKEYSECRET";
+
+/** Records which questions came through the hidden secret prompt. */
+function recordingSecrets(prompter: ReturnType<typeof scriptedPrompter>) {
+  const hidden: string[] = [];
+  return {
+    hidden,
+    prompter: { ...prompter, secret: async (question: string, options: { flag: string; multiline?: boolean }) => { hidden.push(question); return prompter.secret(question, options); } },
+  };
+}
+
+describe("OpenRouter from init", () => {
+  // engine, sign-in, provider, the three OpenRouter model ids, the key, boundary, operator, alerts, email, GitHub account, type, app name, Slack name, posted messages
+  const OPENROUTER_RUN = ["", "", "openrouter", "qwen/qwen3-coder", "qwen/qwen3-coder", "anthropic/claude-sonnet-4", OPENROUTER_KEY, "", "", "", "ops@example.com", "acme", "", "", "", ""];
+
+  it("choosing OpenRouter asks the three model ids and the key (hidden), and stores the raw key as agentx/<env>/openrouter with only its ARN in the answers", async () => {
+    const scripted = scriptedPrompter(OPENROUTER_RUN);
+    const { prompter, hidden } = recordingSecrets(scripted);
+    const collected = await collectInitAnswers({ ...base, flags: {}, prompter });
+    expect(scripted.remaining()).toBe(0);
+    expect(scripted.asked.slice(2, 7)).toEqual(["Model provider", "OpenRouter orchestrator model id", "OpenRouter classifier model id", "OpenRouter worker model id", "OpenRouter API key"]);
+    expect(hidden).toEqual(["OpenRouter API key"]);
+    expect(collected.answers.models).toEqual({
+      orchestrator: "qwen/qwen3-coder", classifier: "qwen/qwen3-coder", worker: "anthropic/claude-sonnet-4",
+      providers: { orchestrator: "openrouter", classifier: "openrouter", worker: "openrouter" },
+    });
+    expect(JSON.stringify(collected.answers)).not.toContain(OPENROUTER_KEY);
+
+    const store = new MemoryParameterStore();
+    const secrets = memoryInitSecrets();
+    const saved = await persistInitAnswers({ store, secrets, collected });
+    expect(secrets.values.get("agentx/staging/openrouter")).toBe(OPENROUTER_KEY);
+    expect(saved.models.openRouter).toEqual({ secretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/openrouter-AbCdEf" });
+    expect(await readInstallAnswers(store, "staging")).toEqual(saved);
+    expect([...store.values.values()].join("\n")).not.toContain(OPENROUTER_KEY);
+  });
+
+  it("keeps an --openrouter-providers allowlist with a key init stores", async () => {
+    const flags: InitFlags = { ...everyFlag, orchestratorModel: "a/b", classifierModel: "a/b", workerModel: "a/b", modelProvider: "openrouter", openrouterProviders: "deepinfra/turbo", openrouterKey: { envName: "OR_KEY" } };
+    const collected = await collectInitAnswers({ ...base, processEnv: { OR_KEY: OPENROUTER_KEY }, flags, prompter: scriptedPrompter([]) });
+    const saved = await persistInitAnswers({ store: new MemoryParameterStore(), secrets: memoryInitSecrets(), collected });
+    expect(saved.models.openRouter?.providers).toEqual(["deepinfra/turbo"]);
+  });
+
+  it("with --yes, reads the key from --openrouter-key-file, and without a key flag refuses, naming the flags", async () => {
+    const flags: InitFlags = { ...everyFlag, orchestratorModel: "a/b", classifierModel: "a/b", workerModel: "a/b", modelProvider: "openrouter" };
+    const collected = await collectInitAnswers({
+      ...base, flags: { ...flags, openrouterKey: { file: "/keys/openrouter" } }, prompter: unattendedPrompter(),
+      readFile: async (path) => { if (path !== "/keys/openrouter") throw new Error("unexpected path"); return `${OPENROUTER_KEY}\n`; },
+    });
+    expect(collected.openRouterKey).toBe(OPENROUTER_KEY);
+    expect(collected.answers.models.providers).toEqual({ orchestrator: "openrouter", classifier: "openrouter", worker: "openrouter" });
+
+    const refusal = collectInitAnswers({ ...base, flags, prompter: unattendedPrompter() });
+    await expect(refusal).rejects.toThrow("--openrouter-key-file <path> or --openrouter-key-env <NAME>");
+    await expect(collectInitAnswers({ ...base, flags, prompter: unattendedPrompter() })).rejects.toThrow("--openrouter-secret-arn");
+  });
+
+  it("with --openrouter-secret-arn, asks for no key and stores nothing", async () => {
+    const secretArn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:my-openrouter-AbCdEf";
+    const scripted = scriptedPrompter(["", "", "openrouter", "a/b", "a/b", "a/b", "", "", "", "ops@example.com", "acme", "", "", "", ""]);
+    const { prompter, hidden } = recordingSecrets(scripted);
+    const collected = await collectInitAnswers({ ...base, flags: { openrouterSecretArn: secretArn }, prompter });
+    expect(scripted.remaining()).toBe(0);
+    expect(hidden).toEqual([]);
+    expect(collected.openRouterKey).toBeUndefined();
+    const secrets = memoryInitSecrets();
+    const saved = await persistInitAnswers({ store: new MemoryParameterStore(), secrets, collected });
+    expect(saved.models.openRouter).toEqual({ secretArn });
+    expect(secrets.values.size).toBe(0);
+  });
+
+  it("lets per-component provider flags win over the provider question, so mixed setups still come from flags", async () => {
+    const flags: InitFlags = { ...everyFlag, modelProvider: "openrouter", classifierProvider: "amazon-bedrock", orchestratorModel: "a/b", workerModel: "a/b", openrouterKey: { envName: "OR_KEY" } };
+    const { answers } = await collectInitAnswers({ ...base, processEnv: { OR_KEY: OPENROUTER_KEY }, flags, prompter: scriptedPrompter([]) });
+    expect(answers.models.providers).toEqual({ orchestrator: "openrouter", classifier: "amazon-bedrock", worker: "openrouter" });
+    expect(answers.models.classifier).toBe("amazon.nova-lite-v1:0");
+  });
+
+  it("writes no answers when the key cannot be stored, and never names the key in the error", async () => {
+    const collected = await collectInitAnswers({ ...base, flags: {}, prompter: scriptedPrompter(OPENROUTER_RUN) });
+    const store = new MemoryParameterStore();
+    const secrets = { ...memoryInitSecrets(), create: async () => { throw Object.assign(new Error("User is not authorized to perform: secretsmanager:CreateSecret"), { name: "AccessDeniedException" }); } };
+    const failure = await persistInitAnswers({ store, secrets, collected }).then(() => undefined, (error: unknown) => error as Error);
+    expect(failure?.message).toContain("not authorized");
+    expect(failure?.message).not.toContain(OPENROUTER_KEY);
+    expect(await readInstallAnswers(store, "staging")).toBeUndefined();
+  });
+
+  it("refuses a resume flag that changes the provider question's answer", async () => {
+    const collected = await collectInitAnswers({ ...base, flags: {}, prompter: scriptedPrompter(OPENROUTER_RUN) });
+    expect(() => assertResumeFlagsMatch(collected.answers, { modelProvider: "openrouter" })).not.toThrow();
+    expect(() => assertResumeFlagsMatch(collected.answers, { modelProvider: "amazon-bedrock" })).toThrow("--model-provider amazon-bedrock differs");
   });
 });
 

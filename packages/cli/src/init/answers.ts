@@ -34,8 +34,12 @@ export interface InitFlags {
   identity?: "cognito" | "oidc";
   oidcIssuer?: string; oidcAudience?: string; oidcClientId?: string; adminClaim?: string; adminValues?: string;
   orchestratorModel?: string; classifierModel?: string; workerModel?: string;
+  /** --model-provider: sets all three providers; a per-component provider flag wins over it. */
+  modelProvider?: string;
   orchestratorProvider?: string; classifierProvider?: string; workerProvider?: string;
   openrouterSecretArn?: string; openrouterProviders?: string;
+  /** --openrouter-key-file / --openrouter-key-env: like the webhook, never a flag value. */
+  openrouterKey?: SecretSource;
   permissionBoundary?: string; operatorPrincipal?: string;
   alertEmail?: string;
   /** --alert-webhook-file / --alert-webhook-env: there is deliberately no flag that takes the address itself. */
@@ -47,7 +51,28 @@ export interface InitFlags {
   workerImage?: string; slackImage?: string;
 }
 
-export interface CollectedAnswers { answers: InitAnswers; /** the secret webhook address, never stored in answers */ alertWebhook?: string; notes: string[] }
+export interface CollectedAnswers {
+  answers: InitAnswers;
+  /** the secret webhook address, never stored in answers */
+  alertWebhook?: string;
+  /** The OpenRouter API key init stores in openRouterSecretName(env) before saving the answers,
+   * which then hold only the secret's ARN. Never stored in answers. */
+  openRouterKey?: string;
+  /** The --openrouter-providers allowlist that goes with openRouterKey's secret. */
+  openRouterProviders?: string[];
+  notes: string[];
+}
+
+export function openRouterSecretName(env: string): string {
+  return `agentx/${env}/openrouter`;
+}
+
+const MODEL_PROVIDERS = ["amazon-bedrock", "openrouter"] as const;
+type ModelProvider = (typeof MODEL_PROVIDERS)[number];
+const isModelProvider = (value: string): value is ModelProvider => (MODEL_PROVIDERS as readonly string[]).includes(value);
+
+/** The runtime refuses a key shorter than this (model-runtime's readOpenRouterKey), so init does too. */
+const OPENROUTER_KEY_MIN_LENGTH = 10;
 
 export function alertWebhookSecretName(env: string): string {
   return `agentx/${env}/alert-endpoint`;
@@ -117,12 +142,21 @@ export async function collectInitAnswers(input: {
     identity = { mode: "oidc", issuer, audience, clientId, adminClaim, adminValues };
   }
 
+  // The provider question is asked only when no provider or model flag pins the answer already:
+  // a per-component flag keeps today's meaning (unset components stay on Bedrock), so mixed setups
+  // still come from flags.
+  const providerFlagGiven = [flags.orchestratorProvider, flags.classifierProvider, flags.workerProvider].some((value) => value !== undefined);
+  const modelFlagGiven = [flags.orchestratorModel, flags.classifierModel, flags.workerModel].some((value) => value !== undefined);
+  const allProvider = flags.modelProvider ?? (providerFlagGiven || modelFlagGiven ? "amazon-bedrock" : await prompter.choose<string>("Model provider", [
+    { value: "amazon-bedrock", label: "Amazon Bedrock (recommended)" },
+    { value: "openrouter", label: "OpenRouter" },
+  ], { flag: "--model-provider", defaultValue: "amazon-bedrock" }));
   const providers = {
-    orchestrator: flags.orchestratorProvider ?? "amazon-bedrock",
-    classifier: flags.classifierProvider ?? "amazon-bedrock",
-    worker: flags.workerProvider ?? "amazon-bedrock",
+    orchestrator: flags.orchestratorProvider ?? allProvider,
+    classifier: flags.classifierProvider ?? allProvider,
+    worker: flags.workerProvider ?? allProvider,
   };
-  if (Object.values(providers).some((value) => value !== "amazon-bedrock" && value !== "openrouter")) {
+  if (!Object.values(providers).every(isModelProvider)) {
     throw agentXError("CONFIG_INVALID", "model providers must be amazon-bedrock or openrouter");
   }
   const orchestrator = providers.orchestrator === "openrouter"
@@ -131,15 +165,32 @@ export async function collectInitAnswers(input: {
   const classifier = providers.classifier === "openrouter"
     ? flags.classifierModel ?? await prompter.ask("OpenRouter classifier model id", { flag: "--classifier-model" })
     : await modelChoice(prompter, flags.classifierModel, "Action-gate classifier model", "--classifier-model", CLASSIFIER_MODEL_CHOICES, DEFAULT_CLASSIFIER_MODEL);
-  const worker = flags.workerModel ?? await prompter.ask("Worker model id", { flag: "--worker-model", ...(providers.worker === "amazon-bedrock" ? { defaultValue: DEFAULT_WORKER_MODEL } : {}) });
+  const worker = providers.worker === "openrouter"
+    ? flags.workerModel ?? await prompter.ask("OpenRouter worker model id", { flag: "--worker-model" })
+    : flags.workerModel ?? await prompter.ask("Worker model id", { flag: "--worker-model", defaultValue: DEFAULT_WORKER_MODEL });
   const usesOpenRouter = Object.values(providers).includes("openrouter");
-  const secretArn = flags.openrouterSecretArn ?? (usesOpenRouter ? await prompter.ask("OpenRouter Secrets Manager ARN (leave blank to use the default Bedrock model)", { flag: "--openrouter-secret-arn", defaultValue: "" }) : undefined);
-  if (flags.openrouterProviders && !secretArn) throw agentXError("CONFIG_INVALID", "--openrouter-providers requires --openrouter-secret-arn");
-  const parsedModels = ModelsAnswersSchema.safeParse({ orchestrator, classifier, worker,
-    ...(usesOpenRouter ? { providers } : {}),
-    ...(secretArn ? { openRouter: { secretArn, ...(flags.openrouterProviders ? { providers: flags.openrouterProviders.split(",") } : {}) } } : {}),
+  const secretArn = flags.openrouterSecretArn;
+  if (secretArn !== undefined && flags.openrouterKey !== undefined) {
+    throw agentXError("CONFIG_INVALID", "--openrouter-secret-arn names a secret you made yourself, so it cannot go with --openrouter-key-file or --openrouter-key-env; pass one or the other");
+  }
+  // Without a secret of your own, init asks for the key and stores it itself (openRouterSecretName).
+  const openRouterKey = secretArn === undefined && (usesOpenRouter || flags.openrouterKey !== undefined)
+    ? await readOpenRouterKeyAnswer({ source: flags.openrouterKey ?? {}, processEnv: input.processEnv, prompter, ...(input.readFile === undefined ? {} : { readFile: input.readFile }) })
+    : undefined;
+  if (flags.openrouterProviders && !secretArn && openRouterKey === undefined) {
+    throw agentXError("CONFIG_INVALID", "--openrouter-providers needs OpenRouter: choose it as a model provider, or pass --openrouter-secret-arn");
+  }
+  const openRouterProviders = flags.openrouterProviders ? flags.openrouterProviders.split(",") : undefined;
+  const modelsInput = { orchestrator, classifier, worker, ...(usesOpenRouter ? { providers } : {}) };
+  // The stored key's ARN is known only once init stores it, after the plan; a stand-in ARN checks
+  // the provider slugs now, so nothing is created for answers that would be refused.
+  const checkArn = secretArn ?? (openRouterKey === undefined ? undefined : `arn:aws:secretsmanager:${input.region}:${input.account}:secret:${openRouterSecretName(input.env)}-XXXXXX`);
+  const parsedModels = ModelsAnswersSchema.safeParse({
+    ...modelsInput,
+    ...(checkArn === undefined ? {} : { openRouter: { secretArn: checkArn, ...(openRouterProviders === undefined ? {} : { providers: openRouterProviders }) } }),
   });
   if (!parsedModels.success) throw agentXError("CONFIG_INVALID", "invalid model configuration; check providers and the OpenRouter secret ARN/provider slugs");
+  const models: InitAnswers["models"] = secretArn === undefined ? ModelsAnswersSchema.parse(modelsInput) : parsedModels.data;
 
   if (orchestrator === GLM) notes.push(GLM_NOTE);
   if (classifier === HAIKU) notes.push(HAIKU_NOTE);
@@ -207,7 +258,7 @@ export async function collectInitAnswers(input: {
     schemaVersion: 1,
     env: input.env, region: input.region, account: input.account, engine, releaseVersion: input.releaseVersion,
     identity,
-    models: parsedModels.data,
+    models,
     ...(boundary === "" ? {} : { permissionsBoundaryArn: boundary }),
     ...(operator === "" ? {} : { operatorPrincipalArn: operator }),
     ...(workerImage === undefined && slackImage === undefined
@@ -218,7 +269,26 @@ export async function collectInitAnswers(input: {
     slack: { appName: slackAppName, appPostedMessages },
     createdAt: new Date(input.now()).toISOString(),
   };
-  return { answers, notes, ...(alertWebhook === undefined ? {} : { alertWebhook }) };
+  return {
+    answers, notes,
+    ...(alertWebhook === undefined ? {} : { alertWebhook }),
+    ...(openRouterKey === undefined ? {} : { openRouterKey, ...(openRouterProviders === undefined ? {} : { openRouterProviders }) }),
+  };
+}
+
+export async function readOpenRouterKeyAnswer(input: { source: SecretSource; processEnv: NodeJS.ProcessEnv; prompter: Prompter; readFile?: (path: string) => Promise<string> }): Promise<string> {
+  let key: string;
+  try {
+    key = await secretFromSource({ what: "OpenRouter API key", flag: "--openrouter-key", ...input });
+  } catch (error) {
+    // With --yes, the refusal also names the bring-your-own-secret flag.
+    if (error instanceof Error && /needs an answer; with --yes/.test(error.message)) {
+      throw agentXError("CONFIG_INVALID", `${error.message.replace(/^[A-Z_]+: /, "")}, or --openrouter-secret-arn <arn> for a secret you made yourself`);
+    }
+    throw error;
+  }
+  if (key.length < OPENROUTER_KEY_MIN_LENGTH) throw agentXError("CONFIG_INVALID", "the OpenRouter API key is too short; copy it again from openrouter.ai/settings/keys");
+  return key;
 }
 
 /** How a resume check's value is normalized before comparing (Fix round 1, item 2): a person
@@ -235,6 +305,10 @@ const RESUME_CHECKS: Array<{ flag: string; key: keyof InitFlags; kind?: ResumeCh
   { flag: "--admin-claim", key: "adminClaim", stored: (a) => (a.identity.mode === "oidc" ? a.identity.adminClaim : undefined) },
   { flag: "--orchestrator-model", key: "orchestratorModel", stored: (a) => a.models.orchestrator },
   { flag: "--classifier-model", key: "classifierModel", stored: (a) => a.models.classifier },
+  { flag: "--model-provider", key: "modelProvider", stored: (a) => {
+    const { orchestrator = "amazon-bedrock", classifier = "amazon-bedrock", worker = "amazon-bedrock" } = a.models.providers ?? {};
+    return orchestrator === classifier && classifier === worker ? worker : "mixed";
+  } },
   { flag: "--orchestrator-provider", key: "orchestratorProvider", stored: (a) => a.models.providers?.orchestrator ?? "amazon-bedrock" },
   { flag: "--classifier-provider", key: "classifierProvider", stored: (a) => a.models.providers?.classifier ?? "amazon-bedrock" },
   { flag: "--worker-provider", key: "workerProvider", stored: (a) => a.models.providers?.worker ?? "amazon-bedrock" },
@@ -320,22 +394,68 @@ export function assertResumeFlagsMatch(stored: InitAnswers, flags: InitFlags): v
   if (flags.alertWebhook !== undefined && stored.alert.kind !== "webhook") {
     resumeMismatch(webhookFlagDisplay(flags.alertWebhook), alertKindWord(stored.alert));
   }
+  // A key flag on a resume replaces the key init stored; an install that reads a secret you made
+  // yourself, or uses no OpenRouter, has no such key to replace.
+  if (flags.openrouterKey !== undefined && !storesOwnOpenRouterKey(stored)) {
+    resumeMismatch(openRouterKeyFlagDisplay(flags.openrouterKey), stored.models.openRouter?.secretArn);
+  }
+}
+
+/** True when the install's OpenRouter secret is the one init created, openRouterSecretName(env). */
+export function storesOwnOpenRouterKey(answers: InitAnswers): boolean {
+  const arn = answers.models.openRouter?.secretArn;
+  return arn !== undefined && arn.split(":secret:")[1]?.replace(/-[A-Za-z0-9]{6}$/, "") === openRouterSecretName(answers.env);
+}
+
+function openRouterKeyFlagDisplay(source: SecretSource): string {
+  if (source.file !== undefined) return `--openrouter-key-file ${source.file}`;
+  if (source.envName !== undefined) return `--openrouter-key-env ${source.envName}`;
+  return "--openrouter-key";
 }
 
 export interface AlertSecretWriter { create(name: string, value: string): Promise<void>; put(name: string, value: string): Promise<void> }
 
-/** Creates the alert webhook secret, or replaces its value when it already exists. */
-export async function storeAlertWebhook(secrets: AlertSecretWriter, secretName: string, address: string): Promise<void> {
+/** Creates the secret, or replaces its value when it already exists. */
+async function createOrReplaceSecret(secrets: AlertSecretWriter, secretName: string, value: string): Promise<void> {
   try {
-    await secrets.create(secretName, address);
+    await secrets.create(secretName, value);
   } catch (error) {
     if (!(error instanceof SecretAlreadyExistsError)) throw error;
-    await secrets.put(secretName, address);
+    await secrets.put(secretName, value);
   }
 }
 
-export async function persistInitAnswers(input: { store: ParameterStore; secrets: AlertSecretWriter; collected: CollectedAnswers }): Promise<void> {
-  const { answers, alertWebhook } = input.collected;
+/** Creates the alert webhook secret, or replaces its value when it already exists. */
+export async function storeAlertWebhook(secrets: AlertSecretWriter, secretName: string, address: string): Promise<void> {
+  await createOrReplaceSecret(secrets, secretName, address);
+}
+
+export interface InitSecretWriter extends AlertSecretWriter {
+  /** The secret's full ARN, or undefined when it does not exist. Needed only to store an OpenRouter key. */
+  arn?(name: string): Promise<string | undefined>;
+}
+
+/** Stores the raw OpenRouter key (not JSON: the runtime reads the secret string as the key),
+ * replacing a value left by a run that stopped before saving its answers, and returns its ARN. */
+export async function storeOpenRouterKey(secrets: InitSecretWriter, env: string, key: string): Promise<string> {
+  const name = openRouterSecretName(env);
+  await createOrReplaceSecret(secrets, name, key);
+  const arn = await secrets.arn?.(name);
+  if (arn === undefined) throw agentXError("RUNTIME_UNAVAILABLE", `secret ${name} was just stored but cannot be described; run agentx init again`);
+  return arn;
+}
+
+/** Stores every secret the answers point to, then saves the answers, and returns what was saved.
+ * The secrets go first, so a secret that fails to store leaves no answers behind and the next run
+ * starts again from the questions; once the answers are saved, a rerun resumes and asks nothing. */
+export async function persistInitAnswers(input: { store: ParameterStore; secrets: InitSecretWriter; collected: CollectedAnswers }): Promise<InitAnswers> {
+  const { alertWebhook, openRouterKey, openRouterProviders } = input.collected;
+  let answers = input.collected.answers;
   if (alertWebhook !== undefined && answers.alert.kind === "webhook") await storeAlertWebhook(input.secrets, answers.alert.secretName, alertWebhook);
+  if (openRouterKey !== undefined) {
+    const secretArn = await storeOpenRouterKey(input.secrets, answers.env, openRouterKey);
+    answers = { ...answers, models: ModelsAnswersSchema.parse({ ...answers.models, openRouter: { secretArn, ...(openRouterProviders === undefined ? {} : { providers: openRouterProviders }) } }) };
+  }
   await writeInstallAnswers(input.store, answers);
+  return answers;
 }

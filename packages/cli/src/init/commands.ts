@@ -15,8 +15,8 @@ import { ssmParameterStore } from "../environments/parameter-store.js";
 import { readEnvironmentSettings, type EnvironmentSettings } from "../environments/settings.js";
 import { isPrereleaseVersion, RELEASE_VERSION } from "../version.js";
 import {
-  assertResumeFlagsMatch, checkAlertWebhook, collectInitAnswers, persistInitAnswers, storeAlertWebhook, webhookDisplay, webhookFlagDisplay,
-  type CollectedAnswers, type InitFlags,
+  assertResumeFlagsMatch, checkAlertWebhook, collectInitAnswers, openRouterSecretName, persistInitAnswers, readOpenRouterKeyAnswer, storeAlertWebhook,
+  webhookDisplay, webhookFlagDisplay, type CollectedAnswers, type InitFlags,
 } from "./answers.js";
 import { cloudFormationStatusReader, secretsManagerInitSecrets, type InitContext, type InitSecrets, type PreMadeGitHubApp, type SecretFlags, type StackStatusReader } from "./context.js";
 import { deployStep } from "./deploy-steps.js";
@@ -172,6 +172,14 @@ async function resumedAlertWebhook(input: { answers: InitAnswers; flags: InitFla
   return address;
 }
 
+/** On a resume, --openrouter-key-file or --openrouter-key-env replaces the key init stored (a
+ * rotated key), so rerunning the same unattended command works; assertResumeFlagsMatch already
+ * refused either flag on an install whose key is not in openRouterSecretName(env). */
+async function resumedOpenRouterKey(input: { flags: InitFlags; processEnv: NodeJS.ProcessEnv; prompter: Prompter }): Promise<string | undefined> {
+  if (input.flags.openrouterKey === undefined) return undefined;
+  return readOpenRouterKeyAnswer({ source: input.flags.openrouterKey, processEnv: input.processEnv, prompter: input.prompter });
+}
+
 async function init(options: InitOptions, deps: InitCliDependencies, services: { stderr: Writer; home: string }): Promise<InitResult> {
   const { env } = options;
   const write = (line: string) => { services.stderr.write(`${line}\n`); };
@@ -246,30 +254,42 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
 
   const activePrompter = prompter;
   const finalAnswers = answers;
-  const runPrerequisites = () => checkPrerequisites({ answers: finalAnswers, release, caller, checks, prompter: activePrompter, write });
+  // A first run's OpenRouter key is not stored until after the plan, so the check uses it directly.
+  const pendingKey = collected?.openRouterKey === undefined
+    ? undefined
+    : { key: collected.openRouterKey, ...(collected.openRouterProviders === undefined ? {} : { providers: collected.openRouterProviders }) };
+  const runPrerequisites = () => checkPrerequisites({ answers: finalAnswers, release, caller, checks, prompter: activePrompter, write, ...(pendingKey === undefined ? {} : { openRouterKey: pendingKey }) });
   let prerequisitesPassed = false;
   let rotatedWebhook: string | undefined;
+  let rotatedOpenRouterKey: string | undefined;
   if (collected !== undefined) {
     await runPrerequisites();
     prerequisitesPassed = true;
     // Printed even under --yes, before anything is created.
-    await confirmInstallPlan({ answers: collected.answers, notes: collected.notes, prompter, write: (text) => { services.stderr.write(text); } });
+    await confirmInstallPlan({
+      answers: collected.answers, notes: collected.notes, prompter, write: (text) => { services.stderr.write(text); },
+      extras: { storesOpenRouterKey: collected.openRouterKey !== undefined, ...(collected.openRouterProviders === undefined ? {} : { openRouterProviders: collected.openRouterProviders }) },
+    });
   } else {
     write(`Resuming the install of environment ${env}.`);
     rotatedWebhook = await resumedAlertWebhook({ answers, flags: options.flags, processEnv, prompter });
+    rotatedOpenRouterKey = await resumedOpenRouterKey({ flags: options.flags, processEnv, prompter });
   }
 
-  // F14: the answers and the alert secret are saved under the environment lock, which is taken
-  // once for the whole run; the deploy steps pass lockHeld.
+  // F14: the answers and the alert and OpenRouter secrets are saved under the environment lock,
+  // which is taken once for the whole run; the deploy steps pass lockHeld. The secrets are stored
+  // before the answers, and before any step, so every stack that takes OpenRouterSecretArn gets it.
   const firstRun = collected;
   const saveAnswers = async () => {
     if (firstRun !== undefined) {
       if ((await readInstallAnswers(store, env)) !== undefined) {
         throw agentXError("CONFIG_INVALID", `another agentx init started installing environment ${env} while this one was asking its questions; nothing was saved. Run agentx init again to continue that install`);
       }
-      await persistInitAnswers({ store, secrets, collected: firstRun });
-    } else if (rotatedWebhook !== undefined && finalAnswers.alert.kind === "webhook") {
-      await storeAlertWebhook(secrets, finalAnswers.alert.secretName, rotatedWebhook);
+      // The saved answers carry the stored OpenRouter key's ARN, which every step reads.
+      context.answers = await persistInitAnswers({ store, secrets, collected: firstRun });
+    } else {
+      if (rotatedWebhook !== undefined && finalAnswers.alert.kind === "webhook") await storeAlertWebhook(secrets, finalAnswers.alert.secretName, rotatedWebhook);
+      if (rotatedOpenRouterKey !== undefined) await secrets.put(openRouterSecretName(env), rotatedOpenRouterKey);
     }
   };
 
