@@ -18,7 +18,7 @@ import { AgentXError, agentXError, environmentStackName, EnvironmentNameSchema, 
 import type { CallerIdentity } from "../environments/adopt.js";
 import { stsCallerIdentity } from "../environments/adopt.js";
 import { ssmParameterStore, type ParameterStore } from "../environments/parameter-store.js";
-import { ACCOUNT_PATTERN, IdentityAnswersSchema, ImagesAnswersSchema, ModelsAnswersSchema, REGION_PATTERN } from "./answer-schemas.js";
+import { ACCOUNT_PATTERN, BudgetAnswersSchema, IdentityAnswersSchema, ImagesAnswersSchema, ModelsAnswersSchema, REGION_PATTERN } from "./answer-schemas.js";
 import { assertCdkBootstrapped, assertSourceAtRelease, buildSource, cdkDeployer, type CommandRunner } from "./cdk-engine.js";
 import type { ChangeSetChange, DeployEvent, StackDeployer, StackOutputs } from "./deployer.js";
 import { deployEnvironment, type DeployAnswers, type DeployEnvironmentResult } from "./deploy-environment.js";
@@ -104,6 +104,7 @@ export const DeployAnswersSchema = z
     operatorPrincipalArn: z.string().min(1).optional(),
     images: ImagesAnswersSchema.optional(),
     slackAppPostedMessages: z.enum(["accept", "ignore"]).optional(),
+    budget: BudgetAnswersSchema.optional(),
   })
   .strict()
   .superRefine(requireOidcAdminAndClient);
@@ -162,6 +163,7 @@ function toDeployAnswers(parsed: z.infer<typeof DeployAnswersSchema>): DeployAns
     ...(parsed.operatorPrincipalArn === undefined ? {} : { operatorPrincipalArn: parsed.operatorPrincipalArn }),
     ...(images === undefined ? {} : { images }),
     ...(parsed.slackAppPostedMessages === undefined ? {} : { slackAppPostedMessages: parsed.slackAppPostedMessages }),
+    ...(parsed.budget === undefined ? {} : { budget: parsed.budget }),
   };
 }
 

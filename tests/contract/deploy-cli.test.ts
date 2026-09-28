@@ -222,6 +222,7 @@ function scriptedOutputs(): Record<string, StackOutputs> {
       TurnRecordsTableName: "tr",
       SlackThreadSessionBucketName: "b",
       SlackSecretArn: `arn:aws:secretsmanager:${REGION}:${ACCOUNT}:secret:SlackSecret-x`,
+      OperatorAlertsTopicArn: `arn:aws:sns:${REGION}:${ACCOUNT}:agentx-staging-alerts`,
     },
     [stackName("runtime")]: { RuntimeArn: "arn:runtime" },
     [stackName("slack")]: { OrchestratorArn: "arn:slack" },

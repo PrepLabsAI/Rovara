@@ -2,13 +2,18 @@ import { grantOpenRouterSecret } from "./openrouter.js";
 import { resolve } from "node:path";
 import {
   ArnFormat,
+  Aws,
+  CfnCondition,
   CfnOutput,
   CfnParameter,
   Duration,
+  Fn,
   RemovalPolicy,
   Stack,
   type StackProps,
+  Token,
   aws_apigatewayv2 as apigwv2,
+  aws_budgets as budgets,
   aws_cloudwatch as cloudwatch,
   aws_cloudwatch_actions as cloudwatchActions,
   aws_dynamodb as dynamodb,
@@ -343,6 +348,46 @@ export class ControlPlaneStack extends Stack {
         ArnLike: { "aws:SourceArn": `arn:${this.partition}:cloudwatch:${this.region}:${this.account}:alarm:*` },
       },
     }));
+    // FR-047, environment naming only. AWS Budgets publishes the budget's notifications to the
+    // same topic, so the topic policy must allow it (enforceSSL left only a Deny).
+    if (naming.env !== undefined) {
+      operatorAlerts.addToResourcePolicy(new iam.PolicyStatement({
+        principals: [new iam.ServicePrincipal("budgets.amazonaws.com")],
+        actions: ["sns:Publish"],
+        resources: [operatorAlerts.topicArn],
+        conditions: { StringEquals: { "aws:SourceAccount": this.account } },
+      }));
+      const monthlyUsd = new CfnParameter(this, "BudgetMonthlyUsd", {
+        type: "String", default: "0", allowedPattern: "^[0-9]{1,7}$",
+        description: "The environment's monthly AWS budget in US dollars; 0 means no budget",
+      });
+      const scope = new CfnParameter(this, "BudgetScope", {
+        type: "String", default: "tag", allowedValues: ["tag", "account"],
+        description: "tag: costs tagged agentx:env for this environment (the tag must be activated in Billing); account: the whole account",
+      });
+      const hasBudget = new CfnCondition(this, "HasBudget", { expression: Fn.conditionNot(Fn.conditionEquals(monthlyUsd.valueAsString, "0")) });
+      const byTag = new CfnCondition(this, "BudgetByTag", { expression: Fn.conditionEquals(scope.valueAsString, "tag") });
+      const notify = (type: "ACTUAL" | "FORECASTED", threshold: number) => ({
+        notification: { notificationType: type, comparisonOperator: "GREATER_THAN", threshold, thresholdType: "PERCENTAGE" },
+        subscribers: [{ subscriptionType: "SNS", address: operatorAlerts.topicArn }],
+      });
+      const budget = new budgets.CfnBudget(this, "MonthlyBudget", {
+        budget: {
+          budgetName: naming.alarmName("monthly"),
+          budgetType: "COST",
+          timeUnit: "MONTHLY",
+          // CloudFormation passes the parameter's string; the Budgets resource accepts it as its number.
+          budgetLimit: { amount: Token.asNumber(monthlyUsd.valueAsString), unit: "USD" },
+          costFilters: Fn.conditionIf(byTag.logicalId, { TagKeyValue: [`user:agentx:env$${naming.env}`] }, Aws.NO_VALUE),
+        },
+        notificationsWithSubscribers: [notify("ACTUAL", 80), notify("FORECASTED", 100)],
+        // C5 / FR-047: every resource the installer creates carries agentx:env. AWS::Budgets::Budget
+        // takes tags through ResourceTags rather than the stack's Tags.of(app), so it is set here
+        // explicitly; Tags.of(app) does not reach this resource.
+        resourceTags: [{ key: "agentx:env", value: naming.env }],
+      });
+      budget.cfnOptions.condition = hasBudget;
+    }
     const notifyOperator = new cloudwatchActions.SnsAction(operatorAlerts);
     // The broker publishes these in embedded metric format with a dimensionless series as well as a
     // per-connector one; the alarms read the dimensionless series, so they cover every connector.

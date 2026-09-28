@@ -100,6 +100,12 @@ function halve(text: string): string {
 export function emitTurnMetrics(record: TurnRecord, log: ServiceLog): void {
   if (record.disposition !== "answered" && record.disposition !== "failed") return;
   log("metric", { metric: "TurnCompleted", count: 1 });
+  // FR-045's slow-turn alarm reads the slowest turn in each 5 minutes; "count" is the value field
+  // every metric filter here maps.
+  log("metric", { metric: "TurnDurationMs", count: record.durationMs });
+  // FR-045's checker-failure alarm: the action gate could not check a call, so it failed closed.
+  const checkerFailures = record.calls.filter((call) => call.gate?.source === "classifier_unavailable" || call.gate?.source === "gate_error").length;
+  if (checkerFailures > 0) log("metric", { metric: "GateCheckerFailed", count: checkerFailures });
   if (record.emptyResponse) log("metric", { metric: "TurnEmptyResponse", count: 1 });
   const schemaErrors = new Map<string, number>();
   let unknownNames = 0;

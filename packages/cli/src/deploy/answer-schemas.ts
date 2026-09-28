@@ -48,3 +48,6 @@ export const ImagesAnswersSchema = z.object({ worker: z.string().min(1).optional
  * install answers already stored in SSM or validated fresh at the `agentx init` prompt: both call
  * this schema rather than each keeping their own regex that could quietly drift apart. */
 export const AlertEmailSchema = z.email();
+
+/** FR-047: the monthly budget init offers; absent means none. */
+export const BudgetAnswersSchema = z.object({ monthlyUsd: z.number().int().min(1).max(1_000_000), scope: z.enum(["tag", "account"]) }).strict();

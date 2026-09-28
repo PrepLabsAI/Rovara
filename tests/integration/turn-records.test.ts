@@ -271,6 +271,8 @@ describe("turn metrics", () => {
     const metricLines = logs.filter((line) => line.includes("\"event\":\"metric\"")).map((line) => JSON.parse(line) as Record<string, unknown>);
     expect(metricLines).toEqual([
       { event: "metric", metric: "TurnCompleted", count: 1 },
+      // FR-045's slow-turn alarm (spec 015 phase 15d2): every answered or failed turn reports its duration.
+      { event: "metric", metric: "TurnDurationMs", count: 0 },
       { event: "metric", metric: "TurnEmptyResponse", count: 1 },
       { event: "metric", metric: "ToolSchemaError", connector: "github", count: 1 },
       { event: "metric", metric: "ToolSchemaError", connector: "agentx", count: 1 },

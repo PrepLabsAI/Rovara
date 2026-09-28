@@ -1,15 +1,21 @@
 import { openRouterParameters, openRouterRoutingParameter } from "./openrouter.js";
 import {
   Aws,
+  CfnCondition,
   CfnOutput,
   CfnParameter,
+  Duration,
+  Fn,
   RemovalPolicy,
   Stack,
   type StackProps,
+  aws_cloudwatch as cloudwatch,
+  aws_cloudwatch_actions as cloudwatchActions,
   aws_ec2 as ec2,
   aws_ecs as ecs,
   aws_iam as iam,
   aws_logs as logs,
+  aws_sns as sns,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
@@ -84,14 +90,7 @@ export class SlackOrchestratorStack extends Stack {
     });
     // The awslogs driver does not extract embedded metric format, so the service logs
     // {"event":"metric","metric":<name>,"count":<n>} lines and these filters publish them.
-    const serviceMetrics: ReadonlyArray<{ metric: string; dimensions?: Record<string, string> }> = [
-      { metric: "TurnCompleted" },
-      { metric: "TurnEmptyResponse" },
-      { metric: "ToolUnknownName" },
-      { metric: "TurnRecordWriteFailed" },
-      { metric: "ToolSchemaError", dimensions: { connector: "$.connector" } },
-    ];
-    for (const { metric, dimensions } of serviceMetrics) {
+    const serviceMetric = (metric: string, dimensions?: Record<string, string>) => {
       logGroup.addMetricFilter(`${metric}Metric`, {
         filterPattern: logs.FilterPattern.all(
           logs.FilterPattern.stringValue("$.event", "=", "metric"),
@@ -102,7 +101,15 @@ export class SlackOrchestratorStack extends Stack {
         metricValue: "$.count",
         ...(dimensions === undefined ? {} : { dimensions }),
       });
-    }
+    };
+    const serviceMetrics: ReadonlyArray<{ metric: string; dimensions?: Record<string, string> }> = [
+      { metric: "TurnCompleted" },
+      { metric: "TurnEmptyResponse" },
+      { metric: "ToolUnknownName" },
+      { metric: "TurnRecordWriteFailed" },
+      { metric: "ToolSchemaError", dimensions: { connector: "$.connector" } },
+    ];
+    for (const { metric, dimensions } of serviceMetrics) serviceMetric(metric, dimensions);
     // A failure while emitting the lines above would otherwise leave those metrics silently missing.
     logGroup.addMetricFilter("TurnMetricsEmitFailedMetric", {
       filterPattern: logs.FilterPattern.stringValue("$.event", "=", "turn_metrics.emit_failed"),
@@ -110,6 +117,73 @@ export class SlackOrchestratorStack extends Stack {
       metricName: "TurnMetricsEmitFailed",
       metricValue: "1",
     });
+    // FR-045, environment naming only, so the legacy template stays byte-identical. The topic is
+    // the control plane's; its policy already lets any alarm in this account publish.
+    if (naming.env !== undefined) {
+      const alertsTopicArn = new CfnParameter(this, "OperatorAlertsTopicArn", {
+        type: "String",
+        description: "The environment's alert topic, the control plane's OperatorAlertsTopicArn output",
+      });
+      const slowTurnMinutes = new CfnParameter(this, "SlowTurnMinutes", {
+        type: "Number", default: 5, minValue: 1, maxValue: 60,
+        description: "A turn slower than this many minutes raises the SlowTurns alarm (alerts.slowTurnMinutes)",
+      });
+      const notify = new cloudwatchActions.SnsAction(sns.Topic.fromTopicArn(this, "OperatorAlerts", alertsTopicArn.valueAsString));
+      const eventMetric = (id: string, event: string, metricName: string) => logGroup.addMetricFilter(id, {
+        filterPattern: logs.FilterPattern.stringValue("$.event", "=", event),
+        metricNamespace: naming.metricsNamespace, metricName, metricValue: "1",
+      });
+      eventMetric("TurnFailedMetric", "task.failed", "TurnFailed");
+      eventMetric("SlackDeliveryFailedMetric", "request.abandoned", "SlackDeliveryFailed");
+      // F18: reuses the same serviceMetric helper as the existing metric filters above, rather than
+      // a second copy of the loop, for the two metrics emitTurnMetrics adds (turn-records.ts).
+      for (const metric of ["TurnDurationMs", "GateCheckerFailed"]) serviceMetric(metric);
+      const agentx = (metricName: string, statistic: string) =>
+        new cloudwatch.Metric({ namespace: naming.metricsNamespace, metricName, statistic, period: Duration.minutes(5) });
+      const alarm = (id: string, props: { suffix: string; description: string; metric: cloudwatch.IMetric; threshold: number }) => {
+        const created = new cloudwatch.Alarm(this, id, {
+          alarmName: naming.alarmName(props.suffix),
+          alarmDescription: props.description,
+          metric: props.metric,
+          threshold: props.threshold,
+          evaluationPeriods: 1,
+          comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+          treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        });
+        created.addAlarmAction(notify);
+        return created;
+      };
+      alarm("TurnErrorsAlarm", { suffix: "TurnErrors", threshold: 1, metric: agentx("TurnFailed", "Sum"),
+        description: "An orchestrator turn failed. Export recent turns with agentx admin turns export --since 1h." });
+      alarm("SlowTurnsAlarm", {
+        suffix: "SlowTurns",
+        threshold: slowTurnMinutes.valueAsNumber,
+        metric: new cloudwatch.MathExpression({
+          expression: "slowest / 60000",
+          usingMetrics: { slowest: agentx("TurnDurationMs", "Maximum") },
+          period: Duration.minutes(5),
+          label: "Slowest turn in minutes",
+        }),
+        description: "A turn took longer than alerts.slowTurnMinutes. Export recent turns with agentx admin turns export --since 1h.",
+      });
+      alarm("SlackDeliveryFailedAlarm", { suffix: "SlackDeliveryFailed", threshold: 1, metric: agentx("SlackDeliveryFailed", "Sum"),
+        description: "A Slack request was given up after its last attempt, so the member got no answer. Check the Slack service logs for request.abandoned." });
+      alarm("CheckerFailuresAlarm", { suffix: "CheckerFailures", threshold: 1, metric: agentx("GateCheckerFailed", "Sum"),
+        description: "The action gate could not check a call and refused it. Check the classifier model's access and the Slack service logs." });
+      const onBedrock = (id: string, provider: CfnParameter) => new CfnCondition(this, id, { expression: Fn.conditionEquals(provider.valueAsString, "amazon-bedrock") });
+      const throttles = (id: string, suffix: string, model: CfnParameter, condition: CfnCondition, what: string) => {
+        const created = alarm(id, {
+          suffix, threshold: 5,
+          metric: new cloudwatch.Metric({ namespace: "AWS/Bedrock", metricName: "InvocationThrottles", dimensionsMap: { ModelId: model.valueAsString }, statistic: "Sum", period: Duration.minutes(5) }),
+          description: `Amazon Bedrock throttled the ${what} model at least 5 times in 5 minutes. Ask for a higher quota in Service Quotas, or choose another model.`,
+        });
+        (created.node.defaultChild as cloudwatch.CfnAlarm).cfnOptions.condition = condition;
+      };
+      throttles("BedrockThrottlingAlarm", "BedrockThrottling", modelId, onBedrock("OrchestratorOnBedrock", modelProvider), "orchestrator");
+      throttles("ClassifierThrottlingAlarm", "ClassifierThrottling", gateClassifierModelId, onBedrock("ClassifierOnBedrock", classifierProvider), "classifier");
+      alarm("TestAlarm", { suffix: "TestAlarm", threshold: 1, metric: agentx("TestAlarmNeverEmitted", "Sum"),
+        description: "agentx alerts test sets this alarm to ALARM and back to OK. It never fires on its own." });
+    }
     const executionRole = new iam.Role(this, "ExecutionRole", {
       assumedBy: new iam.ServicePrincipal("ecs-tasks.amazonaws.com", {
         conditions: { StringEquals: { "aws:SourceAccount": this.account } },
