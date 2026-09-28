@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import { executeCli } from "../../packages/cli/src/main.js";
 import { changeLine } from "../../packages/cli/src/signin/apply.js";
+import { checkSlackClientId, slackClientIdProblem } from "../../packages/cli/src/signin/collect.js";
 import { runSigninDisable, runSigninEnable, runSigninShow, type SigninServices } from "../../packages/cli/src/signin/commands.js";
 import { readSignInSettings, writeSignInSettings, writeSlackTeamId } from "../../packages/cli/src/signin/settings.js";
 import { stagingSettings } from "../support/environment-fixtures.js";
@@ -17,6 +18,7 @@ const discovery = (issuer: string): typeof fetch => async (input: string | URL |
   if (url === `${issuer}/.well-known/openid-configuration`) return Response.json({ issuer, authorization_endpoint: `${issuer}/authorize`, token_endpoint: `${issuer}/token`, jwks_uri: `${issuer}/keys` });
   throw new TypeError("fetch failed");
 };
+const REPLACE = { slackClientId: "1111111111.2222222222222" };
 const slackOn = { schemaVersion: 1 as const, env: "staging", slack: true, updatedAt: "2026-09-27T00:00:00.000Z", updatedBy: HOLDER };
 
 async function services(prompts: Array<string | boolean>, overrides: Partial<SigninServices> = {}, parameters: Record<string, string> = SIGN_IN_PARAMETERS, stack: { finalStatus?: string; slackSecret?: Record<string, string> } = {}) {
@@ -98,8 +100,9 @@ describe("agentx signin enable slack (FR-045)", () => {
   it("puts the previous client credentials back when the stack update rolls back (fix round 1, I1)", async () => {
     const OLD_SECRET = "00000000000000000000000000000000";
     const before = { signingSecret: TEST_SIGNING_SECRET, botToken: TEST_BOT_TOKEN, clientId: "9999.8888", clientSecret: OLD_SECRET };
-    const h = await services(["1111111111.2222222222222", SLACK_CLIENT_SECRET, true], {}, SIGN_IN_PARAMETERS, { finalStatus: "UPDATE_ROLLBACK_COMPLETE", slackSecret: before });
-    const error = await runSigninEnable(h.s, "staging", "slack", {}, {}, false).then(() => undefined, (caught: unknown) => caught);
+    const h = await services([SLACK_CLIENT_SECRET, true], {}, SIGN_IN_PARAMETERS, { finalStatus: "UPDATE_ROLLBACK_COMPLETE", slackSecret: before });
+    // Replacing stored credentials takes --slack-client-id; without it the stored ones are reused.
+    const error = await runSigninEnable(h.s, "staging", "slack", REPLACE, {}, false).then(() => undefined, (caught: unknown) => caught);
     expect(error).toBeInstanceOf(Error);
     const message = error instanceof Error ? error.message : "";
     expect(message).toContain("ended in UPDATE_ROLLBACK_COMPLETE");
@@ -115,8 +118,8 @@ describe("agentx signin enable slack (FR-045)", () => {
     const before = { signingSecret: TEST_SIGNING_SECRET, botToken: TEST_BOT_TOKEN, clientId: "9999.8888", clientSecret: OLD_SECRET };
     // Each clock read moves on 10 minutes, so the 30-minute wait runs out while the stack is still updating.
     let clock = T0;
-    const h = await services(["1111111111.2222222222222", SLACK_CLIENT_SECRET, true], { now: () => (clock += 10 * 60_000) }, SIGN_IN_PARAMETERS, { finalStatus: "UPDATE_IN_PROGRESS", slackSecret: before });
-    const error = await runSigninEnable(h.s, "staging", "slack", {}, {}, false).then(() => undefined, (caught: unknown) => caught);
+    const h = await services([SLACK_CLIENT_SECRET, true], { now: () => (clock += 10 * 60_000) }, SIGN_IN_PARAMETERS, { finalStatus: "UPDATE_IN_PROGRESS", slackSecret: before });
+    const error = await runSigninEnable(h.s, "staging", "slack", REPLACE, {}, false).then(() => undefined, (caught: unknown) => caught);
     const message = error instanceof Error ? error.message : "";
     expect(message).toContain("the update of agentx-staging-control-plane is still running");
     expect(message).toContain("the new client credentials are kept in agentx/staging/slack");
@@ -128,7 +131,8 @@ describe("agentx signin enable slack (FR-045)", () => {
   describe("after a failed update, restores only on an allow-listed failure (fix round 2)", () => {
     const OLD = { signingSecret: TEST_SIGNING_SECRET, botToken: TEST_BOT_TOKEN, clientId: "9999.8888", clientSecret: "00000000000000000000000000000000" };
     const NEW = { clientId: "1111111111.2222222222222", clientSecret: SLACK_CLIENT_SECRET };
-    const PROMPTS = ["1111111111.2222222222222", SLACK_CLIENT_SECRET, true];
+    // These replace the stored credentials, which takes --slack-client-id.
+    const PROMPTS = [SLACK_CLIENT_SECRET, true];
     const failure = (promise: Promise<unknown>) => promise.then(() => "", (caught: unknown) => (caught instanceof Error ? caught.message : ""));
     /** Wraps the fake so a test can fail one call; `executed` turns true once ExecuteChangeSet was sent. */
     function intercept(h: Awaited<ReturnType<typeof services>>, fail: (name: string, executed: boolean) => Error | undefined) {
@@ -146,7 +150,7 @@ describe("agentx signin enable slack (FR-045)", () => {
 
     it("keeps the new credentials on UPDATE_ROLLBACK_FAILED, naming the status", async () => {
       const h = await services(PROMPTS, {}, SIGN_IN_PARAMETERS, { finalStatus: "UPDATE_ROLLBACK_FAILED", slackSecret: OLD });
-      const message = await failure(runSigninEnable(h.s, "staging", "slack", {}, {}, false));
+      const message = await failure(runSigninEnable(h.s, "staging", "slack", REPLACE, {}, false));
       expect(message).toContain("agentx-staging-control-plane is UPDATE_ROLLBACK_FAILED, so the new client credentials are kept in agentx/staging/slack; check the stack in the CloudFormation console, then run agentx signin enable slack again");
       expect(message).not.toContain("sign-in did not change");
       expect(JSON.parse(h.secrets.values.get("agentx/staging/slack")!)).toMatchObject(NEW);
@@ -156,7 +160,7 @@ describe("agentx signin enable slack (FR-045)", () => {
       const h = await services(PROMPTS, {}, SIGN_IN_PARAMETERS, { finalStatus: "UPDATE_ROLLBACK_COMPLETE", slackSecret: OLD });
       let readsAfterExecute = 0;
       intercept(h, (name, executed) => (name === "DescribeStacksCommand" && executed && ++readsAfterExecute > 1 ? Object.assign(new Error("Rate exceeded"), { name: "ThrottlingException" }) : undefined));
-      const message = await failure(runSigninEnable(h.s, "staging", "slack", {}, {}, false));
+      const message = await failure(runSigninEnable(h.s, "staging", "slack", REPLACE, {}, false));
       expect(message).toContain("the state of agentx-staging-control-plane could not be confirmed (Rate exceeded); the new client credentials are kept in agentx/staging/slack; check the stack's status in the CloudFormation console, then run agentx signin enable slack again");
       expect(message).not.toContain("sign-in did not change");
       expect(message).not.toContain("still running");
@@ -167,7 +171,7 @@ describe("agentx signin enable slack (FR-045)", () => {
       const h = await services(PROMPTS, {}, SIGN_IN_PARAMETERS, { slackSecret: OLD });
       // The change set executes (and the fake applies it), then polling it fails.
       intercept(h, (name, executed) => (name === "DescribeChangeSetCommand" && executed ? Object.assign(new Error("Rate exceeded"), { name: "ThrottlingException" }) : undefined));
-      const message = await failure(runSigninEnable(h.s, "staging", "slack", {}, {}, false));
+      const message = await failure(runSigninEnable(h.s, "staging", "slack", REPLACE, {}, false));
       expect(message).toContain("Rate exceeded; agentx-staging-control-plane did take the change, so the new client credentials are kept in agentx/staging/slack; run agentx signin enable slack again to record the settings");
       expect(h.cloudFormation.parameters.DeveloperSignInSlack).toBe("enabled");
       expect(JSON.parse(h.secrets.values.get("agentx/staging/slack")!)).toMatchObject(NEW);
@@ -177,7 +181,7 @@ describe("agentx signin enable slack (FR-045)", () => {
     it("puts the previous credentials back when the change set never executed", async () => {
       const h = await services(PROMPTS, {}, SIGN_IN_PARAMETERS, { slackSecret: OLD });
       intercept(h, (name) => (name === "ExecuteChangeSetCommand" ? Object.assign(new Error("Access denied"), { name: "AccessDeniedException" }) : undefined));
-      const message = await failure(runSigninEnable(h.s, "staging", "slack", {}, {}, false));
+      const message = await failure(runSigninEnable(h.s, "staging", "slack", REPLACE, {}, false));
       expect(message).toContain("Access denied; the previous client credentials were put back in agentx/staging/slack");
       expect(JSON.parse(h.secrets.values.get("agentx/staging/slack")!)).toEqual(OLD);
     });
@@ -254,6 +258,40 @@ describe("agentx signin enable slack (FR-045)", () => {
     const fresh = await services(["1111111111.2222222222222", SLACK_CLIENT_SECRET, true]);
     await runSigninEnable(fresh.s, "staging", "slack", {}, {}, false);
     expect(fresh.lines.join("\n")).not.toContain("within 5 minutes");
+  });
+
+  describe("stored Slack client credentials on a re-enable", () => {
+    const STORED = { signingSecret: TEST_SIGNING_SECRET, botToken: TEST_BOT_TOKEN, clientId: "9999.8888", clientSecret: "abcdef0123456789abcdef0123456789" };
+    const REUSE = "Using the Slack client credentials already stored in agentx/staging/slack; pass --slack-client-id to replace them.";
+
+    it("reuses them without asking, and never prints them", async () => {
+      const h = await services([true], {}, SIGN_IN_PARAMETERS, { slackSecret: STORED });
+      expect(await runSigninEnable(h.s, "staging", "slack", {}, {}, false)).toEqual({ changed: true });
+      expect(h.prompter.asked).toEqual(["Apply this change?"]);
+      expect(h.lines).toContain(REUSE);
+      expect(h.cloudFormation.parameters).toMatchObject({ DeveloperSignInSlack: "enabled", SlackTeamId: "T0TEAM" });
+      expect(JSON.parse(h.secrets.values.get("agentx/staging/slack")!)).toEqual(STORED);
+      const printed = h.lines.join("\n");
+      for (const value of [STORED.clientId, STORED.clientSecret, TEST_BOT_TOKEN]) expect(printed).not.toContain(value);
+    });
+
+    it("reuses them under --yes with nothing to answer", async () => {
+      const h = await services([], {}, SIGN_IN_PARAMETERS, { slackSecret: STORED });
+      expect(await runSigninEnable(h.s, "staging", "slack", {}, {}, true)).toEqual({ changed: true });
+      expect(h.prompter.asked).toEqual([]);
+      expect(h.lines).toContain(REUSE);
+    });
+
+    it("asks again when --slack-client-id is given, or when only one of the two is stored", async () => {
+      const replace = await services([SLACK_CLIENT_SECRET, true], {}, SIGN_IN_PARAMETERS, { slackSecret: STORED });
+      await runSigninEnable(replace.s, "staging", "slack", { slackClientId: "1111111111.2222222222222" }, {}, false);
+      expect(replace.lines).not.toContain(REUSE);
+      expect(JSON.parse(replace.secrets.values.get("agentx/staging/slack")!)).toMatchObject({ clientId: "1111111111.2222222222222", clientSecret: SLACK_CLIENT_SECRET });
+      const idOnly = { signingSecret: STORED.signingSecret, botToken: STORED.botToken, clientId: STORED.clientId };
+      const half = await services(["1111111111.2222222222222", SLACK_CLIENT_SECRET, true], {}, SIGN_IN_PARAMETERS, { slackSecret: idOnly });
+      await runSigninEnable(half.s, "staging", "slack", {}, {}, false);
+      expect(half.lines).not.toContain(REUSE);
+    });
   });
 
   it("never reads a secret from a flag value", async () => {
@@ -418,5 +456,17 @@ describe("the agentx signin command (F14)", () => {
     const code = await executeCli(["--env", "staging", "signin", "enable", "oidc", "--yes"], { stdout: { write: () => true }, stderr: { write: (text: string) => stderr.push(text) }, signin: withoutPrompter });
     expect(code).not.toBe(0);
     expect(stderr.join("")).toContain("with --yes, pass --signin-oidc-issuer");
+  });
+});
+
+describe("the Slack Client ID question", () => {
+  it("says a pasted 32-hex value looks like a secret, without repeating it", () => {
+    const pasted = "abcdef0123456789abcdef0123456789";
+    expect(slackClientIdProblem(pasted)).toBe("that looks like the client secret or signing secret; the Client ID is two numbers joined by a dot");
+    expect(slackClientIdProblem("not-an-id")).toBe("two numbers joined by a dot");
+    expect(slackClientIdProblem("1111111111.2222222222222")).toBeUndefined();
+    const error = (() => { try { checkSlackClientId(pasted); } catch (caught) { return caught as Error; } return undefined; })();
+    expect(error?.message).toContain("that looks like the client secret or signing secret");
+    expect(error?.message).not.toContain(pasted);
   });
 });

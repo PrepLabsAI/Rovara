@@ -28,14 +28,25 @@ export const SIGNIN_FLAG_NAMES = {
 } as const;
 
 const SLACK_CLIENT_ID = /^\d+\.\d+$/;
+const SLACK_CLIENT_SECRET = /^[a-f0-9]{32}$/;
+const LOOKS_LIKE_A_SECRET = "that looks like the client secret or signing secret; the Client ID is two numbers joined by a dot";
+
+/** Why a Client ID answer is wrong, never repeating it: a pasted secret must not be echoed. */
+export function slackClientIdProblem(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (SLACK_CLIENT_ID.test(trimmed)) return undefined;
+  return /^[a-f0-9]{32}$/i.test(trimmed) ? LOOKS_LIKE_A_SECRET : "two numbers joined by a dot";
+}
 
 export function checkSlackClientId(value: string): string {
-  if (!SLACK_CLIENT_ID.test(value.trim())) throw agentXError("CONFIG_INVALID", "a Slack client ID is two numbers joined by a dot (Basic Information, App Credentials, Client ID)");
+  const problem = slackClientIdProblem(value);
+  if (problem === LOOKS_LIKE_A_SECRET) throw agentXError("CONFIG_INVALID", `${problem} (Basic Information, App Credentials, Client ID)`);
+  if (problem !== undefined) throw agentXError("CONFIG_INVALID", "a Slack client ID is two numbers joined by a dot (Basic Information, App Credentials, Client ID)");
   return value.trim();
 }
 
 export function checkSlackClientSecret(value: string): string {
-  if (!/^[a-f0-9]{32}$/.test(value)) throw agentXError("CONFIG_INVALID", "a Slack client secret is 32 lowercase hexadecimal characters (Basic Information, App Credentials, Client Secret); it is not the Signing Secret");
+  if (!SLACK_CLIENT_SECRET.test(value)) throw agentXError("CONFIG_INVALID", "a Slack client secret is 32 lowercase hexadecimal characters (Basic Information, App Credentials, Client Secret); it is not the Signing Secret");
   return value;
 }
 
@@ -54,7 +65,7 @@ export async function slackSignInPrerequisites(input: { env: string; secrets: In
 export async function collectSlackClient(input: { prompter: Prompter; processEnv: NodeJS.ProcessEnv; flags: SigninFlags; secretFlags: SigninSecretFlags }): Promise<{ clientId: string; clientSecret: string }> {
   const clientId = checkSlackClientId(input.flags.slackClientId ?? await input.prompter.ask("Slack app Client ID (Basic Information, App Credentials)", {
     flag: SIGNIN_FLAG_NAMES.slackClientId,
-    validate: (value) => (SLACK_CLIENT_ID.test(value.trim()) ? undefined : "two numbers joined by a dot"),
+    validate: slackClientIdProblem,
   }));
   const clientSecret = checkSlackClientSecret(await secretFromSource({ what: "Slack client secret", flag: SIGNIN_FLAG_NAMES.slackClientSecret, source: input.secretFlags.slackClientSecret ?? {}, processEnv: input.processEnv, prompter: input.prompter }));
   return { clientId, clientSecret };
@@ -138,6 +149,17 @@ function undoableSecretWrite(input: { secrets: InitSecrets; name: string; write:
   };
 }
 
+/** Whether the Slack secret already holds a well-formed client ID and client secret. Reads only their shape; never returns or prints them. */
+async function hasStoredSlackClient(secrets: InitSecrets, name: string): Promise<boolean> {
+  const text = await secrets.get(name);
+  if (text === undefined) return false;
+  let value: unknown;
+  try { value = JSON.parse(text); } catch { return false; }
+  if (typeof value !== "object" || value === null) return false;
+  const { clientId, clientSecret } = value as { clientId?: unknown; clientSecret?: unknown };
+  return typeof clientId === "string" && SLACK_CLIENT_ID.test(clientId) && typeof clientSecret === "string" && SLACK_CLIENT_SECRET.test(clientSecret);
+}
+
 export interface SignInQuestionsInput {
   env: string; apiEndpoint: string; secrets: InitSecrets; prompter: Prompter; processEnv: NodeJS.ProcessEnv;
   flags: SigninFlags; secretFlags: SigninSecretFlags; write: (line: string) => void;
@@ -149,11 +171,16 @@ export interface SignInQuestionsInput {
  * client credentials. Nothing is stored here: `credentials.store` writes them into the Slack
  * secret, and applySignInChange calls it only once the change is confirmed (F21).
  */
-export async function enableSlackSignIn(input: SignInQuestionsInput & { slackApi: SlackApi; expectedTeamId?: string }): Promise<{ teamId: string; credentials: SignInCredentials }> {
+export async function enableSlackSignIn(input: SignInQuestionsInput & { slackApi: SlackApi; expectedTeamId?: string }): Promise<{ teamId: string; credentials?: SignInCredentials }> {
   const { teamId } = await slackSignInPrerequisites({ env: input.env, secrets: input.secrets, slackApi: input.slackApi, ...(input.expectedTeamId === undefined ? {} : { expectedTeamId: input.expectedTeamId }) });
   input.write(`Check that the Slack app's OAuth & Permissions page lists the redirect URL ${slackSignInCallbackUrl(input.apiEndpoint)} and the user scopes openid, email and profile.`);
-  const client = await collectSlackClient(input);
   const name = slackSecretName(input.env);
+  // A re-enable reuses what is stored, so nobody pastes the credentials again; a flag replaces them.
+  if (input.flags.slackClientId === undefined && input.secretFlags.slackClientSecret === undefined && await hasStoredSlackClient(input.secrets, name)) {
+    input.write(`Using the Slack client credentials already stored in ${name}; pass ${SIGNIN_FLAG_NAMES.slackClientId} to replace them.`);
+    return { teamId };
+  }
+  const client = await collectSlackClient(input);
   const credentials = undoableSecretWrite({
     secrets: input.secrets, name, unusedUntil: "Slack sign-in is on",
     write: (previous) => input.secrets.put(name, slackSecretWithSignIn(previous, client)),

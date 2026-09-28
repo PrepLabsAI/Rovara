@@ -63,7 +63,7 @@ export async function runSigninEnable(services: SigninServices, env: string, met
   // Each `next` reads the settings under the lock, so a change made while the questions were asked is kept.
   if (method === "slack") {
     const { teamId, credentials } = await enableSlackSignIn({ ...questions, slackApi: services.slackApi });
-    const result = await applySignInChange({ ...common, next: (current) => ({ slack: true, ...(current?.oidc === undefined ? {} : { oidc: current.oidc }) }), slackTeamId: teamId, credentials });
+    const result = await applySignInChange({ ...common, next: (current) => ({ slack: true, ...(current?.oidc === undefined ? {} : { oidc: current.oidc }) }), slackTeamId: teamId, ...(credentials === undefined ? {} : { credentials }) });
     return { changed: result.changed };
   }
   const { oidc, credentials } = await enableOidcSignIn({ ...questions, fetch: services.fetch });
