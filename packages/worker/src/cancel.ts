@@ -56,8 +56,10 @@ export class WorkerCancellationController {
   }> {
     const operation = this.active.get(operationId);
     if (!operation) throw agentXError("NOT_FOUND", "active operation not found");
-    await operation.session?.abort();
+    // Marked first: an abort can end the task's prompt normally, and the task must already see
+    // that it was cancelled when it checks (#136).
     this.cancelled.add(operationId);
+    await operation.session?.abort();
     for (const child of operation.processes) signalProcess(child, "SIGTERM");
     if (operation.processes.size > 0) await delay(graceMilliseconds);
     for (const child of operation.processes) signalProcess(child, "SIGKILL");
