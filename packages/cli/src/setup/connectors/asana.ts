@@ -8,10 +8,11 @@
 // oauth-refresh-token, all before get_project. Only the project revision waits for the read.
 // The sign-in listens on 127.0.0.1:8765 only, and closes on every path (admin/authorize.ts).
 import { agentXError, OAuthAppSecretSchema, type ConnectorConfig } from "@agentx/contracts";
+import type { AuthorizeSecrets } from "../../admin/authorize.js";
 import { AlertEmailSchema } from "../../deploy/answer-schemas.js";
 import { secretFromSource } from "../../init/prompts.js";
 import type { SetupServices } from "../services.js";
-import { addConnectorRevision, connectorSecretName, refuseLegacyGitHubMcp, scopeAlias, storeConnectorSecret, type ConnectorAddInput } from "./revision.js";
+import { addConnectorRevision, connectorSecretName, refuseLegacyGitHubMcp, scopeAlias, type ConnectorAddInput } from "./revision.js";
 
 export const ASANA_GUIDE = [
   "Asana: AgentX acts as a bot user that signs in once. An Asana token reaches everything that user sees.",
@@ -55,11 +56,21 @@ export async function addAsana(input: ConnectorAddInput & { services: ConnectorA
   const projectGid = checked(input.flags.asanaProject ?? await input.prompter.ask("The Asana project's GID (the number after /project/ in its address)", { flag: "--asana-project", validate: gidProblem }), gidProblem);
 
   const secretName = connectorSecretName(input.env, "asana");
-  // Only the app's client: the sign-in adds the refresh token, and only for the bot's account.
-  await storeConnectorSecret(input.secrets, secretName, JSON.stringify({ clientId, clientSecret }));
+  const client = JSON.stringify({ clientId, clientSecret });
+  // A first run creates the secret (tagged agentx:env) with the app's client only: there is nothing
+  // to lose yet. A rerun leaves the stored secret alone: the sign-in reads the new client from
+  // memory and writes the whole secret (client and refresh token) only after the bot's sign-in
+  // succeeds, so a refused, cancelled or timed-out rerun leaves a working connector exactly as it was.
+  if ((await input.secrets.arn(secretName)) === undefined) await input.secrets.create(secretName, client);
+  const awsSecrets = input.services.authorizeSecrets;
+  const signInSecrets: AuthorizeSecrets = {
+    read: async (name) => (name === secretName ? client : awsSecrets.read(name)),
+    write: (name, value) => awsSecrets.write(name, value),
+    tag: (name) => awsSecrets.tag(name),
+  };
   await input.services.authorize({
     controlPlaneUrl: input.session.controlPlaneUrl, accessToken: input.session.accessToken, ref: "asana", secretName, provider: "asana",
-    secrets: input.services.authorizeSecrets, expectAccount: botEmail, fetchImplementation: input.services.fetch,
+    secrets: signInSecrets, expectAccount: botEmail, fetchImplementation: input.services.fetch,
     // FR-037: no openBrowser; the engineer opens the address in a private window as the bot.
     showUrl: (url, redirect) => {
       input.write([
@@ -71,13 +82,13 @@ export async function addAsana(input: ConnectorAddInput & { services: ConnectorA
     showAccount: (line) => { input.write(line); },
   });
 
-  const stored = OAuthAppSecretSchema.safeParse(parseJson((await input.services.authorizeSecrets.read(secretName)) ?? ""));
-  if (!stored.success || stored.data.refreshToken === undefined) {
+  const signedIn = OAuthAppSecretSchema.safeParse(parseJson((await awsSecrets.read(secretName)) ?? ""));
+  if (!signedIn.success || signedIn.data.refreshToken === undefined) {
     throw agentXError("CONFIG_INVALID", `secret ${secretName} has no refresh token after the sign-in; run ${rerun} again`);
   }
   let tokens;
   try {
-    tokens = await input.services.vendors.asanaAccessToken({ clientId, clientSecret, refreshToken: stored.data.refreshToken });
+    tokens = await input.services.vendors.asanaAccessToken({ clientId, clientSecret, refreshToken: signedIn.data.refreshToken });
   } catch (error) {
     if (refused(error)) throw agentXError("AUTH_REQUIRED", `Asana refused to renew the bot user's sign-in, so the project was not changed; run ${rerun} again to sign in again`);
     throw error;
@@ -86,7 +97,7 @@ export async function addAsana(input: ConnectorAddInput & { services: ConnectorA
   // stored refresh token is the live one even if the read below fails. The broker handles later
   // rotations the same way.
   if (tokens.refreshToken !== undefined) {
-    await input.services.authorizeSecrets.write(secretName, JSON.stringify({ ...stored.data, refreshToken: tokens.refreshToken })).catch((error: unknown) => {
+    await awsSecrets.write(secretName, JSON.stringify({ ...signedIn.data, refreshToken: tokens.refreshToken })).catch((error: unknown) => {
       throw agentXError("CONFIG_INVALID", `Asana issued a new refresh token, but it could not be stored in secret ${secretName} with your AWS credentials (${errorName(error)}); the stored one may no longer work, so run ${rerun} again to sign in again`);
     });
   }

@@ -163,6 +163,54 @@ describe("agentx connector add asana (FR-036 to FR-039)", () => {
     await expect(fetch(`http://127.0.0.1:${port}/callback`)).rejects.toThrow();
   });
 
+  describe("a rerun over a working connector", () => {
+    const EXISTING = JSON.stringify({ clientId: CLIENT_ID, clientSecret: `old-${SECRET}`, refreshToken: "refresh-old" });
+
+    /** addAsana with the real sign-in: the browser answers `callback`, Asana's token endpoint answers
+     * the code exchange for `email`, and the control plane is the fake. */
+    async function rerun(options: { callback: (state: string) => string; email: string }) {
+      const plane = fakeControlPlane();
+      const secrets = memoryInitSecrets({ [SECRET_NAME]: EXISTING });
+      const vendors = fakeVendors({ asanaProject: { name: "Payments" } });
+      let port = 0;
+      const fetchImplementation: typeof fetch = async (url, init) => {
+        const href = url instanceof URL ? url.href : typeof url === "string" ? url : url.url;
+        if (href === "https://app.asana.com/-/oauth_token") return Response.json({ access_token: "access-new", refresh_token: "refresh-new", data: { name: "Someone", email: options.email } });
+        return plane.fetch(url, init);
+      };
+      const authorize = (authorizeInput: AuthorizeInput) => authorizeCredential({
+        ...authorizeInput, fetchImplementation, listenPort: 0, onListening: (bound) => { port = bound; },
+        showUrl: (url, redirect) => {
+          authorizeInput.showUrl(url, redirect);
+          void fetch(`http://127.0.0.1:${port}/callback?${options.callback(new URL(url).searchParams.get("state")!)}`).then((response) => response.text());
+        },
+      });
+      const base = input({ plane, secrets, vendors, script: [CLIENT_ID, SECRET, BOT, GID] });
+      const run = addAsana({ ...base, services: { ...base.services, fetch: fetchImplementation, authorize, authorizeSecrets: memoryAuthorizeSecrets(secrets) } });
+      return { run, secrets, plane };
+    }
+
+    it("leaves the stored secret byte-identical when the sign-in is by another account", async () => {
+      const { run, secrets, plane } = await rerun({ callback: (state) => `code=code-1&state=${state}`, email: "owner@example.com" });
+      await expect(run).rejects.toThrow("not agentx-bot@example.com; nothing was stored or registered");
+      expect(secrets.values.get(SECRET_NAME)).toBe(EXISTING);
+      expect(plane.registered).toEqual([]);
+    });
+
+    it("leaves the stored secret byte-identical when the sign-in is cancelled", async () => {
+      const { run, secrets, plane } = await rerun({ callback: (state) => `error=access_denied&state=${state}`, email: BOT });
+      await expect(run).rejects.toThrow("the sign-in was refused or cancelled (access_denied); nothing was stored");
+      expect(secrets.values.get(SECRET_NAME)).toBe(EXISTING);
+      expect(plane.registered).toEqual([]);
+    });
+
+    it("replaces the whole secret, with the new client, once the bot's new sign-in succeeds", async () => {
+      const { run, secrets } = await rerun({ callback: (state) => `code=code-1&state=${state}`, email: BOT });
+      expect(await run).toEqual({ ref: "asana", revision: 2 });
+      expect(JSON.parse(secrets.values.get(SECRET_NAME)!)).toEqual({ clientId: CLIENT_ID, clientSecret: SECRET, refreshToken: "refresh-new" });
+    });
+  });
+
   it("explains a refused refresh and saves no revision", async () => {
     const plane = fakeControlPlane();
     const secrets = memoryInitSecrets();
