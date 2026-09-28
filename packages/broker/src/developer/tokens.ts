@@ -12,6 +12,7 @@ export interface TokenSigner {
 }
 
 const KMS_RAW_MESSAGE_LIMIT = 4096;
+const NOT_BEFORE_SKEW_SECONDS = 30;
 
 export function kmsTokenSigner(input: { kms: { send(command: unknown): Promise<unknown> }; keyId: string }): TokenSigner {
   let jwk: Promise<PublicSigningJwk> | undefined;
@@ -68,7 +69,8 @@ export async function issueAccessToken(signer: TokenSigner, input: {
     env: input.env,
     sid: input.sessionId,
     iat,
-    nbf: iat,
+    // Backdated, so a verifier whose clock runs a little behind still accepts a fresh token.
+    nbf: iat - NOT_BEFORE_SKEW_SECONDS,
     exp: iat + DEVELOPER_ACCESS_TOKEN_SECONDS,
     jti: randomUUID(),
   };

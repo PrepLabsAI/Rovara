@@ -28,10 +28,18 @@ describe("developer access tokens", () => {
     expect(jwk).toMatchObject({ kty: "RSA", alg: "RS256", use: "sig" });
     expect(decodeProtectedHeader(token)).toEqual({ alg: "RS256", typ: "JWT", kid: jwk.kid });
     const { payload } = await jwtVerify(token, createLocalJWKSet({ keys: [jwk] }), { issuer: ISSUER, audience: "agentx-developer", currentDate: new Date(T0 + 1_000) });
-    expect(payload).toMatchObject({ iss: ISSUER, aud: "agentx-developer", sub: "d".repeat(64), amr: "slack", env: "staging", sid: "s-1", iat: T0 / 1000, nbf: T0 / 1000, exp: T0 / 1000 + 3600 });
+    expect(payload).toMatchObject({ iss: ISSUER, aud: "agentx-developer", sub: "d".repeat(64), amr: "slack", env: "staging", sid: "s-1", iat: T0 / 1000, nbf: T0 / 1000 - 30, exp: T0 / 1000 + 3600 });
     expect(typeof payload.jti).toBe("string");
     // API Gateway passes array claims to the broker as strings, so every claim is a scalar.
     for (const value of Object.values(payload)) expect(["string", "number"]).toContain(typeof value);
+  });
+
+  it("backdate nbf by 30 seconds, so a verifier whose clock runs behind accepts a fresh token", async () => {
+    const signer = kmsTokenSigner({ kms: fakeKms(), keyId: KEY });
+    const { token } = await issue(signer);
+    // A strict verifier (no leeway) 25 seconds behind the signer's clock.
+    const { payload } = await jwtVerify(token, createLocalJWKSet({ keys: [await signer.publicJwk()] }), { issuer: ISSUER, audience: "agentx-developer", currentDate: new Date(T0 - 25_000) });
+    expect(payload.nbf).toBe(T0 / 1000 - 30);
   });
 
   it("stop verifying after one hour", async () => {
