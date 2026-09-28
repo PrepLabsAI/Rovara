@@ -16,12 +16,14 @@ import {
   DeveloperTaskStatusSchema,
   PullRequestResultSchema,
   StartDeveloperTaskRequestSchema,
+  WorkspaceClosePreflightResultSchema,
   agentXError,
   cleanClientName,
   diffStat,
   lastAssistantResponse,
   redactText,
   taskTitle,
+  type DeveloperCloseResponse,
   type DeveloperPullRequestResponse,
   type DeveloperTaskListItem,
   type DeveloperTaskPolicy,
@@ -32,7 +34,7 @@ import {
   type WorkspaceInstance,
 } from "@agentx/contracts";
 import type { z } from "zod";
-import { chargeConflict, chargeItems, developerCharge, limitReached, readWorkspaceLimits, type ChargeConflict, type WorkspaceLimits } from "../developer/limits.js";
+import { chargeConflict, chargeItems, developerCharge, limitReached, readWorkspaceLimits, releaseItems, type ChargeConflict, type WorkspaceLimits } from "../developer/limits.js";
 import {
   aiToolTurn,
   byCreated,
@@ -215,6 +217,16 @@ async function taskDetails(deps: DeveloperTaskRouteDependencies, task: Developer
   return details;
 }
 
+/**
+ * What a close preflight's result says is unpublished, per repository, or undefined when it was
+ * safe or is not a preflight result (ruling F11: the close route and the task view share it).
+ */
+function unpublishedOf(result: unknown): DeveloperCloseResponse["unpublished"] {
+  const preflight = WorkspaceClosePreflightResultSchema.safeParse(result);
+  if (!preflight.success || preflight.data.safeToClose) return undefined;
+  return preflight.data.repositories.map((repository) => ({ repository: repository.name, reasons: [...repository.reasons] }));
+}
+
 /** The live view of a task (R4), with the result details once it has ended. Callers load the owned task first. */
 export async function taskView(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord, options: { events: number; details: boolean }): Promise<DeveloperTaskView> {
   const [workspace, pointer, operations] = await Promise.all([
@@ -232,6 +244,9 @@ export async function taskView(deps: DeveloperTaskRouteDependencies, task: Devel
     ? []
     : recentTaskEvents(await deps.actions.eventsNewestFirst(derived.current.id, 200), options.events);
   const details = options.details && derived.status !== "STARTING" && derived.status !== "RUNNING" ? await taskDetails(deps, task, operations) : {};
+  // R22: why the latest close did not happen, while no later close runs and the task is open.
+  const lastClose = operations.filter((operation) => operation.kind === "close").sort(byCreated).at(-1);
+  const unpublished = lastClose?.status === "SUCCEEDED" && !derived.closing && derived.status !== "CLOSED" ? unpublishedOf(lastClose.result) : undefined;
   return {
     taskId: task.taskId,
     title: task.title,
@@ -246,6 +261,7 @@ export async function taskView(deps: DeveloperTaskRouteDependencies, task: Devel
     updatedAt: derived.current?.createdAt ?? task.updatedAt,
     events,
     ...details,
+    ...(unpublished === undefined ? {} : { unpublished }),
   };
 }
 
@@ -420,8 +436,11 @@ const whole = (value: string | null, fallback: number, min: number, max: number,
 
 async function readTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, url: URL): Promise<{ task: DeveloperTaskView }> {
   // R8, R11: the owner always reads their own task; access is not checked again.
-  const task = await loadOwnedTask(deps, caller, taskId);
-  const view = await taskView(deps, task, { events: whole(url.searchParams.get("events"), DEVELOPER_EVENTS_DEFAULT, 0, DEVELOPER_EVENTS_MAX, "events"), details: true });
+  const events = whole(url.searchParams.get("events"), DEVELOPER_EVENTS_DEFAULT, 0, DEVELOPER_EVENTS_MAX, "events");
+  let task = await loadOwnedTask(deps, caller, taskId);
+  // R15: a safe close whose completion did not land is finished by the next read.
+  if (await resumeClose(deps, task)) task = await loadOwnedTask(deps, caller, taskId);
+  const view = await taskView(deps, task, { events, details: true });
   await syncIndex(deps, task, view.status, view.updatedAt);
   return { task: view };
 }
@@ -513,18 +532,21 @@ async function taskEvents(deps: DeveloperTaskRouteDependencies, caller: Develope
 
 const CLOSED_TASK = "this task is closed; start a new one with agentx_start_task";
 const NEVER_STARTED = "this task never started; close it with agentx_close_task and start a new one";
+const CLOSING_TASK = "this task is closing; check it with agentx_get_task, and if the close is refused for unpublished work you can continue it";
 
 /**
  * What continue and a pull request need before they touch the workspace: an open task that got
- * past its setup (R17, for every setup failure, whatever its category). Access is not checked
- * again (R11): a developer who left the project's channels can still continue and publish their
- * own task. Callers load the owned task first, which is the ownership check.
+ * past its setup (R17, for every setup failure, whatever its category) and is not closing. Access
+ * is not checked again (R11): a developer who left the project's channels can still continue and
+ * publish their own task. Callers load the owned task first, which is the ownership check.
  */
 async function actionableWorkspace(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord): Promise<WorkspaceInstance> {
   if (task.closedAt !== undefined) throw agentXError("CONFIG_INVALID", CLOSED_TASK);
   const workspace = await deps.actions.workspace(task.workspaceId);
   if (workspace.status === "CLOSED") throw agentXError("CONFIG_INVALID", CLOSED_TASK);
   if (workspace.status === "PREPARATION_FAILED") throw agentXError("CONFIG_INVALID", NEVER_STARTED);
+  // A close in flight is not work to wait for or cancel: say so, not TASK_BUSY.
+  if (workspace.status === "CLOSING") throw agentXError("CONFIG_INVALID", CLOSING_TASK);
   return workspace;
 }
 
@@ -689,6 +711,132 @@ async function openPullRequest(deps: DeveloperTaskRouteDependencies, caller: Dev
   };
 }
 
+/**
+ * R15: deletes the compute, then in one transaction closes the workspace, releases the counters
+ * the task charged (R6: the charge stored on the task, whatever the developer's Slack link is now),
+ * sets the task's `closedAt` and marks the index row CLOSED. The task's own `closedAt` transition
+ * guards the release, so it happens exactly once. `extra` joins the same transaction (ruling F15:
+ * the close's accepted record when no preflight ran). `closeOperationId` is the safe preflight's
+ * operation, or undefined for a workspace whose preparation failed. A lost race (another call
+ * closed the task first) is not an error; any other failed condition is rethrown, never hidden.
+ * Callers load the owned task first.
+ */
+export async function finishTaskClose(
+  deps: { tableName: string; actions: DeveloperTaskActions },
+  task: DeveloperTaskRecord,
+  closeOperationId: string | undefined,
+  extra: TransactItems = [],
+): Promise<void> {
+  const workspace = await deps.actions.workspace(task.workspaceId);
+  if (workspace.status !== "CLOSED") await deps.actions.deleteCompute(workspace);
+  const now = new Date().toISOString();
+  const items: TransactItems = [
+    ...(workspace.status === "CLOSED" ? [] : [{ Update: {
+      TableName: deps.tableName,
+      Key: { pk: `WORKSPACE#${task.workspaceId}`, sk: "META" },
+      UpdateExpression: "SET #status = :closed, closedAt = :now, updatedAt = :now REMOVE activeOperationId, closeError",
+      ConditionExpression: closeOperationId === undefined ? "#status = :failed" : "#status = :closing AND closeOperationId = :operation",
+      ExpressionAttributeNames: { "#status": "status" },
+      ExpressionAttributeValues: {
+        ":closed": "CLOSED", ":now": now,
+        ...(closeOperationId === undefined ? { ":failed": "PREPARATION_FAILED" } : { ":closing": "CLOSING", ":operation": closeOperationId }),
+      },
+    } }]),
+    ...releaseItems(deps.tableName, task.charge, task.taskId),
+    { Update: {
+      TableName: deps.tableName, Key: taskKey(task.taskId),
+      UpdateExpression: "SET closedAt = :now, updatedAt = :now", ConditionExpression: "attribute_exists(pk) AND attribute_not_exists(closedAt)",
+      ExpressionAttributeValues: { ":now": now },
+    } },
+    { Update: {
+      TableName: deps.tableName, Key: taskIndexKey(task.developerId, task.createdAt, task.taskId),
+      UpdateExpression: "SET #status = :closed, updatedAt = :now", ExpressionAttributeNames: { "#status": "status" },
+      ExpressionAttributeValues: { ":closed": "CLOSED", ":now": now },
+    } },
+    ...extra,
+  ];
+  try {
+    await deps.actions.transact(items);
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+    // Another call finished the close first; its transaction released the counters once.
+    const current = await deps.actions.task(task.taskId);
+    if (current?.closedAt !== undefined) return;
+    throw error;
+  }
+}
+
+/**
+ * R15: finishes a close whose preflight ended safe but whose completion did not land (the worker's
+ * callback could not delete the compute, say). Answers whether it closed the task. A failure is
+ * logged by its name and left for the next read or close. Callers load the owned task first.
+ */
+export async function resumeClose(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord): Promise<boolean> {
+  if (task.closedAt !== undefined) return false;
+  const workspace = await deps.actions.workspace(task.workspaceId);
+  if (workspace.status !== "CLOSING" || workspace.closeOperationId === undefined) return false;
+  const operation = (await deps.actions.operations(task.workspaceId)).find((entry) => entry.id === workspace.closeOperationId);
+  const preflight = WorkspaceClosePreflightResultSchema.safeParse(operation?.result);
+  if (operation?.status !== "SUCCEEDED" || !preflight.success || !preflight.data.safeToClose) return false;
+  try {
+    await finishTaskClose(deps, task, operation.id);
+    return true;
+  } catch (error) {
+    log(deps, { event: "developer.task_close_failed", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
+    return false;
+  }
+}
+
+/**
+ * FR-016, R15, R22, owner decisions 5 and 6. Answers at once: usually `closing: true` while the
+ * worker checks for unpublished work, which the AI tool then follows with agentx_get_task. There
+ * is no force: unpublished work refuses the close, listing each repository and why.
+ *
+ * Idempotent: the same requestId reports its preflight's outcome and writes nothing. A fresh
+ * requestId while a close is in flight, or after the task closed, answers with that close and
+ * writes no new record: nothing new was accepted (the close already has its accepted record).
+ */
+async function closeTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<DeveloperCloseResponse> {
+  const request = parse(DeveloperTaskActionRequestSchema, value, deps, "close");
+  let task = await loadOwnedTask(deps, caller, taskId);
+  const turns = turnTable(deps);
+  const receivedAt = iso(deps);
+  const record = (response: string, operationId?: string) => putNew(turns, aiToolTurn({
+    party: partyOfTask(task), turnId: randomUUID(), action: "close", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
+    request: "close", response, ...(operationId === undefined ? {} : { operationId }),
+  }));
+  let unpublished: DeveloperCloseResponse["unpublished"];
+  if (task.closedAt === undefined) {
+    const workspace = await deps.actions.workspace(task.workspaceId);
+    if (workspace.status === "PREPARATION_FAILED") {
+      // A task whose setup failed has nothing to check: it closes now and frees its slot. The
+      // accepted record commits with the close (ruling F15).
+      await finishTaskClose(deps, task, undefined, [record("Closed; the task's workspace never started.")]);
+    } else if (workspace.status === "PREPARING") {
+      throw agentXError("TASK_BUSY", `task ${taskId} is still starting; cancel it with agentx_cancel_task, then close it once it has stopped`);
+    } else if (workspace.status !== "CLOSED") {
+      let started: Awaited<ReturnType<DeveloperTaskActions["startClose"]>>;
+      try {
+        // startClose answers a close in flight, and a repeated requestId, with the existing close
+        // operation and writes nothing; otherwise the record commits with the preflight (R12).
+        started = await deps.actions.startClose(developerTaskIdentity(task), workspace, request.requestId, (operation) => [
+          record("Checking the workspace for unpublished work before closing.", operation.id),
+        ]);
+      } catch (error) {
+        busy(error, taskId);
+      }
+      const operation = (await deps.actions.operations(task.workspaceId)).find((entry) => entry.id === started.operationId);
+      if (operation?.status === "SUCCEEDED") unpublished = unpublishedOf(operation.result);
+    }
+    await resumeClose(deps, task);
+    task = await loadOwnedTask(deps, caller, taskId);
+  }
+  const view = await taskView(deps, task, { events: 0, details: false });
+  await syncIndex(deps, task, view.status, view.updatedAt);
+  const closed = view.status === "CLOSED";
+  return { task: view, closed, ...(unpublished === undefined || closed ? {} : { unpublished }) };
+}
+
 /** A path segment, decoded; a malformed escape is kept as is and then fails the task ID check. */
 function safeDecode(segment: string): string {
   try {
@@ -708,6 +856,7 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
   if (taskId !== undefined && request.method === "GET" && route?.[2] === "events") return taskEvents(deps, caller, taskId, url);
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "continue") return continueTask(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "cancel") return cancelTask(deps, caller, taskId, body(request));
+  if (taskId !== undefined && request.method === "POST" && route?.[2] === "close") return closeTask(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "pull-requests") return openPullRequest(deps, caller, taskId, body(request));
   throw agentXError("NOT_FOUND", "route not found");
 }

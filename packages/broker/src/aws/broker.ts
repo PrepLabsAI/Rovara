@@ -93,6 +93,7 @@ import { readWorkspaceLimits } from "../developer/limits.js";
 import { hashJson, isConditional } from "./broker-shared.js";
 import { channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, routeDeveloperRequest, type DeveloperApiConfiguration } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
+import { finishTaskClose } from "./developer-tasks.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
@@ -368,6 +369,7 @@ function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTas
         : { outcome: "NOTHING_RUNNING" };
     },
     startClose: (identity, workspace, requestId, extra) => startTaskClose(dependencies, identity, workspace, requestId, extra),
+    task: (taskId) => getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId)),
     deleteCompute: (workspace) => deleteWorkspaceCompute(dependencies, workspace),
     transact: async (items) => {
       await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: items }));
@@ -3441,6 +3443,7 @@ async function recordTerminalResult(
   } };
   if (operation.kind !== "cancel" || terminalStatus === "SUCCEEDED") transactItems.push(workspaceUpdate);
   const send = (items: TransactItems) => dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: items }));
+  let taskPointer: DeveloperTaskPointerRecord | undefined;
   try {
     // A queuing transaction that met another one in flight (TransactionConflict, not a failed
     // condition) is decided again once from fresh reads before it counts as a stale callback.
@@ -3449,6 +3452,7 @@ async function recordTerminalResult(
       const pointer = TASK_POINTER_KINDS.has(operation.kind)
         ? await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(workspace.id))
         : undefined;
+      taskPointer = pointer;
       const completed = await completedTurnItems(dependencies, operation, pointer, terminalStatus, { result, error }, now);
       await sendTerminalResult(dependencies, workspace, operation, pointer, terminalStatus, now, [...transactItems, ...completed], workspaceUpdate, send);
     };
@@ -3484,7 +3488,27 @@ async function recordTerminalResult(
     }
     throw agentXError("STALE_FENCE", "terminal callback no longer owns the workspace");
   }
+  if (closePreflight?.safeToClose === true && taskPointer !== undefined) await finishDeveloperClose(dependencies, taskPointer, operation.id);
   return { ...operation, status: terminalStatus, updatedAt: now, ...(result === undefined ? {} : { result }), ...(error === undefined ? {} : { error }) };
+}
+
+/**
+ * Spec 025 R15: a developer task's safe close preflight finishes the close itself, after its result
+ * committed. A failure is logged by its name and left to resumeClose (the task's next read or
+ * close); the worker's callback never fails because of it. A Slack workspace has no pointer and
+ * keeps its own completion flow.
+ */
+async function finishDeveloperClose(dependencies: AwsBrokerDependencies, pointer: DeveloperTaskPointerRecord, operationId: string): Promise<void> {
+  try {
+    const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
+    if (task === undefined) {
+      console.log(JSON.stringify({ component: "broker", event: "developer.task_record_missing", taskId: pointer.taskId, operationId }));
+      return;
+    }
+    await finishTaskClose({ tableName: dependencies.tableName, actions: developerTaskActions(dependencies) }, task, operationId);
+  } catch (error) {
+    console.log(JSON.stringify({ component: "broker", event: "developer.task_close_failed", taskId: pointer.taskId, operationId, error: error instanceof Error ? error.name : "unknown" }));
+  }
 }
 
 async function pageEvents(
