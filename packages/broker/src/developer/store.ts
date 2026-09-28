@@ -14,6 +14,20 @@ import { pkceChallengeMatches, randomToken, sha256Hex } from "./tokens.js";
 export interface AuthRequestRecord { id: string; clientRedirectUri: string; clientState: string; codeChallenge: string; nonce: string; method?: DeveloperSignInMethod; consumedAt?: string; expiresAt: number }
 export interface DeveloperRecord { developerId: string; provider: DeveloperSignInMethod; issuer: string; subject: string; displayName: string; email?: string; slackUserId?: string; firstSignInAt: string; lastSignInAt: string; revoked: boolean }
 export interface SessionRecord { sessionId: string; developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; startedAt: string; endsAt: number; lastRefreshAt?: string; revokedAt?: string; revokedReason?: string }
+
+/** A method's enabled-since cutoff from its environment variable, epoch seconds; "0", empty or unreadable means none. */
+export function methodSince(text: string | undefined): number | undefined {
+  if (text === undefined || !/^[0-9]{1,12}$/.test(text)) return undefined;
+  const since = Number(text);
+  return since > 0 ? since : undefined;
+}
+
+/** Whether a session started before its method was last turned on (FR-045): its disable ended it. */
+export function startedBeforeMethodOn(startedAt: string, since: number | undefined): boolean {
+  if (since === undefined || since <= 0) return false;
+  const started = Date.parse(startedAt);
+  return !Number.isFinite(started) || started < since * 1000;
+}
 export type RefreshLookup =
   | { kind: "active"; session: SessionRecord; tokenHash: string }
   | { kind: "unknown" }

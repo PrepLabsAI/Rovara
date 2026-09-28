@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChannelMembersRequest, ChannelMembersResponse } from "@agentx/contracts";
-import { channelMembersThroughLambda, type DeveloperApiConfiguration } from "../../packages/broker/src/aws/developer-routes.js";
+import { channelMembersThroughLambda, developerSinceFromEnvironment, type DeveloperApiConfiguration } from "../../packages/broker/src/aws/developer-routes.js";
 import { adminIssuer, createAdminBroker, type AdminHandler } from "../support/admin-broker.js";
 import type { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
@@ -174,6 +174,25 @@ describe("the developer check on every /v1/dev request (FR-009, R12, R13)", () =
     const response = await call("/v1/dev/projects", claims());
     expect(response.statusCode).toBe(401);
     expect(response.body).toContain("Slack sign-in is turned off");
+  });
+
+  it("refuses a session started before its method was last turned on, and serves one started after (FR-045)", async () => {
+    // The session started at T0; Slack was turned off and back on a minute later.
+    config.since = { slack: T0 / 1000 + 60 };
+    const refused = await call("/v1/dev/projects", claims());
+    expect(refused.statusCode).toBe(401);
+    expect(refused.body).toContain("your sign-in ended when Slack was turned off");
+    // A company sign-in cutoff does not touch a Slack session.
+    config.since = { oidc: T0 / 1000 + 60 };
+    expect((await call("/v1/dev/projects", claims())).statusCode).toBe(200);
+    config.since = { slack: T0 / 1000 - 60 };
+    expect((await call("/v1/dev/projects", claims())).statusCode).toBe(200);
+  });
+
+  it("reads each method's cutoff from the broker's environment, and 0 or unreadable as none", () => {
+    expect(developerSinceFromEnvironment({ DEVELOPER_SIGNIN_SLACK_SINCE: "1790000000", DEVELOPER_OIDC_SINCE: "0" })).toEqual({ slack: 1790000000 });
+    expect(developerSinceFromEnvironment({ DEVELOPER_SIGNIN_SLACK_SINCE: "x", DEVELOPER_OIDC_SINCE: "1790000001" })).toEqual({ oidc: 1790000001 });
+    expect(developerSinceFromEnvironment({})).toEqual({});
   });
 
   it("refuses a revoked or ended session, a session of someone else, and a revoked developer", async () => {

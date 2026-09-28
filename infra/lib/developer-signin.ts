@@ -11,6 +11,7 @@ const SIGN_IN_ROUTE_KEY = "ANY /v1/auth/{proxy+}";
 export interface DeveloperSignInParameters {
   slackTeamId: CfnParameter; slack: CfnParameter; oidcIssuer: CfnParameter; oidcClientId: CfnParameter;
   oidcRequiredClaim: CfnParameter; oidcRequiredValues: CfnParameter; oidcDisplayName: CfnParameter;
+  slackSince: CfnParameter; oidcSince: CfnParameter;
 }
 
 /** Declared on the stack itself, so the parameter names are exactly these. */
@@ -23,6 +24,10 @@ export function developerSignInParameters(stack: Stack): DeveloperSignInParamete
     oidcRequiredClaim: new CfnParameter(stack, "DeveloperOidcRequiredClaim", { type: "String", default: "", maxLength: 128, description: "Claim a company sign-in must carry, for example groups; empty for none" }),
     oidcRequiredValues: new CfnParameter(stack, "DeveloperOidcRequiredValues", { type: "String", default: "[]", allowedPattern: "^\\[.*\\]$", description: "JSON string array; the required claim must contain one of these values" }),
     oidcDisplayName: new CfnParameter(stack, "DeveloperOidcDisplayName", { type: "String", default: "Company sign-in", minLength: 1, maxLength: 40, description: "Name on the company sign-in button, for example Okta" }),
+    // FR-045: a session started before its method was last turned on was ended by that disable, so
+    // it stays ended. agentx signin enable sets these; 0 means the method was never turned back on.
+    slackSince: new CfnParameter(stack, "DeveloperSignInSlackSince", { type: "String", default: "0", allowedPattern: "^[0-9]{1,12}$", description: "When Slack sign-in was last turned on, in epoch seconds; Slack sessions started before it are refused" }),
+    oidcSince: new CfnParameter(stack, "DeveloperOidcSince", { type: "String", default: "0", allowedPattern: "^[0-9]{1,12}$", description: "When company sign-in was last turned on, in epoch seconds; company sessions started before it are refused" }),
   };
 }
 
@@ -82,6 +87,8 @@ export class DeveloperSignIn extends Construct {
       DEVELOPER_OIDC_REQUIRED_VALUES: p.oidcRequiredValues.valueAsString,
       DEVELOPER_OIDC_DISPLAY_NAME: p.oidcDisplayName.valueAsString,
       DEVELOPER_OIDC_SECRET_ID: oidcSecretName,
+      DEVELOPER_SIGNIN_SLACK_SINCE: p.slackSince.valueAsString,
+      DEVELOPER_OIDC_SINCE: p.oidcSince.valueAsString,
     }, Duration.seconds(15));
     // Exactly what DeveloperSignInStore sends: GetItem, PutItem, UpdateItem, and TransactWriteItems
     // made of Put and Update items (IAM authorizes each item as PutItem or UpdateItem).
@@ -141,6 +148,8 @@ export class DeveloperSignIn extends Construct {
     broker.addEnvironment("SLACK_TEAM_ID", p.slackTeamId.valueAsString);
     broker.addEnvironment("DEVELOPER_SIGNIN_SLACK", p.slack.valueAsString);
     broker.addEnvironment("DEVELOPER_OIDC_ISSUER", p.oidcIssuer.valueAsString);
+    broker.addEnvironment("DEVELOPER_SIGNIN_SLACK_SINCE", p.slackSince.valueAsString);
+    broker.addEnvironment("DEVELOPER_OIDC_SINCE", p.oidcSince.valueAsString);
     fn.grantInvoke(broker);
     broker.addToRolePolicy(new iam.PolicyStatement({
       actions: ["dynamodb:GetItem"],

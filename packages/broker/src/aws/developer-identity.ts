@@ -11,7 +11,7 @@ import type { ChannelMembersRequest, DeveloperSignInMethod } from "@agentx/contr
 import { ProviderNotConfiguredError, oidcSignInProvider, slackSignInProvider, type SignInProvider } from "../developer/providers.js";
 import { createDeveloperIdentityHandler, type DeveloperIdentityConfig } from "../developer/server.js";
 import { slackDirectory } from "../developer/slack-directory.js";
-import { DeveloperSignInStore } from "../developer/store.js";
+import { DeveloperSignInStore, methodSince } from "../developer/store.js";
 import { kmsTokenSigner } from "../developer/tokens.js";
 import type { HttpApiV2Event } from "./lambda.js";
 
@@ -44,16 +44,21 @@ function requiredValuesFrom(text: string | undefined): string[] {
   return parsed.filter((value) => value !== "");
 }
 
+function sinceFrom(text: string | undefined): { since: number } | Record<string, never> {
+  const since = methodSince(text);
+  return since === undefined ? {} : { since };
+}
+
 export function developerIdentityConfigFromEnvironment(env: NodeJS.ProcessEnv): DeveloperIdentityLambdaConfig {
   const issuer = env.DEVELOPER_OIDC_ISSUER ?? "";
   const teamId = env.SLACK_TEAM_ID ?? "";
   const config: DeveloperIdentityLambdaConfig = {
     env: required(env, "AGENTX_ENV"),
     issuer: required(env, "DEVELOPER_TOKEN_ISSUER"),
-    slack: { enabled: env.DEVELOPER_SIGNIN_SLACK === "enabled", ...(teamId === "" ? {} : { teamId }) },
+    slack: { enabled: env.DEVELOPER_SIGNIN_SLACK === "enabled", ...(teamId === "" ? {} : { teamId }), ...sinceFrom(env.DEVELOPER_SIGNIN_SLACK_SINCE) },
   };
   if (issuer === "") return config;
-  const withOidc = { ...config, oidc: { displayName: env.DEVELOPER_OIDC_DISPLAY_NAME || "Company sign-in" } };
+  const withOidc = { ...config, oidc: { displayName: env.DEVELOPER_OIDC_DISPLAY_NAME || "Company sign-in", ...sinceFrom(env.DEVELOPER_OIDC_SINCE) } };
   const problem = (text: string) => ({ ...withOidc, oidcProblem: `${text}; ask an admin to run agentx signin enable oidc` });
   const clientId = env.DEVELOPER_OIDC_CLIENT_ID ?? "";
   if (clientId === "") return problem("DEVELOPER_OIDC_CLIENT_ID is not set");

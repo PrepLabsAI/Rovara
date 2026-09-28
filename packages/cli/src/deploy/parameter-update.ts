@@ -3,6 +3,7 @@
 // sent again. It shows the parameter changes and the resource changes, and asks first.
 import { CreateChangeSetCommand, DeleteChangeSetCommand, DescribeChangeSetCommand, DescribeStacksCommand, ExecuteChangeSetCommand, type Change, type Stack } from "@aws-sdk/client-cloudformation";
 import { agentXError } from "@agentx/contracts";
+import { SIGN_IN_SINCE_PARAMETER_NAMES } from "../signin/settings.js";
 import type { ChangeSetChange } from "./deployer.js";
 
 export interface ParameterChange { name: string; from: string; to: string }
@@ -46,6 +47,9 @@ export async function updateStackParameters(input: ParameterUpdateInput): Promis
   if (status.endsWith("_FAILED") || status === "ROLLBACK_COMPLETE") throw agentXError("CONFIG_INVALID", `stack ${stackName} is ${status}; fix it in the CloudFormation console first`);
   const current = new Map((stack.Parameters ?? []).map((parameter) => [parameter.ParameterKey ?? "", parameter.ParameterValue ?? ""]));
   const missing = Object.keys(input.changes).filter((name) => !current.has(name));
+  if (missing.length > 0 && missing.every((name) => SIGN_IN_SINCE_PARAMETER_NAMES.has(name))) {
+    throw agentXError("CONFIG_INVALID", `stack ${stackName} was deployed from an older AgentX release (it has no ${missing.join(", ")} parameter); upgrade the environment with agentx deploy, then run this again`);
+  }
   if (missing.length > 0) {
     throw agentXError("CONFIG_INVALID", `stack ${stackName} was deployed from an AgentX release without developer sign-in (it has no ${missing.join(", ")} parameter); upgrade the environment to a release with developer sign-in, then run this again`);
   }

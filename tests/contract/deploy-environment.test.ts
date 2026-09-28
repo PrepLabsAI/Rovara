@@ -504,6 +504,24 @@ describe("deploy environment", () => {
     for (const name of SIGN_IN_PARAMETER_NAMES) expect(controlPlaneRequest.parameters).not.toHaveProperty(name);
   });
 
+  it("passes the stored enabled-since cutoffs, and drops them for a release from before them (FR-045, F24)", async () => {
+    const store = new MemoryParameterStore();
+    const secrets = memorySecrets();
+    await store.put("/agentx/staging/slack/teamId", "T0TEAM1");
+    await store.put("/agentx/staging/signin", JSON.stringify({ schemaVersion: 1, env: "staging", slack: true, since: { slack: 1790000000 }, updatedAt: "2026-09-27T00:00:00.000Z", updatedBy: HOLDER }));
+    const current = fakeDeployer(scriptedOutputs());
+    await deployEnvironment({ mode: "install", engine: "templates", answers: baseAnswers(), release: fakeReleaseWithControlPlaneParameters([...SIGN_IN_PARAMETER_NAMES]), deployer: current.deployer, store, secrets, holder: HOLDER });
+    expect(current.requests.find((request) => request.part === "control-plane")!.parameters).toMatchObject({ DeveloperSignInSlack: "enabled", DeveloperSignInSlackSince: "1790000000", DeveloperOidcSince: "0" });
+
+    const older = fakeDeployer(scriptedOutputs());
+    const beforeCutoffs = SIGN_IN_PARAMETER_NAMES.filter((name) => !name.endsWith("Since"));
+    await deployEnvironment({ mode: "upgrade", engine: "templates", answers: baseAnswers(), release: fakeReleaseWithControlPlaneParameters(beforeCutoffs), deployer: older.deployer, store, secrets, holder: HOLDER });
+    const parameters = older.requests.find((request) => request.part === "control-plane")!.parameters;
+    expect(parameters).toMatchObject({ DeveloperSignInSlack: "enabled" });
+    expect(parameters).not.toHaveProperty("DeveloperSignInSlackSince");
+    expect(parameters).not.toHaveProperty("DeveloperOidcSince");
+  });
+
   it("names the release version and region, instead of a bare SyntaxError, when the control-plane template cannot be read", async () => {
     const store = new MemoryParameterStore();
     const secrets = memorySecrets();

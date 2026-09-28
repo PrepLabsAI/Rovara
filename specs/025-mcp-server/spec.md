@@ -706,7 +706,9 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   claim and values, and a check that the issuer's discovery document is reachable.
 - **FR-045**: `agentx signin enable slack|oidc`, `agentx signin disable slack|oidc` and
   `agentx signin show` MUST change and show the settings of FR-010 under the operator role, showing
-  the change before applying it. Disabling a method MUST revoke its open sessions.
+  the change before applying it. Disabling a method MUST revoke its open sessions, and turning it back
+  on MUST NOT revive them: each method records when it was last turned on, and a session started
+  before that is refused and revoked.
 - **FR-046**: `agentx doctor` (phase 15e) runs the checks of `agentx signin check`, which phase 25a
   ships: for each enabled method, the Slack client ID and secret are set, the Slack redirect URL is
   registered (by a test authorize request), the team ID is set, and the company issuer's discovery

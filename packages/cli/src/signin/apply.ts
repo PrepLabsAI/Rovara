@@ -79,8 +79,17 @@ export async function applySignInChange(input: ApplySignInInput): Promise<{ chan
   const work = async () => {
     const current = await readSignInSettings(input.store, input.env);
     const choice = typeof input.next === "function" ? input.next(current) : input.next;
+    // FR-045: a method going from off to on gets a new cutoff, so the sessions its disable ended
+    // (a laptop asleep through the disable never refreshed) stay ended. Otherwise it is kept.
+    const nowSeconds = Math.floor(input.now() / 1000);
+    const since = {
+      ...current?.since,
+      ...(choice.slack && current?.slack !== true ? { slack: nowSeconds } : {}),
+      ...(choice.oidc !== undefined && current?.oidc === undefined ? { oidc: nowSeconds } : {}),
+    };
     const parsed = DeveloperSignInSettingsSchema.safeParse({
       schemaVersion: 1, env: input.env, slack: choice.slack, ...(choice.oidc === undefined ? {} : { oidc: choice.oidc }),
+      ...(Object.keys(since).length === 0 ? {} : { since }),
       updatedAt: new Date(input.now()).toISOString(), updatedBy: input.holder,
     });
     if (!parsed.success) throw agentXError("CONFIG_INVALID", `${parsed.error.issues[0]?.message ?? "developer sign-in settings are invalid"}; check the answers and run this again`);

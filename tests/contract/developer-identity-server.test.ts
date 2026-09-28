@@ -369,6 +369,29 @@ describe("the token endpoint (FR-001, FR-005, FR-007)", () => {
     expect((await h.refresh(refreshToken)).body.error).toBe("invalid_grant");
   });
 
+  it("keeps a session the disable ended from coming back once the method is on again: a refresh started before the cutoff is refused and revoked (FR-045)", async () => {
+    const { h, refreshToken } = await signedIn();
+    // The laptop slept through the disable; an admin turned Slack back on an hour later.
+    h.tick(3_600_000);
+    h.deps.config.slack.since = Math.floor(h.now() / 1000);
+    h.tick(60_000);
+    const refused = await h.refresh(refreshToken);
+    expect(refused.status).toBe(400);
+    expect(refused.body.error).toBe("invalid_grant");
+    expect(refused.body.error_description).toContain("Slack was turned off");
+    expect(revocations(h.logs).map((entry) => entry.reason)).toEqual(["method_disabled"]);
+  });
+
+  it("keeps a session started after the method's cutoff working", async () => {
+    const h = identityHarness({ slackUsers: [maya] });
+    h.deps.config.slack.since = Math.floor(h.now() / 1000) - 60;
+    const code = (await h.signIn("slack", maya.userId)).searchParams.get("code")!;
+    const first = await h.exchange(code);
+    h.tick(60_000);
+    expect((await h.refresh(String(first.body.refresh_token))).status).toBe(200);
+    expect(revocations(h.logs)).toEqual([]);
+  });
+
   it("answers unsupported_grant_type for anything else", async () => {
     const h = identityHarness();
     const response = await h.http(httpEvent("POST", "/v1/auth/token", { grant_type: "password", client_id: "agentx-cli" }));
@@ -523,6 +546,16 @@ describe("the Lambda's configuration", () => {
   it("turns Slack on only for enabled, keeps an empty team ID unset, and company sign-in off without an issuer", () => {
     expect(developerIdentityConfigFromEnvironment({ ...base, DEVELOPER_SIGNIN_SLACK: "enabled", SLACK_TEAM_ID: "" })).toEqual({ env: "staging", issuer: ISSUER, slack: { enabled: true } });
     expect(developerIdentityConfigFromEnvironment({ ...base, DEVELOPER_SIGNIN_SLACK: "disabled", SLACK_TEAM_ID: TEAM }).slack).toEqual({ enabled: false, teamId: TEAM });
+  });
+
+  it("reads each method's enabled-since cutoff, and treats 0, empty or unreadable as none (FR-045)", () => {
+    const slackOn = { ...base, DEVELOPER_SIGNIN_SLACK: "enabled", SLACK_TEAM_ID: TEAM };
+    expect(developerIdentityConfigFromEnvironment({ ...slackOn, DEVELOPER_SIGNIN_SLACK_SINCE: "1790000000" }).slack).toEqual({ enabled: true, teamId: TEAM, since: 1790000000 });
+    for (const since of ["0", "", "soon", undefined]) {
+      expect(developerIdentityConfigFromEnvironment({ ...slackOn, DEVELOPER_SIGNIN_SLACK_SINCE: since }).slack).toEqual({ enabled: true, teamId: TEAM });
+    }
+    const oidc = developerIdentityConfigFromEnvironment({ ...base, DEVELOPER_OIDC_ISSUER: OIDC_ISSUER, DEVELOPER_OIDC_CLIENT_ID: "c", DEVELOPER_OIDC_DISPLAY_NAME: "Okta", DEVELOPER_OIDC_SINCE: "1790000500" });
+    expect(oidc.oidc).toEqual({ displayName: "Okta", since: 1790000500 });
   });
 
   it("reads its argument, not the process environment (F1)", () => {

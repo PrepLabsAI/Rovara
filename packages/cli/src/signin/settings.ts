@@ -18,6 +18,12 @@ export const DeveloperSignInSettingsSchema = z.object({
   }).strict()
     .refine((oidc) => (oidc.requiredClaim === undefined) === (oidc.requiredValues === undefined), "requiredClaim and requiredValues must be set together or not at all")
     .optional(),
+  /** FR-045: when each method was last turned on, in epoch seconds. A session started before it was
+   * ended by the disable in between, so it stays ended. Kept while the method is off. */
+  since: z.object({
+    slack: z.number().int().nonnegative().max(999_999_999_999).optional(),
+    oidc: z.number().int().nonnegative().max(999_999_999_999).optional(),
+  }).strict().optional(),
   updatedAt: z.iso.datetime(),
   updatedBy: z.string().min(1).max(2048),
 }).strict()
@@ -81,14 +87,18 @@ export async function readStoredDeveloperSignIn(store: ParameterStore, env: stri
   return { ...(settings === undefined ? {} : { settings }), ...(slackTeamId === undefined ? {} : { slackTeamId }) };
 }
 
-/** Exactly the seven parameter names `developerSignInParameters` declares on the control-plane
+/** Exactly the nine parameter names `developerSignInParameters` declares on the control-plane
  * stack (infra/lib/developer-signin.ts), spec 025 phase 25a. Kept as the one place both sides list
  * these names, so `signInStackParameters` can never drift into returning a key the template does
  * not declare. */
 export const SIGN_IN_PARAMETER_NAMES = [
   "SlackTeamId", "DeveloperSignInSlack", "DeveloperOidcIssuer", "DeveloperOidcClientId",
   "DeveloperOidcRequiredClaim", "DeveloperOidcRequiredValues", "DeveloperOidcDisplayName",
+  "DeveloperSignInSlackSince", "DeveloperOidcSince",
 ] as const;
+
+/** The enabled-since parameters (FR-045), which a control plane from before them lacks. */
+export const SIGN_IN_SINCE_PARAMETER_NAMES: ReadonlySet<string> = new Set(["DeveloperSignInSlackSince", "DeveloperOidcSince"]);
 
 export function signInStackParameters(stored: StoredDeveloperSignIn): Record<string, string> {
   const oidc = stored.settings?.oidc;
@@ -100,6 +110,8 @@ export function signInStackParameters(stored: StoredDeveloperSignIn): Record<str
     DeveloperOidcRequiredClaim: oidc?.requiredClaim ?? "",
     DeveloperOidcRequiredValues: JSON.stringify(oidc?.requiredValues ?? []),
     DeveloperOidcDisplayName: oidc?.displayName ?? "Company sign-in",
+    DeveloperSignInSlackSince: String(stored.settings?.since?.slack ?? 0),
+    DeveloperOidcSince: String(stored.settings?.since?.oidc ?? 0),
   };
   return values;
 }

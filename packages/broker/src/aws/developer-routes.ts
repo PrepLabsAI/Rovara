@@ -12,11 +12,13 @@ import {
   type SlackChannelBinding,
 } from "@agentx/contracts";
 import { resolveDeveloperAccess } from "../developer/access.js";
-import { META, type DeveloperRecord, type SessionRecord } from "../developer/store.js";
+import { META, methodSince, startedBeforeMethodOn, type DeveloperRecord, type SessionRecord } from "../developer/store.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 
 export interface DeveloperApiConfiguration {
   issuer: string; env: string; methods: { slack: boolean; oidc: boolean }; slackTeamId?: string;
+  /** Each method's enabled-since cutoff, epoch seconds (FR-045): a session started before it was ended by a disable. */
+  since?: { slack?: number; oidc?: number };
   signInTableName: string;
   channelMembers(request: ChannelMembersRequest): Promise<ChannelMembersResponse>;
 }
@@ -69,6 +71,13 @@ export function channelMembersThroughLambda(invoke: (payload: Uint8Array) => Pro
   };
 }
 
+/** The broker's copy of each method's enabled-since cutoff (FR-045), from its environment. */
+export function developerSinceFromEnvironment(env: NodeJS.ProcessEnv): { slack?: number; oidc?: number } {
+  const slack = methodSince(env.DEVELOPER_SIGNIN_SLACK_SINCE);
+  const oidc = methodSince(env.DEVELOPER_OIDC_SINCE);
+  return { ...(slack === undefined ? {} : { slack }), ...(oidc === undefined ? {} : { oidc }) };
+}
+
 const SIGN_IN_AGAIN = "your AgentX sign-in has ended; run agentx login <url> again";
 
 export function developerClaims(claims: Record<string, unknown> | undefined, config: DeveloperApiConfiguration): { developerId: string; sessionId: string; amr: DeveloperSignInMethod } {
@@ -93,9 +102,14 @@ async function getSignIn<T>(deps: DeveloperRouteDependencies, pk: string): Promi
 
 export async function authenticateDeveloper(deps: DeveloperRouteDependencies, claims: Record<string, unknown> | undefined): Promise<DeveloperCaller> {
   const token = developerClaims(claims, deps.developer);
-  const session = await getSignIn<Pick<SessionRecord, "developerId" | "endsAt" | "revokedAt">>(deps, `SESSION#${token.sessionId}`);
+  const session = await getSignIn<Pick<SessionRecord, "developerId" | "endsAt" | "revokedAt" | "startedAt">>(deps, `SESSION#${token.sessionId}`);
   if (session === undefined || session.developerId !== token.developerId || session.revokedAt !== undefined || session.endsAt <= Math.floor(deps.now() / 1000)) {
     throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  }
+  // The broker may only read the sign-in table (R13), so it refuses; the token endpoint revokes the
+  // session at its next refresh.
+  if (startedBeforeMethodOn(session.startedAt, deps.developer.since?.[token.amr])) {
+    throw agentXError("AUTH_REQUIRED", `your sign-in ended when ${token.amr === "slack" ? "Slack" : "company sign-in"} was turned off; sign in again with agentx login <url>`);
   }
   const developer = await getSignIn<Pick<DeveloperRecord, "displayName" | "slackUserId" | "email" | "revoked">>(deps, `DEVELOPER#${token.developerId}`);
   if (developer === undefined || developer.revoked) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);

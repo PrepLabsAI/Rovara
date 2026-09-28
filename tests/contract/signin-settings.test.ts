@@ -21,6 +21,15 @@ describe("sign-in settings in SSM (FR-010, R7)", () => {
     expect(store.values.get("/agentx/staging/signin")).not.toMatch(/clientSecret"/);
   });
 
+  it("round-trip each method's enabled-since cutoff, and still read settings written without one (FR-045)", async () => {
+    const store = new MemoryParameterStore();
+    await writeSignInSettings(store, { ...both, since: { slack: 1790000000, oidc: 1790000500 } });
+    expect(await readSignInSettings(store, "staging")).toEqual({ ...both, since: { slack: 1790000000, oidc: 1790000500 } });
+    await writeSignInSettings(store, slackOnly);
+    expect(await readSignInSettings(store, "staging")).toEqual(slackOnly);
+    await expect(writeSignInSettings(store, { ...slackOnly, since: { slack: -1 } })).rejects.toThrow(/since/);
+  });
+
   it("refuse a setting with no method enabled, an http issuer, a secret name for another environment, or another environment's name", async () => {
     const store = new MemoryParameterStore();
     await expect(writeSignInSettings(store, { ...slackOnly, slack: false })).rejects.toThrow(/Slack sign-in, company sign-in, or both/);
@@ -85,11 +94,19 @@ describe("stack parameters from stored sign-in", () => {
     expect(signInStackParameters({ settings: both, slackTeamId: "T0TEAM1" })).toEqual({
       SlackTeamId: "T0TEAM1", DeveloperSignInSlack: "enabled", DeveloperOidcIssuer: "https://acme.okta.com", DeveloperOidcClientId: "0oa1",
       DeveloperOidcRequiredClaim: "groups", DeveloperOidcRequiredValues: "[\"engineering\"]", DeveloperOidcDisplayName: "Okta",
+      DeveloperSignInSlackSince: "0", DeveloperOidcSince: "0",
     });
     expect(signInStackParameters({ slackTeamId: "T0TEAM1" })).toEqual({
       SlackTeamId: "T0TEAM1", DeveloperSignInSlack: "disabled", DeveloperOidcIssuer: "", DeveloperOidcClientId: "",
       DeveloperOidcRequiredClaim: "", DeveloperOidcRequiredValues: "[]", DeveloperOidcDisplayName: "Company sign-in",
+      DeveloperSignInSlackSince: "0", DeveloperOidcSince: "0",
     });
+  });
+
+  it("pass each method's enabled-since cutoff, kept even while the method is off (FR-045)", () => {
+    const since = { slack: 1790000000, oidc: 1790000500 };
+    expect(signInStackParameters({ settings: { ...both, since } })).toMatchObject({ DeveloperSignInSlackSince: "1790000000", DeveloperOidcSince: "1790000500" });
+    expect(signInStackParameters({ settings: { ...slackOnly, since } })).toMatchObject({ DeveloperOidcIssuer: "", DeveloperOidcSince: "1790000500" });
   });
 
   it("describe the settings in plain words", () => {

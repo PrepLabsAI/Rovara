@@ -37,6 +37,12 @@ describe("parameter-only stack updates (R6)", () => {
     await expect(run(cf, { SlackTeamId: "T0TEAM1" })).rejects.toThrow(`stack ${STACK} was deployed from an AgentX release without developer sign-in (it has no SlackTeamId parameter); upgrade the environment to a release with developer sign-in, then run this again`);
   });
 
+  it("asks for an upgrade, not for developer sign-in, when only the enabled-since parameters are missing (FR-045)", async () => {
+    const cf = fakeCloudFormation({ parameters: { SlackTeamId: "", DeveloperSignInSlack: "disabled" } });
+    await expect(run(cf, { SlackTeamId: "T0TEAM1", DeveloperSignInSlack: "enabled", DeveloperSignInSlackSince: "1790000000" })).rejects.toThrow(`stack ${STACK} was deployed from an older AgentX release (it has no DeveloperSignInSlackSince parameter); upgrade the environment with agentx deploy, then run this again`);
+    expect(cf.calls.map((call) => call.name)).toEqual(["DescribeStacksCommand"]);
+  });
+
   it.each([
     ["UPDATE_IN_PROGRESS", /is busy \(UPDATE_IN_PROGRESS\); try again when it finishes/],
     ["UPDATE_ROLLBACK_FAILED", /is UPDATE_ROLLBACK_FAILED; fix it in the CloudFormation console first/],

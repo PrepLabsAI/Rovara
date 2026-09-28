@@ -15,10 +15,12 @@ import {
 import { adaptHttpApiEvent, ownerKeyForSubject, type HttpApiV2Event } from "../aws/lambda.js";
 import { ProviderNotConfiguredError, ProviderUnavailableError, type ProviderResult, type SignInProvider } from "./providers.js";
 import type { SlackDirectory } from "./slack-directory.js";
-import type { AuthRequestRecord, DeveloperSignInStore, SessionRecord } from "./store.js";
+import { startedBeforeMethodOn, type AuthRequestRecord, type DeveloperSignInStore, type SessionRecord } from "./store.js";
 import { issueAccessToken, type TokenSigner } from "./tokens.js";
 
-export interface DeveloperIdentityConfig { env: string; issuer: string; slack: { enabled: boolean; teamId?: string }; oidc?: { displayName: string } }
+/** `since` (epoch seconds, FR-045): when the method was last turned on. A session started before it
+ * was ended by the disable in between, so it never comes back when the method is on again. */
+export interface DeveloperIdentityConfig { env: string; issuer: string; slack: { enabled: boolean; teamId?: string; since?: number }; oidc?: { displayName: string; since?: number } }
 export interface DeveloperIdentityDependencies {
   config: DeveloperIdentityConfig;
   store: DeveloperSignInStore;
@@ -245,6 +247,10 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     if (!methods.includes(session.amr)) {
       await revoke(session.sessionId, "method_disabled");
       return oauthError(400, "invalid_grant", `${methodLabel(session.amr)} sign-in was turned off in this environment; sign in another way with agentx login`);
+    }
+    if (startedBeforeMethodOn(session.startedAt, session.amr === "slack" ? config.slack.since : config.oidc?.since)) {
+      await revoke(session.sessionId, "method_disabled");
+      return oauthError(400, "invalid_grant", `your sign-in ended when ${methodLabel(session.amr)} was turned off; sign in again with agentx login`);
     }
     const developer = await store.getDeveloper(session.developerId);
     if (developer === undefined || developer.revoked) {

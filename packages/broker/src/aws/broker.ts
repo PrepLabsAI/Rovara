@@ -82,7 +82,7 @@ import { observeConnectorRoute } from "./connector-metrics.js";
 import { attributionDroppedLog, callConnector, connectorCatalogKey, discoverConnector, discoverLegacyGitHubScope, stripCode, type ConnectorContextBase, type ScopeDiscovery } from "./connector-routes.js";
 import { resolveConnectors, BUILT_IN_CONNECTOR_TYPES, type ConnectorType, type ConnectorTypeContext, type ResolvedConnector } from "./connector-types.js";
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
-import { channelMembersThroughLambda, routeDeveloperRequest, type DeveloperApiConfiguration } from "./developer-routes.js";
+import { channelMembersThroughLambda, developerSinceFromEnvironment, routeDeveloperRequest, type DeveloperApiConfiguration } from "./developer-routes.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
@@ -3653,6 +3653,7 @@ function developerConfiguration(): DeveloperApiConfiguration | undefined {
     env: requiredEnvironment("AGENTX_ENV"),
     methods: { slack: process.env.DEVELOPER_SIGNIN_SLACK === "enabled", oidc: (process.env.DEVELOPER_OIDC_ISSUER ?? "") !== "" },
     ...(teamId === "" ? {} : { slackTeamId: teamId }),
+    since: developerSinceFromEnvironment(process.env),
     signInTableName: requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME"),
     channelMembers: channelMembersThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
   };

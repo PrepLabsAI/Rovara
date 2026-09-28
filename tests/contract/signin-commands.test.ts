@@ -306,6 +306,42 @@ describe("agentx signin enable oidc (FR-004, FR-010, FR-045)", () => {
   });
 });
 
+describe("each method's enabled-since cutoff (FR-045)", () => {
+  const T0_SECONDS = Math.floor(T0 / 1000);
+  it("sets a method's cutoff to now when it goes from off to on, so sessions its disable ended stay ended", async () => {
+    const h = await services(["1111111111.2222222222222", SLACK_CLIENT_SECRET, true]);
+    await writeSignInSettings(h.store, { ...slackOn, slack: false, oidc: { issuer: "https://acme.okta.com", clientId: "0oa1", displayName: "Okta", clientSecretName: "agentx/staging/developer-oidc" }, since: { slack: 1700000000, oidc: 1700000100 } });
+    await runSigninEnable(h.s, "staging", "slack", {}, {}, false);
+    expect(await readSignInSettings(h.store, "staging")).toMatchObject({ since: { slack: T0_SECONDS, oidc: 1700000100 } });
+    expect(h.cloudFormation.parameters).toMatchObject({ DeveloperSignInSlack: "enabled", DeveloperSignInSlackSince: String(T0_SECONDS), DeveloperOidcSince: "1700000100" });
+  });
+
+  it("sets it on a first enable too", async () => {
+    const h = await services(["1111111111.2222222222222", SLACK_CLIENT_SECRET, true]);
+    await runSigninEnable(h.s, "staging", "slack", {}, {}, false);
+    expect(await readSignInSettings(h.store, "staging")).toMatchObject({ since: { slack: T0_SECONDS } });
+    expect(h.cloudFormation.parameters).toMatchObject({ DeveloperSignInSlackSince: String(T0_SECONDS), DeveloperOidcSince: "0" });
+  });
+
+  it("keeps the cutoff when the method was already on", async () => {
+    const h = await services(["1111111111.2222222222222", SLACK_CLIENT_SECRET, true], {}, { ...SIGN_IN_PARAMETERS, DeveloperSignInSlack: "enabled", SlackTeamId: "T0TEAM", DeveloperSignInSlackSince: "1700000000" });
+    await writeSignInSettings(h.store, { ...slackOn, since: { slack: 1700000000 } });
+    await writeSlackTeamId(h.store, "staging", "T0TEAM");
+    await runSigninEnable(h.s, "staging", "slack", {}, {}, false);
+    expect(await readSignInSettings(h.store, "staging")).toMatchObject({ since: { slack: 1700000000 } });
+    expect(h.cloudFormation.parameters.DeveloperSignInSlackSince).toBe("1700000000");
+  });
+
+  it("keeps the cutoff when the method is turned off", async () => {
+    const h = await services([true], {}, { ...SIGN_IN_PARAMETERS, DeveloperSignInSlack: "enabled", SlackTeamId: "T0TEAM", DeveloperSignInSlackSince: "1700000000" });
+    await writeSignInSettings(h.store, { ...slackOn, oidc: { issuer: "https://acme.okta.com", clientId: "0oa1", displayName: "Okta", clientSecretName: "agentx/staging/developer-oidc" }, since: { slack: 1700000000 } });
+    await writeSlackTeamId(h.store, "staging", "T0TEAM");
+    await runSigninDisable(h.s, "staging", "slack", false);
+    expect(await readSignInSettings(h.store, "staging")).toMatchObject({ slack: false, since: { slack: 1700000000 } });
+    expect(h.cloudFormation.parameters).toMatchObject({ DeveloperSignInSlack: "disabled", DeveloperSignInSlackSince: "1700000000" });
+  });
+});
+
 describe("agentx signin disable and show", () => {
   it("disables a method, which revokes its sessions through the control plane (FR-045, R13)", async () => {
     const h = await services([true], {}, { ...SIGN_IN_PARAMETERS, DeveloperSignInSlack: "enabled", SlackTeamId: "T0TEAM" });

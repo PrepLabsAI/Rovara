@@ -7,6 +7,7 @@ const STACK = "agentx-staging-control-plane";
 export const SIGN_IN_PARAMETERS: Record<string, string> = {
   CallbackSigningKey: "****", SlackTeamId: "", DeveloperSignInSlack: "disabled", DeveloperOidcIssuer: "", DeveloperOidcClientId: "",
   DeveloperOidcRequiredClaim: "", DeveloperOidcRequiredValues: "[]", DeveloperOidcDisplayName: "Company sign-in",
+  DeveloperSignInSlackSince: "0", DeveloperOidcSince: "0",
 };
 
 type Command = { constructor: { name: string }; input: Record<string, unknown> };
