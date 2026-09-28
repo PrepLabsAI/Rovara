@@ -397,8 +397,10 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
     sign-in session.
 - **FR-006**: The environment MUST store its Slack team ID in its settings (`/agentx/<env>/slack/
   teamId`) and pass it to the control plane as the `SlackTeamId` stack parameter. `agentx init`
-  MUST take it from the bot token's `auth.test`; `agentx env adopt` and `agentx doctor` MUST read
-  it the same way for existing environments. Slack sign-in MUST be refused while it is unset.
+  MUST take it from the bot token's `auth.test`; `agentx doctor` MUST read it the same way for
+  existing environments. `agentx env adopt` registers only the legacy deployment, which sign-in
+  refuses, so it never reads that deployment's Slack secret. Slack sign-in MUST be refused while it
+  is unset.
 - **FR-007**: At each refresh of a Slack-signed-in developer, the control plane MUST check with
   `users.info` that the user still exists, is not deactivated and is in the team; otherwise the
   refresh MUST fail and revoke the session. Company-signed-in developers are checked only at sign-in.

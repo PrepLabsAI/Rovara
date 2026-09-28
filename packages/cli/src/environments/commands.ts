@@ -35,8 +35,6 @@ export async function runEnvAdopt(input: {
   clientId?: string;
   stacks: StackReader;
   identity: CallerIdentity;
-  slackTeamId?: (slackSecretArn: string) => Promise<string>;
-  write?: (line: string) => void;
 }): Promise<EnvironmentSettings> {
   return adoptEnvironment(input);
 }

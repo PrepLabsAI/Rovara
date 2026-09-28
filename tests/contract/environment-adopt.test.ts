@@ -7,8 +7,6 @@ import { ADOPTED_STACK_NAMES, adoptEnvironment, type StackReader } from "../../p
 import { STALE_LOCK_MS, lockParameterName } from "../../packages/cli/src/environments/lock.js";
 import type { ParameterStore } from "../../packages/cli/src/environments/parameter-store.js";
 import { readEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
-import { readSlackTeamIdFromSecret } from "../../packages/cli/src/init/slack-app.js";
-import { fakeSlackApi, memoryInitSecrets, TEST_BOT_TOKEN, TEST_SIGNING_SECRET } from "../support/init-fakes.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 
 const liveStacks: Record<string, { outputs: Record<string, string>; parameters: Record<string, string>; status: string }> = {
@@ -187,91 +185,13 @@ describe("agentx env adopt", () => {
   });
 });
 
-describe("agentx env adopt records the Slack team ID (FR-006, R21)", () => {
-  const withSecret = { ...liveStacks, AgentXControlPlane: { ...liveStacks.AgentXControlPlane!, outputs: { ...liveStacks.AgentXControlPlane!.outputs, SlackSecretArn: "arn:aws:secretsmanager:us-east-1:944937319445:secret:SlackSecret-AbCdEf" } } };
-
-  it("writes /agentx/production/slack/teamId from the bot token's auth.test", async () => {
+describe("agentx env adopt and the Slack team ID", () => {
+  it("never records a Slack team ID: the adopted deployment keeps the legacy names, which sign-in refuses", async () => {
+    const withSecret = { ...liveStacks, AgentXControlPlane: { ...liveStacks.AgentXControlPlane!, outputs: { ...liveStacks.AgentXControlPlane!.outputs, SlackSecretArn: "arn:aws:secretsmanager:us-east-1:944937319445:secret:SlackSecret-AbCdEf" } } };
     const store = new MemoryParameterStore();
     const home = await mkdtemp(join(tmpdir(), "agentx-adopt-"));
-    const seen: string[] = [];
-    await adoptEnvironment({ env: "production", region: "us-east-1", stacks: reader(withSecret), identity, store, home, now, slackTeamId: async (arn) => { seen.push(arn); return "T0TEAM1"; } });
-    expect(seen).toEqual(["arn:aws:secretsmanager:us-east-1:944937319445:secret:SlackSecret-AbCdEf"]);
-    expect(store.values.get("/agentx/production/slack/teamId")).toBe("T0TEAM1");
-  });
-
-  it("reports a failure in one line and still adopts", async () => {
-    const store = new MemoryParameterStore();
-    const home = await mkdtemp(join(tmpdir(), "agentx-adopt-"));
-    const lines: string[] = [];
-    const settings = await adoptEnvironment({ env: "production", region: "us-east-1", stacks: reader(withSecret), identity, store, home, now, write: (line) => lines.push(line), slackTeamId: async () => { throw Object.assign(new Error("denied xoxb-should-not-print"), { name: "AccessDeniedException" }); } });
-    expect(settings.env).toBe("production");
-    expect(lines).toEqual(["Could not record the Slack team ID (AccessDeniedException); agentx signin check reports it, and agentx signin enable slack records it"]);
-    expect(store.values.has("/agentx/production/slack/teamId")).toBe(false);
-  });
-
-  describe("names a safe reason and the next step when it cannot (fix round 1)", () => {
-    const ARN = "arn:aws:secretsmanager:us-east-1:944937319445:secret:SlackSecret-AbCdEf";
-    async function failureLines(secret: string, api: ReturnType<typeof fakeSlackApi>): Promise<string[]> {
-      const store = new MemoryParameterStore();
-      const home = await mkdtemp(join(tmpdir(), "agentx-adopt-"));
-      const lines: string[] = [];
-      const secrets = memoryInitSecrets({ [ARN]: secret });
-      const settings = await adoptEnvironment({
-        env: "production", region: "us-east-1", stacks: reader(withSecret), identity, store, home, now, write: (line) => lines.push(line),
-        slackTeamId: async (arn) => (await readSlackTeamIdFromSecret({ secrets, api, secretId: arn })).teamId,
-      });
-      expect(settings.env).toBe("production");
-      expect(store.values.has("/agentx/production/slack/teamId")).toBe(false);
-      for (const line of lines) {
-        expect(line).not.toContain(TEST_BOT_TOKEN);
-        expect(line).not.toContain(TEST_SIGNING_SECRET);
-      }
-      return lines;
-    }
-    const stored = JSON.stringify({ signingSecret: TEST_SIGNING_SECRET, botToken: TEST_BOT_TOKEN });
-
-    it("no bot token in the Slack secret", async () => {
-      expect(await failureLines(JSON.stringify({ botToken: "unset", signingSecret: "placeholder" }), fakeSlackApi())).toEqual([
-        "Could not record the Slack team ID (no bot token in the Slack secret); finish the Slack app step of agentx init, then run agentx signin enable slack",
-      ]);
-    });
-
-    it("Slack refused the bot token, with Slack's error code sanitized", async () => {
-      expect(await failureLines(stored, fakeSlackApi({ authTest: async () => ({ ok: false, error: "token_revoked" }) }))).toEqual([
-        "Could not record the Slack team ID (Slack refused the bot token (token_revoked)); reinstall the Slack app and store its new token with the Slack app step of agentx init, then run agentx signin enable slack",
-      ]);
-      // A code that is not a plain Slack error code is never echoed.
-      const odd = await failureLines(stored, fakeSlackApi({ authTest: async () => ({ ok: false, error: `bad ${TEST_BOT_TOKEN}` }) }));
-      expect(odd).toEqual([
-        "Could not record the Slack team ID (Slack refused the bot token (unrecognized error)); reinstall the Slack app and store its new token with the Slack app step of agentx init, then run agentx signin enable slack",
-      ]);
-    });
-
-    it("Slack could not be reached", async () => {
-      expect(await failureLines(stored, fakeSlackApi({ authTest: async () => { throw new TypeError(`fetch failed ${TEST_BOT_TOKEN}`); } }))).toEqual([
-        "Could not record the Slack team ID (Slack could not be reached); check this computer's network access to slack.com, then run agentx signin enable slack",
-      ]);
-    });
-
-    it("any other error: its class name only", async () => {
-      const secrets = { get: async () => { throw Object.assign(new Error(`denied ${TEST_BOT_TOKEN}`), { name: "AccessDeniedException" }); } };
-      const store = new MemoryParameterStore();
-      const home = await mkdtemp(join(tmpdir(), "agentx-adopt-"));
-      const lines: string[] = [];
-      await adoptEnvironment({
-        env: "production", region: "us-east-1", stacks: reader(withSecret), identity, store, home, now, write: (line) => lines.push(line),
-        slackTeamId: async (arn) => (await readSlackTeamIdFromSecret({ secrets, api: fakeSlackApi(), secretId: arn })).teamId,
-      });
-      expect(lines).toEqual(["Could not record the Slack team ID (AccessDeniedException); agentx signin check reports it, and agentx signin enable slack records it"]);
-    });
-  });
-
-  it("asks for nothing when the control plane reports no Slack secret", async () => {
-    const store = new MemoryParameterStore();
-    const home = await mkdtemp(join(tmpdir(), "agentx-adopt-"));
-    const seen: string[] = [];
-    await adoptEnvironment({ env: "production", region: "us-east-1", stacks: reader(liveStacks), identity, store, home, now, slackTeamId: async (arn) => { seen.push(arn); return "T0TEAM1"; } });
-    expect(seen).toEqual([]);
+    const settings = await adoptEnvironment({ env: "production", region: "us-east-1", stacks: reader(withSecret), identity, store, home, now });
+    expect(settings.naming).toBe("legacy");
     expect(store.values.has("/agentx/production/slack/teamId")).toBe(false);
   });
 });

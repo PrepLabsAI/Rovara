@@ -85,7 +85,7 @@ function parsedSecret(existing: string | undefined): Record<string, unknown> {
 
 /**
  * Why the team ID could not be read, as a fixed phrase that never holds secret content, and what
- * to do next. `env adopt` prints these instead of the message.
+ * to do next, beside the message.
  */
 export class SlackTeamIdError extends AgentXError {
   constructor(message: string, readonly reason: string, readonly nextStep: string) {

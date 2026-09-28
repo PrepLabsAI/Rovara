@@ -2,8 +2,6 @@ import { DescribeStacksCommand, type CloudFormationClient } from "@aws-sdk/clien
 import { GetCallerIdentityCommand, type STSClient } from "@aws-sdk/client-sts";
 import { agentXError, DEFAULT_ENVIRONMENT, type StackPart } from "@agentx/contracts";
 import { ModelsAnswersSchema } from "../deploy/answer-schemas.js";
-import { SlackTeamIdError } from "../init/slack-app.js";
-import { writeSlackTeamId } from "../signin/settings.js";
 import { writeEnvironmentCache } from "./cache.js";
 import { withEnvironmentLock } from "./lock.js";
 import type { ParameterStore } from "./parameter-store.js";
@@ -97,8 +95,8 @@ function required(stack: StackDescription, stackName: string, kind: "outputs" | 
  * the fixed legacy stack names as environment `<env>`, reading its CloudFormation stacks and
  * writing settings to SSM. Never changes any stack. Refuses, writing nothing, when a stack is
  * missing or unhealthy, an output or parameter is missing, or the environment already has settings.
- * When `slackTeamId` is given and the control plane reports its Slack secret, it also records the
- * Slack team ID at /agentx/<env>/slack/teamId; a failure there is one line on `write`, not a refusal.
+ * The adopted deployment keeps the legacy stack names, which developer sign-in refuses, so adopt
+ * never reads its Slack secret or records a Slack team ID.
  */
 export async function adoptEnvironment(input: {
   env: string;
@@ -109,9 +107,6 @@ export async function adoptEnvironment(input: {
   store: ParameterStore;
   home: string;
   now?: () => number;
-  /** The Slack team ID of the bot token in the secret with this ARN (auth.test). */
-  slackTeamId?: (slackSecretArn: string) => Promise<string>;
-  write?: (line: string) => void;
 }): Promise<EnvironmentSettings> {
   if (input.env !== DEFAULT_ENVIRONMENT) {
     throw agentXError("CONFIG_INVALID", "only the production environment can adopt the deployment that predates environments; nothing changed");
@@ -169,17 +164,6 @@ export async function adoptEnvironment(input: {
         "RUNTIME_UNAVAILABLE",
         `settings for ${input.env} were saved to ${settingsParameterName(input.env)}, but the local cache could not be written${detail}; run agentx --env ${input.env} env use`,
       );
-    }
-    const slackSecretArn = control.outputs.SlackSecretArn;
-    if (input.slackTeamId !== undefined && slackSecretArn !== undefined) {
-      try {
-        await writeSlackTeamId(input.store, input.env, await input.slackTeamId(slackSecretArn));
-      } catch (error) {
-        // A fixed reason, or else the error class only: a message could carry anything the Slack or AWS client put in it.
-        input.write?.(error instanceof SlackTeamIdError
-          ? `Could not record the Slack team ID (${error.reason}); ${error.nextStep}`
-          : `Could not record the Slack team ID (${error instanceof Error ? error.name : "unknown error"}); agentx signin check reports it, and agentx signin enable slack records it`);
-      }
     }
     return settings;
   });
