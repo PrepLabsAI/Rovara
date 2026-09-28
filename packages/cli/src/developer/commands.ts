@@ -1,5 +1,5 @@
 // agentx whoami and agentx logout (FR-011).
-import { AGENTX_CLI_CLIENT_ID, DeveloperProjectsResponseSchema, agentXError, type DeveloperProjectsResponse } from "@agentx/contracts";
+import { AGENTX_CLI_CLIENT_ID, AgentXError, DeveloperProjectsResponseSchema, agentXError, type DeveloperProjectsResponse } from "@agentx/contracts";
 import { sanitizeServerText } from "../auth.js";
 import { developerTokenKey, removeDeveloperEnvironment, resolveDeveloperEnvironment } from "./config.js";
 import { developerAccessToken, type DeveloperSessionDeps } from "./session.js";
@@ -51,7 +51,16 @@ export interface DeveloperLogoutResult {
  * environment are removed whatever the server answers; `revoked` and `problem` say how that went.
  */
 export async function developerLogout(deps: DeveloperSessionDeps, env: string | undefined): Promise<DeveloperLogoutResult> {
-  const resolved = await resolveDeveloperEnvironment(deps.home, env);
+  let resolved: Awaited<ReturnType<typeof resolveDeveloperEnvironment>>;
+  try {
+    resolved = await resolveDeveloperEnvironment(deps.home, env);
+  } catch (error) {
+    // No developer sign-in here: the person may mean the admin one, which --admin ends.
+    if (error instanceof AgentXError && error.code === "AUTH_REQUIRED") {
+      throw agentXError("AUTH_REQUIRED", `${error.message.slice(error.code.length + 2)}; for the admin login, run agentx logout --admin`);
+    }
+    throw error;
+  }
   const key = developerTokenKey(resolved.entry.issuer);
   const tokens = await deps.tokenStore.get(key);
   let outcome: Omit<DeveloperLogoutResult, "env"> = { revoked: false };

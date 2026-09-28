@@ -99,6 +99,12 @@ describe("agentx whoami and logout (FR-011)", () => {
     expect(h.out.join("")).toBe("Signed out of AgentX environment staging on this computer. AgentX did not confirm it ended the sign-in there (AgentX could not finish this just now[2J), so the server session may stay until it expires.\n");
   });
 
+  it("logout without a developer sign-in names the admin logout too", async () => {
+    const h = await signedIn();
+    expect(await h.run(["--env", "other", "logout"])).toBe(3);
+    expect(h.err.join("")).toContain("this computer is not signed in to AgentX environment other; run npx @charterarc/agentx login <your AgentX URL>; for the admin login, run agentx logout --admin");
+  });
+
   it("logout --json reports whether the server revoked the session", async () => {
     const h = await signedIn({ revoke: () => Promise.resolve(Response.json({}, { status: 500 })) });
     expect(await h.run(["--json", "logout"])).toBe(0);
