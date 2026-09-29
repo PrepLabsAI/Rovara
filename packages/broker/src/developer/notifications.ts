@@ -64,6 +64,21 @@ export function noticesOf(previous: Record<string, unknown> | undefined, next: R
   }
 }
 
+const isTime = (value: unknown): value is string => typeof value === "string" && !Number.isNaN(Date.parse(value));
+
+/**
+ * Ruling F7: when the change committed, to the millisecond, from the new image's own time (task
+ * and operation records carry `updatedAt`; a cancel stamps the pointer's `cancelledAt`), so it
+ * compares exactly with a share's `sharedAt`. The stream's time has whole seconds and can come
+ * before `sharedAt`, so it is only the fallback.
+ */
+function changedAt(next: Record<string, unknown>, approximate: number | undefined): string {
+  if (isTime(next.updatedAt)) return new Date(next.updatedAt).toISOString();
+  if (next.entityType === "DEVELOPER_TASK_POINTER" && isTime(next.cancelledAt)) return new Date(next.cancelledAt).toISOString();
+  const seconds = typeof approximate === "number" && Number.isFinite(approximate) ? approximate : Date.now() / 1000;
+  return new Date(seconds * 1000).toISOString();
+}
+
 /** A stream record that could not be read: its event name and ID only, never an error message. */
 export interface SkippedRecord { eventID?: string; eventName?: string }
 
@@ -77,10 +92,7 @@ export function readStream(records: readonly StreamRecord[]): { notices: Notice[
     try {
       const next = unmarshall(image) as Record<string, unknown>;
       const previous = entry.dynamodb?.OldImage === undefined ? undefined : unmarshall(entry.dynamodb.OldImage) as Record<string, unknown>;
-      // `noticesOf` takes the time as an argument, so a later caller can stamp it from the new image instead.
-      const approximate = entry.dynamodb?.ApproximateCreationDateTime;
-      const seconds = typeof approximate === "number" && Number.isFinite(approximate) ? approximate : Date.now() / 1000;
-      notices.push(...noticesOf(previous, next, new Date(seconds * 1000).toISOString(), entry.eventID ?? ""));
+      notices.push(...noticesOf(previous, next, changedAt(next, entry.dynamodb?.ApproximateCreationDateTime), entry.eventID ?? ""));
     } catch {
       skipped.push({ ...(entry.eventID === undefined ? {} : { eventID: entry.eventID }), ...(entry.eventName === undefined ? {} : { eventName: entry.eventName }) });
     }

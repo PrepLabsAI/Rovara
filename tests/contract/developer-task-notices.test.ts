@@ -117,6 +117,16 @@ describe("notices from the stream (C7, C8)", () => {
     expect(Number.isNaN(Date.parse(read.notices[0]!.at))).toBe(false);
   });
 
+  it("stamps the notice with the new image's updatedAt, to the millisecond, else a pointer's cancelledAt, else the stream time (ruling F7)", () => {
+    const task = { entityType: "DEVELOPER_TASK", taskId: "t1", share: { mode: "view" } };
+    const at = (image: Record<string, unknown>) => readStream([{ eventID: "e1", eventName: "INSERT", dynamodb: { ApproximateCreationDateTime: 1_790_000_000, NewImage: marshall(image) } }]).notices[0]?.at;
+    expect(at({ ...task, updatedAt: "2026-09-29T10:00:00.123Z" })).toBe("2026-09-29T10:00:00.123Z");
+    expect(at({ ...task, updatedAt: "not a time" })).toBe(new Date(1_790_000_000_000).toISOString());
+    expect(at(task)).toBe(new Date(1_790_000_000_000).toISOString());
+    const pointer = { entityType: "DEVELOPER_TASK_POINTER", taskId: "t1", cancelledAt: "2026-09-29T10:00:00.456Z" };
+    expect(readStream([{ eventID: "e2", eventName: "MODIFY", dynamodb: { ApproximateCreationDateTime: 1_790_000_000, OldImage: marshall({ entityType: "DEVELOPER_TASK_POINTER", taskId: "t1" }), NewImage: marshall(pointer) } }]).notices[0]?.at).toBe("2026-09-29T10:00:00.456Z");
+  });
+
   it("gives a setup notice only for a prepare that failed, not one that was cancelled", () => {
     const prepare = { entityType: "OPERATION", id: randomUUID(), workspaceId: randomUUID(), kind: "prepare", requestedBy: { kind: "developer", developerId: "d".repeat(64), provider: "slack" } };
     const after = (status: string) => noticesOf({ ...prepare, status: "RUNNING" }, { ...prepare, status }, "t", "e1").map((notice) => notice.kind);
