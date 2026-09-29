@@ -104,6 +104,34 @@ describe("sharing into a private channel needs membership (Q10)", () => {
     expect(second.db.get(`DEVTASK#${running.taskId}`, "META")).not.toHaveProperty("share");
   });
 
+  describe("when the channel's privacy is unknown, it is treated as private unless the sharer is a member", () => {
+    const TRANSIENT = "Slack could not be reached to check whether that channel is private; try again shortly";
+    const NOT_SET_UP = "AgentX cannot tell whether that channel is private; ask your AgentX admin to finish the Slack setup, or share to a channel you are a member of";
+    const noInfo = async (): Promise<ChannelInfoResponse> => ({ ok: false, error: "slack_unavailable" });
+
+    for (const [label, channelInfo, message] of [["Slack does not answer channel-info", noInfo, TRANSIENT], ["channel-info is not configured", null, NOT_SET_UP]] as const) {
+      it(`${label}: a Slack-linked non-member is refused, audited, and nothing is written; a member still shares`, async () => {
+        // PUBLIC is in fact public; with its privacy unknown, a non-member must not share into it.
+        const { db, handler, dev } = await createDeveloperTaskBroker({ channelInfo, channelMembers: members(false) });
+        await bindChannel(handler, PUBLIC);
+        const refused = await dev(MAYA, "POST", "/v1/dev/tasks", start({ shareToChannel: true, channel: PUBLIC }));
+        expect(refused.body.error).toEqual({ code: "SLACK_UNAVAILABLE", message });
+        expect(workspaces(db)).toHaveLength(0);
+        expect(refusals(db)).toEqual([expect.objectContaining({ action: "start", outcome: "refused", error: { code: "SLACK_UNAVAILABLE" } })]);
+        const shared = taskOf((await dev(MAYA, "POST", "/v1/dev/tasks", start({ shareToChannel: true, channel: SLACK_CHANNEL }))).body);
+        expect(shared).toMatchObject({ shared: true, share: { channelId: SLACK_CHANNEL } });
+      });
+
+      it(`${label}: a developer with no Slack link is refused`, async () => {
+        const { db, dev } = await createDeveloperTaskBroker({ channelInfo, channelMembers: members(false) });
+        grantProject(db, OMAR);
+        const refused = await dev(OMAR, "POST", "/v1/dev/tasks", start({ shareToChannel: true }));
+        expect(refused.body.error).toEqual({ code: "SLACK_UNAVAILABLE", message });
+        expect(workspaces(db)).toHaveLength(0);
+      });
+    }
+  });
+
   it("leaves a public channel unaffected: a non-member shares into it, and no membership is asked", async () => {
     const { handler, dev, channelMembers } = await withPrivate(false);
     await bindChannel(handler, PUBLIC);

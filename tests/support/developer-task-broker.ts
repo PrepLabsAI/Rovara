@@ -59,16 +59,17 @@ export async function createDeveloperTaskBroker(options: {
   /** null: the environment has no Slack team ID. */
   slackTeamId?: string | null;
   channelMembers?: (request: ChannelMembersRequest) => Promise<ChannelMembersResponse>;
-  channelInfo?: (request: ChannelInfoRequest) => Promise<ChannelInfoResponse>;
+  /** null: the environment has no channel-info lookup configured at all. */
+  channelInfo?: ((request: ChannelInfoRequest) => Promise<ChannelInfoResponse>) | null;
   register?: boolean;
 } = {}) {
   const module = await loadSlackBroker() as unknown as { createDeveloperTaskActions: (input: never) => DeveloperTaskActions };
   const channelMembers = vi.fn(options.channelMembers ?? (async (request: ChannelMembersRequest): Promise<ChannelMembersResponse> => ({ ok: true, memberOf: request.slackUserId === MAYA.slackUserId ? request.channelIds.filter((id) => id === SLACK_CHANNEL) : [] })));
-  const channelInfo = vi.fn(options.channelInfo ?? (async (request: ChannelInfoRequest): Promise<ChannelInfoResponse> => ({ ok: true, channels: request.channelIds.map((channelId) => ({ channelId, name: "payments-dev", isPrivate: false })) })));
+  const channelInfo = vi.fn((options.channelInfo === null ? undefined : options.channelInfo) ?? (async (request: ChannelInfoRequest): Promise<ChannelInfoResponse> => ({ ok: true, channels: request.channelIds.map((channelId) => ({ channelId, name: "payments-dev", isPrivate: false })) })));
   const developer: DeveloperApiConfiguration = {
     issuer: DEV_ISSUER, env: "staging", methods: { slack: true, oidc: true },
     ...(options.slackTeamId === null ? {} : { slackTeamId: options.slackTeamId ?? SLACK_TEAM }),
-    signInTableName: "signin", channelMembers, channelInfo,
+    signInTableName: "signin", channelMembers, ...(options.channelInfo === null ? {} : { channelInfo }),
     verifyAccessToken: developerTokenVerifier({ issuer: DEV_ISSUER, keys: async () => [await signer.publicJwk()], now: () => Date.now() }),
   };
   const s3 = memoryS3();

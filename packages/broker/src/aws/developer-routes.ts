@@ -486,13 +486,16 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
         return answer.memberOf.includes(channelId);
       },
       projectChannelIds: async (project) => (await bindingsOf(deps)).filter((binding) => binding.projectName === project).map((binding) => binding.channelId).sort(),
-      boundChannels: async (channelIds) => {
-        const known = await channelNames(deps, channelIds);
-        return channelIds.map((channelId) => {
-          const channel = known.get(channelId);
-          return channel === undefined ? { channelId } : { channelId, name: channel.name, isPrivate: channel.isPrivate };
-        });
-      },
+      // Only where channel-info is configured: without it no privacy can be known (Q10's message says so).
+      ...(deps.developer.channelInfo === undefined ? {} : {
+        boundChannels: async (channelIds: readonly string[]) => {
+          const known = await channelNames(deps, channelIds);
+          return channelIds.map((channelId) => {
+            const channel = known.get(channelId);
+            return channel === undefined ? { channelId } : { channelId, name: channel.name, isPrivate: channel.isPrivate };
+          });
+        },
+      }),
       now: deps.now,
     }, caller, request, url);
   }

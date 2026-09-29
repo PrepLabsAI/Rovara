@@ -374,20 +374,22 @@ async function shareFor(
 
 const NOT_A_MEMBER = "you are not a member of that private channel; join it first, or share to one of the project's public channels";
 const PRIVACY_UNKNOWN = "Slack could not be reached to check whether that channel is private; try again shortly";
+const PRIVACY_NOT_SET_UP = "AgentX cannot tell whether that channel is private; ask your AgentX admin to finish the Slack setup, or share to a channel you are a member of";
 
 /**
  * Q10 (owner answer, 2026-09-29): a private channel takes a share only from one of its members. A
- * public channel needs nothing. A channel whose privacy Slack did not give is treated as private
- * unless the caller is a member, and a failed membership lookup refuses: it never lets a share through.
+ * public channel needs nothing. A channel whose privacy is unknown (Slack did not answer, or no
+ * channel-info lookup is configured) is treated as private unless the caller is a member, and a
+ * failed membership lookup refuses: nothing here lets a share through on doubt.
  */
 async function confirmMayShareInto(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, channel: BoundChannel): Promise<void> {
   if (channel.isPrivate === false) return;
+  const refusal = () => channel.isPrivate === true
+    ? agentXError("CHANNEL_REQUIRED", NOT_A_MEMBER)
+    : agentXError("SLACK_UNAVAILABLE", deps.boundChannels === undefined ? PRIVACY_NOT_SET_UP : PRIVACY_UNKNOWN);
   // A caller with no Slack link cannot be confirmed as a member.
-  if (caller.slackUserId === undefined || deps.channelMember === undefined) {
-    throw channel.isPrivate === true ? agentXError("CHANNEL_REQUIRED", NOT_A_MEMBER) : agentXError("SLACK_UNAVAILABLE", PRIVACY_UNKNOWN);
-  }
-  if (await deps.channelMember(caller.slackUserId, channel.channelId)) return;
-  throw channel.isPrivate === true ? agentXError("CHANNEL_REQUIRED", NOT_A_MEMBER) : agentXError("SLACK_UNAVAILABLE", PRIVACY_UNKNOWN);
+  if (caller.slackUserId === undefined || deps.channelMember === undefined) throw refusal();
+  if (!(await deps.channelMember(caller.slackUserId, channel.channelId))) throw refusal();
 }
 
 async function startTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, value: unknown): Promise<{ task: DeveloperTaskView }> {
