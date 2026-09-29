@@ -224,6 +224,11 @@ describe("fetching the release for this CLI", () => {
       .rejects.toThrow("release 9.9.9 was not found at https://github.com/PrepLabsAI/AgentX/releases/download/v9.9.9/release.json; check the version is published, or pass --release <dir>");
   });
 
+  it("tells a CLI built from source that --engine cdk still reads the release's images and notes (live check L7)", async () => {
+    await expect(fetchRelease({ version: undefined, engine: "cdk", home: await tmp("agentx-home-"), fetch: github({}), runner, write: () => undefined }))
+      .rejects.toThrow("this agentx was built from source and has no published release to download; --engine cdk builds the stacks from --source, but still reads the release's images and notes from --release <dir> (npm run release:build builds one)");
+  });
+
   it("asks a CLI built from source to pass --release", async () => {
     await expect(fetchRelease({ version: undefined, home: await tmp("agentx-home-"), fetch: github({}), runner, write: () => undefined }))
       .rejects.toThrow("this agentx was built from source and has no published release to download; pass --release <dir> (npm run release:build builds one)");

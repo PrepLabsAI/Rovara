@@ -409,6 +409,11 @@ describe("agentx upgrade with the cdk engine", () => {
     expect(result.doctor).toEqual({ failed: 0, warned: 0 });
   });
 
+  it("tells a source-built CLI that the cdk engine still reads the release's images and notes (live check L7)", async () => {
+    const h = await cdk({ cliVersion: undefined });
+    await expect(runUpgrade({ ...options, source: "/src" }, h.deps)).rejects.toThrow("this agentx was built from source, so it has no release of its own; the cdk engine builds the stacks from --source, but still reads the release's images and notes from --release <dir> (npm run release:build builds one), or pass --to <version>");
+  });
+
   it("needs --source", async () => {
     const h = await cdk();
     await expect(runUpgrade(options, h.deps)).rejects.toThrow("the cdk engine upgrades from a checkout of the target release's tag; pass --source <dir>");

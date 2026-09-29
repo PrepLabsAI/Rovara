@@ -106,10 +106,14 @@ async function makeRemovable(path: string): Promise<void> {
  * cache and only renamed into place once it checks out, so a failed or interrupted fetch never
  * leaves a half-written release directory. `loadRelease` then checks every file's checksum.
  */
-export async function fetchRelease(input: { version: string | undefined; home: string; fetch: typeof fetch; runner: CommandRunner; write(line: string): void }): Promise<string> {
+export async function fetchRelease(input: { version: string | undefined; engine?: "templates" | "cdk" | undefined; home: string; fetch: typeof fetch; runner: CommandRunner; write(line: string): void }): Promise<string> {
   const { version } = input;
   if (version === undefined) {
-    throw agentXError("CONFIG_INVALID", "this agentx was built from source and has no published release to download; pass --release <dir> (npm run release:build builds one)");
+    // Live check L7: --source replaces the templates, not the release's images and notes.
+    const next = input.engine === "cdk"
+      ? "--engine cdk builds the stacks from --source, but still reads the release's images and notes from --release <dir>"
+      : "pass --release <dir>";
+    throw agentXError("CONFIG_INVALID", `this agentx was built from source and has no published release to download; ${next} (npm run release:build builds one)`);
   }
   const urls = releaseAssetUrls(version);
   const published = await download(input.fetch, urls.manifest, version);

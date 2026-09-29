@@ -147,6 +147,10 @@ Use this when you want CDK's own diffs. It deploys the same release.
    `init` runs `npm ci` and `npm run build` in the checkout, then `cdk deploy` one stack at a time.
    The steps and questions are the same as above.
 
+   The cdk engine builds the stacks from `--source`, but still reads the release's images and
+   notes. A published `agentx` downloads them. An `agentx` built from source has no published
+   release, so also pass `--release <dir>` (`npm run release:build` builds one).
+
 **The one difference in secret handling.** The CDK CLI takes the callback signing key only as a
 `cdk deploy --parameters` argument. So while that command runs, the key is visible in your own
 computer's process list. `agentx` never prints it: it shows `<redacted>` in the command, in errors

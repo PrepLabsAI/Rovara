@@ -158,7 +158,10 @@ export async function runUpgrade(options: UpgradeOptions, deps: UpgradeDependenc
 
   const version = options.releaseDir === undefined ? options.to ?? deps.cliVersion : undefined;
   if (options.releaseDir === undefined && version === undefined) {
-    throw agentXError("CONFIG_INVALID", "this agentx was built from source, so it has no release of its own; pass --to <version> or --release <dir>");
+    // Live check L7: --source replaces the templates, not the release's images and notes.
+    throw agentXError("CONFIG_INVALID", first.engine === "cdk"
+      ? "this agentx was built from source, so it has no release of its own; the cdk engine builds the stacks from --source, but still reads the release's images and notes from --release <dir> (npm run release:build builds one), or pass --to <version>"
+      : "this agentx was built from source, so it has no release of its own; pass --to <version> or --release <dir>");
   }
   const release = await deps.loadRelease({ ...(options.releaseDir === undefined ? {} : { releaseDir: options.releaseDir }), ...(version === undefined ? {} : { version }) });
   const target = release.manifest.version;

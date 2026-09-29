@@ -339,7 +339,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
 
   // The release comes first: a CLI built from source is told to pass --release before anything else.
   const version = deps.releaseVersion === undefined ? RELEASE_VERSION : deps.releaseVersion ?? undefined;
-  const releaseDir = options.releaseDir ?? (await fetchRelease({ version, home: services.home, fetch: fetchImplementation, runner, write }));
+  const releaseDir = options.releaseDir ?? (await fetchRelease({ version, engine: options.flags.engine, home: services.home, fetch: fetchImplementation, runner, write }));
   const release = await loadRelease(releaseDir);
   // F23: the saved answers take only x.y.z, so a prerelease would otherwise fail after the plan.
   if (isPrereleaseVersion(release.manifest.version)) {

@@ -337,6 +337,13 @@ describe("agentx init --export", () => {
     expect(io.err.join("")).toContain("this agentx was built from source and has no published release to download; pass --release <dir>");
   });
 
+  it("init --engine cdk from a source build without --release says the cdk engine still reads the release (live check L7)", async () => {
+    const io = capture();
+    const code = await executeCli(["--env", ENV, "init", "--region", REGION, "--engine", "cdk", "--source", "/src"], { ...io, init: { deploy: safeDeployDeps(), releaseVersion: null } });
+    expect(code).toBe(2);
+    expect(io.err.join("")).toContain("--engine cdk builds the stacks from --source, but still reads the release's images and notes from --release <dir> (npm run release:build builds one)");
+  });
+
   it("without an explicit --env refuses: the default is the live production environment", async () => {
     const releaseDir = await fullReleaseDir();
     const exportDir = join(await tmp("agentx-deploy-cli-export-"), "bundle");
