@@ -67,6 +67,31 @@ export async function loadRepositoryContextFiles(
   return { files, diagnostics };
 }
 
+/** Names AgentX's workspace note, so it is never mistaken for a file inside a repository. */
+export const WORKSPACE_NOTE_PATH = "AgentX workspace";
+
+/**
+ * AgentX's own note of where each prepared repository is checked out. Pi runs at the workspace
+ * root, and a repository without a context file otherwise gives the model no hint of its path
+ * (#155). Only the name and path the manifest records reach the note, encoded as data so
+ * neither can add a line of its own.
+ */
+export function workspaceRepositoriesNote(
+  repositories: readonly WorkspaceRepositoryReference[],
+): RepositoryContextFile | undefined {
+  if (repositories.length === 0) return undefined;
+  return {
+    path: WORKSPACE_NOTE_PATH,
+    content: [
+      "AgentX workspace note (written by AgentX, not by any repository):",
+      ...repositories.map(
+        ({ name, path }) =>
+          `The repository ${quoted(name)} is checked out at ${quoted(path).slice(1, -1)} in this workspace. Make every change inside it; files outside it are not part of the repository or its pull request.`,
+      ),
+    ].join("\n"),
+  };
+}
+
 /** Appends the repository context files to the ones Pi's resource loader already discovered. */
 export function appendRepositoryContextFiles(
   files: readonly RepositoryContextFile[],
@@ -128,6 +153,11 @@ function labelledContent(
   content: string,
 ): string {
   return `${candidate} of the "${repository.name}" repository, checked out at ${repository.path} in this workspace. Its guidance applies to the files under ${repository.path}.\n\n${content}`;
+}
+
+/** A JSON string literal, with the line separators JSON leaves raw escaped as well. */
+function quoted(value: string): string {
+  return JSON.stringify(value).replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
 }
 
 function containedPath(rootPath: string, configuredPath: string): string {
