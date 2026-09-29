@@ -287,6 +287,16 @@ describe("cdk engine", () => {
       expect(asked).toEqual([]);
     });
 
+    it("throws when the file names no stacks but CloudFormation reports outputs for the stack (re-review R2)", async () => {
+      // A correct deploy of a stack with outputs writes them to the file: these are the old ones.
+      const dir = await mkdtemp(join(tmpdir(), "agentx-cdk-"));
+      const runner = recordingRunner(dir, {});
+      const deployer = cdkDeployer({ runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => ({ ApiEndpoint: "https://old" }) });
+      await expect(
+        deployer.deploy({ part: "control-plane", stackName: "agentx-staging-control-plane", parameters: {}, roleArn: "arn:aws:iam::1:role/r", terminationProtection: false }),
+      ).rejects.toThrow(/cdk deploy wrote no outputs for agentx-staging-control-plane to .*control-plane\.json \(stacks written: none\)$/);
+    });
+
     it("says the deploy succeeded when reading a no-outputs stack from CloudFormation fails (review M7)", async () => {
       const dir = await mkdtemp(join(tmpdir(), "agentx-cdk-"));
       const runner = recordingRunner(dir, {});

@@ -215,7 +215,8 @@ export function cdkDeployer(input: {
 }
 
 /** cdk leaves a stack with no outputs out of the file entirely (the runtime stack, seen in the Task
- * 20 live check), so when the file names no stacks at all the deployed stack itself is asked. A file
+ * 20 live check), so when the file names no stacks at all the deployed stack itself is asked, and
+ * only a stack CloudFormation reports with no outputs counts. A file
  * that names other stacks means cdk deployed a stack under another name (review I1): CloudFormation
  * would answer the requested stack's old outputs, so that still fails. */
 async function noOutputsStack(read: (stackName: string) => Promise<StackOutputs | undefined>, stackName: string, file: string, stacksWritten: string[]): Promise<StackOutputs> {
@@ -228,6 +229,8 @@ async function noOutputsStack(read: (stackName: string) => Promise<StackOutputs 
     throw new Error(`cdk deploy of ${stackName} succeeded, but its outputs could not be read from CloudFormation: ${errorMessage(error)}`, { cause: error });
   }
   if (outputs === undefined) throw new Error(`${missing}, and CloudFormation reports no such stack`);
+  // Re-review R2: a stack that has outputs always gets them written, so these would be old ones.
+  if (Object.keys(outputs).length > 0) throw new Error(missing);
   return outputs;
 }
 
