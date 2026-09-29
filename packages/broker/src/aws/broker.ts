@@ -108,6 +108,7 @@ import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
 import { RepositoryGrantService } from "../repository-access.js";
 import { publicWorkspace } from "../workspaces.js";
 import { SessionManager } from "./sessions.js";
+import { STUCK_SETUP_MESSAGE } from "./stuck-setup.js";
 import {
   adaptHttpApiEvent,
   identityFromJwtClaims,
@@ -3538,6 +3539,10 @@ const FIRST_TASK_QUEUE_FAILED = "the task's first instructions could not be queu
 const isQueueFailedPrepare = (operation: OperationRecord, reported: unknown): boolean =>
   operation.kind === "prepare" && operation.status === "FAILED" && operation.error === FIRST_TASK_QUEUE_FAILED && reported === "SUCCEEDED";
 
+/** C18: a prepare the stuck-setup sweep failed; the worker's late result is answered, not refused. */
+const isSweptPrepare = (operation: OperationRecord): boolean =>
+  operation.kind === "prepare" && operation.status === "FAILED" && operation.error === STUCK_SETUP_MESSAGE;
+
 /**
  * A developer task's prepare recorded as FAILED (final review I1): the operation, the workspace
  * released as PREPARATION_FAILED, and the raw instructions cleared from an existing pointer.
@@ -3658,7 +3663,7 @@ async function recordTerminalResult(
   const status = input.status;
   if (!TERMINAL.has(status as OperationStatus)) throw agentXError("CONFIG_INVALID", "terminal status is invalid");
   if (TERMINAL.has(operation.status)) {
-    if (operation.status !== status && !isQueueFailedPrepare(operation, status)) throw agentXError("IDEMPOTENCY_CONFLICT", "terminal result is immutable");
+    if (operation.status !== status && !isQueueFailedPrepare(operation, status) && !isSweptPrepare(operation)) throw agentXError("IDEMPOTENCY_CONFLICT", "terminal result is immutable");
     return operation;
   }
   const workspace = await requireWorkspace(dependencies, operation.workspaceId);
@@ -3755,7 +3760,7 @@ async function recordTerminalResult(
   } catch (transactionError) {
     if (!isConditional(transactionError)) throw transactionError;
     const existing = await requireOperation(dependencies, operation.workspaceId, operation.id);
-    if (existing.status === terminalStatus || isQueueFailedPrepare(existing, terminalStatus)) return existing;
+    if (existing.status === terminalStatus || isQueueFailedPrepare(existing, terminalStatus) || isSweptPrepare(existing)) return existing;
     // A cancel whose target finished first (its own result, and for a developer task its
     // completed record, committed meanwhile): decided again once, from a fresh read, the cancel
     // records only its own result. The target, the workspace and the audit record stay as the

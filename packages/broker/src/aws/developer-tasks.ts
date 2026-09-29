@@ -69,6 +69,7 @@ import { hashJson, isConditional } from "./broker-shared.js";
 import type { DeveloperTaskActions, TransactItems } from "./developer-task-actions.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
+import { setupWatchKey } from "./stuck-setup.js";
 
 export interface DeveloperTaskRouteDependencies {
   documentClient: { send(command: unknown): Promise<unknown> };
@@ -499,6 +500,12 @@ async function startTask(deps: DeveloperTaskRouteDependencies, caller: Developer
     putNew(deps.tableName, { ...task }),
     putNew(deps.tableName, { ...index }),
     putNew(deps.tableName, { ...pointer }),
+    // FR-055, C17: the stuck-setup sweep's watch on this prepare, keyed by the prepare's creation
+    // (the task's start, Q5). Only developer-task starts write one (Q4); the sweep removes it.
+    putNew(deps.tableName, {
+      ...setupWatchKey(preparation.workspace.createdAt, workspaceId), entityType: "SETUP_WATCH",
+      workspaceId, operationId: preparation.operationId, taskId, createdAt: preparation.workspace.createdAt,
+    }),
     putNew(deps.tableName, { pk: `WORKSPACE#${workspaceId}`, sk: `CONVERSATION#${conversationId}`, entityType: "CONVERSATION", id: conversationId, workspaceId, createdAt: receivedAt, updatedAt: receivedAt }),
     putNew(deps.tableName, { ...idempotencyKey, entityType: "IDEMPOTENCY", taskId, payloadHash }),
     // R12: the accepted record commits with the start or not at all (ruling F15).

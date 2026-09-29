@@ -70,8 +70,9 @@ export class FakeDynamoDb {
     }
   };
 
-  // Supports only `pk = :pk AND begins_with(sk, :<name>)`, the key condition shape the broker uses
-  // (a project's latest revision, credential records and a credential's cached tokens).
+  // Supports `pk = :pk AND begins_with(sk, :<name>)`, the key condition shape the broker uses (a
+  // project's latest revision, credential records and a credential's cached tokens), and
+  // `pk = :pk AND sk < :<name>`, the stuck-setup sweep's "older than" range (spec 025 C17).
   private query(input: Record<string, unknown>): Item[] {
     const values = input.ExpressionAttributeValues as Values;
     if (input.IndexName !== undefined) {
@@ -92,6 +93,15 @@ export class FakeDynamoDb {
       if (input.ScanIndexForward === false) inRange.reverse();
       const limit = input.Limit as number | undefined;
       return (limit === undefined ? inRange : inRange.slice(0, limit)).map((item) => structuredClone(item));
+    }
+    // The stuck-setup sweep's "older than" range (spec 025 C17).
+    const before = /^pk = :pk AND sk < (:[a-zA-Z]+)$/.exec(String(input.KeyConditionExpression));
+    if (before) {
+      const bound = values[before[1]!] as string;
+      const found = this.find((item) => item.pk === values[":pk"] && compareKeys(item.sk as string, bound) < 0)
+        .sort((left, right) => compareKeys(left.sk as string, right.sk as string));
+      const limit = input.Limit as number | undefined;
+      return (limit === undefined ? found : found.slice(0, limit)).map((item) => structuredClone(item));
     }
     const match = /^pk = :pk AND begins_with\(sk, (:[a-zA-Z]+)\)$/.exec(String(input.KeyConditionExpression));
     if (!match) throw new Error(`FakeDynamoDb does not support the key condition ${String(input.KeyConditionExpression)}`);
