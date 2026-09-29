@@ -25,8 +25,16 @@ export function releaseMismatch(part: DeployPart, parameters: Record<string, str
  * engine's stacks (LegacyStackSynthesizer) never do. */
 const deployedWithCdk = (stack: DoctorStack) => Object.hasOwn(stack.parameters, "BootstrapVersion");
 
-function stackHealth(env: string, region: string, name: string, stack: DoctorStack | undefined): DoctorCheck {
-  if (stack === undefined) return check("stacks", name, "fail", "does not exist", `agentx --env ${env} upgrade deploys it again`);
+/** upgradeAnswers reads these two stacks' parameters, so upgrade refuses when either is gone. */
+const UPGRADE_NEEDS: ReadonlySet<DeployPart> = new Set(["control-plane", "access"]);
+
+function missingStackFix(env: string, region: string, part: DeployPart): string {
+  if (!UPGRADE_NEEDS.has(part)) return `agentx --env ${env} upgrade deploys it again`;
+  return `agentx upgrade cannot deploy it again. If the install never finished, run agentx init --env ${env} --region ${region} --resume; otherwise remove the environment with agentx --env ${env} destroy --region ${region}, then install it again with agentx init`;
+}
+
+function stackHealth(env: string, region: string, part: DeployPart, name: string, stack: DoctorStack | undefined): DoctorCheck {
+  if (stack === undefined) return check("stacks", name, "fail", "does not exist", missingStackFix(env, region, part));
   const status = stack.status;
   const events = `aws cloudformation describe-stack-events --stack-name ${name} --region ${region}`;
   if (HEALTHY.has(status)) return check("stacks", name, "ok", status);
@@ -46,7 +54,7 @@ export async function stackChecks(context: DoctorContext): Promise<DoctorCheck[]
     const name = settings.stacks[part] ?? environmentStackName(env, part);
     const stack = await services.stacks.describe(name);
     described.set(part, { name, stack });
-    checks.push(stackHealth(env, settings.region, name, stack));
+    checks.push(stackHealth(env, settings.region, part, name, stack));
   }
 
   const wrongEngine = [...described.values()].flatMap(({ name, stack }) => {

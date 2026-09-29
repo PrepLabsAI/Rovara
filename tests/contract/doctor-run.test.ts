@@ -73,6 +73,22 @@ describe("doctor: alerts and the budget (FR-050)", () => {
   });
 });
 
+describe("doctor: the budget's fix (final review I1)", () => {
+  const subscribed = [{ arn: "arn:aws:sns:us-east-1:123456789012:agentx-staging-alerts:1", protocol: "email", endpoint: "ops@example.com" }];
+  const monthly = healthyStacks()["agentx-staging-control-plane"]!.parameters.BudgetMonthlyUsd!;
+  const recreate = `agentx --env staging config set budget.monthlyUsd 0, then agentx --env staging config set budget.monthlyUsd ${monthly}: the first removes the budget from the control-plane stack, the second creates it again (an upgrade with no change leaves it as it is)`;
+
+  it("names the two config sets that recreate a missing budget, never a no-change upgrade", async () => {
+    const budget = (await alertChecks(doctorContext({ services: doctorServices({ alerts: fakeAlerts({ existing: subscribed }) }) })))[1]!;
+    expect(budget).toMatchObject({ status: "fail", detail: "the budget agentx-staging-monthly is missing", fix: recreate });
+  });
+
+  it("names the Budgets console or the same two config sets for an amount edited by hand", async () => {
+    const budget = (await alertChecks(doctorContext({ services: doctorServices({ alerts: fakeAlerts({ existing: subscribed, budgetUsd: Number(monthly) + 1 }) }) })))[1]!;
+    expect(budget).toMatchObject({ status: "warn", fix: `set agentx-staging-monthly back to $${monthly} in the AWS Budgets console, or run ${recreate}` });
+  });
+});
+
 describe("doctor: capacity (item 5)", () => {
   it("reports free Elastic IPs and warns when a second environment would not fit", async () => {
     expect((await capacityChecks(doctorContext())).find((entry) => entry.name === "Elastic IPs")).toMatchObject({ status: "ok", detail: "5 of 5 EC2-VPC Elastic IPs free in us-east-1" });

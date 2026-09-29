@@ -68,8 +68,12 @@ export async function alertChecks(context: DoctorContext): Promise<DoctorCheck[]
     checks.push(check("alerts", "budget", "ok", "no budget (budget.monthlyUsd is 0)"));
   } else {
     const limit = await services.alerts.budget(settings.account, `agentx-${env}-monthly`);
-    if (limit === undefined) checks.push(check("alerts", "budget", "fail", `the budget agentx-${env}-monthly is missing`, `agentx --env ${env} upgrade (the control-plane stack creates it)`));
-    else if (limit !== Number(monthly)) checks.push(check("alerts", "budget", "warn", `the budget is $${limit} a month, but budget.monthlyUsd is ${monthly}`, `agentx --env ${env} upgrade`));
+    // CloudFormation neither recreates a budget deleted outside it nor reverts an edited amount, so a
+    // no-change upgrade leaves both as they are. The budget exists only while BudgetMonthlyUsd is not
+    // 0 (the HasBudget condition): setting 0 removes it, and setting the amount again creates it.
+    const recreate = `agentx --env ${env} config set budget.monthlyUsd 0, then agentx --env ${env} config set budget.monthlyUsd ${monthly}: the first removes the budget from the control-plane stack, the second creates it again (an upgrade with no change leaves it as it is)`;
+    if (limit === undefined) checks.push(check("alerts", "budget", "fail", `the budget agentx-${env}-monthly is missing`, recreate));
+    else if (limit !== Number(monthly)) checks.push(check("alerts", "budget", "warn", `the budget is $${limit} a month, but budget.monthlyUsd is ${monthly}`, `set agentx-${env}-monthly back to $${monthly} in the AWS Budgets console, or run ${recreate}`));
     else checks.push(check("alerts", "budget", "ok", `$${monthly} a month, ${scope === "tag" ? "costs tagged agentx:env (the tag must be active in Billing, Cost allocation tags)" : "the whole account"}`));
   }
   return checks;

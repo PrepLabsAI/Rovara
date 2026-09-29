@@ -25,6 +25,16 @@ describe("doctor: stacks (FR-050)", () => {
     expect(found).toMatchObject({ status: "fail", detail: "does not exist", fix: "agentx --env staging upgrade deploys it again" });
   });
 
+  it("never sends a missing control-plane or access stack to upgrade, which refuses both: resume the install, or destroy and install again", async () => {
+    for (const name of ["agentx-staging-control-plane", "agentx-staging-access"]) {
+      const found = (await stackChecks(withStack(name, undefined))).find((entry) => entry.name === name)!;
+      expect(found).toMatchObject({
+        status: "fail", detail: "does not exist",
+        fix: "agentx upgrade cannot deploy it again. If the install never finished, run agentx init --env staging --region us-east-1 --resume; otherwise remove the environment with agentx --env staging destroy --region us-east-1, then install it again with agentx init",
+      });
+    }
+  });
+
   it("fails a stack whose first create failed, offering the delete command and agentx destroy", async () => {
     const found = (await stackChecks(withStack("agentx-staging-identity", { status: "ROLLBACK_COMPLETE" }))).find((entry) => entry.name === "agentx-staging-identity")!;
     expect(found.status).toBe("fail");

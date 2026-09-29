@@ -31,6 +31,15 @@ describe("doctor: secrets (FR-050)", () => {
     expect(text(checks)).not.toContain("PERSONALtoken");
   });
 
+  it("sends a signing key under 32 characters to a delete and then upgrade, since upgrade keeps any key that exists (final review I1)", async () => {
+    const checks = await secretChecks(withSecrets({ ...SECRETS, "agentx/staging/callback-signing-key": "short-key" }));
+    expect(checks.find((entry) => entry.name === "agentx/staging/callback-signing-key")).toMatchObject({
+      status: "fail", detail: "is shorter than the 32 characters the control plane needs",
+      fix: "with admin credentials, delete it (aws secretsmanager delete-secret --secret-id agentx/staging/callback-signing-key --force-delete-without-recovery --region us-east-1), then run agentx --env staging upgrade: it makes a new key and redeploys the control plane with it",
+    });
+    expect(text(checks)).not.toContain("short-key");
+  });
+
   it("checks the webhook alert address and the OpenRouter key only when the environment uses them", async () => {
     const context = doctorContext({
       answers: { ...doctorContext().answers!, alert: { kind: "webhook", display: "https://events.pagerduty.com/...", secretName: "agentx/staging/alert-endpoint" } },

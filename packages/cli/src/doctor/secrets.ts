@@ -5,7 +5,8 @@ import { checkAlertWebhook } from "../init/answers.js";
 import { slackSecretName } from "../init/slack-app.js";
 import { check, type DoctorCheck, type DoctorContext } from "./checks.js";
 
-interface SecretRule { name: string; shape(value: string): string | undefined; fix: string }
+/** `fix` is for a missing secret; `shapeFix`, when set, for one that exists with the wrong shape. */
+interface SecretRule { name: string; shape(value: string): string | undefined; fix: string; shapeFix?: string }
 
 function slackShape(value: string): string | undefined {
   let parsed: Record<string, unknown>;
@@ -25,6 +26,8 @@ export async function secretChecks(context: DoctorContext): Promise<DoctorCheck[
       name: `agentx/${env}/callback-signing-key`,
       shape: (value) => (value.length >= 32 ? undefined : "is shorter than the 32 characters the control plane needs"),
       fix: `run agentx --env ${env} upgrade: it makes a new key and redeploys the control plane with it`,
+      // Upgrade keeps any key that exists (callbackSigningKey), so a short one must go first.
+      shapeFix: `with admin credentials, delete it (aws secretsmanager delete-secret --secret-id agentx/${env}/callback-signing-key --force-delete-without-recovery --region ${settings.region}), then run agentx --env ${env} upgrade: it makes a new key and redeploys the control plane with it`,
     },
     {
       name: slackSecretName(env),
@@ -59,7 +62,7 @@ export async function secretChecks(context: DoctorContext): Promise<DoctorCheck[
     const value = await services.secrets.get(rule.name);
     if (value === undefined) { checks.push(check("secrets", rule.name, "fail", "does not exist", rule.fix)); continue; }
     const problem = rule.shape(value);
-    checks.push(problem === undefined ? check("secrets", rule.name, "ok", "exists and has the right shape") : check("secrets", rule.name, "fail", problem, rule.fix));
+    checks.push(problem === undefined ? check("secrets", rule.name, "ok", "exists and has the right shape") : check("secrets", rule.name, "fail", problem, rule.shapeFix ?? rule.fix));
   }
   return checks;
 }
