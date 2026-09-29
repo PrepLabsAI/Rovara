@@ -115,9 +115,11 @@ const NOUNS: Record<string, [string, string]> = {
   "AWS::S3::Bucket": ["bucket (every version)", "buckets (every version)"], "AWS::DynamoDB::Table": ["table", "tables"], "AWS::Logs::LogGroup": ["log group", "log groups"],
   "AWS::Cognito::UserPool": ["Cognito user pool", "Cognito user pools"], "AWS::KMS::Key": ["KMS key (deleted after 7 days)", "KMS keys (deleted after 7 days)"], "AWS::SecretsManager::Secret": ["secret", "secrets"],
 };
-const counted = (resources: RetainedResource[]) => [...new Set(resources.map((resource) => resource.type))].map((type) => {
+/** Live check L4: a key --keep-data keeps is not scheduled for deletion, so it has no deletion note. */
+const KEPT_NOUNS: Record<string, [string, string]> = { ...NOUNS, "AWS::KMS::Key": ["KMS key", "KMS keys"] };
+const counted = (resources: RetainedResource[], nouns: Record<string, [string, string]> = NOUNS) => [...new Set(resources.map((resource) => resource.type))].map((type) => {
   const count = resources.filter((resource) => resource.type === type).length;
-  const [one, many] = NOUNS[type] ?? [type, type];
+  const [one, many] = nouns[type] ?? [type, type];
   return `${count} ${count === 1 ? one : many}`;
 });
 /** "a", "a and b", "a, b and c". */
@@ -139,7 +141,7 @@ export function destroyPlanText(plan: DestroyPlan): string[] {
     ...(plan.keepData ? [] : [`  secrets: ${plural(plan.secrets, "secret", "secrets")} under agentx/${plan.env}/, deleted without recovery`]),
     `  settings: ${plural(plan.parameters, "parameter", "parameters")} under /agentx/${plan.env}/`,
     ...(plan.localFiles.length === 0 ? [] : [`  on this computer: ${plan.localFiles.join(", ")}`]),
-    ...(plan.keepData ? [`  --keep-data keeps: ${listed([...counted(kept), plural(plan.secrets, "secret", "secrets")])}`] : []),
+    ...(plan.keepData ? [`  --keep-data keeps: ${listed([...counted(kept, KEPT_NOUNS), plural(plan.secrets, "secret", "secrets")])}`] : []),
     ...(plan.stacks.some((stack) => stack.name === controlPlane) ? [`  Deleting ${controlPlane} usually takes 20 to 40 minutes: its Lambda functions release their network interfaces slowly.`] : []),
     "Nothing here can be undone.",
   ];

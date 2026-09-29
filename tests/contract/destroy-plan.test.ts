@@ -159,6 +159,20 @@ describe("destroy: what is shown before, and printed after", () => {
     expect(kept).toContain("  --keep-data keeps: 1 table and 5 secrets");
   });
 
+  it("lists a kept KMS key without the deletion note, and keeps the note where the key is deleted (live check L4)", () => {
+    const resources: RetainedResource[] = [
+      { part: "control-plane", logicalId: "State", type: "AWS::DynamoDB::Table", physicalId: "t" },
+      { part: "foundation", logicalId: "Key", type: "AWS::KMS::Key", physicalId: "k" },
+    ];
+    const plan = { env: "staging", account: "123456789012", region: "us-east-1", stacks: [], instances: 0, volumes: 0, secrets: 5, parameters: 1, localFiles: [], resources };
+    const kept = destroyPlanText({ ...plan, keepData: true });
+    expect(kept).toContain("  --keep-data keeps: 1 table, 1 KMS key and 5 secrets");
+    expect(kept.join("\n")).not.toContain("deleted after 7 days");
+    const two = destroyPlanText({ ...plan, keepData: true, resources: [...resources, { part: "foundation", logicalId: "Key2", type: "AWS::KMS::Key", physicalId: "k2" }] });
+    expect(two).toContain("  --keep-data keeps: 1 table, 2 KMS keys and 5 secrets");
+    expect(destroyPlanText({ ...plan, keepData: false })).toContain("  what the stacks keep, deleted after them: 1 table and 1 KMS key (deleted after 7 days)");
+  });
+
   it("counts the stacks' secrets once, with the secrets under agentx/<env>/, and joins lists as a, b and c", () => {
     const resources: RetainedResource[] = [
       { part: "control-plane", logicalId: "State", type: "AWS::DynamoDB::Table", physicalId: "t" },
