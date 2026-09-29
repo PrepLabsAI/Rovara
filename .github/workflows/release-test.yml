@@ -169,6 +169,11 @@ jobs:
           test "$(node packages/cli/dist/main.js --env "$AGENTX_ENV" config get alerts.slowTurnMinutes --region "$AWS_REGION")" = 7
           node packages/cli/dist/main.js --json --env "$AGENTX_ENV" doctor --region "$AWS_REGION" > "$RUNNER_TEMP/doctor.json" || true
           jq -r -e --arg version "$CANDIDATE" "$DOCTOR_GATE" "$RUNNER_TEMP/doctor.json"
+      # Fresh credentials: the install and upgrade can use up most of the session above, and the
+      # control-plane delete alone takes 20 to 40 minutes.
+      - uses: aws-actions/configure-aws-credentials@v5
+        if: always()
+        with: { role-to-assume: "${{ vars.AGENTX_RELEASE_TEST_ROLE_ARN }}", aws-region: "${{ env.AWS_REGION }}", role-duration-seconds: 10800 }
       - name: Destroy this environment before the next one starts
         if: always()
         run: |
@@ -229,6 +234,11 @@ jobs:
             --stop-after developer-signin
           node packages/cli/dist/main.js --json --env "$AGENTX_ENV" doctor --region "$AWS_REGION" > "$RUNNER_TEMP/doctor.json" || true
           jq -r -e --arg version "$CANDIDATE" "$DOCTOR_GATE" "$RUNNER_TEMP/doctor.json"
+      # Fresh credentials: the install and upgrade can use up most of the session above, and the
+      # control-plane delete alone takes 20 to 40 minutes.
+      - uses: aws-actions/configure-aws-credentials@v5
+        if: always()
+        with: { role-to-assume: "${{ vars.AGENTX_RELEASE_TEST_ROLE_ARN }}", aws-region: "${{ env.AWS_REGION }}", role-duration-seconds: 10800 }
       - name: Destroy this environment
         if: always()
         run: |

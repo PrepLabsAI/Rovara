@@ -77,6 +77,20 @@ describe("the release test workflow (SC-003 to SC-005, question 6)", () => {
     }
   });
 
+  // An install and upgrade can use up most of the lane's session, and the control-plane delete alone
+  // takes 20 to 40 minutes, so each lane's destroy starts on fresh credentials (final review M7).
+  it("takes fresh OIDC credentials, with the same role, right before each lane's destroy, whatever happened before", async () => {
+    const wf = await workflow();
+    for (const name of ["lane", "export"]) {
+      const steps = wf.jobs[name]?.steps ?? [];
+      const refresh = steps.at(-2);
+      expect(refresh?.uses, name).toBe("aws-actions/configure-aws-credentials@v5");
+      expect(refresh?.if, name).toBe("always()");
+      expect(refresh?.with, name).toEqual({ "role-to-assume": "${{ vars.AGENTX_RELEASE_TEST_ROLE_ARN }}", "aws-region": "${{ env.AWS_REGION }}", "role-duration-seconds": 10800 });
+      expect(steps.at(-1)?.run, name).toContain(" destroy --region ");
+    }
+  });
+
   it("takes AWS credentials only from OIDC, never from long-lived keys", async () => {
     const all = await text();
     expect(all).not.toMatch(/aws-access-key-id|aws-secret-access-key|secrets\.AWS_/i);
