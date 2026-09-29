@@ -6,6 +6,7 @@ import { GetCommand, PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/li
 import {
   AdminShareModeRequestSchema,
   AgentXError,
+  CHANNEL_TURNS_MAX,
   ContinueDeveloperTaskRequestSchema,
   DEVELOPER_EVENTS_DEFAULT,
   DEVELOPER_EVENTS_MAX,
@@ -49,6 +50,7 @@ import {
   developerTaskIdentity,
   partyOfTask,
   recentTaskEvents,
+  sharedSubject,
   shareView,
   startIdempotencyKey,
   taskIndexKey,
@@ -273,6 +275,16 @@ export async function taskView(
     ? []
     : recentTaskEvents(await deps.actions.eventsNewestFirst(derived.current.id, 200), options.events);
   const details = options.details && derived.status !== "STARTING" && derived.status !== "RUNNING" ? await taskDetails(deps, task, operations) : {};
+  // C15: only the full read shows channel turns, and a storage problem never breaks it.
+  let channelTurns: DeveloperTaskView["channelTurns"];
+  if (options.details && task.share?.threadTs !== undefined) {
+    try {
+      const turns = await deps.actions.channelTurns(sharedSubject({ ...task.share, threadTs: task.share.threadTs }), task.taskId, CHANNEL_TURNS_MAX);
+      if (turns.length > 0) channelTurns = turns;
+    } catch (error) {
+      log(deps, { event: "developer.channel_turns_failed", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
+    }
+  }
   // R22: why the latest close did not happen, while no later close runs, the task is open and
   // the developer has not asked for more work since (a continue or a pull request may publish it).
   const lastClose = operations.filter((operation) => operation.kind === "close").sort(byCreated).at(-1);
@@ -293,6 +305,7 @@ export async function taskView(
     updatedAt: derived.current?.createdAt ?? task.updatedAt,
     events,
     ...details,
+    ...(channelTurns === undefined ? {} : { channelTurns }),
     ...(unpublished === undefined ? {} : { unpublished }),
   };
 }

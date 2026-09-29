@@ -19,6 +19,7 @@ import {
 } from "@aws-sdk/client-secrets-manager";
 import {
   AgentXError,
+  CHANNEL_TURN_REQUEST_MAX,
   ConnectorCallRequestSchema,
   GitHubMcpRequestSchema,
   OperationRequestSchema,
@@ -55,6 +56,7 @@ import {
   type Operation,
   type OperationRequester,
   type OperationStatus,
+  type ChannelTurn,
   type CodeBuildCheckResult,
   type CodeBuildGateDefinition,
   type ProjectDefinition,
@@ -71,6 +73,7 @@ import {
   type WorkerInvocation,
   type WorkspaceInstance,
   cleanDisplayName,
+  redactAndCap,
   DISPLAY_NAME_MAX_ENCODED_LENGTH,
   modelKey,
   type ModelIdentifier,
@@ -372,6 +375,39 @@ function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTas
     deleteCompute: (workspace) => deleteWorkspaceCompute(dependencies, workspace),
     transact: async (items) => {
       await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: items }));
+    },
+    channelTurns: async (threadSubject, taskId, limit) => {
+      const table = dependencies.turnRecordsTableName;
+      if (table === undefined) return [];
+      const found: Array<Record<string, unknown>> = [];
+      let startKey: Record<string, unknown> | undefined;
+      // A thread's records are few (the thread's rate limit caps them); five pages bound the read anyway.
+      for (let page = 0; page < 5; page += 1) {
+        const response = await dependencies.documentClient.send(new QueryCommand({
+          TableName: table,
+          KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
+          ExpressionAttributeValues: { ":pk": `THREAD#${threadSubject}`, ":prefix": "TURN#" },
+          ScanIndexForward: false,
+          Limit: 100,
+          ...(startKey === undefined ? {} : { ExclusiveStartKey: startKey }),
+        }));
+        // A record without a time cannot be shown (the view's `at` is a timestamp), so it is left out.
+        found.push(...(response.Items ?? []).filter((item) => item.taskId === taskId && typeof item.receivedAt === "string"));
+        startKey = response.LastEvaluatedKey;
+        if (startKey === undefined || found.length >= limit) break;
+      }
+      const text = (value: unknown, fallback: string) => (typeof value === "string" ? value : fallback);
+      return found.slice(0, limit).map((item): ChannelTurn => {
+        const requester = item.requestedBy as { userId?: unknown } | undefined;
+        return {
+          // Only who spoke, when, the capped request and the outcome: never the reply or the channel's name (FR-036).
+          author: { slackUserId: text(requester?.userId, "unknown"), ...(typeof item.requesterName === "string" ? { name: item.requesterName } : {}) },
+          at: text(item.receivedAt, ""),
+          // Stored redacted; redacted again here, so a record from an older writer cannot leak.
+          request: redactAndCap(text(item.requestText, ""), CHANNEL_TURN_REQUEST_MAX).text,
+          outcome: text(item.disposition, "unknown"),
+        };
+      });
     },
   };
 }
