@@ -98,7 +98,7 @@ import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConf
 import { developerTokenVerifier } from "../developer/verify-token.js";
 import { completedTurn, developerFooter, inertName, taskKey, taskOwnerKey, taskOwnerSubject, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type StoredEvent } from "../developer/task-records.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
-import { hashJson, isConditional } from "./broker-shared.js";
+import { hashJson, isConditional, isTemporaryAwsError } from "./broker-shared.js";
 import { channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, routeDeveloperRequest, type DeveloperApiConfiguration } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
 import { adminShareMode, finishTaskClose } from "./developer-tasks.js";
@@ -3504,6 +3504,9 @@ async function sendTerminalResult(
       queued = await queuedFirstTask(dependencies, workspace, operation, { ...pointer, pendingPrompt: pointer.pendingPrompt }, now);
     } catch (partsError) {
       if (isConditional(partsError)) throw partsError;
+      // FR-055, C19: the worker tries the result again; if every try fails, the stuck-setup sweep
+      // ends the prepare (D21). Nothing is recorded, so the next try can still queue the task.
+      if (isTemporaryAwsError(partsError)) throw firstTaskQueueRetry(pointer.taskId, operation.id, partsError);
       // Final review I1: the task's parts could not be built (the project's latest revision or
       // its model could not be read). The prepare is recorded as FAILED, so the task reads as
       // setup_failed, its instructions are cleared and a close frees its slot, instead of the
@@ -3520,6 +3523,10 @@ async function sendTerminalResult(
   try {
     await send([...transactItems.filter((item) => item !== workspaceUpdate), queued.workspaceUpdate, ...queued.items]);
   } catch (queueError) {
+    // C19: a temporary error from the one queuing write committed nothing; the worker tries again.
+    // A TransactionCanceledException with a TransactionConflict reason is not temporary here: it
+    // keeps the QueuingConflict path below.
+    if (isTemporaryAwsError(queueError)) throw firstTaskQueueRetry(pointer?.taskId ?? "unknown", operation.id, queueError);
     if (!isConditional(queueError)) throw queueError;
     if (isTransactionConflict(queueError)) throw new QueuingConflict(queueError);
     // R16: a cancel that removed the instructions first wins; record the prepare without the task.
@@ -3530,6 +3537,12 @@ async function sendTerminalResult(
     await send(withoutTask);
   }
   return terminalStatus;
+}
+
+/** C19: logs a temporary error while queuing a task's first instructions (its name only) and answers 503. */
+function firstTaskQueueRetry(taskId: string, operationId: string, error: Error): AgentXError {
+  console.log(JSON.stringify({ component: "broker", event: "developer.first_task_queue_retry", taskId, operationId, error: error.name }));
+  return agentXError("RUNTIME_UNAVAILABLE", "the task's first instructions could not be queued yet; send the result again");
 }
 
 /** The error a prepare is recorded with when its task's first instructions could not be queued (final review I1). */
