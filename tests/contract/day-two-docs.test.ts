@@ -47,6 +47,15 @@ describe("the guides (FR-054)", () => {
     expect(read("docs/teardown.md")).toContain("It asks only at a terminal: without one (answers piped on stdin), it\nnever takes a lock over");
   });
 
+  it("has the section the refused-bot-token fix names, with the console steps and doctor (live check L1)", () => {
+    const guide = read("docs/day-two.md");
+    const start = guide.indexOf("## Replace the Slack bot token");
+    expect(start).toBeGreaterThan(0);
+    const section = guide.slice(start, guide.indexOf("\n## ", start + 1));
+    for (const step of ["**Secrets Manager**", "`agentx/<env>/slack`", "**Retrieve secret value**", "**Edit**", "Change only the value of the `botToken` key", "**Save**", "agentx --env <env> doctor"]) expect(section, step).toContain(step);
+    expect(section).toContain("within 5 minutes of the\nsave");
+  });
+
   it("uses no em dash in any guide", () => {
     for (const path of ["docs/install.md", "docs/day-two.md", "docs/teardown.md", "docs/move-account.md"]) expect(read(path), path).not.toContain("\u2014");
   });

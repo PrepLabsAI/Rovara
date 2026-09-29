@@ -2,7 +2,7 @@
 // own "Verified" mark cannot be read without an app configuration token (15d1 decision), so the URLs
 // get the same signed self-probe agentx init sends.
 import { AgentXError, environmentStackName } from "@agentx/contracts";
-import { probeSlackUrls, readSlackBotToken, slackSecretName, SlackSignatureRefusedError } from "../init/slack-app.js";
+import { probeSlackUrls, readSlackBotToken, replaceSlackBotTokenStep, slackSecretName, SlackSignatureRefusedError } from "../init/slack-app.js";
 import { SlackRateLimitedError } from "../setup/channel-add.js";
 import { plainMessage } from "../output.js";
 import { check, type DoctorCheck, type DoctorContext } from "./checks.js";
@@ -34,7 +34,7 @@ export function slackSigningSecret(raw: string | undefined): string | undefined 
 
 export async function slackChecks(context: DoctorContext): Promise<DoctorCheck[]> {
   const { env, settings, progress, services } = context;
-  const reinstall = `reinstall the Slack app (api.slack.com/apps, Install App), then store the new Bot User OAuth Token in ${slackSecretName(env)}`;
+  const reinstall = replaceSlackBotTokenStep(slackSecretName(env));
   // One read of the Slack secret serves both the token and the signing secret.
   const raw = await services.secrets.get(slackSecretName(env));
   let token: string;

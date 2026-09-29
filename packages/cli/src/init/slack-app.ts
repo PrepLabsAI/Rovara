@@ -135,6 +135,13 @@ export async function readSlackBotToken(secrets: Pick<InitSecrets, "get">, env: 
   return token;
 }
 
+/** What to do when Slack refuses the stored bot token: doctor's bot token check and sign-in's scope
+ * check give this same step (live check L1). A finished init skips its Slack app step, so neither
+ * points there. */
+export function replaceSlackBotTokenStep(secretName: string): string {
+  return `reinstall the Slack app (api.slack.com/apps, Install App), then store its new Bot User OAuth Token in ${secretName} (docs/day-two.md, "Replace the Slack bot token")`;
+}
+
 /** The workspace (team) ID and granted scopes of the bot token stored in the Slack secret. Never puts the token in an error. */
 export async function readSlackTeamIdFromSecret(input: { secrets: Pick<InitSecrets, "get">; api: SlackApi; secretId: string }): Promise<{ teamId: string; scopes?: string[] }> {
   const token = storedSlackBotToken(await input.secrets.get(input.secretId));
@@ -155,9 +162,9 @@ export async function readSlackTeamIdFromSecret(input: { secrets: Pick<InitSecre
   if (!auth.ok || auth.team_id === undefined) {
     const code = safeSlackErrorCode(auth.error);
     throw new SlackTeamIdError(
-      `Slack refused the stored bot token (${code}); run the Slack app step of agentx init again`,
+      `Slack refused the stored bot token (${code}); ${replaceSlackBotTokenStep(input.secretId)}`,
       `Slack refused the bot token (${code})`,
-      "reinstall the Slack app and store its new token with the Slack app step of agentx init, then run agentx signin enable slack",
+      `${replaceSlackBotTokenStep(input.secretId)}, then run agentx signin enable slack`,
     );
   }
   return { teamId: auth.team_id, ...(auth.scopes === undefined ? {} : { scopes: auth.scopes }) };

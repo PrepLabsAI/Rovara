@@ -189,6 +189,31 @@ aws sns unsubscribe --subscription-arn <the ARN it prints> --region <region>
 A new email address gets alarms once its owner confirms the subscription. Then send a test alarm
 with `agentx --env <env> alerts test`.
 
+## Replace the Slack bot token
+
+When Slack refuses the bot token (doctor shows "Slack refused the bot token", with Slack's error
+code such as `invalid_auth` or `token_revoked`), get a new one and store it. `agentx init` does not
+do this for a finished install.
+
+1. Open the Slack app at api.slack.com/apps, choose **Install App**, reinstall it to the
+   workspace, and copy the **Bot User OAuth Token** (it starts with `xoxb-`).
+2. In the AWS console for the environment's region, open **Secrets Manager** and choose the secret
+   `agentx/<env>/slack`. The console lists secrets only for a caller allowed
+   `secretsmanager:ListSecrets`, which the operator role is not, so use admin credentials here.
+3. Choose **Retrieve secret value**, then **Edit**.
+4. Change only the value of the `botToken` key to the new token. Leave the other keys
+   (`signingSecret`, and `clientId` and `clientSecret` when Slack sign-in is on) as they are.
+5. Choose **Save**.
+6. Check it:
+
+   ```sh
+   agentx --env <env> doctor --region <region>
+   ```
+
+Nothing needs a restart. The Slack service and the control plane's Slack functions keep the
+secret for up to 5 minutes, then read it again, so they use the new token within 5 minutes of the
+save. `doctor` reads the secret itself, so it checks the new token at once.
+
 ## Projects, channels and connectors
 
 - `agentx --env <env> project add --repository <owner/name>`: registers another project on EC2

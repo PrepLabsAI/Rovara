@@ -93,6 +93,8 @@ describe("doctor: Slack (FR-050)", () => {
     const checks = await slackChecks(context);
     expect(checks[0]).toMatchObject({ name: "bot token", status: "fail", detail: "Slack refused the bot token (token_revoked)" });
     expect(checks[0]!.fix).toContain("reinstall the Slack app");
+    // Live check L1: the exact next step, the same one sign-in's scope check gives.
+    expect(checks[0]!.fix).toBe('reinstall the Slack app (api.slack.com/apps, Install App), then store its new Bot User OAuth Token in agentx/staging/slack (docs/day-two.md, "Replace the Slack bot token")');
   });
 
   it("fails when the bot token belongs to another workspace than init recorded", async () => {
