@@ -86,7 +86,7 @@ export async function runConfigGet(services: ConfigServices, env: string, key: s
 }
 
 /** FR-049: a model key passes the same one-token test call init makes, with the environment's provider. */
-async function checkModel(services: ConfigServices, settings: EnvironmentSettings, role: ModelRole, modelId: string): Promise<void> {
+async function checkModel(services: ConfigServices, env: string, settings: EnvironmentSettings, role: ModelRole, modelId: string): Promise<void> {
   const checks = services.checks(settings.region);
   try {
     if (settings.models.providers?.[role] === "openrouter") {
@@ -96,7 +96,13 @@ async function checkModel(services: ConfigServices, settings: EnvironmentSetting
       await checks.converse(modelId);
     }
   } catch (error) {
-    throw agentXError("CONFIG_INVALID", `${modelCheckProblem({ modelId, role, region: settings.region, error })}; nothing changed`);
+    // Live check L3: init's wording names its --<role>-model flag, which config set does not take.
+    const wording = {
+      changeModel: `agentx --env ${env} config set models.${role} <another model id>`,
+      rerun: `run agentx --env ${env} config set models.${role} again`,
+      region: "check this computer's network access to AWS (an environment cannot move regions), then try again",
+    };
+    throw agentXError("CONFIG_INVALID", `${modelCheckProblem({ modelId, role, region: settings.region, error, wording })}; nothing changed`);
   }
 }
 
@@ -158,7 +164,7 @@ export async function runConfigSet(services: ConfigServices, env: string, input:
       return { changed: true };
     });
   }
-  if (role !== undefined) await checkModel(services, settings, role, value);
+  if (role !== undefined) await checkModel(services, env, settings, role, value);
   const roleArn = settings.access?.cloudFormationRoleArn;
   if (roleArn === undefined) throw agentXError("CONFIG_INVALID", `environment ${env}'s settings name no CloudFormation role; run agentx env use --env ${env}, or agentx init --resume`);
   const holder = (await services.identity.get()).arn;

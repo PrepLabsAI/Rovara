@@ -151,6 +151,17 @@ describe("agentx config set", () => {
     expect(lockOps(store)).toEqual(["put", "get", "delete"]);
   });
 
+  it("names config set, not an init flag, as the way to pick another model (live check L3)", async () => {
+    const store = await seeded();
+    const notFound = passingChecks({ converse: async () => { throw Object.assign(new Error("model not found"), { name: "ResourceNotFoundException" }); } });
+    await expect(runConfigSet(services({ store, cloudFormation: fakeCloudFormation(), checks: () => notFound }), ENV, { key: "models.worker", value: "us.made-up-v1", yes: true }))
+      .rejects.toThrow("us.made-up-v1 is not a Bedrock model id available in us-east-1; check the id, or choose another with agentx --env staging config set models.worker <another model id>; nothing changed");
+    const denied = passingChecks({ converse: async () => { throw Object.assign(new Error("You don't have access to the model"), { name: "AccessDeniedException" }); } });
+    const error = await runConfigSet(services({ store, cloudFormation: fakeCloudFormation(), checks: () => denied }), ENV, { key: "models.orchestrator", value: "us.anthropic.claude-opus-4-1", yes: true }).then(() => undefined, (caught: unknown) => caught as Error);
+    expect(error?.message).toContain("or choose another model with agentx --env staging config set models.orchestrator <another model id>; nothing changed");
+    expect(error?.message).not.toContain("--orchestrator-model");
+  });
+
   it("changes nothing when the model fails its one-token test call, and says why", async () => {
     const store = await seeded();
     const cloudFormation = fakeCloudFormation();
