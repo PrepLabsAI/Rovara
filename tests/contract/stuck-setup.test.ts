@@ -2,7 +2,7 @@
 // Spec 025 FR-055, D21, C17, C18: a developer task's setup is failed 50 minutes after it started.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { STUCK_SETUP_MESSAGE, STUCK_SETUP_MS, sweepStuckSetups } from "../../packages/broker/src/aws/stuck-setup.js";
+import { STUCK_SETUP_MESSAGE, STUCK_SETUP_MS, setupWatchKey, sweepStuckSetups } from "../../packages/broker/src/aws/stuck-setup.js";
 import { noticesFromStream } from "../../packages/broker/src/developer/notifications.js";
 import { MAYA, createDeveloperTaskBroker, recordStream } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM, ensureWorkspace } from "../support/slack-broker.js";
@@ -46,7 +46,7 @@ describe("the sweep (FR-055)", () => {
   it("fails a prepare still running 50 minutes after it started, whatever the instance's health", async () => {
     const { db, sweep, workspaceId, prepareId, watches, dev, taskId } = await starting();
     db.set({ pk: `WORKSPACE#${workspaceId}`, sk: "SESSION", entityType: "SESSION", workspaceId, state: "READY", sessionState: "READY", generation: 1 });
-    expect(await sweep(51)).toEqual({ failed: [workspaceId], settled: 0 });
+    expect(await sweep(51)).toEqual({ failed: [workspaceId], dropped: 0, kept: 0 });
     expect(db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${prepareId}`)).toMatchObject({ status: "FAILED", error: STUCK_SETUP_MESSAGE });
     expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "PREPARATION_FAILED" });
     expect(db.get(`WORKSPACE#${workspaceId}`, "META")).not.toHaveProperty("activeOperationId");
@@ -86,7 +86,7 @@ describe("the sweep (FR-055)", () => {
 
   it("leaves a younger prepare alone", async () => {
     const { db, sweep, workspaceId, watches } = await starting();
-    expect(await sweep(49)).toEqual({ failed: [], settled: 0 });
+    expect(await sweep(49)).toEqual({ failed: [], dropped: 0, kept: 0 });
     expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "PREPARING" });
     expect(watches()).toHaveLength(1);
   });
@@ -96,7 +96,7 @@ describe("the sweep (FR-055)", () => {
     await sweep(51);
     const operation = db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${prepareId}`);
     const workspace = db.get(`WORKSPACE#${workspaceId}`, "META");
-    expect(await sweep(52)).toEqual({ failed: [], settled: 0 });
+    expect(await sweep(52)).toEqual({ failed: [], dropped: 0, kept: 0 });
     expect(db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${prepareId}`)).toEqual(operation);
     expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toEqual(workspace);
   });
@@ -105,7 +105,7 @@ describe("the sweep (FR-055)", () => {
     const { db, sweep, finish, workspaceId, prepareId, watches } = await starting();
     await finish(workspaceId, prepareId, "SUCCEEDED");
     const before = db.get(`WORKSPACE#${workspaceId}`, "META");
-    expect(await sweep(51)).toEqual({ failed: [], settled: 1 });
+    expect(await sweep(51)).toEqual({ failed: [], dropped: 1, kept: 0 });
     expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toEqual(before);
     expect(watches()).toEqual([]);
   });
@@ -122,11 +122,59 @@ describe("the sweep (FR-055)", () => {
       }
       return original(command);
     };
-    expect(await sweep(51)).toEqual({ failed: [], settled: 1 });
+    expect(await sweep(51)).toEqual({ failed: [], dropped: 0, kept: 1 });
     expect(raced).toBe(true);
     expect(db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${prepareId}`)).toMatchObject({ status: "SUCCEEDED" });
     expect(watches()).toHaveLength(1);
-    expect(await sweep(52)).toEqual({ failed: [], settled: 1 });
+    expect(await sweep(52)).toEqual({ failed: [], dropped: 1, kept: 0 });
+    expect(watches()).toEqual([]);
+  });
+
+  it("fails a prepare whose cancel was asked but never answered", async () => {
+    const { db, sweep, workspaceId, prepareId } = await starting();
+    db.set({ ...db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${prepareId}`)!, status: "CANCEL_REQUESTED" });
+    expect(await sweep(51)).toEqual({ failed: [workspaceId], dropped: 0, kept: 0 });
+    expect(db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${prepareId}`)).toMatchObject({ status: "FAILED", error: STUCK_SETUP_MESSAGE });
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "PREPARATION_FAILED" });
+  });
+
+  it("drops the watch of a workspace that was closed, and changes nothing else", async () => {
+    const { db, sweep, workspaceId, prepareId, watches } = await starting();
+    db.set({ ...db.get(`WORKSPACE#${workspaceId}`, "META")!, status: "CLOSED", closedAt: new Date().toISOString() });
+    const workspace = db.get(`WORKSPACE#${workspaceId}`, "META");
+    const operation = db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${prepareId}`);
+    expect(await sweep(51)).toEqual({ failed: [], dropped: 1, kept: 0 });
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toEqual(workspace);
+    expect(db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${prepareId}`)).toEqual(operation);
+    expect(watches()).toEqual([]);
+  });
+
+  it("drops the watch of a workspace another operation now holds, and fails neither", async () => {
+    const { db, sweep, workspaceId, prepareId, watches } = await starting();
+    const other = randomUUID();
+    db.set({ ...db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${prepareId}`)!, sk: `OPERATION#${other}`, id: other });
+    db.set({ ...db.get(`WORKSPACE#${workspaceId}`, "META")!, activeOperationId: other });
+    const workspace = db.get(`WORKSPACE#${workspaceId}`, "META");
+    expect(await sweep(51)).toEqual({ failed: [], dropped: 1, kept: 0 });
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toEqual(workspace);
+    expect(db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${other}`)).not.toMatchObject({ status: "FAILED" });
+    expect(db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${prepareId}`)).not.toMatchObject({ status: "FAILED" });
+    expect(watches()).toEqual([]);
+  });
+
+  it("handles more than one page of old watches over two runs", async () => {
+    const { db, sweep, workspaceId, watches } = await starting();
+    const old = new Date(Date.now() - 60 * 60_000);
+    for (let index = 0; index < 100; index += 1) {
+      const stale = randomUUID();
+      const createdAt = new Date(old.getTime() - index * 1_000).toISOString();
+      db.set({ ...setupWatchKey(createdAt, stale), entityType: "SETUP_WATCH", workspaceId: stale, operationId: randomUUID(), taskId: randomUUID(), createdAt });
+    }
+    expect(watches()).toHaveLength(101);
+    // The 100 older, gone workspaces come first; the live task's watch is the 101st.
+    expect(await sweep(51)).toEqual({ failed: [], dropped: 100, kept: 0 });
+    expect(watches()).toHaveLength(1);
+    expect(await sweep(51)).toEqual({ failed: [workspaceId], dropped: 0, kept: 0 });
     expect(watches()).toEqual([]);
   });
 

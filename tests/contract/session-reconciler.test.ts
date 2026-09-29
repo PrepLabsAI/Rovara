@@ -248,12 +248,15 @@ describe("failing an active operation", () => {
 describe("reconciler: stuck setups (spec 025 FR-055)", () => {
   it("runs the sweep last, reports what it failed and counts it", async () => {
     const failedWorkspace = randomUUID();
-    const sweep = vi.fn(async () => ({ failed: [failedWorkspace], settled: 0 }));
-    const { reconcile, emit } = setup({ sweepStuckSetups: sweep });
+    const sweep = vi.fn(async () => ({ failed: [failedWorkspace], dropped: 0, kept: 0 }));
+    const logs: Array<Record<string, unknown>> = [];
+    const { reconcile, emit } = setup({ sweepStuckSetups: sweep, log: (entry) => { logs.push(entry); } });
     const report = await reconcile();
     expect(sweep).toHaveBeenCalledExactlyOnceWith(NOW);
     expect(report.stuckSetups).toEqual([failedWorkspace]);
     expect(emit).toHaveBeenCalledWith(expect.objectContaining({ ReconcilerStuckSetups: 1 }));
+    // The sweep logs each failed setup itself (stuck_setup.failed); the reconciler does not repeat it.
+    expect(logs.filter((entry) => JSON.stringify(entry).includes(failedWorkspace))).toEqual([]);
   });
 
   it("still emits the EC2 repair metrics when the sweep throws, counts the error, and fails the run (F17)", async () => {

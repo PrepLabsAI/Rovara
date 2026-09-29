@@ -16,7 +16,10 @@ type Client = { send(command: unknown): Promise<unknown> };
 export const STUCK_SETUP_MS = 50 * 60_000;
 export const STUCK_SETUP_MESSAGE = "setup did not finish within 50 minutes; close this task and start a new one";
 export const SETUP_WATCH_PK = "SETUP_WATCH";
-/** Watches read per run; a run every 10 minutes clears any realistic backlog. */
+/**
+ * Watches read per run: one page. The oldest come first, so a larger backlog clears over the next
+ * runs, every 10 minutes. A kept watch (a racing result) is dropped by the next run.
+ */
 const SWEEP_PAGE = 100;
 const LIVE = ["ACCEPTED", "DISPATCHING", "RUNNING", "CANCEL_REQUESTED"];
 
@@ -30,7 +33,7 @@ export async function sweepStuckSetups(
   tableName: string,
   now: Date,
   log: (entry: Record<string, unknown>) => void = () => undefined,
-): Promise<{ failed: string[]; settled: number }> {
+): Promise<{ failed: string[]; dropped: number; kept: number }> {
   const cutoff = new Date(now.getTime() - STUCK_SETUP_MS).toISOString();
   const response = await client.send(new QueryCommand({
     TableName: tableName,
@@ -40,25 +43,30 @@ export async function sweepStuckSetups(
     Limit: SWEEP_PAGE,
   })) as { Items?: SetupWatch[] };
   const failed: string[] = [];
-  let settled = 0;
+  let dropped = 0;
+  let kept = 0;
   for (const watch of response.Items ?? []) {
-    if (await settle(client, tableName, watch, now.toISOString()) === "failed") {
+    const outcome = await settle(client, tableName, watch, now.toISOString());
+    if (outcome === "failed") {
       failed.push(watch.workspaceId);
-      // IDs only: never the task's instructions or an error's message.
+      // The one log line per failed setup. IDs only: never the task's instructions or an error's message.
       log({ event: "stuck_setup.failed", workspaceId: watch.workspaceId, taskId: watch.taskId, operationId: watch.operationId });
+    } else if (outcome === "dropped") {
+      dropped += 1;
     } else {
-      settled += 1;
+      kept += 1;
     }
   }
-  return { failed, settled };
+  return { failed, dropped, kept };
 }
 
 /**
  * Fails the watched prepare if it is still the workspace's live operation, else drops the watch.
+ * "kept": a result landed during the failing transaction, which cancelled; the watch stays.
  * The failure commits only while the operation is still in progress under the same fence, so a
  * result that lands first stands, and a second run finds nothing to do.
  */
-async function settle(client: Client, tableName: string, watch: SetupWatch, now: string): Promise<"failed" | "settled"> {
+async function settle(client: Client, tableName: string, watch: SetupWatch, now: string): Promise<"failed" | "dropped" | "kept"> {
   const workspaceKey = { pk: `WORKSPACE#${watch.workspaceId}` };
   const get = async (sk: string) => ((await client.send(new GetCommand({ TableName: tableName, Key: { ...workspaceKey, sk }, ConsistentRead: true }))) as { Item?: Record<string, unknown> }).Item;
   const [workspace, operation] = await Promise.all([get("META"), get(`OPERATION#${watch.operationId}`)]);
@@ -66,7 +74,7 @@ async function settle(client: Client, tableName: string, watch: SetupWatch, now:
   const live = operation?.kind === "prepare" && LIVE.includes(String(operation.status));
   if (workspace?.status !== "PREPARING" || workspace.activeOperationId !== watch.operationId || !live || typeof operation.fence !== "number") {
     await client.send(new DeleteCommand(drop));
-    return "settled";
+    return "dropped";
   }
   try {
     await client.send(new TransactWriteCommand({ TransactItems: [
@@ -100,7 +108,7 @@ async function settle(client: Client, tableName: string, watch: SetupWatch, now:
     return "failed";
   } catch (error) {
     // A result landed first: it stands, and the next run drops the watch.
-    if (error instanceof Error && error.name === "TransactionCanceledException") return "settled";
+    if (error instanceof Error && error.name === "TransactionCanceledException") return "kept";
     throw error;
   }
 }

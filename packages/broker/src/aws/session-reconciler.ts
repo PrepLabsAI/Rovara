@@ -146,8 +146,8 @@ export function createReconcilerHandler(dependencies: ReconcilerDependencies) {
     let sweepError: Error | undefined;
     if (dependencies.sweepStuckSetups !== undefined) {
       try {
+        // The sweep logs each failed setup itself (stuck_setup.failed), so nothing is repeated here.
         report.stuckSetups = (await dependencies.sweepStuckSetups(new Date(now))).failed;
-        for (const workspaceId of report.stuckSetups) log({ event: "reconciler.stuck_setup_failed", workspaceId });
       } catch (error) {
         sweepError = error instanceof Error ? error : new Error("stuck-setup sweep failed");
         log({ event: "reconciler.stuck_setup_sweep_failed", errorName: error instanceof Error ? error.name : "unknown" });
