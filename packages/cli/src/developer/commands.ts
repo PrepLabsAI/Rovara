@@ -4,11 +4,21 @@ import { sanitizeServerText } from "../auth.js";
 import { developerTokenKey, removeDeveloperEnvironment, resolveDeveloperEnvironment } from "./config.js";
 import { developerAccessToken, type DeveloperSessionDeps } from "./session.js";
 
-export async function fetchDeveloperProjects(deps: DeveloperSessionDeps, env: string | undefined): Promise<{ env: string; url: string; projects: DeveloperProjectsResponse }> {
+/**
+ * One signed-in GET against a `/v1/dev/*` route, parsed with the route's schema. Every failure is
+ * told apart the same way for every route: unreachable, a sign-in that has ended, an HTTP error,
+ * and a body this CLI cannot read.
+ */
+export async function developerGet<T>(
+  deps: DeveloperSessionDeps,
+  env: string | undefined,
+  path: string,
+  schema: { safeParse: (value: unknown) => { success: true; data: T } | { success: false } },
+): Promise<{ env: string; url: string; body: T }> {
   const session = await developerAccessToken(deps, env);
   let response: Response;
   try {
-    response = await deps.fetch(`${session.entry.url}/v1/dev/projects`, { headers: { authorization: `Bearer ${session.accessToken}` }, signal: AbortSignal.timeout(20_000) });
+    response = await deps.fetch(`${session.entry.url}${path}`, { headers: { authorization: `Bearer ${session.accessToken}` }, signal: AbortSignal.timeout(20_000) });
   } catch {
     throw agentXError("RUNTIME_UNAVAILABLE", `could not reach AgentX at ${session.entry.url}; check your connection and try again`);
   }
@@ -17,9 +27,14 @@ export async function fetchDeveloperProjects(deps: DeveloperSessionDeps, env: st
     throw agentXError("AUTH_REQUIRED", `your AgentX sign-in for ${session.env} has ended${reason === undefined ? "" : ` (${reason})`}; run npx @charterarc/agentx login ${session.entry.url}`);
   }
   if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `AgentX answered HTTP ${response.status}; try again`);
-  const parsed = DeveloperProjectsResponseSchema.safeParse(await response.json().catch(() => undefined));
+  const parsed = schema.safeParse(await response.json().catch(() => undefined));
   if (!parsed.success) throw agentXError("RUNTIME_UNAVAILABLE", "AgentX answered with something unexpected; try again, or upgrade: npx @charterarc/agentx@latest whoami");
-  return { env: session.env, url: session.entry.url, projects: parsed.data };
+  return { env: session.env, url: session.entry.url, body: parsed.data };
+}
+
+export async function fetchDeveloperProjects(deps: DeveloperSessionDeps, env: string | undefined): Promise<{ env: string; url: string; projects: DeveloperProjectsResponse }> {
+  const { env: resolved, url, body } = await developerGet(deps, env, "/v1/dev/projects", DeveloperProjectsResponseSchema);
+  return { env: resolved, url, projects: body };
 }
 
 /**

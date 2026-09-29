@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { WorkspaceInstanceSchema } from "../../packages/contracts/src/workspace.js";
+import { WorkspaceInstanceSchema, workspaceRecordFields } from "../../packages/contracts/src/workspace.js";
 import { createDispatcherHandler } from "../../packages/broker/src/aws/dispatcher.js";
 import { parseRuntimeBinding } from "../../packages/broker/src/aws/lambda.js";
 import {
@@ -43,8 +43,7 @@ describe.each(["instances-ebs", "demo-microvm"] as const)("retired %s history", 
     db.set({ ...operation, kind: "close", status: "SUCCEEDED", result: { safeToClose: true, repositories: [] } });
 
     const stored = db.get(`WORKSPACE#${workspaceId}`, "META")!;
-    const fields = Object.fromEntries(Object.entries(stored).filter(([key]) => !["pk", "sk", "entityType"].includes(key)));
-    expect(WorkspaceInstanceSchema.parse(fields)).toMatchObject({ deploymentMode: mode, runtimeArn: routing.runtimeArn });
+    expect(WorkspaceInstanceSchema.parse(workspaceRecordFields(stored))).toMatchObject({ deploymentMode: mode, runtimeArn: routing.runtimeArn });
     const outboxCount = db.find((item) => item.entityType === "OUTBOX").length;
     const read = await serviceCall(handler, thread, member, "GET", `/v1/service/workspaces/${workspaceId}/operations/${operationId}`);
     expect(read.status).toBe(200);

@@ -21,6 +21,43 @@ export const WorkspaceDeploymentModeSchema = z.enum(["ec2-ebs"]);
 /** Read compatibility for persisted workspace and project history only. */
 export const StoredDeploymentModeSchema = z.enum(["instances-ebs", "demo-microvm", "ec2-ebs"]);
 
+/**
+ * Spec 041: the state table's sparse index of workspace META items by project, so a developer's
+ * workspaces can be listed for the projects they may use. Only a `WORKSPACE#<id>`/`META` item
+ * carries `workspaceProject`, so nothing else appears here; `workspaceCreatedAt` sorts a project's
+ * workspaces oldest first, and the route reverses that to show the newest work first.
+ *
+ * Workspace records written before this index existed carry neither attribute and so are absent
+ * from it: a listing shows the workspaces created since the release that added it.
+ */
+export const WORKSPACE_PROJECT_INDEX = {
+  name: "byWorkspaceProject",
+  partitionKey: "workspaceProject",
+  sortKey: "workspaceCreatedAt",
+} as const;
+
+/** The index attributes a workspace META item is written with. */
+export function workspaceProjectIndexAttributes(workspace: { projectName: string; createdAt: string }): {
+  workspaceProject: string;
+  workspaceCreatedAt: string;
+} {
+  return { workspaceProject: workspace.projectName, workspaceCreatedAt: workspace.createdAt };
+}
+
+/** The keys a workspace META item carries for storage rather than as record fields. */
+const WORKSPACE_STORAGE_KEYS: ReadonlySet<string> = new Set([
+  "pk",
+  "sk",
+  "entityType",
+  WORKSPACE_PROJECT_INDEX.partitionKey,
+  WORKSPACE_PROJECT_INDEX.sortKey,
+]);
+
+/** A stored workspace item without its storage keys, ready for `WorkspaceInstanceSchema`. */
+export function workspaceRecordFields(item: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(item).filter(([key]) => !WORKSPACE_STORAGE_KEYS.has(key)));
+}
+
 const WorkspaceRecordSchema = z
   .object({
     id: z.string().uuid(),

@@ -4,11 +4,17 @@
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import {
   DEVELOPER_TOKEN_AUDIENCE,
+  DEVELOPER_WORKSPACES_PER_PROJECT,
+  WORKSPACE_PROJECT_INDEX,
+  WorkspaceInstanceSchema,
   agentXError,
+  workspaceRecordFields,
   type ChannelMembersRequest,
   type ChannelMembersResponse,
   type DeveloperProjectsResponse,
   type DeveloperSignInMethod,
+  type DeveloperWorkspace,
+  type DeveloperWorkspacesResponse,
   type SlackChannelBinding,
 } from "@agentx/contracts";
 import { resolveDeveloperAccess } from "../developer/access.js";
@@ -224,9 +230,67 @@ async function listProjects(deps: DeveloperRouteDependencies, caller: DeveloperC
   };
 }
 
+/**
+ * Spec 041 FR-002: a project's workspaces, newest first, from the sparse byWorkspaceProject index.
+ * Only a workspace's own fields are read; the index carries the whole item, so no second get is
+ * needed per workspace.
+ */
+async function projectWorkspaces(deps: DeveloperRouteDependencies, project: string): Promise<DeveloperWorkspace[]> {
+  const items: Array<Record<string, unknown>> = [];
+  let start: Record<string, unknown> | undefined;
+  do {
+    const response = await deps.documentClient.send(new QueryCommand({
+      TableName: deps.tableName,
+      IndexName: WORKSPACE_PROJECT_INDEX.name,
+      KeyConditionExpression: "#project = :project",
+      ExpressionAttributeNames: { "#project": WORKSPACE_PROJECT_INDEX.partitionKey },
+      ExpressionAttributeValues: { ":project": project },
+      // Newest first, and never more than one page past the cap: a project with thousands of
+      // thread workspaces must not turn one page load into an unbounded scan.
+      ScanIndexForward: false,
+      Limit: DEVELOPER_WORKSPACES_PER_PROJECT,
+      ...(start === undefined ? {} : { ExclusiveStartKey: start }),
+    })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> };
+    items.push(...(response.Items ?? []));
+    start = items.length >= DEVELOPER_WORKSPACES_PER_PROJECT ? undefined : response.LastEvaluatedKey;
+  } while (start !== undefined);
+
+  const workspaces: DeveloperWorkspace[] = [];
+  for (const item of items.slice(0, DEVELOPER_WORKSPACES_PER_PROJECT)) {
+    const parsed = WorkspaceInstanceSchema.safeParse(workspaceRecordFields(item));
+    // A record this release cannot read is left out rather than failing the whole listing.
+    if (!parsed.success) {
+      logDeveloperEvent({ event: "developer.workspace_unreadable", project, reason: parsed.error.issues[0]?.message ?? "invalid" });
+      continue;
+    }
+    const workspace = parsed.data;
+    workspaces.push({
+      id: workspace.id,
+      projectName: workspace.projectName,
+      projectRevision: workspace.projectRevision,
+      status: workspace.status,
+      busy: workspace.activeOperationId !== null,
+      createdAt: workspace.createdAt,
+      updatedAt: workspace.updatedAt,
+    });
+  }
+  return workspaces;
+}
+
+/** FR-001: the projects the caller may use, with the workspaces in each of them. */
+async function listWorkspaces(deps: DeveloperRouteDependencies, caller: DeveloperCaller): Promise<DeveloperWorkspacesResponse> {
+  const listing = await listProjects(deps, caller);
+  const workspaces: DeveloperWorkspace[] = [];
+  for (const project of listing.projects) workspaces.push(...await projectWorkspaces(deps, project.name));
+  // Across projects, still newest first, so the page's list reads as one timeline.
+  workspaces.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  return { ...listing, workspaces };
+}
+
 export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   // Never request.jwtClaims: no API Gateway authorizer runs on /v1/dev/* (D17).
   const caller = await authenticateDeveloper(deps, await deps.developer.verifyAccessToken(request.headers.authorization));
   if (request.method === "GET" && url.pathname === "/v1/dev/projects") return listProjects(deps, caller);
+  if (request.method === "GET" && url.pathname === "/v1/dev/workspaces") return listWorkspaces(deps, caller);
   throw agentXError("NOT_FOUND", "route not found");
 }
