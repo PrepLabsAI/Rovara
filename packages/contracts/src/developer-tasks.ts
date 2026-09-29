@@ -5,7 +5,7 @@ import { z } from "zod";
 import { cleanDisplayName } from "./display-name.js";
 import { OperationStatusSchema } from "./operation.js";
 import { DeveloperShareModeSchema } from "./project.js";
-import { slackThreadSubject, type SlackThread } from "./slack.js";
+import { sharedNoticeKey, slackThreadSubject, type SlackThread } from "./slack.js";
 
 export const DEVELOPER_TASK_OWNER_ISSUER = "agentx-developer-task";
 export const DEVELOPER_INSTRUCTIONS_MAX_BYTES = 65_536;
@@ -36,6 +36,30 @@ export const VIEW_ONLY_NOTICE =
   "This thread follows a task that a developer is driving from their AI tool, so I don't act on messages here. To ask AgentX for something, post a new message in the channel; it starts its own thread workspace.";
 export const CLOSED_SHARED_NOTICE =
   "The task this thread followed is closed, so I don't act on messages here. To ask AgentX for something, post a new message in the channel; it starts its own thread workspace.";
+
+/**
+ * C10, F13: the conditional Update that claims a shared thread's hourly notice. The Slack ingress
+ * and the Slack service both send it, so "one notice an hour" is the same claim in both. It succeeds
+ * for at most one caller per thread per interval; a later caller gets ConditionalCheckFailedException.
+ * The marker expires after two intervals.
+ */
+export function sharedNoticeClaim(subject: string, nowSeconds: number): {
+  Key: { pk: string; sk: "SHARED_NOTICE" };
+  UpdateExpression: string;
+  ConditionExpression: string;
+  ExpressionAttributeValues: { ":now": number; ":expires": number; ":cutoff": number };
+} {
+  return {
+    Key: sharedNoticeKey(subject),
+    UpdateExpression: "SET noticedAt = :now, expiresAt = :expires",
+    ConditionExpression: "attribute_not_exists(noticedAt) OR noticedAt <= :cutoff",
+    ExpressionAttributeValues: {
+      ":now": nowSeconds,
+      ":expires": nowSeconds + 2 * SHARED_THREAD_NOTICE_INTERVAL_SECONDS,
+      ":cutoff": nowSeconds - SHARED_THREAD_NOTICE_INTERVAL_SECONDS,
+    },
+  };
+}
 
 export const DeveloperTaskShareSchema = z.object({
   mode: DeveloperShareModeSchema,
