@@ -50,6 +50,8 @@ import { settingsParameterName } from "./environments/settings.js";
 import { formatError, formatSuccess } from "./output.js";
 import { realSetupContext, type SetupCommandContext } from "./setup/command-context.js";
 import { registerSetupCommands } from "./setup/cli.js";
+import { registerConfigCommands } from "./config/cli.js";
+import type { ConfigServices } from "./config/commands.js";
 import { addSignInOptions, definedEntries, registerSigninCommands, secretSource, signInFlags, type SignInCommandOptions } from "./signin/cli.js";
 import { SIGNIN_FLAG_NAMES, type SigninFlags } from "./signin/collect.js";
 import type { SigninServices } from "./signin/commands.js";
@@ -100,6 +102,8 @@ export interface CliDependencies {
   init?: InitCliDependencies;
   /** `agentx signin` overrides, for tests: never touch AWS, Slack or an identity provider. */
   signin?: Partial<SigninServices>;
+  /** `agentx config` overrides, for tests: never touch AWS. */
+  config?: Partial<ConfigServices>;
   /** `agentx workspaces` overrides, for tests: never reach the control plane or open a browser. */
   workspaces?: {
     read?: () => Promise<DeveloperWorkspacesResult>;
@@ -323,6 +327,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     ...(dependencies.signin === undefined ? {} : { overrides: dependencies.signin }),
     parameterStore, fetch: services.fetchImplementation, stdout: services.stdout, stderr: services.stderr,
   });
+  registerConfigCommands(program, { ...(dependencies.config === undefined ? {} : { overrides: dependencies.config }), parameterStore, fetch: services.fetchImplementation, stdout: services.stdout, stderr: services.stderr });
 
   const admin = program.command("admin").description("administrator workflows");
   const adminProject = admin.command("project").description("administer registered projects");
