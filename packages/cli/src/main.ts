@@ -55,6 +55,8 @@ import type { ConfigServices } from "./config/commands.js";
 import { registerDoctorCommand } from "./doctor/cli.js";
 import type { DoctorServices } from "./doctor/checks.js";
 import { addSignInOptions, definedEntries, registerSigninCommands, secretSource, signInFlags, type SignInCommandOptions } from "./signin/cli.js";
+import { registerDestroyCommand } from "./destroy/cli.js";
+import type { DestroyDependencies } from "./destroy/run.js";
 import { registerUpgradeCommand } from "./upgrade/cli.js";
 import type { UpgradeDependencies } from "./upgrade/run.js";
 import { SIGNIN_FLAG_NAMES, type SigninFlags } from "./signin/collect.js";
@@ -112,6 +114,8 @@ export interface CliDependencies {
   doctor?: { store?: ParameterStore; services?: (settings: EnvironmentSettings) => DoctorServices };
   /** `agentx upgrade` overrides, for tests: never touch AWS or GitHub. */
   upgrade?: Partial<UpgradeDependencies>;
+  /** `agentx destroy` overrides, for tests: never touch AWS. */
+  destroy?: Partial<DestroyDependencies>;
   /** `agentx workspaces` overrides, for tests: never reach the control plane or open a browser. */
   workspaces?: {
     read?: () => Promise<DeveloperWorkspacesResult>;
@@ -346,6 +350,10 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     ...(dependencies.upgrade === undefined ? {} : { overrides: dependencies.upgrade }),
     ...(dependencies.deploy === undefined ? {} : { deploy: dependencies.deploy }),
     parameterStore, fetch: services.fetchImplementation, home, stdout: services.stdout, stderr: services.stderr,
+  });
+  registerDestroyCommand(program, {
+    ...(dependencies.destroy === undefined ? {} : { overrides: dependencies.destroy }),
+    parameterStore, stdin: dependencies.stdin ?? process.stdin, home, tokenStore: services.tokenStore, stdout: services.stdout, stderr: services.stderr,
   });
 
   const admin = program.command("admin").description("administrator workflows");

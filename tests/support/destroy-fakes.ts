@@ -1,42 +1,13 @@
 // An AWS account in memory for agentx destroy: stacks that take simulated minutes to delete,
 // worker instances and volumes, retained resources with tags, and secrets. Every mutating call is
 // recorded in order in `calls`.
-import { readdir, readFile } from "node:fs/promises";
-import { join } from "node:path";
 import { environmentStackName, type StackPart } from "@agentx/contracts";
 import type { DestroyApi, DestroyStack } from "../../packages/cli/src/destroy/aws.js";
 import type { RetainedResource } from "../../packages/cli/src/destroy/inventory.js";
 import { isSecretId } from "../../packages/cli/src/destroy/names.js";
-import type { EnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
-import type { InstallProgress } from "../../packages/cli/src/init/install-state.js";
-import { T0 } from "./init-fakes.js";
-import { STAGING_SETTINGS } from "./setup-fakes.js";
 
-// The same installed staging environment tests/support/doctor-fakes.ts describes (lane B); kept here
-// so the destroy lane does not depend on the doctor lane's fakes.
-export const SETTINGS: EnvironmentSettings = {
-  ...STAGING_SETTINGS,
-  stacks: { access: "agentx-staging-access", foundation: "agentx-staging-foundation", identity: "agentx-staging-identity", runtime: "agentx-staging-runtime", "control-plane": "agentx-staging-control-plane", slack: "agentx-staging-slack" },
-};
-export const PROGRESS: InstallProgress = {
-  schemaVersion: 1, env: "staging", steps: {}, updatedAt: new Date(T0).toISOString(),
-  github: { account: "acme", appId: "123", slug: "agentx-acme", privateKeySecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/github-app-AbCdEf", installationId: "456" },
-  slack: { appId: "A0APP", teamId: "T0TEAM", botUserId: "U0BOT" },
-  project: { name: "payments", revision: 1, channelName: "payments", channelId: "C0123456789", teamId: "T0TEAM" },
-};
-
-/** The project files one environment wrote, found by the register line agentx writes in their header
- * (the same rule as environmentProjectFiles in setup/project-add.ts, on the doctor lane). */
-export async function headerProjectFiles(configDir: string, env: string): Promise<Array<{ path: string; launchTemplateId: string }>> {
-  const line = /^#\s+agentx admin project register --env (\S+) --file .+? --deployment-mode ec2-ebs --launch-template-id (\S+)/m;
-  const found: Array<{ path: string; launchTemplateId: string }> = [];
-  for (const entry of (await readdir(configDir).catch(() => [])).filter((name) => name.endsWith(".yaml")).sort()) {
-    const path = join(configDir, entry);
-    const match = line.exec(await readFile(path, "utf8"));
-    if (match?.[1] === env && match[2] !== undefined) found.push({ path, launchTemplateId: match[2] });
-  }
-  return found;
-}
+// The installed staging environment every day-2 test uses: one copy, in doctor-fakes.ts.
+export { PROGRESS, SETTINGS } from "./doctor-fakes.js";
 
 export interface FakeStack extends DestroyStack { template: string; resources: Array<{ logicalId: string; type: string; physicalId: string }>; deleteMinutes?: number; failDeletes?: number; busyMinutes?: number; settledStatus?: string; /** GetTemplate fails, as for a stack with only a pending change set. */ noTemplate?: boolean }
 export interface FakeAccount {

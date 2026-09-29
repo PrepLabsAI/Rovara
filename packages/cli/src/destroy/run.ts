@@ -56,6 +56,10 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
   }
   const legacyRefusal = "agentx destroy never removes the legacy deployment (fixed stack names); tear it down by hand if you mean to";
   if (settings?.naming === "legacy") throw agentXError("CONFIG_INVALID", legacyRefusal);
+  // Every client is built for deps.region; an environment installed elsewhere is not in them.
+  if (settings !== undefined && settings.region !== deps.region) {
+    throw agentXError("CONFIG_INVALID", `environment ${env} is installed in ${settings.region}, not ${deps.region}; run agentx --env ${env} destroy --region ${settings.region}`);
+  }
   if (env === "production") {
     for (const name of Object.values(ADOPTED_STACK_NAMES)) {
       if ((await api.stack(name)) !== undefined) throw agentXError("CONFIG_INVALID", `${legacyRefusal}: stack ${name} exists in this account and region`);

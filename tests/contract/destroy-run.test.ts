@@ -11,7 +11,8 @@ import { settingsParameterName, writeEnvironmentSettings } from "../../packages/
 import { writeInstallAnswers, writeInstallProgress } from "../../packages/cli/src/init/install-state.js";
 import { writeProjectFile } from "../../packages/cli/src/setup/project-add.js";
 import { awsDestroyApi } from "../../packages/cli/src/destroy/aws.js";
-import { fakeDestroyApi, forceDeletedSecretsClient, headerProjectFiles, installedAccount, PROGRESS, SETTINGS, type FakeAccount } from "../support/destroy-fakes.js";
+import { destroyProjectFiles } from "../../packages/cli/src/destroy/cli.js";
+import { fakeDestroyApi, forceDeletedSecretsClient, installedAccount, PROGRESS, SETTINGS, type FakeAccount } from "../support/destroy-fakes.js";
 import { sampleAnswers } from "../support/init-fakes.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 import { memoryTokenStore } from "../support/setup-fakes.js";
@@ -48,12 +49,19 @@ async function harness(input: { account?: FakeAccount; typed?: string[]; caller?
   const deps: DestroyDependencies = {
     store, api: fakeDestroyApi(account, clock), identity: { get: async () => ({ account: "123456789012", arn: input.caller ?? ADMIN }) },
     confirmLine: async (question) => { asked.push(question); return typed.shift() ?? ""; },
-    write: (line) => lines.push(line), ...clock, home, projectFiles: (name) => headerProjectFiles(configDir, name), tokenStore: memoryTokenStore(), region: "us-east-1",
+    write: (line) => lines.push(line), ...clock, home, projectFiles: (name) => destroyProjectFiles({ configDir, env: name, write: (line) => lines.push(line) }), tokenStore: memoryTokenStore(), region: "us-east-1",
   };
   return { deps, account, store, lines, asked, home, configDir, env };
 }
 
 describe("agentx destroy (FR-055, item 3)", () => {
+  it("refuses a region other than the environment's, before asking or deleting anything", async () => {
+    const h = await harness();
+    await expect(runDestroy({ env: "staging", keepData: false }, { ...h.deps, region: "eu-west-1" })).rejects.toThrow("environment staging is installed in us-east-1, not eu-west-1; run agentx --env staging destroy --region us-east-1");
+    expect(h.asked).toEqual([]);
+    expect(h.account.calls).toEqual([]);
+  });
+
   it("removes everything in the documented order and deletes the settings last", async () => {
     const h = await harness();
     const result = await runDestroy({ env: "staging", keepData: false }, h.deps);
