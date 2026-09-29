@@ -14,12 +14,15 @@ describe("the worker image", () => {
     for (const pkg of ["python3", "python3-pip", "python3-venv", "git", "openssh-client", "ca-certificates"]) {
       expect(install.split(/\s+/), pkg).toContain(pkg);
     }
+    expect(finalStage).toContain("rm -rf /var/lib/apt/lists/*");
   });
 
   it("pins uv by version and by SHA-256 for each architecture, and verifies the download", () => {
     expect(toolsStage).toContain("ARG UV_VERSION=0.12.20");
     expect(toolsStage).toContain("uv_sha=8a7aad7bc76a2fae5151566ff3e43eacce0b2a113d5e4de3e4afe3e58fa2441e");
     expect(toolsStage).toContain("uv_sha=6590717592ace991ff83a63fef799e3ad9d33ecc8f96c5d6bdd732496e79337f");
+    expect(toolsStage).toMatch(/arm64\) uv_arch=aarch64; uv_sha=8a7aad7bc76a2fae5151566ff3e43eacce0b2a113d5e4de3e4afe3e58fa2441e ;/);
+    expect(toolsStage).toMatch(/amd64\) uv_arch=x86_64; uv_sha=6590717592ace991ff83a63fef799e3ad9d33ecc8f96c5d6bdd732496e79337f ;/);
     expect(toolsStage).toContain('https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-$uv_arch-unknown-linux-gnu.tar.gz');
     expect(toolsStage).toMatch(/echo "\$uv_sha {2}\/tmp\/uv\.tgz" \| sha256sum -c -/);
   });

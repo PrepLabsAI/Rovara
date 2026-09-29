@@ -22,7 +22,9 @@ A release directory looks like this:
   They are built for `arm64` machines only, the same chip the installer's runtime uses.
 - The worker image carries Node 22, Git, the Docker CLI and Compose, Python 3 with pip and venv,
   and uv. A change to `environments/base/Dockerfile` reaches installs only through a new release's
-  worker image: tag a release, and upgrade each environment with `agentx upgrade`.
+  worker image: tag a release, and upgrade each environment with `agentx upgrade`. Bookworm's
+  system Python is externally managed (PEP 668), so a repository should use `python3 -m venv` or
+  uv, not a bare `pip install`. `uv python install` needs network access.
 - The CLI, published to npm as a single self-contained package with no separate dependencies to
   install.
 
