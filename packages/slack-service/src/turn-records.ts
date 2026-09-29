@@ -26,6 +26,9 @@ export interface TurnDraft {
   error?: { name: string; code?: string };
   /** This turn posted a confirmation; its reply is then the confirmation, never an empty response. */
   confirmationPosted?: boolean;
+  /** Spec 025: a continue-mode turn's task, and the teammate's display name (C13). */
+  taskId?: string;
+  requesterName?: string;
 }
 
 export interface TurnRecordSink {
@@ -59,6 +62,8 @@ export function buildTurnRecord(input: {
     requestedBy: { teamId: message.thread.teamId, userId: message.userId },
     ...(draft.workspaceId === undefined ? {} : { workspaceId: draft.workspaceId }),
     ...(draft.conversationId === undefined ? {} : { conversationId: draft.conversationId }),
+    ...(draft.taskId === undefined ? {} : { taskId: draft.taskId }),
+    ...(draft.requesterName === undefined ? {} : { requesterName: draft.requesterName }),
     ...(draft.settingsRevision === undefined ? {} : { settingsRevision: draft.settingsRevision }),
     disposition: draft.disposition,
     startedAt: input.startedAt.toISOString(),

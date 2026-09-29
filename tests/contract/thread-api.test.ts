@@ -44,6 +44,15 @@ describe("the Slack service's thread client", () => {
     expect(await threadApi(handler).startClose(randomUUID())).toEqual({ outcome: "NOT_FOUND" });
   });
 
+  it("opts in to the shared task refusal when it starts a close (spec 025 C11), and an ordinary thread still gets NOT_FOUND", async () => {
+    const { handler } = createBroker();
+    await registerSlackProject(handler);
+    const sent: unknown[] = [];
+    const requestId = randomUUID();
+    expect(await threadApi(handler, sent).startClose(requestId)).toEqual({ outcome: "NOT_FOUND" });
+    expect(sent).toEqual([{ requestId, includeSharedTask: true }]);
+  });
+
   it("reports a refused request with the broker's code, as before the move", async () => {
     const { handler } = createBroker();
     await registerSlackProject(handler, { bind: false });
@@ -61,7 +70,7 @@ describe("the Slack service's thread client", () => {
     expect(sent).toEqual([{
       requestId, includeIntegrations: true, includeSettingsRevision: true, includeConnectors: true,
       includeAllConnectorTypes: true, includeRecoverableOperations: true, lazyPreparation: true,
-      includeActionPolicy: true,
+      includeActionPolicy: true, includeSharedTask: true,
     }]);
     expect(result).toMatchObject({ outcome: "WORKSPACE", status: "UNPREPARED", operationId: null, created: true });
     expect(db.find((item) => item.entityType === "OPERATION")).toHaveLength(0);

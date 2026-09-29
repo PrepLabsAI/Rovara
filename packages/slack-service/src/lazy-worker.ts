@@ -119,7 +119,7 @@ export function createLazyWorker(input: {
  * Settles with the wait's answer, or "TIMED_OUT" once the deadline passes. Once the deadline
  * passes, `controller` is aborted so the background poll stops instead of continuing forever.
  */
-async function withDeadline<T>(wait: Promise<T>, milliseconds: number, controller: AbortController): Promise<T | "TIMED_OUT"> {
+export async function withDeadline<T>(wait: Promise<T>, milliseconds: number, controller: AbortController): Promise<T | "TIMED_OUT"> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<"TIMED_OUT">((resolve) => {
     timer = setTimeout(() => {

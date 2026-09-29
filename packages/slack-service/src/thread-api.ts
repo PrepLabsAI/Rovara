@@ -42,7 +42,7 @@ export function createThreadApi(options: { controlPlaneUrl: string; signedFetch:
       return SlackThreadPrepareResultSchema.parse(await servicePost("/v1/threads/workspace/prepare", { requestId }, "thread workspace preparation failed"));
     },
     async startClose(requestId) {
-      return SlackWorkspaceCloseStartResultSchema.parse(await servicePost("/v1/threads/workspace/close", { requestId }, "workspace close request failed"));
+      return SlackWorkspaceCloseStartResultSchema.parse(await servicePost("/v1/threads/workspace/close", { requestId, includeSharedTask: true }, "workspace close request failed"));
     },
     async completeClose(requestId, operationId) {
       return SlackWorkspaceCloseCompleteResultSchema.parse(
