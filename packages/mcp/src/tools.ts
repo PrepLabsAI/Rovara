@@ -151,16 +151,18 @@ function instructions(value: unknown): string {
  * The caller's request_id, else one remembered for this call's content for 15 minutes, so an
  * unchanged retry (after the AI tool's own timeout, say) reaches AgentX as the same request.
  */
-function requestIdFor(context: ToolContext, call: ToolCall, input: Record<string, unknown>, content: readonly unknown[]): string {
+function requestIdFor(context: ToolContext, call: ToolCall, input: Record<string, unknown>, content: readonly unknown[], group?: string): string {
   const given = input.request_id as string | undefined;
   if (given !== undefined) return given;
-  return call.requestIds === undefined ? context.newRequestId() : call.requestIds.idFor(content, context.now(), () => context.newRequestId());
+  return call.requestIds === undefined ? context.newRequestId() : call.requestIds.idFor(content, context.now(), () => context.newRequestId(), group);
 }
 const optional = (value: unknown) => value ?? null;
 /** What makes a cancel the same cancel: the tool and its task (final review M3). */
 const cancelContent = (taskId: unknown): readonly unknown[] => ["agentx_cancel_task", taskId];
 /** What makes a share the same share: the task, the mode asked for and the channel named. */
 const shareContent = (taskId: unknown, mode: unknown, channel: unknown): readonly unknown[] => ["agentx_share_task", taskId, optional(mode), optional(channel)];
+/** Every share of one task, forgotten together after a share succeeds (final review M1). */
+const shareGroup = (taskId: string): string => `agentx_share_task:${taskId}`;
 const eventsOf = (input: Record<string, unknown>) => (input.events as number | undefined) ?? DEVELOPER_EVENTS_DEFAULT;
 
 /**
@@ -404,19 +406,18 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
     outputSchema: ActionShape,
     async handler(context, input, call) {
       const taskId = input.task_id as string;
-      const id = requestIdFor(context, call, input, shareContent(taskId, input.share_mode, input.channel));
+      const content = shareContent(taskId, input.share_mode, input.channel);
+      const id = requestIdFor(context, call, input, content, shareGroup(taskId));
       const task = await context.client.shareTask(taskId, {
         requestId: id,
         ...(input.share_mode === undefined ? {} : { shareMode: input.share_mode as "view" | "continue" }),
         ...(input.channel === undefined ? {} : { channel: input.channel as string }),
       });
-      // The mode changed: a later call asking for an earlier mode is a new change, not a retry of
-      // the earlier call, whose stored answer would leave the thread in this mode (as cancel after continue).
-      for (const mode of ["view", "continue", undefined]) {
-        if (mode === input.share_mode) continue;
-        call.requestIds?.forget(shareContent(taskId, mode, input.channel));
-        call.requestIds?.forget(shareContent(taskId, mode, undefined));
-      }
+      // The share changed: a later call asking for an earlier mode is a new change, not a retry of
+      // the earlier call, whose stored answer would leave the thread in this mode (as cancel after
+      // continue). Every other share of this task is forgotten, however it spelled the channel;
+      // only this call's own retry still reaches AgentX as the same request.
+      call.requestIds?.forgetGroup(shareGroup(taskId), content);
       return { structured: { ...taskOutput(task), request_id: id }, text: taskText(task) };
     },
   },

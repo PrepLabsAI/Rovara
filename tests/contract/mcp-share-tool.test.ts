@@ -136,6 +136,33 @@ describe("agentx_share_task (FR-030)", () => {
     ]);
   });
 
+  it("forgets the other modes whatever channel spelling the earlier calls used (final review M1)", async () => {
+    const answers = new Map<string, DeveloperTaskView>();
+    let mode: "view" | "continue" = "view";
+    const shareTask = vi.fn(async (_taskId: string, request: { requestId: string; shareMode?: "view" | "continue" }) => {
+      const stored = answers.get(request.requestId);
+      if (stored !== undefined) return stored;
+      mode = request.shareMode ?? mode;
+      const answer = view({ shared: true, share: { mode, channelId: "C0123456789", sharedReason: "requested" } });
+      answers.set(request.requestId, answer);
+      return answer;
+    });
+    let next = 0;
+    const mcp = await connect({ shareTask }, { newRequestId: () => `33333333-3333-4333-8333-${String(++next).padStart(12, "0")}` });
+    const calls = [
+      { share_mode: "view", channel: "#payments-dev" },
+      { share_mode: "continue" },
+      { share_mode: "view", channel: "#payments-dev" },
+      { share_mode: "continue", channel: "payments-dev" },
+      { share_mode: "view", channel: "#payments-dev" },
+    ];
+    const modes: unknown[] = [];
+    for (const args of calls) modes.push((await mcp.callTool({ name: "agentx_share_task", arguments: { task_id: TASK, ...args } })).structuredContent?.share_mode);
+    expect(new Set(shareTask.mock.calls.map(([, request]) => request.requestId)).size).toBe(5);
+    expect(modes).toEqual(["view", "continue", "view", "continue", "view"]);
+    expect(mode).toBe("view");
+  });
+
   it("refuses an empty channel, as the contract does, and calls nothing", async () => {
     const shareTask = vi.fn();
     const startTask = vi.fn();
