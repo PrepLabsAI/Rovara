@@ -2,6 +2,7 @@
 // and audit records. No I/O; aws/developer-tasks.ts and the broker's result hook call these.
 import { createHash } from "node:crypto";
 import {
+  inertName,
   AiToolTurnRecordSchema,
   DEVELOPER_EVENT_TEXT_MAX,
   DEVELOPER_FAILURE_MESSAGE_MAX,
@@ -374,17 +375,8 @@ export function completedTurn(input: {
   });
 }
 
-/**
- * Text as a GFM code span, which GitHub renders literally: no mention, link, autolink, HTML or
- * issue reference. Per CommonMark the fence is one backtick longer than the text's longest
- * backtick run, padded with a space when the text starts or ends with a backtick.
- */
-export function inertName(name: string): string {
-  const longestRun = Math.max(0, ...(name.match(/`+/g) ?? []).map((run) => run.length));
-  const fence = "`".repeat(longestRun + 1);
-  const pad = name.startsWith("`") || name.endsWith("`") ? " " : "";
-  return `${fence}${pad}${name}${pad}${fence}`;
-}
+/** Moved to the contracts package so the MCP server marks names the same way (final review M7). */
+export { inertName };
 
 /** FR-023. The client is one of the four names cleanClientName gives, so it needs no escaping. */
 export function developerFooter(name: string, client: string): string {

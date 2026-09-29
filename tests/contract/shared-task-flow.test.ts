@@ -148,7 +148,7 @@ describe("a shared task through its life (US3)", () => {
     expect(slack.posts).toHaveLength(3);
 
     // US3 scenario 7: the developer sees the channel's turn, and can still switch to view only.
-    expect((await tool("agentx_get_task", { task_id: taskId })).value).toMatchObject({ channel_turns: [{ author: "Priya", slack_user: PRIYA, request: "also run the linter", outcome: "answered" }] });
+    expect((await tool("agentx_get_task", { task_id: taskId })).value).toMatchObject({ channel_turns: [{ author: "`Priya`", slack_user: PRIYA, request: "also run the linter", outcome: "answered" }] });
     expect((await tool("agentx_share_task", { task_id: taskId, share_mode: "view" })).value).toMatchObject({ share_mode: "view" });
     expect(taskRecord(harness, taskId).share).toMatchObject({ mode: "view" });
     expect(sharedRecord(harness, subject)).toMatchObject({ mode: "view" });

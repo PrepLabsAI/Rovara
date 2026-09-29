@@ -3,7 +3,7 @@
 // for the AI tool that reads them: when to use the tool, and what to do next.
 import {
   DEFAULT_DEVELOPER_TASK_POLICY, DEVELOPER_EVENTS_DEFAULT, DEVELOPER_EVENTS_MAX, DEVELOPER_TASK_LIST_DEFAULT, DEVELOPER_TASK_LIST_MAX,
-  DEVELOPER_WAIT_MAX_SECONDS, DeveloperInstructionsSchema, DeveloperTaskStatusSchema, SHARED_BY_POLICY, VIEW_ONLY_BY_POLICY, type DeveloperTaskView,
+  DEVELOPER_WAIT_MAX_SECONDS, DeveloperInstructionsSchema, DeveloperTaskStatusSchema, SHARED_BY_POLICY, VIEW_ONLY_BY_POLICY, inertName, type DeveloperTaskView,
 } from "@agentx/contracts";
 import { z } from "zod";
 import type { ControlPlaneClient } from "./client.js";
@@ -86,7 +86,8 @@ function taskOutput(task: DeveloperTaskView, timedOut?: boolean): Record<string,
       ...(task.share.threadUrl !== undefined ? { thread_url: task.share.threadUrl } : task.share.postFailed === true ? { share_post_failed: true } : { share_posting: true }),
     }),
     ...(task.channelTurns === undefined ? {} : {
-      channel_turns: task.channelTurns.map((turn) => ({ author: turn.author.name ?? turn.author.slackUserId, slack_user: turn.author.slackUserId, at: turn.at, request: turn.request, outcome: turn.outcome })),
+      // Final review M7: a teammate's display name is marked inert, as TASK_BUSY marks it.
+      channel_turns: task.channelTurns.map((turn) => ({ author: turn.author.name === undefined ? turn.author.slackUserId : inertName(turn.author.name), slack_user: turn.author.slackUserId, at: turn.at, request: turn.request, outcome: turn.outcome })),
     }),
     ...(task.closing === true ? { closing: true } : {}),
     created_at: task.createdAt, updated_at: task.updatedAt, events: task.events,
