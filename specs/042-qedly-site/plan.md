@@ -32,6 +32,8 @@ Needed before launch (FR-060):
   - [ ] turn on automatic publishing (`AGENTX_PUBLISH_ENABLED`)
   - [ ] make `PrepLabsAI/AgentX` public
 - [ ] Rebase this branch on mainline before the launch merge
+- [ ] **Decide the CLI and package name with Pratik:** publish the CLI as `qedly` (npm name owned), so the install reads `npx qedly init`, and keep `agentx` as a legacy alias. Today a visitor meets four names: QEDly Code, agentx, @charterarc/agentx and AgentX.
+- [ ] Give Sample-Project-A real CodeBuild gates, or describe PR #1 as a readiness-only run. Its green ticks were the worker's own readiness results, not CI.
 
 ## Execution (owner decision, 2026-09-29)
 
