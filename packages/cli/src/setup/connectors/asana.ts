@@ -12,7 +12,7 @@ import type { AuthorizeSecrets } from "../../admin/authorize.js";
 import { AlertEmailSchema } from "../../deploy/answer-schemas.js";
 import { secretFromSource } from "../../init/prompts.js";
 import type { SetupServices } from "../services.js";
-import { addConnectorRevision, connectorSecretName, refuseLegacyGitHubMcp, scopeAlias, type ConnectorAddInput } from "./revision.js";
+import { addConnectorRevision, connectorRerun, connectorSecretName, errorName, refuseLegacyGitHubMcp, scopeAlias, type ConnectorAddInput } from "./revision.js";
 
 export const ASANA_GUIDE = [
   "Asana: AgentX acts as a bot user that signs in once. An Asana token reaches everything that user sees.",
@@ -46,9 +46,9 @@ function checked(value: string, problem: (value: string) => string | undefined):
 const refused = (error: unknown) => error instanceof Error && error.name === "VendorRefused";
 
 export async function addAsana(input: ConnectorAddInput & { services: ConnectorAddInput["services"] & Pick<SetupServices, "authorize" | "authorizeSecrets"> }): Promise<{ ref: string; revision: number }> {
-  await refuseLegacyGitHubMcp({ projectName: input.projectName, configDir: input.services.configDir });
+  const rerun = connectorRerun(input, "asana");
+  await refuseLegacyGitHubMcp({ projectName: input.projectName, configDir: input.services.configDir, rerun });
   input.write(ASANA_GUIDE);
-  const rerun = `agentx connector add asana --project ${input.projectName}`;
   const clientId = checked(input.flags.asanaClientId ?? await input.prompter.ask("The Asana app's Client ID", { flag: "--asana-client-id", validate: clientIdProblem }), clientIdProblem);
   const clientSecret = await secretFromSource({ what: "Asana client secret", flag: "--asana-client-secret", source: input.flags.asanaClientSecret ?? {}, processEnv: input.processEnv, prompter: input.prompter });
   const botEmail = checked(input.flags.asanaBotEmail ?? await input.prompter.ask("The bot user's email", { flag: "--asana-bot-email", validate: emailProblem }), emailProblem);
@@ -118,7 +118,7 @@ export async function addAsana(input: ConnectorAddInput & { services: ConnectorA
   }
   input.write(`The bot user sees the Asana project ${project.name}.`);
   const { revision } = await addConnectorRevision({
-    env: input.env, session: input.session, projectName: input.projectName, write: input.write, services: input.services,
+    env: input.env, session: input.session, projectName: input.projectName, write: input.write, services: input.services, rerun,
     connector: { name: "asana", type: "asana", credentialRef: "asana", scopes: [{ alias: scopeAlias(project.name), projectGid }], tools: ASANA_TOOLS },
   });
   return { ref: "asana", revision };
@@ -128,7 +128,3 @@ function parseJson(text: string): unknown {
   try { return JSON.parse(text); } catch { return undefined; }
 }
 
-/** An error's class name, never its message: AWS messages can echo request data. */
-function errorName(error: unknown): string {
-  return error instanceof Error && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(error.name) ? error.name : "unknown error";
-}

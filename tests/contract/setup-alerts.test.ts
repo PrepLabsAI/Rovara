@@ -13,7 +13,7 @@ import type { SetupCommandContext, SetupRun } from "../../packages/cli/src/setup
 import { writeProjectFile } from "../../packages/cli/src/setup/project-add.js";
 import { initContext, memoryInitSecrets, progressHandle, sampleAnswers, scriptedPrompter, T0 } from "../support/init-fakes.js";
 import type { MemoryParameterStore } from "../support/memory-parameter-store.js";
-import { STAGING_SETTINGS, fakeAlerts, fakeVendors, setupServices } from "../support/setup-fakes.js";
+import { STAGING_SETTINGS, fakeAlerts, fakeControlPlane, fakeVendors, setupServices } from "../support/setup-fakes.js";
 
 const TOPIC = "arn:aws:sns:us-east-1:123456789012:agentx-staging-alerts";
 const WEBHOOK = "https://events.pagerduty.com/integration/SECRETKEY123/enqueue";
@@ -353,9 +353,33 @@ describe("the connectors step", () => {
     expect(prompter.asked).toHaveLength(3);
   });
 
-  it("asks nothing with --connectors none", async () => {
+  it("asks nothing with --connectors none, and says how to add them later", async () => {
     const made = initContext({ prompter: scriptedPrompter([]), flags: { connectors: "none" } });
     expect(await connectorsStep().run(made, withProject())).toEqual({ status: "done", note: "no connectors" });
+    expect(made.lines).toContain("No connectors added; add them later with agentx --env staging connector add linear|jira|asana");
+  });
+
+  it("points a connector that fails inside init at rerunning init, not the day-2 command", async () => {
+    const configDir = await mkdtemp(join(tmpdir(), "agentx-projects-"));
+    try {
+      await writeProjectFile(configDir, {
+        name: "payments-api", revision: 1,
+        repositories: [{ name: "payments-api", url: "https://github.com/acme/payments-api.git", path: "repo/payments-api", defaultBranch: "main", credentialRef: "github-agentx-sdlc" }],
+        setup: [], readiness: [], orchestratorInstructions: "Delegate every repository read, edit, build, and test to the remote AgentX worker.",
+      });
+      const plane = fakeControlPlane();
+      plane.preflight.linear = { status: "not_connected", problem: "Linear rejected the credential twice" };
+      const made = initContext({
+        prompter: scriptedPrompter([]),
+        flags: { connectors: "linear", linearKey: { envName: "LINEAR" }, linearTeam: "c408e946-78aa-4db8-923e-f78053dd954f" },
+        processEnv: { LINEAR: `lin_api_${"k".repeat(40)}` },
+        setup: setupServices({ fetch: plane.fetch, configDir, stackOutputs: async () => ({ Ec2WorkerLaunchTemplateId: "lt-0123456789abcdef0", Ec2WorkerSubnets: "us-east-1a=subnet-0aaa1111bbbb2222c" }) }),
+        adminSession: async () => ({ controlPlaneUrl: "https://cp.example.test", accessToken: "t" }),
+      });
+      await expect(connectorsStep().run(made, withProject())).rejects.toThrow("Fix it, then run agentx --env staging init again");
+    } finally {
+      await rm(configDir, { recursive: true, force: true });
+    }
   });
 
   it("refuses an unknown --connectors value, a typo or github, naming the valid ones (F29)", async () => {

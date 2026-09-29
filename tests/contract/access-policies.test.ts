@@ -160,7 +160,7 @@ describe("operator role policy", () => {
     const statements = operatorRoleStatements(scope);
     const snsResources = new Set(statements.filter((s) => s.Action.some((a) => a.startsWith("sns:"))).flatMap((s) => [s.Resource].flat()));
     expect(snsResources).toEqual(new Set(["arn:aws:sns:us-east-1:123456789012:agentx-staging-alerts"]));
-    expect(actions(statements).filter((a) => a.startsWith("sns:")).sort()).toEqual(["sns:GetTopicAttributes", "sns:ListSubscriptionsByTopic", "sns:Subscribe"]);
+    expect(actions(statements).filter((a) => a.startsWith("sns:")).sort()).toEqual(["sns:ListSubscriptionsByTopic", "sns:Subscribe"]);
     expect(actions(statements)).not.toContain("sns:Publish");
     expect(actions(statements)).not.toContain("sns:Unsubscribe");
   });

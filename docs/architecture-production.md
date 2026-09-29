@@ -356,15 +356,15 @@ The first project is also written to `~/.agentx/projects/<name>.yaml` (or under 
 given), the file `agentx admin project register --file` takes; it holds no secret, only credential
 references. `agentx connector add` reads this file and registers its next revision from it.
 
-Day-2, under the operator role `init` creates: `agentx project add` registers another project the same
-way; `agentx channel add --project <name>` binds another channel; `agentx connector add
-linear|jira|asana --project <name>` adds a connector later; `agentx alerts test` sends another test
-alarm.
+After the install, day-2 work runs with the operator role that `init` created: `agentx --env <env>
+project add` registers another project the same way; `agentx --env <env> channel add --project
+<name>` binds another channel; `agentx --env <env> connector add linear|jira|asana --project <name>`
+adds a connector later; `agentx --env <env> alerts test` sends another test alarm.
 
 For a platform team that must deploy the access stack itself, `agentx init --export <dir>` writes a
-bundle instead of calling AWS; the platform team runs its `deploy-access.sh`, and the operator then
-continues with `agentx init --resume --env <env> --region <region> --from-bundle <dir>`. See
-[the export bundle](#deploying-an-environment) below.
+bundle instead of deploying anything; it changes nothing in AWS and makes only two read-only calls
+(see [the export bundle](#deploying-an-environment) below). The platform team runs its
+`deploy-access.sh`, and the operator then continues with `agentx init --resume --env <env> --region <region> --from-bundle <dir>`.
 
 ### Developer sign-in
 

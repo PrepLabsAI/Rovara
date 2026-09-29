@@ -393,7 +393,10 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   }
   // With a bundle and no install yet, the bundle is what is resumed.
   if (options.resume && stored === undefined && bundle === undefined) {
-    throw agentXError("CONFIG_INVALID", `there is no install of environment ${env} to resume in account ${caller.account} (${region}); run agentx init without --resume to start one`);
+    const nothing = `there is no install of environment ${env} to resume in account ${caller.account} (${region})`;
+    throw agentXError("CONFIG_INVALID", isOperatorRole(caller.arn, env)
+      ? `${nothing}; you are using the AgentX operator role, so if your platform team deployed the access stack from an export bundle, run agentx init --resume --from-bundle <the bundle directory>`
+      : `${nothing}; run agentx init without --resume to start one`);
   }
 
   let collected: CollectedAnswers | undefined;

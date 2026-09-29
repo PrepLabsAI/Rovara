@@ -3,12 +3,13 @@
 // step with its reason, so a broken connector, or one the control plane never actually checked
 // (a missing or unparseable preflight report, or the connector simply absent from it), is never
 // reported as set up (F17).
-import { agentXError, environmentConnectorSecretPrefix, type ConnectorConfig } from "@agentx/contracts";
+import { stat } from "node:fs/promises";
+import { agentXError, environmentConnectorSecretPrefix, type ConnectorConfig, type ProjectDefinition } from "@agentx/contracts";
 import { loadProjectConfig } from "../../config.js";
 import type { InitSecrets, FinishFlags } from "../../init/context.js";
 import type { ConnectorType } from "../../init/install-state.js";
 import type { Prompter } from "../../init/prompts.js";
-import { registerRevision } from "../project-add.js";
+import { projectFilePath, registerRevision } from "../project-add.js";
 import type { AdminSession, SetupServices } from "../services.js";
 
 export interface ConnectorAddInput {
@@ -16,6 +17,33 @@ export interface ConnectorAddInput {
   prompter: Prompter; processEnv: NodeJS.ProcessEnv; write: (line: string) => void;
   services: Pick<SetupServices, "fetch" | "stackOutputs" | "configDir" | "vendors">;
   flags: FinishFlags;
+  /** The command to run again after a fix. Inside agentx init, init itself; otherwise (the day-2
+   * command) connectorRerun's default. */
+  rerun?: string;
+}
+
+/** An error's class name, never its message: AWS and vendor messages can echo request data or
+ * vendor text. */
+export function errorName(error: unknown): string {
+  return error instanceof Error && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(error.name) ? error.name : "unknown error";
+}
+
+/** The command to run again after fixing a connector: the caller's own, else the day-2 command. */
+export function connectorRerun(input: Pick<ConnectorAddInput, "env" | "projectName" | "rerun">, type: ConnectorType): string {
+  return input.rerun ?? `agentx --env ${input.env} connector add ${type} --project ${input.projectName}`;
+}
+
+/** The project file project add (or agentx init) wrote. It lives only on the machine that ran it,
+ * in that run's --config-dir, so a missing one says where to find it. */
+async function loadProjectFile(input: { projectName: string; configDir: string; rerun: string }): Promise<ProjectDefinition> {
+  const exists = await stat(projectFilePath(input.configDir, input.projectName)).then(() => true, () => false);
+  if (!exists) {
+    throw agentXError(
+      "CONFIG_INVALID",
+      `project ${input.projectName} has no file in ${input.configDir}; agentx init or agentx project add wrote it on the machine that ran it, in that run's --config-dir. Run this there, or copy ${input.projectName}.yaml into ${input.configDir} (or pass --config-dir <the directory that holds it>), then run ${input.rerun} again`,
+    );
+  }
+  return loadProjectConfig({ projectName: input.projectName, configDirectory: input.configDir, allowLoopback: false });
 }
 
 export function connectorSecretName(env: string, type: ConnectorType): string {
@@ -40,8 +68,8 @@ export async function storeConnectorSecret(secrets: Pick<InitSecrets, "arn" | "c
  * instead, with a message that says what to do, before a connector module stores or registers
  * anything: every `addX` calls this first, ahead of storing its credential.
  */
-export async function refuseLegacyGitHubMcp(input: { projectName: string; configDir: string }): Promise<void> {
-  const current = await loadProjectConfig({ projectName: input.projectName, configDirectory: input.configDir, allowLoopback: false });
+export async function refuseLegacyGitHubMcp(input: { projectName: string; configDir: string; rerun: string }): Promise<void> {
+  const current = await loadProjectFile(input);
   if (current.integrations?.githubMcp !== undefined) {
     throw agentXError(
       "CONFIG_INVALID",
@@ -52,9 +80,9 @@ export async function refuseLegacyGitHubMcp(input: { projectName: string; config
 
 export async function addConnectorRevision(input: {
   env: string; session: AdminSession; projectName: string; connector: ConnectorConfig;
-  services: Pick<SetupServices, "fetch" | "stackOutputs" | "configDir">; write: (line: string) => void;
+  services: Pick<SetupServices, "fetch" | "stackOutputs" | "configDir">; write: (line: string) => void; rerun: string;
 }): Promise<{ revision: number }> {
-  const current = await loadProjectConfig({ projectName: input.projectName, configDirectory: input.services.configDir, allowLoopback: false });
+  const current = await loadProjectFile({ projectName: input.projectName, configDir: input.services.configDir, rerun: input.rerun });
   const others = (current.integrations?.connectors ?? []).filter((entry) => entry.name !== input.connector.name);
   const definition = { ...current, revision: current.revision + 1, integrations: { ...current.integrations, connectors: [...others, input.connector] } };
   const registered = await registerRevision({ env: input.env, session: input.session, definition, services: input.services });
@@ -66,13 +94,13 @@ export async function addConnectorRevision(input: {
   if (report === undefined) {
     throw agentXError(
       "RUNTIME_UNAVAILABLE",
-      `revision ${registered.revision} of ${input.projectName} is registered, but the control plane reported no preflight for the ${input.connector.name} connector, so the registration could not be confirmed. Run agentx connector add ${input.connector.type} --project ${input.projectName} again to check it`,
+      `revision ${registered.revision} of ${input.projectName} is registered, but the control plane reported no preflight for the ${input.connector.name} connector, so the registration could not be confirmed. Run ${input.rerun} again to check it`,
     );
   }
   if (report.status !== "connected") {
     throw agentXError(
       "CONFIG_INVALID",
-      `revision ${registered.revision} of ${input.projectName} is registered, but the ${input.connector.name} connector is ${report.status}${report.problem === undefined ? "" : `: ${report.problem}`}. Fix it, then run agentx connector add ${input.connector.type} --project ${input.projectName} again`,
+      `revision ${registered.revision} of ${input.projectName} is registered, but the ${input.connector.name} connector is ${report.status}${report.problem === undefined ? "" : `: ${report.problem}`}. Fix it, then run ${input.rerun} again`,
     );
   }
   input.write(`Registered revision ${registered.revision} of ${input.projectName} with the ${input.connector.name} connector, offering ${report.offered.length} tools.`);

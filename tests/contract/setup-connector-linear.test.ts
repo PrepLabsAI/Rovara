@@ -87,7 +87,27 @@ describe("agentx connector add linear (FR-036 to FR-039)", () => {
   it("fails the step when the preflight does not report the connector connected, keeping the revision", async () => {
     const plane = fakeControlPlane();
     plane.preflight.linear = { status: "not_connected", problem: "Linear rejected the credential twice" };
-    await expect(addLinear(input({ plane }))).rejects.toThrow("revision 2 of payments-api is registered, but the linear connector is not_connected: Linear rejected the credential twice. Fix it, then run agentx connector add linear --project payments-api again");
+    await expect(addLinear(input({ plane }))).rejects.toThrow("revision 2 of payments-api is registered, but the linear connector is not_connected: Linear rejected the credential twice. Fix it, then run agentx --env staging connector add linear --project payments-api again");
+  });
+
+  it("inside agentx init, points the fix at init's own rerun, not the day-2 command", async () => {
+    const plane = fakeControlPlane();
+    plane.preflight.linear = { status: "not_connected", problem: "Linear rejected the credential twice" };
+    await expect(addLinear({ ...input({ plane }), rerun: "agentx --env staging init" })).rejects.toThrow("Fix it, then run agentx --env staging init again");
+  });
+
+  it("says where the project file comes from when this machine has none, before the key is asked for or stored", async () => {
+    const empty = await mkdtemp(join(tmpdir(), "agentx-projects-empty-"));
+    try {
+      const secrets = memoryInitSecrets();
+      const prompter = scriptedPrompter([]);
+      await expect(addLinear({ ...input({ secrets }), prompter, services: { ...input().services, configDir: empty } }))
+        .rejects.toThrow(`project payments-api has no file in ${empty}; agentx init or agentx project add wrote it on the machine that ran it, in that run's --config-dir. Run this there, or copy payments-api.yaml into ${empty} (or pass --config-dir <the directory that holds it>), then run agentx --env staging connector add linear --project payments-api again`);
+      expect(prompter.asked).toEqual([]);
+      expect(secrets.values.size).toBe(0);
+    } finally {
+      await rm(empty, { recursive: true, force: true });
+    }
   });
 
   it("fails the step when the control plane's preflight names no connector, keeping the revision confirmed as unregistered (F17)", async () => {

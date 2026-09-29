@@ -116,6 +116,15 @@ describe("agentx connector add jira (FR-036 to FR-039)", () => {
     expect(result).toEqual({ ref: "jira", revision: 2 });
   });
 
+  it("names only the class of a search error that is not a refusal, never its text, and stores nothing (as Asana does)", async () => {
+    const secrets = memoryInitSecrets();
+    const vendors = { ...fakeVendors({ jiraCloudId: CLOUD }), jiraSearch: async () => { throw new TypeError("fetch failed: upstream said SECRET-vendor-detail"); } };
+    const failure = addJira({ ...input({ secrets, script: ["acme", TOKEN, "PAY"] }), services: { ...input().services, vendors } });
+    await expect(failure).rejects.toThrow("could not search Jira through Rovo MCP (TypeError), so nothing was stored; check that Rovo MCP allows API token authentication (docs/connectors/jira.md, Step 1), then run agentx --env staging connector add jira --project payments-api again");
+    await expect(failure).rejects.not.toThrow("SECRET-vendor-detail");
+    expect(secrets.values.size).toBe(0);
+  });
+
   it("refuses a project that still uses the older integrations.githubMcp setting, before the token is stored", async () => {
     // Same bug class as Linear's (fixed in 55b0bab): the refusal must happen before anything is
     // read or stored, not only once the control plane rejects the mixed githubMcp/connectors

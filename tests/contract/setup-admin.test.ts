@@ -415,6 +415,6 @@ describe("the admin-user init step", () => {
 
   it("refuses to run before the environment has settings, saying what to do", async () => {
     context = initContext({ prompter: scriptedPrompter([]) });
-    await expect(adminUserStep().run(context, progressHandle())).rejects.toThrow("environment staging has no settings yet; the Slack service step must finish first, so run agentx init again");
+    await expect(adminUserStep().run(context, progressHandle())).rejects.toThrow("environment staging has no settings yet; the Slack service step must finish first, so run agentx --env staging init again");
   });
 });

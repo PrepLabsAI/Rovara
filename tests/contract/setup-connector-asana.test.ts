@@ -118,7 +118,7 @@ describe("agentx connector add asana (FR-036 to FR-039)", () => {
     const secrets = memoryInitSecrets();
     const base = input({ plane, secrets, vendors: fakeVendors({ asanaProject: undefined }), script: [CLIENT_ID, SECRET, BOT, GID] });
     await expect(addAsana({ ...base, services: { ...base.services, authorize: fakeAuthorize().authorize, authorizeSecrets: authorizeSecretsOver(secrets) } }))
-      .rejects.toThrow(`the bot cannot see, or could not read, project ${GID}; invite it to the project (${BOT}, as a guest with Editor access: docs/connectors/asana.md, Step 1) or try again: agentx connector add asana --project payments-api`);
+      .rejects.toThrow(`the bot cannot see, or could not read, project ${GID}; invite it to the project (${BOT}, as a guest with Editor access: docs/connectors/asana.md, Step 1) or try again: agentx --env staging connector add asana --project payments-api`);
     expect(plane.registered).toEqual([]);
   });
 
@@ -227,7 +227,7 @@ describe("agentx connector add asana (FR-036 to FR-039)", () => {
     const plane = fakeControlPlane();
     const secrets = memoryInitSecrets();
     const base = input({ plane, secrets, vendors: fakeVendors({ asanaRefuses: "refresh" }), script: [CLIENT_ID, SECRET, BOT, GID] });
-    await expect(addAsana(withAuthorize(base, secrets))).rejects.toThrow("Asana refused to renew the bot user's sign-in, so the project was not changed; run agentx connector add asana --project payments-api again to sign in again");
+    await expect(addAsana(withAuthorize(base, secrets))).rejects.toThrow("Asana refused to renew the bot user's sign-in, so the project was not changed; run agentx --env staging connector add asana --project payments-api again to sign in again");
     expect(plane.registered).toEqual([]);
   });
 
@@ -235,7 +235,7 @@ describe("agentx connector add asana (FR-036 to FR-039)", () => {
     const plane = fakeControlPlane();
     const secrets = memoryInitSecrets();
     const base = input({ plane, secrets, vendors: fakeVendors({ asanaRefuses: "read" }), script: [CLIENT_ID, SECRET, BOT, GID] });
-    await expect(addAsana(withAuthorize(base, secrets))).rejects.toThrow("Asana MCP refused the bot user's access token, so the project was not changed; check the app type is Asana MCP (docs/connectors/asana.md, Step 2), then run agentx connector add asana --project payments-api again");
+    await expect(addAsana(withAuthorize(base, secrets))).rejects.toThrow("Asana MCP refused the bot user's access token, so the project was not changed; check the app type is Asana MCP (docs/connectors/asana.md, Step 2), then run agentx --env staging connector add asana --project payments-api again");
     expect(plane.registered).toEqual([]);
   });
 
@@ -245,7 +245,7 @@ describe("agentx connector add asana (FR-036 to FR-039)", () => {
     const raw = "MCP tool not allowed or unavailable: vendor said secret-ish things";
     const base = input({ plane, secrets, vendors: fakeVendors({ asanaReadError: raw }), script: [CLIENT_ID, SECRET, BOT, GID] });
     const failure = addAsana(withAuthorize(base, secrets));
-    await expect(failure).rejects.toThrow(`could not read Asana project ${GID} through Asana MCP (Error), so the project was not changed; check that the Asana app type is Asana MCP (see the Asana guide, docs/connectors/asana.md, Step 2), then rerun agentx connector add asana --project payments-api`);
+    await expect(failure).rejects.toThrow(`could not read Asana project ${GID} through Asana MCP (Error), so the project was not changed; check that the Asana app type is Asana MCP (see the Asana guide, docs/connectors/asana.md, Step 2), then rerun agentx --env staging connector add asana --project payments-api`);
     await expect(failure).rejects.not.toThrow(/vendor said/);
     expect(plane.registered).toEqual([]);
   });

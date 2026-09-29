@@ -205,7 +205,7 @@ describe("agentx init", () => {
     const answered = h.plane.turns;
     h.plane.turns = [turn({ subject: "T0TEAM/C0PAY00001/1790000000.000100", receivedAt: new Date(T0 + 86_400_000).toISOString(), disposition: "error" })];
     expect(await h.run([], { prompter: scriptedPrompter([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]) })).not.toBe(0);
-    expect(h.printed()).toContain("then run agentx init again");
+    expect(h.printed()).toContain("then run agentx --env staging init again");
     h.plane.turns = answered;
     const mark = h.mark();
     const prompter = scriptedPrompter([]);
@@ -362,6 +362,37 @@ describe("agentx init", () => {
     expect(data.status).toBe("complete");
     expect(data.ready).toContain("AgentX environment staging is ready.");
     expect(data.ready).toContain("Developers sign in with: npx @charterarc/agentx login https://abc123.execute-api.us-east-1.amazonaws.com");
+  });
+
+  it("under --yes without --connectors, adds none and says how to add them later", async () => {
+    const h = await harness();
+    const argv = UNATTENDED.filter((_, index) => UNATTENDED[index] !== "--connectors" && UNATTENDED[index - 1] !== "--connectors");
+    expect(argv).not.toContain("--connectors");
+    expect(await h.run([...argv, "--alert-email", "ops@example.com"], { processEnv: UNATTENDED_ENV })).toBe(0);
+    expect(h.printed()).toContain("No connectors added; add them later with agentx --env staging connector add linear|jira|asana");
+    expect((await readInstallProgress(h.store, "staging"))?.connectors ?? []).toEqual([]);
+    expect(h.printed()).toContain("AgentX environment staging is ready.");
+  });
+
+  it("under --yes, refuses before anything is created when a finishing flag is missing, naming it", async () => {
+    for (const flag of ["--admin-email", "--channel"]) {
+      const h = await harness();
+      const argv = UNATTENDED.filter((_, index) => UNATTENDED[index] !== flag && UNATTENDED[index - 1] !== flag);
+      expect(await h.run([...argv, "--alert-email", "ops@example.com"], { processEnv: UNATTENDED_ENV })).toBe(2);
+      expect(h.printed()).toContain(`agentx init --yes needs ${flag}`);
+      expect(h.store.calls).toEqual([]);
+      expect(h.deployer.requests).toEqual([]);
+    }
+  });
+
+  it("under --yes with your own OIDC, needs no --admin-email", async () => {
+    const h = await harness();
+    const argv = UNATTENDED.filter((_, index) => UNATTENDED[index] !== "--admin-email" && UNATTENDED[index - 1] !== "--admin-email");
+    const oidc = ["--identity", "oidc", "--oidc-issuer", "https://login.example.com", "--oidc-audience", "agentx", "--oidc-client-id", "cli", "--admin-claim", "groups", "--admin-values", "agentx-admins"];
+    h.deployer.fail.set(environmentStackName("staging", "access"), new Error("stop at access"));
+    expect(await h.run([...argv, ...oidc, "--alert-email", "ops@example.com"], { processEnv: UNATTENDED_ENV })).not.toBe(0);
+    expect(h.printed()).not.toContain("needs --admin-email");
+    expect(h.printed()).toContain("stop at access");
   });
 
   it("refuses a --connectors typo before asking or deploying anything", async () => {
@@ -754,6 +785,15 @@ describe("init --resume --from-bundle (FR-026)", () => {
     expect(code).not.toBe(0);
     expect(h.printed()).toContain("--engine cdk differs from what this install started with (templates)");
     expect(h.store.values.has(installAnswersParameterName("staging"))).toBe(false);
+  });
+});
+
+describe("a plain --resume under the operator role", () => {
+  it("with nothing to resume, points at --from-bundle", async () => {
+    const h = await harness();
+    const operator = { ...h.deps.deploy, identity: { get: async () => ({ account: "123456789012", arn: OPERATOR }) } };
+    expect(await h.run(["--resume"], { prompter: scriptedPrompter([]), deploy: operator })).toBe(2);
+    expect(h.printed()).toContain("there is no install of environment staging to resume in account 123456789012 (us-east-1); you are using the AgentX operator role, so if your platform team deployed the access stack from an export bundle, run agentx init --resume --from-bundle <the bundle directory>");
   });
 });
 

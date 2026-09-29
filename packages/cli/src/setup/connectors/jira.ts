@@ -5,7 +5,7 @@
 import { agentXError, type ConnectorConfig } from "@agentx/contracts";
 import { registerCredential } from "../../admin/credential.js";
 import { secretFromSource } from "../../init/prompts.js";
-import { addConnectorRevision, connectorSecretName, refuseLegacyGitHubMcp, scopeAlias, storeConnectorSecret, type ConnectorAddInput } from "./revision.js";
+import { addConnectorRevision, connectorRerun, connectorSecretName, errorName, refuseLegacyGitHubMcp, scopeAlias, storeConnectorSecret, type ConnectorAddInput } from "./revision.js";
 
 export const JIRA_GUIDE = [
   "Jira: AgentX acts as an Atlassian service account, with an API token.",
@@ -34,12 +34,14 @@ const refused = (error: unknown) => error instanceof Error && error.name === "Ve
 
 /** `vendors.jiraSearch`, with a VendorRefused caught and reworded (both searches read this way,
  * one at a time: the inside search's result decides whether the outside search runs at all). */
-async function jiraSearch(vendors: ConnectorAddInput["services"]["vendors"], params: { token: string; cloudId: string; jql: string; maxResults: number }): Promise<string[]> {
+async function jiraSearch(vendors: ConnectorAddInput["services"]["vendors"], params: { token: string; cloudId: string; jql: string; maxResults: number }, rerun: string): Promise<string[]> {
   try {
     return await vendors.jiraSearch(params);
   } catch (error) {
     if (refused(error)) throw agentXError("AUTH_REQUIRED", "Atlassian refused the API token; check that Rovo MCP's Allow API token authentication is on (Step 1) and the token has all six scopes (Step 5). Nothing was stored");
-    throw error;
+    // Anything else (a raw MCP client or network error) is named by its class only, as Asana's
+    // read is: its message can carry vendor text.
+    throw agentXError("RUNTIME_UNAVAILABLE", `could not search Jira through Rovo MCP (${errorName(error)}), so nothing was stored; check that Rovo MCP allows API token authentication (docs/connectors/jira.md, Step 1), then run ${rerun} again`);
   }
 }
 
@@ -64,7 +66,8 @@ export function widerAccessWarning(projectKey: string, others: readonly string[]
 }
 
 export async function addJira(input: ConnectorAddInput): Promise<{ ref: string; revision: number; warning?: string }> {
-  await refuseLegacyGitHubMcp({ projectName: input.projectName, configDir: input.services.configDir });
+  const rerun = connectorRerun(input, "jira");
+  await refuseLegacyGitHubMcp({ projectName: input.projectName, configDir: input.services.configDir, rerun });
   input.write(JIRA_GUIDE);
   const siteUrl = jiraSiteUrl(input.flags.jiraSite ?? await input.prompter.ask("Your Jira site (the <site> in <site>.atlassian.net)", { flag: "--jira-site" }));
   const cloudId = await input.services.vendors.jiraCloudId(siteUrl);
@@ -76,9 +79,9 @@ export async function addJira(input: ConnectorAddInput): Promise<{ ref: string; 
 
   // The inside search decides everything: an empty project is refused here, one Jira read only,
   // before the outside search (which exists only to build owner decision 6's warning) ever runs.
-  const inside = await jiraSearch(input.services.vendors, { token, cloudId, jql: `project = ${projectKey}`, maxResults: 5 });
+  const inside = await jiraSearch(input.services.vendors, { token, cloudId, jql: `project = ${projectKey}`, maxResults: 5 }, rerun);
   if (inside.length === 0) throw agentXError("CONFIG_INVALID", `the search found no issue in ${projectKey}; if the project is empty, create one issue in it and run this again. If it has issues, the service account cannot see them: add it to the project (Step 4)`);
-  const outside = await jiraSearch(input.services.vendors, { token, cloudId, jql: `project not in (${projectKey})`, maxResults: OUTSIDE_SAMPLE });
+  const outside = await jiraSearch(input.services.vendors, { token, cloudId, jql: `project not in (${projectKey})`, maxResults: OUTSIDE_SAMPLE }, rerun);
   // Owner decision 6: warn and save, never refuse, and never ask (so --yes behaves the same).
   const others = projectKeys(outside).filter((key) => key !== projectKey);
   const warning = others.length === 0 ? undefined : widerAccessWarning(projectKey, others);
@@ -89,7 +92,7 @@ export async function addJira(input: ConnectorAddInput): Promise<{ ref: string; 
   await storeConnectorSecret(input.secrets, secretName, JSON.stringify({ apiKey: token }));
   await registerCredential({ ...input.session, ref: "jira", type: "static-secret", secretName }, input.services.fetch);
   const { revision } = await addConnectorRevision({
-    env: input.env, session: input.session, projectName: input.projectName, write: input.write, services: input.services,
+    env: input.env, session: input.session, projectName: input.projectName, write: input.write, services: input.services, rerun,
     connector: { name: "jira", type: "jira", credentialRef: "jira", scopes: [{ alias: scopeAlias(projectKey), cloudId, projectKey, siteUrl }], tools: JIRA_TOOLS },
   });
   return { ref: "jira", revision, ...(warning === undefined ? {} : { warning }) };

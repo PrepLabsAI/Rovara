@@ -26,7 +26,7 @@ describe("the e2e step (FR-018 step 11)", () => {
     const plane = fakeControlPlane();
     plane.turns = [turn({ subject: "T0123456789/C0PAY00001/1790000000.000100", receivedAt: new Date(T0 + 2000).toISOString(), disposition: "error" })];
     context = initContext({ setup: setupServices({ fetch: plane.fetch }), adminSession: async () => ({ controlPlaneUrl: "https://cp.example.test", accessToken: "t" }) });
-    await expect(e2eStep().run(context, progress())).rejects.toThrow("but the turn ended as error; see agentx admin turns export --since 15m, fix it, then run agentx init again");
+    await expect(e2eStep().run(context, progress())).rejects.toThrow("but the turn ended as error; see agentx --env staging admin turns export --since 15m, fix it, then run agentx --env staging init again");
   });
 
   it("needs the channel from the first-project step", async () => {

@@ -110,9 +110,10 @@ platform team that must review IAM first can use `agentx init --export <dir>` fo
 deploy themselves; the operator then continues with `agentx init --resume --env <name> --region
 <region> --from-bundle <dir>`.
 
-Day-2, under the operator role `init` creates: `agentx project add` and `agentx channel add` for
-another project and channel; `agentx connector add linear|jira|asana` to add a connector later;
-`agentx alerts test` to send another test alarm.
+After the install, day-2 work runs with the operator role that `init` created: `agentx --env
+<name> project add` and `agentx --env <name> channel add` for another project and channel; `agentx
+--env <name> connector add linear|jira|asana` to add a connector later; `agentx --env <name> alerts
+test` to send another test alarm.
 
 Developers then sign in from their own machines with `agentx login <control plane URL>`, with no
 AWS credentials; `agentx whoami` shows which projects they can use, and `agentx workspaces` opens a
@@ -213,7 +214,8 @@ agentx admin workspace cancel --workspace <workspace-id>
 ```
 
 Run `agentx --help` or `agentx <command> --help` for the complete surface: `init`, `deploy`,
-`env`, `signin`, `login`, `logout`, `whoami`, `admin project register`,
+`env`, `signin`, `project add`, `channel add`, `connector add linear|jira|asana`, `alerts test`,
+`login`, `logout`, `whoami`, `admin project register`,
 `admin workspace cancel|stop`, and `admin slack bind|unbind`. Developer commands (`login <url>`,
 `whoami`, `logout`) only sign in and show access; coding work happens in Slack. Handing tasks to
 AgentX from an AI tool arrives in a later release (spec 025, phase 25b).

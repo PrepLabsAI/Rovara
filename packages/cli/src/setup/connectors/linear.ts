@@ -4,7 +4,7 @@
 import { agentXError, type ConnectorConfig } from "@agentx/contracts";
 import { registerCredential } from "../../admin/credential.js";
 import { secretFromSource } from "../../init/prompts.js";
-import { addConnectorRevision, connectorSecretName, refuseLegacyGitHubMcp, scopeAlias, storeConnectorSecret, type ConnectorAddInput } from "./revision.js";
+import { addConnectorRevision, connectorRerun, connectorSecretName, refuseLegacyGitHubMcp, scopeAlias, storeConnectorSecret, type ConnectorAddInput } from "./revision.js";
 
 export const LINEAR_GUIDE = [
   "Linear: AgentX uses a Linear API key, which acts as the Linear user who made it.",
@@ -22,7 +22,8 @@ export const LINEAR_TOOLS: ConnectorConfig["tools"] = [
 ];
 
 export async function addLinear(input: ConnectorAddInput): Promise<{ ref: string; revision: number }> {
-  await refuseLegacyGitHubMcp({ projectName: input.projectName, configDir: input.services.configDir });
+  const rerun = connectorRerun(input, "linear");
+  await refuseLegacyGitHubMcp({ projectName: input.projectName, configDir: input.services.configDir, rerun });
   input.write(LINEAR_GUIDE);
   const apiKey = await secretFromSource({ what: "Linear API key", flag: "--linear-key", source: input.flags.linearKey ?? {}, processEnv: input.processEnv, prompter: input.prompter });
   let teams;
@@ -44,7 +45,7 @@ export async function addLinear(input: ConnectorAddInput): Promise<{ ref: string
   await storeConnectorSecret(input.secrets, secretName, JSON.stringify({ apiKey }));
   await registerCredential({ ...input.session, ref: "linear", type: "static-secret", secretName }, input.services.fetch);
   const { revision } = await addConnectorRevision({
-    env: input.env, session: input.session, projectName: input.projectName, write: input.write, services: input.services,
+    env: input.env, session: input.session, projectName: input.projectName, write: input.write, services: input.services, rerun,
     connector: { name: "linear", type: "linear", credentialRef: "linear", scopes: [{ alias: scopeAlias(team.key), teamId: team.id }], tools: LINEAR_TOOLS },
   });
   return { ref: "linear", revision };

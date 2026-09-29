@@ -13,6 +13,8 @@ const EARLY_MS = 5_000;
 interface WatchedTurn { eventId: string; subject: string; receivedAt: string; disposition: string; durationMs: number; error?: { name: string } }
 
 export async function waitForThreadedReply(input: {
+  /** The environment, named in every command the errors suggest (the default one is production). */
+  env: string;
   session: AdminSession; fetch: typeof fetch; teamId: string; channelId: string; channelName: string; botUserId: string;
   /** The command to run again after fixing a problem, such as "agentx init" (as sign-in's `rerun`). */
   rerun: string;
@@ -37,10 +39,10 @@ export async function waitForThreadedReply(input: {
     }
     const other = mine[0];
     if (other !== undefined) {
-      throw agentXError("RUNTIME_UNAVAILABLE", `AgentX replied in #${input.channelName}, but the turn ended as ${other.disposition}${other.error === undefined ? "" : ` (${other.error.name})`}; see agentx admin turns export --since 15m, fix it, then run ${input.rerun} again`);
+      throw agentXError("RUNTIME_UNAVAILABLE", `AgentX replied in #${input.channelName}, but the turn ended as ${other.disposition}${other.error === undefined ? "" : ` (${other.error.name})`}; see agentx --env ${input.env} admin turns export --since 15m, fix it, then run ${input.rerun} again`);
     }
     if (input.now() - started >= timeout) {
-      throw agentXError("RUNTIME_UNAVAILABLE", `no AgentX reply in #${input.channelName} within ${minutes}; check that the message mentioned the bot, that Slack shows the Request URL as Verified, and agentx admin turns export --since 15m, then run ${input.rerun} again`);
+      throw agentXError("RUNTIME_UNAVAILABLE", `no AgentX reply in #${input.channelName} within ${minutes}; check that the message mentioned the bot, that Slack shows the Request URL as Verified, and agentx --env ${input.env} admin turns export --since 15m, then run ${input.rerun} again`);
     }
     await input.sleep(POLL_MS);
   }

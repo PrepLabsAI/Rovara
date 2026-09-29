@@ -50,13 +50,12 @@ export const SERVICE_ROLE_SERVICES: readonly string[] = [
  * trusts the account, escaping the boundary, and servicequotas:* would let it read every quota in
  * the account instead of only the one EC2 vCPU quota prerequisites checks; the boundary names
  * sts:GetCallerIdentity and servicequotas:GetServiceQuota alone (see defaultBoundaryStatements).
- * Budgets stays a wildcard here (phase 15d2, FR-047): the service role's own statement is scoped to
- * the one monthly budget, but AWS Budgets' resource-level permission support for
- * ModifyBudget/TagResource/UntagResource is not independently confirmed (the AWS MCP documentation
- * tools and a live docs fetch were both unavailable this session), so the ceiling keeps the
- * wildcard rather than risk silently blocking a legitimate deploy if the service does not honor a
- * scoped ARN for those actions. The generated test in access-stack.test.ts keeps this list complete
- * and free of unused services.
+ * Budgets is a wildcard here only as a ceiling (phase 15d2, FR-047). AWS's service reference for
+ * Budgets confirms that ModifyBudget, ViewBudget, TagResource, UntagResource and
+ * ListTagsForResource take the budget/${BudgetName} resource, so the service and operator roles'
+ * own statements name the one monthly budget; the boundary only bounds them and grants nothing by
+ * itself. The generated test in access-stack.test.ts keeps this list complete and free of unused
+ * services.
  */
 export const BOUNDARY_SERVICES: readonly string[] = [...SERVICE_ROLE_SERVICES, "bedrock", "budgets", "codebuild", "execute-api", "xray"];
 
@@ -328,7 +327,7 @@ export function operatorRoleStatements(scope: PolicyScope): PolicyStatementJson[
       // FR-045: read the alert topic. No Publish: the test alarm goes through CloudWatch.
       Sid: "Alerts",
       Effect: "Allow",
-      Action: ["sns:ListSubscriptionsByTopic", "sns:GetTopicAttributes"],
+      Action: ["sns:ListSubscriptionsByTopic"],
       Resource: `arn:${partition}:sns:${region}:${account}:agentx-${env}-alerts`,
     },
     {

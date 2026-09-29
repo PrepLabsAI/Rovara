@@ -24,7 +24,7 @@ import type { InitStep } from "./steps.js";
  * admin session need them (F21: one message, used by both). */
 export async function readSettingsOrThrow(store: ParameterStore, env: string): Promise<EnvironmentSettings> {
   const settings = await readEnvironmentSettings(store, env);
-  if (settings === undefined) throw agentXError("CONFIG_INVALID", `environment ${env} has no settings yet; the Slack service step must finish first, so run agentx init again`);
+  if (settings === undefined) throw agentXError("CONFIG_INVALID", `environment ${env} has no settings yet; the Slack service step must finish first, so run agentx --env ${env} init again`);
   return settings;
 }
 
@@ -147,7 +147,8 @@ export function connectorsStep(): InitStep<InitContext> {
         const yes = wanted !== undefined ? wanted.has(type) : await context.prompter.confirm(`Connect ${CONNECTOR_LABELS[type]} to ${project.name} now? (You can add it later with agentx connector add ${type})`, { defaultValue: false });
         if (!yes) continue;
         const session = await context.adminSession();
-        const base = { env: context.env, session, projectName: project.name, secrets: context.secrets, prompter: context.prompter, processEnv: context.processEnv, write: context.write, services: context.setup, flags: context.flags };
+        // A connector that fails here is fixed by rerunning init, not the day-2 command.
+        const base = { env: context.env, rerun: `agentx --env ${context.env} init`, session, projectName: project.name, secrets: context.secrets, prompter: context.prompter, processEnv: context.processEnv, write: context.write, services: context.setup, flags: context.flags };
         const result: { ref: string; revision: number; warning?: string } = type === "linear" ? await addLinear(base) : type === "jira" ? await addJira(base) : await addAsana(base);
         // Owner decision 6: a Jira connector that sees more than its project is saved with a
         // warning, and the warning is kept in the install progress (for 15e's doctor).
@@ -159,6 +160,8 @@ export function connectorsStep(): InitStep<InitContext> {
         });
       }
       const connected = (progress.current().connectors ?? []).map((entry) => CONNECTOR_LABELS[entry.type]);
+      // --connectors none, which --yes without --connectors also means (main.ts).
+      if (wanted?.size === 0 && connected.length === 0) context.write(`No connectors added; add them later with agentx --env ${context.env} connector add linear|jira|asana`);
       return { status: "done", note: connected.length === 0 ? "no connectors" : `connected ${connected.join(", ")}` };
     },
   };
@@ -217,8 +220,8 @@ export function e2eStep(): InitStep<InitContext> {
         throw agentXError("CONFIG_INVALID", "install progress has no bound channel; the first-project step must finish first, so run agentx init again");
       }
       const reply = await waitForThreadedReply({
-        session: await context.adminSession(), fetch: context.setup.fetch, teamId: slack.teamId, channelId: project.channelId,
-        channelName: project.channelName, botUserId: slack.botUserId, rerun: "agentx init", write: context.write, sleep: context.sleep, now: context.now,
+        env: context.env, session: await context.adminSession(), fetch: context.setup.fetch, teamId: slack.teamId, channelId: project.channelId,
+        channelName: project.channelName, botUserId: slack.botUserId, rerun: `agentx --env ${context.env} init`, write: context.write, sleep: context.sleep, now: context.now,
       });
       return { status: "done", note: `a mention in #${project.channelName} got a threaded reply in ${reply.seconds} seconds` };
     },

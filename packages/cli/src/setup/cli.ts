@@ -64,8 +64,8 @@ export function registerSetupCommands(program: Command, context: SetupCommandCon
       });
       if (options.check) {
         await waitForThreadedReply({
-          session: run.session, fetch: run.services.fetch, teamId: identity.teamId, channelId: bound.channelId, channelName: bound.channelName, botUserId: identity.botUserId,
-          rerun: `agentx channel add --project ${projectName} --channel ${bound.channelName}`, write: run.write, sleep: run.sleep, now: run.now,
+          env: run.env, session: run.session, fetch: run.services.fetch, teamId: identity.teamId, channelId: bound.channelId, channelName: bound.channelName, botUserId: identity.botUserId,
+          rerun: `agentx --env ${run.env} channel add --project ${projectName} --channel ${bound.channelName}`, write: run.write, sleep: run.sleep, now: run.now,
         });
       }
       run.print({ ...bound, projectName }, `Bound #${bound.channelName} to ${projectName}\n`);

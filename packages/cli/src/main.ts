@@ -940,9 +940,21 @@ function initOptions(globals: GlobalOptions, options: InitCommandOptions, comman
   const { env } = globals;
   // A --connectors typo fails here, before anything is asked or deployed.
   if (options.connectors !== undefined) parseConnectorsFlag(options.connectors);
+  // Under --yes, the finishing steps can ask nothing, so what they need is checked here, before
+  // anything is created. The Cognito admin's email (your own OIDC needs none), and the channel.
+  if (options.yes) {
+    const missing = [
+      ...(options.identity !== "oidc" && options.adminEmail === undefined ? [["--admin-email <email>", "the email of your AgentX admin user"]] : []),
+      ...(options.channel === undefined ? [["--channel <name>", "the Slack channel for the first project"]] : []),
+    ];
+    const [first] = missing;
+    if (first !== undefined) throw agentXError("CONFIG_INVALID", `agentx init --yes needs ${first[0]} (${first[1]}); pass it, or run agentx init without --yes to be asked`);
+  }
   const finishFlags = definedEntries<FinishFlags>({
     adminEmail: options.adminEmail, repository: options.repository, projectName: options.projectName,
-    setupCommand: options.setupCommand, testCommand: options.testCommand, channel: options.channel, connectors: options.connectors,
+    setupCommand: options.setupCommand, testCommand: options.testCommand, channel: options.channel,
+    // Under --yes, no --connectors means none: an unattended run never starts a connector's questions.
+    connectors: options.connectors ?? (options.yes ? "none" : undefined),
     linearKey: secretSource(options.linearKeyFile, options.linearKeyEnv), linearTeam: options.linearTeam,
     jiraSite: options.jiraSite, jiraProject: options.jiraProject, jiraToken: secretSource(options.jiraTokenFile, options.jiraTokenEnv),
     asanaClientId: options.asanaClientId, asanaClientSecret: secretSource(options.asanaClientSecretFile, options.asanaClientSecretEnv),
