@@ -20,6 +20,7 @@ import {
 import {
   AgentXError,
   CHANNEL_TURN_REQUEST_MAX,
+  ChannelTurnSchema,
   ConnectorCallRequestSchema,
   GitHubMcpRequestSchema,
   OperationRequestSchema,
@@ -382,7 +383,9 @@ function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTas
       const found: Array<Record<string, unknown>> = [];
       let startKey: Record<string, unknown> | undefined;
       // A thread's records are few (the thread's rate limit caps them); five pages bound the read anyway.
-      for (let page = 0; page < 5; page += 1) {
+      const MAX_PAGES = 5;
+      let pages = 0;
+      for (; pages < MAX_PAGES; pages += 1) {
         const response = await dependencies.documentClient.send(new QueryCommand({
           TableName: table,
           KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
@@ -391,10 +394,14 @@ function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTas
           Limit: 100,
           ...(startKey === undefined ? {} : { ExclusiveStartKey: startKey }),
         }));
-        // A record without a time cannot be shown (the view's `at` is a timestamp), so it is left out.
-        found.push(...(response.Items ?? []).filter((item) => item.taskId === taskId && typeof item.receivedAt === "string"));
+        // A record whose time is not a timestamp cannot be shown (the view's `at` is one), so it is left out.
+        found.push(...(response.Items ?? []).filter((item) => item.taskId === taskId && ChannelTurnSchema.shape.at.safeParse(item.receivedAt).success));
         startKey = response.LastEvaluatedKey;
         if (startKey === undefined || found.length >= limit) break;
+      }
+      if (pages === MAX_PAGES && startKey !== undefined) {
+        // Counts only: the records hold teammates' text.
+        console.log(JSON.stringify({ component: "broker", event: "developer.channel_turns_capped", pages, found: found.length }));
       }
       const text = (value: unknown, fallback: string) => (typeof value === "string" ? value : fallback);
       return found.slice(0, limit).map((item): ChannelTurn => {

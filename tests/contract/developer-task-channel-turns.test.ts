@@ -1,7 +1,7 @@
 // tests/contract/developer-task-channel-turns.test.ts
 // Spec 025 C15: the channel's turns on a shared task, from the thread's Slack turn records.
 import { randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { MAYA, OMAR, createDeveloperTaskBroker, markThreadPosted } from "../support/developer-task-broker.js";
 
 const SECRET = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
@@ -43,7 +43,9 @@ describe("channel turns (C15)", () => {
   it("shows at most 20, and none for a task whose thread is not posted", async () => {
     const { dev, taskId, turn } = await sharedTask();
     for (let index = 0; index < 25; index += 1) turn(`2026-09-29T10:${String(10 + index).padStart(2, "0")}:00.000Z`, { taskId });
-    expect(((await dev(MAYA, "GET", `/v1/dev/tasks/${taskId}`)).body.task as { channelTurns: unknown[] }).channelTurns).toHaveLength(20);
+    const newest = ((await dev(MAYA, "GET", `/v1/dev/tasks/${taskId}`)).body.task as { channelTurns: Array<{ at: string }> }).channelTurns;
+    expect(newest).toHaveLength(20);
+    expect([newest[0]!.at, newest[19]!.at]).toEqual(["2026-09-29T10:34:00.000Z", "2026-09-29T10:15:00.000Z"]);
     const fresh = await createDeveloperTaskBroker();
     const other = await fresh.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix it", client: "claude-code", shareToChannel: true });
     const otherId = (other.body.task as { taskId: string }).taskId;
@@ -79,5 +81,40 @@ describe("channel turns (C15)", () => {
     expect(JSON.stringify(other.body)).not.toContain("run the linter");
     const own = await dev(MAYA, "GET", `/v1/dev/tasks/${taskId}`);
     expect(JSON.stringify(own.body)).not.toContain("the private reply");
+  });
+
+  it("leaves out a record whose time is not a timestamp", async () => {
+    const { dev, taskId, turn } = await sharedTask();
+    turn("2026-09-29T10:01:00.000Z", { taskId });
+    turn("2026-09-29T10:02:00.000Z", { taskId, receivedAt: "yesterday" });
+    turn("2026-09-29T10:03:00.000Z", { taskId, receivedAt: "2026-09-29" });
+    const view = (await dev(MAYA, "GET", `/v1/dev/tasks/${taskId}`)).body.task as { channelTurns: Array<{ at: string }> };
+    expect(view.channelTurns.map((entry) => entry.at)).toEqual(["2026-09-29T10:01:00.000Z"]);
+  });
+
+  it("logs when the read stops at its page cap, with counts and no text", async () => {
+    const { db, dev, taskId, turn } = await sharedTask();
+    turn("2026-09-29T10:01:00.000Z", { taskId });
+    const original = db.send;
+    let pages = 0;
+    db.send = async (command) => {
+      const input = JSON.stringify(command.input);
+      if (command.constructor.name === "QueryCommand" && input.includes("THREAD#")) {
+        pages += 1;
+        return { Items: [{ pk: "x", sk: `TURN#${pages}`, taskId: "another-task", receivedAt: "2026-09-29T10:00:00.000Z", requestText: "run the linter" }], LastEvaluatedKey: { pk: "x", sk: `TURN#${pages}` } };
+      }
+      return original(command);
+    };
+    const logs = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      const read = await dev(MAYA, "GET", `/v1/dev/tasks/${taskId}`);
+      expect(read.status).toBe(200);
+      expect(pages).toBe(5);
+      const lines = logs.mock.calls.map((call) => String(call[0])).filter((line) => line.includes("developer.channel_turns_capped"));
+      expect(lines.map((line) => JSON.parse(line) as unknown)).toEqual([{ component: "broker", event: "developer.channel_turns_capped", pages: 5, found: 0 }]);
+      expect(lines.join("\n")).not.toContain("run the linter");
+    } finally {
+      logs.mockRestore();
+    }
   });
 });
