@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { environmentStackName, type StackPart } from "@agentx/contracts";
 import type { DestroyApi, DestroyStack } from "../../packages/cli/src/destroy/aws.js";
 import type { RetainedResource } from "../../packages/cli/src/destroy/inventory.js";
+import { isSecretId } from "../../packages/cli/src/destroy/names.js";
 import type { EnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import type { InstallProgress } from "../../packages/cli/src/init/install-state.js";
 import { T0 } from "./init-fakes.js";
@@ -37,7 +38,7 @@ export async function headerProjectFiles(configDir: string, env: string): Promis
   return found;
 }
 
-export interface FakeStack extends DestroyStack { template: string; resources: Array<{ logicalId: string; type: string; physicalId: string }>; deleteMinutes?: number; failDeletes?: number; busyMinutes?: number; settledStatus?: string }
+export interface FakeStack extends DestroyStack { template: string; resources: Array<{ logicalId: string; type: string; physicalId: string }>; deleteMinutes?: number; failDeletes?: number; busyMinutes?: number; settledStatus?: string; /** GetTemplate fails, as for a stack with only a pending change set. */ noTemplate?: boolean }
 export interface FakeAccount {
   stacks: Map<string, FakeStack>;
   instances: Array<{ id: string; state: string; tags: Record<string, string> }>;
@@ -46,6 +47,8 @@ export interface FakeAccount {
   secrets: Array<{ name: string; scheduled: boolean }>;
   aliases: string[];
   calls: string[];
+  /** The token each failedResources call was given. */
+  failedTokens?: Array<string | undefined>;
 }
 
 export const retainedTemplate = (resources: Array<{ logicalId: string; type: string }>) => JSON.stringify({ Resources: Object.fromEntries(resources.map((resource) => [resource.logicalId, { Type: resource.type, DeletionPolicy: "RetainExceptOnCreate" }])) });
@@ -105,7 +108,10 @@ export function fakeDestroyApi(account: FakeAccount, clock: { now: () => number 
   const forceDeleted = new Set<string>();
   return {
     async stack(name) { const entry = stackNow(name); return entry === undefined ? undefined : { status: entry.status, terminationProtection: entry.terminationProtection, outputs: entry.outputs, ...(entry.roleArn === undefined ? {} : { roleArn: entry.roleArn }) }; },
-    async template(name) { return account.stacks.get(name)?.template ?? "{}"; },
+    async template(name) {
+      if (account.stacks.get(name)?.noTemplate === true) throw Object.assign(new Error(`Stack with id ${name} has no template`), { name: "ValidationError" });
+      return account.stacks.get(name)?.template ?? "{}";
+    },
     async stackResources(name) { return account.stacks.get(name)?.resources ?? []; },
     async disableTerminationProtection(name) { account.calls.push(`protection off ${name}`); account.stacks.get(name)!.terminationProtection = false; },
     async deleteStack(name) {
@@ -117,7 +123,7 @@ export function fakeDestroyApi(account: FakeAccount, clock: { now: () => number 
       return `agentx-destroy-test-${name}`;
     },
     async latestEvent() { return "Resource DELETE_IN_PROGRESS"; },
-    async failedResources() { return ["WorkerSecurityGroup: resource has a dependent object"]; },
+    async failedResources(_name, token) { (account.failedTokens ??= []).push(token); return ["WorkerSecurityGroup: resource has a dependent object"]; },
     async workerInstances() { return account.instances.filter((instance) => instance.state !== "terminated"); },
     async terminateInstances(ids) { account.calls.push(`terminate ${ids.join(",")}`); for (const instance of account.instances) if (ids.includes(instance.id)) instance.state = "terminated"; for (const volume of account.volumes) volume.state = "available"; },
     async workerVolumes() { return account.volumes; },
@@ -132,11 +138,37 @@ export function fakeDestroyApi(account: FakeAccount, clock: { now: () => number 
     async deleteAlias(name) { account.calls.push(`delete alias ${name}`); account.aliases = account.aliases.filter((alias) => alias !== name); },
     async secrets() { return account.secrets; },
     async deleteSecret(name) {
-      const matches = account.secrets.filter((secret) => secret.name === name || name.includes(`:secret:${secret.name}-`));
+      const matches = account.secrets.filter((secret) => isSecretId(name, secret.name));
       if (matches.some((secret) => forceDeleted.has(secret.name))) throw new Error(`test: ${name} was already force-deleted; RestoreSecret fails on it`);
       account.calls.push(`delete secret ${name}`);
       for (const secret of matches) { secret.scheduled = true; forceDeleted.add(secret.name); }
       gone({ part: "control-plane", logicalId: "", type: "", physicalId: name });
     },
   };
+}
+
+/** A Secrets Manager client for the real adapter's deleteSecret: `forceDeleted` secrets are listed as
+ * scheduled once, refuse RestoreSecret (InvalidRequestException, as for a secret being force-deleted),
+ * then are gone. Every other secret deletes normally. */
+export function forceDeletedSecretsClient(forceDeleted: string[]) {
+  const described = new Map<string, number>();
+  const calls: string[] = [];
+  const client = {
+    async send(command: { constructor: { name: string }; input: { SecretId?: string } }): Promise<unknown> {
+      const op = command.constructor.name.replace(/Command$/, "");
+      const id = command.input.SecretId ?? "";
+      const name = forceDeleted.find((entry) => isSecretId(id, entry));
+      calls.push(`${op} ${id}`);
+      if (op === "DescribeSecret") {
+        if (name === undefined) return { Name: id };
+        const count = (described.get(name) ?? 0) + 1;
+        described.set(name, count);
+        if (count === 1) return { Name: name, DeletedDate: new Date(0) };
+        throw Object.assign(new Error("Secrets Manager can't find the specified secret."), { name: "ResourceNotFoundException" });
+      }
+      if (op === "RestoreSecret" && name !== undefined) throw Object.assign(new Error("You can't perform this operation on the secret because it was deleted."), { name: "InvalidRequestException" });
+      return {};
+    },
+  };
+  return { calls, clients: { cloudFormation: client, ec2: client, s3: client, dynamodb: client, logs: client, cognito: client, kms: client, secrets: client } };
 }

@@ -15,7 +15,7 @@ import { readInstallAnswers, readInstallProgress } from "../init/install-state.j
 import type { TokenStore } from "../token-store.js";
 import type { DestroyApi, DestroyStack } from "./aws.js";
 import { confirmationPrompts, destroyPlanText, inventoryParameterName, KEPT_BY_KEEP_DATA, mergeInventory, readInventory, retainedResources, vendorSteps, writeInventory, type Inventory, type RetainedResource } from "./inventory.js";
-import { DELETE_AFTER_WORKERS, DELETE_BEFORE_WORKERS, isOwnedAlias, isOwnedParameter, isOwnedRetained, isOwnedSecret, isOwnedStack, isOwnedWorker } from "./names.js";
+import { DELETE_AFTER_WORKERS, DELETE_BEFORE_WORKERS, isOwnedAlias, isOwnedParameter, isOwnedRetained, isOwnedSecret, isOwnedStack, isOwnedWorker, isSecretId } from "./names.js";
 import { deleteVolumesWhenFree, waitForInstancesGone, waitForStackDelete } from "./wait.js";
 
 export interface DestroyDependencies {
@@ -89,9 +89,15 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
       }
     }
     const found: RetainedResource[] = [];
-    for (const [part] of stacks) {
+    for (const [part, stack] of stacks) {
       const name = environmentStackName(env, part);
-      found.push(...retainedResources(part, await api.template(name), await api.stackResources(name)));
+      try {
+        found.push(...retainedResources(part, await api.template(name), await api.stackResources(name)));
+      } catch (error) {
+        // A stack with only a pending change set (an interrupted init) may have no template yet: it
+        // holds nothing, so nothing is retained. Any other stack's read error stops destroy.
+        if (stack.status !== "REVIEW_IN_PROGRESS") throw error;
+      }
     }
     const launchTemplateId = stacks.get("foundation")?.outputs.Ec2WorkerLaunchTemplateId;
     const inventory = mergeInventory(await readInventory(store, env), {
@@ -109,8 +115,12 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
   const secrets = (await api.secrets(env)).filter((secret) => isOwnedSecret(env, secret.name));
   const parameters = (await store.list(`/agentx/${env}`)).filter((name) => isOwnedParameter(env, name));
   const cachePath = environmentCachePath(deps.home, env);
-  const projectFiles = inventory.launchTemplateId === undefined ? [] : (await deps.projectFiles(env)).filter((file) => file.launchTemplateId === inventory.launchTemplateId);
-  const localFiles = [...((await exists(cachePath)) ? [cachePath] : []), ...projectFiles.map((file) => file.path)];
+  // This computer's files: the cache, and the project files bound to the inventory's launch template.
+  const filesFor = async (from: Inventory): Promise<string[]> => {
+    const projectFiles = from.launchTemplateId === undefined ? [] : (await deps.projectFiles(env)).filter((file) => file.launchTemplateId === from.launchTemplateId);
+    return [...((await exists(cachePath)) ? [cachePath] : []), ...projectFiles.map((file) => file.path)];
+  };
+  let localFiles = await filesFor(inventory);
 
   const keptSecrets: string[] = [];
   const result: DestroyResult = { env, removed: false, stacksDeleted: [], instances: 0, volumes: 0, retainedDeleted: [], kept: [], leftInPlace: [], secrets: 0, parameters: 0, localFiles: [], manualSteps: [] };
@@ -160,6 +170,7 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
     confirmTakeover: async (held) => /^y(es)?$/i.test((await deps.confirmLine(`Environment ${env} is locked by ${held.holder} running "${held.command}" since ${held.acquiredAt}. Take the lock over? Say yes only if that command is no longer running. [y/N] `)).trim()),
   }, async () => {
     inventory = (await readStacks()).inventory;
+    localFiles = await filesFor(inventory);
     await writeInventory(store, inventory);
     for (const part of DELETE_BEFORE_WORKERS) await deleteStack(part);
 
@@ -202,13 +213,13 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
     if (!options.keepData) {
       for (const alias of (await api.aliases(env)).filter((entry) => isOwnedAlias(env, entry.name))) await api.deleteAlias(alias.name);
       // 6. Every agentx/<env>/ secret, without recovery, so a reinstall can reuse the names.
-      const already = (name: string) => deletedSecrets.some((id) => id === name || id.includes(`:secret:${name}-`));
+      const already = (name: string) => deletedSecrets.some((id) => isSecretId(id, name));
       const remaining = (await api.secrets(env)).filter((secret) => isOwnedSecret(env, secret.name) && !already(secret.name));
       for (const secret of remaining) await api.deleteSecret(secret.name);
       result.secrets = remaining.length;
     } else {
       const keptIds = inventory.resources.filter((resource) => resource.type === "AWS::SecretsManager::Secret").map((resource) => resource.physicalId);
-      keptSecrets.push(...(await api.secrets(env)).filter((secret) => isOwnedSecret(env, secret.name) && !keptIds.some((id) => id === secret.name || id.includes(`:secret:${secret.name}-`))).map((secret) => secret.name));
+      keptSecrets.push(...(await api.secrets(env)).filter((secret) => isOwnedSecret(env, secret.name) && !keptIds.some((id) => isSecretId(id, secret.name))).map((secret) => secret.name));
     }
 
     // 7. Parameters; the settings last, and the lock is released after this function returns. Under

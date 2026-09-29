@@ -42,3 +42,11 @@ export function isOwnedRetained(env: string, resource: RetainedResource, tags: R
   if (resource.type === "AWS::SecretsManager::Secret") return resource.physicalId.includes(`:secret:agentx/${env}/`) || resource.physicalId.startsWith(`agentx/${env}/`);
   return true;
 }
+
+const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** True when `id` is the secret `name` itself, or its ARN: Secrets Manager ends an ARN with "-" and six
+ * random characters, so agentx/<env>/github never matches agentx/<env>/github-app's ARN. */
+export function isSecretId(id: string, name: string): boolean {
+  return id === name || new RegExp(`:secret:${escapeRegExp(name)}-[A-Za-z0-9]{6}$`).test(id);
+}

@@ -10,7 +10,8 @@ import { lockParameterName } from "../../packages/cli/src/environments/lock.js";
 import { settingsParameterName, writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import { writeInstallAnswers, writeInstallProgress } from "../../packages/cli/src/init/install-state.js";
 import { writeProjectFile } from "../../packages/cli/src/setup/project-add.js";
-import { fakeDestroyApi, headerProjectFiles, installedAccount, PROGRESS, SETTINGS, type FakeAccount } from "../support/destroy-fakes.js";
+import { awsDestroyApi } from "../../packages/cli/src/destroy/aws.js";
+import { fakeDestroyApi, forceDeletedSecretsClient, headerProjectFiles, installedAccount, PROGRESS, SETTINGS, type FakeAccount } from "../support/destroy-fakes.js";
 import { sampleAnswers } from "../support/init-fakes.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 import { memoryTokenStore } from "../support/setup-fakes.js";
@@ -293,5 +294,62 @@ describe("agentx destroy (FR-055, item 3)", () => {
   it("tells the operator role that destroy needs admin credentials, and that a role without delete rights fails partway", async () => {
     const operator = await harness({ caller: "arn:aws:sts::123456789012:assumed-role/agentx-staging-operator/alice" });
     await expect(runDestroy({ env: "staging", keepData: false }, operator.deps)).rejects.toThrow("any other role without the rights to delete all of it fails partway; run agentx destroy again with admin credentials to continue");
+  });
+
+  it("sweeps agentx/<env>/github even though the retained agentx/<env>/github-app shares its start", async () => {
+    const account = installedAccount();
+    account.stacks.get("agentx-staging-control-plane")!.resources.push({ logicalId: "GitHubSecret", type: "AWS::SecretsManager::Secret", physicalId: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/github-app-XyZ123" });
+    account.stacks.get("agentx-staging-control-plane")!.template = JSON.stringify({ Resources: Object.fromEntries(account.stacks.get("agentx-staging-control-plane")!.resources.map((resource) => [resource.logicalId, { Type: resource.type, DeletionPolicy: "Retain" }])) });
+    account.tags.set("arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/github-app-XyZ123", { "agentx:env": "staging" });
+    account.secrets.push({ name: "agentx/staging/github", scheduled: false });
+    const h = await harness({ account });
+    const result = await runDestroy({ env: "staging", keepData: false }, h.deps);
+    expect(h.account.calls).toContain("delete secret agentx/staging/github");
+    expect(h.account.calls).not.toContain("delete secret agentx/staging/github-app");
+    expect(result.secrets).toBe(2);
+  });
+
+  it("passes the token DeleteStack answered to the failure report", async () => {
+    const account = installedAccount();
+    account.stacks.get("agentx-staging-foundation")!.failDeletes = 1;
+    const h = await harness({ account });
+    await expect(runDestroy({ env: "staging", keepData: false }, h.deps)).rejects.toThrow("stack agentx-staging-foundation could not be deleted");
+    expect(h.account.failedTokens).toEqual(["agentx-destroy-test-agentx-staging-foundation"]);
+  });
+
+  it("finishes when a secret an earlier run force-deleted is still listed and refuses RestoreSecret", async () => {
+    const h = await harness();
+    let time = 0;
+    const sdk = forceDeletedSecretsClient(["agentx/staging/github-app"]);
+    const real = awsDestroyApi(sdk.clients, { sleep: async (ms) => { time += ms; } });
+    h.deps.api = { ...h.deps.api, deleteSecret: (name) => real.deleteSecret(name) };
+    const result = await runDestroy({ env: "staging", keepData: false }, h.deps);
+    expect(result.removed).toBe(true);
+    expect(sdk.calls).toEqual(expect.arrayContaining(["RestoreSecret agentx/staging/github-app", "DeleteSecret agentx/staging/callback-signing-key"]));
+    expect(sdk.calls).not.toContain("DeleteSecret agentx/staging/github-app");
+    expect(time).toBeGreaterThan(0);
+  });
+
+  it("deletes a REVIEW_IN_PROGRESS stack whose template cannot be read, as retaining nothing", async () => {
+    const account = installedAccount();
+    Object.assign(account.stacks.get("agentx-staging-slack")!, { status: "REVIEW_IN_PROGRESS", noTemplate: true });
+    const h = await harness({ account });
+    await runDestroy({ env: "staging", keepData: false }, h.deps);
+    expect(h.account.calls[0]).toBe("delete stack agentx-staging-slack");
+  });
+
+  it("works out this computer's files from the inventory read inside the lock", async () => {
+    const account = installedAccount();
+    const foundation = account.stacks.get("agentx-staging-foundation")!;
+    foundation.outputs = {};
+    const h = await harness({ account });
+    const answer = h.deps.confirmLine;
+    h.deps.confirmLine = async (question) => {
+      foundation.outputs = { Ec2WorkerLaunchTemplateId: "lt-0123456789abcdef0" };
+      return answer(question);
+    };
+    const result = await runDestroy({ env: "staging", keepData: false }, h.deps);
+    expect(result.localFiles).toContain(join(h.configDir, "payments.yaml"));
+    expect(await readdir(h.configDir)).toEqual(["eu-app.yaml"]);
   });
 });

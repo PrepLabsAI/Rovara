@@ -338,3 +338,33 @@ describe("the destroy adapter, queued minors", () => {
     expect(fake.calls.map((call) => call.name)).toEqual(["DescribeTable", "UpdateTable", "UpdateTable", "DeleteTable"]);
   });
 });
+
+describe("deleting a secret that is being force-deleted", () => {
+  const refused = () => { throw Object.assign(new Error("it was deleted"), { name: "InvalidRequestException" }); };
+
+  it("confirms by describing again that a secret refusing RestoreSecret is gone", async () => {
+    let described = 0;
+    const fake = fakeClients({
+      DescribeSecret: () => { described += 1; if (described <= 2) return { Name: "agentx/staging/a", DeletedDate: new Date() }; throw Object.assign(new Error("gone"), { name: "ResourceNotFoundException" }); },
+      RestoreSecret: refused,
+    });
+    const slept: number[] = [];
+    await awsDestroyApi(fake.clients, { sleep: async (ms) => { slept.push(ms); } }).deleteSecret("agentx/staging/a");
+    expect(fake.calls.map((call) => call.name)).toEqual(["DescribeSecret", "RestoreSecret", "DescribeSecret", "DescribeSecret"]);
+    expect(slept).toEqual([5000, 5000]);
+  });
+
+  it("gives up after 2 minutes when the secret is still there, saying to run destroy again", async () => {
+    const fake = fakeClients({ DescribeSecret: () => ({ Name: "agentx/staging/a", DeletedDate: new Date() }), RestoreSecret: refused });
+    let time = 0;
+    await expect(awsDestroyApi(fake.clients, { sleep: async (ms) => { time += ms; } }).deleteSecret("agentx/staging/a"))
+      .rejects.toThrow("secret agentx/staging/a refused RestoreSecret and is still listed after 2 minutes; run agentx destroy again to continue");
+    expect(time).toBe(120_000);
+    expect(fake.calls.map((call) => call.name)).not.toContain("DeleteSecret");
+  });
+
+  it("does not treat another RestoreSecret error as gone", async () => {
+    const fake = fakeClients({ DescribeSecret: () => ({ Name: "agentx/staging/a", DeletedDate: new Date() }), RestoreSecret: () => { throw Object.assign(new Error("denied"), { name: "AccessDeniedException" }); } });
+    await expect(awsDestroyApi(fake.clients, { sleep: async () => undefined }).deleteSecret("agentx/staging/a")).rejects.toThrow("denied");
+  });
+});

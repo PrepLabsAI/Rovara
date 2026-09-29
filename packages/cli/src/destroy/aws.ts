@@ -57,6 +57,8 @@ const workerFilters = (env: string) => [
   { Name: "tag:DeploymentMode", Values: ["ec2-ebs"] }, { Name: "tag:Environment", Values: [env] }, { Name: "tag:agentx:env", Values: [env] },
 ];
 
+const SECRET_POLL_MS = 5_000;
+const SECRET_GONE_TIMEOUT_MS = 2 * 60_000;
 const TABLE_RETRY_MS = 5_000;
 const TABLE_ATTEMPTS = 36;
 /** EC2 deletes a worker's root volume itself on termination: those are not ours to delete. */
@@ -290,7 +292,21 @@ export function awsDestroyApi(
         // A secret already scheduled for deletion (by an earlier run, or by hand) keeps its name until
         // the window ends; restoring it first lets the force delete free the name for a reinstall now.
         const scheduled = ((await secrets.send(new DescribeSecretCommand({ SecretId: name }))) as { DeletedDate?: Date }).DeletedDate !== undefined;
-        if (scheduled) await secrets.send(new RestoreSecretCommand({ SecretId: name }));
+        if (scheduled) {
+          try {
+            await secrets.send(new RestoreSecretCommand({ SecretId: name }));
+          } catch (error) {
+            if (!(error instanceof Error && error.name === "InvalidRequestException")) throw error;
+            // A secret being force-deleted (by an earlier run) refuses RestoreSecret for a short while.
+            // The refusal alone proves nothing: describe it again until it is gone.
+            for (let waited = 0; waited < SECRET_GONE_TIMEOUT_MS; waited += SECRET_POLL_MS) {
+              await sleep(SECRET_POLL_MS);
+              const gone = await unlessGone(async () => { await secrets.send(new DescribeSecretCommand({ SecretId: name })); return false; }, true);
+              if (gone) return;
+            }
+            throw agentXError("RUNTIME_UNAVAILABLE", `secret ${name} refused RestoreSecret and is still listed after ${SECRET_GONE_TIMEOUT_MS / 60_000} minutes; run agentx destroy again to continue`);
+          }
+        }
         await secrets.send(new DeleteSecretCommand({ SecretId: name, ForceDeleteWithoutRecovery: true }));
       }, undefined);
     },

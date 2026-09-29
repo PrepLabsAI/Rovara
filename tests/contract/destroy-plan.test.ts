@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { confirmationPrompts, destroyPlanText, inventoryParameterName, mergeInventory, readInventory, retainedResources, vendorSteps, writeInventory, type RetainedResource } from "../../packages/cli/src/destroy/inventory.js";
-import { DELETE_AFTER_WORKERS, DELETE_BEFORE_WORKERS, isOwnedAlias, isOwnedParameter, isOwnedRetained, isOwnedSecret, isOwnedStack, isOwnedWorker } from "../../packages/cli/src/destroy/names.js";
+import { DELETE_AFTER_WORKERS, DELETE_BEFORE_WORKERS, isOwnedAlias, isSecretId, isOwnedParameter, isOwnedRetained, isOwnedSecret, isOwnedStack, isOwnedWorker } from "../../packages/cli/src/destroy/names.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 
 describe("destroy: the order (docs/architecture-production.md, Tearing down an environment)", () => {
@@ -172,5 +172,15 @@ describe("destroy: what is shown before, and printed after", () => {
       "Delete the environment's GitHub App, if it had one: https://github.com/settings/apps (for an organization: its Settings, Developer settings, GitHub Apps), then Advanced, Delete GitHub App.",
       "Delete the environment's Slack app, if it had one: https://api.slack.com/apps, the app, then Delete App at the bottom of Basic Information.",
     ]);
+  });
+});
+
+describe("destroy: matching a secret by name or ARN", () => {
+  it("matches the name itself or its ARN with Secrets Manager's six-character suffix, never a longer name", () => {
+    expect(isSecretId("agentx/staging/github", "agentx/staging/github")).toBe(true);
+    expect(isSecretId("arn:aws:secretsmanager:us-east-1:1:secret:agentx/staging/github-AbC123", "agentx/staging/github")).toBe(true);
+    expect(isSecretId("arn:aws:secretsmanager:us-east-1:1:secret:agentx/staging/github-app-AbC123", "agentx/staging/github")).toBe(false);
+    expect(isSecretId("arn:aws:secretsmanager:us-east-1:1:secret:agentx/staging/github-app-AbC123", "agentx/staging/github-app")).toBe(true);
+    expect(isSecretId("arn:aws:secretsmanager:us-east-1:1:secret:agentx/staging/a.b-AbC123", "agentx/staging/aXb")).toBe(false);
   });
 });
