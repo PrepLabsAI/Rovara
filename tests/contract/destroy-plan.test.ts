@@ -51,6 +51,43 @@ describe("destroy: name guards never reach another environment", () => {
   });
 });
 
+describe("destroy: name guards, prefix overlaps and the older production deployment", () => {
+  it("never matches a name that only shares a prefix or differs in case", () => {
+    expect(isOwnedStack("live", "agentx-live25b-slack")).toBe(false);
+    expect(isOwnedSecret("prod", "agentx/production/slack")).toBe(false);
+    expect(isOwnedParameter("prod", "/agentx/production/settings")).toBe(false);
+    expect(isOwnedSecret("prod", "agentx/PROD/slack")).toBe(false);
+    expect(isOwnedWorker("prod", { DeploymentMode: "ec2-ebs", "agentx:env": "prod" })).toBe(false);
+  });
+
+  it("matches the older production deployment's names for env production, so ruling F21 is load-bearing", () => {
+    // The older (adopted) production deployment uses /agentx/production/* parameters and this KMS
+    // alias (infra/lib/naming.ts). These guards cannot tell it from a named environment called
+    // production: only runDestroy's up-front refusal of that deployment (ruling F21) protects it.
+    expect(isOwnedAlias("production", "alias/agentx/production/invoke-signing")).toBe(true);
+    expect(isOwnedParameter("production", "/agentx/production/worker-image")).toBe(true);
+  });
+
+  it("matches a tagged generated-name resource by its stack tag, so a bucket name CloudFormation shortened still matches", () => {
+    const bucket: RetainedResource = { part: "control-plane", logicalId: "Artifacts", type: "AWS::S3::Bucket", physicalId: "agentx-a-very-long-envname-contr-artifactsbucket-1x2y3z" };
+    expect(isOwnedRetained("a-very-long-envname", bucket, { "agentx:env": "a-very-long-envname", "aws:cloudformation:stack-name": "agentx-a-very-long-envname-control-plane" })).toBe(true);
+    expect(isOwnedRetained("a-very-long-envname", bucket, { "agentx:env": "a-very-long-envname", "aws:cloudformation:stack-name": "agentx-a-very-long-envname-foundation" })).toBe(false);
+    expect(isOwnedRetained("prod", { part: "foundation", logicalId: "Key", type: "AWS::KMS::Key", physicalId: "k" }, { "agentx:env": "prod", "aws:cloudformation:stack-name": "agentx-prod-eu-foundation" })).toBe(false);
+    // Without the stack tag, the name prefix still decides.
+    expect(isOwnedRetained("a-very-long-envname", bucket, { "agentx:env": "a-very-long-envname" })).toBe(false);
+  });
+});
+
+describe("destroy: the inventory schema", () => {
+  it("refuses a GitHub account that could change the printed URL, and duplicate connectors", async () => {
+    const store = new MemoryParameterStore();
+    const base = { schemaVersion: 1 as const, env: "staging", resources: [] };
+    await expect(writeInventory(store, { ...base, github: { account: "acme/../evil", accountType: "organization", slug: "agentx-acme" } })).rejects.toThrow();
+    await expect(writeInventory(store, { ...base, connectors: ["linear", "linear"] })).rejects.toThrow();
+    await expect(writeInventory(store, { ...base, github: { account: "Acme-Co", accountType: "organization", slug: "agentx-acme" }, connectors: ["linear", "jira"] })).resolves.toBeUndefined();
+  });
+});
+
 describe("destroy: the inventory of what the stacks retain", () => {
   const template = JSON.stringify({ Resources: {
     State: { Type: "AWS::DynamoDB::Table", DeletionPolicy: "RetainExceptOnCreate" },
@@ -104,11 +141,24 @@ describe("destroy: what is shown before, and printed after", () => {
     expect(lines[0]).toBe("This deletes AgentX environment staging in account 123456789012, region us-east-1:");
     expect(lines).toContain("  stacks, in this order: agentx-staging-slack (UPDATE_COMPLETE), agentx-staging-control-plane (UPDATE_COMPLETE)");
     expect(lines).toContain("  EC2 workers: 1 instance and 2 workspace volumes; deleting the volumes deletes every worker session's workspace");
-    expect(lines).toContain("  what the stacks keep, deleted after them: 1 table, 1 KMS key (deleted after 7 days)");
+    expect(lines).toContain("  what the stacks keep, deleted after them: 1 table and 1 KMS key (deleted after 7 days)");
     expect(lines).toContain("  Deleting agentx-staging-control-plane usually takes 20 to 40 minutes: its Lambda functions release their network interfaces slowly.");
     expect(lines.at(-1)).toBe("Nothing here can be undone.");
     const kept = destroyPlanText({ env: "staging", account: "123456789012", region: "us-east-1", stacks: [], instances: 0, volumes: 0, secrets: 5, parameters: 1, localFiles: [], keepData: true, resources: [{ part: "control-plane", logicalId: "State", type: "AWS::DynamoDB::Table", physicalId: "t" }] });
     expect(kept).toContain("  --keep-data keeps: 1 table and 5 secrets");
+  });
+
+  it("counts the stacks' secrets once, with the secrets under agentx/<env>/, and joins lists as a, b and c", () => {
+    const resources: RetainedResource[] = [
+      { part: "control-plane", logicalId: "State", type: "AWS::DynamoDB::Table", physicalId: "t" },
+      { part: "identity", logicalId: "Pool", type: "AWS::Cognito::UserPool", physicalId: "p" },
+      { part: "control-plane", logicalId: "SlackSecret", type: "AWS::SecretsManager::Secret", physicalId: "agentx/staging/slack" },
+    ];
+    const plan = { env: "staging", account: "123456789012", region: "us-east-1", stacks: [], instances: 0, volumes: 0, secrets: 5, parameters: 1, localFiles: [], resources };
+    const all = destroyPlanText({ ...plan, keepData: false });
+    expect(all).toContain("  what the stacks keep, deleted after them: 1 table and 1 Cognito user pool");
+    expect(all).toContain("  secrets: 5 secrets under agentx/staging/, deleted without recovery");
+    expect(destroyPlanText({ ...plan, keepData: true })).toContain("  --keep-data keeps: 1 table, 1 Cognito user pool and 5 secrets");
   });
 
   it("prints the GitHub App and Slack app pages to delete them, and the connector credentials to revoke", () => {

@@ -3,7 +3,7 @@
 // a re-run after the stacks are gone still knows them. Also the plan shown before confirming, the
 // typed confirmation, and the vendor steps printed at the end.
 import { z } from "zod";
-import { agentXError, EnvironmentNameSchema, environmentSettingsPrefix, environmentStackName, type StackPart } from "@agentx/contracts";
+import { agentXError, EnvironmentNameSchema, environmentSettingsPrefix, environmentStackName, STACK_PARTS, type StackPart } from "@agentx/contracts";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import { CONNECTOR_TYPES, SSM_STANDARD_VALUE_LIMIT, type ConnectorType } from "../init/install-state.js";
 
@@ -13,15 +13,14 @@ export const KEPT_BY_KEEP_DATA: ReadonlySet<string> = new Set(["AWS::S3::Bucket"
 
 export interface RetainedResource { part: StackPart; logicalId: string; type: string; physicalId: string }
 
-const PARTS = ["access", "foundation", "identity", "runtime", "control-plane", "slack"] as const;
 const InventorySchema = z.object({
   schemaVersion: z.literal(1),
   env: EnvironmentNameSchema,
-  resources: z.array(z.object({ part: z.enum(PARTS), logicalId: z.string().min(1).max(255), type: z.string().min(1).max(100), physicalId: z.string().min(1).max(2048) }).strict()).max(40),
+  resources: z.array(z.object({ part: z.enum(STACK_PARTS), logicalId: z.string().min(1).max(255), type: z.string().min(1).max(100), physicalId: z.string().min(1).max(2048) }).strict()).max(40),
   launchTemplateId: z.string().regex(/^lt-[0-9a-f]+$/).optional(),
-  github: z.object({ account: z.string().min(1).max(39), accountType: z.enum(["organization", "user"]), slug: z.string().regex(/^[a-z0-9-]+$/) }).strict().optional(),
+  github: z.object({ account: z.string().min(1).max(39).regex(/^[A-Za-z0-9-]+$/), accountType: z.enum(["organization", "user"]), slug: z.string().regex(/^[a-z0-9-]+$/) }).strict().optional(),
   slackAppId: z.string().regex(/^A[A-Z0-9]+$/).optional(),
-  connectors: z.array(z.enum(CONNECTOR_TYPES)).max(3).optional(),
+  connectors: z.array(z.enum(CONNECTOR_TYPES)).max(3).refine((types) => new Set(types).size === types.length, "connectors must not repeat").optional(),
 }).strict();
 export type Inventory = z.infer<typeof InventorySchema>;
 
@@ -93,13 +92,13 @@ const REVOKE: Record<ConnectorType, string> = {
 
 export function vendorSteps(inventory: Inventory): string[] {
   const { github, slackAppId } = inventory;
-  const githubPage = github === undefined ? undefined : github.accountType === "organization"
-    ? `https://github.com/organizations/${github.account}/settings/apps/${github.slug}/advanced`
-    : `https://github.com/settings/apps/${github.slug}/advanced`;
+  const githubPage = (app: NonNullable<Inventory["github"]>) => (app.accountType === "organization"
+    ? `https://github.com/organizations/${app.account}/settings/apps/${app.slug}/advanced`
+    : `https://github.com/settings/apps/${app.slug}/advanced`);
   return [
-    github === undefined || githubPage === undefined
+    github === undefined
       ? "Delete the environment's GitHub App, if it had one: https://github.com/settings/apps (for an organization: its Settings, Developer settings, GitHub Apps), then Advanced, Delete GitHub App."
-      : `Delete the GitHub App ${github.slug}: open ${githubPage} and choose Delete GitHub App.`,
+      : `Delete the GitHub App ${github.slug}: open ${githubPage(github)} and choose Delete GitHub App.`,
     slackAppId === undefined
       ? "Delete the environment's Slack app, if it had one: https://api.slack.com/apps, the app, then Delete App at the bottom of Basic Information."
       : `Delete the Slack app: open https://api.slack.com/apps/${slackAppId}/general and choose Delete App at the bottom of the page.`,
@@ -121,21 +120,26 @@ const counted = (resources: RetainedResource[]) => [...new Set(resources.map((re
   const [one, many] = NOUNS[type] ?? [type, type];
   return `${count} ${count === 1 ? one : many}`;
 });
+/** "a", "a and b", "a, b and c". */
+const listed = (items: string[]) => (items.length <= 1 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`);
 const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
 
 export function destroyPlanText(plan: DestroyPlan): string[] {
-  const deleted = plan.keepData ? plan.resources.filter((resource) => !KEPT_BY_KEEP_DATA.has(resource.type)) : plan.resources;
-  const kept = plan.keepData ? plan.resources.filter((resource) => KEPT_BY_KEEP_DATA.has(resource.type)) : [];
+  // The stacks' secrets live under agentx/<env>/ and are counted in plan.secrets, so they are left
+  // out of the retained counts here to count each secret once.
+  const retained = plan.resources.filter((resource) => resource.type !== "AWS::SecretsManager::Secret");
+  const deleted = plan.keepData ? retained.filter((resource) => !KEPT_BY_KEEP_DATA.has(resource.type)) : retained;
+  const kept = plan.keepData ? retained.filter((resource) => KEPT_BY_KEEP_DATA.has(resource.type)) : [];
   const controlPlane = environmentStackName(plan.env, "control-plane");
   return [
     `This deletes AgentX environment ${plan.env} in account ${plan.account}, region ${plan.region}:`,
     ...(plan.stacks.length === 0 ? [] : [`  stacks, in this order: ${plan.stacks.map((stack) => `${stack.name} (${stack.status})`).join(", ")}`]),
     ...(plan.instances + plan.volumes === 0 ? [] : [`  EC2 workers: ${plural(plan.instances, "instance", "instances")} and ${plural(plan.volumes, "workspace volume", "workspace volumes")}; deleting the volumes deletes every worker session's workspace`]),
-    ...(deleted.length === 0 ? [] : [`  what the stacks keep, deleted after them: ${counted(deleted).join(", ")}`]),
+    ...(deleted.length === 0 ? [] : [`  what the stacks keep, deleted after them: ${listed(counted(deleted))}`]),
     ...(plan.keepData ? [] : [`  secrets: ${plural(plan.secrets, "secret", "secrets")} under agentx/${plan.env}/, deleted without recovery`]),
     `  settings: ${plural(plan.parameters, "parameter", "parameters")} under /agentx/${plan.env}/`,
     ...(plan.localFiles.length === 0 ? [] : [`  on this computer: ${plan.localFiles.join(", ")}`]),
-    ...(plan.keepData ? [`  --keep-data keeps: ${[...counted(kept), plural(plan.secrets, "secret", "secrets")].join(" and ")}`] : []),
+    ...(plan.keepData ? [`  --keep-data keeps: ${listed([...counted(kept), plural(plan.secrets, "secret", "secrets")])}`] : []),
     ...(plan.stacks.some((stack) => stack.name === controlPlane) ? [`  Deleting ${controlPlane} usually takes 20 to 40 minutes: its Lambda functions release their network interfaces slowly.`] : []),
     "Nothing here can be undone.",
   ];
