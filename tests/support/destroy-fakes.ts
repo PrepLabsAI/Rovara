@@ -37,7 +37,7 @@ export async function headerProjectFiles(configDir: string, env: string): Promis
   return found;
 }
 
-export interface FakeStack extends DestroyStack { template: string; resources: Array<{ logicalId: string; type: string; physicalId: string }>; deleteMinutes?: number; failDeletes?: number }
+export interface FakeStack extends DestroyStack { template: string; resources: Array<{ logicalId: string; type: string; physicalId: string }>; deleteMinutes?: number; failDeletes?: number; busyMinutes?: number; settledStatus?: string }
 export interface FakeAccount {
   stacks: Map<string, FakeStack>;
   instances: Array<{ id: string; state: string; tags: Record<string, string> }>;
@@ -88,6 +88,8 @@ export function fakeDestroyApi(account: FakeAccount, clock: { now: () => number 
   const deleting = new Map<string, number>();   // stack name -> time the delete finishes
   const stackNow = (name: string): FakeStack | undefined => {
     const entry = account.stacks.get(name);
+    // A stack busy with an update settles once its minutes have passed.
+    if (entry?.busyMinutes !== undefined && clock.now() >= entry.busyMinutes * 60_000) { entry.status = entry.settledStatus ?? "UPDATE_COMPLETE"; delete entry.busyMinutes; }
     const done = deleting.get(name);
     if (entry !== undefined && done !== undefined && clock.now() >= done) {
       if ((entry.failDeletes ?? 0) > 0) { entry.failDeletes = (entry.failDeletes ?? 0) - 1; entry.status = "DELETE_FAILED"; deleting.delete(name); return entry; }
@@ -98,6 +100,9 @@ export function fakeDestroyApi(account: FakeAccount, clock: { now: () => number 
     return entry;
   };
   const gone = (resource: RetainedResource) => account.tags.delete(resource.physicalId);
+  // Secrets Manager lists a force-deleted secret, as scheduled for deletion, for a while; deleting it
+  // again would restore it first, which fails on a secret being force-deleted.
+  const forceDeleted = new Set<string>();
   return {
     async stack(name) { const entry = stackNow(name); return entry === undefined ? undefined : { status: entry.status, terminationProtection: entry.terminationProtection, outputs: entry.outputs, ...(entry.roleArn === undefined ? {} : { roleArn: entry.roleArn }) }; },
     async template(name) { return account.stacks.get(name)?.template ?? "{}"; },
@@ -109,6 +114,7 @@ export function fakeDestroyApi(account: FakeAccount, clock: { now: () => number 
       account.calls.push(`delete stack ${name}`);
       entry.status = "DELETE_IN_PROGRESS";
       deleting.set(name, clock.now() + (entry.deleteMinutes ?? 2) * 60_000);
+      return `agentx-destroy-test-${name}`;
     },
     async latestEvent() { return "Resource DELETE_IN_PROGRESS"; },
     async failedResources() { return ["WorkerSecurityGroup: resource has a dependent object"]; },
@@ -125,6 +131,12 @@ export function fakeDestroyApi(account: FakeAccount, clock: { now: () => number 
     async aliases() { return account.aliases.map((name) => ({ name })); },
     async deleteAlias(name) { account.calls.push(`delete alias ${name}`); account.aliases = account.aliases.filter((alias) => alias !== name); },
     async secrets() { return account.secrets; },
-    async deleteSecret(name) { account.calls.push(`delete secret ${name}`); account.secrets = account.secrets.filter((secret) => secret.name !== name && !name.includes(`:secret:${secret.name}-`)); gone({ part: "control-plane", logicalId: "", type: "", physicalId: name }); },
+    async deleteSecret(name) {
+      const matches = account.secrets.filter((secret) => secret.name === name || name.includes(`:secret:${secret.name}-`));
+      if (matches.some((secret) => forceDeleted.has(secret.name))) throw new Error(`test: ${name} was already force-deleted; RestoreSecret fails on it`);
+      account.calls.push(`delete secret ${name}`);
+      for (const secret of matches) { secret.scheduled = true; forceDeleted.add(secret.name); }
+      gone({ part: "control-plane", logicalId: "", type: "", physicalId: name });
+    },
   };
 }

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -75,6 +75,7 @@ describe("agentx destroy (FR-055, item 3)", () => {
     expect(h.store.values.has("/agentx/staging/worker/image")).toBe(false);
     const settingsDelete = h.store.calls.filter((call) => call.op === "delete").map((call) => call.name);
     expect(settingsDelete.indexOf(settingsParameterName("staging"))).toBe(settingsDelete.length - 2); // then the lock
+    expect(settingsDelete.indexOf(inventoryParameterName("staging"))).toBe(settingsDelete.length - 3); // just before the settings
     expect(result.manualSteps).toEqual(expect.arrayContaining([
       "Delete the GitHub App agentx-acme: open https://github.com/organizations/acme/settings/apps/agentx-acme/advanced and choose Delete GitHub App.",
       "Delete the Slack app: open https://api.slack.com/apps/A0APP/general and choose Delete App at the bottom of the page.",
@@ -140,6 +141,8 @@ describe("agentx destroy (FR-055, item 3)", () => {
     expect(first.store.values.has(settingsParameterName("staging"))).toBe(true);
     expect(first.store.values.has(inventoryParameterName("staging"))).toBe(true);
     expect(first.store.values.has(lockParameterName("staging"))).toBe(false);
+    await expect(access(environmentCachePath(first.home, "staging"))).resolves.toBeUndefined();
+    await expect(access(join(first.configDir, "payments.yaml"))).resolves.toBeUndefined();
     // The next run: control-plane and identity are gone, but their retained resources come from the saved inventory.
     first.deps.confirmLine = async () => "staging";
     await runDestroy({ env: "staging", keepData: false }, first.deps);
@@ -219,7 +222,9 @@ describe("agentx destroy (FR-055, item 3)", () => {
     expect(h.store.values.has(inventoryParameterName("staging"))).toBe(true);
     expect(first.manualSteps).toContain("Run agentx destroy again, without --keep-data, to remove what was kept.");
     h.deps.confirmLine = async (question) => (question.includes("account id") ? "123456789012" : "staging");
-    await runDestroy({ env: "staging", keepData: false }, h.deps);
+    const second = await runDestroy({ env: "staging", keepData: false }, h.deps);
+    // Only the inventory was left: the settings delete that finds nothing is not counted.
+    expect(second.parameters).toBe(1);
     expect(h.account.calls).toEqual(expect.arrayContaining([
       "delete table agentx-staging-control-plane-State-5e", "delete user pool us-east-1_Pool4d (domain agentx-staging-123456789012)", "schedule key key-3c",
       "delete secret agentx/staging/callback-signing-key",
@@ -231,5 +236,62 @@ describe("agentx destroy (FR-055, item 3)", () => {
     const h = await harness();
     const result = await runDestroy({ env: "staging", keepData: false }, h.deps);
     expect(result.manualSteps.some((step) => step.startsWith("Delete the ECR repositories under agentx-staging/"))).toBe(true);
+  });
+
+  it("deletes a stack left in REVIEW_IN_PROGRESS by an interrupted init, without waiting for it", async () => {
+    const account = installedAccount();
+    account.stacks.get("agentx-staging-slack")!.status = "REVIEW_IN_PROGRESS";
+    const h = await harness({ account });
+    await runDestroy({ env: "staging", keepData: false }, h.deps);
+    expect(h.account.calls[0]).toBe("delete stack agentx-staging-slack");
+    expect(h.lines.join("\n")).not.toContain("Waiting for agentx-staging-slack");
+  });
+
+  it("waits for a busy stack to finish, then deletes it", async () => {
+    const account = installedAccount();
+    Object.assign(account.stacks.get("agentx-staging-runtime")!, { status: "UPDATE_IN_PROGRESS", busyMinutes: 10, settledStatus: "UPDATE_ROLLBACK_COMPLETE" });
+    const h = await harness({ account });
+    await runDestroy({ env: "staging", keepData: false }, h.deps);
+    expect(h.lines).toContain("Waiting for agentx-staging-runtime: it is UPDATE_IN_PROGRESS");
+    expect(h.account.calls).toContain("delete stack agentx-staging-runtime");
+  });
+
+  it("deletes the retained Slack secret once, and leaves it out of the agentx/<env>/ sweep and its count", async () => {
+    const h = await harness();
+    const result = await runDestroy({ env: "staging", keepData: false }, h.deps);
+    const secretCalls = h.account.calls.filter((call) => call.startsWith("delete secret"));
+    expect(secretCalls).toEqual([
+      "delete secret arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/slack-AbCdEf",
+      "delete secret agentx/staging/callback-signing-key", "delete secret agentx/staging/github-app",
+    ]);
+    expect(result.secrets).toBe(2);
+  });
+
+  it("builds the inventory inside the lock, from what the stacks hold after the confirmation", async () => {
+    const h = await harness();
+    const controlPlane = h.account.stacks.get("agentx-staging-control-plane")!;
+    const answer = h.deps.confirmLine;
+    h.deps.confirmLine = async (question) => {
+      // A stack update lands between the plan and the lock: a new retained table.
+      controlPlane.resources.push({ logicalId: "Late", type: "AWS::DynamoDB::Table", physicalId: "agentx-staging-control-plane-Late-9z" });
+      controlPlane.template = JSON.stringify({ Resources: Object.fromEntries(controlPlane.resources.map((resource) => [resource.logicalId, { Type: resource.type, DeletionPolicy: "Retain" }])) });
+      h.account.tags.set("agentx-staging-control-plane-Late-9z", { "agentx:env": "staging" });
+      return answer(question);
+    };
+    await runDestroy({ env: "staging", keepData: false }, h.deps);
+    expect(h.account.calls).toContain("delete table agentx-staging-control-plane-Late-9z");
+  });
+
+  it("with --keep-data, names every kept agentx/<env>/ secret in the manual step", async () => {
+    const h = await harness();
+    const result = await runDestroy({ env: "staging", keepData: true }, h.deps);
+    const kept = result.manualSteps.find((step) => step.startsWith("Kept, as --keep-data asked:"));
+    expect(kept).toContain("agentx/staging/callback-signing-key");
+    expect(kept).toContain("agentx/staging/github-app");
+  });
+
+  it("tells the operator role that destroy needs admin credentials, and that a role without delete rights fails partway", async () => {
+    const operator = await harness({ caller: "arn:aws:sts::123456789012:assumed-role/agentx-staging-operator/alice" });
+    await expect(runDestroy({ env: "staging", keepData: false }, operator.deps)).rejects.toThrow("any other role without the rights to delete all of it fails partway; run agentx destroy again with admin credentials to continue");
   });
 });

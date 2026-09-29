@@ -14,7 +14,7 @@ import { isOperatorRole } from "../init/commands.js";
 import { readInstallAnswers, readInstallProgress } from "../init/install-state.js";
 import type { TokenStore } from "../token-store.js";
 import type { DestroyApi, DestroyStack } from "./aws.js";
-import { confirmationPrompts, destroyPlanText, inventoryParameterName, KEPT_BY_KEEP_DATA, mergeInventory, readInventory, retainedResources, vendorSteps, writeInventory, type RetainedResource } from "./inventory.js";
+import { confirmationPrompts, destroyPlanText, inventoryParameterName, KEPT_BY_KEEP_DATA, mergeInventory, readInventory, retainedResources, vendorSteps, writeInventory, type Inventory, type RetainedResource } from "./inventory.js";
 import { DELETE_AFTER_WORKERS, DELETE_BEFORE_WORKERS, isOwnedAlias, isOwnedParameter, isOwnedRetained, isOwnedSecret, isOwnedStack, isOwnedWorker } from "./names.js";
 import { deleteVolumesWhenFree, waitForInstancesGone, waitForStackDelete } from "./wait.js";
 
@@ -63,7 +63,7 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
   }
   const caller = await deps.identity.get();
   if (isOperatorRole(caller.arn, env)) {
-    throw agentXError("CONFIG_INVALID", "agentx destroy needs admin credentials: it deletes the access stack and its IAM roles, which the operator role cannot do by design");
+    throw agentXError("CONFIG_INVALID", "agentx destroy needs admin credentials. It deletes the access stack and its IAM roles, which the operator role cannot do by design, and any other role without the rights to delete all of it fails partway; run agentx destroy again with admin credentials to continue");
   }
   if (settings !== undefined && settings.account !== caller.account) {
     throw agentXError("CONFIG_INVALID", `environment ${env} is installed in account ${settings.account}, but your AWS credentials are for ${caller.account}; use credentials for ${settings.account}`);
@@ -71,33 +71,38 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
   const answers = await readInstallAnswers(store, env).catch(() => undefined);
   const progress = await readInstallProgress(store, env).catch(() => undefined);
 
-  // 1. Read everything first.
-  const stacks = new Map<StackPart, DestroyStack>();
-  for (const part of [...DELETE_BEFORE_WORKERS, ...DELETE_AFTER_WORKERS]) {
-    const found = await api.stack(environmentStackName(env, part));
-    if (found !== undefined) stacks.set(part, found);
-  }
-  if (!stacks.has("access")) {
-    for (const [part, stack] of stacks) {
-      if (stack.roleArn === undefined) continue;
-      const name = environmentStackName(env, part);
-      throw agentXError("CONFIG_INVALID", `stack ${name} was deployed through the role ${stack.roleArn}, which the access stack held and which is gone, so CloudFormation cannot delete it. Delete it with a role that can (aws cloudformation delete-stack --stack-name ${name} --role-arn <an admin role ARN> --region ${deps.region}), then run agentx destroy again`);
-    }
-  }
-  const found: RetainedResource[] = [];
-  for (const [part] of stacks) {
-    const name = environmentStackName(env, part);
-    found.push(...retainedResources(part, await api.template(name), await api.stackResources(name)));
-  }
-  const stored = await readInventory(store, env);
-  const launchTemplateId = stacks.get("foundation")?.outputs.Ec2WorkerLaunchTemplateId;
+  // 1. Read everything first. The stacks and the inventory are read again inside the lock, so what
+  // is saved and deleted is never older than the lock.
   const github = progress?.github === undefined || answers === undefined ? undefined : { account: progress.github.account, accountType: answers.github.accountType, slug: progress.github.slug };
   const connectors = progress?.connectors === undefined ? undefined : [...new Set(progress.connectors.map((entry) => entry.type))];
-  const inventory = mergeInventory(stored, {
-    env, resources: found,
-    ...(launchTemplateId === undefined ? {} : { launchTemplateId }), ...(github === undefined ? {} : { github }),
-    ...(progress?.slack?.appId === undefined ? {} : { slackAppId: progress.slack.appId }), ...(connectors === undefined ? {} : { connectors }),
-  });
+  const readStacks = async (): Promise<{ stacks: Map<StackPart, DestroyStack>; inventory: Inventory }> => {
+    const stacks = new Map<StackPart, DestroyStack>();
+    for (const part of [...DELETE_BEFORE_WORKERS, ...DELETE_AFTER_WORKERS]) {
+      const found = await api.stack(environmentStackName(env, part));
+      if (found !== undefined) stacks.set(part, found);
+    }
+    if (!stacks.has("access")) {
+      for (const [part, stack] of stacks) {
+        if (stack.roleArn === undefined) continue;
+        const name = environmentStackName(env, part);
+        throw agentXError("CONFIG_INVALID", `stack ${name} was deployed through the role ${stack.roleArn}, which the access stack held and which is gone, so CloudFormation cannot delete it. Delete it with a role that can (aws cloudformation delete-stack --stack-name ${name} --role-arn <an admin role ARN> --region ${deps.region}), then run agentx destroy again`);
+      }
+    }
+    const found: RetainedResource[] = [];
+    for (const [part] of stacks) {
+      const name = environmentStackName(env, part);
+      found.push(...retainedResources(part, await api.template(name), await api.stackResources(name)));
+    }
+    const launchTemplateId = stacks.get("foundation")?.outputs.Ec2WorkerLaunchTemplateId;
+    const inventory = mergeInventory(await readInventory(store, env), {
+      env, resources: found,
+      ...(launchTemplateId === undefined ? {} : { launchTemplateId }), ...(github === undefined ? {} : { github }),
+      ...(progress?.slack?.appId === undefined ? {} : { slackAppId: progress.slack.appId }), ...(connectors === undefined ? {} : { connectors }),
+    });
+    return { stacks, inventory };
+  };
+  const { stacks, inventory: planned } = await readStacks();
+  let inventory = planned;
   // Every list is checked against the guards again here, whatever the adapter already filtered.
   const instances = (await api.workerInstances(env)).filter((instance) => isOwnedWorker(env, instance.tags));
   const volumes = (await api.workerVolumes(env)).filter((volume) => isOwnedWorker(env, volume.tags));
@@ -107,6 +112,7 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
   const projectFiles = inventory.launchTemplateId === undefined ? [] : (await deps.projectFiles(env)).filter((file) => file.launchTemplateId === inventory.launchTemplateId);
   const localFiles = [...((await exists(cachePath)) ? [cachePath] : []), ...projectFiles.map((file) => file.path)];
 
+  const keptSecrets: string[] = [];
   const result: DestroyResult = { env, removed: false, stacksDeleted: [], instances: 0, volumes: 0, retainedDeleted: [], kept: [], leftInPlace: [], secrets: 0, parameters: 0, localFiles: [], manualSteps: [] };
   if (stacks.size + inventory.resources.length + instances.length + volumes.length + secrets.length + parameters.length + localFiles.length === 0) {
     deps.write(`Environment ${env} has nothing to remove in this account and region.`);
@@ -120,7 +126,7 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
   for (const prompt of confirmationPrompts({ env, account: caller.account, recorded })) {
     // Exact: only the line ending is dropped. An empty line, or end of input, refuses.
     const typed = (await deps.confirmLine(prompt.question)).replace(/\r?\n$/, "");
-    if (typed === "" || typed !== prompt.expected) throw agentXError("CONFIG_INVALID", `you typed ${typed || "nothing"}, not ${prompt.expected}; nothing was removed`);
+    if (typed !== prompt.expected) throw agentXError("CONFIG_INVALID", `you typed ${typed || "nothing"}, not ${prompt.expected}; nothing was removed`);
   }
 
   const deleteStack = async (part: StackPart): Promise<void> => {
@@ -129,7 +135,9 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
     let stack = await api.stack(name);
     if (stack === undefined) return;
     const idleSince = deps.now();
-    while (stack !== undefined && stack.status.endsWith("_IN_PROGRESS") && stack.status !== "DELETE_IN_PROGRESS") {
+    // REVIEW_IN_PROGRESS is a change set an interrupted init never ran: nothing is running, so it is
+    // deleted at once, as init's busyStatus treats it (init/deploy-steps.ts).
+    while (stack !== undefined && stack.status.endsWith("_IN_PROGRESS") && stack.status !== "DELETE_IN_PROGRESS" && stack.status !== "REVIEW_IN_PROGRESS") {
       if (deps.now() - idleSince >= IDLE_TIMEOUT_MS) throw agentXError("RUNTIME_UNAVAILABLE", `stack ${name} is still ${stack.status} after 60 minutes; wait for it to finish, then run agentx destroy again`);
       deps.write(`Waiting for ${name}: it is ${stack.status}`);
       await deps.sleep(15_000);
@@ -137,12 +145,13 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
     }
     if (stack === undefined) return;
     if (stack.terminationProtection) await api.disableTerminationProtection(name);
+    let token: string | undefined;
     if (stack.status !== "DELETE_IN_PROGRESS") {
       if (part === "control-plane") deps.write(`Deleting ${name}: this usually takes 20 to 40 minutes while its Lambda functions release their network interfaces.`);
       else deps.write(`Deleting ${name}`);
-      await api.deleteStack(name);
+      token = await api.deleteStack(name);
     }
-    await waitForStackDelete({ api, name, write: deps.write, sleep: deps.sleep, now: deps.now });
+    await waitForStackDelete({ api, name, ...(token === undefined ? {} : { token }), write: deps.write, sleep: deps.sleep, now: deps.now });
     result.stacksDeleted.push(name);
   };
 
@@ -150,6 +159,7 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
     store, env, holder: caller.arn, command: "destroy", now: deps.now, takeOverOwn: true,
     confirmTakeover: async (held) => /^y(es)?$/i.test((await deps.confirmLine(`Environment ${env} is locked by ${held.holder} running "${held.command}" since ${held.acquiredAt}. Take the lock over? Say yes only if that command is no longer running. [y/N] `)).trim()),
   }, async () => {
+    inventory = (await readStacks()).inventory;
     await writeInventory(store, inventory);
     for (const part of DELETE_BEFORE_WORKERS) await deleteStack(part);
 
@@ -170,7 +180,9 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
 
     for (const part of DELETE_AFTER_WORKERS) await deleteStack(part);
 
-    // 5. What the stacks retained.
+    // 5. What the stacks retained. The secrets deleted here are left out of step 6's sweep: Secrets
+    // Manager can still list one as scheduled, and deleting it again would restore it first.
+    const deletedSecrets: string[] = [];
     for (const resource of inventory.resources) {
       if (options.keepData && KEPT_BY_KEEP_DATA.has(resource.type)) { result.kept.push(label(resource)); continue; }
       const tags = await api.resourceTags(resource);
@@ -182,7 +194,7 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
         case "AWS::Logs::LogGroup": await api.deleteLogGroup(resource.physicalId); break;
         case "AWS::Cognito::UserPool": await api.deleteUserPool(resource.physicalId, `agentx-${env}-${caller.account}`); break;
         case "AWS::KMS::Key": await api.scheduleKeyDeletion(resource.physicalId); break;
-        case "AWS::SecretsManager::Secret": await api.deleteSecret(resource.physicalId); break;
+        case "AWS::SecretsManager::Secret": await api.deleteSecret(resource.physicalId); deletedSecrets.push(resource.physicalId); break;
         default: result.leftInPlace.push(`${label(resource)} (agentx destroy does not delete this type; delete it by hand)`); continue;
       }
       result.retainedDeleted.push(label(resource));
@@ -190,18 +202,24 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
     if (!options.keepData) {
       for (const alias of (await api.aliases(env)).filter((entry) => isOwnedAlias(env, entry.name))) await api.deleteAlias(alias.name);
       // 6. Every agentx/<env>/ secret, without recovery, so a reinstall can reuse the names.
-      const remaining = (await api.secrets(env)).filter((secret) => isOwnedSecret(env, secret.name));
+      const already = (name: string) => deletedSecrets.some((id) => id === name || id.includes(`:secret:${name}-`));
+      const remaining = (await api.secrets(env)).filter((secret) => isOwnedSecret(env, secret.name) && !already(secret.name));
       for (const secret of remaining) await api.deleteSecret(secret.name);
       result.secrets = remaining.length;
+    } else {
+      const keptIds = inventory.resources.filter((resource) => resource.type === "AWS::SecretsManager::Secret").map((resource) => resource.physicalId);
+      keptSecrets.push(...(await api.secrets(env)).filter((secret) => isOwnedSecret(env, secret.name) && !keptIds.some((id) => id === secret.name || id.includes(`:secret:${secret.name}-`))).map((secret) => secret.name));
     }
 
     // 7. Parameters; the settings last, and the lock is released after this function returns. Under
     // --keep-data the inventory stays (ruling F3): a later run without it finds what was kept there.
-    const keep = new Set([settingsParameterName(env), lockParameterName(env), ...(options.keepData ? [inventoryParameterName(env)] : [])]);
-    const names = (await store.list(`/agentx/${env}`)).filter((name) => isOwnedParameter(env, name) && !keep.has(name));
+    // The inventory goes just before the settings, so a run that fails earlier still has it.
+    const listed = (await store.list(`/agentx/${env}`)).filter((name) => isOwnedParameter(env, name));
+    const last = [...(options.keepData ? [] : [inventoryParameterName(env)]), settingsParameterName(env)].filter((name) => listed.includes(name));
+    const skipped = new Set([settingsParameterName(env), lockParameterName(env), inventoryParameterName(env)]);
+    const names = [...listed.filter((name) => !skipped.has(name)), ...last];
     for (const name of names) await store.delete(name);
-    await store.delete(settingsParameterName(env));
-    result.parameters = names.length + 1;
+    result.parameters = names.length;
   });
 
   // 8. This computer.
@@ -212,7 +230,7 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
   // 9. What AgentX cannot do.
   result.manualSteps = [
     ...vendorSteps(inventory),
-    ...(options.keepData && result.kept.length > 0 ? [`Kept, as --keep-data asked: ${result.kept.join(", ")}. A new install named ${env} cannot reuse the secret names until you delete them.`] : []),
+    ...(options.keepData && result.kept.length + keptSecrets.length > 0 ? [`Kept, as --keep-data asked: ${[...result.kept, ...keptSecrets.map((name) => `secret ${name}`)].join(", ")}. A new install named ${env} cannot reuse the secret names until you delete them.`] : []),
     ...(options.keepData ? ["Run agentx destroy again, without --keep-data, to remove what was kept."] : []),
     // Ruling F32: the image pull-through cache made these repositories, outside every stack.
     `Delete the ECR repositories under ${environmentPullThroughPrefix(env)}/ that the image pull-through cache created: in the ECR console for ${deps.region}, Private registry, Repositories, filter by ${environmentPullThroughPrefix(env)}/ and delete each one (or aws ecr delete-repository --force --region ${deps.region} --repository-name <name>).`,

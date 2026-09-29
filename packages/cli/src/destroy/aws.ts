@@ -2,6 +2,7 @@
 // re-run after a failure continues. Run with admin credentials (question 7). Every list method keeps
 // only what the names.ts guards say belongs to the environment; runDestroy checks each name with
 // those guards again before it calls a delete method here.
+import { randomUUID } from "node:crypto";
 import { DeleteStackCommand, DescribeStackEventsCommand, DescribeStacksCommand, GetTemplateCommand, ListStackResourcesCommand, UpdateTerminationProtectionCommand, type Stack } from "@aws-sdk/client-cloudformation";
 import { DeleteUserPoolCommand, DeleteUserPoolDomainCommand, DescribeUserPoolCommand, UpdateUserPoolCommand } from "@aws-sdk/client-cognito-identity-provider";
 import { DeleteTableCommand, DescribeTableCommand, ListTagsOfResourceCommand, UpdateTableCommand } from "@aws-sdk/client-dynamodb";
@@ -20,10 +21,12 @@ export interface DestroyApi {
   template(name: string): Promise<string>;
   stackResources(name: string): Promise<Array<{ logicalId: string; type: string; physicalId: string | undefined }>>;
   disableTerminationProtection(name: string): Promise<void>;
-  deleteStack(name: string): Promise<void>;
+  /** Starts the delete with its own ClientRequestToken, and answers that token. */
+  deleteStack(name: string): Promise<string>;
   latestEvent(name: string): Promise<string | undefined>;
-  /** The resources that failed to delete since the stack's latest delete began. */
-  failedResources(name: string): Promise<string[]>;
+  /** The resources that failed to delete: with `token`, only that delete's events; without, those
+   * since the stack's latest delete began. */
+  failedResources(name: string, token?: string): Promise<string[]>;
   workerInstances(env: string): Promise<Array<{ id: string; state: string; tags: Record<string, string> }>>;
   terminateInstances(ids: string[]): Promise<void>;
   workerVolumes(env: string): Promise<Array<{ id: string; state: string; tags: Record<string, string> }>>;
@@ -91,24 +94,30 @@ export function awsDestroyApi(
     },
     async disableTerminationProtection(name) { await cloudFormation.send(new UpdateTerminationProtectionCommand({ StackName: name, EnableTerminationProtection: false })); },
     // No RoleARN: CloudFormation deletes with the role the stack was deployed through.
-    async deleteStack(name) { await cloudFormation.send(new DeleteStackCommand({ StackName: name })); },
+    async deleteStack(name) {
+      const token = `agentx-destroy-${randomUUID()}`;
+      await cloudFormation.send(new DeleteStackCommand({ StackName: name, ClientRequestToken: token }));
+      return token;
+    },
     async latestEvent(name) {
       const latest = (await events(name))[0];
       return latest === undefined ? undefined : `${latest.LogicalResourceId ?? "stack"} ${latest.ResourceStatus ?? ""}`.trim();
     },
-    async failedResources(name) {
+    async failedResources(name, token) {
       // Events come newest first. Stop at the stack's own latest DELETE_IN_PROGRESS: anything older
       // belongs to an earlier delete (a failed earlier run) and is not this delete's failure.
       const failed: string[] = [];
-      let token: string | undefined;
+      let next: string | undefined;
       for (let page = 0; page < 20; page += 1) {
-        const answer = (await cloudFormation.send(new DescribeStackEventsCommand({ StackName: name, ...(token === undefined ? {} : { NextToken: token }) }))) as { StackEvents?: Array<{ LogicalResourceId?: string; ResourceStatus?: string; ResourceStatusReason?: string }>; NextToken?: string };
+        const answer = (await cloudFormation.send(new DescribeStackEventsCommand({ StackName: name, ...(next === undefined ? {} : { NextToken: next }) }))) as { StackEvents?: Array<{ LogicalResourceId?: string; ResourceStatus?: string; ResourceStatusReason?: string; ClientRequestToken?: string }>; NextToken?: string };
         for (const event of answer.StackEvents ?? []) {
+          // With this delete's own token, events of any other request are never this delete's.
+          if (token !== undefined && event.ClientRequestToken !== token) continue;
           if (event.LogicalResourceId === name && event.ResourceStatus === "DELETE_IN_PROGRESS") return failed;
           if (event.ResourceStatus === "DELETE_FAILED" && event.LogicalResourceId !== name) failed.push(`${event.LogicalResourceId ?? "resource"}: ${event.ResourceStatusReason ?? "no reason given"}`);
         }
-        token = answer.NextToken;
-        if (token === undefined) break;
+        next = answer.NextToken;
+        if (next === undefined) break;
       }
       return failed;
     },
@@ -214,18 +223,22 @@ export function awsDestroyApi(
       await unlessGone(async () => {
         const table = ((await dynamodb.send(new DescribeTableCommand({ TableName: name }))) as { Table?: { TableStatus?: string; DeletionProtectionEnabled?: boolean } }).Table;
         if (table === undefined || table.TableStatus === "DELETING") return;
-        if (table.DeletionProtectionEnabled === true) await dynamodb.send(new UpdateTableCommand({ TableName: name, DeletionProtectionEnabled: false }));
-        // The table stays busy (ResourceInUseException) while that change, or any other update, settles.
-        for (let attempt = 1; ; attempt += 1) {
-          try {
-            await dynamodb.send(new DeleteTableCommand({ TableName: name }));
-            return;
-          } catch (error) {
-            if (!(error instanceof Error && error.name === "ResourceInUseException")) throw error;
-            if (attempt >= TABLE_ATTEMPTS) throw agentXError("RUNTIME_UNAVAILABLE", `table ${name} is still busy after ${(TABLE_ATTEMPTS * TABLE_RETRY_MS) / 60_000} minutes; run agentx destroy again to continue`);
-            await sleep(TABLE_RETRY_MS);
+        // The table stays busy (ResourceInUseException) while an update settles, the protection
+        // change included, so both calls are retried.
+        const whenFree = async (run: () => Promise<unknown>) => {
+          for (let attempt = 1; ; attempt += 1) {
+            try {
+              await run();
+              return;
+            } catch (error) {
+              if (!(error instanceof Error && error.name === "ResourceInUseException")) throw error;
+              if (attempt >= TABLE_ATTEMPTS) throw agentXError("RUNTIME_UNAVAILABLE", `table ${name} is still busy after ${(TABLE_ATTEMPTS * TABLE_RETRY_MS) / 60_000} minutes; run agentx destroy again to continue`);
+              await sleep(TABLE_RETRY_MS);
+            }
           }
-        }
+        };
+        if (table.DeletionProtectionEnabled === true) await whenFree(() => dynamodb.send(new UpdateTableCommand({ TableName: name, DeletionProtectionEnabled: false })));
+        await whenFree(() => dynamodb.send(new DeleteTableCommand({ TableName: name })));
       }, undefined);
     },
     async deleteLogGroup(name) { await unlessGone(() => logs.send(new DeleteLogGroupCommand({ logGroupName: name })), undefined); },

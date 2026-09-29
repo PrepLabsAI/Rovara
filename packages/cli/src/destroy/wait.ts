@@ -23,7 +23,7 @@ async function aws<T>(what: string, run: () => Promise<T>): Promise<T> {
   }
 }
 
-export async function waitForStackDelete(input: { api: DestroyApi; name: string; write: (line: string) => void; sleep: (ms: number) => Promise<void>; now: () => number; pollMs?: number; noticeMs?: number; timeoutMs?: number }): Promise<void> {
+export async function waitForStackDelete(input: { api: DestroyApi; name: string; /** DeleteStack's ClientRequestToken, when this run started the delete. */ token?: string; write: (line: string) => void; sleep: (ms: number) => Promise<void>; now: () => number; pollMs?: number; noticeMs?: number; timeoutMs?: number }): Promise<void> {
   const { api, name } = input;
   const timeout = input.timeoutMs ?? STACK_DELETE_TIMEOUT_MS;
   const started = input.now();
@@ -38,7 +38,7 @@ export async function waitForStackDelete(input: { api: DestroyApi; name: string;
       return;
     }
     if (stack.status === "DELETE_FAILED") {
-      const reasons = await aws(`reading stack ${name}'s events`, () => api.failedResources(name));
+      const reasons = await aws(`reading stack ${name}'s events`, () => api.failedResources(name, input.token));
       throw agentXError("RUNTIME_UNAVAILABLE", `stack ${name} could not be deleted: ${reasons.join("; ") || "no reason given"}. Fix that, then run agentx destroy again to continue`);
     }
     if (input.now() - started >= timeout) {

@@ -300,3 +300,41 @@ describe("waits, fix round 1", () => {
     expect(index).toBe(2);
   });
 });
+
+describe("the destroy adapter, queued minors", () => {
+  it("deletes a stack with its own request token, and reports only that delete's failures", async () => {
+    const fake = fakeClients({
+      DeleteStack: () => ({}),
+      DescribeStackEvents: () => ({ StackEvents: [
+        { LogicalResourceId: "s", ResourceStatus: "DELETE_FAILED", ClientRequestToken: "mine" },
+        { LogicalResourceId: "Sg", ResourceStatus: "DELETE_FAILED", ResourceStatusReason: "now", ClientRequestToken: "mine" },
+        { LogicalResourceId: "s", ResourceStatus: "DELETE_IN_PROGRESS", ClientRequestToken: "mine" },
+        { LogicalResourceId: "Old", ResourceStatus: "DELETE_FAILED", ResourceStatusReason: "before", ClientRequestToken: "earlier" },
+      ] }),
+    });
+    const api = awsDestroyApi(fake.clients);
+    const token = await api.deleteStack("s");
+    expect(fake.calls[0]!.input).toEqual({ StackName: "s", ClientRequestToken: token });
+    expect(token).toMatch(/^[a-zA-Z0-9][-a-zA-Z0-9]{0,127}$/);
+    expect(await api.failedResources("s", "mine")).toEqual(["Sg: now"]);
+  });
+
+  it("passes the delete's token to the failure report", async () => {
+    let asked: string | undefined;
+    const api = { stack: async () => ({ status: "DELETE_FAILED", terminationProtection: false, outputs: {} }), failedResources: async (_name: string, token?: string) => { asked = token; return ["Sg: now"]; } } as unknown as DestroyApi;
+    let time = 0;
+    await expect(waitForStackDelete({ api, name: "s", token: "mine", write: () => undefined, now: () => time, sleep: async (ms) => { time += ms; } })).rejects.toThrow("Sg: now");
+    expect(asked).toBe("mine");
+  });
+
+  it("retries turning a busy table's deletion protection off", async () => {
+    let updates = 0;
+    const fake = fakeClients({
+      DescribeTable: () => ({ Table: { TableStatus: "UPDATING", DeletionProtectionEnabled: true } }),
+      UpdateTable: () => { updates += 1; if (updates < 2) throw Object.assign(new Error("busy"), { name: "ResourceInUseException" }); return {}; },
+      DeleteTable: () => ({}),
+    });
+    await awsDestroyApi(fake.clients, { sleep: async () => undefined }).deleteTable("t");
+    expect(fake.calls.map((call) => call.name)).toEqual(["DescribeTable", "UpdateTable", "UpdateTable", "DeleteTable"]);
+  });
+});
