@@ -200,6 +200,7 @@ async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord &
       }
       // The status and the category are fixed values, placed unescaped; the message and summary are redacted and escaped there.
       return endedReply({
+        kind: ended.kind,
         status: ended.status,
         ...(failed ? { failure: { category: failureCategory(ended.kind, ended.status, ended.error), message: ended.error ?? `the ${ended.kind} operation ended ${ended.status}` } } : {}),
         ...(summary === undefined ? {} : { summary }),

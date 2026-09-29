@@ -105,6 +105,16 @@ describe("the thread's texts (FR-032, C8)", () => {
     expect(setupFailedReply("npm ci exited 1")).toContain("npm ci exited 1");
   });
 
+  it("says a failed or cancelled pull request as the pull request, not as the task ending (final review M4)", () => {
+    expect(endedReply({ kind: "publish", status: "FAILED", failure: { category: "publication_failed", message: "push rejected" } }))
+      .toBe("The pull request could not be opened (FAILED, publication_failed): push rejected");
+    expect(endedReply({ kind: "publish", status: "INTERRUPTED", failure: { category: "interrupted", message: "the worker stopped" } }))
+      .toBe("The pull request could not be opened (INTERRUPTED, interrupted): the worker stopped");
+    expect(endedReply({ kind: "publish", status: "CANCELLED" })).toBe("The pull request was cancelled before it opened.");
+    // A task operation still reads as the task.
+    expect(endedReply({ kind: "task", status: "CANCELLED" })).toBe("The task ended CANCELLED.");
+  });
+
   it("keeps a summary full of & within 1,500 characters after escaping (F21)", () => {
     const head = "The task ended SUCCEEDED.";
     const text = endedReply({ status: "SUCCEEDED", summary: "&".repeat(1_500) });

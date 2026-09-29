@@ -47,7 +47,13 @@ export function setupFailedReply(error: string | undefined): string {
   return `The workspace could not be set up, so the task did not run: ${clean(error ?? "setup failed", 300)}`;
 }
 
-export function endedReply(input: { status: string; failure?: { category: string; message: string } | undefined; summary?: string | undefined }): string {
+export function endedReply(input: { kind?: string; status: string; failure?: { category: string; message: string } | undefined; summary?: string | undefined }): string {
+  // Final review M4: a pull request's outcome is the pull request's, not the task's.
+  if (input.kind === "publish" && input.status !== "SUCCEEDED") {
+    return input.failure === undefined
+      ? "The pull request was cancelled before it opened."
+      : `The pull request could not be opened (${input.status}, ${input.failure.category}): ${clean(input.failure.message, 300)}`;
+  }
   const head = input.failure === undefined
     ? `The task ended ${input.status}.`
     : `The task ended ${input.status} (${input.failure.category}): ${clean(input.failure.message, 300)}`;

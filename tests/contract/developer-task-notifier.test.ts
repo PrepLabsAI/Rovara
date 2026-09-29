@@ -105,6 +105,18 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     expect(JSON.stringify(h.posts)).not.toContain(SECRET);
   });
 
+  it("says a failed pull request as the pull request, in the thread (final review M4)", async () => {
+    const h = await notifierHarness();
+    await h.pump();
+    await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
+    await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
+    await h.pump();
+    const opened = await h.dev(MAYA, "POST", `/v1/dev/tasks/${h.taskId}/pull-requests`, { requestId: randomUUID(), title: "Fix the flaky retry test" });
+    await h.finish(h.workspaceId, String(opened.body.operationId), "FAILED", { error: "push rejected" });
+    await h.pump();
+    expect(h.posts.at(-1)!.text).toBe("The pull request could not be opened (FAILED, publication_failed): push rejected");
+  });
+
   it("posts nothing for a private task (US3 scenario 3)", async () => {
     const h = await notifierHarness({});
     await h.pump();
