@@ -8,6 +8,7 @@ import { CloudWatchLogsClient } from "@aws-sdk/client-cloudwatch-logs";
 import { CognitoIdentityProviderClient } from "@aws-sdk/client-cognito-identity-provider";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { EC2Client } from "@aws-sdk/client-ec2";
+import { ECRClient } from "@aws-sdk/client-ecr";
 import { KMSClient } from "@aws-sdk/client-kms";
 import { S3Client } from "@aws-sdk/client-s3";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
@@ -81,7 +82,7 @@ export function registerDestroyCommand(program: Command, context: DestroyCommand
           store: overrides.store ?? context.parameterStore(region),
           api: overrides.api ?? awsDestroyApi({
             cloudFormation: new CloudFormationClient(aws), ec2: new EC2Client(aws), s3: new S3Client(aws), dynamodb: new DynamoDBClient(aws),
-            logs: new CloudWatchLogsClient(aws), cognito: new CognitoIdentityProviderClient(aws), kms: new KMSClient(aws), secrets: new SecretsManagerClient(aws),
+            logs: new CloudWatchLogsClient(aws), cognito: new CognitoIdentityProviderClient(aws), kms: new KMSClient(aws), secrets: new SecretsManagerClient(aws), ecr: new ECRClient(aws),
           }),
           identity: overrides.identity ?? stsCallerIdentity(new STSClient(aws)),
           confirmLine: overrides.confirmLine ?? ((question) => reader!.ask(question)),

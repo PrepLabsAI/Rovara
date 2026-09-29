@@ -68,7 +68,8 @@ region it looked in, and exits 2. If the environment is in another region, pass 
 - Delete the GitHub App, on its settings page, Advanced, Delete GitHub App.
 - Delete the Slack app, at the bottom of its Basic Information page.
 - Revoke each connector's credential in Linear, Jira or Asana.
-- Delete the ECR repositories under `agentx-<env>/` that the image cache made.
+- Delete the ECR repositories under `agentx-<env>/` that the image cache made. It names them, and
+  prints this step only when there is at least one.
 
 ## By hand
 

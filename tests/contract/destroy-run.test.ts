@@ -280,9 +280,22 @@ describe("agentx destroy (FR-055, item 3)", () => {
   });
 
   it("ruling F32: names the ECR repositories under agentx-<env>/ as a manual step", async () => {
-    const h = await harness();
+    // Live check L6: the step is printed only when the pull-through cache made a repository.
+    const account = installedAccount();
+    account.repositories = ["agentx-staging/ghcr/preplabsai/agentx-worker", "agentx-staging-eu/ghcr/preplabsai/agentx-worker", "other/repo"];
+    const h = await harness({ account });
     const result = await runDestroy({ env: "staging", keepData: false }, h.deps);
-    expect(result.manualSteps.some((step) => step.startsWith("Delete the ECR repositories under agentx-staging/"))).toBe(true);
+    expect(result.manualSteps.filter((step) => step.includes("ECR"))).toEqual([
+      "Delete the ECR repositories under agentx-staging/ that the image pull-through cache created (agentx-staging/ghcr/preplabsai/agentx-worker): in the ECR console for us-east-1, Private registry, Repositories, filter by agentx-staging/ and delete each one (or aws ecr delete-repository --force --region us-east-1 --repository-name <name>).",
+    ]);
+  });
+
+  it("prints no ECR step when no repository under agentx-<env>/ exists (live check L6)", async () => {
+    const account = installedAccount();
+    account.repositories = ["agentx-staging-eu/ghcr/preplabsai/agentx-worker"];
+    const h = await harness({ account });
+    const result = await runDestroy({ env: "staging", keepData: false }, h.deps);
+    expect(result.manualSteps.filter((step) => step.includes("ECR"))).toEqual([]);
   });
 
   it("deletes a stack left in REVIEW_IN_PROGRESS by an interrupted init, without waiting for it", async () => {

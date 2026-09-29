@@ -264,13 +264,15 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
   if (settings !== undefined) await deps.tokenStore.delete(tokenStoreKey({ issuer: settings.identity.issuer, clientId: settings.identity.clientId, audience: settings.identity.audience }));
   result.localFiles = localFiles;
 
-  // 9. What AgentX cannot do.
+  // 9. What AgentX cannot do. Live check L6: the ECR step only when the cache made a repository.
+  const prefix = `${environmentPullThroughPrefix(env)}/`;
+  const repositories = (await api.pullThroughRepositories(env)).filter((name) => name.startsWith(prefix));
   result.manualSteps = [
     ...vendorSteps(inventory),
     ...(options.keepData && result.kept.length + keptSecrets.length > 0 ? [`Kept, as --keep-data asked: ${[...result.kept, ...keptSecrets.map((name) => `secret ${name}`)].join(", ")}. A new install named ${env} cannot reuse the secret names until you delete them.`] : []),
     ...(options.keepData ? ["Run agentx destroy again, without --keep-data, to remove what was kept."] : []),
     // Ruling F32: the image pull-through cache made these repositories, outside every stack.
-    `Delete the ECR repositories under ${environmentPullThroughPrefix(env)}/ that the image pull-through cache created: in the ECR console for ${deps.region}, Private registry, Repositories, filter by ${environmentPullThroughPrefix(env)}/ and delete each one (or aws ecr delete-repository --force --region ${deps.region} --repository-name <name>).`,
+    ...(repositories.length === 0 ? [] : [`Delete the ECR repositories under ${prefix} that the image pull-through cache created (${repositories.join(", ")}): in the ECR console for ${deps.region}, Private registry, Repositories, filter by ${prefix} and delete each one (or aws ecr delete-repository --force --region ${deps.region} --repository-name <name>).`]),
     ...(result.retainedDeleted.some((entry) => entry.startsWith("AWS::KMS::Key")) ? ["The KMS keys are scheduled for deletion in 7 days; until then, aws kms cancel-key-deletion brings one back."] : []),
     ...result.leftInPlace.map((entry) => `Left in place: ${entry}.`),
   ];

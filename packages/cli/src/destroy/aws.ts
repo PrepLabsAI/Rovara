@@ -7,11 +7,12 @@ import { DeleteStackCommand, DescribeStackEventsCommand, DescribeStacksCommand, 
 import { DeleteUserPoolCommand, DeleteUserPoolDomainCommand, DescribeUserPoolCommand, UpdateUserPoolCommand } from "@aws-sdk/client-cognito-identity-provider";
 import { DeleteTableCommand, DescribeTableCommand, ListTagsOfResourceCommand, UpdateTableCommand } from "@aws-sdk/client-dynamodb";
 import { DeleteVolumeCommand, DescribeInstancesCommand, DescribeVolumesCommand, TerminateInstancesCommand } from "@aws-sdk/client-ec2";
+import { DescribeRepositoriesCommand } from "@aws-sdk/client-ecr";
 import { DeleteAliasCommand, DescribeKeyCommand, ListAliasesCommand, ListResourceTagsCommand, ScheduleKeyDeletionCommand } from "@aws-sdk/client-kms";
 import { DeleteLogGroupCommand, DescribeLogGroupsCommand, ListTagsForResourceCommand } from "@aws-sdk/client-cloudwatch-logs";
 import { DeleteBucketCommand, DeleteObjectsCommand, GetBucketTaggingCommand, ListObjectVersionsCommand } from "@aws-sdk/client-s3";
 import { DeleteSecretCommand, DescribeSecretCommand, ListSecretsCommand, RestoreSecretCommand } from "@aws-sdk/client-secrets-manager";
-import { agentXError } from "@agentx/contracts";
+import { agentXError, environmentPullThroughPrefix } from "@agentx/contracts";
 import type { RetainedResource } from "./inventory.js";
 import { isOwnedAlias, isOwnedSecret, isOwnedWorker } from "./names.js";
 
@@ -42,6 +43,9 @@ export interface DestroyApi {
   secrets(env: string): Promise<Array<{ name: string; scheduled: boolean }>>;
   /** Reads whether the secret is scheduled for deletion itself, so one scheduled by hand is handled too. */
   deleteSecret(name: string): Promise<void>;
+  /** The ECR repositories under agentx-<env>/ that the image pull-through cache created (ruling F32).
+   * destroy only names them: it does not delete them. */
+  pullThroughRepositories(env: string): Promise<string[]>;
 }
 
 type Send = { send(command: unknown): Promise<unknown> };
@@ -65,10 +69,10 @@ const TABLE_ATTEMPTS = 36;
 const VOLUME_STATES = ["creating", "available", "in-use", "error"];
 
 export function awsDestroyApi(
-  clients: { cloudFormation: Send; ec2: Send; s3: Send; dynamodb: Send; logs: Send; cognito: Send; kms: Send; secrets: Send },
+  clients: { cloudFormation: Send; ec2: Send; s3: Send; dynamodb: Send; logs: Send; cognito: Send; kms: Send; secrets: Send; ecr: Send },
   options: { sleep?: (ms: number) => Promise<void> } = {},
 ): DestroyApi {
-  const { cloudFormation, ec2, s3, dynamodb, logs, cognito, kms, secrets } = clients;
+  const { cloudFormation, ec2, s3, dynamodb, logs, cognito, kms, secrets, ecr } = clients;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const events = async (name: string) => ((await cloudFormation.send(new DescribeStackEventsCommand({ StackName: name }))) as { StackEvents?: Array<{ LogicalResourceId?: string; ResourceStatus?: string; ResourceStatusReason?: string }> }).StackEvents ?? [];
   return {
@@ -309,6 +313,18 @@ export function awsDestroyApi(
         }
         await secrets.send(new DeleteSecretCommand({ SecretId: name, ForceDeleteWithoutRecovery: true }));
       }, undefined);
+    },
+    async pullThroughRepositories(env) {
+      // DescribeRepositories has no name-prefix filter, so every page is read and filtered here.
+      const prefix = `${environmentPullThroughPrefix(env)}/`;
+      const found: string[] = [];
+      let token: string | undefined;
+      do {
+        const page = (await ecr.send(new DescribeRepositoriesCommand(token === undefined ? {} : { nextToken: token }))) as { repositories?: Array<{ repositoryName?: string }>; nextToken?: string };
+        found.push(...(page.repositories ?? []).flatMap((repository) => (repository.repositoryName?.startsWith(prefix) === true ? [repository.repositoryName] : [])));
+        token = page.nextToken;
+      } while (token !== undefined);
+      return found;
     },
   };
 }

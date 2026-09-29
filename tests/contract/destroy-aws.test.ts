@@ -15,7 +15,7 @@ function fakeClients(handlers: Record<string, Handler>) {
       return handler(command.input);
     },
   };
-  return { calls, clients: { cloudFormation: client, ec2: client, s3: client, dynamodb: client, logs: client, cognito: client, kms: client, secrets: client } };
+  return { calls, clients: { cloudFormation: client, ec2: client, s3: client, dynamodb: client, logs: client, cognito: client, kms: client, secrets: client, ecr: client } };
 }
 const notFound = (name: string) => () => { throw Object.assign(new Error(`${name}`), { name }); };
 
@@ -35,6 +35,17 @@ describe("the destroy adapter", () => {
     expect(batches.reduce((sum, size) => sum + size, 0)).toBe(1102);
     expect(fake.calls.at(-1)?.name).toBe("DeleteBucket");
     expect(progress.at(-1)).toBe(1102);
+  });
+
+  it("lists only the environment's own pull-through repositories, across pages (live check L6)", async () => {
+    let page = 0;
+    const fake = fakeClients({
+      DescribeRepositories: () => (page++ === 0
+        ? { repositories: [{ repositoryName: "agentx-staging/ghcr/preplabsai/agentx-worker" }, { repositoryName: "agentx-staging-eu/ghcr/x" }], nextToken: "t1" }
+        : { repositories: [{ repositoryName: "agentx-staging/ghcr/preplabsai/agentx-slack" }, { repositoryName: "other" }] }),
+    });
+    expect(await awsDestroyApi(fake.clients).pullThroughRepositories("staging")).toEqual(["agentx-staging/ghcr/preplabsai/agentx-worker", "agentx-staging/ghcr/preplabsai/agentx-slack"]);
+    expect(fake.calls.map((call) => call.input)).toEqual([{}, { nextToken: "t1" }]);
   });
 
   it("treats a bucket that is already gone as deleted", async () => {

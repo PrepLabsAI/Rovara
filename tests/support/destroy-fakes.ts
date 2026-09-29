@@ -17,6 +17,8 @@ export interface FakeAccount {
   tags: Map<string, Record<string, string>>;   // physical id -> tags; absent means gone
   secrets: Array<{ name: string; scheduled: boolean }>;
   aliases: string[];
+  /** ECR repository names in the account (every one, as DescribeRepositories lists them). */
+  repositories?: string[];
   calls: string[];
   /** The token each failedResources call was given. */
   failedTokens?: Array<string | undefined>;
@@ -108,6 +110,7 @@ export function fakeDestroyApi(account: FakeAccount, clock: { now: () => number 
     async aliases() { return account.aliases.map((name) => ({ name })); },
     async deleteAlias(name) { account.calls.push(`delete alias ${name}`); account.aliases = account.aliases.filter((alias) => alias !== name); },
     async secrets() { return account.secrets; },
+    async pullThroughRepositories(env) { return (account.repositories ?? []).filter((name) => name.startsWith(`agentx-${env}/`)); },
     async deleteSecret(name) {
       const matches = account.secrets.filter((secret) => isSecretId(name, secret.name));
       if (matches.some((secret) => forceDeleted.has(secret.name))) throw new Error(`test: ${name} was already force-deleted; RestoreSecret fails on it`);
@@ -141,5 +144,5 @@ export function forceDeletedSecretsClient(forceDeleted: string[]) {
       return {};
     },
   };
-  return { calls, clients: { cloudFormation: client, ec2: client, s3: client, dynamodb: client, logs: client, cognito: client, kms: client, secrets: client } };
+  return { calls, clients: { cloudFormation: client, ec2: client, s3: client, dynamodb: client, logs: client, cognito: client, kms: client, secrets: client, ecr: client } };
 }
