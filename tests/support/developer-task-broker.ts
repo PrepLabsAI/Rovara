@@ -1,10 +1,12 @@
 // A hosted broker with developer sign-in for developer task tests: the Slack harness's fake table,
 // the payments project bound to the test channel, two signed-in developers, and worker callbacks.
 import { randomUUID } from "node:crypto";
+import { marshall } from "@aws-sdk/util-dynamodb";
 import { vi } from "vitest";
 import { sharedTaskKey, type ChannelInfoRequest, type ChannelInfoResponse, type ChannelMembersRequest, type ChannelMembersResponse } from "@agentx/contracts";
 import type { DeveloperApiConfiguration } from "../../packages/broker/src/aws/developer-routes.js";
 import type { DeveloperTaskActions } from "../../packages/broker/src/aws/developer-task-actions.js";
+import type { StreamRecord } from "../../packages/broker/src/developer/notifications.js";
 import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
 import { localSigner } from "./developer-fakes.js";
 import type { FakeDynamoDb } from "./fake-dynamodb.js";
@@ -168,4 +170,24 @@ export function markThreadPosted(db: FakeDynamoDb, taskId: string, threadTs = "1
     developerId: task.developerId, developerName: task.developerName, project: task.project, mode: share.mode, sharedAt: share.sharedAt,
   });
   return `${thread.teamId}/${thread.channelId}/${threadTs}`;
+}
+
+/** Every committed write since the last take(), as the state table's stream would deliver it. */
+export function recordStream(db: FakeDynamoDb): { take(): StreamRecord[] } {
+  let records: StreamRecord[] = [];
+  let sequence = 0;
+  const image = (item: Record<string, unknown>) => marshall(item, { removeUndefinedValues: true, convertClassInstanceToMap: true });
+  db.onWrite(({ before, after }) => {
+    sequence += 1;
+    records.push({
+      eventID: `event-${sequence}`,
+      eventName: before === undefined ? "INSERT" : after === undefined ? "REMOVE" : "MODIFY",
+      dynamodb: {
+        ApproximateCreationDateTime: Math.floor(Date.now() / 1000),
+        ...(after === undefined ? {} : { NewImage: image(after) }),
+        ...(before === undefined ? {} : { OldImage: image(before) }),
+      },
+    });
+  });
+  return { take: () => { const taken = records; records = []; return taken; } };
 }

@@ -21,6 +21,13 @@ interface WriteAction {
 
 export class FakeDynamoDb {
   readonly items = new Map<string, Item>();
+  private readonly listeners = new Set<(change: { before?: Item; after?: Item }) => void>();
+
+  /** Each committed write's item before and after, as a DynamoDB stream record carries them. `set` (seeding) is not reported. */
+  onWrite(listener: (change: { before?: Item; after?: Item }) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
 
   get(pk: string, sk: string): Item | undefined {
     return this.items.get(itemKey(pk, sk));
@@ -114,9 +121,15 @@ export class FakeDynamoDb {
     }
     for (const action of actions) {
       if (action.kind === "ConditionCheck") continue;
-      const next = action.apply(this.items.get(action.key));
+      const before = this.items.get(action.key);
+      const next = action.apply(before);
       if (next === undefined) this.items.delete(action.key);
       else this.items.set(action.key, next);
+      // Deleting an item that does not exist leaves no stream record, as in DynamoDB.
+      if (before === undefined && next === undefined) continue;
+      for (const listener of this.listeners) {
+        listener({ ...(before === undefined ? {} : { before: structuredClone(before) }), ...(next === undefined ? {} : { after: structuredClone(next) }) });
+      }
     }
   }
 }
