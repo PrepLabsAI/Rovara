@@ -15,6 +15,8 @@ function slackShape(value: string): string | undefined {
   return undefined;
 }
 
+const ownOpenRouterSecret = (env: string) => new RegExp(`:secret:agentx/${env}/openrouter-[A-Za-z0-9]{6}$`);
+
 export async function secretChecks(context: DoctorContext): Promise<DoctorCheck[]> {
   const { env, settings, answers, services } = context;
   const put = (name: string, shape: string) => `aws secretsmanager put-secret-value --secret-id ${name} --secret-string file://${shape} --region ${settings.region}`;
@@ -42,10 +44,17 @@ export async function secretChecks(context: DoctorContext): Promise<DoctorCheck[
       fix: `agentx --env ${env} config set alerts.address --value-file <file holding the PagerDuty or Opsgenie address>`,
     });
   }
-  if (settings.models.openRouter?.secretArn.includes(`:secret:agentx/${env}/openrouter`) === true) {
-    rules.push({ name: `agentx/${env}/openrouter`, shape: (value) => (value.trim() === "" ? "is empty" : undefined), fix: `store the OpenRouter key again: ${put(`agentx/${env}/openrouter`, "openrouter-key.txt")}` });
-  }
   const checks: DoctorCheck[] = [];
+  const openRouterArn = settings.models.openRouter?.secretArn;
+  if (openRouterArn !== undefined) {
+    // Secrets Manager adds a six-character suffix to a secret's name in its ARN; anchoring on it keeps
+    // agentx/<env>/openrouter-mine from passing for the environment's own secret.
+    if (ownOpenRouterSecret(env).test(openRouterArn)) {
+      rules.push({ name: `agentx/${env}/openrouter`, shape: (value) => (value.trim() === "" ? "is empty" : undefined), fix: `store the OpenRouter key again: ${put(`agentx/${env}/openrouter`, "openrouter-key.txt")}` });
+    } else {
+      checks.push(check("secrets", "OpenRouter key", "skip", `the OpenRouter key is in a secret you made yourself (${openRouterArn}), which doctor's role cannot read; check it yourself`));
+    }
+  }
   for (const rule of rules) {
     const value = await services.secrets.get(rule.name);
     if (value === undefined) { checks.push(check("secrets", rule.name, "fail", "does not exist", rule.fix)); continue; }

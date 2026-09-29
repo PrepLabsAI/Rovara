@@ -13,9 +13,11 @@ const safeCode = (code: string | undefined) => (code !== undefined && /^[a-z0-9_
 export async function slackChecks(context: DoctorContext): Promise<DoctorCheck[]> {
   const { env, settings, progress, services } = context;
   const reinstall = `reinstall the Slack app (api.slack.com/apps, Install App), then store the new Bot User OAuth Token in ${slackSecretName(env)}`;
+  // One read of the Slack secret serves both the token and the signing secret.
+  const raw = await services.secrets.get(slackSecretName(env));
   let token: string;
   try {
-    token = await readSlackBotToken(services.secrets, env);
+    token = await readSlackBotToken({ get: async () => raw }, env);
   } catch (error) {
     return [check("slack", "bot token", "fail", plainMessage(error), reinstall)];
   }
@@ -35,15 +37,23 @@ export async function slackChecks(context: DoctorContext): Promise<DoctorCheck[]
 
   const controlPlane = settings.stacks["control-plane"] ?? environmentStackName(env, "control-plane");
   const outputs = (await services.stacks.describe(controlPlane))?.outputs ?? {};
-  const secret = JSON.parse((await services.secrets.get(slackSecretName(env))) ?? "{}") as { signingSecret?: string };
-  if (outputs.SlackEventsUrl === undefined || outputs.SlackInteractivityUrl === undefined || secret.signingSecret === undefined) {
+  const secret = JSON.parse(raw ?? "{}") as { signingSecret?: string };
+  if (outputs.SlackEventsUrl === undefined || outputs.SlackInteractivityUrl === undefined || typeof secret.signingSecret !== "string") {
     checks.push(check("slack", "request URLs", "skip", "the control-plane stack reports no Slack URLs, or no signing secret is stored"));
   } else {
     try {
       await probeSlackUrls({ eventsUrl: outputs.SlackEventsUrl, interactivityUrl: outputs.SlackInteractivityUrl, signingSecret: secret.signingSecret, fetch: services.fetch, now: services.now, sleep: services.sleep, write: () => undefined, timeoutMs: PROBE_TIMEOUT_MS, pollMs: 5_000 });
       checks.push(check("slack", "request URLs", "ok", "the events URL echoes a signed challenge and the interactivity URL answers; Slack's own Verified mark is on the app's Event Subscriptions page"));
     } catch (error) {
-      checks.push(check("slack", "request URLs", "fail", plainMessage(error), `check that the Slack app's Request URLs are ${outputs.SlackEventsUrl} and ${outputs.SlackInteractivityUrl}, and the control plane's SlackIngress logs`));
+      const message = plainMessage(error);
+      // probeSlackUrls words its 401 timeout for init (a new secret, "run agentx init again"); doctor's secret is not new.
+      const refused = /still refuses requests signed with the new signing secret/.exec(message);
+      if (refused !== null) {
+        const url = message.slice(0, refused.index).trim();
+        checks.push(check("slack", "request URLs", "fail", `${url} refuses requests signed with the signing secret stored in ${slackSecretName(env)}`, `check that ${slackSecretName(env)} holds the Slack app's Signing Secret (not the Client Secret) and that this computer's clock is correct (Slack refuses signatures older than 5 minutes), then run agentx doctor again`));
+      } else {
+        checks.push(check("slack", "request URLs", "fail", message.replace("then run agentx init again", "then run agentx doctor again"), `check that the Slack app's Request URLs are ${outputs.SlackEventsUrl} and ${outputs.SlackInteractivityUrl}, and the control plane's SlackIngress logs`));
+      }
     }
   }
 
@@ -52,8 +62,14 @@ export async function slackChecks(context: DoctorContext): Promise<DoctorCheck[]
     checks.push(check("slack", "bound channels", "skip", "agentx init recorded no bound channel; channels bound later are not listed until the control plane can report them"));
     return checks;
   }
-  const found = await services.slackChannels.find(token, channel);
   const bot = auth.user ?? "the bot";
+  let found: Awaited<ReturnType<typeof services.slackChannels.find>>;
+  try {
+    found = await services.slackChannels.find(token, channel);
+  } catch (error) {
+    checks.push(check("slack", `#${channel}`, "fail", plainMessage(error), "check this computer's network access to slack.com, then run agentx doctor again"));
+    return checks;
+  }
   if (found === undefined) checks.push(check("slack", `#${channel}`, "fail", "the channel no longer exists, or it is private and the bot is not in it", `in #${channel}, type /invite @${bot}, or bind another channel with agentx --env ${env} channel add`));
   else if (!found.isMember) checks.push(check("slack", `#${channel}`, "fail", "the bot is not a member", `in #${channel}, type /invite @${bot}`));
   else checks.push(check("slack", `#${channel}`, "ok", "the bot is a member"));
