@@ -25,7 +25,7 @@ const hex = () => randomUUID().replaceAll("-", "").slice(0, 17);
 
 type Start = (input: { stateMachineArn: string; name: string; input: string }) => Promise<string>;
 
-function setup(options: { instances?: InstanceView[]; volumes?: VolumeView[]; executions?: Record<string, ExecutionStatus>; ping?: ReconcilerDependencies["ping"] } = {}) {
+function setup(options: { instances?: InstanceView[]; volumes?: VolumeView[]; executions?: Record<string, ExecutionStatus>; ping?: ReconcilerDependencies["ping"]; sweepStuckSetups?: ReconcilerDependencies["sweepStuckSetups"]; log?: ReconcilerDependencies["log"] } = {}) {
   const db = new FakeDynamoDb();
   const start = vi.fn<Start>(async ({ name }) => `arn:aws:states:us-east-1:111122223333:execution:provisioner:${name}`);
   const sessions = new SessionManager({
@@ -53,7 +53,8 @@ function setup(options: { instances?: InstanceView[]; volumes?: VolumeView[]; ex
     binding: async () => binding,
     emit,
     now: () => NOW,
-    log: () => undefined,
+    log: options.log ?? (() => undefined),
+    ...(options.sweepStuckSetups === undefined ? {} : { sweepStuckSetups: options.sweepStuckSetups }),
   });
   return { db, sessions, state, start, terminate, deleteVolume, quarantine, emit, reconcile };
 }
@@ -241,5 +242,38 @@ describe("failing an active operation", () => {
     db.set({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${taskId}`, kind: "task", status: "SUCCEEDED", fence: 4 });
     expect(await failActiveOperation(db, "state", workspaceId, "lost")).toBeUndefined();
     expect(db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${taskId}`)).toMatchObject({ status: "SUCCEEDED" });
+  });
+});
+
+describe("reconciler: stuck setups (spec 025 FR-055)", () => {
+  it("runs the sweep last, reports what it failed and counts it", async () => {
+    const failedWorkspace = randomUUID();
+    const sweep = vi.fn(async () => ({ failed: [failedWorkspace], dropped: 0, kept: 0 }));
+    const logs: Array<Record<string, unknown>> = [];
+    const { reconcile, emit } = setup({ sweepStuckSetups: sweep, log: (entry) => { logs.push(entry); } });
+    const report = await reconcile();
+    expect(sweep).toHaveBeenCalledExactlyOnceWith(NOW);
+    expect(report.stuckSetups).toEqual([failedWorkspace]);
+    expect(emit).toHaveBeenCalledWith(expect.objectContaining({ ReconcilerStuckSetups: 1 }));
+    // The sweep logs each failed setup itself (stuck_setup.failed); the reconciler does not repeat it.
+    expect(logs.filter((entry) => JSON.stringify(entry).includes(failedWorkspace))).toEqual([]);
+  });
+
+  it("still emits the EC2 repair metrics when the sweep throws, counts the error, and fails the run (F17)", async () => {
+    const orphan: InstanceView = { instanceId: `i-${hex()}`, state: "running", launchedAt: minutesAgo(30) };
+    const logs: Array<Record<string, unknown>> = [];
+    const failure = Object.assign(new Error("PLANTED-SWEEP-MESSAGE"), { name: "ProvisionedThroughputExceededException" });
+    const { reconcile, emit, terminate } = setup({ instances: [orphan], sweepStuckSetups: async () => { throw failure; }, log: (entry) => { logs.push(entry); } });
+    await expect(reconcile()).rejects.toBe(failure);
+    expect(terminate).toHaveBeenCalledWith(orphan.instanceId);
+    expect(emit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ReconcilerOrphanInstances: 1, ReconcilerStuckSetups: 0, ReconcilerStuckSetupErrors: 1 }));
+    expect(logs).toContainEqual({ event: "reconciler.stuck_setup_sweep_failed", errorName: "ProvisionedThroughputExceededException" });
+    expect(JSON.stringify(logs)).not.toContain("PLANTED-SWEEP-MESSAGE");
+  });
+
+  it("reports no stuck setups and no sweep errors when no sweep is wired", async () => {
+    const { reconcile, emit } = setup();
+    expect((await reconcile()).stuckSetups).toEqual([]);
+    expect(emit).toHaveBeenCalledWith(expect.objectContaining({ ReconcilerStuckSetups: 0, ReconcilerStuckSetupErrors: 0 }));
   });
 });

@@ -70,6 +70,11 @@ export function createLazyWorker(input: {
       return limitRefusal(result.limit);
     }
     if (result.outcome === "CLOSED") return unavailableRefusal("this thread's workspace is closed; start a new Slack thread for coding work");
+    // Spec 025 C11: a shared task's thread that stopped taking requests mid-turn. The next message
+    // gets the thread's notice from the ensure route.
+    if (result.outcome === "VIEW_ONLY") {
+      return unavailableRefusal(result.closed ? "the task this thread followed is closed" : "this thread only follows a task a developer is driving from their AI tool");
+    }
     if (result.status === "PREPARING" && result.operationId) {
       await input.post(result.created ? NEW_WORKSPACE_MESSAGE : STILL_PREPARING_MESSAGE);
       const controller = new AbortController();
@@ -119,7 +124,7 @@ export function createLazyWorker(input: {
  * Settles with the wait's answer, or "TIMED_OUT" once the deadline passes. Once the deadline
  * passes, `controller` is aborted so the background poll stops instead of continuing forever.
  */
-async function withDeadline<T>(wait: Promise<T>, milliseconds: number, controller: AbortController): Promise<T | "TIMED_OUT"> {
+export async function withDeadline<T>(wait: Promise<T>, milliseconds: number, controller: AbortController): Promise<T | "TIMED_OUT"> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<"TIMED_OUT">((resolve) => {
     timer = setTimeout(() => {

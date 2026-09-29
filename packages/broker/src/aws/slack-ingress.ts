@@ -11,15 +11,20 @@ import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-sec
 import { SendMessageCommand, SQSClient } from "@aws-sdk/client-sqs";
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import {
+  CLOSED_SHARED_NOTICE,
+  SharedTaskRecordSchema,
   SlackChannelBindingSchema,
   SlackChannelIdSchema,
   SlackMessageTimestampSchema,
   SlackRequestMessageSchema,
   SlackTeamIdSchema,
   SlackUserIdSchema,
+  VIEW_ONLY_NOTICE,
   isStopCommand,
   parseConfirmationReply,
   queuedBehindAttributes,
+  sharedNoticeClaim,
+  sharedTaskKey,
   slackRequestText,
   slackThreadSubject,
   type SlackChannelBinding,
@@ -55,6 +60,15 @@ export interface SlackIngressDependencies {
    * would otherwise wait behind. Absent: "stop" is an ordinary request.
    */
   stopTask?: (thread: SlackThread, userId: string) => Promise<"CANCEL_REQUESTED" | "NOTHING_RUNNING">;
+  /**
+   * Spec 025 FR-035: shared task threads. Absent (the legacy deployment): every thread is ordinary.
+   * `lookup` gives the thread's mode, or undefined for an ordinary thread, and throws when it cannot
+   * tell. `claimNotice` answers true for at most one caller per thread per hour.
+   */
+  sharedTask?: {
+    lookup: (thread: SlackThread) => Promise<{ mode: "view" | "continue"; closed: boolean } | undefined>;
+    claimNotice: (threadSubject: string, nowSeconds: number, kind: "view" | "closed") => Promise<boolean>;
+  };
   now?: () => number;
   log?: SlackIngressLog;
   /**
@@ -148,6 +162,30 @@ export function createSlackIngressHandler(dependencies: SlackIngressDependencies
       return ignore(log, "duplicate_event", { eventId: mention.eventId });
     }
     const subject = slackThreadSubject(thread);
+    // FR-035, C10: a view-only or closed shared thread gets one fixed notice an hour. Nothing is
+    // queued or counted, so no thread workspace is ever made for it. A continue thread goes on as
+    // any thread does. A record that cannot be read fails closed: Slack retries the event.
+    if (dependencies.sharedTask) {
+      let shared: { mode: "view" | "continue"; closed: boolean } | undefined;
+      try {
+        shared = await dependencies.sharedTask.lookup(thread);
+      } catch (error) {
+        await releaseQuietly(dependencies, log, mention.eventId, "shared_task.release_failed");
+        log("shared_task.lookup_failed", { eventId: mention.eventId, errorName: errorName(error) });
+        return respond(500, { error: "shared thread could not be checked" });
+      }
+      if (shared !== undefined && (shared.mode === "view" || shared.closed)) {
+        let notify = false;
+        try {
+          notify = await dependencies.sharedTask.claimNotice(subject, nowSeconds, shared.closed ? "closed" : "view");
+        } catch (error) {
+          log("shared_task.notice_claim_failed", { eventId: mention.eventId, errorName: errorName(error) });
+        }
+        log("shared_task.not_run", { eventId: mention.eventId, closed: shared.closed, notified: notify });
+        if (notify) await post(dependencies, log, thread, shared.closed ? CLOSED_SHARED_NOTICE : VIEW_ONLY_NOTICE, "shared_task.notice_failed");
+        return respond(200, { ok: true });
+      }
+    }
     // Set only when a turn was actually counted, so the enqueue-failure path knows whether (and at
     // which window) to undo it.
     let countedWindowStart: number | undefined;
@@ -501,6 +539,27 @@ function createAwsSlackIngressHandler() {
     async postMessage(input) {
       await postSlackMessage((await secrets()).botToken, input);
     },
+    ...(process.env.SHARED_TASKS === "enabled" ? {
+      sharedTask: {
+        async lookup(thread: SlackThread) {
+          const response = await documentClient.send(new GetCommand({ TableName: stateTableName, Key: sharedTaskKey(thread), ConsistentRead: true }));
+          if (response.Item === undefined) return undefined;
+          // An unreadable record throws, and the handler fails closed.
+          const record = SharedTaskRecordSchema.parse(response.Item);
+          return { mode: record.mode, closed: record.closedAt !== undefined };
+        },
+        async claimNotice(threadSubject: string, nowSeconds: number, kind: "view" | "closed") {
+          try {
+            // The same claim the Slack service sends (F13), so one notice an hour holds across both.
+            await documentClient.send(new UpdateCommand({ TableName: threadsTableName, ...sharedNoticeClaim(threadSubject, nowSeconds, kind) }));
+            return true;
+          } catch (error) {
+            if (error instanceof Error && error.name === "ConditionalCheckFailedException") return false;
+            throw error;
+          }
+        },
+      },
+    } : {}),
     ...(brokerFunctionName === undefined ? {} : {
       // The broker holds the state table and callback key; this Lambda gets neither (#126).
       async stopTask(thread: SlackThread, userId: string) {

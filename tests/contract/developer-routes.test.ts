@@ -413,7 +413,7 @@ describe("checkProjectAccess, FR-018's first three checks (FR-013, FR-014, FR-04
     vi.fn(async (request: ChannelInfoRequest) => ({ ok: true as const, channels: request.channelIds.filter((id) => channels[id] !== undefined).map((channelId) => ({ channelId, ...channels[channelId]! })) }));
 
   it("grants a granted project, and a project through a bound channel the caller is in", async () => {
-    expect(await checkProjectAccess(deps(), maya, "solo")).toEqual({ revision: 1, policy: { enabled: true, share: "optional", shareMode: { default: "view", allowContinue: true }, channelMembersMayUse: true }, access: "granted" });
+    expect(await checkProjectAccess(deps(), maya, "solo")).toEqual({ revision: 1, policy: { enabled: true, share: "optional", shareMode: { default: "view", allowContinue: true }, channelMembersMayUse: true }, access: "granted", channelIds: [] });
     expect(await checkProjectAccess(deps(), maya, "payments-api")).toMatchObject({ revision: 7, access: "channel" });
     expect(channelMembers).toHaveBeenLastCalledWith({ kind: "channel-members", slackUserId: "U0MAYA001", channelIds: ["C0PAY0001"] });
   });

@@ -31,6 +31,7 @@ import type { Construct } from "constructs";
 import { WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
 import { DeveloperSignIn, developerSignInParameters } from "./developer-signin.js";
+import { DeveloperTaskNotifier } from "./developer-task-notifier.js";
 import { SessionLifecycle } from "./session-lifecycle.js";
 
 const MAX_DISPATCH_ATTEMPTS = 5;
@@ -161,6 +162,10 @@ export class ControlPlaneStack extends Stack {
     state.grantStreamRead(outboxPublisher);
     state.grantReadWriteData(outboxPublisher);
     dispatchQueue.grantSendMessages(outboxPublisher);
+    // The State table's stream has two readers: this outbox publisher and, in named environments,
+    // the DeveloperTaskNotifier (developer-task-notifier.ts). That is the per-shard maximum AWS
+    // recommends: later phases (such as 25e's Slack Confirm DMs) add filters to an existing
+    // trigger, never a third reader.
     new lambda.EventSourceMapping(this, "OutboxStreamMapping", {
       target: outboxPublisher,
       eventSourceArn: state.tableStreamArn!,
@@ -618,6 +623,22 @@ export class ControlPlaneStack extends Stack {
       new DeveloperSignIn(this, "DeveloperSignIn", {
         naming, env: naming.env, api, stage: defaultStage, brokerIntegration: integration, broker, slackSecret, parameters: signInParameters, turnRecords,
       });
+      // Spec 025 phase 25c: sharing, named environments only (D14).
+      new DeveloperTaskNotifier(this, "DeveloperTaskNotifier", { naming, state, slackSecret, notifyOperator });
+      // C10: the ingress reads shared thread records by key; its SLACK_BINDING# statement is unchanged.
+      slackIngress.addEnvironment("SHARED_TASKS", "enabled");
+      slackIngress.addToRolePolicy(new iam.PolicyStatement({
+        actions: ["dynamodb:GetItem"],
+        resources: [state.tableArn],
+        conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SHARED_TASK#*"] } },
+      }));
+      // C14: TASK_BUSY counts the shared thread's waiting messages.
+      broker.addEnvironment("SLACK_THREADS_TABLE_NAME", slackThreads.tableName);
+      broker.addToRolePolicy(new iam.PolicyStatement({
+        actions: ["dynamodb:GetItem"],
+        resources: [slackThreads.tableArn],
+        conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["THREAD#*"] } },
+      }));
     }
 
     const sessions = new SessionLifecycle(this, "Sessions", { naming, state, invokeSigningKey, notifyOperator });

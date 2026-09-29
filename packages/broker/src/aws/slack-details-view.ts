@@ -43,16 +43,25 @@ export function escapeSlack(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+export interface FitOptions {
+  /** Quote every line with `>`, the quote marks counted in the limit. */
+  quoteLines?: boolean;
+  /** The text was already cut upstream, so it ends with CUT_MARKER even when it fits. */
+  cut?: boolean;
+}
+
 /** Escapes, then fits `limit` characters, never cutting inside an escape or a surrogate pair; marks a cut. */
-export function fitEscaped(raw: string, limit: number): string {
-  const escaped = escapeSlack(raw);
-  if (escaped.length <= limit) return escaped;
+export function fitEscaped(raw: string, limit: number, { quoteLines = false, cut = false }: FitOptions = {}): string {
+  const piece = (character: string) => (quoteLines && character === "\n" ? "\n>" : escapeSlack(character));
+  const prefix = quoteLines ? ">" : "";
+  const escaped = prefix + (quoteLines ? [...raw].map(piece).join("") : escapeSlack(raw));
+  if (!cut && escaped.length <= limit) return escaped;
   const room = limit - CUT_MARKER.length;
-  let fitted = "";
+  let fitted = prefix;
   for (const character of raw) {
-    const piece = escapeSlack(character);
-    if (fitted.length + piece.length > room) break;
-    fitted += piece;
+    const next = piece(character);
+    if (fitted.length + next.length > room) break;
+    fitted += next;
   }
   return `${fitted}${CUT_MARKER}`;
 }

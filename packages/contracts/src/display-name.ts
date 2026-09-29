@@ -21,3 +21,16 @@ export function cleanDisplayName(name: string): string | undefined {
   result = result.trimEnd();
   return result.length > 0 ? result : undefined;
 }
+
+/**
+ * Text as a GFM code span, which GitHub renders literally: no mention, link, autolink, HTML or
+ * issue reference. Per CommonMark the fence is one backtick longer than the text's longest
+ * backtick run, padded with a space when the text starts or ends with a backtick. The broker marks
+ * names in pull requests and TASK_BUSY with it, and the MCP server marks channel turns' authors.
+ */
+export function inertName(name: string): string {
+  const longestRun = Math.max(0, ...(name.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = "`".repeat(longestRun + 1);
+  const pad = name.startsWith("`") || name.endsWith("`") ? " " : "";
+  return `${fence}${pad}${name}${pad}${fence}`;
+}

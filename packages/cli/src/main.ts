@@ -25,6 +25,7 @@ import { listCredentials, registerCredential } from "./admin/credential.js";
 import { cliRuntimeBinding, registerProject } from "./admin/register.js";
 import { bindSlackChannel, unbindSlackChannel } from "./admin/slack.js";
 import { stopWorkspace } from "./admin/stop.js";
+import { setTaskShareMode } from "./admin/task-share-mode.js";
 import { cancelWorkspaceTask } from "./admin/cancel.js";
 import { exportTurns, parseSince } from "./admin/turns.js";
 import { loginWithPkce, openSystemBrowser, tokenStoreKey } from "./auth.js";
@@ -573,6 +574,23 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         await rm(partialPath, { force: true });
         throw exportFailure(error, written, "file");
       }
+    });
+
+  const adminTask = admin.command("task").description("administer tasks started from AI tools");
+  adminTask
+    .command("share-mode")
+    .description("switch a shared task between view only and continue, within its project's policy")
+    .requiredOption("--task <task-id>", "the task to change")
+    .requiredOption("--mode <mode>", "view or continue")
+    .action(async (options: { task: string; mode: string }, command: Command) => {
+      if (options.mode !== "view" && options.mode !== "continue") throw agentXError("CONFIG_INVALID", "--mode must be view or continue");
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(options.task)) {
+        throw agentXError("CONFIG_INVALID", "--task must be a task ID, such as 44444444-4444-4444-8444-444444444444; agentx admin turns export shows task IDs");
+      }
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      const result = await setTaskShareMode({ controlPlaneUrl: settings.controlPlaneUrl, accessToken, taskId: options.task, mode: options.mode }, services.fetchImplementation);
+      services.stdout.write(formatSuccess(result, globals.json));
     });
 
   registerSetupCommands(program, dependencies.setup ?? realSetupContext({

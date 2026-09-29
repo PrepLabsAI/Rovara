@@ -90,6 +90,10 @@ export const TurnRecordSchema = TurnObservationSchema.extend({
   settingsRevision: z.number().int().positive().optional(),
   workspaceId: z.string().uuid().optional(),
   conversationId: z.string().uuid().optional(),
+  /** Spec 025 FR-037: a teammate's continue-mode turn names the task it ran on. */
+  taskId: z.string().uuid().optional(),
+  /** C13: the teammate's display name, on continue-mode turns only. */
+  requesterName: z.string().min(1).max(80).optional(),
   disposition: TurnDispositionSchema,
   startedAt: z.string().datetime(),
   finishedAt: z.string().datetime(),
@@ -178,7 +182,7 @@ export const AiToolTurnRecordSchema = z.object({
   origin: z.literal("ai_tool"),
   taskId: z.string().uuid(),
   turnId: z.string().uuid(),
-  action: z.enum(["start", "continue", "pull_request", "cancel", "close"]),
+  action: z.enum(["start", "continue", "pull_request", "cancel", "close", "share"]),
   phase: z.enum(["accepted", "completed", "refused"]),
   developer: z.object({
     developerId: Hex64,
@@ -187,6 +191,8 @@ export const AiToolTurnRecordSchema = z.object({
     slackUserId: SlackUserIdSchema.optional(),
   }).strict(),
   client: z.string().min(1).max(40),
+  /** Spec 025 C25: the AgentX admin who made this change on the developer's task, when one did. */
+  admin: z.object({ issuer: z.string().min(1).max(512), subject: z.string().min(1).max(256), displayName: z.string().min(1).max(200).optional() }).strict().optional(),
   receivedAt: z.string().datetime(),
   /** Added at export from the workspace record; never stored. */
   project: z.string().max(63).optional(),

@@ -22,6 +22,7 @@ export const AgentXErrorCodeSchema = z.enum([
   "CHANNEL_REQUIRED",
   "WORKSPACE_LIMIT",
   "SLACK_UNAVAILABLE",
+  "CHANNEL_AMBIGUOUS",
 ]);
 
 export type AgentXErrorCode = z.infer<typeof AgentXErrorCodeSchema>;

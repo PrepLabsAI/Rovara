@@ -21,6 +21,13 @@ interface WriteAction {
 
 export class FakeDynamoDb {
   readonly items = new Map<string, Item>();
+  private readonly listeners = new Set<(change: { before?: Item; after?: Item }) => void>();
+
+  /** Each committed write's item before and after, as a DynamoDB stream record carries them. `set` (seeding) is not reported. */
+  onWrite(listener: (change: { before?: Item; after?: Item }) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
 
   get(pk: string, sk: string): Item | undefined {
     return this.items.get(itemKey(pk, sk));
@@ -63,8 +70,9 @@ export class FakeDynamoDb {
     }
   };
 
-  // Supports only `pk = :pk AND begins_with(sk, :<name>)`, the key condition shape the broker uses
-  // (a project's latest revision, credential records and a credential's cached tokens).
+  // Supports `pk = :pk AND begins_with(sk, :<name>)`, the key condition shape the broker uses (a
+  // project's latest revision, credential records and a credential's cached tokens), and
+  // `pk = :pk AND sk < :<name>`, the stuck-setup sweep's "older than" range (spec 025 C17).
   private query(input: Record<string, unknown>): Item[] {
     const values = input.ExpressionAttributeValues as Values;
     if (input.IndexName !== undefined) {
@@ -74,6 +82,26 @@ export class FakeDynamoDb {
       if (!indexed) throw new Error(`FakeDynamoDb does not support the index key condition ${String(input.KeyConditionExpression)}`);
       const attribute = indexed[1]!.startsWith("#") ? names[indexed[1]!]! : indexed[1]!;
       return this.find((item) => item[attribute] !== undefined && item[attribute] === values[indexed[2]!]).map((item) => structuredClone(item));
+    }
+    // A sort key range, as the operation events page reads it: `pk = :pk AND sk BETWEEN :a AND :b`.
+    const range = /^pk = :pk AND sk BETWEEN (:[a-zA-Z]+) AND (:[a-zA-Z]+)$/.exec(String(input.KeyConditionExpression));
+    if (range) {
+      const low = values[range[1]!] as string;
+      const high = values[range[2]!] as string;
+      const inRange = this.find((item) => item.pk === values[":pk"] && compareKeys(item.sk as string, low) >= 0 && compareKeys(item.sk as string, high) <= 0)
+        .sort((left, right) => compareKeys(left.sk as string, right.sk as string));
+      if (input.ScanIndexForward === false) inRange.reverse();
+      const limit = input.Limit as number | undefined;
+      return (limit === undefined ? inRange : inRange.slice(0, limit)).map((item) => structuredClone(item));
+    }
+    // The stuck-setup sweep's "older than" range (spec 025 C17).
+    const before = /^pk = :pk AND sk < (:[a-zA-Z]+)$/.exec(String(input.KeyConditionExpression));
+    if (before) {
+      const bound = values[before[1]!] as string;
+      const found = this.find((item) => item.pk === values[":pk"] && compareKeys(item.sk as string, bound) < 0)
+        .sort((left, right) => compareKeys(left.sk as string, right.sk as string));
+      const limit = input.Limit as number | undefined;
+      return (limit === undefined ? found : found.slice(0, limit)).map((item) => structuredClone(item));
     }
     const match = /^pk = :pk AND begins_with\(sk, (:[a-zA-Z]+)\)$/.exec(String(input.KeyConditionExpression));
     if (!match) throw new Error(`FakeDynamoDb does not support the key condition ${String(input.KeyConditionExpression)}`);
@@ -114,9 +142,15 @@ export class FakeDynamoDb {
     }
     for (const action of actions) {
       if (action.kind === "ConditionCheck") continue;
-      const next = action.apply(this.items.get(action.key));
+      const before = this.items.get(action.key);
+      const next = action.apply(before);
       if (next === undefined) this.items.delete(action.key);
       else this.items.set(action.key, next);
+      // Deleting an item that does not exist leaves no stream record, as in DynamoDB.
+      if (before === undefined && next === undefined) continue;
+      for (const listener of this.listeners) {
+        listener({ ...(before === undefined ? {} : { before: structuredClone(before) }), ...(next === undefined ? {} : { after: structuredClone(next) }) });
+      }
     }
   }
 }

@@ -38,7 +38,7 @@ async function fakeControlPlane(): Promise<FakeControlPlane> {
       response.writeHead(status, { "content-type": "application/json" });
       response.end(JSON.stringify(body));
     };
-    if (url.pathname === "/v1/auth/.well-known/agentx-configuration") return send(200, { env: "staging", apiVersion: "1.1" });
+    if (url.pathname === "/v1/auth/.well-known/agentx-configuration") return send(200, { env: "staging", apiVersion: "1.2" });
     if (request.headers.authorization !== `Bearer ${ACCESS_TOKEN}`) return send(401, { error: { code: "AUTH_REQUIRED", message: "sign in again" } });
     if (url.pathname === "/v1/dev/projects") return send(200, { developer: DEVELOPER, projects: [], notices: [] });
     if (url.pathname === `/v1/dev/tasks/${TASK_ID}`) {
@@ -168,7 +168,7 @@ describe("agentx mcp over stdio (FR-026)", () => {
     await client.connect(transport);
     try {
       const { tools } = await client.listTools();
-      expect(tools).toHaveLength(10);
+      expect(tools).toHaveLength(11);
       // Ruling F3: the tools were listed first, and the error result still passes the SDK's checks.
       const result = await client.callTool({ name: "agentx_whoami", arguments: {} });
       expect(toolError(result)).toMatchObject({ code: "SIGN_IN_REQUIRED", next_step: "run npx @charterarc/agentx login <your AgentX URL>" });
@@ -190,11 +190,11 @@ describe("agentx mcp over stdio (FR-026)", () => {
 
     const initialized = await mcp.initialize();
     expect(initialized.result).toMatchObject({ serverInfo: { name: "agentx" } });
-    expect(((await mcp.request("tools/list")).result?.tools as unknown[]).length).toBe(10);
+    expect(((await mcp.request("tools/list")).result?.tools as unknown[]).length).toBe(11);
 
     const whoami = await mcp.callTool("agentx_whoami");
     expect(whoami.isError).not.toBe(true);
-    expect(whoami.structuredContent).toMatchObject({ environment: "staging", developer_name: "Maya Chen", sign_in_method: "slack", admin: false, control_plane_api_version: "1.1" });
+    expect(whoami.structuredContent).toMatchObject({ environment: "staging", developer_name: "Maya Chen", sign_in_method: "slack", admin: false, control_plane_api_version: "1.2" });
     expect(plane.requests.filter((entry) => entry.path === "/v1/dev/projects")).toEqual([{ method: "GET", path: "/v1/dev/projects", authorization: `Bearer ${ACCESS_TOKEN}` }]);
 
     // An error AgentX answers, and a line that is not JSON, both leave stdout clean and the server up.

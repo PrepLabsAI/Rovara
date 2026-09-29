@@ -12,7 +12,7 @@ import {
   SQSClient,
 } from "@aws-sdk/client-sqs";
 import { defaultProvider } from "@aws-sdk/credential-provider-node";
-import { SLACK_QUEUED_BEHIND_ATTRIBUTE, confirmationBlocks, queuedBehindOf, type SlackRequestMessage } from "@agentx/contracts";
+import { SLACK_QUEUED_BEHIND_ATTRIBUTE, confirmationBlocks, queuedBehindOf, sharedNoticeClaim, type SlackRequestMessage } from "@agentx/contracts";
 import { ControlPlaneApi } from "@agentx/orchestrator/control-plane-api";
 import { runOrchestratorTurn } from "@agentx/orchestrator/orchestrator";
 import { createDynamoConfirmationStore } from "./confirmation-store.js";
@@ -164,6 +164,16 @@ const threads: ThreadStore = {
         : { UpdateExpression: "SET refreshConnectors = :connectors", ExpressionAttributeValues: { ":connectors": connectors } }),
     }), { abortSignal: AbortSignal.timeout(5000) });
   },
+  async claimSharedNotice(subject, nowSeconds, kind) {
+    try {
+      // The same claim the Slack ingress sends (F13), so one notice an hour holds across both.
+      await documentClient.send(new UpdateCommand({ TableName: threadsTableName, ...sharedNoticeClaim(subject, nowSeconds, kind) }), { abortSignal: AbortSignal.timeout(5000) });
+      return true;
+    } catch (error) {
+      if (error instanceof Error && error.name === "ConditionalCheckFailedException") return false;
+      throw error;
+    }
+  },
   async finish(subject) {
     try {
       await documentClient.send(new UpdateCommand({
@@ -302,6 +312,7 @@ await runConsumer(queue, (message, context) => processSlackRequest(message, {
   postConfirmation: (thread, confirmation, text) => postToSlack(thread.channelId, thread.threadTs, text, confirmationBlocks(text, confirmation.confirmationId)),
   postWithBlocks: (thread, text, blocks) => postToSlack(thread.channelId, thread.threadTs, text, blocks),
   turnRecords: new DynamoTurnRecordWriter(documentClient, turnRecordsTableName),
+  userName: slackUserName,
 }, context), {
   concurrency,
   maxReceiveCount: MAX_RECEIVE_COUNT,

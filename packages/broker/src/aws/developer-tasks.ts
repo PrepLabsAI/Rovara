@@ -4,7 +4,11 @@
 import { randomUUID } from "node:crypto";
 import { GetCommand, PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import {
+  CHANNEL_PRIVACY_NOT_SET_UP,
+  PRIVATE_CHANNEL_NOT_A_MEMBER,
+  AdminShareModeRequestSchema,
   AgentXError,
+  CHANNEL_TURNS_MAX,
   ContinueDeveloperTaskRequestSchema,
   DEVELOPER_EVENTS_DEFAULT,
   DEVELOPER_EVENTS_MAX,
@@ -15,18 +19,23 @@ import {
   DeveloperTaskActionRequestSchema,
   DeveloperTaskStatusSchema,
   PullRequestResultSchema,
+  ShareDeveloperTaskRequestSchema,
+  SlackChannelIdSchema,
   StartDeveloperTaskRequestSchema,
   WorkspaceClosePreflightResultSchema,
   agentXError,
   cleanClientName,
+  developerTaskPolicy,
   diffStat,
   lastAssistantResponse,
   redactText,
+  sharedTaskKey,
   taskTitle,
   type DeveloperCloseResponse,
   type DeveloperPullRequestResponse,
   type DeveloperTaskListItem,
   type DeveloperTaskPolicy,
+  type DeveloperTaskShare,
   type DeveloperTaskStatus,
   type DeveloperTaskView,
   type Operation,
@@ -34,21 +43,27 @@ import {
   type WorkspaceInstance,
 } from "@agentx/contracts";
 import type { z } from "zod";
+import { channelLabel, decideMode, decideShare, type BoundChannel, type ShareDecision } from "../developer/share.js";
 import { chargeConflict, chargeItems, developerCharge, limitReached, readWorkspaceLimits, releaseConflict, releaseItems, type ChargeConflict, type WorkspaceLimits } from "../developer/limits.js";
 import {
   aiToolTurn,
   byCreated,
   deriveTaskStatus,
   developerTaskIdentity,
+  inertName,
   partyOfTask,
   recentTaskEvents,
+  sharedSubject,
+  shareView,
   startIdempotencyKey,
   taskIndexKey,
   taskKey,
   taskPointerKey,
+  taskShare,
   type DeveloperTaskIndexRecord,
   type DeveloperTaskPointerRecord,
   type DeveloperTaskRecord,
+  type TaskShare,
   type TurnParty,
   type WorkspaceCharge,
 } from "../developer/task-records.js";
@@ -56,23 +71,33 @@ import { hashJson, isConditional } from "./broker-shared.js";
 import type { DeveloperTaskActions, TransactItems } from "./developer-task-actions.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
+import { setupWatchKey } from "./stuck-setup.js";
 
 export interface DeveloperTaskRouteDependencies {
   documentClient: { send(command: unknown): Promise<unknown> };
   tableName: string;
   slackTeamId?: string;
   actions: DeveloperTaskActions;
-  checkAccess(project: string): Promise<{ revision: number; policy: DeveloperTaskPolicy; access: "granted" | "channel" }>;
+  checkAccess(project: string): Promise<{ revision: number; policy: DeveloperTaskPolicy; access: "granted" | "channel"; channelIds: string[] }>;
+  /** C3: bound channels' names and privacy, best effort (R10). */
+  boundChannels?(channelIds: readonly string[]): Promise<BoundChannel[]>;
+  /**
+   * Q10: whether this Slack user is a member of this channel, through the access check's own Slack
+   * lookup; SLACK_UNAVAILABLE when the lookup fails. Without it no private-channel share is allowed.
+   */
+  channelMember?(slackUserId: string, channelId: string): Promise<boolean>;
+  /** C5: the project's bound channel IDs, sorted, for sharing a task that already exists (R11: no access check). */
+  projectChannelIds(project: string): Promise<string[]>;
   now(): number;
   log?(entry: Record<string, unknown>): void;
 }
 
 const TASK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const iso = (deps: DeveloperTaskRouteDependencies) => new Date(deps.now()).toISOString();
-const log = (deps: DeveloperTaskRouteDependencies, entry: Record<string, unknown>) =>
+const iso = (deps: Pick<DeveloperTaskRouteDependencies, "now">) => new Date(deps.now()).toISOString();
+const log = (deps: Pick<DeveloperTaskRouteDependencies, "log">, entry: Record<string, unknown>) =>
   (deps.log ?? ((line) => console.log(JSON.stringify({ component: "broker", ...line }))))(entry);
 
-function parse<T>(schema: z.ZodType<T>, body: unknown, deps: DeveloperTaskRouteDependencies, route: string): T {
+function parse<T>(schema: z.ZodType<T>, body: unknown, deps: Pick<DeveloperTaskRouteDependencies, "log">, route: string): T {
   const parsed = schema.safeParse(body);
   if (parsed.success) return parsed.data;
   const issue = parsed.error.issues[0];
@@ -98,7 +123,7 @@ async function get<T>(deps: Pick<DeveloperTaskRouteDependencies, "documentClient
 
 const putNew = (tableName: string, item: Record<string, unknown>) => ({ Put: { TableName: tableName, Item: item, ConditionExpression: "attribute_not_exists(pk)" } });
 
-function turnTable(deps: DeveloperTaskRouteDependencies): string {
+function turnTable(deps: Pick<DeveloperTaskRouteDependencies, "actions">): string {
   const table = deps.actions.turnRecordsTableName;
   // FR-037: an action that cannot be audited does not run.
   if (table === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "turn records are not configured in this deployment; developer tasks are off");
@@ -254,6 +279,16 @@ export async function taskView(
     ? []
     : recentTaskEvents(await deps.actions.eventsNewestFirst(derived.current.id, 200), options.events);
   const details = options.details && derived.status !== "STARTING" && derived.status !== "RUNNING" ? await taskDetails(deps, task, operations) : {};
+  // C15: only the full read shows channel turns, and a storage problem never breaks it.
+  let channelTurns: DeveloperTaskView["channelTurns"];
+  if (options.details && task.share?.threadTs !== undefined) {
+    try {
+      const turns = await deps.actions.channelTurns(sharedSubject({ ...task.share, threadTs: task.share.threadTs }), task.taskId, CHANNEL_TURNS_MAX);
+      if (turns.length > 0) channelTurns = turns;
+    } catch (error) {
+      log(deps, { event: "developer.channel_turns_failed", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
+    }
+  }
   // R22: why the latest close did not happen, while no later close runs, the task is open and
   // the developer has not asked for more work since (a continue or a pull request may publish it).
   const lastClose = operations.filter((operation) => operation.kind === "close").sort(byCreated).at(-1);
@@ -268,11 +303,13 @@ export async function taskView(
     startingRevision: task.startingRevision,
     client: task.client,
     shared: task.shared,
+    ...(task.share === undefined ? {} : { share: shareView(task.share) }),
     ...(derived.closing ? { closing: true } : {}),
     createdAt: task.createdAt,
     updatedAt: derived.current?.createdAt ?? task.updatedAt,
     events,
     ...details,
+    ...(channelTurns === undefined ? {} : { channelTurns }),
     ...(unpublished === undefined ? {} : { unpublished }),
   };
 }
@@ -311,6 +348,67 @@ async function chargeFailure(deps: DeveloperTaskRouteDependencies, charge: Works
   }
 }
 
+type ProjectAccess = Awaited<ReturnType<DeveloperTaskRouteDependencies["checkAccess"]>>;
+
+/**
+ * C3: where and how a task is shared, or undefined for a private one. Names are read only when a
+ * share needs them, and shown only to a caller with a Slack link, as GET /v1/dev/projects does
+ * (R10). Q10: privacy is read for every share, since a private channel needs its sharer's membership.
+ */
+async function shareFor(
+  deps: DeveloperTaskRouteDependencies,
+  caller: DeveloperCaller,
+  project: string,
+  access: ProjectAccess,
+  wanted: { shareToChannel: boolean; shareMode?: "view" | "continue" | undefined; channel?: string | undefined },
+): Promise<ShareDecision | undefined> {
+  if (!wanted.shareToChannel && access.policy.share !== "required") return undefined;
+  const linked = caller.slackUserId !== undefined;
+  const looked: BoundChannel[] = deps.boundChannels === undefined
+    ? access.channelIds.map((channelId) => ({ channelId }))
+    : await deps.boundChannels(access.channelIds);
+  // R10: a caller with no Slack link keeps each channel's privacy, never its name.
+  const bound: BoundChannel[] = linked ? looked : looked.map(({ channelId, isPrivate }) => (isPrivate === undefined ? { channelId } : { channelId, isPrivate }));
+  let decision: ShareDecision | undefined;
+  try {
+    decision = decideShare({
+      project, policy: access.policy, bound, shareToChannel: wanted.shareToChannel,
+      ...(wanted.shareMode === undefined ? {} : { shareMode: wanted.shareMode }),
+      ...(wanted.channel === undefined ? {} : { channel: wanted.channel }),
+    });
+  } catch (error) {
+    // A channel named by name when Slack did not name every bound channel: the name may be right,
+    // so say the names could not be read rather than blame it, and give the IDs to use (IDs only, R10).
+    const byName = wanted.channel !== undefined && !SlackChannelIdSchema.safeParse(wanted.channel).success;
+    if (linked && deps.boundChannels !== undefined && byName && error instanceof AgentXError && error.code === "CHANNEL_REQUIRED" && bound.some((channel) => channel.name === undefined)) {
+      throw agentXError("CHANNEL_REQUIRED", `AgentX could not read the channel names from Slack; name the channel by its ID: ${bound.map((channel) => channel.channelId).sort().join(", ")}`);
+    }
+    throw error;
+  }
+  if (decision !== undefined) await confirmMayShareInto(deps, caller, bound.find((channel) => channel.channelId === decision.channelId) ?? { channelId: decision.channelId });
+  return decision;
+}
+
+const NOT_A_MEMBER = PRIVATE_CHANNEL_NOT_A_MEMBER;
+const PRIVACY_UNKNOWN = "Slack could not be reached to check whether that channel is private; try again shortly";
+const PRIVACY_NOT_SET_UP = CHANNEL_PRIVACY_NOT_SET_UP;
+
+/**
+ * Q10 (owner answer, 2026-09-29): a private channel takes a share only from one of its members. A
+ * public channel needs nothing. A channel whose privacy is unknown (Slack did not answer, or no
+ * channel-info lookup is configured) is treated as private unless the caller is a member, and a
+ * failed membership lookup refuses: nothing here lets a share through on doubt.
+ */
+async function confirmMayShareInto(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, channel: BoundChannel): Promise<void> {
+  if (channel.isPrivate === false) return;
+  const refusal = () => channel.isPrivate === true
+    ? agentXError("CHANNEL_REQUIRED", NOT_A_MEMBER)
+    : agentXError("SLACK_UNAVAILABLE", deps.boundChannels === undefined ? PRIVACY_NOT_SET_UP : PRIVACY_UNKNOWN);
+  // A caller with no Slack link cannot be confirmed as a member.
+  if (caller.slackUserId === undefined || deps.channelMember === undefined) throw refusal();
+  if (!(await deps.channelMember(caller.slackUserId, channel.channelId))) throw refusal();
+}
+
 async function startTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, value: unknown): Promise<{ task: DeveloperTaskView }> {
   const request = parse(StartDeveloperTaskRequestSchema, value, deps, "start");
   const turns = turnTable(deps);
@@ -343,12 +441,19 @@ async function startTask(deps: DeveloperTaskRouteDependencies, caller: Developer
     if (error instanceof AgentXError) return refused(error);
     throw error;
   }
-  // R9: sharing is phase 25c.
-  if (access.policy.share === "required") {
-    return refused(agentXError("CHANNEL_REQUIRED", `project \`${request.project}\` requires tasks to be shared to its Slack channel, which this AgentX cannot do yet`));
+  // FR-031, C4: decided here, in R8's place for sharing; a refusal is audited and writes nothing else.
+  let decision: ShareDecision | undefined;
+  try {
+    decision = await shareFor(deps, caller, request.project, access, { shareToChannel: request.shareToChannel === true, shareMode: request.shareMode, channel: request.channel });
+  } catch (error) {
+    if (error instanceof AgentXError) return refused(error);
+    throw error;
   }
-  if (request.shareToChannel === true) {
-    return refused(agentXError("CHANNEL_REQUIRED", "sharing tasks to Slack is not available yet in this AgentX"));
+  let share: TaskShare | undefined;
+  if (decision !== undefined) {
+    // Bindings exist only under a team ID, so this cannot happen; refuse rather than write a half share.
+    if (deps.slackTeamId === undefined) return refused(agentXError("CHANNEL_REQUIRED", "this AgentX has no Slack workspace set, so tasks cannot be shared"));
+    share = taskShare(decision, deps.slackTeamId, receivedAt);
   }
   const project = await deps.actions.latestProject(request.project);
   if (project === undefined) return refused(agentXError("PROJECT_NOT_FOUND", `project \`${request.project}\` doesn't exist in this AgentX`));
@@ -373,11 +478,12 @@ async function startTask(deps: DeveloperTaskRouteDependencies, caller: Developer
     ...taskKey(taskId), entityType: "DEVELOPER_TASK", taskId, developerId: caller.developerId, provider: caller.amr, developerName: caller.name,
     ...(caller.slackUserId === undefined ? {} : { slackUserId: caller.slackUserId }),
     client, project: request.project, title, workspaceId, ownerKey: identity.ownerKey, conversationId, startingRevision: revision,
-    charge, shared: false, createdAt: receivedAt, updatedAt: receivedAt,
+    charge, shared: share !== undefined, ...(share === undefined ? {} : { share, shareVersion: 1 }),
+    createdAt: receivedAt, updatedAt: receivedAt,
   };
   const index: DeveloperTaskIndexRecord = {
     ...taskIndexKey(caller.developerId, receivedAt, taskId), entityType: "DEVELOPER_TASK_INDEX", taskId, project: request.project, title, client,
-    status: "STARTING", shared: false, startingRevision: revision, workspaceId, createdAt: receivedAt, updatedAt: receivedAt,
+    status: "STARTING", shared: share !== undefined, startingRevision: revision, workspaceId, createdAt: receivedAt, updatedAt: receivedAt,
   };
   const pointer: DeveloperTaskPointerRecord = {
     ...taskPointerKey(workspaceId), entityType: "DEVELOPER_TASK_POINTER", taskId, developerId: caller.developerId,
@@ -396,6 +502,12 @@ async function startTask(deps: DeveloperTaskRouteDependencies, caller: Developer
     putNew(deps.tableName, { ...task }),
     putNew(deps.tableName, { ...index }),
     putNew(deps.tableName, { ...pointer }),
+    // FR-055, C17: the stuck-setup sweep's watch on this prepare, keyed by the prepare's creation
+    // (the task's start, Q5). Only developer-task starts write one (Q4); the sweep removes it.
+    putNew(deps.tableName, {
+      ...setupWatchKey(preparation.workspace.createdAt, workspaceId), entityType: "SETUP_WATCH",
+      workspaceId, operationId: preparation.operationId, taskId, createdAt: preparation.workspace.createdAt,
+    }),
     putNew(deps.tableName, { pk: `WORKSPACE#${workspaceId}`, sk: `CONVERSATION#${conversationId}`, entityType: "CONVERSATION", id: conversationId, workspaceId, createdAt: receivedAt, updatedAt: receivedAt }),
     putNew(deps.tableName, { ...idempotencyKey, entityType: "IDEMPOTENCY", taskId, payloadHash }),
     // R12: the accepted record commits with the start or not at all (ruling F15).
@@ -575,8 +687,22 @@ async function busyOrClosing(deps: DeveloperTaskRouteDependencies, task: Develop
   if (error instanceof AgentXError && (error.code === "WORKSPACE_BUSY" || error.code === "WORKSPACE_NOT_READY")) {
     const workspace = await deps.actions.workspace(task.workspaceId);
     if (workspace.status === "CLOSING") throw agentXError("CONFIG_INVALID", CLOSING_TASK);
+    const channel = await channelDriver(deps, task, workspace.activeOperationId);
+    if (channel !== undefined) throw agentXError("TASK_BUSY", channel);
   }
   return busy(error, task.taskId);
+}
+
+/** C14, D4: the words for a developer's action that met a teammate's channel turn, or undefined. */
+async function channelDriver(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord, operationId: string | null): Promise<string | undefined> {
+  if (operationId === null || task.share?.threadTs === undefined) return undefined;
+  const activity = await deps.actions.channelActivity({ taskId: task.taskId, operationId, threadSubject: sharedSubject({ ...task.share, threadTs: task.share.threadTs }) });
+  if (activity.driver === undefined) return undefined;
+  // The name reaches the AI tool inert, as every other name there does.
+  const who = activity.driver.name === undefined ? `Slack user ${activity.driver.slackUserId}` : inertName(activity.driver.name);
+  // F18: a floor. The running turn may or may not still count among the thread's pending messages.
+  const waiting = activity.waiting === 0 ? "" : `, and at least ${activity.waiting} more channel message${activity.waiting === 1 ? " is" : "s are"} waiting`;
+  return `task ${task.taskId} is running a request from ${who} in its shared Slack thread${waiting}; wait with agentx_wait_for_task, stop it with agentx_cancel_task, or make the thread view only with agentx_share_task`;
 }
 
 /** The existing handlers' busy answers, in the developer's words (FR-049's TASK_BUSY). */
@@ -745,6 +871,9 @@ async function openPullRequest(deps: DeveloperTaskRouteDependencies, caller: Dev
   };
 }
 
+/** A share changed meanwhile (by the notifier or either share route) retries the close; 4 attempts, then the last conflict is rethrown. */
+const CLOSE_ATTEMPTS = 4;
+
 /**
  * R15: deletes the compute, then in one transaction releases the counters the task charged (R6:
  * the charge stored on the task, whatever the developer's Slack link is now), closes the
@@ -757,6 +886,10 @@ async function openPullRequest(deps: DeveloperTaskRouteDependencies, caller: Dev
  * is not an error; counters an earlier release already gave back (releaseConflict) do not block
  * the close, which is sent again without them; anything else is rethrown, never hidden. Callers
  * load the owned task, or are the worker's authenticated callback.
+ *
+ * C24, ruling F4: a shared task's thread record is marked closed in the same transaction, and a
+ * share the notifier changed after the task was read (a thread it just recorded) is read again, so
+ * the thread's record is closed too.
  */
 export async function finishTaskClose(
   deps: { tableName: string; actions: DeveloperTaskActions; documentClient: { send(command: unknown): Promise<unknown> } },
@@ -767,7 +900,7 @@ export async function finishTaskClose(
   const workspace = await deps.actions.workspace(task.workspaceId);
   if (workspace.status !== "CLOSED") await deps.actions.deleteCompute(workspace);
   const now = new Date().toISOString();
-  const closing: TransactItems = [
+  const closing = (current: DeveloperTaskRecord): TransactItems => [
     ...(workspace.status === "CLOSED" ? [] : [{ Update: {
       TableName: deps.tableName,
       Key: { pk: `WORKSPACE#${task.workspaceId}`, sk: "META" },
@@ -779,10 +912,15 @@ export async function finishTaskClose(
         ...(closeOperationId === undefined ? { ":failed": "PREPARATION_FAILED" } : { ":closing": "CLOSING", ":operation": closeOperationId }),
       },
     } }]),
+    // Ruling F4: a shared task's close holds only while its share is the one read here, so a thread
+    // the notifier recorded meanwhile is read again and closed below, never left open.
     { Update: {
       TableName: deps.tableName, Key: taskKey(task.taskId),
-      UpdateExpression: "SET closedAt = :now, updatedAt = :now", ConditionExpression: "attribute_exists(pk) AND attribute_not_exists(closedAt)",
-      ExpressionAttributeValues: { ":now": now },
+      UpdateExpression: "SET closedAt = :now, updatedAt = :now",
+      ConditionExpression: current.share === undefined
+        ? "attribute_exists(pk) AND attribute_not_exists(closedAt)"
+        : "attribute_exists(pk) AND attribute_not_exists(closedAt) AND shareVersion = :sv",
+      ExpressionAttributeValues: { ":now": now, ...(current.share === undefined ? {} : { ":sv": current.shareVersion ?? 0 }) },
     } },
     // Deliberately unconditional (an upsert): the start writes this row with the task, and a close
     // must mark it CLOSED whatever status a read last synced into it.
@@ -791,26 +929,42 @@ export async function finishTaskClose(
       UpdateExpression: "SET #status = :closed, updatedAt = :now", ExpressionAttributeNames: { "#status": "status" },
       ExpressionAttributeValues: { ":closed": "CLOSED", ":now": now },
     } },
+    // C24: the shared thread's record says the task closed, so its mentions get the closed notice.
+    ...(current.share?.threadTs === undefined ? [] : [{ Update: {
+      TableName: deps.tableName,
+      Key: sharedTaskKey({ teamId: current.share.teamId, channelId: current.share.channelId, threadTs: current.share.threadTs }),
+      UpdateExpression: "SET closedAt = :now", ConditionExpression: "attribute_exists(pk)",
+      ExpressionAttributeValues: { ":now": now },
+    } }]),
     ...extra,
   ];
-  const closedMeanwhile = async () => (await get<DeveloperTaskRecord>(deps, taskKey(task.taskId)))?.closedAt !== undefined;
-  try {
-    // First, at positions 0 and 1: releaseConflict reads the cancellation reasons by position.
-    await deps.actions.transact([...releaseItems(deps.tableName, task.charge, task.taskId), ...closing]);
-    return;
-  } catch (error) {
-    if (!isConditional(error)) throw error;
-    // Another call finished the close first; its transaction released the counters once.
-    if (await closedMeanwhile()) return;
-    // Rethrows anything but counters that no longer hold this task.
-    await releaseConflict(deps.documentClient, deps.tableName, task.charge, task.taskId, error);
+  let current = task;
+  let release = true;
+  let lastError: unknown;
+  for (let attempt = 0; attempt < CLOSE_ATTEMPTS; attempt += 1) {
+    try {
+      // First, at positions 0 and 1: releaseConflict reads the cancellation reasons by position.
+      await deps.actions.transact([...(release ? releaseItems(deps.tableName, task.charge, task.taskId) : []), ...closing(current)]);
+      return;
+    } catch (error) {
+      if (!isConditional(error)) throw error;
+      lastError = error;
+      const fresh = await get<DeveloperTaskRecord>(deps, taskKey(task.taskId));
+      // Another call finished the close first; its transaction released the counters once.
+      if (fresh?.closedAt !== undefined) return;
+      // Ruling F4: the notifier changed the share (it recorded the thread) meanwhile: close that one.
+      if (fresh !== undefined && fresh.shareVersion !== current.shareVersion) {
+        current = fresh;
+        continue;
+      }
+      if (!release) throw error;
+      // Rethrows anything but counters that no longer hold this task.
+      await releaseConflict(deps.documentClient, deps.tableName, task.charge, task.taskId, error);
+      console.log(JSON.stringify({ component: "broker", event: "developer.task_release_already_released", taskId: task.taskId }));
+      release = false;
+    }
   }
-  console.log(JSON.stringify({ component: "broker", event: "developer.task_release_already_released", taskId: task.taskId }));
-  try {
-    await deps.actions.transact(closing);
-  } catch (error) {
-    if (!isConditional(error) || !(await closedMeanwhile())) throw error;
-  }
+  throw lastError;
 }
 
 /**
@@ -930,11 +1084,201 @@ function safeDecode(segment: string): string {
   }
 }
 
+const SHARE_ATTEMPTS = 3;
+
+/** A share's channel as a message names it: `#name` when its name was stored (public only), else its ID (R10). */
+const shareLabel = (share: TaskShare) => channelLabel({ channelId: share.channelId, ...(share.channelName === undefined ? {} : { name: share.channelName, isPrivate: false }) });
+
+/** C5: the share the request asks for, from the task's current one, or "unchanged". */
+async function nextShare(
+  deps: DeveloperTaskRouteDependencies,
+  caller: DeveloperCaller,
+  task: DeveloperTaskRecord,
+  request: { shareMode?: "view" | "continue" | undefined; channel?: string | undefined },
+  now: string,
+): Promise<TaskShare | "unchanged"> {
+  const project = await deps.actions.latestProject(task.project);
+  if (project === undefined) throw agentXError("CONFIG_INVALID", "this task's project is no longer registered; ask an admin");
+  const policy = developerTaskPolicy(project.definition);
+  if (task.share === undefined) {
+    // R11: sharing an existing task does not recheck project access; it uses the latest policy.
+    const decision = await shareFor(deps, caller, task.project, { revision: project.definition.revision, policy, access: "granted", channelIds: await deps.projectChannelIds(task.project) }, { shareToChannel: true, shareMode: request.shareMode, channel: request.channel });
+    if (decision === undefined || deps.slackTeamId === undefined) throw agentXError("CHANNEL_REQUIRED", "this AgentX has no Slack workspace set, so tasks cannot be shared");
+    return taskShare(decision, deps.slackTeamId, now);
+  }
+  const current = task.share;
+  if (request.channel !== undefined) {
+    const named = request.channel.replace(/^#/, "").toLowerCase();
+    if (request.channel !== current.channelId && current.channelName?.toLowerCase() !== named) {
+      throw agentXError("CONFIG_INVALID", `this task is already shared in ${shareLabel(current)}; its channel cannot change`);
+    }
+  }
+  return withMode(current, decideMode(policy, request.shareMode ?? current.mode));
+}
+
+/** The share with a new mode, or "unchanged". Built field by field, so a stale modeReason is dropped. */
+function withMode(current: TaskShare, mode: { mode: "view" | "continue"; modeReason?: "continue_not_allowed" }): TaskShare | "unchanged" {
+  if (mode.mode === current.mode && mode.modeReason === current.modeReason) return "unchanged";
+  return {
+    teamId: current.teamId, channelId: current.channelId,
+    ...(current.channelName === undefined ? {} : { channelName: current.channelName }),
+    sharedReason: current.sharedReason, sharedAt: current.sharedAt,
+    ...(current.threadTs === undefined ? {} : { threadTs: current.threadTs }),
+    ...(current.postFailedAt === undefined ? {} : { postFailedAt: current.postFailedAt }),
+    mode: mode.mode,
+    ...(mode.modeReason === undefined ? {} : { modeReason: mode.modeReason }),
+  };
+}
+
+/** An AgentX admin who changed a task's share mode (C25), named on the audit record. */
+export interface ShareAdmin { issuer: string; subject: string; displayName?: string }
+export type ShareModeDependencies = Pick<DeveloperTaskRouteDependencies, "documentClient" | "tableName" | "actions" | "now" | "log">;
+
+/**
+ * C1, C5, C25: one share change's items: the task's whole share map under shareVersion, the index
+ * row, the thread record's mode, the idempotency item and the `share` audit record (Q9), which
+ * names the admin when an admin made the change.
+ */
+function shareItems(
+  deps: ShareModeDependencies,
+  turns: string,
+  task: DeveloperTaskRecord,
+  share: TaskShare,
+  audit: { idempotencyKey: { pk: string; sk: string }; payloadHash: string; receivedAt: string; request: string; admin?: ShareAdmin },
+): TransactItems {
+  const version = task.shareVersion ?? 0;
+  return [
+    { Update: {
+      TableName: deps.tableName, Key: taskKey(task.taskId),
+      UpdateExpression: "SET #share = :share, #shared = :true, shareVersion = :next, updatedAt = :now",
+      ConditionExpression: version === 0
+        ? "attribute_exists(pk) AND attribute_not_exists(shareVersion) AND attribute_not_exists(closedAt)"
+        : "shareVersion = :current AND attribute_not_exists(closedAt)",
+      ExpressionAttributeNames: { "#share": "share", "#shared": "shared" },
+      ExpressionAttributeValues: { ":share": share, ":true": true, ":next": version + 1, ":now": audit.receivedAt, ...(version === 0 ? {} : { ":current": version }) },
+    } },
+    // Unconditional, as the close's: the start wrote this row with the task.
+    { Update: {
+      TableName: deps.tableName, Key: taskIndexKey(task.developerId, task.createdAt, task.taskId),
+      UpdateExpression: "SET #shared = :true", ExpressionAttributeNames: { "#shared": "shared" }, ExpressionAttributeValues: { ":true": true },
+    } },
+    ...(share.threadTs === undefined ? [] : [{ Update: {
+      TableName: deps.tableName, Key: sharedTaskKey({ teamId: share.teamId, channelId: share.channelId, threadTs: share.threadTs }),
+      UpdateExpression: "SET #mode = :mode", ConditionExpression: "attribute_exists(pk)",
+      ExpressionAttributeNames: { "#mode": "mode" }, ExpressionAttributeValues: { ":mode": share.mode },
+    } }]),
+    putNew(deps.tableName, { ...audit.idempotencyKey, entityType: "IDEMPOTENCY", action: "share", payloadHash: audit.payloadHash }),
+    // Q9: a share or mode change is audited like the task's other actions.
+    putNew(turns, aiToolTurn({
+      party: partyOfTask(task), turnId: randomUUID(), action: "share", phase: "accepted", outcome: "accepted", receivedAt: audit.receivedAt, finishedAt: iso(deps),
+      request: audit.request, response: `Shared in ${shareLabel(share)}, ${share.mode === "view" ? "view only" : "open to the channel"}.`,
+      ...(audit.admin === undefined ? {} : { admin: audit.admin }),
+    })),
+  ];
+}
+
+const shareIdempotencyKey = (task: DeveloperTaskRecord, requestId: string) => ({ pk: `IDEMPOTENCY#${task.ownerKey}#${task.workspaceId}`, sk: `REQUEST#${requestId}` });
+const REUSED_REQUEST = "this request_id was already used for another action on this task; use a new request_id";
+
+/**
+ * C5. Answers at once; the notifier posts the start message or the mode change (C6). Only the
+ * task's developer may call this route; an AgentX admin switches the mode through adminShareMode
+ * (C25). Every write of `share` replaces the map, conditioned on shareVersion, so a notifier write
+ * between this read and this write is read again, never lost (C1).
+ */
+async function shareTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
+  const request = parse(ShareDeveloperTaskRequestSchema, value, deps, "share");
+  let task = await loadOwnedTask(deps, caller, taskId);
+  const turns = turnTable(deps);
+  const idempotencyKey = shareIdempotencyKey(task, request.requestId);
+  const payloadHash = hashJson({ action: "share", shareMode: request.shareMode ?? null, channel: request.channel ?? null });
+  const answer = async () => {
+    const view = await taskView(deps, task, { events: 0, details: false });
+    await syncIndex(deps, task, view.status, view.updatedAt);
+    return { task: view };
+  };
+  const previous = await get<{ payloadHash: string }>(deps, idempotencyKey);
+  if (previous !== undefined) {
+    if (previous.payloadHash !== payloadHash) throw agentXError("IDEMPOTENCY_CONFLICT", REUSED_REQUEST);
+    return answer();
+  }
+  for (let attempt = 0; attempt < SHARE_ATTEMPTS; attempt += 1) {
+    if (task.closedAt !== undefined) throw agentXError("CONFIG_INVALID", CLOSED_TASK);
+    const receivedAt = iso(deps);
+    const share = await nextShare(deps, caller, task, request, receivedAt);
+    if (share === "unchanged") return answer();
+    const items = shareItems(deps, turns, task, share, {
+      idempotencyKey, payloadHash, receivedAt,
+      request: `share ${request.shareMode ?? "default mode"}${request.channel === undefined ? "" : ` in ${request.channel}`}`,
+    });
+    try {
+      await deps.actions.transact(items);
+      task = await loadOwnedTask(deps, caller, taskId);
+      return answer();
+    } catch (error) {
+      if (!isConditional(error)) throw error;
+      // The same share, sent again, committed first.
+      const concurrent = await get<{ payloadHash: string }>(deps, idempotencyKey);
+      if (concurrent !== undefined) return shareTask(deps, caller, taskId, value);
+      // The notifier (or a close) changed the task meanwhile: decide again from a fresh read.
+      task = await loadOwnedTask(deps, caller, taskId);
+    }
+  }
+  throw agentXError("WORKSPACE_BUSY", "the task changed while sharing; try agentx_share_task again");
+}
+
+/**
+ * C25 (owner answer to Q2, 2026-09-29): an AgentX admin switches a shared task between view only and
+ * continue, within the latest revision's policy. The broker's admin route has already checked the
+ * admin claim and the project's administrator membership (FR-015). An admin cannot share a private
+ * task (sharing stays the developer's choice), move it to another channel, or change a closed task.
+ * Ruling F5 (D22): the answer is the task's ID and share only, never its title or results.
+ */
+export async function adminShareMode(deps: ShareModeDependencies, admin: ShareAdmin, task: DeveloperTaskRecord, value: unknown): Promise<{ task: { taskId: string; share?: DeveloperTaskShare } }> {
+  const request = parse(AdminShareModeRequestSchema, value, deps, "admin-share-mode");
+  const turns = turnTable(deps);
+  const idempotencyKey = shareIdempotencyKey(task, request.requestId);
+  const payloadHash = hashJson({ action: "share", shareMode: request.shareMode, channel: null, admin: `${admin.issuer}#${admin.subject}` });
+  let current = task;
+  const answer = () => ({ task: { taskId: current.taskId, ...(current.share === undefined ? {} : { share: shareView(current.share) }) } });
+  const reload = async () => {
+    const fresh = await get<DeveloperTaskRecord>(deps, taskKey(task.taskId));
+    if (fresh === undefined) throw agentXError("TASK_NOT_FOUND", `no task ${task.taskId}`);
+    current = fresh;
+  };
+  const previous = await get<{ payloadHash: string }>(deps, idempotencyKey);
+  if (previous !== undefined) {
+    if (previous.payloadHash !== payloadHash) throw agentXError("IDEMPOTENCY_CONFLICT", REUSED_REQUEST);
+    return answer();
+  }
+  for (let attempt = 0; attempt < SHARE_ATTEMPTS; attempt += 1) {
+    if (current.closedAt !== undefined) throw agentXError("CONFIG_INVALID", "this task is closed, so its share mode can no longer change");
+    if (current.share === undefined) throw agentXError("CONFIG_INVALID", "this task is private; only its developer can share it");
+    const project = await deps.actions.latestProject(current.project);
+    if (project === undefined) throw agentXError("CONFIG_INVALID", "this task's project is no longer registered; register it again first");
+    const share = withMode(current.share, decideMode(developerTaskPolicy(project.definition), request.shareMode));
+    if (share === "unchanged") return answer();
+    const receivedAt = iso(deps);
+    try {
+      await deps.actions.transact(shareItems(deps, turns, current, share, { idempotencyKey, payloadHash, receivedAt, request: `admin share mode ${request.shareMode}`, admin }));
+      await reload();
+      return answer();
+    } catch (error) {
+      if (!isConditional(error)) throw error;
+      // The same request committed first, or the notifier (or a close) changed the task: read it again.
+      const committed = await get(deps, idempotencyKey) !== undefined;
+      await reload();
+      if (committed) return answer();
+    }
+  }
+  throw agentXError("WORKSPACE_BUSY", "the task changed while switching its mode; try again");
+}
+
 /** Every developer task route answers 200 with its body; errors are AgentXErrors. */
 export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   if (request.method === "POST" && url.pathname === "/v1/dev/tasks") return startTask(deps, caller, body(request));
   if (request.method === "GET" && url.pathname === "/v1/dev/tasks") return listTasks(deps, caller, url);
-  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests))?$/.exec(url.pathname);
+  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share))?$/.exec(url.pathname);
   const taskId = route?.[1] === undefined ? undefined : safeDecode(route[1]);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === undefined) return readTask(deps, caller, taskId, url);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === "events") return taskEvents(deps, caller, taskId, url);
@@ -942,5 +1286,6 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "cancel") return cancelTask(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "close") return closeTask(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "pull-requests") return openPullRequest(deps, caller, taskId, body(request));
+  if (taskId !== undefined && request.method === "POST" && route?.[2] === "share") return shareTask(deps, caller, taskId, body(request));
   throw agentXError("NOT_FOUND", "route not found");
 }

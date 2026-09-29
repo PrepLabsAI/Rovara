@@ -3,7 +3,7 @@
 // for the AI tool that reads them: when to use the tool, and what to do next.
 import {
   DEFAULT_DEVELOPER_TASK_POLICY, DEVELOPER_EVENTS_DEFAULT, DEVELOPER_EVENTS_MAX, DEVELOPER_TASK_LIST_DEFAULT, DEVELOPER_TASK_LIST_MAX,
-  DEVELOPER_WAIT_MAX_SECONDS, DeveloperInstructionsSchema, DeveloperTaskStatusSchema, type DeveloperTaskView,
+  DEVELOPER_WAIT_MAX_SECONDS, DeveloperInstructionsSchema, DeveloperTaskStatusSchema, SHARED_BY_POLICY, VIEW_ONLY_BY_POLICY, inertName, type DeveloperTaskView,
 } from "@agentx/contracts";
 import { z } from "zod";
 import type { ControlPlaneClient } from "./client.js";
@@ -50,6 +50,10 @@ const TaskShape = {
   task_id: z.string(), title: z.string(), project: z.string(), status: DeveloperTaskStatusSchema,
   failure: z.object({ category: z.string(), message: z.string() }).optional(),
   starting_revision: z.number(), client: z.string(), shared: z.boolean(), share_mode: z.string().nullable(),
+  share_reason: z.string().optional(), share_mode_reason: z.string().optional(),
+  channel: z.object({ id: z.string(), name: z.string().optional() }).optional(),
+  thread_url: z.string().optional(), share_posting: z.boolean().optional(), share_post_failed: z.boolean().optional(),
+  channel_turns: z.array(z.object({ author: z.string(), slack_user: z.string(), at: z.string(), request: z.string(), outcome: z.string() })).optional(),
   closing: z.boolean().optional(), created_at: z.string(), updated_at: z.string(),
   events: z.array(z.object({ at: z.string(), kind: z.string(), text: z.string() })),
   summary: z.string().optional(),
@@ -71,8 +75,20 @@ function taskOutput(task: DeveloperTaskView, timedOut?: boolean): Record<string,
   return {
     task_id: task.taskId, title: task.title, project: task.project, status: task.status,
     ...(task.failure === undefined ? {} : { failure: task.failure }),
-    // Tasks are private in 25b; sharing, and so a share mode, arrive in 25c.
-    starting_revision: task.startingRevision, client: task.client, shared: task.shared, share_mode: null,
+    starting_revision: task.startingRevision, client: task.client,
+    shared: task.shared, share_mode: task.share?.mode ?? null,
+    // C6, C21: why the policy changed what was asked, the channel (a private one by ID only, R10),
+    // and the thread link once the notifier has posted it (Q6: never on the start's own answer).
+    ...(task.share === undefined ? {} : {
+      ...(task.share.sharedReason === "required" ? { share_reason: SHARED_BY_POLICY } : {}),
+      ...(task.share.modeReason === "continue_not_allowed" ? { share_mode_reason: VIEW_ONLY_BY_POLICY } : {}),
+      channel: { id: task.share.channelId, ...(task.share.channelName === undefined ? {} : { name: task.share.channelName }) },
+      ...(task.share.threadUrl !== undefined ? { thread_url: task.share.threadUrl } : task.share.postFailed === true ? { share_post_failed: true } : { share_posting: true }),
+    }),
+    ...(task.channelTurns === undefined ? {} : {
+      // Final review M7: a teammate's display name is marked inert, as TASK_BUSY marks it.
+      channel_turns: task.channelTurns.map((turn) => ({ author: turn.author.name === undefined ? turn.author.slackUserId : inertName(turn.author.name), slack_user: turn.author.slackUserId, at: turn.at, request: turn.request, outcome: turn.outcome })),
+    }),
     ...(task.closing === true ? { closing: true } : {}),
     created_at: task.createdAt, updated_at: task.updatedAt, events: task.events,
     ...(task.summary === undefined ? {} : { summary: task.summary }),
@@ -102,11 +118,28 @@ function nextFor(task: DeveloperTaskView): string {
   }
 }
 
+/** C6, C21: where the task is shared, and why the policy changed what was asked. */
+function shareText(task: DeveloperTaskView): string {
+  const share = task.share;
+  if (share === undefined) return "";
+  // R10: AgentX sends a channel's name only when the developer may see it.
+  const where = share.channelName === undefined ? `channel ${share.channelId}` : `#${share.channelName}`;
+  const mode = share.mode === "view" ? "view only" : "open to the channel";
+  const why = [
+    ...(share.sharedReason === "required" ? [`shared because it is ${SHARED_BY_POLICY}`] : []),
+    ...(share.modeReason === "continue_not_allowed" ? [`view only because ${VIEW_ONLY_BY_POLICY}`] : []),
+  ];
+  const thread = share.threadUrl !== undefined
+    ? ` Thread: ${share.threadUrl}.`
+    : share.postFailed === true ? " AgentX could not post the thread in Slack." : " The Slack thread link appears in agentx_get_task within a few seconds.";
+  return ` Shared in ${where}, ${mode}${why.length === 0 ? "" : ` (${why.join("; ")})`}.${thread}`;
+}
+
 function taskText(task: DeveloperTaskView, timedOut?: boolean): string {
   const failure = task.failure === undefined ? "" : ` (${task.failure.category}: ${task.failure.message})`;
   const waited = timedOut === true ? " The wait ended first; the task keeps running." : "";
   const summary = task.summary === undefined ? "" : ` Summary: ${task.summary}`;
-  return `Task ${task.taskId} "${task.title}" on ${task.project} is ${task.status}${failure}.${waited} ${nextFor(task)}${summary}`;
+  return `Task ${task.taskId} "${task.title}" on ${task.project} is ${task.status}${failure}.${waited}${shareText(task)} ${nextFor(task)}${summary}`;
 }
 
 function instructions(value: unknown): string {
@@ -119,14 +152,18 @@ function instructions(value: unknown): string {
  * The caller's request_id, else one remembered for this call's content for 15 minutes, so an
  * unchanged retry (after the AI tool's own timeout, say) reaches AgentX as the same request.
  */
-function requestIdFor(context: ToolContext, call: ToolCall, input: Record<string, unknown>, content: readonly unknown[]): string {
+function requestIdFor(context: ToolContext, call: ToolCall, input: Record<string, unknown>, content: readonly unknown[], group?: string): string {
   const given = input.request_id as string | undefined;
   if (given !== undefined) return given;
-  return call.requestIds === undefined ? context.newRequestId() : call.requestIds.idFor(content, context.now(), () => context.newRequestId());
+  return call.requestIds === undefined ? context.newRequestId() : call.requestIds.idFor(content, context.now(), () => context.newRequestId(), group);
 }
 const optional = (value: unknown) => value ?? null;
 /** What makes a cancel the same cancel: the tool and its task (final review M3). */
 const cancelContent = (taskId: unknown): readonly unknown[] => ["agentx_cancel_task", taskId];
+/** What makes a share the same share: the task, the mode asked for and the channel named. */
+const shareContent = (taskId: unknown, mode: unknown, channel: unknown): readonly unknown[] => ["agentx_share_task", taskId, optional(mode), optional(channel)];
+/** Every share of one task, forgotten together after a share succeeds (final review M1). */
+const shareGroup = (taskId: string): string => `agentx_share_task:${taskId}`;
 const eventsOf = (input: Record<string, unknown>) => (input.events as number | undefined) ?? DEVELOPER_EVENTS_DEFAULT;
 
 /**
@@ -186,7 +223,7 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
     name: "agentx_list_projects",
     title: "List AgentX projects",
     description:
-      "Lists the AgentX projects you can hand coding tasks to, with each project's Slack channels and task policy. Use it before agentx_start_task to get a project's exact name. A project with tasks_enabled false, or with share_policy required, cannot take tasks from an AI tool yet; use its Slack channel instead.",
+      "Lists the AgentX projects you can hand coding tasks to, with each project's Slack channels and task policy. Use it before agentx_start_task to get a project's exact name. A project with tasks_enabled false cannot take tasks from an AI tool; use its Slack channel instead. With share_policy required, every task is shared to the project's channel.",
     inputSchema: {},
     outputSchema: {
       projects: z.array(z.object({
@@ -219,14 +256,14 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
     name: "agentx_start_task",
     title: "Hand a coding task to AgentX",
     description:
-      `Hands a coding task to AgentX, which runs it in a private remote workspace on the project's repositories. The task is private to you. Write complete instructions: the remote worker gets them exactly as written and cannot see this conversation. By default it answers at once with a task ID while the task runs; then check it with agentx_get_task or wait with agentx_wait_for_task. To wait for a small task in the same call, set wait_seconds (up to 600); if the wait ends first, the result says timed_out and the task keeps running. ${RETRY}, so no second task starts; to run the same instructions again as new work, send a new request_id. When the task ends, open a pull request with agentx_open_pull_request or send more work with agentx_continue_task, and close it with agentx_close_task when done, since each open task counts against your limit.`,
+      `Hands a coding task to AgentX, which runs it in a private remote workspace on the project's repositories. The task is private to you unless you share it, or the project requires sharing. Write complete instructions: the remote worker gets them exactly as written and cannot see this conversation. By default it answers at once with a task ID while the task runs; then check it with agentx_get_task or wait with agentx_wait_for_task. To wait for a small task in the same call, set wait_seconds (up to 600); if the wait ends first, the result says timed_out and the task keeps running. ${RETRY}, so no second task starts; to run the same instructions again as new work, send a new request_id. When the task ends, open a pull request with agentx_open_pull_request or send more work with agentx_continue_task, and close it with agentx_close_task when done, since each open task counts against your limit.`,
     inputSchema: {
       project: z.string().min(1).max(200).describe("the project's exact name, from agentx_list_projects"),
       instructions: instructionsInput,
       title: z.string().max(120).optional().describe("a short title, at most 120 characters; the first line of the instructions when left out"),
-      share_to_channel: z.boolean().optional().describe("not available yet: AgentX refuses a start that asks to share, so leave it out"),
-      share_mode: z.enum(["view", "continue"]).optional().describe("for sharing, which is not available yet; leave it out"),
-      channel: z.string().max(80).optional().describe("for sharing, which is not available yet; leave it out"),
+      share_to_channel: z.boolean().optional().describe("post the task in the project's Slack channel, where AgentX replies as it runs; false by default"),
+      share_mode: z.enum(["view", "continue"]).optional().describe("view (the channel watches) or continue (channel members may mention AgentX in the thread to steer the task); the project's default when left out, and view when the project does not allow continue"),
+      channel: z.string().min(1).max(80).optional().describe("which bound channel to share in, by name or ID; needed only when the project has several"),
       wait_seconds: waitInput(0).optional().describe("seconds to wait for the task to end, 0 to 600; 0 (answer at once) by default"),
       request_id: requestIdInput,
     },
@@ -253,7 +290,7 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
     name: "agentx_get_task",
     title: "Check an AgentX task",
     description:
-      "Shows one of your tasks: its status (STARTING, RUNNING, SUCCEEDED, FAILED, CANCELLED, INTERRUPTED or CLOSED), any failure, and its latest progress. Once the task ends it also shows the worker's summary, the changed files with line counts, artifacts, and pull requests with their URLs. Use it to check on a task, to find a pull request's URL after agentx_open_pull_request, and to see how agentx_close_task went: status CLOSED when done, or unpublished listing each repository and why it was not closed.",
+      "Shows one of your tasks: its status (STARTING, RUNNING, SUCCEEDED, FAILED, CANCELLED, INTERRUPTED or CLOSED), any failure, and its latest progress. Once the task ends it also shows the worker's summary, the changed files with line counts, artifacts, and pull requests with their URLs. Use it to check on a task, to find a pull request's URL after agentx_open_pull_request, and to see how agentx_close_task went: status CLOSED when done, or unpublished listing each repository and why it was not closed. For a shared task it shows the channel, the mode, the thread link once posted, and in continue mode the channel's turns.",
     inputSchema: { task_id: taskIdInput, events: eventsInput },
     outputSchema: TaskShape,
     async handler(context, input) {
@@ -354,6 +391,35 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
             ? `Task ${taskId} was not closed: unpublished work in ${unpublished.map((entry) => `${entry.repository} (${entry.reasons.join(", ")})`).join("; ")}. Open a pull request with agentx_open_pull_request first, or continue the task with instructions to discard the changes, then close it again.`
             : `Closing task ${taskId}: AgentX is checking the workspace for unpublished work. Check with agentx_get_task; it shows CLOSED when done.`;
       return { structured: { ...taskOutput(task), closed: answer.closed }, text };
+    },
+  },
+  {
+    name: "agentx_share_task",
+    title: "Share an AgentX task to its Slack channel",
+    description:
+      `Shares one of your tasks to its project's Slack channel, or changes how a shared task is shared. view lets the channel watch while you drive the task from here; continue also lets channel members mention AgentX in the thread to steer it, one request at a time. On a shared task it changes the mode, within the project's policy; the channel cannot change. Answers at once: AgentX posts the thread within seconds, and agentx_get_task then shows its link. Switching to view makes channel messages that are still waiting get a notice instead of running. ${RETRY}.`,
+    inputSchema: {
+      task_id: taskIdInput,
+      share_mode: z.enum(["view", "continue"]).optional().describe("view or continue; for a new share, the project's default when left out"),
+      channel: z.string().min(1).max(80).optional().describe("which bound channel, by name or ID; needed only when the project has several"),
+      request_id: requestIdInput,
+    },
+    outputSchema: ActionShape,
+    async handler(context, input, call) {
+      const taskId = input.task_id as string;
+      const content = shareContent(taskId, input.share_mode, input.channel);
+      const id = requestIdFor(context, call, input, content, shareGroup(taskId));
+      const task = await context.client.shareTask(taskId, {
+        requestId: id,
+        ...(input.share_mode === undefined ? {} : { shareMode: input.share_mode as "view" | "continue" }),
+        ...(input.channel === undefined ? {} : { channel: input.channel as string }),
+      });
+      // The share changed: a later call asking for an earlier mode is a new change, not a retry of
+      // the earlier call, whose stored answer would leave the thread in this mode (as cancel after
+      // continue). Every other share of this task is forgotten, however it spelled the channel;
+      // only this call's own retry still reaches AgentX as the same request.
+      call.requestIds?.forgetGroup(shareGroup(taskId), content);
+      return { structured: { ...taskOutput(task), request_id: id }, text: taskText(task) };
     },
   },
   {

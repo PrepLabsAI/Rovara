@@ -2,6 +2,7 @@
 // and audit records. No I/O; aws/developer-tasks.ts and the broker's result hook call these.
 import { createHash } from "node:crypto";
 import {
+  inertName,
   AiToolTurnRecordSchema,
   DEVELOPER_EVENT_TEXT_MAX,
   DEVELOPER_FAILURE_MESSAGE_MAX,
@@ -13,14 +14,18 @@ import {
   lastAssistantResponse,
   redactAndCap,
   redactText,
+  slackThreadSubject,
+  slackThreadUrl,
   type AiToolTurnRecord,
   type DeveloperRequester,
   type DeveloperTaskEvent,
   type DeveloperTaskFailureCategory,
+  type DeveloperTaskShare,
   type DeveloperTaskStatus,
   type Operation,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
+import type { ShareDecision } from "./share.js";
 
 export interface CounterKey { pk: string; sk: string }
 export interface WorkspaceCharge { member: CounterKey; organization: CounterKey }
@@ -43,12 +48,54 @@ export interface DeveloperTaskRecord {
   conversationId: string;
   startingRevision: number;
   charge: WorkspaceCharge;
-  /** Phase 25c shares tasks; until then every task is private. */
-  shared: false;
+  /** C1: whether the task is shared to its channel, and how. */
+  shared: boolean;
+  share?: TaskShare;
+  /** C1: every write of `share` replaces the whole map, conditioned on this number. */
+  shareVersion?: number;
   createdAt: string;
   updatedAt: string;
   closedAt?: string;
 }
+
+/** C1: a shared task's thread, as the task record keeps it. */
+export interface TaskShare {
+  teamId: string;
+  channelId: string;
+  channelName?: string;
+  mode: "view" | "continue";
+  sharedReason: "requested" | "required";
+  modeReason?: "continue_not_allowed";
+  sharedAt: string;
+  threadTs?: string;
+  postFailedAt?: string;
+}
+
+export function taskShare(decision: ShareDecision, teamId: string, sharedAt: string): TaskShare {
+  return {
+    teamId, channelId: decision.channelId,
+    ...(decision.channelName === undefined ? {} : { channelName: decision.channelName }),
+    mode: decision.mode, sharedReason: decision.sharedReason,
+    ...(decision.modeReason === undefined ? {} : { modeReason: decision.modeReason }),
+    sharedAt,
+  };
+}
+
+/** The wire view of a share: a thread link only once the notifier has posted (C6). */
+export function shareView(share: TaskShare): DeveloperTaskShare {
+  return {
+    mode: share.mode, channelId: share.channelId,
+    ...(share.channelName === undefined ? {} : { channelName: share.channelName }),
+    sharedReason: share.sharedReason,
+    ...(share.modeReason === undefined ? {} : { modeReason: share.modeReason }),
+    ...(share.threadTs === undefined ? {} : { threadUrl: slackThreadUrl({ teamId: share.teamId, channelId: share.channelId, threadTs: share.threadTs }) }),
+    ...(share.postFailedAt === undefined ? {} : { postFailed: true }),
+  };
+}
+
+/** The shared thread's Slack subject, the key of its Slack-side records (ruling F11: contracts' builder, which validates). */
+export const sharedSubject = (share: TaskShare & { threadTs: string }): string =>
+  slackThreadSubject({ teamId: share.teamId, channelId: share.channelId, threadTs: share.threadTs });
 
 /** DEVELOPER#<developerId> / TASK#<createdAt>#<taskId>: the task index of FR-017. */
 export interface DeveloperTaskIndexRecord {
@@ -254,6 +301,8 @@ export function aiToolTurn(input: {
   response: string;
   operationId?: string | undefined;
   errorCode?: string | undefined;
+  /** C25: the AgentX admin who took this action on the developer's task (a share mode change). */
+  admin?: { issuer: string; subject: string; displayName?: string } | undefined;
 }): Record<string, unknown> & AiToolTurnRecord {
   const request = redactAndCap(input.request, TURN_TEXT_LIMIT);
   const response = redactAndCap(input.response, TURN_TEXT_LIMIT);
@@ -271,6 +320,10 @@ export function aiToolTurn(input: {
       ...(party.slackUserId === undefined ? {} : { slackUserId: party.slackUserId }),
     },
     client: party.client,
+    ...(input.admin === undefined ? {} : { admin: {
+      issuer: input.admin.issuer.slice(0, 512), subject: input.admin.subject.slice(0, 256),
+      ...(input.admin.displayName === undefined ? {} : { displayName: input.admin.displayName.slice(0, 200) }),
+    } }),
     receivedAt: input.receivedAt,
     ...(party.settingsRevision === undefined ? {} : { settingsRevision: party.settingsRevision }),
     ...(party.workspaceId === undefined ? {} : { workspaceId: party.workspaceId }),
@@ -322,17 +375,8 @@ export function completedTurn(input: {
   });
 }
 
-/**
- * Text as a GFM code span, which GitHub renders literally: no mention, link, autolink, HTML or
- * issue reference. Per CommonMark the fence is one backtick longer than the text's longest
- * backtick run, padded with a space when the text starts or ends with a backtick.
- */
-export function inertName(name: string): string {
-  const longestRun = Math.max(0, ...(name.match(/`+/g) ?? []).map((run) => run.length));
-  const fence = "`".repeat(longestRun + 1);
-  const pad = name.startsWith("`") || name.endsWith("`") ? " " : "";
-  return `${fence}${pad}${name}${pad}${fence}`;
-}
+/** Moved to the contracts package so the MCP server marks names the same way (final review M7). */
+export { inertName };
 
 /** FR-023. The client is one of the four names cleanClientName gives, so it needs no escaping. */
 export function developerFooter(name: string, client: string): string {

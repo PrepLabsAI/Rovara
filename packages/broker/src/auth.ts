@@ -32,6 +32,12 @@ export interface AuthenticatedIdentity {
     client: string;
     taskId: string;
   };
+  /**
+   * Spec 025 C11: the call comes from a shared task's Slack thread. In `continue` the identity is the
+   * task's owner key with the teammate's Slack context; otherwise the thread's own key, which answers
+   * VIEW_ONLY and never creates a workspace.
+   */
+  sharedTask?: { taskId: string; workspaceId: string; developerName: string; state: "continue" | "view" | "closed" };
 }
 
 export interface JwtAuthenticatorConfig {
