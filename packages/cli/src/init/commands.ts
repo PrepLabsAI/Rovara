@@ -18,7 +18,7 @@ import { assertReleaseCoversRegion, loadRelease } from "../deploy/release.js";
 import { stsCallerIdentity } from "../environments/adopt.js";
 import type { LockRecord } from "../environments/lock.js";
 import { ssmParameterStore, type ParameterStore } from "../environments/parameter-store.js";
-import { readEnvironmentSettings, type EnvironmentSettings } from "../environments/settings.js";
+import { readEnvironmentSettings } from "../environments/settings.js";
 import { openAdminSession } from "../setup/admin-session.js";
 import { awsAlertsApi } from "../setup/alerts.js";
 import { slackChannelApi } from "../setup/channel-add.js";
@@ -225,7 +225,9 @@ export async function runInit(options: InitOptions, deps: InitCliDependencies, s
   };
   try {
     const result = await init(options, deps, services, session);
-    session.wizard?.finish(result.status === "complete" ? `AgentX environment ${result.env} is installed.` : result.message);
+    // A finished run ends the page on the same summary the terminal ends on: where to talk to
+    // AgentX, the developer sign-in command, and the day-2 commands (readyText).
+    session.wizard?.finish(result.status === "complete" ? result.ready ?? `AgentX environment ${result.env} is installed.` : result.message);
     return result;
   } catch (error) {
     const mapped = cliErrorFor(error);
