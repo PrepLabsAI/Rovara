@@ -677,8 +677,21 @@ async function busyOrClosing(deps: DeveloperTaskRouteDependencies, task: Develop
   if (error instanceof AgentXError && (error.code === "WORKSPACE_BUSY" || error.code === "WORKSPACE_NOT_READY")) {
     const workspace = await deps.actions.workspace(task.workspaceId);
     if (workspace.status === "CLOSING") throw agentXError("CONFIG_INVALID", CLOSING_TASK);
+    const channel = await channelDriver(deps, task, workspace.activeOperationId);
+    if (channel !== undefined) throw agentXError("TASK_BUSY", channel);
   }
   return busy(error, task.taskId);
+}
+
+/** C14, D4: the words for a developer's action that met a teammate's channel turn, or undefined. */
+async function channelDriver(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord, operationId: string | null): Promise<string | undefined> {
+  if (operationId === null || task.share?.threadTs === undefined) return undefined;
+  const activity = await deps.actions.channelActivity({ taskId: task.taskId, operationId, threadSubject: sharedSubject({ ...task.share, threadTs: task.share.threadTs }) });
+  if (activity.driver === undefined) return undefined;
+  const who = activity.driver.name ?? `Slack user ${activity.driver.slackUserId}`;
+  // F18: a floor. The running turn may or may not still count among the thread's pending messages.
+  const waiting = activity.waiting === 0 ? "" : `, and at least ${activity.waiting} more channel message${activity.waiting === 1 ? " is" : "s are"} waiting`;
+  return `task ${task.taskId} is running a request from ${who} in its shared Slack thread${waiting}; wait with agentx_wait_for_task, stop it with agentx_cancel_task, or make the thread view only with agentx_share_task`;
 }
 
 /** The existing handlers' busy answers, in the developer's words (FR-049's TASK_BUSY). */

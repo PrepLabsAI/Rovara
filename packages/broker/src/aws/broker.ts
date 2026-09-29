@@ -21,6 +21,10 @@ import {
   AgentXError,
   CHANNEL_TURN_REQUEST_MAX,
   ChannelTurnSchema,
+  DEVELOPER_TASK_OWNER_ISSUER,
+  SharedTaskRecordSchema,
+  sharedTaskKey,
+  type SharedTaskRecord,
   ConnectorCallRequestSchema,
   GitHubMcpRequestSchema,
   OperationRequestSchema,
@@ -92,7 +96,7 @@ import { attributionDroppedLog, callConnector, connectorCatalogKey, discoverConn
 import { resolveConnectors, BUILT_IN_CONNECTOR_TYPES, type ConnectorType, type ConnectorTypeContext, type ResolvedConnector } from "./connector-types.js";
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
 import { developerTokenVerifier } from "../developer/verify-token.js";
-import { completedTurn, developerFooter, inertName, taskKey, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type StoredEvent } from "../developer/task-records.js";
+import { completedTurn, developerFooter, inertName, taskKey, taskOwnerKey, taskOwnerSubject, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type StoredEvent } from "../developer/task-records.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
 import { hashJson, isConditional } from "./broker-shared.js";
 import { channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, routeDeveloperRequest, type DeveloperApiConfiguration } from "./developer-routes.js";
@@ -260,6 +264,8 @@ interface AwsBrokerDependencies {
   turnRecordsTableName?: string;
   /** Connector types this deployment serves; the built-in types when absent. */
   connectorTypes?: Record<string, ConnectorType>;
+  /** Spec 025 C14: the Slack threads table, read for a shared thread's waiting messages; absent in legacy. */
+  slackThreadsTableName?: string;
 }
 
 /**
@@ -376,6 +382,25 @@ function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTas
     deleteCompute: (workspace) => deleteWorkspaceCompute(dependencies, workspace),
     transact: async (items) => {
       await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: items }));
+    },
+    channelActivity: async ({ taskId, operationId, threadSubject }) => {
+      const marker = await getItem<{ slackUserId?: unknown; name?: unknown }>(dependencies, { pk: `DEVTASK#${taskId}`, sk: `CHANNEL_OPERATION#${operationId}` });
+      let waiting = 0;
+      if (marker !== undefined && dependencies.slackThreadsTableName !== undefined) {
+        try {
+          const thread = await dependencies.documentClient.send(new GetCommand({ TableName: dependencies.slackThreadsTableName, Key: { pk: `THREAD#${threadSubject}`, sk: "META" } })) as { Item?: { pendingRequests?: unknown } };
+          const pending = Number(thread.Item?.pendingRequests ?? 0);
+          // F18: the running turn may still be one of the thread's pending requests, or may have
+          // answered already while its operation runs on, so pending - 1 is a floor, not a count.
+          waiting = Number.isFinite(pending) ? Math.max(0, pending - 1) : 0;
+        } catch (error) {
+          console.log(JSON.stringify({ component: "broker", event: "developer.channel_waiting_unread", taskId, error: error instanceof Error ? error.name : "unknown" }));
+        }
+      }
+      return {
+        ...(typeof marker?.slackUserId === "string" ? { driver: { slackUserId: marker.slackUserId, ...(typeof marker.name === "string" ? { name: marker.name } : {}) } } : {}),
+        waiting,
+      };
     },
     channelTurns: async (threadSubject, taskId, limit) => {
       const table = dependencies.turnRecordsTableName;
@@ -648,12 +673,12 @@ async function routeWorkspaceRequest(
 
   const tasks = /^\/v1\/workspaces\/([0-9a-f-]+)\/tasks$/.exec(url.pathname);
   if (request.method === "POST" && tasks?.[1]) {
-    return json(await acceptTask(dependencies, identity, tasks[1], body), request.requestId, 202);
+    return json(await acceptTask(dependencies, identity, tasks[1], body, channelOperation(dependencies, identity)), request.requestId, 202);
   }
 
   const pullRequests = /^\/v1\/workspaces\/([0-9a-f-]+)\/pull-requests$/.exec(url.pathname);
   if (request.method === "POST" && pullRequests?.[1]) {
-    return json(await acceptPullRequest(dependencies, identity, pullRequests[1], body), request.requestId, 202);
+    return json(await acceptPullRequest(dependencies, identity, pullRequests[1], body, channelOperation(dependencies, identity)), request.requestId, 202);
   }
   const pullRequestActions = /^\/v1\/workspaces\/([0-9a-f-]+)\/pull-request-actions$/.exec(url.pathname);
   if (request.method === "POST" && pullRequestActions?.[1]) {
@@ -986,7 +1011,7 @@ async function slackServiceIdentity(
   const binding = await getSlackBinding(dependencies, context.thread.teamId, context.thread.channelId);
   if (!binding) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
   const subject = slackThreadSubject(context.thread);
-  return {
+  const own: AuthenticatedIdentity = {
     issuer: SLACK_THREAD_OWNER_ISSUER,
     subject,
     ownerKey: ownerKeyForSubject(SLACK_THREAD_OWNER_ISSUER, subject),
@@ -994,6 +1019,42 @@ async function slackServiceIdentity(
     claims: {},
     slack: { ...context, binding },
   };
+  const shared = await sharedThread(dependencies, context.thread);
+  if (shared === undefined) return own;
+  const sharedTask = { taskId: shared.taskId, workspaceId: shared.workspaceId, developerName: shared.developerName };
+  // C11: open only while continue, not closed, and the channel still serves the task's project.
+  if (!sharedThreadOpen(shared, binding)) {
+    return { ...own, sharedTask: { ...sharedTask, state: shared.closedAt !== undefined ? "closed" : "view" } };
+  }
+  return {
+    issuer: DEVELOPER_TASK_OWNER_ISSUER,
+    subject: taskOwnerSubject(shared.developerId, shared.taskId),
+    ownerKey: shared.ownerKey,
+    isAdministrator: false,
+    claims: {},
+    // The teammate's Slack context: requesterOf records them on every operation (FR-054).
+    slack: { ...context, binding },
+    sharedTask: { ...sharedTask, state: "continue" },
+  };
+}
+
+/** Spec 025 FR-035, FR-054: the thread's shared task record, or undefined for an ordinary thread. */
+async function sharedThread(dependencies: AwsBrokerDependencies, thread: SlackThread): Promise<SharedTaskRecord | undefined> {
+  // Developer tasks exist only where developer sign-in is set up (D14); nothing else reads this key.
+  if (dependencies.developer === undefined) return undefined;
+  const item = await getItem<Record<string, unknown>>(dependencies, sharedTaskKey(thread));
+  if (item === undefined) return undefined;
+  const record = SharedTaskRecordSchema.safeParse(item);
+  // Fail closed: an unreadable record must never let the thread act as an ordinary one.
+  if (!record.success || record.data.ownerKey !== taskOwnerKey(record.data.developerId, record.data.taskId)) {
+    throw agentXError("FORBIDDEN", "this thread's shared task record cannot be read; ask an admin");
+  }
+  return record.data;
+}
+
+/** C11, F16: a shared thread acts on the task only in continue, before the close, while its channel serves the task's project. */
+function sharedThreadOpen(shared: SharedTaskRecord, binding: SlackChannelBinding): boolean {
+  return shared.mode === "continue" && shared.closedAt === undefined && binding.projectName === shared.project;
 }
 
 function parseSlackHeaders(headers: Record<string, string | undefined>): Omit<NonNullable<AuthenticatedIdentity["slack"]>, "binding"> {
@@ -1120,6 +1181,11 @@ async function startThreadWorkspaceClose(
 ): Promise<SlackWorkspaceCloseStartResult> {
   if (!identity.slack) throw agentXError("FORBIDDEN", "a Slack thread identity is required");
   const input = object(value, "thread workspace close request");
+  // C11: only the developer closes a shared task, from their AI tool.
+  if (identity.sharedTask !== undefined) {
+    if (input.includeSharedTask === true) return { outcome: "REFUSED", reason: "shared_task" };
+    throw agentXError("FORBIDDEN", SHARED_CLOSE_REFUSED);
+  }
   const requestId = uuid(input.requestId, "requestId");
   const workspace = await getThreadWorkspace(dependencies, identity.ownerKey);
   if (!workspace) return { outcome: "NOT_FOUND" };
@@ -1283,6 +1349,7 @@ async function completeThreadWorkspaceClose(
   const slack = identity.slack;
   if (!slack) throw agentXError("FORBIDDEN", "a Slack thread identity is required");
   const input = object(value, "thread workspace close completion");
+  if (identity.sharedTask !== undefined) throw agentXError("FORBIDDEN", SHARED_CLOSE_REFUSED);
   uuid(input.requestId, "requestId");
   const operationId = uuid(input.operationId, "operationId");
   const workspace = await getThreadWorkspace(dependencies, identity.ownerKey);
@@ -1392,6 +1459,9 @@ async function ensureThreadWorkspace(
     recoverableOperations: includeRecoverableOperations,
     actionPolicy: includeActionPolicy,
   };
+  if (identity.sharedTask !== undefined) {
+    return sharedThreadWorkspace(dependencies, identity, identity.sharedTask, input.includeSharedTask === true, include, includeSettingsRevision);
+  }
   const threadWorkspace = await getThreadWorkspace(dependencies, identity.ownerKey);
   if (threadWorkspace) {
     if (threadWorkspace.status === "CLOSED" && threadWorkspace.closedAt) {
@@ -1563,6 +1633,14 @@ async function prepareThreadWorkspace(
   if (!slack || !dependencies.slack) throw agentXError("FORBIDDEN", "a Slack thread identity is required");
   const input = object(value, "thread workspace preparation");
   const requestId = uuid(input.requestId, "requestId");
+  // C11: a shared task's workspace is the developer's; the thread never prepares it.
+  if (identity.sharedTask !== undefined) {
+    if (identity.sharedTask.state !== "continue") throw agentXError("FORBIDDEN", SHARED_VIEW_ONLY);
+    const workspace = await requireWorkspace(dependencies, identity.sharedTask.workspaceId);
+    if (workspace.ownerKey !== identity.ownerKey) throw agentXError("FORBIDDEN", "the workspace does not belong to this task");
+    if (workspace.status === "CLOSED" && workspace.closedAt) return { outcome: "CLOSED", workspaceId: workspace.id, closedAt: workspace.closedAt };
+    return { outcome: "WORKSPACE", workspaceId: workspace.id, status: workspace.status, operationId: workspace.activeOperationId, created: false };
+  }
   const workspace = await getThreadWorkspace(dependencies, identity.ownerKey)
     ?? await getDefaultWorkspace(dependencies, identity.ownerKey, slack.binding.projectName);
   if (!workspace) throw agentXError("NOT_FOUND", "thread workspace not found");
@@ -1705,6 +1783,45 @@ async function startThreadPreparation(
     throw agentXError("WORKSPACE_BUSY", "thread workspace preparation conflicted with another request; retry");
   }
   return { outcome: "WORKSPACE", workspaceId: workspace.id, status: "PREPARING", operationId, created: true };
+}
+
+const SHARED_VIEW_ONLY = "this thread follows a task started from an AI tool and is view only";
+const SHARED_CLOSE_REFUSED = "only the developer who started this task can close it, from their AI tool";
+
+/**
+ * Spec 025 C11: a shared thread's workspace. View or closed: VIEW_ONLY, and nothing is created.
+ * Continue: the task's workspace as it is, never created, prepared again or charged (FR-054), with
+ * no recoverable operations, because the running one may be the developer's own.
+ */
+async function sharedThreadWorkspace(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  shared: NonNullable<AuthenticatedIdentity["sharedTask"]>,
+  includeSharedTask: boolean,
+  include: IntegrationInclude,
+  includeSettingsRevision: boolean,
+): Promise<SlackThreadWorkspaceResult> {
+  if (shared.state !== "continue") {
+    if (!includeSharedTask) throw agentXError("FORBIDDEN", SHARED_VIEW_ONLY);
+    return { outcome: "VIEW_ONLY", taskId: shared.taskId, closed: shared.state === "closed" };
+  }
+  const workspace = await requireWorkspace(dependencies, shared.workspaceId);
+  if (workspace.ownerKey !== identity.ownerKey) throw agentXError("FORBIDDEN", "the workspace does not belong to this task");
+  if (workspace.status === "CLOSED" && workspace.closedAt) return { outcome: "CLOSED", workspaceId: workspace.id, closedAt: workspace.closedAt };
+  const settings = await requireLatestProject(dependencies, workspace.projectName);
+  return {
+    outcome: "WORKSPACE",
+    workspaceId: workspace.id,
+    status: workspace.status,
+    operationId: workspace.activeOperationId,
+    created: false,
+    orchestratorInstructions: settings.definition.orchestratorInstructions,
+    ...await threadIntegrations(settings.definition, include, dependencies),
+    ...(include.recoverableOperations ? { recoverableOperations: [] } : {}),
+    ...(includeSettingsRevision ? { settingsRevision: settings.definition.revision } : {}),
+    ...(include.actionPolicy && settings.definition.actionPolicy ? { actionPolicy: settings.definition.actionPolicy } : {}),
+    ...(includeSharedTask ? { sharedTask: { taskId: shared.taskId, developerName: shared.developerName } } : {}),
+  };
 }
 
 async function existingThreadWorkspace(
@@ -1883,6 +2000,21 @@ async function attributedBody(
   const attribution = `Requested in Slack thread ${link} by ${requesters.join(", ")}.`;
   const attributed = body ? `${body}\n\n---\n${attribution}` : attribution;
   return Buffer.byteLength(attributed, "utf8") <= 32_768 ? attributed : body;
+}
+
+/** C13: who started an operation from a shared thread, for the developer's TASK_BUSY (C14). */
+function channelOperation(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity): ExtraItems {
+  const shared = identity.sharedTask;
+  const slack = identity.slack;
+  if (shared?.state !== "continue" || slack === undefined) return () => [];
+  return (operation) => [{ Put: {
+    TableName: dependencies.tableName,
+    Item: {
+      pk: `DEVTASK#${shared.taskId}`, sk: `CHANNEL_OPERATION#${operation.id}`, entityType: "CHANNEL_OPERATION",
+      slackUserId: slack.requester.userId, ...(slack.requesterName === undefined ? {} : { name: slack.requesterName }), createdAt: operation.createdAt,
+    },
+    ConditionExpression: "attribute_not_exists(pk)",
+  } }];
 }
 
 /** Who asked, for the operation record (FR-022): a Slack member or a developer. */
@@ -2703,8 +2835,15 @@ export function isSlackStopTaskEvent(event: unknown): event is SlackStopTaskEven
 async function stopSlackThreadTask(dependencies: AwsBrokerDependencies, event: SlackStopTaskEvent): Promise<TaskCancellation> {
   const thread = SlackThreadSchema.parse(event.thread);
   const requester = SlackRequesterSchema.parse({ teamId: thread.teamId, userId: event.userId });
-  if (!await getSlackBinding(dependencies, thread.teamId, thread.channelId)) {
-    throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
+  const binding = await getSlackBinding(dependencies, thread.teamId, thread.channelId);
+  if (!binding) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
+  // Q8: in a continue thread a teammate's stop cancels the task's running task operation, whoever
+  // started it, as the developer's own cancel would. A view-only or closed thread, or one whose
+  // channel now serves another project (F16), stops nothing.
+  const shared = await sharedThread(dependencies, thread);
+  if (shared !== undefined) {
+    if (!sharedThreadOpen(shared, binding)) return { outcome: "NOTHING_RUNNING" };
+    return cancelRunningTask(dependencies, await requireWorkspace(dependencies, shared.workspaceId), { requestedBy: requester });
   }
   const ownerKey = ownerKeyForSubject(SLACK_THREAD_OWNER_ISSUER, slackThreadSubject(thread));
   const record = await getItem<{ workspaceId?: string; closedAt?: string }>(dependencies, slackThreadKey(ownerKey));
@@ -3441,6 +3580,10 @@ async function completedTurnItems(
     }
   }
   if (ended === undefined) return [];
+  // F3: a teammate's operation from a continue thread gets an ordinary Slack turn record (FR-037,
+  // FR-054), never an AI-tool record under the developer's name.
+  const endedBy = ended.operation.requestedBy;
+  if (endedBy === undefined || !("kind" in endedBy) || endedBy.kind !== "developer") return [];
   const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
   if (task === undefined) {
     // The pointer and the task are written in one transaction, so this is not expected.
@@ -4386,6 +4529,7 @@ export const handler = createAwsBrokerHandler({
   codeBuild,
   ...(developer ? { developer } : {}),
   ...(process.env.TURN_RECORDS_TABLE_NAME ? { turnRecordsTableName: process.env.TURN_RECORDS_TABLE_NAME } : {}),
+  ...(process.env.SLACK_THREADS_TABLE_NAME ? { slackThreadsTableName: process.env.SLACK_THREADS_TABLE_NAME } : {}),
   ...(process.env.SLACK_ORCHESTRATOR_ROLE_ARN
     ? {
         slack: {

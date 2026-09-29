@@ -10,7 +10,7 @@ import type { StreamRecord } from "../../packages/broker/src/developer/notificat
 import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
 import { localSigner } from "./developer-fakes.js";
 import type { FakeDynamoDb } from "./fake-dynamodb.js";
-import { SLACK_CHANNEL, SLACK_TEAM, call, createBroker, loadSlackBroker, registerSlackProject, type Handler } from "./slack-broker.js";
+import { SLACK_CHANNEL, SLACK_TEAM, call, createBroker, loadSlackBroker, orchestratorPrincipal, registerSlackProject, type Handler } from "./slack-broker.js";
 
 export const DEV_ISSUER = "https://abc123.execute-api.us-east-1.amazonaws.com/v1/auth";
 export interface Developer { developerId: string; name: string; provider: "slack" | "oidc"; sessionId: string; slackUserId?: string }
@@ -79,7 +79,7 @@ export async function createDeveloperTaskBroker(options: {
     s3,
     ...(options.memberLimit === undefined ? {} : { memberLimit: options.memberLimit }),
     ...(options.organizationLimit === undefined ? {} : { organizationLimit: options.organizationLimit }),
-    developer, turnRecordsTableName: "turns",
+    developer, turnRecordsTableName: "turns", slackThreadsTableName: "threads",
   });
   const actions = module.createDeveloperTaskActions(brokerInput as never);
   for (const who of [MAYA, OMAR]) {
@@ -170,6 +170,16 @@ export function markThreadPosted(db: FakeDynamoDb, taskId: string, threadTs = "1
     developerId: task.developerId, developerName: task.developerName, project: task.project, mode: share.mode, sharedAt: share.sharedAt,
   });
   return `${thread.teamId}/${thread.channelId}/${threadTs}`;
+}
+
+/** A teammate's request through the Slack orchestrator's service route, in a shared thread (FR-054). */
+export function teammate(handler: Handler, subject: string, slackUserId: string, method: string, path: string, body?: unknown, name?: string) {
+  return call(handler, {
+    method, path,
+    service: { principal: orchestratorPrincipal, thread: subject, slackUser: slackUserId },
+    ...(name === undefined ? {} : { headers: { "x-agentx-slack-user-name": encodeURIComponent(name) } }),
+    ...(body === undefined ? {} : { body }),
+  });
 }
 
 /** Every committed write since the last take(), as the state table's stream would deliver it. */
