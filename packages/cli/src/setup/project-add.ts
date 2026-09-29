@@ -3,7 +3,7 @@
 // written to <config dir>/<name>.yaml, the file agentx admin project register --file takes, so
 // connector add can build the next revision from it. The file holds no secret: the repository's
 // credential is a reference (the built-in GitHub App's ref), never a token.
-import { access, mkdir, writeFile } from "node:fs/promises";
+import { access, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import YAML from "yaml";
@@ -64,6 +64,38 @@ function fileHeader(path: string, register?: { env: string; binding: Ec2RuntimeB
     `#   agentx admin project register${env} --file ${path} --deployment-mode ec2-ebs --launch-template-id ${launchTemplate} --subnets ${subnets}`,
     "",
   ].join("\n");
+}
+
+/** A project file that one environment's commands wrote, found by fileHeader's register line. */
+export interface EnvironmentProjectFile { path: string; name: string; launchTemplateId: string; definition: Record<string, unknown> }
+
+/** fileHeader's register line; kept beside fileHeader so the reader and the writer change together (ruling F26). */
+const REGISTER_LINE = /^#\s+agentx admin project register --env (\S+) --file .+? --deployment-mode ec2-ebs --launch-template-id (\S+)/m;
+
+/** The project files environment `env` wrote in configDir (doctor and destroy read them). A file
+ * without fileHeader's register line (hand-written) belongs to no environment. A missing directory
+ * has none. */
+export async function environmentProjectFiles(configDir: string, env: string): Promise<EnvironmentProjectFile[]> {
+  let entries: string[];
+  try {
+    entries = await readdir(configDir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  const files: EnvironmentProjectFile[] = [];
+  for (const entry of entries.filter((name) => name.endsWith(".yaml")).sort()) {
+    const path = join(configDir, entry);
+    const text = await readFile(path, "utf8");
+    const match = REGISTER_LINE.exec(text);
+    if (match === null || match[1] !== env || match[2] === undefined) continue;
+    let parsed: unknown;
+    try { parsed = YAML.parse(text); } catch { continue; }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+    const definition = parsed as Record<string, unknown>;
+    files.push({ path, name: typeof definition.name === "string" ? definition.name : entry.slice(0, -".yaml".length), launchTemplateId: match[2], definition });
+  }
+  return files;
 }
 
 export async function writeProjectFile(configDir: string, definition: ProjectDefinition, register?: { env: string; binding: Ec2RuntimeBinding }): Promise<string> {
