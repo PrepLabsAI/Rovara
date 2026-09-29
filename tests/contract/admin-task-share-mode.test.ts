@@ -4,6 +4,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { setTaskShareMode } from "../../packages/cli/src/admin/task-share-mode.js";
+import { executeCli } from "../../packages/cli/src/main.js";
 import { MAYA, OMAR, createDeveloperTaskBroker, markThreadPosted, registerRevision } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM, call, issuer } from "../support/slack-broker.js";
 
@@ -64,6 +65,32 @@ describe("an admin switches a shared task's mode (C25)", () => {
     expect(unknown.body.error).toMatchObject({ code: "TASK_NOT_FOUND" });
   });
 
+  it("refuses a closed task CONFIG_INVALID, and writes no share record", async () => {
+    const harness = await sharedTask();
+    const { db, dev, finish, taskId, switchMode, record } = harness;
+    const task = db.get(`DEVTASK#${taskId}`, "META") as { workspaceId: string };
+    const prepareId = String((db.get(`WORKSPACE#${task.workspaceId}`, "META") as { activeOperationId: string }).activeOperationId);
+    await finish(task.workspaceId, prepareId, "FAILED", { error: "npm ci exited 1" });
+    expect((await dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/close`, { requestId: randomUUID() })).body).toMatchObject({ closed: true });
+    expect((await switchMode("view")).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task is closed, so its share mode can no longer change" });
+    expect(db.find((item) => item.pk === `TASK#${taskId}` && item.action === "share")).toHaveLength(0);
+    expect(record().share).toMatchObject({ mode: "continue" });
+  });
+
+  it("answers a non-admin FORBIDDEN for any task ID, so task IDs cannot be probed", async () => {
+    const { handler, taskId } = await sharedTask();
+    for (const id of [randomUUID(), taskId, "not-a-task"]) {
+      const response = await call(handler, { method: "POST", path: `/v1/admin/tasks/${id}/share-mode`, user: { subject: "someone", admin: false }, body: { requestId: randomUUID(), shareMode: "view" } });
+      expect(response.body.error).toEqual({ code: "FORBIDDEN", message: "administrator claim is required" });
+    }
+  });
+
+  it("answers an admin's mistyped task ID TASK_NOT_FOUND, not the catch-all refusal", async () => {
+    const { handler } = await sharedTask();
+    const response = await call(handler, { method: "POST", path: "/v1/admin/tasks/not-a-task/share-mode", user: ADMIN, body: { requestId: randomUUID(), shareMode: "view" } });
+    expect(response.body.error).toEqual({ code: "TASK_NOT_FOUND", message: "that is not a task ID" });
+  });
+
   it("answers a repeated request_id with the task and writes nothing", async () => {
     const { db, handler, taskId } = await sharedTask();
     const body = { requestId: randomUUID(), shareMode: "view" };
@@ -74,6 +101,18 @@ describe("an admin switches a shared task's mode (C25)", () => {
 });
 
 describe("agentx admin task share-mode", () => {
+  it("refuses a --task that is not a task ID before signing in or calling AgentX", async () => {
+    const fetchImplementation = vi.fn();
+    let stderr = "";
+    const code = await executeCli(["admin", "task", "share-mode", "--task", "not-a-task", "--mode", "view"], {
+      fetchImplementation: fetchImplementation as unknown as typeof globalThis.fetch,
+      stdout: { write: () => true }, stderr: { write: (text: string) => { stderr += text; return true; } },
+    });
+    expect(code).not.toBe(0);
+    expect(stderr).toContain("--task must be a task ID, such as 44444444-4444-4444-8444-444444444444");
+    expect(fetchImplementation).not.toHaveBeenCalled();
+  });
+
   it("posts the mode with the admin token and a fresh request ID, and reports AgentX's refusal", async () => {
     const fetch = vi.fn(async () => Response.json({ task: { taskId: "t" } }));
     await setTaskShareMode({ controlPlaneUrl: "https://agentx.example.test/", accessToken: "admin-token", taskId: "44444444-4444-4444-8444-444444444444", mode: "view" }, fetch);

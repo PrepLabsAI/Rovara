@@ -832,7 +832,7 @@ async function openPullRequest(deps: DeveloperTaskRouteDependencies, caller: Dev
   };
 }
 
-/** A share the notifier changes meanwhile retries the close; it changes a task's share at most twice. */
+/** A share changed meanwhile (by the notifier or either share route) retries the close; 4 attempts, then the last conflict is rethrown. */
 const CLOSE_ATTEMPTS = 4;
 
 /**
@@ -1045,7 +1045,6 @@ function safeDecode(segment: string): string {
   }
 }
 
-/** Every developer task route answers 200 with its body; errors are AgentXErrors. */
 const SHARE_ATTEMPTS = 3;
 
 /** A share's channel as a message names it: `#name` when its name was stored (public only), else its ID (R10). */
@@ -1236,6 +1235,7 @@ export async function adminShareMode(deps: ShareModeDependencies, admin: ShareAd
   throw agentXError("WORKSPACE_BUSY", "the task changed while switching its mode; try again");
 }
 
+/** Every developer task route answers 200 with its body; errors are AgentXErrors. */
 export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   if (request.method === "POST" && url.pathname === "/v1/dev/tasks") return startTask(deps, caller, body(request));
   if (request.method === "GET" && url.pathname === "/v1/dev/tasks") return listTasks(deps, caller, url);

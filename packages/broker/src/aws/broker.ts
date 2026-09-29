@@ -499,7 +499,8 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         return json({ workspace: await stopWorkspace(dependencies, identity, stop[1]) }, request.requestId, 202);
       }
       // Spec 025 C25: an admin switches a shared task's mode, within its project's policy.
-      const taskShareMode = /^\/v1\/admin\/tasks\/([0-9a-f-]{36})\/share-mode$/.exec(url.pathname);
+      // Any segment: a mistyped task ID gets TASK_NOT_FOUND from the handler, not the catch-all refusal.
+      const taskShareMode = /^\/v1\/admin\/tasks\/([^/]+)\/share-mode$/.exec(url.pathname);
       if (request.method === "POST" && taskShareMode?.[1]) {
         return json(await adminTaskShareMode(dependencies, identity, taskShareMode[1], body, tasks), request.requestId);
       }
@@ -3885,6 +3886,8 @@ async function requireAdministrator(
   if (membership.role !== "administrator") throw agentXError("FORBIDDEN", "administrator project membership is required");
 }
 
+const TASK_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
 /**
  * Spec 025 C25: the admin claim first, so a non-admin learns nothing about task IDs; then the task;
  * then the administrator membership on the task's project (FR-015). The audit record names the
@@ -3893,6 +3896,8 @@ async function requireAdministrator(
 async function adminTaskShareMode(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, taskId: string, value: unknown, tasks: DeveloperTaskActions) {
   if (!dependencies.developer) throw agentXError("NOT_FOUND", "developer tasks are not set up in this deployment");
   if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+  // A malformed ID is never echoed back: it could be long or carry markup.
+  if (!TASK_ID_PATTERN.test(taskId)) throw agentXError("TASK_NOT_FOUND", "that is not a task ID");
   const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
   if (task === undefined) throw agentXError("TASK_NOT_FOUND", `no task ${taskId}`);
   // FR-015's membership check, answered FORBIDDEN (requireAdministrator's missing-membership answer

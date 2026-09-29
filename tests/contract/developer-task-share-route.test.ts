@@ -1,7 +1,7 @@
 // Spec 025 C5, C24: POST /v1/dev/tasks/{taskId}/share, and a close ending the shared thread.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { MAYA, OMAR, createDeveloperTaskBroker, markThreadPosted, registerRevision } from "../support/developer-task-broker.js";
+import { MAYA, OMAR, createDeveloperTaskBroker, grantProject, markThreadPosted, registerRevision, unbindChannel } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 
 async function privateTask(options: Parameters<typeof createDeveloperTaskBroker>[0] = {}) {
@@ -68,6 +68,14 @@ describe("POST /v1/dev/tasks/{taskId}/share (C5)", () => {
     expect(other.body.error).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
     expect((await share({ shareMode: "continue" })).status).toBe(200);
     expect(shareRecords()).toHaveLength(1);
+  });
+
+  it("refuses a share on a project with no bound channel for what it is, not a missing Slack workspace", async () => {
+    const { db, handler, share, record } = await privateTask();
+    grantProject(db, MAYA);
+    await unbindChannel(handler, SLACK_CHANNEL);
+    expect((await share()).body.error).toEqual({ code: "CHANNEL_REQUIRED", message: "project `payments` has no Slack channel bound to it, so the task cannot be shared" });
+    expect(record()).not.toHaveProperty("share");
   });
 
   it("is the task owner's alone on the developer route (FR-036; an admin uses C25's route)", async () => {
