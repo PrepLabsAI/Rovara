@@ -114,6 +114,12 @@ doing?" to check on it, "continue it and add a test for the timeout" to send mor
 and "open a pull request" when it is ready. For a small task, ask your tool to wait: it can wait up
 to 10 minutes.
 
+If you write your own MCP client, a wait longer than a minute needs your client to accept progress
+updates. AgentX sends one while it waits, but only when the call includes a progress token. With the
+MCP TypeScript SDK, pass `onprogress` and `resetTimeoutOnProgress: true` in the call's options;
+otherwise the SDK gives up after its default of 60 seconds while AgentX is still waiting. Claude Code,
+Codex and Cursor handle this themselves.
+
 Tasks from your AI tool are private: only you see them, and every action is recorded for your
 admins. Each task keeps a workspace until you close it ("close my AgentX task"), and open tasks
 count against the same limit as your Slack threads (3 at a time unless your admin changed it).
