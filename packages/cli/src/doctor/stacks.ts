@@ -58,11 +58,20 @@ export async function stackChecks(context: DoctorContext): Promise<DoctorCheck[]
     ? check("stacks", "engine", "ok", `every stack was deployed with the ${settings.engine} engine`)
     : check("stacks", "engine", "fail", `the settings say ${settings.engine}, but ${wrongEngine.join(", ")} ${wrongEngine.length === 1 ? "was" : "were"} deployed with the other engine; switching engines is not supported`, `redeploy with the ${settings.engine} engine: agentx --env ${env} upgrade uses the engine in the settings`));
 
-  const drifted = [...described.values()].filter(({ stack }) => stack?.drift === "DRIFTED").map(({ name }) => name);
-  const checked = [...described.values()].some(({ stack }) => stack?.drift === "IN_SYNC" || stack?.drift === "DRIFTED");
-  checks.push(drifted.length > 0
-    ? check("stacks", "drift", "warn", `${drifted.join(", ")} changed outside CloudFormation (at the last drift check)`, `see what changed, with admin credentials: ${drifted.map((name) => `aws cloudformation describe-stack-resource-drifts --stack-name ${name} --region ${settings.region}`).join("; ")}; then undo it by hand or run agentx --env ${env} upgrade`)
-    : check("stacks", "drift", "ok", checked ? "no drift at the last drift check" : `drift has not been checked; detecting it needs admin credentials (aws cloudformation detect-stack-drift --stack-name <stack> --region ${settings.region})`));
+  const existing = [...described.values()].filter((entry): entry is { name: string; stack: DoctorStack } => entry.stack !== undefined);
+  const drifted = existing.filter(({ stack }) => stack.drift === "DRIFTED").map(({ name }) => name);
+  const inSync = existing.filter(({ stack }) => stack.drift === "IN_SYNC").map(({ name }) => name);
+  const unchecked = existing.filter(({ stack }) => stack.drift !== "IN_SYNC" && stack.drift !== "DRIFTED").map(({ name }) => name);
+  const detect = `detecting it needs admin credentials (${unchecked.map((name) => `aws cloudformation detect-stack-drift --stack-name ${name} --region ${settings.region}`).join("; ")})`;
+  // Only stacks that were never checked are named as such: a partly checked environment never reads as fully checked.
+  const notChecked = unchecked.length === 0 ? "" : inSync.length === 0 && drifted.length === 0 ? `drift has not been checked; ${detect}` : `drift has not been checked for ${unchecked.join(", ")}; ${detect}`;
+  if (drifted.length > 0) {
+    checks.push(check("stacks", "drift", "warn", `${drifted.join(", ")} changed outside CloudFormation (at the last drift check)${notChecked === "" ? "" : `; ${notChecked}`}`, `see what changed, with admin credentials: ${drifted.map((name) => `aws cloudformation describe-stack-resource-drifts --stack-name ${name} --region ${settings.region}`).join("; ")}; then undo it by hand or run agentx --env ${env} upgrade`));
+  } else if (inSync.length === 0) {
+    checks.push(check("stacks", "drift", "ok", notChecked === "" ? "no stack to check" : notChecked));
+  } else {
+    checks.push(check("stacks", "drift", "ok", unchecked.length === 0 ? "no drift at the last drift check" : `no drift at the last drift check for ${inSync.join(", ")}; ${notChecked}`));
+  }
 
   const title = `release ${settings.version}`;
   const manifest = await services.releaseManifest(settings.version);
@@ -73,6 +82,8 @@ export async function stackChecks(context: DoctorContext): Promise<DoctorCheck[]
   const code: string[] = [];
   const images: string[] = [];
   let cdkStacks = 0;
+  // On cdk the image digest is the only sign of a stale release, so a mismatch there is not blamed on the testing flags alone.
+  let cdkMismatch = false;
   for (const [part, { name, stack }] of described) {
     if (stack === undefined) continue;
     const found = releaseMismatch(part, stack.parameters, manifest);
@@ -80,10 +91,11 @@ export async function stackChecks(context: DoctorContext): Promise<DoctorCheck[]
     // parameters, so only its image digests are compared.
     if (deployedWithCdk(stack)) cdkStacks += 1;
     else code.push(...found.code.map((parameter) => `${name} ${parameter}`));
+    if (found.images.length > 0 && deployedWithCdk(stack)) cdkMismatch = true;
     images.push(...found.images.map((parameter) => `${name} ${parameter}`));
   }
   if (code.length > 0) checks.push(check("stacks", title, "fail", `${code.join(", ")} ${code.length === 1 ? "does" : "do"} not match release ${settings.version}'s code packages`, `agentx --env ${env} upgrade --to ${settings.version}`));
-  else if (images.length > 0) checks.push(check("stacks", title, "warn", `${images.join(", ")} ${images.length === 1 ? "is not" : "are not"} release ${settings.version}'s image (the testing-only image flags set this)`, `agentx --env ${env} upgrade --to ${settings.version}, without --worker-image or --slack-image`));
+  else if (images.length > 0) checks.push(check("stacks", title, "warn", `${images.join(", ")} ${images.length === 1 ? "is not" : "are not"} release ${settings.version}'s image (the testing-only image flags set this${cdkMismatch ? ", or the stack runs another release" : ""})`, `agentx --env ${env} upgrade --to ${settings.version}, without --worker-image or --slack-image`));
   else checks.push(check("stacks", title, "ok", cdkStacks === 0 ? `every stack runs release ${settings.version}'s code and images` : `every stack runs release ${settings.version}'s images; cdk: code packages are not compared (they live in the bootstrap bucket)`));
   return checks;
 }

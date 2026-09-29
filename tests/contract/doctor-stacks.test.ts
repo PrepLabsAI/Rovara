@@ -45,6 +45,19 @@ describe("doctor: stacks (FR-050)", () => {
     expect(engine.detail).toContain("agentx-staging-slack (cdk)");
   });
 
+  it("names the stacks whose drift was never checked when others were checked in sync", async () => {
+    const stacks = healthyStacks();
+    for (const name of ["agentx-staging-access", "agentx-staging-foundation", "agentx-staging-identity", "agentx-staging-control-plane"]) stacks[name] = { ...stacks[name]!, drift: "IN_SYNC" };
+    const drift = (await stackChecks(doctorContext({ services: doctorServices({ stackMap: stacks }) }))).find((entry) => entry.name === "drift")!;
+    expect(drift.status).toBe("ok");
+    expect(drift.detail).not.toContain("no drift at the last drift check;");
+    expect(drift.detail).toContain("no drift at the last drift check for agentx-staging-access, agentx-staging-foundation, agentx-staging-identity, agentx-staging-control-plane");
+    expect(drift.detail).toContain("drift has not been checked for agentx-staging-runtime, agentx-staging-slack");
+    expect(drift.detail).toContain("aws cloudformation detect-stack-drift --stack-name agentx-staging-runtime --region us-east-1");
+    expect(drift.detail).toContain("aws cloudformation detect-stack-drift --stack-name agentx-staging-slack --region us-east-1");
+    expect(drift.detail).not.toContain("--stack-name agentx-staging-access");
+  });
+
   it("warns about drift found by the last drift check, with the admin command to see it", async () => {
     const drift = (await stackChecks(withStack("agentx-staging-control-plane", { drift: "DRIFTED" }))).find((entry) => entry.name === "drift")!;
     expect(drift.status).toBe("warn");
@@ -77,6 +90,7 @@ describe("doctor: stacks (FR-050)", () => {
     expect(checks.filter((entry) => entry.status !== "ok")).toEqual([]);
     const release = checks.find((entry) => entry.name === "release 1.2.3")!;
     expect(release.detail).toContain("cdk: code packages are not compared (they live in the bootstrap bucket)");
+    expect(checks.find((entry) => entry.name === "engine")!.detail).toBe("every stack was deployed with the cdk engine");
   });
 
   it("still compares a cdk stack's image digest, and never its code packages (F4)", async () => {
@@ -88,6 +102,8 @@ describe("doctor: stacks (FR-050)", () => {
     expect(release.status).toBe("warn");
     expect(release.detail).toContain("agentx-staging-runtime WorkerImageUri");
     expect(release.detail).not.toContain("AssetHash");
+    // On cdk the image digest is the only sign of a stale release, so the cause is not stated as fact.
+    expect(release.detail).toContain("(the testing-only image flags set this, or the stack runs another release)");
   });
 
   it("warns, and does not fail, when the release manifest cannot be read", async () => {
