@@ -7,6 +7,7 @@ import type { ServiceLog, ThreadServiceApi } from "./processor.js";
 
 export const TASK_BUSY_WAIT_MESSAGE = "The task is busy with other work right now. I'll start on this as soon as it's free.";
 export const TASK_STILL_BUSY_MESSAGE = "The task was still busy after 30 minutes, so I didn't run this request. Mention me again when it's free.";
+export const SHARED_SETUP_FAILED_MESSAGE = "This task's workspace could not be set up, so I can't run requests in this thread. The developer who started the task can close it and start a new one from their AI tool.";
 export const SHARED_CLOSE_REFUSED_MESSAGE = "This thread follows a task started from an AI tool. Only the developer who started it can close it, from their AI tool.";
 
 type WorkspaceAnswer = Extract<SlackThreadWorkspaceResult, { outcome: "WORKSPACE" }>;

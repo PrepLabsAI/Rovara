@@ -30,7 +30,7 @@ import { NEW_WORKSPACE_MESSAGE, STILL_PREPARING_MESSAGE, limitMessage, preparati
 import { escapeText, slackReplyText } from "./slack-format.js";
 import { buildTurnRecord, emitTurnMetrics, type TurnDraft, type TurnRecordSink } from "./turn-records.js";
 import { matchApprovedModel, modelName, modelOptionsMessage, parseModelCommand } from "./model-command.js";
-import { SHARED_CLOSE_REFUSED_MESSAGE, TASK_STILL_BUSY_MESSAGE, taskBusy, waitForIdleTask } from "./shared-task.js";
+import { SHARED_CLOSE_REFUSED_MESSAGE, SHARED_SETUP_FAILED_MESSAGE, TASK_STILL_BUSY_MESSAGE, taskBusy, waitForIdleTask } from "./shared-task.js";
 
 export interface ThreadServiceApi {
   ensureWorkspace(requestId: string): Promise<SlackThreadWorkspaceResult>;
@@ -326,6 +326,13 @@ export async function processSlackRequest(
     } else if (workspace.status !== "UNPREPARED" && !RUNNABLE_STATUSES.has(workspace.status)) {
       draft.disposition = "workspace_unavailable";
       log("workspace.unavailable", { eventId: message.eventId, status: workspace.status });
+      // Final review M5: a shared task's failed setup is never retried from the thread (C11), so
+      // mentioning again cannot help; only its developer can start the task again.
+      if (shared !== undefined && workspace.status === "PREPARATION_FAILED") {
+        await post(SHARED_SETUP_FAILED_MESSAGE);
+        finished = true;
+        return;
+      }
       await post(`This thread's workspace is not available right now (${escapeText(workspace.status)}). Mention me again later to retry.`);
       finished = true;
       return;

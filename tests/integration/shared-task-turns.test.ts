@@ -146,6 +146,14 @@ describe("a continue thread's turn (FR-054, C12)", () => {
     expect(h.records[0]).toMatchObject({ disposition: "workspace_unavailable", taskId: TASK });
   });
 
+  it("tells teammates the task could not be set up, and who can start it again, instead of to retry (final review M5)", async () => {
+    const h = harness([{ ...workspace(null), status: "PREPARATION_FAILED" }]);
+    await processSlackRequest(message(), h.dependencies, { finalAttempt: true, queuedBehind: 0 });
+    expect(h.posts).toEqual(["This task's workspace could not be set up, so I can't run requests in this thread. The developer who started the task can close it and start a new one from their AI tool."]);
+    expect(h.order).toEqual([]);
+    expect(h.records).toEqual([expect.objectContaining({ disposition: "workspace_unavailable", taskId: TASK })]);
+  });
+
   it("names the teammate in the reply, and records the task and the teammate's name (C13, US3 scenario 5)", async () => {
     const h = harness([workspace(null)]);
     await processSlackRequest(message(), h.dependencies, { finalAttempt: false, queuedBehind: 0 });
