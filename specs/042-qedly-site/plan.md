@@ -1092,7 +1092,13 @@ phases:
 }
 ```
 
-The SEO category penalises `noindex`. Before launch, the SEO assertion is expected to fail only on the "Page is blocked from indexing" audit. Add `"audits:is-crawlable": "off"` under `assertions` until `SITE.launched` is `true`, and remove that line in the launch PR. Run the mobile preset too: add a second `lighthouserc.mobile.json` with `"preset"` removed (mobile is the default), and run `npx lhci autorun --config=lighthouserc.mobile.json`.
+The SEO category penalises `noindex`, and switching off `is-crawlable` does not raise the category score, because a switched-off audit still counts. Until `SITE.launched` is `true`:
+- replace `categories:seo` with one `"error"` assertion per scored SEO audit: `document-title`, `meta-description`, `http-status-code`, `link-text`, `crawlable-anchors`, `robots-txt`, `image-alt`, `hreflang`, `canonical`;
+- leave out `structured-data`, a manual audit with no score.
+
+The launch PR restores `"categories:seo": ["error", { "minScore": 0.95 }]`.
+
+Run the mobile preset too: add a second `lighthouserc.mobile.json` with `"preset"` removed (mobile is the default). `npm run lighthouse` runs both. Built in qedly/qedly.github.io#8.
 
 - [ ] **Step 4: Verify.** Push to `main`. Expected:
   - the Deploy workflow succeeds;
@@ -1104,14 +1110,16 @@ The SEO category penalises `noindex`. Before launch, the SEO assertion is expect
 
 **Files (AgentX repo):**
 - Create: an issue and then `specs/043-qed-pr-footer/spec.md`
-- Modify at launch: `README.md` (pointer); site `src/config/site.ts` (`launched: true`, `docsRelease` real tag), `lighthouserc.json` (remove the `is-crawlable` exemption)
+- Modify at launch: `README.md` (pointer); site `src/config/site.ts` (`launched: true`, `docsRelease` real tag), `lighthouserc.json` and `lighthouserc.mobile.json` (restore `categories:seo`)
 
 - [ ] **Step 1: The ∎ PR footer as its own AgentX feature.** Open an issue with the spec 043 description. Today `slackAttributedBody` in `packages/broker/src/aws/broker.ts` appends "Requested in Slack thread … by …" when the publication starts, before gates run. The footer must list each gate's result on the exact commit, so it has to be written, or the PR body updated, in the publication callback after `assertCodeBuildGatesPassed`. The existing contract tests in `tests/contract/slack-control-plane.test.ts` (around line 1263) and `tests/contract/cloud-handlers.test.ts` (around line 560) pin the current body and must be updated in that feature's TDD cycle. Keep the product name out of the footer until the trademark clears. Use `∎ Checked: <gate> passed on <short sha>.`
 - [ ] **Step 2: The launch PR**, opened only when FR-060 items 1-4 hold:
   1. Set `SITE.launched = true` and `SITE.docsRelease` to the first public tag.
-  2. Remove the Lighthouse `is-crawlable` exemption.
-  3. Add the FR-034 README pointer in AgentX: "AgentX is QEDly Code, the first product from [QEDly](https://qedly.github.io). Docs: [qedly.github.io/docs](https://qedly.github.io/docs/agentx/quickstart/)."
+  2. In both Lighthouse configs, replace the per-audit SEO lines with `"categories:seo": ["error", { "minScore": 0.95 }]`.
+  3. Set the site repository variables `DOCS_REF` and `CLAIMS_REF` to empty (the defaults then use `SITE.docsRelease`), and `RECEIPTS_ALLOW_EMPTY` to empty.
+  4. Replace README line 3 ("A software factory with …", a banned phrase) with the product line from Appendix A, then add the FR-034 README pointer in AgentX: "AgentX is QEDly Code, the first product from [QEDly](https://qedly.github.io). Docs: [qedly.github.io/docs](https://qedly.github.io/docs/agentx/quickstart/)."
 - [ ] **Step 3: Verify after merge.**
+  - `https://qedly.github.io/llms.txt` does not contain "open source" (the Asana and Jira pages at the release tag carry the source-available wording from this branch).
   - `curl -s https://qedly.github.io/robots.txt` shows `Allow: /`.
   - The home page has `index,follow`.
   - The Receipts totals show at least 20 PRs.
