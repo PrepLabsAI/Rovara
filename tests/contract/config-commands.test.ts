@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { runConfigGet, runConfigList, runConfigSet, type ConfigServices } from "../../packages/cli/src/config/commands.js";
 import { lockParameterName } from "../../packages/cli/src/environments/lock.js";
-import { readEnvironmentSettings, writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
+import { readEnvironmentSettings, settingsParameterName, writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import type { StackDescription } from "../../packages/cli/src/environments/adopt.js";
 import { fakeCloudFormation } from "../support/fake-cloudformation.js";
 import { installAnswersParameterName, readInstallAnswers, writeInstallAnswers } from "../../packages/cli/src/init/install-state.js";
@@ -14,11 +14,12 @@ const ROLE = "arn:aws:iam::123456789012:role/agentx-staging-cloudformation";
 const WEBHOOK = "https://events.pagerduty.com/integration/SECRETkey0123456789/enqueue";
 const OLD_WEBHOOK = "https://events.pagerduty.com/integration/OLDkey0123456789/enqueue";
 
-/** A store whose next put of the install answers fails, once `failNext` is set, as SSM might after the stack has changed. */
-class AnswersPutFailsOnce extends MemoryParameterStore {
+/** A store whose next put of one parameter fails, once `failNext` is set, as SSM might after the stack has changed. */
+class PutFailsOnce extends MemoryParameterStore {
   failNext = false;
+  constructor(private readonly failing: string) { super(); }
   override async put(name: string, value: string, options: { createOnly?: boolean } = {}): Promise<void> {
-    if (this.failNext && name === installAnswersParameterName(ENV)) {
+    if (this.failNext && name === this.failing) {
       this.failNext = false;
       this.calls.push({ op: "put", name });
       throw Object.assign(new Error("Rate exceeded"), { name: "ThrottlingException" });
@@ -177,14 +178,15 @@ describe("agentx config set", () => {
   });
 
   it("says how to finish when the stack changed but the answers could not be written, and a rerun records it", async () => {
-    const store = new AnswersPutFailsOnce();
+    const store = new PutFailsOnce(installAnswersParameterName(ENV));
     await writeEnvironmentSettings(store, { ...STAGING_SETTINGS, access: { artifactBucket: "b", cloudFormationRoleArn: ROLE, operatorRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-operator", pullThroughPrefix: "agentx-staging" } });
     await writeInstallAnswers(store, sampleAnswers());
     store.failNext = true;
     store.calls.length = 0;
     const cloudFormation = fakeCloudFormation({ parameters: { ModelId: "amazon.nova-pro-v1:0" } });
-    await expect(runConfigSet(services({ store, cloudFormation }), ENV, { key: "models.worker", value: "amazon.nova-premier-v1:0", yes: true }))
-      .rejects.toThrow("stack agentx-staging-runtime now uses amazon.nova-premier-v1:0, but the settings were not updated; run the same agentx config set again to record it");
+    const error = await runConfigSet(services({ store, cloudFormation }), ENV, { key: "models.worker", value: "amazon.nova-premier-v1:0", yes: true }).catch((caught: unknown) => caught);
+    expect((error as Error).message).toContain("stack agentx-staging-runtime now uses amazon.nova-premier-v1:0, but the install answers were not updated; run the same agentx config set again to record it");
+    expect(((error as Error).cause as Error).message).toBe("Rate exceeded");
     expect(cloudFormation.parameters.ModelId).toBe("amazon.nova-premier-v1:0");
     expect((await readInstallAnswers(store, ENV))?.models.worker).toBe("amazon.nova-pro-v1:0");
     expect(lockOps(store)).toEqual(["put", "get", "delete"]);
@@ -198,6 +200,17 @@ describe("agentx config set", () => {
     expect((await readInstallAnswers(store, ENV))?.models.worker).toBe("amazon.nova-premier-v1:0");
     expect((await readEnvironmentSettings(store, ENV))?.models.worker).toBe("amazon.nova-premier-v1:0");
     expect(lockOps(store)).toEqual(["put", "get", "delete"]);
+  });
+
+  it("names the settings when their write fails after the stack change, keeping the cause", async () => {
+    const store = new PutFailsOnce(settingsParameterName(ENV));
+    await writeEnvironmentSettings(store, { ...STAGING_SETTINGS, access: { artifactBucket: "b", cloudFormationRoleArn: ROLE, operatorRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-operator", pullThroughPrefix: "agentx-staging" } });
+    await writeInstallAnswers(store, sampleAnswers());
+    store.failNext = true;
+    const error = await runConfigSet(services({ store, cloudFormation: fakeCloudFormation({ parameters: { ModelId: "amazon.nova-pro-v1:0" } }) }), ENV, { key: "models.worker", value: "amazon.nova-premier-v1:0", yes: true }).catch((caught: unknown) => caught);
+    expect((error as Error).message).toContain("stack agentx-staging-runtime now uses amazon.nova-premier-v1:0, but the settings were not updated; run the same agentx config set again to record it");
+    expect(((error as Error).cause as Error).message).toBe("Rate exceeded");
+    expect((await readInstallAnswers(store, ENV))?.models.worker).toBe("amazon.nova-pro-v1:0");
   });
 
   it("says nothing changed for a model already recorded everywhere, and takes no lock", async () => {

@@ -104,13 +104,27 @@ async function checkModel(services: ConfigServices, settings: EnvironmentSetting
  * upgrade` rebuilds each ModelId parameter from the install answers (deploy/parameters.ts), so a
  * stale answer would quietly put the old model back on the next upgrade. */
 async function recordModel(services: ConfigServices, env: string, role: ModelRole, modelId: string): Promise<void> {
-  const current = await installed(services, env);
-  if (current.models[role] !== modelId) {
-    await writeEnvironmentSettings(services.store, { ...current, models: { ...current.models, [role]: modelId }, updatedAt: new Date(services.now()).toISOString() });
+  let what: RecordModelError["what"] = "the settings";
+  try {
+    const current = await installed(services, env);
+    if (current.models[role] !== modelId) {
+      await writeEnvironmentSettings(services.store, { ...current, models: { ...current.models, [role]: modelId }, updatedAt: new Date(services.now()).toISOString() });
+    }
+    what = "the install answers";
+    const answers = await readInstallAnswers(services.store, env);
+    if (answers !== undefined && answers.models[role] !== modelId) {
+      await writeInstallAnswers(services.store, { ...answers, models: { ...answers.models, [role]: modelId } });
+    }
+  } catch (error) {
+    throw new RecordModelError(what, error);
   }
-  const answers = await readInstallAnswers(services.store, env);
-  if (answers !== undefined && answers.models[role] !== modelId) {
-    await writeInstallAnswers(services.store, { ...answers, models: { ...answers.models, [role]: modelId } });
+}
+
+/** Which record a model write failed on, with the original error as its cause. */
+class RecordModelError extends Error {
+  constructor(readonly what: "the settings" | "the install answers", cause: unknown) {
+    super(`could not update ${what}`, { cause });
+    this.name = "RecordModelError";
   }
 }
 
@@ -161,8 +175,12 @@ export async function runConfigSet(services: ConfigServices, env: string, input:
     if (result.changed && role !== undefined) {
       try {
         await recordModel(services, env, role, value);
-      } catch {
-        throw agentXError("RUNTIME_UNAVAILABLE", `stack ${stackName} now uses ${value}, but the settings were not updated; run the same agentx config set again to record it`);
+      } catch (error) {
+        const failed = error instanceof RecordModelError ? error : new RecordModelError("the settings", error);
+        throw Object.assign(
+          agentXError("RUNTIME_UNAVAILABLE", `stack ${stackName} now uses ${value}, but ${failed.what} were not updated; run the same agentx config set again to record it`),
+          { cause: failed.cause },
+        );
       }
     }
     return { changed: result.changed };
