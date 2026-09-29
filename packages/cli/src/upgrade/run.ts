@@ -11,9 +11,11 @@ import { upgradeOrder, type DeployPart } from "../deploy/parameters.js";
 import type { LoadedRelease } from "../deploy/release.js";
 import { reportText, type DoctorReport } from "../doctor/checks.js";
 import type { CallerIdentity, StackReader } from "../environments/adopt.js";
+import { withEnvironmentLock } from "../environments/lock.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import { readEnvironmentSettings, type EnvironmentSettings } from "../environments/settings.js";
 import { isOperatorRole } from "../init/commands.js";
+import { plainMessage } from "../output.js";
 import { upgradeAnswers } from "./answers.js";
 import { cdkDiffRisks, cdkReviewedDeployer, guardData, upgradeConfirm } from "./review.js";
 import { notesText, refusePrereleaseTarget, upgradeDirection, type ReleaseNotes } from "./target.js";
@@ -52,9 +54,11 @@ function canonical(value: unknown): unknown {
  * template this code cannot read as JSON counts as changed, so the upgrade stops rather than leave
  * the access stack behind. */
 export async function accessChanged(input: { cloudFormation: { send(command: unknown): Promise<unknown> }; stackName: string; release: LoadedRelease; region: string; env: string }): Promise<boolean> {
+  // Only the parse is caught: the release's own refusal (a region it does not cover, say) keeps its words.
+  const releaseText = input.release.template("access", input.region, input.env);
   let releaseTemplate: unknown;
   try {
-    releaseTemplate = JSON.parse(input.release.template("access", input.region, input.env));
+    releaseTemplate = JSON.parse(releaseText);
   } catch {
     throw agentXError("CONFIG_INVALID", `the release's access template for ${input.region} could not be read; rebuild or re-download release ${input.release.manifest.version}`);
   }
@@ -86,18 +90,23 @@ export async function droppedConfigKeys(input: { release: LoadedRelease; env: st
   return dropped;
 }
 
-export async function runUpgrade(options: UpgradeOptions, deps: UpgradeDependencies): Promise<UpgradeResult> {
-  const { env } = options;
-  const settings = await readEnvironmentSettings(deps.store, env);
+/** The settings an upgrade may run on. Read before the environment lock, and read again under it. */
+function upgradableSettings(settings: EnvironmentSettings | undefined, env: string): EnvironmentSettings {
   if (settings === undefined) throw agentXError("CONFIG_INVALID", `environment ${env} is not installed in this account and region; check --env and --region`);
   if (settings.naming !== "environment") throw agentXError("CONFIG_INVALID", `agentx upgrade works on environments installed with agentx init; ${env} uses the legacy stack names`);
+  return settings;
+}
+
+export async function runUpgrade(options: UpgradeOptions, deps: UpgradeDependencies): Promise<UpgradeResult> {
+  const { env } = options;
+  const first = upgradableSettings(await readEnvironmentSettings(deps.store, env), env);
   if (options.exportDir !== undefined) {
     // Ruling F19 (FR-013): the bundle holds the published templates; deploying them onto
     // cdk-deployed stacks would switch the environment's engine.
-    if (settings.engine === "cdk") throw agentXError("CONFIG_INVALID", "upgrade --export writes the published templates; a cdk environment upgrades with --source. Run agentx upgrade --source <dir> with admin credentials instead");
+    if (first.engine === "cdk") throw agentXError("CONFIG_INVALID", "upgrade --export writes the published templates; a cdk environment upgrades with --source. Run agentx upgrade --source <dir> with admin credentials instead");
     throw agentXError("CONFIG_INVALID", "upgrade --export is not available in this agentx yet; run agentx upgrade with admin credentials instead, or ask your platform team to deploy the access stack");
   }
-  if (settings.engine === "cdk" && options.source === undefined) {
+  if (first.engine === "cdk" && options.source === undefined) {
     throw agentXError("CONFIG_INVALID", "the cdk engine upgrades from a checkout of the target release's tag; pass --source <dir>");
   }
   if (!options.yes && !deps.isInteractive()) throw agentXError("CONFIG_INVALID", "agentx upgrade needs --yes when stdin is not a terminal");
@@ -106,7 +115,7 @@ export async function runUpgrade(options: UpgradeOptions, deps: UpgradeDependenc
   const operator = isOperatorRole(caller.arn, env);
   // Ruling F20: the cdk engine reads CDK's bootstrap version parameter and deploys through the
   // bootstrap roles and bucket, none of which the operator role may use.
-  if (operator && settings.engine === "cdk") {
+  if (operator && first.engine === "cdk") {
     throw agentXError("CONFIG_INVALID", "a cdk environment upgrades with admin credentials (the operator role cannot use CDK's bootstrap resources); run agentx upgrade again with admin credentials");
   }
 
@@ -120,59 +129,78 @@ export async function runUpgrade(options: UpgradeOptions, deps: UpgradeDependenc
   if (options.to !== undefined && options.releaseDir !== undefined && options.to !== target) {
     throw agentXError("CONFIG_INVALID", `--release holds release ${target}, not ${options.to}; pass the release you mean`);
   }
-  const direction = upgradeDirection(env, settings.version, target);
-  deps.write(direction === "same" ? `Environment ${env} already runs ${target}; checking that every stack is on it` : `Upgrading ${env} from ${settings.version} to ${target} (${settings.engine} engine)`);
-  deps.write(notesText(await deps.notes(target), target));
+  // Checked here to fail fast, and again under the lock, where it counts.
+  upgradeDirection(env, first.version, target);
 
-  const answers = await upgradeAnswers({ settings, stacks: deps.stacks, ...(options.images === undefined ? {} : { images: options.images }) });
-  let parts = upgradeOrder(settings.identity.mode);
-  // Question 9: the operator role cannot change the access stack (it holds the IAM roles). An
-  // unchanged one is skipped; a changed one stops the upgrade before anything deploys. Admin
-  // credentials deploy it first, like every other stack.
-  if (operator) {
-    parts = parts.filter((part) => part !== "access");
-    const accessStack = settings.stacks.access ?? environmentStackName(env, "access");
-    if (await accessChanged({ cloudFormation: deps.cloudFormation, stackName: accessStack, release, region: settings.region, env })) {
-      throw agentXError("CONFIG_INVALID", `release ${target} changes the access stack, which only admin credentials can deploy. Ask your platform team to deploy it (agentx --env ${env} upgrade --export <dir> writes what they need), or run agentx upgrade with admin credentials; then run agentx upgrade again`);
+  // Question 3 under concurrency: another upgrade may finish between the read above and this lock,
+  // so the settings are read again, and every check on them repeated, while the lock is held.
+  const { settings, parts } = await withEnvironmentLock({ store: deps.store, env, holder: caller.arn, command: "upgrade", now: deps.now }, async () => {
+    const settings = upgradableSettings(await readEnvironmentSettings(deps.store, env), env);
+    if (settings.engine !== first.engine) {
+      throw agentXError("CONFIG_INVALID", `environment ${env}'s settings changed to the ${settings.engine} engine while agentx upgrade was starting; run agentx upgrade again`);
     }
-  }
+    const direction = upgradeDirection(env, settings.version, target);
+    deps.write(direction === "same" ? `Environment ${env} already runs ${target}; checking that every stack is on it` : `Upgrading ${env} from ${settings.version} to ${target} (${settings.engine} engine)`);
+    deps.write(notesText(await deps.notes(target), target));
 
-  for (const entry of await droppedConfigKeys({ release, env, parts, stacks: deps.stacks })) {
-    deps.write(`config key ${entry.key} (${entry.value}) is not in release ${target}, so the upgrade drops it; nothing replaces it`);
-  }
-
-  const allowReplace = new Set(options.allowReplace);
-  const review = upgradeConfirm({ write: deps.write, ask: deps.ask, yes: options.yes, allowReplace });
-  const prepared = await deps.prepare({ settings, release, ...(options.source === undefined ? {} : { source: options.source }) });
-  try {
-    const deployer = settings.engine === "templates" ? prepared.deployer : cdkReviewedDeployer(prepared.deployer, async (request) => {
-      const risks = cdkDiffRisks(await deps.cdkDiff(request, settings, options.source ?? ""));
-      if (risks.iam) deps.write(`${request.stackName} changes IAM; the changes are in the diff above.`);
-      const refusal = await guardData({ stackName: request.stackName, data: risks.data, allowReplace, yes: options.yes, ask: deps.ask });
-      if (refusal !== undefined) throw agentXError("CONFIG_INVALID", refusal);
-      if (!options.yes && !/^y(es)?$/i.test((await deps.ask(`Deploy ${request.stackName}? [y/N] `)).trim())) {
-        throw agentXError("CONFIG_INVALID", `upgrade stopped before ${request.stackName}: nothing in it changed. Stacks upgraded before it keep the new release; run agentx upgrade again to continue`);
+    const answers = await upgradeAnswers({ settings, stacks: deps.stacks, ...(options.images === undefined ? {} : { images: options.images }) });
+    let parts = upgradeOrder(settings.identity.mode);
+    // Question 9: the operator role cannot change the access stack (it holds the IAM roles). An
+    // unchanged one is skipped; a changed one stops the upgrade before anything deploys. Admin
+    // credentials deploy it first, like every other stack.
+    if (operator) {
+      parts = parts.filter((part) => part !== "access");
+      const accessStack = settings.stacks.access ?? environmentStackName(env, "access");
+      if (await accessChanged({ cloudFormation: deps.cloudFormation, stackName: accessStack, release, region: settings.region, env })) {
+        throw agentXError("CONFIG_INVALID", `release ${target} changes the access stack, which only admin credentials can deploy. Ask your platform team to deploy it (agentx --env ${env} upgrade --export <dir> writes what they need), or run agentx upgrade with admin credentials; then run agentx upgrade again`);
       }
-    });
-    try {
-      await deployEnvironment({
-        mode: "upgrade", engine: settings.engine, answers, release, deployer, store: prepared.store, secrets: prepared.secrets, holder: prepared.holder, parts,
-        onEvent: (event) => deps.write(progressLine(event)),
-        ...(settings.engine === "templates" ? { confirm: review.confirm } : {}),
-        deployedParameters: async (stackName) => (await deps.stacks.describe(stackName))?.parameters,
-        now: deps.now,
-      });
-    } catch (error) {
-      const refusal = review.refusal();
-      if (refusal !== undefined && error instanceof Error && /confirmation declined/.test(error.message)) throw agentXError("CONFIG_INVALID", refusal);
-      throw error;
     }
-  } finally {
-    await prepared.cleanup();
-  }
+
+    for (const entry of await droppedConfigKeys({ release, env, parts, stacks: deps.stacks })) {
+      deps.write(`config key ${entry.key} (${entry.value}) is not in release ${target}, so the upgrade drops it; nothing replaces it`);
+    }
+
+    const allowReplace = new Set(options.allowReplace);
+    const review = upgradeConfirm({ write: deps.write, ask: deps.ask, yes: options.yes, allowReplace });
+    const prepared = await deps.prepare({ settings, release, ...(options.source === undefined ? {} : { source: options.source }) });
+    try {
+      const deployer = settings.engine === "templates" ? prepared.deployer : cdkReviewedDeployer(prepared.deployer, async (request) => {
+        const risks = cdkDiffRisks(await deps.cdkDiff(request, settings, options.source ?? ""));
+        if (risks.iam) deps.write(`${request.stackName} changes IAM; the changes are in the diff above.`);
+        const refusal = await guardData({ stackName: request.stackName, data: risks.data, allowReplace, yes: options.yes, ask: deps.ask });
+        if (refusal !== undefined) throw agentXError("CONFIG_INVALID", refusal);
+        if (!options.yes && !/^y(es)?$/i.test((await deps.ask(`Deploy ${request.stackName}? [y/N] `)).trim())) {
+          throw agentXError("CONFIG_INVALID", `upgrade stopped before ${request.stackName}: nothing in it changed. Stacks upgraded before it keep the new release; run agentx upgrade again to continue`);
+        }
+      });
+      try {
+        // The lock is this command's, in deps.store, where the settings live; deployEnvironment
+        // checks that and writes the new settings there.
+        await deployEnvironment({
+          mode: "upgrade", engine: settings.engine, answers, release, deployer, store: deps.store, secrets: prepared.secrets, holder: caller.arn, parts, lockHeld: true,
+          onEvent: (event) => deps.write(progressLine(event)),
+          ...(settings.engine === "templates" ? { confirm: review.confirm } : {}),
+          deployedParameters: async (stackName) => (await deps.stacks.describe(stackName))?.parameters,
+          now: deps.now,
+        });
+      } catch (error) {
+        const refusal = review.refusal();
+        if (refusal !== undefined && error instanceof Error && /confirmation declined/.test(error.message)) throw agentXError("CONFIG_INVALID", refusal);
+        throw error;
+      }
+    } finally {
+      await prepared.cleanup();
+    }
+    return { settings, parts };
+  });
 
   deps.write("Checking the environment with agentx doctor");
-  const report = await deps.doctor(env);
+  let report: DoctorReport;
+  try {
+    report = await deps.doctor(env);
+  } catch (error) {
+    throw agentXError("CONFIG_INVALID", `upgraded ${env} to ${target}, but doctor could not run: ${plainMessage(error)}; run agentx doctor`);
+  }
   deps.write(reportText(report).trimEnd());
   if (report.failed > 0) {
     throw agentXError("CONFIG_INVALID", `upgraded ${env} to ${target}, but ${report.failed} doctor ${report.failed === 1 ? "check" : "checks"} failed; fix what each one names, then run agentx doctor again`);

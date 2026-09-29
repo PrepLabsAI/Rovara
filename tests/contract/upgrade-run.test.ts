@@ -4,9 +4,11 @@ import type { ChangeSetChange, DeployRequest, StackDeployer } from "../../packag
 import type { LoadedRelease } from "../../packages/cli/src/deploy/release.js";
 import type { DoctorReport } from "../../packages/cli/src/doctor/checks.js";
 import type { StackDescription } from "../../packages/cli/src/environments/adopt.js";
+import { lockParameterName } from "../../packages/cli/src/environments/lock.js";
 import { readEnvironmentSettings, writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import { executeCli } from "../../packages/cli/src/main.js";
-import { runUpgrade, type UpgradeDependencies } from "../../packages/cli/src/upgrade/run.js";
+import { agentXError } from "@agentx/contracts";
+import { accessChanged, runUpgrade, type UpgradeDependencies } from "../../packages/cli/src/upgrade/run.js";
 import { SETTINGS } from "../support/doctor-fakes.js";
 import { allStackOutputs, fakeRelease, memoryInitSecrets, scriptedDeployer, T0 } from "../support/init-fakes.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
@@ -100,6 +102,41 @@ describe("agentx upgrade (FR-042 to FR-044)", () => {
   it("refuses an older release before anything else happens", async () => {
     const h = await harness({ loadRelease: async () => release("1.1.0") });
     await expect(runUpgrade(options, h.deps)).rejects.toThrow("release 1.1.0 is older than 1.2.3");
+    expect(h.prepared).toEqual([]);
+    expect(h.deployer.deployed).toEqual([]);
+  });
+
+  it("re-checks the version under the environment lock, so a concurrent upgrade is never undone (question 3)", async () => {
+    const h = await harness();
+    h.deps.loadRelease = async () => {
+      // Another upgrade finishes while this one loads its release.
+      await writeEnvironmentSettings(h.store, { ...INSTALLED, version: "1.4.0" });
+      return release("1.3.0");
+    };
+    await expect(runUpgrade(options, h.deps)).rejects.toThrow("release 1.3.0 is older than 1.4.0");
+    expect(h.prepared).toEqual([]);
+    expect(h.deployer.deployed).toEqual([]);
+    expect(h.store.values.has(lockParameterName("staging"))).toBe(false);
+  });
+
+  it("holds the environment lock while it deploys, and releases it after", async () => {
+    const h = await harness();
+    const holders: Array<string | undefined> = [];
+    const prepare = h.deps.prepare.bind(h.deps);
+    h.deps.prepare = async (input) => {
+      holders.push(h.store.values.get(lockParameterName("staging")));
+      return prepare(input);
+    };
+    await runUpgrade(options, h.deps);
+    expect(holders).toHaveLength(1);
+    expect(JSON.parse(holders[0] ?? "{}")).toMatchObject({ holder: ADMIN, command: "upgrade" });
+    expect(h.store.values.has(lockParameterName("staging"))).toBe(false);
+  });
+
+  it("refuses while another command holds the environment lock, deploying nothing", async () => {
+    const h = await harness();
+    h.store.values.set(lockParameterName("staging"), JSON.stringify({ holder: "arn:aws:sts::123456789012:assumed-role/Admin/bob", command: "config set", acquiredAt: new Date(T0).toISOString() }));
+    await expect(runUpgrade(options, h.deps)).rejects.toThrow("config set");
     expect(h.deployer.deployed).toEqual([]);
   });
 
@@ -184,6 +221,36 @@ describe("agentx upgrade (FR-042 to FR-044)", () => {
   it("fails when doctor finds a problem after the upgrade (FR-044)", async () => {
     const h = await harness({ doctor: async () => ({ ...healthy, failed: 2 }) });
     await expect(runUpgrade(options, h.deps)).rejects.toThrow("upgraded staging to 1.3.0, but 2 doctor checks failed; fix what each one names, then run agentx doctor again");
+    expect((await readEnvironmentSettings(h.store, "staging"))?.version).toBe("1.3.0");
+    expect(h.deployer.deployed).toHaveLength(6);
+  });
+
+  it("says the upgrade finished when doctor itself cannot run", async () => {
+    const h = await harness({ doctor: async () => { throw new Error("connect ETIMEDOUT 140.82.112.3:443"); } });
+    await expect(runUpgrade(options, h.deps)).rejects.toThrow("upgraded staging to 1.3.0, but doctor could not run: connect ETIMEDOUT 140.82.112.3:443; run agentx doctor");
+    expect((await readEnvironmentSettings(h.store, "staging"))?.version).toBe("1.3.0");
+  });
+
+  it("keeps a release's own refusal for a region it does not cover", async () => {
+    const uncovered: LoadedRelease = { ...release(), template: (part) => { if (part === "access") throw agentXError("CONFIG_INVALID", "release 1.3.0 does not cover region us-east-1; use a region it lists"); return "{}"; } };
+    const h = await harness({ caller: OPERATOR, loadRelease: async () => uncovered });
+    await expect(runUpgrade(options, h.deps)).rejects.toThrow("release 1.3.0 does not cover region us-east-1; use a region it lists");
+    expect(h.deployer.deployed).toEqual([]);
+  });
+
+  it("puts no secret in a refusal", async () => {
+    const refusals: string[] = [];
+    const changes = { "agentx-staging-control-plane": [{ action: "Modify", logicalId: "State", type: "AWS::DynamoDB::Table", replacement: "True" }] };
+    for (const h of [
+      await harness({ changes }),
+      await harness({ caller: OPERATOR, loadRelease: async () => release("1.3.0", [], CHANGED_ACCESS_TEMPLATE) }),
+      await harness({ doctor: async () => ({ ...healthy, failed: 1 }) }),
+    ]) {
+      const error = await runUpgrade(options, h.deps).then(() => undefined, (caught: unknown) => caught);
+      expect(error).toBeInstanceOf(Error);
+      refusals.push((error as Error).message, ...h.lines);
+    }
+    for (const text of refusals) expect(text).not.toContain(CALLBACK_KEY);
   });
 
   it("needs --yes when stdin is not a terminal", async () => {
@@ -275,5 +342,24 @@ describe("the agentx upgrade command", () => {
     expect(loaded).toEqual([{ releaseDir: "/releases/1.3.0" }]);
     expect(h.deployer.deployed).toContain("agentx-staging-control-plane");
     expect(JSON.parse(io.out.join(""))).toMatchObject({ ok: true, data: { env: "staging", from: "1.2.3", to: "1.3.0" } });
+  });
+});
+
+describe("accessChanged (question 9)", () => {
+  const input = (templateBody: string | undefined) => ({
+    cloudFormation: { send: async () => (templateBody === undefined ? {} : { TemplateBody: templateBody }) },
+    stackName: "agentx-staging-access", release: release(), region: "us-east-1", env: "staging",
+  });
+
+  it("is false for the same template written differently", async () => {
+    expect(await accessChanged(input(JSON.stringify({ Resources: { ArtifactBucket: { Type: "AWS::S3::Bucket" } } }, null, 2)))).toBe(false);
+  });
+
+  it("is true when GetTemplate returns no body", async () => {
+    expect(await accessChanged(input(undefined))).toBe(true);
+  });
+
+  it("is true when the deployed template is not JSON", async () => {
+    expect(await accessChanged(input("Resources:\n  ArtifactBucket:\n    Type: AWS::S3::Bucket\n"))).toBe(true);
   });
 });
