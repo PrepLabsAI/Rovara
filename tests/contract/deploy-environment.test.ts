@@ -204,6 +204,23 @@ describe("deploy environment", () => {
     expect(result.settingsWritten).toBe(true);
   });
 
+  it("sends the release's package parameters with the templates engine only: cdk uploads its own assets (Task 20 live check)", async () => {
+    // live15eb: cdk deploy refused the change set, "Parameters: [AssetParameters...] do not exist in the template".
+    const withPackage = (): LoadedRelease => {
+      const release = fakeRelease();
+      return { ...release, manifest: { ...release.manifest, packages: [{ assetId: "f".repeat(64), file: `packages/${"f".repeat(64)}.zip`, sha256: "e".repeat(64), parts: ["control-plane"], bucketParameter: "AssetBucket", keyParameter: "AssetKey", hashParameter: "AssetHash", keyParameterValue: `packages/||${"f".repeat(64)}.zip` }] } };
+    };
+    const controlPlane = async (engine: "templates" | "cdk") => {
+      const { deployer, requests } = fakeDeployer(scriptedOutputs());
+      await deployEnvironment({ mode: "install", engine, answers: baseAnswers(), release: withPackage(), deployer, store: new MemoryParameterStore(), secrets: memorySecrets(), holder: HOLDER });
+      return requests.find((request) => request.part === "control-plane")!.parameters;
+    };
+    expect(await controlPlane("templates")).toMatchObject({ AssetBucket: scriptedOutputs()[stackName("access")]!.ArtifactBucketName, AssetKey: `packages/||${"f".repeat(64)}.zip`, AssetHash: "f".repeat(64) });
+    const cdk = await controlPlane("cdk");
+    expect(Object.keys(cdk).filter((name) => name.startsWith("Asset"))).toEqual([]);
+    expect(cdk.GitHubAppId).toBe(baseAnswers().github.appId);
+  });
+
   it("creates the callback signing key once and reuses it on later deploys", async () => {
     const store = new MemoryParameterStore();
     const secrets = memorySecrets();
