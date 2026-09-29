@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { environmentStackName, type ReleaseManifest } from "@agentx/contracts";
 import { deployEnvironment, keptOperatorParameters, type DeployAnswers } from "../../packages/cli/src/deploy/deploy-environment.js";
 import { PROTECTED_PARTS, type DeployRequest, type StackDeployer, type StackOutputs } from "../../packages/cli/src/deploy/deployer.js";
-import type { DeployPart } from "../../packages/cli/src/deploy/parameters.js";
+import { OPERATOR_PARAMETERS, type DeployPart } from "../../packages/cli/src/deploy/parameters.js";
 import type { LoadedRelease } from "../../packages/cli/src/deploy/release.js";
 import type { SecretValueStore } from "../../packages/cli/src/deploy/signing-key.js";
 import { lockParameterName } from "../../packages/cli/src/environments/lock.js";
@@ -683,13 +683,18 @@ describe("an upgrade keeps what the operator set (OPERATOR_PARAMETERS)", () => {
   it("does not send a parameter the new template no longer declares, and reports it as dropped", async () => {
     const { store, secrets } = await installed();
     const upgrade = fakeDeployer(scriptedOutputs());
+    const events: unknown[] = [];
     const result = await deployEnvironment({
       mode: "upgrade", engine: "templates", answers: baseAnswers(), release: fakeReleaseWithControlPlaneParameters(["BudgetMonthlyUsd"]),
       deployer: upgrade.deployer, store, secrets, holder: HOLDER,
       deployedParameters: async (name) => (name === stackName("control-plane") ? { BudgetMonthlyUsd: "250", SlackThreadTurnsPerMinute: "12" } : undefined),
+      onEvent: (event) => events.push(event),
     });
     const controlPlane = upgrade.requests.find((request) => request.part === "control-plane")!;
     expect(controlPlane.parameters).not.toHaveProperty("SlackThreadTurnsPerMinute");
+    // Dropping one parameter does not drop the others: the budget is still kept in the same request.
+    expect(controlPlane.parameters.BudgetMonthlyUsd).toBe("250");
+    expect(events).toContainEqual({ kind: "kept", stackName: stackName("control-plane"), kept: ["BudgetMonthlyUsd"], dropped: ["SlackThreadTurnsPerMinute"] });
     expect(result.droppedParameters).toEqual([{ stackName: stackName("control-plane"), parameter: "SlackThreadTurnsPerMinute", value: "12" }]);
   });
 
@@ -700,6 +705,20 @@ describe("an upgrade keeps what the operator set (OPERATOR_PARAMETERS)", () => {
       .rejects.toThrow("an upgrade must read the deployed stacks' parameters");
     // F6: the refusal comes before the deploy loop, so no part deploys at all.
     expect(upgrade.requests).toEqual([]);
+  });
+
+  it("refuses, never skips, when the reader is missing at the part that needs it (the loop's own check)", async () => {
+    const { store, secrets } = await installed();
+    const upgrade = fakeDeployer(scriptedOutputs());
+    // Forces the guard before the loop and the loop to disagree: the reader is there when the guard
+    // looks, and gone when the control plane deploys. Skipping would reset the budget silently.
+    let reads = 0;
+    const input = {
+      mode: "upgrade" as const, engine: "templates" as const, answers: baseAnswers(), release: fakeRelease(), deployer: upgrade.deployer, store, secrets, holder: HOLDER,
+      get deployedParameters() { reads += 1; return reads === 1 ? nothingDeployed : undefined; },
+    };
+    await expect(deployEnvironment(input)).rejects.toThrow("an upgrade must read the deployed stacks' parameters");
+    expect(upgrade.requests.filter((request) => request.part === "control-plane")).toEqual([]);
   });
 
   it("never reads deployed parameters on an install", async () => {
@@ -742,5 +761,19 @@ describe("keptOperatorParameters", () => {
       part: "slack", computed: { ModelId: "m" }, deployed: { SlowTurnMinutes: "9", ModelId: "old" }, declared: new Set(["SlowTurnMinutes", "ModelId"]),
     })).toEqual({ kept: { SlowTurnMinutes: "9" }, dropped: [] });
     expect(keptOperatorParameters({ part: "runtime", computed: {}, deployed: { ModelId: "old" }, declared: undefined })).toEqual({ kept: {}, dropped: [] });
+  });
+
+  it("never carries a secret parameter, even one listed by mistake: DescribeStacks reads it back as \"****\"", () => {
+    // Simulates a later edit that lists a secret in OPERATOR_PARAMETERS; restored afterwards.
+    const controlPlane = OPERATOR_PARAMETERS["control-plane"] as string[];
+    controlPlane.push("CallbackSigningKey");
+    try {
+      expect(keptOperatorParameters({
+        part: "control-plane", computed: {}, deployed: { CallbackSigningKey: "****", BudgetMonthlyUsd: "250" }, declared: new Set(["CallbackSigningKey", "BudgetMonthlyUsd"]),
+      })).toEqual({ kept: { BudgetMonthlyUsd: "250" }, dropped: [] });
+    } finally {
+      controlPlane.pop();
+    }
+    expect(OPERATOR_PARAMETERS["control-plane"]).not.toContain("CallbackSigningKey");
   });
 });

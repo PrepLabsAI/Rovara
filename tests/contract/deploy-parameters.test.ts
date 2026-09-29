@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { ENVIRONMENT_PLACEHOLDER, renderTemplate, type ReleaseManifest } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
-import { SECRET_PARAMETERS, installOrder, privateImageUri, stackParameters, upgradeOrder, type DeployPart, type InstallAnswers } from "../../packages/cli/src/deploy/parameters.js";
+import { OPERATOR_PARAMETERS, SECRET_PARAMETERS, installOrder, privateImageUri, stackParameters, upgradeOrder, type DeployPart, type InstallAnswers } from "../../packages/cli/src/deploy/parameters.js";
 
 const d = (c: string) => c.repeat(64);
 let templates: Map<string, { Parameters?: Record<string, { Default?: unknown; NoEcho?: boolean }>; Outputs?: Record<string, unknown> }>;
@@ -194,6 +194,21 @@ describe("deploy parameters", () => {
     const noEcho = new Set([...templates.values()].flatMap((t) => Object.entries(t.Parameters ?? {}).filter(([, p]) => p.NoEcho === true).map(([name]) => name)));
     expect(noEcho.size).toBeGreaterThan(0);
     expect([...SECRET_PARAMETERS].sort()).toEqual([...noEcho].sort());
+  });
+
+  it("lists no secret as an operator parameter an upgrade carries (none is in SECRET_PARAMETERS or NoEcho in any template)", () => {
+    const operator = Object.values(OPERATOR_PARAMETERS).flat();
+    expect(operator.length).toBeGreaterThan(0);
+    for (const name of operator) expect(SECRET_PARAMETERS.has(name)).toBe(false);
+    const noEcho = new Set([...templates.values()].flatMap((t) => Object.entries(t.Parameters ?? {}).filter(([, p]) => p.NoEcho === true).map(([name]) => name)));
+    for (const name of operator) expect(noEcho.has(name)).toBe(false);
+  });
+
+  it("names only operator parameters its own part's template declares", () => {
+    for (const [part, names] of Object.entries(OPERATOR_PARAMETERS)) {
+      const declared = Object.keys(templates.get(part)?.Parameters ?? {});
+      for (const name of names) expect(declared, `${part} ${name}`).toContain(name);
+    }
   });
 
   it("reads only outputs the producing templates declare", () => {
