@@ -398,6 +398,18 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
       ? `${nothing}; you are using the AgentX operator role, so if your platform team deployed the access stack from an export bundle, run agentx init --resume --from-bundle <the bundle directory>`
       : `${nothing}; run agentx init without --resume to start one`);
   }
+  // A first run under --yes (no install under way, and no --resume): the finishing steps can ask
+  // nothing, so what they need is checked here, before anything is created. The Cognito admin's
+  // email (your own OIDC needs none), and the channel. A resume skips this: each finishing step
+  // refuses with its flag named only when it still needs the value.
+  if (options.yes && !options.resume && stored === undefined) {
+    const missing = [
+      ...(options.flags.identity !== "oidc" && options.finishFlags.adminEmail === undefined ? [["--admin-email <email>", "the email of your AgentX admin user"]] : []),
+      ...(options.finishFlags.channel === undefined ? [["--channel <name>", "the Slack channel for the first project"]] : []),
+    ];
+    const [first] = missing;
+    if (first !== undefined) throw agentXError("CONFIG_INVALID", `agentx init --yes needs ${first[0]} (${first[1]}); pass it, or run agentx init without --yes to be asked`);
+  }
 
   let collected: CollectedAnswers | undefined;
   let answers: InitAnswers;

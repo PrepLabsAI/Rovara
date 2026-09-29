@@ -143,6 +143,8 @@ const UNATTENDED = [
   // F15: the finishing steps' answers.
   "--admin-email", ADMIN_EMAIL, "--repository", "acme/payments-api", "--channel", "payments", "--connectors", "none",
 ];
+/** `argv` without `flag` and its value. */
+const without = (argv: readonly string[], flag: string): string[] => argv.filter((_, index) => argv[index] !== flag && argv[index - 1] !== flag);
 const UNATTENDED_ENV = { GH_KEY: TEST_PRIVATE_KEY, BOT: TEST_BOT_TOKEN, SIGNING: TEST_SIGNING_SECRET, SLACK_CLIENT_SECRET: "fedcba9876543210fedcba9876543210" };
 const WEBHOOK = "https://events.pagerduty.com/integration/0123SECRETintegrationKEY/enqueue";
 
@@ -374,15 +376,45 @@ describe("agentx init", () => {
     expect(h.printed()).toContain("AgentX environment staging is ready.");
   });
 
-  it("under --yes, refuses before anything is created when a finishing flag is missing, naming it", async () => {
+  it("under --yes, a first run refuses before anything is created when a finishing flag is missing, naming it", async () => {
     for (const flag of ["--admin-email", "--channel"]) {
       const h = await harness();
-      const argv = UNATTENDED.filter((_, index) => UNATTENDED[index] !== flag && UNATTENDED[index - 1] !== flag);
+      const argv = without(UNATTENDED, flag);
       expect(await h.run([...argv, "--alert-email", "ops@example.com"], { processEnv: UNATTENDED_ENV })).toBe(2);
       expect(h.printed()).toContain(`agentx init --yes needs ${flag}`);
-      expect(h.store.calls).toEqual([]);
+      expect(h.store.calls.filter((call) => call.op === "put")).toEqual([]);
+      expect(h.secrets.values.has("agentx/staging/github-app")).toBe(false);
       expect(h.deployer.requests).toEqual([]);
     }
+  });
+
+  it("under --yes, a resume whose admin and channel are recorded needs neither flag", async () => {
+    const h = await harness();
+    const answered = h.plane.turns;
+    h.plane.turns = [turn({ subject: "T0TEAM/C0PAY00001/1790000000.000100", receivedAt: new Date(T0 + 86_400_000).toISOString(), disposition: "error" })];
+    expect(await h.run([...UNATTENDED, "--alert-email", "ops@example.com"], { processEnv: UNATTENDED_ENV })).not.toBe(0);
+    h.plane.turns = answered;
+    const mark = h.mark();
+    expect(await h.run(without(without(UNATTENDED, "--admin-email"), "--channel"), { processEnv: UNATTENDED_ENV })).toBe(0);
+    const rerun = h.printedSince(mark);
+    expect(rerun).not.toContain("needs --");
+    expect(rerun).toContain("AgentX environment staging is ready.");
+  });
+
+  it("under --yes, a resume that still needs the channel is refused at that step, naming --channel", async () => {
+    const h = await harness();
+    h.deployer.fail.set(environmentStackName("staging", "control-plane"), new Error("Resource limit exceeded"));
+    expect(await h.run([...UNATTENDED, "--alert-email", "ops@example.com"], { processEnv: UNATTENDED_ENV })).not.toBe(0);
+    h.deployer.fail.clear();
+    const mark = h.mark();
+    expect(await h.run(without(UNATTENDED, "--channel"), { processEnv: UNATTENDED_ENV })).not.toBe(0);
+    const rerun = h.printedSince(mark);
+    expect(rerun).not.toContain("agentx init --yes needs");
+    expect(rerun).toContain('init stopped at "Set up the first project and its channel"');
+    expect(rerun).toContain("with --yes, pass --channel");
+    const progress = await readInstallProgress(h.store, "staging");
+    expect(progress?.admin?.username).toBe(ADMIN_EMAIL);
+    expect(progress?.project?.channelId).toBeUndefined();
   });
 
   it("under --yes with your own OIDC, needs no --admin-email", async () => {
