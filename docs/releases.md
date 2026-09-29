@@ -151,6 +151,8 @@ runs by hand, before a release is tagged, and never touches the live deployment.
    `us-east-1`).
 3. **Two private ECR repositories** in that account and region: `agentx-release-test/worker` and
    `agentx-release-test/slack`. The workflow pushes the candidate's images there.
+   Each repository needs a lifecycle policy that expires `rt-*` images a few days after they are
+   pushed: every run pushes both images tagged `rt-<run id>`, and nothing else removes them.
 4. **A test GitHub App**, installed on a test repository: `vars.RT_GITHUB_ACCOUNT`,
    `vars.RT_GITHUB_APP_ID`, `vars.RT_GITHUB_INSTALLATION_ID`, and its private key in
    `secrets.RT_GITHUB_PRIVATE_KEY`.

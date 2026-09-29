@@ -37,6 +37,16 @@ describe("the guides (FR-054)", () => {
     expect(read("docs/move-account.md")).toContain("https://github.com/PrepLabsAI/AgentX/issues/67");
   });
 
+  it("tells the release test owner that each ECR repository needs a lifecycle policy for the rt- images (final review M3)", () => {
+    const guide = read("docs/releases.md");
+    const step3 = guide.slice(guide.indexOf("3. **Two private ECR repositories**"), guide.indexOf("4. **A test GitHub App**"));
+    expect(step3).toContain("Each repository needs a lifecycle policy that expires `rt-*` images");
+  });
+
+  it("says destroy never takes a lock over without a terminal (final review M11)", () => {
+    expect(read("docs/teardown.md")).toContain("It asks only at a terminal: without one (answers piped on stdin), it\nnever takes a lock over");
+  });
+
   it("uses no em dash in any guide", () => {
     for (const path of ["docs/install.md", "docs/day-two.md", "docs/teardown.md", "docs/move-account.md"]) expect(read(path), path).not.toContain("\u2014");
   });
