@@ -27,6 +27,8 @@ tests (Tasks 14, 16).
 
 Tasks: 14, 16.
 
+**Owner answer (2026-09-29):** the recommendation, accepted. The plan already follows it.
+
 ## 2. What does `destroy` remove by default, and what does `--keep-data` keep?
 
 FR-055 removes the retained data by default and keeps it with `--keep-data`. Two tables hold
@@ -51,6 +53,8 @@ typed confirmation exists.
 
 Tasks: 14, 16.
 
+**Owner answer (2026-09-29):** the recommendation, accepted. The plan already follows it.
+
 ## 3. What does `agentx upgrade` do when the target release is older than the environment's?
 
 - **A. (recommended)** Refuse, naming both versions. The same release is allowed (a re-run finishes
@@ -66,6 +70,8 @@ restore from backups, not a downgrade command.
 Cost if wrong: B is a flag and one test (Task 10). Nothing is lost by starting with A.
 
 Tasks: 10, 12.
+
+**Owner answer (2026-09-29):** the recommendation, accepted. The plan already follows it.
 
 ## 4. `config set limits.workspacesPerMember` and `limits.workspacesPerOrg` before spec 025 phase 25e
 
@@ -87,6 +93,8 @@ and overlaps 25e.
 
 Tasks: 3, 4.
 
+**Owner answer (2026-09-29):** the recommendation, accepted. The plan already follows it.
+
 ## 5. Does `doctor` detect drift, or only report the last result?
 
 FR-050 asks for drift. CloudFormation's drift detection reads every resource with the caller's own
@@ -106,6 +114,8 @@ Cost if wrong: B is about half a day (a flag, a wait, tests). C is a policy chan
 must approve.
 
 Tasks: 5.
+
+**Owner answer (2026-09-29):** the recommendation, accepted. The plan already follows it.
 
 ## 6. What does the release test automate?
 
@@ -132,6 +142,8 @@ Cost if wrong: B is two to three days, plus a Slack token that must be rotated o
 
 Tasks: 18 (and 19 for the checklist).
 
+**Owner answer (2026-09-29):** the recommendation, accepted. The plan already follows it.
+
 ## 7. `destroy` needs admin credentials
 
 SC-005 says day-2 commands run under the operator role alone. `destroy` deletes the access stack and
@@ -150,6 +162,8 @@ harder story for the platform team.
 
 Tasks: 16, 17.
 
+**Owner answer (2026-09-29):** the recommendation, accepted. The plan already follows it.
+
 ## 8. Changing `alerts.address` leaves the old subscription
 
 The operator role has `sns:Subscribe` (email and https only) but no `sns:Unsubscribe`: 15d2 kept it
@@ -167,6 +181,8 @@ alerts elsewhere), but it reverses a 15d2 decision and its test, so it should be
 Cost if wrong: B is a policy line, a spec line, a test change and about ten lines of code.
 
 Tasks: 4.
+
+**Owner answer (2026-09-29):** the recommendation, accepted. The plan already follows it.
 
 ## 9. The access stack during `upgrade` under the operator role
 
@@ -188,6 +204,8 @@ Cost if wrong: B risks a stack that no longer matches the release; C loses SC-00
 
 Tasks: 12, 13.
 
+**Owner answer (2026-09-29):** the recommendation, accepted. The plan already follows it.
+
 ## 10. `doctor`'s Asana check
 
 FR-050 asks for each connector's test read. For Asana, a test read needs a fresh access token, and a
@@ -207,6 +225,8 @@ in the control plane.
 
 Tasks: 7.
 
+**Owner answer (2026-09-29):** the recommendation, accepted. The plan already follows it.
+
 ## 11. The typed confirmation when stdin is not a terminal
 
 FR-055's typed name has no flag. The release test (question 6) must destroy what it made, unattended.
@@ -222,3 +242,5 @@ environment's name, and a script that pipes the wrong name removes nothing.
 Cost if wrong: B is one option and one test; C loses the automated check of `destroy` itself.
 
 Tasks: 17, 18.
+
+**Owner answer (2026-09-29):** the recommendation, accepted. The plan already follows it.
