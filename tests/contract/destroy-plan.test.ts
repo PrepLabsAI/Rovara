@@ -115,10 +115,22 @@ describe("destroy: a generated bucket name, shortened (review I2)", () => {
     expect(isOwnedRetained(ENV20, long, { "agentx:env": "abcdefghijklmnopqrs" })).toBe(false);
     expect(isOwnedRetained(ENV20, { ...long, physicalId: long.physicalId.slice(0, -1) }, tagged)).toBe(false);
     expect(isOwnedRetained(ENV20, { ...long, logicalId: "Artifacts" }, tagged)).toBe(false);
-    // A sibling environment prod-c passes a name check for prod's control-plane (candidate "c"), but
-    // not at 63 characters and not with prod's tag: the tag is what blocks it.
+    // A sibling environment prod-c's unshortened bucket, even carrying prod's tag, is refused by the
+    // 63-character rule: it is not the full stack name agentx-prod-control-plane followed by "-".
     const sibling: RetainedResource = { part: "control-plane", logicalId: "State", type: "AWS::S3::Bucket", physicalId: "agentx-prod-c-foundation-state-1x" };
     expect(isOwnedRetained("prod", sibling, { "agentx:env": "prod" })).toBe(false);
+    // At 63 characters, prod-c's name passes prod's name check (agentx-prod-c is a start of
+    // agentx-prod-control-plane): only the agentx:env tag blocks it (re-review R4).
+    const shortenedSibling: RetainedResource = { part: "control-plane", logicalId: "SlackThreadSessions6FD21617", type: "AWS::S3::Bucket", physicalId: `agentx-prod-c-slackthreadsessions6fd21-${"a1".repeat(12)}` };
+    expect(shortenedSibling.physicalId).toHaveLength(63);
+    expect(isOwnedRetained("prod", shortenedSibling, { "agentx:env": "prod-c" })).toBe(false);
+    expect(isOwnedRetained("prod", shortenedSibling, { "agentx:env": "prod" })).toBe(true);
+  });
+
+  it("never takes a bare agentx as the stack-name part of a shortened name (re-review R3)", () => {
+    const bare: RetainedResource = { part: "control-plane", logicalId: "SlackThreadSessions6FD21617", type: "AWS::S3::Bucket", physicalId: `agentx-slackthreadsessions6fd21617-${"b2".repeat(14)}` };
+    expect(bare.physicalId).toHaveLength(63);
+    expect(isOwnedRetained("live15ea", bare, { "agentx:env": "live15ea" })).toBe(false);
   });
 
   it("keeps the full-prefix rule for tables and log groups, which S3's limit does not shorten", () => {

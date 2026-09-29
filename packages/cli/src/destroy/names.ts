@@ -50,7 +50,9 @@ function generatedNameMatches(env: string, resource: RetainedResource): boolean 
   for (let first = id.indexOf("-"); first !== -1; first = id.indexOf("-", first + 1)) {
     for (let second = id.indexOf("-", first + 1); second !== -1; second = id.indexOf("-", second + 1)) {
       const [p1, p2, suffix] = [id.slice(0, first), id.slice(first + 1, second), id.slice(second + 1)];
-      if (p1.length > 0 && stack.startsWith(p1) && p2.length > 0 && logicalId.startsWith(p2) && /^[a-z0-9]+$/.test(suffix)) return true;
+      // Re-review R3: at least one character past "agentx-", so a bare "agentx" never matches (an env
+      // is at most 20 characters, so CloudFormation's cut always keeps one).
+      if (p1.length > "agentx-".length && stack.startsWith(p1) && p2.length > 0 && logicalId.startsWith(p2) && /^[a-z0-9]+$/.test(suffix)) return true;
     }
   }
   return false;
