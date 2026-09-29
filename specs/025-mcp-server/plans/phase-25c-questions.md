@@ -184,3 +184,9 @@ later is the same one-value change plus the write.
 **Depends on it:** Tasks 1, 4.
 
 **Owner answer (2026-09-29):** A, audit a `share` action, accepted.
+
+## Q10. Sharing into a private bound channel the developer is not a member of (raised in Task 3's review)
+
+The spec allowed any developer who may use the project to share into any bound channel, private ones included.
+
+**Owner answer (2026-09-29):** refuse it. Sharing into a private channel needs the developer to be a member of it; otherwise the start or share is refused with a message to join the channel first or share to one of the project's public channels. Implemented as a small change after Task 4, and written into FR-031 by Task 17.
