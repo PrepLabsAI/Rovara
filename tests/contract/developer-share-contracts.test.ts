@@ -92,7 +92,7 @@ describe("share shapes (C1, C2, C6)", () => {
 
 describe("the shared thread's hourly notice claim (C10, F13)", () => {
   const subject = "T0BSHLLUGBD/C0123456789/1695500000.000001";
-  const claim = async (db: FakeDynamoDb, now: number, kind?: "view" | "closed") => {
+  const claim = async (db: FakeDynamoDb, now: number, kind: "view" | "closed" = "view") => {
     try {
       await db.send(new UpdateCommand({ TableName: "threads", ...sharedNoticeClaim(subject, now, kind) }));
       return true;
@@ -103,10 +103,11 @@ describe("the shared thread's hourly notice claim (C10, F13)", () => {
   };
 
   it("claims the thread's SHARED_NOTICE item, and keeps it two intervals", () => {
-    expect(sharedNoticeClaim(subject, 1_000_000)).toEqual({
+    expect(sharedNoticeClaim(subject, 1_000_000, "view")).toEqual({
       Key: sharedNoticeKey(subject),
       UpdateExpression: "SET noticedAt = :now, expiresAt = :expires",
-      ConditionExpression: "attribute_not_exists(noticedAt) OR noticedAt <= :cutoff",
+      // Closed wins at the store: no view-only claim once a closed notice was ever claimed.
+      ConditionExpression: "attribute_not_exists(closedNoticedAt) AND (attribute_not_exists(noticedAt) OR noticedAt <= :cutoff)",
       ExpressionAttributeValues: { ":now": 1_000_000, ":expires": 1_007_200, ":cutoff": 996_400 },
     });
   });
@@ -135,6 +136,14 @@ describe("the shared thread's hourly notice claim (C10, F13)", () => {
     expect(await claim(db, 1_002_000, "view")).toBe(false);
     expect(await claim(db, 1_004_680, "closed")).toBe(true);
     expect(db.get(`THREAD#${subject}`, "SHARED_NOTICE")).toMatchObject({ noticedAt: 1_000_000, closedNoticedAt: 1_004_680, expiresAt: 1_011_880 });
+  });
+
+  it("refuses a view-only claim after any closed claim, even one older than an hour (closed wins)", async () => {
+    const db = new FakeDynamoDb();
+    expect(await claim(db, 1_000_000, "closed")).toBe(true);
+    expect(await claim(db, 1_000_010, "view")).toBe(false);
+    expect(await claim(db, 1_000_000 + 2 * 3_600, "view")).toBe(false);
+    expect(db.get(`THREAD#${subject}`, "SHARED_NOTICE")).not.toHaveProperty("noticedAt");
   });
 });
 

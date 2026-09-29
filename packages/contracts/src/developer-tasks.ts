@@ -55,9 +55,10 @@ export type SharedNoticeKind = "view" | "closed";
  * ConditionalCheckFailedException. Each kind has its own time on the one item (the live check found
  * a closed notice swallowed by a view-only one sent 18 minutes before), so a thread whose task
  * closes still hears so once. A marker from before the kinds holds `noticedAt` only, which is the
- * view-only time. The marker expires after two intervals.
+ * view-only time. A closed claim, however old, refuses every later view-only claim (closed wins).
+ * The marker expires after two intervals.
  */
-export function sharedNoticeClaim(subject: string, nowSeconds: number, kind: SharedNoticeKind = "view"): {
+export function sharedNoticeClaim(subject: string, nowSeconds: number, kind: SharedNoticeKind): {
   Key: { pk: string; sk: "SHARED_NOTICE" };
   UpdateExpression: string;
   ConditionExpression: string;
@@ -67,7 +68,10 @@ export function sharedNoticeClaim(subject: string, nowSeconds: number, kind: Sha
   return {
     Key: sharedNoticeKey(subject),
     UpdateExpression: `SET ${at} = :now, expiresAt = :expires`,
-    ConditionExpression: `attribute_not_exists(${at}) OR ${at} <= :cutoff`,
+    // Closed wins: once a closed notice was claimed, the view-only notice is never claimed again.
+    ConditionExpression: kind === "closed"
+      ? "attribute_not_exists(closedNoticedAt) OR closedNoticedAt <= :cutoff"
+      : "attribute_not_exists(closedNoticedAt) AND (attribute_not_exists(noticedAt) OR noticedAt <= :cutoff)",
     ExpressionAttributeValues: {
       ":now": nowSeconds,
       ":expires": nowSeconds + 2 * SHARED_THREAD_NOTICE_INTERVAL_SECONDS,

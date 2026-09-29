@@ -39,8 +39,8 @@ function harness(answers: SlackThreadWorkspaceResult[], options: { claim?: boole
     threads: {
       load: async () => ({}), saveConversation: async () => undefined, saveSettingsRevision: async () => undefined,
       close: async () => undefined, finish: async () => undefined,
-      claimSharedNotice: async (subject) => {
-        claims.push(subject);
+      claimSharedNotice: async (subject, _nowSeconds, kind) => {
+        claims.push(`${subject}:${kind}`);
         if (options.claimThrows) throw Object.assign(new Error("DynamoDB unavailable"), { name: "InternalServerError" });
         return options.claim ?? true;
       },
@@ -191,7 +191,7 @@ describe("a thread that is not open to the channel (C10, Review Focus 2)", () =>
     const h = harness([{ outcome: "VIEW_ONLY", taskId: TASK, closed: true }], { claim: false });
     await processSlackRequest(message(), h.dependencies, { finalAttempt: false });
     expect(h.posts).toEqual([]);
-    expect(h.claims).toEqual(["T0BSHLLUGBD/C0123456789/1695500000.000100"]);
+    expect(h.claims).toEqual(["T0BSHLLUGBD/C0123456789/1695500000.000100:closed"]);
     const closed = harness([{ outcome: "VIEW_ONLY", taskId: TASK, closed: true }]);
     await processSlackRequest(message(), closed.dependencies, { finalAttempt: false });
     expect(closed.posts).toEqual([CLOSED_SHARED_NOTICE]);
