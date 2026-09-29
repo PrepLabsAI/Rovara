@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ChannelMembersRequest, SlackChannelBinding } from "@agentx/contracts";
-import { resolveDeveloperAccess } from "../../packages/broker/src/developer/access.js";
+import { accessDeniedMessage, resolveDeveloperAccess } from "../../packages/broker/src/developer/access.js";
 
 const binding = (channelId: string, projectName: string): SlackChannelBinding => ({ teamId: "T0TEAM1", channelId, projectName, updatedAt: "2026-09-27T00:00:00.000Z" });
 const bindings = [binding("C0PAY0001", "payments-api"), binding("C0PAY0002", "payments-api"), binding("C0LEDGER1", "ledger"), binding("C0DOCS001", "docs")];
@@ -80,5 +80,15 @@ describe("project access (FR-013)", () => {
   it("lists a granted project that has no bound channel", async () => {
     const access = await resolveDeveloperAccess({ grants: ["solo"], bindings, channelMembersMayUse: () => true, channelMembers: vi.fn() });
     expect(access.projects.get("solo")).toEqual({ access: "granted", channels: [] });
+  });
+});
+
+describe("the access-denied message (FR-049, R10)", () => {
+  it("names the public bound channels to join", () => {
+    expect(accessDeniedMessage("payments", ["payments-dev", "payments-ops"])).toBe("you don't have access to `payments`: join one of its channels (#payments-dev, #payments-ops) or ask an admin");
+  });
+
+  it("just says ask an admin when there is no channel to name", () => {
+    expect(accessDeniedMessage("ledger", [])).toBe("you don't have access to `ledger`: ask an admin");
   });
 });

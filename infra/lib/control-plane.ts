@@ -564,7 +564,7 @@ export class ControlPlaneStack extends Stack {
     // Spec 025 phase 25a: developer sign-in, named environments only (R3).
     if (naming.env !== undefined && signInParameters !== undefined) {
       new DeveloperSignIn(this, "DeveloperSignIn", {
-        naming, env: naming.env, api, stage: defaultStage, brokerIntegration: integration, broker, slackSecret, parameters: signInParameters,
+        naming, env: naming.env, api, stage: defaultStage, brokerIntegration: integration, broker, slackSecret, parameters: signInParameters, turnRecords,
       });
     }
 

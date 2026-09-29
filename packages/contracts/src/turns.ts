@@ -81,6 +81,7 @@ export const TurnDispositionSchema = z.enum([
 
 export const TurnRecordSchema = TurnObservationSchema.extend({
   eventId: z.string().regex(/^Ev[A-Za-z0-9]{4,64}$/),
+  origin: z.literal("slack").optional(),
   subject: z.string().min(1).max(128),
   receivedAt: z.string().datetime(),
   requestedBy: z.object({ teamId: SlackTeamIdSchema, userId: SlackUserIdSchema }).strict(),
@@ -155,13 +156,66 @@ export function redactArguments(value: unknown, limit = TURN_ARGUMENT_LIMIT): st
   }
 }
 
-export function turnRecordKeys(record: Pick<TurnRecord, "subject" | "receivedAt" | "eventId">) {
-  const at = `${record.receivedAt}#${record.eventId}`;
+/** The sk, export and expiry shape every turn record key shares; only pk differs between a
+ * Slack record's THREAD# and an AI-tool record's TASK#. */
+function timeIndexedKeys(pk: string, at: string, receivedAt: string) {
   return {
-    pk: `THREAD#${record.subject}`,
+    pk,
     sk: `TURN#${at}`,
     exportPk: TURN_EXPORT_PARTITION,
     exportSk: at,
-    expiresAt: Math.floor(Date.parse(record.receivedAt) / 1000) + TURN_RETENTION_DAYS * 86_400,
+    expiresAt: Math.floor(Date.parse(receivedAt) / 1000) + TURN_RETENTION_DAYS * 86_400,
   } as const;
+}
+
+export function turnRecordKeys(record: Pick<TurnRecord, "subject" | "receivedAt" | "eventId">) {
+  const at = `${record.receivedAt}#${record.eventId}`;
+  return timeIndexedKeys(`THREAD#${record.subject}`, at, record.receivedAt);
+}
+
+/** Spec 025 FR-037: one developer action from an AI tool, keyed by task, in the same table and export. */
+export const AiToolTurnRecordSchema = z.object({
+  origin: z.literal("ai_tool"),
+  taskId: z.string().uuid(),
+  turnId: z.string().uuid(),
+  action: z.enum(["start", "continue", "pull_request", "cancel", "close"]),
+  phase: z.enum(["accepted", "completed", "refused"]),
+  developer: z.object({
+    developerId: Hex64,
+    provider: z.enum(["slack", "oidc"]),
+    displayName: z.string().min(1).max(200),
+    slackUserId: SlackUserIdSchema.optional(),
+  }).strict(),
+  client: z.string().min(1).max(40),
+  receivedAt: z.string().datetime(),
+  /** Added at export from the workspace record; never stored. */
+  project: z.string().max(63).optional(),
+  settingsRevision: z.number().int().positive().optional(),
+  workspaceId: z.string().uuid().optional(),
+  operationId: z.string().uuid().optional(),
+  outcome: z.enum(["accepted", "refused", "succeeded", "failed", "cancelled", "interrupted"]),
+  startedAt: z.string().datetime(),
+  finishedAt: z.string().datetime(),
+  durationMs: z.number().int().nonnegative(),
+  requestText: z.string().max(TURN_TEXT_LIMIT),
+  responseText: z.string().max(TURN_TEXT_LIMIT),
+  textTruncated: z.boolean().optional(),
+  error: z.object({ code: z.string().max(64) }).strict().optional(),
+}).strict();
+export type AiToolTurnRecord = z.infer<typeof AiToolTurnRecordSchema>;
+export type ExportedTurnRecord = TurnRecord | AiToolTurnRecord;
+
+/**
+ * Narrows a page of ExportedTurnRecord to the Slack shape: true unless origin is "ai_tool".
+ * A caller that only reads Slack turns (eventId, disposition, calls, and so on) filters with
+ * this first, rather than asserting the type or disabling the lint rule that would otherwise
+ * catch a Slack-only field read off an AI-tool record.
+ */
+export function isSlackTurnRecord(turn: ExportedTurnRecord): turn is TurnRecord {
+  return turn.origin !== "ai_tool";
+}
+
+export function aiToolTurnRecordKeys(record: Pick<AiToolTurnRecord, "taskId" | "receivedAt" | "turnId">) {
+  const at = `${record.receivedAt}#${record.turnId}`;
+  return timeIndexedKeys(`TASK#${record.taskId}`, at, record.receivedAt);
 }

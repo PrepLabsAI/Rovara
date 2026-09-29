@@ -2,10 +2,11 @@
 // responses with the non-strict schemas here, so a newer control plane can add fields.
 import { z } from "zod";
 import { EnvironmentNameSchema } from "./environments.js";
+import { DeveloperTaskPolicySchema } from "./project.js";
 import { SlackChannelIdSchema, SlackUserIdSchema } from "./slack.js";
 import { WorkspaceStatusSchema } from "./workspace.js";
 
-export const DEVELOPER_API_VERSION = "1.0";
+export const DEVELOPER_API_VERSION = "1.1";
 export const AGENTX_CLI_CLIENT_ID = "agentx-cli";
 export const DEVELOPER_TOKEN_AUDIENCE = "agentx-developer";
 export const DEVELOPER_ACCESS_TOKEN_SECONDS = 3600;
@@ -71,11 +72,56 @@ export const DeveloperSummarySchema = z.object({
 });
 export type DeveloperSummary = z.infer<typeof DeveloperSummarySchema>;
 
+interface IntrospectableDef {
+  type: string;
+  innerType?: z.ZodTypeAny;
+  defaultValue?: unknown;
+}
+
+/**
+ * F6: rebuilds a zod object schema so every nested object accepts unknown keys, not only the
+ * outermost one (a plain `.passthrough()` only loosens the schema it is called on; a strict
+ * sub-object such as `DeveloperTaskPolicySchema.shareMode`, wrapped in `.default()`, stays
+ * strict). Walks `.shape` recursively, unwrapping `.default()`/`.optional()`/`.nullable()` and
+ * rewrapping the loosened inner type the same way, so the field list is still defined exactly
+ * once, in the schema passed in.
+ */
+function looseCopy<Output>(schema: z.ZodType<Output>): z.ZodType<Output> {
+  const def = (schema as unknown as { _zod: { def: IntrospectableDef } })._zod.def;
+  if (def.type === "object") {
+    const shape = (schema as unknown as { shape: Record<string, z.ZodTypeAny> }).shape;
+    const loosened: Record<string, z.ZodTypeAny> = {};
+    for (const [key, value] of Object.entries(shape)) loosened[key] = looseCopy(value);
+    return z.object(loosened).passthrough() as unknown as z.ZodType<Output>;
+  }
+  if (def.type === "default" && def.innerType) {
+    return looseCopy(def.innerType).default(def.defaultValue as never) as unknown as z.ZodType<Output>;
+  }
+  if (def.type === "optional" && def.innerType) {
+    return looseCopy(def.innerType).optional() as unknown as z.ZodType<Output>;
+  }
+  if (def.type === "nullable" && def.innerType) {
+    return looseCopy(def.innerType).nullable() as unknown as z.ZodType<Output>;
+  }
+  return schema;
+}
+
+/**
+ * F6: a non-strict copy of `DeveloperTaskPolicySchema` (`project.ts`), used only to parse a
+ * project's task policy inside this response. A strict schema embedded here would make an old MCP
+ * server fail the whole `projects()` response (`whoami`, `agentx_list_projects`) as soon as a
+ * newer control plane added one field to the policy, at any nesting level (including inside
+ * `shareMode`). The field list stays defined once, in Task 1's schema.
+ */
+const DeveloperProjectTaskPolicySchema = looseCopy(DeveloperTaskPolicySchema);
+
 export const DeveloperProjectSchema = z.object({
   name: z.string().min(1),
   latestRevision: z.number().int().positive(),
   access: z.enum(["granted", "channel"]),
-  channels: z.array(z.object({ channelId: SlackChannelIdSchema })),
+  channels: z.array(z.object({ channelId: SlackChannelIdSchema, name: z.string().optional(), isPrivate: z.boolean().optional() })),
+  // Absent from a 1.0 control plane.
+  tasks: DeveloperProjectTaskPolicySchema.optional(),
 });
 export type DeveloperProject = z.infer<typeof DeveloperProjectSchema>;
 
@@ -130,5 +176,18 @@ export type ChannelMembersRequest = z.infer<typeof ChannelMembersRequestSchema>;
 /** `invalid_request` means the caller sent a request the identity function refused: a caller bug. */
 export type ChannelMembersResponse =
   | { ok: true; memberOf: string[] }
+  | { ok: false; error: "slack_unavailable" }
+  | { ok: false; error: "invalid_request" };
+
+/** R10: the names and privacy of bound channels, read by DeveloperIdentity with the bot token. */
+export const ChannelInfoRequestSchema = z
+  .object({
+    kind: z.literal("channel-info"),
+    channelIds: z.array(SlackChannelIdSchema).max(CHANNEL_MEMBERS_MAX_CHANNELS),
+  })
+  .strict();
+export type ChannelInfoRequest = z.infer<typeof ChannelInfoRequestSchema>;
+export type ChannelInfoResponse =
+  | { ok: true; channels: Array<{ channelId: string; name: string; isPrivate: boolean }> }
   | { ok: false; error: "slack_unavailable" }
   | { ok: false; error: "invalid_request" };

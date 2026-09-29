@@ -36,7 +36,7 @@ describe("discovery (FR-001, FR-048)", () => {
   it("reports the environment, API version and the methods that can actually be used", async () => {
     const both = identityHarness({ oidc: {} });
     expect(json((await both.http(httpEvent("GET", "/v1/auth/.well-known/agentx-configuration"))).body)).toEqual({
-      env: "staging", apiVersion: "1.0", issuer: ISSUER, authorizationEndpoint: `${ISSUER}/authorize`, tokenEndpoint: `${ISSUER}/token`,
+      env: "staging", apiVersion: "1.1", issuer: ISSUER, authorizationEndpoint: `${ISSUER}/authorize`, tokenEndpoint: `${ISSUER}/token`,
       revocationEndpoint: `${ISSUER}/revoke`, clientId: "agentx-cli", methods: { slack: true, oidc: { displayName: "Okta" } },
     });
     // FR-006: Slack sign-in is refused while the team ID is unset, so it is not offered.
@@ -454,6 +454,12 @@ describe("revocation and the channel-members invoke", () => {
   it("answers invalid_request, not slack_unavailable, for a malformed channel-members request", async () => {
     const h = identityHarness();
     expect(await h.handler({ kind: "channel-members", slackUserId: "not-a-user", channelIds: [] })).toEqual({ ok: false, error: "invalid_request" });
+  });
+
+  it("answers the broker's channel-info request, and refuses a malformed one", async () => {
+    const h = identityHarness({ channelInfo: { C0PAY0001: { name: "payments-dev", isPrivate: false } } });
+    expect(await h.handler({ kind: "channel-info", channelIds: ["C0PAY0001"] })).toEqual({ ok: true, channels: [{ channelId: "C0PAY0001", name: "payments-dev", isPrivate: false }] });
+    expect(await h.handler({ kind: "channel-info", channelIds: ["not-a-channel"] })).toEqual({ ok: false, error: "invalid_request" });
   });
 });
 

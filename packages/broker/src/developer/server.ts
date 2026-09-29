@@ -1,13 +1,17 @@
 // packages/broker/src/developer/server.ts
 // Spec 025 FR-001 to FR-008: the control plane as the developers' sign-in server. Behind
-// ANY /v1/auth/{proxy+} with no authorizer, plus one direct-invoke operation for the broker.
+// ANY /v1/auth/{proxy+} with no authorizer, plus two direct-invoke operations for the broker
+// (channel members, and channel names for R10).
 // Nothing here logs or echoes a secret, a code, a token or a caught error's message.
 import { randomBytes } from "node:crypto";
 import {
   AGENTX_CLI_CLIENT_ID,
+  ChannelInfoRequestSchema,
   ChannelMembersRequestSchema,
   DEVELOPER_API_VERSION,
   isLoopbackRedirectUri,
+  type ChannelInfoRequest,
+  type ChannelInfoResponse,
   type ChannelMembersRequest,
   type ChannelMembersResponse,
   type DeveloperSignInMethod,
@@ -373,8 +377,13 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
 
   const isPage = (pathname: string) => pathname === "/v1/auth/authorize" || pathname.startsWith("/v1/auth/callback/");
 
-  return async (event: HttpApiV2Event | ChannelMembersRequest): Promise<HttpResult | ChannelMembersResult> => {
+  return async (event: HttpApiV2Event | ChannelMembersRequest | ChannelInfoRequest): Promise<HttpResult | ChannelMembersResult | ChannelInfoResponse> => {
     if ("kind" in event) {
+      if (event.kind === "channel-info") {
+        const parsed = ChannelInfoRequestSchema.safeParse(event);
+        if (!parsed.success) return { ok: false, error: "invalid_request" };
+        return deps.directory.channelInfo(parsed.data.channelIds);
+      }
       const parsed = ChannelMembersRequestSchema.safeParse(event);
       if (!parsed.success) return { ok: false, error: "invalid_request" };
       return deps.directory.channelMembers(parsed.data.slackUserId, parsed.data.channelIds);

@@ -7,6 +7,7 @@
     { "path": "packages/broker" },
     { "path": "packages/worker" },
     { "path": "packages/orchestrator" },
+    { "path": "packages/mcp" },
     { "path": "packages/cli" },
     { "path": "packages/slack-service" },
     { "path": "infra" }

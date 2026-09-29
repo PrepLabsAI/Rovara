@@ -81,8 +81,18 @@ export class FakeDynamoDb {
     const items = this.find((item) => item.pk === values[":pk"] && (item.sk as string).startsWith(prefix))
       .sort((left, right) => compareKeys(left.sk as string, right.sk as string));
     if (input.ScanIndexForward === false) items.reverse();
+    // ExclusiveStartKey resumes after that key in the query's direction. DynamoDB refuses a start
+    // key from another partition, without a sort key, or outside the key condition's range, and so
+    // does this fake. (No LastEvaluatedKey is handed out.)
+    const start = input.ExclusiveStartKey as { pk?: unknown; sk?: unknown } | undefined;
+    if (start !== undefined && (start.pk !== values[":pk"] || typeof start.sk !== "string" || !start.sk.startsWith(prefix))) {
+      throw Object.assign(new Error("The provided starting key is invalid"), { name: "ValidationException" });
+    }
+    const after = start === undefined
+      ? items
+      : items.filter((item) => compareKeys(item.sk as string, String(start.sk)) * (input.ScanIndexForward === false ? -1 : 1) > 0);
     const limit = input.Limit as number | undefined;
-    return (limit === undefined ? items : items.slice(0, limit)).map((item) => structuredClone(item));
+    return (limit === undefined ? after : after.slice(0, limit)).map((item) => structuredClone(item));
   }
 
   private commit(actions: WriteAction[], errorName: string): void {
@@ -276,6 +286,19 @@ class Parser {
       this.expect(")");
       const exists = item?.[path] !== undefined;
       return token === "attribute_exists" ? exists : !exists;
+    }
+    if (token === "contains") {
+      this.next();
+      this.expect("(");
+      const path = this.path();
+      this.expect(",");
+      const operand = this.operand(item ?? {});
+      this.expect(")");
+      const value = item?.[path];
+      if (value instanceof Set) return value.has(operand);
+      if (typeof value === "string") return typeof operand === "string" && value.includes(operand);
+      if (Array.isArray(value)) return value.includes(operand);
+      return false;
     }
     const left = this.operand(item ?? {});
     const comparator = this.next();

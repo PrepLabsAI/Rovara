@@ -6515,7 +6515,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Includes": [
                       "environments/**",
                       "infra/**",
-                      "packages/{broker,cli,contracts,gateway,model-runtime,orchestrator,slack-service,worker}/**",
+                      "packages/{broker,cli,contracts,gateway,mcp,model-runtime,orchestrator,slack-service,worker}/**",
                       "{package.json,package-lock.json,tsconfig.json,tsconfig.base.json,.dockerignore}",
                     ],
                   },

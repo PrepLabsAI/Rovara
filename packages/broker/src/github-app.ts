@@ -16,6 +16,8 @@ export interface GitHubPullRequestInput {
   baseBranch: string;
   title: string;
   body?: string;
+  /** Spec 025 FR-023: opens the pull request as a draft; GitHub's default applies when absent. */
+  draft?: boolean;
 }
 
 export interface GitHubPullRequestResult {
@@ -120,6 +122,7 @@ export class GitHubAppCredentialProvider {
             head: input.headBranch,
             base: input.baseBranch,
             ...(input.body === undefined ? {} : { body: input.body }),
+            ...(input.draft === undefined ? {} : { draft: input.draft }),
           }),
         },
       );

@@ -19,6 +19,9 @@
     "yaml": "2.9.1",
     "zod": "4.6.5",
     "@agentx/model-runtime": "0.1.0",
-    "@aws-sdk/client-service-quotas": "3.1134.0"
+    "@aws-sdk/client-service-quotas": "3.1134.0",
+    "@agentx/mcp": "0.1.0",
+    "@modelcontextprotocol/sdk": "1.30.1",
+    "smol-toml": "1.8.0"
   }
 }

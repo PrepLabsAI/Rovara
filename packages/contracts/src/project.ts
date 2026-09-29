@@ -150,6 +150,36 @@ export const DEFAULT_DEVCONTAINER_CONFIG_PATH = ".devcontainer/devcontainer.json
  */
 export const LEGACY_PROJECT_FIELDS = ["schemaVersion", "controlPlaneUrl", "auth", "environment"] as const;
 
+export const DeveloperShareModeSchema = z.enum(["view", "continue"]);
+
+/** Spec 025 FR-014: how a project treats tasks started from an AI tool. Part of the revision. */
+export const DeveloperTaskPolicySchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    share: z.enum(["optional", "required"]).default("optional"),
+    shareMode: z
+      .object({
+        default: DeveloperShareModeSchema.default("view"),
+        allowContinue: z.boolean().default(true),
+      })
+      .strict()
+      .default({ default: "view", allowContinue: true }),
+    channelMembersMayUse: z.boolean().default(true),
+  })
+  .strict();
+export type DeveloperTaskPolicy = z.output<typeof DeveloperTaskPolicySchema>;
+export const DEFAULT_DEVELOPER_TASK_POLICY: DeveloperTaskPolicy = DeveloperTaskPolicySchema.parse({});
+
+/**
+ * The policy a stored definition carries, or the defaults when it has none. A value that no longer
+ * parses turns tasks and channel access off, so a damaged record never widens access.
+ */
+export function developerTaskPolicy(definition: { developerTasks?: unknown }): DeveloperTaskPolicy {
+  // Only a missing value takes the defaults; a stored null is damaged and fails closed.
+  const parsed = DeveloperTaskPolicySchema.safeParse(definition.developerTasks === undefined ? {} : definition.developerTasks);
+  return parsed.success ? parsed.data : { ...DEFAULT_DEVELOPER_TASK_POLICY, enabled: false, channelMembersMayUse: false };
+}
+
 function projectDefinitionObject<Connectors extends z.ZodTypeAny>(connectorsSchema: Connectors) {
   return z
     .object({
@@ -166,6 +196,7 @@ function projectDefinitionObject<Connectors extends z.ZodTypeAny>(connectorsSche
         connectors: connectorsSchema.optional(),
       }).strict().optional(),
       actionPolicy: ActionPolicySchema.optional(),
+      developerTasks: DeveloperTaskPolicySchema.optional(),
     })
     .strict();
 }

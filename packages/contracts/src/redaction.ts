@@ -138,6 +138,10 @@ const TEXT_PATTERNS: ReadonlyArray<[RegExp, string]> = [
   [/(?<![A-Za-z0-9])[sr]k_(?:live|test)_[A-Za-z0-9]{10,}/g, REDACTED],
   [/(?<![A-Za-z0-9])npm_[A-Za-z0-9]{30,}/g, REDACTED],
   [/(?<![A-Za-z0-9])hf_[A-Za-z0-9]{30,}/g, REDACTED],
+  // AgentX's own refresh token (agxr_) and authorization code (agxc_), 43 base64url characters
+  // (packages/broker/src/developer/tokens.ts); the minimum length keeps "agxr_" alone in prose
+  // (no token after it) from being overmatched.
+  [/(?<![A-Za-z0-9])agx[rc]_[A-Za-z0-9_-]{30,}/g, REDACTED],
   [/(?<![A-Za-z0-9])SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g, REDACTED],
   [/(?<![A-Za-z0-9])SK[0-9a-f]{32}(?![A-Za-z0-9])/g, REDACTED],
   // A Twilio-style auth token: 32 hex characters after the word "auth" or "auth token".

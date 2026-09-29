@@ -24,6 +24,14 @@ export interface AuthenticatedIdentity {
     requesterName?: string;
     binding: SlackChannelBinding;
   };
+  /** Spec 025: a developer task's workspace owner (FR-017); never set with `slack`. */
+  developer?: {
+    developerId: string;
+    provider: "slack" | "oidc";
+    name: string;
+    client: string;
+    taskId: string;
+  };
 }
 
 export interface JwtAuthenticatorConfig {

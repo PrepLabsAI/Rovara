@@ -5,6 +5,7 @@ import {
   type ConnectorCallRequest,
   OperationSchema,
   agentXError,
+  lastAssistantResponse,
   type Operation,
 } from "@agentx/contracts";
 import {
@@ -14,6 +15,8 @@ import {
   type RemoteOperationStatus,
 } from "./event-client.js";
 import type { OrchestrationApi } from "./orchestration-tools.js";
+
+export { lastAssistantResponse };
 
 export class ControlPlaneApi implements OrchestrationApi, OperationPollingTransport {
   readonly baseUrl: string;
@@ -252,28 +255,6 @@ export function completedTaskResult(
     ...(response === undefined ? {} : { response }),
     ...(operation.error === undefined ? {} : { error: operation.error }),
   };
-}
-
-export function lastAssistantResponse(events: RemoteEventPage["events"]): string | undefined {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const payload = events[index]?.payload;
-    if (!payload || typeof payload !== "object") continue;
-    const event = payload as Record<string, unknown>;
-    if (event.type !== "message_end" || !event.message || typeof event.message !== "object") continue;
-    const message = event.message as Record<string, unknown>;
-    if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
-    const text = message.content
-      .flatMap((block) => {
-        if (!block || typeof block !== "object") return [];
-        const content = block as Record<string, unknown>;
-        return content.type === "text" && typeof content.text === "string" ? [content.text] : [];
-      })
-      .join("\n")
-      .replace(/<thinking>[\s\S]*?<\/thinking>\s*/gi, "")
-      .trim();
-    if (text.length > 0) return text;
-  }
-  return undefined;
 }
 
 export function acceptedOperationId(value: unknown): string {

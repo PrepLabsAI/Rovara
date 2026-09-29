@@ -110,7 +110,8 @@ const form = (init: RequestInit | undefined) => new URLSearchParams(typeof init?
 export interface FakeSlackUser { userId: string; teamId?: string; name: string; email?: string; emailVerified?: boolean; deleted?: boolean; isBot?: boolean; enterpriseTeams?: string[] }
 
 /** Slack's OpenID Connect and Web API, as far as the sign-in uses them. */
-export function fakeSlack(options: { users: FakeSlackUser[]; channels?: Record<string, string[]>; scopes?: string[]; now?: () => number }) {
+/** `channelInfo`: what conversations.info answers per channel ID (no `isPrivate` leaves is_private out); any other ID is channel_not_found. */
+export function fakeSlack(options: { users: FakeSlackUser[]; channels?: Record<string, string[]>; channelInfo?: Record<string, { name: string; isPrivate?: boolean }>; scopes?: string[]; now?: () => number }) {
   const issuedAt = () => Math.floor((options.now ?? Date.now)() / 1000);
   const signer = signingKey();
   const codes = new Map<string, { user: FakeSlackUser; nonce: string; redirectUri: string; teamId: string; idToken?: string }>();
@@ -161,6 +162,12 @@ export function fakeSlack(options: { users: FakeSlackUser[]; channels?: Record<s
       const page = members.slice(start, start + 2);
       const next = start + 2 < members.length ? String(start + 2) : "";
       return Response.json({ ok: true, members: page, response_metadata: { next_cursor: next } });
+    }
+    if (url.pathname === "/api/conversations.info") {
+      const id = url.searchParams.get("channel") ?? "";
+      const info = options.channelInfo?.[id];
+      if (info === undefined) return Response.json({ ok: false, error: "channel_not_found" });
+      return Response.json({ ok: true, channel: { id, name: info.name, ...(info.isPrivate === undefined ? {} : { is_private: info.isPrivate }) } });
     }
     return undefined;
   };
@@ -267,12 +274,13 @@ export function authorizeQuery(overrides: Record<string, string> = {}): string {
 export function identityHarness(options: {
   slack?: boolean; teamId?: string | undefined; oidc?: { requiredClaim?: string; requiredValues?: string[] };
   slackUsers?: FakeSlackUser[]; oidcUsers?: FakeOidcUser[]; channels?: Record<string, string[]>;
+  channelInfo?: Record<string, { name: string; isPrivate?: boolean }>;
   slackCredentials?: { clientId?: string; clientSecret?: string };
 } = {}) {
   let clock = T0;
   const now = () => clock;
   const db = new FakeDynamoDb();
-  const slack = fakeSlack({ users: options.slackUsers ?? [], now, ...(options.channels ? { channels: options.channels } : {}) });
+  const slack = fakeSlack({ users: options.slackUsers ?? [], now, ...(options.channels ? { channels: options.channels } : {}), ...(options.channelInfo ? { channelInfo: options.channelInfo } : {}) });
   const oidc = fakeOidc({ users: options.oidcUsers ?? [], now });
   const fetch = routeFetch(slack.handler, oidc.handler);
   const signer = localSigner();

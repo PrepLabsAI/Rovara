@@ -67,8 +67,8 @@ What the code does today, and what this spec has to change:
    (`packages/cli/src/auth.ts`).
 10. **There is no MCP server code.** `packages/gateway` and `packages/broker/src/github-mcp.ts` are
     MCP clients.
-11. **Two worker modes run side by side.** AgentCore and Pratik's EC2 workers (`ec2-ebs`, specs 018
-    to 024) are chosen by the project's runtime binding. Issue #88 plans to remove AgentCore.
+11. **`ec2-ebs` is the only worker mode since #118 and #134** (owner decision, 2026-09-28). Issue
+    #88's plan to remove AgentCore has landed.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -96,8 +96,8 @@ pull request. Then do the same live against a throwaway environment (see Testing
 3. **Given** a running task, **When** the developer calls `agentx_get_task`, **Then** they see the
    status, the latest progress events and, once it ends, the summary and changed files.
 4. **Given** a finished task with changes, **When** the developer calls
-   `agentx_open_pull_request`, **Then** AgentX opens the PR through the existing publication path,
-   and the result gives the PR URL.
+   `agentx_open_pull_request`, **Then** AgentX answers at once with the started publish operation;
+   `agentx_get_task` gives the PR URL once it is published (owner decision, changed, 2026-09-28).
 5. **Given** a finished task, **When** the developer calls `agentx_continue_task` with more
    instructions, **Then** they run in the same workspace, on the same branch.
 6. **Given** another developer, **When** they ask for this task by ID, **Then** they are told the
@@ -336,7 +336,8 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
 - **Two starts with the same client request ID** (a retried tool call). The second returns the first
   task; nothing runs twice.
 - **The project gets a new revision while a task runs.** The task keeps its starting revision, like a
-  Slack thread; `agentx_continue_task` uses it too.
+  Slack thread; `agentx_continue_task` uses it too. Pull requests it opens list repositories from
+  that same starting (pinned) revision, not the latest one (build ruling, 2026-09-28).
 - **The worker is interrupted** (process loss, EC2 instance replaced). The task ends `INTERRUPTED`
   with the reason; `agentx_continue_task` resumes it through the existing recovery path.
 - **The MCP client times out before `wait_seconds` ends.** The task keeps running; the developer
@@ -360,6 +361,12 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   MCP server uses the environment named by `--env` or the default set by `agentx login`.
 - **Enterprise Grid.** A Slack sign-in whose team ID is another team in the same Grid organization is
   refused; only the environment's own team is accepted.
+- **Closing a task with unpublished work.** The close is refused, naming each repository and why;
+  there is no force flag (owner decision, 2026-09-28; FR-030, FR-037).
+- **A developer continues a task or opens its pull request after losing project access, but still
+  owns the task.** The action still succeeds: only ownership is checked, not project access
+  (FR-013); a new task's start is the only place access is rechecked (build ruling, 2026-09-28;
+  FR-021).
 
 ## Requirements *(mandatory)*
 
@@ -447,7 +454,11 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
     true); with `allowContinue` false every shared task is view only;
   - `channelMembersMayUse` (default true).
 
-  It is part of the revision, so changing it is a revision registration.
+  It is part of the revision, so changing it is a revision registration. A revision with no
+  `developerTasks` field at all (every project registered before this phase) gets these same
+  defaults, as if it had been written out: tasks enabled, optional sharing, view-only default
+  sharing with continue allowed, and channel members may use it. An admin turns any of this off only
+  by registering a revision that says so (build ruling, 2026-09-28).
 - **FR-015**: Admin tools MUST need an admin token from the admin issuer (today's Cognito or OIDC)
   whose admin claim matches, as today. A Slack or company developer sign-in MUST never grant admin
   rights. Admin change tools on a project MUST also need the admin's `administrator` membership, as
@@ -462,6 +473,10 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   - `POST tasks/{taskId}/continue`, `POST tasks/{taskId}/cancel`, `POST tasks/{taskId}/close`,
     `POST tasks/{taskId}/share` and `POST tasks/{taskId}/pull-requests`;
   - `GET tasks/{taskId}/events`: the task's progress events.
+
+  `GET tasks` MAY answer with an opaque `nextCursor` for paging past the first page: a sort-key
+  value only, taken from the caller's own partition, validated on the next call, and never a signed
+  token (build ruling, 2026-09-28).
 - **FR-017**: Each task MUST own one workspace. The workspace's owner key MUST be
   `sha256("agentx-developer-task", "<developerId>/<taskId>")`, so each task has its own workspace,
   as each Slack thread does, and a developer can run several tasks at once. The control plane MUST
@@ -470,23 +485,32 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
 - **FR-018**: `POST tasks` MUST, in order: check the token; check that the project exists
   (`PROJECT_NOT_FOUND`), that the developer may use it (FR-013, `PROJECT_ACCESS_DENIED`) and that
   `developerTasks.enabled` is true (`PROJECT_TASKS_DISABLED`);
-  check sharing (FR-031); check the workspace limit (FR-020); create the task index entry, the
-  workspace with a `developer` membership for its owner key, and an idempotency record keyed by the
-  client's request ID, in one transaction; and return `STARTING` with the task ID. Preparing the
-  workspace, creating the conversation and accepting the task (the existing prepare, conversation
-  and task handlers) MUST then run through the existing operation, outbox and dispatcher path, with
-  no further call from the client.
+  check sharing (FR-031); check the workspace limit (FR-020); and, in one transaction, create an
+  ordinary workspace plus three records beside it: the task index entry, a pointer record holding
+  the pending instructions and the client's request ID for idempotency, and the workspace's
+  `developer` membership for its owner key; and return `STARTING` with the task ID (D18). Preparing
+  the workspace MUST then run through the existing prepare path unchanged; the same transaction that
+  records a successful prepare MUST also create the conversation and queue the pending instructions
+  as the task's first turn, so the client makes no further call. When preparing the workspace does
+  not end by queuing the task, for any reason, the pending instructions held on the pointer record
+  MUST be cleared, so none linger unqueued (build ruling, 2026-09-28).
 - **FR-019**: The instructions MUST be sent to the worker as the task prompt, unchanged, with the
   existing 65,536-byte limit. No AgentX model reads, rewrites or plans them. The worker gets the same
   tools and limits as a Slack task's worker.
 - **FR-020**: A developer task MUST count against the same workspace limits as Slack threads (by
   default 3 per person and 20 per organization, FR-053). A developer linked to a Slack user
   MUST share that user's counter; an unlinked developer MUST have their own counter with the same
-  limit.
+  limit. A task stores the counters it charged, and its close releases those (owner decision,
+  2026-09-28). An environment with no Slack team ID counts developer tasks on
+  `DEVELOPER_LIMIT#ORGANIZATION`, with the same limit (owner decision, 2026-09-28). A prepare that
+  fails MUST NOT release the charge; only closing the task releases it, and closing MUST release it
+  exactly once (build ruling, 2026-09-28).
 - **FR-021**: The task routes MUST reuse the existing handlers for operations, events, artifacts,
   pull requests, pull-request actions and cancellation, reached with the task's owner key. The
   broker's refusal message for other JWT routes (FR-006 of spec 008) MUST stay for everything that
-  is neither `/v1/admin/*` nor `/v1/dev/*`.
+  is neither `/v1/admin/*` nor `/v1/dev/*`. Continuing a task and opening its pull request MUST
+  check only that the caller owns the task; they MUST NOT recheck project access (FR-013), which is
+  checked again only when a new task starts (build ruling, 2026-09-28).
 - **FR-022**: `Operation.requestedBy` MUST accept either a Slack requester or a developer requester
   (`{ kind: "developer", developerId, provider }`). Every operation of a developer task MUST record
   it.
@@ -516,24 +540,35 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   `agentx login --admin`).
 - **FR-029**: Every tool result MUST pass through the contracts package's `redactSecrets` and
   `redactText` before it is returned. Tool results MUST never contain a token, a secret value or a
-  secret's contents; a credential appears only as its reference, type and secret name.
+  secret's contents; a credential appears only as its reference, type and secret name. Redaction
+  MUST also cover AgentX's own request and callback tokens (the `agxr_` and `agxc_` prefixes), and a
+  task's title, since a title may be taken straight from the developer's own instructions (build
+  ruling, 2026-09-28).
 - **FR-030**: The tools are:
 
   **Developer tools**
 
   | Tool | Inputs | Output |
   |---|---|---|
-  | `agentx_whoami` | none | environment, developer name, sign-in method, linked Slack user, admin (yes or no), server and control-plane versions, upgrade notice |
-  | `agentx_list_projects` | none | per project: name, description, bound channels, `share` policy, `shareMode` policy, whether tasks are enabled |
+  | `agentx_whoami` | none | environment, developer name, sign-in method, linked Slack user, admin (whether this computer holds an unexpired admin sign-in for the environment), server and control-plane versions, upgrade notice |
+  | `agentx_list_projects` | none | per project: name, bound channels, `share` policy, `shareMode` policy, whether tasks are enabled |
   | `agentx_start_task` | `project`; `instructions` (up to 65,536 bytes); `title` (optional, up to 120 characters, else the first line of the instructions); `share_to_channel` (optional, default false); `share_mode` (optional, `view` or `continue`, else the project's default); `channel` (optional); `wait_seconds` (optional, 0 to 600, default 0); `request_id` (optional UUID, else generated) | task ID, status, project, starting revision, `shared`, `share_mode` and the reason for any policy override, thread link if shared; with a wait, the same as `agentx_get_task` plus `timed_out` |
   | `agentx_get_task` | `task_id`; `events` (optional, 0 to 50, default 10) | status, failure if any, title, project, times, latest events, and once ended: summary (up to 4,000 characters), changed files with line counts, artifacts (name, size), pull requests (URL, state); in continue mode, the channel's turns (author, time, request up to 300 characters, outcome) |
   | `agentx_wait_for_task` | `task_id`; `wait_seconds` (1 to 600) | as `agentx_get_task`, plus `timed_out` |
   | `agentx_list_tasks` | `project` (optional); `status` (optional); `limit` (1 to 50, default 20) | the developer's tasks, newest first: ID, title, project, status, times, shared |
   | `agentx_continue_task` | `task_id`; `instructions`; `wait_seconds` (optional) | as `agentx_start_task` |
   | `agentx_cancel_task` | `task_id` | status after the request |
-  | `agentx_close_task` | `task_id` | status `CLOSED`; the workspace is released and stops counting against limits |
+  | `agentx_close_task` | `task_id` | the task with `closing` while AgentX checks for unpublished work, at once; `agentx_get_task` then shows `CLOSED`, or `unpublished` with each repository and why; an optional `message` gives more detail |
   | `agentx_share_task` | `task_id`; `share_mode` (optional); `channel` (optional) | thread link and mode; on a task already shared, it changes the mode (within the project's policy) |
-  | `agentx_open_pull_request` | `task_id`; `title`; `body` (optional); `repository` (optional when the project has one repository); `draft` (optional, default true) | operation status, then PR URL once published |
+  | `agentx_open_pull_request` | `task_id`; `title`; `body` (optional); `repository` (optional when the project has one repository, else from the task's pinned starting revision); `draft` (optional, default true) | the publish operation's ID and status, at once; the PR URL appears in `agentx_get_task` once published |
+
+  Only `agentx_start_task`, `agentx_continue_task` and `agentx_wait_for_task` wait; every other tool
+  answers at once (owner decision, changed, 2026-09-28; D20). When a tool call omits `request_id`,
+  the server derives one from a hash of the call's own content and remembers it for 15 minutes, so a
+  client-level retry of the same call reuses the same ID instead of starting a second task or
+  duplicate action, and returns the ID it used as `request_id` in the output; `agentx_cancel_task`
+  and `agentx_close_task` instead take a fresh ID on every call, since repeating either is exactly
+  what calling it again means (build ruling, 2026-09-28).
 
   **Admin read tools** (no confirmation)
 
@@ -612,11 +647,16 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
 
 - **FR-036**: A developer task MUST be visible through `/v1/dev/*` only to the developer who started
   it. Any other caller MUST get `TASK_NOT_FOUND`.
-- **FR-037**: Every start, continue, pull-request request, cancel and close of a developer task MUST
-  write a turn record. The turn record schema MUST gain `origin` (`slack` or `ai_tool`, absent read
-  as `slack`) and, for `ai_tool`, `taskId`, `developer` (`developerId`, provider, display name,
-  linked Slack user if any) and `client` in place of the Slack event ID and requester. They MUST be
-  keyed `TASK#{taskId}`, keep the 30-day retention, hold the instructions redacted and capped as
+- **FR-037**: Each action on a developer task (start, continue, a pull-request request, cancel or
+  close) MUST write an `accepted` record in its own transaction, and each task or publish operation
+  MUST write a `completed` record, holding the result summary, when it ends; a start refused after
+  its request parses MUST write a `refused` record (owner decision, 2026-09-28). The one exception:
+  a cancel that finds nothing running has no action transaction to write the `accepted` record in,
+  so it is written on its own (build ruling, 2026-09-28). The turn record schema MUST gain `origin`
+  (`slack` or `ai_tool`, absent read as `slack`) and, for `ai_tool`, `taskId`, `developer`
+  (`developerId`, provider, display name, linked Slack user if any) and `client` in place of the
+  Slack event ID and requester. They MUST be keyed `TASK#{taskId}`, keep the 30-day retention, hold
+  the instructions redacted and capped as
   request text and the result summary as response text, and appear in `GET /v1/admin/turns` and
   `agentx_admin_turns`. Teammates' turns in continue mode are ordinary Slack turn records that also carry
   `taskId`.
@@ -684,7 +724,10 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   `agentx admin changes --since <time> [--json]`, which exports them like `agentx admin turns`.
 - **FR-053**: The per-person and per-organization workspace limits MUST be changeable without a
   CloudFormation change. The control plane MUST store them as a setting in its state table
-  (`SETTINGS` / `WORKSPACE_LIMITS`, with the admin and time of the last change). The broker MUST read
+  (`SETTINGS` / `WORKSPACE_LIMITS`, with the admin and time of the last change). Its fields are
+  `perPerson` and `perOrganization`. The broker reads this setting from phase 25b on, for Slack
+  threads and developer tasks alike; phase 25e adds the change tool that writes it (owner decision,
+  2026-09-28). The broker MUST read
   the setting at each workspace creation, with a consistent read, and use it in the existing limit
   conditions; when the setting is absent it MUST use the stack parameters `SlackMemberWorkspaceLimit`
   and `SlackOrganizationWorkspaceLimit` (defaults 3 and 20), which stay as the install-time
@@ -724,7 +767,10 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
 - **FR-048**: The control plane MUST report an API version in
   `/v1/auth/.well-known/agentx-configuration`. The MCP server MUST refuse with `UPGRADE_REQUIRED`
   when the major version differs, and show an upgrade notice in `agentx_whoami` when only the minor
-  version differs.
+  version differs. When the control plane's minor version is older than the tools' own (for example
+  a `1.0` control plane, which has no developer task routes at all), every tool MUST also refuse
+  with `UPGRADE_REQUIRED`, asking an admin to upgrade AgentX: a minor-version gap in that direction
+  means routes this phase needs are simply missing, not merely different (build ruling, 2026-09-28).
 
 **Errors**
 
@@ -746,7 +792,8 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   | `SLACK_UNAVAILABLE` | Slack could not be reached for a membership check or sign-in | try again; explicit grants still work |
   | `CONFIRMATION_UNAVAILABLE` | no confirmation method in this session | use a client with elicitation, link a Slack user, or use the CLI |
   | `CONFIRMATION_DECLINED`, `CONFIRMATION_EXPIRED`, `CHANGE_STALE` | the change was declined, timed out, or state moved | ask for the change again |
-  | `UPGRADE_REQUIRED` | incompatible API version | the install command with the right version |
+  | `INVALID_REQUEST` | the control plane refuses the input (a reused request ID, instructions over 65,536 bytes, a malformed ID) | fix the input the message names |
+  | `UPGRADE_REQUIRED` | the client's major version differs from the control plane's, or the control plane's minor version is older than the tools need (FR-048) | run the install command again for the latest CLI; if the control plane is the older side, ask your AgentX admin to upgrade AgentX instead |
   | `CONTROL_PLANE_UNAVAILABLE` | network or 5xx after 3 tries | check the connection; `agentx_admin_health` for admins |
 
   A worker failure is not a tool error: the task's status and failure category (FR-025) carry it.
@@ -766,6 +813,13 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
     task's workspace is reachable only by the developer who started it, and, while the developer
     shares it in continue mode, by the members of the bound channel who post in its shared thread.
     Personal workspaces not tied to a task stay retired.
+
+- **FR-055**: A developer task's workspace MUST NOT stay in setup forever. A sweep MUST mark failed
+  any prepare still running 15 minutes after it started, whatever the instance's health, with a fixed
+  message that setup did not finish; the workspace then reads `setup_failed` and frees its slot, as
+  with any other failed setup. Once the sweep exists, a temporary AWS error (throttling, or a 5xx)
+  while queuing the task's first instructions MUST be retried rather than failing the start at once.
+  Phase 25c.
 
 ### Key Entities
 
@@ -806,10 +860,13 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   update within 60 seconds of the task's end, in the live check.
 - **SC-007**: 100% of sign-ins from a Slack team other than the environment's are refused, in the
   contract tests and once live.
-- **SC-008**: The existing Slack, control-plane, ingress and CLI suites pass with no assertion removed
-  or weakened; lists of commands, init steps and manifest scopes gain the new entries.
-- **SC-009**: The developer task contract tests pass with both an AgentCore and an `ec2-ebs` runtime
-  binding.
+- **SC-008**: The existing Slack, control-plane, ingress and CLI suites pass with no assertion
+  removed or weakened; lists of commands, error codes and constants gain the new entries, and
+  `DEVELOPER_API_VERSION` moves to `1.1` (owner decision, 2026-09-28). This covers updating
+  `tests/contract/developer-identity-server.test.ts`'s expected `apiVersion` from `"1.0"` to `"1.1"`,
+  the same kind of additive change as every other list here.
+- **SC-009**: The developer task contract tests pass with an `ec2-ebs` runtime binding, and no
+  developer task code reads the deployment mode (owner decision, 2026-09-28).
 - **SC-010**: One tool definition module serves the stdio server, proved by a test that compares the
   listed tools with the module's exports.
 - **SC-011**: 100% of admin change requests in the contract tests and the live check (applied,
@@ -872,6 +929,42 @@ Owner decisions from the review of this spec (binding, 2026-09-27):
   they cannot use it. Channel names are shown only when the person can already see those channels.
 - **Admins can change the workspace limits without editing CloudFormation**, through an admin change
   tool with confirmation and audit (FR-053).
+
+Owner decisions on the phase 25b build (binding, 2026-09-28). Building phase 25b (the developer
+task API and the MCP server) raised 12 questions the spec had not settled; the owner answered each
+one. Eleven were accepted as recommended; one (6) was changed:
+
+1. **The limits setting (FR-053). Accepted.** The broker reads it from phase 25b on, for Slack
+   threads and developer tasks alike; phase 25e adds the change tool that writes it.
+2. **No Slack team ID (FR-020). Accepted.** Developers in an environment with no Slack team ID
+   count on `DEVELOPER_LIMIT#ORGANIZATION`, with the same limit.
+3. **Audit records (FR-037). Accepted.** Three stages: an `accepted` record in the action's own
+   transaction, a `completed` record with the result summary when the operation ends, and a
+   `refused` record for a start refused after its request parses.
+4. **`INVALID_REQUEST` (FR-049). Accepted.** Added for input the control plane refuses: a reused
+   request ID, instructions over 65,536 bytes, or a malformed ID.
+5. **Closing with unpublished work. Accepted.** The close is refused, listing each repository and
+   why. There is no force flag.
+6. **Waiting for the PR URL and the close (FR-030, FR-049). Changed.** `agentx_open_pull_request`
+   and `agentx_close_task` do not wait. They return at once with a started status and the
+   operation or task reference, and the AI tool checks back with `agentx_get_task`. The task wait
+   (off by default, at most 600 seconds) stays exactly as it is.
+7. **`agentx_whoami`'s admin field (FR-030). Accepted.** It says whether this computer holds an
+   unexpired admin sign-in for the environment.
+8. **Project description (FR-030). Accepted.** `description` is dropped from
+   `agentx_list_projects`.
+9. **SC-009 and AgentCore. Accepted.** SC-009 becomes: the developer task contract tests pass with
+   an `ec2-ebs` binding, and no developer task code reads the deployment mode. Context item 11 and
+   the Testing section are updated to match.
+10. **A Slack member at the limit because of AI-tool tasks. Accepted.** The Slack refusal lists
+    only the member's open threads, so it undercounts when AI-tool tasks fill the limit. 25b
+    accepts this; the fix is a known follow-up in 25c (see plans/README.md).
+11. **Rolling back past 25b. Accepted.** The release notes say: before rolling back to a release
+    before 25b, register a revision without `developerTasks`, since the strict schema of an older
+    control plane cannot read it.
+12. **SC-008 and the API version. Accepted.** The expected `DEVELOPER_API_VERSION` in
+    `tests/contract/developer-contracts.test.ts` changes from `"1.0"` to `"1.1"`. SC-008 means no
+    assertion is removed or weakened.
 
 Decisions made in this spec, all owner-confirmed on 2026-09-27:
 
@@ -975,6 +1068,45 @@ Decisions made in this spec, all owner-confirmed on 2026-09-27:
   not call `kms:GetPublicKey`), keeps them for the Lambda's lifetime, refetches at most once a minute
   on an unknown key ID, and answers 503 when the keys cannot be read.
 
+- **D18. The start transaction writes three records beside an ordinary workspace, and the first
+  task is queued inside the prepare's result transaction** (build ruling, 2026-09-28;
+  owner-confirmed after the live check, 2026-09-29). FR-018's start transaction creates the task index entry, a
+  pointer record holding the pending instructions and the idempotency key, and the workspace's
+  `developer` membership, beside an ordinary workspace. Preparing the workspace runs through the
+  existing prepare path unchanged; the transaction that records a successful prepare also creates
+  the conversation and queues the pending instructions as the task's first turn, so the client
+  never makes a second call. Why: this keeps FR-018's no-further-call promise true by reusing
+  `recordTerminalResult`, which every prepare result already goes through, instead of adding a
+  second operation path. This is the build's reading of FR-018's original "existing operation,
+  outbox and dispatcher path" wording, which this same amendment replaces.
+- **D19. Developer-task audit is three stages, with one exception** (owner decision, accepted,
+  2026-09-28). An `accepted` record is written in the action's own transaction; a `completed`
+  record, holding the result summary, is written when the task or publish operation ends; and a
+  start refused after its request parses writes a `refused` record. The one exception: a cancel
+  that finds nothing running has no action transaction to join, so its `accepted` record is written
+  on its own. FR-037 carries this.
+- **D20. `agentx_open_pull_request` and `agentx_close_task` return at once; the AI tool checks
+  back** (owner decision, changed from the recommended 120-second wait, 2026-09-28). Both tools
+  answer immediately with a started status and the operation or task reference; neither waits for
+  the publish or the close's unpublished-work check to finish. The AI tool learns the outcome by
+  calling `agentx_get_task` afterward. The task wait (`agentx_start_task`, `agentx_continue_task`
+  and `agentx_wait_for_task`, off by default, at most 600 seconds) is the only wait and is
+  unaffected. FR-030 and FR-049 carry this.
+- **D22. A task's workspace shows in the project's workspace list, without its details** (owner
+  decision, 2026-09-29). `GET /v1/dev/workspaces` and `agentx workspaces` (spec 041) list every
+  workspace of a project the caller may use, AI-tool task workspaces included, with only the
+  workspace ID, project revision, status, whether it is busy, and its times. A task's title,
+  instructions, progress, events and results stay visible only to the developer who started it
+  (FR-036). The install guide says so.
+- **D21. A stuck task setup is ended by a sweep, not by a "last attempt" signal** (owner decision,
+  2026-09-28). In 25b, a temporary AWS error while queuing a task's first instructions fails the
+  start at once: the worker gives up after three silent callback attempts, and nothing else ends a
+  prepare on a healthy instance, so retrying would leave the workspace stuck in setup with its slot
+  taken. A sweep in the existing reaper or reconciler that fails any prepare older than 15 minutes
+  covers this and every other cause (a lost callback, a hung worker), stays inside the control plane,
+  and makes the retry safe. A "last attempt" field in the worker's callback was rejected: it covers
+  only this one case and changes the worker contract. FR-055 carries this, in 25c.
+
 ## Assumptions and Scope
 
 - **Assumptions:**
@@ -989,6 +1121,9 @@ Decisions made in this spec, all owner-confirmed on 2026-09-27:
     `init` step on a later `agentx init` run, because `runInit` refuses to continue when the release
     it was installed with differs from the CLI's own release. Such environments turn sign-in on with
     `agentx signin enable` instead.
+  - Rolling back to a release before 25b needs a project revision without `developerTasks` first,
+    since an older control plane's strict schema cannot read it; the release notes say so (owner
+    decision, 2026-09-28).
 - **In scope:** everything in the requirements above, delivered in the phases of
   [plans/README.md](plans/README.md).
 - **Out of scope:**
@@ -1032,7 +1167,8 @@ Decisions made in this spec, all owner-confirmed on 2026-09-27:
 - **Contract tests (every PR, no network):**
   - the MCP server over stdio, driven by the MCP SDK's client, against the broker running in process
     with a fake DynamoDB, fake Slack, fake providers and a fake dispatcher, through every user story;
-  - the same developer task flow with an AgentCore runtime binding and an `ec2-ebs` one (SC-009);
+  - the developer task flow with an `ec2-ebs` runtime binding, and a source scan proving no
+    developer task code reads the deployment mode (SC-009);
   - the existing Slack, control-plane, ingress and CLI suites, unchanged (SC-008);
   - `cdk synth` with the second authorizer, the new routes and the notifier's permissions; a test that
     only the notifier, the ingress, the orchestrator role and the `DeveloperIdentity` sign-in function

@@ -1,5 +1,5 @@
 import { GetCommand, QueryCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { TURN_EXPORT_PAGE, TURN_EXPORT_PARTITION, TurnRecordSchema, agentXError, type TurnRecord } from "@agentx/contracts";
+import { AiToolTurnRecordSchema, TURN_EXPORT_PAGE, TURN_EXPORT_PARTITION, TurnRecordSchema, agentXError, type ExportedTurnRecord } from "@agentx/contracts";
 
 export interface TurnRecordStartKey { pk: string; sk: string; exportPk: string; exportSk: string }
 
@@ -71,7 +71,7 @@ export class TurnRecordExport {
     log?: (line: string) => void;
   }) {}
 
-  async page(query: URLSearchParams): Promise<{ turns: TurnRecord[]; cursor?: string; skipped?: number }> {
+  async page(query: URLSearchParams): Promise<{ turns: ExportedTurnRecord[]; cursor?: string; skipped?: number }> {
     const rawSince = query.get("since");
     if (rawSince === null || !validTime(rawSince)) {
       throw agentXError("CONFIG_INVALID", "since must be an ISO 8601 time such as 2026-09-17T00:00:00.000Z");
@@ -102,13 +102,14 @@ export class TurnRecordExport {
     }
     // invalidBefore: how many malformed items came before this record, so a page cut short by
     // size reports only the ones it passed; the rest are counted on the page that reaches them.
-    const records: { record: TurnRecord; key: TurnRecordStartKey | undefined; invalidBefore: number }[] = [];
+    const records: { record: ExportedTurnRecord; key: TurnRecordStartKey | undefined; invalidBefore: number }[] = [];
     const invalidKeys: string[] = [];
     const invalidFields = new Set<string>();
     let invalid = 0;
     for (const item of page.items) {
       if (typeof item.expiresAt === "number" && item.expiresAt <= nowSeconds) continue;
-      const parsed = TurnRecordSchema.safeParse(Object.fromEntries(Object.entries(item).filter(([key]) => !STORAGE_KEYS.has(key))));
+      const schema = item.origin === "ai_tool" ? AiToolTurnRecordSchema : TurnRecordSchema;
+      const parsed = schema.safeParse(Object.fromEntries(Object.entries(item).filter(([key]) => !STORAGE_KEYS.has(key))));
       if (!parsed.success) {
         invalid += 1;
         if (invalidKeys.length < LOGGED_KEY_LIMIT) invalidKeys.push(typeof item.sk === "string" ? item.sk.slice(0, 160) : "unknown");
@@ -116,7 +117,7 @@ export class TurnRecordExport {
         for (const issue of parsed.error.issues) {
           if (invalidFields.size >= LOGGED_KEY_LIMIT) break;
           const field = issue.path[0];
-          invalidFields.add(typeof field === "string" && TurnRecordSchema.shape[field as keyof typeof TurnRecordSchema.shape] !== undefined ? field : "(root)");
+          invalidFields.add(typeof field === "string" && Object.hasOwn(schema.shape, field) ? field : "(root)");
         }
         continue;
       }
@@ -134,7 +135,7 @@ export class TurnRecordExport {
         return undefined;
       }),
     ] as const)));
-    const turns: TurnRecord[] = [];
+    const turns: ExportedTurnRecord[] = [];
     let skipped = invalid;
     let bytes = PAGE_ENVELOPE_BYTES;
     for (const [index, { record }] of records.entries()) {
@@ -184,9 +185,9 @@ function parseCursor(cursor: string, since: string): TurnRecordStartKey | undefi
   }
   const key = startKey(value);
   if (key === undefined) return undefined;
-  // The shape turnRecordKeys writes: THREAD#<subject>, TURN#<exportSk>, TURNS, <time>#<eventId>.
+  // The shapes turnRecordKeys and aiToolTurnRecordKeys write.
   if (key.exportPk !== TURN_EXPORT_PARTITION) return undefined;
-  if (!key.pk.startsWith("THREAD#") || key.sk !== `TURN#${key.exportSk}`) return undefined;
+  if (!(key.pk.startsWith("THREAD#") || key.pk.startsWith("TASK#")) || key.sk !== `TURN#${key.exportSk}`) return undefined;
   if ([key.pk, key.sk, key.exportSk].some((part) => part.length > KEY_PART_LIMIT)) return undefined;
   // The same string comparison the key condition uses.
   if (key.exportSk < since) return undefined;
