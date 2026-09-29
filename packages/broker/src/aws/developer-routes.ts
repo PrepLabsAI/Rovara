@@ -381,9 +381,9 @@ async function listProjects(deps: DeveloperRouteDependencies, caller: DeveloperC
  */
 export async function checkProjectAccess(deps: DeveloperRouteDependencies, caller: DeveloperCaller, project: string): Promise<{ revision: number; policy: DeveloperTaskPolicy; access: "granted" | "channel" }> {
   // A name that is not a project name is never echoed back: it could be long or carry markup.
-  if (!AgentXNameSchema.safeParse(project).success) throw agentXError("PROJECT_NOT_FOUND", "that is not a valid AgentX project name; run agentx_list_projects to see the projects you can use");
+  if (!AgentXNameSchema.safeParse(project).success) throw agentXError("PROJECT_NOT_FOUND", "that is not a valid AgentX project name");
   const known = (await projectsWithPolicy(deps, [project])).get(project);
-  if (known === undefined) throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist in this AgentX; run agentx_list_projects`);
+  if (known === undefined) throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist in this AgentX`);
   const grants = (await grantsOf(deps, caller)).filter((name) => name === project);
   const bindings = (await bindingsOf(deps)).filter((binding) => binding.projectName === project);
   const access = await resolveDeveloperAccess({

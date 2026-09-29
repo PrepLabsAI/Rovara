@@ -274,4 +274,8 @@ describe("the control-plane client (FR-027)", () => {
     expect(TOOL_ERROR_CODES).toContain("INVALID_REQUEST");
     expect(UPGRADE_AGENTX_STEP).toContain("ask your AgentX admin to upgrade AgentX");
   });
+
+  it("gives CHANNEL_REQUIRED a next step that fits a project which requires sharing as well as a start that asked to share", () => {
+    expect(NEXT_STEPS.CHANNEL_REQUIRED).toBe("use the project's Slack channel; if the project does not require sharing, start the task again without share_to_channel");
+  });
 });

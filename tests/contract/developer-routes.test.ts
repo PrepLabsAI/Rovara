@@ -419,7 +419,7 @@ describe("checkProjectAccess, FR-018's first three checks (FR-013, FR-014, FR-04
   });
 
   it("answers PROJECT_NOT_FOUND for a project with no revision or an invalid name, without asking Slack", async () => {
-    expect(await refusal("nope")).toEqual({ code: "PROJECT_NOT_FOUND", message: "project `nope` doesn't exist in this AgentX; run agentx_list_projects" });
+    expect(await refusal("nope")).toEqual({ code: "PROJECT_NOT_FOUND", message: "project `nope` doesn't exist in this AgentX" });
     expect((await refusal("../PROJECT#solo")).code).toBe("PROJECT_NOT_FOUND");
     expect(channelMembers).not.toHaveBeenCalled();
   });
@@ -605,7 +605,7 @@ describe("PROJECT_NOT_FOUND for a name that is not a project name (Task 7 fix ro
     const error = await checkProjectAccess({ documentClient: db, tableName: "state", developer: config, now: () => T0 }, maya, raw).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(AgentXError);
     expect((error as AgentXError).code).toBe("PROJECT_NOT_FOUND");
-    expect((error as AgentXError).message).toBe("PROJECT_NOT_FOUND: that is not a valid AgentX project name; run agentx_list_projects to see the projects you can use");
+    expect((error as AgentXError).message).toBe("PROJECT_NOT_FOUND: that is not a valid AgentX project name");
     expect((error as AgentXError).message).not.toContain("planted");
     expect((error as AgentXError).message).not.toContain("xxxx");
   });

@@ -17,7 +17,7 @@ export const NEXT_STEPS: Record<ToolErrorCode, string> = {
   PROJECT_ACCESS_DENIED: "join one of the project's Slack channels, or ask an admin for access",
   PROJECT_TASKS_DISABLED: "use the project's Slack channel, or ask an admin",
   TASK_NOT_FOUND: "run agentx_list_tasks to see your tasks",
-  CHANNEL_REQUIRED: "start the task without share_to_channel, or use the project's Slack channel",
+  CHANNEL_REQUIRED: "use the project's Slack channel; if the project does not require sharing, start the task again without share_to_channel",
   CHANNEL_AMBIGUOUS: "name one of the project's channels",
   WORKSPACE_LIMIT: "close a task you no longer need with agentx_close_task",
   TASK_BUSY: "wait with agentx_wait_for_task, or stop the task with agentx_cancel_task",

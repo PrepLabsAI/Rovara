@@ -153,7 +153,7 @@ export async function loadOwnedTask(deps: DeveloperTaskRouteDependencies, caller
   const task = TASK_ID.test(taskId) ? await get<DeveloperTaskRecord>(deps, taskKey(taskId)) : undefined;
   if (task === undefined || task.developerId !== caller.developerId) {
     // A malformed ID is never echoed back: it could be long or carry markup.
-    throw agentXError("TASK_NOT_FOUND", TASK_ID.test(taskId) ? `no task ${taskId} of yours; run agentx_list_tasks` : "that is not a task ID of yours; run agentx_list_tasks");
+    throw agentXError("TASK_NOT_FOUND", TASK_ID.test(taskId) ? `no task ${taskId} of yours` : "that is not a task ID of yours");
   }
   return task;
 }
@@ -345,13 +345,13 @@ async function startTask(deps: DeveloperTaskRouteDependencies, caller: Developer
   }
   // R9: sharing is phase 25c.
   if (access.policy.share === "required") {
-    return refused(agentXError("CHANNEL_REQUIRED", `project \`${request.project}\` requires tasks to be shared to its Slack channel, which this AgentX cannot do yet; use the project's Slack channel`));
+    return refused(agentXError("CHANNEL_REQUIRED", `project \`${request.project}\` requires tasks to be shared to its Slack channel, which this AgentX cannot do yet`));
   }
   if (request.shareToChannel === true) {
-    return refused(agentXError("CHANNEL_REQUIRED", "sharing tasks to Slack is not available yet in this AgentX; start the task without share_to_channel"));
+    return refused(agentXError("CHANNEL_REQUIRED", "sharing tasks to Slack is not available yet in this AgentX"));
   }
   const project = await deps.actions.latestProject(request.project);
-  if (project === undefined) return refused(agentXError("PROJECT_NOT_FOUND", `project \`${request.project}\` doesn't exist in this AgentX; run agentx_list_projects`));
+  if (project === undefined) return refused(agentXError("PROJECT_NOT_FOUND", `project \`${request.project}\` doesn't exist in this AgentX`));
   // The policy checked must be the policy started: a revision registered between the two reads
   // could have turned tasks off or required sharing. Nothing was decided, so nothing is recorded.
   if (project.definition.revision !== access.revision) {

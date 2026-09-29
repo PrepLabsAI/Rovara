@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { NEXT_STEPS } from "../../packages/mcp/src/index.js";
 import { MAYA, OMAR, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
@@ -67,7 +68,9 @@ describe("GET /v1/dev/tasks/{taskId} (FR-016, FR-025)", () => {
       const response = await dev(who, "GET", `/v1/dev/tasks/${id}`);
       expect(response.status).toBe(404);
       expect(response.body.error).toMatchObject({ code: "TASK_NOT_FOUND" });
-      expect(String((response.body.error as { message: string }).message)).toContain("agentx_list_tasks");
+      // The broker names what is wrong; the MCP server adds "run agentx_list_tasks" once, as its next step.
+      expect((response.body.error as { message: string }).message).toBe(id === "not-a-task" ? "that is not a task ID of yours" : `no task ${id} of yours`);
+      expect(NEXT_STEPS.TASK_NOT_FOUND).toContain("agentx_list_tasks");
     }
   });
 

@@ -2,6 +2,7 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { NEXT_STEPS } from "../../packages/mcp/src/index.js";
 import { MAYA, OMAR, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM, call, ensureWorkspace } from "../support/slack-broker.js";
 
@@ -65,7 +66,9 @@ describe("the start's refusals, in FR-018's order, before anything starts", () =
     for (const project of ["nope", "Not A Name!"]) {
       const response = await dev(MAYA, "POST", "/v1/dev/tasks", start({ project }));
       expect(response.body.error).toMatchObject({ code: "PROJECT_NOT_FOUND" });
-      expect(String((response.body.error as { message: string }).message)).toContain("agentx_list_projects");
+      // The broker names what is wrong; the MCP server adds "run agentx_list_projects" once, as its next step.
+      expect((response.body.error as { message: string }).message).toBe(project === "nope" ? "project `nope` doesn't exist in this AgentX" : "that is not a valid AgentX project name");
+      expect(NEXT_STEPS.PROJECT_NOT_FOUND).toContain("agentx_list_projects");
     }
     expect(workspaces(db)).toHaveLength(0);
     expect(refusals(db).map((item) => (item.error as { code: string }).code)).toEqual(["PROJECT_NOT_FOUND", "PROJECT_NOT_FOUND"]);
@@ -211,6 +214,17 @@ describe("the start's audit records (R12)", () => {
     expect(Array.from(title)).toHaveLength(120);
     expect(title).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/);
     expect(JSON.stringify(db.find((item) => item.entityType === "DEVELOPER_TASK" || item.entityType === "DEVELOPER_TASK_INDEX"))).not.toContain(FAKE_SECRET);
+  });
+
+  it("names what is wrong in the refusal's message and leaves the next step to the MCP server, so it is said once", async () => {
+    const { handler, dev } = await createDeveloperTaskBroker();
+    const shared = await dev(MAYA, "POST", "/v1/dev/tasks", start({ shareToChannel: true }));
+    expect((shared.body.error as { message: string }).message).toBe("sharing tasks to Slack is not available yet in this AgentX");
+    const missing = await dev(MAYA, "POST", "/v1/dev/tasks", start({ project: "nope" }));
+    expect((missing.body.error as { message: string }).message).toBe("project `nope` doesn't exist in this AgentX");
+    await registerRevision(handler, 2, { share: "required" });
+    const required = await dev(MAYA, "POST", "/v1/dev/tasks", start());
+    expect((required.body.error as { message: string }).message).toBe("project `payments` requires tasks to be shared to its Slack channel, which this AgentX cannot do yet");
   });
 
   it("writes the refused record for a refusal after the checks, with its error code and no workspace", async () => {
