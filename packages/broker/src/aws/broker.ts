@@ -1478,7 +1478,7 @@ async function ensureThreadWorkspace(
     }
     if (existing.status === "UNPREPARED" && !lazyPreparation) {
       // An older Slack service cannot parse UNPREPARED and expects compute now: prepare it at once.
-      const prepared = await startThreadPreparation(dependencies, identity, requestId, existing);
+      const prepared = await startThreadPreparation(dependencies, identity, requestId, existing, input.includeOpenTaskCount === true);
       if (prepared.outcome !== "WORKSPACE") return prepared;
       const current = await requireWorkspace(dependencies, existing.id);
       const result = await existingThreadWorkspace(dependencies, identity, requestId, current, include, includeSettingsRevision);
@@ -1533,7 +1533,7 @@ async function ensureThreadWorkspace(
     if (concurrent) {
       return existingThreadWorkspace(dependencies, identity, requestId, concurrent, include, includeSettingsRevision);
     }
-    return threadWorkspaceLimitRefusal(dependencies, teamId, userId, effective);
+    return threadWorkspaceLimitRefusal(dependencies, teamId, userId, effective, input.includeOpenTaskCount === true);
   }
   await recordThreadRequester(dependencies, identity, preparation.workspace.id, true);
   return {
@@ -1650,7 +1650,7 @@ async function prepareThreadWorkspace(
   if (workspace.projectName !== slack.binding.projectName) {
     throw agentXError("FORBIDDEN", "this thread's workspace belongs to the channel's previous project binding");
   }
-  return startThreadPreparation(dependencies, identity, requestId, workspace);
+  return startThreadPreparation(dependencies, identity, requestId, workspace, input.includeOpenTaskCount === true);
 }
 
 /**
@@ -1666,6 +1666,7 @@ async function startThreadPreparation(
   identity: AuthenticatedIdentity,
   requestId: string,
   workspace: WorkspaceInstance,
+  includeOpenTaskCount = false,
 ): Promise<SlackThreadPrepareResult> {
   const slack = identity.slack;
   const limits = dependencies.slack;
@@ -1775,7 +1776,7 @@ async function startThreadPreparation(
     // threadWorkspaceLimitRefusal throws its own WORKSPACE_BUSY, worded for creation, when no limit
     // is reached. Answer with this route's wording instead.
     try {
-      const refusal = await threadWorkspaceLimitRefusal(dependencies, teamId, userId, effective);
+      const refusal = await threadWorkspaceLimitRefusal(dependencies, teamId, userId, effective, includeOpenTaskCount);
       if (refusal.outcome === "LIMIT_REACHED") return refusal;
     } catch (refusalError) {
       if (!(refusalError instanceof AgentXError) || refusalError.code !== "WORKSPACE_BUSY") throw refusalError;
@@ -1942,14 +1943,18 @@ async function threadWorkspaceLimitRefusal(
   teamId: string,
   userId: string,
   limits: SlackServiceConfiguration,
+  includeOpenTaskCount: boolean,
 ): Promise<SlackThreadWorkspaceResult> {
-  const member = await getItem<{ count?: number; threads?: string[] }>(dependencies, slackMemberLimitKey(teamId, userId));
+  const member = await getItem<{ count?: number; threads?: string[]; tasks?: unknown }>(dependencies, slackMemberLimitKey(teamId, userId));
   if ((member?.count ?? 0) >= limits.memberWorkspaceLimit) {
     return {
       outcome: "LIMIT_REACHED",
       limit: "MEMBER",
       maximum: limits.memberWorkspaceLimit,
       starterThreads: (member?.threads ?? []).map((subject) => parseSlackThreadSubject(subject)),
+      // C16: the member's open AI-tool tasks share this counter (25b R6), so the reply counts them.
+      // A count only: a task's title stays with its developer, never in the channel (D22).
+      ...(includeOpenTaskCount ? { openTaskCount: openTaskCount(member?.tasks) } : {}),
     };
   }
   const organization = await getItem<{ count?: number }>(dependencies, slackOrganizationLimitKey(teamId));
@@ -1957,6 +1962,12 @@ async function threadWorkspaceLimitRefusal(
     return { outcome: "LIMIT_REACHED", limit: "ORGANIZATION", maximum: limits.organizationWorkspaceLimit, starterThreads: [] };
   }
   throw agentXError("WORKSPACE_BUSY", "thread workspace creation conflicted with another request; retry");
+}
+
+/** The size of the member counter's `tasks` string set, which the document client reads as a Set. */
+function openTaskCount(tasks: unknown): number {
+  if (tasks instanceof Set) return tasks.size;
+  return Array.isArray(tasks) ? tasks.length : 0;
 }
 
 /** The Slack limits with the admin's setting applied (R7); read only when a workspace is created. */

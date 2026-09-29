@@ -44,6 +44,16 @@ describe("the Slack service's thread client", () => {
     expect(await threadApi(handler).startClose(randomUUID())).toEqual({ outcome: "NOT_FOUND" });
   });
 
+  it("asks for the member's open AI-tool task count when it prepares a thread (spec 025 C16)", async () => {
+    const { handler } = createBroker();
+    await registerSlackProject(handler);
+    await lazyEnsureWorkspace(handler, thread, pratik);
+    const sent: unknown[] = [];
+    const requestId = randomUUID();
+    await threadApi(handler, sent).prepareWorkspace!(requestId);
+    expect(sent).toEqual([{ requestId, includeOpenTaskCount: true }]);
+  });
+
   it("opts in to the shared task refusal when it starts a close (spec 025 C11), and an ordinary thread still gets NOT_FOUND", async () => {
     const { handler } = createBroker();
     await registerSlackProject(handler);
@@ -70,7 +80,7 @@ describe("the Slack service's thread client", () => {
     expect(sent).toEqual([{
       requestId, includeIntegrations: true, includeSettingsRevision: true, includeConnectors: true,
       includeAllConnectorTypes: true, includeRecoverableOperations: true, lazyPreparation: true,
-      includeActionPolicy: true, includeSharedTask: true,
+      includeActionPolicy: true, includeSharedTask: true, includeOpenTaskCount: true,
     }]);
     expect(result).toMatchObject({ outcome: "WORKSPACE", status: "UNPREPARED", operationId: null, created: true });
     expect(db.find((item) => item.entityType === "OPERATION")).toHaveLength(0);
