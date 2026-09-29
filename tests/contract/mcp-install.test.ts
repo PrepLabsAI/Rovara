@@ -6,6 +6,7 @@ import { createCliProgram, executeCli } from "../../packages/cli/src/main.js";
 import { codexToml, cursorJson, installMcp, mcpEntry, runCommand } from "../../packages/cli/src/mcp/install.js";
 
 const entry = mcpEntry("0.4.0", undefined);
+const tomlBlock = '[mcp_servers.agentx]\ncommand = "npx"\nargs = ["-y", "@charterarc/agentx@0.4.0", "mcp"]\n';
 const home = () => mkdtemp(join(tmpdir(), "agentx-install-"));
 const codexFile = (dir: string) => join(dir, ".codex", "config.toml");
 const cursorFile = (dir: string) => join(dir, ".cursor", "mcp.json");
@@ -63,6 +64,15 @@ describe("Codex's config.toml", () => {
   it("refuses a file that is not valid TOML, and shows the entry to add by hand", () => {
     expect(() => codexToml('[mcp_servers.linear\ncommand = "linear-mcp"\n', entry)).toThrow(/not valid TOML[\s\S]*by hand[\s\S]*\[mcp_servers\.agentx\]/);
     expect(() => codexToml('model = "o4"\nmodel = "o5"\n', entry)).toThrow(/not valid TOML/);
+  });
+
+  it("keeps dates and times, which the edit check compares by value", () => {
+    const existing = 'when = 2026-01-01\nat = 2026-01-01T10:30:00Z\nlocal = 2026-01-01T10:30:00\nclock = 10:30:00\n\n[mcp_servers.linear]\ncommand = "linear-mcp"\n';
+    expect(codexToml(existing, entry)).toEqual({ action: "added", text: `${existing}\n${tomlBlock}` });
+  });
+
+  it("says a file that defines agentx another way cannot be edited safely", () => {
+    expect(() => codexToml('[[mcp_servers.agentx]]\ncommand = "x"\n', entry)).toThrow("~/.codex/config.toml defines agentx in a form this command cannot edit safely");
   });
 
   it("keeps Windows line endings", () => {
@@ -158,6 +168,41 @@ describe("installMcp (US7 scenarios 1 and 2)", () => {
     await installMcp("cursor", { print: false }, { home: dir, run: vi.fn(), version: "0.4.0" });
     expect((await lstat(cursorFile(dir))).isSymbolicLink()).toBe(true);
     expect(JSON.parse(await readFile(target, "utf8"))).toEqual({ mcpServers: { linear: { command: "linear-mcp" }, agentx: entry } });
+    // The backup goes beside the link, never into the folder the link points at (a dotfiles checkout, say).
+    expect(await readFile(`${cursorFile(dir)}.agentx-backup`, "utf8")).toBe('{ "mcpServers": { "linear": { "command": "linear-mcp" } } }\n');
+    expect(await readdir(join(dir, "dotfiles"))).toEqual(["mcp.json"]);
+  });
+
+  it("refuses a link that points at a missing file, and writes nothing", async () => {
+    const dir = await home();
+    await mkdir(join(dir, ".codex"));
+    await symlink(join(dir, "dotfiles", "config.toml"), codexFile(dir));
+    await expect(installMcp("codex", { print: false }, { home: dir, run: vi.fn(), version: "0.4.0" })).rejects.toThrow(/the link points at a missing file;[\s\S]*by hand[\s\S]*\[mcp_servers\.agentx\]/);
+    expect(await readdir(join(dir, ".codex"))).toEqual(["config.toml"]);
+    expect((await lstat(codexFile(dir))).isSymbolicLink()).toBe(true);
+  });
+
+  it("follows CODEX_HOME, and names the real file in what it says", async () => {
+    const dir = await home();
+    const codexHome = join(dir, "elsewhere");
+    const text = await installMcp("codex", { print: false }, { home: dir, codexHome, run: vi.fn(), version: "0.4.0" });
+    expect(await readFile(join(codexHome, "config.toml"), "utf8")).toContain("[mcp_servers.agentx]");
+    expect(text).toContain(join(codexHome, "config.toml"));
+    await expect(readFile(codexFile(dir), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await writeFile(join(codexHome, "config.toml"), "[mcp_servers.linear\n");
+    await expect(installMcp("codex", { print: false }, { home: dir, codexHome, run: vi.fn(), version: "0.4.0" })).rejects.toThrow(`${join(codexHome, "config.toml")} is not valid TOML`);
+  });
+
+  it.each([
+    ["not valid TOML", 'TOKEN = "fake-secret-123"\n[mcp_servers.linear\n'],
+    ["refused", 'TOKEN = "fake-secret-123"\n[[mcp_servers.agentx]]\ncommand = "x"\n'],
+  ])("never repeats the file's contents in its error (%s)", async (_name, text) => {
+    const dir = await withCodexConfig(text);
+    const error: unknown = await installMcp("codex", { print: false }, { home: dir, run: vi.fn(), version: "0.4.0" }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/by hand/);
+    expect((error as Error).message).not.toContain("fake-secret-123");
+    expect((error as Error).message).not.toContain("TOKEN");
   });
 
   it.each([
@@ -239,6 +284,21 @@ describe("agentx mcp install", () => {
     const run = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
     expect((await cli(["mcp", "install", "--client", "claude-code"], dir, run)).code).toBe(0);
     expect(run).toHaveBeenCalledWith("claude", ["mcp", "add", "--scope", "user", "agentx", "--", "npx", "-y", "@charterarc/agentx@latest", "mcp"]);
+  });
+
+  it("writes Codex's file under CODEX_HOME when it is set, and under ~/.codex when it is empty", async () => {
+    const dir = await home();
+    const codexHome = join(dir, "codex-settings");
+    vi.stubEnv("CODEX_HOME", codexHome);
+    try {
+      expect((await cli(["mcp", "install", "--client", "codex"], dir)).code).toBe(0);
+      expect(await readFile(join(codexHome, "config.toml"), "utf8")).toContain("[mcp_servers.agentx]");
+      vi.stubEnv("CODEX_HOME", "");
+      expect((await cli(["mcp", "install", "--client", "codex"], dir)).code).toBe(0);
+      expect(await readFile(codexFile(dir), "utf8")).toContain("[mcp_servers.agentx]");
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("needs a known --client", () => {

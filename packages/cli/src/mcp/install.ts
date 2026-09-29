@@ -15,7 +15,13 @@ export type McpClientKind = "claude-code" | "codex" | "cursor";
 export const MCP_CLIENTS: readonly McpClientKind[] = ["claude-code", "codex", "cursor"];
 export interface McpEntry { command: "npx"; args: string[] }
 export interface RunResult { code: number; stdout: string; stderr: string }
-export interface McpInstallDeps { home: string; run(command: string, args: readonly string[]): Promise<RunResult>; version?: string | undefined }
+export interface McpInstallDeps {
+  home: string;
+  /** Codex's settings folder when CODEX_HOME is set; ~/.codex otherwise. */
+  codexHome?: string | undefined;
+  run(command: string, args: readonly string[]): Promise<RunResult>;
+  version?: string | undefined;
+}
 type Edit = { text: string; action: "added" | "replaced" };
 
 /** R26: the packed release's version, or latest for a CLI built from source. */
@@ -40,10 +46,10 @@ function tomlOf(text: string): { value: Record<string, unknown> } | { line: numb
 
 /** The parsed file with mcp_servers.agentx set to the entry: what the edited file must parse to. */
 function withEntry(document: Record<string, unknown>, entry: McpEntry): Record<string, unknown> {
-  const copy = structuredClone(document);
-  const servers = copy.mcp_servers;
-  copy.mcp_servers = { ...(typeof servers === "object" && servers !== null && !Array.isArray(servers) ? servers : {}), agentx: { command: entry.command, args: [...entry.args] } };
-  return copy;
+  // Shallow copies only: a deep clone would turn the parser's TomlDate values into plain Dates,
+  // and then no file holding a date or time would ever compare equal.
+  const servers = document.mcp_servers;
+  return { ...document, mcp_servers: { ...(typeof servers === "object" && servers !== null && !Array.isArray(servers) ? servers : {}), agentx: { command: entry.command, args: [...entry.args] } } };
 }
 
 /**
@@ -52,11 +58,11 @@ function withEntry(document: Record<string, unknown>, entry: McpEntry): Record<s
  * parsing: the new file must parse to the old one with only mcp_servers.agentx changed, so a file
  * that defines agentx some other way is refused rather than guessed at.
  */
-export function codexToml(existing: string | undefined, entry: McpEntry): Edit {
-  const byHand = (why: string) => agentXError("CONFIG_INVALID", `~/.codex/config.toml ${why}, so this command will not edit it; add the entry by hand:\n${tomlBlock(entry).join("\n")}`);
+export function codexToml(existing: string | undefined, entry: McpEntry, path = "~/.codex/config.toml"): Edit {
+  const byHand = (why: string) => agentXError("CONFIG_INVALID", `${path} ${why}; add the entry by hand:\n${tomlBlock(entry).join("\n")}`);
   const base = existing ?? "";
   const original = tomlOf(base);
-  if (!("value" in original)) throw byHand(`is not valid TOML${original.line === undefined ? "" : ` (line ${original.line})`}`);
+  if (!("value" in original)) throw byHand(`is not valid TOML${original.line === undefined ? "" : ` (line ${original.line})`}, so this command will not edit it`);
   const eol = base.includes("\r\n") ? "\r\n" : "\n";
   const lines = base.split(eol);
   const kept: string[] = [];
@@ -89,7 +95,7 @@ export function codexToml(existing: string | undefined, entry: McpEntry): Edit {
     result = { text: `${base}${separator}${tomlBlock(entry).join(eol)}${eol}`, action: "added" };
   }
   const edited = tomlOf(result.text);
-  if (!("value" in edited) || !isDeepStrictEqual(edited.value, withEntry(original.value, entry))) throw byHand("defines mcp_servers or agentx in a form this command does not edit");
+  if (!("value" in edited) || !isDeepStrictEqual(edited.value, withEntry(original.value, entry))) throw byHand("defines agentx in a form this command cannot edit safely");
   return result;
 }
 
@@ -100,7 +106,7 @@ function indentOf(text: string): string | number {
   return indent.startsWith("\t") ? "\t" : indent.length;
 }
 
-export function cursorJson(existing: string | undefined, entry: McpEntry): Edit {
+export function cursorJson(existing: string | undefined, entry: McpEntry, path = "~/.cursor/mcp.json"): Edit {
   const byHand = `add this under "mcpServers" by hand: "agentx": ${JSON.stringify(entry)}`;
   let document: Record<string, unknown> = {};
   if (existing !== undefined && existing.trim() !== "") {
@@ -108,13 +114,13 @@ export function cursorJson(existing: string | undefined, entry: McpEntry): Edit 
     try {
       parsed = JSON.parse(existing);
     } catch {
-      throw agentXError("CONFIG_INVALID", `~/.cursor/mcp.json is not plain JSON, so this command will not edit it; ${byHand}`);
+      throw agentXError("CONFIG_INVALID", `${path} is not plain JSON, so this command will not edit it; ${byHand}`);
     }
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw agentXError("CONFIG_INVALID", `~/.cursor/mcp.json is not a JSON object; ${byHand}`);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw agentXError("CONFIG_INVALID", `${path} is not a JSON object; ${byHand}`);
     document = parsed as Record<string, unknown>;
   }
   const servers = document.mcpServers ?? {};
-  if (typeof servers !== "object" || servers === null || Array.isArray(servers)) throw agentXError("CONFIG_INVALID", `~/.cursor/mcp.json has an mcpServers that is not an object; ${byHand}`);
+  if (typeof servers !== "object" || servers === null || Array.isArray(servers)) throw agentXError("CONFIG_INVALID", `${path} has an mcpServers that is not an object; ${byHand}`);
   const current = (servers as Record<string, unknown>).agentx;
   if (existing !== undefined && isDeepStrictEqual(current, entry)) return { text: existing, action: "replaced" };
   const action = Object.hasOwn(servers, "agentx") ? "replaced" : "added";
@@ -137,18 +143,24 @@ async function writeAtomically(path: string, text: string, mode: number | undefi
 /**
  * Replaces the file atomically with the same permissions, keeping the old one beside it as
  * <file>.agentx-backup. A symbolic link (a dotfiles checkout, say) stays a link: the file it
- * points at is the one written. Returns the backup's path, if one was written.
+ * points at is the one written, while the backup goes beside the link, never into the folder the
+ * link points at. Returns the backup's path, if one was written.
  */
-async function replaceFile(path: string, text: string, previous: string | undefined): Promise<string | undefined> {
-  const isLink = await lstat(path).then((stats) => stats.isSymbolicLink(), () => false);
+async function replaceFile(path: string, text: string, previous: string | undefined, isLink: boolean): Promise<string | undefined> {
   const target = isLink ? await realpath(path) : path;
   await mkdir(dirname(target), { recursive: true });
   const mode = previous === undefined ? undefined : (await stat(target)).mode & 0o7777;
-  const backup = previous === undefined ? undefined : `${target}.agentx-backup`;
+  const backup = previous === undefined ? undefined : `${path}.agentx-backup`;
   if (backup !== undefined) await writeAtomically(backup, previous!, mode);
   await writeAtomically(target, text, mode);
   return backup;
 }
+
+/** True when the path, followed through any link, names something that exists. */
+const exists = (path: string) => stat(path).then(() => true, (error: NodeJS.ErrnoException) => {
+  if (error.code === "ENOENT") return false;
+  throw error;
+});
 
 const readIfPresent = (path: string) => readFile(path, "utf8").catch((error: NodeJS.ErrnoException) => {
   if (error.code === "ENOENT") return undefined;
@@ -175,13 +187,15 @@ export async function installMcp(kind: McpClientKind, options: { print: boolean;
     }
     return `Added agentx to Claude Code for your user:\n  ${command}\n${NEXT}`;
   }
-  const path = kind === "codex" ? join(deps.home, ".codex", "config.toml") : join(deps.home, ".cursor", "mcp.json");
+  const path = kind === "codex" ? join(deps.codexHome ?? join(deps.home, ".codex"), "config.toml") : join(deps.home, ".cursor", "mcp.json");
   const shown = kind === "codex" ? tomlBlock(entry).join("\n") : JSON.stringify({ mcpServers: { agentx: entry } }, null, 2);
   if (options.print) return `${shown}\n`;
+  const isLink = await lstat(path).then((stats) => stats.isSymbolicLink(), () => false);
+  if (isLink && !(await exists(path))) throw agentXError("CONFIG_INVALID", `${path} is a symbolic link, and the link points at a missing file; fix or remove the link and run this again, or add the entry by hand:\n${shown}`);
   const previous = await readIfPresent(path);
-  const result = kind === "codex" ? codexToml(previous, entry) : cursorJson(previous, entry);
+  const result = kind === "codex" ? codexToml(previous, entry, path) : cursorJson(previous, entry, path);
   if (result.text === previous) return `The agentx entry in ${path} is already up to date:\n${shown}\n${NEXT}`;
-  const backup = await replaceFile(path, result.text, previous);
+  const backup = await replaceFile(path, result.text, previous, isLink);
   return `${result.action === "added" ? "Added" : "Replaced"} the agentx entry in ${path}${backup === undefined ? "" : ` (the old file is at ${backup})`}:\n${shown}\n${NEXT}`;
 }
 

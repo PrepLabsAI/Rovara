@@ -111,6 +111,8 @@ export interface CliDependencies {
   mcpClock?: McpServeDeps["clock"];
   /** `agentx mcp install`'s runner for the claude command, for tests. */
   runCommand?: McpInstallDeps["run"];
+  /** `agentx mcp install`'s Codex settings folder, for tests; CODEX_HOME by default. */
+  codexHome?: string;
 }
 
 interface AuthenticatedDeployment {
@@ -801,10 +803,16 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--print", "only print the entry; change nothing", false)
     .action(async (options: { client: McpClientKind; print: boolean }, command: Command) => {
       const env = developerEnv(command);
-      services.stdout.write(await installMcp(options.client, { print: options.print, ...(env === undefined ? {} : { env }) }, { home, run: dependencies.runCommand ?? runCommand, version: RELEASE_VERSION }));
+      services.stdout.write(await installMcp(options.client, { print: options.print, ...(env === undefined ? {} : { env }) }, { home, codexHome: dependencies.codexHome ?? codexHomeFromEnvironment(), run: dependencies.runCommand ?? runCommand, version: RELEASE_VERSION }));
     });
 
   return program;
+}
+
+/** Codex's own settings folder override; an empty CODEX_HOME counts as unset. */
+function codexHomeFromEnvironment(): string | undefined {
+  const value = process.env.CODEX_HOME;
+  return value === undefined || value === "" ? undefined : value;
 }
 
 export async function executeCli(argv = process.argv.slice(2), dependencies: CliDependencies = {}): Promise<number> {

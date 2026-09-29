@@ -25,6 +25,9 @@ your admin gave you an environment name, put `--env <name>` before `mcp install`
 `--env` to the server. You can run `mcp install` again at any time: it replaces the agentx entry
 and never adds a second one.
 
+Run `mcp install` as yourself, never with `sudo`: it sets up the AI tool for the user who runs it,
+so under `sudo` it would change root's settings instead of yours.
+
 ## Claude Code
 
 Install:
@@ -34,7 +37,12 @@ claude mcp add --scope user agentx -- npx -y @charterarc/agentx mcp
 ```
 
 or let AgentX run that for you, with the version you have: `npx @charterarc/agentx mcp install --client claude-code`.
-It removes any agentx entry you added for your user before, then adds the new one.
+It removes any agentx entry you added for your user before, then adds the new one. If the add
+fails, your old entry is already gone, so it prints the exact command to run yourself.
+
+Claude Code also has local and project entries (`--scope local` and `--scope project`, the second
+kept in a project's `.mcp.json`). An agentx entry there wins over your user entry in that folder, so
+if AgentX behaves oddly in one project, check `claude mcp list` there and remove the extra entry.
 
 Manual setup: the command above is the whole setup. To see the exact command without running it,
 use `npx @charterarc/agentx mcp install --client claude-code --print`.
@@ -51,7 +59,9 @@ npx @charterarc/agentx mcp install --client codex
 
 It adds this to `~/.codex/config.toml`, keeps every other entry, and saves the old file as
 `config.toml.agentx-backup`. If the file is not valid TOML, or already defines agentx in a
-different way, it changes nothing and shows you the entry to add yourself. Manual setup: add it
+different way, it changes nothing and shows you the entry to add yourself. If the file is a
+symbolic link (from a dotfiles folder, say), it changes the file the link points at and saves the
+backup beside the link. Manual setup: add it
 yourself:
 
 ```
@@ -62,8 +72,8 @@ args = ["-y", "@charterarc/agentx", "mcp"]
 
 To see the exact entry without changing anything, use
 `npx @charterarc/agentx mcp install --client codex --print`. If you keep Codex's settings
-somewhere other than `~/.codex` (with `CODEX_HOME`), add the entry by hand to the `config.toml`
-there.
+somewhere other than `~/.codex` (with `CODEX_HOME`), `mcp install` follows it and edits the
+`config.toml` there. Run it in a terminal where `CODEX_HOME` is set the same way it is for Codex.
 
 Remove it: delete the `[mcp_servers.agentx]` table from `~/.codex/config.toml`.
 
