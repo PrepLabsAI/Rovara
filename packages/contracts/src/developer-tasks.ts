@@ -5,6 +5,7 @@ import { z } from "zod";
 import { cleanDisplayName } from "./display-name.js";
 import { OperationStatusSchema } from "./operation.js";
 import { DeveloperShareModeSchema } from "./project.js";
+import { slackThreadSubject, type SlackThread } from "./slack.js";
 
 export const DEVELOPER_TASK_OWNER_ISSUER = "agentx-developer-task";
 export const DEVELOPER_INSTRUCTIONS_MAX_BYTES = 65_536;
@@ -53,7 +54,7 @@ export type DeveloperTaskShare = z.infer<typeof DeveloperTaskShareSchema>;
 /** C15: one Slack turn a teammate ran on the task in its shared thread. */
 export const ChannelTurnSchema = z.object({
   author: z.object({ slackUserId: z.string(), name: z.string().optional() }),
-  at: z.string(),
+  at: z.string().datetime(),
   request: z.string().max(CHANNEL_TURN_REQUEST_MAX),
   outcome: z.string(),
 });
@@ -69,8 +70,8 @@ export const AdminShareModeRequestSchema = z.object({ requestId: z.string().uuid
 export type AdminShareModeRequest = z.infer<typeof AdminShareModeRequestSchema>;
 
 /** C2: the shared thread record, read by the Slack ingress and the broker's service identity. */
-export function sharedTaskKey(thread: { teamId: string; channelId: string; threadTs: string }): { pk: string; sk: "META" } {
-  return { pk: `SHARED_TASK#${thread.teamId}/${thread.channelId}/${thread.threadTs}`, sk: "META" };
+export function sharedTaskKey(thread: SlackThread): { pk: string; sk: "META" } {
+  return { pk: `SHARED_TASK#${slackThreadSubject(thread)}`, sk: "META" };
 }
 export const SharedTaskRecordSchema = z.object({
   taskId: z.string().uuid(),
@@ -80,8 +81,8 @@ export const SharedTaskRecordSchema = z.object({
   developerName: z.string().min(1).max(200),
   project: z.string().min(1).max(63),
   mode: DeveloperShareModeSchema,
-  sharedAt: z.string(),
-  closedAt: z.string().optional(),
+  sharedAt: z.string().datetime(),
+  closedAt: z.string().datetime().optional(),
 });
 export type SharedTaskRecord = z.infer<typeof SharedTaskRecordSchema>;
 

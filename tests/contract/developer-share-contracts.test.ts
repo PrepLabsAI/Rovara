@@ -4,7 +4,9 @@
 import { describe, expect, it } from "vitest";
 import {
   AdminShareModeRequestSchema,
+  AgentXErrorCodeSchema,
   AiToolTurnRecordSchema,
+  ChannelTurnSchema,
   CLOSED_SHARED_NOTICE,
   DEVELOPER_API_VERSION,
   DeveloperTaskViewSchema,
@@ -57,6 +59,25 @@ describe("share shapes (C1, C2, C6)", () => {
     expect(sharedNoticeKey("T0BSHLLUGBD/C0123456789/1695500000.000001")).toEqual({ pk: "THREAD#T0BSHLLUGBD/C0123456789/1695500000.000001", sk: "SHARED_NOTICE" });
   });
 
+  it("builds the shared thread key on the Slack thread subject, so a malformed thread is refused", () => {
+    expect(sharedTaskKey({ teamId: "T0BSHLLUGBD", channelId: "C0123456789", threadTs: "1695500000.000001" }).pk).toBe("SHARED_TASK#T0BSHLLUGBD/C0123456789/1695500000.000001");
+    expect(() => sharedTaskKey({ teamId: "T0BSHLLUGBD", channelId: "C0123456789", threadTs: "not-a-ts" })).toThrow();
+    expect(() => sharedTaskKey({ teamId: "T0BSHLLUGBD/x", channelId: "C0123456789", threadTs: "1695500000.000001" })).toThrow();
+  });
+
+  it("refuses a malformed time on a channel turn and a shared thread record", () => {
+    const turn = { author: { slackUserId: "U0PRIYA001" }, at: "2026-09-29T10:05:00.000Z", request: "run the linter", outcome: "answered" };
+    expect(ChannelTurnSchema.safeParse(turn).success).toBe(true);
+    expect(ChannelTurnSchema.safeParse({ ...turn, at: "yesterday" }).success).toBe(false);
+    const record = {
+      taskId: TASK, workspaceId: WORKSPACE, ownerKey: "a".repeat(64), developerId: "d".repeat(64),
+      developerName: "Maya Chen", project: "payments", mode: "view", sharedAt: "2026-09-29T10:00:00.000Z",
+    };
+    expect(SharedTaskRecordSchema.safeParse({ ...record, closedAt: "2026-09-29T11:00:00.000Z" }).success).toBe(true);
+    expect(SharedTaskRecordSchema.safeParse({ ...record, sharedAt: "29 Sep 2026" }).success).toBe(false);
+    expect(SharedTaskRecordSchema.safeParse({ ...record, closedAt: "later" }).success).toBe(false);
+  });
+
   it("uses the spec's exact reasons, and notices with no em dash", () => {
     expect([SHARED_BY_POLICY, VIEW_ONLY_BY_POLICY]).toEqual(["required by project", "continue not allowed by project"]);
     for (const text of [VIEW_ONLY_NOTICE, CLOSED_SHARED_NOTICE]) {
@@ -107,6 +128,8 @@ describe("records and codes", () => {
   });
 
   it("adds CHANNEL_AMBIGUOUS as a 409, and moves the API to 1.2 (Q7)", () => {
+    // errorStatus answers 409 for any code it does not list, so pin the code's membership too.
+    expect(AgentXErrorCodeSchema.options).toContain("CHANNEL_AMBIGUOUS");
     expect(agentXError("CHANNEL_AMBIGUOUS", "name one").statusCode).toBe(409);
     expect(DEVELOPER_API_VERSION).toBe("1.2");
   });

@@ -109,8 +109,8 @@ describe("the task view", () => {
   });
 });
 
-describe("developer API 1.1 (R23)", () => {
-  it("reports 1.1 and adds the project's task policy and channel names", () => {
+describe("developer API 1.2 (R23, Q7)", () => {
+  it("reports 1.2 and adds the project's task policy and channel names", () => {
     expect(DEVELOPER_API_VERSION).toBe("1.2");
     const project = DeveloperProjectSchema.parse({
       name: "payments", latestRevision: 7, access: "channel",
