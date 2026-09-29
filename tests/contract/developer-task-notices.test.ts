@@ -3,7 +3,8 @@
 import { randomUUID } from "node:crypto";
 import { DeleteCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it } from "vitest";
-import { noticesFromStream, noticesOf } from "../../packages/broker/src/developer/notifications.js";
+import { marshall } from "@aws-sdk/util-dynamodb";
+import { noticesFromStream, noticesOf, readStream, type StreamRecord } from "../../packages/broker/src/developer/notifications.js";
 import { MAYA, createDeveloperTaskBroker, recordStream } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM, ensureWorkspace } from "../support/slack-broker.js";
 
@@ -48,7 +49,9 @@ describe("notices from the stream (C7, C8)", () => {
     await finish(workspaceId, prepareId, "FAILED", { error: "stopped" });
     stream.take();
     await dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/close`, { requestId: randomUUID() });
-    expect(kinds(stream.take())).toContain("closed");
+    const closing = noticesFromStream(stream.take());
+    expect(closing).toEqual([{ id: `${taskId}:closed`, kind: "closed", taskId, at: closing[0]?.at }]);
+    expect(Number.isNaN(Date.parse(String(closing[0]?.at)))).toBe(false);
   });
 
   it("derives the same notices for a private task, which the notifier then drops, and none for a Slack thread", async () => {
@@ -88,5 +91,51 @@ describe("notices from the stream (C7, C8)", () => {
     stream.take();
     await db.send(new DeleteCommand({ TableName: "state", Key: { pk: "NOTHING#here", sk: "META" } }));
     expect(stream.take()).toEqual([]);
+  });
+
+  it("skips a malformed record, keeps the good ones around it, and names what it skipped", () => {
+    const task = (taskId: string) => marshall({ entityType: "DEVELOPER_TASK", taskId, share: { mode: "view" } });
+    const first = randomUUID();
+    const last = randomUUID();
+    const records = [
+      { eventID: "e1", eventName: "INSERT", dynamodb: { ApproximateCreationDateTime: 1_790_000_000, NewImage: task(first) } },
+      { eventID: "e2", eventName: "MODIFY", dynamodb: { ApproximateCreationDateTime: 1_790_000_000, NewImage: { entityType: { S: "DEVELOPER_TASK" }, taskId: {} }, OldImage: { a: { X: "1" } } } },
+      { eventID: "e3", eventName: "INSERT", dynamodb: { ApproximateCreationDateTime: 1_790_000_000, NewImage: { a: null } } },
+      { eventID: "e4", eventName: "INSERT", dynamodb: { ApproximateCreationDateTime: 1_790_000_000, NewImage: task(last) } },
+    ] as unknown as StreamRecord[];
+    const read = readStream(records);
+    expect(read.notices.map((notice) => notice.id)).toEqual([`${first}:start`, `${last}:start`]);
+    expect(read.skipped).toEqual([{ eventID: "e2", eventName: "MODIFY" }, { eventID: "e3", eventName: "INSERT" }]);
+    expect(JSON.stringify(read.skipped)).not.toMatch(/Error|expected|convert/i);
+    expect(noticesFromStream(records)).toEqual(read.notices);
+  });
+
+  it("stamps the notice with the current time when the record's time is not a finite number", () => {
+    const record = { eventID: "e1", eventName: "INSERT", dynamodb: { ApproximateCreationDateTime: Number.NaN, NewImage: marshall({ entityType: "DEVELOPER_TASK", taskId: "t1", share: { mode: "view" } }) } };
+    const read = readStream([record]);
+    expect(read.skipped).toEqual([]);
+    expect(Number.isNaN(Date.parse(read.notices[0]!.at))).toBe(false);
+  });
+
+  it("gives a setup notice only for a prepare that failed, not one that was cancelled", () => {
+    const prepare = { entityType: "OPERATION", id: randomUUID(), workspaceId: randomUUID(), kind: "prepare", requestedBy: { kind: "developer", developerId: "d".repeat(64), provider: "slack" } };
+    const after = (status: string) => noticesOf({ ...prepare, status: "RUNNING" }, { ...prepare, status }, "t", "e1").map((notice) => notice.kind);
+    expect([after("FAILED"), after("INTERRUPTED"), after("CANCELLED"), after("SUCCEEDED")]).toEqual([["setup_failed"], ["setup_failed"], [], ["ready"]]);
+  });
+
+  it("treats a stored NULL close or cancel time as unset", () => {
+    const task = { entityType: "DEVELOPER_TASK", taskId: "t1" };
+    expect(noticesOf({ ...task, closedAt: null }, { ...task, closedAt: "2026-09-29T10:00:00.000Z" }, "t", "e1").map((notice) => notice.kind)).toEqual(["closed"]);
+    expect(noticesOf(task, { ...task, closedAt: null }, "t", "e2")).toEqual([]);
+    const pointer = { entityType: "DEVELOPER_TASK_POINTER", taskId: "t1" };
+    expect(noticesOf({ ...pointer, cancelledAt: null }, { ...pointer, cancelledAt: "2026-09-29T10:00:00.000Z" }, "t", "e3").map((notice) => notice.kind)).toEqual(["cancelled"]);
+    expect(noticesOf(pointer, { ...pointer, cancelledAt: null }, "t", "e4")).toEqual([]);
+  });
+
+  it("gives no mode notice for a record without an event ID, so two changes cannot collapse into one", () => {
+    const task = { entityType: "DEVELOPER_TASK", taskId: "t1" };
+    expect(noticesOf({ ...task, share: { mode: "view" } }, { ...task, share: { mode: "continue" } }, "t", "")).toEqual([]);
+    const record = { eventName: "MODIFY", dynamodb: { ApproximateCreationDateTime: 1_790_000_000, OldImage: marshall({ ...task, share: { mode: "view" } }), NewImage: marshall({ ...task, share: { mode: "continue" } }) } };
+    expect(readStream([record]).notices).toEqual([]);
   });
 });

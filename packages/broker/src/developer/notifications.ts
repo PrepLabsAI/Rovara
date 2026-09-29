@@ -33,14 +33,16 @@ export function noticesOf(previous: Record<string, unknown> | undefined, next: R
       const after = record(next.share);
       const notices: Notice[] = [];
       if (after !== undefined && before === undefined) notices.push({ id: `${taskId}:start`, kind: "start", taskId, at });
-      else if (after !== undefined && before !== undefined && after.mode !== before.mode) {
+      // A mode notice is named by its stream event; without one, two changes would collapse into one ID.
+      else if (after !== undefined && before !== undefined && after.mode !== before.mode && eventId !== "") {
         notices.push({ id: `${taskId}:mode:${eventId}`, kind: "mode", taskId, at, mode: after.mode === "continue" ? "continue" : "view" });
       }
-      if (next.closedAt !== undefined && previous?.closedAt === undefined) notices.push({ id: `${taskId}:closed`, kind: "closed", taskId, at });
+      // A stored NULL counts as unset.
+      if (next.closedAt != null && previous?.closedAt == null) notices.push({ id: `${taskId}:closed`, kind: "closed", taskId, at });
       return notices;
     }
     case "DEVELOPER_TASK_POINTER":
-      return next.cancelledAt !== undefined && previous?.cancelledAt === undefined
+      return next.cancelledAt != null && previous?.cancelledAt == null
         ? [{ id: `${text(next.taskId)}:cancelled`, kind: "cancelled", taskId: text(next.taskId), at }]
         : [];
     case "OPERATION": {
@@ -49,8 +51,9 @@ export function noticesOf(previous: Record<string, unknown> | undefined, next: R
       if (!TERMINAL.has(text(next.status)) || TERMINAL.has(text(previous?.status))) return [];
       const base = { workspaceId: text(next.workspaceId), operationId: text(next.id), at };
       if (next.kind === "prepare") {
-        const kind = next.status === "SUCCEEDED" ? "ready" : "setup_failed";
-        return [{ ...base, id: `${base.operationId}:${kind}`, kind }];
+        // A cancelled setup has no notice of its own: the cancel notice covers it.
+        const kind = next.status === "SUCCEEDED" ? "ready" : next.status === "FAILED" || next.status === "INTERRUPTED" ? "setup_failed" : undefined;
+        return kind === undefined ? [] : [{ ...base, id: `${base.operationId}:${kind}`, kind }];
       }
       if (next.kind === "publish" && next.status === "SUCCEEDED") return [{ ...base, id: `${base.operationId}:pull_request`, kind: "pull_request" }];
       if (next.kind === "task" || next.kind === "publish") return [{ ...base, id: `${base.operationId}:ended`, kind: "ended" }];
@@ -61,16 +64,30 @@ export function noticesOf(previous: Record<string, unknown> | undefined, next: R
   }
 }
 
-export function noticesFromStream(records: readonly StreamRecord[]): Notice[] {
+/** A stream record that could not be read: its event name and ID only, never an error message. */
+export interface SkippedRecord { eventID?: string; eventName?: string }
+
+/** The notices of a batch. A malformed record is skipped and named, so one bad record never loses the batch. */
+export function readStream(records: readonly StreamRecord[]): { notices: Notice[]; skipped: SkippedRecord[] } {
   const notices: Notice[] = [];
+  const skipped: SkippedRecord[] = [];
   for (const entry of records) {
     const image = entry.dynamodb?.NewImage;
     if (image === undefined) continue;
-    const next = unmarshall(image) as Record<string, unknown>;
-    const previous = entry.dynamodb?.OldImage === undefined ? undefined : unmarshall(entry.dynamodb.OldImage) as Record<string, unknown>;
-    // `noticesOf` takes the time as an argument, so a later caller can stamp it from the new image instead.
-    const seconds = entry.dynamodb?.ApproximateCreationDateTime ?? Date.now() / 1000;
-    notices.push(...noticesOf(previous, next, new Date(seconds * 1000).toISOString(), entry.eventID ?? ""));
+    try {
+      const next = unmarshall(image) as Record<string, unknown>;
+      const previous = entry.dynamodb?.OldImage === undefined ? undefined : unmarshall(entry.dynamodb.OldImage) as Record<string, unknown>;
+      // `noticesOf` takes the time as an argument, so a later caller can stamp it from the new image instead.
+      const approximate = entry.dynamodb?.ApproximateCreationDateTime;
+      const seconds = typeof approximate === "number" && Number.isFinite(approximate) ? approximate : Date.now() / 1000;
+      notices.push(...noticesOf(previous, next, new Date(seconds * 1000).toISOString(), entry.eventID ?? ""));
+    } catch {
+      skipped.push({ ...(entry.eventID === undefined ? {} : { eventID: entry.eventID }), ...(entry.eventName === undefined ? {} : { eventName: entry.eventName }) });
+    }
   }
-  return notices;
+  return { notices, skipped };
+}
+
+export function noticesFromStream(records: readonly StreamRecord[]): Notice[] {
+  return readStream(records).notices;
 }
