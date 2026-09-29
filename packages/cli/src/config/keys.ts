@@ -2,7 +2,7 @@
 // an SSM value (the environment settings) or a control-plane setting. docs/day-two.md lists the
 // same table.
 import { agentXError, environmentSettingsPrefix, environmentStackName } from "@agentx/contracts";
-import { AlertEmailSchema } from "../deploy/answer-schemas.js";
+import { AlertEmailSchema, MAX_BUDGET_USD } from "../deploy/answer-schemas.js";
 import type { DeployPart } from "../deploy/parameters.js";
 import type { ModelRole } from "../init/prerequisites.js";
 
@@ -43,10 +43,6 @@ const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/;
 const modelId = (key: string) => (value: string): string => (MODEL_ID.test(value.trim()) ? value.trim() : refuse(key, "a model id"));
 
 const email = (key: string) => (value: string): string => (AlertEmailSchema.safeParse(value.trim()).success ? value.trim() : refuse(key, "an email address"));
-
-// The same cap as init's budget answer (answers.ts MAX_BUDGET_USD), so config never accepts a
-// budget that init would refuse. The template itself allows up to 9,999,999.
-const MAX_BUDGET_USD = 1_000_000;
 
 const parameter = (part: DeployPart, name: string): ConfigTarget => ({ kind: "stack-parameter", part, parameter: name });
 

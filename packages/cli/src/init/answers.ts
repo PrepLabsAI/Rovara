@@ -3,7 +3,7 @@ import { DEFAULT_BEDROCK_MODELS, OPENROUTER_KEY_MIN_LENGTH } from "@agentx/model
 // commander default never silently skips a question. An alert webhook carries its integration
 // key, so it is a secret: it is never a flag value and never stored in the answers.
 import { agentXError, ImageDigest } from "@agentx/contracts";
-import { AlertEmailSchema, GITHUB_LOGIN_PATTERN, ModelsAnswersSchema } from "../deploy/answer-schemas.js";
+import { AlertEmailSchema, GITHUB_LOGIN_PATTERN, MAX_BUDGET_USD, ModelsAnswersSchema } from "../deploy/answer-schemas.js";
 import type { BundleAnswers } from "../deploy/export-bundle.js";
 import { SecretAlreadyExistsError } from "../deploy/signing-key.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
@@ -109,7 +109,6 @@ const checkEmail = (value: string): string | undefined => (AlertEmailSchema.safe
  * (no leading zero, "0" alone meaning no budget), and the same maximum as BudgetAnswersSchema
  * (answer-schemas.ts), so a value the CLI accepts here can never be refused later by the schema
  * once the plan has already been shown. */
-const MAX_BUDGET_USD = 1_000_000;
 const budgetProblem = (value: string): string | undefined =>
   (/^(0|[1-9][0-9]{0,6})$/.test(value) && Number(value) <= MAX_BUDGET_USD)
     ? undefined

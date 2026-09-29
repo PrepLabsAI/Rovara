@@ -46,7 +46,7 @@ describe("config keys (FR-048)", () => {
 
   it.each([
     ["limits.threadTurnsPerMinute", "12", "12"], ["limits.threadTurnsPerMinute", " 07 ", "7"],
-    ["alerts.slowTurnMinutes", "60", "60"], ["budget.monthlyUsd", "0", "0"], ["budget.monthlyUsd", "1500", "1500"],
+    ["alerts.slowTurnMinutes", "60", "60"], ["budget.monthlyUsd", "0", "0"], ["budget.monthlyUsd", "1500", "1500"], ["budget.monthlyUsd", "1000000", "1000000"],
     ["budget.scope", "account", "account"], ["slack.appPostedMessages", "ignore", "ignore"],
     ["models.orchestrator", "us.anthropic.claude-sonnet-4-6", "us.anthropic.claude-sonnet-4-6"],
     ["alerts.address", "ops@example.com", "ops@example.com"], ["limits.workspacesPerMember", "5", "5"],
