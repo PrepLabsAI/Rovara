@@ -8,7 +8,7 @@ import { runDestroy, type DestroyDependencies } from "../../packages/cli/src/des
 import { environmentCachePath } from "../../packages/cli/src/environments/cache.js";
 import { lockParameterName } from "../../packages/cli/src/environments/lock.js";
 import { settingsParameterName, writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
-import { writeInstallAnswers, writeInstallProgress } from "../../packages/cli/src/init/install-state.js";
+import { installAnswersParameterName, installProgressParameterName, writeInstallAnswers, writeInstallProgress } from "../../packages/cli/src/init/install-state.js";
 import { writeProjectFile } from "../../packages/cli/src/setup/project-add.js";
 import { awsDestroyApi } from "../../packages/cli/src/destroy/aws.js";
 import { destroyProjectFiles } from "../../packages/cli/src/destroy/project-files.js";
@@ -50,6 +50,7 @@ async function harness(input: { account?: FakeAccount; typed?: string[]; caller?
     store, api: fakeDestroyApi(account, clock), identity: { get: async () => ({ account: "123456789012", arn: input.caller ?? ADMIN }) },
     confirmLine: async (question) => { asked.push(question); return typed.shift() ?? ""; },
     write: (line) => lines.push(line), ...clock, home, projectFiles: (name) => destroyProjectFiles({ configDir, env: name, write: (line) => lines.push(line) }), tokenStore: memoryTokenStore(), region: "us-east-1",
+    isInteractive: () => true,
   };
   return { deps, account, store, lines, asked, home, configDir, env };
 }
@@ -177,6 +178,27 @@ describe("agentx destroy (FR-055, item 3)", () => {
     h.store.values.set(lockParameterName("staging"), JSON.stringify({ holder: ADMIN, command: "destroy", acquiredAt: new Date(0).toISOString() }));
     await runDestroy({ env: "staging", keepData: false }, h.deps);
     expect(h.asked[1]).toContain("Take the lock over?");
+  });
+
+  it("never offers a takeover without a terminal: a piped yes cannot take a lock over (final review M11)", async () => {
+    const h = await harness({ typed: ["staging", "yes"] });
+    h.deps.isInteractive = () => false;
+    const held = JSON.stringify({ holder: ADMIN, command: "destroy", acquiredAt: new Date(0).toISOString() });
+    h.store.values.set(lockParameterName("staging"), held);
+    await expect(runDestroy({ env: "staging", keepData: false }, h.deps)).rejects.toThrow(`environment staging is locked by ${ADMIN} running "destroy" since ${new Date(0).toISOString()} (your own earlier "destroy"; confirm the takeover only if that run is no longer going; to clear it, delete ${lockParameterName("staging")} once you are sure no AgentX command is running)`);
+    expect(h.asked).toHaveLength(1);
+    expect(h.store.values.get(lockParameterName("staging"))).toBe(held);
+    expect(h.account.calls.filter((call) => call.startsWith("delete"))).toEqual([]);
+  });
+
+  it("names each install record it could not read, and nothing of what it holds (final review M8)", async () => {
+    const h = await harness();
+    h.store.values.set(installAnswersParameterName("staging"), "{\"SECRETanswer\": ");
+    h.store.values.set(installProgressParameterName("staging"), "[\"SECRETprogress\"]");
+    await runDestroy({ env: "staging", keepData: false }, h.deps);
+    expect(h.lines).toContain(`Could not read ${installAnswersParameterName("staging")}, so agentx destroy goes on without the install answers: it may ask for the account id, and the steps printed at the end name no GitHub App of this environment.`);
+    expect(h.lines).toContain(`Could not read ${installProgressParameterName("staging")}, so agentx destroy goes on without the install progress: the steps printed at the end name no app of this environment.`);
+    expect(h.lines.join("\n")).not.toContain("SECRET");
   });
 
   it("says so, and asks nothing, when there is nothing to remove", async () => {

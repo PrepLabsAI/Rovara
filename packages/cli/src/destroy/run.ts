@@ -7,11 +7,11 @@ import { agentXError, environmentPullThroughPrefix, environmentStackName, type S
 import { tokenStoreKey } from "../auth.js";
 import { ADOPTED_STACK_NAMES, type CallerIdentity } from "../environments/adopt.js";
 import { cachedEnvironmentRegion, environmentCachePath } from "../environments/cache.js";
-import { lockParameterName, withEnvironmentLock } from "../environments/lock.js";
+import { lockParameterName, withEnvironmentLock, type LockRecord } from "../environments/lock.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import { readEnvironmentSettings, settingsParameterName, type EnvironmentSettings } from "../environments/settings.js";
 import { isOperatorRole } from "../init/commands.js";
-import { readInstallAnswers, readInstallProgress } from "../init/install-state.js";
+import { installAnswersParameterName, installProgressParameterName, readInstallAnswers, readInstallProgress } from "../init/install-state.js";
 import type { TokenStore } from "../token-store.js";
 import type { DestroyApi, DestroyStack } from "./aws.js";
 import { confirmationPrompts, destroyPlanText, inventoryParameterName, KEPT_BY_KEEP_DATA, mergeInventory, readInventory, retainedResources, vendorSteps, writeInventory, type Inventory, type RetainedResource } from "./inventory.js";
@@ -31,6 +31,8 @@ export interface DestroyDependencies {
   projectFiles: (env: string) => Promise<Array<{ path: string; launchTemplateId: string }>>;
   tokenStore: TokenStore;
   region: string;
+  /** Whether stdin is a terminal: a lock takeover is offered only then, never to piped input. */
+  isInteractive: () => boolean;
 }
 
 export interface DestroyResult {
@@ -82,8 +84,13 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
   if (settings !== undefined && settings.account !== caller.account) {
     throw agentXError("CONFIG_INVALID", `environment ${env} is installed in account ${settings.account}, but your AWS credentials are for ${caller.account}; use credentials for ${settings.account}`);
   }
-  const answers = await readInstallAnswers(store, env).catch(() => undefined);
-  const progress = await readInstallProgress(store, env).catch(() => undefined);
+  // An unreadable record is safe to go on without; the line names it, never what it holds.
+  const unreadable = (name: string, effect: string) => () => {
+    deps.write(`Could not read ${name}, so agentx destroy goes on without ${effect}.`);
+    return undefined;
+  };
+  const answers = await readInstallAnswers(store, env).catch(unreadable(installAnswersParameterName(env), "the install answers: it may ask for the account id, and the steps printed at the end name no GitHub App of this environment"));
+  const progress = await readInstallProgress(store, env).catch(unreadable(installProgressParameterName(env), "the install progress: the steps printed at the end name no app of this environment"));
 
   // 1. Read everything first. The stacks and the inventory are read again inside the lock, so what
   // is saved and deleted is never older than the lock.
@@ -180,9 +187,12 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
     result.stacksDeleted.push(name);
   };
 
+  // As upgrade: a takeover is offered only at a terminal, so a script piping answers never takes a lock over.
+  const confirmTakeover = deps.isInteractive()
+    ? async (held: LockRecord) => /^y(es)?$/i.test((await deps.confirmLine(`Environment ${env} is locked by ${held.holder} running "${held.command}" since ${held.acquiredAt}. Take the lock over? Say yes only if that command is no longer running. [y/N] `)).trim())
+    : undefined;
   await withEnvironmentLock({
-    store, env, holder: caller.arn, command: "destroy", now: deps.now, takeOverOwn: true,
-    confirmTakeover: async (held) => /^y(es)?$/i.test((await deps.confirmLine(`Environment ${env} is locked by ${held.holder} running "${held.command}" since ${held.acquiredAt}. Take the lock over? Say yes only if that command is no longer running. [y/N] `)).trim()),
+    store, env, holder: caller.arn, command: "destroy", now: deps.now, takeOverOwn: true, ...(confirmTakeover === undefined ? {} : { confirmTakeover }),
   }, async () => {
     inventory = (await readStacks()).inventory;
     localFiles = await filesFor(inventory);

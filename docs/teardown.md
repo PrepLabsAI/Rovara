@@ -54,6 +54,12 @@ Lambda functions release their network interfaces. `destroy` prints a line each 
 **After a failure**, fix what it names and run the same command again. It continues where it
 stopped.
 
+**Locking.** `destroy` holds the environment's lock while it runs. If a killed `destroy` of yours
+left the lock, the next one asks at once whether to take it over; anyone's lock older than 2 hours
+gets the same question. It asks only at a terminal: without one (answers piped on stdin), it
+never takes a lock over, and refuses with the lock's holder and the parameter to delete
+(`/agentx/<env>/lock`) once you are sure no AgentX command is running.
+
 **Nothing found.** When it finds nothing for the environment, it says so, naming the account and
 region it looked in, and exits 2. If the environment is in another region, pass `--region`.
 

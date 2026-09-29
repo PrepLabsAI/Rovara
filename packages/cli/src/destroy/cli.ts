@@ -92,6 +92,7 @@ export function registerDestroyCommand(program: Command, context: DestroyCommand
           projectFiles: overrides.projectFiles ?? ((env) => destroyProjectFiles({ configDir: globals.configDir, env, write })),
           tokenStore: overrides.tokenStore ?? context.tokenStore,
           region,
+          isInteractive: overrides.isInteractive ?? (() => (context.stdin as { isTTY?: boolean }).isTTY === true),
         };
         const result = await runDestroy({ env: globals.env, keepData: options.keepData }, deps);
         if (result.notFound !== undefined) {
