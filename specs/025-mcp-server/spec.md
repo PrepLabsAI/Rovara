@@ -814,6 +814,13 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
     shares it in continue mode, by the members of the bound channel who post in its shared thread.
     Personal workspaces not tied to a task stay retired.
 
+- **FR-055**: A developer task's workspace MUST NOT stay in setup forever. A sweep MUST mark failed
+  any prepare still running 15 minutes after it started, whatever the instance's health, with a fixed
+  message that setup did not finish; the workspace then reads `setup_failed` and frees its slot, as
+  with any other failed setup. Once the sweep exists, a temporary AWS error (throttling, or a 5xx)
+  while queuing the task's first instructions MUST be retried rather than failing the start at once.
+  Phase 25c.
+
 ### Key Entities
 
 - **Developer**: a person signed in with Slack or the company's sign-in. ID, provider, display name,
@@ -1086,6 +1093,14 @@ Decisions made in this spec, all owner-confirmed on 2026-09-27:
   calling `agentx_get_task` afterward. The task wait (`agentx_start_task`, `agentx_continue_task`
   and `agentx_wait_for_task`, off by default, at most 600 seconds) is the only wait and is
   unaffected. FR-030 and FR-049 carry this.
+- **D21. A stuck task setup is ended by a sweep, not by a "last attempt" signal** (owner decision,
+  2026-09-28). In 25b, a temporary AWS error while queuing a task's first instructions fails the
+  start at once: the worker gives up after three silent callback attempts, and nothing else ends a
+  prepare on a healthy instance, so retrying would leave the workspace stuck in setup with its slot
+  taken. A sweep in the existing reaper or reconciler that fails any prepare older than 15 minutes
+  covers this and every other cause (a lost callback, a hung worker), stays inside the control plane,
+  and makes the retry safe. A "last attempt" field in the worker's callback was rejected: it covers
+  only this one case and changes the worker contract. FR-055 carries this, in 25c.
 
 ## Assumptions and Scope
 
