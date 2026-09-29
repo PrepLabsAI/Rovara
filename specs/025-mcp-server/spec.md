@@ -815,8 +815,9 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
     Personal workspaces not tied to a task stay retired.
 
 - **FR-055**: A developer task's workspace MUST NOT stay in setup forever. A sweep MUST mark failed
-  any prepare still running 15 minutes after it started, whatever the instance's health, with a fixed
-  message that setup did not finish; the workspace then reads `setup_failed` and frees its slot, as
+  any prepare still running 50 minutes after it started (owner decision, 2026-09-29, raised from 15
+  minutes because the provisioner allows 45), whatever the instance's health, with a fixed message
+  that setup did not finish; the workspace then reads `setup_failed` and frees its slot, as
   with any other failed setup. Once the sweep exists, a temporary AWS error (throttling, or a 5xx)
   while queuing the task's first instructions MUST be retried rather than failing the start at once.
   Phase 25c.
@@ -1102,8 +1103,8 @@ Decisions made in this spec, all owner-confirmed on 2026-09-27:
   2026-09-28). In 25b, a temporary AWS error while queuing a task's first instructions fails the
   start at once: the worker gives up after three silent callback attempts, and nothing else ends a
   prepare on a healthy instance, so retrying would leave the workspace stuck in setup with its slot
-  taken. A sweep in the existing reaper or reconciler that fails any prepare older than 15 minutes
-  covers this and every other cause (a lost callback, a hung worker), stays inside the control plane,
+  taken. A sweep in the existing reaper or reconciler that fails any prepare older than 50 minutes
+  (owner decision, 2026-09-29, raised from 15 minutes because the provisioner allows 45) covers this and every other cause (a lost callback, a hung worker), stays inside the control plane,
   and makes the retry safe. A "last attempt" field in the worker's callback was rejected: it covers
   only this one case and changes the worker contract. FR-055 carries this, in 25c.
 

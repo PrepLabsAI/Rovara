@@ -94,7 +94,7 @@ recommendation of an open owner question.
   start message then shows the current status (US3 scenario 9). A shared task changes mode within
   the latest revision's policy (continue on a project that forbids it stays view, and the answer
   says why); a different `channel` is refused (`INVALID_REQUEST`: "already shared in #x"). Only the
-  developer who owns the task may call it **(Q2)**. A repeated `requestId` answers with the task as
+  developer who owns the task may call this route; an AgentX admin has the path of C25 **(Q2)**. A repeated `requestId` answers with the task as
   it is and writes nothing. A closed task answers `INVALID_REQUEST`. Each share or mode change
   writes an `accepted` AI-tool turn record with the new action `share` **(Q9)**. Task 4.
 - **C6. The start and share answers do not wait for the thread link (Q6).** The view says
@@ -175,17 +175,18 @@ recommendation of an open owner question.
   member with no AI-tool tasks gets exactly today's text. Task 12.
 - **C17. The stuck-setup sweep (FR-055, D21).** The start transaction writes `SETUP_WATCH` /
   `<prepare createdAt>#<workspaceId>` (with the prepare's operation ID and the task ID, one-day
-  TTL). Each reconciler run (every 10 minutes) queries the watches older than 15 minutes. For each,
+  TTL). Each reconciler run (every 10 minutes) queries the watches older than 50 minutes (owner
+  decision, 2026-09-29, raised from 15 minutes because the instance provisioner allows 45). For each,
   a prepare still live on a workspace still `PREPARING` is failed in one transaction, whatever the
   instance's health: the operation `FAILED` with the fixed message "setup did not finish within 15
   minutes; close this task and start a new one", the workspace `PREPARATION_FAILED` (so the task
   reads `setup_failed`), the pending instructions cleared, the watch deleted. Any other watch is
   just deleted. The slot is freed as for any failed setup: by closing the task (FR-020). Only
-  developer-task prepares are watched **(Q4)**, and the 15 minutes run from the prepare's creation,
+  developer-task prepares are watched **(Q4)**, and the 50 minutes run from the prepare's creation,
   the start itself **(Q5)**. The reconciler fits better than the reaper: it
   already repairs drift and fails operations (`failActiveOperation`), while the reaper's contract is
   that it never changes a workspace's status. The cost is up to 10 more minutes: a stuck setup is
-  failed between 15 and 25 minutes after it started. Task 13.
+  failed between 50 and 60 minutes after it started. Task 13.
 - **C18. A late result after the sweep is answered, not refused.** The worker's `SUCCEEDED` result
   for a prepare the sweep failed answers 200 and changes nothing, like the "first task could not be
   queued" case in 25b. Task 13.
@@ -213,15 +214,33 @@ recommendation of an open owner question.
   broker says owns the workspace, not the tools. If any task finds it must change one of Pratik's
   `agentx_*` orchestrator tools (`packages/orchestrator/src/orchestration-tools.ts`), it stops and
   first adds characterization tests, then 1:1 mapping tests, with no weakened assertion.
+- **C25. An AgentX admin may switch a shared task's mode (Q2, owner answer, 2026-09-29).** The
+  owner changed Q2's recommendation: the owning developer or an AgentX admin may switch a shared
+  task between view only and continue, within the project's `shareMode` policy. The smallest safe
+  path, ruled by this plan: one admin route, `POST /v1/admin/tasks/{taskId}/share-mode` with body
+  `{ requestId, shareMode }`, behind the existing JWT authorizer and FR-015's checks (the admin
+  claim, then the `administrator` membership on the task's project), and one CLI command,
+  `agentx admin task share-mode --task <id> --mode view|continue`, which a person types (D12: no
+  further confirmation, like every `agentx admin` command). The admin path only changes the mode:
+  it cannot share a private task (that stays the developer's choice, owner decision 3's "private by
+  default"), cannot change the channel, and cannot touch a closed task. The change writes the same
+  `share` audit record as the developer's (Q9), under the task's key, with the developer as its
+  party and a new optional `admin` field (issuer, subject, and the token's name or email claim).
+  There is no MCP admin tool for it in 25c: 25d and 25e add admin tools, with confirmations, and may
+  wrap this route then. A non-admin is refused `FORBIDDEN` before the task is read, so task IDs are
+  not probed; a developer who does not own the task still gets `TASK_NOT_FOUND` on the developer
+  route. Task 4.
 - **C24. What a closed shared thread does (Q3).** The notifier posts the closed reply; the shared
   record gets `closedAt`; later mentions get the closed notice (at most once an hour) and nothing
   runs. Tasks 4, 7, 9, 10.
 
 ## Owner questions
 
-[phase-25c-questions.md](phase-25c-questions.md) lists nine questions the spec leaves open, each
-with options, a recommendation and the cost if wrong. This plan follows every recommendation; the
-tasks that depend on one say so. The owner's answers are recorded in the spec by Task 17.
+[phase-25c-questions.md](phase-25c-questions.md) lists nine questions the spec leaves open, with
+the owner's answers of 2026-09-29. Seven recommendations were accepted as written. Q2 was changed:
+an AgentX admin may also switch a shared task's mode (C25, Task 4). Q7's move to API 1.2 was
+approved. Separately, the owner raised the stuck-setup limit from 15 to 50 minutes (C17, Task 13);
+the spec's FR-055 and D21 already say so. Task 17 records the rest in the spec.
 
 ## Global Constraints
 
@@ -250,13 +269,14 @@ tasks that depend on one say so. The owner's answers are recorded in the spec by
 - **Pratik's `agentx_*` orchestrator tools** need characterization tests before any change, 1:1
   mapping tests, and no weakened assertions (C23).
 - **Exact names and values:**
-  - route `POST /v1/dev/tasks/{taskId}/share`; tool `agentx_share_task`;
+  - routes `POST /v1/dev/tasks/{taskId}/share` and `POST /v1/admin/tasks/{taskId}/share-mode`
+    (C25); tool `agentx_share_task`; CLI command `agentx admin task share-mode`;
   - items `SHARED_TASK#<team>/<channel>/<threadTs>`/`META`, `DEVTASK#<taskId>`/`NOTICE#<noticeId>`,
     `DEVTASK#<taskId>`/`CHANNEL_OPERATION#<operationId>`, `SETUP_WATCH`/`<createdAt>#<workspaceId>`,
     Slack threads table `THREAD#<subject>`/`SHARED_NOTICE`;
   - one notice per thread per 3,600 seconds; summary at most 1,500 characters; a channel turn waits
     at most 30 minutes; notices retried for 3,600 seconds; channel turns listed at most 20, request
-    text at most 300 characters; a stuck setup is 15 minutes old;
+    text at most 300 characters; a stuck setup is 50 minutes old (owner decision, 2026-09-29);
   - reasons `required by project` and `continue not allowed by project`;
   - `DEVELOPER_API_VERSION = "1.2"` (Q7);
   - error codes gain `CHANNEL_AMBIGUOUS`; the turn record action list gains `share` (Q9).
@@ -316,7 +336,8 @@ tasks that depend on one say so. The owner's answers are recorded in the spec by
 | `packages/broker/src/developer/share-messages.ts` | the thread's texts (C8) | 2 |
 | `packages/broker/src/developer/task-records.ts` (modify) | `TaskShare`, `shareVersion`, `shareView`, `sharedSubject` | 3 |
 | `packages/broker/src/aws/developer-routes.ts` (modify) | bound channel IDs from the access check; `boundChannels` | 3 |
-| `packages/broker/src/aws/developer-tasks.ts` (modify) | sharing at start, the share route, the view's share and channel turns, `TASK_BUSY` naming the driver, the setup watch | 3, 4, 5, 10, 13 |
+| `packages/broker/src/aws/developer-tasks.ts` (modify) | sharing at start, the share route, the admin's mode switch, the view's share and channel turns, `TASK_BUSY` naming the driver, the setup watch | 3, 4, 5, 10, 13 |
+| `packages/cli/src/admin/task-share-mode.ts`, `packages/cli/src/main.ts` (modify) | `agentx admin task share-mode` (C25) | 4 |
 | `packages/broker/src/aws/developer-task-actions.ts` (modify) | `channelTurns`, `channelActivity` | 5, 10 |
 | `packages/broker/src/developer/notifications.ts` | notices from stream images (C7) | 6 |
 | `packages/broker/src/aws/slack-web.ts` | `chat.postMessage` that returns `ts` | 7 |
@@ -325,7 +346,7 @@ tasks that depend on one say so. The owner's answers are recorded in the spec by
 | `infra/lib/control-plane.ts` (modify) | wire the notifier; ingress and broker grants (named only) | 8 |
 | `packages/broker/src/aws/slack-ingress.ts` (modify) | the view-only notice | 9 |
 | `packages/broker/src/auth.ts` (modify) | `AuthenticatedIdentity.sharedTask` | 10 |
-| `packages/broker/src/aws/broker.ts` (modify) | shared identity, shared thread workspace, close refusal, stop, channel operation records, channel actions, limit count, sweep-aware result, temporary-error retry | 10, 12, 13, 14 |
+| `packages/broker/src/aws/broker.ts` (modify) | the admin share-mode route (Task 4), shared identity, shared thread workspace, close refusal, stop, channel operation records, channel actions, limit count, sweep-aware result, temporary-error retry | 10, 12, 13, 14 |
 | `packages/broker/src/aws/broker-shared.ts` (modify) | `isTemporaryAwsError` | 14 |
 | `packages/slack-service/src/shared-task.ts` | wait for an idle task workspace | 11 |
 | `packages/slack-service/src/processor.ts`, `turn-records.ts`, `lazy-worker.ts`, `thread-api.ts`, `thread-workspace-request.ts`, `messages.ts`, `main.ts` (modify) | continue-mode turns, notices, attribution, limit reply | 11, 12 |
@@ -364,6 +385,7 @@ version) and **Q9** (the `share` action).
   - `DeveloperTaskShareSchema` / `DeveloperTaskShare`, `ChannelTurnSchema` / `ChannelTurn`;
     `DeveloperTaskViewSchema` gains `share?` and `channelTurns?`;
   - `ShareDeveloperTaskRequestSchema` / `ShareDeveloperTaskRequest`;
+    `AdminShareModeRequestSchema` / `AdminShareModeRequest` (`{ requestId, shareMode }`, strict; C25);
   - `sharedTaskKey(thread)`, `SharedTaskRecordSchema` / `SharedTaskRecord`;
   - `sharedNoticeKey(subject)`;
   - `SlackThreadWorkspaceResultSchema`: WORKSPACE gains `sharedTask?: { taskId, developerName }`;
@@ -371,7 +393,7 @@ version) and **Q9** (the `share` action).
     (also on `SlackThreadPrepareResultSchema`); `SlackWorkspaceCloseStartResultSchema` gains
     `{ outcome: "REFUSED", reason: "shared_task" }`;
   - `TurnRecordSchema` gains `taskId?` and `requesterName?`; `AiToolTurnRecordSchema.action` gains
-    `"share"`;
+    `"share"`, and the record gains `admin?: { issuer, subject, displayName? }` (C25);
   - `AgentXErrorCodeSchema` gains `CHANNEL_AMBIGUOUS` (HTTP 409);
   - `DEVELOPER_API_VERSION = "1.2"`.
 
@@ -383,6 +405,7 @@ version) and **Q9** (the `share` action).
 // answer written before 25c still parses.
 import { describe, expect, it } from "vitest";
 import {
+  AdminShareModeRequestSchema,
   AiToolTurnRecordSchema,
   CLOSED_SHARED_NOTICE,
   DEVELOPER_API_VERSION,
@@ -473,8 +496,16 @@ describe("records and codes", () => {
     expect(TurnRecordSchema.parse(base)).not.toHaveProperty("taskId");
   });
 
-  it("adds the share action to AI-tool records (Q9)", () => {
+  it("adds the share action to AI-tool records (Q9), and names an admin who made the change (C25)", () => {
     expect(AiToolTurnRecordSchema.shape.action.options).toEqual(["start", "continue", "pull_request", "cancel", "close", "share"]);
+    expect(AiToolTurnRecordSchema.shape.admin.parse({ issuer: "https://identity.example.test", subject: "admin-subject", displayName: "Ada" })).toMatchObject({ subject: "admin-subject" });
+    expect(AiToolTurnRecordSchema.shape.admin.safeParse(undefined).success).toBe(true);
+  });
+
+  it("takes an admin's mode switch with only a request ID and a mode (C25)", () => {
+    expect(AdminShareModeRequestSchema.parse({ requestId: TASK, shareMode: "view" })).toEqual({ requestId: TASK, shareMode: "view" });
+    expect(AdminShareModeRequestSchema.safeParse({ requestId: TASK, shareMode: "view", channel: "C0123456789" }).success).toBe(false);
+    expect(AdminShareModeRequestSchema.safeParse({ requestId: TASK }).success).toBe(false);
   });
 
   it("adds CHANNEL_AMBIGUOUS as a 409, and moves the API to 1.2 (Q7)", () => {
@@ -537,6 +568,10 @@ export const ShareDeveloperTaskRequestSchema = z
   .object({ requestId: z.string().uuid(), shareMode: DeveloperShareModeSchema.optional(), channel: z.string().min(1).max(80).optional() })
   .strict();
 export type ShareDeveloperTaskRequest = z.infer<typeof ShareDeveloperTaskRequestSchema>;
+
+/** C25: an AgentX admin switches a shared task's mode; no channel, no first share. */
+export const AdminShareModeRequestSchema = z.object({ requestId: z.string().uuid(), shareMode: DeveloperShareModeSchema }).strict();
+export type AdminShareModeRequest = z.infer<typeof AdminShareModeRequestSchema>;
 
 /** C2: the shared thread record, read by the Slack ingress and the broker's service identity. */
 export function sharedTaskKey(thread: { teamId: string; channelId: string; threadTs: string }): { pk: string; sk: "META" } {
@@ -615,7 +650,13 @@ In `packages/contracts/src/turns.ts`, add to `TurnRecordSchema` after `conversat
 ```
 
 and change `AiToolTurnRecordSchema`'s action to
-`action: z.enum(["start", "continue", "pull_request", "cancel", "close", "share"]),`.
+`action: z.enum(["start", "continue", "pull_request", "cancel", "close", "share"]),`, and add after
+its `client`:
+
+```ts
+  /** Spec 025 C25: the AgentX admin who made this change on the developer's task, when one did. */
+  admin: z.object({ issuer: z.string().min(1).max(512), subject: z.string().min(1).max(256), displayName: z.string().min(1).max(200).optional() }).strict().optional(),
+```
 
 In `packages/contracts/src/developer.ts:9`: `export const DEVELOPER_API_VERSION = "1.2";`.
 
@@ -1346,23 +1387,37 @@ git commit -m "feat(broker): share a task at its start (spec 025 FR-031)"
 
 ---
 
-### Task 4: The share route, mode changes, and a closed shared thread
+### Task 4: The share route, mode changes by the developer or an admin, and a closed shared thread
 
-C5, C24: `POST /v1/dev/tasks/{taskId}/share` (FR-016, FR-030's `agentx_share_task`, US3 scenarios 7
-and 9), and the close marking the shared thread record. **Depends on Q2** (only the developer
-switches), **Q3** (what a close does to the thread) and **Q9** (the `share` audit record).
+C5, C24, C25: `POST /v1/dev/tasks/{taskId}/share` (FR-016, FR-030's `agentx_share_task`, US3
+scenarios 7 and 9), the admin's mode switch `POST /v1/admin/tasks/{taskId}/share-mode` with
+`agentx admin task share-mode`, and the close marking the shared thread record. **Depends on Q2**
+(the owner's answer: the developer or an AgentX admin switches the mode), **Q3** (what a close does
+to the thread) and **Q9** (the `share` audit record).
 
 **Files:**
-- Modify: `packages/broker/src/aws/developer-tasks.ts` (`shareTask`, `routeDeveloperTaskRequest`, `finishTaskClose`)
+- Modify: `packages/broker/src/aws/developer-tasks.ts` (`withMode`, `shareItems`, `shareTask`, `adminShareMode`, `routeDeveloperTaskRequest`, `finishTaskClose`)
 - Modify: `packages/broker/src/aws/developer-routes.ts` (`projectChannelIds`)
+- Modify: `packages/broker/src/aws/broker.ts` (the admin route, `adminTaskShareMode`)
+- Modify: `packages/broker/src/developer/task-records.ts` (`aiToolTurn` takes `admin`)
+- Create: `packages/cli/src/admin/task-share-mode.ts`
+- Modify: `packages/cli/src/main.ts` (`agentx admin task share-mode`)
 - Modify: `tests/support/developer-task-broker.ts` (`markThreadPosted`)
-- Test: `tests/contract/developer-task-share-route.test.ts`
+- Test: `tests/contract/developer-task-share-route.test.ts`, `tests/contract/admin-task-share-mode.test.ts`
 
 **Interfaces:**
 - Consumes: `shareFor` (Task 3), `decideMode`, `channelLabel` (Task 2), `taskShare`, `TaskShare`
-  (Task 3), `ShareDeveloperTaskRequestSchema`, `sharedTaskKey` (Task 1).
+  (Task 3), `ShareDeveloperTaskRequestSchema`, `AdminShareModeRequestSchema`, the AI-tool record's
+  `admin` field, `sharedTaskKey` (Task 1); `getMembership` (`broker.ts`, FR-015).
 - Produces:
   - route `POST /v1/dev/tasks/{taskId}/share` answering `{ task: DeveloperTaskView }`;
+  - route `POST /v1/admin/tasks/{taskId}/share-mode`, body `AdminShareModeRequest` (Task 1),
+    answering `{ task: DeveloperTaskView }`;
+  - `interface ShareAdmin { issuer: string; subject: string; displayName?: string }`;
+  - `type ShareModeDependencies = Pick<DeveloperTaskRouteDependencies, "documentClient" | "tableName" | "actions" | "now" | "log">`;
+  - `adminShareMode(deps: ShareModeDependencies, admin: ShareAdmin, task: DeveloperTaskRecord, value: unknown): Promise<{ task: DeveloperTaskView }>`;
+  - `aiToolTurn`'s input gains `admin?: ShareAdmin`, written as the record's `admin`;
+  - `setTaskShareMode(input: { controlPlaneUrl: string; accessToken: string; taskId: string; mode: "view" | "continue"; requestId?: string }, fetchImplementation?): Promise<unknown>` (CLI);
   - `DeveloperTaskRouteDependencies.projectChannelIds(project: string): Promise<string[]>`;
   - `finishTaskClose` also sets `closedAt` on the task's `SHARED_TASK` record when it has a thread;
   - test helper `markThreadPosted(db, taskId, threadTs?)`: sets `share.threadTs` and writes the
@@ -1454,7 +1509,7 @@ describe("POST /v1/dev/tasks/{taskId}/share (C5)", () => {
     expect(shareRecords()).toHaveLength(1);
   });
 
-  it("is the task owner's alone (FR-036, Q2)", async () => {
+  it("is the task owner's alone on the developer route (FR-036; an admin uses C25's route)", async () => {
     const { share } = await privateTask();
     expect((await share({}, OMAR)).body.error).toMatchObject({ code: "TASK_NOT_FOUND" });
   });
@@ -1539,9 +1594,12 @@ async function nextShare(
       throw agentXError("CONFIG_INVALID", `this task is already shared in ${channelLabel({ channelId: current.channelId, ...(current.channelName === undefined ? {} : { name: current.channelName, isPrivate: false }) })}; its channel cannot change`);
     }
   }
-  const mode = decideMode(policy, request.shareMode ?? current.mode);
+  return withMode(current, decideMode(policy, request.shareMode ?? current.mode));
+}
+
+/** The share with a new mode, or "unchanged". Built field by field, so a stale modeReason is dropped. */
+function withMode(current: TaskShare, mode: { mode: "view" | "continue"; modeReason?: "continue_not_allowed" }): TaskShare | "unchanged" {
   if (mode.mode === current.mode && mode.modeReason === current.modeReason) return "unchanged";
-  // Built field by field, so a modeReason that no longer applies is dropped.
   return {
     teamId: current.teamId, channelId: current.channelId,
     ...(current.channelName === undefined ? {} : { channelName: current.channelName }),
@@ -1553,9 +1611,57 @@ async function nextShare(
   };
 }
 
+/** An AgentX admin who changed a task's share mode (C25), named on the audit record. */
+export interface ShareAdmin { issuer: string; subject: string; displayName?: string }
+export type ShareModeDependencies = Pick<DeveloperTaskRouteDependencies, "documentClient" | "tableName" | "actions" | "now" | "log">;
+
+/**
+ * C1, C5, C25: one share change's items: the task's whole share map under shareVersion, the index
+ * row, the thread record's mode, the idempotency item and the `share` audit record (Q9), which
+ * names the admin when an admin made the change.
+ */
+function shareItems(
+  deps: ShareModeDependencies,
+  turns: string,
+  task: DeveloperTaskRecord,
+  share: TaskShare,
+  audit: { idempotencyKey: { pk: string; sk: string }; payloadHash: string; receivedAt: string; request: string; admin?: ShareAdmin },
+): TransactItems {
+  const version = task.shareVersion ?? 0;
+  const label = channelLabel({ channelId: share.channelId, ...(share.channelName === undefined ? {} : { name: share.channelName, isPrivate: false }) });
+  return [
+    { Update: {
+      TableName: deps.tableName, Key: taskKey(task.taskId),
+      UpdateExpression: "SET #share = :share, #shared = :true, shareVersion = :next, updatedAt = :now",
+      ConditionExpression: version === 0
+        ? "attribute_exists(pk) AND attribute_not_exists(shareVersion) AND attribute_not_exists(closedAt)"
+        : "shareVersion = :current AND attribute_not_exists(closedAt)",
+      ExpressionAttributeNames: { "#share": "share", "#shared": "shared" },
+      ExpressionAttributeValues: { ":share": share, ":true": true, ":next": version + 1, ":now": audit.receivedAt, ...(version === 0 ? {} : { ":current": version }) },
+    } },
+    // Unconditional, as the close's: the start wrote this row with the task.
+    { Update: {
+      TableName: deps.tableName, Key: taskIndexKey(task.developerId, task.createdAt, task.taskId),
+      UpdateExpression: "SET #shared = :true", ExpressionAttributeNames: { "#shared": "shared" }, ExpressionAttributeValues: { ":true": true },
+    } },
+    ...(share.threadTs === undefined ? [] : [{ Update: {
+      TableName: deps.tableName, Key: sharedTaskKey({ teamId: share.teamId, channelId: share.channelId, threadTs: share.threadTs }),
+      UpdateExpression: "SET #mode = :mode", ConditionExpression: "attribute_exists(pk)",
+      ExpressionAttributeNames: { "#mode": "mode" }, ExpressionAttributeValues: { ":mode": share.mode },
+    } }]),
+    putNew(deps.tableName, { ...audit.idempotencyKey, entityType: "IDEMPOTENCY", action: "share", payloadHash: audit.payloadHash }),
+    // Q9: a share or mode change is audited like the task's other actions.
+    putNew(turns, aiToolTurn({
+      party: partyOfTask(task), turnId: randomUUID(), action: "share", phase: "accepted", outcome: "accepted", receivedAt: audit.receivedAt, finishedAt: iso(deps),
+      request: audit.request, response: `Shared in ${label}, ${share.mode === "view" ? "view only" : "open to the channel"}.`,
+      ...(audit.admin === undefined ? {} : { admin: audit.admin }),
+    })),
+  ];
+}
+
 /**
  * C5. Answers at once; the notifier posts the start message or the mode change (C6). Only the task's
- * developer may call it (Q2). Every write of `share` replaces the map, conditioned on shareVersion,
+ * developer may call this route; an AgentX admin switches the mode through adminShareMode (C25). Every write of `share` replaces the map, conditioned on shareVersion,
  * so a notifier write between this read and this write is read again, never lost (C1).
  */
 async function shareTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
@@ -1579,36 +1685,10 @@ async function shareTask(deps: DeveloperTaskRouteDependencies, caller: Developer
     const receivedAt = iso(deps);
     const share = await nextShare(deps, caller, task, request, receivedAt);
     if (share === "unchanged") return answer();
-    const version = task.shareVersion ?? 0;
-    const label = channelLabel({ channelId: share.channelId, ...(share.channelName === undefined ? {} : { name: share.channelName, isPrivate: false }) });
-    const items: TransactItems = [
-      { Update: {
-        TableName: deps.tableName, Key: taskKey(task.taskId),
-        UpdateExpression: "SET #share = :share, #shared = :true, shareVersion = :next, updatedAt = :now",
-        ConditionExpression: version === 0
-          ? "attribute_exists(pk) AND attribute_not_exists(shareVersion) AND attribute_not_exists(closedAt)"
-          : "shareVersion = :current AND attribute_not_exists(closedAt)",
-        ExpressionAttributeNames: { "#share": "share", "#shared": "shared" },
-        ExpressionAttributeValues: { ":share": share, ":true": true, ":next": version + 1, ":now": receivedAt, ...(version === 0 ? {} : { ":current": version }) },
-      } },
-      // Unconditional, as the close's: the start wrote this row with the task.
-      { Update: {
-        TableName: deps.tableName, Key: taskIndexKey(task.developerId, task.createdAt, task.taskId),
-        UpdateExpression: "SET #shared = :true", ExpressionAttributeNames: { "#shared": "shared" }, ExpressionAttributeValues: { ":true": true },
-      } },
-      ...(share.threadTs === undefined ? [] : [{ Update: {
-        TableName: deps.tableName, Key: sharedTaskKey({ teamId: share.teamId, channelId: share.channelId, threadTs: share.threadTs }),
-        UpdateExpression: "SET #mode = :mode", ConditionExpression: "attribute_exists(pk)",
-        ExpressionAttributeNames: { "#mode": "mode" }, ExpressionAttributeValues: { ":mode": share.mode },
-      } }]),
-      putNew(deps.tableName, { ...idempotencyKey, entityType: "IDEMPOTENCY", action: "share", payloadHash }),
-      // Q9: a share or mode change is audited like the task's other actions.
-      putNew(turns, aiToolTurn({
-        party: partyOfTask(task), turnId: randomUUID(), action: "share", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
-        request: `share ${request.shareMode ?? "default mode"}${request.channel === undefined ? "" : ` in ${request.channel}`}`,
-        response: `Shared in ${label}, ${share.mode === "view" ? "view only" : "open to the channel"}.`,
-      })),
-    ];
+    const items = shareItems(deps, turns, task, share, {
+      idempotencyKey, payloadHash, receivedAt,
+      request: `share ${request.shareMode ?? "default mode"}${request.channel === undefined ? "" : ` in ${request.channel}`}`,
+    });
     try {
       await deps.actions.transact(items);
       task = await loadOwnedTask(deps, caller, taskId);
@@ -1652,11 +1732,275 @@ the notifier writes the record with `closedAt` itself (Task 7), so the thread en
 Run: `npx vitest run tests/contract/developer-task-share-route.test.ts tests/contract/developer-task-close.test.ts tests/contract/developer-task-actions-routes.test.ts`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Write the failing test for the admin path (Q2 as answered, C25)**
+
+```ts
+// tests/contract/admin-task-share-mode.test.ts
+// Spec 025 C25 (owner answer to Q2, 2026-09-29): an AgentX admin may switch a shared task between
+// view only and continue, within the project's policy, through the admin API; nobody else but the
+// owning developer may.
+import { randomUUID } from "node:crypto";
+import { describe, expect, it, vi } from "vitest";
+import { setTaskShareMode } from "../../packages/cli/src/admin/task-share-mode.js";
+import { MAYA, OMAR, createDeveloperTaskBroker, markThreadPosted, registerPolicy } from "../support/developer-task-broker.js";
+import { SLACK_CHANNEL, SLACK_TEAM, call, issuer } from "../support/slack-broker.js";
+
+const ADMIN = { subject: "admin-subject", admin: true };
+
+async function sharedTask(body: Record<string, unknown> = { shareToChannel: true, shareMode: "continue" }) {
+  const harness = await createDeveloperTaskBroker();
+  const response = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix it", client: "claude-code", ...body });
+  const taskId = (response.body.task as { taskId: string }).taskId;
+  const switchMode = (shareMode: string, user: { subject: string; admin?: boolean } = ADMIN, extra: Record<string, unknown> = {}) =>
+    call(harness.handler, { method: "POST", path: `/v1/admin/tasks/${taskId}/share-mode`, user, body: { requestId: randomUUID(), shareMode, ...extra } });
+  const record = () => harness.db.get(`DEVTASK#${taskId}`, "META") as { share?: { mode: string; modeReason?: string } };
+  return { ...harness, taskId, switchMode, record };
+}
+
+describe("an admin switches a shared task's mode (C25)", () => {
+  it("changes the task and its thread, and audits it naming the admin", async () => {
+    const { db, taskId, switchMode, record } = await sharedTask();
+    markThreadPosted(db, taskId);
+    const answer = await switchMode("view");
+    expect(answer.status).toBe(200);
+    expect(answer.body.task).toMatchObject({ taskId, share: { mode: "view" } });
+    expect(record().share).toMatchObject({ mode: "view" });
+    expect(db.get(`SHARED_TASK#${SLACK_TEAM}/${SLACK_CHANNEL}/1695500000.000100`, "META")).toMatchObject({ mode: "view" });
+    expect(db.find((item) => item.pk === `TASK#${taskId}` && item.action === "share")).toEqual([expect.objectContaining({
+      origin: "ai_tool", phase: "accepted", admin: { issuer, subject: "admin-subject" }, developer: expect.objectContaining({ developerId: MAYA.developerId }),
+    })]);
+  });
+
+  it("stays within the project's policy: continue is view where the project does not allow it", async () => {
+    const { handler, switchMode, record } = await sharedTask({ shareToChannel: true });
+    await registerPolicy(handler, 2, { shareMode: { default: "view", allowContinue: false } });
+    expect((await switchMode("continue")).body.task).toMatchObject({ share: { mode: "view", modeReason: "continue_not_allowed" } });
+    expect(record().share).toMatchObject({ mode: "view", modeReason: "continue_not_allowed" });
+  });
+
+  it("refuses a non-admin, and an admin who does not administer the project, and changes nothing", async () => {
+    const { switchMode, record } = await sharedTask();
+    expect((await switchMode("view", { subject: "someone", admin: false })).body.error).toMatchObject({ code: "FORBIDDEN" });
+    expect((await switchMode("view", { subject: "other-admin", admin: true })).body.error).toMatchObject({ code: "FORBIDDEN" });
+    expect(record().share).toMatchObject({ mode: "continue" });
+  });
+
+  it("still refuses a developer who does not own the task, through the developer API", async () => {
+    const { dev, taskId, record } = await sharedTask();
+    expect((await dev(OMAR, "POST", `/v1/dev/tasks/${taskId}/share`, { requestId: randomUUID(), shareMode: "view" })).body.error).toMatchObject({ code: "TASK_NOT_FOUND" });
+    expect(record().share).toMatchObject({ mode: "continue" });
+  });
+
+  it("cannot share a private task or move it, and answers an unknown task TASK_NOT_FOUND", async () => {
+    const priv = await sharedTask({});
+    expect((await priv.switchMode("view")).body.error).toMatchObject({ code: "CONFIG_INVALID", message: "this task is private; only its developer can share it" });
+    const shared = await sharedTask();
+    expect((await shared.switchMode("view", ADMIN, { channel: "C0SECOND001" })).body.error).toMatchObject({ code: "CONFIG_INVALID" });
+    const unknown = await call(shared.handler, { method: "POST", path: `/v1/admin/tasks/${randomUUID()}/share-mode`, user: ADMIN, body: { requestId: randomUUID(), shareMode: "view" } });
+    expect(unknown.body.error).toMatchObject({ code: "TASK_NOT_FOUND" });
+  });
+
+  it("answers a repeated request_id with the task and writes nothing", async () => {
+    const { db, handler, taskId } = await sharedTask();
+    const body = { requestId: randomUUID(), shareMode: "view" };
+    await call(handler, { method: "POST", path: `/v1/admin/tasks/${taskId}/share-mode`, user: ADMIN, body });
+    await call(handler, { method: "POST", path: `/v1/admin/tasks/${taskId}/share-mode`, user: ADMIN, body });
+    expect(db.find((item) => item.pk === `TASK#${taskId}` && item.action === "share")).toHaveLength(1);
+  });
+});
+
+describe("agentx admin task share-mode", () => {
+  it("posts the mode with the admin token and a fresh request ID, and reports AgentX's refusal", async () => {
+    const fetch = vi.fn(async () => Response.json({ task: { taskId: "t" } }));
+    await setTaskShareMode({ controlPlaneUrl: "https://agentx.example.test/", accessToken: "admin-token", taskId: "44444444-4444-4444-8444-444444444444", mode: "view" }, fetch as unknown as typeof globalThis.fetch);
+    const [url, init] = fetch.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("https://agentx.example.test/v1/admin/tasks/44444444-4444-4444-8444-444444444444/share-mode");
+    expect(init.headers).toMatchObject({ authorization: "Bearer admin-token" });
+    expect(JSON.parse(String(init.body))).toMatchObject({ shareMode: "view", requestId: expect.stringMatching(/^[0-9a-f-]{36}$/) });
+    const refused = vi.fn(async () => Response.json({ error: { code: "FORBIDDEN", message: "administrator claim is required" } }, { status: 403 }));
+    await expect(setTaskShareMode({ controlPlaneUrl: "https://agentx.example.test", accessToken: "t", taskId: "x", mode: "continue" }, refused as unknown as typeof globalThis.fetch)).rejects.toThrow(/FORBIDDEN administrator claim is required/);
+  });
+});
+```
+
+- [ ] **Step 7: Run it to verify it fails**
+
+Run: `npx vitest run tests/contract/admin-task-share-mode.test.ts`
+Expected: FAIL, the CLI module does not exist and the admin route answers "this endpoint serves
+administration only".
+
+- [ ] **Step 8: Implement the admin path**
+
+In `packages/broker/src/developer/task-records.ts`, add `admin?: { issuer: string; subject: string; displayName?: string } | undefined;`
+to `aiToolTurn`'s input, and in its record, after `client: party.client,`:
+
+```ts
+    ...(input.admin === undefined ? {} : { admin: {
+      issuer: input.admin.issuer.slice(0, 512), subject: input.admin.subject.slice(0, 256),
+      ...(input.admin.displayName === undefined ? {} : { displayName: input.admin.displayName.slice(0, 200) }),
+    } }),
+```
+
+In `packages/broker/src/aws/developer-tasks.ts`, widen the `deps` parameter type of `parse`, `get`,
+`turnTable`, `iso`, `log`, `taskView`, `syncIndex` and the helpers `taskView` calls from
+`DeveloperTaskRouteDependencies` to `ShareModeDependencies` (they read only those fields; a full
+`DeveloperTaskRouteDependencies` still fits), import `AdminShareModeRequestSchema`, and add:
+
+```ts
+/**
+ * C25 (owner answer to Q2, 2026-09-29): an AgentX admin switches a shared task between view only and
+ * continue, within the latest revision's policy. The broker's admin route has already checked the
+ * admin claim and the project's administrator membership (FR-015). An admin cannot share a private
+ * task (sharing stays the developer's choice) or move it to another channel.
+ */
+export async function adminShareMode(deps: ShareModeDependencies, admin: ShareAdmin, task: DeveloperTaskRecord, value: unknown): Promise<{ task: DeveloperTaskView }> {
+  const request = parse(AdminShareModeRequestSchema, value, deps, "admin-share-mode");
+  const turns = turnTable(deps);
+  const idempotencyKey = { pk: `IDEMPOTENCY#${task.ownerKey}#${task.workspaceId}`, sk: `REQUEST#${request.requestId}` };
+  const payloadHash = hashJson({ action: "share", shareMode: request.shareMode, channel: null, admin: `${admin.issuer}#${admin.subject}` });
+  let current = task;
+  const answer = async () => {
+    const view = await taskView(deps, current, { events: 0, details: false });
+    await syncIndex(deps, current, view.status, view.updatedAt);
+    return { task: view };
+  };
+  const reload = async () => {
+    const fresh = await get<DeveloperTaskRecord>(deps, taskKey(task.taskId));
+    if (fresh === undefined) throw agentXError("TASK_NOT_FOUND", `no task ${task.taskId}`);
+    current = fresh;
+  };
+  const previous = await get<{ payloadHash: string }>(deps, idempotencyKey);
+  if (previous !== undefined) {
+    if (previous.payloadHash !== payloadHash) throw agentXError("IDEMPOTENCY_CONFLICT", "this request_id was already used for another action on this task; use a new request_id");
+    return answer();
+  }
+  for (let attempt = 0; attempt < SHARE_ATTEMPTS; attempt += 1) {
+    if (current.closedAt !== undefined) throw agentXError("CONFIG_INVALID", "this task is closed");
+    if (current.share === undefined) throw agentXError("CONFIG_INVALID", "this task is private; only its developer can share it");
+    const project = await deps.actions.latestProject(current.project);
+    if (project === undefined) throw agentXError("CONFIG_INVALID", "this task's project is no longer registered");
+    const share = withMode(current.share, decideMode(developerTaskPolicy(project.definition), request.shareMode));
+    if (share === "unchanged") return answer();
+    const receivedAt = iso(deps);
+    try {
+      await deps.actions.transact(shareItems(deps, turns, current, share, { idempotencyKey, payloadHash, receivedAt, request: `admin share mode ${request.shareMode}`, admin }));
+      await reload();
+      return answer();
+    } catch (error) {
+      if (!isConditional(error)) throw error;
+      if (await get(deps, idempotencyKey) !== undefined) {
+        await reload();
+        return answer();
+      }
+      await reload();
+    }
+  }
+  throw agentXError("WORKSPACE_BUSY", "the task changed while switching its mode; try again");
+}
+```
+
+In `packages/broker/src/aws/broker.ts`, import `adminShareMode` from `./developer-tasks.js` and
+`taskKey`, `type DeveloperTaskRecord` from `"../developer/task-records.js"` (if not imported
+already), add, among the admin routes before the final `FORBIDDEN`:
+
+```ts
+      // Spec 025 C25: an admin switches a shared task's mode, within its project's policy.
+      const taskShareMode = /^\/v1\/admin\/tasks\/([0-9a-f-]{36})\/share-mode$/.exec(url.pathname);
+      if (request.method === "POST" && taskShareMode?.[1]) {
+        return json(await adminTaskShareMode(dependencies, identity, taskShareMode[1], body, tasks), request.requestId);
+      }
+```
+
+and:
+
+```ts
+/**
+ * Spec 025 C25: the admin claim first, so a non-admin learns nothing about task IDs; then the task;
+ * then the administrator membership on the task's project (FR-015). The audit record names the
+ * admin by issuer and subject, and by the token's name or email claim when it has one.
+ */
+async function adminTaskShareMode(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, taskId: string, value: unknown, tasks: DeveloperTaskActions) {
+  if (!dependencies.developer) throw agentXError("NOT_FOUND", "developer tasks are not set up in this deployment");
+  if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
+  if (task === undefined) throw agentXError("TASK_NOT_FOUND", `no task ${taskId}`);
+  // FR-015's membership check, answered FORBIDDEN (requireAdministrator's missing-membership answer
+  // is NOT_FOUND, which would read as "no such task").
+  const membership = await getMembership(dependencies, identity.ownerKey, task.project);
+  if (membership?.role !== "administrator") throw agentXError("FORBIDDEN", "administrator project membership is required");
+  const claimed = [identity.claims.name, identity.claims.email].find((value): value is string => typeof value === "string" && value.trim() !== "");
+  return adminShareMode(
+    { documentClient: dependencies.documentClient, tableName: dependencies.tableName, actions: tasks, now: Date.now },
+    { issuer: identity.issuer, subject: identity.subject, ...(claimed === undefined ? {} : { displayName: claimed.trim() }) },
+    task,
+    value,
+  );
+}
+```
+
+(`createAwsBrokerHandler` already builds `tasks` with `developerTaskActions(dependencies)`; pass it
+through.)
+
+Create `packages/cli/src/admin/task-share-mode.ts`:
+
+```ts
+// Spec 025 C25: `agentx admin task share-mode`, a person typing an admin command (D12: no
+// confirmation beyond the admin sign-in, like every other `agentx admin` command).
+import { randomUUID } from "node:crypto";
+import { agentXError } from "@agentx/contracts";
+
+export async function setTaskShareMode(
+  input: { controlPlaneUrl: string; accessToken: string; taskId: string; mode: "view" | "continue"; requestId?: string },
+  fetchImplementation: typeof fetch = fetch,
+): Promise<unknown> {
+  const response = await fetchImplementation(
+    `${input.controlPlaneUrl.replace(/\/$/, "")}/v1/admin/tasks/${encodeURIComponent(input.taskId)}/share-mode`,
+    {
+      method: "POST",
+      headers: { authorization: `Bearer ${input.accessToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ requestId: input.requestId ?? randomUUID(), shareMode: input.mode }),
+    },
+  );
+  const result: unknown = await response.json();
+  if (!response.ok) {
+    const error = (result as { error?: { code?: unknown; message?: unknown } }).error;
+    const code = typeof error?.code === "string" ? error.code : `HTTP ${response.status}`;
+    throw agentXError("RUNTIME_UNAVAILABLE", `the share mode change failed: ${code}${typeof error?.message === "string" ? ` ${error.message}` : ""}`);
+  }
+  return result;
+}
+```
+
+In `packages/cli/src/main.ts`, after the `adminWorkspace` commands:
+
+```ts
+  const adminTask = admin.command("task").description("administer tasks started from AI tools");
+  adminTask
+    .command("share-mode")
+    .description("switch a shared task between view only and continue, within its project's policy")
+    .requiredOption("--task <task-id>", "the task to change")
+    .requiredOption("--mode <mode>", "view or continue")
+    .action(async (options: { task: string; mode: string }, command: Command) => {
+      if (options.mode !== "view" && options.mode !== "continue") throw agentXError("CONFIG_INVALID", "--mode must be view or continue");
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      const result = await setTaskShareMode({ controlPlaneUrl: settings.controlPlaneUrl, accessToken, taskId: options.task, mode: options.mode }, services.fetchImplementation);
+      services.stdout.write(formatSuccess(result, globals.json));
+    });
+```
+
+If `tests/contract/cli-main.test.ts` lists the admin commands, append `task share-mode` to that list.
+
+- [ ] **Step 9: Run the tests**
+
+Run: `npx vitest run tests/contract/admin-task-share-mode.test.ts tests/contract/developer-task-share-route.test.ts tests/contract/cli-main.test.ts tests/contract/admin-preparation.test.ts tests/contract/stop-command.test.ts && npm run typecheck`
+Expected: PASS.
+
+- [ ] **Step 10: Commit**
 
 ```bash
-git add packages/broker/src/aws/developer-tasks.ts packages/broker/src/aws/developer-routes.ts tests/support/developer-task-broker.ts tests/contract/developer-task-share-route.test.ts
-git commit -m "feat(broker): share a running task and change its mode (spec 025 FR-030, FR-031)"
+git add packages/broker/src packages/cli/src tests/support/developer-task-broker.ts tests/contract/developer-task-share-route.test.ts tests/contract/admin-task-share-mode.test.ts tests/contract/cli-main.test.ts
+git commit -m "feat(broker, cli): share a running task and change its mode, by its developer or an admin (spec 025 FR-030, FR-031)"
 ```
 
 ---
@@ -4115,7 +4459,7 @@ watched) and **Q5** (the clock starts at the prepare's creation).
 **Interfaces:**
 - Consumes: the task pointer (25b); `failureCategory` reads `setup_failed` for any failed prepare.
 - Produces:
-  - `STUCK_SETUP_MS = 900_000`, `STUCK_SETUP_MESSAGE = "setup did not finish within 15 minutes; close this task and start a new one"`
+  - `STUCK_SETUP_MS = 3_000_000`, `STUCK_SETUP_MESSAGE = "setup did not finish within 50 minutes; close this task and start a new one"`
   - `setupWatchKey(createdAt: string, workspaceId: string): { pk: "SETUP_WATCH"; sk: string }`
   - `sweepStuckSetups(client, tableName: string, now: Date, log?): Promise<{ failed: string[]; settled: number }>`
   - `ReconcilerDependencies.sweepStuckSetups?(now: Date): Promise<{ failed: string[] }>`; `ReconcilerReport.stuckSetups: string[]`; metric `ReconcilerStuckSetups`.
@@ -4142,7 +4486,7 @@ and update the comment above `query` to name both shapes.
 
 ```ts
 // tests/contract/stuck-setup.test.ts
-// Spec 025 FR-055, D21, C17, C18: a developer task's setup is failed 15 minutes after it started.
+// Spec 025 FR-055, D21, C17, C18: a developer task's setup is failed 50 minutes after it started.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { STUCK_SETUP_MESSAGE, sweepStuckSetups } from "../../packages/broker/src/aws/stuck-setup.js";
@@ -4171,10 +4515,10 @@ describe("the setup watch (C17)", () => {
 });
 
 describe("the sweep (FR-055)", () => {
-  it("fails a prepare still running 15 minutes after it started, whatever the instance's health", async () => {
+  it("fails a prepare still running 50 minutes after it started, whatever the instance's health", async () => {
     const { db, sweep, workspaceId, prepareId, watches, dev, taskId } = await starting();
     db.set({ pk: `WORKSPACE#${workspaceId}`, sk: "SESSION", entityType: "SESSION", workspaceId, state: "READY", sessionState: "READY", generation: 1 });
-    expect(await sweep(16)).toEqual({ failed: [workspaceId], settled: 0 });
+    expect(await sweep(51)).toEqual({ failed: [workspaceId], settled: 0 });
     expect(db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${prepareId}`)).toMatchObject({ status: "FAILED", error: STUCK_SETUP_MESSAGE });
     expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "PREPARATION_FAILED" });
     expect(db.get(`WORKSPACE#${workspaceId}`, "META")).not.toHaveProperty("activeOperationId");
@@ -4188,7 +4532,7 @@ describe("the sweep (FR-055)", () => {
 
   it("leaves a younger prepare alone", async () => {
     const { db, sweep, workspaceId, watches } = await starting();
-    expect(await sweep(14)).toEqual({ failed: [], settled: 0 });
+    expect(await sweep(49)).toEqual({ failed: [], settled: 0 });
     expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "PREPARING" });
     expect(watches()).toHaveLength(1);
   });
@@ -4197,7 +4541,7 @@ describe("the sweep (FR-055)", () => {
     const { db, sweep, finish, workspaceId, prepareId, watches } = await starting();
     await finish(workspaceId, prepareId, "SUCCEEDED");
     const before = db.get(`WORKSPACE#${workspaceId}`, "META");
-    expect(await sweep(16)).toEqual({ failed: [], settled: 1 });
+    expect(await sweep(51)).toEqual({ failed: [], settled: 1 });
     expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toEqual(before);
     expect(watches()).toEqual([]);
   });
@@ -4214,17 +4558,17 @@ describe("the sweep (FR-055)", () => {
       }
       return original(command);
     };
-    expect(await sweep(16)).toEqual({ failed: [], settled: 1 });
+    expect(await sweep(51)).toEqual({ failed: [], settled: 1 });
     expect(raced).toBe(true);
     expect(db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${prepareId}`)).toMatchObject({ status: "SUCCEEDED" });
     expect(watches()).toHaveLength(1);
-    expect(await sweep(17)).toEqual({ failed: [], settled: 1 });
+    expect(await sweep(52)).toEqual({ failed: [], settled: 1 });
     expect(watches()).toEqual([]);
   });
 
   it("answers a late SUCCEEDED result for a swept prepare and queues nothing (Review Focus 4)", async () => {
     const { db, sweep, finish, workspaceId, prepareId } = await starting();
-    await sweep(16);
+    await sweep(51);
     await expect(finish(workspaceId, prepareId, "SUCCEEDED")).resolves.toBeDefined();
     expect(db.find((item) => item.entityType === "OPERATION" && item.workspaceId === workspaceId && item.kind === "task")).toHaveLength(0);
     expect(db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${prepareId}`)).toMatchObject({ status: "FAILED", error: STUCK_SETUP_MESSAGE });
@@ -4259,14 +4603,15 @@ Expected: FAIL, `stuck-setup.js` does not exist.
 ```ts
 // packages/broker/src/aws/stuck-setup.ts
 // Spec 025 FR-055, D21, C17: a developer task's setup never stays in PREPARING for good. The start
-// writes a watch; each reconciler run fails a watched prepare still live 15 minutes after it
+// writes a watch; each reconciler run fails a watched prepare still live 50 minutes after it
 // started, whatever the instance's health, and drops every other old watch.
 import { DeleteCommand, GetCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 
 type Client = { send(command: unknown): Promise<unknown> };
 
-export const STUCK_SETUP_MS = 15 * 60_000;
-export const STUCK_SETUP_MESSAGE = "setup did not finish within 15 minutes; close this task and start a new one";
+/** Owner decision, 2026-09-29: raised from 15 minutes because the instance provisioner allows 45. */
+export const STUCK_SETUP_MS = 50 * 60_000;
+export const STUCK_SETUP_MESSAGE = "setup did not finish within 50 minutes; close this task and start a new one";
 export const SETUP_WATCH_PK = "SETUP_WATCH";
 const SWEEP_PAGE = 100;
 
@@ -4373,7 +4718,7 @@ and the conflict path's early return to
 In `packages/broker/src/aws/session-reconciler.ts`:
 - import `sweepStuckSetups` from `./stuck-setup.js`;
 - add `stuckSetups: string[];` to `ReconcilerReport` (initialized `[]`), and
-  `/** Spec 025 FR-055: fails developer-task prepares 15 minutes old; absent in tests that do not need it. */ sweepStuckSetups?: (now: Date) => Promise<{ failed: string[] }>;`
+  `/** Spec 025 FR-055: fails developer-task prepares 50 minutes old; absent in tests that do not need it. */ sweepStuckSetups?: (now: Date) => Promise<{ failed: string[] }>;`
   to `ReconcilerDependencies`;
 - just before `dependencies.emit(...)`:
 
@@ -4404,7 +4749,7 @@ Expected: PASS.
 
 ```bash
 git add packages/broker/src/aws/stuck-setup.ts packages/broker/src/aws/developer-tasks.ts packages/broker/src/aws/broker.ts packages/broker/src/aws/session-reconciler.ts tests/support/fake-dynamodb.ts tests/contract/stuck-setup.test.ts tests/contract/session-reconciler.test.ts
-git commit -m "feat(broker): fail a developer task's setup still running after 15 minutes (spec 025 FR-055)"
+git commit -m "feat(broker): fail a developer task's setup still running after 50 minutes (spec 025 FR-055)"
 ```
 
 ---
@@ -4482,7 +4827,7 @@ In `tests/contract/developer-task-chain.test.ts`:
       db.send = original;
       logged.mockRestore();
     }
-    expect(await sweepStuckSetups(db, "state", new Date(Date.now() + 16 * 60_000))).toMatchObject({ failed: [task.workspaceId] });
+    expect(await sweepStuckSetups(db, "state", new Date(Date.now() + 51 * 60_000))).toMatchObject({ failed: [task.workspaceId] });
     expect(db.get(`WORKSPACE#${task.workspaceId}`, `OPERATION#${prepareId}`)).toMatchObject({ status: "FAILED", error: STUCK_SETUP_MESSAGE });
     expect(taskOperations()).toHaveLength(0);
   });
@@ -5113,7 +5458,10 @@ task records it.
 - [ ] **Step 1: Amend the spec**
   - FR-030: `agentx_share_task`'s output says "the task, with the thread link once AgentX has posted
     it (`agentx_get_task` shows it within seconds)" (Q6); add "Only the developer who owns a task
-    may share it or change its mode" (Q2).
+    may share it; the developer or an AgentX admin may switch a shared task between view only and
+    continue, within the project's `shareMode` policy, the admin through
+    `POST /v1/admin/tasks/{taskId}/share-mode` or `agentx admin task share-mode`, audited with the
+    admin's name" (Q2 as answered, C25).
   - FR-032: add the setup-failure reply (C8).
   - FR-034: "The notifier is triggered by the control plane's state table stream, filtered to task,
     pointer and developer-operation changes, and posts from its own queue; it is the stream's second
@@ -5126,8 +5474,9 @@ task records it.
   - FR-054: "A teammate's `stop` in a continue thread cancels the running task operation, whoever
     started it; `close this workspace` in a shared thread is refused" (Q8, C11).
   - FR-055: "Only developer-task prepares are watched; the sweep runs in the session reconciler,
-    every 10 minutes, so a stuck setup is failed between 15 and 25 minutes after it started" (Q4,
-    C17).
+    every 10 minutes, so a stuck setup is failed between 50 and 60 minutes after it started" (Q4,
+    Q5, C17). The 50-minute limit itself is already in FR-055 and D21 (owner decision, 2026-09-29,
+    written with this plan's answers).
   - Decisions: add **D23** (C7: the stream-triggered notifier with its own queue, and why not a send
     from the broker), **D24** (C1: share state on the task, replaced whole under `shareVersion`), and
     **D25** (C11: the broker resolves a continue thread to the task's owner key; view, closed and
@@ -5175,7 +5524,7 @@ It uses a new environment, `live25c`, in `us-east-1`.
     workspace, a KMS RSA key, the sign-in table, and EC2 worker instances and volumes while tasks
     run;
   - the cost while it exists: about $3 a day for the stacks, the KMS key prorated, the EC2 time of
-    each task, and one setup deliberately left running for up to 25 minutes (Step 9);
+    each task, and one setup deliberately left running for over an hour (Step 9);
   - that everything is torn down in Step 12.
 - [ ] **Step 3: Install.** `node packages/cli/dist/main.js --env live25c init --region us-east-1 --release <scratch>/rel --worker-image <worker digest ref> --slack-image <slack digest ref>`,
   taking Slack at the `developer-signin` step. As admin, register a test project on the owner's test
@@ -5200,7 +5549,11 @@ It uses a new environment, `live25c`, in `us-east-1`.
   Claude Code to continue the task: `TASK_BUSY` names the teammate. Post two mentions quickly as two
   users: they run one after the other (the second says it is waiting). `agentx_get_task` lists the
   channel turns. Then "make the thread view only": the thread says so, and the next mention gets the
-  notice.
+  notice. As a Cognito admin who administers the project, run
+  `agentx --env live25c admin task share-mode --task <id> --mode continue`: the thread says it is
+  open to the channel again, and `agentx admin turns export` shows a `share` record with `admin`.
+  Run the same command signed in as a Cognito user without the admin group: `FORBIDDEN`, and
+  nothing changes (C25).
 - [ ] **Step 7: Required sharing and view only (US3 scenarios 2 and 8).** Register a revision with
   `developerTasks: { share: "required", shareMode: { default: "view", allowContinue: false } }`. Ask
   Claude Code to start a private task in continue mode: the result says shared, view only, with
@@ -5211,9 +5564,9 @@ It uses a new environment, `live25c`, in `us-east-1`.
   (limit 3) and mention AgentX in a new Slack thread as the developer's own Slack user: the reply
   says the AI-tool tasks fill the limit and how to close one (C16). Close them.
 - [ ] **Step 9: The stuck-setup sweep (FR-055).** Register a revision whose setup runs longer than
-  25 minutes (a setup step such as `sleep 1800`; check the setup step's shape in the project schema
-  first) and start a task. After 15 to 25 minutes, `agentx_get_task` shows `FAILED`,
-  `setup_failed`, "setup did not finish within 15 minutes; close this task and start a new one",
+  an hour (a setup step such as `sleep 4200`; check the setup step's shape in the project schema
+  first) and start a task. After 50 to 60 minutes, `agentx_get_task` shows `FAILED`,
+  `setup_failed`, "setup did not finish within 50 minutes; close this task and start a new one",
   and the reconciler's log has `reconciler.stuck_setup_failed`. When the worker finally reports
   (after the sleep), the broker log shows the result answered, with no `IDEMPOTENCY_CONFLICT`. Close
   the task: the slot is free again. Register a revision without the sleep afterwards.
@@ -5274,6 +5627,11 @@ It uses a new environment, `live25c`, in `us-east-1`.
   (Task 10), each added to the test fakes in its own task.
 - **Review Focus.** Each line has its test in the owning task: 1 in Tasks 11 and 16, 2 in Tasks 10
   and 11, 3 in Task 7, 4 in Task 13, 5 in Task 3.
+- **The owner's answers (2026-09-29).** Q2 changed: the admin path is C25, built and tested in
+  Task 4 (an admin switches within policy, audited with `admin`; a non-admin, an admin without the
+  project's administrator membership, and a non-owner developer are refused). The stuck-setup
+  limit is 50 minutes everywhere: C17, the Global Constraints, Task 13's constant, message and
+  tests, Task 14's test, and Task 18's Step 9.
 - **The caller's four carry-overs.** FR-055 and D21: Tasks 13 and 14, with the pinned
   `developer-task-chain.test.ts` test changed deliberately (Task 14 Step 1). The limit reply: Task
   12. `CHANNEL_REQUIRED`: the 25b refusals are replaced (Task 3 Step 5) and the MCP next steps fit

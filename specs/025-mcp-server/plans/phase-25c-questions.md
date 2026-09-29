@@ -1,10 +1,12 @@
 # Phase 25c: Owner Questions
 
-Building phase 25c (sharing a task to its Slack channel, and the stuck-setup sweep) raises nine
-product decisions the spec leaves open. The plan, [phase-25c-sharing.md](phase-25c-sharing.md),
-follows each recommendation below so building need not wait; every task that depends on an answer
-says "Depends on Q<n>". An answer that differs from the recommendation changes the named task
-first, with its test, and Task 17 records the answer in the spec.
+Building phase 25c (sharing a task to its Slack channel, and the stuck-setup sweep) raised nine
+product decisions the spec left open. The owner answered all nine on 2026-09-29: seven as
+recommended, Q2 changed (an AgentX admin may also switch a shared task's mode), and Q7 approved.
+Separately, the owner raised the stuck-setup limit from 15 to 50 minutes, because the instance
+provisioner allows 45; the spec's FR-055 and D21 say so. The plan,
+[phase-25c-sharing.md](phase-25c-sharing.md), follows every answer; every task that depends on one
+says "Depends on Q<n>", and Task 17 records the answers in the spec.
 
 ## Q1. What does a view-only thread say when someone mentions AgentX in it?
 
@@ -26,6 +28,8 @@ one-line change and a test update.
 
 **Depends on it:** Tasks 1, 2, 9, 11.
 
+**Owner answer (2026-09-29):** A, the recommendation, accepted.
+
 ## Q2. Who may switch a shared task between view only and continue?
 
 The spec gives the developer `agentx_share_task` (FR-030) and says the admin sets the policy
@@ -42,6 +46,8 @@ security change (anyone in the channel could open a developer's task to everyone
 later means new checks in the ingress and the broker.
 
 **Depends on it:** Task 4 (and the tool description in Task 15).
+
+**Owner answer (2026-09-29):** changed. The owning developer or an AgentX admin may switch a shared task between view only and continue, within the project's `shareMode` policy. The plan's C25 rules on the smallest safe admin path: `POST /v1/admin/tasks/{taskId}/share-mode` behind FR-015's admin checks, and `agentx admin task share-mode`; mode changes only (no first share, no channel change); audited with a `share` record naming the admin; no MCP admin tool until 25d and 25e.
 
 ## Q3. What happens to a shared thread when the task closes?
 
@@ -62,6 +68,8 @@ means changing the close, the ingress and the broker's identity rules.
 
 **Depends on it:** Tasks 4, 7, 9, 10, 11.
 
+**Owner answer (2026-09-29):** A, the recommendation, accepted.
+
 ## Q4. Does the stuck-setup sweep cover Slack thread setups too?
 
 FR-055 is written about a developer task's workspace; D21 says "fails any prepare older than 15
@@ -78,6 +86,8 @@ failed at 15 minutes, and the Slack path's characterization tests change. Moving
 means writing the watch item in the Slack prepare paths too.
 
 **Depends on it:** Task 13.
+
+**Owner answer (2026-09-29):** A, developer-task setups only, accepted.
 
 ## Q5. When do the 15 minutes start, and are they enough for a cold first setup?
 
@@ -99,6 +109,8 @@ point is one field of the watch item.
 
 **Depends on it:** Task 13.
 
+**Owner answer (2026-09-29):** A, the clock starts at the task's start, accepted. The limit itself was changed from 15 to 50 minutes (owner decision, 2026-09-29), because the provisioner allows 45 and the reconciler runs every 10, so a stuck setup is failed 50 to 60 minutes after it started.
+
 ## Q6. Should the start and share answers wait for the Slack thread link?
 
 FR-030 lists "thread link if shared" in `agentx_start_task`'s output, but the broker cannot post to
@@ -113,6 +125,8 @@ Slack (D11), so the link exists only once the notifier has posted, usually withi
 without a link when Slack is slow. Moving to B later is a small change in the start and share routes.
 
 **Depends on it:** Tasks 3, 4, 15.
+
+**Owner answer (2026-09-29):** A, answer at once, accepted.
 
 ## Q7. Does the developer API version move to 1.2?
 
@@ -129,6 +143,8 @@ approved 25b's move to 1.1 explicitly (SC-008), so this move needs the same appr
 until the admin does. B gives a confusing error for one tool. Either is a one-constant change.
 
 **Depends on it:** Tasks 1, 15.
+
+**Owner answer (2026-09-29):** A, approved: `DEVELOPER_API_VERSION` moves to 1.2.
 
 ## Q8. What does "stop" do in a continue thread?
 
@@ -147,6 +163,8 @@ operation record this plan already writes), a small change.
 
 **Depends on it:** Task 10.
 
+**Owner answer (2026-09-29):** A, a teammate's stop cancels the running operation whoever started it, accepted.
+
 ## Q9. Is sharing a task, or changing its mode, audited?
 
 FR-037 lists start, continue, pull request, cancel and close as the actions that write an
@@ -164,3 +182,5 @@ admin-readable record of a compliance-relevant change (opening a task to a chann
 later is the same one-value change plus the write.
 
 **Depends on it:** Tasks 1, 4.
+
+**Owner answer (2026-09-29):** A, audit a `share` action, accepted.
