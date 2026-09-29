@@ -54,6 +54,7 @@ header p { margin: 0 0 1.5rem; opacity: .75; }
 .hidden { display: none; }
 pre { font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; margin: 0; max-height: 26rem; overflow: auto; white-space: pre-wrap; word-break: break-word; }
 #log { max-height: 18rem; opacity: .85; }
+#outcome-body { white-space: pre-wrap; }
 ol#steps { list-style: none; margin: 0; padding: 0; }
 ol#steps li { display: flex; gap: .6rem; padding: .2rem 0; }
 ol#steps li .mark { flex: none; width: 1.3rem; text-align: center; }

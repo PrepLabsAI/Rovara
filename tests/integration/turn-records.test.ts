@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { agentXError, type SlackRequestMessage, type SlackThreadWorkspaceResult } from "../../packages/contracts/src/index.js";
 import { TurnRecordSchema, type TurnRecord } from "../../packages/contracts/src/turns.js";
 import { processSlackRequest, type ProcessorDependencies, type TurnInput } from "../../packages/slack-service/src/processor.js";
@@ -253,6 +253,10 @@ describe("turn record size", () => {
 
 describe("turn metrics", () => {
   it("emits the Slack service metrics once per written record, never for a duplicate", async () => {
+    // The turn's start and finish times come from new Date(); a frozen clock makes TurnDurationMs 0 on
+    // every machine instead of only on a fast one.
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-09-29T05:00:00Z") });
+    onTestFinished(() => { vi.useRealTimers(); });
     const { dependencies, logs } = harness({
       runTurn: async (input) => {
         input.recorder?.offer({ manifest: "m", tools: [], connectorOf: new Map([["github__list_issues", "github"]]), model: { provider: "p", modelId: "m" } });
@@ -263,6 +267,8 @@ describe("turn metrics", () => {
         input.recorder?.toolStarted({ toolCallId: "3", toolName: "agentx_sync_pull_request", args: {} });
         input.recorder?.toolEnded({ toolCallId: "3", toolName: "agentx_sync_pull_request", isError: true, result: { content: [{ type: "text", text: "Tool agentx_sync_pull_request not found" }] } });
         input.recorder?.agentEnded([{ role: "assistant", content: [], stopReason: "stop" }]);
+        // Real time passes during the turn; only the frozen Date keeps the duration at 0.
+        await new Promise((resolve) => { setTimeout(resolve, 5); });
         return "AgentX completed the request without returning a textual response.";
       },
     });
@@ -271,6 +277,8 @@ describe("turn metrics", () => {
     const metricLines = logs.filter((line) => line.includes("\"event\":\"metric\"")).map((line) => JSON.parse(line) as Record<string, unknown>);
     expect(metricLines).toEqual([
       { event: "metric", metric: "TurnCompleted", count: 1 },
+      // FR-045's slow-turn alarm (spec 015 phase 15d2): every answered or failed turn reports its duration.
+      { event: "metric", metric: "TurnDurationMs", count: 0 },
       { event: "metric", metric: "TurnEmptyResponse", count: 1 },
       { event: "metric", metric: "ToolSchemaError", connector: "github", count: 1 },
       { event: "metric", metric: "ToolSchemaError", connector: "agentx", count: 1 },

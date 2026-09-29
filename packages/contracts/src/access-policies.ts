@@ -45,12 +45,19 @@ export const SERVICE_ROLE_SERVICES: readonly string[] = [
 
 /**
  * Services the default permission boundary allows by wildcard: the service role's own, plus what
- * the environment's roles call (Bedrock models, X-Ray, CodeBuild and API Gateway invoke). STS is
- * not here: sts:* would let a bounded role assume any same-account role that trusts the account,
- * escaping the boundary, so the boundary names sts:GetCallerIdentity alone. The generated test in
- * access-stack.test.ts keeps this list complete and free of unused services.
+ * the environment's roles call (Bedrock models, X-Ray, CodeBuild and API Gateway invoke). STS and
+ * Service Quotas are not here: sts:* would let a bounded role assume any same-account role that
+ * trusts the account, escaping the boundary, and servicequotas:* would let it read every quota in
+ * the account instead of only the two EC2 quotas prerequisites checks; the boundary names
+ * sts:GetCallerIdentity and servicequotas:GetServiceQuota alone (see defaultBoundaryStatements).
+ * Budgets is a wildcard here only as a ceiling (phase 15d2, FR-047). AWS's service reference for
+ * Budgets confirms that ModifyBudget, ViewBudget, TagResource, UntagResource and
+ * ListTagsForResource take the budget/${BudgetName} resource, so the service and operator roles'
+ * own statements name the one monthly budget; the boundary only bounds them and grants nothing by
+ * itself. The generated test in access-stack.test.ts keeps this list complete and free of unused
+ * services.
  */
-export const BOUNDARY_SERVICES: readonly string[] = [...SERVICE_ROLE_SERVICES, "bedrock", "codebuild", "execute-api", "xray"];
+export const BOUNDARY_SERVICES: readonly string[] = [...SERVICE_ROLE_SERVICES, "bedrock", "budgets", "codebuild", "execute-api", "xray"];
 
 /** Service-linked roles the service role may create while deploying. */
 const SERVICE_LINKED_ROLE_SERVICES = ["ecs.amazonaws.com"];
@@ -85,6 +92,14 @@ const INSTANCE_PROFILE_ACTIONS = [
   "iam:TagInstanceProfile",
   "iam:UntagInstanceProfile",
 ];
+
+/**
+ * What AWS::Budgets::Budget needs to create, update, delete and tag the monthly budget (phase
+ * 15d2, FR-047). AWS Budgets has no separate Create/Update/Delete action: ModifyBudget covers all
+ * three, and ViewBudget covers every read. No BudgetsAction permission: this is a plain budget with
+ * notifications, not the separate AWS::Budgets::BudgetsAction resource.
+ */
+const BUDGET_ACTIONS = ["budgets:ModifyBudget", "budgets:ViewBudget", "budgets:TagResource", "budgets:UntagResource", "budgets:ListTagsForResource"];
 
 /** The IAM path every role of an environment's stacks lives under, except the access stack's two roles. */
 export function environmentRolePath(env: string): string {
@@ -157,6 +172,8 @@ export function serviceRoleStatements(scope: PolicyScope): PolicyStatementJson[]
       Resource: `arn:${scope.partition}:iam::${scope.account}:role/aws-service-role/*`,
       Condition: { StringLike: { "iam:AWSServiceName": [...SERVICE_LINKED_ROLE_SERVICES] } },
     },
+    // FR-047: the control-plane stack's monthly budget, and only that one, never budgets:* on *.
+    { Sid: "Budget", Effect: "Allow", Action: [...BUDGET_ACTIONS], Resource: `arn:${scope.partition}:budgets::${scope.account}:budget/agentx-${scope.env}-monthly` },
   ];
 }
 
@@ -173,6 +190,9 @@ export function defaultBoundaryStatements(scope: Pick<PolicyScope, "env" | "part
     { Sid: "Services", Effect: "Allow", Action: BOUNDARY_SERVICES.map((s) => `${s}:*`), Resource: "*" },
     // The operator's identity check; the only STS action any AgentX role uses.
     { Sid: "CallerIdentity", Effect: "Allow", Action: ["sts:GetCallerIdentity"], Resource: "*" },
+    // The operator's EC2 quota reads (prerequisites on a resume); named like CallerIdentity above,
+    // not scoped further, since scoped ARNs in the identity policy already limit it to two quotas.
+    { Sid: "Quotas", Effect: "Allow", Action: ["servicequotas:GetServiceQuota"], Resource: "*" },
     { Sid: "IamRoles", Effect: "Allow", Action: [...ROLE_ACTIONS], Resource: roles },
     { Sid: "IamInstanceProfiles", Effect: "Allow", Action: [...INSTANCE_PROFILE_ACTIONS], Resource: environmentInstanceProfiles(scope) },
     {
@@ -293,6 +313,61 @@ export function operatorRoleStatements(scope: PolicyScope): PolicyStatementJson[
         `arn:${partition}:bedrock:${region}:${account}:inference-profile/*`,
       ],
     },
+    {
+      // FR-018 step 7: the admin user. The identity stack's user pool carries agentx:env (15a's
+      // Tags.of(app)); an exact tag value cannot match another environment. AdminListGroupsForUser
+      // tells whether an existing user is already an administrator before init promotes it.
+      Sid: "AdminUser",
+      Effect: "Allow",
+      Action: ["cognito-idp:AdminGetUser", "cognito-idp:AdminCreateUser", "cognito-idp:AdminAddUserToGroup", "cognito-idp:AdminListGroupsForUser"],
+      Resource: `arn:${partition}:cognito-idp:${region}:${account}:userpool/*`,
+      Condition: { StringEquals: { "aws:ResourceTag/agentx:env": env } },
+    },
+    {
+      // FR-045: read the alert topic. No Publish: the test alarm goes through CloudWatch.
+      Sid: "Alerts",
+      Effect: "Allow",
+      Action: ["sns:ListSubscriptionsByTopic"],
+      Resource: `arn:${partition}:sns:${region}:${account}:agentx-${env}-alerts`,
+    },
+    {
+      // FR-045: subscribe the alert address, but only email (the operator) or https (the alert
+      // webhook): sqs, lambda and sms would let a compromised operator session re-route alerts
+      // somewhere the platform team can't see. A separate statement because sns:Protocol is a
+      // Subscribe-only context key; on Alerts above it would be absent and the condition would
+      // deny those two read actions outright.
+      Sid: "AlertsSubscribe",
+      Effect: "Allow",
+      Action: ["sns:Subscribe"],
+      Resource: `arn:${partition}:sns:${region}:${account}:agentx-${env}-alerts`,
+      Condition: { StringEquals: { "sns:Protocol": ["email", "https"] } },
+    },
+    {
+      // FR-046: agentx alerts test flips this one alarm, named exactly.
+      Sid: "TestAlarm",
+      Effect: "Allow",
+      Action: ["cloudwatch:SetAlarmState", "cloudwatch:DescribeAlarmHistory"],
+      Resource: `arn:${partition}:cloudwatch:${region}:${account}:alarm:agentx-${env}-TestAlarm`,
+    },
+    // FR-047: the alerts step checks the budget CloudFormation made; it never changes it.
+    { Sid: "Budget", Effect: "Allow", Action: ["budgets:ViewBudget"], Resource: `arn:${partition}:budgets::${account}:budget/agentx-${env}-monthly` },
+    // prerequisites.ts checks two EC2 quotas on an operator resume: standard vCPUs (ServiceCode
+    // "ec2", QuotaCode "L-1216C47A") and EC2-VPC Elastic IPs ("L-0263D0A3"). The servicequotas
+    // "quota" resource type's ARN format is
+    // arn:partition:servicequotas:region:account:serviceCode/quotaCode, so this scopes to exactly
+    // those two quotas rather than every quota in the account.
+    {
+      Sid: "Quotas",
+      Effect: "Allow",
+      Action: ["servicequotas:GetServiceQuota"],
+      Resource: [
+        `arn:${partition}:servicequotas:${region}:${account}:ec2/L-1216C47A`,
+        `arn:${partition}:servicequotas:${region}:${account}:ec2/L-0263D0A3`,
+      ],
+    },
+    // The Elastic IP check counts the region's allocated addresses. ec2:DescribeAddresses has no
+    // resource-level permissions, so "*" is its only Resource; it reads, and changes nothing.
+    { Sid: "Addresses", Effect: "Allow", Action: ["ec2:DescribeAddresses"], Resource: "*", Condition: { StringEquals: { "aws:RequestedRegion": region } } },
     { Sid: "Identity", Effect: "Allow", Action: ["sts:GetCallerIdentity"], Resource: "*" },
     {
       Sid: "Logs",

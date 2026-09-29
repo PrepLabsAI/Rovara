@@ -111,10 +111,26 @@ export function slackSecretWithSignIn(existing: string | undefined, client: { cl
   return JSON.stringify({ ...parsedSecret(existing), clientId: client.clientId, clientSecret: client.clientSecret });
 }
 
+/** The bot token in a Slack secret's value, or undefined when it holds none (F25: the one place
+ * that reads it). Callers never put it in an error or a log line. */
+function storedSlackBotToken(raw: string | undefined): string | undefined {
+  const token = parsedSecret(raw).botToken;
+  return typeof token === "string" && token.startsWith("xoxb-") ? token : undefined;
+}
+
+/** The environment's Slack bot token, from agentx/<env>/slack; the error never echoes what the secret holds. */
+export async function readSlackBotToken(secrets: Pick<InitSecrets, "get">, env: string): Promise<string> {
+  const token = storedSlackBotToken(await secrets.get(slackSecretName(env)));
+  if (token === undefined) {
+    throw agentXError("CONFIG_INVALID", `secret ${slackSecretName(env)} holds no Slack bot token; run agentx init again so the Slack app step stores it`);
+  }
+  return token;
+}
+
 /** The workspace (team) ID and granted scopes of the bot token stored in the Slack secret. Never puts the token in an error. */
 export async function readSlackTeamIdFromSecret(input: { secrets: Pick<InitSecrets, "get">; api: SlackApi; secretId: string }): Promise<{ teamId: string; scopes?: string[] }> {
-  const token = parsedSecret(await input.secrets.get(input.secretId)).botToken;
-  if (typeof token !== "string" || !token.startsWith("xoxb-")) {
+  const token = storedSlackBotToken(await input.secrets.get(input.secretId));
+  if (token === undefined) {
     throw new SlackTeamIdError(
       `secret ${input.secretId} has no Slack bot token yet; finish the Slack app step of agentx init first`,
       "no bot token in the Slack secret",

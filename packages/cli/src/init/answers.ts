@@ -4,6 +4,7 @@ import { DEFAULT_BEDROCK_MODELS, OPENROUTER_KEY_MIN_LENGTH } from "@agentx/model
 // key, so it is a secret: it is never a flag value and never stored in the answers.
 import { agentXError, ImageDigest } from "@agentx/contracts";
 import { AlertEmailSchema, GITHUB_LOGIN_PATTERN, ModelsAnswersSchema } from "../deploy/answer-schemas.js";
+import type { BundleAnswers } from "../deploy/export-bundle.js";
 import { SecretAlreadyExistsError } from "../deploy/signing-key.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import { writeInstallAnswers, type InitAnswers } from "./install-state.js";
@@ -29,6 +30,12 @@ export const HAIKU_NOTE =
   "Claude Haiku 4.5 needs Anthropic model access in this account: a one-time use-case form in the Bedrock console. The prerequisite check below tests it.";
 const NO_ALERTS_NOTE = "No alert address: nobody is told when AgentX fails until you add one (agentx config set alerts.address, phase 15e).";
 
+/** FR-047: shown in the plan and repeated by the `alerts` step (Task 12) whenever the budget scope
+ * is "tag", since AWS Budgets reads $0 against a cost allocation tag until someone with billing
+ * rights activates it. */
+export const BUDGET_TAG_NOTE =
+  "The budget counts costs tagged agentx:env. Someone with billing rights must activate that tag once in Billing, Cost allocation tags; it appears there up to 24 hours after the first tagged resource is billed. Until then the budget reads $0. For an account used only by AgentX, --budget-scope account needs no tag.";
+
 export interface InitFlags {
   engine?: "templates" | "cdk";
   identity?: "cognito" | "oidc";
@@ -46,6 +53,9 @@ export interface InitFlags {
   alertWebhook?: SecretSource;
   /** false for --no-alerts */
   alerts?: boolean;
+  /** --budget: whole US dollars a month; "0" for none. */
+  budget?: string;
+  budgetScope?: "tag" | "account";
   githubAccount?: string; githubAccountType?: "organization" | "user"; githubAppName?: string;
   slackAppName?: string; slackAppPostedMessages?: "accept" | "ignore";
   workerImage?: string; slackImage?: string;
@@ -95,6 +105,16 @@ const optionalArn = (pattern: RegExp, what: string) => (value: string): string |
 
 const checkEmail = (value: string): string | undefined => (AlertEmailSchema.safeParse(value).success ? undefined : "must be an email address");
 
+/** FR-047's budget answer: the control plane's own `BudgetMonthlyUsd` template parameter pattern
+ * (no leading zero, "0" alone meaning no budget), and the same maximum as BudgetAnswersSchema
+ * (answer-schemas.ts), so a value the CLI accepts here can never be refused later by the schema
+ * once the plan has already been shown. */
+const MAX_BUDGET_USD = 1_000_000;
+const budgetProblem = (value: string): string | undefined =>
+  (/^(0|[1-9][0-9]{0,6})$/.test(value) && Number(value) <= MAX_BUDGET_USD)
+    ? undefined
+    : `must be a whole number of US dollars from 1 to ${MAX_BUDGET_USD}, or 0 for no budget`;
+
 async function modelChoice(prompter: Prompter, flagValue: string | undefined, question: string, flag: string, choices: ReadonlyArray<{ value: string; label: string }>, defaultValue: string): Promise<string> {
   if (flagValue !== undefined) return flagValue;
   const picked = await prompter.choose<string>(question, [...choices, { value: "other", label: "Another Bedrock model id" }], { flag, defaultValue });
@@ -107,16 +127,137 @@ function digestFlag(value: string | undefined, flag: string): string | undefined
   return value;
 }
 
+/** The engine, identity, models, boundary and operator principal: what an export bundle already
+ * knows (`fixed`), or asked here. */
+type PlatformAnswers = Pick<InitAnswers, "engine" | "identity" | "models" | "permissionsBoundaryArn" | "operatorPrincipalArn">;
+
 export async function collectInitAnswers(input: {
   env: string; region: string; account: string; releaseVersion: string;
   flags: InitFlags; prompter: Prompter; processEnv: NodeJS.ProcessEnv; now: () => number;
   readFile?: (path: string) => Promise<string>;
+  /** An export bundle's answers (`init --resume --from-bundle`): their questions are not asked. */
+  fixed?: BundleAnswers;
 }): Promise<CollectedAnswers> {
   const { flags, prompter } = input;
   const notes: string[] = [];
   const workerImage = digestFlag(flags.workerImage, "--worker-image");
   const slackImage = digestFlag(flags.slackImage, "--slack-image");
 
+  let platform: PlatformAnswers;
+  let openRouterKey: string | undefined;
+  let openRouterProviders: string[] | undefined;
+  if (input.fixed === undefined) {
+    ({ platform, openRouterKey, openRouterProviders } = await askPlatformAnswers(input));
+  } else {
+    // The export took no OpenRouter key (it stores no secret), so a bundle's OpenRouter secret, if
+    // any, is one the team made itself: nothing is stored here.
+    const { engine, identity, models, permissionsBoundaryArn, operatorPrincipalArn } = input.fixed;
+    platform = {
+      engine, identity, models,
+      ...(permissionsBoundaryArn === undefined ? {} : { permissionsBoundaryArn }),
+      ...(operatorPrincipalArn === undefined ? {} : { operatorPrincipalArn }),
+    };
+  }
+  if (platform.models.orchestrator === GLM) notes.push(GLM_NOTE);
+  if (platform.models.classifier === HAIKU) notes.push(HAIKU_NOTE);
+
+  let alert: InitAnswers["alert"] | undefined;
+  let alertWebhook: string | undefined;
+  const emailFlag = "--alert-email (or --alert-webhook-file, --alert-webhook-env, --no-alerts)";
+  const readWebhook = async (source: SecretSource) => checkAlertWebhook(await secretFromSource({
+    what: "alert webhook address", flag: "--alert-webhook", source, processEnv: input.processEnv, prompter,
+    ...(input.readFile === undefined ? {} : { readFile: input.readFile }),
+  }));
+  if (flags.alerts === false) {
+    alert = { kind: "none" };
+  } else if (flags.alertEmail !== undefined) {
+    if (checkEmail(flags.alertEmail) !== undefined) throw agentXError("CONFIG_INVALID", `--alert-email ${flags.alertEmail} is not an email address`);
+    alert = { kind: "email", address: flags.alertEmail };
+  } else if (flags.alertWebhook !== undefined) {
+    alertWebhook = await readWebhook(flags.alertWebhook);
+  } else {
+    const kind = await prompter.choose<"email" | "webhook" | "none">("Where should AgentX send alerts?", [
+      { value: "email", label: "An email address" },
+      { value: "webhook", label: "A PagerDuty or Opsgenie integration address (kept secret)" },
+      { value: "none", label: "Nowhere for now" },
+    ], { flag: emailFlag, defaultValue: "email" });
+    if (kind === "email") {
+      alert = { kind: "email", address: await prompter.ask("Alert email address", { flag: emailFlag, validate: checkEmail }) };
+    } else if (kind === "webhook") {
+      alertWebhook = await readWebhook({});
+    } else {
+      alert = { kind: "none" };
+    }
+  }
+  if (alertWebhook !== undefined) alert = { kind: "webhook", display: webhookDisplay(alertWebhook), secretName: alertWebhookSecretName(input.env) };
+  if (alert === undefined) throw new Error("unreachable: every alert branch sets alert");
+  if (alert.kind === "none") notes.push(NO_ALERTS_NOTE);
+
+  const budgetFlag = "--budget";
+  const rawBudget = flags.budget ?? (await prompter.ask("Monthly AWS budget for this environment, in US dollars (0 for none)", {
+    flag: budgetFlag, defaultValue: "100",
+    validate: budgetProblem,
+  }));
+  const budgetIssue = budgetProblem(rawBudget);
+  if (budgetIssue !== undefined) throw agentXError("CONFIG_INVALID", `--budget ${budgetIssue}`);
+  let budget: InitAnswers["budget"];
+  if (Number(rawBudget) > 0) {
+    const scope = flags.budgetScope ?? (await prompter.choose<"tag" | "account">("Which costs should the budget count?", [
+      { value: "tag", label: "Only this environment's (tagged agentx:env; the tag must be activated in Billing)" },
+      { value: "account", label: "The whole account (for an account used only by AgentX)" },
+    ], { flag: "--budget-scope", defaultValue: "tag" }));
+    budget = { monthlyUsd: Number(rawBudget), scope };
+    if (scope === "tag") notes.push(BUDGET_TAG_NOTE);
+  }
+
+  const githubAccount = flags.githubAccount ?? (await prompter.ask("GitHub organization or user that will own the AgentX GitHub App", {
+    flag: "--github-account", validate: (value) => (GITHUB_LOGIN_PATTERN.test(value) ? undefined : "must be a GitHub organization or user name"),
+  }));
+  if (!GITHUB_LOGIN_PATTERN.test(githubAccount)) throw agentXError("CONFIG_INVALID", `--github-account ${githubAccount} is not a GitHub organization or user name`);
+  const accountType = flags.githubAccountType ?? (await prompter.choose<"organization" | "user">(`Is ${githubAccount} an organization or a personal account?`, [
+    { value: "organization", label: "An organization" },
+    { value: "user", label: "A personal account" },
+  ], { flag: "--github-account-type", defaultValue: "organization" }));
+  const appName = flags.githubAppName ?? (await prompter.ask("GitHub App name (must be unique on GitHub)", {
+    flag: "--github-app-name", defaultValue: `AgentX ${githubAccount} ${input.env}`.slice(0, 34),
+    validate: (value) => (value.length <= 34 ? undefined : "must be at most 34 characters"),
+  }));
+  const slackAppName = flags.slackAppName ?? (await prompter.ask("Slack app name", {
+    flag: "--slack-app-name", defaultValue: "AgentX", validate: (value) => (value.length <= 35 ? undefined : "must be at most 35 characters"),
+  }));
+  const appPostedMessages = flags.slackAppPostedMessages ?? (await prompter.choose<"accept" | "ignore">("Answer mentions people post through other apps with their own Slack token?", [
+    { value: "accept", label: "Yes (accept)" },
+    { value: "ignore", label: "No, only mentions typed in Slack (ignore)" },
+  ], { flag: "--slack-app-posted-messages", defaultValue: "accept" }));
+
+  const answers: InitAnswers = {
+    schemaVersion: 1,
+    env: input.env, region: input.region, account: input.account, engine: platform.engine, releaseVersion: input.releaseVersion,
+    identity: platform.identity,
+    models: platform.models,
+    ...(platform.permissionsBoundaryArn === undefined ? {} : { permissionsBoundaryArn: platform.permissionsBoundaryArn }),
+    ...(platform.operatorPrincipalArn === undefined ? {} : { operatorPrincipalArn: platform.operatorPrincipalArn }),
+    ...(workerImage === undefined && slackImage === undefined
+      ? {}
+      : { images: { ...(workerImage === undefined ? {} : { worker: workerImage }), ...(slackImage === undefined ? {} : { slack: slackImage }) } }),
+    alert,
+    ...(budget === undefined ? {} : { budget }),
+    github: { account: githubAccount, accountType, appName },
+    slack: { appName: slackAppName, appPostedMessages },
+    createdAt: new Date(input.now()).toISOString(),
+  };
+  return {
+    answers, notes,
+    ...(alertWebhook === undefined ? {} : { alertWebhook }),
+    ...(openRouterKey === undefined ? {} : { openRouterKey, ...(openRouterProviders === undefined ? {} : { openRouterProviders }) }),
+  };
+}
+
+/** The questions an export bundle answers instead (engine, identity, models, boundary, operator). */
+async function askPlatformAnswers(
+  input: { env: string; region: string; account: string; flags: InitFlags; prompter: Prompter; processEnv: NodeJS.ProcessEnv; readFile?: (path: string) => Promise<string> },
+): Promise<{ platform: PlatformAnswers; openRouterKey?: string; openRouterProviders?: string[] }> {
+  const { flags, prompter } = input;
   const engine = flags.engine ?? (await prompter.choose<"templates" | "cdk">("Deploy engine", [
     { value: "templates", label: "templates: published CloudFormation templates, no CDK setup (recommended)" },
     { value: "cdk", label: "cdk: deploy from AgentX's CDK code at the release tag" },
@@ -189,9 +330,6 @@ export async function collectInitAnswers(input: {
   if (!parsedModels.success) throw agentXError("CONFIG_INVALID", "invalid model configuration; check providers and the OpenRouter secret ARN/provider slugs");
   const models: InitAnswers["models"] = secretArn === undefined ? ModelsAnswersSchema.parse(modelsInput) : parsedModels.data;
 
-  if (orchestrator === GLM) notes.push(GLM_NOTE);
-  if (classifier === HAIKU) notes.push(HAIKU_NOTE);
-
   const boundary = flags.permissionBoundary ?? (await prompter.ask("Permission boundary policy ARN (Enter for AgentX's default boundary)", {
     flag: "--permission-boundary", defaultValue: "", validate: optionalArn(/^arn:aws[a-z-]*:iam::\d{12}:policy\/.+$/, "an IAM policy ARN"),
   }));
@@ -199,76 +337,12 @@ export async function collectInitAnswers(input: {
     flag: "--operator-principal", defaultValue: "", validate: optionalArn(/^arn:aws[a-z-]*:(iam|sts)::\d{12}:.+$/, "an IAM principal ARN"),
   }));
 
-  let alert: InitAnswers["alert"] | undefined;
-  let alertWebhook: string | undefined;
-  const emailFlag = "--alert-email (or --alert-webhook-file, --alert-webhook-env, --no-alerts)";
-  const readWebhook = async (source: SecretSource) => checkAlertWebhook(await secretFromSource({
-    what: "alert webhook address", flag: "--alert-webhook", source, processEnv: input.processEnv, prompter,
-    ...(input.readFile === undefined ? {} : { readFile: input.readFile }),
-  }));
-  if (flags.alerts === false) {
-    alert = { kind: "none" };
-  } else if (flags.alertEmail !== undefined) {
-    if (checkEmail(flags.alertEmail) !== undefined) throw agentXError("CONFIG_INVALID", `--alert-email ${flags.alertEmail} is not an email address`);
-    alert = { kind: "email", address: flags.alertEmail };
-  } else if (flags.alertWebhook !== undefined) {
-    alertWebhook = await readWebhook(flags.alertWebhook);
-  } else {
-    const kind = await prompter.choose<"email" | "webhook" | "none">("Where should AgentX send alerts?", [
-      { value: "email", label: "An email address" },
-      { value: "webhook", label: "A PagerDuty or Opsgenie integration address (kept secret)" },
-      { value: "none", label: "Nowhere for now" },
-    ], { flag: emailFlag, defaultValue: "email" });
-    if (kind === "email") {
-      alert = { kind: "email", address: await prompter.ask("Alert email address", { flag: emailFlag, validate: checkEmail }) };
-    } else if (kind === "webhook") {
-      alertWebhook = await readWebhook({});
-    } else {
-      alert = { kind: "none" };
-    }
-  }
-  if (alertWebhook !== undefined) alert = { kind: "webhook", display: webhookDisplay(alertWebhook), secretName: alertWebhookSecretName(input.env) };
-  if (alert === undefined) throw new Error("unreachable: every alert branch sets alert");
-  if (alert.kind === "none") notes.push(NO_ALERTS_NOTE);
-
-  const githubAccount = flags.githubAccount ?? (await prompter.ask("GitHub organization or user that will own the AgentX GitHub App", {
-    flag: "--github-account", validate: (value) => (GITHUB_LOGIN_PATTERN.test(value) ? undefined : "must be a GitHub organization or user name"),
-  }));
-  if (!GITHUB_LOGIN_PATTERN.test(githubAccount)) throw agentXError("CONFIG_INVALID", `--github-account ${githubAccount} is not a GitHub organization or user name`);
-  const accountType = flags.githubAccountType ?? (await prompter.choose<"organization" | "user">(`Is ${githubAccount} an organization or a personal account?`, [
-    { value: "organization", label: "An organization" },
-    { value: "user", label: "A personal account" },
-  ], { flag: "--github-account-type", defaultValue: "organization" }));
-  const appName = flags.githubAppName ?? (await prompter.ask("GitHub App name (must be unique on GitHub)", {
-    flag: "--github-app-name", defaultValue: `AgentX ${githubAccount} ${input.env}`.slice(0, 34),
-    validate: (value) => (value.length <= 34 ? undefined : "must be at most 34 characters"),
-  }));
-  const slackAppName = flags.slackAppName ?? (await prompter.ask("Slack app name", {
-    flag: "--slack-app-name", defaultValue: "AgentX", validate: (value) => (value.length <= 35 ? undefined : "must be at most 35 characters"),
-  }));
-  const appPostedMessages = flags.slackAppPostedMessages ?? (await prompter.choose<"accept" | "ignore">("Answer mentions people post through other apps with their own Slack token?", [
-    { value: "accept", label: "Yes (accept)" },
-    { value: "ignore", label: "No, only mentions typed in Slack (ignore)" },
-  ], { flag: "--slack-app-posted-messages", defaultValue: "accept" }));
-
-  const answers: InitAnswers = {
-    schemaVersion: 1,
-    env: input.env, region: input.region, account: input.account, engine, releaseVersion: input.releaseVersion,
-    identity,
-    models,
-    ...(boundary === "" ? {} : { permissionsBoundaryArn: boundary }),
-    ...(operator === "" ? {} : { operatorPrincipalArn: operator }),
-    ...(workerImage === undefined && slackImage === undefined
-      ? {}
-      : { images: { ...(workerImage === undefined ? {} : { worker: workerImage }), ...(slackImage === undefined ? {} : { slack: slackImage }) } }),
-    alert,
-    github: { account: githubAccount, accountType, appName },
-    slack: { appName: slackAppName, appPostedMessages },
-    createdAt: new Date(input.now()).toISOString(),
-  };
   return {
-    answers, notes,
-    ...(alertWebhook === undefined ? {} : { alertWebhook }),
+    platform: {
+      engine, identity, models,
+      ...(boundary === "" ? {} : { permissionsBoundaryArn: boundary }),
+      ...(operator === "" ? {} : { operatorPrincipalArn: operator }),
+    },
     ...(openRouterKey === undefined ? {} : { openRouterKey, ...(openRouterProviders === undefined ? {} : { openRouterProviders }) }),
   };
 }
@@ -315,6 +389,8 @@ const RESUME_CHECKS: Array<{ flag: string; key: keyof InitFlags; kind?: ResumeCh
   { flag: "--permission-boundary", key: "permissionBoundary", stored: (a) => a.permissionsBoundaryArn ?? "" },
   { flag: "--operator-principal", key: "operatorPrincipal", stored: (a) => a.operatorPrincipalArn ?? "" },
   { flag: "--alert-email", key: "alertEmail", kind: "email", stored: (a) => (a.alert.kind === "email" ? a.alert.address : undefined) },
+  { flag: "--budget", key: "budget", stored: (a) => String(a.budget?.monthlyUsd ?? 0) },
+  { flag: "--budget-scope", key: "budgetScope", stored: (a) => a.budget?.scope },
   { flag: "--github-account", key: "githubAccount", kind: "login", stored: (a) => a.github.account },
   { flag: "--github-account-type", key: "githubAccountType", stored: (a) => a.github.accountType },
   { flag: "--github-app-name", key: "githubAppName", stored: (a) => a.github.appName },

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
+import type { CreateSecretCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import {
-  callbackSigningKey, callbackSigningKeySecretName, SecretAlreadyExistsError, secretsManagerValueStore, type SecretValueStore,
+  callbackSigningKey, callbackSigningKeySecretName, secretsManagerValueStore, secretTags, SecretAlreadyExistsError, type SecretValueStore,
 } from "../../packages/cli/src/deploy/signing-key.js";
 
 /** An SDK-shaped error: the SDK sets `name` to the service's error code. */
@@ -126,5 +126,26 @@ describe("callbackSigningKey", () => {
       },
     };
     await expect(callbackSigningKey(store, "staging")).rejects.toBeInstanceOf(SecretAlreadyExistsError);
+  });
+});
+
+describe("secrets the CLI creates carry agentx:env (FR-047)", () => {
+  it("tags a secret under agentx/<env>/ with its environment", async () => {
+    const sent: unknown[] = [];
+    const client = { send: async (command: unknown) => { sent.push(command); return {}; } };
+    await secretsManagerValueStore(client as never).create("agentx/staging/connectors/linear", "{}");
+    const input = (sent[0] as CreateSecretCommand).input;
+    expect(input.Tags).toEqual([{ Key: "agentx:env", Value: "staging" }]);
+  });
+
+  it("adds no tag to the legacy connector secret name", () => {
+    expect(secretTags("agentx/connectors/linear-payments")).toEqual([]);
+  });
+
+  // Fix round 1: a name that is neither agentx/<env>/... nor the legacy agentx/connectors/... is a
+  // bug in the caller (a mistyped secret name), not a value to leave silently untagged.
+  it("refuses a malformed secret name instead of silently leaving it untagged", () => {
+    expect(() => secretTags("something-else")).toThrow("CONFIG_INVALID");
+    expect(() => secretTags("something-else")).toThrow("something-else");
   });
 });

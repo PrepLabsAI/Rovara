@@ -46,6 +46,8 @@ export interface InstallAnswers {
   slackAppPostedMessages?: "accept" | "ignore";
   /** Spec 025 R7: the stored developer sign-in; deployEnvironment reads it from SSM when absent. */
   developerSignIn?: StoredDeveloperSignIn;
+  /** FR-047's budget; absent means none (the template's BudgetMonthlyUsd default, 0). */
+  budget?: { monthlyUsd: number; scope: "tag" | "account" };
 }
 
 /** The shortest callback signing key the control plane accepts. */
@@ -217,6 +219,7 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
         // The EC2 session lifecycle (#83) runs in the foundation's network with its key and role.
         ...Object.fromEntries(CONTROL_PLANE_FOUNDATION_PARAMETERS.map((name) => [name, required(outputs, "foundation", name, answers.env)])),
         ...(answers.slackAppPostedMessages === undefined ? {} : { SlackAppPostedMessages: answers.slackAppPostedMessages }),
+        ...(answers.budget === undefined ? {} : { BudgetMonthlyUsd: String(answers.budget.monthlyUsd), BudgetScope: answers.budget.scope }),
         // F24: only when a stored sign-in choice is actually given; the template's own defaults
         // (sign-in off) are otherwise left untouched, and only the seven keys the control-plane
         // template declares (infra/lib/developer-signin.ts) are ever added here.
@@ -245,6 +248,7 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
         TurnRecordsTableName: required(outputs, "control-plane", "TurnRecordsTableName", answers.env),
         ThreadSessionBucketName: required(outputs, "control-plane", "SlackThreadSessionBucketName", answers.env),
         SlackSecretArn: required(outputs, "control-plane", "SlackSecretArn", answers.env),
+        OperatorAlertsTopicArn: required(outputs, "control-plane", "OperatorAlertsTopicArn", answers.env),
         VpcId: required(outputs, "foundation", "VpcId", answers.env),
         PrivateSubnetIds: required(outputs, "foundation", "PrivateSubnetIds", answers.env),
         ModelProvider: answers.models.providers?.orchestrator ?? "amazon-bedrock",

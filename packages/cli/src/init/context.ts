@@ -6,6 +6,7 @@ import type { PreparedDeployment } from "../deploy/commands.js";
 import type { LoadedRelease } from "../deploy/release.js";
 import { secretsManagerValueStore, type SecretValueStore } from "../deploy/signing-key.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
+import type { AdminSession, SetupServices } from "../setup/services.js";
 import type { SigninFlags } from "../signin/collect.js";
 import type { InitAnswers } from "./install-state.js";
 import type { Prompter, SecretSource } from "./prompts.js";
@@ -41,17 +42,28 @@ export function secretsManagerInitSecrets(client: SecretsManagerClient): InitSec
 export interface StackStatusReader {
   /** The stack's StackStatus, or undefined when it does not exist. */
   status(stackName: string): Promise<string | undefined>;
+  /** The stack's parameters, or undefined when it does not exist. Optional: a reader without it
+   * skips the checks that need it. */
+  parameters?(stackName: string): Promise<Record<string, string> | undefined>;
 }
 
 export function cloudFormationStatusReader(client: CloudFormationClient): StackStatusReader {
+  const describe = async (stackName: string) => {
+    try {
+      return (await client.send(new DescribeStacksCommand({ StackName: stackName }))).Stacks?.[0];
+    } catch (error) {
+      if (errorName(error) === "ValidationError" && /does not exist/.test((error as Error).message)) return undefined;
+      throw error;
+    }
+  };
   return {
     async status(stackName) {
-      try {
-        return (await client.send(new DescribeStacksCommand({ StackName: stackName }))).Stacks?.[0]?.StackStatus;
-      } catch (error) {
-        if (errorName(error) === "ValidationError" && /does not exist/.test((error as Error).message)) return undefined;
-        throw error;
-      }
+      return (await describe(stackName))?.StackStatus;
+    },
+    async parameters(stackName) {
+      const stack = await describe(stackName);
+      if (stack === undefined) return undefined;
+      return Object.fromEntries((stack.Parameters ?? []).map((parameter) => [parameter.ParameterKey ?? "", parameter.ParameterValue ?? ""]));
     },
   };
 }
@@ -61,6 +73,13 @@ export interface SecretFlags {
   slackClientSecret?: SecretSource; oidcClientSecret?: SecretSource;
 }
 export interface PreMadeGitHubApp { appId: string; installationId: string }
+
+/** Phase 15d2's answers for the finishing steps, from flags (every one also has a prompt). */
+export interface FinishFlags {
+  adminEmail?: string; projectName?: string; repository?: string; setupCommand?: string; testCommand?: string; channel?: string;
+  connectors?: string; linearKey?: SecretSource; jiraToken?: SecretSource; jiraSite?: string; jiraProject?: string;
+  asanaClientId?: string; asanaClientSecret?: SecretSource; asanaBotEmail?: string; asanaProject?: string; linearTeam?: string;
+}
 
 // write, now and sleep are function-typed properties rather than methods, so steps can pass them
 // on (as `write: context.write`) without an unbound-method lint error.
@@ -94,4 +113,11 @@ export interface InitContext {
   /** True when this run already ran checkPrerequisites before the plan. */
   prerequisitesPassed: boolean;
   runPrerequisites(): Promise<void>;
+  /** Phase 15d2's injected interfaces (setup/services.ts). */
+  setup: SetupServices;
+  /** The admin's control-plane session: the stored token when still good, else a new sign-in.
+   * Not memoized: each call reads the token store and checks the admin route once. */
+  adminSession: () => Promise<AdminSession>;
+  /** Phase 15d2's answers for the finishing steps, from flags (every one also has a prompt). */
+  flags: FinishFlags;
 }

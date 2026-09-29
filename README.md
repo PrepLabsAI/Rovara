@@ -54,8 +54,9 @@ its request path, and how environments are installed and torn down.
 ## Install AgentX in your AWS account
 
 `agentx init` installs a complete AgentX environment in your own AWS account, step by step: its
-stacks, its own GitHub App and Slack app, and developer sign-in. It prints everything it will
-create and an estimated monthly cost before it creates anything, and running it again resumes
+stacks, its own GitHub App and Slack app, developer sign-in, your first project and its Slack
+channel, and, if you want them now, the Linear, Jira and Asana connectors. It prints everything it
+will create and an estimated monthly cost before it creates anything, and running it again resumes
 where it stopped.
 
 **Status:** no AgentX release is published yet (the public image registry and the npm package are
@@ -95,15 +96,24 @@ node packages/cli/dist/main.js --env <name> init --region us-east-1 --release ./
 5. creates the Slack app from AgentX's manifest; you install it and paste its tokens into hidden
    prompts;
 6. deploys the Slack service and checks that Slack can reach it;
-7. sets up developer sign-in: Slack, your company's sign-in (OIDC), or both.
+7. sets up developer sign-in: Slack, your company's sign-in (OIDC), or both;
+8. creates your admin user and signs you in;
+9. sets up your first project (on EC2 workers) and its Slack channel;
+10. offers the Linear, Jira and Asana connectors;
+11. subscribes alerts, sets the monthly budget and sends a test alarm;
+12. ends once a person mentions the bot in the channel and gets a threaded reply, and prints the
+    command developers use to sign in.
 
 Secrets never go on the command line: each comes from a hidden prompt, a file you point to, or an
-environment variable, and `init` stores it in AWS Secrets Manager, never in its own settings. A platform team that must review
-IAM first can use `agentx init --export <dir>` for a bundle they deploy themselves.
+environment variable, and `init` stores it in AWS Secrets Manager, never in its own settings. A
+platform team that must review IAM first can use `agentx init --export <dir>` for a bundle they
+deploy themselves; the operator then continues with `agentx init --resume --env <name> --region
+<region> --from-bundle <dir>`.
 
-Until a later release adds them to `init`, finish by hand: create your admin user, sign in with
-`agentx login --env <name>`, then register a project and bind its Slack channel (section 2 below).
-`init` prints these steps at the end.
+After the install, day-2 work runs with the operator role that `init` created: `agentx --env
+<name> project add` and `agentx --env <name> channel add` for another project and channel; `agentx
+--env <name> connector add linear|jira|asana` to add a connector later; `agentx --env <name> alerts
+test` to send another test alarm.
 
 Developers then sign in from their own machines with `agentx login <control plane URL>`, with no
 AWS credentials; `agentx whoami` shows which projects they can use, and `agentx workspaces` opens a
@@ -204,7 +214,8 @@ agentx admin workspace cancel --workspace <workspace-id>
 ```
 
 Run `agentx --help` or `agentx <command> --help` for the complete surface: `init`, `deploy`,
-`env`, `signin`, `login`, `logout`, `whoami`, `admin project register`,
+`env`, `signin`, `project add`, `channel add`, `connector add linear|jira|asana`, `alerts test`,
+`login`, `logout`, `whoami`, `admin project register`,
 `admin workspace cancel|stop`, and `admin slack bind|unbind`. Developer commands (`login <url>`,
 `whoami`, `logout`) only sign in and show access; coding work happens in Slack. Handing tasks to
 AgentX from an AI tool arrives in a later release (spec 025, phase 25b).

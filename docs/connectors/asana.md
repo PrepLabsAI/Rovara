@@ -5,6 +5,11 @@ own Asana app and its own bot user, stores the app's client secret and the bot u
 token in your own AWS Secrets Manager, and registers them with `agentx admin credential authorize`.
 This guide walks you through that, end to end, for one Asana project.
 
+`agentx connector add asana --project <name>` walks you through this guide, reads the credential
+from a hidden prompt, tests it, and registers the project's next revision. The steps below are what
+it does, for doing it by hand or understanding it. The command signs the bot in with
+`--no-browser` and `--expect-account` already set, as Step 4 below explains.
+
 ## What you get
 
 AgentX can search, list, read, create, update and comment on Asana tasks in one project from
@@ -40,7 +45,8 @@ You need:
 - An AgentX control plane you can reach with `agentx login` as an administrator.
 - AWS credentials for the control plane's account and region that can create, read, write and tag
   secrets: `secretsmanager:CreateSecret`, `GetSecretValue`, `PutSecretValue` and `TagResource` on
-  `agentx/connectors/*`.
+  `agentx/<env>/connectors/*` for a named environment, or `agentx/connectors/*` for the legacy
+  default deployment.
 - A browser on the machine where you run `agentx`, and local port 8765 free.
 - `jq` (included in macOS 15 and later).
 
@@ -77,15 +83,17 @@ it in the developer console, then repeat Steps 3 and 4.
 
 ## Step 3: Store the app's client in Secrets Manager
 
-The secret name must start with `agentx/connectors/`. Copy the client secret to the clipboard, then
-run this. It asks for the client ID, which is not secret, and reads the client secret from the
+The secret name must start with `agentx/<env>/connectors/` for a named environment (add `--env
+<name>` to the commands on this page); the legacy default deployment, adopted before named
+environments existed, keeps `agentx/connectors/` instead. Copy the client secret to the clipboard,
+then run this. It asks for the client ID, which is not secret, and reads the client secret from the
 clipboard so it never appears in your shell history:
 
 ```sh
 export AWS_PROFILE=<your deployer profile> AWS_REGION=<your region>
 printf 'Asana client ID: '; read -r ASANA_CLIENT_ID
 pbpaste | tr -d '\n' | jq -Rc --arg id "$ASANA_CLIENT_ID" '{clientId: $id, clientSecret: .}' \
-  | aws secretsmanager create-secret --name agentx/connectors/asana-bot \
+  | aws secretsmanager create-secret --name agentx/<env>/connectors/asana-bot \
       --tags Key=agentx-writable,Value=refresh-token --secret-string file:///dev/stdin
 pbcopy < /dev/null
 ```
@@ -108,7 +116,7 @@ The sign-in must be the bot user's, not yours. Run, with the bot user's email:
 
 ```sh
 agentx admin credential authorize --ref asana-bot \
-  --secret agentx/connectors/asana-bot --provider asana \
+  --secret agentx/<env>/connectors/asana-bot --provider asana \
   --no-browser --expect-account <bot user's email>
 ```
 
@@ -139,7 +147,7 @@ received the sign-in", and the command prints which Asana account signed in, the
 
 ```text
 Signed in to Asana as AgentX Bot <agentx-bot@example.com>. This must be the connector's bot user; if it is not, run the command again with the sign-in URL opened in a private window signed in as the bot user.
-Stored the refresh token in agentx/connectors/asana-bot and registered asana-bot as oauth-refresh-token.
+Stored the refresh token in agentx/<env>/connectors/asana-bot and registered asana-bot as oauth-refresh-token.
 ```
 
 Check that the "Signed in to Asana as" line names the bot user. With `--expect-account`, any other
@@ -168,7 +176,7 @@ the job without a new sign-in:
 
 ```sh
 agentx admin credential register --ref asana-bot --type oauth-refresh-token \
-  --secret agentx/connectors/asana-bot
+  --secret agentx/<env>/connectors/asana-bot
 ```
 
 If you run `agentx` on a remote machine over SSH, forward the port first:
@@ -311,8 +319,15 @@ action policy is needed for this.
 If the bot user's access is removed, its password is reset or the app's client secret changes, the
 refresh token stops working. AgentX then answers that Asana is not connected and names the fix:
 run Step 4 again. If you reset the client secret, first update the secret's `clientSecret` with
-Step 3's pipe, using `aws secretsmanager put-secret-value --secret-id agentx/connectors/asana-bot`
+Step 3's pipe, using `aws secretsmanager put-secret-value --secret-id agentx/<env>/connectors/asana-bot`
 in place of `create-secret` and dropping `--tags`, then run Step 4.
+
+Running Step 4 again to re-authorize has a brief rotation window: Asana issues a new refresh token
+and kills the old one the moment the new sign-in exchanges its code, but AgentX writes the new
+token to the secret only after that exchange succeeds. If the broker refreshes the connector's
+access token in that narrow window, it still reads the old, now-dead token from the secret and the
+connector reports not connected until the write lands, normally within a second or two. If it does
+not clear on its own, run Step 4 again.
 
 To disconnect AgentX, signed in as the bot user, remove the app's access in Asana's account
 settings, then delete the secret.
@@ -362,7 +377,7 @@ settings, then delete the secret.
   remove the AgentX app from your own authorized apps in Asana's settings.
 - **"secret ... holds binary data, not a JSON string".** The secret was stored as binary. Store it
   again as a JSON string with Step 3's pipe, using `aws secretsmanager put-secret-value --secret-id
-  agentx/connectors/asana-bot` in place of `create-secret` and dropping `--tags`.
+  agentx/<env>/connectors/asana-bot` in place of `create-secret` and dropping `--tags`.
 - **The error says the secret "was not found" and "the control plane reads secrets in its own AWS
   region".** The sign-in stored the token in the region your AWS configuration points at, and the
   control plane runs in another. Running `register` again fails the same way. Create the secret in

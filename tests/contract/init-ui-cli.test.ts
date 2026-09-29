@@ -2,7 +2,7 @@
 // the terminal after the command. The wizard server and the GitHub manifest listener are both
 // real, on 127.0.0.1; every AWS, GitHub, Slack and clock dependency is injected, so nothing here
 // reaches AWS, GitHub or Slack.
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,6 +20,7 @@ import {
 import { fakeWizardOperator } from "../support/wizard-browser.js";
 import { SIGN_IN_PARAMETERS, fakeCloudFormation } from "../support/fake-cloudformation.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
+import { ADMIN_EMAIL, FOUNDATION_OUTPUTS, fakeAlerts, fakeControlPlane, fakeRepositories, fakeSlackChannels, setupServices, turn } from "../support/setup-fakes.js";
 
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
@@ -42,11 +43,26 @@ async function releaseDir(): Promise<string> {
   return dir;
 }
 
-// The same answers the terminal path's tests script, in the same order: `agentx init --ui` asks
-// exactly the questions it always asked, only on a page.
-const FIRST_RUN = ["", "", "", "", "", "", "", "", "", "ops@example.com", "acme", "", "", "", "", true];
+// The same answers the terminal path's tests script (init-cli.test.ts), in the same order: `agentx
+// init --ui` asks exactly the questions it always asked, only on a page. FIRST_RUN includes the
+// budget's amount and scope after the alert address; FINISH is the finishing steps (phase 15d2):
+// admin email; repository; project name; use the proposed commands; channel; the three connector
+// offers; "did the test alarm arrive?".
+const FIRST_RUN = ["", "", "", "", "", "", "", "", "", "ops@example.com", "", "", "acme", "", "", "", "", true];
 const SLACK = ["installed", TEST_BOT_TOKEN, TEST_SIGNING_SECRET, true, true];
 const SIGNIN = ["", "1111111111.2222222222222", "fedcba9876543210fedcba9876543210", true];
+const FINISH = [ADMIN_EMAIL, "acme/payments-api", "", true, "payments", false, false, false, true];
+const LINEAR_KEY = `lin_api_${"k".repeat(40)}SECRETlinearKEY`;
+// FINISH with Linear connected: yes to the offer, the key (typed on the page), the team (the
+// default, the key's only team), then no to Jira and Asana.
+const FINISH_WITH_LINEAR = [ADMIN_EMAIL, "acme/payments-api", "", true, "payments", true, LINEAR_KEY, "", false, false, true];
+
+/** What the finishing steps read from the stacks: every deployed output, with the foundation's EC2
+ * worker outputs as the real foundation stack has them (allStackOutputs's are placeholders). */
+async function finishStackOutputs(name: string): Promise<Record<string, string> | undefined> {
+  const outputs = allStackOutputs()[name];
+  return outputs === undefined || name !== environmentStackName("staging", "foundation") ? outputs : { ...outputs, ...FOUNDATION_OUTPUTS };
+}
 
 async function harness() {
   let clock = T0;
@@ -58,6 +74,20 @@ async function harness() {
   const err: string[] = [];
   const home = await tmp("agentx-init-ui-home-");
   const release = await releaseDir();
+  // The finishing steps' services, faked as the terminal path's tests fake them, so a run that
+  // finishes reaches no AWS, GitHub or Slack: one repository, the payments channel, a confirmed
+  // alert subscription and the $100 budget FIRST_RUN takes, and a turn received a day after T0.
+  const projects = await tmp("agentx-init-ui-projects-");
+  const plane = fakeControlPlane();
+  plane.turns = [turn({ subject: "T0TEAM/C0PAY00001/1790000000.000100", receivedAt: new Date(T0 + 86_400_000).toISOString() })];
+  const setup = setupServices({
+    fetch: plane.fetch,
+    repositories: fakeRepositories({ "acme/payments-api": { files: { "go.mod": "module example.com/pay" } } }),
+    slackChannels: fakeSlackChannels([{ id: "C0PAY00001", name: "payments", isPrivate: false, isMember: true }]),
+    alerts: fakeAlerts({ confirmAfterPolls: 0, budgetUsd: 100 }),
+    stackOutputs: finishStackOutputs,
+    configDir: projects,
+  });
   const base: InitCliDependencies = {
     deploy: { identity: { get: async () => ({ account: "123456789012", arn: HOLDER }) }, store, secrets, deployer },
     initSecrets: secrets,
@@ -73,6 +103,7 @@ async function harness() {
     sleep: async (ms) => { clock += ms; },
     now: () => clock,
     processEnv: {},
+    setup,
   };
   const run = (argv: string[], overrides: Partial<InitCliDependencies> = {}) =>
     executeCli(["--env", "staging", "init", "--release", release, "--region", "us-east-1", ...argv], {
@@ -89,16 +120,21 @@ async function harness() {
     return { code, operator };
   };
   return {
-    store, secrets, deployer, github, out, err, home, run, runUi,
+    store, secrets, deployer, github, plane, out, err, home, run, runUi,
     printed: () => `${out.join("")}${err.join("")}`,
-    everywhere: async () => [out.join(""), err.join(""), ...store.values.values(), await readFile(environmentCachePath(home, "staging"), "utf8").catch(() => "")].join("\n"),
+    /** The terminal, every SSM value, this machine's environment cache, and the project files the
+     * finishing steps wrote. */
+    everywhere: async () => [
+      out.join(""), err.join(""), ...store.values.values(), await readFile(environmentCachePath(home, "staging"), "utf8").catch(() => ""),
+      ...(await Promise.all((await readdir(projects)).map((name) => readFile(join(projects, name), "utf8")))),
+    ].join("\n"),
   };
 }
 
 describe("agentx init --ui", () => {
   it("runs the whole install from the page, with nothing typed in the terminal", async () => {
     const h = await harness();
-    const { code, operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN]);
+    const { code, operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
     expect(code).toBe(0);
     expect(operator.remaining()).toBe(0);
     expect(operator.fieldErrors).toEqual([]);
@@ -107,7 +143,7 @@ describe("agentx init --ui", () => {
     expect(operator.asked).toContain("Deploy engine");
     expect(operator.asked).toContain("Create all of this?");
     expect(operator.asked).toContain("Slack bot token");
-    expect(operator.asked).toHaveLength(FIRST_RUN.length + SLACK.length + SIGNIN.length);
+    expect(operator.asked).toHaveLength(FIRST_RUN.length + SLACK.length + SIGNIN.length + FINISH.length);
 
     expect(h.deployer.requests.map((request) => request.part)).toEqual(["access", "foundation", "identity", "control-plane", "runtime", "slack"]);
     const progress = await readInstallProgress(h.store, "staging");
@@ -124,16 +160,22 @@ describe("agentx init --ui", () => {
 
   it("FR-012: no secret typed on the page reaches the page's state, the log, the terminal, SSM or the cache", async () => {
     const h = await harness();
-    const { operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN]);
+    // FINISH_WITH_LINEAR: the finishing steps' own secret, the Linear API key, is typed on the page too.
+    const { code, operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH_WITH_LINEAR]);
+    expect(code).toBe(0);
+    expect(operator.remaining()).toBe(0);
+    expect(operator.asked).toContain("Linear API key");
     const seen = JSON.stringify(operator.states);
     const everywhere = await h.everywhere();
-    for (const secret of [TEST_BOT_TOKEN, TEST_SIGNING_SECRET, "fedcba9876543210fedcba9876543210"]) {
+    for (const secret of [TEST_BOT_TOKEN, TEST_SIGNING_SECRET, "fedcba9876543210fedcba9876543210", LINEAR_KEY]) {
       expect(secret.length).toBeGreaterThan(10);
       expect(seen).not.toContain(secret);
       expect(everywhere).not.toContain(secret);
     }
     // The secrets really were collected and stored, so the absence above means something.
     expect(h.secrets.values.get("agentx/staging/slack")).toContain(TEST_BOT_TOKEN);
+    expect(JSON.parse(h.secrets.values.get("agentx/staging/connectors/linear") ?? "{}")).toEqual({ apiKey: LINEAR_KEY });
+    expect(h.plane.credentials).toContainEqual({ ref: "linear", type: "static-secret", secretName: "agentx/staging/connectors/linear" });
   });
 
   it("FR-005: the priced plan is a review screen, and declining it creates nothing", async () => {
@@ -159,7 +201,7 @@ describe("agentx init --ui", () => {
     expect(await h.run([], { prompter: scriptedPrompter(FIRST_RUN) })).not.toBe(0);
     h.deployer.fail.clear();
 
-    const { code, operator } = await h.runUi([...SLACK, ...SIGNIN]);
+    const { code, operator } = await h.runUi([...SLACK, ...SIGNIN, ...FINISH]);
     expect(code).toBe(0);
     const resume = operator.states.find((state) => state.resume !== undefined)?.resume;
     expect(resume?.completed).toEqual([
@@ -178,7 +220,7 @@ describe("agentx init --ui", () => {
     const script = [...FIRST_RUN];
     // The alert email address, with a typo first.
     script.splice(9, 1, "not-an-email", "ops@example.com");
-    const { code, operator } = await h.runUi([...script, ...SLACK, ...SIGNIN]);
+    const { code, operator } = await h.runUi([...script, ...SLACK, ...SIGNIN, ...FINISH]);
     expect(code).toBe(0);
     // Once from the POST's own reply, once on the question that came back carrying it.
     expect(operator.fieldErrors).toEqual(["must be an email address", "must be an email address"]);
@@ -189,6 +231,68 @@ describe("agentx init --ui", () => {
     const h = await harness();
     expect(await h.run(["--ui", "--yes"])).not.toBe(0);
     expect(h.printed()).toContain("agentx init --ui asks its questions on a page; --yes answers them without asking");
-    expect(await h.run(["--no-ui"], { prompter: scriptedPrompter([...FIRST_RUN, ...SLACK, ...SIGNIN]) })).toBe(0);
+    expect(await h.run(["--no-ui"], { prompter: scriptedPrompter([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]) })).toBe(0);
+  });
+
+  it("asks the finishing steps' questions on the page, and ends the page on the developer sign-in command", async () => {
+    const h = await harness();
+    const { code, operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
+    expect(code).toBe(0);
+    expect(operator.remaining()).toBe(0);
+    // Every finishing question and confirmation was a field on the page, in the steps' own order.
+    const finishing = operator.asked.slice(FIRST_RUN.length + SLACK.length + SIGNIN.length);
+    expect(finishing).toHaveLength(FINISH.length);
+    expect(finishing[0]).toBe("Your email address, for your AgentX admin user");
+    expect(finishing).toContain("Connect Linear to payments-api now? (You can add it later with agentx connector add linear)");
+    // Nothing was asked in the terminal: no scripted terminal prompter exists in this run, and the
+    // terminal output carries no question text.
+    expect(h.printed()).not.toContain("Your email address, for your AgentX admin user");
+    expect(h.plane.bindings).toEqual(["T0TEAM/C0PAY00001"]);
+    // The finishing steps' progress lines reached the page's log pane.
+    const last = operator.states.at(-1);
+    expect(last?.log.join("\n")).toContain("done: Set up the first project and its channel");
+    expect(last?.log.join("\n")).toContain("done: Check that AgentX answers in Slack");
+    // The page ends on the same summary the terminal does, developer sign-in command and all.
+    expect(last).toMatchObject({ phase: "finished" });
+    expect(last?.outcome).toContain("AgentX environment staging is ready.");
+    expect(last?.outcome).toContain("  Talk to it: mention <@U0BOT> in #payments (project payments-api, revision 1).");
+    expect(last?.outcome).toContain("  Developers sign in with: npx @charterarc/agentx login https://abc123.execute-api.us-east-1.amazonaws.com");
+    expect(h.out.join("")).toContain("  Developers sign in with: npx @charterarc/agentx login https://abc123.execute-api.us-east-1.amazonaws.com\n");
+  });
+
+  it("--from-bundle works through the page: only what the export did not know is asked there, and a bad bundle is refused before the page opens", async () => {
+    const h = await harness();
+    const dir = await tmp("agentx-init-ui-bundle-");
+    await writeFile(join(dir, "init-answers.json"), JSON.stringify({
+      schemaVersion: 1, env: "staging", region: "us-east-1", account: "123456789012", engine: "templates", releaseVersion: "1.2.3",
+      identity: { mode: "cognito" }, models: { orchestrator: "us.anthropic.claude-sonnet-4-6", classifier: "amazon.nova-lite-v1:0", worker: "amazon.nova-pro-v1:0" },
+    }));
+    // A bundle for another environment is refused before the wizard starts: no page is opened.
+    const wrong = await tmp("agentx-init-ui-bundle-dev-");
+    await writeFile(join(wrong, "init-answers.json"), (await readFile(join(dir, "init-answers.json"), "utf8")).replace('"env":"staging"', '"env":"dev"'));
+    const refused = fakeWizardOperator([]);
+    expect(await h.run(["--ui", "--resume", "--from-bundle", wrong], { openBrowser: refused.open })).not.toBe(0);
+    expect(refused.opened).toEqual([]);
+    expect(h.printed()).toContain("the bundle is for environment dev; pass --env dev");
+
+    // The platform team's access stack exists already; the run stops after it, at foundation.
+    const deployer = scriptedDeployer(allStackOutputs(), [environmentStackName("staging", "access")]);
+    deployer.fail.set(environmentStackName("staging", "foundation"), new Error("stop after access"));
+    const operator = fakeWizardOperator(["", "ops@example.com", "", "", "acme", "", "", "", "", true]);
+    const code = await h.run(["--ui", "--resume", "--from-bundle", dir], {
+      openBrowser: operator.open,
+      stackStatus: { status: async (name: string) => (name === "agentx-staging-access" ? "CREATE_COMPLETE" : undefined) },
+      deploy: { identity: { get: async () => ({ account: "123456789012", arn: "arn:aws:sts::123456789012:assumed-role/agentx-staging-operator/alice" }) }, store: h.store, secrets: h.secrets, deployer },
+    });
+    await operator.settled();
+    expect(code).not.toBe(0);
+    expect(operator.remaining()).toBe(0);
+    expect(operator.asked).toContain("Alert email address");
+    expect(operator.asked).toContain("Create all of this?");
+    expect(operator.asked).not.toContain("Deploy engine");
+    expect(operator.states.at(-1)).toMatchObject({ phase: "failed" });
+    expect(operator.states.at(-1)?.outcome).toContain("stop after access");
+    expect((await readInstallProgress(h.store, "staging"))?.steps.access).toMatchObject({ status: "done", note: "deployed by your platform team from the export bundle" });
+    expect(deployer.requests.map((request) => request.part)).toEqual(["foundation"]);
   });
 });

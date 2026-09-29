@@ -4,6 +4,7 @@
 // only the value itself, to hold in memory for the length of one deploy.
 import { randomBytes } from "node:crypto";
 import { CreateSecretCommand, GetSecretValueCommand, type SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
+import { agentXError } from "@agentx/contracts";
 
 /** The number of random bytes in a freshly created callback signing key (before base64url encoding).
  * Exported so callers that must bound a buffer against "the longest secret we ever redact"
@@ -20,6 +21,19 @@ export class SecretAlreadyExistsError extends Error {
     super(`secret ${name} already exists`);
     this.name = "SecretAlreadyExistsError";
   }
+}
+
+/** FR-047: every resource carries agentx:env. A secret the CLI creates under agentx/<env>/ is
+ * tagged with that environment; the legacy agentx/connectors/ name is not (it names no single
+ * environment). Any other name is not a value the caller chose but a name it built wrong, so this
+ * refuses it rather than silently creating an untagged secret. */
+export function secretTags(name: string): Array<{ Key: string; Value: string }> {
+  if (name.startsWith("agentx/connectors/")) return [];
+  const match = /^agentx\/([a-z0-9-]{1,20})\//.exec(name);
+  if (match === null) {
+    throw agentXError("CONFIG_INVALID", `secret name "${name}" is not a valid agentx secret name; it must start with agentx/<env>/ or be the legacy agentx/connectors/...`);
+  }
+  return [{ Key: "agentx:env", Value: match[1]! }];
 }
 
 /** What `callbackSigningKey` needs from Secrets Manager. */
@@ -45,7 +59,8 @@ export function secretsManagerValueStore(client: SecretsManagerClient): SecretVa
     },
     async create(name, value) {
       try {
-        await client.send(new CreateSecretCommand({ Name: name, SecretString: value }));
+        const tags = secretTags(name);
+        await client.send(new CreateSecretCommand({ Name: name, SecretString: value, ...(tags.length === 0 ? {} : { Tags: tags }) }));
       } catch (error) {
         if (errorName(error) === "ResourceExistsException") throw new SecretAlreadyExistsError(name);
         throw error;

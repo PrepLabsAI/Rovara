@@ -109,7 +109,7 @@ export interface CallbackListenerMessages {
   noAnswer: string;
 }
 
-const ADMIN_LISTENER_MESSAGES: CallbackListenerMessages = {
+export const ADMIN_LISTENER_MESSAGES: CallbackListenerMessages = {
   timedOut: "OIDC login timed out",
   noAnswer: "OIDC callback state or code is invalid",
 };

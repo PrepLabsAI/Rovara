@@ -5,7 +5,7 @@ describe("AgentX executable command surface", () => {
   it("exposes administration and developer sign-in; developer tasks come from AI tools", () => {
     const program = createCliProgram();
 
-    expect(program.commands.map((command) => command.name())).toEqual(["login", "logout", "whoami", "workspaces", "signin", "admin", "env", "deploy", "init", "mcp"]);
+    expect(program.commands.map((command) => command.name())).toEqual(["login", "logout", "whoami", "workspaces", "signin", "admin", "project", "channel", "connector", "alerts", "env", "deploy", "init", "mcp"]);
 
     const admin = program.commands.find((command) => command.name() === "admin");
     expect(admin?.commands.map((command) => command.name())).toEqual(["project", "workspace", "slack", "credential", "turns"]);
@@ -17,6 +17,10 @@ describe("AgentX executable command surface", () => {
 
     expect(subcommands(program, "signin")).toEqual(["show", "enable", "disable", "check"]);
     expect(subcommands(program, "mcp")).toEqual(["install"]);
+    expect(subcommands(program, "project")).toEqual(["add"]);
+    expect(subcommands(program, "channel")).toEqual(["add"]);
+    expect(subcommands(program, "connector")).toEqual(["add"]);
+    expect(subcommands(program, "alerts")).toEqual(["test"]);
 
     const env = program.commands.find((command) => command.name() === "env");
     expect(env?.commands.map((command) => command.name())).toEqual(["list", "use", "adopt"]);

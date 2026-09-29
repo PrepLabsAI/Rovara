@@ -30,8 +30,10 @@ describe("access stack", () => {
     const types = new Set(environmentResources().filter(({ stack }) => stack.stackName !== "agentx-staging-access").flatMap(({ resources }) => Object.values(resources).map((r) => r.Type)));
     // AWS::CDK::Metadata is a CDK pseudo-resource, not an AWS service call. Custom resources are
     // backed by Lambda, so they need the lambda service. Roles, policies and instance profiles are
-    // IAM, checked by action.
-    return new Set([...types].filter((t) => !["AWS::CDK::Metadata", "AWS::IAM::Role", "AWS::IAM::Policy", "AWS::IAM::InstanceProfile"].includes(t))
+    // IAM, checked by action. AWS::Budgets::Budget (spec 015 phase 15d2, FR-047) is also checked by
+    // action: the service role's scoped "Budget" Sid, never a budgets:* wildcard (SERVICE_ROLE_SERVICES
+    // deliberately excludes "budgets"; only the permission boundary's ceiling still wildcards it).
+    return new Set([...types].filter((t) => !["AWS::CDK::Metadata", "AWS::IAM::Role", "AWS::IAM::Policy", "AWS::IAM::InstanceProfile", "AWS::Budgets::Budget"].includes(t))
       .map((t) => (t.startsWith("Custom::") || t === "AWS::CloudFormation::CustomResource" ? "lambda" : serviceOf(t))));
   };
   /**
@@ -130,7 +132,9 @@ describe("access stack", () => {
     // The service role creates resources of these services, and the roles call them.
     const neededServices = new Set([...resourceTypeServices(), ...Object.values(MANAGED_POLICY_SERVICES).flat().filter((s) => s !== "iam")]);
     expect([...neededServices].filter((service) => !allowedServices.has(service))).toEqual([]);
-    // Every action a role uses is allowed by its service's wildcard or by name (IAM and STS only by name).
+    // Every action a role uses is allowed by its service's wildcard or by name (IAM, STS and
+    // Service Quotas only by name: servicequotas:GetServiceQuota is the operator's one scoped
+    // quota read, never servicequotas:*).
     const namedActions = [...actions];
     expect(namedActions.length).toBeGreaterThan(0);
     // The service role's own boundary Deny action (DeleteRolePermissionsBoundary) is never needed as an allow.

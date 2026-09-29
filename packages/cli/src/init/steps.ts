@@ -10,10 +10,12 @@ import { emptyProgress, readInstallProgress, writeInstallProgress, type InitStep
 
 export type StepOutcome = { status: "done"; note?: string } | { status: "waiting"; message: string };
 
+export type ProgressPatch = Pick<Partial<InstallProgress>, "github" | "slack" | "admin" | "project" | "connectors" | "alerts">;
+
 export interface ProgressHandle {
   current(): InstallProgress;
-  /** Merges github or slack facts and writes progress at once, so a crash right after keeps them. */
-  update(patch: Pick<Partial<InstallProgress>, "github" | "slack">): Promise<void>;
+  /** Merges step facts and writes progress at once, so a crash right after keeps them. */
+  update(patch: ProgressPatch): Promise<void>;
 }
 
 export interface InitStep<C> {

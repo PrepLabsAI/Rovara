@@ -3,6 +3,10 @@
 This guide connects one AgentX project to Linear. It is written for the administrator of your own
 AgentX deployment. You create the Linear credential in your own Linear workspace.
 
+`agentx connector add linear --project <name>` walks you through this guide, reads the credential
+from a hidden prompt, tests it, and registers the project's next revision. The steps below are what
+it does, for doing it by hand or understanding it.
+
 ## How access works
 
 AgentX calls Linear's hosted MCP server, `https://mcp.linear.app/mcp`, with a Linear API key,
@@ -72,13 +76,15 @@ On Linux, replace `pbpaste` with `xclip -o -selection clipboard`.
 
 ## 3. Store the key in AWS Secrets Manager
 
-The secret name must start with `agentx/connectors/`. Store the key straight from the clipboard,
+The secret name must start with `agentx/<env>/connectors/` for a named environment (add `--env
+<name>` to the commands on this page); the legacy default deployment, adopted before named
+environments existed, keeps `agentx/connectors/` instead. Store the key straight from the clipboard,
 so it never appears in your shell history or a terminal prompt:
 
 ```sh
 export AWS_PROFILE=<your deployer profile> AWS_REGION=<your region>
 pbpaste | tr -d '\n' | jq -Rc '{apiKey: .}' | aws secretsmanager create-secret \
-  --name agentx/connectors/linear-payments --secret-string file:///dev/stdin
+  --name agentx/<env>/connectors/linear-payments --secret-string file:///dev/stdin
 pbcopy < /dev/null
 ```
 
@@ -108,7 +114,7 @@ then register the credential again (step 4) so AgentX drops the old one at once.
 
 ```sh
 agentx admin credential register --ref linear-payments \
-  --type static-secret --secret agentx/connectors/linear-payments
+  --type static-secret --secret agentx/<env>/connectors/linear-payments
 agentx admin credential list
 ```
 
@@ -180,7 +186,7 @@ Raise `revision`, then run:
 
 ```sh
 agentx admin project register --file payments.yaml \
-  --runtime-arn <runtime ARN> --deployment-mode <mode>
+  --deployment-mode ec2-ebs --launch-template-id <Ec2WorkerLaunchTemplateId> --subnets <Ec2WorkerSubnets>
 ```
 
 A working setup prints the revision with a `preflight` entry like this, and no warnings:

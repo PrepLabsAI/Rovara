@@ -1,10 +1,10 @@
-// Spec 025 FR-044: the last agentx init step. R9 does not hold (F15): an environment installed
-// before 25a never reaches this step, because agentx init refuses to resume across a release
-// mismatch (a 25a release is a new one); it turns sign-in on with agentx signin enable instead. This
-// step asks which developer sign-in methods to enable (Slack by default), collects the Slack app's
-// client ID and secret or the company OIDC app, and applies the same change as agentx signin enable
-// (F16: enableSlackSignIn and enableOidcSignIn are shared, not copied), under the lock the step
-// runner already holds.
+// Spec 025 FR-044: the init step that runs after the Slack service step. R9 does not hold (F15):
+// an environment installed before 25a never reaches this step, because agentx init refuses to
+// resume across a release mismatch (a 25a release is a new one); it turns sign-in on with agentx
+// signin enable instead. This step asks which developer sign-in methods to enable (Slack by
+// default), collects the Slack app's client ID and secret or the company OIDC app, and applies the
+// same change as agentx signin enable (F16: enableSlackSignIn and enableOidcSignIn are shared, not
+// copied), under the lock the step runner already holds.
 import { AgentXError, agentXError } from "@agentx/contracts";
 import { readEnvironmentSettings } from "../environments/settings.js";
 import { applySignInChange, errorReason } from "../signin/apply.js";
