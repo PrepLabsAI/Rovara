@@ -905,8 +905,8 @@ describe("products", () => {
 **Interfaces:**
 - Produces: `waitlistAction(user: string): string` and `waitlistFields(email: string, tag: "workspace" | "cloud"): URLSearchParams`.
 
-- [x] **Step 1: Confirm Buttondown's current embed endpoint** (done 2026-09-29, qedly/qedly.github.io#13). Buttondown's docs give `https://buttondown.com/<user>/embed-subscribe`, with a `tag` field, and say never to submit it with `fetch`, because a subscriber may need to finish a CAPTCHA on Buttondown's page.
-- [x] **Steps 2 to 4, as built.** `waitlistAction(user)` returns that address, and `WAITLIST_TAGS` is `["workspace", "cloud"]`, both tested. `WaitlistForm.astro` posts the form itself (`email`, hidden `tag`) with `target="_blank"`, then this page shows "Check your inbox to confirm your place on the waitlist." There is no `fetch` and no cookie. Confirm the `email` field name with one real signup once the account exists.
+- [x] **Step 1: Confirm Buttondown's current embed endpoint** (done 2026-09-29, qedly/qedly.github.io#13). The working route is `https://buttondown.com/api/emails/embed-subscribe/<user>`: `https://buttondown.com/<user>/embed-subscribe`, which one docs page suggested, returns 404 (qedly/qedly.github.io#15). Buttondown's docs say never to submit the form with `fetch`, because a subscriber may need to finish a CAPTCHA on Buttondown's page. Tags are a paid feature, so the product travels as `metadata__product` (#14).
+- [x] **Steps 2 to 4, as built.** `waitlistAction(user)` returns that address, and `WAITLIST_TAGS` is `["workspace", "cloud"]`, both tested. `WaitlistForm.astro` posts the form itself (`email`, hidden `metadata__product`) with `target="_blank"`, then this page shows "Check your inbox to confirm your place on the waitlist." There is no `fetch` and no cookie. Confirm the `email` field name with one real signup once the account exists.
 - [ ] **Step 5: Build Roadmap** from `PRODUCTS`, grouped Now, Next, Later, with a `WaitlistForm` under Workspace and Cloud.
 - [ ] **Step 6: Commit** with `feat: roadmap and Buttondown waitlist`.
 
