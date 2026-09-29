@@ -12,10 +12,12 @@ import type { CallerIdentity } from "../../packages/cli/src/environments/adopt.j
 import type { DeployRequest, StackDeployer, StackOutputs } from "../../packages/cli/src/deploy/deployer.js";
 import type { ParameterStore } from "../../packages/cli/src/environments/parameter-store.js";
 import type { SecretValueStore } from "../../packages/cli/src/deploy/signing-key.js";
-import type { DeployCliDependencies } from "../../packages/cli/src/deploy/commands.js";
+import { progressLine, runDeploy, type DeployCliDependencies } from "../../packages/cli/src/deploy/commands.js";
 import { assertReleaseCoversRegion, releaseRegionProblem } from "../../packages/cli/src/deploy/release.js";
 import type { TemplatesEngineClients } from "../../packages/cli/src/deploy/templates-engine.js";
 import { executeCli } from "../../packages/cli/src/main.js";
+import { writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
+import { allStackOutputs } from "../support/init-fakes.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 
 const ENV = "staging";
@@ -184,6 +186,7 @@ function safeDeployDeps(overrides: DeployCliDependencies = {}): DeployCliDepende
       create: () => unexpectedAwsCall(),
     },
     stackOutputs: () => unexpectedAwsCall(),
+    stackParameters: () => unexpectedAwsCall(),
     templatesClients: {
       cloudFormation: { send: () => unexpectedAwsCall() } as unknown as TemplatesEngineClients["cloudFormation"],
       s3: { send: () => unexpectedAwsCall() } as unknown as TemplatesEngineClients["s3"],
@@ -1000,6 +1003,65 @@ describe("agentx deploy", () => {
     expect(io.out.join("")).toContain(
       `Resume with: agentx deploy --mode install --engine cdk --source /some/source --parts foundation,identity,control-plane,runtime,slack --release ${releaseDir} --answers ${answersPath} --yes\n`,
     );
+  });
+});
+
+/** A release whose control-plane template declares the budget parameters, and "{}" for every other part. */
+async function releaseDirDeclaringBudget(): Promise<string> {
+  const dir = await tmp("agentx-deploy-cli-budget-");
+  await mkdir(join(dir, "templates", REGION), { recursive: true });
+  const templates = [];
+  for (const part of ["access", "foundation", "identity", "control-plane", "runtime", "slack"]) {
+    const body = part === "control-plane" ? JSON.stringify({ Parameters: { BudgetMonthlyUsd: {}, BudgetScope: {} } }) : "{}";
+    const file = `templates/${REGION}/${part}.template.json`;
+    await writeFile(join(dir, file), body);
+    templates.push({ region: REGION, part, file, sha256: sha256(body) });
+  }
+  await writeFile(join(dir, "release.json"), JSON.stringify({ schemaVersion: 1, version: RELEASE_VERSION, gitCommit: "a".repeat(40), environmentPlaceholder: "qqenv-placeholderqq", templates, packages: [], images: {} }));
+  return dir;
+}
+
+describe("agentx deploy --mode upgrade keeps the deployed budget", () => {
+  it("reads the control-plane stack's parameters and sends its budget back", async () => {
+    const store = new MemoryParameterStore();
+    // Every part's outputs, including every foundation output the control plane takes.
+    const outputs = allStackOutputs();
+    const requests: DeployRequest[] = [];
+    const deployer: StackDeployer = { async deploy(request) { requests.push(request); return outputs[request.stackName]!; }, async outputs(name) { return outputs[name]; } };
+    await writeEnvironmentSettings(store, {
+      schemaVersion: 1, env: ENV, account: ACCOUNT, region: REGION, engine: "templates", version: "1.2.2", naming: "environment",
+      stacks: { access: stackName("access"), foundation: stackName("foundation"), identity: stackName("identity"), runtime: stackName("runtime"), "control-plane": stackName("control-plane"), slack: stackName("slack") },
+      controlPlaneUrl: "https://abc123.execute-api.us-east-1.amazonaws.com", identity: { mode: "cognito", issuer: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_abc", audience: "client123", clientId: "client123" },
+      models: { orchestrator: "o", classifier: "c", worker: "w" }, updatedAt: "2026-09-29T00:00:00.000Z",
+    });
+    const answersDir = await tmp("agentx-deploy-cli-answers-");
+    const answersFile = join(answersDir, "answers.json");
+    await writeFile(answersFile, JSON.stringify({
+      env: ENV, region: REGION, account: ACCOUNT, models: { orchestrator: "o", classifier: "c", worker: "w" }, identity: { mode: "cognito" },
+      github: { appId: "123", privateKeySecretArn: `arn:aws:secretsmanager:${REGION}:${ACCOUNT}:secret:agentx/staging/github-app-AbCdEf` },
+      images: { worker: `${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/w@sha256:${"b".repeat(64)}`, slack: `${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/s@sha256:${"c".repeat(64)}` },
+    }));
+    const reads: string[] = [];
+    const signingKey = "k".repeat(43);
+    await runDeploy(
+      { mode: "upgrade", engine: "templates", releaseDir: await releaseDirDeclaringBudget(), answersFile, yes: true },
+      {
+        store, deployer,
+        secrets: { get: async () => signingKey, create: async () => undefined },
+        identity: { get: async () => ({ account: ACCOUNT, arn: `arn:aws:iam::${ACCOUNT}:user/alice` }) },
+        stackParameters: async (name) => { reads.push(name); return name === stackName("control-plane") ? { BudgetMonthlyUsd: "250", BudgetScope: "tag" } : undefined; },
+      },
+      { stderr: { write: () => undefined } },
+    );
+    expect(reads).toContain(stackName("control-plane"));
+    expect(requests.find((request) => request.part === "control-plane")!.parameters.BudgetMonthlyUsd).toBe("250");
+  });
+
+  it("names what it kept and what this release no longer takes, never their values", () => {
+    expect(progressLine({ kind: "kept", stackName: "agentx-staging-control-plane", kept: ["BudgetMonthlyUsd", "BudgetScope"], dropped: [] }))
+      .toBe("kept agentx-staging-control-plane: BudgetMonthlyUsd, BudgetScope");
+    expect(progressLine({ kind: "kept", stackName: "agentx-staging-slack", kept: [], dropped: ["SlowTurnMinutes"] }))
+      .toBe("kept agentx-staging-slack: nothing; not in this release, so not sent: SlowTurnMinutes");
   });
 });
 

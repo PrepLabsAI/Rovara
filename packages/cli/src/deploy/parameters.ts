@@ -56,6 +56,21 @@ const MIN_CALLBACK_SIGNING_KEY_LENGTH = 32;
 /** The parameter names whose values must never be printed: every NoEcho template parameter. */
 export const SECRET_PARAMETERS: ReadonlySet<string> = new Set(["CallbackSigningKey"]);
 
+/**
+ * Stack parameters an operator sets after install (the budget question, agentx config set) that an
+ * upgrade's answers do not carry. An upgrade keeps each one's deployed value unless its answers set
+ * it, so no upgrade resets them to the template default. Models are not here: they live in the
+ * settings, which the upgrade's answers read.
+ */
+export const OPERATOR_PARAMETERS: Readonly<Record<DeployPart, readonly string[]>> = {
+  access: [],
+  foundation: [],
+  identity: [],
+  runtime: [],
+  "control-plane": ["BudgetMonthlyUsd", "BudgetScope", "SlackAppPostedMessages", "SlackThreadTurnsPerMinute", "SlackMemberWorkspaceLimit", "SlackOrganizationWorkspaceLimit"],
+  slack: ["SlowTurnMinutes"],
+};
+
 /** Fresh install order: the control plane needs the GitHub App. The `runtime` part is the EC2 worker settings (#117); the control plane reads them only when it boots a worker. */
 export function installOrder(identityMode: "cognito" | "oidc"): DeployPart[] {
   const order: DeployPart[] = ["access", "foundation", "identity", "control-plane", "runtime", "slack"];
