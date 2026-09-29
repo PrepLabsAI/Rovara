@@ -3,17 +3,17 @@
 // service's processor, against the broker in process. Fake Slack, fake worker, the fake table.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { CLOSED_SHARED_NOTICE, VIEW_ONLY_NOTICE, parseSlackThreadSubject, turnRecordKeys, type ChannelInfoRequest, type ChannelInfoResponse, type SlackRequestMessage, type TurnRecord } from "../../packages/contracts/src/index.js";
+import { CLOSED_SHARED_NOTICE, VIEW_ONLY_NOTICE, parseSlackThreadSubject, turnRecordKeys, type ChannelInfoRequest, type ChannelInfoResponse, type ChannelMembersRequest, type ChannelMembersResponse, type SlackRequestMessage, type TurnRecord } from "../../packages/contracts/src/index.js";
 import { createNotifierHandler } from "../../packages/broker/src/aws/developer-task-notifier.js";
 import { STUCK_SETUP_MESSAGE, sweepStuckSetups } from "../../packages/broker/src/aws/stuck-setup.js";
-import type { Notice } from "../../packages/broker/src/developer/notifications.js";
+import type { Notice, StreamRecord } from "../../packages/broker/src/developer/notifications.js";
 import { processSlackRequest, type ProcessorDependencies, type TurnInput } from "../../packages/slack-service/src/processor.js";
 import { createSignedServiceFetch } from "../../packages/slack-service/src/signing-fetch.js";
 import { createThreadApi } from "../../packages/slack-service/src/thread-api.js";
 import { brokerFetch } from "../support/broker-fetch.js";
 import { MAYA, bindChannel, createDeveloperTaskBroker, recordStream, registerRevision, teammate } from "../support/developer-task-broker.js";
 import { signedInClient } from "../support/mcp-broker-client.js";
-import { SLACK_TEAM, call, issuer } from "../support/slack-broker.js";
+import { SLACK_CHANNEL, SLACK_TEAM, call, issuer } from "../support/slack-broker.js";
 
 type Harness = Awaited<ReturnType<typeof createDeveloperTaskBroker>>;
 interface SharedTask { workspaceId: string; share: { threadTs: string; teamId: string; channelId: string; mode: string; sharedReason: string; modeReason?: string } }
@@ -29,7 +29,10 @@ const activeOperation = (harness: Harness, workspaceId: string) => (harness.db.g
 const subjectOf = (task: SharedTask) => `${task.share.teamId}/${task.share.channelId}/${task.share.threadTs}`;
 const sharedRecord = (harness: Harness, subject: string) => harness.db.get(`SHARED_TASK#${subject}`, "META") as { mode: string; closedAt?: string } | undefined;
 
-/** The notifier over the harness's table, with Slack faked; pump() delivers everything pending. */
+/**
+ * The notifier over the harness's table, with Slack faked; pump() delivers everything pending.
+ * hold() takes the pending stream records without delivering them, for pump(held) to deliver later.
+ */
 function notifier(harness: Harness) {
   const stream = recordStream(harness.db);
   const posts: Array<{ channel: string; threadTs?: string; text: string }> = [];
@@ -42,14 +45,15 @@ function notifier(harness: Harness) {
     post: async (input) => { posts.push(input); ts += 1; const text = String(ts); return { ts: `${text.slice(0, 10)}.${text.slice(10)}` }; },
     now: Date.now, log: () => undefined, deliveryFailed: () => undefined,
   });
-  const pump = async () => {
+  const hold = (): StreamRecord[] => stream.take();
+  const pump = async (held: StreamRecord[] = []) => {
     for (let round = 0; round < 3; round += 1) {
-      await handle({ Records: stream.take().map((record) => ({ ...record, eventSource: "aws:dynamodb" })) });
+      await handle({ Records: [...(round === 0 ? held : []), ...stream.take()].map((record) => ({ ...record, eventSource: "aws:dynamodb" })) });
       const batch = queue.splice(0, queue.length);
       await handle({ Records: batch.map((notice, index) => ({ eventSource: "aws:sqs", messageId: `m${index}`, receiptHandle: `r${index}`, body: JSON.stringify(notice), attributes: { ApproximateReceiveCount: "1" } })) });
     }
   };
-  return { posts, pump };
+  return { posts, pump, hold };
 }
 
 /**
@@ -153,6 +157,10 @@ describe("a shared task through its life (US3)", () => {
     await service.handle(service.mention(LEO, "one more thing"));
     expect(service.posts.at(-1)).toBe(VIEW_ONLY_NOTICE);
     expect(service.ran).toHaveLength(1);
+    // The developer runs one more instruction; its end reaches the notifier only after the close.
+    expect((await tool("agentx_continue_task", { task_id: taskId, instructions: "Tidy the test names." })).value).toMatchObject({ status: "RUNNING" });
+    await harness.finish(workspaceId, String(active()), "SUCCEEDED");
+    const lateEnd = slack.hold();
 
     // FR-032 and Q3: the close posts "closed", and the thread then drives nothing.
     await tool("agentx_close_task", { task_id: taskId });
@@ -168,6 +176,9 @@ describe("a shared task through its life (US3)", () => {
     expect(service.ran).toHaveLength(1);
     expect(harness.db.find((item) => item.entityType === "WORKSPACE")).toHaveLength(workspaces);
     await slack.pump();
+    expect(slack.posts).toHaveLength(postsAtClose);
+    // Q3 at the notifier: the run's end, delivered after the close, posts nothing.
+    await slack.pump(lateEnd);
     expect(slack.posts).toHaveLength(postsAtClose);
     expectNoTokenLeaked();
   });
@@ -247,6 +258,7 @@ describe("the owner's answers, end to end", () => {
     const stop = await harness.handler({ source: "agentx.slack-ingress", action: "stop-task", thread: parseSlackThreadSubject(subject), userId: PRIYA });
     expect(JSON.parse(stop.body)).toMatchObject({ outcome: "CANCEL_REQUESTED" });
     expect(harness.db.find((item) => item.entityType === "OPERATION" && item.kind === "cancel" && item.workspaceId === workspaceId)).toEqual([expect.objectContaining({ requestedBy: { teamId: SLACK_TEAM, userId: PRIYA } })]);
+    expect(harness.db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${developerRun}`)).toMatchObject({ status: "CANCEL_REQUESTED" });
     // The worker stops the developer's run.
     await harness.finish(workspaceId, developerRun, "CANCELLED");
     expect(harness.db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${developerRun}`)).toMatchObject({ status: "CANCELLED" });
@@ -255,10 +267,14 @@ describe("the owner's answers, end to end", () => {
     expect(slack.posts.at(-1)).toMatchObject({ threadTs: taskRecord(harness, taskId).share.threadTs, text: "The task ended CANCELLED." });
   });
 
-  it("refuses to share into a private channel the developer has not joined, and posts nothing (Q10)", async () => {
+  it("refuses to share into a private channel the developer has not joined and posts nothing, then shares once she joins (Q10)", async () => {
     const PRIVATE = "G0PRIVATE01";
     const channelInfo = async (request: ChannelInfoRequest): Promise<ChannelInfoResponse> => ({ ok: true, channels: request.channelIds.map((channelId) => ({ channelId, name: channelId === PRIVATE ? "payments-secret" : "payments-dev", isPrivate: channelId === PRIVATE })) });
-    const harness = await createDeveloperTaskBroker({ channelInfo });
+    let joined = false;
+    const channelMembers = async (request: ChannelMembersRequest): Promise<ChannelMembersResponse> => ({
+      ok: true, memberOf: request.slackUserId === MAYA.slackUserId ? request.channelIds.filter((id) => id === SLACK_CHANNEL || (joined && id === PRIVATE)) : [],
+    });
+    const harness = await createDeveloperTaskBroker({ channelInfo, channelMembers });
     await bindChannel(harness.handler, PRIVATE);
     const slack = notifier(harness);
     const { tool } = await signedInClient(harness, MAYA);
@@ -267,6 +283,17 @@ describe("the owner's answers, end to end", () => {
     expect(harness.db.find((item) => item.entityType === "DEVELOPER_TASK")).toEqual([]);
     await slack.pump();
     expect(slack.posts).toEqual([]);
+
+    joined = true;
+    const started = await tool("agentx_start_task", { project: "payments", instructions: "Fix it", share_to_channel: true, channel: PRIVATE });
+    expect(started).toMatchObject({ isError: false, value: { shared: true, channel: { id: PRIVATE } } });
+    const taskId = String(started.value.task_id);
+    await slack.pump();
+    expect(slack.posts).toEqual([expect.objectContaining({ channel: PRIVATE })]);
+    const task = taskRecord(harness, taskId);
+    expect(task.share).toMatchObject({ channelId: PRIVATE, threadTs: expect.any(String) as unknown });
+    // The private channel's name is never stored on the task.
+    expect(JSON.stringify(task)).not.toContain("payments-secret");
   });
 
   it("fails a shared task's setup after 50 minutes, says so in the thread, and the developer reads setup_failed", async () => {
@@ -307,7 +334,7 @@ describe("SC-012: 20 mentions from 3 teammates in a burst", () => {
       const started: string[] = [];
       const overlaps: string[] = [];
       const service = slackService(harness, subject, async (input) => {
-        if (active() !== undefined) overlaps.push(input.message.eventId);
+        if (active() != null) overlaps.push(input.message.eventId);
         started.push(input.message.eventId);
         const accepted = await teammate(harness.handler, subject, input.message.userId, "POST", `/v1/service/workspaces/${input.workspaceId}/tasks`, { requestId: randomUUID(), conversationId: input.conversationId, prompt: input.message.text });
         const operationId = String((accepted.body.operation as { id: string }).id);
