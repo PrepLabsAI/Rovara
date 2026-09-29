@@ -905,41 +905,8 @@ describe("products", () => {
 **Interfaces:**
 - Produces: `waitlistAction(user: string): string` and `waitlistFields(email: string, tag: "workspace" | "cloud"): URLSearchParams`.
 
-- [ ] **Step 1: Confirm Buttondown's current embed endpoint and tag field** in Buttondown's documentation, then fix the expected strings below to match it. The expected shape is `https://buttondown.com/api/emails/embed-subscribe/<user>` with fields `email` and `tag`.
-- [ ] **Step 2: Write the failing test.**
-
-```ts
-// tests/waitlist.test.ts
-import { describe, expect, it } from "vitest";
-import { waitlistAction, waitlistFields } from "../src/lib/waitlist";
-
-describe("waitlist", () => {
-  it("posts to the PrepLabs Buttondown list", () => {
-    expect(waitlistAction("qedly")).toBe("https://buttondown.com/api/emails/embed-subscribe/qedly");
-  });
-  it("tags the product the visitor chose", () => {
-    expect(waitlistFields("a@b.co", "cloud").toString()).toBe("email=a%40b.co&tag=cloud");
-  });
-});
-```
-
-- [ ] **Step 3: Run to verify it fails, implement, run to pass.**
-
-```ts
-// src/lib/waitlist.ts
-export function waitlistAction(user: string): string {
-  return `https://buttondown.com/api/emails/embed-subscribe/${encodeURIComponent(user)}`;
-}
-export function waitlistFields(email: string, tag: "workspace" | "cloud"): URLSearchParams {
-  return new URLSearchParams({ email, tag });
-}
-```
-
-- [ ] **Step 4: Build the form.** `WaitlistForm.astro` renders an `<form>` with a labelled email input and a submit button. On submit, a small inline script does two things:
-  - calls `fetch(waitlistAction(SITE.buttondownUser), { method: "POST", mode: "no-cors", body: waitlistFields(email, tag) })`;
-  - then replaces the form with "Check your inbox to confirm your place on the waitlist."
-
-  If `fetch` throws (offline), it shows "That didn't send. Check your connection and try again." and keeps the typed email. Without JavaScript, the form posts normally to Buttondown. No cookies are set by the site.
+- [x] **Step 1: Confirm Buttondown's current embed endpoint** (done 2026-09-29, qedly/qedly.github.io#13). Buttondown's docs give `https://buttondown.com/<user>/embed-subscribe`, with a `tag` field, and say never to submit it with `fetch`, because a subscriber may need to finish a CAPTCHA on Buttondown's page.
+- [x] **Steps 2 to 4, as built.** `waitlistAction(user)` returns that address, and `WAITLIST_TAGS` is `["workspace", "cloud"]`, both tested. `WaitlistForm.astro` posts the form itself (`email`, hidden `tag`) with `target="_blank"`, then this page shows "Check your inbox to confirm your place on the waitlist." There is no `fetch` and no cookie. Confirm the `email` field name with one real signup once the account exists.
 - [ ] **Step 5: Build Roadmap** from `PRODUCTS`, grouped Now, Next, Later, with a `WaitlistForm` under Workspace and Cloud.
 - [ ] **Step 6: Commit** with `feat: roadmap and Buttondown waitlist`.
 
