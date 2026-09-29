@@ -30,8 +30,8 @@ Then it removes, in this order:
    and `agentx-<env>-control-plane`, waiting for each.
 3. It terminates the EC2 worker instances and deletes their workspace volumes. Deleting the
    volumes deletes every worker session's workspace.
-4. It turns protection off and deletes the identity, foundation and access stacks, waiting for
-   each.
+4. It turns protection off and deletes `agentx-<env>-identity`, `agentx-<env>-foundation` and
+   `agentx-<env>-access`, waiting for each.
 5. It deletes what the stacks keep: it empties and deletes the buckets (every version), and
    deletes the tables, the flow-log group and the Cognito user pool. It schedules each KMS key
    for deletion in 7 days and deletes its aliases.
@@ -118,18 +118,29 @@ none with your own OIDC provider), then `agentx-<env>-foundation`, then `agentx-
 
 **6. Delete what the stacks kept**, from your list in step 1:
 
-- **The Cognito user pool**, which has deletion protection:
+- **The Cognito user pool**, which has deletion protection. A pool that still has a domain cannot
+  be deleted, so first look for one and, if `describe-user-pool` shows a `Domain`, delete it:
   ```sh
+  aws cognito-idp describe-user-pool --user-pool-id <id> --region <region> --query "UserPool.Domain" --output text
+  aws cognito-idp delete-user-pool-domain --user-pool-id <id> --domain <domain> --region <region>
   aws cognito-idp update-user-pool --user-pool-id <id> --deletion-protection INACTIVE --region <region>
   aws cognito-idp delete-user-pool --user-pool-id <id> --region <region>
   ```
   `update-user-pool` resets settings you leave out; the pool is being deleted, so that is fine.
-- **Each bucket.** Empty every object version and delete marker first (at most 1,000 per call, so
-  repeat until the listing is empty), then delete it:
+- **Each bucket.** Empty every object version and delete marker first, then delete it. List
+  them; `delete-objects` takes at most 1,000 at a time:
   ```sh
-  aws s3api delete-objects --region <region> --bucket <bucket> --delete "$(aws s3api list-object-versions --region <region> --bucket <bucket> \
-    --query '{Objects: [Versions, DeleteMarkers][][].{Key: Key, VersionId: VersionId}, Quiet: `true`}' --output json)"
-  aws s3 rb s3://<bucket> --force --region <region>
+  aws s3api list-object-versions --region <region> --bucket <bucket> --max-items 1000 \
+    --query '{Objects: [Versions, DeleteMarkers][][].{Key: Key, VersionId: VersionId}, Quiet: `true`}' --output json > delete.json
+  ```
+  If `delete.json` has an empty `Objects` list (`"Objects": []`), the bucket is empty: stop here.
+  Otherwise delete those, then list again, until the list is empty:
+  ```sh
+  aws s3api delete-objects --region <region> --bucket <bucket> --delete file://delete.json
+  ```
+  Then delete the empty bucket:
+  ```sh
+  aws s3 rb s3://<bucket> --region <region>
   ```
 - **Each table:**
   ```sh

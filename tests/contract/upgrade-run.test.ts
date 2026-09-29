@@ -172,6 +172,34 @@ describe("agentx upgrade (FR-042 to FR-044)", () => {
     expect(h.deployer.deployed).toEqual([]);
   });
 
+  it("offers the same caller its own cut-off upgrade's lock at once, and upgrades once confirmed", async () => {
+    const asked: string[] = [];
+    const h = await harness({ ask: async (prompt) => { asked.push(prompt); return "y"; } });
+    const fresh = new Date(T0).toISOString();
+    h.store.values.set(lockParameterName("staging"), JSON.stringify({ holder: ADMIN, command: "upgrade", acquiredAt: fresh }));
+    await runUpgrade(options, h.deps);
+    expect(asked[0]).toBe(`Environment staging is locked by ${ADMIN} running "upgrade" since ${fresh}. Take the lock over? Say yes only if that command is no longer running. [y/N] `);
+    expect(h.deployer.deployed).toHaveLength(6);
+    expect(h.store.values.has(lockParameterName("staging"))).toBe(false);
+  });
+
+  it("still refuses a fresh upgrade lock another caller holds, asking nothing", async () => {
+    const asked: string[] = [];
+    const h = await harness({ ask: async (prompt) => { asked.push(prompt); return "y"; } });
+    const bob = "arn:aws:sts::123456789012:assumed-role/Admin/bob";
+    h.store.values.set(lockParameterName("staging"), JSON.stringify({ holder: bob, command: "upgrade", acquiredAt: new Date(T0).toISOString() }));
+    await expect(runUpgrade(options, h.deps)).rejects.toThrow(`locked by ${bob} running "upgrade"`);
+    expect(asked).toEqual([]);
+    expect(h.deployer.deployed).toEqual([]);
+  });
+
+  it("never takes over its own lock without a terminal to ask at", async () => {
+    const h = await harness({ isInteractive: () => false });
+    h.store.values.set(lockParameterName("staging"), JSON.stringify({ holder: ADMIN, command: "upgrade", acquiredAt: new Date(T0).toISOString() }));
+    await expect(runUpgrade(options, h.deps)).rejects.toThrow("your own earlier \"upgrade\"");
+    expect(h.deployer.deployed).toEqual([]);
+  });
+
   it("allows the same release, so a re-run finishes an upgrade that stopped (question 3)", async () => {
     const h = await harness({ loadRelease: async () => release("1.2.3") });
     await runUpgrade(options, h.deps);

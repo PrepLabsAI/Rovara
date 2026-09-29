@@ -172,12 +172,13 @@ export async function runUpgrade(options: UpgradeOptions, deps: UpgradeDependenc
 
   // Question 3 under concurrency: another upgrade may finish between the read above and this lock,
   // so the settings are read again, and every check on them repeated, while the lock is held.
-  // A killed upgrade leaves its lock; once it is stale (2 hours), a person at a terminal may take it
-  // over, as with init and destroy. --yes never takes one over on its own.
+  // A killed upgrade leaves its lock. At a terminal, the same caller's next upgrade is offered its own
+  // lock at once (takeOverOwn, as init and destroy do), and anyone's lock once it is stale (2 hours).
+  // Without a terminal nothing is taken over; --yes never answers the takeover question.
   const confirmTakeover = deps.isInteractive()
     ? async (held: LockRecord) => /^y(es)?$/i.test((await deps.ask(`Environment ${env} is locked by ${held.holder} running "${held.command}" since ${held.acquiredAt}. Take the lock over? Say yes only if that command is no longer running. [y/N] `)).trim())
     : undefined;
-  const { settings, parts } = await withEnvironmentLock({ store: deps.store, env, holder: caller.arn, command: "upgrade", now: deps.now, ...(confirmTakeover === undefined ? {} : { confirmTakeover }) }, async () => {
+  const { settings, parts } = await withEnvironmentLock({ store: deps.store, env, holder: caller.arn, command: "upgrade", now: deps.now, takeOverOwn: true, ...(confirmTakeover === undefined ? {} : { confirmTakeover }) }, async () => {
     const settings = upgradableSettings(await readEnvironmentSettings(deps.store, env), env);
     if (settings.engine !== first.engine) {
       throw agentXError("CONFIG_INVALID", `environment ${env}'s settings changed to the ${settings.engine} engine while agentx upgrade was starting; run agentx upgrade again`);

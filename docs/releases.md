@@ -138,9 +138,10 @@ runs by hand, before a release is tagged, and never touches the live deployment.
 
 ### One-time owner setup
 
-1. **A throwaway AWS account** that holds nothing else. The Elastic IP quota (5 per region; each
-   environment's NAT gateways take 2) fits only one throwaway environment in the account at a
-   time, so the workflow installs one environment after another and removes each before the next.
+1. **A throwaway AWS account** that holds nothing else. The Elastic IP limit is 5 per region, and
+   each environment's two NAT gateways take 2, so an empty account fits two environments. The
+   workflow still runs one environment at a time, as a margin: it installs one after another and
+   removes each before the next starts.
 2. **A role GitHub can assume** in that account, with admin rights there. Its trust policy allows
    this repository's `workflow_dispatch` runs through GitHub OIDC (no long-lived keys), and its
    maximum session is at least 3 hours, since an install and an upgrade can outlast the 1 hour

@@ -486,8 +486,8 @@ launched by Step Functions, outside CloudFormation, so their instances and volum
 delete above and are never removed by CloudFormation. List instances tagged `Environment=<env>`,
 `DeploymentMode=ec2-ebs` and `agentx:env=<env>` (the last keeps the older production deployment's
 workers, also tagged `Environment=production`, out of the list) with `aws ec2 describe-instances`,
-terminate them, and wait with `aws ec2 wait instance-terminated`; then list and delete the volumes carrying the same tags with `aws ec2 describe-volumes`
-and `aws ec2 delete-volume`. A worker instance still running in the worker security group blocks the
+terminate them, and wait with `aws ec2 wait instance-terminated`; then list and delete the volumes
+carrying the same tags with `aws ec2 describe-volumes` and `aws ec2 delete-volume`. A worker instance still running in the worker security group blocks the
 foundation stack's delete. The export bundle's README lists the exact commands, each naming its region.
 
 Stack deletion keeps, on purpose: the Cognito user pool (deletion protection), three

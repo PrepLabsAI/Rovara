@@ -66,7 +66,7 @@ agentx --env <new env> connector add linear|jira|asana --project <name>
 ## 5. What does not move
 
 - **Turn records**: the history of what each Slack turn did. To keep it, export it from the old
-  environment first with `agentx --env <old env> admin turns export --output <file>` (records are
+  environment first with `agentx --env <old env> admin turns export --since 30d --output <file>` (records are
   kept 30 days).
 - **Workspaces**: open worker sessions and their volumes. Finish or close them first.
 - **Developer sign-in sessions**: everyone signs in again, to the new control plane URL

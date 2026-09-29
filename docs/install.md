@@ -26,9 +26,9 @@ You need:
 - **An email address for alerts**, or a PagerDuty or Opsgenie integration address.
 - **Room in the region's quotas:**
   - EC2 On-Demand Standard vCPUs (quota `L-1216C47A`): at least 1, so a worker can start.
-  - Two free EC2-VPC Elastic IPs (quota `L-0263D0A3`, 5 per region by default). The
-    environment's two NAT gateways take one each. In practice one environment at a time fits in
-    an account's region with the default quota, so request more before you add a second one.
+  - Two free EC2-VPC Elastic IPs (quota `L-0263D0A3`). The limit is 5 per region, and each
+    environment's two NAT gateways take 2. An empty region fits two environments, and one next to
+    an existing environment fits one more. `doctor` warns when fewer than 2 are free.
 
   `init` checks both before it creates anything. To see the Elastic IP room yourself:
 

@@ -22,7 +22,10 @@ describe("the guides (FR-054)", () => {
     expect(guide).toContain("agentx --env <env> destroy --region <region>");
     expect(guide).toContain("Name=tag:agentx:env,Values=<env>");
     const order = ["agentx-<env>-slack", "agentx-<env>-runtime", "agentx-<env>-control-plane", "aws ec2 terminate-instances", "agentx-<env>-identity", "agentx-<env>-foundation", "agentx-<env>-access"];
-    const positions = order.map((text) => guide.indexOf(text));
+    // The order is checked in the by-hand steps, so the agentx destroy section may name every stack.
+    const byHand = guide.slice(guide.indexOf("## By hand"));
+    expect(guide.indexOf("## By hand")).toBeGreaterThan(0);
+    const positions = order.map((text) => byHand.indexOf(text));
     expect(positions.every((position) => position >= 0)).toBe(true);
     expect([...positions].sort((a, b) => a - b)).toEqual(positions);
     expect(guide).toContain("https://github.com/PrepLabsAI/AgentX/issues/66");
@@ -35,6 +38,6 @@ describe("the guides (FR-054)", () => {
   });
 
   it("uses no em dash in any guide", () => {
-    for (const path of ["docs/install.md", "docs/day-two.md", "docs/teardown.md", "docs/move-account.md"]) expect(read(path), path).not.toContain("—");
+    for (const path of ["docs/install.md", "docs/day-two.md", "docs/teardown.md", "docs/move-account.md"]) expect(read(path), path).not.toContain("\u2014");
   });
 });

@@ -100,8 +100,11 @@ back. Stacks before it stay on the new release. Run the same command again: it c
 every stack is done, it records the new version in the settings and runs `doctor`.
 
 **Locking.** `upgrade` holds the environment's lock while it runs, so no other `agentx` command
-changes the environment at the same time. If a run was cut off, the same caller's next run offers
-to take the lock over.
+changes the environment at the same time. A run that was cut off leaves its lock. At a terminal,
+the same caller's next `upgrade` asks at once whether to take that lock over; say yes only if the
+earlier run is no longer going. A lock someone else holds is refused until it is 2 hours old
+(stale); then, at a terminal, `upgrade` asks too. `--yes` never answers this question, so without
+a terminal no lock is taken over, not your own and not a stale one someone else holds.
 
 **What it keeps.** Your settings survive: the budget, the limits, `slack.appPostedMessages`,
 `alerts.slowTurnMinutes`, the models, the GitHub App, the admin claim and the operator principal

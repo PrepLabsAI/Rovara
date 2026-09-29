@@ -659,8 +659,9 @@ and the budget.
   the rest. `agentx admin turns export` exports turns first for anyone who wants them.
 - **`agentx upgrade` never moves an environment back** (2026-09-29; phase 15e plan; owner
   decision; accepted; question 3). An older target is refused, naming both versions; the same
-  release is allowed, so a re-run finishes a stopped upgrade. Every prerelease is refused too, as
-  the settings record only x.y.z.
+  release is allowed, so a re-run finishes a stopped upgrade. A real rollback is a fix released
+  forward, or a restore from backups. (Separately from the answer, the plan also refuses every
+  prerelease, since the settings record only x.y.z.)
 - **The workspace limit keys wait for spec 025 phase 25e** (2026-09-29; phase 15e plan; owner
   decision; accepted; question 4). `config list` and `get` show `limits.workspacesPerMember` and
   `limits.workspacesPerOrg` with the install-time default and say the control plane may hold a
@@ -669,11 +670,13 @@ and the budget.
   decision; accepted; question 5). It shows each stack's last drift result from `DescribeStacks`
   and, when drift was never checked or a stack drifted, the admin command to check or see it.
   Detection reads every resource with the caller's rights, which the operator role does not have.
+  A `doctor --detect-drift` that needs admin credentials is a small later addition if people ask.
 - **The release test's scope** (2026-09-29; phase 15e plan; owner decision; accepted; question 6).
   The workflow installs with each engine up to `developer-signin` (`init --stop-after`), runs
   `doctor`, upgrades from the previous release, changes a setting under the operator role, runs the
-  export path under the operator role, and destroys everything, in a throwaway account, one
-  environment at a time (the Elastic IP quota). The Slack reply, `alerts test`, the manual-guide
+  export path under the operator role, and destroys everything, in a throwaway account. (The plan
+  runs one environment at a time, as a margin: an empty account's Elastic IPs fit two.) The Slack
+  reply, `alerts test`, the manual-guide
   teardown and SC-001 are the manual release check in docs/releases.md.
 - **`agentx destroy` needs admin credentials** (2026-09-29; phase 15e plan; owner decision;
   accepted; question 7). It refuses the operator role up front: it deletes the access stack, its
@@ -683,15 +686,17 @@ and the budget.
   prints the exact `aws sns unsubscribe` command for each old subscription, for an admin. The
   operator role keeps no `sns:Unsubscribe`. A webhook is shown only by its host.
 - **The access stack during `upgrade` under the operator role** (2026-09-29; phase 15e plan; owner
-  decision; accepted; question 9). Under the operator role, `upgrade` compares the deployed access
+  decision; accepted, its cdk branch changed by ruling F20; question 9). Under the operator role, `upgrade` compares the deployed access
   template with the release's: unchanged, it upgrades every other stack; changed, it stops before
   deploying anything and names `agentx upgrade --export`, whose bundle includes the access stack.
-  With admin credentials it deploys access first. A cdk environment upgrades with admin
-  credentials only (ruling F20: the operator role cannot use CDK's bootstrap resources). SC-005
-  excludes both cases.
+  With admin credentials it deploys access first. The answer's cdk branch (under the operator
+  role, print a notice and skip access) cannot work, because the operator role cannot use CDK's
+  bootstrap resources, so ruling F20 changed it: a cdk environment upgrades with admin credentials
+  only, and `upgrade` refuses the operator role up front. SC-005 excludes both cases.
 - **`doctor`'s Asana check does not refresh** (2026-09-29; phase 15e plan; owner decision;
   accepted; question 10). It checks the Asana credential exists with a refresh token; a refresh
   would rotate the token the control plane's broker holds. Linear and Jira get a real read.
+  Asking the control plane to test the credential comes later, with spec 025's admin reads.
 - **The typed confirmation without a terminal** (2026-09-29; phase 15e plan; owner decision;
   accepted; question 11). When stdin is not a terminal, `destroy` reads each typed answer as a line
   from stdin, so a script must still send the exact name. There is no `--confirm` flag.
