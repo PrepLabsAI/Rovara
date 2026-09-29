@@ -6,7 +6,7 @@ import { isTemporaryAwsError } from "../../packages/broker/src/aws/broker-shared
 describe("isTemporaryAwsError (spec 025 C19)", () => {
   it("names throttling and 5xx answers temporary, and nothing else", () => {
     const named = (name: string, extra: Record<string, unknown> = {}) => Object.assign(new Error("x"), { name, ...extra });
-    for (const name of ["ThrottlingException", "ProvisionedThroughputExceededException", "RequestLimitExceeded", "TooManyRequestsException", "InternalServerError", "ServiceUnavailable", "TransactionConflictException"]) {
+    for (const name of ["ThrottlingException", "ProvisionedThroughputExceededException", "RequestLimitExceeded", "TooManyRequestsException", "InternalServerError", "ServiceUnavailable", "TransactionConflictException", "InternalFailure", "ServiceUnavailableException", "TimeoutError"]) {
       expect(isTemporaryAwsError(named(name))).toBe(true);
     }
     expect(isTemporaryAwsError(named("SomethingNew", { $metadata: { httpStatusCode: 503 } }))).toBe(true);

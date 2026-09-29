@@ -5,7 +5,9 @@ import { deriveTaskStatus, type OperationFacts } from "../../packages/broker/src
 import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM, ensureWorkspace } from "../support/slack-broker.js";
 
-async function started(instructions = "Fix the flaky retry test") {
+const PLANTED_INSTRUCTIONS = "Fix the flaky retry test";
+
+async function started(instructions = PLANTED_INSTRUCTIONS) {
   const harness = await createDeveloperTaskBroker();
   const response = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions, client: "claude-code" });
   const taskId = (response.body.task as { taskId: string }).taskId;
@@ -14,6 +16,23 @@ async function started(instructions = "Fix the flaky retry test") {
   const taskOperations = () => harness.db.find((item) => item.entityType === "OPERATION" && item.workspaceId === task.workspaceId && item.kind === "task");
   const taskOutbox = () => harness.db.find((item) => item.entityType === "OUTBOX" && item.workspaceId === task.workspaceId && (item.invocation as { kind: string }).kind === "task");
   return { ...harness, taskId, task, prepareId, taskOperations, taskOutbox };
+}
+
+/** A retried result's rejection, for the planted-instructions check. */
+async function rejectedRetry(attempt: Promise<unknown>): Promise<string> {
+  const error = await attempt.then(() => undefined, (rejection: unknown) => rejection);
+  expect(error).toBeInstanceOf(Error);
+  const text = (error as Error).message;
+  expect(text).toMatch(/RUNTIME_UNAVAILABLE/);
+  return text;
+}
+
+/** The developer's instructions never reach a log line or an error answer (global constraint). */
+function expectNoPlantedInstructions(logged: { mock: { calls: unknown[][] } }, rejections: string[]): void {
+  expect(logged.mock.calls.length).toBeGreaterThan(0);
+  for (const line of logged.mock.calls.map((call) => call.map(String).join(" "))) expect(line).not.toContain(PLANTED_INSTRUCTIONS);
+  expect(rejections.length).toBeGreaterThan(0);
+  for (const text of rejections) expect(text).not.toContain(PLANTED_INSTRUCTIONS);
 }
 
 describe("the first task is queued by the prepare's result (R3, FR-018)", () => {
@@ -169,14 +188,16 @@ describe("the first task is queued by the prepare's result (R3, FR-018)", () => 
     db.send = async (command) => {
       if (failedReads === 0 && command.constructor.name === "QueryCommand" && JSON.stringify(command.input).includes("REV#")) {
         failedReads += 1;
-        throw Object.assign(new Error("try again later"), { name, ...extra });
+        // The error's message quotes the task, as an AWS message could.
+        throw Object.assign(new Error(`try again later: ${PLANTED_INSTRUCTIONS}`), { name, ...extra });
       }
       return original(command);
     };
     const logged = vi.spyOn(console, "log").mockImplementation(() => undefined);
     try {
-      await expect(finish(task.workspaceId, prepareId, "SUCCEEDED")).rejects.toThrow(/RUNTIME_UNAVAILABLE/);
+      const rejection = await rejectedRetry(finish(task.workspaceId, prepareId, "SUCCEEDED"));
       expect(logged.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({ event: "developer.first_task_queue_retry", operationId: prepareId, error: name }));
+      expectNoPlantedInstructions(logged, [rejection]);
     } finally {
       db.send = original;
       logged.mockRestore();
@@ -204,14 +225,15 @@ describe("the first task is queued by the prepare's result (R3, FR-018)", () => 
     db.send = async (command) => {
       if (failedWrites === 0 && command.constructor.name === "TransactWriteCommand" && JSON.stringify(command.input).includes("OUTBOX")) {
         failedWrites += 1;
-        throw Object.assign(new Error("slow down"), { name: "ThrottlingException" });
+        throw Object.assign(new Error(`slow down: ${PLANTED_INSTRUCTIONS}`), { name: "ThrottlingException" });
       }
       return original(command);
     };
     const logged = vi.spyOn(console, "log").mockImplementation(() => undefined);
     try {
-      await expect(finish(task.workspaceId, prepareId, "SUCCEEDED")).rejects.toThrow(/RUNTIME_UNAVAILABLE/);
+      const rejection = await rejectedRetry(finish(task.workspaceId, prepareId, "SUCCEEDED"));
       expect(logged.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({ event: "developer.first_task_queue_retry", operationId: prepareId, error: "ThrottlingException" }));
+      expectNoPlantedInstructions(logged, [rejection]);
     } finally {
       db.send = original;
       logged.mockRestore();
@@ -226,15 +248,17 @@ describe("the first task is queued by the prepare's result (R3, FR-018)", () => 
   });
 
   it("leaves a prepare whose every try met a temporary error to the stuck-setup sweep (D21)", async () => {
-    const { db, finish, task, prepareId, taskOperations } = await started();
+    const { db, dev, finish, task, taskId, prepareId, taskOperations } = await started();
     const original = db.send;
     db.send = async (command) => {
-      if (command.constructor.name === "QueryCommand" && JSON.stringify(command.input).includes("REV#")) throw Object.assign(new Error("slow down"), { name: "ThrottlingException" });
+      if (command.constructor.name === "QueryCommand" && JSON.stringify(command.input).includes("REV#")) throw Object.assign(new Error(`slow down: ${PLANTED_INSTRUCTIONS}`), { name: "ThrottlingException" });
       return original(command);
     };
     const logged = vi.spyOn(console, "log").mockImplementation(() => undefined);
     try {
-      for (let attempt = 0; attempt < 3; attempt += 1) await expect(finish(task.workspaceId, prepareId, "SUCCEEDED")).rejects.toThrow(/RUNTIME_UNAVAILABLE/);
+      const rejections: string[] = [];
+      for (let attempt = 0; attempt < 3; attempt += 1) rejections.push(await rejectedRetry(finish(task.workspaceId, prepareId, "SUCCEEDED")));
+      expectNoPlantedInstructions(logged, rejections);
     } finally {
       db.send = original;
       logged.mockRestore();
@@ -242,6 +266,10 @@ describe("the first task is queued by the prepare's result (R3, FR-018)", () => 
     expect(await sweepStuckSetups(db, "state", new Date(Date.now() + 51 * 60_000))).toMatchObject({ failed: [task.workspaceId] });
     expect(db.get(`WORKSPACE#${task.workspaceId}`, `OPERATION#${prepareId}`)).toMatchObject({ status: "FAILED", error: STUCK_SETUP_MESSAGE });
     expect(taskOperations()).toHaveLength(0);
+    // Closing the failed task frees the member's slot.
+    const closed = await dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/close`, { requestId: randomUUID() });
+    expect(closed.body).toMatchObject({ closed: true, task: { status: "CLOSED" } });
+    expect(db.get(`SLACK_LIMIT#${SLACK_TEAM}`, `MEMBER#${MAYA.slackUserId}`)).toMatchObject({ count: 0 });
   });
 
   it("a Slack thread's failed prepare creates no developer task pointer", async () => {
