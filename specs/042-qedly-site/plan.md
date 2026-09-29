@@ -33,6 +33,13 @@ Needed before launch (FR-060):
   - [ ] make `PrepLabsAI/AgentX` public
 - [ ] Rebase this branch on mainline before the launch merge
 
+## Execution (owner decision, 2026-09-29)
+
+- **Direct:** Tasks 1, 2, 3, 5, 6, 10 and 11 are built directly, not through QEDly Code. They are the build's plumbing, where a mistake breaks every later task.
+- **QEDly Code, from `#qedly-site`:** Tasks 7, 8 and 9 (the pages), and later copy changes. Each merged PR becomes a receipt.
+- **When to set up dogfooding:** Task 2 step 7 (App install, project registration, channel) moves to just before Task 7.
+- **Tech stack as built:** Astro 7.2 and Starlight 0.42 on Node 22 (qedly/qedly.github.io#2). The current `create-astro` refuses Node 20.
+
 ## Global Constraints
 
 - Site URL comes from one setting: `SITE.url = "https://qedly.github.io"` (FR-040).
