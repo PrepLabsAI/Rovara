@@ -63,51 +63,57 @@ export function endpointMissing(error: unknown): boolean {
  * reliably (item 8), sends the person to the console instead of a wrong id: `ca-` and `sa-` regions
  * are not covered by the `us.`/`eu.`/`apac.` cross-region profile families, so guessing would print
  * an id that does not exist. */
-function inferenceProfileHint(modelId: string, region: string, role: ModelRole): string {
-  if (region.startsWith("us-gov-")) return `use us-gov.${modelId} instead (--${role}-model)`;
-  if (region.startsWith("eu-")) return `use eu.${modelId} instead (--${role}-model)`;
-  if (region.startsWith("ap-")) return `use apac.${modelId} instead (--${role}-model)`;
+function inferenceProfileHint(modelId: string, region: string, change: string): string {
+  if (region.startsWith("us-gov-")) return `use us-gov.${modelId} instead (${change})`;
+  if (region.startsWith("eu-")) return `use eu.${modelId} instead (${change})`;
+  if (region.startsWith("ap-")) return `use apac.${modelId} instead (${change})`;
   if (region.startsWith("ca-") || region.startsWith("sa-")) {
-    return `use the inference profile id listed in the Bedrock console for ${region} instead (--${role}-model)`;
+    return `use the inference profile id listed in the Bedrock console for ${region} instead (${change})`;
   }
-  return `use us.${modelId} instead (--${role}-model)`;
+  return `use us.${modelId} instead (${change})`;
 }
+
+/** How modelCheckProblem's messages say to change a model and to try again. init's defaults name its
+ * flags; agentx doctor names agentx config set (a model is changed there after install). */
+export interface ModelProblemWording { changeModel: string; rerun: string; region: string }
+const initWording = (role: ModelRole): ModelProblemWording => ({ changeModel: `--${role}-model`, rerun: "run agentx init again", region: "choose another region with --region" });
 
 /** Turns a failed one-token Converse call into a message that says what to change, for the
  * failures a new account hits in practice (Review Focus 5): the Anthropic one-time usage form, a
  * model id that must be called through an inference profile, an id Bedrock does not recognize in
  * this region, access denied for some other reason, a throttled check, a timed-out check, and a
  * model that failed for no clear reason at all. Every branch ends by saying what to try next. */
-export function modelCheckProblem(input: { modelId: string; role: ModelRole; region: string; error: unknown }): string {
+export function modelCheckProblem(input: { modelId: string; role: ModelRole; region: string; error: unknown; wording?: ModelProblemWording }): string {
   const { modelId, role, region, error } = input;
+  const wording = input.wording ?? initWording(role);
   const name = errorName(error);
   const message = errorMessage(error);
-  if (endpointMissing(error)) return `Amazon Bedrock is not available in ${region}; choose another region with --region`;
+  if (endpointMissing(error)) return `Amazon Bedrock is not available in ${region}; ${wording.region}`;
   // Item 1: Bedrock reports the Anthropic one-time usage-form problem as AccessDeniedException in
   // some accounts and ResourceNotFoundException in others; only the message says which problem
   // this is, so it is checked before any check on the error's name.
   if (/use case/i.test(message)) {
-    return `${modelId}: Anthropic models need a one-time usage form submitted in the Bedrock console. Open the Bedrock console in ${region}, Model catalog, choose the model and submit the form; submitting it in your organization's management account covers every member account. Then run agentx init again`;
+    return `${modelId}: Anthropic models need a one-time usage form submitted in the Bedrock console. Open the Bedrock console in ${region}, Model catalog, choose the model and submit the form; submitting it in your organization's management account covers every member account. Then ${wording.rerun}`;
   }
   if (name === "ValidationException" && /on-demand throughput/i.test(message)) {
-    return `${modelId} must be called through an inference profile in ${region}; ${inferenceProfileHint(modelId, region, role)}`;
+    return `${modelId} must be called through an inference profile in ${region}; ${inferenceProfileHint(modelId, region, wording.changeModel)}`;
   }
   if (name === "ResourceNotFoundException" || (name === "ValidationException" && /model identifier is invalid/i.test(message))) {
-    return `${modelId} is not a Bedrock model id available in ${region}; check the id, or choose another with --${role}-model`;
+    return `${modelId} is not a Bedrock model id available in ${region}; check the id, or choose another with ${wording.changeModel}`;
   }
   if (name === "AccessDeniedException") {
     // Item 7: AWS retired the Bedrock console's "Model access" page (What's New, October 2025);
     // serverless models are enabled automatically in commercial regions, so a plain access denial
     // now means a role or SCP denies bedrock:InvokeModel, or (for a Marketplace model) the role
     // is missing aws-marketplace:Subscribe.
-    return `${modelId}: this account or your credentials cannot call it in ${region} (${message}). Your role or an SCP may deny bedrock:InvokeModel for this model; for a Marketplace model, the role also needs aws-marketplace:Subscribe. Check your permissions, or choose another model with --${role}-model`;
+    return `${modelId}: this account or your credentials cannot call it in ${region} (${message}). Your role or an SCP may deny bedrock:InvokeModel for this model; for a Marketplace model, the role also needs aws-marketplace:Subscribe. Check your permissions, or choose another model with ${wording.changeModel}`;
   }
-  if (name === "ThrottlingException") return `Bedrock throttled the check of ${modelId}; wait a minute and run agentx init again`;
+  if (name === "ThrottlingException") return `Bedrock throttled the check of ${modelId}; wait a minute and ${wording.rerun}`;
   // Item 2: awsPrerequisiteChecks' own withDeadline already builds this exact, complete message
   // (naming the model, the region, and what to try), so it is returned as-is rather than wrapped
   // a second time.
   if (name === "TimeoutError") return message;
-  return `${modelId} did not answer a one-token test call in ${region}: ${message}; check your credentials or network, or choose another model with --${role}-model`;
+  return `${modelId} did not answer a one-token test call in ${region}: ${message}; check your credentials or network, or choose another model with ${wording.changeModel}`;
 }
 
 function nodeVersionOk(version: string): boolean {

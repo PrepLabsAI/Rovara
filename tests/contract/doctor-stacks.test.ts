@@ -130,6 +130,6 @@ describe("doctor: reporting (FR-051)", () => {
 
   it("turns a check group that throws into one failed check, without the error's code prefix", async () => {
     const checks = await guarded("github", async () => { throw new Error("GitHub app lookup failed with HTTP 502"); });
-    expect(checks).toEqual([{ group: "github", name: "github checks", status: "fail", detail: "could not run the github checks: GitHub app lookup failed with HTTP 502", fix: "check this computer's network access and AWS credentials, then run agentx doctor again" }]);
+    expect(checks).toEqual([{ group: "github", name: "github checks", status: "fail", detail: "could not run the github checks: GitHub app lookup failed with HTTP 502", fix: "check this computer's network access to github.com, then run agentx doctor again" }]);
   });
 });

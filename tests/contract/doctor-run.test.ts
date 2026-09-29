@@ -18,6 +18,37 @@ describe("doctor: models (FR-050)", () => {
   });
 });
 
+describe("doctor: models (Task 8 polish)", () => {
+  it("calls each distinct model once, however many roles share it", async () => {
+    const checks = passingChecks();
+    const settings = { ...SETTINGS, models: { ...SETTINGS.models, classifier: "amazon.nova-pro-v1:0", worker: "amazon.nova-pro-v1:0" } };
+    const found = await modelChecks(doctorContext({ settings, services: doctorServices({ checks }) }));
+    expect(found.map((entry) => entry.status)).toEqual(["ok", "ok", "ok"]);
+    expect(checks.models).toEqual(["us.anthropic.claude-sonnet-4-6", "amazon.nova-pro-v1:0"]);
+  });
+
+  it("words a failed model in doctor's terms: agentx config set, never init's flags", async () => {
+    for (const error of [
+      Object.assign(new Error("no access"), { name: "AccessDeniedException" }),
+      Object.assign(new Error("Rate exceeded"), { name: "ThrottlingException" }),
+      Object.assign(new Error("model use case details have not been submitted"), { name: "ResourceNotFoundException" }),
+      Object.assign(new Error("Invocation with on-demand throughput isn't supported"), { name: "ValidationException" }),
+      Object.assign(new Error("The provided model identifier is invalid"), { name: "ValidationException" }),
+      new Error("socket hang up"),
+      Object.assign(new Error("getaddrinfo ENOTFOUND bedrock-runtime.us-east-1.amazonaws.com"), { code: "ENOTFOUND" }),
+    ]) {
+      const checks = passingChecks({ converse: async (id) => { if (id === "amazon.nova-pro-v1:0") throw error; } });
+      const worker = (await modelChecks(doctorContext({ services: doctorServices({ checks }) })))[2]!;
+      expect(worker.status).toBe("fail");
+      expect(worker.detail).not.toContain("--worker-model");
+      expect(worker.detail).not.toContain("agentx init");
+      expect(worker.detail).not.toContain("--region");
+    }
+    const denied = passingChecks({ converse: async (id) => { if (id === "amazon.nova-pro-v1:0") throw Object.assign(new Error("no access"), { name: "AccessDeniedException" }); } });
+    expect((await modelChecks(doctorContext({ services: doctorServices({ checks: denied }) })))[2]!.detail).toContain("agentx --env staging config set models.worker <model id>");
+  });
+});
+
 describe("doctor: alerts and the budget (FR-050)", () => {
   it("passes a confirmed subscription and a budget that matches its parameter", async () => {
     expect((await alertChecks(doctorContext())).map((entry) => [entry.name, entry.status])).toEqual([["subscription", "ok"], ["budget", "ok"]]);
@@ -93,9 +124,31 @@ describe("runDoctor", () => {
     await expect(runDoctor({ env: "staging", store: await store({ ...SETTINGS, naming: "legacy" }), services: () => doctorServices() })).rejects.toThrow("agentx doctor checks environments installed with agentx init; staging uses the legacy stack names");
   });
 
+  it("skips the budget check, not passes it, when the control-plane stack is missing", async () => {
+    const stacks = healthyStacks();
+    delete stacks["agentx-staging-control-plane"];
+    const budget = (await alertChecks(doctorContext({ services: doctorServices({ stackMap: stacks }) })))[1]!;
+    expect(budget).toMatchObject({ name: "budget", status: "skip" });
+    expect(budget.detail).toContain("agentx-staging-control-plane does not exist");
+  });
+
+  it("runs the later groups when an early group throws", async () => {
+    const services = () => doctorServices({ stacks: { describe: async () => { throw new Error("CloudFormation is unreachable"); } } });
+    const report = await runDoctor({ env: "staging", store: await store(), services });
+    expect(report.checks).toContainEqual(expect.objectContaining({ group: "stacks", name: "stacks checks", status: "fail" }));
+    expect(report.checks.filter((entry) => entry.group === "capacity").map((entry) => entry.status)).toEqual(["ok", "ok"]);
+    expect(report.checks.filter((entry) => entry.group === "sign-in").map((entry) => entry.status)).toEqual(["ok"]);
+    expect(report.checks.some((entry) => entry.group === "models" && entry.status === "ok")).toBe(true);
+  });
+
+  it("says what to do when doctor's clients cannot be set up", async () => {
+    await expect(runDoctor({ env: "staging", store: await store(), services: () => { throw new Error("Could not load credentials from any providers"); } }))
+      .rejects.toThrow("could not set up doctor's AWS, Slack and GitHub clients (Could not load credentials from any providers); sign in to AWS for this account and region, then run agentx doctor again");
+  });
+
   it("keeps going when a group throws, reporting it as one failed check", async () => {
     const services = () => doctorServices({ signIn: async () => { throw new Error("SSM read failed"); } });
     const report = await runDoctor({ env: "staging", store: await store(), services });
-    expect(report.checks).toContainEqual({ group: "sign-in", name: "sign-in checks", status: "fail", detail: "could not run the sign-in checks: SSM read failed", fix: "check this computer's network access and AWS credentials, then run agentx doctor again" });
+    expect(report.checks).toContainEqual({ group: "sign-in", name: "sign-in checks", status: "fail", detail: "could not run the sign-in checks: SSM read failed", fix: "fix the problem named above, then run agentx doctor again" });
   });
 });

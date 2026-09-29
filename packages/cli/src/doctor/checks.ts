@@ -50,16 +50,27 @@ export function check(group: DoctorGroup, name: string, status: CheckStatus, det
   return { group, name, status, detail, ...(fix === undefined ? {} : { fix }) };
 }
 
-/** What to do about a group that threw: its message names the failing call; most such throws are the
- * network or expired credentials. */
-const GUARDED_FIX = "check this computer's network access and AWS credentials, then run agentx doctor again";
+/** What to do about a group that threw. The detail names the failing call; the fix points only at the
+ * service that group talks to: Slack and GitHub over the network, the AWS-only groups at AWS, and the
+ * groups that mix several (connectors, sign-in) at the problem named. */
+const GUARDED_FIX: Record<DoctorGroup, string> = {
+  stacks: "check this computer's network access and AWS credentials, then run agentx doctor again",
+  secrets: "check this computer's network access and AWS credentials, then run agentx doctor again",
+  models: "check this computer's network access and AWS credentials, then run agentx doctor again",
+  alerts: "check this computer's network access and AWS credentials, then run agentx doctor again",
+  capacity: "check this computer's network access and AWS credentials, then run agentx doctor again",
+  slack: "check this computer's network access to slack.com, then run agentx doctor again",
+  github: "check this computer's network access to github.com, then run agentx doctor again",
+  connectors: "fix the problem named above, then run agentx doctor again",
+  "sign-in": "fix the problem named above, then run agentx doctor again",
+};
 
 /** A group that throws becomes one failed check, so one broken dependency never hides the others. */
 export async function guarded(group: DoctorGroup, run: () => Promise<DoctorCheck[]>): Promise<DoctorCheck[]> {
   try {
     return await run();
   } catch (error) {
-    return [check(group, `${group} checks`, "fail", `could not run the ${group} checks: ${plainMessage(error)}`, GUARDED_FIX)];
+    return [check(group, `${group} checks`, "fail", `could not run the ${group} checks: ${plainMessage(error)}`, GUARDED_FIX[group])];
   }
 }
 

@@ -26,7 +26,13 @@ export async function runDoctor(input: { env: string; store: ParameterStore; ser
   const notes: DoctorCheck[] = [];
   const answers = await readInstallAnswers(store, env).catch((error: unknown) => { notes.push(check("stacks", "install answers", "warn", plainMessage(error))); return undefined; });
   const progress = await readInstallProgress(store, env).catch((error: unknown) => { notes.push(check("stacks", "install progress", "warn", plainMessage(error))); return undefined; });
-  const context: DoctorContext = { env, settings, answers, progress, services: input.services(settings) };
+  let services: DoctorServices;
+  try {
+    services = input.services(settings);
+  } catch (error) {
+    throw agentXError("CONFIG_INVALID", `could not set up doctor's AWS, Slack and GitHub clients (${plainMessage(error)}); sign in to AWS for this account and region, then run agentx doctor again`);
+  }
+  const context: DoctorContext = { env, settings, answers, progress, services };
   const checks = [...notes];
   for (const [group, run] of GROUPS) checks.push(...await guarded(group, () => run(context)));
   return doctorReport(settings, checks);

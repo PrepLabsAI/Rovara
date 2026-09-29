@@ -24,7 +24,8 @@ export async function modelChecks(context: DoctorContext): Promise<DoctorCheck[]
         }
         result = { ok: true, detail: `${modelId} answers a one-token test call` };
       } catch (error) {
-        result = { ok: false, detail: modelCheckProblem({ modelId, role, region: settings.region, error }) };
+        const wording = { changeModel: `agentx --env ${env} config set models.${role} <model id>`, rerun: "run agentx doctor again", region: "check this computer's network access to AWS (an environment cannot move regions), then run agentx doctor again" };
+        result = { ok: false, detail: modelCheckProblem({ modelId, role, region: settings.region, error, wording }) };
       }
       results.set(key, result);
     }
@@ -35,7 +36,8 @@ export async function modelChecks(context: DoctorContext): Promise<DoctorCheck[]
 
 export async function alertChecks(context: DoctorContext): Promise<DoctorCheck[]> {
   const { env, settings, answers, services } = context;
-  const controlPlane = await services.stacks.describe(settings.stacks["control-plane"] ?? environmentStackName(env, "control-plane"));
+  const controlPlaneName = settings.stacks["control-plane"] ?? environmentStackName(env, "control-plane");
+  const controlPlane = await services.stacks.describe(controlPlaneName);
   const set = `agentx --env ${env} config set alerts.address <email>`;
   const checks: DoctorCheck[] = [];
   const topicArn = controlPlane?.outputs.OperatorAlertsTopicArn;
@@ -56,8 +58,12 @@ export async function alertChecks(context: DoctorContext): Promise<DoctorCheck[]
       checks.push(check("alerts", "subscription", "ok", `${confirmed.length} confirmed ${confirmed.length === 1 ? "subscription" : "subscriptions"} (${protocols})`));
     }
   }
-  const monthly = controlPlane?.parameters.BudgetMonthlyUsd ?? "0";
-  const scope = controlPlane?.parameters.BudgetScope ?? "tag";
+  if (controlPlane === undefined) {
+    checks.push(check("alerts", "budget", "skip", `${controlPlaneName} does not exist, so its budget setting cannot be read (the stacks check says what to do)`));
+    return checks;
+  }
+  const monthly = controlPlane.parameters.BudgetMonthlyUsd ?? "0";
+  const scope = controlPlane.parameters.BudgetScope ?? "tag";
   if (monthly === "0") {
     checks.push(check("alerts", "budget", "ok", "no budget (budget.monthlyUsd is 0)"));
   } else {
