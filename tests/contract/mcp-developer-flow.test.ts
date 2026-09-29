@@ -1,75 +1,11 @@
 // Spec 025 Testing section: the MCP SDK's client drives `agentx mcp`'s server against the broker in
 // process, through User Stories 1 and 2. The client lists the tools first, as real AI tools do, so
 // every error result is also checked against SDK 1.30.1's output-schema validation (ruling F3).
-import { randomUUID } from "node:crypto";
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { describe, expect, it } from "vitest";
-import { agentxMcpServer } from "../../packages/cli/src/mcp/serve.js";
-import { developerTokenKey, saveDeveloperEnvironment } from "../../packages/cli/src/developer/config.js";
-import { InMemoryTokenStore } from "../../packages/cli/src/token-store.js";
-import { DEV_ISSUER, MAYA, OMAR, bearerFor, createDeveloperTaskBroker, type Developer } from "../support/developer-task-broker.js";
-import { toolError, type ParsedToolError } from "../support/mcp-tool-error.js";
-
-const URL_BASE = "https://abc123.execute-api.us-east-1.amazonaws.com";
-const REFRESH_TOKEN = `agxr_${"a".repeat(43)}`;
+import { MAYA, OMAR, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
+import { URL_BASE, signedInClient } from "../support/mcp-broker-client.js";
 
 type Harness = Awaited<ReturnType<typeof createDeveloperTaskBroker>>;
-
-/** The control plane as the MCP server sees it: agentx-configuration, and /v1/dev/* on the broker. */
-function brokerFetch(harness: Harness): typeof fetch {
-  return async (input, init) => {
-    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
-    if (url.pathname === "/v1/auth/.well-known/agentx-configuration") return Response.json({ env: "staging", apiVersion: "1.2", issuer: DEV_ISSUER });
-    const response = await harness.handler({
-      version: "2.0", rawPath: url.pathname, rawQueryString: url.search.slice(1),
-      headers: { authorization: new Headers(init?.headers).get("authorization") ?? "" },
-      ...(typeof init?.body === "string" ? { body: init.body } : {}),
-      requestContext: { requestId: randomUUID(), http: { method: init?.method ?? "GET" } },
-    });
-    return new Response(response.body, { status: response.statusCode, headers: { "content-type": "application/json" } });
-  };
-}
-
-interface ToolAnswer { isError: boolean; value: Record<string, unknown>; error?: ParsedToolError }
-
-async function signedInClient(harness: Harness, who: Developer | undefined, onSleep: () => Promise<void> = async () => undefined) {
-  const home = await mkdtemp(join(tmpdir(), "agentx-mcp-"));
-  const tokenStore = new InMemoryTokenStore();
-  await saveDeveloperEnvironment(home, "staging", { url: URL_BASE, issuer: DEV_ISSUER, tokenEndpoint: `${DEV_ISSUER}/token`, revocationEndpoint: `${DEV_ISSUER}/revoke` });
-  const accessToken = who === undefined ? undefined : (await bearerFor(who)).slice("Bearer ".length);
-  if (accessToken !== undefined) await tokenStore.set(developerTokenKey(DEV_ISSUER), { accessToken, refreshToken: REFRESH_TOKEN, expiresAt: Date.now() + 3_600_000 });
-  const stderr: string[] = [];
-  let now = 0;
-  const server = agentxMcpServer({
-    home, tokenStore, fetch: brokerFetch(harness), adminSignedIn: async () => false, stderr: { write: (text: string) => stderr.push(text) },
-    clock: { now: () => now, sleep: async (ms) => { now += ms; await onSleep(); } },
-  });
-  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-  await server.connect(serverSide);
-  const client = new Client({ name: "claude-code", version: "2.1.0" });
-  await client.connect(clientSide);
-  // Ruling F3: listing first makes the client validate every structuredContent it gets back.
-  expect((await client.listTools()).tools).toHaveLength(11);
-  const answers: string[] = [];
-  const tool = async (name: string, args: Record<string, unknown> = {}): Promise<ToolAnswer> => {
-    const result = await client.callTool({ name, arguments: args });
-    answers.push(JSON.stringify(result));
-    if (result.isError === true) return { isError: true, value: {}, error: toolError(result) };
-    return { isError: false, value: result.structuredContent as Record<string, unknown> };
-  };
-  /** FR-026 and the global constraints: neither token appears in any tool result or log line. */
-  const expectNoTokenLeaked = () => {
-    for (const secret of [accessToken, REFRESH_TOKEN].filter((value): value is string => value !== undefined)) {
-      expect(answers.join("\n")).not.toContain(secret);
-      expect(stderr.join("")).not.toContain(secret);
-    }
-  };
-  return { tool, home, stderr, expectNoTokenLeaked };
-}
 
 const workspaceOf = (harness: Harness, taskId: string) => (harness.db.get(`DEVTASK#${taskId}`, "META") as { workspaceId: string }).workspaceId;
 const activeOf = (harness: Harness, workspaceId: string) => String((harness.db.get(`WORKSPACE#${workspaceId}`, "META") as { activeOperationId: string }).activeOperationId);
