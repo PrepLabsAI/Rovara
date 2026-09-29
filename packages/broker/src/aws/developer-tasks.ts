@@ -75,6 +75,11 @@ export interface DeveloperTaskRouteDependencies {
   checkAccess(project: string): Promise<{ revision: number; policy: DeveloperTaskPolicy; access: "granted" | "channel"; channelIds: string[] }>;
   /** C3: bound channels' names and privacy, best effort (R10). */
   boundChannels?(channelIds: readonly string[]): Promise<BoundChannel[]>;
+  /**
+   * Q10: whether this Slack user is a member of this channel, through the access check's own Slack
+   * lookup; SLACK_UNAVAILABLE when the lookup fails. Without it no private-channel share is allowed.
+   */
+  channelMember?(slackUserId: string, channelId: string): Promise<boolean>;
   /** C5: the project's bound channel IDs, sorted, for sharing a task that already exists (R11: no access check). */
   projectChannelIds(project: string): Promise<string[]>;
   now(): number;
@@ -330,7 +335,8 @@ type ProjectAccess = Awaited<ReturnType<DeveloperTaskRouteDependencies["checkAcc
 
 /**
  * C3: where and how a task is shared, or undefined for a private one. Names are read only when a
- * share needs them, and only for a caller with a Slack link, as GET /v1/dev/projects does (R10).
+ * share needs them, and shown only to a caller with a Slack link, as GET /v1/dev/projects does
+ * (R10). Q10: privacy is read for every share, since a private channel needs its sharer's membership.
  */
 async function shareFor(
   deps: DeveloperTaskRouteDependencies,
@@ -340,12 +346,15 @@ async function shareFor(
   wanted: { shareToChannel: boolean; shareMode?: "view" | "continue" | undefined; channel?: string | undefined },
 ): Promise<ShareDecision | undefined> {
   if (!wanted.shareToChannel && access.policy.share !== "required") return undefined;
-  const readsNames = caller.slackUserId !== undefined && deps.boundChannels !== undefined;
-  const bound: BoundChannel[] = readsNames && deps.boundChannels !== undefined
-    ? await deps.boundChannels(access.channelIds)
-    : access.channelIds.map((channelId) => ({ channelId }));
+  const linked = caller.slackUserId !== undefined;
+  const looked: BoundChannel[] = deps.boundChannels === undefined
+    ? access.channelIds.map((channelId) => ({ channelId }))
+    : await deps.boundChannels(access.channelIds);
+  // R10: a caller with no Slack link keeps each channel's privacy, never its name.
+  const bound: BoundChannel[] = linked ? looked : looked.map(({ channelId, isPrivate }) => (isPrivate === undefined ? { channelId } : { channelId, isPrivate }));
+  let decision: ShareDecision | undefined;
   try {
-    return decideShare({
+    decision = decideShare({
       project, policy: access.policy, bound, shareToChannel: wanted.shareToChannel,
       ...(wanted.shareMode === undefined ? {} : { shareMode: wanted.shareMode }),
       ...(wanted.channel === undefined ? {} : { channel: wanted.channel }),
@@ -354,11 +363,31 @@ async function shareFor(
     // A channel named by name when Slack did not name every bound channel: the name may be right,
     // so say the names could not be read rather than blame it, and give the IDs to use (IDs only, R10).
     const byName = wanted.channel !== undefined && !SlackChannelIdSchema.safeParse(wanted.channel).success;
-    if (readsNames && byName && error instanceof AgentXError && error.code === "CHANNEL_REQUIRED" && bound.some((channel) => channel.name === undefined)) {
+    if (linked && deps.boundChannels !== undefined && byName && error instanceof AgentXError && error.code === "CHANNEL_REQUIRED" && bound.some((channel) => channel.name === undefined)) {
       throw agentXError("CHANNEL_REQUIRED", `AgentX could not read the channel names from Slack; name the channel by its ID: ${bound.map((channel) => channel.channelId).sort().join(", ")}`);
     }
     throw error;
   }
+  if (decision !== undefined) await confirmMayShareInto(deps, caller, bound.find((channel) => channel.channelId === decision.channelId) ?? { channelId: decision.channelId });
+  return decision;
+}
+
+const NOT_A_MEMBER = "you are not a member of that private channel; join it first, or share to one of the project's public channels";
+const PRIVACY_UNKNOWN = "Slack could not be reached to check whether that channel is private; try again shortly";
+
+/**
+ * Q10 (owner answer, 2026-09-29): a private channel takes a share only from one of its members. A
+ * public channel needs nothing. A channel whose privacy Slack did not give is treated as private
+ * unless the caller is a member, and a failed membership lookup refuses: it never lets a share through.
+ */
+async function confirmMayShareInto(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, channel: BoundChannel): Promise<void> {
+  if (channel.isPrivate === false) return;
+  // A caller with no Slack link cannot be confirmed as a member.
+  if (caller.slackUserId === undefined || deps.channelMember === undefined) {
+    throw channel.isPrivate === true ? agentXError("CHANNEL_REQUIRED", NOT_A_MEMBER) : agentXError("SLACK_UNAVAILABLE", PRIVACY_UNKNOWN);
+  }
+  if (await deps.channelMember(caller.slackUserId, channel.channelId)) return;
+  throw channel.isPrivate === true ? agentXError("CHANNEL_REQUIRED", NOT_A_MEMBER) : agentXError("SLACK_UNAVAILABLE", PRIVACY_UNKNOWN);
 }
 
 async function startTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, value: unknown): Promise<{ task: DeveloperTaskView }> {

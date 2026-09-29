@@ -480,6 +480,11 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
       ...(deps.developer.slackTeamId === undefined ? {} : { slackTeamId: deps.developer.slackTeamId }),
       actions: deps.tasks,
       checkAccess: (project) => checkProjectAccess(deps, caller, project),
+      channelMember: async (slackUserId, channelId) => {
+        const answer = await safeChannelMembers(deps)({ kind: "channel-members", slackUserId, channelIds: [channelId] });
+        if (!answer.ok) throw agentXError("SLACK_UNAVAILABLE", "Slack could not be reached to check your membership of that channel; try again shortly");
+        return answer.memberOf.includes(channelId);
+      },
       projectChannelIds: async (project) => (await bindingsOf(deps)).filter((binding) => binding.projectName === project).map((binding) => binding.channelId).sort(),
       boundChannels: async (channelIds) => {
         const known = await channelNames(deps, channelIds);

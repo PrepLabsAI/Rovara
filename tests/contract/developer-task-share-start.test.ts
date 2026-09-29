@@ -109,6 +109,7 @@ describe("sharing at the start (FR-031)", () => {
       documentClient: db, tableName: "state", actions, now: () => Date.now(),
       checkAccess: async () => ({ revision: 1, policy: DEFAULT_DEVELOPER_TASK_POLICY, access: "granted", channelIds: [SLACK_CHANNEL] }),
       projectChannelIds: async () => [],
+      boundChannels: async (channelIds) => channelIds.map((channelId) => ({ channelId, name: "payments-dev", isPrivate: false })),
     }, caller, { method: "POST", path: "/v1/dev/tasks", headers: {}, requestId: randomUUID(), body: JSON.stringify(start({ shareToChannel: true })) }, new URL("https://agentx.test/v1/dev/tasks")).then(() => undefined, (error: unknown) => error);
     expect(refusal).toBeInstanceOf(AgentXError);
     expect((refusal as AgentXError).code).toBe("CHANNEL_REQUIRED");
@@ -119,7 +120,8 @@ describe("sharing at the start (FR-031)", () => {
   });
 
   it("never stores or shows a private channel's name, even to a Slack-linked developer (R10)", async () => {
-    const { db, handler, dev } = await createDeveloperTaskBroker({ channelInfo: names });
+    // Q10: a private channel takes a share only from a member, so Maya is in this one.
+    const { db, handler, dev } = await createDeveloperTaskBroker({ channelInfo: names, channelMembers: async (request) => ({ ok: true, memberOf: request.slackUserId === MAYA.slackUserId ? request.channelIds.filter((id) => id === SLACK_CHANNEL || id === PRIVATE) : [] }) });
     await bindChannel(handler, PRIVATE);
     const task = taskOf((await dev(MAYA, "POST", "/v1/dev/tasks", start({ shareToChannel: true, channel: PRIVATE }))).body);
     expect(task).toMatchObject({ shared: true, share: { channelId: PRIVATE } });
@@ -130,13 +132,16 @@ describe("sharing at the start (FR-031)", () => {
     expect(JSON.stringify(db.find((item) => item.taskId === task.taskId))).not.toContain("payments-secret");
   });
 
-  it("gives a developer with no Slack link channel IDs only, and reads no names for them (R10)", async () => {
+  it("gives a developer with no Slack link channel IDs only, and shows no names to them (R10, Q10)", async () => {
     const { db, dev, channelInfo } = await createDeveloperTaskBroker({ channelInfo: names });
     grantProject(db, OMAR);
     const task = taskOf((await dev(OMAR, "POST", "/v1/dev/tasks", start({ shareToChannel: true }))).body);
     expect(task.share).toMatchObject({ channelId: SLACK_CHANNEL });
     expect(task.share).not.toHaveProperty("channelName");
-    expect(channelInfo).not.toHaveBeenCalled();
+    // Q10: the channel's privacy is read, since a private channel needs its sharer's membership;
+    // its name is still never stored or shown to this developer.
+    expect(channelInfo).toHaveBeenCalledWith({ kind: "channel-info", channelIds: [SLACK_CHANNEL] });
+    expect(JSON.stringify(db.find((item) => item.taskId === task.taskId))).not.toContain("payments-dev");
   });
 
   it("keeps a private start private, and reads no channel names for it", async () => {
