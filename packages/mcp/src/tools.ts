@@ -159,6 +159,8 @@ function requestIdFor(context: ToolContext, call: ToolCall, input: Record<string
 const optional = (value: unknown) => value ?? null;
 /** What makes a cancel the same cancel: the tool and its task (final review M3). */
 const cancelContent = (taskId: unknown): readonly unknown[] => ["agentx_cancel_task", taskId];
+/** What makes a share the same share: the task, the mode asked for and the channel named. */
+const shareContent = (taskId: unknown, mode: unknown, channel: unknown): readonly unknown[] => ["agentx_share_task", taskId, optional(mode), optional(channel)];
 const eventsOf = (input: Record<string, unknown>) => (input.events as number | undefined) ?? DEVELOPER_EVENTS_DEFAULT;
 
 /**
@@ -258,7 +260,7 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
       title: z.string().max(120).optional().describe("a short title, at most 120 characters; the first line of the instructions when left out"),
       share_to_channel: z.boolean().optional().describe("post the task in the project's Slack channel, where AgentX replies as it runs; false by default"),
       share_mode: z.enum(["view", "continue"]).optional().describe("view (the channel watches) or continue (channel members may mention AgentX in the thread to steer the task); the project's default when left out, and view when the project does not allow continue"),
-      channel: z.string().max(80).optional().describe("which bound channel to share in, by name or ID; needed only when the project has several"),
+      channel: z.string().min(1).max(80).optional().describe("which bound channel to share in, by name or ID; needed only when the project has several"),
       wait_seconds: waitInput(0).optional().describe("seconds to wait for the task to end, 0 to 600; 0 (answer at once) by default"),
       request_id: requestIdInput,
     },
@@ -396,18 +398,25 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
     inputSchema: {
       task_id: taskIdInput,
       share_mode: z.enum(["view", "continue"]).optional().describe("view or continue; for a new share, the project's default when left out"),
-      channel: z.string().max(80).optional().describe("which bound channel, by name or ID; needed only when the project has several"),
+      channel: z.string().min(1).max(80).optional().describe("which bound channel, by name or ID; needed only when the project has several"),
       request_id: requestIdInput,
     },
     outputSchema: ActionShape,
     async handler(context, input, call) {
       const taskId = input.task_id as string;
-      const id = requestIdFor(context, call, input, ["agentx_share_task", taskId, optional(input.share_mode), optional(input.channel)]);
+      const id = requestIdFor(context, call, input, shareContent(taskId, input.share_mode, input.channel));
       const task = await context.client.shareTask(taskId, {
         requestId: id,
         ...(input.share_mode === undefined ? {} : { shareMode: input.share_mode as "view" | "continue" }),
         ...(input.channel === undefined ? {} : { channel: input.channel as string }),
       });
+      // The mode changed: a later call asking for an earlier mode is a new change, not a retry of
+      // the earlier call, whose stored answer would leave the thread in this mode (as cancel after continue).
+      for (const mode of ["view", "continue", undefined]) {
+        if (mode === input.share_mode) continue;
+        call.requestIds?.forget(shareContent(taskId, mode, input.channel));
+        call.requestIds?.forget(shareContent(taskId, mode, undefined));
+      }
       return { structured: { ...taskOutput(task), request_id: id }, text: taskText(task) };
     },
   },
