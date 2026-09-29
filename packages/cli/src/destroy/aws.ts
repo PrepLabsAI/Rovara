@@ -22,6 +22,7 @@ export interface DestroyApi {
   disableTerminationProtection(name: string): Promise<void>;
   deleteStack(name: string): Promise<void>;
   latestEvent(name: string): Promise<string | undefined>;
+  /** The resources that failed to delete since the stack's latest delete began. */
   failedResources(name: string): Promise<string[]>;
   workerInstances(env: string): Promise<Array<{ id: string; state: string; tags: Record<string, string> }>>;
   terminateInstances(ids: string[]): Promise<void>;
@@ -36,7 +37,8 @@ export interface DestroyApi {
   aliases(env: string): Promise<Array<{ name: string }>>;
   deleteAlias(name: string): Promise<void>;
   secrets(env: string): Promise<Array<{ name: string; scheduled: boolean }>>;
-  deleteSecret(name: string, scheduled: boolean): Promise<void>;
+  /** Reads whether the secret is scheduled for deletion itself, so one scheduled by hand is handled too. */
+  deleteSecret(name: string): Promise<void>;
 }
 
 type Send = { send(command: unknown): Promise<unknown> };
@@ -45,13 +47,24 @@ const isGone = (error: unknown) => error instanceof Error && (GONE.has(error.nam
 async function unlessGone<T>(run: () => Promise<T>, gone: T): Promise<T> {
   try { return await run(); } catch (error) { if (isGone(error)) return gone; throw error; }
 }
+/** DeleteVolume on a volume EC2 is already deleting answers IncorrectState. */
+export const isVolumeGone = (error: unknown) => error instanceof Error && (error.name === "InvalidVolume.NotFound" || (error.name === "IncorrectState" && /delet/i.test(error.message)));
 const tagMap = (tags: Array<{ Key?: string; Value?: string }> | undefined) => Object.fromEntries((tags ?? []).flatMap((tag) => (tag.Key === undefined ? [] : [[tag.Key, tag.Value ?? ""]])));
 const workerFilters = (env: string) => [
   { Name: "tag:DeploymentMode", Values: ["ec2-ebs"] }, { Name: "tag:Environment", Values: [env] }, { Name: "tag:agentx:env", Values: [env] },
 ];
 
-export function awsDestroyApi(clients: { cloudFormation: Send; ec2: Send; s3: Send; dynamodb: Send; logs: Send; cognito: Send; kms: Send; secrets: Send }): DestroyApi {
+const TABLE_RETRY_MS = 5_000;
+const TABLE_ATTEMPTS = 36;
+/** EC2 deletes a worker's root volume itself on termination: those are not ours to delete. */
+const VOLUME_STATES = ["creating", "available", "in-use", "error"];
+
+export function awsDestroyApi(
+  clients: { cloudFormation: Send; ec2: Send; s3: Send; dynamodb: Send; logs: Send; cognito: Send; kms: Send; secrets: Send },
+  options: { sleep?: (ms: number) => Promise<void> } = {},
+): DestroyApi {
   const { cloudFormation, ec2, s3, dynamodb, logs, cognito, kms, secrets } = clients;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const events = async (name: string) => ((await cloudFormation.send(new DescribeStackEventsCommand({ StackName: name }))) as { StackEvents?: Array<{ LogicalResourceId?: string; ResourceStatus?: string; ResourceStatusReason?: string }> }).StackEvents ?? [];
   return {
     stack: (name) => unlessGone(async () => {
@@ -84,7 +97,20 @@ export function awsDestroyApi(clients: { cloudFormation: Send; ec2: Send; s3: Se
       return latest === undefined ? undefined : `${latest.LogicalResourceId ?? "stack"} ${latest.ResourceStatus ?? ""}`.trim();
     },
     async failedResources(name) {
-      return (await events(name)).filter((event) => event.ResourceStatus === "DELETE_FAILED" && event.LogicalResourceId !== name).map((event) => `${event.LogicalResourceId ?? "resource"}: ${event.ResourceStatusReason ?? "no reason given"}`);
+      // Events come newest first. Stop at the stack's own latest DELETE_IN_PROGRESS: anything older
+      // belongs to an earlier delete (a failed earlier run) and is not this delete's failure.
+      const failed: string[] = [];
+      let token: string | undefined;
+      for (let page = 0; page < 20; page += 1) {
+        const answer = (await cloudFormation.send(new DescribeStackEventsCommand({ StackName: name, ...(token === undefined ? {} : { NextToken: token }) }))) as { StackEvents?: Array<{ LogicalResourceId?: string; ResourceStatus?: string; ResourceStatusReason?: string }>; NextToken?: string };
+        for (const event of answer.StackEvents ?? []) {
+          if (event.LogicalResourceId === name && event.ResourceStatus === "DELETE_IN_PROGRESS") return failed;
+          if (event.ResourceStatus === "DELETE_FAILED" && event.LogicalResourceId !== name) failed.push(`${event.LogicalResourceId ?? "resource"}: ${event.ResourceStatusReason ?? "no reason given"}`);
+        }
+        token = answer.NextToken;
+        if (token === undefined) break;
+      }
+      return failed;
     },
     async workerInstances(env) {
       const found: Array<{ id: string; state: string; tags: Record<string, string> }> = [];
@@ -104,16 +130,23 @@ export function awsDestroyApi(clients: { cloudFormation: Send; ec2: Send; s3: Se
       const found: Array<{ id: string; state: string; tags: Record<string, string> }> = [];
       let token: string | undefined;
       do {
-        const page = (await ec2.send(new DescribeVolumesCommand({ Filters: workerFilters(env), ...(token === undefined ? {} : { NextToken: token }) }))) as { Volumes?: Array<{ VolumeId?: string; State?: string; Tags?: Array<{ Key?: string; Value?: string }> }>; NextToken?: string };
+        const page = (await ec2.send(new DescribeVolumesCommand({ Filters: [...workerFilters(env), { Name: "status", Values: VOLUME_STATES }], ...(token === undefined ? {} : { NextToken: token }) }))) as { Volumes?: Array<{ VolumeId?: string; State?: string; Tags?: Array<{ Key?: string; Value?: string }> }>; NextToken?: string };
         for (const volume of page.Volumes ?? []) {
           const tags = tagMap(volume.Tags);
-          if (volume.VolumeId !== undefined && isOwnedWorker(env, tags)) found.push({ id: volume.VolumeId, state: volume.State ?? "unknown", tags });
+          if (volume.VolumeId !== undefined && VOLUME_STATES.includes(volume.State ?? "") && isOwnedWorker(env, tags)) found.push({ id: volume.VolumeId, state: volume.State ?? "unknown", tags });
         }
         token = page.NextToken;
       } while (token !== undefined);
       return found;
     },
-    async deleteVolume(id) { await unlessGone(() => ec2.send(new DeleteVolumeCommand({ VolumeId: id })), undefined); },
+    async deleteVolume(id) {
+      try {
+        await ec2.send(new DeleteVolumeCommand({ VolumeId: id }));
+      } catch (error) {
+        if (isVolumeGone(error)) return;
+        throw error;
+      }
+    },
     async resourceTags(resource) {
       const id = resource.physicalId;
       switch (resource.type) {
@@ -132,8 +165,14 @@ export function awsDestroyApi(clients: { cloudFormation: Send; ec2: Send; s3: Se
           }, undefined);
         case "AWS::Logs::LogGroup":
           return unlessGone(async () => {
-            const groups = ((await logs.send(new DescribeLogGroupsCommand({ logGroupNamePrefix: id }))) as { logGroups?: Array<{ logGroupName?: string; logGroupArn?: string }> }).logGroups ?? [];
-            const arn = groups.find((group) => group.logGroupName === id)?.logGroupArn;
+            // The prefix also matches longer names, so read every page for the exact one.
+            let arn: string | undefined;
+            let token: string | undefined;
+            do {
+              const page = (await logs.send(new DescribeLogGroupsCommand({ logGroupNamePrefix: id, ...(token === undefined ? {} : { nextToken: token }) }))) as { logGroups?: Array<{ logGroupName?: string; logGroupArn?: string }>; nextToken?: string };
+              arn = (page.logGroups ?? []).find((group) => group.logGroupName === id)?.logGroupArn;
+              token = page.nextToken;
+            } while (arn === undefined && token !== undefined);
             return arn === undefined ? undefined : ((await logs.send(new ListTagsForResourceCommand({ resourceArn: arn }))) as { tags?: Record<string, string> }).tags ?? {};
           }, undefined);
         case "AWS::Cognito::UserPool":
@@ -173,9 +212,20 @@ export function awsDestroyApi(clients: { cloudFormation: Send; ec2: Send; s3: Se
     },
     async deleteTable(name) {
       await unlessGone(async () => {
-        const table = ((await dynamodb.send(new DescribeTableCommand({ TableName: name }))) as { Table?: { DeletionProtectionEnabled?: boolean } }).Table;
-        if (table?.DeletionProtectionEnabled === true) await dynamodb.send(new UpdateTableCommand({ TableName: name, DeletionProtectionEnabled: false }));
-        await dynamodb.send(new DeleteTableCommand({ TableName: name }));
+        const table = ((await dynamodb.send(new DescribeTableCommand({ TableName: name }))) as { Table?: { TableStatus?: string; DeletionProtectionEnabled?: boolean } }).Table;
+        if (table === undefined || table.TableStatus === "DELETING") return;
+        if (table.DeletionProtectionEnabled === true) await dynamodb.send(new UpdateTableCommand({ TableName: name, DeletionProtectionEnabled: false }));
+        // The table stays busy (ResourceInUseException) while that change, or any other update, settles.
+        for (let attempt = 1; ; attempt += 1) {
+          try {
+            await dynamodb.send(new DeleteTableCommand({ TableName: name }));
+            return;
+          } catch (error) {
+            if (!(error instanceof Error && error.name === "ResourceInUseException")) throw error;
+            if (attempt >= TABLE_ATTEMPTS) throw agentXError("RUNTIME_UNAVAILABLE", `table ${name} is still busy after ${(TABLE_ATTEMPTS * TABLE_RETRY_MS) / 60_000} minutes; run agentx destroy again to continue`);
+            await sleep(TABLE_RETRY_MS);
+          }
+        }
       }, undefined);
     },
     async deleteLogGroup(name) { await unlessGone(() => logs.send(new DeleteLogGroupCommand({ logGroupName: name })), undefined); },
@@ -222,10 +272,11 @@ export function awsDestroyApi(clients: { cloudFormation: Send; ec2: Send; s3: Se
       } while (token !== undefined);
       return found;
     },
-    async deleteSecret(name, scheduled) {
+    async deleteSecret(name) {
       await unlessGone(async () => {
-        // A secret already scheduled for deletion keeps its name until the window ends; restoring it
-        // first lets the force delete free the name for a reinstall now.
+        // A secret already scheduled for deletion (by an earlier run, or by hand) keeps its name until
+        // the window ends; restoring it first lets the force delete free the name for a reinstall now.
+        const scheduled = ((await secrets.send(new DescribeSecretCommand({ SecretId: name }))) as { DeletedDate?: Date }).DeletedDate !== undefined;
         if (scheduled) await secrets.send(new RestoreSecretCommand({ SecretId: name }));
         await secrets.send(new DeleteSecretCommand({ SecretId: name, ForceDeleteWithoutRecovery: true }));
       }, undefined);
