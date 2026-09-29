@@ -163,6 +163,28 @@ describe("agentx init", () => {
     expect(h.store.values.has(lockParameterName("staging"))).toBe(false);
   });
 
+  it("finishes a run --stop-after cut short on the next plain run, from the step after the one it named", async () => {
+    const h = await harness();
+    expect(await h.run(["--stop-after", "developer-signin"], { prompter: scriptedPrompter([...FIRST_RUN, ...SLACK, ...SIGNIN]) })).toBe(0);
+    const mark = h.mark();
+    const prompter = scriptedPrompter([...FINISH]);
+    expect(await h.run(["--json"], { prompter })).toBe(0);
+    expect(prompter.remaining()).toBe(0);
+    const result = (JSON.parse(h.printedSince(mark).split("\n").find((line) => line.startsWith("{\"ok\"")) ?? "{}") as { data?: { status: string; ran: string[]; skipped: string[]; stoppedAfter?: string } }).data;
+    expect(result?.status).toBe("complete");
+    expect(result?.ran).toContain("admin-user");
+    const beforeStop = ["access", "core", "github-app", "control-plane", "slack-app", "slack-service", "developer-signin"];
+    expect(result?.skipped).toEqual(expect.arrayContaining(beforeStop));
+    expect(result?.ran.filter((id) => beforeStop.includes(id))).toEqual([]);
+    expect(result?.stoppedAfter).toBeUndefined();
+  });
+
+  it("refuses --stop-after with --export, which runs no init step", async () => {
+    const h = await harness();
+    expect(await h.run(["--export", join(h.home, "bundle"), "--stop-after", "developer-signin"], { prompter: scriptedPrompter([]) })).not.toBe(0);
+    expect(h.printed()).toContain("--stop-after cannot be used with --export");
+  });
+
   it("refuses a --stop-after that names no step", async () => {
     const h = await harness();
     expect(await h.run(["--stop-after", "everything"], { prompter: scriptedPrompter([]) })).not.toBe(0);

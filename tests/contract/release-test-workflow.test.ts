@@ -102,7 +102,35 @@ describe("the release test workflow (SC-003 to SC-005, question 6)", () => {
     const gates = runs(wf).split("\n").filter((line) => line.includes("\"$DOCTOR_GATE\""));
     expect(gates).toHaveLength(doctorLines.length);
     const gate = wf.env.DOCTOR_GATE ?? "";
-    expect(gate).toContain(".group == \"sign-in\" and .name == \"Slack redirect URL\"");
+    // Only Slack's own "not registered" answer; "no Slack client ID is stored" still fails.
+    expect(gate).toContain(".group == \"sign-in\" and .name == \"Slack redirect URL\" and (.detail | startswith(\"Slack does not list\"))");
     expect(gate.match(/Slack redirect URL/g)).toHaveLength(1);
+  });
+
+  // A cancelled run kills agentx before its finally releases /agentx/<env>/lock, and destroy
+  // refuses a locked environment, so each destroy first removes the lock this run left.
+  it("removes this run's own lock before every destroy, so a cancelled run is still torn down", async () => {
+    const all = await text();
+    expect(all).toMatch(/^#.*lock/m);
+    const destroySteps = Object.values((await workflow()).jobs).flatMap((job) => job.steps).filter((step) => step.run?.includes(" destroy --region "));
+    expect(destroySteps).toHaveLength(3);
+    const unlock = 'aws ssm delete-parameter --name "/agentx/$env/lock" --region "$AWS_REGION" 2>/dev/null || true';
+    for (const step of destroySteps) {
+      const run = step.run ?? "";
+      expect(run).toContain(unlock);
+      expect(run.indexOf(unlock)).toBeLessThan(run.indexOf(" destroy --region "));
+    }
+  });
+
+  it("gives the GitHub token only to the step that downloads the previous release", async () => {
+    const wf = await workflow();
+    for (const job of Object.values(wf.jobs)) expect(job.env?.GH_TOKEN).toBeUndefined();
+    const holders = Object.values(wf.jobs).flatMap((job) => job.steps).filter((step) => step.env?.GH_TOKEN !== undefined);
+    expect(holders.map((step) => step.name)).toEqual(["Fetch the previous release and build the candidate"]);
+    expect(holders[0]?.run).toContain("gh release download");
+  });
+
+  it("tells the owner how the rt-<run id> images are cleaned up", async () => {
+    expect(await text()).toMatch(/^#.*lifecycle policy.*\n#.*rt-/m);
   });
 });

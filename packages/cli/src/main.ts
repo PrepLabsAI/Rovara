@@ -764,6 +764,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       command: Command,
     ) => {
       const globals = globalOptions(command);
+      if (options.export !== undefined && options.stopAfter !== undefined) throw agentXError("CONFIG_INVALID", "--stop-after cannot be used with --export, which runs no init step; drop one of them");
       if (options.export === undefined) {
         const result = await runInit(initOptions(globals, options, command), dependencies.init ?? {}, { stderr: services.stderr, home });
         if (globals.json) {

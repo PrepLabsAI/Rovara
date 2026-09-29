@@ -7,15 +7,22 @@ name: Release test
 #     repository through GitHub OIDC (no long-lived keys), with a maximum session of at least
 #     3 hours, because an install and an upgrade can outlast the 1 hour default;
 #   - vars.AGENTX_RELEASE_TEST_REGION (optional, default us-east-1);
-#   - the private ECR repositories agentx-release-test/worker and agentx-release-test/slack;
+#   - the private ECR repositories agentx-release-test/worker and agentx-release-test/slack, each
+#     with a lifecycle policy that expires images a few days after they are pushed; every run
+#     pushes both images tagged rt-<run id>, and nothing else removes them;
 #   - a test GitHub App (vars.RT_GITHUB_ACCOUNT, RT_GITHUB_APP_ID, RT_GITHUB_INSTALLATION_ID,
 #     secrets.RT_GITHUB_PRIVATE_KEY) and a test Slack app (vars.RT_SLACK_CLIENT_ID,
 #     secrets.RT_SLACK_BOT_TOKEN, RT_SLACK_SIGNING_SECRET, RT_SLACK_CLIENT_SECRET).
 # init stops after developer-signin: the admin sign-in needs a browser, and a pre-made Slack app
 # cannot follow each new environment's API address, so the Slack reply, alerts test and the manual
 # teardown guide stay in the manual release check (question 6).
-# The Elastic IP quota fits one throwaway environment in an account at a time, so the installs run
-# one after another, and each job destroys its own environment before the next one starts.
+# The Elastic IP quota fits one throwaway environment in an account at a time, so the jobs run one
+# after another, and each destroys its own environment at its end. If one of those destroys fails,
+# the next job can hit the Elastic IP quota; the teardown job's sweep cleans up afterwards.
+# A cancelled run kills agentx before it releases /agentx/<env>/lock, and destroy refuses a locked
+# environment. So each destroy first deletes that lock. This is safe: the release-test concurrency
+# group runs one run at a time, the account is throwaway, and the always() steps run only after the
+# killed process is gone.
 on:
   workflow_dispatch:
     inputs:
@@ -39,7 +46,8 @@ env:
   PREVIOUS: ${{ inputs.previous }}
   CANDIDATE: ${{ inputs.candidate }}
   # Rulings F22: doctor's "Slack redirect URL" check may fail against the pre-made test Slack app,
-  # which cannot list every new environment's callback. Until the live check (Task 20) confirms
+  # which cannot list every new environment's callback. Only Slack's "not registered" answer
+  # ("Slack does not list ...") is set aside; "no Slack client ID is stored" still fails. Until the live check (Task 20) confirms
   # it, every doctor run goes through this gate: it fails on any other failed check, or when the
   # environment does not run the expected release, and prints that one check for the manual
   # release check. Run as: jq -r -e --arg version <expected> "$DOCTOR_GATE" doctor.json
@@ -47,7 +55,7 @@ env:
     if .data == null then ("doctor did not finish: \(.error.message // "no report")", false)
     else .data as $r
       | [$r.checks[] | select(.status == "fail")] as $fails
-      | [$fails[] | select(.group == "sign-in" and .name == "Slack redirect URL")] as $manual
+      | [$fails[] | select(.group == "sign-in" and .name == "Slack redirect URL" and (.detail | startswith("Slack does not list")))] as $manual
       | ($fails - $manual) as $real
       | ($manual[] | "for the manual release check (rulings F22): \(.group) / \(.name): \(.detail)"),
         ($real[] | "failed: \(.group) / \(.name): \(.detail)"),
@@ -102,7 +110,6 @@ jobs:
       RT_GITHUB_APP_ID: ${{ vars.RT_GITHUB_APP_ID }}
       RT_GITHUB_INSTALLATION_ID: ${{ vars.RT_GITHUB_INSTALLATION_ID }}
       RT_SLACK_CLIENT_ID: ${{ vars.RT_SLACK_CLIENT_ID }}
-      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v5
         with: { fetch-depth: 0, persist-credentials: false }
@@ -112,6 +119,8 @@ jobs:
       - uses: aws-actions/configure-aws-credentials@v5
         with: { role-to-assume: "${{ vars.AGENTX_RELEASE_TEST_ROLE_ARN }}", aws-region: "${{ env.AWS_REGION }}", role-duration-seconds: 10800 }
       - name: Fetch the previous release and build the candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p "$RUNNER_TEMP/previous"
           gh release download "v$PREVIOUS" --repo "$GITHUB_REPOSITORY" --pattern "agentx-$PREVIOUS.tar.gz" --dir "$RUNNER_TEMP"
@@ -165,6 +174,8 @@ jobs:
         run: |
           ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
           env="$AGENTX_ENV"
+          # A cancelled run leaves its lock behind (see the header).
+          aws ssm delete-parameter --name "/agentx/$env/lock" --region "$AWS_REGION" 2>/dev/null || true
           # The name, then the account id, for an install that failed before it recorded itself.
           if printf '%s\n%s\n' "$env" "$ACCOUNT" | node packages/cli/dist/main.js --env "$env" destroy --region "$AWS_REGION" > "$RUNNER_TEMP/destroy.txt" 2>&1; then
             cat "$RUNNER_TEMP/destroy.txt"
@@ -175,7 +186,7 @@ jobs:
           fi
 
   export:
-    # After both lanes, whether they passed or not, so only one environment is ever in the account.
+    # After both lanes, whether they passed or not, so the installs run one after another.
     needs: [images, lane]
     if: ${{ !cancelled() && needs.images.result == 'success' }}
     runs-on: ubuntu-latest
@@ -223,6 +234,8 @@ jobs:
         run: |
           ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
           env="$AGENTX_ENV"
+          # A cancelled run leaves its lock behind (see the header).
+          aws ssm delete-parameter --name "/agentx/$env/lock" --region "$AWS_REGION" 2>/dev/null || true
           # The name, then the account id, for an install that failed before it recorded itself.
           if printf '%s\n%s\n' "$env" "$ACCOUNT" | node packages/cli/dist/main.js --env "$env" destroy --region "$AWS_REGION" > "$RUNNER_TEMP/destroy.txt" 2>&1; then
             cat "$RUNNER_TEMP/destroy.txt"
@@ -255,6 +268,8 @@ jobs:
           ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
           status=0
           for env in "rt${{ github.run_number }}t" "rt${{ github.run_number }}c" "rt${{ github.run_number }}x"; do
+            # A cancelled run leaves its lock behind (see the header).
+            aws ssm delete-parameter --name "/agentx/$env/lock" --region "$AWS_REGION" 2>/dev/null || true
             # The name, then the account id, for an install that failed before it recorded itself.
             if printf '%s\n%s\n' "$env" "$ACCOUNT" | node packages/cli/dist/main.js --env "$env" destroy --region "$AWS_REGION" > "$RUNNER_TEMP/destroy-$env.txt" 2>&1; then
               cat "$RUNNER_TEMP/destroy-$env.txt"
