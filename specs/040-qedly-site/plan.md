@@ -1,8 +1,8 @@
-# Qedly Website Implementation Plan
+# QEDly Website Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build and ship the Qedly website at `https://qedly.github.io`, with the AgentX docs pulled from a release tag, a Receipts page generated from the site's own Qedly Code pull requests, and build checks that keep every claim true.
+**Goal:** Build and ship the QEDly website at `https://qedly.github.io`, with the AgentX docs pulled from a release tag, a Receipts page generated from the site's own QEDly Code pull requests, and build checks that keep every claim true.
 
 **Architecture:** A static Astro site with Starlight for the docs. It lives in the public repository `qedly/qedly.github.io` and is published to GitHub Pages by a GitHub Action. Three build-time scripts feed it: a docs sync from `PrepLabsAI/AgentX` at a pinned tag, a receipts fetch from the GitHub API, and a claims check over the ledger and the built HTML. After Task 2, the site repository is registered as an AgentX project, and later site changes are requested in its Slack channel so each one becomes a receipt.
 
@@ -26,7 +26,7 @@ Needed before Task 5 (docs sync), and only while AgentX is private:
 
 Needed before launch (FR-060):
 - [ ] Buttondown: create a PrepLabs account and set `SITE.buttondownUser`
-- [ ] Trademark search: UK, EU and US, classes 9 and 42, for "Qedly"
+- [ ] Trademark search: UK, EU and US, classes 9 and 42, for "QEDly"
 - [ ] First public AgentX release, cut after this branch merges so its tag contains the new docs:
   - [ ] publish the first npm version by hand (`docs/releases.md`, one-time owner setup step 3)
   - [ ] turn on automatic publishing (`AGENTX_PUBLISH_ENABLED`)
@@ -36,11 +36,11 @@ Needed before launch (FR-060):
 ## Global Constraints
 
 - Site URL comes from one setting: `SITE.url = "https://qedly.github.io"` (FR-040).
-- Home H1, exactly: "Your AI agent says the tests pass. Qedly makes it prove it." (FR-001)
+- Home H1, exactly: "Your AI agent says the tests pass. QEDly makes it prove it." (FR-001)
 - Hero line, exactly: "Source-available · Runs in your AWS account · Amazon Bedrock" (FR-001)
 - Licence wording, exactly and in one setting: "Source-available (FSL-1.1-ALv2). Every line is readable. Each release becomes Apache 2.0 two years after it ships." (FR-004)
-- Banned in copy (FR-003): "10x", "autonomous", "AI engineer", "AI employee", "teammate", "swarm", "army of agents", "software factory", "mission control", "production-ready in minutes", "game-changing", "enterprise-grade", "open source" (for AgentX or Qedly Code).
-- Status labels are exactly: Now (Qedly Code, Qedly Checks), Next (Workspace, Passport), Later (Outcomes, Cloud) (FR-005).
+- Banned in copy (FR-003): "10x", "autonomous", "AI engineer", "AI employee", "teammate", "swarm", "army of agents", "software factory", "mission control", "production-ready in minutes", "game-changing", "enterprise-grade", "open source" (for AgentX or QEDly Code).
+- Status labels are exactly: Now (QEDly Code, QEDly Checks), Next (Workspace, Passport), Later (Outcomes, Cloud) (FR-005).
 - No usage volume, customer counts or productivity multiples (FR-009).
 - No cookies; any analytics must be cookieless (FR-043).
 - Lighthouse ≥ 95 in all four categories, mobile and desktop (FR-041).
@@ -54,8 +54,8 @@ Needed before launch (FR-060):
 
 1. **Quoted competitor wording.** The FAQ answer "How is it different from Devin" may need to quote a banned word ("autonomous software engineer"). A reader expects the quote to be allowed and our own copy to be checked. Test in Task 3: text inside an element with `data-quote` is skipped by the banned-word check, and the same word elsewhere fails.
 2. **Docs links that point outside `docs/`.** AgentX docs link to `../README.md#anchor`, `../examples/...` and `../packages/...`. A reader expects each to open the right GitHub file at the documented tag, not a 404 on the site. Test in Task 5: those three shapes, a `connectors/linear.md` sibling link, and an in-page `#anchor`.
-3. **A receipt whose requester did not consent.** The Slack user ID must never appear on the site. Test in Task 6: a body with an unknown `U…` ID renders "a Qedly team member", and a known ID renders the consented display name.
-4. **Pull requests that are not Qedly Code's.** Hand-written PRs, bot PRs from Dependabot, and unmerged PRs must not count. Test in Task 6: only merged PRs by the configured app login are kept.
+3. **A receipt whose requester did not consent.** The Slack user ID must never appear on the site. Test in Task 6: a body with an unknown `U…` ID renders "a QEDly team member", and a known ID renders the consented display name.
+4. **Pull requests that are not QEDly Code's.** Hand-written PRs, bot PRs from Dependabot, and unmerged PRs must not count. Test in Task 6: only merged PRs by the configured app login are kept.
 5. **The site URL changing later.** Canonical URLs, sitemap entries, Open Graph URLs and `llms.txt` links must all move together. Test in Task 2 (`absoluteUrl`) and Task 10: the llms output is built only from `absoluteUrl`.
 
 ---
@@ -106,15 +106,15 @@ These are owner actions. Tasks 2 onward depend on items 1 to 3.
   - `SITE_READ_TOKEN`: for the receipts fetch on the site repository. In GitHub Actions this is the built-in `GITHUB_TOKEN`, so there is nothing to create. In CodeBuild the fetch runs without a token, because the repository is public.
 - [ ] **Step 3a:** Install the AgentX GitHub App (`agentx-sdlc`) on the `qedly` organisation for the `qedly.github.io` repository only, with Contents and Pull requests read and write. Spec 030 supports one App across several owners, but its live check (030 T005) is still open. This install is its first real use, so verify it in Task 2 step 7.
 - [ ] **Step 4:** Create a Buttondown account owned by PrepLabs, note the username, and enable tags `workspace` and `cloud`.
-- [ ] **Step 5:** Book the UK, EU and US trademark search for "Qedly" in classes 9 and 42.
+- [ ] **Step 5:** Book the UK, EU and US trademark search for "QEDly" in classes 9 and 42.
 
 ### Task 1: Logo system (FR-050)
 
 **Files:**
-- Create (site repo, after approval): `public/brand/qed-mark.svg`, `public/brand/wordmark.svg`, `public/brand/lockup-qed.svg`, `public/brand/favicon.svg`, `public/brand/icon-512.png`, `public/brand/og-template.svg`
+- Created (site repo, qedly/qedly.github.io#1): `public/brand/wordmark.svg`, `lockup-tagline.svg`, `icon.svg`, `favicon.svg`, `qed-stamp.svg`, `og-template.svg`, each with a `-dark` variant where it applies, plus `icon-512.png`, `icon-dark-512.png`, `README.md` and `scripts/brand/export.py`
 
 **Interfaces:**
-- Produces: the six files above, each with light and dark variants as `*-dark.svg`. Later tasks reference these exact paths.
+- Produces: the files above. Later tasks reference these exact paths. Status: approved 2026-09-28 ("Box the answer"), exported and in review as qedly/qedly.github.io#1.
 
 - [ ] **Step 1: Explore.** Publish one private review page showing four directions. Each direction appears at 16 px, 32 px and 512 px, in the site header, in a mock PR footer, and on light and dark backgrounds. The directions are:
   - (a) the solid ∎ square alone;
@@ -126,7 +126,7 @@ These are owner actions. Tasks 2 onward depend on items 1 to 3.
 - [ ] **Step 4: Export and commit** the six files (plus dark variants) to `public/brand/`, with a `public/brand/README.md` listing each file's use and minimum size.
 
 ```bash
-git add public/brand && git commit -m "feat(brand): add approved Qedly mark, wordmark and icons"
+git add public/brand && git commit -m "feat(brand): add approved QEDly mark, wordmark and icons"
 ```
 
 ### Task 2: Scaffold the site and its one settings file
@@ -193,7 +193,7 @@ describe("robotsTxt", () => {
 // src/config/site.ts
 export const SITE = {
   url: "https://qedly.github.io",
-  name: "Qedly",
+  name: "QEDly",
   licence: "Source-available (FSL-1.1-ALv2). Every line is readable. Each release becomes Apache 2.0 two years after it ships.",
   docsRelease: "v0.1.0",
   agentxRepo: "PrepLabsAI/AgentX",
@@ -690,7 +690,7 @@ describe("toReceipt", () => {
   const runs = [{ name: "agentx-qedly-site-build", conclusion: "success", started_at: "2026-10-02T09:50:00Z", completed_at: "2026-10-02T09:53:30Z", html_url: "https://github.com/r/1" }];
   it("shows a consented display name and never a raw Slack ID", () => {
     expect(toReceipt(pr(), runs, { U0AAA: "Pratik" }).requester).toBe("Pratik");
-    expect(toReceipt(pr(), runs, {}).requester).toBe("a Qedly team member");
+    expect(toReceipt(pr(), runs, {}).requester).toBe("a QEDly team member");
   });
   it("records each gate with its duration", () => {
     expect(toReceipt(pr(), runs, {}).gates).toEqual([{ name: "agentx-qedly-site-build", status: "success", seconds: 210, url: "https://github.com/r/1" }]);
@@ -738,7 +738,7 @@ export function keepQedlyCode(prs: PullRequest[], appLogin: string): PullRequest
 function requesterOf(body: string | null, consent: Record<string, string>): string {
   const ids = /Requested in Slack thread \S+ by ([U0-9A-Z, ]+)\./.exec(body ?? "")?.[1]?.split(",").map((id) => id.trim()) ?? [];
   const named = ids.map((id) => consent[id]).filter((name): name is string => Boolean(name));
-  return named.length ? named.join(", ") : "a Qedly team member";
+  return named.length ? named.join(", ") : "a QEDly team member";
 }
 
 export function toReceipt(pr: PullRequest, checkRuns: CheckRun[], consent: Record<string, string>): Receipt {
@@ -801,7 +801,7 @@ try {
     fresh.push(toReceipt(pr, runs.check_runs, consent));
   }
   const receipts = mergeWithCache(fresh, cached).sort((a, b) => b.mergedAt.localeCompare(a.mergedAt));
-  if (receipts.length === 0 && !allowEmpty) throw new Error("receipts: no Qedly Code PRs found; refusing to publish an empty Receipts page (set RECEIPTS_ALLOW_EMPTY=1 before launch)");
+  if (receipts.length === 0 && !allowEmpty) throw new Error("receipts: no QEDly Code PRs found; refusing to publish an empty Receipts page (set RECEIPTS_ALLOW_EMPTY=1 before launch)");
   await writeFile(target, JSON.stringify(receipts, null, 2));
   console.log(`wrote ${receipts.length} receipts`);
 } catch (error) {
@@ -814,13 +814,13 @@ try {
 `src/data/consent.yaml` starts empty (`{}`). Add a person only after they agree in writing.
 
 - [ ] **Step 4: Run tests.** Run: `npx vitest run`. Expected: PASS.
-- [ ] **Step 5: Commit** with `feat: receipts from the site's own Qedly Code pull requests`.
+- [ ] **Step 5: Commit** with `feat: receipts from the site's own QEDly Code pull requests`.
 
 ### Task 7: Layout, brand mark and Home (FR-001, FR-006, FR-007, FR-011, FR-023, FR-045)
 
 **Files:**
 - Create: `src/styles/tokens.css`, `src/layouts/Marketing.astro`, `src/components/QedMark.astro`, `src/components/Status.astro`, `src/components/SlackThread.astro`, `src/components/Receipt.astro`, `src/components/ReceiptTotals.astro`, `src/pages/index.astro`, `src/data/products.ts`, `tests/products.test.ts`
-- Modify: `astro.config.mjs` (Starlight `customCss: ["./src/styles/tokens.css"]`, logo `public/brand/qed-mark.svg`)
+- Modify: `astro.config.mjs` (Starlight `customCss: ["./src/styles/tokens.css"]`, logo `public/brand/icon.svg`)
 
 **Interfaces:**
 - Consumes: Task 1 brand files; `SITE`, `STATUS_LABEL`; `<Claim>`; `receipts.json`, `totals`.
@@ -836,8 +836,8 @@ import { PRODUCTS } from "../src/data/products";
 describe("products", () => {
   it("carries the spec's statuses exactly", () => {
     expect(PRODUCTS.map((product) => [product.name, product.status])).toEqual([
-      ["Qedly Code", "now"], ["Qedly Checks", "now"], ["Qedly Workspace", "next"],
-      ["Qedly Passport", "next"], ["Qedly Outcomes", "later"], ["Qedly Cloud", "later"],
+      ["QEDly Code", "now"], ["QEDly Checks", "now"], ["QEDly Workspace", "next"],
+      ["QEDly Passport", "next"], ["QEDly Outcomes", "later"], ["QEDly Cloud", "later"],
     ]);
   });
   it("offers waitlists only for Workspace and Cloud", () => {
@@ -853,8 +853,8 @@ describe("products", () => {
   - the canonical URL from `absoluteUrl(path)`;
   - Open Graph tags;
   - optional JSON-LD;
-  - a header with `QedMark`, nav (Qedly Code, Security, Receipts, Roadmap, Docs, GitHub) and the action "Deploy Qedly Code" linking to `/docs/agentx/quickstart/`;
-  - a footer carrying `SITE.licence` and the "KED-lee, as in Q.E.D." line.
+  - a header with the `wordmark.svg` logo, nav (QEDly Code, Security, Receipts, Roadmap, Docs, GitHub) and the action "Deploy QEDly Code" linking to `/docs/agentx/quickstart/`;
+  - a footer carrying `SITE.licence` and the "Q-E-D-lee" line.
 
   Colour and type tokens go in `tokens.css`. Light values sit on `:root`, with dark overrides under `@media (prefers-color-scheme: dark)` and `[data-theme="dark"]`, which Starlight also uses, so docs and marketing share one theme.
 
@@ -864,7 +864,7 @@ describe("products", () => {
 
 - [ ] **Step 6: Commit** with `feat: layout, brand mark and home page`.
 
-### Task 8: Qedly Code, Security, Receipts, Manifesto, FAQ and About pages (FR-010, FR-012, US3)
+### Task 8: QEDly Code, Security, Receipts, Manifesto, FAQ and About pages (FR-010, FR-012, US3)
 
 **Files:**
 - Create: `src/pages/code.astro`, `src/pages/security.astro`, `src/pages/receipts.astro`, `src/pages/manifesto.astro`, `src/pages/faq.astro`, `src/pages/about.astro`
@@ -872,18 +872,18 @@ describe("products", () => {
 **Interfaces:**
 - Consumes: `Marketing`, `Claim`, `SlackThread`, `Receipt`, `ReceiptTotals`, `receipts.json`, `jsonLd` builders from Task 10 (write the page first and add JSON-LD in Task 10).
 
-- [ ] **Step 1: Qedly Code.**
+- [ ] **Step 1: QEDly Code.**
   - A `SlackThread` replay of the recorded site-channel thread, with members' consent: request, progress, gates, PR with ∎, follow-up.
   - Install steps linking to the quickstart.
   - The monthly infrastructure estimate that `agentx init` prints, labelled "Estimate from `agentx init`. Model tokens are extra."
-- [ ] **Step 2: Security.** One section per control in US3 scenario 1, each built from a ledger claim. Then "What Qedly does not protect against", copied from AgentX `docs/security.md` at the docs tag. Do not rewrite it.
-- [ ] **Step 3: Receipts.** "This website was built by Qedly Code." Totals, then every receipt newest first, each linking to its PR and gate logs, and marking "check log expired" when `logsExpired` is true.
+- [ ] **Step 2: Security.** One section per control in US3 scenario 1, each built from a ledger claim. Then "What QEDly does not protect against", copied from AgentX `docs/security.md` at the docs tag. Do not rewrite it.
+- [ ] **Step 3: Receipts.** "This website was built by QEDly Code." Totals, then every receipt newest first, each linking to its PR and gate logs, and marking "check log expired" when `logsExpired` is true.
 - [ ] **Step 4: Manifesto, FAQ, About.**
   - Manifesto: "Show your work", with both founders' names at the end.
   - FAQ: the six questions from Appendix A item 9. Wrap any quoted competitor wording in `<q data-quote>`.
   - About: the story of the name from the brand proposal, and the founders.
 - [ ] **Step 5: Check.** Run `npm test && RECEIPTS_ALLOW_EMPTY=1 npm run build`. Expected: PASS.
-- [ ] **Step 6: Commit** with `feat: Qedly Code, Security, Receipts, Manifesto, FAQ and About pages`.
+- [ ] **Step 6: Commit** with `feat: QEDly Code, Security, Receipts, Manifesto, FAQ and About pages`.
 
 ### Task 9: Roadmap and waitlist (FR-005, FR-044)
 
@@ -954,7 +954,7 @@ import { buildLlmsTxt, buildLlmsFull } from "../src/lib/llms";
 describe("llms.txt", () => {
   it("lists docs with absolute URLs from the site setting", () => {
     expect(buildLlmsTxt([{ title: "Quickstart", path: "/docs/agentx/quickstart/", summary: "Install AgentX." }]))
-      .toBe("# Qedly\n\n> Qedly is where people and AI agents take work from a hunch to a proven result. Qedly Code is the first product.\n\n## Docs\n\n- [Quickstart](https://qedly.github.io/docs/agentx/quickstart.md): Install AgentX.\n");
+      .toBe("# QEDly\n\n> QEDly is where people and AI agents take work from a hunch to a proven result. QEDly Code is the first product.\n\n## Docs\n\n- [Quickstart](https://qedly.github.io/docs/agentx/quickstart.md): Install AgentX.\n");
   });
   it("bundles full docs in order", () => {
     expect(buildLlmsFull([{ title: "A", markdown: "one" }, { title: "B", markdown: "two" }])).toBe("# A\n\none\n\n# B\n\ntwo\n");
@@ -966,11 +966,11 @@ Add to `tests/seo.test.ts`:
 
 ```ts
 import { softwareApplicationLd, faqLd } from "../src/lib/seo";
-it("describes Qedly Code as a SoftwareApplication at the site URL", () => {
-  expect(softwareApplicationLd()).toMatchObject({ "@type": "SoftwareApplication", name: "Qedly Code", url: "https://qedly.github.io/code" });
+it("describes QEDly Code as a SoftwareApplication at the site URL", () => {
+  expect(softwareApplicationLd()).toMatchObject({ "@type": "SoftwareApplication", name: "QEDly Code", url: "https://qedly.github.io/code" });
 });
 it("builds FAQPage structured data", () => {
-  expect(faqLd([{ q: "How do I say it?", a: "KED-lee." }])).toEqual({ "@context": "https://schema.org", "@type": "FAQPage", mainEntity: [{ "@type": "Question", name: "How do I say it?", acceptedAnswer: { "@type": "Answer", text: "KED-lee." } }] });
+  expect(faqLd([{ q: "How do I say it?", a: "Q-E-D-lee." }])).toEqual({ "@context": "https://schema.org", "@type": "FAQPage", mainEntity: [{ "@type": "Question", name: "How do I say it?", acceptedAnswer: { "@type": "Answer", text: "Q-E-D-lee." } }] });
 });
 ```
 
@@ -982,7 +982,7 @@ import { absoluteUrl } from "../config/site";
 
 export function buildLlmsTxt(pages: { title: string; path: string; summary: string }[]): string {
   const lines = pages.map((page) => `- [${page.title}](${absoluteUrl(page.path.replace(/\/$/, ".md"))}): ${page.summary}`);
-  return `# Qedly\n\n> Qedly is where people and AI agents take work from a hunch to a proven result. Qedly Code is the first product.\n\n## Docs\n\n${lines.join("\n")}\n`;
+  return `# QEDly\n\n> QEDly is where people and AI agents take work from a hunch to a proven result. QEDly Code is the first product.\n\n## Docs\n\n${lines.join("\n")}\n`;
 }
 
 export function buildLlmsFull(pages: { title: string; markdown: string }[]): string {
@@ -994,7 +994,7 @@ export function buildLlmsFull(pages: { title: string; markdown: string }[]): str
 // add to src/lib/seo.ts
 import { absoluteUrl, SITE } from "../config/site";
 export function softwareApplicationLd(): object {
-  return { "@context": "https://schema.org", "@type": "SoftwareApplication", name: "Qedly Code", applicationCategory: "DeveloperApplication", operatingSystem: "AWS", url: absoluteUrl("/code"), license: SITE.licence };
+  return { "@context": "https://schema.org", "@type": "SoftwareApplication", name: "QEDly Code", applicationCategory: "DeveloperApplication", operatingSystem: "AWS", url: absoluteUrl("/code"), license: SITE.licence };
 }
 export function faqLd(items: { q: string; a: string }[]): object {
   return { "@context": "https://schema.org", "@type": "FAQPage", mainEntity: items.map((item) => ({ "@type": "Question", name: item.q, acceptedAnswer: { "@type": "Answer", text: item.a } })) };
@@ -1085,7 +1085,7 @@ The SEO category penalises `noindex`. Before launch, the SEO assertion is expect
 - [ ] **Step 4: Verify.** Push to `main`. Expected:
   - the Deploy workflow succeeds;
   - `https://qedly.github.io` serves the home page with `noindex`;
-  - the next Qedly Code PR shows the `agentx-qedly-site-build` gate on its commit.
+  - the next QEDly Code PR shows the `agentx-qedly-site-build` gate on its commit.
 - [ ] **Step 5: Commit** with `ci: deploy to GitHub Pages, CodeBuild gate and Lighthouse thresholds`.
 
 ### Task 12: Follow-ups in AgentX and the launch PR (FR-034, FR-051, FR-060)
@@ -1098,7 +1098,7 @@ The SEO category penalises `noindex`. Before launch, the SEO assertion is expect
 - [ ] **Step 2: The launch PR**, opened only when FR-060 items 1-4 hold:
   1. Set `SITE.launched = true` and `SITE.docsRelease` to the first public tag.
   2. Remove the Lighthouse `is-crawlable` exemption.
-  3. Add the FR-034 README pointer in AgentX: "AgentX is Qedly Code, the first product from [Qedly](https://qedly.github.io). Docs: [qedly.github.io/docs](https://qedly.github.io/docs/agentx/quickstart/)."
+  3. Add the FR-034 README pointer in AgentX: "AgentX is QEDly Code, the first product from [QEDly](https://qedly.github.io). Docs: [qedly.github.io/docs](https://qedly.github.io/docs/agentx/quickstart/)."
 - [ ] **Step 3: Verify after merge.**
   - `curl -s https://qedly.github.io/robots.txt` shows `Allow: /`.
   - The home page has `index,follow`.

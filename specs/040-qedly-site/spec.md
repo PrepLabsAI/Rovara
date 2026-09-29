@@ -1,4 +1,4 @@
-# Feature Specification: The Qedly website (qedly.github.io) and AgentX docs
+# Feature Specification: The QEDly website (qedly.github.io) and AgentX docs
 
 **Feature Branch**: `docs/040-qedly-site`
 
@@ -6,13 +6,13 @@
 
 **Status**: Draft
 
-**Input**: Owner request: "We need a URL, a website along with docs that serves as the pitch for customers and users (developers, SEO, CTOs and founders of startups), and a logo." Brand decided 2026-09-28: **Qedly**. AgentX launches as **Qedly Code**, the first Qedly product.
+**Input**: Owner request: "We need a URL, a website along with docs that serves as the pitch for customers and users (developers, SEO, CTOs and founders of startups), and a logo." Brand decided 2026-09-28: **QEDly**. AgentX launches as **QEDly Code**, the first QEDly product.
 
 ## Context
 
 ### The brand in one paragraph
 
-Qedly (KED-lee, from Q.E.D., "which was to be shown") is the workspace where people and AI agents take a product bet from a hunch to a proven result. The line is **"From hunch to proof."** The enemy is orphaned work: output nobody can explain, trace to an approver, or show worked. AgentX is the first chapter, sold as **Qedly Code**. The site sells the whole vision and marks each product's real status. The brand proposal, with the strategy, naming history and architecture, is at https://claude.ai/artifact/B77e9bbASEhncb3Lu9iXnZ.
+QEDly (said "Q-E-D-lee", from Q.E.D., "which was to be shown") is the workspace where people and AI agents take a product bet from a hunch to a proven result. The line is **"From hunch to proof."** The enemy is orphaned work: output nobody can explain, trace to an approver, or show worked. AgentX is the first chapter, sold as **QEDly Code**. The site sells the whole vision and marks each product's real status. The brand proposal, with the strategy, naming history and architecture, is at https://claude.ai/artifact/B77e9bbASEhncb3Lu9iXnZ.
 
 ### What the research found (2026-09-28)
 
@@ -35,9 +35,9 @@ Qedly (KED-lee, from Q.E.D., "which was to be shown") is the workspace where peo
 
 ## Positioning
 
-- **Big idea:** everyone else sells an agent that works. Qedly sells the proof that it did.
-- **Signature device:** the **∎** (the end-of-proof "tombstone"). It ends every PR summary Qedly Code writes and every receipt on the site, and it is the brand mark. The site explains it once, in "What the little black square means".
-- **Headline:** "Your AI agent says the tests pass. Qedly makes it prove it."
+- **Big idea:** everyone else sells an agent that works. QEDly sells the proof that it did.
+- **Signature device:** the **∎** (the end-of-proof "tombstone"). It ends every PR summary QEDly Code writes and every receipt on the site, and it is the brand mark. The site explains it once, in "What the little black square means".
+- **Headline:** "Your AI agent says the tests pass. QEDly makes it prove it."
 - **Voice:** precise, warm and a little dry. It admits risk before it promises anything. The manifesto is "Show your work."
 - **Readers:**
   - The CTO or founder is afraid of an unexplained outage and a runaway bill. They get: who asked, who approved, what checked it, the cost per task, and that it runs in their account.
@@ -46,25 +46,25 @@ Qedly (KED-lee, from Q.E.D., "which was to be shown") is the workspace where peo
 
 ## User Scenarios & Testing *(mandatory)*
 
-### User Story 1 - A CTO understands Qedly in ten seconds and finds proof (Priority: P1)
+### User Story 1 - A CTO understands QEDly in ten seconds and finds proof (Priority: P1)
 
-A startup CTO arrives from a link or a search. From the hero alone they can say what Qedly is and what makes it different. One scroll later they have seen a real receipt, and within two clicks they can deploy or join a waitlist.
+A startup CTO arrives from a link or a search. From the hero alone they can say what QEDly is and what makes it different. One scroll later they have seen a real receipt, and within two clicks they can deploy or join a waitlist.
 
 **Why this priority**: the buyer decides whether the rest of the site gets read. If the hero fails, nothing else matters.
 
-**Independent Test**: show the home page for ten seconds to five people who fit the profile, then ask what Qedly does and how it differs from other coding agents.
+**Independent Test**: show the home page for ten seconds to five people who fit the profile, then ask what QEDly does and how it differs from other coding agents.
 
 **Acceptance Scenarios**:
 
-1. **Given** a first-time visitor on a laptop or phone, **When** the home page loads, **Then** the headline, subhead, the "Deploy Qedly Code" action and the "See the receipts" action are visible without scrolling.
-2. **Given** the visitor scrolls once, **When** they reach the ∎ section, **Then** they see a real Qedly Code pull request summary with its gate results, requester and commit, linked to the public PR.
+1. **Given** a first-time visitor on a laptop or phone, **When** the home page loads, **Then** the headline, subhead, the "Deploy QEDly Code" action and the "See the receipts" action are visible without scrolling.
+2. **Given** the visitor scrolls once, **When** they reach the ∎ section, **Then** they see a real QEDly Code pull request summary with its gate results, requester and commit, linked to the public PR.
 3. **Given** the visitor wants the wider vision, **When** they open Roadmap, **Then** each product shows its status (Now, Next, Later) and Workspace and Cloud offer a waitlist.
 
 ---
 
 ### User Story 2 - A developer goes from the README to a working install (Priority: P1)
 
-A developer finds AgentX on GitHub or Hacker News. The README tells them AgentX is Qedly Code and links to qedly.github.io. The Qedly Code page and the quickstart take them from nothing to a working Slack bot.
+A developer finds AgentX on GitHub or Hacker News. The README tells them AgentX is QEDly Code and links to qedly.github.io. The QEDly Code page and the quickstart take them from nothing to a working Slack bot.
 
 **Why this priority**: developers are the adoption channel, and the source-available release is the launch.
 
@@ -72,7 +72,7 @@ A developer finds AgentX on GitHub or Hacker News. The README tells them AgentX 
 
 **Acceptance Scenarios**:
 
-1. **Given** the AgentX README, **When** a developer reads its first screen, **Then** it says "AgentX is Qedly Code, the first product from Qedly" and links to `qedly.github.io/code` and `qedly.github.io/docs`.
+1. **Given** the AgentX README, **When** a developer reads its first screen, **Then** it says "AgentX is QEDly Code, the first product from QEDly" and links to `qedly.github.io/code` and `qedly.github.io/docs`.
 2. **Given** the quickstart, **When** it is followed on a clean AWS account, **Then** every command, prerequisite and cost statement matches the released `agentx init`.
 3. **Given** any docs page, **When** it is opened, **Then** it shows the release version it documents, and no link on it returns 404.
 
@@ -80,7 +80,7 @@ A developer finds AgentX on GitHub or Hacker News. The README tells them AgentX 
 
 ### User Story 3 - A security lead gets specifics, not adjectives (Priority: P2)
 
-A platform or security lead opens the Security page to decide whether to veto. They find exactly what the agent can and cannot touch, where credentials live, what is logged, and what Qedly does not protect against.
+A platform or security lead opens the Security page to decide whether to veto. They find exactly what the agent can and cannot touch, where credentials live, what is logged, and what QEDly does not protect against.
 
 **Why this priority**: this reader holds a veto, and an honest security page is how self-hosted tools earn trust.
 
@@ -89,13 +89,13 @@ A platform or security lead opens the Security page to decide whether to veto. T
 **Acceptance Scenarios**:
 
 1. **Given** the Security page, **When** it is read, **Then** it covers: the orchestrator's lack of code tools, workers without CodeBuild credentials, per-operation single-repository GitHub tokens, no force-push and no merge, the action gate that ignores tool output, KMS-signed worker invocations, the permission boundary and its documented limits, turn records and their retention, and the data that leaves the account (model inference through Bedrock).
-2. **Given** the page's "What Qedly does not protect against" section, **When** it is compared with `docs/` and the permission-boundary limits, **Then** it states the same limits without softening them.
+2. **Given** the page's "What QEDly does not protect against" section, **When** it is compared with `docs/` and the permission-boundary limits, **Then** it states the same limits without softening them.
 
 ---
 
 ### User Story 4 - Anyone can inspect the receipts (Priority: P2)
 
-A skeptic reads "This site was built by Qedly Code" and opens the Receipts page. It lists every pull request that Qedly Code opened on the site repository: the Slack request, the checks that ran on the exact commit, the result, and the human who merged it.
+A skeptic reads "This site was built by QEDly Code" and opens the Receipts page. It lists every pull request that QEDly Code opened on the site repository: the Slack request, the checks that ran on the exact commit, the result, and the human who merged it.
 
 **Why this priority**: it turns our thinnest point (little public usage) into the strongest demonstration in the category.
 
@@ -103,15 +103,15 @@ A skeptic reads "This site was built by Qedly Code" and opens the Receipts page.
 
 **Acceptance Scenarios**:
 
-1. **Given** the site build, **When** it runs, **Then** it reads the site repository's merged PRs from the GitHub API and renders one receipt per PR authored by the Qedly Code GitHub App.
-2. **Given** a receipt, **When** it is shown, **Then** it has the PR title and link, the commit, each gate with its status and duration, the merge time, and the merging human. The Slack requester is shown as a display name only if that person has consented; otherwise it reads "a Qedly team member".
-3. **Given** a PR that a person wrote by hand, **When** the page renders, **Then** that PR is excluded, and the page counts receipts only from Qedly Code.
+1. **Given** the site build, **When** it runs, **Then** it reads the site repository's merged PRs from the GitHub API and renders one receipt per PR authored by the QEDly Code GitHub App.
+2. **Given** a receipt, **When** it is shown, **Then** it has the PR title and link, the commit, each gate with its status and duration, the merge time, and the merging human. The Slack requester is shown as a display name only if that person has consented; otherwise it reads "a QEDly team member".
+3. **Given** a PR that a person wrote by hand, **When** the page renders, **Then** that PR is excluded, and the page counts receipts only from QEDly Code.
 
 ---
 
 ### User Story 5 - Search engines and AI assistants read the site well (Priority: P3)
 
-People searching "self-hosted AI coding agent", "AI agent CI gates", "Claude Tag alternative" or "Devin alternative self-hosted", and AI assistants asked the same questions, find accurate Qedly pages.
+People searching "self-hosted AI coding agent", "AI agent CI gates", "Claude Tag alternative" or "Devin alternative self-hosted", and AI assistants asked the same questions, find accurate QEDly pages.
 
 **Why this priority**: it compounds after launch, but it does not block launch.
 
@@ -119,7 +119,7 @@ People searching "self-hosted AI coding agent", "AI agent CI gates", "Claude Tag
 
 **Acceptance Scenarios**:
 
-1. **Given** any page, **When** it is fetched, **Then** it has a unique title and description, a canonical URL, an Open Graph image, and structured data where relevant (`SoftwareApplication` on Qedly Code, `FAQPage` on the FAQ).
+1. **Given** any page, **When** it is fetched, **Then** it has a unique title and description, a canonical URL, an Open Graph image, and structured data where relevant (`SoftwareApplication` on QEDly Code, `FAQPage` on the FAQ).
 2. **Given** `/llms.txt`, **When** it is fetched, **Then** it links to every docs page. Every docs page also has a `.md` copy, and `/llms-full.txt` bundles the docs for the current release.
 
 ### Edge Cases
@@ -135,27 +135,27 @@ People searching "self-hosted AI coding agent", "AI agent CI gates", "Claude Tag
 
 ### Messaging and claims
 
-- **FR-001**: The home hero MUST read, in order: the H1 "Your AI agent says the tests pass. Qedly makes it prove it."; the subhead (Appendix A); the actions "Deploy Qedly Code" and "See the receipts"; and the line "Source-available · Runs in your AWS account · Amazon Bedrock".
-- **FR-002**: Every factual statement about what Qedly Code does today MUST appear in the claims ledger (Appendix B) with its evidence. A statement about a planned product MUST carry that product's status label.
-- **FR-003**: Copy MUST NOT use: "10x", "autonomous", "AI engineer", "AI employee", "teammate", "swarm", "army of agents", "software factory", "mission control", "production-ready in minutes", "game-changing", "enterprise-grade", or "open source" to describe AgentX or Qedly Code.
+- **FR-001**: The home hero MUST read, in order: the H1 "Your AI agent says the tests pass. QEDly makes it prove it."; the subhead (Appendix A); the actions "Deploy QEDly Code" and "See the receipts"; and the line "Source-available · Runs in your AWS account · Amazon Bedrock".
+- **FR-002**: Every factual statement about what QEDly Code does today MUST appear in the claims ledger (Appendix B) with its evidence. A statement about a planned product MUST carry that product's status label.
+- **FR-003**: Copy MUST NOT use: "10x", "autonomous", "AI engineer", "AI employee", "teammate", "swarm", "army of agents", "software factory", "mission control", "production-ready in minutes", "game-changing", "enterprise-grade", or "open source" to describe AgentX or QEDly Code.
 - **FR-004**: The licence MUST be described as "Source-available (FSL-1.1-ALv2). Every line is readable. Each release becomes Apache 2.0 two years after it ships." The phrase lives in one site setting, so a licence change touches one place.
-- **FR-005**: Product status MUST use exactly three labels, shared by the Roadmap and every product mention: **Now** (Qedly Code, Qedly Checks), **Next** (Workspace, Passport), **Later** (Outcomes, Cloud).
+- **FR-005**: Product status MUST use exactly three labels, shared by the Roadmap and every product mention: **Now** (QEDly Code, QEDly Checks), **Next** (Workspace, Passport), **Later** (Outcomes, Cloud).
 - **FR-006**: The ∎ MUST appear as the brand mark in the header and favicon, at the end of every receipt, and in the section "What the little black square means". That section explains it in one paragraph.
-- **FR-007**: The pronunciation MUST be taught on first contact: the wordmark lock-up carries "Q.E.D." on launch pages, and the About page and the FAQ say "KED-lee, as in Q.E.D.".
+- **FR-007**: The name MUST be written "QEDly" (QED in capitals) everywhere in copy, and the About page and the FAQ MUST say it is pronounced "Q-E-D-lee". The logo is "Box the answer": QED in a drawn box with "ly" outside (files in the site repository under `public/brand/`).
 - **FR-008**: Limits MUST be stated as principles where true, and the principle wording in Appendix A is fixed: never merges ("A person does"), PRs only on request, Slack as the only surface ("It lives where your team already talks").
 - **FR-009**: The site MUST NOT state usage volume, customer counts or productivity multiples. It MAY state specific, verifiable figures from the claims ledger.
 
 ### Pages at launch
 
-- **FR-010**: Launch pages MUST be: Home, Qedly Code, Security, Receipts, Roadmap, Manifesto ("Show your work"), Docs, FAQ, and About (the story of the name and the founders). Compare pages and the blog MAY follow after launch.
+- **FR-010**: Launch pages MUST be: Home, QEDly Code, Security, Receipts, Roadmap, Manifesto ("Show your work"), Docs, FAQ, and About (the story of the name and the founders). Compare pages and the blog MAY follow after launch.
 - **FR-011**: Home MUST follow the section order in Appendix A.
-- **FR-012**: Qedly Code MUST show a recorded or scripted Slack thread with the request, working progress, gates passing, a PR opened with its ∎ summary, and a follow-up in the same thread. It MUST also show the install path and the monthly infrastructure estimate that `agentx init` prints, labelled as an estimate that excludes model tokens.
+- **FR-012**: QEDly Code MUST show a recorded or scripted Slack thread with the request, working progress, gates passing, a PR opened with its ∎ summary, and a follow-up in the same thread. It MUST also show the install path and the monthly infrastructure estimate that `agentx init` prints, labelled as an estimate that excludes model tokens.
 - **FR-013**: The build MUST fail if a page contains a claim marked `current` in the ledger whose evidence reference no longer resolves, or if a banned word from FR-003 appears.
 
 ### Receipts and dogfooding
 
 - **FR-020**: The site repository MUST be public, and it MUST be registered as an AgentX project with at least one CodeBuild gate that builds the site, runs the link check and runs the claims check.
-- **FR-021**: Site changes after the initial scaffold SHOULD be made through Qedly Code from the site's Slack channel. A human MUST merge every PR.
+- **FR-021**: Site changes after the initial scaffold SHOULD be made through QEDly Code from the site's Slack channel. A human MUST merge every PR.
 - **FR-022**: The Receipts page MUST be generated at build time from the GitHub API. It MUST NOT be hand-edited. It shows per-receipt data (US4) and running totals: PRs, gates run, and gates passed on the first attempt.
 - **FR-023**: The home "Receipts" section MUST show the running totals and the three most recent receipts.
 
@@ -168,7 +168,7 @@ People searching "self-hosted AI coding agent", "AI agent CI gates", "Claude Tag
   - fix or remove README links to docs that do not exist (`docs/project-configuration.md`, `docs/architecture-deployed-demo.md`, `docs/validation/agentx-foundation.md`);
   - update stale statements (microVM storage, the classifier-model prompt in init).
   These fixes are in the same branch as this spec.
-- **FR-034**: The launch PR MUST open the README with the Qedly Code pointer from US2. It is left out until then because it links to the site and names the brand before the trademark search clears.
+- **FR-034**: The launch PR MUST open the README with the QEDly Code pointer from US2. It is left out until then because it links to the site and names the brand before the trademark search clears.
 - **FR-033**: Docs search MUST work offline in the static build.
 
 ### Build, hosting and discovery
@@ -183,7 +183,7 @@ People searching "self-hosted AI coding agent", "AI agent CI gates", "Claude Tag
 ### Brand assets
 
 - **FR-050**: The logo system MUST be designed and approved before the site's visual build: the ∎ mark, the wordmark and the "Q.E.D." lock-up, the favicon and app icon at 16, 32 and 512 px, the PR summary footer, and the Open Graph template. Each is shown in light and dark.
-- **FR-051**: Qedly Code's PR summaries MUST end with the ∎ footer (a separate AgentX change, tracked as its own issue) before the Receipts page ships.
+- **FR-051**: QEDly Code's PR summaries MUST end with the ∎ footer (a separate AgentX change, tracked as its own issue) before the Receipts page ships.
 
 ### Launch gate
 
@@ -191,24 +191,24 @@ People searching "self-hosted AI coding agent", "AI agent CI gates", "Claude Tag
   1. The trademark search (UK, EU, US; classes 9 and 42) has cleared.
   2. The first public AgentX release exists: the CLI on npm (`@charterarc/agentx` or its renamed package), both images on ECR Public, and the repository public. On 2026-09-28 none of these exist: npm returns 404 and there are no version tags.
   3. FR-032 is merged and the FR-034 pointer is ready in the launch PR.
-  4. The Receipts page lists at least 20 Qedly Code PRs.
+  4. The Receipts page lists at least 20 QEDly Code PRs.
 
 ### Key Entities
 
 - **Claim**: one statement the site makes about the product. It has its text, a status (`current`, `next` or `later`), an evidence reference (file path, PR or measurement), and the pages that use it.
-- **Receipt**: one merged PR from Qedly Code on the site repository. It has the title, link, commit, gates (name, status, duration), requester display name or placeholder, the merging human, and the merge time.
-- **Product**: one Qedly product, with its name, one-line job and status label.
+- **Receipt**: one merged PR from QEDly Code on the site repository. It has the title, link, commit, gates (name, status, duration), requester display name or placeholder, the merging human, and the merge time.
+- **Product**: one QEDly product, with its name, one-line job and status label.
 - **Docs release**: the AgentX release tag the docs are built from.
 
 ## Success Criteria *(mandatory)*
 
 ### Measurable Outcomes
 
-- **SC-001**: At least 4 of 5 target readers (CTOs or founders of 20-200 engineer startups) can say what Qedly does and name one difference from other coding agents after ten seconds on the home page.
+- **SC-001**: At least 4 of 5 target readers (CTOs or founders of 20-200 engineer startups) can say what QEDly does and name one difference from other coding agents after ten seconds on the home page.
 - **SC-002**: A developer new to AgentX reaches a first Slack reply from their own deployment by following only the site's docs, with no step missing or wrong.
 - **SC-003**: The launch build contains zero claims marked `current` without evidence, zero banned words, and zero broken internal links. The build checks enforce all three.
-- **SC-004**: Lighthouse scores at least 95 in all four categories on the home, Qedly Code and one docs page, on mobile and desktop.
-- **SC-005**: At launch, the Receipts page lists at least 20 Qedly Code PRs, each linked to a public PR whose checks match the receipt.
+- **SC-004**: Lighthouse scores at least 95 in all four categories on the home, QEDly Code and one docs page, on mobile and desktop.
+- **SC-005**: At launch, the Receipts page lists at least 20 QEDly Code PRs, each linked to a public PR whose checks match the receipt.
 - **SC-006**: In the first 30 days after launch, the site records waitlist signups for Workspace and Cloud, and referrals from the AgentX repository, so the team can judge whether the funnel works. There is no target yet; the first month sets the baseline.
 
 ## Assumptions
@@ -216,29 +216,29 @@ People searching "self-hosted AI coding agent", "AI agent CI gates", "Claude Tag
 - The site launches at `qedly.github.io` with no custom domain (owner decision, 2026-09-28). The owners claim the GitHub organisation `qedly` and the npm name `qedly`. qedly.com was listed at $100 on Spaceship on 2026-09-28; the owners accept that someone else may buy it. This spec does not buy or register anything.
 - The site lives in its own public repository, because receipts must be clickable by anyone while the AgentX repository is private. Docs stay in the AgentX repository, so they change in the same PR as the code.
 - GitHub Pages hosting is free for a public repository. Cloudflare Pages remains an option if per-PR previews become necessary.
-- The open-source repository keeps the AgentX name at launch, with the Qedly Code pointer. Whether to rename the repository and CLI is a separate owners' decision.
+- The open-source repository keeps the AgentX name at launch, with the QEDly Code pointer. Whether to rename the repository and CLI is a separate owners' decision.
 - The home-page Slack demo uses a real recorded thread from the site's own channel, with members' consent.
 
 ## Out of Scope
 
-- Compare pages, blog, changelog feed, pricing page, and the Qedly Cloud product.
+- Compare pages, blog, changelog feed, pricing page, and the QEDly Cloud product.
 - Renaming the `agentx` CLI, npm package or repository.
 - Any feature work in AgentX other than FR-032 and the ∎ PR footer (FR-051).
 
 ## Appendix A: Home page copy deck
 
 1. **Hero**
-   - H1: "Your AI agent says the tests pass. Qedly makes it prove it."
-   - Subhead: "Qedly is where people and AI agents take work from a hunch in Slack to a proven result. Every change is checked on the exact commit, approved by a person, and kept on the record. It starts today with Qedly Code, running in your own AWS account."
-   - Actions: "Deploy Qedly Code", "See the receipts".
+   - H1: "Your AI agent says the tests pass. QEDly makes it prove it."
+   - Subhead: "QEDly is where people and AI agents take work from a hunch in Slack to a proven result. Every change is checked on the exact commit, approved by a person, and kept on the record. It starts today with QEDly Code, running in your own AWS account."
+   - Actions: "Deploy QEDly Code", "See the receipts".
    - Line: "Source-available · Runs in your AWS account · Amazon Bedrock".
-2. **What the little black square means.** "Mathematicians end a proof with ∎. Every pull request Qedly Code opens ends with one too: the checks it passed on that exact commit, who asked for it, and the thread where it started." A real PR summary is shown underneath.
+2. **What the little black square means.** "Mathematicians end a proof with ∎. Every pull request QEDly Code opens ends with one too: the checks it passed on that exact commit, who asked for it, and the thread where it started." A real PR summary is shown underneath.
 3. **A thread, start to finish.** The Slack demo: request, progress, gates, PR, follow-up.
-4. **Three things Qedly Code will never do.**
+4. **Three things QEDly Code will never do.**
    - "Grade its own homework. Checks run in your CodeBuild, on the exact commit, where the agent has no credentials."
    - "Merge. It opens the pull request when you ask. A person merges it."
    - "Take orders from a ticket. Text inside an issue can't approve an action; only the people in the thread can."
-5. **Receipts.** "This website was built by Qedly Code." Running totals and the three latest receipts.
+5. **Receipts.** "This website was built by QEDly Code." Running totals and the three latest receipts.
 6. **For the people who sign off.**
    - "Every thread gets its own isolated, persistent machine in your AWS account."
    - "Every coding task records its tokens and estimated cost."
@@ -247,7 +247,7 @@ People searching "self-hosted AI coding agent", "AI agent CI gates", "Claude Tag
 7. **Code is the first chapter.** Workspace, Passport, Outcomes and Cloud with their status labels, and the waitlist.
 8. **Show your work.** An excerpt of the manifesto, signed by both founders.
 9. **FAQ.** Questions answered:
-   - What does Qedly mean and how do I say it?
+   - What does QEDly mean and how do I say it?
    - What does source-available mean?
    - What does it cost to run?
    - Which models does it use?
