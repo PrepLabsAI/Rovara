@@ -1032,6 +1032,9 @@ Spec 014 phase 14d adds the **Details** button. Operator notes:
 
 ## Implementation documents
 
+- Guides: [quickstart](docs/quickstart.md), [concepts](docs/concepts.md),
+  [security](docs/security.md), [CLI reference](docs/cli.md), [costs](docs/costs.md) and
+  [troubleshooting](docs/troubleshooting.md).
 - [Pull-request task list](specs/002-create-pull-request/tasks.md): implementation and validation
   status for explicit publication.
 - [Safe PR lifecycle task list](specs/003-safe-pr-lifecycle/tasks.md): clean publication,
