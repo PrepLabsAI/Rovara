@@ -88,7 +88,7 @@ export async function connectorChecks(context: DoctorContext): Promise<DoctorChe
   for (const saved of progress?.connectors ?? []) {
     if (saved.warning === undefined) continue;
     checks.push(check("connectors", `${LABEL[saved.type]} warning`, "warn", saved.warning, saved.type === "jira"
-      ? "narrow the Jira service account to the connected project (docs/connectors/jira.md, Step 4), then run agentx connector add jira again"
+      ? `narrow the Jira service account to the connected project (docs/connectors/jira.md, Step 4), then run agentx --env ${env} connector add jira --project <name> again`
       : `agentx --env ${env} connector add ${saved.type} --project <name>`));
   }
   const recorded = progress?.connectors ?? [];

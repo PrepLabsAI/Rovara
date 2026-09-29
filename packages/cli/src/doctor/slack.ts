@@ -6,6 +6,7 @@ import { probeSlackUrls, readSlackBotToken, slackSecretName, SlackSignatureRefus
 import { SlackRateLimitedError } from "../setup/channel-add.js";
 import { plainMessage } from "../output.js";
 import { check, type DoctorCheck, type DoctorContext } from "./checks.js";
+import { jsonObject } from "./secrets.js";
 
 const PROBE_TIMEOUT_MS = 30_000;
 /** Slack documents its error codes as lower case, digits and underscores; anything else is not echoed. */
@@ -23,6 +24,12 @@ function channelLookupFix(error: unknown, reinstall: string, project: { name: st
   if (error.code === "CONFIG_INVALID") return `bind it by ID: agentx admin slack bind --team ${project?.teamId ?? "<team-id>"} --channel ${project?.channelId ?? "<channel-id>"} --project ${project?.name ?? "<name>"}`;
   if (message.includes(" refused: ")) return `Slack refused the bot's request (its error code is above); ${reinstall}`;
   return network;
+}
+
+/** The Slack secret's signing secret, read with the same safe parse as the secrets check. */
+export function slackSigningSecret(raw: string | undefined): string | undefined {
+  const value = jsonObject(raw)?.signingSecret;
+  return typeof value === "string" ? value : undefined;
 }
 
 export async function slackChecks(context: DoctorContext): Promise<DoctorCheck[]> {
@@ -52,12 +59,12 @@ export async function slackChecks(context: DoctorContext): Promise<DoctorCheck[]
 
   const controlPlane = settings.stacks["control-plane"] ?? environmentStackName(env, "control-plane");
   const outputs = (await services.stacks.describe(controlPlane))?.outputs ?? {};
-  const secret = JSON.parse(raw ?? "{}") as { signingSecret?: string };
-  if (outputs.SlackEventsUrl === undefined || outputs.SlackInteractivityUrl === undefined || typeof secret.signingSecret !== "string") {
+  const signingSecret = slackSigningSecret(raw);
+  if (outputs.SlackEventsUrl === undefined || outputs.SlackInteractivityUrl === undefined || signingSecret === undefined) {
     checks.push(check("slack", "request URLs", "skip", "the control-plane stack reports no Slack URLs, or no signing secret is stored"));
   } else {
     try {
-      await probeSlackUrls({ eventsUrl: outputs.SlackEventsUrl, interactivityUrl: outputs.SlackInteractivityUrl, signingSecret: secret.signingSecret, fetch: services.fetch, now: services.now, sleep: services.sleep, write: () => undefined, timeoutMs: PROBE_TIMEOUT_MS, pollMs: 5_000 });
+      await probeSlackUrls({ eventsUrl: outputs.SlackEventsUrl, interactivityUrl: outputs.SlackInteractivityUrl, signingSecret, fetch: services.fetch, now: services.now, sleep: services.sleep, write: () => undefined, timeoutMs: PROBE_TIMEOUT_MS, pollMs: 5_000 });
       checks.push(check("slack", "request URLs", "ok", "the events URL echoes a signed challenge and the interactivity URL answers; Slack's own Verified mark is on the app's Event Subscriptions page"));
     } catch (error) {
       if (error instanceof SlackSignatureRefusedError) {
@@ -82,7 +89,7 @@ export async function slackChecks(context: DoctorContext): Promise<DoctorCheck[]
     checks.push(check("slack", `#${channel}`, "fail", plainMessage(error), channelLookupFix(error, reinstall, progress?.project)));
     return checks;
   }
-  if (found === undefined) checks.push(check("slack", `#${channel}`, "fail", "the channel no longer exists, or it is private and the bot is not in it", `in #${channel}, type /invite @${bot}, or bind another channel with agentx --env ${env} channel add`));
+  if (found === undefined) checks.push(check("slack", `#${channel}`, "fail", "the channel no longer exists, or it is private and the bot is not in it", `in #${channel}, type /invite @${bot}, or bind another channel with agentx --env ${env} channel add --project ${progress?.project?.name ?? "<project>"}`));
   else if (!found.isMember) checks.push(check("slack", `#${channel}`, "fail", "the bot is not a member", `in #${channel}, type /invite @${bot}`));
   else checks.push(check("slack", `#${channel}`, "ok", "the bot is a member"));
   return checks;

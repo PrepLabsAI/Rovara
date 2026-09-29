@@ -107,6 +107,12 @@ describe("doctor: connectors (FR-050, the 15d2 decision on saved warnings)", () 
     expect(checks.find((entry) => entry.name === "project payments")?.fix).toContain("specs/013-connector-gateway/contracts/project-config.md");
   });
 
+  it("names --env and --project in the fix for a saved Jira warning, as for every other connector (final review M9)", async () => {
+    const progress = { ...PROGRESS, connectors: [{ type: "jira" as const, ref: "jira", warning: "the Jira service account can also see issues in HR" }] };
+    const checks = await run({ connectors: [], progress });
+    expect(checks.find((entry) => entry.name === "Jira warning")?.fix).toBe("narrow the Jira service account to the connected project (docs/connectors/jira.md, Step 4), then run agentx --env staging connector add jira --project <name> again");
+  });
+
   it("says so when there are no connectors", async () => {
     expect(await run({ connectors: [] })).toEqual([expect.objectContaining({ name: "connectors", status: "ok", detail: "no connectors are set up" })]);
   });

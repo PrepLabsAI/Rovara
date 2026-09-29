@@ -2,7 +2,7 @@ import { AgentXError } from "@agentx/contracts";
 import { describe, expect, it } from "vitest";
 import { githubChecks } from "../../packages/cli/src/doctor/github.js";
 import { secretChecks } from "../../packages/cli/src/doctor/secrets.js";
-import { slackChecks } from "../../packages/cli/src/doctor/slack.js";
+import { slackChecks, slackSigningSecret } from "../../packages/cli/src/doctor/slack.js";
 import { probeSlackUrls, SlackSignatureRefusedError } from "../../packages/cli/src/init/slack-app.js";
 import { SlackRateLimitedError } from "../../packages/cli/src/setup/channel-add.js";
 import { doctorContext, doctorServices, SECRETS, SIGNING_KEY } from "../support/doctor-fakes.js";
@@ -110,9 +110,33 @@ describe("doctor: Slack (FR-050)", () => {
     expect((await slackChecks(context)).find((entry) => entry.name === "#payments")).toMatchObject({ status: "fail", fix: "in #payments, type /invite @agentx" });
   });
 
+  it("names --project in the fix for a channel that is gone, since channel add refuses without it (final review M9)", async () => {
+    const context = doctorContext({ services: doctorServices({ slackChannels: fakeSlackChannels([]) }) });
+    expect((await slackChecks(context)).find((entry) => entry.name === "#payments")).toMatchObject({ status: "fail", fix: "in #payments, type /invite @agentx, or bind another channel with agentx --env staging channel add --project payments" });
+  });
+
   it("skips the channel check when init bound no channel", async () => {
     const context = doctorContext({ progress: { ...doctorContext().progress!, project: undefined } });
     expect((await slackChecks(context)).at(-1)).toMatchObject({ name: "bound channels", status: "skip" });
+  });
+});
+
+describe("doctor: the Slack signing secret parse (final review M10)", () => {
+  it("reads the signing secret with the safe parse, so a malformed value never throws or echoes any part of itself", () => {
+    const malformed = `{"botToken":"xoxb-SECRETpart","signingSecret":"${TEST_SIGNING_SECRET}"`;
+    let result: unknown;
+    expect(() => { result = slackSigningSecret(malformed); }).not.toThrow();
+    expect(result).toBeUndefined();
+    expect(slackSigningSecret(undefined)).toBeUndefined();
+    expect(slackSigningSecret("[1]")).toBeUndefined();
+    expect(slackSigningSecret(JSON.stringify({ signingSecret: TEST_SIGNING_SECRET }))).toBe(TEST_SIGNING_SECRET);
+  });
+
+  it("fails a malformed Slack secret with a message that holds no part of it", async () => {
+    const malformed = `{"botToken":"xoxb-SECRETpart","signingSecret":"${TEST_SIGNING_SECRET}"`;
+    const checks = await slackChecks(withSecrets({ ...SECRETS, "agentx/staging/slack": malformed }));
+    expect(checks[0]).toMatchObject({ name: "bot token", status: "fail" });
+    for (const part of ["SECRETpart", TEST_SIGNING_SECRET, "botToken"]) expect(text(checks)).not.toContain(part);
   });
 });
 

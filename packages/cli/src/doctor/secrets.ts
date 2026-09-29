@@ -8,9 +8,20 @@ import { check, type DoctorCheck, type DoctorContext } from "./checks.js";
 /** `fix` is for a missing secret; `shapeFix`, when set, for one that exists with the wrong shape. */
 interface SecretRule { name: string; shape(value: string): string | undefined; fix: string; shapeFix?: string }
 
+/** A secret value as a JSON object, or undefined. Never throws: V8's SyntaxError quotes part of its
+ * input, so a parse error must never reach a message. */
+export function jsonObject(value: string | undefined): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(value ?? "") as unknown;
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function slackShape(value: string): string | undefined {
-  let parsed: Record<string, unknown>;
-  try { parsed = JSON.parse(value) as Record<string, unknown>; } catch { return "is not JSON"; }
+  const parsed = jsonObject(value);
+  if (parsed === undefined) return "is not JSON";
   if (typeof parsed.botToken !== "string" || !parsed.botToken.startsWith("xoxb-")) return "holds no bot token (xoxb-)";
   if (typeof parsed.signingSecret !== "string" || !/^[a-f0-9]{32}$/.test(parsed.signingSecret)) return "holds no Slack signing secret";
   return undefined;
