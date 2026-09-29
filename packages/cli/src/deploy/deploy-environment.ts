@@ -7,7 +7,7 @@ import { PROTECTED_PARTS, type DeployEvent, type DeployRequest, type StackDeploy
 import { currentLockHolder, withEnvironmentLock } from "../environments/lock.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import { readEnvironmentSettings, writeEnvironmentSettings, type EnvironmentSettings } from "../environments/settings.js";
-import { installOrder, stackParameters, upgradeOrder, type DeployPart, type InstallAnswers, type StackOutputs } from "./parameters.js";
+import { installOrder, OPERATOR_PARAMETERS, SECRET_PARAMETERS, stackParameters, upgradeOrder, type DeployPart, type InstallAnswers, type StackOutputs } from "./parameters.js";
 import type { LoadedRelease } from "./release.js";
 import { callbackSigningKey, type SecretValueStore } from "./signing-key.js";
 import { readStoredDeveloperSignIn, SIGN_IN_PARAMETER_NAMES } from "../signin/settings.js";
@@ -37,16 +37,21 @@ export interface DeployEnvironmentInput {
   now?: () => number;
   /** The caller already holds the environment lock (agentx init's step runner): do not take it again. */
   lockHeld?: boolean;
+  /** An upgrade reads each deployed stack's parameters here, to keep OPERATOR_PARAMETERS (Task 1 of
+   * phase 15e). Required for an upgrade that deploys a part with operator parameters. */
+  deployedParameters?: (stackName: string) => Promise<Record<string, string> | undefined>;
 }
 
 export interface DeployEnvironmentResult {
   outputs: Partial<Record<DeployPart, StackOutputs>>;
   settingsWritten: boolean;
+  /** Operator parameters an upgrade could not keep because this release's template no longer declares them. */
+  droppedParameters: Array<{ stackName: string; parameter: string; value: string }>;
 }
 
 /**
- * F24: the exact parameter names the release's control-plane template declares, so
- * `withDeclaredSignIn` below can drop any stored sign-in key that template does not know about —
+ * The exact parameter names the release's template for `part` declares. F24: for the control plane,
+ * so `withDeclaredSignIn` below can drop any stored sign-in key that template does not know about —
  * concretely, an environment upgraded to a release built before phase 25a while sign-in settings
  * from a later release are still stored in SSM. A CDK stack's parameter *names* do not vary by
  * region (only default/output values do), so any region the release covers is used here, never
@@ -59,7 +64,7 @@ export interface DeployEnvironmentResult {
  * through, trusting the freshly cdk-synthesized template — built from that same checked-out source,
  * which always declares them for a named environment — to accept them.
  */
-function controlPlaneParameterNames(release: LoadedRelease, env: string): ReadonlySet<string> | undefined {
+export function templateParameterNames(release: LoadedRelease, part: DeployPart, env: string): ReadonlySet<string> | undefined {
   const [anyRegion] = release.regions();
   // No region at all (a release meant only for the cdk engine, with no pre-synthesized templates
   // recorded): there is nothing here to parse. `withDeclaredSignIn` below then passes every
@@ -69,14 +74,14 @@ function controlPlaneParameterNames(release: LoadedRelease, env: string): Readon
   if (anyRegion === undefined) return undefined;
   let template: { Parameters?: Record<string, unknown> };
   try {
-    template = JSON.parse(release.template("control-plane", anyRegion, env)) as { Parameters?: Record<string, unknown> };
+    template = JSON.parse(release.template(part, anyRegion, env)) as { Parameters?: Record<string, unknown> };
   } catch {
     // Whether `release.template()` itself failed (a missing or unreadable file) or the text it
     // returned was not valid JSON, a bare SyntaxError (or any other raw error) must never surface
     // here: name the release version and region so the operator knows exactly what to re-fetch.
     throw agentXError(
       "CONFIG_INVALID",
-      `the release's control-plane template for ${anyRegion} could not be read; rebuild or re-download release ${release.manifest.version}`,
+      `the release's ${part} template for ${anyRegion} could not be read; rebuild or re-download release ${release.manifest.version}`,
     );
   }
   return new Set(Object.keys(template.Parameters ?? {}));
@@ -87,8 +92,8 @@ function controlPlaneParameterNames(release: LoadedRelease, env: string): Readon
  * parameter names from `parameters` that `declared` does not list, leaving every other parameter
  * untouched.
  */
-function withDeclaredSignIn(parameters: Record<string, string>, declared: ReadonlySet<string> | undefined): Record<string, string> {
-  // declared === undefined: no region to introspect (see controlPlaneParameterNames). Every
+export function withDeclaredSignIn(parameters: Record<string, string>, declared: ReadonlySet<string> | undefined): Record<string, string> {
+  // declared === undefined: no region to introspect (see templateParameterNames). Every
   // sign-in key is passed through unfiltered here, deliberately — CloudFormation is left to refuse
   // the deploy loudly if the actual template does not declare one of them, rather than this
   // function silently resetting stored sign-in settings on the operator's behalf.
@@ -98,6 +103,51 @@ function withDeclaredSignIn(parameters: Record<string, string>, declared: Readon
     if (!declared.has(name)) delete filtered[name];
   }
   return filtered;
+}
+
+/**
+ * Keeps what the operator set (OPERATOR_PARAMETERS) on an upgrade: each listed parameter the answers
+ * did not set keeps its deployed value, when the release's template still declares it. One the
+ * template no longer declares is reported as dropped and never sent: CloudFormation refuses an
+ * unknown parameter. `declared` undefined means the release has no template to read (a cdk-only
+ * release): every candidate is kept, and CloudFormation itself refuses one it does not know. A name
+ * in SECRET_PARAMETERS is never kept, even if it were listed.
+ */
+export function keptOperatorParameters(input: {
+  part: DeployPart; computed: Record<string, string>; deployed: Record<string, string> | undefined; declared: ReadonlySet<string> | undefined;
+}): { kept: Record<string, string>; dropped: Array<{ parameter: string; value: string }> } {
+  const kept: Record<string, string> = {};
+  const dropped: Array<{ parameter: string; value: string }> = [];
+  for (const name of upgradeKeptParameterNames(input.part)) {
+    // A secret is never carried: DescribeStacks reads a NoEcho value back as "****", which would
+    // overwrite the real secret. The answers always supply secrets themselves.
+    if (SECRET_PARAMETERS.has(name)) continue;
+    if (Object.hasOwn(input.computed, name)) continue;
+    const value = input.deployed?.[name];
+    if (value === undefined) continue;
+    if (input.declared !== undefined && !input.declared.has(name)) {
+      dropped.push({ parameter: name, value });
+      continue;
+    }
+    kept[name] = value;
+  }
+  return { kept, dropped };
+}
+
+/**
+ * Ruling F29: the one rule for which of a stack's deployed parameters an upgrade keeps, for
+ * `agentx upgrade` and `agentx upgrade --export` alike: the operator's settings (OPERATOR_PARAMETERS)
+ * and the secrets. keptOperatorParameters takes its candidates from here (sending each kept operator
+ * setting's deployed value); the export marks each UsePreviousValue. A secret's value never leaves
+ * AWS: agentx upgrade sends it from Secrets Manager, the export keeps the deployed one.
+ *
+ * Developer sign-in is not kept from the stack on either path: both send the choice stored in SSM
+ * (readStoredDeveloperSignIn, then withDeclaredSignIn), so when SSM and the stack disagree, both
+ * apply SSM's. Any other deployed parameter (one set by hand in the console) goes back to the
+ * template's default on both paths.
+ */
+export function upgradeKeptParameterNames(part: DeployPart): ReadonlySet<string> {
+  return new Set([...OPERATOR_PARAMETERS[part], ...SECRET_PARAMETERS]);
 }
 
 /** Throws the exact message a missing stack output must report, naming the real (`environment`-naming) stack name. */
@@ -148,6 +198,15 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
   if (answers.identity.mode === "oidc" && answers.identity.clientId === undefined) {
     throw agentXError("CONFIG_INVALID", "bringing your own OIDC provider requires clientId to write environment settings (needed for agentx login)");
   }
+  // F6: refused before the lock and the deploy loop, so nothing deploys. An upgrade that could not
+  // read the deployed parameters would reset every operator parameter to its template default.
+  // The order and the parts are read once, here, and the deploy loop below uses these same values, so
+  // the parts this guard checks are exactly the parts that deploy.
+  const fullOrder = mode === "install" ? installOrder(answers.identity.mode) : upgradeOrder(answers.identity.mode);
+  const deploySet = new Set(input.parts ?? fullOrder);
+  if (mode === "upgrade" && input.deployedParameters === undefined && [...deploySet].some((part) => OPERATOR_PARAMETERS[part].length > 0)) {
+    throw agentXError("CONFIG_INVALID", "an upgrade must read the deployed stacks' parameters to keep what the operator set; this is an AgentX bug, so report it");
+  }
 
   const work = async (): Promise<DeployEnvironmentResult> => {
     // Settings may have changed in the window between the check above and taking the lock (or, with
@@ -158,10 +217,8 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
 
     const key = await callbackSigningKey(secrets, env);
 
-    const fullOrder = mode === "install" ? installOrder(answers.identity.mode) : upgradeOrder(answers.identity.mode);
-    const deploySet = new Set(input.parts ?? fullOrder);
     // Extra defense-in-depth, not itself the F24 "only the keys the template declares" fix (that is
-    // `withDeclaredSignIn`/`controlPlaneParameterNames` below): assertDeployAllowed above already
+    // `withDeclaredSignIn`/`templateParameterNames` below): assertDeployAllowed above already
     // refuses a legacy-named deploy outright, so this never actually triggers today. It stays as a
     // second, explicit guard against ever reading stored sign-in for a legacy-named environment's
     // control plane, in case a later change lets a legacy deploy reach this far. `existing`
@@ -172,6 +229,7 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
     const fullAnswers: InstallAnswers = { ...answers, ...(developerSignIn === undefined ? {} : { developerSignIn }), release: release.manifest, callbackSigningKey: key };
 
     const outputs: Partial<Record<DeployPart, StackOutputs>> = {};
+    const droppedParameters: DeployEnvironmentResult["droppedParameters"] = [];
 
     if (existing !== undefined) {
       // Every part this environment already has settings for supplies its outputs by reading the
@@ -212,12 +270,27 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
     for (const part of fullOrder) {
       if (!deploySet.has(part)) continue;
       const stackName = environmentStackName(env, part);
-      const rawParameters = stackParameters(part, fullAnswers, outputs);
+      const rawParameters = stackParameters(part, fullAnswers, outputs, { packages: engine === "templates" });
       // F24: only when this deploy is actually sending a stored sign-in choice to the control plane
       // is the release's template even consulted (every other deploy never calls `release.template`).
-      const parameters = part === "control-plane" && developerSignIn !== undefined
-        ? withDeclaredSignIn(rawParameters, controlPlaneParameterNames(release, env))
+      let parameters = part === "control-plane" && developerSignIn !== undefined
+        ? withDeclaredSignIn(rawParameters, templateParameterNames(release, "control-plane", env))
         : rawParameters;
+      if (mode === "upgrade" && OPERATOR_PARAMETERS[part].length > 0) {
+        // The F6 guard above already refused this before anything deployed. Never skip carrying the
+        // parameters: skipping would reset them to the template defaults, the bug this code prevents.
+        if (input.deployedParameters === undefined) {
+          throw agentXError("CONFIG_INVALID", "an upgrade must read the deployed stacks' parameters to keep what the operator set; this is an AgentX bug, so report it");
+        }
+        const deployed = await input.deployedParameters(stackName);
+        // The template is read only when there is something to keep: most upgrades read none.
+        const candidates = OPERATOR_PARAMETERS[part].filter((name) => deployed?.[name] !== undefined && !Object.hasOwn(parameters, name));
+        const declared = candidates.length === 0 ? undefined : templateParameterNames(release, part, env);
+        const { kept, dropped } = keptOperatorParameters({ part, computed: parameters, deployed, declared });
+        parameters = { ...kept, ...parameters };
+        droppedParameters.push(...dropped.map((entry) => ({ stackName, ...entry })));
+        if (candidates.length > 0) input.onEvent?.({ kind: "kept", stackName, kept: Object.keys(kept), dropped: dropped.map((entry) => entry.parameter) });
+      }
       const roleArn = part === "access" ? undefined : requiredOutput(outputs, "access", "CloudFormationRoleArn", env);
       const request: DeployRequest = {
         part,
@@ -233,7 +306,7 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
 
     const controlPlaneOutputs = outputs["control-plane"];
     const identityKnown = answers.identity.mode === "cognito" ? outputs.identity !== undefined : answers.identity.clientId !== undefined;
-    if (controlPlaneOutputs === undefined || !identityKnown) return { outputs, settingsWritten: false };
+    if (controlPlaneOutputs === undefined || !identityKnown) return { outputs, settingsWritten: false, droppedParameters };
 
     const identitySettings = identitySettingsFor(answers.identity, outputs, env);
 
@@ -245,7 +318,7 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
       // Every part this environment needs (foundation, runtime, control-plane, slack) is required by
       // the settings schema; if control-plane is known but one of the others somehow is not, nothing
       // was written rather than writing settings that lie about what is deployed.
-      return { outputs, settingsWritten: false };
+      return { outputs, settingsWritten: false, droppedParameters };
     }
 
     const settings: EnvironmentSettings = {
@@ -267,6 +340,8 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
       controlPlaneUrl: requiredOutput(outputs, "control-plane", "ApiEndpoint", env),
       identity: identitySettings,
       models: answers.models,
+      // F16: set after install (agentx setup alerts, agentx config set alerts.address); no deploy's answers carry it.
+      ...(existing?.alertAddress === undefined ? {} : { alertAddress: existing.alertAddress }),
       ...(outputs.access === undefined
         ? {}
         : {
@@ -281,7 +356,7 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
       updatedAt: new Date(now()).toISOString(),
     };
     await writeEnvironmentSettings(store, settings);
-    return { outputs, settingsWritten: true };
+    return { outputs, settingsWritten: true, droppedParameters };
   };
 
   if (input.lockHeld === true) {

@@ -56,6 +56,21 @@ const MIN_CALLBACK_SIGNING_KEY_LENGTH = 32;
 /** The parameter names whose values must never be printed: every NoEcho template parameter. */
 export const SECRET_PARAMETERS: ReadonlySet<string> = new Set(["CallbackSigningKey"]);
 
+/**
+ * Stack parameters an operator sets after install (the budget question, agentx config set) that an
+ * upgrade's answers do not carry. An upgrade keeps each one's deployed value unless its answers set
+ * it, so no upgrade resets them to the template default. Models are not here: they live in the
+ * settings, which the upgrade's answers read.
+ */
+export const OPERATOR_PARAMETERS: Readonly<Record<DeployPart, readonly string[]>> = {
+  access: [],
+  foundation: [],
+  identity: [],
+  runtime: [],
+  "control-plane": ["BudgetMonthlyUsd", "BudgetScope", "SlackAppPostedMessages", "SlackThreadTurnsPerMinute", "SlackMemberWorkspaceLimit", "SlackOrganizationWorkspaceLimit"],
+  slack: ["SlowTurnMinutes"],
+};
+
 /** Fresh install order: the control plane needs the GitHub App. The `runtime` part is the EC2 worker settings (#117); the control plane reads them only when it boots a worker. */
 export function installOrder(identityMode: "cognito" | "oidc"): DeployPart[] {
   const order: DeployPart[] = ["access", "foundation", "identity", "control-plane", "runtime", "slack"];
@@ -100,10 +115,18 @@ export function privateImageUri(publicRef: string, target: { account: string; re
   return `${target.account}.dkr.ecr.${target.region}.${hostSuffix}/${target.prefix}/${rest}`;
 }
 
+/** A stack output a later stack's parameters need is missing: typed, so upgrade --export can say what to do instead. */
+export class MissingStackOutputError extends Error {
+  constructor(readonly stackName: string, readonly output: string) {
+    super(`stack ${stackName} has no output ${output}`);
+    this.name = "MissingStackOutputError";
+  }
+}
+
 /** Throws the exact message a missing stack output must report. */
 function required(outputs: Partial<Record<DeployPart, StackOutputs>>, part: DeployPart, name: string, env: string): string {
   const value = outputs[part]?.[name];
-  if (value === undefined) throw new Error(`stack ${environmentStackName(env, part)} has no output ${name}`);
+  if (value === undefined) throw new MissingStackOutputError(environmentStackName(env, part), name);
   return value;
 }
 
@@ -178,12 +201,16 @@ function adminParameters(identity: InstallAnswers["identity"]): Record<string, s
   return { AdminClaim: adminClaim, AdminValues: JSON.stringify(adminValues) };
 }
 
-/** Parameters for one stack. Throws a clear error naming the missing input or output. */
-export function stackParameters(part: DeployPart, answers: InstallAnswers, outputs: Partial<Record<DeployPart, StackOutputs>>): Record<string, string> {
+/** Parameters for one stack. Throws a clear error naming the missing input or output. The release's
+ * package parameters belong to its published templates only: a cdk deploy synthesizes from source and
+ * uploads its own assets, and CloudFormation refuses a parameter its template does not declare, so
+ * the cdk engine passes `packages: false` (Task 20 live check). The option is required so every
+ * caller chooses (review M5). */
+export function stackParameters(part: DeployPart, answers: InstallAnswers, outputs: Partial<Record<DeployPart, StackOutputs>>, options: { packages: boolean }): Record<string, string> {
   const boundary = answers.permissionsBoundaryArn ?? "";
   const base: Record<string, string> = {
     PermissionsBoundaryArn: boundary,
-    ...packageParameters(answers.release, part, outputs, answers.env),
+    ...(options.packages ? packageParameters(answers.release, part, outputs, answers.env) : {}),
   };
 
   const openRouter = answers.models.openRouter;

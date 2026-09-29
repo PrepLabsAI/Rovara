@@ -38,7 +38,7 @@ import {
 import { deployStep } from "./deploy-steps.js";
 import { finishSteps, readSettingsOrThrow, readyText } from "./finish-steps.js";
 import { githubAppStep, githubRestApi, type GitHubApi } from "./github-app.js";
-import { emptyProgress, readInstallAnswers, readInstallProgress, writeInstallProgress, type InitAnswers } from "./install-state.js";
+import { emptyProgress, readInstallAnswers, readInstallProgress, writeInstallProgress, type InitAnswers, type InitStepId } from "./install-state.js";
 import { confirmInstallPlan } from "./plan.js";
 import { awsPrerequisiteChecks, checkPrerequisites, type PrerequisiteChecks } from "./prerequisites.js";
 import { processPrompter, secretFromSource, unattendedPrompter, type Prompter } from "./prompts.js";
@@ -98,10 +98,12 @@ export interface InitOptions {
   configDir: string;
   /** --from-bundle: with --resume, an export bundle whose access stack a platform team deployed. */
   fromBundle?: string;
+  /** --stop-after: run the steps up to and including this one, then stop (the release test). */
+  stopAfter?: InitStepId;
 }
 
 /** `ready` is the message a finished install ends with (readyText). */
-export type InitResult = InitRunResult & { env: string; resumed: boolean; controlPlaneUrl?: string; ready?: string };
+export type InitResult = InitRunResult & { env: string; resumed: boolean; controlPlaneUrl?: string; ready?: string; stoppedAfter?: InitStepId };
 
 /** True when `callerArn` is a session of this environment's AgentX operator role (FR-019). */
 export function isOperatorRole(callerArn: string, env: string): boolean {
@@ -227,7 +229,9 @@ export async function runInit(options: InitOptions, deps: InitCliDependencies, s
     const result = await init(options, deps, services, session);
     // A finished run ends the page on the same summary the terminal ends on: where to talk to
     // AgentX, the developer sign-in command, and the day-2 commands (readyText).
-    session.wizard?.finish(result.status === "complete" ? result.ready ?? `AgentX environment ${result.env} is installed.` : result.message);
+    session.wizard?.finish(result.status !== "complete" ? result.message
+      : result.stoppedAfter !== undefined ? `Stopped after the ${result.stoppedAfter} step, as --stop-after asked.`
+        : result.ready ?? `AgentX environment ${result.env} is installed.`);
     return result;
   } catch (error) {
     const mapped = cliErrorFor(error);
@@ -335,7 +339,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
 
   // The release comes first: a CLI built from source is told to pass --release before anything else.
   const version = deps.releaseVersion === undefined ? RELEASE_VERSION : deps.releaseVersion ?? undefined;
-  const releaseDir = options.releaseDir ?? (await fetchRelease({ version, home: services.home, fetch: fetchImplementation, runner, write }));
+  const releaseDir = options.releaseDir ?? (await fetchRelease({ version, engine: options.flags.engine, home: services.home, fetch: fetchImplementation, runner, write }));
   const release = await loadRelease(releaseDir);
   // F23: the saved answers take only x.y.z, so a prerelease would otherwise fail after the plan.
   if (isPrereleaseVersion(release.manifest.version)) {
@@ -367,6 +371,9 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   // screen names its titles.
   const steps = initSteps({ github: deps.github ?? githubRestApi(fetchImplementation), slack: deps.slack ?? slackWebApi(fetchImplementation) });
   session.wizard?.setSteps(steps.map((step) => ({ id: step.id, title: step.title })));
+  // --stop-after runs a prefix of the steps; the wizard's checklist still shows them all.
+  const stopIndex = options.stopAfter === undefined ? -1 : steps.findIndex((step) => step.id === options.stopAfter);
+  const runSteps = stopIndex < 0 ? steps : steps.slice(0, stopIndex + 1);
 
   const regions = release.regions();
   // The AWS CLI's own region comes first, so a resume looks where the install started.
@@ -544,7 +551,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   try {
     const result = await runInitSteps({
       env, region, store, holder: caller.arn, context, now,
-      steps,
+      steps: runSteps,
       beforeSteps: saveAnswers,
       onEvent: (event) => { write(eventLine(event)); session.wizard?.event(event); },
       // A takeover is never behind --yes, which answers every confirm with yes.
@@ -557,6 +564,10 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
         ),
       }),
     });
+    // A run --stop-after cut short is not installed, so it has no ready text.
+    if (options.stopAfter !== undefined && result.status === "complete") {
+      return { ...result, env, resumed: stored !== undefined, stoppedAfter: options.stopAfter };
+    }
     const settings = result.status === "complete" ? await readEnvironmentSettings(store, env) : undefined;
     const progress = result.status === "complete" ? await readInstallProgress(store, env) : undefined;
     return {

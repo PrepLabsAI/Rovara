@@ -34,7 +34,11 @@ export interface CommandRunner {
       /** Captures stdout without echoing it (a long listing only our own code reads). */
       quiet?: boolean;
     },
-  ): Promise<{ stdout: string }>;
+  ): Promise<{
+    stdout: string;
+    /** The child's captured standard error, unredacted; only our own code reads it, and redacts it before showing it. */
+    stderr?: string;
+  }>;
 }
 
 /** Every deploy part's CDK construct id, exactly as infra/lib/app.ts names them. */
@@ -146,6 +150,35 @@ function redactSecrets(text: string, parameters: Record<string, string>): string
   return redacted;
 }
 
+/** The cdk command's arguments for one stack (deploy or diff); a deploy passes each parameter by physical stack name. */
+function cdkArguments(input: { env: string; region: string; identityMode: "cognito" | "oidc" }, request: DeployRequest, command: "deploy" | "diff"): string[] {
+  // --no-install: only the CDK CLI `npm ci` installed from the release's own lockfile, never one npx
+  // would otherwise download on the fly.
+  const args = ["--no-install", "cdk", command, CDK_CONSTRUCT_IDS[request.part], "--exclusively", "--app", "node infra/dist/bin/agentx.js", "-c", `agentxEnv=${input.env}`, "-c", `agentxRegion=${input.region}`];
+  if (input.identityMode === "oidc") args.push("-c", "agentxIdentity=oidc");
+  // cdk diff ignores --parameters (CDK 2.1142 warns that they apply only to deploy).
+  if (command === "diff") return args;
+  // The CDK CLI looks `--parameters` up by the physical stack name (parameterMap[stack.stackName]),
+  // not the construct id; a construct-id prefix silently drops every parameter.
+  for (const [key, value] of Object.entries(request.parameters)) args.push("--parameters", `${request.stackName}:${key}=${value}`);
+  return args;
+}
+
+/** FR-042: `cdk diff` for one stack, against the deployed template (`--method=template`: no change
+ * set, so nothing is written to AWS). No `--parameters`: CDK 2.1142 ignores them for diff and warns.
+ * A template diff cannot see a replacement caused only by a changed parameter value or cascading
+ * through a Ref or GetAtt, nor a Conditions or Mappings change that adds or removes a conditional
+ * resource; the live check (Task 20) looks at this. cdk prints the diff on stderr; the
+ * text returned has every secret redacted. */
+export async function cdkDiff(input: { runner: CommandRunner; source: string; env: string; region: string; identityMode: "cognito" | "oidc"; request: DeployRequest }): Promise<string> {
+  // --no-notices: a notice naming a guarded resource type would otherwise read as an unclear line.
+  const args = [...cdkArguments(input, input.request, "diff"), "--method=template", "--no-notices"];
+  const redact = (text: string) => redactSecrets(text, input.request.parameters);
+  const display = ["npx", ...args.map((arg) => displayArg(redact(arg)))].join(" ");
+  const result = await input.runner.run("npx", args, { cwd: input.source, display, redact, quiet: true });
+  return redact([result.stdout, result.stderr ?? ""].filter((part) => part !== "").join("\n"));
+}
+
 export function cdkDeployer(input: {
   runner: CommandRunner;
   source: string;
@@ -157,32 +190,8 @@ export function cdkDeployer(input: {
 }): StackDeployer {
   return {
     async deploy(request: DeployRequest): Promise<StackOutputs> {
-      const constructId = CDK_CONSTRUCT_IDS[request.part];
       const outputsFile = join(input.outputsDir, `${request.part}.json`);
-
-      const args: string[] = [
-        // --no-install: only the CDK CLI `npm ci` installed from the release's own lockfile, never
-        // one npx would otherwise download on the fly.
-        "--no-install",
-        "cdk",
-        "deploy",
-        constructId,
-        "--exclusively",
-        "--app",
-        "node infra/dist/bin/agentx.js",
-        "-c",
-        `agentxEnv=${input.env}`,
-        "-c",
-        `agentxRegion=${input.region}`,
-      ];
-      if (input.identityMode === "oidc") args.push("-c", "agentxIdentity=oidc");
-      args.push("--require-approval", "never", "--outputs-file", outputsFile);
-      if (request.roleArn !== undefined) args.push("--role-arn", request.roleArn);
-      // The CDK CLI looks `--parameters` up by the physical stack name (parameterMap[stack.stackName]),
-      // not the construct id; a construct-id prefix silently drops every parameter.
-      for (const [key, value] of Object.entries(request.parameters)) {
-        args.push("--parameters", `${request.stackName}:${key}=${value}`);
-      }
+      const args = [...cdkArguments(input, request, "deploy"), "--require-approval", "never", "--outputs-file", outputsFile, ...(request.roleArn === undefined ? [] : ["--role-arn", request.roleArn])];
 
       // Redact each raw argument first, then quote the (now secret-free) result — quoting after
       // redaction would let an escaped fragment of a secret containing whitespace, a quote, or a
@@ -196,7 +205,8 @@ export function cdkDeployer(input: {
       await rm(outputsFile, { force: true });
       await input.runner.run("npx", args, { cwd: input.source, display, redact: (text) => redactSecrets(text, request.parameters) });
 
-      const outputs = await readOutputs(outputsFile, request.stackName);
+      const written = await readOutputs(outputsFile, request.stackName);
+      const outputs = written.outputs ?? (await noOutputsStack(input.outputs, request.stackName, outputsFile, written.stacksWritten));
       request.onEvent?.({ kind: "deployed", stackName: request.stackName });
       return outputs;
     },
@@ -204,12 +214,30 @@ export function cdkDeployer(input: {
   };
 }
 
+/** cdk leaves a stack with no outputs out of the file entirely (the runtime stack, seen in the Task
+ * 20 live check), so when the file names no stacks at all the deployed stack itself is asked, and
+ * only a stack CloudFormation reports with no outputs counts. A file
+ * that names other stacks means cdk deployed a stack under another name (review I1): CloudFormation
+ * would answer the requested stack's old outputs, so that still fails. */
+async function noOutputsStack(read: (stackName: string) => Promise<StackOutputs | undefined>, stackName: string, file: string, stacksWritten: string[]): Promise<StackOutputs> {
+  const missing = `cdk deploy wrote no outputs for ${stackName} to ${file} (stacks written: ${stacksWritten.length === 0 ? "none" : stacksWritten.join(", ")})`;
+  if (stacksWritten.length > 0) throw new Error(missing);
+  let outputs: StackOutputs | undefined;
+  try {
+    outputs = await read(stackName);
+  } catch (error) {
+    throw new Error(`cdk deploy of ${stackName} succeeded, but its outputs could not be read from CloudFormation: ${errorMessage(error)}`, { cause: error });
+  }
+  if (outputs === undefined) throw new Error(`${missing}, and CloudFormation reports no such stack`);
+  // Re-review R2: a stack that has outputs always gets them written, so these would be old ones.
+  if (Object.keys(outputs).length > 0) throw new Error(missing);
+  return outputs;
+}
+
 /** Reads the outputs file `cdk deploy --outputs-file` wrote and returns `stackName`'s entry.
- * Throws a clear, cause-carrying message for a missing or unparseable file, and — since neither of
- * those is possible once the file is confirmed to parse — a distinct message naming the stacks it
- * actually holds when `stackName` itself has no entry (a stack `cdk deploy` didn't touch, or a
- * `--outputs-file` path that doesn't match what was requested). */
-async function readOutputs(file: string, stackName: string): Promise<StackOutputs> {
+ * Throws a clear, cause-carrying message for a missing or unparseable file. When `stackName` has no
+ * entry, it returns the stacks the file does name instead, for noOutputsStack to judge. */
+async function readOutputs(file: string, stackName: string): Promise<{ outputs: StackOutputs; stacksWritten?: never } | { outputs?: never; stacksWritten: string[] }> {
   let raw: string;
   try {
     raw = await readFile(file, "utf8");
@@ -224,8 +252,7 @@ async function readOutputs(file: string, stackName: string): Promise<StackOutput
   }
   const outputs = written[stackName];
   if (outputs === undefined) {
-    const stacksWritten = Object.keys(written);
-    throw new Error(`cdk deploy wrote no outputs for ${stackName} to ${file} (stacks written: ${stacksWritten.length === 0 ? "none" : stacksWritten.join(", ")})`);
+    return { stacksWritten: Object.keys(written) };
   }
-  return outputs;
+  return { outputs };
 }

@@ -256,6 +256,9 @@ every `AWS::IAM::Role` in every environment stack carries the given boundary, el
 
 ## Installing with agentx init
 
+The step-by-step guide for each way to install is [docs/install.md](install.md); running an
+environment afterwards is [docs/day-two.md](day-two.md). This section describes how `init` works.
+
 `agentx init --env <name>` (`npx @charterarc/agentx init`) walks an engineer from AWS credentials to a
 deployed AgentX environment with its own GitHub App and Slack app. For this first run it needs AWS admin
 credentials, a GitHub organization or personal account to own the GitHub App, and a Slack workspace where
@@ -473,16 +476,18 @@ streamed output.
 
 ### Tearing down an environment
 
-`agentx destroy` is planned for phase 15e; until then, teardown is by hand. Turn termination protection off
-on access, foundation, identity and runtime, then delete the stacks in reverse install order (slack, runtime,
-control-plane, identity, foundation, access).
+The step-by-step guide, with `agentx destroy` and by hand, is [docs/teardown.md](teardown.md).
+`agentx --env <env> destroy --region <region>`, with admin credentials, does everything below after
+you type the environment's name. The order: turn termination protection off, then delete the stacks
+in reverse install order (slack, runtime, control-plane, identity, foundation, access).
 
 Between deleting the control-plane stack and the foundation stack, tear down the EC2 workers: they are
 launched by Step Functions, outside CloudFormation, so their instances and volumes survive every stack
-delete above and are never removed by CloudFormation. List instances tagged `Environment=<env>` and
-`DeploymentMode=ec2-ebs` with `aws ec2 describe-instances`, terminate them, and wait with `aws ec2 wait
-instance-terminated`; then list and delete the volumes carrying the same tags with `aws ec2 describe-volumes`
-and `aws ec2 delete-volume`. A worker instance still running in the worker security group blocks the
+delete above and are never removed by CloudFormation. List instances tagged `Environment=<env>`,
+`DeploymentMode=ec2-ebs` and `agentx:env=<env>` (the last keeps the older production deployment's
+workers, also tagged `Environment=production`, out of the list) with `aws ec2 describe-instances`,
+terminate them, and wait with `aws ec2 wait instance-terminated`; then list and delete the volumes
+carrying the same tags with `aws ec2 describe-volumes` and `aws ec2 delete-volume`. A worker instance still running in the worker security group blocks the
 foundation stack's delete. The export bundle's README lists the exact commands, each naming its region.
 
 Stack deletion keeps, on purpose: the Cognito user pool (deletion protection), three

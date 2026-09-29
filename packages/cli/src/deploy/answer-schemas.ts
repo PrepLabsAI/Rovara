@@ -49,5 +49,9 @@ export const ImagesAnswersSchema = z.object({ worker: z.string().min(1).optional
  * this schema rather than each keeping their own regex that could quietly drift apart. */
 export const AlertEmailSchema = z.email();
 
+/** The largest monthly budget, in whole US dollars, that init and `config set` accept. The template
+ * itself allows up to 9,999,999; one cap here means the CLI never accepts a budget it later refuses. */
+export const MAX_BUDGET_USD = 1_000_000;
+
 /** FR-047: the monthly budget init offers; absent means none. */
-export const BudgetAnswersSchema = z.object({ monthlyUsd: z.number().int().min(1).max(1_000_000), scope: z.enum(["tag", "account"]) }).strict();
+export const BudgetAnswersSchema = z.object({ monthlyUsd: z.number().int().min(1).max(MAX_BUDGET_USD), scope: z.enum(["tag", "account"]) }).strict();
