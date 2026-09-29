@@ -301,6 +301,27 @@ describe("the developer meets a channel turn (C14, D4)", () => {
     expect(String((pr.body.error as { message: string }).message)).toContain("Priya");
   });
 
+  it("names the teammate when their pull-request action holds the task (final review M2)", async () => {
+    const h = await continueThread();
+    const head = "a".repeat(40);
+    h.db.set({
+      pk: `WORKSPACE#${h.workspaceId}`, sk: "PULL_REQUEST#demo#000000000003", entityType: "PULL_REQUEST", workspaceId: h.workspaceId,
+      repository: "demo", repositoryUrl: "https://github.com/example/demo.git", number: 3, url: "https://github.com/example/demo/pull/3",
+      state: "open", headBranch: "agentx/fix", baseBranch: "main", expectedHeadCommit: head, title: "Fix", body: "Fix it",
+      createdByOperationId: randomUUID(), updatedAt: new Date().toISOString(),
+    });
+    const github = (h.brokerInput as unknown as { githubPullRequests: { getPullRequest: { mockResolvedValue(value: unknown): void } } }).githubPullRequests;
+    github.getPullRequest.mockResolvedValue({ number: 3, url: "https://github.com/example/demo/pull/3", state: "open", headBranch: "agentx/fix", baseBranch: "main", headCommit: head, title: "Fix", body: "Fix it" });
+    const accepted = await teammate(h.handler, h.subject, PRIYA, "POST", `/v1/service/workspaces/${h.workspaceId}/pull-request-actions`, { requestId: randomUUID(), repository: "demo", pullRequestNumber: 3, action: "sync" }, "Priya");
+    expect(accepted.status).toBe(202);
+    const operationId = String((accepted.body.operation as { id: string }).id);
+    expect(h.active()).toBe(operationId);
+    expect(h.db.get(`DEVTASK#${h.taskId}`, `CHANNEL_OPERATION#${operationId}`)).toMatchObject({ slackUserId: PRIYA, name: "Priya" });
+    const continued = await h.dev(MAYA, "POST", `/v1/dev/tasks/${h.taskId}/continue`, { requestId: randomUUID(), instructions: "also this" });
+    expect(continued.body.error).toMatchObject({ code: "TASK_BUSY" });
+    expect(String((continued.body.error as { message: string }).message)).toContain("a request from `Priya` in its shared Slack thread");
+  });
+
   it("gives no count when the thread's pending messages may be only the running turn (F18)", async () => {
     const h = await continueThread();
     await channelTask(h);

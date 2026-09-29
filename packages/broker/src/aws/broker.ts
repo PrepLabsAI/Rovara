@@ -684,7 +684,7 @@ async function routeWorkspaceRequest(
   const pullRequestActions = /^\/v1\/workspaces\/([0-9a-f-]+)\/pull-request-actions$/.exec(url.pathname);
   if (request.method === "POST" && pullRequestActions?.[1]) {
     return json(
-      await acceptPullRequestLifecycle(dependencies, identity, pullRequestActions[1], body),
+      await acceptPullRequestLifecycle(dependencies, identity, pullRequestActions[1], body, channelOperation(dependencies, identity)),
       request.requestId,
       202,
     );
@@ -2478,6 +2478,8 @@ async function acceptPullRequestLifecycle(
   identity: AuthenticatedIdentity,
   workspaceId: string,
   value: unknown,
+  // C13: a continue thread's marker naming the teammate, as tasks and pull requests write (final review M2).
+  extra: ExtraItems = () => [],
 ): Promise<{ operation: Operation; duplicate: boolean }> {
   const request = PullRequestLifecycleRequestSchema.parse(value);
   const workspace = await requireOwnedWorkspace(dependencies, identity, workspaceId);
@@ -2577,6 +2579,7 @@ async function acceptPullRequestLifecycle(
         Item: { ...idempotencyKey, entityType: "IDEMPOTENCY", operationId, payloadHash: requestHash },
         ConditionExpression: "attribute_not_exists(pk)",
       } },
+      ...extra(publicOperation(operation)),
     ] }));
     return { operation: publicOperation(operation), duplicate: false };
   }
@@ -2658,6 +2661,7 @@ async function acceptPullRequestLifecycle(
         Item: { ...idempotencyKey, entityType: "IDEMPOTENCY", operationId, payloadHash: requestHash },
         ConditionExpression: "attribute_not_exists(pk)",
       } },
+      ...extra(publicOperation(operation)),
     ] }));
     return { operation: publicOperation(operation), duplicate: false };
   }
@@ -2727,6 +2731,7 @@ async function acceptPullRequestLifecycle(
       Item: { ...idempotencyKey, entityType: "IDEMPOTENCY", operationId, payloadHash: requestHash },
       ConditionExpression: "attribute_not_exists(pk)",
     } },
+    ...extra(publicOperation(operation)),
   ] }));
   return { operation: publicOperation(operation), duplicate: false };
 }
