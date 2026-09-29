@@ -103,6 +103,111 @@ describe("the cdk engine's review: cdk diff (FR-042)", () => {
     expect(cdkDiffRisks(real.replace("[+] AWS::SQS::Queue DeveloperTaskNotifier/NoticeQueue DeveloperTaskNotifierNoticeQueue56CA42FC", "[-] AWS::DynamoDB::Table State State1C20CC9A destroy")).data).toEqual([{ logicalId: "State1C20CC9A", type: "AWS::DynamoDB::Table", verb: "delete" }]);
   });
 
+  it("reads the real IAM table rows and property lines verbatim: no data risk, IAM changed (review M8)", () => {
+    // Lines copied verbatim from the same live15eb control-plane diff (2026-09-29): IAM table rows with
+    // multi-line conditions, the IAM Policy Changes table and its NOTE, and the indented property lines
+    // under a changed policy and a changed function.
+    const verbatim = [
+      "Stack AgentXControlPlane (agentx-live15eb-control-plane) (aws://944937319445/us-east-1)",
+      "IAM Statement Changes",
+      "┌───┬────────────────────────────────────────────────────┬────────┬───────────────────────────────┬───────────────────────────────────────────────────┬──────────────────────────────────┐",
+      "│   │ Resource                                           │ Effect │ Action                        │ Principal                                         │ Condition                        │",
+      "├───┼────────────────────────────────────────────────────┼────────┼───────────────────────────────┼───────────────────────────────────────────────────┼──────────────────────────────────┤",
+      "│ + │ ${DeveloperTaskNotifier/Function/ServiceRole.Arn}  │ Allow  │ sts:AssumeRole                │ Service:lambda.amazonaws.com                      │                                  │",
+      "├───┼────────────────────────────────────────────────────┼────────┼───────────────────────────────┼───────────────────────────────────────────────────┼──────────────────────────────────┤",
+      "│ + │ ${DeveloperTaskNotifier/NoticeDeadLetterQueue.Arn} │ Deny   │ sqs:*                         │ AWS:*                                             │ \"Bool\": {                        │",
+      "│   │                                                    │        │                               │                                                   │   \"aws:SecureTransport\": \"false\" │",
+      "│   │                                                    │        │                               │                                                   │ }                                │",
+      "└───┴────────────────────────────────────────────────────┴────────┴───────────────────────────────┴───────────────────────────────────────────────────┴──────────────────────────────────┘",
+      "IAM Policy Changes",
+      "┌───┬───────────────────────────────────────────────┬────────────────────────────────────────────────────────────────────────────────┐",
+      "│   │ Resource                                      │ Managed Policy ARN                                                             │",
+      "├───┼───────────────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────┤",
+      "│ + │ ${DeveloperTaskNotifier/Function/ServiceRole} │ arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole │",
+      "└───┴───────────────────────────────────────────────┴────────────────────────────────────────────────────────────────────────────────┘",
+      "(NOTE: There may be security-related changes not in this list. See https://github.com/aws/aws-cdk/issues/1299)",
+      "Resources",
+      "[+] AWS::SQS::Queue DeveloperTaskNotifier/NoticeDeadLetterQueue DeveloperTaskNotifierNoticeDeadLetterQueue3C87E1D7",
+      "[+] AWS::SQS::QueuePolicy DeveloperTaskNotifier/NoticeDeadLetterQueue/Policy DeveloperTaskNotifierNoticeDeadLetterQueuePolicy60467B6F",
+      "[+] AWS::SQS::Queue DeveloperTaskNotifier/NoticeQueue DeveloperTaskNotifierNoticeQueue56CA42FC",
+      "[+] AWS::SQS::QueuePolicy DeveloperTaskNotifier/NoticeQueue/Policy DeveloperTaskNotifierNoticeQueuePolicy653601CD",
+      "[~] AWS::IAM::Policy Broker/ServiceRole/DefaultPolicy BrokerServiceRoleDefaultPolicyDDFD9E7E",
+      " └─ [~] PolicyDocument",
+      "     └─ [~] .Statement:",
+      "         └─ @@ -285,6 +285,23 @@",
+      "            [ ]   }",
+      "            [ ] },",
+      "            [ ] {",
+      "            [+]   \"Action\": \"dynamodb:GetItem\",",
+      "            [+]   \"Condition\": {",
+      "            [+]     \"ForAllValues:StringLike\": {",
+      "            [+]       \"dynamodb:LeadingKeys\": [",
+      "            [+]         \"THREAD#*\"",
+      "            [+]       ]",
+      "            [+]     }",
+      "            [+]   },",
+      "            [+]   \"Effect\": \"Allow\",",
+      "            [+]   \"Resource\": {",
+      "            [+]     \"Fn::GetAtt\": [",
+      "            [+]       \"SlackThreads36E14C1E\",",
+      "            [+]       \"Arn\"",
+      "            [+]     ]",
+      "            [+]   }",
+      "            [+] },",
+      "            [+] {",
+      "            [ ]   \"Action\": \"states:StartExecution\",",
+      "            [ ]   \"Effect\": \"Allow\",",
+      "            [ ]   \"Resource\": {",
+      "[~] AWS::Lambda::Function Broker BrokerE1355FD6",
+      " ├─ [~] Code",
+      " │   └─ [~] .S3Key:",
+      " │       ├─ [-] 5c4fecde38ca306ad6ea1eb8c07b6bff6400e31846e53d3e8f782efe1426b765.zip",
+      " │       └─ [+] 6578f7f3ab7f06676d6646d532db5c02368323a101af4e7f9748dcb65146c4b4.zip",
+      " ├─ [~] Environment",
+      " │   └─ [~] .Variables:",
+      " │       └─ [+] Added: .SLACK_THREADS_TABLE_NAME",
+      " └─ [~] Metadata",
+      "     └─ [~] .aws:asset:path:",
+      "         ├─ [-] asset.5c4fecde38ca306ad6ea1eb8c07b6bff6400e31846e53d3e8f782efe1426b765",
+      "         └─ [+] asset.6578f7f3ab7f06676d6646d532db5c02368323a101af4e7f9748dcb65146c4b4",
+      "✨  Number of stacks with differences: 1",
+    ].join("\n");
+    expect(cdkDiffRisks(verbatim)).toEqual({ iam: true, data: [] });
+  });
+
+  it("flags IAM from the IAM Statement Changes table alone, with no IAM resource line (review M8)", () => {
+    const statementsOnly = [
+      "Stack AgentXControlPlane (agentx-live15eb-control-plane) (aws://944937319445/us-east-1)",
+      "IAM Statement Changes",
+      "┌───┬────────────────────────────────────────────────────┬────────┬───────────────────────────────┬───────────────────────────────────────────────────┬──────────────────────────────────┐",
+      "│   │ Resource                                           │ Effect │ Action                        │ Principal                                         │ Condition                        │",
+      "├───┼────────────────────────────────────────────────────┼────────┼───────────────────────────────┼───────────────────────────────────────────────────┼──────────────────────────────────┤",
+      "│ + │ ${DeveloperTaskNotifier/Function/ServiceRole.Arn}  │ Allow  │ sts:AssumeRole                │ Service:lambda.amazonaws.com                      │                                  │",
+      "├───┼────────────────────────────────────────────────────┼────────┼───────────────────────────────┼───────────────────────────────────────────────────┼──────────────────────────────────┤",
+      "│ + │ ${DeveloperTaskNotifier/NoticeDeadLetterQueue.Arn} │ Deny   │ sqs:*                         │ AWS:*                                             │ \"Bool\": {                        │",
+      "│   │                                                    │        │                               │                                                   │   \"aws:SecureTransport\": \"false\" │",
+      "│   │                                                    │        │                               │                                                   │ }                                │",
+      "└───┴────────────────────────────────────────────────────┴────────┴───────────────────────────────┴───────────────────────────────────────────────────┴──────────────────────────────────┘",
+      "Resources",
+      "[+] AWS::SQS::Queue DeveloperTaskNotifier/NoticeQueue DeveloperTaskNotifierNoticeQueue56CA42FC",
+      "[~] AWS::Lambda::Function Broker BrokerE1355FD6",
+      " ├─ [~] Code",
+      " │   └─ [~] .S3Key:",
+      " │       ├─ [-] 5c4fecde38ca306ad6ea1eb8c07b6bff6400e31846e53d3e8f782efe1426b765.zip",
+      " │       └─ [+] 6578f7f3ab7f06676d6646d532db5c02368323a101af4e7f9748dcb65146c4b4.zip",
+      " ├─ [~] Environment",
+      " │   └─ [~] .Variables:",
+      " │       └─ [+] Added: .SLACK_THREADS_TABLE_NAME",
+      " └─ [~] Metadata",
+      "     └─ [~] .aws:asset:path:",
+      "         ├─ [-] asset.5c4fecde38ca306ad6ea1eb8c07b6bff6400e31846e53d3e8f782efe1426b765",
+      "         └─ [+] asset.6578f7f3ab7f06676d6646d532db5c02368323a101af4e7f9748dcb65146c4b4",
+      "✨  Number of stacks with differences: 1",
+    ].join("\n");
+    expect(statementsOnly).not.toMatch(/AWS::IAM::|IAM Policy Changes/);
+    expect(cdkDiffRisks(statementsOnly)).toEqual({ iam: true, data: [] });
+  });
+
   it("runs cdk diff as a template diff, redacting the signing key everywhere", async () => {
     const calls: Array<{ args: string[]; display: string }> = [];
     const runner: CommandRunner = { async run(_command, args, options) { calls.push({ args, display: options.display }); return { stdout: "", stderr: `diff with ${"s".repeat(43)}` }; } };
