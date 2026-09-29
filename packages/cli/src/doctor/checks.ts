@@ -50,12 +50,16 @@ export function check(group: DoctorGroup, name: string, status: CheckStatus, det
   return { group, name, status, detail, ...(fix === undefined ? {} : { fix }) };
 }
 
+/** What to do about a group that threw: its message names the failing call; most such throws are the
+ * network or expired credentials. */
+const GUARDED_FIX = "check this computer's network access and AWS credentials, then run agentx doctor again";
+
 /** A group that throws becomes one failed check, so one broken dependency never hides the others. */
 export async function guarded(group: DoctorGroup, run: () => Promise<DoctorCheck[]>): Promise<DoctorCheck[]> {
   try {
     return await run();
   } catch (error) {
-    return [check(group, `${group} checks`, "fail", `could not run the ${group} checks: ${plainMessage(error)}`)];
+    return [check(group, `${group} checks`, "fail", `could not run the ${group} checks: ${plainMessage(error)}`, GUARDED_FIX)];
   }
 }
 
