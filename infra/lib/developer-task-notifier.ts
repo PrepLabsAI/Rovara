@@ -1,6 +1,6 @@
 // Spec 025 FR-034, C7: the DeveloperTaskNotifier. Named environments only (D14). It is the only new
 // reader of the Slack secret; the broker still cannot read it (D11).
-import { Duration, type aws_dynamodb as dynamodb, aws_iam as iam, aws_lambda as lambda, type aws_lambda_nodejs as lambdaNodejs, type aws_secretsmanager as secretsmanager, aws_sqs as sqs } from "aws-cdk-lib";
+import { Duration, aws_cloudwatch as cloudwatch, type aws_dynamodb as dynamodb, aws_iam as iam, aws_lambda as lambda, aws_lambda_event_sources as eventSources, type aws_lambda_nodejs as lambdaNodejs, type aws_secretsmanager as secretsmanager, aws_sqs as sqs } from "aws-cdk-lib";
 import { Construct } from "constructs";
 import { packagedFunction } from "./control-plane.js";
 import type { AgentXNaming } from "./naming.js";
@@ -10,6 +10,8 @@ export interface DeveloperTaskNotifierProps {
   /** The concrete Table: its stream ARN is read here. */
   state: dynamodb.Table;
   slackSecret: secretsmanager.Secret;
+  /** The operator alerts topic's action: a dead-lettered notice or stream batch is never silent. */
+  notifyOperator: cloudwatch.IAlarmAction;
 }
 
 const TERMINAL = ["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"];
@@ -35,6 +37,24 @@ export class DeveloperTaskNotifier extends Construct {
       visibilityTimeout: Duration.seconds(180),
       deadLetterQueue: { queue: deadLetters, maxReceiveCount: 100 },
     });
+    // A stream batch that still fails after its retries (the notice queue refusing sends, say) is
+    // recorded here: shard and sequence numbers only, never an item's images.
+    const streamFailures = new sqs.Queue(this, "StreamFailureQueue", {
+      encryption: sqs.QueueEncryption.SQS_MANAGED, enforceSSL: true, retentionPeriod: Duration.days(14),
+    });
+    const deadLetterAlarm = (id: string, suffix: string, queue: sqs.Queue, description: string) => new cloudwatch.Alarm(this, id, {
+      alarmName: props.naming.alarmName(suffix),
+      alarmDescription: description,
+      metric: queue.metricApproximateNumberOfMessagesVisible({ statistic: "Maximum", period: Duration.minutes(5) }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(props.notifyOperator);
+    deadLetterAlarm("NoticeDeadLettersAlarm", "DeveloperNoticeDeadLetters", deadLetters,
+      "A shared task's notice exhausted its receives and is in the notice dead-letter queue. Check the developer task notifier logs for its message ID.");
+    deadLetterAlarm("StreamFailuresAlarm", "DeveloperNoticeStreamFailures", streamFailures,
+      "A batch of state table changes could not be turned into shared task notices, so a thread may have missed updates. Check the developer task notifier logs, and the failure queue for the shard and sequence numbers.");
     this.function = packagedFunction(this, "Function", "packages/broker/src/aws/developer-task-notifier.ts", {
       STATE_TABLE_NAME: props.state.tableName,
       NOTICE_QUEUE_URL: this.queue.queueUrl,
@@ -54,7 +74,13 @@ export class DeveloperTaskNotifier extends Construct {
     this.function.addToRolePolicy(new iam.PolicyStatement({
       actions: ["dynamodb:PutItem", "dynamodb:UpdateItem"],
       resources: [props.state.tableArn],
-      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["DEVTASK#*", "SHARED_TASK#*"] } },
+      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["DEVTASK#*"] } },
+    }));
+    // A shared thread's record is only ever put, once, with the thread (C2).
+    this.function.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["dynamodb:PutItem"],
+      resources: [props.state.tableArn],
+      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SHARED_TASK#*"] } },
     }));
     // C7: the State table's stream has two readers, the outbox publisher (control-plane.ts,
     // OutboxStreamMapping) and this notifier: the per-shard maximum AWS recommends. Later phases
@@ -67,6 +93,7 @@ export class DeveloperTaskNotifier extends Construct {
       retryAttempts: 10,
       bisectBatchOnError: true,
       maxRecordAge: Duration.hours(1),
+      onFailure: new eventSources.SqsDlq(streamFailures),
       filters: [
         lambda.FilterCriteria.filter({ dynamodb: { NewImage: { entityType: { S: equals("DEVELOPER_TASK") } } } }),
         lambda.FilterCriteria.filter({ dynamodb: { NewImage: { entityType: { S: equals("DEVELOPER_TASK_POINTER") } } } }),

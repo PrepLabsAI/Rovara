@@ -624,7 +624,7 @@ export class ControlPlaneStack extends Stack {
         naming, env: naming.env, api, stage: defaultStage, brokerIntegration: integration, broker, slackSecret, parameters: signInParameters, turnRecords,
       });
       // Spec 025 phase 25c: sharing, named environments only (D14).
-      new DeveloperTaskNotifier(this, "DeveloperTaskNotifier", { naming, state, slackSecret });
+      new DeveloperTaskNotifier(this, "DeveloperTaskNotifier", { naming, state, slackSecret, notifyOperator });
       // C10: the ingress reads shared thread records by key; its SLACK_BINDING# statement is unchanged.
       slackIngress.addEnvironment("SHARED_TASKS", "enabled");
       slackIngress.addToRolePolicy(new iam.PolicyStatement({

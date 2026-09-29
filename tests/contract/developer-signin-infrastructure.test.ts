@@ -287,7 +287,14 @@ describe("the developer task notifier (spec 025 phase 25c, named environments)",
   it("runs the notifier with its table, queue, Slack secret and metrics namespace", () => {
     const [, notifier] = ofType(named, "AWS::Lambda::Function").find(([id]) => withoutHash(id) === "DeveloperTaskNotifierFunction")!;
     const variables = (notifier.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
-    expect(Object.keys(variables).sort()).toEqual(expect.arrayContaining(["AGENTX_METRICS_NAMESPACE", "NOTICE_QUEUE_URL", "SLACK_SECRET_ARN", "STATE_TABLE_NAME"]));
+    const idOf = (type: string, prefix: string) => ofType(named, type).find(([id]) => withoutHash(id) === prefix)![0];
+    const [secretId] = ofType(named, "AWS::SecretsManager::Secret").find(([, resource]) => resource.Properties.Name === "agentx/staging/slack")!;
+    expect(variables).toMatchObject({
+      STATE_TABLE_NAME: { Ref: stateId() },
+      NOTICE_QUEUE_URL: { Ref: idOf("AWS::SQS::Queue", "DeveloperTaskNotifierNoticeQueue") },
+      SLACK_SECRET_ARN: { Ref: secretId },
+      AGENTX_METRICS_NAMESPACE: "AgentX/staging",
+    });
   });
 
   it("reads the state table's stream as its second and last reader, filtered to task, pointer and developer-operation changes (C7)", () => {
@@ -300,7 +307,11 @@ describe("the developer task notifier (spec 025 phase 25c, named environments)",
       { dynamodb: { NewImage: { entityType: { S: ["DEVELOPER_TASK_POINTER"] } } } },
       { dynamodb: { NewImage: { entityType: { S: ["OPERATION"] }, requestedBy: { M: { kind: { S: ["developer"] } } }, status: { S: ["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"] } } } },
     ]);
-    expect(notifierMapping.Properties).toMatchObject({ StartingPosition: "LATEST", MaximumRecordAgeInSeconds: 3600, BisectBatchOnFunctionError: true });
+    expect(notifierMapping.Properties).toMatchObject({ StartingPosition: "LATEST", MaximumRecordAgeInSeconds: 3600, MaximumRetryAttempts: 10, BisectBatchOnFunctionError: true });
+    // A batch that still fails (the notice queue refusing sends, say) leaves a record of its shard and
+    // sequence numbers, never its item images, and the operator is told.
+    const [streamFailuresId] = ofType(named, "AWS::SQS::Queue").find(([id]) => withoutHash(id) === "DeveloperTaskNotifierStreamFailureQueue")!;
+    expect(notifierMapping.Properties).toMatchObject({ DestinationConfig: { OnFailure: { Destination: { "Fn::GetAtt": [streamFailuresId, "Arn"] } } } });
   });
 
   it("consumes its own queue with per-message failures and a dead-letter queue", () => {
@@ -324,8 +335,14 @@ describe("the developer task notifier (spec 025 phase 25c, named environments)",
     }
     const reads = dynamo.find((statement) => allows(statement, "dynamodb:GetItem"))!;
     expect((reads.Condition!["ForAllValues:StringLike"] as Record<string, string[]>)["dynamodb:LeadingKeys"].sort()).toEqual(["DEVTASK#*", "OPERATION#*", "WORKSPACE#*"]);
-    const writes = dynamo.find((statement) => allows(statement, "dynamodb:PutItem"))!;
-    expect((writes.Condition!["ForAllValues:StringLike"] as Record<string, string[]>)["dynamodb:LeadingKeys"].sort()).toEqual(["DEVTASK#*", "SHARED_TASK#*"]);
+    const keysOf = (statement: Statement) => (statement.Condition!["ForAllValues:StringLike"] as Record<string, string[]>)["dynamodb:LeadingKeys"];
+    const writes = dynamo.filter((statement) => allows(statement, "dynamodb:PutItem") || allows(statement, "dynamodb:UpdateItem"));
+    expect(writes).toHaveLength(2);
+    // The task and its notice markers are put and updated; a shared thread record is only put.
+    expect(writes.map((statement) => ({ actions: actionsOf(statement).sort(), keys: keysOf(statement) }))).toEqual(expect.arrayContaining([
+      { actions: ["dynamodb:PutItem", "dynamodb:UpdateItem"], keys: ["DEVTASK#*"] },
+      { actions: ["dynamodb:PutItem"], keys: ["SHARED_TASK#*"] },
+    ]));
   });
 
   it("lets the ingress read shared thread records, and the broker read Slack thread counters, by key", () => {
@@ -339,8 +356,21 @@ describe("the developer task notifier (spec 025 phase 25c, named environments)",
     }));
   });
 
+  it("tells the operator when a notice or a stream batch is dead-lettered", () => {
+    for (const [queue, name] of [["DeveloperTaskNotifierNoticeDeadLetterQueue", "agentx-staging-DeveloperNoticeDeadLetters"], ["DeveloperTaskNotifierStreamFailureQueue", "agentx-staging-DeveloperNoticeStreamFailures"]] as const) {
+      const [queueId] = ofType(named, "AWS::SQS::Queue").find(([id]) => withoutHash(id) === queue)!;
+      const [, alarm] = ofType(named, "AWS::CloudWatch::Alarm").find(([, resource]) => resource.Properties.AlarmName === name)!;
+      expect(alarm.Properties).toMatchObject({
+        MetricName: "ApproximateNumberOfMessagesVisible", Namespace: "AWS/SQS", Dimensions: [{ Name: "QueueName", Value: { "Fn::GetAtt": [queueId, "QueueName"] } }],
+        Threshold: 1, ComparisonOperator: "GreaterThanOrEqualToThreshold", TreatMissingData: "notBreaching",
+      });
+      expect(JSON.stringify(alarm.Properties.AlarmActions)).toContain("OperatorAlerts");
+    }
+  });
+
   it("adds none of it to the legacy template", () => {
     expect(ofType(legacy, "AWS::Lambda::Function").map(([id]) => withoutHash(id))).not.toContain("DeveloperTaskNotifierFunction");
+    expect(ofType(legacy, "AWS::CloudWatch::Alarm").map(([, resource]) => JSON.stringify(resource.Properties.AlarmName))).not.toContainEqual(expect.stringContaining("DeveloperNotice"));
     expect(streamMappings(legacy)).toHaveLength(1);
     const [, ingress] = ofType(legacy, "AWS::Lambda::Function").find(([id]) => withoutHash(id) === "SlackIngress")!;
     expect((ingress.Properties.Environment as { Variables: Record<string, unknown> }).Variables).not.toHaveProperty("SHARED_TASKS");
