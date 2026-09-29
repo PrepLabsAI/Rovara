@@ -2,7 +2,8 @@
 import { describe, expect, it } from "vitest";
 import { AgentXError, DEFAULT_DEVELOPER_TASK_POLICY, type DeveloperTaskPolicy } from "@agentx/contracts";
 import { decideShare, decideMode, channelLabel } from "../../packages/broker/src/developer/share.js";
-import { CLOSED_REPLY, endedReply, modeReply, pullRequestReply, setupFailedReply, startMessage } from "../../packages/broker/src/developer/share-messages.js";
+import { CUT_MARKER } from "../../packages/broker/src/aws/slack-details-view.js";
+import { CANCELLED_REPLY, CLOSED_REPLY, endedReply, modeReply, pullRequestReply, READY_REPLY, setupFailedReply, startMessage } from "../../packages/broker/src/developer/share-messages.js";
 
 const policy = (overrides: Partial<DeveloperTaskPolicy> = {}): DeveloperTaskPolicy => ({ ...DEFAULT_DEVELOPER_TASK_POLICY, ...overrides });
 const ONE = [{ channelId: "C0123456789", name: "payments-dev", isPrivate: false }];
@@ -111,7 +112,7 @@ describe("the thread's texts (FR-032, C8)", () => {
     const summary = text.slice(head.length + 2);
     expect(summary.length).toBeLessThanOrEqual(1_500);
     expect(summary).not.toMatch(/&(?!amp;)/);
-    expect(summary.endsWith("… [cut to fit]")).toBe(true);
+    expect(summary.endsWith(CUT_MARKER)).toBe(true);
   });
 
   it("keeps a failure message full of & within 300 characters after escaping (F21)", () => {
@@ -119,6 +120,24 @@ describe("the thread's texts (FR-032, C8)", () => {
     const message = text.slice("The task ended FAILED (task_failed): ".length);
     expect(message.length).toBeLessThanOrEqual(300);
     expect(setupFailedReply("&".repeat(300)).length).toBeLessThanOrEqual("The workspace could not be set up, so the task did not run: ".length + 300);
+  });
+
+  it("keeps a many-line quoted summary, every > counted, within 1,500 characters", () => {
+    const head = "The task ended SUCCEEDED.";
+    const text = endedReply({ status: "SUCCEEDED", summary: Array.from({ length: 700 }, () => "a").join("\n") });
+    const summary = text.slice(head.length + 1);
+    expect(summary.startsWith(">a\n>a")).toBe(true);
+    expect(summary.length).toBeLessThanOrEqual(1_500);
+    expect(summary.endsWith(CUT_MARKER)).toBe(true);
+    for (const line of summary.split("\n")) expect(line.startsWith(">")).toBe(true);
+  });
+
+  it("marks a summary the redaction cap cut, even when the rest fits", () => {
+    const text = endedReply({ status: "SUCCEEDED", summary: "x".repeat(3_000) });
+    expect(text.endsWith(CUT_MARKER)).toBe(true);
+    expect(text.slice("The task ended SUCCEEDED.\n".length).length).toBeLessThanOrEqual(1_500);
+    expect(endedReply({ status: "SUCCEEDED", summary: "short and whole" })).toBe("The task ended SUCCEEDED.\n>short and whole");
+    expect(setupFailedReply("y".repeat(600)).endsWith(CUT_MARKER)).toBe(true);
   });
 
   it("links a pull request, says the mode, and says a close ended the thread", () => {
@@ -129,7 +148,20 @@ describe("the thread's texts (FR-032, C8)", () => {
   });
 
   it("uses no em dash in any text", () => {
-    const texts = [startMessage({ ...input, mode: "view" }), startMessage({ ...input, mode: "continue" }), endedReply({ status: "CANCELLED" }), modeReply("view"), modeReply("continue"), CLOSED_REPLY, setupFailedReply(undefined)];
+    const texts = [
+      startMessage({ ...input, mode: "view" }),
+      startMessage({ ...input, mode: "continue" }),
+      endedReply({ status: "CANCELLED" }),
+      endedReply({ status: "FAILED", failure: { category: "task_failed", message: "tests failed" } }),
+      endedReply({ status: "SUCCEEDED", summary: "All green." }),
+      modeReply("view"),
+      modeReply("continue"),
+      pullRequestReply("https://github.com/example/demo/pull/7"),
+      READY_REPLY,
+      CANCELLED_REPLY,
+      CLOSED_REPLY,
+      setupFailedReply(undefined),
+    ];
     for (const text of texts) expect(text).not.toContain("\u2014");
   });
 });
