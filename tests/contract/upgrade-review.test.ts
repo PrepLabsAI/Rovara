@@ -82,6 +82,27 @@ describe("the cdk engine's review: cdk diff (FR-042)", () => {
     expect(cdkDiffRisks("Stack s\nResources\n[~] AWS::Lambda::Function Fn FnABC")).toEqual({ iam: false, data: [] });
   });
 
+  it("reads a real cdk diff (CDK 2, --method=template): additions and changed functions are no data risk; IAM is (Task 20 live check)", () => {
+    // Recorded against live15eb's control plane on 2026-09-29, trimmed to its structure.
+    const real = [
+      "Stack AgentXControlPlane (agentx-live15eb-control-plane) (aws://944937319445/us-east-1)",
+      "IAM Statement Changes",
+      "┌───┬──────────────────────────────────────┬────────┬──────────────────┐",
+      "│   │ Resource                             │ Effect │ Action           │",
+      "IAM Policy Changes",
+      "Resources",
+      "[+] AWS::SQS::Queue DeveloperTaskNotifier/NoticeQueue DeveloperTaskNotifierNoticeQueue56CA42FC",
+      "[+] AWS::Lambda::Function DeveloperTaskNotifier/Function DeveloperTaskNotifierFunction551419CC",
+      "[~] AWS::IAM::Policy Broker/ServiceRole/DefaultPolicy BrokerServiceRoleDefaultPolicyDDFD9E7E",
+      "[~] AWS::Lambda::Function Broker BrokerE1355FD6",
+      "",
+      "✨  Number of stacks with differences: 1",
+    ].join("\n");
+    expect(cdkDiffRisks(real)).toEqual({ iam: true, data: [] });
+    // The same real shape with a table deletion is caught.
+    expect(cdkDiffRisks(real.replace("[+] AWS::SQS::Queue DeveloperTaskNotifier/NoticeQueue DeveloperTaskNotifierNoticeQueue56CA42FC", "[-] AWS::DynamoDB::Table State State1C20CC9A destroy")).data).toEqual([{ logicalId: "State1C20CC9A", type: "AWS::DynamoDB::Table", verb: "delete" }]);
+  });
+
   it("runs cdk diff as a template diff, redacting the signing key everywhere", async () => {
     const calls: Array<{ args: string[]; display: string }> = [];
     const runner: CommandRunner = { async run(_command, args, options) { calls.push({ args, display: options.display }); return { stdout: "", stderr: `diff with ${"s".repeat(43)}` }; } };
