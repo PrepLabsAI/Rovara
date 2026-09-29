@@ -64,7 +64,7 @@ async function harness(overrides: Partial<UpgradeDependencies> & { caller?: stri
       prepared.push(input.settings.env);
       return { deployer, store, secrets: memoryInitSecrets({ "agentx/staging/callback-signing-key": CALLBACK_KEY }), holder: overrides.caller ?? ADMIN, partition: "aws", cleanup: async () => undefined };
     },
-    cdkDiff: async () => "",
+    cdkDiff: async (request) => `Stack ${request.stackName}\nThere were no differences`,
     ask: async () => "y",
     isInteractive: () => true,
     doctor: async (env) => { doctorRuns.push(env); return healthy; },
@@ -273,7 +273,7 @@ describe("agentx upgrade with the cdk engine", () => {
   };
 
   it("reviews each stack's cdk diff before deploying it", async () => {
-    const h = await cdk({ cdkDiff: async (request) => (request.part === "control-plane" ? "Resources\n[-] AWS::S3::Bucket Artifacts Artifacts9F8E7D destroy" : "") });
+    const h = await cdk({ cdkDiff: async (request) => (request.part === "control-plane" ? "Stack agentx-staging-control-plane\nResources\n[-] AWS::S3::Bucket Artifacts Artifacts9F8E7D destroy" : `Stack ${request.stackName}\nThere were no differences`) });
     await expect(runUpgrade({ ...options, source: "/src" }, h.deps)).rejects.toThrow("upgrade stopped: agentx-staging-control-plane would delete Artifacts9F8E7D (AWS::S3::Bucket)");
     expect(h.deployer.deployed).toContain("agentx-staging-runtime");
     expect(h.deployer.deployed).not.toContain("agentx-staging-control-plane");

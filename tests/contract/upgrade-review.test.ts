@@ -79,7 +79,7 @@ describe("the cdk engine's review: cdk diff (FR-042)", () => {
       iam: true,
       data: [{ logicalId: "StateABC123", type: "AWS::DynamoDB::Table", verb: "replace" }, { logicalId: "Artifacts9F8E7D", type: "AWS::S3::Bucket", verb: "delete" }],
     });
-    expect(cdkDiffRisks("Resources\n[~] AWS::Lambda::Function Fn FnABC")).toEqual({ iam: false, data: [] });
+    expect(cdkDiffRisks("Stack s\nResources\n[~] AWS::Lambda::Function Fn FnABC")).toEqual({ iam: false, data: [] });
   });
 
   it("runs cdk diff as a template diff, redacting the signing key everywhere", async () => {
@@ -91,6 +91,7 @@ describe("the cdk engine's review: cdk diff (FR-042)", () => {
     // Controller ruling 3(b) and 3(c): CDK 2.1142 ignores --parameters for diff (and warns), and
     // --no-change-set is deprecated for --method=template.
     expect(calls[0]!.args).toContain("--method=template");
+    expect(calls[0]!.args).toContain("--no-notices");
     expect(calls[0]!.args).not.toContain("--no-change-set");
     expect(calls[0]!.args).not.toContain("--parameters");
     expect(calls[0]!.display).not.toContain("s".repeat(43));
@@ -126,9 +127,9 @@ describe("the replacement guard fails safe (FR-043)", () => {
   });
 
   it.each(STATEFUL)("stops replacing or deleting a %s under --yes, from cdk diff", async (type) => {
-    expect(cdkDiffRisks(`Resources\n[~] ${type} Data DataABC replace`).data).toEqual([{ logicalId: "DataABC", type, verb: "replace" }]);
-    expect(cdkDiffRisks(`Resources\n[-] ${type} Data DataABC destroy`).data).toEqual([{ logicalId: "DataABC", type, verb: "delete" }]);
-    expect(cdkDiffRisks(`Resources\n[+] ${type} Data DataABC`).data).toEqual([]);
+    expect(cdkDiffRisks(`Stack s\nResources\n[~] ${type} Data DataABC replace\n └─ [~] Name (requires replacement)`).data).toEqual([{ logicalId: "DataABC", type, verb: "replace" }]);
+    expect(cdkDiffRisks(`Stack s\nResources\n[-] ${type} Data DataABC destroy`).data).toEqual([{ logicalId: "DataABC", type, verb: "delete" }]);
+    expect(cdkDiffRisks(`Stack s\nResources\n[+] ${type} Data DataABC`).data).toEqual([]);
   });
 
   it("treats an unrecognised Replacement value, or a Dynamic or unknown action, on a stateful resource as a replacement", () => {
@@ -145,13 +146,13 @@ describe("the replacement guard fails safe (FR-043)", () => {
   });
 
   it("reads a replacement from a stateful resource's property lines too, and ignores ANSI colours", () => {
-    const text = ["Resources", "\u001b[33m[~]\u001b[39m AWS::KMS::Key Key KeyABC", " └─ [~] KeyPolicy", "[~] AWS::S3::Bucket Bucket BucketABC", " └─ [~] BucketName (requires replacement)", "[~] AWS::Lambda::Function Fn FnABC", " └─ [~] Code (may cause replacement)"].join("\n");
+    const text = ["Stack s", "Resources", "\u001b[33m[~]\u001b[39m AWS::KMS::Key Key KeyABC", " └─ [~] KeyPolicy", "[~] AWS::S3::Bucket Bucket BucketABC", " └─ [~] BucketName (requires replacement)", "[~] AWS::Lambda::Function Fn FnABC", " └─ [~] Code (may cause replacement)"].join("\n");
     // iam: a KMS key's KeyPolicy counts as an IAM change (controller ruling 3(e)).
     expect(cdkDiffRisks(text)).toEqual({ iam: true, data: [{ logicalId: "BucketABC", type: "AWS::S3::Bucket", verb: "replace" }] });
   });
 
   it("never reads a cdk diff resource line it cannot understand as safe: it needs review", async () => {
-    const risks = cdkDiffRisks(["Resources", "[~] AWS::DynamoDB::Table", "[?] AWS::S3::Bucket Artifacts ArtifactsABC", "[~] something new", "Outputs", "[+] Output Url: {\"Value\":\"x\"}"].join("\n"));
+    const risks = cdkDiffRisks(["Stack s", "Resources", "[~] AWS::DynamoDB::Table", "[?] AWS::S3::Bucket Artifacts ArtifactsABC", "[~] something new", "Outputs", "[+] Output Url: {\"Value\":\"x\"}"].join("\n"));
     expect(risks.data).toEqual([
       { logicalId: "", type: "AWS::DynamoDB::Table", verb: "unclear", line: "[~] AWS::DynamoDB::Table" },
       { logicalId: "ArtifactsABC", type: "AWS::S3::Bucket", verb: "unclear", line: "[?] AWS::S3::Bucket Artifacts ArtifactsABC" },
@@ -203,33 +204,34 @@ describe("cdk diff as the real formatter prints it (review round 1)", () => {
   });
 
   it("reads a resource line without a construct path, and a replacement under an array hunk", () => {
-    const text = ["Resources", "[~] AWS::DynamoDB::Table StateABC replace", " └─ [~] KeySchema (requires replacement)", "     └─ @@ -1,3 +1,3 @@", "        [ ] [", "        [-]   {\"AttributeName\": \"pk\"}", "        [+]   {\"AttributeName\": \"id\"}", "        [ ] ]"].join("\n");
+    const text = ["Stack s", "Resources", "[~] AWS::DynamoDB::Table StateABC replace", " └─ [~] KeySchema (requires replacement)", "     └─ @@ -1,3 +1,3 @@", "        [ ] [", "        [-]   {\"AttributeName\": \"pk\"}", "        [+]   {\"AttributeName\": \"id\"}", "        [ ] ]"].join("\n");
     expect(cdkDiffRisks(text)).toEqual({ iam: false, data: [{ logicalId: "StateABC", type: "AWS::DynamoDB::Table", verb: "replace" }] });
   });
 
   it("must positively find what it read: output with no Resources section and no \"There were no differences\" is unclear", () => {
     expect(cdkDiffRisks("Stack agentx-staging-runtime\nThere were no differences\n\n\u2728  Number of stacks with differences: 0")).toEqual({ iam: false, data: [] });
-    expect(cdkDiffRisks("")).toEqual({ iam: false, data: [] });
+    // Behaviour correction (review round 2): empty output is no longer read as "no changes".
+    expect(cdkDiffRisks("")).toEqual({ iam: false, data: [{ logicalId: "", type: "", verb: "unclear", line: "no \"Stack <name>\" header in cdk diff's output" }] });
     expect(cdkDiffRisks("Stack agentx-staging-runtime\nRessources\n[~] AWS::Lambda::Function Fn FnABC").data).toEqual([
       { logicalId: "", type: "", verb: "unclear", line: "no Resources section, and not \"There were no differences\"" },
     ]);
   });
 
   it("treats a line naming a guarded type that is not a resource line as unclear, in any section", () => {
-    expect(cdkDiffRisks(["Resources", "[~] AWS::Lambda::Function Fn FnABC", "  [-] AWS::SQS::Queue Jobs JobsABC destroy"].join("\n")).data).toEqual([
+    expect(cdkDiffRisks(["Stack s", "Resources", "[~] AWS::Lambda::Function Fn FnABC", "  [-] AWS::SQS::Queue Jobs JobsABC destroy"].join("\n")).data).toEqual([
       { logicalId: "", type: "", verb: "unclear", line: "[-] AWS::SQS::Queue Jobs JobsABC destroy" },
     ]);
-    expect(cdkDiffRisks(["Parameters", "[~] Parameter X: AWS::Logs::LogGroup", "Resources", "[+] AWS::S3::BucketPolicy P PABC"].join("\n"))).toEqual({
+    expect(cdkDiffRisks(["Stack s", "Parameters", "[~] Parameter X: AWS::Logs::LogGroup", "Resources", "[+] AWS::S3::BucketPolicy P PABC"].join("\n"))).toEqual({
       iam: true, data: [{ logicalId: "", type: "", verb: "unclear", line: "[~] Parameter X: AWS::Logs::LogGroup" }],
     });
   });
 
   it("treats an import ([\u2190]) as an add: nothing is lost", () => {
-    expect(cdkDiffRisks("Resources\n[\u2190] AWS::S3::Bucket Imported ImportedABC import")).toEqual({ iam: false, data: [] });
+    expect(cdkDiffRisks("Stack s\nResources\n[\u2190] AWS::S3::Bucket Imported ImportedABC import")).toEqual({ iam: false, data: [] });
   });
 
   it("guards queues and log groups, with the retained flow-log group orphaned rather than deleted", async () => {
-    const risks = cdkDiffRisks(["Resources", "[-] AWS::Logs::LogGroup VpcFlowLogs VpcFlowLogsABC orphan", "[-] AWS::Logs::LogGroup WorkerLogs WorkerLogsABC destroy", "[~] AWS::SQS::Queue Jobs JobsABC replace"].join("\n"));
+    const risks = cdkDiffRisks(["Stack s", "Resources", "[-] AWS::Logs::LogGroup VpcFlowLogs VpcFlowLogsABC orphan", "[-] AWS::Logs::LogGroup WorkerLogs WorkerLogsABC destroy", "[~] AWS::SQS::Queue Jobs JobsABC replace", " └─ [~] FifoQueue (requires replacement)"].join("\n"));
     expect(risks.data).toEqual([
       { logicalId: "VpcFlowLogsABC", type: "AWS::Logs::LogGroup", verb: "orphan" },
       { logicalId: "WorkerLogsABC", type: "AWS::Logs::LogGroup", verb: "delete" },
@@ -240,18 +242,53 @@ describe("cdk diff as the real formatter prints it (review round 1)", () => {
       "upgrade stopped: s would remove VpcFlowLogsABC (AWS::Logs::LogGroup) from the stack, which orphans the retained log group, delete WorkerLogsABC (AWS::Logs::LogGroup), which deletes its logs, and replace JobsABC (AWS::SQS::Queue) and lose its data; nothing in s changed. If you accept that, run agentx upgrade again with --allow-replace VpcFlowLogsABC --allow-replace WorkerLogsABC --allow-replace JobsABC",
     );
     expect(await guardData({ stackName: "s", data: risks.data, allowReplace: new Set(["WorkerLogsABC"]), yes: false, ask: answers("VpcFlowLogsABC", "no") })).toBe(
-      "upgrade stopped: s would replace JobsABC (AWS::SQS::Queue) and lose its data; nothing in s changed. If you accept that, run agentx upgrade again with --allow-replace JobsABC",
+      "upgrade stopped: s would replace JobsABC (AWS::SQS::Queue) and lose its data; nothing in s changed. If you accept that, run agentx upgrade again with --allow-replace JobsABC --allow-replace VpcFlowLogsABC --allow-replace WorkerLogsABC (VpcFlowLogsABC and WorkerLogsABC are changes you already accepted; --yes needs them named too)",
     );
   });
 
   it("counts resource policies, and a KMS key's KeyPolicy, as IAM changes", () => {
     for (const type of ["AWS::S3::BucketPolicy", "AWS::Lambda::Permission", "AWS::SQS::QueuePolicy", "AWS::SNS::TopicPolicy", "AWS::SecretsManager::ResourcePolicy"]) {
-      expect(cdkDiffRisks(`Resources\n[~] ${type} P PABC`)).toEqual({ iam: true, data: [] });
+      expect(cdkDiffRisks(`Stack s\nResources\n[~] ${type} P PABC`)).toEqual({ iam: true, data: [] });
       expect(reviewChanges([change("Modify", "P", type)]).iam.map((entry) => entry.logicalId)).toEqual(["P"]);
     }
-    expect(cdkDiffRisks("Resources\n[~] AWS::KMS::Key Key KeyABC\n └─ [~] KeyPolicy\n     └─ [~] .Statement:")).toEqual({ iam: true, data: [] });
-    expect(cdkDiffRisks("Resources\n[~] AWS::KMS::Key Key KeyABC\n └─ [~] Description")).toEqual({ iam: false, data: [] });
+    expect(cdkDiffRisks("Stack s\nResources\n[~] AWS::KMS::Key Key KeyABC\n └─ [~] KeyPolicy\n     └─ [~] .Statement:")).toEqual({ iam: true, data: [] });
+    expect(cdkDiffRisks("Stack s\nResources\n[~] AWS::KMS::Key Key KeyABC\n └─ [~] Description")).toEqual({ iam: false, data: [] });
     // A change set does not say which property changed, so any KMS key modification is shown with the IAM changes.
     expect(reviewChanges([change("Modify", "Key", "AWS::KMS::Key", "False")]).iam.map((entry) => entry.logicalId)).toEqual(["Key"]);
+  });
+});
+
+describe("cdk diff must show it was read (review round 2)", () => {
+  const NO_HEADER = { logicalId: "", type: "", verb: "unclear", line: "no \"Stack <name>\" header in cdk diff's output" };
+  const NO_RESOURCES = { logicalId: "", type: "", verb: "unclear", line: "no Resources section, and not \"There were no differences\"" };
+
+  it("reads a diff of only Outputs, or only Metadata and the template's Description, as safe", () => {
+    expect(cdkDiffRisks("Stack s\nOutputs\n[~] Output ApiUrl ApiUrl: {\"Value\":\"a\"} to {\"Value\":\"b\"}\n[+] Output Extra: x\n")).toEqual({ iam: false, data: [] });
+    expect(cdkDiffRisks("Stack s\nTemplate\n[~] Description Description: old to new\n\nMetadata\n[+] Metadata Info Info: x\n")).toEqual({ iam: false, data: [] });
+  });
+
+  it("reads any other diff without a Resources section as unclear", () => {
+    expect(cdkDiffRisks("Stack s\nConditions\n[~] Condition IsProd IsProd: {} to {}\n").data).toEqual([NO_RESOURCES]);
+    for (const heading of ["Parameters", "Mappings", "Other Changes", "IAM Statement Changes", "Security Group Changes"]) {
+      expect(cdkDiffRisks(`Stack s\n${heading}\n`).data).toEqual([NO_RESOURCES]);
+    }
+    expect(cdkDiffRisks("Stack s\nTemplate\n[~] Transform Transform: a to b\n").data).toEqual([NO_RESOURCES]);
+    expect(cdkDiffRisks("Stack s\n").data).toEqual([NO_RESOURCES]);
+    expect(cdkDiffRisks("Stack s\nOutputs\n[~] Something else entirely\n").data).toEqual([{ logicalId: "", type: "", verb: "unclear", line: "[~] Something else entirely" }, NO_RESOURCES]);
+  });
+
+  it("needs a Stack header: a headerless \"There were no differences\" or Resources section is unclear", () => {
+    expect(cdkDiffRisks("There were no differences").data).toEqual([NO_HEADER]);
+    expect(cdkDiffRisks("Resources\n[~] AWS::Lambda::Function Fn FnABC").data).toEqual([NO_HEADER]);
+    expect(cdkDiffRisks("Stack s\n  There were no differences").data).toEqual([NO_RESOURCES]);
+  });
+
+  it("reads a replaced resource with no property lines (a type change) as unclear", () => {
+    expect(cdkDiffRisks("Stack s\nResources\n[~] AWS::Lambda::Function Fn FnABC replace\n[+] AWS::SNS::Topic T TABC").data).toEqual([
+      { logicalId: "FnABC", type: "AWS::Lambda::Function", verb: "unclear", line: "[~] AWS::Lambda::Function Fn FnABC replace" },
+    ]);
+    expect(cdkDiffRisks("Stack s\nResources\n[~] AWS::DynamoDB::Table State StateABC replace").data).toEqual([
+      { logicalId: "StateABC", type: "AWS::DynamoDB::Table", verb: "unclear", line: "[~] AWS::DynamoDB::Table State StateABC replace" },
+    ]);
   });
 });

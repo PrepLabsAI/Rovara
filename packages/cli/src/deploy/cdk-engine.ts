@@ -167,10 +167,12 @@ function cdkArguments(input: { env: string; region: string; identityMode: "cogni
 /** FR-042: `cdk diff` for one stack, against the deployed template (`--method=template`: no change
  * set, so nothing is written to AWS). No `--parameters`: CDK 2.1142 ignores them for diff and warns.
  * A template diff cannot see a replacement caused only by a changed parameter value or cascading
- * through a Ref or GetAtt; the live check (Task 20) looks at this. cdk prints the diff on stderr; the
+ * through a Ref or GetAtt, nor a Conditions or Mappings change that adds or removes a conditional
+ * resource; the live check (Task 20) looks at this. cdk prints the diff on stderr; the
  * text returned has every secret redacted. */
 export async function cdkDiff(input: { runner: CommandRunner; source: string; env: string; region: string; identityMode: "cognito" | "oidc"; request: DeployRequest }): Promise<string> {
-  const args = [...cdkArguments(input, input.request, "diff"), "--method=template"];
+  // --no-notices: a notice naming a guarded resource type would otherwise read as an unclear line.
+  const args = [...cdkArguments(input, input.request, "diff"), "--method=template", "--no-notices"];
   const redact = (text: string) => redactSecrets(text, input.request.parameters);
   const display = ["npx", ...args.map((arg) => displayArg(redact(arg)))].join(" ");
   const result = await input.runner.run("npx", args, { cwd: input.source, display, redact, quiet: true });
