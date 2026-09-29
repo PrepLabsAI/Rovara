@@ -2,11 +2,13 @@
 // Spec 025 FR-032, FR-034, C7 to C9: the notifier, fed from the fake table's writes, posting to a
 // fake Slack. The queue is an array; a failed notice stays in it with its attempt count.
 import { randomUUID } from "node:crypto";
+import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it, vi } from "vitest";
 import { SlackPostError, chatPostMessage } from "../../packages/broker/src/aws/slack-web.js";
-import { createNotifierHandler, retryDelaySeconds } from "../../packages/broker/src/aws/developer-task-notifier.js";
+import { cachedSlackPoster, createNotifierHandler, retryDelaySeconds } from "../../packages/broker/src/aws/developer-task-notifier.js";
 import type { Notice } from "../../packages/broker/src/developer/notifications.js";
 import { MAYA, createDeveloperTaskBroker, recordStream } from "../support/developer-task-broker.js";
+import type { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 
 const SECRET = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
@@ -15,8 +17,11 @@ const say = (text: string) => ({ type: "progress", payload: { type: "message_end
 
 type Post = (input: { channel: string; threadTs?: string; text: string }) => Promise<{ ts: string }>;
 
-async function notifierHarness(body: Record<string, unknown> = { shareToChannel: true }, postOverride?: Post) {
+type Client = { send(command: unknown): Promise<unknown> };
+
+async function notifierHarness(body: Record<string, unknown> = { shareToChannel: true }, options: { post?: Post; documentClient?: (db: FakeDynamoDb) => Client } = {}) {
   const harness = await createDeveloperTaskBroker();
+  const postOverride = options.post;
   const stream = recordStream(harness.db);
   const posts: Array<{ channel: string; threadTs?: string; text: string }> = [];
   const queue: Array<{ notice: Notice; attempt: number }> = [];
@@ -27,7 +32,7 @@ async function notifierHarness(body: Record<string, unknown> = { shareToChannel:
   const deliveryFailed = vi.fn();
   const retryLater = vi.fn(async () => undefined);
   const handle = createNotifierHandler({
-    documentClient: harness.db, tableName: "state",
+    documentClient: options.documentClient?.(harness.db) ?? harness.db, tableName: "state",
     enqueue: async (notices) => { for (const notice of notices) queue.push({ notice, attempt: 0 }); },
     retryLater,
     post: postOverride ?? (async (input) => {
@@ -111,13 +116,19 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
 
   it("shares a running task with its current status, and leaves out what happened before (US3 scenario 9)", async () => {
     const h = await notifierHarness({});
-    await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
+    const prepareId = h.active();
+    await h.finish(h.workspaceId, prepareId, "SUCCEEDED");
     await h.dev(MAYA, "POST", `/v1/dev/tasks/${h.taskId}/share`, { requestId: randomUUID() });
+    // Deterministic timing: the share is 5 seconds after the prepare ended (db.set emits no stream record).
+    const readyAt = Date.parse(String((h.db.get(`WORKSPACE#${h.workspaceId}`, `OPERATION#${prepareId}`) as { updatedAt: string }).updatedAt));
+    const task = h.db.get(`DEVTASK#${h.taskId}`, "META") as { share: Record<string, unknown> };
+    h.db.set({ ...task, share: { ...task.share, sharedAt: new Date(readyAt + 5_000).toISOString() } });
     // Ruling F7: the earlier "workspace is ready" is dropped, not held for the thread.
     await h.pump();
     await h.pump();
     expect(h.posts).toHaveLength(1);
     expect(h.posts[0]!.text).toContain("Status: RUNNING");
+    expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.notice", kind: "ready", noticeId: `${prepareId}:ready`, outcome: "before_share" }));
   });
 
   it("holds a reply until the start message has its thread, then posts it there", async () => {
@@ -184,7 +195,7 @@ describe("retries (C9, Review Focus 3)", () => {
   it("never logs the bot token or a post's text", async () => {
     // Ruling F6: the token flows into the real Slack call, which Slack refuses.
     const refused = vi.fn(async () => Response.json({ ok: false, error: "invalid_auth" }));
-    const h = await notifierHarness({ shareToChannel: true }, (input) => chatPostMessage(BOT_TOKEN, input, refused));
+    const h = await notifierHarness({ shareToChannel: true }, { post: (input) => chatPostMessage(BOT_TOKEN, input, refused) });
     await h.pump();
     expect(refused).toHaveBeenCalled();
     expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.retry", kind: "start", reason: "invalid_auth" }));
@@ -223,6 +234,94 @@ describe("a closed task (C24, Q3)", () => {
     expect(h.posts).toHaveLength(posted);
     expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.notice", kind: "setup_failed", outcome: "after_close" }));
   });
+
+  it("posts nothing for an earlier change delivered after the closed reply (Q3)", async () => {
+    const h = await notifierHarness();
+    await h.pump();
+    const prepareId = h.active();
+    await h.finish(h.workspaceId, prepareId, "FAILED", { error: "npm ci exited 1" });
+    await h.pump();
+    await h.dev(MAYA, "POST", `/v1/dev/tasks/${h.taskId}/close`, { requestId: randomUUID() });
+    await h.pump();
+    const posted = h.posts.length;
+    const task = h.db.get(`DEVTASK#${h.taskId}`, "META") as { share: { sharedAt: string }; closedAt: string };
+    expect(Date.parse(task.share.sharedAt)).toBeLessThan(Date.parse(task.closedAt));
+    // Changed before the close (at the share's time), delivered after the closed reply.
+    h.queue.push({ notice: { id: `${randomUUID()}:setup_failed`, kind: "setup_failed", workspaceId: h.workspaceId, operationId: prepareId, at: task.share.sharedAt }, attempt: 0 });
+    await h.pump();
+    expect(h.posts).toHaveLength(posted);
+    expect(h.logs.filter((entry) => entry.outcome === "after_close")).toHaveLength(1);
+  });
+
+  it("drops an expired notice even when counting the failure throws", async () => {
+    const h = await notifierHarness();
+    h.fail("channel_not_found");
+    await h.pump();
+    h.deliveryFailed.mockImplementation(() => { throw Object.assign(new Error("namespace missing"), { name: "MetricError" }); });
+    h.advance(3_600_000 + 2_000);
+    await h.pump();
+    expect(h.queue).toEqual([]);
+    expect(h.logs).toContainEqual({ event: "developer_notifier.metric_failed", error: "MetricError" });
+    expect((h.db.get(`DEVTASK#${h.taskId}`, "META") as { share: Record<string, unknown> }).share).toHaveProperty("postFailedAt");
+  });
+});
+
+describe("races with the start message (C1, C24)", () => {
+  /** A table whose next TransactWriteCommand first runs `before`: another writer committing meanwhile. */
+  function interleaved() {
+    let before: (() => Promise<void>) | undefined;
+    return {
+      set: (run: () => Promise<void>) => { before = run; },
+      documentClient: (db: FakeDynamoDb): Client => ({
+        send: async (command: unknown) => {
+          if (before !== undefined && command instanceof TransactWriteCommand) {
+            const run = before;
+            before = undefined;
+            await run();
+          }
+          return db.send(command as Parameters<FakeDynamoDb["send"]>[0]);
+        },
+      }),
+    };
+  }
+
+  it("records the thread closed when the task closes between the start post and its record (ruling F4)", async () => {
+    const race = interleaved();
+    const h = await notifierHarness({ shareToChannel: true }, { documentClient: race.documentClient });
+    h.fail("ratelimited");
+    await h.pump();
+    await h.finish(h.workspaceId, h.active(), "FAILED", { error: "npm ci exited 1" });
+    h.fail(undefined);
+    race.set(async () => { await h.dev(MAYA, "POST", `/v1/dev/tasks/${h.taskId}/close`, { requestId: randomUUID() }); });
+    await h.pump();
+    await h.pump();
+    const threadTs = (h.db.get(`DEVTASK#${h.taskId}`, "META") as { share: { threadTs: string } }).share.threadTs;
+    expect(h.db.get(`SHARED_TASK#${SLACK_TEAM}/${SLACK_CHANNEL}/${threadTs}`, "META")).toMatchObject({ closedAt: expect.any(String) as string });
+    expect(h.posts.map((post) => post.text.split("\n")[0])).toContain("The task is closed, and its workspace is released. This thread no longer drives it.");
+  });
+
+  it("keeps a posted start message's ts when its record fails, and records that thread on the next delivery, without posting again", async () => {
+    const race = interleaved();
+    const h = await notifierHarness({ shareToChannel: true }, { documentClient: race.documentClient });
+    race.set(async () => { throw Object.assign(new Error("the table is unavailable"), { name: "InternalServerError" }); });
+    await h.pump();
+    expect(h.posts).toHaveLength(1);
+    expect((h.db.get(`DEVTASK#${h.taskId}`, "META") as { share: Record<string, unknown> }).share).not.toHaveProperty("threadTs");
+    const { postedTs } = h.db.get(`DEVTASK#${h.taskId}`, `NOTICE#${h.taskId}:start`) as { postedTs: string };
+    expect(postedTs).toMatch(/^\d{10}\.\d{6}$/);
+    expect(h.queue).toHaveLength(1);
+    await h.pump();
+    expect(h.posts).toHaveLength(1);
+    const threadTs = (h.db.get(`DEVTASK#${h.taskId}`, "META") as { share: { threadTs: string } }).share.threadTs;
+    expect(threadTs).toBe(postedTs);
+    expect(h.db.get(`DEVTASK#${h.taskId}`, `NOTICE#${h.taskId}:start`)).toMatchObject({ deliveredAt: expect.any(String) as string });
+    expect(h.db.get(`SHARED_TASK#${SLACK_TEAM}/${SLACK_CHANNEL}/${threadTs}`, "META")).toMatchObject({ taskId: h.taskId });
+    expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.notice", kind: "start", outcome: "recorded" }));
+    // Later deliveries find it delivered.
+    h.queue.push({ notice: { id: `${h.taskId}:start`, kind: "start", taskId: h.taskId, at: new Date().toISOString() }, attempt: 0 });
+    await h.pump();
+    expect(h.posts).toHaveLength(1);
+  });
 });
 
 describe("chat.postMessage", () => {
@@ -234,5 +333,25 @@ describe("chat.postMessage", () => {
     await expect(chatPostMessage(BOT_TOKEN, { channel: SLACK_CHANNEL, text: "hi" }, refused as unknown as typeof fetch)).rejects.toMatchObject({ slackError: "not_in_channel" });
     const error = await chatPostMessage(BOT_TOKEN, { channel: SLACK_CHANNEL, text: "hi" }, refused as unknown as typeof fetch).catch((caught: unknown) => caught as Error);
     expect(error.message).not.toContain(BOT_TOKEN);
+  });
+
+  it("keeps the bot token cached, and loads it again after Slack refuses it", async () => {
+    const loadToken = vi.fn(async () => BOT_TOKEN);
+    let answer: Record<string, unknown> = { ok: true, ts: "1695500000.000200" };
+    const fetcher = vi.fn(async () => Response.json(answer));
+    const post = cachedSlackPoster(loadToken, () => 0, fetcher);
+    await post({ channel: SLACK_CHANNEL, text: "hi" });
+    await post({ channel: SLACK_CHANNEL, text: "hi" });
+    expect(loadToken).toHaveBeenCalledTimes(1);
+    for (const code of ["invalid_auth", "token_revoked"]) {
+      answer = { ok: false, error: code };
+      await expect(post({ channel: SLACK_CHANNEL, text: "hi" })).rejects.toMatchObject({ slackError: code });
+    }
+    answer = { ok: false, error: "ratelimited" };
+    await expect(post({ channel: SLACK_CHANNEL, text: "hi" })).rejects.toMatchObject({ slackError: "ratelimited" });
+    answer = { ok: true, ts: "1695500000.000300" };
+    await post({ channel: SLACK_CHANNEL, text: "hi" });
+    // Loaded once at first, and once after each refusal; a rate limit keeps the token.
+    expect(loadToken).toHaveBeenCalledTimes(3);
   });
 });

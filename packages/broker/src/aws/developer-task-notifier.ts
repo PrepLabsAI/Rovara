@@ -16,6 +16,7 @@ import { parseSlackSecrets } from "./slack-ingress.js";
 import { SlackPostError, chatPostMessage } from "./slack-web.js";
 
 type Client = { send(command: unknown): Promise<unknown> };
+const errorName = (error: unknown) => (error instanceof Error ? error.name : "unknown");
 interface QueueRecord { eventSource: "aws:sqs"; messageId: string; receiptHandle: string; body: string; attributes?: { ApproximateReceiveCount?: string } }
 interface PostInput { channel: string; threadTs?: string; text: string }
 
@@ -61,9 +62,12 @@ async function getItem<T>(deps: NotifierDependencies, key: { pk: string; sk: str
   return ((await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: key, ConsistentRead: true }))) as { Item?: T }).Item;
 }
 
+/** A delivered marker replaces a start's posted-but-unrecorded marker, never another delivered one. */
+const MARKER_CONDITION = "attribute_not_exists(pk) OR attribute_not_exists(deliveredAt)";
+
 async function putMarker(deps: NotifierDependencies, marker: { pk: string; sk: string }): Promise<void> {
   try {
-    await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, Item: { ...marker, entityType: "NOTICE", deliveredAt: new Date(deps.now()).toISOString() }, ConditionExpression: "attribute_not_exists(pk)" }));
+    await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, Item: { ...marker, entityType: "NOTICE", deliveredAt: new Date(deps.now()).toISOString() }, ConditionExpression: MARKER_CONDITION }));
   } catch (error) {
     if (!isConditional(error)) throw error;
   }
@@ -105,7 +109,8 @@ async function recordThread(deps: NotifierDependencies, taskId: string, threadTs
     const task = await getItem<DeveloperTaskRecord>(deps, taskKey(taskId));
     if (task?.share === undefined) return;
     if (task.share.threadTs !== undefined) {
-      // Only a delivery that posted but could not record gets here; the first thread stays the thread.
+      // Another delivery of this notice, running at the same time, posted too and recorded its
+      // thread first. The first thread stays the thread; this post stays in the channel unrecorded.
       deps.log({ event: "developer_notifier.start_posted_twice", taskId });
       await putMarker(deps, marker);
       return;
@@ -134,7 +139,7 @@ async function recordThread(deps: NotifierDependencies, taskId: string, threadTs
           },
           ConditionExpression: "attribute_not_exists(pk)",
         } },
-        { Put: { TableName: deps.tableName, Item: { ...marker, entityType: "NOTICE", deliveredAt: now }, ConditionExpression: "attribute_not_exists(pk)" } },
+        { Put: { TableName: deps.tableName, Item: { ...marker, entityType: "NOTICE", deliveredAt: now }, ConditionExpression: MARKER_CONDITION } },
       ] }));
       return;
     } catch (error) {
@@ -204,7 +209,22 @@ async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord &
   }
 }
 
-type Outcome = "posted" | "not_shared" | "before_share" | "after_close" | "delivered" | "no_thread" | "stale";
+type Outcome = "posted" | "recorded" | "not_shared" | "before_share" | "after_close" | "delivered" | "no_thread" | "stale";
+
+interface NoticeMarker { deliveredAt?: string; postedTs?: string }
+
+/**
+ * C1: a start message posted but not recorded keeps its ts on the notice's marker, so the next
+ * delivery records that thread instead of posting a second start message. Best effort: when this
+ * write fails too, the next delivery posts again, and the record keeps the first thread it gets.
+ */
+async function keepPostedTs(deps: NotifierDependencies, marker: { pk: string; sk: string }, ts: string): Promise<void> {
+  try {
+    await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, Item: { ...marker, entityType: "NOTICE", postedTs: ts } }));
+  } catch (error) {
+    deps.log({ event: "developer_notifier.posted_ts_lost", error: errorName(error) });
+  }
+}
 
 async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outcome> {
   const task = await noticeTask(deps, notice);
@@ -216,18 +236,28 @@ async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outc
   if (notice.kind !== "start" && notice.kind !== "closed" && task.closedAt !== undefined
     && (Date.parse(notice.at) > Date.parse(task.closedAt) || await getItem(deps, noticeMarker(task.taskId, `${task.taskId}:closed`)) !== undefined)) return "after_close";
   const marker = noticeMarker(task.taskId, notice.id);
-  if (await getItem(deps, marker) !== undefined) return "delivered";
+  const delivered = await getItem<NoticeMarker>(deps, marker);
+  if (delivered?.deliveredAt !== undefined) return "delivered";
   if (notice.kind === "start") {
     if (share.threadTs !== undefined) {
       await putMarker(deps, marker);
       return "delivered";
+    }
+    if (delivered?.postedTs !== undefined) {
+      await recordThread(deps, task.taskId, delivered.postedTs, marker);
+      return "recorded";
     }
     const status = await currentStatus(deps, task);
     const { ts } = await deps.post({
       channel: share.channelId,
       text: startMessage({ developerName: task.developerName, slackUserId: task.slackUserId, client: task.client, title: task.title, project: task.project, mode: share.mode, status, sharedReason: share.sharedReason }),
     });
-    await recordThread(deps, task.taskId, ts, marker);
+    try {
+      await recordThread(deps, task.taskId, ts, marker);
+    } catch (error) {
+      await keepPostedTs(deps, marker, ts);
+      throw error;
+    }
     return "posted";
   }
   if (share.threadTs === undefined) {
@@ -237,12 +267,12 @@ async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outc
   }
   const text = await replyText(deps, { ...task, share }, notice);
   if (text === undefined) return "stale";
+  // Accepted: a close that commits while this reply is being posted can put this one reply after
+  // "closed". The checks above read the task before the post; at most one reply per notice lands late.
   await deps.post({ channel: share.channelId, threadTs: share.threadTs, text });
   await putMarker(deps, marker);
   return "posted";
 }
-
-const errorName = (error: unknown) => (error instanceof Error ? error.name : "unknown");
 
 export function createNotifierHandler(deps: NotifierDependencies) {
   return async (event: { Records?: unknown[] }): Promise<{ batchItemFailures: Array<{ itemIdentifier: string }> }> => {
@@ -277,7 +307,12 @@ export function createNotifierHandler(deps: NotifierDependencies) {
           batchItemFailures.push({ itemIdentifier: record.messageId });
         } else {
           deps.log({ event: "developer_notifier.delivery_failed", kind: notice.kind, noticeId: notice.id, reason });
-          deps.deliveryFailed();
+          try {
+            deps.deliveryFailed();
+          } catch (metricError) {
+            // An expired notice is dropped whatever happens to its count, so it can never loop.
+            deps.log({ event: "developer_notifier.metric_failed", error: errorName(metricError) });
+          }
           if (notice.kind === "start" && notice.taskId !== undefined) {
             try {
               await markPostFailed(deps, notice.taskId);
@@ -293,6 +328,31 @@ export function createNotifierHandler(deps: NotifierDependencies) {
 }
 
 const SECRET_CACHE_MS = 5 * 60_000;
+/** Slack's answers that mean the token itself is bad: the next post loads it again. */
+const REFUSED_TOKEN = new Set(["invalid_auth", "token_revoked"]);
+
+/** chat.postMessage with the bot token cached for five minutes, and dropped when Slack refuses it. */
+export function cachedSlackPoster(loadToken: () => Promise<string>, now: () => number = Date.now, fetchImplementation: typeof fetch = fetch): (input: PostInput) => Promise<{ ts: string }> {
+  let cached: { value: Promise<string>; loadedAt: number } | undefined;
+  const token = (): Promise<string> => {
+    if (cached === undefined || now() - cached.loadedAt > SECRET_CACHE_MS) {
+      const value = loadToken();
+      const entry = { value, loadedAt: now() };
+      cached = entry;
+      value.catch(() => { if (cached === entry) cached = undefined; });
+    }
+    return cached.value;
+  };
+  return async (input) => {
+    const entry = cached;
+    try {
+      return await chatPostMessage(await token(), input, fetchImplementation);
+    } catch (error) {
+      if (error instanceof SlackPostError && REFUSED_TOKEN.has(error.slackError) && (entry === undefined || cached === entry)) cached = undefined;
+      throw error;
+    }
+  };
+}
 
 /** The Lambda's own dependencies, built on first use: the environment is read only then. */
 function createAwsNotifierHandler() {
@@ -301,16 +361,8 @@ function createAwsNotifierHandler() {
   const sqs = new SQSClient(awsClientConfiguration);
   const secretsManager = new SecretsManagerClient(awsClientConfiguration);
   const queueUrl = () => requiredEnvironment("NOTICE_QUEUE_URL");
-  let cachedToken: { value: Promise<string>; loadedAt: number } | undefined;
-  const botToken = (): Promise<string> => {
-    if (cachedToken === undefined || Date.now() - cachedToken.loadedAt > SECRET_CACHE_MS) {
-      const value = secretsManager.send(new GetSecretValueCommand({ SecretId: requiredEnvironment("SLACK_SECRET_ARN") }))
-        .then((response) => parseSlackSecrets(response.SecretString ?? "").botToken);
-      cachedToken = { value, loadedAt: Date.now() };
-      value.catch(() => { cachedToken = undefined; });
-    }
-    return cachedToken.value;
-  };
+  const post = cachedSlackPoster(() => secretsManager.send(new GetSecretValueCommand({ SecretId: requiredEnvironment("SLACK_SECRET_ARN") }))
+    .then((response) => parseSlackSecrets(response.SecretString ?? "").botToken));
   return createNotifierHandler({
     documentClient,
     tableName: requiredEnvironment("STATE_TABLE_NAME"),
@@ -328,9 +380,7 @@ function createAwsNotifierHandler() {
     async retryLater(receiptHandle, seconds) {
       await sqs.send(new ChangeMessageVisibilityCommand({ QueueUrl: queueUrl(), ReceiptHandle: receiptHandle, VisibilityTimeout: seconds }));
     },
-    async post(input) {
-      return chatPostMessage(await botToken(), input);
-    },
+    post,
     now: Date.now,
     log: (entry) => console.log(JSON.stringify({ component: "developer-task-notifier", ...entry })),
     deliveryFailed: () => console.log(JSON.stringify({
