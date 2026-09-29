@@ -16,7 +16,7 @@ import { STSClient } from "@aws-sdk/client-sts";
 import { z } from "zod";
 import { AgentXError, agentXError, environmentStackName, EnvironmentNameSchema, STACK_PARTS, type StackPart } from "@agentx/contracts";
 import type { CallerIdentity } from "../environments/adopt.js";
-import { stsCallerIdentity } from "../environments/adopt.js";
+import { cloudFormationStackReader, stsCallerIdentity } from "../environments/adopt.js";
 import { ssmParameterStore, type ParameterStore } from "../environments/parameter-store.js";
 import { settingsParameterName } from "../environments/settings.js";
 import { ACCOUNT_PATTERN, BudgetAnswersSchema, IdentityAnswersSchema, ImagesAnswersSchema, ModelsAnswersSchema, REGION_PATTERN } from "./answer-schemas.js";
@@ -50,6 +50,8 @@ export interface DeployCliDependencies {
   commandRunner?: CommandRunner;
   /** The cdk engine's stack-outputs reader (CloudFormation DescribeStacks by default). */
   stackOutputs?: (stackName: string) => Promise<StackOutputs | undefined>;
+  /** The deployed stacks' parameters an upgrade keeps (DescribeStacks by default). */
+  stackParameters?: (stackName: string) => Promise<Record<string, string> | undefined>;
   /** The templates engine's AWS clients (real CloudFormation and S3 clients by default). */
   templatesClients?: TemplatesEngineClients;
   /** Overrides the interactive y/N confirmation entirely (and so skips the stdin-is-a-terminal check below). */
@@ -212,7 +214,8 @@ export function partitionFromArn(arn: string): string {
 
 /** A plain progress line for one deploy event: its kind, the stack it concerns, and its outcome —
  * never a parameter value. `DeployEvent` itself carries no parameter value in any of its variants
- * (a "changes" event's entries are only action/logicalId/type/replacement), so this is safe by
+ * (a "changes" event's entries are only action/logicalId/type/replacement, and a "kept" event names
+ * parameters without their values), so this is safe by
  * construction, not just by omission. */
 export function progressLine(event: DeployEvent): string {
   switch (event.kind) {
@@ -226,6 +229,8 @@ export function progressLine(event: DeployEvent): string {
       return `deploying ${event.stackName}`;
     case "deployed":
       return `deployed ${event.stackName}`;
+    case "kept":
+      return `kept ${event.stackName}: ${event.kept.join(", ") || "nothing"}${event.dropped.length === 0 ? "" : `; not in this release, so not sent: ${event.dropped.join(", ")}`}`;
   }
 }
 
@@ -370,7 +375,7 @@ export function realCommandRunner(stderr: Writer): CommandRunner {
           stdoutStream.flush();
           stderrStream.flush();
           if (code === 0) {
-            resolvePromise({ stdout });
+            resolvePromise({ stdout, stderr: stderrBuffer });
             return;
           }
           const tailed = tail(redact(stderrBuffer), STDERR_TAIL_LINES);
@@ -379,6 +384,14 @@ export function realCommandRunner(stderr: Writer): CommandRunner {
       });
     },
   };
+}
+
+/** A stack's current parameter values (NoEcho ones read back as "****" and are never used here: none
+ * is in OPERATOR_PARAMETERS), or undefined when the stack does not exist. Built on
+ * cloudFormationStackReader, which owns the absent-stack handling. */
+export function cloudFormationParametersReader(client: CloudFormationClient): (stackName: string) => Promise<Record<string, string> | undefined> {
+  const reader = cloudFormationStackReader(client);
+  return async (stackName) => (await reader.describe(stackName))?.parameters;
 }
 
 // ---- reading a stack's outputs directly, for the cdk engine's StackDeployer.outputs -------------
@@ -585,6 +598,7 @@ async function deployCommand(options: DeployCommandOptions, deps: DeployCliDepen
       secrets: prepared.secrets,
       holder: prepared.holder,
       ...(parts === undefined ? {} : { parts }),
+      deployedParameters: deps.stackParameters ?? cloudFormationParametersReader(new CloudFormationClient({ region: answers.region })),
       onEvent,
       ...(confirm === undefined ? {} : { confirm }),
       ...(deps.now === undefined ? {} : { now: deps.now }),

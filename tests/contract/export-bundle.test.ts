@@ -239,6 +239,8 @@ describe("writeExportBundle", () => {
     expect(step4Body).toContain("aws ec2 delete-volume");
     expect(step4Body).toContain("Name=tag:Environment,Values=staging");
     expect(step4Body).toContain("Name=tag:DeploymentMode,Values=ec2-ebs");
+    expect(step4Body).toContain("Name=tag:agentx:env,Values=staging");
+    expect(readmeText).toContain("agentx --env staging destroy --region us-east-1 does all of this");
     // Normalize line wrapping before matching this sentence, so a reflow of the README's prose
     // doesn't break the test.
     expect(step4Body.replace(/\s+/g, " ")).toContain("worker security group blocks the foundation stack's delete");

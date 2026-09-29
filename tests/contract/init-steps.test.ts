@@ -145,7 +145,7 @@ describe("init step runner", () => {
     const other = new MemoryParameterStore();
     other.values.set(LOCK, JSON.stringify({ holder: "arn:aws:sts::123456789012:assumed-role/Admin/bob", command: "init", acquiredAt: new Date(T0 - 5 * 60_000).toISOString() }));
     const notAsked = vi.fn(async () => true);
-    await expect(run(other, [step("access")], { confirmTakeover: notAsked })).rejects.toThrow("locked by arn:aws:sts::123456789012:assumed-role/Admin/bob");
+    await expect(run(other, [step("access")], { confirmTakeover: notAsked })).rejects.toThrow(`locked by arn:aws:sts::123456789012:assumed-role/Admin/bob running "init" since ${new Date(T0 - 5 * 60_000).toISOString()}; wait for it to finish, then run the same agentx command again`);
     expect(notAsked).not.toHaveBeenCalled();
   });
 

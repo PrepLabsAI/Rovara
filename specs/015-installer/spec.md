@@ -212,14 +212,15 @@ and the budget.
   synthesizes for that release, so the two engines cannot drift apart.
 - **FR-013**: A command that would deploy an environment with a different engine than the one
   stored MUST refuse. Switching engines is out of scope.
-- **FR-014**: The installer MUST deploy the production runtime mode (`instances-ebs`). The
-  `demo-microvm` mode and the maintainers' `AgentXReleasePipeline` stack are not installed.
+- **FR-014**: The installer MUST deploy EC2 workers (`ec2-ebs`); the retired runtime modes and
+  the maintainers' `AgentXReleasePipeline` stack are not installed.
 
 **`agentx init` (US1)**
 
 - **FR-015**: `init` MUST check before creating anything:
   - AWS credentials and account;
-  - that the region supports AgentCore Runtime and Bedrock;
+  - that the region's EC2 quotas allow a worker (vCPUs `L-1216C47A`) and the environment's two NAT
+    gateways (two free EC2-VPC Elastic IPs, `L-0263D0A3`), and that Bedrock is available;
   - that the chosen orchestrator, worker and checker models answer a one-token test call;
   - the required CLIs for the chosen engine (none for templates; Node and CDK for cdk).
 
@@ -348,9 +349,10 @@ and the budget.
 - **FR-043**: A change that replaces or deletes a table, user pool, bucket or secret MUST stop the
   upgrade unless the operator confirms it by typing the resource's name (or passes
   `--allow-replace <logical-id>`).
-- **FR-044**: `upgrade` MUST deploy stacks in the release pipeline's order (runtime, control plane,
-  Slack service), stop at the first failure (CloudFormation rolls that stack back), leave earlier
-  stacks on the new version, be safe to re-run, and run `doctor` at the end.
+- **FR-044**: `upgrade` MUST deploy stacks in the upgrade order of the "Deploy order" decision
+  (access, foundation, identity, runtime, control-plane, slack; identity skipped with your own
+  OIDC), stop at the first failure (CloudFormation rolls that stack back), leave earlier stacks on
+  the new version, be safe to re-run, and run `doctor` at the end.
 
 **Alerts and cost (US5)**
 
@@ -393,7 +395,10 @@ and the budget.
   - that stacks exist and are healthy, and that their version matches SSM;
   - engine mismatch and drift;
   - that secrets exist and have the right shape (without reading values out);
-  - the Slack token, the verified URLs, and bot membership of bound channels;
+  - the Slack token; the Slack URLs, with the same signed self-probe `init` sends (the phase 15d1
+    decision "Slack URL verification is a signed self-probe plus a manual 'Verified' check": no
+    Slack API reports Verified); and bot membership of the channel `init` bound (no route lists
+    bindings until spec 025 phase 25d adds admin reads; see the "bound-channel limit" decision);
   - the GitHub App installation and repository access;
   - each connector's test read;
   - model access;
@@ -408,15 +413,17 @@ and the budget.
   - It MUST ask the operator to type the environment's name to confirm (no flag skips this).
   - It MUST turn termination protection off, then delete the stacks in reverse install order
     (slack, runtime, control-plane, identity, foundation, access), stopping at the first failure.
-  - It MUST then remove what the stacks retain: the capacity provider, the Cognito user pool
-    (turning its deletion protection off), the buckets (emptying every version and delete marker of
-    a versioned bucket first), the tables, the log groups, the KMS key (scheduled for deletion, 7
-    days minimum), and the secrets `agentx/<env>/callback-signing-key` and `agentx/<env>/slack`
-    (deleted without recovery, so the names can be reused).
-  - It MUST warn, before confirming, that deleting the capacity provider deletes every worker
-    session's persistent workspace volume.
-  - `--keep-data` MUST keep the tables, buckets, secrets, the Cognito user pool, the KMS key and
-    the capacity provider, and remove the rest.
+  - It MUST terminate the environment's EC2 worker instances and delete their volumes (tagged
+    `DeploymentMode=ec2-ebs`, `Environment=<env>` and `agentx:env=<env>`) after the control-plane
+    stack and before the foundation stack.
+  - It MUST then remove what the stacks retain: the Cognito user pool (turning its deletion
+    protection off), the buckets (emptying every version and delete marker of a versioned bucket
+    first), the tables, the log groups, the KMS key (scheduled for deletion, 7 days minimum), and
+    every secret under `agentx/<env>/` (deleted without recovery, so the names can be reused).
+  - It MUST warn, before confirming, that deleting the worker volumes deletes every worker
+    session's workspace.
+  - `--keep-data` MUST keep the tables, buckets, secrets, the Cognito user pool and the KMS key,
+    and remove the rest.
   - It MUST delete the environment's settings and lock last, and be safe to re-run after a failure.
 
 **Secrets and output**
@@ -456,6 +463,10 @@ and the budget.
 - **SC-003**: Both engines produce the same resources and settings, over the release test.
 - **SC-004**: An upgrade from the previous release passes `doctor` with each engine.
 - **SC-005**: Day-2 commands all run under the operator role alone.
+  (Note, phase 15e: "all" excludes `agentx destroy`, which needs admin credentials (question 7);
+  an access-stack change during `agentx upgrade`, which only admin credentials or the platform
+  team can deploy (question 9); and `agentx upgrade` of a cdk environment, since the operator role
+  cannot use CDK's bootstrap resources (ruling F20). See Decisions.)
 - **SC-006**: No secret value appears in any output, log or local file over the test suite.
 
 ## Decisions
@@ -636,7 +647,76 @@ and the budget.
   forecast) (2026-09-28; phase 15d2 plan).
 - **FR-014 (`instances-ebs`) and FR-015 (AgentCore Runtime) are superseded by the scope amendment**
   (2026-09-28; phase 15d2 plan, note only). See the note at the top of Requirements; they should be
-  reworded in phase 15e, and are left unchanged here.
+  reworded in phase 15e, and are left unchanged here. Reworded in phase 15e (2026-09-29).
+- **`agentx destroy` confirms by typed name, and by account id where a slip costs most**
+  (2026-09-29; phase 15e plan; owner decision; accepted; question 1). Every environment: type its
+  name. `production`, or an environment with neither settings nor install answers (AgentX has no
+  record of creating it), also: type the AWS account id shown. No flag skips either. The authors'
+  adopted deployment is refused outright.
+- **`agentx destroy` removes everything by default** (2026-09-29; phase 15e plan; owner decision;
+  accepted; question 2), as FR-055 says. `--keep-data` keeps every table (turn records and
+  developer sign-in included), bucket, secret, the Cognito user pool and the KMS keys, and removes
+  the rest. `agentx admin turns export` exports turns first for anyone who wants them.
+- **`agentx upgrade` never moves an environment back** (2026-09-29; phase 15e plan; owner
+  decision; accepted; question 3). An older target is refused, naming both versions; the same
+  release is allowed, so a re-run finishes a stopped upgrade. A real rollback is a fix released
+  forward, or a restore from backups. (Separately from the answer, the plan also refuses every
+  prerelease, since the settings record only x.y.z.)
+- **The workspace limit keys wait for spec 025 phase 25e** (2026-09-29; phase 15e plan; owner
+  decision; accepted; question 4). `config list` and `get` show `limits.workspacesPerMember` and
+  `limits.workspacesPerOrg` with the install-time default and say the control plane may hold a
+  newer setting; `config set` refuses them, naming 25e's admin change tool.
+- **`doctor` reports drift, and never starts detection** (2026-09-29; phase 15e plan; owner
+  decision; accepted; question 5). It shows each stack's last drift result from `DescribeStacks`
+  and, when drift was never checked or a stack drifted, the admin command to check or see it.
+  Detection reads every resource with the caller's rights, which the operator role does not have.
+  A `doctor --detect-drift` that needs admin credentials is a small later addition if people ask.
+- **The release test's scope** (2026-09-29; phase 15e plan; owner decision; accepted; question 6).
+  The workflow installs with each engine up to `developer-signin` (`init --stop-after`), runs
+  `doctor`, upgrades from the previous release, changes a setting under the operator role, runs the
+  export path under the operator role, and destroys everything, in a throwaway account. (The plan
+  runs one environment at a time, as a margin: an empty account's Elastic IPs fit two.) The Slack
+  reply, `alerts test`, the manual-guide
+  teardown and SC-001 are the manual release check in docs/releases.md.
+- **`agentx destroy` needs admin credentials** (2026-09-29; phase 15e plan; owner decision;
+  accepted; question 7). It refuses the operator role up front: it deletes the access stack, its
+  IAM roles and the kept data, which the operator role cannot do by design. SC-005 excludes it.
+- **Changing `alerts.address` leaves the old subscription** (2026-09-29; phase 15e plan; owner
+  decision; accepted; question 8). `config set alerts.address` subscribes the new address and
+  prints the exact `aws sns unsubscribe` command for each old subscription, for an admin. The
+  operator role keeps no `sns:Unsubscribe`. A webhook is shown only by its host.
+- **The access stack during `upgrade` under the operator role** (2026-09-29; phase 15e plan; owner
+  decision; accepted, its cdk branch changed by ruling F20; question 9). Under the operator role, `upgrade` compares the deployed access
+  template with the release's: unchanged, it upgrades every other stack; changed, it stops before
+  deploying anything and names `agentx upgrade --export`, whose bundle includes the access stack.
+  With admin credentials it deploys access first. The answer's cdk branch (under the operator
+  role, print a notice and skip access) cannot work, because the operator role cannot use CDK's
+  bootstrap resources, so ruling F20 changed it: a cdk environment upgrades with admin credentials
+  only, and `upgrade` refuses the operator role up front. SC-005 excludes both cases.
+- **`doctor`'s Asana check does not refresh** (2026-09-29; phase 15e plan; owner decision;
+  accepted; question 10). It checks the Asana credential exists with a refresh token; a refresh
+  would rotate the token the control plane's broker holds. Linear and Jira get a real read.
+  Asking the control plane to test the credential comes later, with spec 025's admin reads.
+- **The typed confirmation without a terminal** (2026-09-29; phase 15e plan; owner decision;
+  accepted; question 11). When stdin is not a terminal, `destroy` reads each typed answer as a line
+  from stdin, so a script must still send the exact name. There is no `--confirm` flag.
+- **Operator settings survive upgrades** (2026-09-29; phase 15e plan). An upgrade whose answers do
+  not set one of `OPERATOR_PARAMETERS` (the budget and its scope, `SlackAppPostedMessages`,
+  `SlackThreadTurnsPerMinute`, the two workspace limits, `SlowTurnMinutes`) sends the deployed
+  value. A parameter the target release no longer declares is not sent; `upgrade` names its config
+  key and says nothing replaces it.
+- **Upgrade review is per stack** (2026-09-29; phase 15e plan). A later stack's parameters depend
+  on an earlier stack's new outputs, so each stack's change set (or `cdk diff`) is reviewed as it
+  is ready. IAM changes are listed on their own, and a replaced or deleted table, user pool,
+  bucket, key or secret stops the upgrade unless named (FR-043). Stopping leaves earlier stacks
+  upgraded, as FR-044 allows.
+- **`doctor`'s release and engine checks** (2026-09-29; phase 15e plan). A stack records no
+  version, so `doctor` compares each stack's code package parameters and image digests with the
+  release manifest of the version in the settings. The engine is read from the stack's
+  parameters: only a cdk-deployed stack declares `BootstrapVersion`.
+- **The bound-channel limit** (2026-09-29; phase 15e plan). No control-plane route lists channel
+  bindings until spec 025 phase 25d adds admin reads, so `doctor` checks the bot's membership of
+  the channel `init` bound, and says channels bound later are not listed yet (FR-050).
 
 ## Assumptions and Scope
 

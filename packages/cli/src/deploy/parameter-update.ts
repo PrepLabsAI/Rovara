@@ -12,6 +12,8 @@ export interface ParameterUpdateInput {
   stackName: string; roleArn: string; changes: Record<string, string>;
   confirm: (event: { stackName: string; parameters: ParameterChange[]; changes: ChangeSetChange[] }) => Promise<boolean>;
   write: (line: string) => void; now?: () => number; sleep?: (ms: number) => Promise<void>; pollMs?: number; timeoutMs?: number;
+  /** Which command is changing the stack: names the change set and the messages. Default "sign-in". */
+  label?: "sign-in" | "config";
 }
 
 const NO_CHANGES = ["didn't contain changes", "No updates are to be performed"];
@@ -25,6 +27,7 @@ function isChangeSetNotFound(error: unknown): boolean {
 }
 
 export async function updateStackParameters(input: ParameterUpdateInput): Promise<{ changed: boolean }> {
+  const label = input.label ?? "sign-in";
   const now = input.now ?? Date.now;
   const sleep = input.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const pollMs = input.pollMs ?? 5_000;
@@ -47,6 +50,9 @@ export async function updateStackParameters(input: ParameterUpdateInput): Promis
   if (status.endsWith("_FAILED") || status === "ROLLBACK_COMPLETE") throw agentXError("CONFIG_INVALID", `stack ${stackName} is ${status}; fix it in the CloudFormation console first`);
   const current = new Map((stack.Parameters ?? []).map((parameter) => [parameter.ParameterKey ?? "", parameter.ParameterValue ?? ""]));
   const missing = Object.keys(input.changes).filter((name) => !current.has(name));
+  if (missing.length > 0 && label === "config") {
+    throw agentXError("CONFIG_INVALID", `stack ${stackName} has no ${missing.join(", ")} parameter; it runs an older AgentX release, so upgrade it with agentx upgrade, then run this again`);
+  }
   if (missing.length > 0 && missing.every((name) => SIGN_IN_SINCE_PARAMETER_NAMES.has(name))) {
     throw agentXError("CONFIG_INVALID", `stack ${stackName} was deployed from an older AgentX release (it has no ${missing.join(", ")} parameter); upgrade the environment with agentx deploy, then run this again`);
   }
@@ -56,7 +62,7 @@ export async function updateStackParameters(input: ParameterUpdateInput): Promis
   const parameters = Object.entries(input.changes).filter(([name, to]) => current.get(name) !== to).map(([name, to]) => ({ name, from: current.get(name) ?? "", to }));
   if (parameters.length === 0) return { changed: false };
 
-  const changeSetName = `agentx-signin-${Math.floor(now() / 1000)}`;
+  const changeSetName = `agentx-${label === "config" ? "config" : "signin"}-${Math.floor(now() / 1000)}`;
   const id = { StackName: stackName, ChangeSetName: changeSetName };
   await input.cloudFormation.send(new CreateChangeSetCommand({
     ...id,
@@ -86,7 +92,7 @@ export async function updateStackParameters(input: ParameterUpdateInput): Promis
   }));
   if (!(await input.confirm({ stackName, parameters, changes }))) {
     await deleteChangeSet();
-    throw agentXError("CONFIG_INVALID", `the sign-in change to ${stackName} was not applied; nothing changed`);
+    throw agentXError("CONFIG_INVALID", `the ${label} change to ${stackName} was not applied; nothing changed`);
   }
   await input.cloudFormation.send(new ExecuteChangeSetCommand({ ...id, ClientRequestToken: changeSetName }));
   input.write(`Updating ${stackName}; this usually takes one to three minutes`);
@@ -98,7 +104,7 @@ export async function updateStackParameters(input: ParameterUpdateInput): Promis
     const finished = executed === undefined || ENDED.has(executed.ExecutionStatus ?? "");
     const stackStatus = finished ? (await describe()).StackStatus ?? "" : "";
     if (finished && !stackStatus.endsWith("_IN_PROGRESS")) {
-      if (stackStatus !== "UPDATE_COMPLETE") throw agentXError("CONFIG_INVALID", `stack ${stackName} ended in ${stackStatus}; sign-in did not change. See the stack's events in the CloudFormation console`);
+      if (stackStatus !== "UPDATE_COMPLETE") throw agentXError("CONFIG_INVALID", `stack ${stackName} ended in ${stackStatus}; ${label === "config" ? "the setting" : "sign-in"} did not change. See the stack's events in the CloudFormation console`);
       return { changed: true };
     }
     if (now() > deadline) throw agentXError("RUNTIME_UNAVAILABLE", `stack ${stackName} is still updating after 30 minutes; check it in the CloudFormation console`);

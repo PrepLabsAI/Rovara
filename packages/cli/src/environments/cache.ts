@@ -1,4 +1,4 @@
-import { access, mkdir, open, rename, rm } from "node:fs/promises";
+import { access, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { agentXError } from "@agentx/contracts";
 import YAML from "yaml";
@@ -21,6 +21,28 @@ export function cacheFromSettings(settings: EnvironmentSettings): DeploymentSett
       audience: settings.identity.audience,
     },
   };
+}
+
+/**
+ * The region this computer's cache places environment `env` in, read from the AWS endpoints it
+ * records (the control plane's execute-api URL, or a Cognito issuer). undefined when there is no
+ * cache, it cannot be read, or neither endpoint names a region (a custom domain and your own OIDC
+ * provider).
+ */
+export async function cachedEnvironmentRegion(home: string, env: string): Promise<string | undefined> {
+  let cached: unknown;
+  try {
+    cached = YAML.parse(await readFile(environmentCachePath(home, env), "utf8"));
+  } catch {
+    return undefined;
+  }
+  const record = (cached ?? {}) as { controlPlaneUrl?: unknown; auth?: { issuer?: unknown } };
+  const endpoints = [record.controlPlaneUrl, record.auth?.issuer].filter((value): value is string => typeof value === "string");
+  for (const endpoint of endpoints) {
+    const match = /^https:\/\/(?:[a-z0-9-]+\.execute-api|cognito-idp)\.([a-z]{2}(?:-[a-z]+)+-\d)\.amazonaws\.com(?:\.cn)?(?:\/|$)/.exec(endpoint);
+    if (match?.[1] !== undefined) return match[1];
+  }
+  return undefined;
 }
 
 export async function writeEnvironmentCache(home: string, settings: EnvironmentSettings): Promise<string> {

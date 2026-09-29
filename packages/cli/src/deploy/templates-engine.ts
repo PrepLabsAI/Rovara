@@ -201,7 +201,7 @@ export function templatesDeployer(input: {
     if (status === "ROLLBACK_COMPLETE") {
       throw agentXError(
         "CONFIG_INVALID",
-        `stack ${stackName} failed to create earlier and must be deleted before it can be deployed again (aws cloudformation delete-stack --stack-name ${stackName} --region ${region})`,
+        `stack ${stackName} failed to create earlier and must be deleted before it can be deployed again (aws cloudformation delete-stack --stack-name ${stackName} --region ${region}), or remove the whole environment with agentx --env ${env} destroy --region ${region}`,
       );
     }
     // A stack in REVIEW_IN_PROGRESS has only ever had a CREATE change set that was never executed.

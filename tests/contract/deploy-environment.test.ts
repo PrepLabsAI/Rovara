@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { environmentStackName, type ReleaseManifest } from "@agentx/contracts";
-import { deployEnvironment, type DeployAnswers } from "../../packages/cli/src/deploy/deploy-environment.js";
+import { deployEnvironment, keptOperatorParameters, type DeployAnswers } from "../../packages/cli/src/deploy/deploy-environment.js";
 import { PROTECTED_PARTS, type DeployRequest, type StackDeployer, type StackOutputs } from "../../packages/cli/src/deploy/deployer.js";
-import type { DeployPart } from "../../packages/cli/src/deploy/parameters.js";
+import { OPERATOR_PARAMETERS, type DeployPart } from "../../packages/cli/src/deploy/parameters.js";
 import type { LoadedRelease } from "../../packages/cli/src/deploy/release.js";
 import type { SecretValueStore } from "../../packages/cli/src/deploy/signing-key.js";
 import { lockParameterName } from "../../packages/cli/src/environments/lock.js";
@@ -60,6 +60,9 @@ function flipOnceThenReveal(real: MemoryParameterStore, flipName: string): Param
     list: (path) => real.list(path),
   };
 }
+
+/** A deployed environment that reports no parameters: nothing for an upgrade to keep. */
+const nothingDeployed = async (): Promise<Record<string, string> | undefined> => undefined;
 
 function memorySecrets(initial: Record<string, string> = {}): SecretValueStore & { creates: Array<{ name: string; value: string }> } {
   const values = new Map(Object.entries(initial));
@@ -201,6 +204,23 @@ describe("deploy environment", () => {
     expect(result.settingsWritten).toBe(true);
   });
 
+  it("sends the release's package parameters with the templates engine only: cdk uploads its own assets (Task 20 live check)", async () => {
+    // live15eb: cdk deploy refused the change set, "Parameters: [AssetParameters...] do not exist in the template".
+    const withPackage = (): LoadedRelease => {
+      const release = fakeRelease();
+      return { ...release, manifest: { ...release.manifest, packages: [{ assetId: "f".repeat(64), file: `packages/${"f".repeat(64)}.zip`, sha256: "e".repeat(64), parts: ["control-plane"], bucketParameter: "AssetBucket", keyParameter: "AssetKey", hashParameter: "AssetHash", keyParameterValue: `packages/||${"f".repeat(64)}.zip` }] } };
+    };
+    const controlPlane = async (engine: "templates" | "cdk") => {
+      const { deployer, requests } = fakeDeployer(scriptedOutputs());
+      await deployEnvironment({ mode: "install", engine, answers: baseAnswers(), release: withPackage(), deployer, store: new MemoryParameterStore(), secrets: memorySecrets(), holder: HOLDER });
+      return requests.find((request) => request.part === "control-plane")!.parameters;
+    };
+    expect(await controlPlane("templates")).toMatchObject({ AssetBucket: scriptedOutputs()[stackName("access")]!.ArtifactBucketName, AssetKey: `packages/||${"f".repeat(64)}.zip`, AssetHash: "f".repeat(64) });
+    const cdk = await controlPlane("cdk");
+    expect(Object.keys(cdk).filter((name) => name.startsWith("Asset"))).toEqual([]);
+    expect(cdk.GitHubAppId).toBe(baseAnswers().github.appId);
+  });
+
   it("creates the callback signing key once and reuses it on later deploys", async () => {
     const store = new MemoryParameterStore();
     const secrets = memorySecrets();
@@ -209,7 +229,7 @@ describe("deploy environment", () => {
     await deployEnvironment({ mode: "install", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer: install.deployer, store, secrets, holder: HOLDER });
 
     const upgrade = fakeDeployer(scriptedOutputs());
-    await deployEnvironment({ mode: "upgrade", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer: upgrade.deployer, store, secrets, holder: HOLDER });
+    await deployEnvironment({ mode: "upgrade", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer: upgrade.deployer, store, secrets, holder: HOLDER, deployedParameters: nothingDeployed });
 
     expect(secrets.creates).toHaveLength(1);
     const firstKey = install.requests.find((request) => request.part === "control-plane")!.parameters.CallbackSigningKey;
@@ -268,7 +288,7 @@ describe("deploy environment", () => {
 
     const upgrade = fakeDeployer(scriptedOutputs());
     const result = await deployEnvironment({
-      mode: "upgrade", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer: upgrade.deployer, store, secrets, holder: HOLDER,
+      mode: "upgrade", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer: upgrade.deployer, store, secrets, holder: HOLDER, deployedParameters: nothingDeployed,
       parts: ["runtime", "control-plane"],
     });
 
@@ -291,7 +311,7 @@ describe("deploy environment", () => {
     const attempt = fakeDeployer(scriptedOutputs());
 
     await expect(
-      deployEnvironment({ mode: "upgrade", engine: "cdk", answers: baseAnswers(), release: fakeRelease(), deployer: attempt.deployer, store, secrets, holder: HOLDER }),
+      deployEnvironment({ mode: "upgrade", engine: "cdk", answers: baseAnswers(), release: fakeRelease(), deployer: attempt.deployer, store, secrets, holder: HOLDER, deployedParameters: nothingDeployed }),
     ).rejects.toThrow("environment staging was installed with the templates engine; switching engines is not supported");
     expect(attempt.requests).toEqual([]);
     expect(store.values.has("/agentx/staging/lock")).toBe(false);
@@ -305,7 +325,7 @@ describe("deploy environment", () => {
     const attempt = fakeDeployer(scriptedOutputs());
 
     await expect(
-      deployEnvironment({ mode: "upgrade", engine: "cdk", answers: baseAnswers(), release: fakeRelease(), deployer: attempt.deployer, store, secrets, holder: HOLDER }),
+      deployEnvironment({ mode: "upgrade", engine: "cdk", answers: baseAnswers(), release: fakeRelease(), deployer: attempt.deployer, store, secrets, holder: HOLDER, deployedParameters: nothingDeployed }),
     ).rejects.toThrow("environment staging uses the legacy stack names; upgrading it with agentx deploy is not supported yet");
     expect(attempt.requests).toEqual([]);
     expect(store.values.has("/agentx/staging/lock")).toBe(false);
@@ -391,7 +411,7 @@ describe("deploy environment", () => {
 
     await expect(
       deployEnvironment({
-        mode: "upgrade", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer, store, secrets, holder: HOLDER,
+        mode: "upgrade", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer, store, secrets, holder: HOLDER, deployedParameters: nothingDeployed,
         parts: ["runtime"],
       }),
     ).rejects.toThrow(`stack ${stackName("access")} (environment staging's access stack) no longer reports outputs`);
@@ -403,7 +423,7 @@ describe("deploy environment", () => {
 
     const freshUpgrade = fakeDeployer(scriptedOutputs());
     await expect(
-      deployEnvironment({ mode: "upgrade", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer: freshUpgrade.deployer, store, secrets, holder: HOLDER }),
+      deployEnvironment({ mode: "upgrade", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer: freshUpgrade.deployer, store, secrets, holder: HOLDER, deployedParameters: nothingDeployed }),
     ).rejects.toThrow("environment staging is not installed; install it first");
     expect(freshUpgrade.requests).toEqual([]);
 
@@ -484,7 +504,7 @@ describe("deploy environment", () => {
     await store.put("/agentx/staging/signin", JSON.stringify({ schemaVersion: 1, env: "staging", slack: true, updatedAt: "2026-09-27T00:00:00.000Z", updatedBy: HOLDER }));
 
     const { deployer, requests } = fakeDeployer(scriptedOutputs());
-    await deployEnvironment({ mode, engine: "templates", answers: baseAnswers(), release, deployer, store, secrets, holder: HOLDER, ...(parts === undefined ? {} : { parts }) });
+    await deployEnvironment({ mode, engine: "templates", answers: baseAnswers(), release, deployer, store, secrets, holder: HOLDER, deployedParameters: nothingDeployed, ...(parts === undefined ? {} : { parts }) });
     expect(requests.find((request) => request.part === "control-plane")!.parameters).toMatchObject({ SlackTeamId: "T0TEAM1", DeveloperSignInSlack: "enabled" });
   });
 
@@ -516,7 +536,7 @@ describe("deploy environment", () => {
 
     const older = fakeDeployer(scriptedOutputs());
     const beforeCutoffs = SIGN_IN_PARAMETER_NAMES.filter((name) => !name.endsWith("Since"));
-    await deployEnvironment({ mode: "upgrade", engine: "templates", answers: baseAnswers(), release: fakeReleaseWithControlPlaneParameters(beforeCutoffs), deployer: older.deployer, store, secrets, holder: HOLDER });
+    await deployEnvironment({ mode: "upgrade", engine: "templates", answers: baseAnswers(), release: fakeReleaseWithControlPlaneParameters(beforeCutoffs), deployer: older.deployer, store, secrets, holder: HOLDER, deployedParameters: nothingDeployed });
     const parameters = older.requests.find((request) => request.part === "control-plane")!.parameters;
     expect(parameters).toMatchObject({ DeveloperSignInSlack: "enabled" });
     expect(parameters).not.toHaveProperty("DeveloperSignInSlackSince");
@@ -550,7 +570,7 @@ describe("deploy environment", () => {
     await store.put("/agentx/staging/signin", JSON.stringify({ schemaVersion: 1, env: "staging", slack: true, updatedAt: "2026-09-27T00:00:00.000Z", updatedBy: HOLDER }));
 
     // fakeRelease()'s own template() always throws "not expected to be called by the orchestrator";
-    // an empty regions() must mean it is never even asked (see controlPlaneParameterNames).
+    // an empty regions() must mean it is never even asked (see templateParameterNames).
     const noRegionRelease: LoadedRelease = { ...fakeRelease(), regions: () => [] };
     const { deployer, requests } = fakeDeployer(scriptedOutputs());
     await deployEnvironment({ mode: "install", engine: "templates", answers: baseAnswers(), release: noRegionRelease, deployer, store, secrets, holder: HOLDER });
@@ -632,5 +652,145 @@ describe("deployEnvironment with lockHeld", () => {
       deployEnvironment({ mode: "install", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer, store, secrets: memorySecrets(), holder: HOLDER, parts: ["access"], lockHeld: true }),
     ).rejects.toThrow("is not held by");
     expect(requests).toEqual([]);
+  });
+});
+
+describe("an upgrade keeps what the operator set (OPERATOR_PARAMETERS)", () => {
+  const declared = ["BudgetMonthlyUsd", "BudgetScope", "SlackAppPostedMessages", "SlackThreadTurnsPerMinute", "SlackMemberWorkspaceLimit", "SlackOrganizationWorkspaceLimit"];
+
+  async function installed(): Promise<{ store: MemoryParameterStore; secrets: ReturnType<typeof memorySecrets> }> {
+    const store = new MemoryParameterStore();
+    const secrets = memorySecrets();
+    const install = fakeDeployer(scriptedOutputs());
+    await deployEnvironment({ mode: "install", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer: install.deployer, store, secrets, holder: HOLDER });
+    return { store, secrets };
+  }
+
+  it("sends the deployed budget and thread limit when the answers set none", async () => {
+    const { store, secrets } = await installed();
+    const upgrade = fakeDeployer(scriptedOutputs());
+    const events: unknown[] = [];
+    await deployEnvironment({
+      mode: "upgrade", engine: "templates", answers: baseAnswers(), release: fakeReleaseWithControlPlaneParameters(declared), deployer: upgrade.deployer, store, secrets, holder: HOLDER,
+      deployedParameters: async (name) => (name === stackName("control-plane") ? { BudgetMonthlyUsd: "250", BudgetScope: "account", SlackThreadTurnsPerMinute: "12", GitHubAppId: "999" } : undefined),
+      onEvent: (event) => events.push(event),
+    });
+    const controlPlane = upgrade.requests.find((request) => request.part === "control-plane")!;
+    expect(controlPlane.parameters.BudgetMonthlyUsd).toBe("250");
+    expect(controlPlane.parameters.BudgetScope).toBe("account");
+    expect(controlPlane.parameters.SlackThreadTurnsPerMinute).toBe("12");
+    // Only OPERATOR_PARAMETERS are carried: every other parameter still comes from the answers.
+    expect(controlPlane.parameters.GitHubAppId).toBe("123");
+    expect(events).toContainEqual({ kind: "kept", stackName: stackName("control-plane"), kept: ["BudgetMonthlyUsd", "BudgetScope", "SlackThreadTurnsPerMinute"], dropped: [] });
+  });
+
+  it("lets the answers' own budget win over the deployed one", async () => {
+    const { store, secrets } = await installed();
+    const upgrade = fakeDeployer(scriptedOutputs());
+    await deployEnvironment({
+      mode: "upgrade", engine: "templates", answers: { ...baseAnswers(), budget: { monthlyUsd: 40, scope: "tag" } }, release: fakeReleaseWithControlPlaneParameters(declared),
+      deployer: upgrade.deployer, store, secrets, holder: HOLDER,
+      deployedParameters: async () => ({ BudgetMonthlyUsd: "250", BudgetScope: "account" }),
+    });
+    const controlPlane = upgrade.requests.find((request) => request.part === "control-plane")!;
+    expect(controlPlane.parameters.BudgetMonthlyUsd).toBe("40");
+    expect(controlPlane.parameters.BudgetScope).toBe("tag");
+  });
+
+  it("does not send a parameter the new template no longer declares, and reports it as dropped", async () => {
+    const { store, secrets } = await installed();
+    const upgrade = fakeDeployer(scriptedOutputs());
+    const events: unknown[] = [];
+    const result = await deployEnvironment({
+      mode: "upgrade", engine: "templates", answers: baseAnswers(), release: fakeReleaseWithControlPlaneParameters(["BudgetMonthlyUsd"]),
+      deployer: upgrade.deployer, store, secrets, holder: HOLDER,
+      deployedParameters: async (name) => (name === stackName("control-plane") ? { BudgetMonthlyUsd: "250", SlackThreadTurnsPerMinute: "12" } : undefined),
+      onEvent: (event) => events.push(event),
+    });
+    const controlPlane = upgrade.requests.find((request) => request.part === "control-plane")!;
+    expect(controlPlane.parameters).not.toHaveProperty("SlackThreadTurnsPerMinute");
+    // Dropping one parameter does not drop the others: the budget is still kept in the same request.
+    expect(controlPlane.parameters.BudgetMonthlyUsd).toBe("250");
+    expect(events).toContainEqual({ kind: "kept", stackName: stackName("control-plane"), kept: ["BudgetMonthlyUsd"], dropped: ["SlackThreadTurnsPerMinute"] });
+    expect(result.droppedParameters).toEqual([{ stackName: stackName("control-plane"), parameter: "SlackThreadTurnsPerMinute", value: "12" }]);
+  });
+
+  it("refuses an upgrade that cannot read the deployed parameters, before deploying anything", async () => {
+    const { store, secrets } = await installed();
+    const upgrade = fakeDeployer(scriptedOutputs());
+    await expect(deployEnvironment({ mode: "upgrade", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer: upgrade.deployer, store, secrets, holder: HOLDER }))
+      .rejects.toThrow("an upgrade must read the deployed stacks' parameters");
+    // F6: the refusal comes before the deploy loop, so no part deploys at all.
+    expect(upgrade.requests).toEqual([]);
+  });
+
+  it("refuses, never skips, when the reader is missing at the part that needs it (the loop's own check)", async () => {
+    const { store, secrets } = await installed();
+    const upgrade = fakeDeployer(scriptedOutputs());
+    // Forces the guard before the loop and the loop to disagree: the reader is there when the guard
+    // looks, and gone when the control plane deploys. Skipping would reset the budget silently.
+    let reads = 0;
+    const input = {
+      mode: "upgrade" as const, engine: "templates" as const, answers: baseAnswers(), release: fakeRelease(), deployer: upgrade.deployer, store, secrets, holder: HOLDER,
+      get deployedParameters() { reads += 1; return reads === 1 ? nothingDeployed : undefined; },
+    };
+    await expect(deployEnvironment(input)).rejects.toThrow("an upgrade must read the deployed stacks' parameters");
+    expect(upgrade.requests.filter((request) => request.part === "control-plane")).toEqual([]);
+  });
+
+  it("never reads deployed parameters on an install", async () => {
+    const store = new MemoryParameterStore();
+    const reads: string[] = [];
+    const install = fakeDeployer(scriptedOutputs());
+    await deployEnvironment({
+      mode: "install", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer: install.deployer, store, secrets: memorySecrets(), holder: HOLDER,
+      deployedParameters: async (name) => { reads.push(name); return { BudgetMonthlyUsd: "250" }; },
+    });
+    expect(reads).toEqual([]);
+    expect(install.requests.find((request) => request.part === "control-plane")!.parameters).not.toHaveProperty("BudgetMonthlyUsd");
+  });
+
+  it("keeps the settings' alert address when it rewrites the settings (F16)", async () => {
+    const { store, secrets } = await installed();
+    const before = (await readEnvironmentSettings(store, ENV))!;
+    await writeEnvironmentSettings(store, { ...before, alertAddress: "ops@example.com" });
+    const upgrade = fakeDeployer(scriptedOutputs());
+    const result = await deployEnvironment({
+      mode: "upgrade", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer: upgrade.deployer, store, secrets, holder: HOLDER, deployedParameters: nothingDeployed,
+    });
+    expect(result.settingsWritten).toBe(true);
+    expect((await readEnvironmentSettings(store, ENV))!.alertAddress).toBe("ops@example.com");
+  });
+
+  it("writes no alert address when the settings had none", async () => {
+    const { store, secrets } = await installed();
+    const upgrade = fakeDeployer(scriptedOutputs());
+    await deployEnvironment({
+      mode: "upgrade", engine: "templates", answers: baseAnswers(), release: fakeRelease(), deployer: upgrade.deployer, store, secrets, holder: HOLDER, deployedParameters: nothingDeployed,
+    });
+    expect(await readEnvironmentSettings(store, ENV)).not.toHaveProperty("alertAddress");
+  });
+});
+
+describe("keptOperatorParameters", () => {
+  it("keeps only listed parameters the answers did not set and the template declares", () => {
+    expect(keptOperatorParameters({
+      part: "slack", computed: { ModelId: "m" }, deployed: { SlowTurnMinutes: "9", ModelId: "old" }, declared: new Set(["SlowTurnMinutes", "ModelId"]),
+    })).toEqual({ kept: { SlowTurnMinutes: "9" }, dropped: [] });
+    expect(keptOperatorParameters({ part: "runtime", computed: {}, deployed: { ModelId: "old" }, declared: undefined })).toEqual({ kept: {}, dropped: [] });
+  });
+
+  it("never carries a secret parameter, even one listed by mistake: DescribeStacks reads it back as \"****\"", () => {
+    // Simulates a later edit that lists a secret in OPERATOR_PARAMETERS; restored afterwards.
+    const controlPlane = OPERATOR_PARAMETERS["control-plane"] as string[];
+    controlPlane.push("CallbackSigningKey");
+    try {
+      expect(keptOperatorParameters({
+        part: "control-plane", computed: {}, deployed: { CallbackSigningKey: "****", BudgetMonthlyUsd: "250" }, declared: new Set(["CallbackSigningKey", "BudgetMonthlyUsd"]),
+      })).toEqual({ kept: { BudgetMonthlyUsd: "250" }, dropped: [] });
+    } finally {
+      controlPlane.pop();
+    }
+    expect(OPERATOR_PARAMETERS["control-plane"]).not.toContain("CallbackSigningKey");
   });
 });

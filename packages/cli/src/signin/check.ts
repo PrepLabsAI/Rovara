@@ -1,18 +1,16 @@
 // FR-046's checks. 15e's `agentx doctor` calls checkDeveloperSignIn unchanged (R5). Never prints
 // a secret: the Slack test request carries only the client ID and the callback URL.
-import { AgentXConfigurationSchema, AgentXError } from "@agentx/contracts";
+import { AgentXConfigurationSchema } from "@agentx/contracts";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import type { EnvironmentSettings } from "../environments/settings.js";
 import type { InitSecrets } from "../init/context.js";
 import { SIGN_IN_BOT_SCOPES, missingScopes, readSlackTeamIdFromSecret, slackSecretName, slackSignInCallbackUrl, type SlackApi } from "../init/slack-app.js";
+import { plainMessage } from "../output.js";
 import { checkOidcDiscovery } from "./collect.js";
 import { oidcSecretName, readSignInSettings, readSlackTeamId } from "./settings.js";
 
 /** `warn`: ok, but not verified; shown as a warning, and it fails neither signin check nor doctor. */
 export interface SignInCheck { name: string; ok: boolean; warn?: boolean; detail: string }
-
-/** An error's own words, without AgentXError's "CODE: " prefix. */
-const plainMessage = (error: Error) => (error instanceof AgentXError ? error.message.slice(error.code.length + 2) : error.message);
 
 const parse = (text: string | undefined): Record<string, unknown> => {
   try {

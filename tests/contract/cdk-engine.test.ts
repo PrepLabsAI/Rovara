@@ -254,6 +254,18 @@ describe("cdk engine", () => {
   });
 
   describe("outputs file handling", () => {
+    it("reads a stack with no outputs from CloudFormation: cdk leaves it out of the outputs file (Task 20 live check)", async () => {
+      // live15eb: agentx-live15eb-runtime deployed, but "cdk deploy wrote no outputs ... (stacks written: none)".
+      const dir = await mkdtemp(join(tmpdir(), "agentx-cdk-"));
+      const runner = recordingRunner(dir, {});
+      const asked: string[] = [];
+      const deployer = cdkDeployer({ runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async (stackName) => { asked.push(stackName); return {}; } });
+      await expect(
+        deployer.deploy({ part: "runtime", stackName: "agentx-staging-runtime", parameters: {}, roleArn: "arn:aws:iam::1:role/r", terminationProtection: false }),
+      ).resolves.toEqual({});
+      expect(asked).toEqual(["agentx-staging-runtime"]);
+    });
+
     it("throws naming the stacks actually written when the outputs file has no entry for the requested stack", async () => {
       const dir = await mkdtemp(join(tmpdir(), "agentx-cdk-"));
       const runner = recordingRunner(dir, { "agentx-staging-other-stack": { ApiEndpoint: "https://x" } });
@@ -261,6 +273,46 @@ describe("cdk engine", () => {
       await expect(
         deployer.deploy({ part: "control-plane", stackName: "agentx-staging-control-plane", parameters: {}, roleArn: "arn:aws:iam::1:role/r", terminationProtection: false }),
       ).rejects.toThrow(/cdk deploy wrote no outputs for agentx-staging-control-plane to .*control-plane\.json \(stacks written: agentx-staging-other-stack\)/);
+    });
+
+    it("still throws when the outputs file names another stack, even though the requested stack exists (review I1)", async () => {
+      // An upgrade: the requested stack exists from the install, so CloudFormation would answer its old outputs.
+      const dir = await mkdtemp(join(tmpdir(), "agentx-cdk-"));
+      const runner = recordingRunner(dir, { "agentx-staging-other-stack": { ApiEndpoint: "https://x" } });
+      const asked: string[] = [];
+      const deployer = cdkDeployer({ runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async (stackName) => { asked.push(stackName); return { ApiEndpoint: "https://old" }; } });
+      await expect(
+        deployer.deploy({ part: "control-plane", stackName: "agentx-staging-control-plane", parameters: {}, roleArn: "arn:aws:iam::1:role/r", terminationProtection: false }),
+      ).rejects.toThrow(/cdk deploy wrote no outputs for agentx-staging-control-plane to .*control-plane\.json \(stacks written: agentx-staging-other-stack\)$/);
+      expect(asked).toEqual([]);
+    });
+
+    it("throws when the file names no stacks but CloudFormation reports outputs for the stack (re-review R2)", async () => {
+      // A correct deploy of a stack with outputs writes them to the file: these are the old ones.
+      const dir = await mkdtemp(join(tmpdir(), "agentx-cdk-"));
+      const runner = recordingRunner(dir, {});
+      const deployer = cdkDeployer({ runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => ({ ApiEndpoint: "https://old" }) });
+      await expect(
+        deployer.deploy({ part: "control-plane", stackName: "agentx-staging-control-plane", parameters: {}, roleArn: "arn:aws:iam::1:role/r", terminationProtection: false }),
+      ).rejects.toThrow(/cdk deploy wrote no outputs for agentx-staging-control-plane to .*control-plane\.json \(stacks written: none\)$/);
+    });
+
+    it("says the deploy succeeded when reading a no-outputs stack from CloudFormation fails (review M7)", async () => {
+      const dir = await mkdtemp(join(tmpdir(), "agentx-cdk-"));
+      const runner = recordingRunner(dir, {});
+      const deployer = cdkDeployer({ runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => { throw new Error("Rate exceeded"); } });
+      await expect(
+        deployer.deploy({ part: "runtime", stackName: "agentx-staging-runtime", parameters: {}, roleArn: "arn:aws:iam::1:role/r", terminationProtection: false }),
+      ).rejects.toThrow("cdk deploy of agentx-staging-runtime succeeded, but its outputs could not be read from CloudFormation: Rate exceeded");
+    });
+
+    it("throws when the outputs file names no stacks and CloudFormation reports no such stack", async () => {
+      const dir = await mkdtemp(join(tmpdir(), "agentx-cdk-"));
+      const runner = recordingRunner(dir, {});
+      const deployer = cdkDeployer({ runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => undefined });
+      await expect(
+        deployer.deploy({ part: "runtime", stackName: "agentx-staging-runtime", parameters: {}, roleArn: "arn:aws:iam::1:role/r", terminationProtection: false }),
+      ).rejects.toThrow(/cdk deploy wrote no outputs for agentx-staging-runtime to .*runtime\.json \(stacks written: none\), and CloudFormation reports no such stack/);
     });
 
     it("deletes a stale outputs file before running, so a run that writes nothing cannot return stale data", async () => {
