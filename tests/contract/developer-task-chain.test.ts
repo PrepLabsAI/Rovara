@@ -157,6 +157,37 @@ describe("the first task is queued by the prepare's result (R3, FR-018)", () => 
     expect(db.get(`SLACK_LIMIT#${SLACK_TEAM}`, "ORGANIZATION")).toMatchObject({ count: 0 });
   });
 
+  it.each([
+    ["ThrottlingException", {}],
+    ["InternalServerError", { $metadata: { httpStatusCode: 500 } }],
+  ])("records the prepare as FAILED on the first callback even for a retryable %s (final re-review: pinned on purpose)", async (name, extra) => {
+    // Pinned, not retried: nothing ends a prepare whose worker gave up on its callback while its
+    // compute stays healthy (the reaper skips busy workspaces, the reconciler fails an operation
+    // only when its instance is lost, and the worker's 3 callback tries carry no "last attempt").
+    // Rethrowing a retryable error here would bring the STARTING wedge back after the last try.
+    const { db, finish, task, prepareId, taskOperations } = await started();
+    const original = db.send;
+    let failedReads = 0;
+    db.send = async (command) => {
+      if (failedReads === 0 && command.constructor.name === "QueryCommand" && JSON.stringify(command.input).includes("REV#")) {
+        failedReads += 1;
+        throw Object.assign(new Error("try again later"), { name, ...extra });
+      }
+      return original(command);
+    };
+    const logged = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      await finish(task.workspaceId, prepareId, "SUCCEEDED");
+    } finally {
+      db.send = original;
+      logged.mockRestore();
+    }
+    expect(failedReads).toBe(1);
+    expect(taskOperations()).toHaveLength(0);
+    expect(db.get(`WORKSPACE#${task.workspaceId}`, `OPERATION#${prepareId}`)).toMatchObject({ status: "FAILED" });
+    expect(db.get(`WORKSPACE#${task.workspaceId}`, "META")).toMatchObject({ status: "PREPARATION_FAILED" });
+  });
+
   it("a Slack thread's failed prepare creates no developer task pointer", async () => {
     const { db, handler, finish } = await createDeveloperTaskBroker();
     const thread = await ensureWorkspace(handler, `${SLACK_TEAM}/${SLACK_CHANNEL}/1695500000.000002`, "U0PRATIK01");

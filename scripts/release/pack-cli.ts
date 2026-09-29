@@ -94,7 +94,9 @@ export async function thirdPartyNotices(metafile: Metafile, root: string): Promi
     const texts = await Promise.all(files.map(async (file) => (await readFile(join(directory, file), "utf8")).trim()));
     entries.push({ name, version, license, texts });
   }
-  entries.sort((a, b) => (a.name === b.name ? a.version.localeCompare(b.version) : a.name.localeCompare(b.name)));
+  // Code-point order, not localeCompare: the file is the same whatever the machine's locale.
+  const byCodePoint = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+  entries.sort((a, b) => (a.name === b.name ? byCodePoint(a.version, b.version) : byCodePoint(a.name, b.name)));
   const rule = "-".repeat(72);
   // A package that ships no license file points at a package in this file that ships the same license's text.
   const missing = (entry: BundledPackage): string => {

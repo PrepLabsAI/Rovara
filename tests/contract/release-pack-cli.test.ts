@@ -1,12 +1,12 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { build } from "esbuild";
 import { afterEach, describe, expect, it } from "vitest";
-import { ENTRY_SHEBANG_FILTER, packCli, parsePackCliArgs } from "../../scripts/release/pack-cli.js";
+import { ENTRY_SHEBANG_FILTER, packCli, parsePackCliArgs, thirdPartyNotices } from "../../scripts/release/pack-cli.js";
 
 const run = promisify(execFile);
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -110,6 +110,22 @@ describe("publishable CLI package", () => {
     const manifest = JSON.parse(await readFile(join(out, "package", "package.json"), "utf8")) as Record<string, unknown>;
     expect(manifest.version).toBe("2.0.0");
   }, 300_000);
+});
+
+describe("thirdPartyNotices", () => {
+  it("orders packages by code point, the same on every machine's locale", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentx-notices-order-"));
+    temporaryDirectories.push(root);
+    for (const name of ["alpha", "Zeta", "_under"]) {
+      await mkdir(join(root, "node_modules", name), { recursive: true });
+      await writeFile(join(root, "node_modules", name, "package.json"), JSON.stringify({ name, version: "1.0.0", license: "MIT" }));
+      await writeFile(join(root, "node_modules", name, "LICENSE"), `license of ${name}`);
+    }
+    const metafile = { inputs: Object.fromEntries(["alpha", "Zeta", "_under"].map((name) => [`node_modules/${name}/index.js`, { bytes: 1, imports: [] }])), outputs: {} };
+    const { packages } = await thirdPartyNotices(metafile, root);
+    // Code points: "Z" (0x5A) < "_" (0x5F) < "a" (0x61); a locale-aware compare puts "_under" or "alpha" first.
+    expect(packages.map((entry) => entry.name)).toEqual(["Zeta", "_under", "alpha"]);
+  });
 });
 
 describe("ENTRY_SHEBANG_FILTER", () => {
