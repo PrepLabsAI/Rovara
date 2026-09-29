@@ -94,8 +94,13 @@ export async function stackChecks(context: DoctorContext): Promise<DoctorCheck[]
     if (found.images.length > 0 && deployedWithCdk(stack)) cdkMismatch = true;
     images.push(...found.images.map((parameter) => `${name} ${parameter}`));
   }
-  if (code.length > 0) checks.push(check("stacks", title, "fail", `${code.join(", ")} ${code.length === 1 ? "does" : "do"} not match release ${settings.version}'s code packages`, `agentx --env ${env} upgrade --to ${settings.version}`));
-  else if (images.length > 0) checks.push(check("stacks", title, "warn", `${images.join(", ")} ${images.length === 1 ? "is not" : "are not"} release ${settings.version}'s image (the testing-only image flags set this${cdkMismatch ? ", or the stack runs another release" : ""})`, `agentx --env ${env} upgrade --to ${settings.version}, without --worker-image or --slack-image`));
+  // A cdk environment upgrades from a checkout of the release's tag, and only with admin credentials
+  // (ruling F20), so its fix names both.
+  const upgrade = settings.engine === "cdk"
+    ? `with admin credentials, agentx --env ${env} upgrade --to ${settings.version} --source <a clean checkout of tag v${settings.version}>`
+    : `agentx --env ${env} upgrade --to ${settings.version}`;
+  if (code.length > 0) checks.push(check("stacks", title, "fail", `${code.join(", ")} ${code.length === 1 ? "does" : "do"} not match release ${settings.version}'s code packages`, upgrade));
+  else if (images.length > 0) checks.push(check("stacks", title, "warn", `${images.join(", ")} ${images.length === 1 ? "is not" : "are not"} release ${settings.version}'s image (the testing-only image flags set this${cdkMismatch ? ", or the stack runs another release" : ""})`, `${upgrade}, without --worker-image or --slack-image`));
   else checks.push(check("stacks", title, "ok", cdkStacks === 0 ? `every stack runs release ${settings.version}'s code and images` : `every stack runs release ${settings.version}'s images; cdk: code packages are not compared (they live in the bootstrap bucket)`));
   return checks;
 }

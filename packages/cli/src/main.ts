@@ -55,6 +55,8 @@ import type { ConfigServices } from "./config/commands.js";
 import { registerDoctorCommand } from "./doctor/cli.js";
 import type { DoctorServices } from "./doctor/checks.js";
 import { addSignInOptions, definedEntries, registerSigninCommands, secretSource, signInFlags, type SignInCommandOptions } from "./signin/cli.js";
+import { registerUpgradeCommand } from "./upgrade/cli.js";
+import type { UpgradeDependencies } from "./upgrade/run.js";
 import { SIGNIN_FLAG_NAMES, type SigninFlags } from "./signin/collect.js";
 import type { SigninServices } from "./signin/commands.js";
 import { SystemCredentialTokenStore, type TokenStore } from "./token-store.js";
@@ -108,6 +110,8 @@ export interface CliDependencies {
   config?: Partial<ConfigServices>;
   /** `agentx doctor` overrides, for tests: never touch AWS or a vendor. */
   doctor?: { store?: ParameterStore; services?: (settings: EnvironmentSettings) => DoctorServices };
+  /** `agentx upgrade` overrides, for tests: never touch AWS or GitHub. */
+  upgrade?: Partial<UpgradeDependencies>;
   /** `agentx workspaces` overrides, for tests: never reach the control plane or open a browser. */
   workspaces?: {
     read?: () => Promise<DeveloperWorkspacesResult>;
@@ -336,6 +340,11 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
   registerDoctorCommand(program, {
     ...(dependencies.doctor?.store === undefined ? {} : { store: dependencies.doctor.store }),
     ...(dependencies.doctor?.services === undefined ? {} : { services: dependencies.doctor.services }),
+    parameterStore, fetch: services.fetchImplementation, home, stdout: services.stdout, stderr: services.stderr,
+  });
+  registerUpgradeCommand(program, {
+    ...(dependencies.upgrade === undefined ? {} : { overrides: dependencies.upgrade }),
+    ...(dependencies.deploy === undefined ? {} : { deploy: dependencies.deploy }),
     parameterStore, fetch: services.fetchImplementation, home, stdout: services.stdout, stderr: services.stderr,
   });
 

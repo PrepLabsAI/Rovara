@@ -106,6 +106,14 @@ describe("doctor: stacks (FR-050)", () => {
     expect(release.detail).toContain("(the testing-only image flags set this, or the stack runs another release)");
   });
 
+  it("names the upgrade a cdk environment can run: --source and admin credentials (carry-forward from ruling F20)", async () => {
+    const context = cdkEnvironment((stacks) => {
+      stacks["agentx-staging-runtime"]!.parameters.WorkerImageUri = `x@sha256:${"9".repeat(64)}`;
+    });
+    const release = (await stackChecks(context)).find((entry) => entry.name === "release 1.2.3")!;
+    expect(release.fix).toBe("with admin credentials, agentx --env staging upgrade --to 1.2.3 --source <a clean checkout of tag v1.2.3>, without --worker-image or --slack-image");
+  });
+
   it("warns, and does not fail, when the release manifest cannot be read", async () => {
     const release = (await stackChecks(doctorContext({ services: doctorServices({ releaseManifest: async () => undefined }) }))).find((entry) => entry.name === "release 1.2.3")!;
     expect(release.status).toBe("warn");

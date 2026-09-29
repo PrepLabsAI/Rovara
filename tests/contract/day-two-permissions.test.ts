@@ -4,7 +4,7 @@
 // Task 20's IAM policy simulator run against the deployed operator role.
 import { describe, expect, it } from "vitest";
 import { operatorRoleStatements } from "@agentx/contracts";
-import { CONFIG_AWS_ACTIONS, DOCTOR_AWS_ACTIONS } from "../../packages/cli/src/day-two-actions.js";
+import { CONFIG_AWS_ACTIONS, DOCTOR_AWS_ACTIONS, UPGRADE_AWS_ACTIONS } from "../../packages/cli/src/day-two-actions.js";
 
 const scope = {
   env: "staging", partition: "aws", region: "us-east-1", account: "123456789012",
@@ -17,6 +17,12 @@ describe("day-2 commands need no permission beyond the operator role (SC-005)", 
     expect(allowed.has(action)).toBe(true);
   });
   it.each(DOCTOR_AWS_ACTIONS.map((action) => [action]))("doctor: %s is allowed", (action) => {
+    expect(allowed.has(action)).toBe(true);
+  });
+});
+
+describe("upgrade needs no permission beyond the operator role, except an access-stack change (SC-005, question 9)", () => {
+  it.each(UPGRADE_AWS_ACTIONS.map((action) => [action]))("upgrade: %s is allowed", (action) => {
     expect(allowed.has(action)).toBe(true);
   });
 });

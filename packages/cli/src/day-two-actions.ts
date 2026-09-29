@@ -24,3 +24,20 @@ export const DOCTOR_AWS_ACTIONS: readonly string[] = [
   "servicequotas:GetServiceQuota", "ec2:DescribeAddresses",
   "sns:ListSubscriptionsByTopic", "budgets:ViewBudget",
 ];
+
+/** agentx upgrade's actions under the operator role: the templates engine's change sets, the access
+ * stack comparison (GetTemplate), the settings and lock, the callback signing key, and doctor at the
+ * end. Deploying a changed access stack, and any cdk-engine upgrade, need admin credentials
+ * (question 9, ruling F20), so neither is listed. */
+export const UPGRADE_AWS_ACTIONS: readonly string[] = [
+  "sts:GetCallerIdentity",
+  "ssm:GetParameter", "ssm:PutParameter", "ssm:DeleteParameter", "ssm:GetParametersByPath",
+  "cloudformation:DescribeStacks", "cloudformation:DescribeStackEvents", "cloudformation:GetTemplate",
+  "cloudformation:CreateChangeSet", "cloudformation:DescribeChangeSet", "cloudformation:ExecuteChangeSet", "cloudformation:DeleteChangeSet",
+  "cloudformation:UpdateTerminationProtection", "iam:PassRole",
+  "s3:GetObject", "s3:PutObject",
+  // InitSecrets.arn reads a secret's ARN with DescribeSecret; an S3 HeadObject answers 404 only with ListBucket (ruling F13).
+  "secretsmanager:DescribeSecret", "s3:ListBucket",
+  "secretsmanager:GetSecretValue", "secretsmanager:CreateSecret", "secretsmanager:TagResource",
+  ...DOCTOR_AWS_ACTIONS,
+];
