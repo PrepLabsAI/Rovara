@@ -205,7 +205,11 @@ export function cdkDeployer(input: {
       await rm(outputsFile, { force: true });
       await input.runner.run("npx", args, { cwd: input.source, display, redact: (text) => redactSecrets(text, request.parameters) });
 
-      const outputs = await readOutputs(outputsFile, request.stackName);
+      const written = await readOutputs(outputsFile, request.stackName);
+      // cdk leaves a stack with no outputs out of the file entirely (the runtime stack, seen in the
+      // Task 20 live check), so the deployed stack itself is asked before that counts as a failure.
+      const outputs = written.outputs ?? (await input.outputs(request.stackName));
+      if (outputs === undefined) throw new Error(written.missing);
       request.onEvent?.({ kind: "deployed", stackName: request.stackName });
       return outputs;
     },
@@ -215,10 +219,10 @@ export function cdkDeployer(input: {
 
 /** Reads the outputs file `cdk deploy --outputs-file` wrote and returns `stackName`'s entry.
  * Throws a clear, cause-carrying message for a missing or unparseable file, and — since neither of
- * those is possible once the file is confirmed to parse — a distinct message naming the stacks it
- * actually holds when `stackName` itself has no entry (a stack `cdk deploy` didn't touch, or a
- * `--outputs-file` path that doesn't match what was requested). */
-async function readOutputs(file: string, stackName: string): Promise<StackOutputs> {
+ * those is possible once the file is confirmed to parse — returns, instead of outputs, a message
+ * naming the stacks it actually holds when `stackName` itself has no entry (a stack with no outputs,
+ * one `cdk deploy` didn't touch, or a `--outputs-file` path that doesn't match what was requested). */
+async function readOutputs(file: string, stackName: string): Promise<{ outputs: StackOutputs; missing?: never } | { outputs?: never; missing: string }> {
   let raw: string;
   try {
     raw = await readFile(file, "utf8");
@@ -234,7 +238,7 @@ async function readOutputs(file: string, stackName: string): Promise<StackOutput
   const outputs = written[stackName];
   if (outputs === undefined) {
     const stacksWritten = Object.keys(written);
-    throw new Error(`cdk deploy wrote no outputs for ${stackName} to ${file} (stacks written: ${stacksWritten.length === 0 ? "none" : stacksWritten.join(", ")})`);
+    return { missing: `cdk deploy wrote no outputs for ${stackName} to ${file} (stacks written: ${stacksWritten.length === 0 ? "none" : stacksWritten.join(", ")}), and CloudFormation reports no such stack` };
   }
-  return outputs;
+  return { outputs };
 }

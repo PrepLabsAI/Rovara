@@ -254,6 +254,18 @@ describe("cdk engine", () => {
   });
 
   describe("outputs file handling", () => {
+    it("reads a stack with no outputs from CloudFormation: cdk leaves it out of the outputs file (Task 20 live check)", async () => {
+      // live15eb: agentx-live15eb-runtime deployed, but "cdk deploy wrote no outputs ... (stacks written: none)".
+      const dir = await mkdtemp(join(tmpdir(), "agentx-cdk-"));
+      const runner = recordingRunner(dir, {});
+      const asked: string[] = [];
+      const deployer = cdkDeployer({ runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async (stackName) => { asked.push(stackName); return {}; } });
+      await expect(
+        deployer.deploy({ part: "runtime", stackName: "agentx-staging-runtime", parameters: {}, roleArn: "arn:aws:iam::1:role/r", terminationProtection: false }),
+      ).resolves.toEqual({});
+      expect(asked).toEqual(["agentx-staging-runtime"]);
+    });
+
     it("throws naming the stacks actually written when the outputs file has no entry for the requested stack", async () => {
       const dir = await mkdtemp(join(tmpdir(), "agentx-cdk-"));
       const runner = recordingRunner(dir, { "agentx-staging-other-stack": { ApiEndpoint: "https://x" } });
