@@ -31,12 +31,17 @@ QEDly (said "Q-E-D-lee", from Q.E.D., "which was to be shown") is the workspace 
   - The words "accountable", "provenance" and "receipt" appear on none of them.
   - None leads with "your cloud".
   - The headlines that stand out admit a risk rather than boast. Only Warp publishes a unit cost.
+- **Paperclip (reviewed 2026-09-29).** paperclipai/paperclip had 93k stars, 120k npm downloads a month and an MIT licence at 7 months old. It is an agent-agnostic "company of agents" with an org chart, budgets, approvals and an audit log. It has moved into our language ("verification from real evidence instead of rubber stamps", "every task carries a receipt"), but its checks are other AI agents, and its README says "Not a code review tool. Paperclip orchestrates work, not pull requests. Bring your own review process." Full review: the Paperclip lessons in the owner's notes of 2026-09-29.
 - **Product truth.** An audit of `origin/mainline` at 9f1e839 (PR #144), refreshed at d7d214b after installer phase 15d2 (#148) and the MCP server phase 25b (#149), is summarised in the claims ledger (Appendix B). Only claims with evidence may be stated as current fact.
 
 ## Positioning
 
-- **Big idea:** everyone else sells an agent that works. QEDly sells the proof that it did.
-- **Signature device:** the **∎** (the end-of-proof "tombstone"). It ends every PR summary QEDly Code writes and every receipt on the site, and it is the brand mark. The site explains it once, in "What the little black square means".
+- **Big idea:** others check agents with more agents. QEDly checks them with your CI, on the exact commit.
+- **The line people repeat:** "Other agents say *done*. QEDly Code says *QED*."
+- **Signature device:** the logo, "Box the answer": QED in a drawn box, the way every student boxed a final answer. The same small green QED box starts every PR footer and every receipt. The site explains it once, in "What the box means".
+- **What a receipt is:** always a commit SHA plus a link to the CI run that checked it. Never an agent's own report. This is what keeps the word ours.
+- **Lead with QEDly Code.** The multi-agent workspace is the vision and carries its status labels. The pitch leads with the narrow, provable product.
+- **Not unique on:** audit trails, approvals and working with any agent. Competitors have them, so copy never claims them as ours alone.
 - **Headline:** "Your AI agent says the tests pass. QEDly makes it prove it."
 - **Voice:** precise, warm and a little dry. It admits risk before it promises anything. The manifesto is "Show your work."
 - **Readers:**
@@ -140,7 +145,7 @@ People searching "self-hosted AI coding agent", "AI agent CI gates", "Claude Tag
 - **FR-003**: Copy MUST NOT use: "10x", "autonomous", "AI engineer", "AI employee", "teammate", "swarm", "army of agents", "software factory", "mission control", "production-ready in minutes", "game-changing", "enterprise-grade", or "open source" to describe AgentX or QEDly Code.
 - **FR-004**: The licence MUST be described as "Source-available (FSL-1.1-ALv2). Every line is readable. Each release becomes Apache 2.0 two years after it ships." The phrase lives in one site setting, so a licence change touches one place.
 - **FR-005**: Product status MUST use exactly three labels, shared by the Roadmap and every product mention: **Now** (QEDly Code, QEDly Checks), **Next** (Workspace, Passport), **Later** (Outcomes, Cloud).
-- **FR-006**: The ∎ MUST appear as the brand mark in the header and favicon, at the end of every receipt, and in the section "What the little black square means". That section explains it in one paragraph.
+- **FR-006**: The "Box the answer" logo MUST be the mark in the header and favicon. The green QED stamp MUST start every receipt, and the section "What the box means" explains both in one paragraph.
 - **FR-007**: The name MUST be written "QEDly" (QED in capitals) everywhere in copy, and the About page and the FAQ MUST say it is pronounced "Q-E-D-lee". The logo is "Box the answer": QED in a drawn box with "ly" outside (files in the site repository under `public/brand/`).
 - **FR-008**: Limits MUST be stated as principles where true, and the principle wording in Appendix A is fixed: never merges ("A person does"), PRs only on request, Slack as the only surface ("It lives where your team already talks").
 - **FR-009**: The site MUST NOT state usage volume, customer counts or productivity multiples. It MAY state specific, verifiable figures from the claims ledger.
@@ -151,6 +156,10 @@ People searching "self-hosted AI coding agent", "AI agent CI gates", "Claude Tag
 - **FR-011**: Home MUST follow the section order in Appendix A.
 - **FR-012**: QEDly Code MUST show a recorded or scripted Slack thread with the request, working progress, gates passing, a PR opened with its ∎ summary, and a follow-up in the same thread. It MUST also show the install path and the monthly infrastructure estimate that `agentx init` prints, labelled as an estimate that excludes model tokens.
 - **FR-013**: The build MUST fail if a page contains a claim marked `current` in the ledger whose evidence reference no longer resolves, or if a banned word from FR-003 appears.
+- **FR-014**: Home and the QEDly Code page MUST include "What QEDly Code is not": not an IDE, not an agent framework, not an AI reviewer that grades AI code, and not a bot that merges.
+- **FR-015**: The install block MUST offer two tabs: the shell command, and a prompt to paste into Claude Code, Codex or Cursor that points at `/llms.txt`.
+- **FR-016**: The thread demo MUST be live HTML built from a real recorded thread (request, commit SHA, each gate's result, the PR link), not a video or a screenshot, and it MUST link to that PR's receipt.
+- **FR-017**: Copy MUST use one name per concept everywhere: a **receipt** (a checked PR with its SHA and CI link), a **check** (one CI gate), a **thread** (one Slack conversation and its workspace). Green appears only for a passed check.
 
 ### Receipts and dogfooding
 
@@ -170,6 +179,8 @@ People searching "self-hosted AI coding agent", "AI agent CI gates", "Claude Tag
   These fixes are in the same branch as this spec.
 - **FR-034**: The launch PR MUST open the README with the QEDly Code pointer from US2. It is left out until then because it links to the site and names the brand before the trademark search clears.
 - **FR-033**: Docs search MUST work offline in the static build.
+- **FR-035**: The launch README of AgentX MUST sell as well as explain: the one-line pitch and repeatable line, "Right for you if", a Without/With table, an architecture diagram, "What it is not", the quickstart, and the roadmap with status labels.
+- **FR-036**: The site repository's pull request template MUST ask for an evidence link (file, PR or CI run) for every product claim a change adds.
 
 ### Build, hosting and discovery
 
@@ -225,6 +236,13 @@ People searching "self-hosted AI coding agent", "AI agent CI gates", "Claude Tag
 - Renaming the `agentx` CLI, npm package or repository.
 - Any feature work in AgentX other than FR-032 and the ∎ PR footer (FR-051).
 
+## Growth backlog (after launch)
+
+- A category guide: "What counts as proof that an AI change works?", with a source list.
+- "Who uses QEDly": a count built from the QED PR footer across public repositories, every entry a clickable PR.
+- Gate packs: ready-made CodeBuild gate definitions for common stacks (Node, Python, Go, Playwright).
+- The cost per receipt on the Receipts page, from each task's usage record.
+
 ## Appendix A: Home page copy deck
 
 1. **Hero**
@@ -232,7 +250,7 @@ People searching "self-hosted AI coding agent", "AI agent CI gates", "Claude Tag
    - Subhead: "QEDly is where people and AI agents take work from a hunch in Slack to a proven result. Every change is checked on the exact commit, approved by a person, and kept on the record. It starts today with QEDly Code, running in your own AWS account."
    - Actions: "Deploy QEDly Code", "See the receipts".
    - Line: "Source-available · Runs in your AWS account · Amazon Bedrock".
-2. **What the little black square means.** "Mathematicians end a proof with ∎. Every pull request QEDly Code opens ends with one too: the checks it passed on that exact commit, who asked for it, and the thread where it started." A real PR summary is shown underneath.
+2. **What the box means.** "Every student learned to box the final answer, once the working was shown. Every pull request QEDly Code opens starts its footer with the same box: the checks it passed on that exact commit, who asked for it, and the thread where it started. Other agents say *done*. QEDly Code says *QED*." A real PR footer is shown underneath.
 3. **A thread, start to finish.** The Slack demo: request, progress, gates, PR, follow-up.
 4. **Three things QEDly Code will never do.**
    - "Grade its own homework. Checks run in your CodeBuild, on the exact commit, where the agent has no credentials."
