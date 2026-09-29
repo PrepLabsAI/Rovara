@@ -2,6 +2,7 @@
 // is wrong, how to fix it. A check never carries a secret value: checks read secrets only to judge
 // their shape, and every message here is built from names and fixed words.
 import type { ReleaseManifest } from "@agentx/contracts";
+import type { StackDescription } from "../environments/adopt.js";
 import type { EnvironmentSettings } from "../environments/settings.js";
 import type { GitHubApi } from "../init/github-app.js";
 import type { InitSecrets } from "../init/context.js";
@@ -20,7 +21,8 @@ export { plainMessage };
 export type CheckStatus = "ok" | "warn" | "fail" | "skip";
 export type DoctorGroup = "stacks" | "secrets" | "slack" | "github" | "connectors" | "models" | "alerts" | "capacity" | "sign-in";
 export interface DoctorCheck { group: DoctorGroup; name: string; status: CheckStatus; detail: string; fix?: string }
-export interface DoctorStack { status: string; parameters: Record<string, string>; outputs: Record<string, string>; drift?: string }
+/** One stack as doctor reads it: env adopt's StackDescription, drift included (ruling F9). */
+export type DoctorStack = StackDescription;
 
 export interface DoctorServices {
   secrets: Pick<InitSecrets, "get">;
