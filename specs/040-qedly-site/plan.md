@@ -10,6 +10,29 @@
 
 **Spec:** `specs/040-qedly-site/spec.md` (read it first: the positioning, Appendix A copy deck, and Appendix B claims ledger are inputs to Tasks 3, 7 and 8).
 
+## Owner TODO
+
+This branch (`docs/040-qedly-site`, PR #145, kept as a draft) collects every AgentX-repository change for the launch and merges into mainline once, at launch.
+
+Done:
+- [x] GitHub organisation `qedly` and public repository `qedly/qedly.github.io` (2026-09-28)
+- [x] npm scope `@qedly` and pointer package `qedly@0.0.1` (2026-09-28)
+
+Needed before Task 2 step 7 (dogfooding):
+- [ ] Install the AgentX GitHub App on the `qedly` organisation, for `qedly.github.io` only (Contents and Pull requests, read and write)
+
+Needed before Task 5 (docs sync), and only while AgentX is private:
+- [ ] Fine-grained read-only token owned by PrepLabsAI, limited to `AgentX` (Contents: Read, Pull requests: Read), saved as the Actions secret `AGENTX_READ_TOKEN` in `qedly/qedly.github.io` and as `qedly-site/agentx-readonly` in AWS Secrets Manager
+
+Needed before launch (FR-060):
+- [ ] Buttondown: create a PrepLabs account and set `SITE.buttondownUser`
+- [ ] Trademark search: UK, EU and US, classes 9 and 42, for "Qedly"
+- [ ] First public AgentX release, cut after this branch merges so its tag contains the new docs:
+  - [ ] publish the first npm version by hand (`docs/releases.md`, one-time owner setup step 3)
+  - [ ] turn on automatic publishing (`AGENTX_PUBLISH_ENABLED`)
+  - [ ] make `PrepLabsAI/AgentX` public
+- [ ] Rebase this branch on mainline before the launch merge
+
 ## Global Constraints
 
 - Site URL comes from one setting: `SITE.url = "https://qedly.github.io"` (FR-040).
