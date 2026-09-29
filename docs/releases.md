@@ -20,6 +20,9 @@ A release directory looks like this:
 - Two container images (the worker and the Slack listener), pushed to ECR Public and referenced
   only by digest (a fixed fingerprint), never by a tag that could later point at something else.
   They are built for `arm64` machines only, the same chip the installer's runtime uses.
+- The worker image carries Node 22, Git, the Docker CLI and Compose, Python 3 with pip and venv,
+  and uv. A change to `environments/base/Dockerfile` reaches installs only through a new release's
+  worker image: tag a release, and upgrade each environment with `agentx upgrade`.
 - The CLI, published to npm as a single self-contained package with no separate dependencies to
   install.
 
