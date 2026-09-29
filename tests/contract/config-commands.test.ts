@@ -4,7 +4,7 @@ import { lockParameterName } from "../../packages/cli/src/environments/lock.js";
 import { readEnvironmentSettings, writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import type { StackDescription } from "../../packages/cli/src/environments/adopt.js";
 import { fakeCloudFormation } from "../support/fake-cloudformation.js";
-import { writeInstallAnswers } from "../../packages/cli/src/init/install-state.js";
+import { installAnswersParameterName, readInstallAnswers, writeInstallAnswers } from "../../packages/cli/src/init/install-state.js";
 import { memoryInitSecrets, passingChecks, sampleAnswers, scriptedPrompter, T0 } from "../support/init-fakes.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 import { fakeAlerts, STAGING_SETTINGS } from "../support/setup-fakes.js";
@@ -12,6 +12,22 @@ import { fakeAlerts, STAGING_SETTINGS } from "../support/setup-fakes.js";
 const ENV = "staging";
 const ROLE = "arn:aws:iam::123456789012:role/agentx-staging-cloudformation";
 const WEBHOOK = "https://events.pagerduty.com/integration/SECRETkey0123456789/enqueue";
+const OLD_WEBHOOK = "https://events.pagerduty.com/integration/OLDkey0123456789/enqueue";
+
+/** A store whose next put of the install answers fails, once `failNext` is set, as SSM might after the stack has changed. */
+class AnswersPutFailsOnce extends MemoryParameterStore {
+  failNext = false;
+  override async put(name: string, value: string, options: { createOnly?: boolean } = {}): Promise<void> {
+    if (this.failNext && name === installAnswersParameterName(ENV)) {
+      this.failNext = false;
+      this.calls.push({ op: "put", name });
+      throw Object.assign(new Error("Rate exceeded"), { name: "ThrottlingException" });
+    }
+    return super.put(name, value, options);
+  }
+}
+
+const lockOps = (store: MemoryParameterStore) => store.calls.filter((call) => call.name === lockParameterName(ENV)).map((call) => call.op);
 
 async function seeded(region = STAGING_SETTINGS.region): Promise<MemoryParameterStore> {
   const store = new MemoryParameterStore();
@@ -123,6 +139,7 @@ describe("agentx config set", () => {
     await expect(runConfigSet(services({ store, cloudFormation }), ENV, { key: "budget.monthlyUsd", value: "1000000", yes: true }))
       .rejects.toThrow("the change set for agentx-staging-control-plane failed: Parameter BudgetMonthlyUsd failed to satisfy constraint; nothing changed");
     expect(cloudFormation.calls.filter((call) => call.name === "ExecuteChangeSetCommand")).toEqual([]);
+    expect(lockOps(store)).toEqual(["put", "get", "delete"]);
   });
 
   it("changes nothing when the model fails its one-token test call, and says why", async () => {
@@ -140,6 +157,55 @@ describe("agentx config set", () => {
     await runConfigSet(services({ store, checks: () => checks, cloudFormation: fakeCloudFormation({ parameters: { ModelId: "amazon.nova-pro-v1:0" } }) }), ENV, { key: "models.worker", value: "amazon.nova-premier-v1:0", yes: true });
     expect(checks.models).toEqual(["amazon.nova-premier-v1:0"]);
     expect((await readEnvironmentSettings(store, ENV))?.models.worker).toBe("amazon.nova-premier-v1:0");
+  });
+
+  it("records a model change in the install answers, which upgrades rebuild ModelId from (F18)", async () => {
+    const store = await seeded();
+    await writeInstallAnswers(store, sampleAnswers());
+    await runConfigSet(services({ store, cloudFormation: fakeCloudFormation({ parameters: { ModelId: "amazon.nova-pro-v1:0" } }) }), ENV, { key: "models.worker", value: "amazon.nova-premier-v1:0", yes: true });
+    expect((await readInstallAnswers(store, ENV))?.models.worker).toBe("amazon.nova-premier-v1:0");
+  });
+
+  it("leaves the install answers alone for a non-model key, which upgrades keep from the stack (F18)", async () => {
+    const store = await seeded();
+    await writeInstallAnswers(store, sampleAnswers());
+    const before = store.values.get(installAnswersParameterName(ENV));
+    store.calls.length = 0;
+    await runConfigSet(services({ store, cloudFormation: fakeCloudFormation({ parameters: { BudgetMonthlyUsd: "100" } }) }), ENV, { key: "budget.monthlyUsd", value: "250", yes: true });
+    expect(store.values.get(installAnswersParameterName(ENV))).toBe(before);
+    expect(store.calls.some((call) => call.op === "put" && call.name === installAnswersParameterName(ENV))).toBe(false);
+  });
+
+  it("says how to finish when the stack changed but the answers could not be written, and a rerun records it", async () => {
+    const store = new AnswersPutFailsOnce();
+    await writeEnvironmentSettings(store, { ...STAGING_SETTINGS, access: { artifactBucket: "b", cloudFormationRoleArn: ROLE, operatorRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-operator", pullThroughPrefix: "agentx-staging" } });
+    await writeInstallAnswers(store, sampleAnswers());
+    store.failNext = true;
+    store.calls.length = 0;
+    const cloudFormation = fakeCloudFormation({ parameters: { ModelId: "amazon.nova-pro-v1:0" } });
+    await expect(runConfigSet(services({ store, cloudFormation }), ENV, { key: "models.worker", value: "amazon.nova-premier-v1:0", yes: true }))
+      .rejects.toThrow("stack agentx-staging-runtime now uses amazon.nova-premier-v1:0, but the settings were not updated; run the same agentx config set again to record it");
+    expect(cloudFormation.parameters.ModelId).toBe("amazon.nova-premier-v1:0");
+    expect((await readInstallAnswers(store, ENV))?.models.worker).toBe("amazon.nova-pro-v1:0");
+    expect(lockOps(store)).toEqual(["put", "get", "delete"]);
+
+    store.calls.length = 0;
+    const rerunStack = fakeCloudFormation({ parameters: { ModelId: "amazon.nova-premier-v1:0" } });
+    const rerun = services({ store, cloudFormation: rerunStack, stacks: stacks({ "agentx-staging-runtime": { ModelId: "amazon.nova-premier-v1:0" } }) });
+    const result = await runConfigSet(rerun, ENV, { key: "models.worker", value: "amazon.nova-premier-v1:0", yes: true });
+    expect(result.changed).toBe(true);
+    expect(rerunStack.calls.filter((call) => call.name === "CreateChangeSetCommand")).toEqual([]);
+    expect((await readInstallAnswers(store, ENV))?.models.worker).toBe("amazon.nova-premier-v1:0");
+    expect((await readEnvironmentSettings(store, ENV))?.models.worker).toBe("amazon.nova-premier-v1:0");
+    expect(lockOps(store)).toEqual(["put", "get", "delete"]);
+  });
+
+  it("says nothing changed for a model already recorded everywhere, and takes no lock", async () => {
+    const store = await seeded();
+    await writeInstallAnswers(store, sampleAnswers());
+    const result = await runConfigSet(services({ store }), ENV, { key: "models.worker", value: "amazon.nova-pro-v1:0", yes: true });
+    expect(result.changed).toBe(false);
+    expect(lockOps(store)).toEqual([]);
   });
 
   it("makes the model's test call in the environment's own region (F33)", async () => {
@@ -193,6 +259,44 @@ describe("agentx config set", () => {
     expect(alerts.subscribed).toEqual([]);
     expect(store.calls.some((call) => call.name === lockParameterName(ENV))).toBe(false);
     expect((await readEnvironmentSettings(store, ENV))?.alertAddress).toBeUndefined();
+  });
+
+  it("says an alert address that is already set needs no change, without the lock or any write", async () => {
+    const store = await seeded();
+    const current = (await readEnvironmentSettings(store, ENV))!;
+    await writeEnvironmentSettings(store, { ...current, alertAddress: "ops@example.com" });
+    store.calls.length = 0;
+    const alerts = fakeAlerts({ confirmAfterPolls: 0 });
+    const run = services({ store, alerts });
+    expect(await runConfigSet(run, ENV, { key: "alerts.address", value: "OPS@example.com", yes: true })).toEqual({ changed: false });
+    expect(run.lines).toContain("alerts.address is already set; nothing to change");
+    expect(alerts.subscribed).toEqual([]);
+    expect(store.calls.filter((call) => call.op !== "get")).toEqual([]);
+  });
+
+  it("says a webhook that is already set needs no change, and never prints it", async () => {
+    const store = await seeded();
+    const current = (await readEnvironmentSettings(store, ENV))!;
+    await writeEnvironmentSettings(store, { ...current, alertAddress: "https://events.pagerduty.com/..." });
+    store.calls.length = 0;
+    const secrets = memoryInitSecrets({ "agentx/staging/alert-endpoint": WEBHOOK });
+    const alerts = fakeAlerts({ confirmAfterPolls: 0 });
+    const run = services({ store, secrets, alerts, processEnv: { HOOK: WEBHOOK } });
+    expect(await runConfigSet(run, ENV, { key: "alerts.address", valueSource: { envName: "HOOK" }, yes: true })).toEqual({ changed: false });
+    expect(alerts.subscribed).toEqual([]);
+    expect(store.calls.filter((call) => call.op !== "get")).toEqual([]);
+    expect(run.lines.join("\n")).not.toContain("SECRETkey");
+  });
+
+  it("keeps the old webhook secret when subscribing the new one fails", async () => {
+    const store = await seeded();
+    const secrets = memoryInitSecrets({ "agentx/staging/alert-endpoint": OLD_WEBHOOK });
+    const alerts = { ...fakeAlerts({ confirmAfterPolls: 0 }), subscribe: async () => { throw Object.assign(new Error("Rate exceeded"), { name: "ThrottlingException" }); } };
+    const run = services({ store, secrets, alerts, processEnv: { HOOK: WEBHOOK } });
+    await expect(runConfigSet(run, ENV, { key: "alerts.address", valueSource: { envName: "HOOK" }, yes: true })).rejects.toThrow("Rate exceeded");
+    expect(secrets.values.get("agentx/staging/alert-endpoint")).toBe(OLD_WEBHOOK);
+    expect((await readEnvironmentSettings(store, ENV))?.alertAddress).toBeUndefined();
+    expect(lockOps(store)).toEqual(["put", "get", "delete"]);
   });
 
   it("reads a webhook alert address only from a file or variable, stores it as a secret and never prints it", async () => {

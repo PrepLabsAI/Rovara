@@ -100,6 +100,27 @@ async function checkModel(services: ConfigServices, settings: EnvironmentSetting
   }
 }
 
+/** Records a model in the settings and the install answers. Both must follow the stack: `agentx
+ * upgrade` rebuilds each ModelId parameter from the install answers (deploy/parameters.ts), so a
+ * stale answer would quietly put the old model back on the next upgrade. */
+async function recordModel(services: ConfigServices, env: string, role: ModelRole, modelId: string): Promise<void> {
+  const current = await installed(services, env);
+  if (current.models[role] !== modelId) {
+    await writeEnvironmentSettings(services.store, { ...current, models: { ...current.models, [role]: modelId }, updatedAt: new Date(services.now()).toISOString() });
+  }
+  const answers = await readInstallAnswers(services.store, env);
+  if (answers !== undefined && answers.models[role] !== modelId) {
+    await writeInstallAnswers(services.store, { ...answers, models: { ...answers.models, [role]: modelId } });
+  }
+}
+
+/** True when the settings and install answers (if any) already name this model. */
+async function modelRecorded(services: ConfigServices, env: string, settings: EnvironmentSettings, role: ModelRole, modelId: string): Promise<boolean> {
+  if (settings.models[role] !== modelId) return false;
+  const answers = await readInstallAnswers(services.store, env);
+  return answers === undefined || answers.models[role] === modelId;
+}
+
 export async function runConfigSet(services: ConfigServices, env: string, input: { key: string; value?: string; valueSource?: SecretSource; yes: boolean }): Promise<{ changed: boolean }> {
   const entry = configKey(input.key);
   const { target } = entry;
@@ -108,11 +129,21 @@ export async function runConfigSet(services: ConfigServices, env: string, input:
   if (input.value === undefined) throw agentXError("CONFIG_INVALID", `give the new value: agentx config set ${entry.key} <value>`);
   const value = entry.parse(input.value);
   const settings = await installed(services, env);
+  const role = entry.model;
   if ((await currentValue(services, env, settings, entry)) === value) {
-    services.write(`${entry.key} is already ${value}; nothing to change`);
-    return { changed: false };
+    if (role === undefined || await modelRecorded(services, env, settings, role, value)) {
+      services.write(`${entry.key} is already ${value}; nothing to change`);
+      return { changed: false };
+    }
+    // The stack already runs this model, but an earlier set stopped before recording it.
+    const holder = (await services.identity.get()).arn;
+    return withEnvironmentLock({ store: services.store, env, holder, command: `config set ${entry.key}`, now: services.now }, async () => {
+      await recordModel(services, env, role, value);
+      services.write(`${entry.key} was already ${value} on the stack; recorded it in the settings and install answers`);
+      return { changed: true };
+    });
   }
-  if (entry.model !== undefined) await checkModel(services, settings, entry.model, value);
+  if (role !== undefined) await checkModel(services, settings, role, value);
   const roleArn = settings.access?.cloudFormationRoleArn;
   if (roleArn === undefined) throw agentXError("CONFIG_INVALID", `environment ${env}'s settings name no CloudFormation role; run agentx env use --env ${env}, or agentx init --resume`);
   const holder = (await services.identity.get()).arn;
@@ -127,12 +158,12 @@ export async function runConfigSet(services: ConfigServices, env: string, input:
       },
       write: services.write, now: services.now, sleep: services.sleep, ...(services.pollMs === undefined ? {} : { pollMs: services.pollMs }),
     });
-    if (result.changed && entry.model !== undefined) {
-      // Settings are the source of truth an upgrade reads models from (Task 10), so they follow the stack.
-      const current = await installed(services, env);
-      await writeEnvironmentSettings(services.store, { ...current, models: { ...current.models, [entry.model]: value }, updatedAt: new Date(services.now()).toISOString() });
-      const answers = await readInstallAnswers(services.store, env);
-      if (answers !== undefined) await writeInstallAnswers(services.store, { ...answers, models: { ...answers.models, [entry.model]: value } });
+    if (result.changed && role !== undefined) {
+      try {
+        await recordModel(services, env, role, value);
+      } catch {
+        throw agentXError("RUNTIME_UNAVAILABLE", `stack ${stackName} now uses ${value}, but the settings were not updated; run the same agentx config set again to record it`);
+      }
     }
     return { changed: result.changed };
   });
@@ -153,17 +184,22 @@ async function setAlertAddress(services: ConfigServices, env: string, input: { v
       return { kind: "webhook" as const, endpoint, display: webhookDisplay(endpoint) };
     })();
   const shown = target.kind === "email" ? target.address : target.display;
+  const secretName = `agentx/${env}/alert-endpoint`;
+  if (await alertAddressAlreadySet(services, settings, target, secretName)) {
+    services.write("alerts.address is already set; nothing to change");
+    return { changed: false };
+  }
   services.write(`alerts.address: ${(await recordedAlertAddress(services, env, settings)) ?? "none"} -> ${shown}`);
   if (!input.yes && !(await services.prompter.confirm("Apply this change?", { defaultValue: false }))) {
     throw agentXError("CONFIG_INVALID", "the alerts.address change was not applied; nothing changed");
   }
   const holder = (await services.identity.get()).arn;
   return withEnvironmentLock({ store: services.store, env, holder, command: "config set alerts.address", now: services.now }, async () => {
-    const secretName = `agentx/${env}/alert-endpoint`;
-    if (target.kind === "webhook") await storeAlertWebhook(services.secrets, secretName, target.endpoint);
     const topicArn = await alertsTopicArn({ stackOutputs: async (name) => (await services.stacks.describe(name))?.outputs, stackName: settings.stacks["control-plane"], next: "upgrade the environment with agentx upgrade" });
     const before = await services.alerts.subscriptions(topicArn);
     const state = await ensureSubscribed({ api: services.alerts, topicArn, target, write: services.write, sleep: services.sleep, now: services.now });
+    // Only once the new address is subscribed: until then the secret keeps the old one.
+    if (target.kind === "webhook") await storeAlertWebhook(services.secrets, secretName, target.endpoint);
     const current = await installed(services, env);
     await writeEnvironmentSettings(services.store, { ...current, alertAddress: shown, updatedAt: new Date(services.now()).toISOString() });
     const answers = await readInstallAnswers(services.store, env);
@@ -182,6 +218,15 @@ async function setAlertAddress(services: ConfigServices, env: string, input: { v
       : `Alerts now go to ${shown}. Send a test alarm with agentx --env ${env} alerts test.`);
     return { changed: true };
   });
+}
+
+/** The settings already record this address: an email compared without case, or a webhook whose
+ * shown host matches and whose stored secret is the same address. */
+async function alertAddressAlreadySet(services: ConfigServices, settings: EnvironmentSettings, target: { kind: "email"; address: string } | { kind: "webhook"; endpoint: string; display: string }, secretName: string): Promise<boolean> {
+  const recorded = settings.alertAddress;
+  if (recorded === undefined) return false;
+  if (target.kind === "email") return recorded.toLowerCase() === target.address.toLowerCase();
+  return recorded === target.display && (await services.secrets.get(secretName)) === target.endpoint;
 }
 
 function safeHost(endpoint: string): string {
