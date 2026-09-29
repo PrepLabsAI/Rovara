@@ -150,22 +150,27 @@ function redactSecrets(text: string, parameters: Record<string, string>): string
   return redacted;
 }
 
-/** The cdk command's arguments for one stack (deploy or diff), with each parameter by physical stack name. */
+/** The cdk command's arguments for one stack (deploy or diff); a deploy passes each parameter by physical stack name. */
 function cdkArguments(input: { env: string; region: string; identityMode: "cognito" | "oidc" }, request: DeployRequest, command: "deploy" | "diff"): string[] {
   // --no-install: only the CDK CLI `npm ci` installed from the release's own lockfile, never one npx
   // would otherwise download on the fly.
   const args = ["--no-install", "cdk", command, CDK_CONSTRUCT_IDS[request.part], "--exclusively", "--app", "node infra/dist/bin/agentx.js", "-c", `agentxEnv=${input.env}`, "-c", `agentxRegion=${input.region}`];
   if (input.identityMode === "oidc") args.push("-c", "agentxIdentity=oidc");
+  // cdk diff ignores --parameters (CDK 2.1142 warns that they apply only to deploy).
+  if (command === "diff") return args;
   // The CDK CLI looks `--parameters` up by the physical stack name (parameterMap[stack.stackName]),
   // not the construct id; a construct-id prefix silently drops every parameter.
   for (const [key, value] of Object.entries(request.parameters)) args.push("--parameters", `${request.stackName}:${key}=${value}`);
   return args;
 }
 
-/** FR-042: `cdk diff` for one stack, against the deployed template (no change set, so nothing is
- * written to AWS). cdk prints the diff on stderr; the text returned has every secret redacted. */
+/** FR-042: `cdk diff` for one stack, against the deployed template (`--method=template`: no change
+ * set, so nothing is written to AWS). No `--parameters`: CDK 2.1142 ignores them for diff and warns.
+ * A template diff cannot see a replacement caused only by a changed parameter value or cascading
+ * through a Ref or GetAtt; the live check (Task 20) looks at this. cdk prints the diff on stderr; the
+ * text returned has every secret redacted. */
 export async function cdkDiff(input: { runner: CommandRunner; source: string; env: string; region: string; identityMode: "cognito" | "oidc"; request: DeployRequest }): Promise<string> {
-  const args = [...cdkArguments(input, input.request, "diff"), "--no-change-set"];
+  const args = [...cdkArguments(input, input.request, "diff"), "--method=template"];
   const redact = (text: string) => redactSecrets(text, input.request.parameters);
   const display = ["npx", ...args.map((arg) => displayArg(redact(arg)))].join(" ");
   const result = await input.runner.run("npx", args, { cwd: input.source, display, redact, quiet: true });

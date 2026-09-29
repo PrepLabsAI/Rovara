@@ -1,16 +1,23 @@
 // FR-042 and FR-043: every change an upgrade makes, with IAM changes called out separately, and a
-// stop before replacing or deleting a table, user pool, bucket, KMS key or secret unless the operator
-// types its name (or passes --allow-replace <logical-id>). Replacing one loses its data, so anything
-// this code cannot read for certain (an unknown Replacement value or action, a cdk diff line it does
-// not understand) is treated as needing that same review, never as safe.
+// stop before replacing or deleting a table, user pool, bucket, KMS key, secret, queue or log group
+// unless the operator types its name (or passes --allow-replace <logical-id>). Replacing one loses
+// its data, so anything this code cannot read for certain (an unknown Replacement value or action, a
+// cdk diff line it does not understand) is treated as needing that same review, never as safe.
 import type { Ask, ConfirmFn } from "../deploy/commands.js";
 import type { ChangeSetChange, DeployRequest, StackDeployer } from "../deploy/deployer.js";
 
-export const DATA_RESOURCE_TYPES: ReadonlySet<string> = new Set(["AWS::DynamoDB::Table", "AWS::Cognito::UserPool", "AWS::S3::Bucket", "AWS::KMS::Key", "AWS::SecretsManager::Secret"]);
+const LOG_GROUP = "AWS::Logs::LogGroup";
+export const DATA_RESOURCE_TYPES: ReadonlySet<string> = new Set(["AWS::DynamoDB::Table", "AWS::Cognito::UserPool", "AWS::S3::Bucket", "AWS::KMS::Key", "AWS::SecretsManager::Secret", "AWS::SQS::Queue", LOG_GROUP]);
 
-/** "unclear": a cdk diff resource line this code could not read; `line` holds it, and logicalId and
- * type are "" when they could not be read either. */
-export interface DataChange { logicalId: string; type: string; verb: "replace" | "delete" | "unclear"; line?: string }
+/** Resource policies grant access like IAM policies do, so their changes are shown with the IAM
+ * changes (as is a KMS key's KeyPolicy). */
+const POLICY_RESOURCE_TYPES: ReadonlySet<string> = new Set(["AWS::S3::BucketPolicy", "AWS::Lambda::Permission", "AWS::SQS::QueuePolicy", "AWS::SNS::TopicPolicy", "AWS::SecretsManager::ResourcePolicy"]);
+const isIamType = (type: string) => type.startsWith("AWS::IAM::") || POLICY_RESOURCE_TYPES.has(type);
+
+/** "orphan": cdk diff says a retained resource leaves the stack (its data stays, unmanaged).
+ * "unclear": cdk diff output this code could not read; `line` holds it, and logicalId and type are ""
+ * when they could not be read either. */
+export interface DataChange { logicalId: string; type: string; verb: "replace" | "delete" | "orphan" | "unclear"; line?: string }
 export interface ReviewedChanges { iam: ChangeSetChange[]; data: DataChange[]; other: ChangeSetChange[] }
 
 /** Adding or importing a resource loses nothing, nor does a modification CloudFormation says replaces
@@ -20,9 +27,11 @@ const keepsData = (change: ChangeSetChange) => change.action === "Add" || change
 export function reviewChanges(changes: ChangeSetChange[]): ReviewedChanges {
   const reviewed: ReviewedChanges = { iam: [], data: [], other: [] };
   for (const change of changes) {
-    if (change.type.startsWith("AWS::IAM::")) reviewed.iam.push(change);
-    else if (DATA_RESOURCE_TYPES.has(change.type) && !keepsData(change)) {
+    if (DATA_RESOURCE_TYPES.has(change.type) && !keepsData(change)) {
       reviewed.data.push({ logicalId: change.logicalId, type: change.type, verb: change.action === "Remove" ? "delete" : "replace" });
+    } else if (isIamType(change.type) || (change.type === "AWS::KMS::Key" && change.action === "Modify")) {
+      // A change set does not say which property changed, so a KMS key's modification may be its KeyPolicy.
+      reviewed.iam.push(change);
     } else reviewed.other.push(change);
   }
   return reviewed;
@@ -40,24 +49,43 @@ export function reviewLines(stackName: string, reviewed: ReviewedChanges): strin
   ];
 }
 
-/** FR-043: undefined when every data change is accepted; otherwise the refusal to report. */
+/** What a data change does, for the refusal and the prompt: "replace State (AWS::DynamoDB::Table) and lose its data". */
+function consequence(entry: DataChange): string {
+  const what = `${entry.logicalId} (${entry.type})`;
+  if (entry.verb === "orphan") return `remove ${what} from the stack, which orphans the retained ${entry.type === LOG_GROUP ? "log group" : "resource"}`;
+  if (entry.type === LOG_GROUP) return `${entry.verb} ${what}, which deletes its logs`;
+  return `${entry.verb} ${what} and lose its data`;
+}
+
+const listed = (items: string[]) => (items.length <= 1 ? items.join("") : `${items.slice(0, -1).join(", ")}, and ${items.at(-1) ?? ""}`);
+
+function refusalFor(stackName: string, refused: DataChange[]): string {
+  const known = refused.filter((entry) => entry.verb !== "unclear");
+  const unclear = refused.filter((entry) => entry.verb === "unclear");
+  const clauses = [
+    ...(known.length === 0 ? [] : [`${stackName} would ${listed(known.map(consequence))}`]),
+    ...(unclear.length === 0 ? [] : [`agentx could not read cdk diff's output for ${stackName}, so it cannot tell whether it replaces or deletes data (${unclear.map((entry) => entry.line ?? "").join("; ")})`]),
+  ];
+  const ids = refused.map((entry) => entry.logicalId).filter((id) => id !== "");
+  const steps = [
+    ...(unclear.length === 0 ? [] : ["Check the diff above, and run agentx upgrade again without --yes to review it"]),
+    ...(ids.length === 0 ? [] : [`If you accept that, run agentx upgrade again with ${ids.map((id) => `--allow-replace ${id}`).join(" ")}`]),
+  ];
+  return `upgrade stopped: ${clauses.join("; ")}; nothing in ${stackName} changed. ${steps.join(". ")}`;
+}
+
+/** FR-043: undefined when every data change is accepted; otherwise one refusal naming every change
+ * not accepted. Interactively, each is asked in turn until one is declined. */
 export async function guardData(input: { stackName: string; data: DataChange[]; allowReplace: ReadonlySet<string>; yes: boolean; ask: Ask }): Promise<string | undefined> {
-  for (const entry of input.data) {
-    if (entry.logicalId !== "" && input.allowReplace.has(entry.logicalId)) continue;
-    if (entry.verb === "unclear") {
-      const line = entry.line ?? "";
-      const allow = entry.logicalId === "" ? "" : `, or with --allow-replace ${entry.logicalId} if you accept it`;
-      const refusal = `upgrade stopped: agentx could not read this line of cdk diff's output for ${input.stackName}, so it cannot tell whether it replaces or deletes data: ${line}. Nothing in ${input.stackName} changed. Run agentx upgrade again without --yes to review the change${allow}`;
-      if (input.yes) return refusal;
-      const token = entry.logicalId === "" ? "accept" : entry.logicalId;
-      const typed = await input.ask(`agentx could not read this line of cdk diff's output for ${input.stackName}, so it may replace or delete data: ${line}. Check the diff above. Type ${token} to accept, or anything else to stop: `);
-      if (typed.trim() !== token) return refusal;
-      continue;
-    }
-    const refusal = `upgrade stopped: ${input.stackName} would ${entry.verb} ${entry.logicalId} (${entry.type}) and lose its data; nothing in ${input.stackName} changed. If you accept that, run agentx upgrade again with --allow-replace ${entry.logicalId}`;
-    if (input.yes) return refusal;
-    const typed = await input.ask(`${input.stackName} would ${entry.verb} ${entry.logicalId} (${entry.type}), losing its data. Type ${entry.logicalId} to accept, or anything else to stop: `);
-    if (typed.trim() !== entry.logicalId) return refusal;
+  const pending = input.data.filter((entry) => entry.logicalId === "" || !input.allowReplace.has(entry.logicalId));
+  if (pending.length === 0) return undefined;
+  if (input.yes) return refusalFor(input.stackName, pending);
+  for (const [index, entry] of pending.entries()) {
+    const token = entry.logicalId === "" ? "accept" : entry.logicalId;
+    const prompt = entry.verb === "unclear"
+      ? `agentx could not read cdk diff's output for ${input.stackName}, so it may replace or delete data (${entry.line ?? ""}). Check the diff above. Type ${token} to accept, or anything else to stop: `
+      : `${input.stackName} would ${consequence(entry)}. Type ${token} to accept, or anything else to stop: `;
+    if ((await input.ask(prompt)).trim() !== token) return refusalFor(input.stackName, pending.slice(index));
   }
   return undefined;
 }
@@ -81,59 +109,100 @@ export function upgradeConfirm(input: { write: (line: string) => void; ask: Ask;
   };
 }
 
-// cdk diff's resource lines: "[~] AWS::DynamoDB::Table State StateABC123 replace", then indented
-// property lines such as " └─ [~] KeySchema (requires replacement)". The third word is the construct
-// path's last part, the fourth the logical id. The pinned CDK's exact output could not be checked
-// offline (the live check, Task 20, records one), so the parse is defensive: inside the Resources
-// section, a line that opens with a change mark but does not read as a resource line is "unclear",
-// which guardData stops on like a replacement.
-const RESOURCE_LINE = /^\[([-~+])\]\s+(AWS::[A-Za-z0-9]+::[A-Za-z0-9:]+)\s+\S+\s+(\S+)(.*)$/;
-const MARKED_LINE = /^\[[^\]]{1,2}\]/;
-const LOOSE_RESOURCE = /^\[[^\]]{1,2}\]\s+(AWS::[A-Za-z0-9]+::[A-Za-z0-9:]+)\s+\S+\s+(\S+)/;
-// Every section heading cdk diff prints besides Resources; any other unindented heading also ends it.
-const HEADING = /^[A-Z][A-Za-z ]*$|^Stack \S+$/;
+// cdk diff's output, as @aws-cdk/cloudformation-diff's Formatter prints it (aws-cdk 2.1142.0):
+// section headings at column 0; in Resources, one line per resource at column 0,
+// "[~] AWS::DynamoDB::Table State StateABC123 replace" (mark, type, construct path when known,
+// logical id, impact: replace, may be replaced, destroy, orphan or import); then its property lines,
+// every one indented: " └─ [~] KeySchema (requires replacement)", and for an array or type change a
+// JSON hunk of "[ ]", "[-]" and "[+]" lines. The live check (Task 20) records one real diff. The
+// parse is defensive: a column-0 marked line in Resources that is not a resource line, a line naming
+// a guarded type that is not a resource line (in any section), and output that shows neither a
+// Resources section nor "There were no differences", are all "unclear", which guardData stops on.
+//
+// A limit to review in the live check: `--method=template` compares templates, so it cannot see a
+// replacement caused only by a changed parameter value, or one that cascades through a Ref or GetAtt
+// to a resource whose template did not change. The templates engine's change set does see those.
+const MARK = /^\[([^\]]{1,2})\]\s+(.*)$/;
+const RESOURCE_TYPE = /^(AWS::[A-Za-z0-9]+::[A-Za-z0-9]+(?:::[A-Za-z0-9]+)*)(?:\s+(.*))?$/;
+const IMPACT = /\s*\b(may be replaced|replace|destroy|orphan|import)$/;
+const MOVE = /\s*\(OR move .*\)$/;
+const LOGICAL_ID = /^[A-Za-z0-9]+$/;
+const REPLACING_PROPERTY = /\((?:requires|may cause) replacement\)/;
+const HEADINGS: ReadonlySet<string> = new Set(["Template", "IAM Statement Changes", "IAM Policy Changes", "IAM Identity Center Changes", "Security Group Changes", "Parameters", "Metadata", "Mappings", "Conditions", "Resources", "Outputs", "Other Changes", "Resources In Sync", "Unchecked Resources"]);
+const NO_DIFFERENCES = "There were no differences";
+const GUARDED_NAME = new RegExp(`(?:${[...DATA_RESOURCE_TYPES].map((type) => type.replace(/:/g, "\\:")).join("|")})(?![A-Za-z0-9])`);
 // eslint-disable-next-line no-control-regex
-const ANSI = /\u001b\[[0-9;]*m/g;
+const ANSI = /\u001b\[[0-9;]*[A-Za-z]/g;
+
+interface ResourceLine { mark: string; type: string; logicalId: string; impact: string }
+
+function resourceLine(line: string): ResourceLine | undefined {
+  const marked = MARK.exec(line);
+  const typed = marked === null ? null : RESOURCE_TYPE.exec(marked[2] ?? "");
+  if (marked === null || typed === null) return undefined;
+  let rest = (typed[2] ?? "").replace(MOVE, "");
+  const impact = IMPACT.exec(rest)?.[1] ?? "";
+  rest = rest.replace(IMPACT, "").trim();
+  const logicalId = rest.split(/\s+/).at(-1) ?? "";
+  return { mark: marked[1] ?? "", type: typed[1] ?? "", logicalId: LOGICAL_ID.test(logicalId) ? logicalId : "", impact };
+}
 
 export function cdkDiffRisks(text: string): { data: DataChange[]; iam: boolean } {
   const data: DataChange[] = [];
   let iam = /IAM Statement Changes|IAM Policy Changes/.test(text);
-  let inResources = false;
-  // The stateful resource the property lines below belong to, until its replacement is recorded.
-  let current: DataChange | undefined;
-  for (const raw of text.replace(/\r\n/g, "\n").split("\n")) {
-    const line = raw.replace(ANSI, "").trim();
+  let section = "";
+  let sawResources = false;
+  // The resource the indented lines below belong to, and its replacement while not yet recorded.
+  let resource: ResourceLine | undefined;
+  let pending: DataChange | undefined;
+  const unclear = (line: string, parsed?: ResourceLine) => data.push({ logicalId: parsed?.logicalId ?? "", type: parsed?.type ?? "", verb: "unclear", line });
+  for (const raw of text.replace(/\r\n?/g, "\n").split("\n")) {
+    const plain = raw.replace(ANSI, "");
+    const line = plain.trim();
     if (line === "") continue;
-    if (!raw.startsWith(" ") && HEADING.test(line)) {
-      inResources = line === "Resources";
-      current = undefined;
+    const indented = /^\s/.test(plain);
+    if (!indented && (HEADINGS.has(line) || line.startsWith("Stack "))) {
+      section = line;
+      if (line === "Resources") sawResources = true;
+      resource = undefined;
+      pending = undefined;
       continue;
     }
-    if (!inResources) continue;
-    if (!MARKED_LINE.test(line)) {
-      // A property line ("└─ [~] BucketName (requires replacement)") of the resource above.
-      if (current !== undefined && /replace/i.test(line)) {
-        data.push(current);
-        current = undefined;
+    if (indented || !MARK.test(line)) {
+      // A property line, a JSON hunk line, or a multi-line value's continuation: detail of the resource above.
+      if (resource?.type === "AWS::KMS::Key" && /^[├└]─ \[.\] KeyPolicy\b/.test(line)) iam = true;
+      if (pending !== undefined && REPLACING_PROPERTY.test(line)) {
+        data.push(pending);
+        pending = undefined;
       }
+      if (GUARDED_NAME.test(line)) unclear(line);
       continue;
     }
-    current = undefined;
-    const match = RESOURCE_LINE.exec(line);
-    if (match === null) {
-      const loose = LOOSE_RESOURCE.exec(line);
-      if (loose?.[1]?.startsWith("AWS::IAM::") === true) iam = true;
-      data.push({ logicalId: loose?.[2] ?? "", type: loose?.[1] ?? "", verb: "unclear", line });
+    // A column-0 marked line.
+    resource = undefined;
+    pending = undefined;
+    if (section !== "Resources") {
+      if (GUARDED_NAME.test(line)) unclear(line);
       continue;
     }
-    const [, mark, type = "", logicalId = "", rest = ""] = match;
-    if (type.startsWith("AWS::IAM::")) iam = true;
-    if (!DATA_RESOURCE_TYPES.has(type)) continue;
-    if (mark === "-") data.push({ logicalId, type, verb: "delete" });
-    else if (mark === "~") {
-      if (/replace/i.test(rest)) data.push({ logicalId, type, verb: "replace" });
-      else current = { logicalId, type, verb: "replace" };
+    const parsed = resourceLine(line);
+    if (parsed === undefined || parsed.logicalId === "" || !["-", "~", "+", "←"].includes(parsed.mark)) {
+      unclear(line, parsed);
+      continue;
     }
+    resource = parsed;
+    if (isIamType(parsed.type)) iam = true;
+    if (!DATA_RESOURCE_TYPES.has(parsed.type)) continue;
+    const change = { logicalId: parsed.logicalId, type: parsed.type };
+    if (parsed.mark === "-") data.push({ ...change, verb: parsed.impact === "orphan" ? "orphan" : "delete" });
+    else if (parsed.mark === "~") {
+      if (parsed.impact === "replace" || parsed.impact === "may be replaced") data.push({ ...change, verb: "replace" });
+      else pending = { ...change, verb: "replace" };
+    }
+    // "+" adds and "←" imports: nothing is lost.
+  }
+  if (!sawResources && text.trim() !== "" && !text.includes(NO_DIFFERENCES)) {
+    data.push({ logicalId: "", type: "", verb: "unclear", line: `no Resources section, and not "${NO_DIFFERENCES}"` });
   }
   return { data, iam };
 }
