@@ -51,7 +51,7 @@ describe("the Slack service's thread client", () => {
     const sent: unknown[] = [];
     const requestId = randomUUID();
     await threadApi(handler, sent).prepareWorkspace!(requestId);
-    expect(sent).toEqual([{ requestId, includeOpenTaskCount: true }]);
+    expect(sent).toEqual([{ requestId, includeOpenTaskCount: true, includeSharedTask: true }]);
   });
 
   it("opts in to the shared task refusal when it starts a close (spec 025 C11), and an ordinary thread still gets NOT_FOUND", async () => {

@@ -123,6 +123,14 @@ export const SlackThreadPrepareResultSchema = z.discriminatedUnion("outcome", [
       closedAt: z.string().datetime(),
     })
     .strict(),
+  z
+    .object({
+      // Spec 025 C11, Q3: a view-only or closed shared thread; sent only to a service that sends includeSharedTask: true.
+      outcome: z.literal("VIEW_ONLY"),
+      taskId: z.string().uuid(),
+      closed: z.boolean(),
+    })
+    .strict(),
 ]);
 
 export const SlackWorkspaceCloseStartResultSchema = z.discriminatedUnion("outcome", [

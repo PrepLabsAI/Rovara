@@ -156,6 +156,16 @@ describe("the lazy worker", () => {
     expect(h.posts).toEqual([]);
   });
 
+  it("refuses without posting in a shared task's thread that is view only or closed (spec 025 C11)", async () => {
+    const taskId = "44444444-4444-4444-8444-444444444444";
+    const closed = lazyHarness({ outcome: "VIEW_ONLY", taskId, closed: true });
+    expect(await closed.worker.ensureReady()).toEqual(unavailableRefusal("the task this thread followed is closed"));
+    expect(closed.posts).toEqual([]);
+    const viewOnly = lazyHarness({ outcome: "VIEW_ONLY", taskId, closed: false });
+    expect(await viewOnly.worker.ensureReady()).toEqual(unavailableRefusal("this thread only follows a task a developer is driving from their AI tool"));
+    expect(viewOnly.posts).toEqual([]);
+  });
+
   it("fails the tool call, once per turn, when the control plane cannot be reached", async () => {
     const h = lazyHarness(new Error("thread workspace preparation failed: 503"));
     await expect(h.worker.ensureReady()).rejects.toThrow(/503/);

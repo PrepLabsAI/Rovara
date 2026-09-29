@@ -116,6 +116,36 @@ describe("a continue thread acts on the task's workspace (FR-054)", () => {
     expect(prepared.body).toMatchObject({ outcome: "WORKSPACE", status: "BUSY", operationId: null });
   });
 
+  it("treats the workspace as idle when its active operation's record is missing", async () => {
+    const h = await continueThread();
+    h.db.set({ ...h.db.get(`WORKSPACE#${h.workspaceId}`, "META")!, status: "BUSY", activeOperationId: randomUUID() });
+    const answer = await h.ensure();
+    expect(answer.status).toBe(200);
+    expect(answer.body).toMatchObject({ outcome: "WORKSPACE", workspaceId: h.workspaceId, operationId: null });
+    expect(answer.body).not.toHaveProperty("activeOperation");
+    const prepared = await teammate(h.handler, h.subject, PRIYA, "POST", "/v1/service/threads/workspace/prepare", { requestId: randomUUID(), includeSharedTask: true });
+    expect(prepared.status).toBe(200);
+    expect(prepared.body).toMatchObject({ outcome: "WORKSPACE", operationId: null });
+  });
+
+  it("answers the prepare route for a closed workspace as the ensure route does (Q3)", async () => {
+    const h = await continueThread();
+    const closedAt = new Date().toISOString();
+    h.db.set({ ...h.db.get(`WORKSPACE#${h.workspaceId}`, "META")!, status: "CLOSED", closedAt });
+    const prepare = (body: Record<string, unknown>) => teammate(h.handler, h.subject, PRIYA, "POST", "/v1/service/threads/workspace/prepare", { requestId: randomUUID(), ...body });
+    expect(result((await prepare({ includeSharedTask: true })).body)).toEqual({ outcome: "VIEW_ONLY", taskId: h.taskId, closed: true });
+    expect(result((await h.ensure()).body)).toEqual({ outcome: "VIEW_ONLY", taskId: h.taskId, closed: true });
+    // A Slack service that does not ask for sharedTask parses strictly: it keeps today's CLOSED answer.
+    expect(result((await prepare({})).body)).toEqual({ outcome: "CLOSED", workspaceId: h.workspaceId, closedAt });
+  });
+
+  it("answers the prepare route of a view-only thread with VIEW_ONLY for a service that asks", async () => {
+    const h = await continueThread("view");
+    const prepare = (body: Record<string, unknown>) => teammate(h.handler, h.subject, PRIYA, "POST", "/v1/service/threads/workspace/prepare", { requestId: randomUUID(), ...body });
+    expect(result((await prepare({ includeSharedTask: true })).body)).toEqual({ outcome: "VIEW_ONLY", taskId: h.taskId, closed: false });
+    expect((await prepare({})).status).toBe(403);
+  });
+
   it("keeps a WORKSPACE answer strict for a Slack service that does not ask for sharedTask", async () => {
     const h = await continueThread();
     expect((await h.ensure(OLDER_REQUEST)).body).not.toHaveProperty("sharedTask");

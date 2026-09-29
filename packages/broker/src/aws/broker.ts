@@ -1635,10 +1635,21 @@ async function prepareThreadWorkspace(
   const requestId = uuid(input.requestId, "requestId");
   // C11: a shared task's workspace is the developer's; the thread never prepares it.
   if (identity.sharedTask !== undefined) {
-    if (identity.sharedTask.state !== "continue") throw agentXError("FORBIDDEN", SHARED_VIEW_ONLY);
-    const workspace = await requireWorkspace(dependencies, identity.sharedTask.workspaceId);
+    // Q3: as the ensure route does, a service that sends includeSharedTask hears VIEW_ONLY, never
+    // the ordinary "start a new thread" or a bare refusal.
+    const includeSharedTask = input.includeSharedTask === true;
+    const shared = identity.sharedTask;
+    if (shared.state !== "continue") {
+      if (!includeSharedTask) throw agentXError("FORBIDDEN", SHARED_VIEW_ONLY);
+      return { outcome: "VIEW_ONLY", taskId: shared.taskId, closed: shared.state === "closed" };
+    }
+    const workspace = await requireWorkspace(dependencies, shared.workspaceId);
     if (workspace.ownerKey !== identity.ownerKey) throw agentXError("FORBIDDEN", "the workspace does not belong to this task");
-    if (workspace.status === "CLOSED" && workspace.closedAt) return { outcome: "CLOSED", workspaceId: workspace.id, closedAt: workspace.closedAt };
+    if (workspace.status === "CLOSED" && workspace.closedAt) {
+      return includeSharedTask
+        ? { outcome: "VIEW_ONLY", taskId: shared.taskId, closed: true }
+        : { outcome: "CLOSED", workspaceId: workspace.id, closedAt: workspace.closedAt };
+    }
     return { outcome: "WORKSPACE", workspaceId: workspace.id, status: workspace.status, operationId: (await activeOperationForChannel(dependencies, workspace)).operationId, created: false };
   }
   const workspace = await getThreadWorkspace(dependencies, identity.ownerKey)
@@ -1839,7 +1850,9 @@ async function sharedThreadWorkspace(
  */
 async function activeOperationForChannel(dependencies: AwsBrokerDependencies, workspace: WorkspaceInstance): Promise<{ operationId: string | null; developer: boolean }> {
   if (!workspace.activeOperationId) return { operationId: null, developer: false };
-  const operation = await requireOperation(dependencies, workspace.id, workspace.activeOperationId);
+  const operation = await getItem<OperationRecord>(dependencies, operationKey(workspace.id, workspace.activeOperationId));
+  // A pointer to a record that is gone names nothing to wait for: the workspace reads as idle.
+  if (!operation) return { operationId: null, developer: false };
   const developer = developerRequested(operation);
   return developer ? { operationId: null, developer: true } : { operationId: operation.id, developer: false };
 }

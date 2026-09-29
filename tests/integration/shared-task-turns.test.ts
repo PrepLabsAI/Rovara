@@ -83,7 +83,7 @@ describe("a continue thread's turn (FR-054, C12)", () => {
     const hidden: SlackThreadWorkspaceResult = { ...workspace(null), status: "BUSY", activeOperation: "developer" };
     const h = harness([hidden, hidden, workspace(null)]);
     const done = processSlackRequest(message(), h.dependencies, { finalAttempt: false, queuedBehind: 0 });
-    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(30_000);
     await done;
     expect(h.order).toEqual(["turn"]);
     expect(h.posts).toEqual([TASK_BUSY_WAIT_MESSAGE, "Working on it now. I'll post the result in this thread when it's done.", "<@U0PRIYA001> done"]);
@@ -96,6 +96,23 @@ describe("a continue thread's turn (FR-054, C12)", () => {
     await vi.advanceTimersByTimeAsync(30 * 60_000 + 1);
     await done;
     expect(h.order).toEqual([]);
+    expect(h.posts).toEqual([TASK_BUSY_WAIT_MESSAGE, TASK_STILL_BUSY_MESSAGE]);
+  });
+
+  it("asks the broker about a hidden run at most every 15 seconds, not every 5", async () => {
+    vi.useFakeTimers();
+    const h = harness([{ ...workspace(null), status: "BUSY", activeOperation: "developer" }]);
+    const api = h.dependencies.api;
+    let asked = 0;
+    h.dependencies.api = (queued) => {
+      const inner = api(queued);
+      return { ...inner, ensureWorkspace: async (requestId) => { asked += 1; return inner.ensureWorkspace(requestId); } };
+    };
+    const done = processSlackRequest(message(), h.dependencies, { finalAttempt: false, queuedBehind: 0 });
+    await vi.advanceTimersByTimeAsync(30 * 60_000 + 1);
+    await done;
+    // One first ask, then one per 15-second pause over the 30 minutes.
+    expect(asked).toBeLessThanOrEqual(1 + (30 * 60) / 15);
     expect(h.posts).toEqual([TASK_BUSY_WAIT_MESSAGE, TASK_STILL_BUSY_MESSAGE]);
   });
 
