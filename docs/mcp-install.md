@@ -120,7 +120,9 @@ MCP TypeScript SDK, pass `onprogress` and `resetTimeoutOnProgress: true` in the 
 otherwise the SDK gives up after its default of 60 seconds while AgentX is still waiting. Claude Code,
 Codex and Cursor handle this themselves.
 
-Tasks from your AI tool are private: only you see them, and every action is recorded for your
+Tasks from your AI tool are private: only you see their titles, instructions, progress and results.
+Others who can use the project see only that a workspace exists, with its status and times, in
+`agentx workspaces`. Every action is recorded for your
 admins. Each task keeps a workspace until you close it ("close my AgentX task"), and open tasks
 count against the same limit as your Slack threads (3 at a time unless your admin changed it).
 

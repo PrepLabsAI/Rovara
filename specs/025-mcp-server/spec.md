@@ -1069,9 +1069,8 @@ Decisions made in this spec, all owner-confirmed on 2026-09-27:
   on an unknown key ID, and answers 503 when the keys cannot be read.
 
 - **D18. The start transaction writes three records beside an ordinary workspace, and the first
-  task is queued inside the prepare's result transaction** (build ruling, 2026-09-28; not one of
-  the 12 questions the owner answered above, so it is flagged here for the owner's confirmation
-  rather than marked owner-confirmed). FR-018's start transaction creates the task index entry, a
+  task is queued inside the prepare's result transaction** (build ruling, 2026-09-28;
+  owner-confirmed after the live check, 2026-09-29). FR-018's start transaction creates the task index entry, a
   pointer record holding the pending instructions and the idempotency key, and the workspace's
   `developer` membership, beside an ordinary workspace. Preparing the workspace runs through the
   existing prepare path unchanged; the transaction that records a successful prepare also creates
@@ -1093,6 +1092,12 @@ Decisions made in this spec, all owner-confirmed on 2026-09-27:
   calling `agentx_get_task` afterward. The task wait (`agentx_start_task`, `agentx_continue_task`
   and `agentx_wait_for_task`, off by default, at most 600 seconds) is the only wait and is
   unaffected. FR-030 and FR-049 carry this.
+- **D22. A task's workspace shows in the project's workspace list, without its details** (owner
+  decision, 2026-09-29). `GET /v1/dev/workspaces` and `agentx workspaces` (spec 041) list every
+  workspace of a project the caller may use, AI-tool task workspaces included, with only the
+  workspace ID, project revision, status, whether it is busy, and its times. A task's title,
+  instructions, progress, events and results stay visible only to the developer who started it
+  (FR-036). The install guide says so.
 - **D21. A stuck task setup is ended by a sweep, not by a "last attempt" signal** (owner decision,
   2026-09-28). In 25b, a temporary AWS error while queuing a task's first instructions fails the
   start at once: the worker gives up after three silent callback attempts, and nothing else ends a
