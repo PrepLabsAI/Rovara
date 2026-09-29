@@ -5,7 +5,6 @@ import { afterEach, describe, expect, it } from "vitest";
 import { OPERATOR_PARAMETERS, SECRET_PARAMETERS } from "../../packages/cli/src/deploy/parameters.js";
 import { upgradeKeptParameterNames } from "../../packages/cli/src/deploy/deploy-environment.js";
 import type { LoadedRelease } from "../../packages/cli/src/deploy/release.js";
-import { SIGN_IN_PARAMETER_NAMES } from "../../packages/cli/src/signin/settings.js";
 import { writeUpgradeBundle } from "../../packages/cli/src/upgrade/export.js";
 import { SETTINGS } from "../support/doctor-fakes.js";
 import { allStackOutputs, fakeRelease } from "../support/init-fakes.js";
@@ -84,17 +83,49 @@ describe("agentx upgrade --export (FR-026)", () => {
     expect(parameters.filter((entry) => entry.ParameterKey === "CallbackSigningKey")).toEqual([{ ParameterKey: "CallbackSigningKey", UsePreviousValue: true }]);
   });
 
-  it("keeps exactly what agentx upgrade keeps: operator settings, secrets and sign-in, never a console-set parameter (ruling F29)", async () => {
+  it("keeps exactly what agentx upgrade keeps: operator settings and secrets, never a console-set parameter (ruling F29)", async () => {
     const out = await freshDir();
     await writeUpgradeBundle({
       dir: out, settings, answers, release: await releaseWithPackage(CONTROL_PLANE_DECLARED), parts: ["control-plane"], outputs,
       deployed: { "control-plane": { CallbackSigningKey: "****", BudgetMonthlyUsd: "250", GitHubAppId: "123", DeveloperSignInSlack: "enabled", ConsoleSetting: "by hand" } },
     });
     const parameters = JSON.parse(await readFile(join(out, "parameters", "control-plane.json"), "utf8")) as Array<Record<string, unknown>>;
-    expect(parameters).toContainEqual({ ParameterKey: "DeveloperSignInSlack", UsePreviousValue: true });
+    expect(parameters).toContainEqual({ ParameterKey: "BudgetMonthlyUsd", UsePreviousValue: true });
     expect(parameters.find((entry) => entry.ParameterKey === "ConsoleSetting")).toBeUndefined();
-    expect([...upgradeKeptParameterNames("control-plane")].sort()).toEqual([...OPERATOR_PARAMETERS["control-plane"], ...SECRET_PARAMETERS, ...SIGN_IN_PARAMETER_NAMES].sort());
+    // No stored sign-in: agentx upgrade sends none, so the bundle sends none either (not the deployed value).
+    expect(parameters.find((entry) => entry.ParameterKey === "DeveloperSignInSlack")).toBeUndefined();
+    expect([...upgradeKeptParameterNames("control-plane")].sort()).toEqual([...OPERATOR_PARAMETERS["control-plane"], ...SECRET_PARAMETERS].sort());
     expect([...upgradeKeptParameterNames("slack")].sort()).toEqual([...OPERATOR_PARAMETERS.slack, ...SECRET_PARAMETERS].sort());
+  });
+
+  it("sends the stored sign-in, as agentx upgrade does, only for names the target declares (ruling F29)", async () => {
+    const out = await freshDir();
+    await writeUpgradeBundle({
+      dir: out, settings, answers: { ...answers, developerSignIn: { slackTeamId: "T0NEW" } }, release: await releaseWithPackage({ ...CONTROL_PLANE_DECLARED, SlackTeamId: {} }), parts: ["control-plane"], outputs,
+      deployed: { "control-plane": { CallbackSigningKey: "****", DeveloperSignInSlack: "enabled", SlackTeamId: "T0OLD" } },
+    });
+    const parameters = JSON.parse(await readFile(join(out, "parameters", "control-plane.json"), "utf8")) as Array<Record<string, unknown>>;
+    expect(parameters).toContainEqual({ ParameterKey: "SlackTeamId", ParameterValue: "T0NEW" });
+    expect(parameters).toContainEqual({ ParameterKey: "DeveloperSignInSlack", ParameterValue: "disabled" });
+    expect(parameters.find((entry) => entry.ParameterKey === "DeveloperOidcIssuer")).toBeUndefined();
+  });
+
+  it("refuses a release that adds a secret parameter, which a bundle cannot carry", async () => {
+    const out = await freshDir();
+    await expect(writeUpgradeBundle({ dir: out, settings, answers, release: await releaseWithPackage(), parts: ["control-plane"], outputs, deployed: { "control-plane": { GitHubAppId: "123" } } }))
+      .rejects.toThrow("release 1.3.0 adds secret CallbackSigningKey, which a bundle cannot carry; run agentx upgrade with admin credentials");
+    expect(await readdir(join(out, ".."))).toEqual([]);
+  });
+
+  it("writes SHA256SUMS, checks it first, and says where to run the commands", async () => {
+    const out = await freshDir();
+    await writeUpgradeBundle({ dir: out, settings, answers, release: await releaseWithPackage(), parts: ["control-plane"], outputs, deployed: { "control-plane": { CallbackSigningKey: "****" } } });
+    expect(await readFile(join(out, "SHA256SUMS"), "utf8")).toBe(`${"f".repeat(64)}  packages/${ASSET}.zip\n`);
+    const readme = await readFile(join(out, "README.md"), "utf8");
+    const step1 = readme.slice(readme.indexOf("## 1."));
+    expect(step1.split("\n").filter((line) => line.startsWith("aws ") || line.startsWith("shasum "))[0]).toBe("shasum -a 256 -c SHA256SUMS");
+    expect(readme).toContain("Run every command below from this bundle's directory.");
+    expect(readme).toContain("didn't contain changes");
   });
 
   it("carries a changed access stack for the platform team, deployed with their own credentials (question 9)", async () => {
@@ -118,7 +149,7 @@ describe("agentx upgrade --export (FR-026)", () => {
   it("leaves nothing behind when a write fails partway (ruling F28)", async () => {
     const out = await freshDir();
     const release = await releaseWithPackage(undefined, join(tmpdir(), "agentx-no-such-package.zip"));
-    await expect(writeUpgradeBundle({ dir: out, settings, answers, release, parts: ["foundation", "control-plane"], outputs, deployed: {} })).rejects.toThrow();
+    await expect(writeUpgradeBundle({ dir: out, settings, answers, release, parts: ["foundation", "control-plane"], outputs, deployed: { "control-plane": { CallbackSigningKey: "****" } } })).rejects.toThrow("agentx-no-such-package.zip");
     expect(await readdir(join(out, ".."))).toEqual([]);
   });
 

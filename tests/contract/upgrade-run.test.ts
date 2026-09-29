@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { GetTemplateCommand } from "@aws-sdk/client-cloudformation";
 import type { ChangeSetChange, DeployRequest, StackDeployer } from "../../packages/cli/src/deploy/deployer.js";
 import type { LoadedRelease } from "../../packages/cli/src/deploy/release.js";
@@ -9,12 +9,22 @@ import type { DoctorReport } from "../../packages/cli/src/doctor/checks.js";
 import type { StackDescription } from "../../packages/cli/src/environments/adopt.js";
 import { lockParameterName } from "../../packages/cli/src/environments/lock.js";
 import { readEnvironmentSettings, writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
+import { writeSlackTeamId } from "../../packages/cli/src/signin/settings.js";
 import { executeCli } from "../../packages/cli/src/main.js";
 import { agentXError } from "@agentx/contracts";
 import { accessChanged, runUpgrade, type UpgradeDependencies } from "../../packages/cli/src/upgrade/run.js";
 import { SETTINGS } from "../support/doctor-fakes.js";
 import { allStackOutputs, fakeRelease, memoryInitSecrets, scriptedDeployer, T0 } from "../support/init-fakes.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
+
+const dirs: string[] = [];
+afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
+/** A bundle path in a fresh temporary directory, removed after each test. */
+async function bundleDir(prefix: string): Promise<string> {
+  const parent = await mkdtemp(join(tmpdir(), prefix));
+  dirs.push(parent);
+  return join(parent, "bundle");
+}
 
 const ADMIN = "arn:aws:sts::123456789012:assumed-role/Admin/alice";
 const OPERATOR = "arn:aws:sts::123456789012:assumed-role/agentx-staging-operator/alice";
@@ -281,7 +291,7 @@ describe("agentx upgrade (FR-042 to FR-044)", () => {
   });
 
   it("with --export, writes the bundle and deploys nothing", async () => {
-    const out = join(await mkdtemp(join(tmpdir(), "agentx-upgrade-run-export-")), "bundle");
+    const out = await bundleDir("agentx-upgrade-run-export-");
     const h = await harness();
     const result = await runUpgrade({ ...options, exportDir: out }, h.deps);
     expect(result.exported).toBe(out);
@@ -293,33 +303,59 @@ describe("agentx upgrade (FR-042 to FR-044)", () => {
     expect(h.store.values.has(lockParameterName("staging"))).toBe(false);
     expect(await readdir(out)).toEqual(expect.arrayContaining(["README.md", "parameters", "templates", "packages"]));
     expect(h.lines).toContain("Writing the upgrade of staging from 1.2.3 to 1.3.0 (templates engine) to a bundle");
-    await rm(dirname(out), { recursive: true, force: true });
   });
 
   it("with --export under the operator role, carries a changed access stack instead of refusing (question 9)", async () => {
-    const out = join(await mkdtemp(join(tmpdir(), "agentx-upgrade-run-export-")), "bundle");
+    const out = await bundleDir("agentx-upgrade-run-export-");
     const h = await harness({ caller: OPERATOR, isInteractive: () => false, loadRelease: async () => release("1.3.0", [], CHANGED_ACCESS_TEMPLATE) });
     const result = await runUpgrade({ ...options, yes: false, exportDir: out }, h.deps);
     expect(result.parts[0]).toBe("access");
     expect(await readFile(join(out, "README.md"), "utf8")).toContain("create-change-set --stack-name agentx-staging-access ");
-    await rm(dirname(out), { recursive: true, force: true });
   });
 
   it("with --export, leaves out an unchanged access stack", async () => {
-    const out = join(await mkdtemp(join(tmpdir(), "agentx-upgrade-run-export-")), "bundle");
+    const out = await bundleDir("agentx-upgrade-run-export-");
     const h = await harness();
     const result = await runUpgrade({ ...options, exportDir: out }, h.deps);
     expect(result.parts).not.toContain("access");
     expect(await readFile(join(out, "README.md"), "utf8")).not.toContain("--stack-name agentx-staging-access ");
-    await rm(dirname(out), { recursive: true, force: true });
+  });
+
+  it("with --export, describes each stack once", async () => {
+    const out = await bundleDir("agentx-upgrade-run-export-");
+    const h = await harness();
+    const described: string[] = [];
+    const stacks = h.deps.stacks;
+    h.deps.stacks = { describe: async (name) => { described.push(name); return stacks.describe(name); } };
+    await runUpgrade({ ...options, exportDir: out }, h.deps);
+    expect(described.length).toBeGreaterThan(0);
+    expect(new Set(described).size).toBe(described.length);
+  });
+
+  it("applies the same sign-in values as agentx upgrade when SSM and the stack disagree (ruling F29)", async () => {
+    const declared = ["BudgetMonthlyUsd", "SlackTeamId", "DeveloperSignInSlack"];
+    const controlPlane = { GitHubAppId: "123", GitHubAppPrivateKeySecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/github-app-AbCdEf", BudgetMonthlyUsd: "250", CallbackSigningKey: "****", SlackTeamId: "T0OLD", DeveloperSignInSlack: "enabled" };
+    const upgraded = await harness({ controlPlane, loadRelease: async () => release("1.3.0", declared) });
+    await writeSlackTeamId(upgraded.store, "staging", "T0NEW");
+    await runUpgrade(options, upgraded.deps);
+    const sent = upgraded.deployer.requests.find((request) => request.stackName === "agentx-staging-control-plane")!.parameters;
+
+    const out = await bundleDir("agentx-upgrade-run-export-");
+    const exported = await harness({ controlPlane, loadRelease: async () => release("1.3.0", declared) });
+    await writeSlackTeamId(exported.store, "staging", "T0NEW");
+    await runUpgrade({ ...options, exportDir: out }, exported.deps);
+    const file = JSON.parse(await readFile(join(out, "parameters", "control-plane.json"), "utf8")) as Array<{ ParameterKey: string; ParameterValue?: string }>;
+    const written = Object.fromEntries(file.map((entry) => [entry.ParameterKey, entry.ParameterValue]));
+
+    expect({ SlackTeamId: sent.SlackTeamId, DeveloperSignInSlack: sent.DeveloperSignInSlack }).toEqual({ SlackTeamId: "T0NEW", DeveloperSignInSlack: "disabled" });
+    expect({ SlackTeamId: written.SlackTeamId, DeveloperSignInSlack: written.DeveloperSignInSlack }).toEqual({ SlackTeamId: sent.SlackTeamId, DeveloperSignInSlack: sent.DeveloperSignInSlack });
   });
 
   it("with --export, still refuses an older release and a prerelease", async () => {
-    const out = join(await mkdtemp(join(tmpdir(), "agentx-upgrade-run-export-")), "bundle");
+    const out = await bundleDir("agentx-upgrade-run-export-");
     await expect(runUpgrade({ ...options, exportDir: out }, (await harness({ loadRelease: async () => release("1.1.0") })).deps)).rejects.toThrow("release 1.1.0 is older than 1.2.3");
     await expect(runUpgrade({ ...options, exportDir: out }, (await harness({ loadRelease: async () => release("1.3.0-rc.1") })).deps)).rejects.toThrow("release 1.3.0-rc.1 is a prerelease");
     expect(await readdir(dirname(out))).toEqual([]);
-    await rm(dirname(out), { recursive: true, force: true });
   });
 });
 
@@ -390,14 +426,13 @@ describe("the agentx upgrade command", () => {
   });
 
   it("with --export, says where the bundle is and who it is for", async () => {
-    const out = join(await mkdtemp(join(tmpdir(), "agentx-upgrade-cli-export-")), "bundle");
+    const out = await bundleDir("agentx-upgrade-cli-export-");
     const h = await harness();
     const io = capture();
     const code = await executeCli(["--env", "staging", "upgrade", "--export", out], { ...io, upgrade: withoutWrite(h.deps) });
     expect(code).toBe(0);
     expect(io.out.join("")).toBe(`Wrote the upgrade of staging to 1.3.0 to ${out}; give it to your platform team.\n`);
     expect(h.deployer.deployed).toEqual([]);
-    await rm(dirname(out), { recursive: true, force: true });
   });
 
   it("passes --to, --release and --allow-replace through, and prints JSON with --json", async () => {

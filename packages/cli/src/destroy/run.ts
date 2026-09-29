@@ -253,7 +253,7 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
     ...result.leftInPlace.map((entry) => `Left in place: ${entry}.`),
   ];
   result.removed = true;
+  // The command prints the manual steps once, on stdout, with its own summary line.
   deps.write(`Environment ${env} is removed.`);
-  for (const step of result.manualSteps) deps.write(`  ${step}`);
   return result;
 }

@@ -92,7 +92,7 @@ export function templateParameterNames(release: LoadedRelease, part: DeployPart,
  * parameter names from `parameters` that `declared` does not list, leaving every other parameter
  * untouched.
  */
-function withDeclaredSignIn(parameters: Record<string, string>, declared: ReadonlySet<string> | undefined): Record<string, string> {
+export function withDeclaredSignIn(parameters: Record<string, string>, declared: ReadonlySet<string> | undefined): Record<string, string> {
   // declared === undefined: no region to introspect (see templateParameterNames). Every
   // sign-in key is passed through unfiltered here, deliberately — CloudFormation is left to refuse
   // the deploy loudly if the actual template does not declare one of them, rather than this
@@ -118,7 +118,7 @@ export function keptOperatorParameters(input: {
 }): { kept: Record<string, string>; dropped: Array<{ parameter: string; value: string }> } {
   const kept: Record<string, string> = {};
   const dropped: Array<{ parameter: string; value: string }> = [];
-  for (const name of OPERATOR_PARAMETERS[input.part]) {
+  for (const name of upgradeKeptParameterNames(input.part)) {
     // A secret is never carried: DescribeStacks reads a NoEcho value back as "****", which would
     // overwrite the real secret. The answers always supply secrets themselves.
     if (SECRET_PARAMETERS.has(name)) continue;
@@ -136,15 +136,18 @@ export function keptOperatorParameters(input: {
 
 /**
  * Ruling F29: the one rule for which of a stack's deployed parameters an upgrade keeps, for
- * `agentx upgrade` and `agentx upgrade --export` alike. The operator's settings (OPERATOR_PARAMETERS)
- * and the secrets are kept, and on the control plane the developer sign-in choice. `agentx upgrade`
- * keeps the operator settings with keptOperatorParameters, sends the secrets from Secrets Manager
- * and the sign-in choice from SSM (the same values); the export marks each UsePreviousValue. Any
- * other deployed parameter (one set by hand in the console) goes back to the template's default on
- * both paths.
+ * `agentx upgrade` and `agentx upgrade --export` alike: the operator's settings (OPERATOR_PARAMETERS)
+ * and the secrets. keptOperatorParameters takes its candidates from here (sending each kept operator
+ * setting's deployed value); the export marks each UsePreviousValue. A secret's value never leaves
+ * AWS: agentx upgrade sends it from Secrets Manager, the export keeps the deployed one.
+ *
+ * Developer sign-in is not kept from the stack on either path: both send the choice stored in SSM
+ * (readStoredDeveloperSignIn, then withDeclaredSignIn), so when SSM and the stack disagree, both
+ * apply SSM's. Any other deployed parameter (one set by hand in the console) goes back to the
+ * template's default on both paths.
  */
 export function upgradeKeptParameterNames(part: DeployPart): ReadonlySet<string> {
-  return new Set([...OPERATOR_PARAMETERS[part], ...SECRET_PARAMETERS, ...(part === "control-plane" ? SIGN_IN_PARAMETER_NAMES : [])]);
+  return new Set([...OPERATOR_PARAMETERS[part], ...SECRET_PARAMETERS]);
 }
 
 /** Throws the exact message a missing stack output must report, naming the real (`environment`-naming) stack name. */

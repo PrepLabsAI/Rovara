@@ -10,12 +10,13 @@ import type { DeployRequest } from "../deploy/deployer.js";
 import { upgradeOrder, type DeployPart } from "../deploy/parameters.js";
 import type { LoadedRelease } from "../deploy/release.js";
 import { reportText, type DoctorReport } from "../doctor/checks.js";
-import type { CallerIdentity, StackReader } from "../environments/adopt.js";
+import type { CallerIdentity, StackDescription, StackReader } from "../environments/adopt.js";
 import { withEnvironmentLock, type LockRecord } from "../environments/lock.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import { readEnvironmentSettings, type EnvironmentSettings } from "../environments/settings.js";
 import { isOperatorRole } from "../init/commands.js";
 import { plainMessage } from "../output.js";
+import { readStoredDeveloperSignIn } from "../signin/settings.js";
 import { upgradeAnswers } from "./answers.js";
 import { writeUpgradeBundle } from "./export.js";
 import { cdkDiffRisks, cdkReviewedDeployer, guardData, upgradeConfirm } from "./review.js";
@@ -100,21 +101,30 @@ async function exportUpgrade(input: { options: UpgradeOptions; deps: UpgradeDepe
   const target = release.manifest.version;
   deps.write(`Writing the upgrade of ${env} from ${settings.version} to ${target} (${settings.engine} engine) to a bundle`);
   deps.write(notesText(await deps.notes(target), target));
-  const answers = await upgradeAnswers({ settings, stacks: deps.stacks, ...(options.images === undefined ? {} : { images: options.images }) });
   const order = upgradeOrder(settings.identity.mode);
+  // Each stack is described once; the answers, the dropped keys and the bundle all read these.
+  const described = new Map<string, StackDescription | undefined>();
+  for (const part of order) {
+    const name = settings.stacks[part] ?? environmentStackName(env, part);
+    described.set(name, await deps.stacks.describe(name));
+  }
+  const stacks: StackReader = { describe: async (name) => (described.has(name) ? described.get(name) : deps.stacks.describe(name)) };
+  const answers = await upgradeAnswers({ settings, stacks, ...(options.images === undefined ? {} : { images: options.images }) });
+  // Ruling F29: the stored developer sign-in, as deployEnvironment sends it on an upgrade.
+  const developerSignIn = await readStoredDeveloperSignIn(deps.store, env);
   const accessStack = settings.stacks.access ?? environmentStackName(env, "access");
   const includeAccess = await accessChanged({ cloudFormation: deps.cloudFormation, stackName: accessStack, release, region: settings.region, env });
   const parts = order.filter((part) => part !== "access" || includeAccess);
-  for (const entry of await droppedConfigKeys({ release, env, parts, stacks: deps.stacks })) {
+  for (const entry of await droppedConfigKeys({ release, env, parts, stacks })) {
     deps.write(`config key ${entry.key} (${entry.value}) is not in release ${target}, so the upgrade drops it; nothing replaces it`);
   }
   const outputs: Partial<Record<DeployPart, Record<string, string>>> = {};
   const deployed: Partial<Record<DeployPart, Record<string, string>>> = {};
   for (const part of order) {
-    const stack = await deps.stacks.describe(settings.stacks[part] ?? environmentStackName(env, part));
+    const stack = described.get(settings.stacks[part] ?? environmentStackName(env, part));
     if (stack !== undefined) { outputs[part] = stack.outputs; deployed[part] = stack.parameters; }
   }
-  const written = await writeUpgradeBundle({ dir: input.dir, settings, answers, release, parts, outputs, deployed });
+  const written = await writeUpgradeBundle({ dir: input.dir, settings, answers: { ...answers, ...(developerSignIn === undefined ? {} : { developerSignIn }) }, release, parts, outputs, deployed });
   return { env, from: settings.version, to: target, parts, exported: written.dir };
 }
 

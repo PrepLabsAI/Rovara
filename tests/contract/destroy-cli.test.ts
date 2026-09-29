@@ -53,6 +53,8 @@ describe("agentx destroy", () => {
     expect(code).toBe(0);
     expect(io.out.join("")).toContain("Removed environment staging.");
     expect(io.out.join("")).toContain("https://api.slack.com/apps");
+    // Once, on stdout: stderr carries the progress only.
+    expect(io.err.join("")).not.toContain("https://api.slack.com/apps");
   });
 
   it("keeps the data with --keep-data", async () => {
