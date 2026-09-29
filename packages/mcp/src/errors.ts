@@ -17,8 +17,9 @@ export const NEXT_STEPS: Record<ToolErrorCode, string> = {
   PROJECT_ACCESS_DENIED: "join one of the project's Slack channels, or ask an admin for access",
   PROJECT_TASKS_DISABLED: "use the project's Slack channel, or ask an admin",
   TASK_NOT_FOUND: "run agentx_list_tasks to see your tasks",
-  CHANNEL_REQUIRED: "use the project's Slack channel; if the project does not require sharing, start the task again without share_to_channel",
-  CHANNEL_AMBIGUOUS: "name one of the project's channels",
+  // Ruling F22: fits a project with no bound channel, and a named channel that is not bound (C3).
+  CHANNEL_REQUIRED: "send channel with one of the bound channels the message names, or ask an AgentX admin to bind one",
+  CHANNEL_AMBIGUOUS: "send channel with one of the channels the message names",
   WORKSPACE_LIMIT: "close a task you no longer need with agentx_close_task",
   TASK_BUSY: "wait with agentx_wait_for_task, or stop the task with agentx_cancel_task",
   SLACK_UNAVAILABLE: "try again in a few minutes; projects an admin granted you still work",
@@ -46,6 +47,8 @@ export const UNEXPECTED_ANSWER_STEP = "ask your AgentX admin, or try again later
  */
 export const START_BUSY_STEP = "try again with the same request_id";
 export const CLOSE_BUSY_STEP = "try agentx_close_task again in a moment, and ask an admin if it keeps failing";
+/** Spec 025 C21: a share that met a task changing under it is tried again, not waited on. */
+export const SHARE_BUSY_STEP = "try agentx_share_task again with the same request_id";
 
 export class ToolError extends Error {
   constructor(readonly code: ToolErrorCode, message: string, readonly nextStep: string = NEXT_STEPS[code]) {
@@ -67,8 +70,8 @@ export function plainText(value: unknown, fallback: string, secrets: readonly st
   return clean === "" ? fallback : clean;
 }
 
-/** Broker codes whose meaning, words and next step are the tool's too (P6: exactly these eight). */
-const PASSED_THROUGH = new Set<string>(["PROJECT_NOT_FOUND", "PROJECT_ACCESS_DENIED", "PROJECT_TASKS_DISABLED", "TASK_NOT_FOUND", "TASK_BUSY", "CHANNEL_REQUIRED", "WORKSPACE_LIMIT", "SLACK_UNAVAILABLE"]);
+/** Broker codes whose meaning, words and next step are the tool's too (P6, C21: exactly these nine). */
+const PASSED_THROUGH = new Set<string>(["PROJECT_NOT_FOUND", "PROJECT_ACCESS_DENIED", "PROJECT_TASKS_DISABLED", "TASK_NOT_FOUND", "TASK_BUSY", "CHANNEL_REQUIRED", "WORKSPACE_LIMIT", "SLACK_UNAVAILABLE", "CHANNEL_AMBIGUOUS"]);
 /**
  * A task that moved on under an action: the busy answers of the existing handlers, and a cancel
  * that raced the task's own result (Task 11 passes both through with words naming the tool).

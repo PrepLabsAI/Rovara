@@ -23,7 +23,7 @@ type Harness = Awaited<ReturnType<typeof createDeveloperTaskBroker>>;
 function brokerFetch(harness: Harness): typeof fetch {
   return async (input, init) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
-    if (url.pathname === "/v1/auth/.well-known/agentx-configuration") return Response.json({ env: "staging", apiVersion: "1.1", issuer: DEV_ISSUER });
+    if (url.pathname === "/v1/auth/.well-known/agentx-configuration") return Response.json({ env: "staging", apiVersion: "1.2", issuer: DEV_ISSUER });
     const response = await harness.handler({
       version: "2.0", rawPath: url.pathname, rawQueryString: url.search.slice(1),
       headers: { authorization: new Headers(init?.headers).get("authorization") ?? "" },
@@ -53,7 +53,7 @@ async function signedInClient(harness: Harness, who: Developer | undefined, onSl
   const client = new Client({ name: "claude-code", version: "2.1.0" });
   await client.connect(clientSide);
   // Ruling F3: listing first makes the client validate every structuredContent it gets back.
-  expect((await client.listTools()).tools).toHaveLength(10);
+  expect((await client.listTools()).tools).toHaveLength(11);
   const answers: string[] = [];
   const tool = async (name: string, args: Record<string, unknown> = {}): Promise<ToolAnswer> => {
     const result = await client.callTool({ name, arguments: args });
