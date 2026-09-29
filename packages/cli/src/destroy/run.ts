@@ -6,7 +6,7 @@ import { access, rm } from "node:fs/promises";
 import { agentXError, environmentPullThroughPrefix, environmentStackName, type StackPart } from "@agentx/contracts";
 import { tokenStoreKey } from "../auth.js";
 import { ADOPTED_STACK_NAMES, type CallerIdentity } from "../environments/adopt.js";
-import { environmentCachePath } from "../environments/cache.js";
+import { cachedEnvironmentRegion, environmentCachePath } from "../environments/cache.js";
 import { lockParameterName, withEnvironmentLock } from "../environments/lock.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import { readEnvironmentSettings, settingsParameterName, type EnvironmentSettings } from "../environments/settings.js";
@@ -36,6 +36,8 @@ export interface DestroyDependencies {
 export interface DestroyResult {
   env: string; removed: boolean; stacksDeleted: string[]; instances: number; volumes: number;
   retainedDeleted: string[]; kept: string[]; leftInPlace: string[]; secrets: number; parameters: number; localFiles: string[]; manualSteps: string[];
+  /** Set when nothing of the environment was found: says where agentx looked. */
+  notFound?: string;
 }
 
 const exists = (path: string) => access(path).then(() => true, () => false);
@@ -59,6 +61,14 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
   // Every client is built for deps.region; an environment installed elsewhere is not in them.
   if (settings !== undefined && settings.region !== deps.region) {
     throw agentXError("CONFIG_INVALID", `environment ${env} is installed in ${settings.region}, not ${deps.region}; run agentx --env ${env} destroy --region ${settings.region}`);
+  }
+  // SSM is regional: in the wrong region the settings simply read as absent. This computer's cache
+  // records the environment's endpoints, which name its region.
+  if (settings === undefined) {
+    const cachedRegion = await cachedEnvironmentRegion(deps.home, env);
+    if (cachedRegion !== undefined && cachedRegion !== deps.region) {
+      throw agentXError("CONFIG_INVALID", `this computer's record of environment ${env} (${environmentCachePath(deps.home, env)}) says it is in ${cachedRegion}, not ${deps.region}; run agentx --env ${env} destroy --region ${cachedRegion}`);
+    }
   }
   if (env === "production") {
     for (const name of Object.values(ADOPTED_STACK_NAMES)) {
@@ -130,6 +140,7 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
   const result: DestroyResult = { env, removed: false, stacksDeleted: [], instances: 0, volumes: 0, retainedDeleted: [], kept: [], leftInPlace: [], secrets: 0, parameters: 0, localFiles: [], manualSteps: [] };
   if (stacks.size + inventory.resources.length + instances.length + volumes.length + secrets.length + parameters.length + localFiles.length === 0) {
     deps.write(`Environment ${env} has nothing to remove in this account and region.`);
+    result.notFound = `found nothing for environment ${env} in account ${caller.account}, region ${deps.region}; if it is installed in another region, pass --region <that region>`;
     return result;
   }
 

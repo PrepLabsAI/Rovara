@@ -11,7 +11,7 @@ import { settingsParameterName, writeEnvironmentSettings } from "../../packages/
 import { writeInstallAnswers, writeInstallProgress } from "../../packages/cli/src/init/install-state.js";
 import { writeProjectFile } from "../../packages/cli/src/setup/project-add.js";
 import { awsDestroyApi } from "../../packages/cli/src/destroy/aws.js";
-import { destroyProjectFiles } from "../../packages/cli/src/destroy/cli.js";
+import { destroyProjectFiles } from "../../packages/cli/src/destroy/project-files.js";
 import { fakeDestroyApi, forceDeletedSecretsClient, installedAccount, PROGRESS, SETTINGS, type FakeAccount } from "../support/destroy-fakes.js";
 import { sampleAnswers } from "../support/init-fakes.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
@@ -188,6 +188,7 @@ describe("agentx destroy (FR-055, item 3)", () => {
     expect(result.removed).toBe(false);
     expect(h.asked).toEqual([]);
     expect(h.lines).toContain("Environment staging has nothing to remove in this account and region.");
+    expect(result.notFound).toBe("found nothing for environment staging in account 123456789012, region us-east-1; if it is installed in another region, pass --region <that region>");
   });
 
   it("refuses up front when the access stack is gone but a stack deployed through its role remains", async () => {

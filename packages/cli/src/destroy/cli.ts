@@ -18,9 +18,9 @@ import { stsCallerIdentity } from "../environments/adopt.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import type { TextWriter } from "../init/prompts.js";
 import { formatSuccess } from "../output.js";
-import { environmentProjectFiles } from "../setup/project-add.js";
 import type { TokenStore } from "../token-store.js";
 import { awsDestroyApi } from "./aws.js";
+import { destroyProjectFiles } from "./project-files.js";
 import { runDestroy, type DestroyDependencies } from "./run.js";
 
 /** One answer per line, from a terminal or a pipe. End of input answers "", which every typed
@@ -38,25 +38,8 @@ export function lineReader(input: { stdin: Readable; stderr: TextWriter }): { as
   };
 }
 
-/** The environment's project files destroy removes. A file that could not be read, or read as YAML,
- * is skipped and named: its register line may still name the environment's launch template, but
- * agentx destroy never deletes a file it could not read. */
-export async function destroyProjectFiles(input: { configDir: string; env: string; write: (line: string) => void }): Promise<Array<{ path: string; launchTemplateId: string }>> {
-  const found: Array<{ path: string; launchTemplateId: string }> = [];
-  for (const file of await environmentProjectFiles(input.configDir, input.env)) {
-    if (file.error !== undefined) {
-      const why = file.error === "invalid-yaml" ? "it is not valid YAML" : `it could not be read (${file.errorCode ?? "unknown"})`;
-      input.write(`Skipping ${file.path}: ${why}, so agentx destroy leaves it; delete it by hand if it belongs to ${input.env}`);
-      continue;
-    }
-    found.push({ path: file.path, launchTemplateId: file.launchTemplateId });
-  }
-  return found;
-}
-
-/** --region, or the region your AWS configuration names; undefined when neither gives one. */
-async function configuredRegion(flag: string | undefined): Promise<string | undefined> {
-  if (flag !== undefined) return flag;
+/** The region your AWS configuration names; undefined when it names none. */
+async function configuredRegion(): Promise<string | undefined> {
   try {
     return await new STSClient({}).config.region();
   } catch {
@@ -88,7 +71,7 @@ export function registerDestroyCommand(program: Command, context: DestroyCommand
       const overrides = context.overrides ?? {};
       // Every client, the settings store and the plan use this one region, so runDestroy's check
       // against the environment's own region covers everything it touches.
-      const region = overrides.region ?? await configuredRegion(options.region);
+      const region = options.region ?? overrides.region ?? await configuredRegion();
       if (region === undefined) throw agentXError("CONFIG_INVALID", "agentx destroy could not find an AWS region in your configuration; pass --region <the environment's region>");
       const aws = { region };
       const write = overrides.write ?? ((line: string) => { context.stderr.write(`${line}\n`); });
@@ -111,9 +94,13 @@ export function registerDestroyCommand(program: Command, context: DestroyCommand
           region,
         };
         const result = await runDestroy({ env: globals.env, keepData: options.keepData }, deps);
-        context.stdout.write(globals.json ? formatSuccess(result, true) : result.removed
-          ? `${[`Removed environment ${result.env}.`, ...result.manualSteps.map((step) => `  ${step}`)].join("\n")}\n`
-          : `Nothing to remove for environment ${result.env}.\n`);
+        if (result.notFound !== undefined) {
+          // Exit 2, not 0: from here, an environment removed earlier and one installed in another
+          // region look the same, and a script must never read the second as success.
+          context.stdout.write(globals.json ? formatSuccess(result, true) : `Nothing removed: ${result.notFound}.\n`);
+          throw agentXError("CONFIG_INVALID", `${result.notFound}; if it was removed earlier, there is nothing left to do`);
+        }
+        context.stdout.write(globals.json ? formatSuccess(result, true) : `${[`Removed environment ${result.env}.`, ...result.manualSteps.map((step) => `  ${step}`)].join("\n")}\n`);
       } finally {
         reader?.close();
       }
