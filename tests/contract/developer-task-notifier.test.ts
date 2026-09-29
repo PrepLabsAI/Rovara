@@ -57,7 +57,7 @@ async function notifierHarness(body: Record<string, unknown> = { shareToChannel:
   const workspaceId = (harness.db.get(`DEVTASK#${taskId}`, "META") as { workspaceId: string }).workspaceId;
   const active = () => String((harness.db.get(`WORKSPACE#${workspaceId}`, "META") as { activeOperationId: string }).activeOperationId);
   return {
-    ...harness, stream, posts, queue, logs, pump, taskId, workspaceId, active, deliveryFailed, retryLater,
+    ...harness, stream, posts, queue, logs, pump, handle, taskId, workspaceId, active, deliveryFailed, retryLater,
     advance: (ms: number) => { clock += ms; }, fail: (code: string | undefined) => { failing = code; },
   };
 }
@@ -321,6 +321,40 @@ describe("races with the start message (C1, C24)", () => {
     h.queue.push({ notice: { id: `${h.taskId}:start`, kind: "start", taskId: h.taskId, at: new Date().toISOString() }, attempt: 0 });
     await h.pump();
     expect(h.posts).toHaveLength(1);
+  });
+
+  it("posts the start message once when two deliveries of it run at the same time (final review M3)", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const posted: string[] = [];
+    const h = await notifierHarness({ shareToChannel: true }, { post: async (input) => { posted.push(input.channel); await gate; return { ts: "1695500000.000200" }; } });
+    await h.handle({ Records: h.stream.take().map((record) => ({ ...record, eventSource: "aws:dynamodb" })) });
+    const start = h.queue.find((entry) => entry.notice.kind === "start")!.notice;
+    const delivery = (id: string) => h.handle({ Records: [{ eventSource: "aws:sqs", messageId: id, receiptHandle: id, body: JSON.stringify(start), attributes: { ApproximateReceiveCount: "1" } }] });
+    const first = delivery("first");
+    const second = delivery("second");
+    await vi.waitFor(() => expect(posted).toHaveLength(1));
+    release();
+    const answers = await Promise.all([first, second]);
+    expect(posted).toHaveLength(1);
+    // The delivery that did not post waits for the other one, and is retried.
+    expect(answers.flatMap((answer) => answer.batchItemFailures.map((failure) => failure.itemIdentifier))).toHaveLength(1);
+    expect((h.db.get(`DEVTASK#${h.taskId}`, "META") as { share: { threadTs: string } }).share.threadTs).toBe("1695500000.000200");
+    expect(h.logs).not.toContainEqual(expect.objectContaining({ event: "developer_notifier.start_posted_twice" }));
+    // Its retry finds the start delivered and posts nothing.
+    expect((await delivery("again")).batchItemFailures).toEqual([]);
+    expect(posted).toHaveLength(1);
+  });
+
+  it("lets a later delivery post the start message when an earlier one failed to post (final review M3)", async () => {
+    const h = await notifierHarness();
+    h.fail("ratelimited");
+    await h.pump();
+    expect(h.posts).toHaveLength(0);
+    h.fail(undefined);
+    await h.pump();
+    expect(h.posts).toHaveLength(1);
+    expect((h.db.get(`DEVTASK#${h.taskId}`, "META") as { share: Record<string, unknown> }).share).toHaveProperty("threadTs");
   });
 });
 

@@ -5,7 +5,7 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { ChangeMessageVisibilityCommand, SQSClient, SendMessageBatchCommand } from "@aws-sdk/client-sqs";
-import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, lastAssistantResponse, sharedTaskKey } from "@agentx/contracts";
 import { readStream, type Notice, type StreamRecord } from "../developer/notifications.js";
 import { CANCELLED_REPLY, CLOSED_REPLY, READY_REPLY, endedReply, modeReply, pullRequestReply, setupFailedReply, startMessage } from "../developer/share-messages.js";
@@ -211,6 +211,41 @@ async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord &
 
 type Outcome = "posted" | "recorded" | "not_shared" | "before_share" | "after_close" | "delivered" | "no_thread" | "stale";
 
+/** How long one delivery holds the start message's post (final review M3); longer than a post's timeout. */
+const START_LEASE_MS = 60_000;
+
+/**
+ * Final review M3: claims the start message's post, so two deliveries running at the same time
+ * cannot both post a top-level message (the second would start a thread with no record). True when
+ * this delivery may post; false when another delivery holds a live claim, or already posted.
+ */
+async function claimStart(deps: NotifierDependencies, marker: { pk: string; sk: string }, until: number): Promise<boolean> {
+  try {
+    await deps.documentClient.send(new UpdateCommand({
+      TableName: deps.tableName, Key: marker,
+      UpdateExpression: "SET entityType = :notice, postingUntil = :until",
+      ConditionExpression: "attribute_not_exists(deliveredAt) AND attribute_not_exists(postedTs) AND (attribute_not_exists(postingUntil) OR postingUntil < :now)",
+      ExpressionAttributeValues: { ":notice": "NOTICE", ":until": until, ":now": deps.now() },
+    }));
+    return true;
+  } catch (error) {
+    if (isConditional(error)) return false;
+    throw error;
+  }
+}
+
+/** Gives a failed post's claim back at once, so the retry need not wait for it to lapse. Best effort. */
+async function releaseStart(deps: NotifierDependencies, marker: { pk: string; sk: string }, until: number): Promise<void> {
+  try {
+    await deps.documentClient.send(new UpdateCommand({
+      TableName: deps.tableName, Key: marker, UpdateExpression: "REMOVE postingUntil", ConditionExpression: "postingUntil = :until",
+      ExpressionAttributeValues: { ":until": until },
+    }));
+  } catch (error) {
+    deps.log({ event: "developer_notifier.start_release_failed", error: errorName(error) });
+  }
+}
+
 interface NoticeMarker { deliveredAt?: string; postedTs?: string }
 
 /**
@@ -247,11 +282,28 @@ async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outc
       await recordThread(deps, task.taskId, delivered.postedTs, marker);
       return "recorded";
     }
+    const until = deps.now() + START_LEASE_MS;
+    if (!await claimStart(deps, marker, until)) {
+      const current = await getItem<NoticeMarker>(deps, marker);
+      if (current?.deliveredAt !== undefined) return "delivered";
+      if (current?.postedTs !== undefined) {
+        await recordThread(deps, task.taskId, current.postedTs, marker);
+        return "recorded";
+      }
+      // Another delivery is posting it now: this one is retried, and then finds it delivered.
+      throw new StartPending();
+    }
     const status = await currentStatus(deps, task);
-    const { ts } = await deps.post({
-      channel: share.channelId,
-      text: startMessage({ developerName: task.developerName, slackUserId: task.slackUserId, client: task.client, title: task.title, project: task.project, mode: share.mode, status, sharedReason: share.sharedReason }),
-    });
+    let ts: string;
+    try {
+      ({ ts } = await deps.post({
+        channel: share.channelId,
+        text: startMessage({ developerName: task.developerName, slackUserId: task.slackUserId, client: task.client, title: task.title, project: task.project, mode: share.mode, status, sharedReason: share.sharedReason }),
+      }));
+    } catch (error) {
+      await releaseStart(deps, marker, until);
+      throw error;
+    }
     try {
       await recordThread(deps, task.taskId, ts, marker);
     } catch (error) {
