@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { build } from "esbuild";
 import { afterEach, describe, expect, it } from "vitest";
 import { ENTRY_SHEBANG_FILTER, packCli, parsePackCliArgs } from "../../scripts/release/pack-cli.js";
 
@@ -28,7 +29,7 @@ describe("publishable CLI package", () => {
       license: "FSL-1.1-ALv2",
     });
     expect(manifest.dependencies).toBeUndefined();
-    expect(manifest.files).toEqual(["bin", "README.md", "LICENSE"]);
+    expect(manifest.files).toEqual(["bin", "README.md", "LICENSE", "THIRD_PARTY_NOTICES"]);
     expect(manifest.description).toBe("AgentX installer and administration CLI");
     expect(manifest.repository).toEqual({ type: "git", url: "git+https://github.com/PrepLabsAI/AgentX.git" });
 
@@ -49,6 +50,42 @@ describe("publishable CLI package", () => {
     // staged one packCli wrote before running `npm pack`.
     const installedLicense = await readFile(join(project, "node_modules", "@charterarc", "agentx", "LICENSE"), "utf8");
     expect(installedLicense).toBe(await readFile(join(repoRoot, "LICENSE"), "utf8"));
+    // The bundled packages' notices travel with the installed package too (MIT and BSD require them).
+    const installedNotices = await readFile(join(project, "node_modules", "@charterarc", "agentx", "THIRD_PARTY_NOTICES"), "utf8");
+    expect(installedNotices).toBe(await readFile(join(out, "package", "THIRD_PARTY_NOTICES"), "utf8"));
+  }, 300_000);
+
+  it("names every bundled node_modules package in THIRD_PARTY_NOTICES, with its version, license and license text", async () => {
+    const out = await mkdtemp(join(tmpdir(), "agentx-pack-notices-"));
+    temporaryDirectories.push(out);
+    const { bundledPackages } = await packCli({ version: "1.2.3", out });
+    const notices = await readFile(join(out, "package", "THIRD_PARTY_NOTICES"), "utf8");
+    const names = bundledPackages.map((entry) => entry.name);
+    expect(names).toEqual(expect.arrayContaining(["@modelcontextprotocol/sdk", "smol-toml", "zod", "commander"]));
+    expect(names.some((name) => name.startsWith("@agentx/"))).toBe(false);
+    // A nested copy of another version is its own entry; the same version is listed once.
+    const versions = bundledPackages.map((entry) => `${entry.name}@${entry.version}`);
+    expect(new Set(versions).size).toBe(versions.length);
+    for (const entry of bundledPackages) {
+      const installed = JSON.parse(await readFile(join(repoRoot, "node_modules", entry.name, "package.json"), "utf8").catch(() => "{}")) as { version?: string; license?: string };
+      if (installed.version === entry.version) expect(entry.license, entry.name).toBe(installed.license);
+      expect(notices, entry.name).toContain(`${entry.name}@${entry.version}\nLicense: ${entry.license}\n`);
+    }
+    // Each package's own LICENSE text, not only its name.
+    const smolLicense = await readFile(join(repoRoot, "node_modules", "smol-toml", "LICENSE"), "utf8");
+    expect(notices).toContain(smolLicense.trim());
+    // Every package esbuild bundles from node_modules is named, found here from esbuild's own
+    // metafile for the same entry point: none is missing.
+    const { metafile } = await build({
+      entryPoints: [join(repoRoot, "packages/cli/src/main.ts")], bundle: true, platform: "node", format: "esm", target: "node22",
+      write: false, metafile: true, logLevel: "silent", define: { __AGENTX_VERSION__: JSON.stringify("1.2.3") },
+    });
+    const expected = new Set(Object.keys(metafile.inputs).flatMap((input) => {
+      const match = /.*node_modules\/((?:@[^/]+\/)?[^/]+)\//.exec(input.split("\\").join("/"));
+      return match === null ? [] : [match[1]!];
+    }));
+    expect(expected.size).toBeGreaterThan(3);
+    for (const name of expected) expect(names, name).toContain(name);
   }, 300_000);
 
   it("honors a custom package name", async () => {

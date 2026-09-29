@@ -1,9 +1,9 @@
 import { execFile } from "node:child_process";
-import { chmod, copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { build, type Plugin } from "esbuild";
+import { build, type Metafile, type Plugin } from "esbuild";
 
 const execFileAsync = promisify(execFile);
 
@@ -47,6 +47,79 @@ export interface PackCliInput {
 
 export interface PackCliResult {
   tarball: string;
+  /** Every node_modules package in the bundle, as THIRD_PARTY_NOTICES names it. */
+  bundledPackages: BundledPackage[];
+}
+
+export interface BundledPackage {
+  name: string;
+  version: string;
+  license: string;
+}
+
+const LICENSE_FILE = /^(licen[cs]e|copying|notice)(\.[a-z0-9]+)?$/i;
+
+/**
+ * The node_modules packages esbuild put into the bundle, read from its metafile: each package's
+ * directory is the path up to its name after the last `node_modules/` (a nested copy is its own
+ * entry). Workspace packages (@agentx/*) resolve to packages/*, never node_modules, so they are
+ * not third-party and are left out.
+ */
+export function bundledPackageDirectories(metafile: Metafile, root: string): Map<string, string> {
+  const directories = new Map<string, string>();
+  for (const input of Object.keys(metafile.inputs)) {
+    const path = input.split("\\").join("/");
+    const match = /^(.*node_modules\/)((?:@[^/]+\/)?[^/]+)\//.exec(path);
+    if (match === null) continue;
+    directories.set(resolve(root, `${match[1]}${match[2]}`), match[2]!);
+  }
+  return directories;
+}
+
+/**
+ * THIRD_PARTY_NOTICES: for each bundled package, its name, version and license, then the license
+ * text it ships. MIT, ISC and BSD licenses require the notice to travel with every copy, and the
+ * bundle keeps no legal comments, so this file is where the notices live.
+ */
+export async function thirdPartyNotices(metafile: Metafile, root: string): Promise<{ text: string; packages: BundledPackage[] }> {
+  const entries: Array<BundledPackage & { texts: string[] }> = [];
+  const seen = new Set<string>();
+  for (const [directory, name] of bundledPackageDirectories(metafile, root)) {
+    const manifest = JSON.parse(await readFile(join(directory, "package.json"), "utf8")) as { name?: string; version?: string; license?: unknown };
+    const version = manifest.version ?? "unknown";
+    if (seen.has(`${name}@${version}`)) continue;
+    seen.add(`${name}@${version}`);
+    const license = typeof manifest.license === "string" ? manifest.license : "see the license text below";
+    const files = (await readdir(directory)).filter((file) => LICENSE_FILE.test(file)).sort();
+    const texts = await Promise.all(files.map(async (file) => (await readFile(join(directory, file), "utf8")).trim()));
+    entries.push({ name, version, license, texts });
+  }
+  entries.sort((a, b) => (a.name === b.name ? a.version.localeCompare(b.version) : a.name.localeCompare(b.name)));
+  const rule = "-".repeat(72);
+  // A package that ships no license file points at a package in this file that ships the same license's text.
+  const missing = (entry: BundledPackage): string => {
+    const other = entries.find((candidate) => candidate.license === entry.license && candidate.texts.length > 0);
+    return other === undefined
+      ? `This package ships no license file; its package.json declares the license ${entry.license}.`
+      : `This package ships no license file; its package.json declares the license ${entry.license}, whose text is included in this file under ${other.name}@${other.version}.`;
+  };
+  const sections = entries.map((entry) => [
+    rule,
+    `${entry.name}@${entry.version}`,
+    `License: ${entry.license}`,
+    "",
+    entry.texts.length > 0 ? entry.texts.join("\n\n") : missing(entry),
+    "",
+  ].join("\n"));
+  const text = [
+    "Third-party notices for the AgentX CLI",
+    "",
+    "bin/agentx.mjs bundles the open-source packages below. Each is listed with its version, its",
+    "license, and the license text it ships.",
+    "",
+    ...sections,
+  ].join("\n");
+  return { text, packages: entries.map(({ name, version, license }) => ({ name, version, license })) };
 }
 
 function readmeText(name: string): string {
@@ -55,7 +128,8 @@ function readmeText(name: string): string {
     "",
     "AgentX installer and administration CLI, bundled as a single self-contained script with no",
     "runtime dependencies of its own. See LICENSE for terms (Functional Source License 1.1, ALv2",
-    "future license).",
+    "future license). The notices and license texts of the open-source packages the bundle",
+    "includes are in THIRD_PARTY_NOTICES.",
     "",
     "## Install",
     "",
@@ -83,8 +157,10 @@ export async function packCli(input: PackCliInput): Promise<PackCliResult> {
   await mkdir(binDir, { recursive: true });
 
   const bundlePath = join(binDir, "agentx.mjs");
-  await build({
+  const { metafile } = await build({
     entryPoints: [ENTRY_POINT],
+    // The inputs list names every bundled package, for THIRD_PARTY_NOTICES.
+    metafile: true,
     bundle: true,
     platform: "node",
     format: "esm",
@@ -108,7 +184,7 @@ export async function packCli(input: PackCliInput): Promise<PackCliResult> {
     bin: { agentx: "bin/agentx.mjs" },
     engines: { node: ">=22.19.0" },
     license: "FSL-1.1-ALv2",
-    files: ["bin", "README.md", "LICENSE"],
+    files: ["bin", "README.md", "LICENSE", "THIRD_PARTY_NOTICES"],
     description: "AgentX installer and administration CLI",
     // release.yml's npm job passes no --provenance flag: PrepLabsAI/AgentX is private today, and
     // npm provenance attestation fails for private repositories. Once the repository is public,
@@ -123,13 +199,16 @@ export async function packCli(input: PackCliInput): Promise<PackCliResult> {
   // copyFile, not read-as-utf8-then-write, so the packaged LICENSE is byte-for-byte identical to
   // the repo root's (no re-encoding, no line-ending normalization).
   await copyFile(join(REPO_ROOT, "LICENSE"), join(packageDir, "LICENSE"));
+  // esbuild's metafile paths are relative to its working directory.
+  const notices = await thirdPartyNotices(metafile, process.cwd());
+  await writeFile(join(packageDir, "THIRD_PARTY_NOTICES"), notices.text, "utf8");
 
   // npm pack, run with `packageDir` as cwd, prints only the tarball's filename to stdout (its
   // human-readable "npm notice" summary goes to stderr instead).
   const { stdout } = await execFileAsync("npm", ["pack", "--pack-destination", out], { cwd: packageDir });
   const tarballName = stdout.trim().split("\n").at(-1);
   if (!tarballName) throw new Error("npm pack did not print a tarball filename");
-  return { tarball: join(out, tarballName) };
+  return { tarball: join(out, tarballName), bundledPackages: notices.packages };
 }
 
 function usage(): string {
