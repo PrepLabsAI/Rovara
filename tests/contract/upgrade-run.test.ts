@@ -136,7 +136,26 @@ describe("agentx upgrade (FR-042 to FR-044)", () => {
   it("refuses while another command holds the environment lock, deploying nothing", async () => {
     const h = await harness();
     h.store.values.set(lockParameterName("staging"), JSON.stringify({ holder: "arn:aws:sts::123456789012:assumed-role/Admin/bob", command: "config set", acquiredAt: new Date(T0).toISOString() }));
-    await expect(runUpgrade(options, h.deps)).rejects.toThrow("config set");
+    await expect(runUpgrade(options, h.deps)).rejects.toThrow(`locked by arn:aws:sts::123456789012:assumed-role/Admin/bob running "config set" since ${new Date(T0).toISOString()}; wait for it to finish, then run the same agentx command again`);
+    expect(h.deployer.deployed).toEqual([]);
+  });
+
+  it("offers to take over a stale lock a killed upgrade left, and upgrades once confirmed", async () => {
+    const asked: string[] = [];
+    const h = await harness({ ask: async (prompt) => { asked.push(prompt); return "y"; } });
+    const stale = new Date(T0 - 3 * 60 * 60 * 1000).toISOString();
+    h.store.values.set(lockParameterName("staging"), JSON.stringify({ holder: ADMIN, command: "upgrade", acquiredAt: stale }));
+    await runUpgrade(options, h.deps);
+    expect(asked[0]).toBe(`Environment staging is locked by ${ADMIN} running "upgrade" since ${stale}. Take the lock over? Say yes only if that command is no longer running. [y/N] `);
+    expect(h.deployer.deployed).toHaveLength(6);
+    expect(h.store.values.has(lockParameterName("staging"))).toBe(false);
+  });
+
+  it("keeps a stale lock when the takeover is declined, deploying nothing", async () => {
+    const h = await harness({ ask: async () => "n" });
+    h.store.values.set(lockParameterName("staging"), JSON.stringify({ holder: ADMIN, command: "upgrade", acquiredAt: new Date(T0 - 3 * 60 * 60 * 1000).toISOString() }));
+    await expect(runUpgrade(options, h.deps)).rejects.toThrow("older than 2 hours");
+    expect(h.prepared).toEqual([]);
     expect(h.deployer.deployed).toEqual([]);
   });
 

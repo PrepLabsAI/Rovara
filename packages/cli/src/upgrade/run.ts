@@ -11,7 +11,7 @@ import { upgradeOrder, type DeployPart } from "../deploy/parameters.js";
 import type { LoadedRelease } from "../deploy/release.js";
 import { reportText, type DoctorReport } from "../doctor/checks.js";
 import type { CallerIdentity, StackReader } from "../environments/adopt.js";
-import { withEnvironmentLock } from "../environments/lock.js";
+import { withEnvironmentLock, type LockRecord } from "../environments/lock.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import { readEnvironmentSettings, type EnvironmentSettings } from "../environments/settings.js";
 import { isOperatorRole } from "../init/commands.js";
@@ -134,7 +134,12 @@ export async function runUpgrade(options: UpgradeOptions, deps: UpgradeDependenc
 
   // Question 3 under concurrency: another upgrade may finish between the read above and this lock,
   // so the settings are read again, and every check on them repeated, while the lock is held.
-  const { settings, parts } = await withEnvironmentLock({ store: deps.store, env, holder: caller.arn, command: "upgrade", now: deps.now }, async () => {
+  // A killed upgrade leaves its lock; once it is stale (2 hours), a person at a terminal may take it
+  // over, as with init and destroy. --yes never takes one over on its own.
+  const confirmTakeover = deps.isInteractive()
+    ? async (held: LockRecord) => /^y(es)?$/i.test((await deps.ask(`Environment ${env} is locked by ${held.holder} running "${held.command}" since ${held.acquiredAt}. Take the lock over? Say yes only if that command is no longer running. [y/N] `)).trim())
+    : undefined;
+  const { settings, parts } = await withEnvironmentLock({ store: deps.store, env, holder: caller.arn, command: "upgrade", now: deps.now, ...(confirmTakeover === undefined ? {} : { confirmTakeover }) }, async () => {
     const settings = upgradableSettings(await readEnvironmentSettings(deps.store, env), env);
     if (settings.engine !== first.engine) {
       throw agentXError("CONFIG_INVALID", `environment ${env}'s settings changed to the ${settings.engine} engine while agentx upgrade was starting; run agentx upgrade again`);

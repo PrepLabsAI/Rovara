@@ -540,7 +540,7 @@ describe("agentx init", () => {
     h.store.values.set(lockParameterName("staging"), JSON.stringify({ holder: "arn:aws:sts::123456789012:assumed-role/Admin/bob", command: "deploy install", acquiredAt: new Date(T0).toISOString() }));
     const code = await h.run([...UNATTENDED, "--alert-webhook-env", "HOOK"], { processEnv: { ...UNATTENDED_ENV, HOOK: WEBHOOK } });
     expect(code).toBe(2);
-    expect(h.printed()).toContain("locked by arn:aws:sts::123456789012:assumed-role/Admin/bob");
+    expect(h.printed()).toContain(`locked by arn:aws:sts::123456789012:assumed-role/Admin/bob running "deploy install" since ${new Date(T0).toISOString()}; wait for it to finish, then run the same agentx command again`);
     expect(h.store.values.has(installAnswersParameterName("staging"))).toBe(false);
     expect(h.secrets.values.has("agentx/staging/alert-endpoint")).toBe(false);
   });
