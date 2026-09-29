@@ -79,13 +79,53 @@ describe("destroy: name guards, prefix overlaps and the older production deploym
 
   it("matches a bucket whose name CloudFormation shortened when S3 returns no stack tag (Task 20 live check)", () => {
     // live15ea's Slack thread-session bucket: S3's tag set held only agentx:env, and CloudFormation cut
-    // the stack name agentx-live15ea-control-plane to agentx-live15ea-control-p.
-    const bucket: RetainedResource = { part: "control-plane", logicalId: "SlackThreadSessions", type: "AWS::S3::Bucket", physicalId: "agentx-live15ea-control-p-slackthreadsessions6fd21-taqjchbygr25" };
+    // the stack name agentx-live15ea-control-plane to agentx-live15ea-control-p and the logical id
+    // SlackThreadSessions6FD21617 to slackthreadsessions6fd21, to fit S3's 63 characters.
+    const bucket: RetainedResource = { part: "control-plane", logicalId: "SlackThreadSessions6FD21617", type: "AWS::S3::Bucket", physicalId: "agentx-live15ea-control-p-slackthreadsessions6fd21-taqjchbygr25" };
+    expect(bucket.physicalId).toHaveLength(63);
     expect(isOwnedRetained("live15ea", bucket, { "agentx:env": "live15ea" })).toBe(true);
     expect(isOwnedRetained("live15ea", bucket, { "agentx:env": "live15eab" })).toBe(false);
     expect(isOwnedRetained("live15ea", { ...bucket, part: "slack" }, { "agentx:env": "live15ea" })).toBe(false);
     expect(isOwnedRetained("live15ea", { ...bucket, physicalId: "agentx-live15eab-control-p-slackthreadsessions6fd21-x" }, { "agentx:env": "live15ea" })).toBe(false);
     expect(isOwnedRetained("live15ea", { ...bucket, physicalId: "agentx-live15ea--slackthreadsessions6fd21-x" }, { "agentx:env": "live15ea" })).toBe(false);
+  });
+});
+
+describe("destroy: a generated bucket name, shortened (review I2)", () => {
+  const ENV20 = "abcdefghijklmnopqrst";
+  // agentx-abcdefghijklmnopqrst-control-plane cut to 25 characters reaches into agentx-<env>- itself.
+  const long: RetainedResource = { part: "control-plane", logicalId: "SlackThreadSessions6FD21617", type: "AWS::S3::Bucket", physicalId: "agentx-abcdefghijklmnopqr-slackthreadsessions6fd21-taqjchbygr25" };
+  const tagged = { "agentx:env": ENV20 };
+
+  it("matches a 20-character environment's bucket whose stack name was cut inside agentx-<env>-", () => {
+    expect(long.physicalId).toHaveLength(63);
+    expect(isOwnedRetained(ENV20, long, tagged)).toBe(true);
+  });
+
+  it("matches the full stack name followed by a hyphen at any length, as before", () => {
+    expect(isOwnedRetained("staging", { part: "access", logicalId: "ArtifactBucket", type: "AWS::S3::Bucket", physicalId: "agentx-staging-access-artifactbucket-1a" }, { "agentx:env": "staging" })).toBe(true);
+  });
+
+  it("refuses another part, another environment's tag, a shortened name that is not 63 characters, and another logical id", () => {
+    // Cut inside agentx-<env>-, the name no longer holds the part, so the logical id binds it: another
+    // part's bucket has another logical id. (Cut inside the part, as for live15ea, the part itself is
+    // checked: see the live check test above.)
+    expect(isOwnedRetained(ENV20, { ...long, part: "slack", logicalId: "SessionArchive1A2B3C4D" }, tagged)).toBe(false);
+    expect(isOwnedRetained("live15ea", { part: "slack", logicalId: "SlackThreadSessions6FD21617", type: "AWS::S3::Bucket", physicalId: "agentx-live15ea-control-p-slackthreadsessions6fd21-taqjchbygr25" }, { "agentx:env": "live15ea" })).toBe(false);
+    expect(isOwnedRetained(ENV20, long, { "agentx:env": "abcdefghijklmnopqrs" })).toBe(false);
+    expect(isOwnedRetained(ENV20, { ...long, physicalId: long.physicalId.slice(0, -1) }, tagged)).toBe(false);
+    expect(isOwnedRetained(ENV20, { ...long, logicalId: "Artifacts" }, tagged)).toBe(false);
+    // A sibling environment prod-c passes a name check for prod's control-plane (candidate "c"), but
+    // not at 63 characters and not with prod's tag: the tag is what blocks it.
+    const sibling: RetainedResource = { part: "control-plane", logicalId: "State", type: "AWS::S3::Bucket", physicalId: "agentx-prod-c-foundation-state-1x" };
+    expect(isOwnedRetained("prod", sibling, { "agentx:env": "prod" })).toBe(false);
+  });
+
+  it("keeps the full-prefix rule for tables and log groups, which S3's limit does not shorten", () => {
+    for (const type of ["AWS::DynamoDB::Table", "AWS::Logs::LogGroup"]) {
+      expect(isOwnedRetained(ENV20, { ...long, type }, tagged), type).toBe(false);
+      expect(isOwnedRetained(ENV20, { ...long, type, physicalId: `agentx-${ENV20}-control-plane-state-1x` }, tagged), type).toBe(true);
+    }
   });
 });
 

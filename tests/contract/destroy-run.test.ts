@@ -108,6 +108,21 @@ describe("agentx destroy (FR-055, item 3)", () => {
     expect(result.leftInPlace).toEqual(["AWS::KMS::Key key-3c (it does not carry agentx:env=staging)"]);
   });
 
+  it("says which check a retained resource failed: the tag, or the name (review M4)", async () => {
+    const account = installedAccount("staging");
+    const access = account.stacks.get("agentx-staging-access")!;
+    access.resources = [{ logicalId: "ArtifactBucket", type: "AWS::S3::Bucket", physicalId: "agentx-staging-foundation-artifactbucket-1a" }];
+    account.tags.set("agentx-staging-foundation-artifactbucket-1a", { "agentx:env": "staging" });
+    account.tags.set("key-3c", { "agentx:env": "staging-eu" });
+    const h = await harness({ account });
+    const result = await runDestroy({ env: "staging", keepData: false }, h.deps);
+    expect(h.account.calls.join("\n")).not.toContain("delete bucket agentx-staging-foundation-artifactbucket-1a");
+    expect(result.leftInPlace).toEqual([
+      "AWS::KMS::Key key-3c (it does not carry agentx:env=staging)",
+      "AWS::S3::Bucket agentx-staging-foundation-artifactbucket-1a (its name does not match stack agentx-staging-access)",
+    ]);
+  });
+
   it("changes nothing when the typed name is wrong", async () => {
     const h = await harness({ typed: ["stagin"] });
     await expect(runDestroy({ env: "staging", keepData: false }, h.deps)).rejects.toThrow("you typed stagin, not staging; nothing was removed");

@@ -30,34 +30,49 @@ export const isOwnedWorker = (env: string, tags: Record<string, string>) =>
 /** CloudFormation's own tag on the resources it creates. */
 const STACK_NAME_TAG = "aws:cloudformation:stack-name";
 
-/** A generated name starts with its stack's name and "-". For a bucket, CloudFormation may cut the
- * stack name's part short (agentx-live15ea-control-plane becomes agentx-live15ea-control-p, seen in
- * the Task 20 live check), and S3 then returns no stack-name tag, so a non-empty start of the part also
- * counts. "agentx-<env>-" itself is never cut here, so a sibling environment never matches. */
-function startsWithOwnStack(env: string, part: StackPart, physicalId: string): boolean {
-  const id = physicalId.toLowerCase();
-  const head = `agentx-${env}-`.toLowerCase();
-  if (!id.startsWith(head)) return false;
-  const rest = id.slice(head.length);
-  for (let end = rest.indexOf("-"); end !== -1; end = rest.indexOf("-", end + 1)) {
-    const candidate = rest.slice(0, end);
-    if (candidate.length > 0 && part.startsWith(candidate)) return true;
+/** S3's longest bucket name: CloudFormation shortens a generated bucket name only to fit it. */
+const BUCKET_NAME_MAX = 63;
+
+/** A generated name starts with its stack's name and "-". CloudFormation fits a generated bucket
+ * name into 63 characters as <start of the stack name>-<start of the logical id>-<random>, lowercased
+ * (agentx-live15ea-control-p-slackthreadsessions6fd21-taqjchbygr25, seen in the Task 20 live check),
+ * and S3 then returns no stack-name tag. For a long environment name the cut can reach into
+ * agentx-<env>- itself. So a bucket name exactly 63 characters long also matches that shape, bound
+ * to this resource's own stack name and logical id. Tables and log groups have no such limit and
+ * keep the full-prefix rule. A sibling environment (prod-c beside prod) can pass the name check; the
+ * agentx:env tag is what blocks it. */
+function generatedNameMatches(env: string, resource: RetainedResource): boolean {
+  const id = resource.physicalId.toLowerCase();
+  const stack = environmentStackName(env, resource.part).toLowerCase();
+  if (id.startsWith(`${stack}-`)) return true;
+  if (resource.type !== "AWS::S3::Bucket" || id.length !== BUCKET_NAME_MAX) return false;
+  const logicalId = resource.logicalId.toLowerCase();
+  for (let first = id.indexOf("-"); first !== -1; first = id.indexOf("-", first + 1)) {
+    for (let second = id.indexOf("-", first + 1); second !== -1; second = id.indexOf("-", second + 1)) {
+      const [p1, p2, suffix] = [id.slice(0, first), id.slice(first + 1, second), id.slice(second + 1)];
+      if (p1.length > 0 && stack.startsWith(p1) && p2.length > 0 && logicalId.startsWith(p2) && /^[a-z0-9]+$/.test(suffix)) return true;
+    }
   }
   return false;
 }
 
-/** A retained resource comes from this environment's own stack inventory; it must also carry this
- * environment's tag. When it carries CloudFormation's stack-name tag, that must be its own stack
- * (a generated bucket name can be shortened for a long environment name, so the name alone can miss
- * it); without that tag, a generated name must start with its own stack's name. */
-export function isOwnedRetained(env: string, resource: RetainedResource, tags: Record<string, string> | undefined): boolean {
-  if (!valid(env) || tags?.["agentx:env"] !== env) return false;
+/** Why a retained resource is not this environment's to delete, or undefined when it is. It comes
+ * from this environment's own stack inventory; it must also carry this environment's tag. When it
+ * carries CloudFormation's stack-name tag, that must be its own stack; without that tag, a generated
+ * name must match its own stack (generatedNameMatches). */
+export function retainedMismatch(env: string, resource: RetainedResource, tags: Record<string, string> | undefined): string | undefined {
+  if (!valid(env) || tags?.["agentx:env"] !== env) return `it does not carry agentx:env=${env}`;
+  const own = environmentStackName(env, resource.part);
   const stackTag = tags[STACK_NAME_TAG];
-  if (stackTag !== undefined && stackTag !== environmentStackName(env, resource.part)) return false;
-  if (stackTag === undefined && GENERATED_NAMES.has(resource.type)) return startsWithOwnStack(env, resource.part, resource.physicalId);
-  if (resource.type === "AWS::SecretsManager::Secret") return resource.physicalId.includes(`:secret:agentx/${env}/`) || resource.physicalId.startsWith(`agentx/${env}/`);
-  return true;
+  if (stackTag !== undefined && stackTag !== own) return `it belongs to stack ${stackTag}, not ${own}`;
+  if (stackTag === undefined && GENERATED_NAMES.has(resource.type) && !generatedNameMatches(env, resource)) return `its name does not match stack ${own}`;
+  if (resource.type === "AWS::SecretsManager::Secret" && !(resource.physicalId.includes(`:secret:agentx/${env}/`) || resource.physicalId.startsWith(`agentx/${env}/`))) {
+    return `its name is not under agentx/${env}/`;
+  }
+  return undefined;
 }
+
+export const isOwnedRetained = (env: string, resource: RetainedResource, tags: Record<string, string> | undefined): boolean => retainedMismatch(env, resource, tags) === undefined;
 
 const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 

@@ -15,7 +15,7 @@ import { installAnswersParameterName, installProgressParameterName, readInstallA
 import type { TokenStore } from "../token-store.js";
 import type { DestroyApi, DestroyStack } from "./aws.js";
 import { confirmationPrompts, destroyPlanText, inventoryParameterName, KEPT_BY_KEEP_DATA, mergeInventory, readInventory, retainedResources, vendorSteps, writeInventory, type Inventory, type RetainedResource } from "./inventory.js";
-import { DELETE_AFTER_WORKERS, DELETE_BEFORE_WORKERS, isOwnedAlias, isOwnedParameter, isOwnedRetained, isOwnedSecret, isOwnedStack, isOwnedWorker, isSecretId } from "./names.js";
+import { DELETE_AFTER_WORKERS, DELETE_BEFORE_WORKERS, isOwnedAlias, isOwnedParameter, isOwnedSecret, isOwnedStack, isOwnedWorker, isSecretId, retainedMismatch } from "./names.js";
 import { deleteVolumesWhenFree, waitForInstancesGone, waitForStackDelete } from "./wait.js";
 
 export interface DestroyDependencies {
@@ -223,7 +223,8 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
       if (options.keepData && KEPT_BY_KEEP_DATA.has(resource.type)) { result.kept.push(label(resource)); continue; }
       const tags = await api.resourceTags(resource);
       if (tags === undefined) continue;
-      if (!isOwnedRetained(env, resource, tags)) { result.leftInPlace.push(`${label(resource)} (it does not carry agentx:env=${env})`); continue; }
+      const mismatch = retainedMismatch(env, resource, tags);
+      if (mismatch !== undefined) { result.leftInPlace.push(`${label(resource)} (${mismatch})`); continue; }
       switch (resource.type) {
         case "AWS::S3::Bucket": await api.deleteBucket(resource.physicalId, (count) => { if (count % 1000 === 0) deps.write(`${resource.physicalId}: ${count} objects deleted`); }); break;
         case "AWS::DynamoDB::Table": await api.deleteTable(resource.physicalId); break;
