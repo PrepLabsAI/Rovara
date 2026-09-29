@@ -3,6 +3,7 @@ import type { ModelsAnswers } from "../deploy/answer-schemas.js";
 // FR-015: everything init checks before it creates anything. Every problem is collected and
 // reported together, with what to change; cdk bootstrap (which creates the CDKToolkit stack) is
 // offered only when every other check has passed.
+import { DescribeAddressesCommand, EC2Client } from "@aws-sdk/client-ec2";
 import { ServiceQuotasClient, GetServiceQuotaCommand } from "@aws-sdk/client-service-quotas";
 import { BedrockRuntimeClient, ConverseCommand } from "@aws-sdk/client-bedrock-runtime";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
@@ -21,6 +22,8 @@ export interface PrerequisiteChecks {
   openRouter?(modelId: string, config: OpenRouterCheckConfig, key?: string): Promise<void>;
   /** Regional on-demand Standard EC2 vCPU quota. */
   ec2Quota(): Promise<number>;
+  /** The regional EC2-VPC Elastic IP quota (L-0263D0A3) and how many addresses are allocated now. */
+  elasticIps(): Promise<{ quota: number; allocated: number }>;
   /** The command's --version output, or undefined when it is not installed. */
   commandVersion(command: string): Promise<string | undefined>;
   cdkBootstrapped(): Promise<boolean>;
@@ -28,6 +31,9 @@ export interface PrerequisiteChecks {
   oidcDiscovery(issuer: string): Promise<unknown>;
   sleep(ms: number): Promise<void>;
 }
+
+/** The foundation stack gives each of its two NAT gateways its own Elastic IP. */
+export const NAT_ELASTIC_IPS = 2;
 
 export type ModelRole = "orchestrator" | "classifier" | "worker";
 export type OpenRouterCheckConfig = Partial<NonNullable<ModelsAnswers["openRouter"]>>;
@@ -139,6 +145,19 @@ export async function checkPrerequisites(input: {
     } else write(`ok EC2 Standard on-demand vCPU quota is ${quota} in ${region}`);
   } catch (error) {
     problems.push(`could not check EC2 vCPU quota in ${region}: ${errorMessage(error)}; check Service Quotas read permission and your network`);
+  }
+
+  // The foundation stack's NAT gateways fail five minutes in when the region is out of addresses.
+  try {
+    const { quota, allocated } = await checks.elasticIps();
+    const free = Math.max(0, quota - allocated);
+    if (free < NAT_ELASTIC_IPS) {
+      problems.push(`this environment needs ${NAT_ELASTIC_IPS} Elastic IPs for its NAT gateways, but ${allocated} of the ${quota} allowed in ${region} are already allocated. `
+        + `Release addresses you no longer use, or raise the EC2-VPC Elastic IPs quota (L-0263D0A3) in Service Quotas: `
+        + `aws service-quotas request-service-quota-increase --service-code ec2 --quota-code L-0263D0A3 --desired-value ${allocated + NAT_ELASTIC_IPS} --region ${region}`);
+    } else write(`ok ${free} of ${quota} EC2-VPC Elastic IPs free in ${region}; this environment needs ${NAT_ELASTIC_IPS}`);
+  } catch (error) {
+    problems.push(`could not check Elastic IPs in ${region}: ${errorMessage(error)}; check EC2 DescribeAddresses and Service Quotas read permission and your network`);
   }
 
   const roles: Array<[ModelRole, string]> = [
@@ -285,6 +304,7 @@ export function awsPrerequisiteChecks(input: { region: string; account: string; 
     requestHandler: new NodeHttpHandler(CONVERSE_REQUEST_HANDLER_OPTIONS),
   });
   const quotas = new ServiceQuotasClient({ region: input.region });
+  const ec2 = new EC2Client({ region: input.region });
   return {
     async openRouter(modelId, config, suppliedKey) {
       openRouterModel(modelId);
@@ -317,6 +337,13 @@ export function awsPrerequisiteChecks(input: { region: string; account: string; 
     async ec2Quota() {
       const response = await quotas.send(new GetServiceQuotaCommand({ ServiceCode: "ec2", QuotaCode: "L-1216C47A" }));
       return response.Quota?.Value ?? 0;
+    },
+    async elasticIps() {
+      const [quota, addresses] = await Promise.all([
+        quotas.send(new GetServiceQuotaCommand({ ServiceCode: "ec2", QuotaCode: "L-0263D0A3" })),
+        ec2.send(new DescribeAddressesCommand({ Filters: [{ Name: "domain", Values: ["vpc"] }] })),
+      ]);
+      return { quota: quota.Quota?.Value ?? 0, allocated: addresses.Addresses?.length ?? 0 };
     },
     async commandVersion(command) {
       try {

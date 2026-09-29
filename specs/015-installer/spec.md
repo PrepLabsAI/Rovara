@@ -2,7 +2,7 @@
 
 > Scope amendment (2026-09-27, #99 / #119, user confirmed): every install, including self-hosted,
 > uses `ec2-ebs` for new projects. The first-project step uses `Ec2WorkerLaunchTemplateId` and
-> `Ec2WorkerSubnets`, plus volume size/type. Prerequisites check EC2 vCPU quota; there is no
+> `Ec2WorkerSubnets`, plus volume size/type. Prerequisites check EC2 vCPU quota and that the region has the two Elastic IPs the NAT gateways need (quota L-0263D0A3, checked on a first run so init refuses before creating anything; found live, 2026-09-28); there is no
 > separate retired-runtime charge or runtime/capacity-provider teardown. This supersedes the
 > legacy assumptions in US1 scenario 3, FR-014, FR-015, FR-040, FR-050, FR-055 and Decisions below.
 > Closed workspaces, operations and historical project revisions remain readable only.

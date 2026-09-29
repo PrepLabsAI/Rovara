@@ -186,12 +186,22 @@ describe("operator role policy", () => {
     expect(actions(operatorRoleStatements(scope)).filter((a) => a.startsWith("budgets:"))).toEqual(["budgets:ViewBudget"]);
   });
 
-  it("may read only the EC2 standard vCPU quota that prerequisites checks, not any other quota", () => {
+  it("may read only the two EC2 quotas that prerequisites checks, not any other quota", () => {
     const quotas = operatorRoleStatements(scope).find((s) => s.Sid === "Quotas")!;
     expect(quotas.Action).toEqual(["servicequotas:GetServiceQuota"]);
-    // Exactly the quota code prerequisites.ts:318 checks (ServiceCode "ec2", QuotaCode "L-1216C47A"),
-    // never a wildcard: arn:partition:servicequotas:region:account:serviceCode/quotaCode.
-    expect(quotas.Resource).toBe("arn:aws:servicequotas:us-east-1:123456789012:ec2/L-1216C47A");
+    // Exactly the two quota codes prerequisites.ts checks (ServiceCode "ec2": the vCPU quota
+    // L-1216C47A and the Elastic IP quota L-0263D0A3), never a wildcard:
+    // arn:partition:servicequotas:region:account:serviceCode/quotaCode.
+    expect(quotas.Resource).toEqual([
+      "arn:aws:servicequotas:us-east-1:123456789012:ec2/L-1216C47A",
+      "arn:aws:servicequotas:us-east-1:123456789012:ec2/L-0263D0A3",
+    ]);
+  });
+
+  it("may count the region's Elastic IPs, and do nothing else with them, so the address check runs on an operator resume", () => {
+    const addresses = operatorRoleStatements(scope).find((s) => s.Sid === "Addresses")!;
+    // ec2:DescribeAddresses has no resource-level permissions, so "*" is the only Resource it takes.
+    expect(addresses).toEqual({ Sid: "Addresses", Effect: "Allow", Action: ["ec2:DescribeAddresses"], Resource: "*" });
   });
 });
 

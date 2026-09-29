@@ -351,16 +351,23 @@ export function operatorRoleStatements(scope: PolicyScope): PolicyStatementJson[
     },
     // FR-047: the alerts step checks the budget CloudFormation made; it never changes it.
     { Sid: "Budget", Effect: "Allow", Action: ["budgets:ViewBudget"], Resource: `arn:${partition}:budgets::${account}:budget/agentx-${env}-monthly` },
-    // prerequisites.ts:318 checks only the EC2 standard vCPU quota (ServiceCode "ec2", QuotaCode
-    // "L-1216C47A") on an operator resume; the servicequotas "quota" resource type's ARN format is
+    // prerequisites.ts checks two EC2 quotas on an operator resume: standard vCPUs (ServiceCode
+    // "ec2", QuotaCode "L-1216C47A") and EC2-VPC Elastic IPs ("L-0263D0A3"). The servicequotas
+    // "quota" resource type's ARN format is
     // arn:partition:servicequotas:region:account:serviceCode/quotaCode, so this scopes to exactly
-    // that one quota rather than every quota in the account.
+    // those two quotas rather than every quota in the account.
     {
       Sid: "Quotas",
       Effect: "Allow",
       Action: ["servicequotas:GetServiceQuota"],
-      Resource: `arn:${partition}:servicequotas:${region}:${account}:ec2/L-1216C47A`,
+      Resource: [
+        `arn:${partition}:servicequotas:${region}:${account}:ec2/L-1216C47A`,
+        `arn:${partition}:servicequotas:${region}:${account}:ec2/L-0263D0A3`,
+      ],
     },
+    // The Elastic IP check counts the region's allocated addresses. ec2:DescribeAddresses has no
+    // resource-level permissions, so "*" is its only Resource; it reads, and changes nothing.
+    { Sid: "Addresses", Effect: "Allow", Action: ["ec2:DescribeAddresses"], Resource: "*" },
     { Sid: "Identity", Effect: "Allow", Action: ["sts:GetCallerIdentity"], Resource: "*" },
     {
       Sid: "Logs",

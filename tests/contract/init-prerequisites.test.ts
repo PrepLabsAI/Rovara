@@ -9,6 +9,7 @@ import {
   DEDICATED_ACCOUNT_NOTE,
   endpointMissing,
   modelCheckProblem,
+  NAT_ELASTIC_IPS,
   withDeadline,
 } from "../../packages/cli/src/init/prerequisites.js";
 import type { InitAnswers } from "../../packages/cli/src/init/install-state.js";
@@ -113,6 +114,23 @@ describe("init prerequisites", () => {
       await expect(run(sampleAnswers(), passingChecks({ ec2Quota: async () => quota })))
         .rejects.toThrow(/vCPU quota.*at least 1/);
     }
+  });
+
+  it("refuses up front when the region has too few Elastic IPs left for the NAT gateways", async () => {
+    const error = await run(sampleAnswers(), passingChecks({ elasticIps: async () => ({ quota: 5, allocated: 4 }) })).catch((caught: unknown) => caught);
+    expect(String(error)).toContain(`needs ${NAT_ELASTIC_IPS} Elastic IPs for its NAT gateways, but 4 of the 5 allowed`);
+    expect(String(error)).toContain("L-0263D0A3");
+    expect(String(error)).toContain("aws service-quotas request-service-quota-increase --service-code ec2 --quota-code L-0263D0A3 --desired-value 6 --region us-east-1");
+  });
+
+  it("passes when exactly enough Elastic IPs are left, and says how many", async () => {
+    const lines = await run(sampleAnswers(), passingChecks({ elasticIps: async () => ({ quota: 5, allocated: 3 }) }));
+    expect(lines).toContain("ok 2 of 5 EC2-VPC Elastic IPs free in us-east-1; this environment needs 2");
+  });
+
+  it("refuses an unreadable Elastic IP count and reports a remedy", async () => {
+    await expect(run(sampleAnswers(), passingChecks({ elasticIps: async () => { throw awsError("UnauthorizedOperation", "not authorized"); } })))
+      .rejects.toThrow(/could not check Elastic IPs in us-east-1: .*check EC2 DescribeAddresses and Service Quotas read permission/);
   });
 
   it("refuses an unreadable quota and reports a remedy", async () => {

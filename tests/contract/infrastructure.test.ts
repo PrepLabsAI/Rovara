@@ -1,6 +1,7 @@
 import { App } from "aws-cdk-lib";
 import { Match, Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
+import { NAT_ELASTIC_IPS } from "../../packages/cli/src/init/prerequisites.js";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import {
   ProductionFoundationStack,
@@ -242,6 +243,8 @@ describe("production foundation and worker settings", () => {
     template.resourceCountIs("AWS::EC2::VPC", 1);
     template.resourceCountIs("AWS::EC2::Subnet", 4);
     template.resourceCountIs("AWS::EC2::NatGateway", 2);
+    // init's prerequisite check counts on this many Elastic IPs for a new environment.
+    template.resourceCountIs("AWS::EC2::EIP", NAT_ELASTIC_IPS);
     template.resourceCountIs("AWS::EC2::FlowLog", 1);
     template.resourceCountIs("AWS::EC2::VPCEndpoint", 1);
     template.resourceCountIs("AWS::KMS::Key", 1);

@@ -91,6 +91,7 @@ export function passingChecks(overrides: Partial<PrerequisiteChecks> = {}): Prer
     get bootstraps() { return state.bootstraps; },
     converse: async (modelId) => { state.models.push(modelId); },
     ec2Quota: async () => 32,
+    elasticIps: async () => ({ quota: 5, allocated: 0 }),
     commandVersion: async (command) => (command === "node" ? "v22.20.0" : "10.9.0"),
     cdkBootstrapped: async () => true,
     runCdkBootstrap: async () => { state.bootstraps += 1; },
