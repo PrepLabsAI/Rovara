@@ -11,7 +11,7 @@ import { processSlackRequest, type ProcessorDependencies, type TurnInput } from 
 import { createSignedServiceFetch } from "../../packages/slack-service/src/signing-fetch.js";
 import { createThreadApi } from "../../packages/slack-service/src/thread-api.js";
 import { brokerFetch } from "../support/broker-fetch.js";
-import { MAYA, bindChannel, createDeveloperTaskBroker, recordStream, registerRevision, teammate } from "../support/developer-task-broker.js";
+import { MAYA, bindChannel, createDeveloperTaskBroker, grantProject, recordStream, registerRevision, teammate } from "../support/developer-task-broker.js";
 import { signedInClient } from "../support/mcp-broker-client.js";
 import { SLACK_CHANNEL, SLACK_TEAM, call, issuer } from "../support/slack-broker.js";
 
@@ -279,7 +279,12 @@ describe("the owner's answers, end to end", () => {
     const slack = notifier(harness);
     const { tool } = await signedInClient(harness, MAYA);
     const refused = await tool("agentx_start_task", { project: "payments", instructions: "Fix it", share_to_channel: true, channel: PRIVATE });
-    expect(refused).toMatchObject({ isError: true, error: { code: "CHANNEL_REQUIRED", message: "you are not a member of that private channel; join it first, or share to one of the project's public channels" } });
+    // Final review M6: the next step matches the message, not the generic "ask an admin to bind one".
+    expect(refused).toMatchObject({ isError: true, error: {
+      code: "CHANNEL_REQUIRED",
+      message: "you are not a member of that private channel; join it first, or share to one of the project's public channels",
+      next_step: "join that private channel in Slack, or send channel with one of the project's public channels",
+    } });
     expect(harness.db.find((item) => item.entityType === "DEVELOPER_TASK")).toEqual([]);
     await slack.pump();
     expect(slack.posts).toEqual([]);
@@ -294,6 +299,23 @@ describe("the owner's answers, end to end", () => {
     expect(task.share).toMatchObject({ channelId: PRIVATE, threadTs: expect.any(String) as unknown });
     // The private channel's name is never stored on the task.
     expect(JSON.stringify(task)).not.toContain("payments-secret");
+  });
+
+  it("tells the developer to ask the admin to finish the Slack setup when AgentX cannot tell a channel's privacy (final review M6)", async () => {
+    // Maya may use the project by an admin's grant, but is in none of its channels.
+    const harness = await createDeveloperTaskBroker({ channelInfo: null, channelMembers: async () => ({ ok: true, memberOf: [] }) });
+    grantProject(harness.db, MAYA);
+    const slack = notifier(harness);
+    const { tool } = await signedInClient(harness, MAYA);
+    const refused = await tool("agentx_start_task", { project: "payments", instructions: "Fix it", share_to_channel: true });
+    expect(refused).toMatchObject({ isError: true, error: {
+      code: "SLACK_UNAVAILABLE",
+      message: "AgentX cannot tell whether that channel is private; ask your AgentX admin to finish the Slack setup, or share to a channel you are a member of",
+      next_step: "ask your AgentX admin to finish the Slack setup, or send channel with a channel you are a member of",
+    } });
+    expect(harness.db.find((item) => item.entityType === "DEVELOPER_TASK")).toEqual([]);
+    await slack.pump();
+    expect(slack.posts).toEqual([]);
   });
 
   it("fails a shared task's setup after 50 minutes, says so in the thread, and the developer reads setup_failed", async () => {

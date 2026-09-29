@@ -31,6 +31,14 @@ export const CHANNEL_TURN_REQUEST_MAX = 300;
 /** FR-031: the reasons a result gives when the project's policy changed what was asked. */
 export const SHARED_BY_POLICY = "required by project";
 export const VIEW_ONLY_BY_POLICY = "continue not allowed by project";
+/**
+ * Q10 and its fail-closed rule: the two share refusals whose next step is their own, not their
+ * code's generic one (final review M6). The broker sends the message; the MCP server matches it.
+ */
+export const PRIVATE_CHANNEL_NOT_A_MEMBER = "you are not a member of that private channel; join it first, or share to one of the project's public channels";
+export const PRIVATE_CHANNEL_NOT_A_MEMBER_STEP = "join that private channel in Slack, or send channel with one of the project's public channels";
+export const CHANNEL_PRIVACY_NOT_SET_UP = "AgentX cannot tell whether that channel is private; ask your AgentX admin to finish the Slack setup, or share to a channel you are a member of";
+export const CHANNEL_PRIVACY_NOT_SET_UP_STEP = "ask your AgentX admin to finish the Slack setup, or send channel with a channel you are a member of";
 /** FR-035 and US3 scenario 4: the fixed notices in a shared thread (Q1, Q3). */
 export const VIEW_ONLY_NOTICE =
   "This thread follows a task that a developer is driving from their AI tool, so I don't act on messages here. To ask AgentX for something, post a new message in the channel; it starts its own thread workspace.";

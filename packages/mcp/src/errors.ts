@@ -1,5 +1,5 @@
 // Spec 025 FR-049: every tool error has a stable code, a plain message and a next step.
-import { redactText } from "@agentx/contracts";
+import { CHANNEL_PRIVACY_NOT_SET_UP, CHANNEL_PRIVACY_NOT_SET_UP_STEP, PRIVATE_CHANNEL_NOT_A_MEMBER, PRIVATE_CHANNEL_NOT_A_MEMBER_STEP, redactText } from "@agentx/contracts";
 
 export const TOOL_ERROR_CODES = [
   "SIGN_IN_REQUIRED", "SIGN_IN_REJECTED", "ADMIN_REQUIRED", "PROJECT_NOT_FOUND", "PROJECT_ACCESS_DENIED",
@@ -93,13 +93,19 @@ export function signInStep(message: string, fallback: string): string {
   return `run ${SIGN_IN.exec(message)?.[1] ?? fallback}`;
 }
 
+/** Final review M6: answers whose own words name a next step their code's generic one contradicts. */
+const OWN_STEPS = new Map<string, string>([
+  [`CHANNEL_REQUIRED:${PRIVATE_CHANNEL_NOT_A_MEMBER}`, PRIVATE_CHANNEL_NOT_A_MEMBER_STEP],
+  [`SLACK_UNAVAILABLE:${CHANNEL_PRIVACY_NOT_SET_UP}`, CHANNEL_PRIVACY_NOT_SET_UP_STEP],
+]);
+
 /** A control-plane error answer as the tool error of FR-049; `secrets` never appear in its words. */
 export function toolErrorFromResponse(status: number, value: unknown, signInCommand: string, secrets: readonly string[] = [], busyStep: string = NEXT_STEPS.TASK_BUSY): ToolError {
   const error = typeof value === "object" && value !== null ? (value as { error?: { code?: unknown; message?: unknown } }).error : undefined;
   const code = typeof error?.code === "string" ? error.code : undefined;
   const message = plainText(error?.message, `AgentX answered HTTP ${status}`, secrets);
   if (status === 401 || code === "AUTH_REQUIRED") return new ToolError("SIGN_IN_REQUIRED", message, `run ${signInCommand}`);
-  if (code !== undefined && PASSED_THROUGH.has(code)) return new ToolError(code as ToolErrorCode, message);
+  if (code !== undefined && PASSED_THROUGH.has(code)) return new ToolError(code as ToolErrorCode, message, OWN_STEPS.get(`${code}:${message}`));
   if (code !== undefined && BUSY.has(code)) return new ToolError("TASK_BUSY", message, busyStep);
   if (code !== undefined && INVALID.has(code)) return new ToolError("INVALID_REQUEST", message);
   if (status >= 400 && status < 500) return new ToolError("CONTROL_PLANE_UNAVAILABLE", message, UNEXPECTED_ANSWER_STEP);

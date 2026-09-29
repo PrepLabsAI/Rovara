@@ -4,6 +4,8 @@
 import { randomUUID } from "node:crypto";
 import { GetCommand, PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import {
+  CHANNEL_PRIVACY_NOT_SET_UP,
+  PRIVATE_CHANNEL_NOT_A_MEMBER,
   AdminShareModeRequestSchema,
   AgentXError,
   CHANNEL_TURNS_MAX,
@@ -387,9 +389,9 @@ async function shareFor(
   return decision;
 }
 
-const NOT_A_MEMBER = "you are not a member of that private channel; join it first, or share to one of the project's public channels";
+const NOT_A_MEMBER = PRIVATE_CHANNEL_NOT_A_MEMBER;
 const PRIVACY_UNKNOWN = "Slack could not be reached to check whether that channel is private; try again shortly";
-const PRIVACY_NOT_SET_UP = "AgentX cannot tell whether that channel is private; ask your AgentX admin to finish the Slack setup, or share to a channel you are a member of";
+const PRIVACY_NOT_SET_UP = CHANNEL_PRIVACY_NOT_SET_UP;
 
 /**
  * Q10 (owner answer, 2026-09-29): a private channel takes a share only from one of its members. A
