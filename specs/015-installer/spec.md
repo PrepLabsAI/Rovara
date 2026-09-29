@@ -600,7 +600,9 @@ and the budget.
   `aws:ResourceTag/agentx:env` equal to the environment, proven with the IAM policy simulator in the
   live check; the fallback is the exact pool ARN. The operator role also gains subscribe and list on
   the environment's alert topic, `SetAlarmState` on the test alarm only, `budgets:ViewBudget` on the
-  environment's budget, and `servicequotas:GetServiceQuota`.
+  environment's budget, `servicequotas:GetServiceQuota` on the two EC2 quotas prerequisites check
+  (vCPUs `L-1216C47A` and Elastic IPs `L-0263D0A3`), and `ec2:DescribeAddresses` in the
+  environment's region only, which the Elastic IP check needs on a bundle resume.
 - **The budget filters on the `agentx:env` tag by default** (2026-09-28; phase 15d2 plan, owner
   decision; accepted), with a warning that it reads $0 until the tag is activated and the exact
   Billing step to activate it (Billing, Cost allocation tags); `--budget-scope account` is for a

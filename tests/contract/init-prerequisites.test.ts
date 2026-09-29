@@ -1,6 +1,8 @@
 import { MissingOpenRouterSecret, DEFAULT_BEDROCK_MODELS } from "@agentx/model-runtime/config";
 import { describe, expect, it, vi } from "vitest";
 import { AgentXError } from "@agentx/contracts";
+import { EC2Client, type DescribeAddressesCommand } from "@aws-sdk/client-ec2";
+import { ServiceQuotasClient, type GetServiceQuotaCommand } from "@aws-sdk/client-service-quotas";
 import {
   awsPrerequisiteChecks,
   checkPrerequisites,
@@ -126,6 +128,39 @@ describe("init prerequisites", () => {
   it("passes when exactly enough Elastic IPs are left, and says how many", async () => {
     const lines = await run(sampleAnswers(), passingChecks({ elasticIps: async () => ({ quota: 5, allocated: 3 }) }));
     expect(lines).toContain("ok 2 of 5 EC2-VPC Elastic IPs free in us-east-1; this environment needs 2");
+  });
+
+  it("reports an Elastic IP quota or count it cannot read as a problem, never as a pass", async () => {
+    for (const reading of [{ quota: Number.NaN, allocated: 0 }, { quota: 5, allocated: Number.NaN }]) {
+      await expect(run(sampleAnswers(), passingChecks({ elasticIps: async () => reading })))
+        .rejects.toThrow(/could not check Elastic IPs in us-east-1: .*did not return a number/);
+    }
+  });
+
+  it("awsPrerequisiteChecks().elasticIps reads quota L-0263D0A3 and counts only VPC addresses", async () => {
+    const quotaSend = vi.spyOn(ServiceQuotasClient.prototype, "send").mockResolvedValue({ Quota: { Value: 5 } } as never);
+    const ec2Send = vi.spyOn(EC2Client.prototype, "send").mockResolvedValue({ Addresses: [{}, {}, {}] } as never);
+    try {
+      const checks = awsPrerequisiteChecks({ region: "us-east-1", account: "123456789012", store: new MemoryParameterStore(), runner: { run: async () => ({ stdout: "", stderr: "" }) }, fetch: async () => { throw new Error("unused"); } });
+      expect(await checks.elasticIps()).toEqual({ quota: 5, allocated: 3 });
+      expect((quotaSend.mock.calls[0]![0] as GetServiceQuotaCommand).input).toEqual({ ServiceCode: "ec2", QuotaCode: "L-0263D0A3" });
+      expect((ec2Send.mock.calls[0]![0] as DescribeAddressesCommand).input).toEqual({ Filters: [{ Name: "domain", Values: ["vpc"] }] });
+    } finally {
+      quotaSend.mockRestore();
+      ec2Send.mockRestore();
+    }
+  });
+
+  it("awsPrerequisiteChecks().elasticIps refuses a quota response with no value instead of reading it as 0", async () => {
+    const quotaSend = vi.spyOn(ServiceQuotasClient.prototype, "send").mockResolvedValue({ Quota: {} } as never);
+    const ec2Send = vi.spyOn(EC2Client.prototype, "send").mockResolvedValue({ Addresses: [] } as never);
+    try {
+      const checks = awsPrerequisiteChecks({ region: "us-east-1", account: "123456789012", store: new MemoryParameterStore(), runner: { run: async () => ({ stdout: "", stderr: "" }) }, fetch: async () => { throw new Error("unused"); } });
+      await expect(checks.elasticIps()).rejects.toThrow("the Elastic IP quota L-0263D0A3 did not return a number");
+    } finally {
+      quotaSend.mockRestore();
+      ec2Send.mockRestore();
+    }
   });
 
   it("refuses an unreadable Elastic IP count and reports a remedy", async () => {

@@ -48,7 +48,7 @@ export const SERVICE_ROLE_SERVICES: readonly string[] = [
  * the environment's roles call (Bedrock models, X-Ray, CodeBuild and API Gateway invoke). STS and
  * Service Quotas are not here: sts:* would let a bounded role assume any same-account role that
  * trusts the account, escaping the boundary, and servicequotas:* would let it read every quota in
- * the account instead of only the one EC2 vCPU quota prerequisites checks; the boundary names
+ * the account instead of only the two EC2 quotas prerequisites checks; the boundary names
  * sts:GetCallerIdentity and servicequotas:GetServiceQuota alone (see defaultBoundaryStatements).
  * Budgets is a wildcard here only as a ceiling (phase 15d2, FR-047). AWS's service reference for
  * Budgets confirms that ModifyBudget, ViewBudget, TagResource, UntagResource and
@@ -190,8 +190,8 @@ export function defaultBoundaryStatements(scope: Pick<PolicyScope, "env" | "part
     { Sid: "Services", Effect: "Allow", Action: BOUNDARY_SERVICES.map((s) => `${s}:*`), Resource: "*" },
     // The operator's identity check; the only STS action any AgentX role uses.
     { Sid: "CallerIdentity", Effect: "Allow", Action: ["sts:GetCallerIdentity"], Resource: "*" },
-    // The operator's EC2 quota read (prerequisites on a resume); named like CallerIdentity above,
-    // not scoped further, since a scoped ARN in the identity policy already limits it to one quota.
+    // The operator's EC2 quota reads (prerequisites on a resume); named like CallerIdentity above,
+    // not scoped further, since scoped ARNs in the identity policy already limit it to two quotas.
     { Sid: "Quotas", Effect: "Allow", Action: ["servicequotas:GetServiceQuota"], Resource: "*" },
     { Sid: "IamRoles", Effect: "Allow", Action: [...ROLE_ACTIONS], Resource: roles },
     { Sid: "IamInstanceProfiles", Effect: "Allow", Action: [...INSTANCE_PROFILE_ACTIONS], Resource: environmentInstanceProfiles(scope) },
@@ -367,7 +367,7 @@ export function operatorRoleStatements(scope: PolicyScope): PolicyStatementJson[
     },
     // The Elastic IP check counts the region's allocated addresses. ec2:DescribeAddresses has no
     // resource-level permissions, so "*" is its only Resource; it reads, and changes nothing.
-    { Sid: "Addresses", Effect: "Allow", Action: ["ec2:DescribeAddresses"], Resource: "*" },
+    { Sid: "Addresses", Effect: "Allow", Action: ["ec2:DescribeAddresses"], Resource: "*", Condition: { StringEquals: { "aws:RequestedRegion": region } } },
     { Sid: "Identity", Effect: "Allow", Action: ["sts:GetCallerIdentity"], Resource: "*" },
     {
       Sid: "Logs",

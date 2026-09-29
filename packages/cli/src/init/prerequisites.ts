@@ -150,6 +150,7 @@ export async function checkPrerequisites(input: {
   // The foundation stack's NAT gateways fail five minutes in when the region is out of addresses.
   try {
     const { quota, allocated } = await checks.elasticIps();
+    if (!Number.isFinite(quota) || !Number.isFinite(allocated)) throw new Error("the Elastic IP quota or address count did not return a number");
     const free = Math.max(0, quota - allocated);
     if (free < NAT_ELASTIC_IPS) {
       problems.push(`this environment needs ${NAT_ELASTIC_IPS} Elastic IPs for its NAT gateways, but ${allocated} of the ${quota} allowed in ${region} are already allocated. `
@@ -343,7 +344,9 @@ export function awsPrerequisiteChecks(input: { region: string; account: string; 
         quotas.send(new GetServiceQuotaCommand({ ServiceCode: "ec2", QuotaCode: "L-0263D0A3" })),
         ec2.send(new DescribeAddressesCommand({ Filters: [{ Name: "domain", Values: ["vpc"] }] })),
       ]);
-      return { quota: quota.Quota?.Value ?? 0, allocated: addresses.Addresses?.length ?? 0 };
+      const value = quota.Quota?.Value;
+      if (typeof value !== "number") throw new Error("the Elastic IP quota L-0263D0A3 did not return a number");
+      return { quota: value, allocated: addresses.Addresses?.length ?? 0 };
     },
     async commandVersion(command) {
       try {
