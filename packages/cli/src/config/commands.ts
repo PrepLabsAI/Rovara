@@ -100,9 +100,10 @@ async function checkModel(services: ConfigServices, settings: EnvironmentSetting
   }
 }
 
-/** Records a model in the settings and the install answers. Both must follow the stack: `agentx
- * upgrade` rebuilds each ModelId parameter from the install answers (deploy/parameters.ts), so a
- * stale answer would quietly put the old model back on the next upgrade. */
+/** Records a model in the settings, then the install answers. `agentx upgrade` reads the models from
+ * the settings (upgradeAnswers uses `settings.models`), so the settings are written first; the
+ * install answers are kept in step so `agentx init --resume` (and a re-run of init) deploys the same
+ * model rather than quietly putting the old one back. */
 async function recordModel(services: ConfigServices, env: string, role: ModelRole, modelId: string): Promise<void> {
   let what: RecordModelError["what"] = "the settings";
   try {

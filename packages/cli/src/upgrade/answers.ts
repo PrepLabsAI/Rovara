@@ -30,8 +30,19 @@ export async function upgradeAnswers(input: { settings: EnvironmentSettings; sta
     identity = { mode: "oidc", issuer: settings.identity.issuer, audience: settings.identity.audience, clientId: settings.identity.clientId, adminClaim: parameter("AdminClaim"), adminValues: adminValues as string[] };
   }
   const credentialRef = controlPlane.parameters.GitHubAppCredentialRef;
-  const access = settings.stacks.access === undefined ? undefined : await input.stacks.describe(settings.stacks.access);
-  const operatorPrincipalArn = access?.parameters.OperatorPrincipalArn;
+  const appId = parameter("GitHubAppId");
+  if (!/^\d+$/.test(appId)) throw agentXError("CONFIG_INVALID", `stack ${controlPlaneName}'s GitHubAppId parameter is not a GitHub App id (a number); run agentx doctor, and agentx init --resume if the install never finished`);
+  const privateKeySecretArn = parameter("GitHubAppPrivateKeySecretArn");
+  if (!privateKeySecretArn.startsWith("arn:")) throw agentXError("CONFIG_INVALID", `stack ${controlPlaneName}'s GitHubAppPrivateKeySecretArn parameter is not an ARN; run agentx doctor, and agentx init --resume if the install never finished`);
+  // An access stack the settings name but that is gone is refused, never read as "no operator
+  // principal": the upgrade would otherwise deploy it again without one. An empty value is the
+  // install's own choice (the parameter's default).
+  let operatorPrincipalArn: string | undefined;
+  if (settings.stacks.access !== undefined) {
+    const access = await input.stacks.describe(settings.stacks.access);
+    if (access === undefined) throw agentXError("CONFIG_INVALID", `stack ${settings.stacks.access} does not exist; agentx doctor says what else is missing`);
+    operatorPrincipalArn = access.parameters.OperatorPrincipalArn;
+  }
   const images = input.images === undefined || (input.images.worker === undefined && input.images.slack === undefined) ? undefined : {
     ...(input.images.worker === undefined ? {} : { worker: input.images.worker }),
     ...(input.images.slack === undefined ? {} : { slack: input.images.slack }),
@@ -42,7 +53,7 @@ export async function upgradeAnswers(input: { settings: EnvironmentSettings; sta
     account: settings.account,
     models: settings.models,
     identity,
-    github: { appId: parameter("GitHubAppId"), privateKeySecretArn: parameter("GitHubAppPrivateKeySecretArn"), ...(credentialRef === undefined || credentialRef === "" ? {} : { credentialRef }) },
+    github: { appId, privateKeySecretArn, ...(credentialRef === undefined || credentialRef === "" ? {} : { credentialRef }) },
     ...(settings.access?.permissionsBoundaryArn === undefined ? {} : { permissionsBoundaryArn: settings.access.permissionsBoundaryArn }),
     ...(operatorPrincipalArn === undefined || operatorPrincipalArn === "" ? {} : { operatorPrincipalArn }),
     ...(images === undefined ? {} : { images }),
