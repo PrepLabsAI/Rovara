@@ -1,6 +1,7 @@
 import { createHash, createHmac } from "node:crypto";
+import { UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it } from "vitest";
-import { CLOSED_SHARED_NOTICE, SlackRequestMessageSchema, VIEW_ONLY_NOTICE, type SlackRequestMessage } from "../../packages/contracts/src/index.js";
+import { CLOSED_SHARED_NOTICE, SlackRequestMessageSchema, VIEW_ONLY_NOTICE, sharedNoticeClaim, sharedNoticeKey, type SlackRequestMessage } from "../../packages/contracts/src/index.js";
 import {
   createSlackIngressHandler,
   parseSlackSecrets,
@@ -8,6 +9,7 @@ import {
   validSignature,
 } from "../../packages/broker/src/aws/slack-ingress.js";
 import type { SlackMemberCheck } from "../../packages/broker/src/aws/slack-members.js";
+import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const signingSecret = "8f742231b10e8888abcd99yyyzzz85a5";
 const team = "T0BSHLLUGBD";
@@ -26,7 +28,7 @@ function harness(options: {
   failRelease?: number;
   failDecrement?: number;
   stop?: { outcome?: "CANCEL_REQUESTED" | "NOTHING_RUNNING"; throws?: boolean };
-  shared?: { threads: Record<string, { mode: "view" | "continue"; closed?: boolean }>; lookupThrows?: boolean };
+  shared?: { threads: Record<string, { mode: "view" | "continue"; closed?: boolean }>; lookupThrows?: boolean; claimThrows?: boolean };
 } = {}) {
   const stopCalls: Array<{ thread: unknown; userId: string }> = [];
   const memberChecks: string[] = [];
@@ -34,7 +36,9 @@ function harness(options: {
   const turnWindows: Array<{ subject: string; windowStart: number; expiresAt: number }> = [];
   const turnReleases: Array<{ subject: string; windowStart: number }> = [];
   const turnCounts = new Map<string, number>();
-  const noticeClaims = new Map<string, number>();
+  // The hourly claim is the one the AWS wiring sends (F13), evaluated by the fake table.
+  const threadsTable = new FakeDynamoDb();
+  const noticedAt = (subject: string) => sharedNoticeKeyItem(threadsTable, subject)?.noticedAt;
   let countFailures = options.failCount ?? 0;
   let decrementFailures = options.failDecrement ?? 0;
   const claimed = new Set<string>();
@@ -86,10 +90,14 @@ function harness(options: {
           return found === undefined ? undefined : { mode: found.mode, closed: found.closed ?? false };
         },
         claimNotice: async (subject: string, now: number) => {
-          const last = noticeClaims.get(subject);
-          if (last !== undefined && now - last < 3_600) return false;
-          noticeClaims.set(subject, now);
-          return true;
+          if (options.shared?.claimThrows) throw Object.assign(new Error("DynamoDB unavailable"), { name: "InternalServerError" });
+          try {
+            await threadsTable.send(new UpdateCommand({ TableName: "threads", ...sharedNoticeClaim(subject, now) }));
+            return true;
+          } catch (error) {
+            if (error instanceof Error && error.name === "ConditionalCheckFailedException") return false;
+            throw error;
+          }
         },
       },
     }),
@@ -137,7 +145,12 @@ function harness(options: {
       },
     }),
   });
-  return { handler, queue, posts, pending, logs, memberChecks, clock, turnWindows, turnReleases, stopCalls, noticeClaims };
+  return { handler, queue, posts, pending, logs, memberChecks, clock, turnWindows, turnReleases, stopCalls, noticedAt };
+}
+
+function sharedNoticeKeyItem(table: FakeDynamoDb, subject: string): { noticedAt?: unknown } | undefined {
+  const key = sharedNoticeKey(subject);
+  return table.get(key.pk, key.sk);
 }
 
 function signedEvent(payload: unknown, options: { timestamp?: number; signature?: string; base64?: boolean } = {}) {
@@ -712,7 +725,7 @@ describe("shared task threads (spec 025 FR-035, C10)", () => {
     expect((await send(h.handler, reply("Ev0000000104", undefined, h.clock.seconds))).status).toBe(200);
     expect(h.posts).toHaveLength(2);
     expect(h.queue).toEqual([]);
-    expect(h.noticeClaims.get(`${team}/${channel}/1695500000.000100`)).toBe(nowSeconds + 3_601);
+    expect(h.noticedAt(`${team}/${channel}/1695500000.000100`)).toBe(nowSeconds + 3_601);
   });
 
   it("gives a closed task's thread the closed notice, whatever its mode (C24)", async () => {
@@ -756,6 +769,17 @@ describe("shared task threads (spec 025 FR-035, C10)", () => {
     const h = harness();
     await send(h.handler, reply("Ev0000000109"));
     expect(h.queue).toHaveLength(1);
+  });
+
+  it("stays silent and queues nothing when the notice claim throws", async () => {
+    const h = harness({ shared: { threads: { "1695500000.000100": { mode: "view" } }, claimThrows: true }, turnsPerMinute: 6 });
+    const response = await send(h.handler, reply("Ev0000000111"));
+    expect(response.status).toBe(200);
+    expect(h.posts).toEqual([]);
+    expect(h.queue).toEqual([]);
+    expect(h.turnWindows).toEqual([]);
+    expect(h.logs).toContainEqual({ event: "shared_task.notice_claim_failed", fields: { eventId: "Ev0000000111", errorName: "InternalServerError" } });
+    expect(h.logs).toContainEqual({ event: "shared_task.not_run", fields: { eventId: "Ev0000000111", closed: false, notified: false } });
   });
 
   it("never logs the mention's text", async () => {
