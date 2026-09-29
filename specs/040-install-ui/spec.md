@@ -1,0 +1,178 @@
+# Feature Specification: Local Install UI
+
+**Feature Branch**: `feat/040-install-ui`
+**Created**: 2026-09-28
+**Status**: Approved
+**Input**: Paperclip PRE-2, plan accepted 2026-09-28 (full scope: the wizard ends with a working
+project, not a list of follow-up commands)
+
+## Context
+
+Spec 015 US1 promises that `agentx init` "walks the engineer through creating the GitHub and Slack
+apps, creates their admin user, sets up a first project and channel, and ends with a working reply
+in Slack", with "nothing copied between screens by hand". What shipped is a terminal wizard: the
+operator answers hidden prompts, pastes Slack tokens into a TTY, reads a priced plan as text, and
+is then told by `nextStepsText()` to run three more commands by hand. Every AWS question assumes
+ambient credentials, so "which account am I installing into" is something the operator has to know
+rather than something the installer shows them.
+
+This feature puts the install behind a browser page on `127.0.0.1`, the way the Paperclip installer
+works, and closes the gap between spec 015 US1 and what `agentx init` actually does.
+
+`agentx init` is already shaped for this. Everything a person touches passes through four seams:
+
+| Seam | Where | What the UI does with it |
+| --- | --- | --- |
+| `Prompter` (`ask`/`choose`/`confirm`/`secret`) | `packages/cli/src/init/prompts.ts` | A `browserPrompter()` pushes the question to the page and awaits the posted answer |
+| `InitEvent` + `onEvent` | `packages/cli/src/init/steps.ts` | The live step checklist |
+| `write(line)` | `packages/cli/src/init/commands.ts` | The log pane |
+| `openBrowser(url)` | `packages/cli/src/auth.ts` | Opens the wizard |
+
+Resume (`InstallProgress` in SSM), the priced review screen (`confirmInstallPlan`) and
+single-install concurrency (`withEnvironmentLock`) already exist and are reused unchanged.
+
+## User Scenarios & Testing *(mandatory)*
+
+### User Story 1 - Install From A Browser (Priority: P1)
+
+An engineer runs `agentx init`. A page opens on `127.0.0.1`. It shows which AWS account and region
+they are about to install into, the prerequisite results, what will be created and what it costs
+per month, and then the eight install steps with live status. Every question `agentx init` asks
+today is asked on that page instead of the terminal.
+
+**Independent Test**: on a machine with a browser, `agentx init` completes an install end to end
+without the operator typing anything into the terminal after the command itself.
+
+### User Story 2 - Connect AWS, GitHub And Slack Without Leaving The Wizard (Priority: P1)
+
+The wizard is where the three connections are made: an AWS profile is picked and its identity
+shown, a GitHub App is created through GitHub's manifest flow and its repositories chosen, and a
+Slack app is created from a generated manifest with its two credentials pasted into masked fields
+and its Request URLs probed.
+
+**Independent Test**: from a machine with no GitHub App and no Slack app, both apps exist and are
+installed at the end of the run, and the operator never copied a value between two windows by hand.
+
+### User Story 3 - The Install Ends With Something That Works (Priority: P1)
+
+The last wizard screens create the admin user, sign in, register the first project, bind a Slack
+channel, and confirm a real reply in that channel. `nextStepsText()`'s three manual commands are
+gone.
+
+**Independent Test**: after the wizard reports success, a message in the chosen channel gets an
+AgentX reply in its thread, with no command run by hand.
+
+### User Story 4 - Headless Installs Still Work (Priority: P2)
+
+`--yes` unattended installs, CI, CloudShell and SSH sessions keep working exactly as they do today.
+
+**Independent Test**: the existing `agentx init --yes` tests pass unchanged, and on a host with no
+browser the wizard prints its URL and falls back to the terminal prompter.
+
+## Requirements
+
+### The wizard server
+
+- **FR-001**: `agentx init --ui` MUST start an HTTP server bound to `127.0.0.1` on an ephemeral
+  port, open the operator's browser at it, and serve the wizard. `--no-ui` MUST force the terminal
+  path. When neither is given, the UI is used if a browser is available and the session is
+  interactive; otherwise the terminal prompter is used.
+- **FR-002**: The server MUST exit with the `init` run. It MUST NOT outlive the command, and MUST
+  NOT bind any address other than the loopback one.
+- **FR-003**: A `browserPrompter()` MUST implement `Prompter` against the page: `ask`, `choose`,
+  `confirm` and `secret` each render as a question and resolve with the posted answer. Validation
+  rejections MUST be shown inline on the field rather than thrown as a failed run.
+- **FR-004**: The page MUST show the `InitEvent` stream as a step checklist (skipped, started,
+  done, waiting) and the `write(line)` output as a log pane, both live.
+- **FR-005**: The priced install plan from `confirmInstallPlan` MUST be shown as a review screen
+  whose confirm is a button. An install MUST NOT create anything before it is confirmed.
+- **FR-006**: When `readInstallProgress` reports a part-finished install for the environment, the
+  wizard MUST open on a resume screen naming the completed steps and the step it will continue
+  from.
+
+### Security
+
+- **FR-010**: Every request MUST carry a single-use session token minted for that run. A request
+  without it MUST be refused.
+- **FR-011**: The server MUST reject any request whose `Origin` or `Referer` is not its own, MUST
+  send no CORS headers, and MUST reject cross-site `Sec-Fetch-Site` values.
+- **FR-012**: A secret entered in the page MUST pass straight through the existing `cleanSecret` →
+  Secrets Manager path. It MUST NOT be echoed back to the page, put in an `InitEvent`, written to
+  an install-progress `note`, or written to disk.
+
+### Connect AWS
+
+- **FR-020**: The AWS screen MUST list the profiles in the operator's AWS configuration, and for
+  the selected one show the resolved `sts:GetCallerIdentity` account id and ARN, so the operator can
+  see which account the install will land in before it starts.
+- **FR-021**: When credentials are missing or expired (`AUTH_REQUIRED`), the screen MUST offer a
+  sign-in action that runs the profile's SSO login and re-resolves the identity, instead of ending
+  the run with advice text.
+- **FR-022**: The region picker MUST offer only the regions the release supports.
+- **FR-023**: The prerequisite checks (region support, Bedrock model access, EC2 vCPU quota) MUST be
+  shown as a pass/fail list, each failure with what to do about it, and MUST be re-runnable without
+  restarting `init`.
+
+### Connect GitHub
+
+- **FR-030**: The GitHub App MUST be created through the existing manifest flow, with the manifest
+  form and the callback both served by the wizard's own origin, so the operator stays in the
+  wizard. The existing `state` check MUST still be enforced on the callback.
+- **FR-031**: After creation the wizard MUST link the operator to the app's repository-selection
+  page and show the installation wait as a waiting card that resolves when the installation
+  appears.
+
+### Connect Slack
+
+- **FR-040**: The Slack screen MUST offer a button that opens Slack's create-app page with the
+  generated manifest, then two masked fields for the bot token and signing secret, validated inline
+  by the existing `checkSlackBotToken` and `checkSlackSigningSecret`.
+- **FR-041**: The Request URL verification MUST be shown as a live card with its result, and MUST
+  be re-runnable after the operator fixes the app.
+
+### Finish the job
+
+- **FR-050**: After deployment the wizard MUST create the Cognito admin user, sign the operator in,
+  register the first project and bind a Slack channel, as screens in the same run.
+- **FR-051**: The final screen MUST confirm a real reply in the bound channel, and MUST report what
+  to fix when it does not arrive.
+- **FR-052**: `nextStepsText()`'s manual follow-up commands MUST be removed from the UI path once
+  FR-050 and FR-051 hold.
+
+### Packaging
+
+- **FR-060**: The wizard's static assets MUST ship in `release:build` output and in the published
+  npm package.
+- **FR-061**: The README and `docs/` install instructions MUST describe the UI path and `--no-ui`.
+
+## Success Criteria
+
+- **SC-001**: Unit tests cover the `browserPrompter` protocol (each `Prompter` method, inline
+  validation, cancellation) and that no secret reaches an event, a log line or a progress note.
+- **SC-002**: HTTP-level tests cover the server's routes, the session-token refusal, the
+  `Origin`/`Referer`/`Sec-Fetch-Site` refusals, and that the listener is loopback-only.
+- **SC-003**: A headless end-to-end test drives a full install through the UI path using the
+  existing fake `deps.github` and `deps.slack` seams.
+- **SC-004**: The existing `agentx init` tests pass unchanged; `--yes` behaviour is untouched.
+- **SC-005**: On a clean machine, `agentx init` ends with a message in the bound Slack channel
+  getting an AgentX reply, with no command typed after `agentx init` (spec 015 US1's independent
+  test, now actually met).
+
+## Out Of Scope
+
+- A frontend framework or a second build toolchain. The page is plain HTML, one ES module and
+  server-sent events; the repo ships no non-JS assets today and a published CLI is the wrong place
+  to add a bundler.
+- Remote or multi-user access to the wizard. It is loopback-only, one operator, one run.
+- Any change to what `init` deploys. This feature changes how the operator drives the install, not
+  what the install creates.
+
+## Decisions
+
+- **Location**: `packages/cli/src/init/ui/`, static assets built to `packages/cli/dist/ui/`. Not a
+  separate package: it ships with the CLI and shares the init types.
+- **Terminal path stays**: the UI is additive. `InitCliDependencies` is already a DI seam, so the
+  UI is injected and the existing tests are untouched.
+- **Phasing**: (1) server, prompter, event/log stream, review and resume screens behind `--ui`;
+  (2) the three connect screens and the prerequisite checklist; (3) admin user, project, channel
+  bind and the test reply; (4) UI on by default plus packaging and docs. Phase 1 is shippable alone.
