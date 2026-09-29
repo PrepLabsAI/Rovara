@@ -603,6 +603,8 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--resume", "only continue an install already under way; never start a new one", false)
     .option("--yes", "answer every question with its default or its flag, without asking; the plan is still printed. Confirmations such as the Slack bot and workspace check and \"Request URL Verified?\" are answered yes, so check the printed summary afterwards", false)
     .option("--no-browser", "print every address to open instead of opening a browser")
+    .option("--ui", "ask every question on a page on 127.0.0.1 instead of in the terminal")
+    .option("--no-ui", "ask every question in the terminal (the default in this release)")
     .addOption(new Option("--identity <mode>", "identity provider").choices(["cognito", "oidc"]).default("cognito"))
     .option("--oidc-issuer <url>", "your OIDC provider's issuer URL (required with --identity oidc)")
     .option("--oidc-audience <audience>", "your OIDC provider's audience (required with --identity oidc)")
@@ -779,6 +781,8 @@ function parsePort(value: string): number {
 interface InitCommandOptions extends SignInCommandOptions {
   region?: string; account?: string; release?: string; engine?: "templates" | "cdk"; source?: string;
   resume: boolean; yes: boolean; browser: boolean;
+  /** --ui / --no-ui. Undefined when neither was given: in this release that is the terminal. */
+  ui?: boolean;
   identity: "cognito" | "oidc"; oidcIssuer?: string; oidcAudience?: string; oidcClientId?: string; adminClaim?: string; adminValues?: string;
   modelProvider?: string; orchestratorProvider?: string; classifierProvider?: string; workerProvider?: string; openrouterSecretArn?: string; openrouterProviders?: string;
   openrouterKeyFile?: string; openrouterKeyEnv?: string;
@@ -838,6 +842,7 @@ function initOptions(env: string, options: InitCommandOptions, command: Command)
     ...(options.release === undefined ? {} : { releaseDir: options.release }),
     ...(options.source === undefined ? {} : { source: options.source }),
     yes: options.yes, browser: options.browser, resume: options.resume,
+    ...(options.ui === undefined ? {} : { ui: options.ui }),
     flags,
     secretFlags,
     signinFlags: definedEntries<SigninFlags>({ methods: options.signin, ...signin.flags }),

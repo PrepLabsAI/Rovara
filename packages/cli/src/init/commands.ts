@@ -11,7 +11,7 @@ import { cliErrorFor, prepareDeployment, realCommandRunner, type DeployCliDepend
 import { assertReleaseCoversRegion, loadRelease } from "../deploy/release.js";
 import { stsCallerIdentity } from "../environments/adopt.js";
 import type { LockRecord } from "../environments/lock.js";
-import { ssmParameterStore } from "../environments/parameter-store.js";
+import { ssmParameterStore, type ParameterStore } from "../environments/parameter-store.js";
 import { readEnvironmentSettings, type EnvironmentSettings } from "../environments/settings.js";
 import type { SigninFlags } from "../signin/collect.js";
 import { isPrereleaseVersion, RELEASE_VERSION } from "../version.js";
@@ -22,7 +22,7 @@ import {
 import { cloudFormationStatusReader, secretsManagerInitSecrets, type InitContext, type InitSecrets, type PreMadeGitHubApp, type SecretFlags, type StackStatusReader } from "./context.js";
 import { deployStep } from "./deploy-steps.js";
 import { githubAppStep, githubRestApi, type GitHubApi } from "./github-app.js";
-import { readInstallAnswers, type InitAnswers } from "./install-state.js";
+import { readInstallAnswers, readInstallProgress, type InitAnswers } from "./install-state.js";
 import { confirmInstallPlan } from "./plan.js";
 import { awsPrerequisiteChecks, checkPrerequisites, type PrerequisiteChecks } from "./prerequisites.js";
 import { processPrompter, secretFromSource, unattendedPrompter, type Prompter } from "./prompts.js";
@@ -30,6 +30,8 @@ import { fetchRelease } from "./release-fetch.js";
 import { developerSignInStep } from "./signin-step.js";
 import { slackAppStep, slackWebApi, verifySlackUrls, type SlackApi } from "./slack-app.js";
 import { runInitSteps, type InitEvent, type InitRunResult, type InitStep } from "./steps.js";
+import { startInstallWizard, type InstallWizard } from "./ui/index.js";
+import type { WizardResume } from "./ui/protocol.js";
 
 export interface InitCliDependencies {
   /** identity, store, deployer, templatesClients, commandRunner: the same seam agentx deploy uses. */
@@ -62,6 +64,9 @@ export interface InitOptions {
   source?: string;
   yes: boolean;
   browser: boolean;
+  /** --ui / --no-ui: ask on a page on 127.0.0.1 instead of in the terminal. Undefined means
+   * neither was given; in this release that still means the terminal. */
+  ui?: boolean;
   resume: boolean;
   flags: InitFlags;
   secretFlags: SecretFlags;
@@ -137,12 +142,42 @@ function neverThrowingBrowser(open: (url: string) => Promise<unknown>, write: (l
   };
 }
 
+/** What `--ui` adds to a run: the wizard, once started, and the `write(line)` that tees every
+ * progress line to both the terminal and the page's log pane. Held out here so the wizard is closed
+ * with the run whichever way it ends (FR-002). */
+interface InitSession {
+  wizard?: InstallWizard;
+  /** A property, not a method, so `init` can pass it on as `write` without rebinding it. */
+  write: (line: string) => void;
+}
+
 export async function runInit(options: InitOptions, deps: InitCliDependencies, services: { stderr: Writer; home: string }): Promise<InitResult> {
+  const session: InitSession = {
+    write: (line) => { services.stderr.write(`${line}\n`); session.wizard?.log(line); },
+  };
   try {
-    return await init(options, deps, services);
+    const result = await init(options, deps, services, session);
+    session.wizard?.finish(result.status === "complete" ? `AgentX environment ${result.env} is installed.` : result.message);
+    return result;
   } catch (error) {
-    throw cliErrorFor(error);
+    const mapped = cliErrorFor(error);
+    session.wizard?.finish(mapped instanceof Error ? mapped.message : String(mapped), "failed");
+    throw mapped;
+  } finally {
+    await session.wizard?.close();
   }
+}
+
+/** FR-006: the resume screen's two facts, from the progress `readInstallProgress` already keeps --
+ * the steps recorded done, and the first one this run will pick up at. No new state is stored. */
+async function resumeScreen(store: ParameterStore, env: string, steps: ReadonlyArray<InitStep<InitContext>>): Promise<WizardResume> {
+  const progress = await readInstallProgress(store, env);
+  const done = new Set(Object.entries(progress?.steps ?? {}).filter(([, record]) => record?.status === "done").map(([id]) => id));
+  const next = steps.find((step) => !done.has(step.id));
+  return {
+    completed: steps.filter((step) => done.has(step.id)).map((step) => step.title),
+    ...(next === undefined ? {} : { continueFrom: next.title }),
+  };
 }
 
 /** Answers "is the Slack app installed?" from --slack-install; every other question goes to `inner`. */
@@ -185,9 +220,9 @@ async function resumedOpenRouterKey(input: { flags: InitFlags; processEnv: NodeJ
   return readOpenRouterKeyAnswer({ source: input.flags.openrouterKey, processEnv: input.processEnv, prompter: input.prompter });
 }
 
-async function init(options: InitOptions, deps: InitCliDependencies, services: { stderr: Writer; home: string }): Promise<InitResult> {
+async function init(options: InitOptions, deps: InitCliDependencies, services: { stderr: Writer; home: string }, session: InitSession): Promise<InitResult> {
   const { env } = options;
-  const write = (line: string) => { services.stderr.write(`${line}\n`); };
+  const { write } = session;
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? realSleep;
   const fetchImplementation = deps.fetch ?? fetch;
@@ -208,13 +243,31 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     throw agentXError("CONFIG_INVALID", `release ${release.manifest.version} is a prerelease; agentx init installs only published releases (x.y.z). Pass --release <dir> with a published release`);
   }
 
-  let prompter = deps.prompter;
-  if (prompter === undefined) {
-    if (options.yes) prompter = unattendedPrompter();
-    else if (process.stdin.isTTY !== true) throw agentXError("CONFIG_INVALID", "agentx init asks questions; run it in a terminal, or pass --yes with a flag for every answer");
-    else prompter = processPrompter(services.stderr);
+  // FR-001: --ui asks on a page on 127.0.0.1 instead of in the terminal, so no TTY is needed. An
+  // injected prompter still wins, so a test can drive the wizard's screens without a browser.
+  let prompter: Prompter;
+  if (options.ui === true) {
+    if (options.yes) throw agentXError("CONFIG_INVALID", "agentx init --ui asks its questions on a page; --yes answers them without asking. Use one or the other");
+    const wizard = await startInstallWizard({
+      env, write,
+      ...(options.browser ? { openBrowser: neverThrowingBrowser(deps.openBrowser ?? openSystemBrowser, write) } : {}),
+    });
+    session.wizard = wizard;
+    prompter = deps.prompter ?? wizard.prompter;
+  } else if (deps.prompter !== undefined) {
+    prompter = deps.prompter;
+  } else if (options.yes) {
+    prompter = unattendedPrompter();
+  } else if (process.stdin.isTTY !== true) {
+    throw agentXError("CONFIG_INVALID", "agentx init asks questions; run it in a terminal, pass --ui to answer them in a browser, or pass --yes with a flag for every answer");
+  } else {
+    prompter = processPrompter(services.stderr);
   }
   if (options.slackInstall !== undefined) prompter = answeringSlackInstall(prompter, options.slackInstall);
+  // Built once: the wizard shows the checklist from it before the first step runs, and the resume
+  // screen names its titles.
+  const steps = initSteps({ github: deps.github ?? githubRestApi(fetchImplementation), slack: deps.slack ?? slackWebApi(fetchImplementation) });
+  session.wizard?.setSteps(steps.map((step) => ({ id: step.id, title: step.title })));
 
   const regions = release.regions();
   // The AWS CLI's own region comes first, so a resume looks where the install started.
@@ -270,13 +323,16 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   if (collected !== undefined) {
     await runPrerequisites();
     prerequisitesPassed = true;
-    // Printed even under --yes, before anything is created.
+    // Printed even under --yes, before anything is created. FR-005: with --ui the same priced plan
+    // is the review screen, and its confirm is a button.
     await confirmInstallPlan({
-      answers: collected.answers, notes: collected.notes, prompter, write: (text) => { services.stderr.write(text); },
+      answers: collected.answers, notes: collected.notes, prompter,
+      write: (text) => { services.stderr.write(text); session.wizard?.plan(text); },
       extras: { storesOpenRouterKey: collected.openRouterKey !== undefined, ...(collected.openRouterProviders === undefined ? {} : { openRouterProviders: collected.openRouterProviders }) },
     });
   } else {
     write(`Resuming the install of environment ${env}.`);
+    if (session.wizard !== undefined) session.wizard.resume(await resumeScreen(store, env, steps));
     rotatedWebhook = await resumedAlertWebhook({ answers, flags: options.flags, processEnv, prompter });
     rotatedOpenRouterKey = await resumedOpenRouterKey({ flags: options.flags, processEnv, prompter });
   }
@@ -338,9 +394,9 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   try {
     const result = await runInitSteps({
       env, region, store, holder: caller.arn, context, now,
-      steps: initSteps({ github: deps.github ?? githubRestApi(fetchImplementation), slack: deps.slack ?? slackWebApi(fetchImplementation) }),
+      steps,
       beforeSteps: saveAnswers,
-      onEvent: (event) => write(eventLine(event)),
+      onEvent: (event) => { write(eventLine(event)); session.wizard?.event(event); },
       // A takeover is never behind --yes, which answers every confirm with yes.
       ...(options.yes ? {} : {
         confirmTakeover: (held: LockRecord) => activePrompter.confirm(
