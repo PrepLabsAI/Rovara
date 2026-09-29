@@ -112,6 +112,14 @@ describe("agentx config list and get", () => {
 });
 
 describe("agentx config set", () => {
+  it("refuses a held lock with the same next step as the other commands, even for its own killed run (final review M2)", async () => {
+    const store = await seeded();
+    const holder = "arn:aws:sts::123456789012:assumed-role/agentx-staging-operator/alice";
+    store.values.set(lockParameterName(ENV), JSON.stringify({ holder, command: "config set limits.threadTurnsPerMinute", acquiredAt: new Date(T0).toISOString() }));
+    await expect(runConfigSet(services({ store, now: () => T0 + 60_000 }), ENV, { key: "limits.threadTurnsPerMinute", value: "12", yes: true }))
+      .rejects.toThrow(`locked by ${holder} running "config set limits.threadTurnsPerMinute" since ${new Date(T0).toISOString()}; wait for it to finish, then run the same agentx command again. If it is no longer running, agentx init, upgrade and destroy offer a takeover once the lock is 2 hours old, or delete it now (aws ssm delete-parameter --name ${lockParameterName(ENV)} --region <region>)`);
+  });
+
   it("changes one stack parameter with a parameter-only update, keeping every other value, under the lock", async () => {
     const store = await seeded();
     const cloudFormation = fakeCloudFormation({ parameters: { SlackThreadTurnsPerMinute: "6", BudgetMonthlyUsd: "100", CallbackSigningKey: "****" } });

@@ -33,6 +33,13 @@ describe("environment lock", () => {
     expect(store.values.has("/agentx/staging/lock")).toBe(true);
   });
 
+  it("tells the caller what to do when the fresh lock's command is no longer running (final review M1)", async () => {
+    const store = new MemoryParameterStore();
+    store.values.set("/agentx/staging/lock", JSON.stringify({ holder: "bob", command: "upgrade", acquiredAt: new Date(t0 - 60_000).toISOString() }));
+    await expect(withEnvironmentLock({ ...base, command: "destroy", store, now: () => t0, takeOverOwn: true, confirmTakeover: async () => true }, async () => 1))
+      .rejects.toThrow(`; wait for it to finish, then run the same agentx command again. If it is no longer running, agentx init, upgrade and destroy offer a takeover once the lock is 2 hours old, or delete it now (aws ssm delete-parameter --name /agentx/staging/lock --region <region>)`);
+  });
+
   it("does not offer takeover of a fresh lock", async () => {
     const store = new MemoryParameterStore();
     store.values.set("/agentx/staging/lock", JSON.stringify({ holder: "bob", command: "upgrade", acquiredAt: new Date(t0 - 60_000).toISOString() }));

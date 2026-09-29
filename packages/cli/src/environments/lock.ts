@@ -35,6 +35,11 @@ const heldMessage = (env: string, held: LockRecord) => `environment ${env} is lo
 /** What to do about a lock another command holds right now. */
 const WAIT_AND_RETRY = "wait for it to finish, then run the same agentx command again";
 
+/** For a fresh lock whose command may have been killed: any caller of any command gets it, including
+ * one (config set, env adopt) that never offers a takeover itself. */
+const notRunningNote = (name: string) =>
+  `If it is no longer running, agentx init, upgrade and destroy offer a takeover once the lock is 2 hours old, or delete it now (aws ssm delete-parameter --name ${name} --region <region>)`;
+
 /**
  * Another command already took the stale lock before we could (racedHeld is what it now holds), or
  * the stale lock was simply released while we waited for takeover confirmation (racedHeld is
@@ -109,7 +114,7 @@ export async function withEnvironmentLock<T>(input: {
 
     const stale = now() - Date.parse(held.acquiredAt) > STALE_LOCK_MS;
     const ownEarlierRun = input.takeOverOwn === true && held.holder === input.holder && held.command === input.command;
-    if (!stale && !ownEarlierRun) throw agentXError("CONFIG_INVALID", `${heldMessage(input.env, held)}; ${WAIT_AND_RETRY}`);
+    if (!stale && !ownEarlierRun) throw agentXError("CONFIG_INVALID", `${heldMessage(input.env, held)}; ${WAIT_AND_RETRY}. ${notRunningNote(name)}`);
     const why = stale
       ? "older than 2 hours"
       : `your own earlier "${held.command}"; confirm the takeover only if that run is no longer going`;
