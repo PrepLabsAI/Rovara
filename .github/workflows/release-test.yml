@@ -1,0 +1,267 @@
+name: Release test
+
+# The spec's release tests (Testing, "Release tests"), run by hand before a release, in a throwaway
+# AWS account that holds nothing else. Off unless the repository variable AGENTX_ENABLE_RELEASE_TEST
+# is "true". An owner sets it up once (docs/releases.md, "The release test"):
+#   - vars.AGENTX_RELEASE_TEST_ROLE_ARN: a role in the throwaway account that trusts this
+#     repository through GitHub OIDC (no long-lived keys), with a maximum session of at least
+#     3 hours, because an install and an upgrade can outlast the 1 hour default;
+#   - vars.AGENTX_RELEASE_TEST_REGION (optional, default us-east-1);
+#   - the private ECR repositories agentx-release-test/worker and agentx-release-test/slack;
+#   - a test GitHub App (vars.RT_GITHUB_ACCOUNT, RT_GITHUB_APP_ID, RT_GITHUB_INSTALLATION_ID,
+#     secrets.RT_GITHUB_PRIVATE_KEY) and a test Slack app (vars.RT_SLACK_CLIENT_ID,
+#     secrets.RT_SLACK_BOT_TOKEN, RT_SLACK_SIGNING_SECRET, RT_SLACK_CLIENT_SECRET).
+# init stops after developer-signin: the admin sign-in needs a browser, and a pre-made Slack app
+# cannot follow each new environment's API address, so the Slack reply, alerts test and the manual
+# teardown guide stay in the manual release check (question 6).
+# The Elastic IP quota fits one throwaway environment in an account at a time, so the installs run
+# one after another, and each job destroys its own environment before the next one starts.
+on:
+  workflow_dispatch:
+    inputs:
+      previous:
+        description: "The published release to install first, then upgrade from (for example 1.2.3)"
+        required: true
+      candidate:
+        description: "The version for the candidate built from this ref, newer than previous (for example 1.3.0)"
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: release-test
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AGENTX_RELEASE_TEST_REGION || 'us-east-1' }}
+  PREVIOUS: ${{ inputs.previous }}
+  CANDIDATE: ${{ inputs.candidate }}
+  # Rulings F22: doctor's "Slack redirect URL" check may fail against the pre-made test Slack app,
+  # which cannot list every new environment's callback. Until the live check (Task 20) confirms
+  # it, every doctor run goes through this gate: it fails on any other failed check, or when the
+  # environment does not run the expected release, and prints that one check for the manual
+  # release check. Run as: jq -r -e --arg version <expected> "$DOCTOR_GATE" doctor.json
+  DOCTOR_GATE: |
+    if .data == null then ("doctor did not finish: \(.error.message // "no report")", false)
+    else .data as $r
+      | [$r.checks[] | select(.status == "fail")] as $fails
+      | [$fails[] | select(.group == "sign-in" and .name == "Slack redirect URL")] as $manual
+      | ($fails - $manual) as $real
+      | ($manual[] | "for the manual release check (rulings F22): \(.group) / \(.name): \(.detail)"),
+        ($real[] | "failed: \(.group) / \(.name): \(.detail)"),
+        (if $r.version == $version then empty else "doctor found release \($r.version), expected \($version)" end),
+        (($real | length) == 0 and $r.version == $version)
+    end
+
+jobs:
+  images:
+    if: vars.AGENTX_ENABLE_RELEASE_TEST == 'true'
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      worker: ${{ steps.push.outputs.worker }}
+      slack: ${{ steps.push.outputs.slack }}
+    steps:
+      - uses: actions/checkout@v5
+        with: { persist-credentials: false }
+      - uses: aws-actions/configure-aws-credentials@v5
+        with: { role-to-assume: "${{ vars.AGENTX_RELEASE_TEST_ROLE_ARN }}", aws-region: "${{ env.AWS_REGION }}" }
+      - id: login
+        uses: aws-actions/amazon-ecr-login@v2
+      - uses: docker/setup-buildx-action@v3
+      - id: push
+        shell: bash
+        env:
+          REGISTRY: ${{ steps.login.outputs.registry }}
+          TAG: rt-${{ github.run_id }}
+        run: |
+          for image in worker slack; do
+            dockerfile=environments/base/Dockerfile; [ "$image" = slack ] && dockerfile=environments/slack/Dockerfile
+            repo="$REGISTRY/agentx-release-test/$image"
+            docker buildx build --platform linux/arm64 --provenance=false --sbom=false --file "$dockerfile" --tag "$repo:$TAG" --push --metadata-file "$RUNNER_TEMP/$image.json" .
+            echo "$image=$repo@$(jq -r '."containerimage.digest"' "$RUNNER_TEMP/$image.json")" >> "$GITHUB_OUTPUT"
+          done
+
+  lane:
+    needs: images
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # One environment in the account at a time (the Elastic IP quota).
+      max-parallel: 1
+      matrix:
+        engine: [templates, cdk]
+    env:
+      AGENTX_ENV: rt${{ github.run_number }}${{ matrix.engine == 'cdk' && 'c' || 't' }}
+      ENGINE: ${{ matrix.engine }}
+      WORKER: ${{ needs.images.outputs.worker }}
+      SLACK: ${{ needs.images.outputs.slack }}
+      OPERATOR_PRINCIPAL: ${{ vars.AGENTX_RELEASE_TEST_ROLE_ARN }}
+      RT_GITHUB_ACCOUNT: ${{ vars.RT_GITHUB_ACCOUNT }}
+      RT_GITHUB_APP_ID: ${{ vars.RT_GITHUB_APP_ID }}
+      RT_GITHUB_INSTALLATION_ID: ${{ vars.RT_GITHUB_INSTALLATION_ID }}
+      RT_SLACK_CLIENT_ID: ${{ vars.RT_SLACK_CLIENT_ID }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+        with: { fetch-depth: 0, persist-credentials: false }
+      - uses: actions/setup-node@v5
+        with: { node-version-file: .node-version, cache: npm }
+      - run: npm ci && npm run build
+      - uses: aws-actions/configure-aws-credentials@v5
+        with: { role-to-assume: "${{ vars.AGENTX_RELEASE_TEST_ROLE_ARN }}", aws-region: "${{ env.AWS_REGION }}", role-duration-seconds: 10800 }
+      - name: Fetch the previous release and build the candidate
+        run: |
+          mkdir -p "$RUNNER_TEMP/previous"
+          gh release download "v$PREVIOUS" --repo "$GITHUB_REPOSITORY" --pattern "agentx-$PREVIOUS.tar.gz" --dir "$RUNNER_TEMP"
+          tar -xzf "$RUNNER_TEMP/agentx-$PREVIOUS.tar.gz" -C "$RUNNER_TEMP/previous"
+          npm run release:build -- --version "$CANDIDATE" --out "$RUNNER_TEMP/candidate"
+      - name: Check out the previous release's source (cdk engine)
+        if: matrix.engine == 'cdk'
+        run: |
+          git worktree add "$RUNNER_TEMP/source-previous" "v$PREVIOUS"
+          # A local tag only, never pushed: the cdk engine deploys from a checkout at v<version>.
+          git tag "v$CANDIDATE"
+      - name: Install the previous release, up to developer sign-in
+        env:
+          RT_GITHUB_PRIVATE_KEY: ${{ secrets.RT_GITHUB_PRIVATE_KEY }}
+          RT_SLACK_BOT_TOKEN: ${{ secrets.RT_SLACK_BOT_TOKEN }}
+          RT_SLACK_SIGNING_SECRET: ${{ secrets.RT_SLACK_SIGNING_SECRET }}
+          RT_SLACK_CLIENT_SECRET: ${{ secrets.RT_SLACK_CLIENT_SECRET }}
+        run: |
+          source_flag=""; [ "$ENGINE" = cdk ] && source_flag="--source $RUNNER_TEMP/source-previous"
+          # Rulings F5: a first --yes run refuses to start without --admin-email and --channel; --stop-after stops before either is used.
+          node packages/cli/dist/main.js --env "$AGENTX_ENV" init --yes --no-browser --region "$AWS_REGION" --release "$RUNNER_TEMP/previous" --engine "$ENGINE" $source_flag --admin-email release-test@example.com --channel agentx-release-test \
+            --operator-principal "$OPERATOR_PRINCIPAL" --budget 0 --no-alerts --connectors none \
+            --github-account "$RT_GITHUB_ACCOUNT" --github-app-id "$RT_GITHUB_APP_ID" --github-installation-id "$RT_GITHUB_INSTALLATION_ID" --github-private-key-env RT_GITHUB_PRIVATE_KEY \
+            --slack-app-name "AgentX release test" --slack-bot-token-env RT_SLACK_BOT_TOKEN --slack-signing-secret-env RT_SLACK_SIGNING_SECRET --slack-install installed \
+            --signin slack --slack-client-id "$RT_SLACK_CLIENT_ID" --slack-client-secret-env RT_SLACK_CLIENT_SECRET \
+            --stop-after developer-signin
+      - name: Doctor on the previous release
+        run: |
+          node packages/cli/dist/main.js --json --env "$AGENTX_ENV" doctor --region "$AWS_REGION" > "$RUNNER_TEMP/doctor.json" || true
+          jq -r -e --arg version "$PREVIOUS" "$DOCTOR_GATE" "$RUNNER_TEMP/doctor.json"
+      - name: Upgrade to the candidate, then doctor
+        run: |
+          source_flag=""; [ "$ENGINE" = cdk ] && source_flag="--source $GITHUB_WORKSPACE"
+          # upgrade exits non-zero when any doctor check fails, including the one rulings F22 sets
+          # aside, so the gate decides: it also checks the environment now runs the candidate.
+          node packages/cli/dist/main.js --env "$AGENTX_ENV" upgrade --yes --region "$AWS_REGION" --release "$RUNNER_TEMP/candidate" --worker-image "$WORKER" --slack-image "$SLACK" $source_flag \
+            || echo "agentx upgrade exited non-zero; the doctor gate below decides"
+          node packages/cli/dist/main.js --json --env "$AGENTX_ENV" doctor --region "$AWS_REGION" > "$RUNNER_TEMP/doctor.json" || true
+          jq -r -e --arg version "$CANDIDATE" "$DOCTOR_GATE" "$RUNNER_TEMP/doctor.json"
+      - name: Change a setting under the operator role alone (SC-005)
+        run: |
+          creds=$(aws sts assume-role --role-arn "arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):role/agentx-$AGENTX_ENV-operator" --role-session-name release-test --query Credentials --output json)
+          export AWS_ACCESS_KEY_ID=$(echo "$creds" | jq -r .AccessKeyId) AWS_SECRET_ACCESS_KEY=$(echo "$creds" | jq -r .SecretAccessKey) AWS_SESSION_TOKEN=$(echo "$creds" | jq -r .SessionToken)
+          echo "::add-mask::$AWS_SECRET_ACCESS_KEY"; echo "::add-mask::$AWS_SESSION_TOKEN"
+          node packages/cli/dist/main.js --env "$AGENTX_ENV" config set alerts.slowTurnMinutes 7 --yes --region "$AWS_REGION"
+          test "$(node packages/cli/dist/main.js --env "$AGENTX_ENV" config get alerts.slowTurnMinutes --region "$AWS_REGION")" = 7
+          node packages/cli/dist/main.js --json --env "$AGENTX_ENV" doctor --region "$AWS_REGION" > "$RUNNER_TEMP/doctor.json" || true
+          jq -r -e --arg version "$CANDIDATE" "$DOCTOR_GATE" "$RUNNER_TEMP/doctor.json"
+      - name: Destroy this environment before the next one starts
+        if: always()
+        run: |
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          env="$AGENTX_ENV"
+          # The name, then the account id, for an install that failed before it recorded itself.
+          if printf '%s\n%s\n' "$env" "$ACCOUNT" | node packages/cli/dist/main.js --env "$env" destroy --region "$AWS_REGION" > "$RUNNER_TEMP/destroy.txt" 2>&1; then
+            cat "$RUNNER_TEMP/destroy.txt"
+          elif grep -q "has nothing to remove in this account and region" "$RUNNER_TEMP/destroy.txt"; then
+            echo "$env: nothing to remove"
+          else
+            cat "$RUNNER_TEMP/destroy.txt"; exit 1
+          fi
+
+  export:
+    # After both lanes, whether they passed or not, so only one environment is ever in the account.
+    needs: [images, lane]
+    if: ${{ !cancelled() && needs.images.result == 'success' }}
+    runs-on: ubuntu-latest
+    env:
+      AGENTX_ENV: rt${{ github.run_number }}x
+      WORKER: ${{ needs.images.outputs.worker }}
+      SLACK: ${{ needs.images.outputs.slack }}
+      OPERATOR_PRINCIPAL: ${{ vars.AGENTX_RELEASE_TEST_ROLE_ARN }}
+      RT_GITHUB_ACCOUNT: ${{ vars.RT_GITHUB_ACCOUNT }}
+      RT_GITHUB_APP_ID: ${{ vars.RT_GITHUB_APP_ID }}
+      RT_GITHUB_INSTALLATION_ID: ${{ vars.RT_GITHUB_INSTALLATION_ID }}
+      RT_SLACK_CLIENT_ID: ${{ vars.RT_SLACK_CLIENT_ID }}
+    steps:
+      - uses: actions/checkout@v5
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@v5
+        with: { node-version-file: .node-version, cache: npm }
+      - run: npm ci && npm run build && npm run release:build -- --version "$CANDIDATE" --out "$RUNNER_TEMP/candidate"
+      - uses: aws-actions/configure-aws-credentials@v5
+        with: { role-to-assume: "${{ vars.AGENTX_RELEASE_TEST_ROLE_ARN }}", aws-region: "${{ env.AWS_REGION }}", role-duration-seconds: 10800 }
+      - name: Export, then deploy the access stack as a platform team would
+        run: |
+          node packages/cli/dist/main.js --env "$AGENTX_ENV" init --export "$RUNNER_TEMP/bundle" --region "$AWS_REGION" --release "$RUNNER_TEMP/candidate" --operator-principal "$OPERATOR_PRINCIPAL"
+          "$RUNNER_TEMP/bundle/deploy-access.sh" --yes
+      - name: Resume under the operator role alone, up to developer sign-in, then doctor
+        env:
+          RT_GITHUB_PRIVATE_KEY: ${{ secrets.RT_GITHUB_PRIVATE_KEY }}
+          RT_SLACK_BOT_TOKEN: ${{ secrets.RT_SLACK_BOT_TOKEN }}
+          RT_SLACK_SIGNING_SECRET: ${{ secrets.RT_SLACK_SIGNING_SECRET }}
+          RT_SLACK_CLIENT_SECRET: ${{ secrets.RT_SLACK_CLIENT_SECRET }}
+        run: |
+          creds=$(aws sts assume-role --role-arn "arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):role/agentx-$AGENTX_ENV-operator" --role-session-name release-test --query Credentials --output json)
+          export AWS_ACCESS_KEY_ID=$(echo "$creds" | jq -r .AccessKeyId) AWS_SECRET_ACCESS_KEY=$(echo "$creds" | jq -r .SecretAccessKey) AWS_SESSION_TOKEN=$(echo "$creds" | jq -r .SessionToken)
+          echo "::add-mask::$AWS_SECRET_ACCESS_KEY"; echo "::add-mask::$AWS_SESSION_TOKEN"
+          node packages/cli/dist/main.js init --resume --from-bundle "$RUNNER_TEMP/bundle" --env "$AGENTX_ENV" --yes --no-browser --region "$AWS_REGION" --release "$RUNNER_TEMP/candidate" \
+            --worker-image "$WORKER" --slack-image "$SLACK" --budget 0 --no-alerts --connectors none \
+            --github-account "$RT_GITHUB_ACCOUNT" --github-app-id "$RT_GITHUB_APP_ID" --github-installation-id "$RT_GITHUB_INSTALLATION_ID" --github-private-key-env RT_GITHUB_PRIVATE_KEY \
+            --slack-app-name "AgentX release test" --slack-bot-token-env RT_SLACK_BOT_TOKEN --slack-signing-secret-env RT_SLACK_SIGNING_SECRET --slack-install installed \
+            --signin slack --slack-client-id "$RT_SLACK_CLIENT_ID" --slack-client-secret-env RT_SLACK_CLIENT_SECRET \
+            --stop-after developer-signin
+          node packages/cli/dist/main.js --json --env "$AGENTX_ENV" doctor --region "$AWS_REGION" > "$RUNNER_TEMP/doctor.json" || true
+          jq -r -e --arg version "$CANDIDATE" "$DOCTOR_GATE" "$RUNNER_TEMP/doctor.json"
+      - name: Destroy this environment
+        if: always()
+        run: |
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          env="$AGENTX_ENV"
+          # The name, then the account id, for an install that failed before it recorded itself.
+          if printf '%s\n%s\n' "$env" "$ACCOUNT" | node packages/cli/dist/main.js --env "$env" destroy --region "$AWS_REGION" > "$RUNNER_TEMP/destroy.txt" 2>&1; then
+            cat "$RUNNER_TEMP/destroy.txt"
+          elif grep -q "has nothing to remove in this account and region" "$RUNNER_TEMP/destroy.txt"; then
+            echo "$env: nothing to remove"
+          else
+            cat "$RUNNER_TEMP/destroy.txt"; exit 1
+          fi
+
+  teardown:
+    # A last sweep, whatever happened above: every environment this run could have made.
+    needs: [lane, export]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - if: vars.AGENTX_ENABLE_RELEASE_TEST == 'true'
+        uses: actions/checkout@v5
+        with: { persist-credentials: false }
+      - if: vars.AGENTX_ENABLE_RELEASE_TEST == 'true'
+        uses: actions/setup-node@v5
+        with: { node-version-file: .node-version, cache: npm }
+      - if: vars.AGENTX_ENABLE_RELEASE_TEST == 'true'
+        run: npm ci && npm run build
+      - if: vars.AGENTX_ENABLE_RELEASE_TEST == 'true'
+        uses: aws-actions/configure-aws-credentials@v5
+        with: { role-to-assume: "${{ vars.AGENTX_RELEASE_TEST_ROLE_ARN }}", aws-region: "${{ env.AWS_REGION }}", role-duration-seconds: 10800 }
+      - name: Destroy every environment this run made
+        if: vars.AGENTX_ENABLE_RELEASE_TEST == 'true'
+        run: |
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          status=0
+          for env in "rt${{ github.run_number }}t" "rt${{ github.run_number }}c" "rt${{ github.run_number }}x"; do
+            # The name, then the account id, for an install that failed before it recorded itself.
+            if printf '%s\n%s\n' "$env" "$ACCOUNT" | node packages/cli/dist/main.js --env "$env" destroy --region "$AWS_REGION" > "$RUNNER_TEMP/destroy-$env.txt" 2>&1; then
+              cat "$RUNNER_TEMP/destroy-$env.txt"
+            elif grep -q "has nothing to remove in this account and region" "$RUNNER_TEMP/destroy-$env.txt"; then
+              echo "$env: nothing to remove"
+            else
+              cat "$RUNNER_TEMP/destroy-$env.txt"; status=1
+            fi
+          done
+          exit $status

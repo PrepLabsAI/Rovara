@@ -153,6 +153,22 @@ describe("agentx init", () => {
     expect(initSteps({ github: fakeGitHubApi(), slack: fakeSlackApi() }).map((step) => step.id)).toEqual([...INIT_STEP_IDS]);
   });
 
+  it("stops after the step --stop-after names, records it, and says how to finish", async () => {
+    const h = await harness();
+    expect(await h.run(["--stop-after", "developer-signin"], { prompter: scriptedPrompter([...FIRST_RUN, ...SLACK, ...SIGNIN]) })).toBe(0);
+    const progress = await readInstallProgress(h.store, "staging");
+    expect(progress?.steps["developer-signin"]?.status).toBe("done");
+    expect(progress?.steps["admin-user"]).toBeUndefined();
+    expect(h.printed()).toContain("Stopped after the developer-signin step, as --stop-after asked. Run agentx init --env staging --region us-east-1 again to finish.");
+    expect(h.store.values.has(lockParameterName("staging"))).toBe(false);
+  });
+
+  it("refuses a --stop-after that names no step", async () => {
+    const h = await harness();
+    expect(await h.run(["--stop-after", "everything"], { prompter: scriptedPrompter([]) })).not.toBe(0);
+    expect(h.printed()).toContain("--stop-after");
+  });
+
   it("a first run asks, checks, shows the plan, deploys every stack, creates both apps, writes settings and the local cache, and ends on a threaded Slack reply", async () => {
     // The harness's finishing services (F15): one repository, the payments channel, a confirmed
     // alert subscription and the $100 budget FIRST_RUN takes (F16), and a turn received a day later.

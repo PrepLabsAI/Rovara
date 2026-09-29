@@ -43,6 +43,7 @@ import { resolveDeploymentFile } from "./environments/cache.js";
 import { DEFAULT_CLASSIFIER_MODEL, DEFAULT_ORCHESTRATOR_MODEL, DEFAULT_WORKER_MODEL, type InitFlags } from "./init/answers.js";
 import { runInit, type InitCliDependencies, type InitOptions } from "./init/commands.js";
 import type { FinishFlags, SecretFlags } from "./init/context.js";
+import { INIT_STEP_IDS, type InitStepId } from "./init/install-state.js";
 import { parseConnectorsFlag } from "./init/finish-steps.js";
 import { runEnvAdopt, runEnvList, runEnvUse } from "./environments/commands.js";
 import { ssmParameterStore, type ParameterStore } from "./environments/parameter-store.js";
@@ -756,6 +757,8 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--asana-project <gid>", "the Asana project's GID"),
   )
     .addOption(new Option(`${SIGNIN_FLAG_NAMES.methods} <method>`, "how developers sign in: Slack (default), your company's sign-in (oidc), or both").choices(["slack", "oidc", "both"]))
+    // Checked in initOptions, not with .choices(): commander would exit the process on a bad value.
+    .option("--stop-after <step>", "run the steps up to and including this one, then stop; agentx init again finishes (for automated tests)")
     .action(async (
       options: InitCommandOptions & { export?: string },
       command: Command,
@@ -769,6 +772,10 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         }
         if (result.status === "waiting") {
           services.stdout.write(`${result.message}\n`);
+          return;
+        }
+        if (result.stoppedAfter !== undefined) {
+          services.stdout.write(`Stopped after the ${result.stoppedAfter} step, as --stop-after asked. Run agentx init --env ${result.env} --region ${options.region ?? "<region>"} again to finish.\n`);
           return;
         }
         services.stdout.write(`${result.ready ?? `AgentX environment ${result.env} is deployed. Control plane: ${result.controlPlaneUrl ?? "unknown"}`}\n`);
@@ -942,7 +949,7 @@ function parsePort(value: string): number {
 
 interface InitCommandOptions extends SignInCommandOptions {
   region?: string; account?: string; release?: string; engine?: "templates" | "cdk"; source?: string;
-  resume: boolean; yes: boolean; browser: boolean; fromBundle?: string;
+  resume: boolean; yes: boolean; browser: boolean; fromBundle?: string; stopAfter?: string;
   /** --ui / --no-ui. Undefined when neither was given: in this release that is the terminal. */
   ui?: boolean;
   identity: "cognito" | "oidc"; oidcIssuer?: string; oidcAudience?: string; oidcClientId?: string; adminClaim?: string; adminValues?: string;
@@ -968,6 +975,10 @@ interface InitCommandOptions extends SignInCommandOptions {
  * --identity, --no-alerts's true) must never silently answer a question init would otherwise ask. */
 function initOptions(globals: GlobalOptions, options: InitCommandOptions, command: Command): InitOptions {
   const { env } = globals;
+  const { stopAfter } = options;
+  if (stopAfter !== undefined && !isInitStepId(stopAfter)) {
+    throw agentXError("CONFIG_INVALID", `--stop-after ${JSON.stringify(stopAfter)} names no init step; use one of: ${INIT_STEP_IDS.join(", ")}`);
+  }
   // A --connectors typo fails here, before anything is asked or deployed.
   if (options.connectors !== undefined) parseConnectorsFlag(options.connectors);
   const finishFlags = definedEntries<FinishFlags>({
@@ -1032,7 +1043,12 @@ function initOptions(globals: GlobalOptions, options: InitCommandOptions, comman
     ...(options.slackInstall === undefined ? {} : { slackInstall: options.slackInstall }),
     finishFlags,
     configDir: globals.configDir,
+    ...(stopAfter === undefined ? {} : { stopAfter }),
   };
+}
+
+function isInitStepId(value: string): value is InitStepId {
+  return (INIT_STEP_IDS as readonly string[]).includes(value);
 }
 
 function globalOptions(command: Command): GlobalOptions {
