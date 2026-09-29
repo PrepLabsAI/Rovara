@@ -70,6 +70,60 @@ describe("worker HTTP contract", () => {
     expect((await journal.get(invocation.operationId))?.status).toBe("SUCCEEDED");
   });
 
+  it("retries a failed terminal callback three times, waiting 2 s, 8 s and 30 s", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentx-terminal-"));
+    const journal = new OperationJournal(root);
+    const waits: number[] = [];
+    let attempts = 0;
+    const state = createWorkerServerState(
+      journal,
+      { execute: async () => undefined },
+      {
+        onTerminal: async () => {
+          attempts += 1;
+          throw new Error("ThrottlingException");
+        },
+        retrySleep: async (ms) => {
+          waits.push(ms);
+        },
+      },
+    );
+    const invocation = taskInvocation();
+
+    await handleWorkerRequest(invocationRequest(invocation), state);
+    await vi.waitFor(() => expect(attempts).toBe(4));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(attempts).toBe(4);
+    expect(waits).toEqual([2_000, 8_000, 30_000]);
+    expect((await journal.get(invocation.operationId))?.status).toBe("SUCCEEDED");
+  });
+
+  it("stops retrying the terminal callback once it succeeds", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentx-terminal-"));
+    const journal = new OperationJournal(root);
+    const waits: number[] = [];
+    let attempts = 0;
+    const state = createWorkerServerState(
+      journal,
+      { execute: async () => undefined },
+      {
+        onTerminal: async () => {
+          attempts += 1;
+          if (attempts < 3) throw new Error("ThrottlingException");
+        },
+        retrySleep: async (ms) => {
+          waits.push(ms);
+        },
+      },
+    );
+
+    await handleWorkerRequest(invocationRequest(taskInvocation()), state);
+    await vi.waitFor(() => expect(attempts).toBe(3));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(attempts).toBe(3);
+    expect(waits).toEqual([2_000, 8_000]);
+  });
+
   it("accepts a prepare invocation whose stored project has a connector of an unknown type", async () => {
     const root = await mkdtemp(join(tmpdir(), "agentx-journal-"));
     const journal = new OperationJournal(root);
