@@ -77,7 +77,8 @@ export async function writeUpgradeBundle(input: {
       // As deployEnvironment does: the stored sign-in is sent only for the names the target declares.
       let raw: Record<string, string>;
       try {
-        raw = stackParameters(part, full, input.outputs);
+        // upgrade --export runs only for the templates engine (run.ts refuses it for cdk).
+        raw = stackParameters(part, full, input.outputs, { packages: true });
       } catch (error) {
         // The outputs are the deployed ones: a target release that adds an output a later stack reads
         // cannot be written as one bundle, since the earlier stack must run the release first.

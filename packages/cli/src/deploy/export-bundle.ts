@@ -785,7 +785,8 @@ export async function writeExportBundle(input: ExportBundleInput): Promise<Expor
 
     for (const part of order) {
       await write(`templates/${part}.template.json`, release.template(part, region, env));
-      const parameters = stackParameters(part, parameterAnswers, outputs);
+      // The export bundle holds the published templates, so it passes the release packages.
+      const parameters = stackParameters(part, parameterAnswers, outputs, { packages: true });
       await write(`parameters/${part}.json`, `${JSON.stringify(parameterList(parameters), null, 2)}\n`);
     }
 

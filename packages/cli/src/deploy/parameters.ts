@@ -204,12 +204,13 @@ function adminParameters(identity: InstallAnswers["identity"]): Record<string, s
 /** Parameters for one stack. Throws a clear error naming the missing input or output. The release's
  * package parameters belong to its published templates only: a cdk deploy synthesizes from source and
  * uploads its own assets, and CloudFormation refuses a parameter its template does not declare, so
- * the cdk engine passes `packages: false` (Task 20 live check). */
-export function stackParameters(part: DeployPart, answers: InstallAnswers, outputs: Partial<Record<DeployPart, StackOutputs>>, options: { packages?: boolean } = {}): Record<string, string> {
+ * the cdk engine passes `packages: false` (Task 20 live check). The option is required so every
+ * caller chooses (review M5). */
+export function stackParameters(part: DeployPart, answers: InstallAnswers, outputs: Partial<Record<DeployPart, StackOutputs>>, options: { packages: boolean }): Record<string, string> {
   const boundary = answers.permissionsBoundaryArn ?? "";
   const base: Record<string, string> = {
     PermissionsBoundaryArn: boundary,
-    ...(options.packages === false ? {} : packageParameters(answers.release, part, outputs, answers.env)),
+    ...(options.packages ? packageParameters(answers.release, part, outputs, answers.env) : {}),
   };
 
   const openRouter = answers.models.openRouter;
