@@ -15,6 +15,7 @@ import {
   DeveloperTaskActionRequestSchema,
   DeveloperTaskStatusSchema,
   PullRequestResultSchema,
+  SlackChannelIdSchema,
   StartDeveloperTaskRequestSchema,
   WorkspaceClosePreflightResultSchema,
   agentXError,
@@ -52,6 +53,7 @@ import {
   type DeveloperTaskIndexRecord,
   type DeveloperTaskPointerRecord,
   type DeveloperTaskRecord,
+  type TaskShare,
   type TurnParty,
   type WorkspaceCharge,
 } from "../developer/task-records.js";
@@ -331,14 +333,25 @@ async function shareFor(
   wanted: { shareToChannel: boolean; shareMode?: "view" | "continue" | undefined; channel?: string | undefined },
 ): Promise<ShareDecision | undefined> {
   if (!wanted.shareToChannel && access.policy.share !== "required") return undefined;
-  const bound: BoundChannel[] = caller.slackUserId === undefined || deps.boundChannels === undefined
-    ? access.channelIds.map((channelId) => ({ channelId }))
-    : await deps.boundChannels(access.channelIds);
-  return decideShare({
-    project, policy: access.policy, bound, shareToChannel: wanted.shareToChannel,
-    ...(wanted.shareMode === undefined ? {} : { shareMode: wanted.shareMode }),
-    ...(wanted.channel === undefined ? {} : { channel: wanted.channel }),
-  });
+  const readsNames = caller.slackUserId !== undefined && deps.boundChannels !== undefined;
+  const bound: BoundChannel[] = readsNames && deps.boundChannels !== undefined
+    ? await deps.boundChannels(access.channelIds)
+    : access.channelIds.map((channelId) => ({ channelId }));
+  try {
+    return decideShare({
+      project, policy: access.policy, bound, shareToChannel: wanted.shareToChannel,
+      ...(wanted.shareMode === undefined ? {} : { shareMode: wanted.shareMode }),
+      ...(wanted.channel === undefined ? {} : { channel: wanted.channel }),
+    });
+  } catch (error) {
+    // A channel named by name when Slack did not name every bound channel: the name may be right,
+    // so say the names could not be read rather than blame it, and give the IDs to use (IDs only, R10).
+    const byName = wanted.channel !== undefined && !SlackChannelIdSchema.safeParse(wanted.channel).success;
+    if (readsNames && byName && error instanceof AgentXError && error.code === "CHANNEL_REQUIRED" && bound.some((channel) => channel.name === undefined)) {
+      throw agentXError("CHANNEL_REQUIRED", `AgentX could not read the channel names from Slack; name the channel by its ID: ${bound.map((channel) => channel.channelId).sort().join(", ")}`);
+    }
+    throw error;
+  }
 }
 
 async function startTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, value: unknown): Promise<{ task: DeveloperTaskView }> {
@@ -374,16 +387,19 @@ async function startTask(deps: DeveloperTaskRouteDependencies, caller: Developer
     throw error;
   }
   // FR-031, C4: decided here, in R8's place for sharing; a refusal is audited and writes nothing else.
-  let share: ShareDecision | undefined;
+  let decision: ShareDecision | undefined;
   try {
-    share = await shareFor(deps, caller, request.project, access, { shareToChannel: request.shareToChannel === true, shareMode: request.shareMode, channel: request.channel });
+    decision = await shareFor(deps, caller, request.project, access, { shareToChannel: request.shareToChannel === true, shareMode: request.shareMode, channel: request.channel });
   } catch (error) {
     if (error instanceof AgentXError) return refused(error);
     throw error;
   }
-  const teamId = deps.slackTeamId;
-  // Bindings exist only under a team ID, so this cannot happen; refuse rather than write a half share.
-  if (share !== undefined && teamId === undefined) return refused(agentXError("CHANNEL_REQUIRED", "this AgentX has no Slack workspace set, so tasks cannot be shared"));
+  let share: TaskShare | undefined;
+  if (decision !== undefined) {
+    // Bindings exist only under a team ID, so this cannot happen; refuse rather than write a half share.
+    if (deps.slackTeamId === undefined) return refused(agentXError("CHANNEL_REQUIRED", "this AgentX has no Slack workspace set, so tasks cannot be shared"));
+    share = taskShare(decision, deps.slackTeamId, receivedAt);
+  }
   const project = await deps.actions.latestProject(request.project);
   if (project === undefined) return refused(agentXError("PROJECT_NOT_FOUND", `project \`${request.project}\` doesn't exist in this AgentX`));
   // The policy checked must be the policy started: a revision registered between the two reads
@@ -407,7 +423,7 @@ async function startTask(deps: DeveloperTaskRouteDependencies, caller: Developer
     ...taskKey(taskId), entityType: "DEVELOPER_TASK", taskId, developerId: caller.developerId, provider: caller.amr, developerName: caller.name,
     ...(caller.slackUserId === undefined ? {} : { slackUserId: caller.slackUserId }),
     client, project: request.project, title, workspaceId, ownerKey: identity.ownerKey, conversationId, startingRevision: revision,
-    charge, shared: share !== undefined, ...(share === undefined ? {} : { share: taskShare(share, teamId!, receivedAt), shareVersion: 1 }),
+    charge, shared: share !== undefined, ...(share === undefined ? {} : { share, shareVersion: 1 }),
     createdAt: receivedAt, updatedAt: receivedAt,
   };
   const index: DeveloperTaskIndexRecord = {

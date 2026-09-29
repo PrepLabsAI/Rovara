@@ -1,7 +1,8 @@
 // Spec 025 FR-031, D5, D6, C3, C4: sharing decided at POST /v1/dev/tasks.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import type { ChannelInfoRequest, ChannelInfoResponse } from "../../packages/contracts/src/index.js";
+import { AgentXError, DEFAULT_DEVELOPER_TASK_POLICY, type ChannelInfoRequest, type ChannelInfoResponse } from "@agentx/contracts";
+import { routeDeveloperTaskRequest } from "../../packages/broker/src/aws/developer-tasks.js";
 import { MAYA, OMAR, bindChannel, createDeveloperTaskBroker, grantProject, registerRevision, unbindChannel } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 
@@ -83,11 +84,49 @@ describe("sharing at the start (FR-031)", () => {
     const { db, handler, dev } = await createDeveloperTaskBroker({ channelInfo: names });
     const unknown = await dev(MAYA, "POST", "/v1/dev/tasks", start({ shareToChannel: true, channel: "#elsewhere" }));
     expect(unknown.body.error).toMatchObject({ code: "CHANNEL_REQUIRED", message: "`#elsewhere` is not a channel of `payments`; its channels are #payments-dev" });
+    expect(refusals(db)).toEqual([expect.objectContaining({ action: "start", outcome: "refused", error: { code: "CHANNEL_REQUIRED" } })]);
     grantProject(db, MAYA);
     await unbindChannel(handler, SLACK_CHANNEL);
     const none = await dev(MAYA, "POST", "/v1/dev/tasks", start({ shareToChannel: true }));
     expect(none.body.error).toMatchObject({ code: "CHANNEL_REQUIRED", message: "project `payments` has no Slack channel bound to it, so the task cannot be shared" });
     expect(workspaces(db)).toHaveLength(0);
+  });
+
+  it("says the names could not be read, not that the channel is wrong, when Slack does not answer (review minor 2)", async () => {
+    const { db, dev } = await createDeveloperTaskBroker({ channelInfo: async () => ({ ok: false, error: "slack_unavailable" }) });
+    const named = await dev(MAYA, "POST", "/v1/dev/tasks", start({ shareToChannel: true, channel: "#payments-dev" }));
+    expect(named.body.error).toMatchObject({ code: "CHANNEL_REQUIRED", message: `AgentX could not read the channel names from Slack; name the channel by its ID: ${SLACK_CHANNEL}` });
+    expect(workspaces(db)).toHaveLength(0);
+    expect(taskOf((await dev(MAYA, "POST", "/v1/dev/tasks", start({ shareToChannel: true, channel: SLACK_CHANNEL }))).body).share).toMatchObject({ channelId: SLACK_CHANNEL });
+  });
+
+  it("refuses a share, audited, when the route is given a bound channel but no Slack team ID, and writes nothing else", async () => {
+    // The hosted router finds no binding without a team ID, so this guard is reached only by
+    // dependencies that report a channel anyway: call the task routes directly with such a checkAccess.
+    const { db, actions } = await createDeveloperTaskBroker({ channelInfo: names });
+    const caller = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: MAYA.provider, name: MAYA.name, slackUserId: MAYA.slackUserId! };
+    const refusal = await routeDeveloperTaskRequest({
+      documentClient: db, tableName: "state", actions, now: () => Date.now(),
+      checkAccess: async () => ({ revision: 1, policy: DEFAULT_DEVELOPER_TASK_POLICY, access: "granted", channelIds: [SLACK_CHANNEL] }),
+    }, caller, { method: "POST", path: "/v1/dev/tasks", headers: {}, requestId: randomUUID(), body: JSON.stringify(start({ shareToChannel: true })) }, new URL("https://agentx.test/v1/dev/tasks")).then(() => undefined, (error: unknown) => error);
+    expect(refusal).toBeInstanceOf(AgentXError);
+    expect((refusal as AgentXError).code).toBe("CHANNEL_REQUIRED");
+    expect((refusal as AgentXError).message).toContain("this AgentX has no Slack workspace set, so tasks cannot be shared");
+    expect(workspaces(db)).toHaveLength(0);
+    expect(db.find((item) => item.entityType === "DEVELOPER_TASK")).toHaveLength(0);
+    expect(refusals(db)).toEqual([expect.objectContaining({ action: "start", outcome: "refused", error: { code: "CHANNEL_REQUIRED" } })]);
+  });
+
+  it("never stores or shows a private channel's name, even to a Slack-linked developer (R10)", async () => {
+    const { db, handler, dev } = await createDeveloperTaskBroker({ channelInfo: names });
+    await bindChannel(handler, PRIVATE);
+    const task = taskOf((await dev(MAYA, "POST", "/v1/dev/tasks", start({ shareToChannel: true, channel: PRIVATE }))).body);
+    expect(task).toMatchObject({ shared: true, share: { channelId: PRIVATE } });
+    expect(task.share).not.toHaveProperty("channelName");
+    const stored = db.get(`DEVTASK#${task.taskId}`, "META") as { share: Record<string, unknown> };
+    expect(stored.share).toMatchObject({ channelId: PRIVATE });
+    expect(stored.share).not.toHaveProperty("channelName");
+    expect(JSON.stringify(db.find((item) => item.taskId === task.taskId))).not.toContain("payments-secret");
   });
 
   it("gives a developer with no Slack link channel IDs only, and reads no names for them (R10)", async () => {
