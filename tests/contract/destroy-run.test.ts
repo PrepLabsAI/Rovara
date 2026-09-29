@@ -290,6 +290,22 @@ describe("agentx destroy (FR-055, item 3)", () => {
     ]);
   });
 
+  it("lists the ECR repositories before deleting anything, and a failed listing keeps every manual step (re-review R1)", async () => {
+    const account = installedAccount();
+    account.repositoriesError = Object.assign(new Error("not authorized to perform: ecr:DescribeRepositories"), { name: "AccessDeniedException" });
+    const h = await harness({ account });
+    const result = await runDestroy({ env: "staging", keepData: false }, h.deps);
+    expect(result.removed).toBe(true);
+    expect(h.account.repositoriesListedAfter).toBe(0);
+    expect(result.manualSteps.some((step) => step.startsWith("Delete the GitHub App"))).toBe(true);
+    expect(result.manualSteps.some((step) => step.startsWith("Delete the Slack app"))).toBe(true);
+    expect(result.manualSteps.some((step) => step.startsWith("Revoke the Linear API key"))).toBe(true);
+    expect(result.manualSteps.filter((step) => step.includes("ECR"))).toEqual([
+      "Delete the ECR repositories under agentx-staging/ that the image pull-through cache created: in the ECR console for us-east-1, Private registry, Repositories, filter by agentx-staging/ and delete each one (or aws ecr delete-repository --force --region us-east-1 --repository-name <name>).",
+    ]);
+    expect(h.lines).toContain("Could not list the ECR repositories under agentx-staging/ (AccessDeniedException), so the step to delete them is printed at the end anyway.");
+  });
+
   it("prints no ECR step when no repository under agentx-<env>/ exists (live check L6)", async () => {
     const account = installedAccount();
     account.repositories = ["agentx-staging-eu/ghcr/preplabsai/agentx-worker"];

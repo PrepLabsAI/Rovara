@@ -19,6 +19,10 @@ export interface FakeAccount {
   aliases: string[];
   /** ECR repository names in the account (every one, as DescribeRepositories lists them). */
   repositories?: string[];
+  /** DescribeRepositories fails with this error (an admin role scoped without ECR, say). */
+  repositoriesError?: Error;
+  /** How many mutating calls had been made when the repositories were listed. */
+  repositoriesListedAfter?: number;
   calls: string[];
   /** The token each failedResources call was given. */
   failedTokens?: Array<string | undefined>;
@@ -110,7 +114,7 @@ export function fakeDestroyApi(account: FakeAccount, clock: { now: () => number 
     async aliases() { return account.aliases.map((name) => ({ name })); },
     async deleteAlias(name) { account.calls.push(`delete alias ${name}`); account.aliases = account.aliases.filter((alias) => alias !== name); },
     async secrets() { return account.secrets; },
-    async pullThroughRepositories(env) { return (account.repositories ?? []).filter((name) => name.startsWith(`agentx-${env}/`)); },
+    async pullThroughRepositories(env) { account.repositoriesListedAfter = account.calls.length; if (account.repositoriesError !== undefined) throw account.repositoriesError; return (account.repositories ?? []).filter((name) => name.startsWith(`agentx-${env}/`)); },
     async deleteSecret(name) {
       const matches = account.secrets.filter((secret) => isSecretId(name, secret.name));
       if (matches.some((secret) => forceDeleted.has(secret.name))) throw new Error(`test: ${name} was already force-deleted; RestoreSecret fails on it`);

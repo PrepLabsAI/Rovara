@@ -128,6 +128,16 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
     });
     return { stacks, inventory };
   };
+  // Re-review R1: the pull-through cache's ECR repositories are listed now, before anything is
+  // deleted, so a failed listing can never lose the manual steps printed at the end. Undefined means
+  // the listing failed, and the step is printed without names.
+  const repositoryPrefix = `${environmentPullThroughPrefix(env)}/`;
+  let repositories: string[] | undefined;
+  try {
+    repositories = (await api.pullThroughRepositories(env)).filter((name) => name.startsWith(repositoryPrefix));
+  } catch (error) {
+    deps.write(`Could not list the ECR repositories under ${repositoryPrefix} (${error instanceof Error ? error.name : "unknown error"}), so the step to delete them is printed at the end anyway.`);
+  }
   const { stacks, inventory: planned } = await readStacks();
   let inventory = planned;
   // Every list is checked against the guards again here, whatever the adapter already filtered.
@@ -264,15 +274,14 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
   if (settings !== undefined) await deps.tokenStore.delete(tokenStoreKey({ issuer: settings.identity.issuer, clientId: settings.identity.clientId, audience: settings.identity.audience }));
   result.localFiles = localFiles;
 
-  // 9. What AgentX cannot do. Live check L6: the ECR step only when the cache made a repository.
-  const prefix = `${environmentPullThroughPrefix(env)}/`;
-  const repositories = (await api.pullThroughRepositories(env)).filter((name) => name.startsWith(prefix));
+  // 9. What AgentX cannot do. Live check L6: the ECR step only when the cache made a repository
+  // (listed in step 1), or, when that listing failed, without names.
   result.manualSteps = [
     ...vendorSteps(inventory),
     ...(options.keepData && result.kept.length + keptSecrets.length > 0 ? [`Kept, as --keep-data asked: ${[...result.kept, ...keptSecrets.map((name) => `secret ${name}`)].join(", ")}. A new install named ${env} cannot reuse the secret names until you delete them.`] : []),
     ...(options.keepData ? ["Run agentx destroy again, without --keep-data, to remove what was kept."] : []),
     // Ruling F32: the image pull-through cache made these repositories, outside every stack.
-    ...(repositories.length === 0 ? [] : [`Delete the ECR repositories under ${prefix} that the image pull-through cache created (${repositories.join(", ")}): in the ECR console for ${deps.region}, Private registry, Repositories, filter by ${prefix} and delete each one (or aws ecr delete-repository --force --region ${deps.region} --repository-name <name>).`]),
+    ...(repositories?.length === 0 ? [] : [`Delete the ECR repositories under ${repositoryPrefix} that the image pull-through cache created${repositories === undefined ? "" : ` (${repositories.join(", ")})`}: in the ECR console for ${deps.region}, Private registry, Repositories, filter by ${repositoryPrefix} and delete each one (or aws ecr delete-repository --force --region ${deps.region} --repository-name <name>).`]),
     ...(result.retainedDeleted.some((entry) => entry.startsWith("AWS::KMS::Key")) ? ["The KMS keys are scheduled for deletion in 7 days; until then, aws kms cancel-key-deletion brings one back."] : []),
     ...result.leftInPlace.map((entry) => `Left in place: ${entry}.`),
   ];
