@@ -20,7 +20,7 @@ type Resource = { Type: string; DeletionPolicy?: string; Properties?: Record<str
 /** The longest physical ID AWS gives the resource: its own name when the template sets one as plain
  * text, else CloudFormation's generated name (stack name, logical ID and a random suffix). */
 function physicalId(stackName: string, logicalId: string, resource: Resource): string {
-  const named = (key: string) => (typeof resource.Properties?.[key] === "string" ? resource.Properties[key] as string : undefined);
+  const named = (key: string) => (typeof resource.Properties?.[key] === "string" ? resource.Properties[key] : undefined);
   const generated = (limit: number) => `${stackName}-${logicalId}`.slice(0, limit - 14) + "-ABCDEFGHIJKLM";
   switch (resource.Type) {
     case "AWS::S3::Bucket": return named("BucketName") ?? generated(63).toLowerCase();
