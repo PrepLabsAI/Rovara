@@ -30,6 +30,22 @@ export const isOwnedWorker = (env: string, tags: Record<string, string>) =>
 /** CloudFormation's own tag on the resources it creates. */
 const STACK_NAME_TAG = "aws:cloudformation:stack-name";
 
+/** A generated name starts with its stack's name and "-". For a bucket, CloudFormation may cut the
+ * stack name's part short (agentx-live15ea-control-plane becomes agentx-live15ea-control-p, seen in
+ * the Task 20 live check), and S3 then returns no stack-name tag, so a non-empty start of the part also
+ * counts. "agentx-<env>-" itself is never cut here, so a sibling environment never matches. */
+function startsWithOwnStack(env: string, part: StackPart, physicalId: string): boolean {
+  const id = physicalId.toLowerCase();
+  const head = `agentx-${env}-`.toLowerCase();
+  if (!id.startsWith(head)) return false;
+  const rest = id.slice(head.length);
+  for (let end = rest.indexOf("-"); end !== -1; end = rest.indexOf("-", end + 1)) {
+    const candidate = rest.slice(0, end);
+    if (candidate.length > 0 && part.startsWith(candidate)) return true;
+  }
+  return false;
+}
+
 /** A retained resource comes from this environment's own stack inventory; it must also carry this
  * environment's tag. When it carries CloudFormation's stack-name tag, that must be its own stack
  * (a generated bucket name can be shortened for a long environment name, so the name alone can miss
@@ -38,7 +54,7 @@ export function isOwnedRetained(env: string, resource: RetainedResource, tags: R
   if (!valid(env) || tags?.["agentx:env"] !== env) return false;
   const stackTag = tags[STACK_NAME_TAG];
   if (stackTag !== undefined && stackTag !== environmentStackName(env, resource.part)) return false;
-  if (stackTag === undefined && GENERATED_NAMES.has(resource.type)) return resource.physicalId.toLowerCase().startsWith(`${environmentStackName(env, resource.part)}-`.toLowerCase());
+  if (stackTag === undefined && GENERATED_NAMES.has(resource.type)) return startsWithOwnStack(env, resource.part, resource.physicalId);
   if (resource.type === "AWS::SecretsManager::Secret") return resource.physicalId.includes(`:secret:agentx/${env}/`) || resource.physicalId.startsWith(`agentx/${env}/`);
   return true;
 }

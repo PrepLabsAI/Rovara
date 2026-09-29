@@ -73,8 +73,19 @@ describe("destroy: name guards, prefix overlaps and the older production deploym
     expect(isOwnedRetained("a-very-long-envname", bucket, { "agentx:env": "a-very-long-envname", "aws:cloudformation:stack-name": "agentx-a-very-long-envname-control-plane" })).toBe(true);
     expect(isOwnedRetained("a-very-long-envname", bucket, { "agentx:env": "a-very-long-envname", "aws:cloudformation:stack-name": "agentx-a-very-long-envname-foundation" })).toBe(false);
     expect(isOwnedRetained("prod", { part: "foundation", logicalId: "Key", type: "AWS::KMS::Key", physicalId: "k" }, { "agentx:env": "prod", "aws:cloudformation:stack-name": "agentx-prod-eu-foundation" })).toBe(false);
-    // Without the stack tag, the name prefix still decides.
-    expect(isOwnedRetained("a-very-long-envname", bucket, { "agentx:env": "a-very-long-envname" })).toBe(false);
+    // Without the stack tag, the name prefix still decides: another part's shortened prefix never matches.
+    expect(isOwnedRetained("a-very-long-envname", { ...bucket, part: "foundation" }, { "agentx:env": "a-very-long-envname" })).toBe(false);
+  });
+
+  it("matches a bucket whose name CloudFormation shortened when S3 returns no stack tag (Task 20 live check)", () => {
+    // live15ea's Slack thread-session bucket: S3's tag set held only agentx:env, and CloudFormation cut
+    // the stack name agentx-live15ea-control-plane to agentx-live15ea-control-p.
+    const bucket: RetainedResource = { part: "control-plane", logicalId: "SlackThreadSessions", type: "AWS::S3::Bucket", physicalId: "agentx-live15ea-control-p-slackthreadsessions6fd21-taqjchbygr25" };
+    expect(isOwnedRetained("live15ea", bucket, { "agentx:env": "live15ea" })).toBe(true);
+    expect(isOwnedRetained("live15ea", bucket, { "agentx:env": "live15eab" })).toBe(false);
+    expect(isOwnedRetained("live15ea", { ...bucket, part: "slack" }, { "agentx:env": "live15ea" })).toBe(false);
+    expect(isOwnedRetained("live15ea", { ...bucket, physicalId: "agentx-live15eab-control-p-slackthreadsessions6fd21-x" }, { "agentx:env": "live15ea" })).toBe(false);
+    expect(isOwnedRetained("live15ea", { ...bucket, physicalId: "agentx-live15ea--slackthreadsessions6fd21-x" }, { "agentx:env": "live15ea" })).toBe(false);
   });
 });
 
