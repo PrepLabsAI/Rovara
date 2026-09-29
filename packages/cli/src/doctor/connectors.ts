@@ -93,7 +93,11 @@ export async function connectorChecks(context: DoctorContext): Promise<DoctorChe
   }
   const recorded = progress?.connectors ?? [];
   if (files.length === 0 && recorded.length > 0) {
-    checks.push(check("connectors", "project files", "warn", `agentx init added ${recorded.map((entry) => LABEL[entry.type]).join(", ")}, but no project file of environment ${env} is in ${services.configDir}`, "run agentx doctor with --config-dir <the directory holding the project files>"));
+    const added = recorded.map((entry) => LABEL[entry.type]).join(", ");
+    // A file marked unusable above may be this environment's: never also claim there is none.
+    checks.push(found.length > 0
+      ? check("connectors", "project files", "warn", `agentx init added ${added}, but the only project files found for environment ${env} could not be used (see the warnings above)`, fixFile)
+      : check("connectors", "project files", "warn", `agentx init added ${added}, but no project file of environment ${env} is in ${services.configDir}`, "run agentx doctor with --config-dir <the directory holding the project files>"));
   }
   return checks.length > 0 ? checks : [check("connectors", "connectors", "ok", "no connectors are set up")];
 }

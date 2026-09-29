@@ -180,3 +180,17 @@ describe("doctor: connectors (Task 7 fix round 1)", () => {
     expect(checks).toEqual([expect.objectContaining({ name: "project files", status: "warn", detail: "agentx init added Linear, but no project file of environment staging is in /nonexistent-agentx-projects" })]);
   });
 });
+
+describe("doctor: connectors (Task 7 re-review)", () => {
+  it("does not say no project file exists when the environment's only one could not be used", async () => {
+    const configDir = await projectDir([{ env: "staging", definition: payments([linear]) }]);
+    const good = await readFile(join(configDir, "payments.yaml"), "utf8");
+    const header = good.split("\n").filter((line) => line.startsWith("#")).join("\n");
+    await writeFile(join(configDir, "payments.yaml"), `${header}\nname: [unclosed\n`);
+    const progress = { ...PROGRESS, connectors: [{ type: "linear" as const, ref: "linear" }] };
+    const checks = await connectorChecks(doctorContext({ services: doctorServices({ configDir }), progress }));
+    expect(checks.find((entry) => entry.name === `project file ${join(configDir, "payments.yaml")}`)?.status).toBe("warn");
+    expect(JSON.stringify(checks)).not.toContain("no project file");
+    expect(checks.find((entry) => entry.name === "project files")).toMatchObject({ status: "warn", detail: "agentx init added Linear, but the only project files found for environment staging could not be used (see the warnings above)" });
+  });
+});

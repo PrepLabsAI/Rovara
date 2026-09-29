@@ -4,6 +4,7 @@ import { githubChecks } from "../../packages/cli/src/doctor/github.js";
 import { secretChecks } from "../../packages/cli/src/doctor/secrets.js";
 import { slackChecks } from "../../packages/cli/src/doctor/slack.js";
 import { probeSlackUrls, SlackSignatureRefusedError } from "../../packages/cli/src/init/slack-app.js";
+import { SlackRateLimitedError } from "../../packages/cli/src/setup/channel-add.js";
 import { doctorContext, doctorServices, SECRETS, SIGNING_KEY } from "../support/doctor-fakes.js";
 import { fakeGitHubApi, fakeSlackApi, memoryInitSecrets, T0, TEST_BOT_TOKEN, TEST_PRIVATE_KEY, TEST_SIGNING_SECRET } from "../support/init-fakes.js";
 import { fakeSlackChannels } from "../support/setup-fakes.js";
@@ -224,6 +225,11 @@ describe("doctor: Slack and GitHub (Task 6 polish)", () => {
     expect(network.fix).toContain("network access to slack.com");
     const refused = await channelCheck(new AgentXError("RUNTIME_UNAVAILABLE", "Slack conversations.list refused: invalid_auth", 503));
     expect(refused.fix).not.toContain("network");
+  });
+
+  it("tells a rate-limited channel lookup to wait, not to check the network", async () => {
+    const limited = await channelCheck(new SlackRateLimitedError("conversations.list", 30_000));
+    expect(limited).toMatchObject({ status: "fail", detail: "Slack conversations.list is rate limited; try again in 30 seconds", fix: "Slack is rate limiting the bot; run agentx doctor again in a minute" });
   });
 
   it("blames a suspended installation only on HTTP 403 or 404", async () => {
