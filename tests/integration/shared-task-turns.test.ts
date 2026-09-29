@@ -78,6 +78,46 @@ describe("a continue thread's turn (FR-054, C12)", () => {
     expect(h.order).toEqual([`wait:${RUNNING}`, "turn"]);
   });
 
+  it("waits while the developer's own run is active, which the broker names by no ID (D22)", async () => {
+    vi.useFakeTimers();
+    const hidden: SlackThreadWorkspaceResult = { ...workspace(null), status: "BUSY", activeOperation: "developer" };
+    const h = harness([hidden, hidden, workspace(null)]);
+    const done = processSlackRequest(message(), h.dependencies, { finalAttempt: false, queuedBehind: 0 });
+    await vi.advanceTimersByTimeAsync(10_000);
+    await done;
+    expect(h.order).toEqual(["turn"]);
+    expect(h.posts).toEqual([TASK_BUSY_WAIT_MESSAGE, "Working on it now. I'll post the result in this thread when it's done.", "<@U0PRIYA001> done"]);
+  });
+
+  it("gives up on a hidden run that stays busy for 30 minutes", async () => {
+    vi.useFakeTimers();
+    const h = harness([{ ...workspace(null), status: "BUSY", activeOperation: "developer" }]);
+    const done = processSlackRequest(message(), h.dependencies, { finalAttempt: false, queuedBehind: 0 });
+    await vi.advanceTimersByTimeAsync(30 * 60_000 + 1);
+    await done;
+    expect(h.order).toEqual([]);
+    expect(h.posts).toEqual([TASK_BUSY_WAIT_MESSAGE, TASK_STILL_BUSY_MESSAGE]);
+  });
+
+  it("is still only waiting 1 ms before the 30 minutes are up", async () => {
+    vi.useFakeTimers();
+    const h = harness([workspace(RUNNING)], { waitForever: true });
+    const done = processSlackRequest(message(), h.dependencies, { finalAttempt: false, queuedBehind: 0 });
+    await vi.advanceTimersByTimeAsync(30 * 60_000 - 1);
+    expect(h.posts).toEqual([TASK_BUSY_WAIT_MESSAGE]);
+    expect(h.records).toEqual([]);
+    await vi.advanceTimersByTimeAsync(2);
+    await done;
+    expect(h.posts).toEqual([TASK_BUSY_WAIT_MESSAGE, TASK_STILL_BUSY_MESSAGE]);
+  });
+
+  it("does not say the wait again on an SQS redelivery", async () => {
+    const h = harness([workspace(RUNNING), workspace(null)]);
+    await processSlackRequest(message(), h.dependencies, { finalAttempt: false, queuedBehind: 0, redelivered: true });
+    expect(h.order).toEqual([`wait:${RUNNING}`, "turn"]);
+    expect(h.posts).toEqual(["Working on it now. I'll post the result in this thread when it's done.", "<@U0PRIYA001> done"]);
+  });
+
   it("answers that the task is still busy after 30 minutes, and runs nothing", async () => {
     vi.useFakeTimers();
     const h = harness([workspace(RUNNING)], { waitForever: true });

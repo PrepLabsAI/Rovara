@@ -12,6 +12,14 @@ export const SHARED_CLOSE_REFUSED_MESSAGE = "This thread follows a task started 
 type WorkspaceAnswer = Extract<SlackThreadWorkspaceResult, { outcome: "WORKSPACE" }>;
 const SAME_OPERATION_PAUSE_MS = 5_000;
 
+/**
+ * C12: the task's workspace is taken. The broker names the running operation only when the channel
+ * started it; the developer's own run comes as `activeOperation: "developer"` with no ID (D22).
+ */
+export function taskBusy(answer: SlackThreadWorkspaceResult): answer is WorkspaceAnswer {
+  return answer.outcome === "WORKSPACE" && (answer.operationId !== null || answer.activeOperation === "developer");
+}
+
 export async function waitForIdleTask(input: {
   api: Pick<ThreadServiceApi, "ensureWorkspace" | "waitForOperation">;
   requestId: string;
@@ -22,18 +30,21 @@ export async function waitForIdleTask(input: {
   now: () => number;
   deadlineMs?: number;
   sleep?: (ms: number) => Promise<void>;
+  /** False on an SQS redelivery: the earlier attempt already told the thread to wait. */
+  announce?: boolean;
 }): Promise<SlackThreadWorkspaceResult | "BUSY"> {
   const until = input.now() + (input.deadlineMs ?? CHANNEL_TURN_WAIT_MS);
   const sleep = input.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  await input.post(TASK_BUSY_WAIT_MESSAGE);
+  if (input.announce !== false) await input.post(TASK_BUSY_WAIT_MESSAGE);
   input.log("shared_task.waiting", { eventId: input.eventId });
   let current: SlackThreadWorkspaceResult = input.first;
   let waitedFor: string | undefined;
-  while (current.outcome === "WORKSPACE" && current.operationId !== null) {
+  while (taskBusy(current)) {
     const remaining = until - input.now();
     if (remaining <= 0) return "BUSY";
-    if (current.operationId === waitedFor) {
-      // The operation ended but the workspace still names it: a brief pause, never a hot loop.
+    if (current.operationId === null || current.operationId === waitedFor) {
+      // The developer's own run, which the broker does not name, or a run that ended while the
+      // workspace still names it: a brief pause before asking again, never a hot loop.
       await sleep(Math.min(SAME_OPERATION_PAUSE_MS, remaining));
     } else {
       const controller = new AbortController();

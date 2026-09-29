@@ -15,8 +15,9 @@ function harness(result: SlackThreadWorkspaceResult) {
   const turns: string[] = [];
   const waitForOperation = vi.fn(async () => ({ status: "SUCCEEDED" }));
   const ensureWorkspace = vi.fn(async () => result);
+  const userName = vi.fn(async () => "Priya");
   // Every optional dependency a shared thread uses is present, so the test shows they change nothing here.
-  const dependencies = {
+  const dependencies: ProcessorDependencies = {
     api: () => ({
       ensureWorkspace,
       startClose: async () => ({ outcome: "NOT_FOUND" as const }),
@@ -30,11 +31,11 @@ function harness(result: SlackThreadWorkspaceResult) {
       claimSharedNotice: vi.fn(async () => true),
     },
     runTurn: async () => { turns.push("turn"); return "done"; },
-    post: async (_thread: unknown, text: string) => { posts.push(text); },
-    userName: vi.fn(async () => "Priya"),
-    turnRecords: { write: async (record: TurnRecord) => { records.push(record); return "written" as const; } },
-  } as ProcessorDependencies;
-  return { dependencies, posts, records, turns, waitForOperation, ensureWorkspace, userName: (dependencies as { userName: ReturnType<typeof vi.fn> }).userName };
+    post: async (_thread, text) => { posts.push(text); },
+    userName,
+    turnRecords: { write: async (record) => { records.push(record); return "written"; } },
+  };
+  return { dependencies, posts, records, turns, waitForOperation, ensureWorkspace, userName };
 }
 
 describe("an ordinary thread (characterization, C23)", () => {

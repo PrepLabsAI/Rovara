@@ -42,7 +42,7 @@ function threadOf(subject: string) {
 }
 
 describe("an ordinary thread beside a shared one (characterization, C23)", () => {
-  it("still gets its own thread workspace, charged to the member, and ignores the includeSharedTask opt-in", async () => {
+  it("still gets its own thread workspace, and ignores the includeSharedTask opt-in", async () => {
     const h = await continueThread();
     const other = `${SLACK_TEAM}/${h.subject.split("/")[1]}/1695500000.000900`;
     const before = h.workspaces();
@@ -89,6 +89,33 @@ describe("a continue thread acts on the task's workspace (FR-054)", () => {
     expect(h.db.find((item) => item.pk === `TASK#${h.taskId}` && item.phase === "completed").length).toBeGreaterThan(0);
   });
 
+  it("names the running operation only when the channel started it, so the developer's own run stays private (D22)", async () => {
+    const h = await continueThread();
+    await h.dev(MAYA, "POST", `/v1/dev/tasks/${h.taskId}/continue`, { requestId: randomUUID(), instructions: "keep going" });
+    const developers = String(h.active());
+    // The developer's run: busy, with no ID anywhere in the answer, so the Slack service waits (C12).
+    const busy = await h.ensure();
+    expect(busy.body).toMatchObject({ outcome: "WORKSPACE", status: "BUSY", operationId: null, activeOperation: "developer" });
+    expect(JSON.stringify(busy.body)).not.toContain(developers);
+    // A Slack service that does not ask for sharedTask parses strictly, so it gets no new field.
+    expect((await h.ensure(OLDER_REQUEST)).body).not.toHaveProperty("activeOperation");
+    await h.finish(h.workspaceId, developers, "SUCCEEDED");
+    const accepted = await channelTask(h, "Priya");
+    const channels = String((accepted.body.operation as { id: string }).id);
+    const running = await h.ensure();
+    expect(running.body).toMatchObject({ outcome: "WORKSPACE", status: "BUSY", operationId: channels });
+    expect(running.body).not.toHaveProperty("activeOperation");
+    const prepared = await teammate(h.handler, h.subject, PRIYA, "POST", "/v1/service/threads/workspace/prepare", { requestId: randomUUID() });
+    expect(prepared.body).toMatchObject({ outcome: "WORKSPACE", operationId: channels });
+  });
+
+  it("hides the developer's running operation from the prepare route too", async () => {
+    const h = await continueThread();
+    await h.dev(MAYA, "POST", `/v1/dev/tasks/${h.taskId}/continue`, { requestId: randomUUID(), instructions: "keep going" });
+    const prepared = await teammate(h.handler, h.subject, PRIYA, "POST", "/v1/service/threads/workspace/prepare", { requestId: randomUUID() });
+    expect(prepared.body).toMatchObject({ outcome: "WORKSPACE", status: "BUSY", operationId: null });
+  });
+
   it("keeps a WORKSPACE answer strict for a Slack service that does not ask for sharedTask", async () => {
     const h = await continueThread();
     expect((await h.ensure(OLDER_REQUEST)).body).not.toHaveProperty("sharedTask");
@@ -105,6 +132,12 @@ describe("a thread that is not open to the channel (C11, Review Focus 2)", () =>
     expect(h.workspaces()).toBe(before);
     // The thread's own key owns no workspace, so the task's is out of reach.
     expect((await teammate(h.handler, h.subject, PRIYA, "POST", `/v1/service/workspaces/${h.workspaceId}/conversations`, {})).status).toBe(404);
+  });
+
+  it("says the task is closed, never the ordinary closed workspace, when the workspace closed first (Q3)", async () => {
+    const h = await continueThread();
+    h.db.set({ ...h.db.get(`WORKSPACE#${h.workspaceId}`, "META")!, status: "CLOSED", closedAt: new Date().toISOString() });
+    expect(result((await h.ensure()).body)).toEqual({ outcome: "VIEW_ONLY", taskId: h.taskId, closed: true });
   });
 
   it("says closed once the task is closed", async () => {
@@ -141,10 +174,23 @@ describe("stop in a shared thread (Q8)", () => {
     const h = await continueThread();
     await h.dev(MAYA, "POST", `/v1/dev/tasks/${h.taskId}/continue`, { requestId: randomUUID(), instructions: "keep going" });
     const stop = async () => JSON.parse((await h.handler({ source: "agentx.slack-ingress", action: "stop-task", thread: threadOf(h.subject), userId: PRIYA })).body) as { outcome: string };
+    // FR-054: a teammate's request waits its turn; it never runs beside the developer's operation.
+    expect((await channelTask(h)).body.error).toMatchObject({ code: "WORKSPACE_BUSY" });
     expect(await stop()).toMatchObject({ outcome: "CANCEL_REQUESTED" });
     expect(h.db.find((item) => item.entityType === "OPERATION" && item.kind === "cancel")).toEqual([expect.objectContaining({ requestedBy: { teamId: SLACK_TEAM, userId: PRIYA } })]);
     h.db.set({ ...h.db.get(`SHARED_TASK#${h.subject}`, "META")!, mode: "view" });
     expect(await stop()).toMatchObject({ outcome: "NOTHING_RUNNING" });
+  });
+
+  it("refuses to stop a workspace the task does not own", async () => {
+    const h = await continueThread();
+    const other = `${SLACK_TEAM}/${h.subject.split("/")[1]}/1695500000.000900`;
+    const foreign = String((await teammate(h.handler, other, PRIYA, "POST", "/v1/service/threads/workspace", { requestId: randomUUID(), ...WORKSPACE_REQUEST })).body.workspaceId);
+    h.db.set({ ...h.db.get(`SHARED_TASK#${h.subject}`, "META")!, workspaceId: foreign });
+    const response = await h.handler({ source: "agentx.slack-ingress", action: "stop-task", thread: threadOf(h.subject), userId: PRIYA });
+    expect(response.statusCode).toBe(403);
+    expect(JSON.parse(response.body)).toMatchObject({ error: { code: "FORBIDDEN" } });
+    expect(h.db.find((item) => item.entityType === "OPERATION" && item.kind === "cancel")).toEqual([]);
   });
 
   it("stops nothing when the channel now serves another project (F16)", async () => {
@@ -165,7 +211,8 @@ describe("the developer meets a channel turn (C14, D4)", () => {
     const continued = await h.dev(MAYA, "POST", `/v1/dev/tasks/${h.taskId}/continue`, { requestId: randomUUID(), instructions: "also this" });
     expect(continued.body.error).toMatchObject({ code: "TASK_BUSY" });
     const message = String((continued.body.error as { message: string }).message);
-    expect(message).toContain("a request from Priya in its shared Slack thread");
+    // The teammate's name reaches the AI tool inert, as every other name there does.
+    expect(message).toContain("a request from `Priya` in its shared Slack thread");
     // F18: the running turn may already have answered, so the count is a floor.
     expect(message).toContain("at least 2 more channel messages are waiting");
     expect(message).toContain("agentx_share_task");

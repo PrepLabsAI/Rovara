@@ -61,6 +61,9 @@ export const SlackThreadWorkspaceResultSchema = z.discriminatedUnion("outcome", 
       actionPolicy: ActionPolicySchema.optional(),
       // Spec 025 C11: a continue thread's task, sent only to a service that sends includeSharedTask: true.
       sharedTask: z.object({ taskId: z.string().uuid(), developerName: z.string().min(1).max(200) }).strict().optional(),
+      // D22, C12: sent with sharedTask while the developer's own operation runs. Its ID stays private
+      // (operationId is then null), but the Slack service still waits for the task to be free.
+      activeOperation: z.literal("developer").optional(),
     })
     .strict(),
   z

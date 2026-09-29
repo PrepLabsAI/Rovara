@@ -48,6 +48,7 @@ import {
   byCreated,
   deriveTaskStatus,
   developerTaskIdentity,
+  inertName,
   partyOfTask,
   recentTaskEvents,
   sharedSubject,
@@ -688,7 +689,8 @@ async function channelDriver(deps: DeveloperTaskRouteDependencies, task: Develop
   if (operationId === null || task.share?.threadTs === undefined) return undefined;
   const activity = await deps.actions.channelActivity({ taskId: task.taskId, operationId, threadSubject: sharedSubject({ ...task.share, threadTs: task.share.threadTs }) });
   if (activity.driver === undefined) return undefined;
-  const who = activity.driver.name ?? `Slack user ${activity.driver.slackUserId}`;
+  // The name reaches the AI tool inert, as every other name there does.
+  const who = activity.driver.name === undefined ? `Slack user ${activity.driver.slackUserId}` : inertName(activity.driver.name);
   // F18: a floor. The running turn may or may not still count among the thread's pending messages.
   const waiting = activity.waiting === 0 ? "" : `, and at least ${activity.waiting} more channel message${activity.waiting === 1 ? " is" : "s are"} waiting`;
   return `task ${task.taskId} is running a request from ${who} in its shared Slack thread${waiting}; wait with agentx_wait_for_task, stop it with agentx_cancel_task, or make the thread view only with agentx_share_task`;

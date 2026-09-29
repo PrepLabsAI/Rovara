@@ -30,7 +30,7 @@ import { NEW_WORKSPACE_MESSAGE, STILL_PREPARING_MESSAGE, limitMessage, preparati
 import { escapeText, slackReplyText } from "./slack-format.js";
 import { buildTurnRecord, emitTurnMetrics, type TurnDraft, type TurnRecordSink } from "./turn-records.js";
 import { matchApprovedModel, modelName, modelOptionsMessage, parseModelCommand } from "./model-command.js";
-import { SHARED_CLOSE_REFUSED_MESSAGE, TASK_STILL_BUSY_MESSAGE, waitForIdleTask } from "./shared-task.js";
+import { SHARED_CLOSE_REFUSED_MESSAGE, TASK_STILL_BUSY_MESSAGE, taskBusy, waitForIdleTask } from "./shared-task.js";
 
 export interface ThreadServiceApi {
   ensureWorkspace(requestId: string): Promise<SlackThreadWorkspaceResult>;
@@ -62,7 +62,10 @@ export interface ThreadStore {
   finish(subject: string): Promise<void>;
   /** Remembers the connectors whose next discovery should ask for a refresh; an empty list clears them. */
   saveRefreshConnectors?(subject: string, connectors: string[]): Promise<void>;
-  /** C10: claims the shared thread's hourly notice (the ingress's marker); true when this caller may post it. */
+  /**
+   * C10: claims the shared thread's hourly notice (the ingress's marker); true when this caller may
+   * post it. Absent: the notice is posted every time a view-only or closed thread's message is processed.
+   */
   claimSharedNotice?(subject: string, nowSeconds: number): Promise<boolean>;
 }
 
@@ -254,9 +257,9 @@ export async function processSlackRequest(
     const workspaceRequestId = deterministicUuid(`${message.eventId}:workspace`);
     let workspace = await api.ensureWorkspace(workspaceRequestId);
     // Spec 025 FR-054, C12: a continue thread's turn starts only once the task's workspace is idle.
-    if (workspace.outcome === "WORKSPACE" && workspace.sharedTask !== undefined && workspace.operationId !== null) {
+    if (taskBusy(workspace) && workspace.sharedTask !== undefined) {
       const taskId = workspace.sharedTask.taskId;
-      const idle = await waitForIdleTask({ api, requestId: workspaceRequestId, first: workspace, post, log, eventId: message.eventId, now });
+      const idle = await waitForIdleTask({ api, requestId: workspaceRequestId, first: workspace, post, log, eventId: message.eventId, now, announce: options.redelivered !== true });
       if (idle === "BUSY") {
         draft.disposition = "workspace_unavailable";
         draft.taskId = taskId;
