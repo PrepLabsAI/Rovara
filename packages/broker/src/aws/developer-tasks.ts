@@ -617,6 +617,9 @@ const CANCEL_PAYLOAD_HASH = hashJson({ action: "cancel" });
 async function cancelTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
   const request = parse(DeveloperTaskActionRequestSchema, value, deps, "cancel");
   const task = await loadOwnedTask(deps, caller, taskId);
+  // Final review M2: a closed task is refused as continue refuses it, before anything is written,
+  // so a repeat after the close answers "this task is closed" like any new call.
+  if (task.closedAt !== undefined) throw agentXError("CONFIG_INVALID", CLOSED_TASK);
   const turns = turnTable(deps);
   const receivedAt = iso(deps);
   // Ruling F14: the same key the task's other actions use, so one requestId names one action.
@@ -659,9 +662,11 @@ async function cancelTask(deps: DeveloperTaskRouteDependencies, caller: Develope
     }
   }
   if (!handled) {
+    const workspace = await deps.actions.workspace(task.workspaceId);
+    if (workspace.status === "CLOSED") throw agentXError("CONFIG_INVALID", CLOSED_TASK);
     let outcome: "CANCEL_REQUESTED" | "NOTHING_RUNNING";
     try {
-      outcome = (await deps.actions.cancelRunning(developerTaskIdentity(task), await deps.actions.workspace(task.workspaceId), (operation) => [
+      outcome = (await deps.actions.cancelRunning(developerTaskIdentity(task), workspace, (operation) => [
         record("Asked the worker to stop.", operation.id),
         marker,
       ])).outcome;

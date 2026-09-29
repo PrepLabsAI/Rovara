@@ -110,6 +110,22 @@ describe("continue (US1 scenario 5, FR-019)", () => {
     expect(turns().filter((item) => (item.action === "continue" || item.action === "pull_request") && item.phase === "accepted")).toHaveLength(2);
   });
 
+  it("refuses to cancel a closed task, as continue does, and writes no audit record (final review M2)", async () => {
+    const { db, post, taskId, turns } = await finished();
+    (db.get(`DEVTASK#${taskId}`, "META") as { closedAt?: string }).closedAt = new Date().toISOString();
+    const before = turns().length;
+    expect((await post("cancel", { requestId: randomUUID() })).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task is closed; start a new one with agentx_start_task" });
+    expect(turns()).toHaveLength(before);
+    expect(turns().filter((item) => item.action === "cancel")).toHaveLength(0);
+  });
+
+  it("refuses to cancel a task whose workspace is closed, with no audit record (final review M2)", async () => {
+    const { db, post, task, turns } = await finished();
+    Object.assign(db.get(`WORKSPACE#${task.workspaceId}`, "META")!, { status: "CLOSED", closedAt: new Date().toISOString() });
+    expect((await post("cancel", { requestId: randomUUID() })).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task is closed; start a new one with agentx_start_task" });
+    expect(turns().filter((item) => item.action === "cancel")).toHaveLength(0);
+  });
+
   it("refuses a closed task", async () => {
     const { db, post, taskId } = await finished();
     (db.get(`DEVTASK#${taskId}`, "META") as { closedAt?: string }).closedAt = new Date().toISOString();

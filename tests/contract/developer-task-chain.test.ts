@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { deriveTaskStatus, type OperationFacts } from "../../packages/broker/src/developer/task-records.js";
 import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM, ensureWorkspace } from "../support/slack-broker.js";
@@ -117,6 +117,44 @@ describe("the first task is queued by the prepare's result (R3, FR-018)", () => 
     expect(db.get(`WORKSPACE#${task.workspaceId}`, "META")).toMatchObject({ status: "BUSY", activeOperationId: taskOperations()[0]?.id });
     expect(db.get(`WORKSPACE#${task.workspaceId}`, `OPERATION#${prepareId}`)).toMatchObject({ status: "SUCCEEDED" });
     expect(db.get(`WORKSPACE#${task.workspaceId}`, "DEVELOPER_TASK")).not.toHaveProperty("pendingPrompt");
+  });
+
+  it("records the prepare as FAILED when the project's latest revision cannot be read, so close frees the slot (final review I1)", async () => {
+    const harness = await started();
+    const { db, finish, task, taskId, prepareId, taskOperations, dev } = harness;
+    const original = db.send;
+    let failedReads = 0;
+    db.send = async (command) => {
+      if (command.constructor.name === "QueryCommand" && JSON.stringify(command.input).includes("PROJECT#payments") && JSON.stringify(command.input).includes("REV#")) {
+        failedReads += 1;
+        throw Object.assign(new Error("Throughput exceeds the current capacity"), { name: "ProvisionedThroughputExceededException" });
+      }
+      return original(command);
+    };
+    const logged = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      await finish(task.workspaceId, prepareId, "SUCCEEDED");
+      expect(logged.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({
+        component: "broker", event: "developer.first_task_queue_failed", taskId, operationId: prepareId, error: "ProvisionedThroughputExceededException",
+      }));
+    } finally {
+      db.send = original;
+      logged.mockRestore();
+    }
+    expect(failedReads).toBeGreaterThan(0);
+    expect(taskOperations()).toHaveLength(0);
+    expect(db.get(`WORKSPACE#${task.workspaceId}`, "META")).toMatchObject({ status: "PREPARATION_FAILED" });
+    expect(db.get(`WORKSPACE#${task.workspaceId}`, "META")).not.toHaveProperty("activeOperationId");
+    expect(db.get(`WORKSPACE#${task.workspaceId}`, "DEVELOPER_TASK")).not.toHaveProperty("pendingPrompt");
+    expect(db.get(`WORKSPACE#${task.workspaceId}`, `OPERATION#${prepareId}`)).toMatchObject({ status: "FAILED" });
+    // A repeated SUCCEEDED callback from the worker is answered, not refused.
+    await finish(task.workspaceId, prepareId, "SUCCEEDED");
+    const read = await dev(MAYA, "GET", `/v1/dev/tasks/${taskId}`);
+    expect(read.body).toMatchObject({ task: { status: "FAILED", failure: { category: "setup_failed" } } });
+    const closed = await dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/close`, { requestId: randomUUID() });
+    expect(closed.body).toMatchObject({ closed: true, task: { status: "CLOSED" } });
+    expect(db.get(`SLACK_LIMIT#${SLACK_TEAM}`, `MEMBER#${MAYA.slackUserId}`)).toMatchObject({ count: 0 });
+    expect(db.get(`SLACK_LIMIT#${SLACK_TEAM}`, "ORGANIZATION")).toMatchObject({ count: 0 });
   });
 
   it("a Slack thread's failed prepare creates no developer task pointer", async () => {

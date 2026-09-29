@@ -267,7 +267,7 @@ describe("AI-tool turn records (spec 025 FR-037, R27)", () => {
     expect(actionsOf(puts[0]!.statement)).toEqual(["dynamodb:PutItem"]);
   });
 
-  it("gives the broker no other write on TurnRecords, and no update or delete anywhere on it", () => {
+  it("gives the broker no other write on TurnRecords: no update, delete or batch write on TurnRecords", () => {
     for (const action of ["dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:BatchWriteItem"]) {
       expect(grants(named).some(({ role, statement }) => role === brokerRole(named) && allows(statement, action) && JSON.stringify(statement.Resource ?? "").includes(turnTable(named)))).toBe(false);
     }

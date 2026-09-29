@@ -40,6 +40,40 @@ describe("AgentX administration workflow", () => {
     });
   });
 
+  it("admin workspace cancel keeps WORKSPACE_BUSY and its try-again message when the cancel raced its task (final review I2)", async () => {
+    const context = await administratorContext("agentx-cli-cancel-");
+    const workspaceId = randomUUID();
+    const fetchImplementation = vi.fn<typeof fetch>(async () => Response.json(
+      { error: { code: "WORKSPACE_BUSY", message: "the workspace changed while the cancel was being recorded; try again" } },
+      { status: 409 },
+    ));
+    let errors = "";
+    const exitCode = await executeCli([...context.globals, "admin", "workspace", "cancel", "--workspace", workspaceId], {
+      fetchImplementation,
+      tokenStore: context.tokens,
+      stdout: { write(text) { throw new Error(text); } },
+      stderr: { write(text) { errors += text; } },
+    });
+    expect(exitCode).toBe(5);
+    expect(errors).toContain("AgentX error [WORKSPACE_BUSY]");
+    expect(errors).toContain("try again");
+  });
+
+  it("admin workspace cancel reports nothing running when the task finished first (final review I2)", async () => {
+    const context = await administratorContext("agentx-cli-cancel-");
+    const workspaceId = randomUUID();
+    const fetchImplementation = vi.fn<typeof fetch>(async () => Response.json({ outcome: "NOTHING_RUNNING", workspaceId }, { status: 202 }));
+    let output = "";
+    const exitCode = await executeCli([...context.globals, "--json", "admin", "workspace", "cancel", "--workspace", workspaceId], {
+      fetchImplementation,
+      tokenStore: context.tokens,
+      stdout: { write(text) { output += text; } },
+      stderr: { write(text) { throw new Error(text); } },
+    });
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(output)).toEqual({ ok: true, data: { outcome: "NOTHING_RUNNING", workspaceId } });
+  });
+
   it("binds a Slack channel to the selected project", async () => {
     const context = await administratorContext("agentx-cli-bind-");
     const fetchImplementation = vi.fn<typeof fetch>(async (input, init) => {

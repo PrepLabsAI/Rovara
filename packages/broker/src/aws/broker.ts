@@ -3256,7 +3256,7 @@ async function sendTerminalResult(
   transactItems: TransactItems,
   workspaceUpdate: TransactItems[number],
   send: (items: TransactItems) => Promise<unknown>,
-): Promise<void> {
+): Promise<OperationStatus> {
   const pointer = operation.kind === "prepare" ? taskPointer : undefined;
   const withoutTask: TransactItems = pointer === undefined ? transactItems : [...transactItems, { Update: {
     TableName: dependencies.tableName,
@@ -3264,12 +3264,24 @@ async function sendTerminalResult(
     UpdateExpression: "REMOVE pendingPrompt",
     ConditionExpression: "attribute_exists(pk)",
   } }];
-  const queued = terminalStatus === "SUCCEEDED" && pointer?.pendingPrompt !== undefined && pointer.cancelledAt === undefined
-    ? await queuedFirstTask(dependencies, workspace, operation, { ...pointer, pendingPrompt: pointer.pendingPrompt }, now)
-    : undefined;
+  let queued: Awaited<ReturnType<typeof queuedFirstTask>> | undefined;
+  if (terminalStatus === "SUCCEEDED" && pointer?.pendingPrompt !== undefined && pointer.cancelledAt === undefined) {
+    try {
+      queued = await queuedFirstTask(dependencies, workspace, operation, { ...pointer, pendingPrompt: pointer.pendingPrompt }, now);
+    } catch (partsError) {
+      if (isConditional(partsError)) throw partsError;
+      // Final review I1: the task's parts could not be built (the project's latest revision or
+      // its model could not be read). The prepare is recorded as FAILED, so the task reads as
+      // setup_failed, its instructions are cleared and a close frees its slot, instead of the
+      // task waiting in STARTING forever. The error name only: its message could quote the task.
+      console.log(JSON.stringify({ component: "broker", event: "developer.first_task_queue_failed", taskId: pointer.taskId, operationId: operation.id, error: partsError instanceof Error ? partsError.name : "unknown" }));
+      await send(failedPrepareItems(dependencies, workspace, operation, now));
+      return "FAILED";
+    }
+  }
   if (queued === undefined) {
     await send(withoutTask);
-    return;
+    return terminalStatus;
   }
   try {
     await send([...transactItems.filter((item) => item !== workspaceUpdate), queued.workspaceUpdate, ...queued.items]);
@@ -3283,6 +3295,45 @@ async function sendTerminalResult(
     if (again?.pendingPrompt !== undefined) throw queueError;
     await send(withoutTask);
   }
+  return terminalStatus;
+}
+
+/** The error a prepare is recorded with when its task's first instructions could not be queued (final review I1). */
+const FIRST_TASK_QUEUE_FAILED = "the task's first instructions could not be queued; close this task and start a new one";
+
+/** A prepare that the worker reported SUCCEEDED but that was recorded FAILED because its first task could not be queued. */
+const isQueueFailedPrepare = (operation: OperationRecord, reported: unknown): boolean =>
+  operation.kind === "prepare" && operation.status === "FAILED" && operation.error === FIRST_TASK_QUEUE_FAILED && reported === "SUCCEEDED";
+
+/**
+ * A developer task's prepare recorded as FAILED (final review I1): the operation, the workspace
+ * released as PREPARATION_FAILED, and the raw instructions cleared from an existing pointer.
+ */
+function failedPrepareItems(dependencies: AwsBrokerDependencies, workspace: WorkspaceInstance, operation: OperationRecord, now: string): TransactItems {
+  return [
+    { Update: {
+      TableName: dependencies.tableName,
+      Key: operationKey(operation.workspaceId, operation.id),
+      UpdateExpression: "SET #status = :status, updatedAt = :now, #error = :error",
+      ConditionExpression: "fence = :fence",
+      ExpressionAttributeNames: { "#status": "status", "#error": "error" },
+      ExpressionAttributeValues: { ":status": "FAILED", ":now": now, ":error": FIRST_TASK_QUEUE_FAILED, ":fence": operation.fence },
+    } },
+    { Update: {
+      TableName: dependencies.tableName,
+      Key: workspaceKey(workspace.id),
+      UpdateExpression: "SET #status = :status, updatedAt = :now REMOVE activeOperationId, closeError",
+      ConditionExpression: "activeOperationId = :operation AND fence = :fence",
+      ExpressionAttributeNames: { "#status": "status" },
+      ExpressionAttributeValues: { ":status": "PREPARATION_FAILED", ":now": now, ":operation": operation.id, ":fence": operation.fence },
+    } },
+    { Update: {
+      TableName: dependencies.tableName,
+      Key: taskPointerKey(workspace.id),
+      UpdateExpression: "REMOVE pendingPrompt",
+      ConditionExpression: "attribute_exists(pk)",
+    } },
+  ];
 }
 
 /** The operation kinds whose result may concern a developer task: one pointer read serves them all (P39). */
@@ -3370,12 +3421,13 @@ async function recordTerminalResult(
   const status = input.status;
   if (!TERMINAL.has(status as OperationStatus)) throw agentXError("CONFIG_INVALID", "terminal status is invalid");
   if (TERMINAL.has(operation.status)) {
-    if (operation.status !== status) throw agentXError("IDEMPOTENCY_CONFLICT", "terminal result is immutable");
+    if (operation.status !== status && !isQueueFailedPrepare(operation, status)) throw agentXError("IDEMPOTENCY_CONFLICT", "terminal result is immutable");
     return operation;
   }
   const workspace = await requireWorkspace(dependencies, operation.workspaceId);
   const now = new Date().toISOString();
   const terminalStatus = status as OperationStatus;
+  let recordedStatus: OperationStatus = terminalStatus;
   const error = typeof input.error === "string" ? input.error.slice(0, 16_384) : undefined;
   const result = operation.kind === "publish" && status === "SUCCEEDED"
     ? PullRequestResultSchema.parse(input.result)
@@ -3453,7 +3505,7 @@ async function recordTerminalResult(
         : undefined;
       taskPointer = pointer;
       const completed = await completedTurnItems(dependencies, operation, pointer, terminalStatus, { result, error }, now);
-      await sendTerminalResult(dependencies, workspace, operation, pointer, terminalStatus, now, [...transactItems, ...completed], workspaceUpdate, send);
+      recordedStatus = await sendTerminalResult(dependencies, workspace, operation, pointer, terminalStatus, now, [...transactItems, ...completed], workspaceUpdate, send);
     };
     try {
       await decideAndSend();
@@ -3466,7 +3518,7 @@ async function recordTerminalResult(
   } catch (transactionError) {
     if (!isConditional(transactionError)) throw transactionError;
     const existing = await requireOperation(dependencies, operation.workspaceId, operation.id);
-    if (existing.status === terminalStatus) return existing;
+    if (existing.status === terminalStatus || isQueueFailedPrepare(existing, terminalStatus)) return existing;
     // A cancel whose target finished first (its own result, and for a developer task its
     // completed record, committed meanwhile): decided again once, from a fresh read, the cancel
     // records only its own result. The target, the workspace and the audit record stay as the
@@ -3488,6 +3540,7 @@ async function recordTerminalResult(
     throw agentXError("STALE_FENCE", "terminal callback no longer owns the workspace");
   }
   if (closePreflight?.safeToClose === true && taskPointer !== undefined) await finishDeveloperClose(dependencies, taskPointer, operation.id);
+  if (recordedStatus !== terminalStatus) return { ...operation, status: recordedStatus, updatedAt: now, error: FIRST_TASK_QUEUE_FAILED };
   return { ...operation, status: terminalStatus, updatedAt: now, ...(result === undefined ? {} : { result }), ...(error === undefined ? {} : { error }) };
 }
 

@@ -91,3 +91,76 @@ describe("an administrator cancelling a task (#126)", () => {
     expect(again.body).toMatchObject({ outcome: "NOTHING_RUNNING" });
   });
 });
+
+/**
+ * Final review I2: the cancel is being written when its target's own result lands first
+ * ("finished"), or when something else changed the target meanwhile ("changed").
+ */
+function raceTheCancel(db: ReturnType<typeof createBroker>["db"], workspaceId: string, taskOperationId: string, mode: "finished" | "changed") {
+  const original = db.send;
+  let raced = 0;
+  db.send = async (command) => {
+    if (raced === 0 && command.constructor.name === "TransactWriteCommand" && JSON.stringify(command.input).includes("\"CANCEL_REQUESTED\"")) {
+      raced += 1;
+      if (mode === "finished") db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${taskOperationId}`)!.status = "SUCCEEDED";
+      throw Object.assign(new Error("Transaction cancelled"), { name: "TransactionCanceledException", CancellationReasons: [{ Code: "ConditionalCheckFailed" }] });
+    }
+    return original(command);
+  };
+  return () => raced;
+}
+
+const cancelOperations = (db: ReturnType<typeof createBroker>["db"], workspaceId: string) =>
+  db.find((item) => item.entityType === "OPERATION" && item.workspaceId === workspaceId && item.kind === "cancel");
+
+describe("the cancel routes when the cancel races its target (final review I2)", () => {
+  it("the owner route answers 202 duplicate with the finished target operation, and writes no cancel", async () => {
+    const { db, handler, workspaceId, taskOperationId } = await runningTask();
+    const raced = raceTheCancel(db, workspaceId, taskOperationId, "finished");
+    const answer = await serviceCall(handler, thread, pratik, "POST", `/v1/service/workspaces/${workspaceId}/operations/${taskOperationId}/cancel`);
+    expect(raced()).toBe(1);
+    expect(answer).toMatchObject({ status: 202, body: { duplicate: true, operation: { id: taskOperationId, kind: "task", status: "SUCCEEDED" } } });
+    expect(cancelOperations(db, workspaceId)).toHaveLength(0);
+  });
+
+  it("the owner route answers WORKSPACE_BUSY when the target is still live but changed meanwhile", async () => {
+    const { db, handler, workspaceId, taskOperationId } = await runningTask();
+    const raced = raceTheCancel(db, workspaceId, taskOperationId, "changed");
+    const answer = await serviceCall(handler, thread, pratik, "POST", `/v1/service/workspaces/${workspaceId}/operations/${taskOperationId}/cancel`);
+    expect(raced()).toBe(1);
+    expect(answer.status).toBeGreaterThanOrEqual(400);
+    expect(answer.body).toMatchObject({ error: { code: "WORKSPACE_BUSY" } });
+    expect(String((answer.body.error as { message: string }).message)).toContain("try again");
+    expect(cancelOperations(db, workspaceId)).toHaveLength(0);
+  });
+
+  it("the Slack stop reads a finished target as nothing running, never as a cancel it made", async () => {
+    const { db, handler, workspaceId, taskOperationId } = await runningTask();
+    raceTheCancel(db, workspaceId, taskOperationId, "finished");
+    const stopped = await stopEvent(handler);
+    expect(stopped).toMatchObject({ status: 200, body: { outcome: "NOTHING_RUNNING", workspaceId } });
+    expect(stopped.body).not.toHaveProperty("cancelOperationId");
+  });
+
+  it("the Slack stop fails with WORKSPACE_BUSY when the target changed, so the ingress says to try again", async () => {
+    const { db, handler, workspaceId, taskOperationId } = await runningTask();
+    raceTheCancel(db, workspaceId, taskOperationId, "changed");
+    const stopped = await stopEvent(handler);
+    expect(stopped.status).not.toBe(200);
+    expect(stopped.body).toMatchObject({ error: { code: "WORKSPACE_BUSY" } });
+  });
+
+  it("the administrator cancel reads a finished target as nothing running, and a changed one as WORKSPACE_BUSY", async () => {
+    const finished = await runningTask();
+    raceTheCancel(finished.db, finished.workspaceId, finished.taskOperationId, "finished");
+    const path = (workspaceId: string) => `/v1/admin/workspaces/${workspaceId}/cancel`;
+    const nothing = await call(finished.handler, { method: "POST", path: path(finished.workspaceId), user: { subject: "admin-subject", admin: true } });
+    expect(nothing).toMatchObject({ status: 202, body: { outcome: "NOTHING_RUNNING", workspaceId: finished.workspaceId } });
+    expect(nothing.body).not.toHaveProperty("cancelOperationId");
+
+    const changed = await runningTask();
+    raceTheCancel(changed.db, changed.workspaceId, changed.taskOperationId, "changed");
+    const busy = await call(changed.handler, { method: "POST", path: path(changed.workspaceId), user: { subject: "admin-subject", admin: true } });
+    expect(busy.body).toMatchObject({ error: { code: "WORKSPACE_BUSY" } });
+  });
+});
