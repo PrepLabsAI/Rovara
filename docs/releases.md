@@ -129,3 +129,56 @@ deployment.
   release (`gh release create` is its last step, so this is rare). A re-run then reports that the
   release already exists. `gh release create` publishes a real release, not a draft. To redo that
   version, delete the release and its tag, then push the tag again, or cut a new patch version.
+
+## The release test
+
+The `Release test` workflow (`.github/workflows/release-test.yml`) installs, upgrades and removes
+real environments in a throwaway AWS account, with both engines and the platform team path. It
+runs by hand, before a release is tagged, and never touches the live deployment.
+
+### One-time owner setup
+
+1. **A throwaway AWS account** that holds nothing else. The Elastic IP quota (5 per region; each
+   environment's NAT gateways take 2) fits only one throwaway environment in the account at a
+   time, so the workflow installs one environment after another and removes each before the next.
+2. **A role GitHub can assume** in that account, with admin rights there. Its trust policy allows
+   this repository's `workflow_dispatch` runs through GitHub OIDC (no long-lived keys), and its
+   maximum session is at least 3 hours, since an install and an upgrade can outlast the 1 hour
+   default. The workflow also names it as each environment's operator principal, so it must be
+   able to assume `agentx-<env>-operator`. Store its ARN in the repository variable
+   `vars.AGENTX_RELEASE_TEST_ROLE_ARN`. `vars.AGENTX_RELEASE_TEST_REGION` is optional (default
+   `us-east-1`).
+3. **Two private ECR repositories** in that account and region: `agentx-release-test/worker` and
+   `agentx-release-test/slack`. The workflow pushes the candidate's images there.
+4. **A test GitHub App**, installed on a test repository: `vars.RT_GITHUB_ACCOUNT`,
+   `vars.RT_GITHUB_APP_ID`, `vars.RT_GITHUB_INSTALLATION_ID`, and its private key in
+   `secrets.RT_GITHUB_PRIVATE_KEY`.
+5. **A test Slack app**, installed in a test workspace: `vars.RT_SLACK_CLIENT_ID`, and
+   `secrets.RT_SLACK_BOT_TOKEN`, `secrets.RT_SLACK_SIGNING_SECRET` and
+   `secrets.RT_SLACK_CLIENT_SECRET`.
+6. **Turn it on:** set `vars.AGENTX_ENABLE_RELEASE_TEST` to `true`. Until then the workflow does
+   nothing.
+
+### Running it
+
+In GitHub, open Actions, then Release test, then Run workflow, on the commit you plan to tag. Give
+two versions: `previous`, the published release to install first, and `candidate`, the version
+this commit will become (newer than `previous`).
+
+For each engine (templates, then cdk), it installs `previous` up to the `developer-signin` step
+(`init --stop-after developer-signin`), runs `doctor`, upgrades to the candidate, runs `doctor`,
+changes a setting under the operator role alone, and destroys the environment. Then it runs the
+platform team path: `init --export`, `deploy-access.sh`, `init --resume --from-bundle` under the
+operator role, `doctor`, and `destroy`. A last job destroys anything a failed run left behind.
+
+### The manual release check
+
+Some steps need a person, so do these by hand before tagging, in a throwaway account:
+
+1. One full `agentx init`, all the way to a Slack reply in the thread (docs/install.md).
+2. `agentx --env <env> alerts test`, and check the alarm arrives.
+3. Remove that environment by hand, following docs/teardown.md's "By hand" section, and check
+   nothing is left.
+4. Once, SC-001: a person who has never seen AgentX installs it from docs/install.md, on a clean
+   computer and a new AWS account, with no help, and gets a Slack reply. Record every place they
+   get stuck, and fix it.

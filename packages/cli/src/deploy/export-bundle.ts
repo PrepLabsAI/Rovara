@@ -612,8 +612,9 @@ lasts at least as long as the deploy (plan for about an hour).
 
 ## Tearing down an environment
 
-\`agentx destroy\` is planned for phase 15e. Until then, tear an environment down by hand, with
-credentials that can delete every resource below.
+agentx --env ${env} destroy --region ${region} does all of this, in this order, with admin
+credentials; it asks you to type the environment's name first. If agentx destroy stops partway, run
+it again: it continues where it stopped. The steps below are the same work by hand.
 
 1. **Record what the stacks retain.** Stack deletion keeps some resources on purpose. Before you
    delete anything, list them, for example:
@@ -634,15 +635,17 @@ credentials that can delete every resource below.
 4. **Terminate the EC2 workers**, before the foundation stack below deletes. EC2 worker instances and
    volumes are launched by Step Functions, outside CloudFormation (the control plane's own state
    machines), so no stack delete removes them, and a worker instance still running in the worker security
-   group blocks the foundation stack's delete.
+   group blocks the foundation stack's delete. The agentx:env tag keeps the workers of any other
+   deployment in this account out of the list, including the one that predates named environments,
+   whose workers are also tagged Environment=production.
    \`\`\`
    aws ec2 describe-instances --region ${region} \\
-     --filters Name=tag:Environment,Values=${env} Name=tag:DeploymentMode,Values=ec2-ebs \\
+     --filters Name=tag:Environment,Values=${env} Name=tag:DeploymentMode,Values=ec2-ebs Name=tag:agentx:env,Values=${env} \\
      --query "Reservations[].Instances[].InstanceId" --output text
    aws ec2 terminate-instances --instance-ids <ids> --region ${region}
    aws ec2 wait instance-terminated --instance-ids <ids> --region ${region}
    aws ec2 describe-volumes --region ${region} \\
-     --filters Name=tag:Environment,Values=${env} Name=tag:DeploymentMode,Values=ec2-ebs \\
+     --filters Name=tag:Environment,Values=${env} Name=tag:DeploymentMode,Values=ec2-ebs Name=tag:agentx:env,Values=${env} \\
      --query "Volumes[].VolumeId" --output text
    aws ec2 delete-volume --volume-id <id> --region ${region}
    \`\`\`
@@ -684,13 +687,16 @@ credentials that can delete every resource below.
      aws kms schedule-key-deletion --key-id <key id> --pending-window-in-days 7 --region ${region}
      aws kms delete-alias --alias-name alias/agentx/${env}/workspaces --region ${region}
      \`\`\`
-   - **Two secrets**: \`agentx/${env}/callback-signing-key\` (created by \`agentx deploy\`, outside any
-     stack) and \`agentx/${env}/slack\`. Delete them without a recovery window, so the names can be
-     reused by a new install:
+   - **Every secret under \`agentx/${env}/\`**: \`callback-signing-key\` (created by \`agentx deploy\`,
+     outside any stack), \`slack\`, and those \`agentx init\` stored (\`github-app\`, \`alert-endpoint\`,
+     \`openrouter\`, \`developer-oidc\`, \`connectors/...\`). List them, then delete each one without a
+     recovery window, so the names can be reused by a new install:
      \`\`\`
+     aws secretsmanager list-secrets --region ${region} --filters Key=name,Values=agentx/${env}/ --query "SecretList[].Name" --output text
      aws secretsmanager delete-secret --secret-id agentx/${env}/callback-signing-key --force-delete-without-recovery --region ${region}
      aws secretsmanager delete-secret --secret-id agentx/${env}/slack --force-delete-without-recovery --region ${region}
      \`\`\`
+     (Repeat \`delete-secret\` for every other name the listing shows.)
 
 A failed first create removes what it made (the kept resources use RetainExceptOnCreate), so
 "delete the stack and rerun" works. The one exception is the identity stack's Cognito user pool,
