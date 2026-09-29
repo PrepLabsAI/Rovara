@@ -263,7 +263,7 @@ People searching "self-hosted AI coding agent", "AI agent CI gates", "Claude Tag
    - "Every reply that used a tool has an audit view."
    - "Destructive actions always ask first."
 7. **Code is the first chapter.** Workspace, Passport, Outcomes and Cloud with their status labels, and the waitlist.
-8. **Show your work.** An excerpt of the manifesto, signed by both founders.
+8. **Show your work.** An excerpt of the manifesto, and the founders' line: "We're Abhishek and Pratik. Since we rebuilt QEDly Code on 19 September, we've shipped [commits] commits, and AI agents co-wrote [ai_commits] of them. We built it because we needed every one of those to prove it worked, without the two of us checking each by hand." The build fills both numbers from PrepLabsAI/AgentX mainline: non-merge commits since 2026-09-19, and those whose message carries an AI `Co-Authored-By` line (683 and 641 on 2026-09-29).
 9. **FAQ.** Questions answered:
    - What does QEDly mean and how do I say it?
    - What does source-available mean?
