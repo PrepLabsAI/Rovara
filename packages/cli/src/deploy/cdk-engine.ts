@@ -34,7 +34,11 @@ export interface CommandRunner {
       /** Captures stdout without echoing it (a long listing only our own code reads). */
       quiet?: boolean;
     },
-  ): Promise<{ stdout: string }>;
+  ): Promise<{
+    stdout: string;
+    /** The child's captured standard error, unredacted; only our own code reads it, and redacts it before showing it. */
+    stderr?: string;
+  }>;
 }
 
 /** Every deploy part's CDK construct id, exactly as infra/lib/app.ts names them. */
@@ -146,6 +150,28 @@ function redactSecrets(text: string, parameters: Record<string, string>): string
   return redacted;
 }
 
+/** The cdk command's arguments for one stack (deploy or diff), with each parameter by physical stack name. */
+function cdkArguments(input: { env: string; region: string; identityMode: "cognito" | "oidc" }, request: DeployRequest, command: "deploy" | "diff"): string[] {
+  // --no-install: only the CDK CLI `npm ci` installed from the release's own lockfile, never one npx
+  // would otherwise download on the fly.
+  const args = ["--no-install", "cdk", command, CDK_CONSTRUCT_IDS[request.part], "--exclusively", "--app", "node infra/dist/bin/agentx.js", "-c", `agentxEnv=${input.env}`, "-c", `agentxRegion=${input.region}`];
+  if (input.identityMode === "oidc") args.push("-c", "agentxIdentity=oidc");
+  // The CDK CLI looks `--parameters` up by the physical stack name (parameterMap[stack.stackName]),
+  // not the construct id; a construct-id prefix silently drops every parameter.
+  for (const [key, value] of Object.entries(request.parameters)) args.push("--parameters", `${request.stackName}:${key}=${value}`);
+  return args;
+}
+
+/** FR-042: `cdk diff` for one stack, against the deployed template (no change set, so nothing is
+ * written to AWS). cdk prints the diff on stderr; the text returned has every secret redacted. */
+export async function cdkDiff(input: { runner: CommandRunner; source: string; env: string; region: string; identityMode: "cognito" | "oidc"; request: DeployRequest }): Promise<string> {
+  const args = [...cdkArguments(input, input.request, "diff"), "--no-change-set"];
+  const redact = (text: string) => redactSecrets(text, input.request.parameters);
+  const display = ["npx", ...args.map((arg) => displayArg(redact(arg)))].join(" ");
+  const result = await input.runner.run("npx", args, { cwd: input.source, display, redact, quiet: true });
+  return redact([result.stdout, result.stderr ?? ""].filter((part) => part !== "").join("\n"));
+}
+
 export function cdkDeployer(input: {
   runner: CommandRunner;
   source: string;
@@ -157,32 +183,8 @@ export function cdkDeployer(input: {
 }): StackDeployer {
   return {
     async deploy(request: DeployRequest): Promise<StackOutputs> {
-      const constructId = CDK_CONSTRUCT_IDS[request.part];
       const outputsFile = join(input.outputsDir, `${request.part}.json`);
-
-      const args: string[] = [
-        // --no-install: only the CDK CLI `npm ci` installed from the release's own lockfile, never
-        // one npx would otherwise download on the fly.
-        "--no-install",
-        "cdk",
-        "deploy",
-        constructId,
-        "--exclusively",
-        "--app",
-        "node infra/dist/bin/agentx.js",
-        "-c",
-        `agentxEnv=${input.env}`,
-        "-c",
-        `agentxRegion=${input.region}`,
-      ];
-      if (input.identityMode === "oidc") args.push("-c", "agentxIdentity=oidc");
-      args.push("--require-approval", "never", "--outputs-file", outputsFile);
-      if (request.roleArn !== undefined) args.push("--role-arn", request.roleArn);
-      // The CDK CLI looks `--parameters` up by the physical stack name (parameterMap[stack.stackName]),
-      // not the construct id; a construct-id prefix silently drops every parameter.
-      for (const [key, value] of Object.entries(request.parameters)) {
-        args.push("--parameters", `${request.stackName}:${key}=${value}`);
-      }
+      const args = [...cdkArguments(input, request, "deploy"), "--require-approval", "never", "--outputs-file", outputsFile, ...(request.roleArn === undefined ? [] : ["--role-arn", request.roleArn])];
 
       // Redact each raw argument first, then quote the (now secret-free) result — quoting after
       // redaction would let an escaped fragment of a secret containing whitespace, a quote, or a

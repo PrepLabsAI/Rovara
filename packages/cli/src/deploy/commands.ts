@@ -375,7 +375,7 @@ export function realCommandRunner(stderr: Writer): CommandRunner {
           stdoutStream.flush();
           stderrStream.flush();
           if (code === 0) {
-            resolvePromise({ stdout });
+            resolvePromise({ stdout, stderr: stderrBuffer });
             return;
           }
           const tailed = tail(redact(stderrBuffer), STDERR_TAIL_LINES);
