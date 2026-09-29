@@ -13,14 +13,18 @@ import {
   lastAssistantResponse,
   redactAndCap,
   redactText,
+  slackThreadSubject,
+  slackThreadUrl,
   type AiToolTurnRecord,
   type DeveloperRequester,
   type DeveloperTaskEvent,
   type DeveloperTaskFailureCategory,
+  type DeveloperTaskShare,
   type DeveloperTaskStatus,
   type Operation,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
+import type { ShareDecision } from "./share.js";
 
 export interface CounterKey { pk: string; sk: string }
 export interface WorkspaceCharge { member: CounterKey; organization: CounterKey }
@@ -43,12 +47,54 @@ export interface DeveloperTaskRecord {
   conversationId: string;
   startingRevision: number;
   charge: WorkspaceCharge;
-  /** Phase 25c shares tasks; until then every task is private. */
-  shared: false;
+  /** C1: whether the task is shared to its channel, and how. */
+  shared: boolean;
+  share?: TaskShare;
+  /** C1: every write of `share` replaces the whole map, conditioned on this number. */
+  shareVersion?: number;
   createdAt: string;
   updatedAt: string;
   closedAt?: string;
 }
+
+/** C1: a shared task's thread, as the task record keeps it. */
+export interface TaskShare {
+  teamId: string;
+  channelId: string;
+  channelName?: string;
+  mode: "view" | "continue";
+  sharedReason: "requested" | "required";
+  modeReason?: "continue_not_allowed";
+  sharedAt: string;
+  threadTs?: string;
+  postFailedAt?: string;
+}
+
+export function taskShare(decision: ShareDecision, teamId: string, sharedAt: string): TaskShare {
+  return {
+    teamId, channelId: decision.channelId,
+    ...(decision.channelName === undefined ? {} : { channelName: decision.channelName }),
+    mode: decision.mode, sharedReason: decision.sharedReason,
+    ...(decision.modeReason === undefined ? {} : { modeReason: decision.modeReason }),
+    sharedAt,
+  };
+}
+
+/** The wire view of a share: a thread link only once the notifier has posted (C6). */
+export function shareView(share: TaskShare): DeveloperTaskShare {
+  return {
+    mode: share.mode, channelId: share.channelId,
+    ...(share.channelName === undefined ? {} : { channelName: share.channelName }),
+    sharedReason: share.sharedReason,
+    ...(share.modeReason === undefined ? {} : { modeReason: share.modeReason }),
+    ...(share.threadTs === undefined ? {} : { threadUrl: slackThreadUrl({ teamId: share.teamId, channelId: share.channelId, threadTs: share.threadTs }) }),
+    ...(share.postFailedAt === undefined ? {} : { postFailed: true }),
+  };
+}
+
+/** The shared thread's Slack subject, the key of its Slack-side records (ruling F11: contracts' builder, which validates). */
+export const sharedSubject = (share: TaskShare & { threadTs: string }): string =>
+  slackThreadSubject({ teamId: share.teamId, channelId: share.channelId, threadTs: share.threadTs });
 
 /** DEVELOPER#<developerId> / TASK#<createdAt>#<taskId>: the task index of FR-017. */
 export interface DeveloperTaskIndexRecord {

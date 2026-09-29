@@ -379,7 +379,7 @@ async function listProjects(deps: DeveloperRouteDependencies, caller: DeveloperC
  * SLACK_UNAVAILABLE when only a channel could have given access and Slack is down, then
  * PROJECT_TASKS_DISABLED.
  */
-export async function checkProjectAccess(deps: DeveloperRouteDependencies, caller: DeveloperCaller, project: string): Promise<{ revision: number; policy: DeveloperTaskPolicy; access: "granted" | "channel" }> {
+export async function checkProjectAccess(deps: DeveloperRouteDependencies, caller: DeveloperCaller, project: string): Promise<{ revision: number; policy: DeveloperTaskPolicy; access: "granted" | "channel"; channelIds: string[] }> {
   // A name that is not a project name is never echoed back: it could be long or carry markup.
   if (!AgentXNameSchema.safeParse(project).success) throw agentXError("PROJECT_NOT_FOUND", "that is not a valid AgentX project name");
   const known = (await projectsWithPolicy(deps, [project])).get(project);
@@ -403,7 +403,7 @@ export async function checkProjectAccess(deps: DeveloperRouteDependencies, calle
     throw agentXError("PROJECT_ACCESS_DENIED", accessDeniedMessage(project, visible));
   }
   if (!known.policy.enabled) throw agentXError("PROJECT_TASKS_DISABLED", `tasks from AI tools are turned off for \`${project}\`; use the project's Slack channel, or ask an admin`);
-  return { revision: known.revision, policy: known.policy, access: entry.access };
+  return { revision: known.revision, policy: known.policy, access: entry.access, channelIds: bindings.map((binding) => binding.channelId).sort() };
 }
 
 /**
@@ -480,6 +480,13 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
       ...(deps.developer.slackTeamId === undefined ? {} : { slackTeamId: deps.developer.slackTeamId }),
       actions: deps.tasks,
       checkAccess: (project) => checkProjectAccess(deps, caller, project),
+      boundChannels: async (channelIds) => {
+        const known = await channelNames(deps, channelIds);
+        return channelIds.map((channelId) => {
+          const channel = known.get(channelId);
+          return channel === undefined ? { channelId } : { channelId, name: channel.name, isPrivate: channel.isPrivate };
+        });
+      },
       now: deps.now,
     }, caller, request, url);
   }

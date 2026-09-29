@@ -34,6 +34,7 @@ import {
   type WorkspaceInstance,
 } from "@agentx/contracts";
 import type { z } from "zod";
+import { decideShare, type BoundChannel, type ShareDecision } from "../developer/share.js";
 import { chargeConflict, chargeItems, developerCharge, limitReached, readWorkspaceLimits, releaseConflict, releaseItems, type ChargeConflict, type WorkspaceLimits } from "../developer/limits.js";
 import {
   aiToolTurn,
@@ -42,10 +43,12 @@ import {
   developerTaskIdentity,
   partyOfTask,
   recentTaskEvents,
+  shareView,
   startIdempotencyKey,
   taskIndexKey,
   taskKey,
   taskPointerKey,
+  taskShare,
   type DeveloperTaskIndexRecord,
   type DeveloperTaskPointerRecord,
   type DeveloperTaskRecord,
@@ -62,7 +65,9 @@ export interface DeveloperTaskRouteDependencies {
   tableName: string;
   slackTeamId?: string;
   actions: DeveloperTaskActions;
-  checkAccess(project: string): Promise<{ revision: number; policy: DeveloperTaskPolicy; access: "granted" | "channel" }>;
+  checkAccess(project: string): Promise<{ revision: number; policy: DeveloperTaskPolicy; access: "granted" | "channel"; channelIds: string[] }>;
+  /** C3: bound channels' names and privacy, best effort (R10). */
+  boundChannels?(channelIds: readonly string[]): Promise<BoundChannel[]>;
   now(): number;
   log?(entry: Record<string, unknown>): void;
 }
@@ -268,6 +273,7 @@ export async function taskView(
     startingRevision: task.startingRevision,
     client: task.client,
     shared: task.shared,
+    ...(task.share === undefined ? {} : { share: shareView(task.share) }),
     ...(derived.closing ? { closing: true } : {}),
     createdAt: task.createdAt,
     updatedAt: derived.current?.createdAt ?? task.updatedAt,
@@ -311,6 +317,30 @@ async function chargeFailure(deps: DeveloperTaskRouteDependencies, charge: Works
   }
 }
 
+type ProjectAccess = Awaited<ReturnType<DeveloperTaskRouteDependencies["checkAccess"]>>;
+
+/**
+ * C3: where and how a task is shared, or undefined for a private one. Names are read only when a
+ * share needs them, and only for a caller with a Slack link, as GET /v1/dev/projects does (R10).
+ */
+async function shareFor(
+  deps: DeveloperTaskRouteDependencies,
+  caller: DeveloperCaller,
+  project: string,
+  access: ProjectAccess,
+  wanted: { shareToChannel: boolean; shareMode?: "view" | "continue" | undefined; channel?: string | undefined },
+): Promise<ShareDecision | undefined> {
+  if (!wanted.shareToChannel && access.policy.share !== "required") return undefined;
+  const bound: BoundChannel[] = caller.slackUserId === undefined || deps.boundChannels === undefined
+    ? access.channelIds.map((channelId) => ({ channelId }))
+    : await deps.boundChannels(access.channelIds);
+  return decideShare({
+    project, policy: access.policy, bound, shareToChannel: wanted.shareToChannel,
+    ...(wanted.shareMode === undefined ? {} : { shareMode: wanted.shareMode }),
+    ...(wanted.channel === undefined ? {} : { channel: wanted.channel }),
+  });
+}
+
 async function startTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, value: unknown): Promise<{ task: DeveloperTaskView }> {
   const request = parse(StartDeveloperTaskRequestSchema, value, deps, "start");
   const turns = turnTable(deps);
@@ -343,13 +373,17 @@ async function startTask(deps: DeveloperTaskRouteDependencies, caller: Developer
     if (error instanceof AgentXError) return refused(error);
     throw error;
   }
-  // R9: sharing is phase 25c.
-  if (access.policy.share === "required") {
-    return refused(agentXError("CHANNEL_REQUIRED", `project \`${request.project}\` requires tasks to be shared to its Slack channel, which this AgentX cannot do yet`));
+  // FR-031, C4: decided here, in R8's place for sharing; a refusal is audited and writes nothing else.
+  let share: ShareDecision | undefined;
+  try {
+    share = await shareFor(deps, caller, request.project, access, { shareToChannel: request.shareToChannel === true, shareMode: request.shareMode, channel: request.channel });
+  } catch (error) {
+    if (error instanceof AgentXError) return refused(error);
+    throw error;
   }
-  if (request.shareToChannel === true) {
-    return refused(agentXError("CHANNEL_REQUIRED", "sharing tasks to Slack is not available yet in this AgentX"));
-  }
+  const teamId = deps.slackTeamId;
+  // Bindings exist only under a team ID, so this cannot happen; refuse rather than write a half share.
+  if (share !== undefined && teamId === undefined) return refused(agentXError("CHANNEL_REQUIRED", "this AgentX has no Slack workspace set, so tasks cannot be shared"));
   const project = await deps.actions.latestProject(request.project);
   if (project === undefined) return refused(agentXError("PROJECT_NOT_FOUND", `project \`${request.project}\` doesn't exist in this AgentX`));
   // The policy checked must be the policy started: a revision registered between the two reads
@@ -373,11 +407,12 @@ async function startTask(deps: DeveloperTaskRouteDependencies, caller: Developer
     ...taskKey(taskId), entityType: "DEVELOPER_TASK", taskId, developerId: caller.developerId, provider: caller.amr, developerName: caller.name,
     ...(caller.slackUserId === undefined ? {} : { slackUserId: caller.slackUserId }),
     client, project: request.project, title, workspaceId, ownerKey: identity.ownerKey, conversationId, startingRevision: revision,
-    charge, shared: false, createdAt: receivedAt, updatedAt: receivedAt,
+    charge, shared: share !== undefined, ...(share === undefined ? {} : { share: taskShare(share, teamId!, receivedAt), shareVersion: 1 }),
+    createdAt: receivedAt, updatedAt: receivedAt,
   };
   const index: DeveloperTaskIndexRecord = {
     ...taskIndexKey(caller.developerId, receivedAt, taskId), entityType: "DEVELOPER_TASK_INDEX", taskId, project: request.project, title, client,
-    status: "STARTING", shared: false, startingRevision: revision, workspaceId, createdAt: receivedAt, updatedAt: receivedAt,
+    status: "STARTING", shared: share !== undefined, startingRevision: revision, workspaceId, createdAt: receivedAt, updatedAt: receivedAt,
   };
   const pointer: DeveloperTaskPointerRecord = {
     ...taskPointerKey(workspaceId), entityType: "DEVELOPER_TASK_POINTER", taskId, developerId: caller.developerId,

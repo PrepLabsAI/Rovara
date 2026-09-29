@@ -7,7 +7,8 @@ import type { DeveloperApiConfiguration } from "../../packages/broker/src/aws/de
 import type { DeveloperTaskActions } from "../../packages/broker/src/aws/developer-task-actions.js";
 import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
 import { localSigner } from "./developer-fakes.js";
-import { SLACK_CHANNEL, SLACK_TEAM, call, createBroker, loadSlackBroker, registerSlackProject } from "./slack-broker.js";
+import type { FakeDynamoDb } from "./fake-dynamodb.js";
+import { SLACK_CHANNEL, SLACK_TEAM, call, createBroker, loadSlackBroker, registerSlackProject, type Handler } from "./slack-broker.js";
 
 export const DEV_ISSUER = "https://abc123.execute-api.us-east-1.amazonaws.com/v1/auth";
 export interface Developer { developerId: string; name: string; provider: "slack" | "oidc"; sessionId: string; slackUserId?: string }
@@ -119,4 +120,38 @@ export async function createDeveloperTaskBroker(options: {
     artifact: (workspaceId: string, operationId: string, name: string, content: string) =>
       callback(workspaceId, operationId, "artifacts", { name, mediaType: "text/plain", content }),
   };
+}
+
+const ADMIN = { subject: "admin-subject", admin: true };
+
+/** Binds another Slack channel of the test team to a project, as `agentx admin slack bind` does. */
+export async function bindChannel(handler: Handler, channelId: string, projectName = "payments"): Promise<void> {
+  const response = await call(handler, { method: "PUT", path: `/v1/admin/slack/bindings/${SLACK_TEAM}/${channelId}`, user: ADMIN, body: { projectName } });
+  if (response.status !== 200) throw new Error(`binding failed: ${JSON.stringify(response.body)}`);
+}
+
+export async function unbindChannel(handler: Handler, channelId: string): Promise<void> {
+  const response = await call(handler, { method: "DELETE", path: `/v1/admin/slack/bindings/${SLACK_TEAM}/${channelId}`, user: ADMIN });
+  if (response.status !== 200) throw new Error(`unbinding failed: ${JSON.stringify(response.body)}`);
+}
+
+/** Registers revision `revision` of payments with the given developerTasks, as an administrator (FR-014). */
+export async function registerRevision(handler: Handler, revision: number, developerTasks: Record<string, unknown>): Promise<void> {
+  const response = await call(handler, {
+    method: "POST", path: "/v1/admin/projects", user: ADMIN,
+    body: {
+      definition: {
+        name: "payments", revision,
+        repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "github-app" }],
+        setup: [], readiness: [], orchestratorInstructions: "Delegate work.", developerTasks,
+      },
+      runtimeBinding: { deploymentMode: "ec2-ebs", launchTemplateId: "lt-0123456789abcdef0", subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0123456789abcdef0" }], volumeSizeGiB: 20, volumeType: "gp3" },
+    },
+  });
+  if (response.status !== 201) throw new Error(`registration failed: ${JSON.stringify(response.body)}`);
+}
+
+/** An admin grant (FR-013), so access does not depend on a bound channel. */
+export function grantProject(db: FakeDynamoDb, who: Developer, projectName = "payments"): void {
+  db.set({ pk: `MEMBER#${who.developerId}`, sk: `PROJECT#${projectName}`, entityType: "MEMBERSHIP", ownerKey: who.developerId, projectName, role: "developer" });
 }
