@@ -10,17 +10,37 @@ jobs:
   local:
     runs-on: ubuntu-latest
     steps:
+      # Depth 2 keeps the pull request's merge commit and its first parent, the base branch.
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
       - uses: actions/setup-node@v5
         with:
           node-version-file: .node-version
           cache: npm
+      # A pull request that changes only Markdown under specs/ or docs/, which no test reads, skips
+      # the steps below (scripts/ci-docs-only.ts). Pushes and manual runs always run them.
+      - name: Docs-only change?
+        id: scope
+        if: github.event_name == 'pull_request'
+        run: |
+          git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed.txt"
+          node scripts/ci-docs-only.ts "$RUNNER_TEMP/changed.txt"
+      - name: Markdown-only change
+        if: steps.scope.outputs.docs_only == 'true'
+        run: echo "Only Markdown that no test reads changed; typecheck, lint, tests, synth and the release check are skipped."
       - run: npm ci
+        if: steps.scope.outputs.docs_only != 'true'
       - run: npm run typecheck
+        if: steps.scope.outputs.docs_only != 'true'
       - run: npm run lint
+        if: steps.scope.outputs.docs_only != 'true'
       - run: npm test
+        if: steps.scope.outputs.docs_only != 'true'
       - run: npm run infra:synth
+        if: steps.scope.outputs.docs_only != 'true'
       - name: Release builds are reproducible
+        if: steps.scope.outputs.docs_only != 'true'
         run: |
           npm run release:build -- --version 0.0.0-ci --out "$RUNNER_TEMP/release-a"
           npm run release:build -- --version 0.0.0-ci --out "$RUNNER_TEMP/release-b"
