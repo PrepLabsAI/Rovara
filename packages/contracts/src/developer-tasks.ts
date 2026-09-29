@@ -45,22 +45,29 @@ export const VIEW_ONLY_NOTICE =
 export const CLOSED_SHARED_NOTICE =
   "The task this thread followed is closed, so I don't act on messages here. To ask AgentX for something, post a new message in the channel; it starts its own thread workspace.";
 
+/** Which fixed notice a claim is for: the view-only one, or a closed task's (Q3). */
+export type SharedNoticeKind = "view" | "closed";
+
 /**
  * C10, F13: the conditional Update that claims a shared thread's hourly notice. The Slack ingress
  * and the Slack service both send it, so "one notice an hour" is the same claim in both. It succeeds
- * for at most one caller per thread per interval; a later caller gets ConditionalCheckFailedException.
- * The marker expires after two intervals.
+ * for at most one caller per thread per interval and notice kind; a later caller gets
+ * ConditionalCheckFailedException. Each kind has its own time on the one item (the live check found
+ * a closed notice swallowed by a view-only one sent 18 minutes before), so a thread whose task
+ * closes still hears so once. A marker from before the kinds holds `noticedAt` only, which is the
+ * view-only time. The marker expires after two intervals.
  */
-export function sharedNoticeClaim(subject: string, nowSeconds: number): {
+export function sharedNoticeClaim(subject: string, nowSeconds: number, kind: SharedNoticeKind = "view"): {
   Key: { pk: string; sk: "SHARED_NOTICE" };
   UpdateExpression: string;
   ConditionExpression: string;
   ExpressionAttributeValues: { ":now": number; ":expires": number; ":cutoff": number };
 } {
+  const at = kind === "closed" ? "closedNoticedAt" : "noticedAt";
   return {
     Key: sharedNoticeKey(subject),
-    UpdateExpression: "SET noticedAt = :now, expiresAt = :expires",
-    ConditionExpression: "attribute_not_exists(noticedAt) OR noticedAt <= :cutoff",
+    UpdateExpression: `SET ${at} = :now, expiresAt = :expires`,
+    ConditionExpression: `attribute_not_exists(${at}) OR ${at} <= :cutoff`,
     ExpressionAttributeValues: {
       ":now": nowSeconds,
       ":expires": nowSeconds + 2 * SHARED_THREAD_NOTICE_INTERVAL_SECONDS,

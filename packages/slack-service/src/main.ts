@@ -164,10 +164,10 @@ const threads: ThreadStore = {
         : { UpdateExpression: "SET refreshConnectors = :connectors", ExpressionAttributeValues: { ":connectors": connectors } }),
     }), { abortSignal: AbortSignal.timeout(5000) });
   },
-  async claimSharedNotice(subject, nowSeconds) {
+  async claimSharedNotice(subject, nowSeconds, kind) {
     try {
       // The same claim the Slack ingress sends (F13), so one notice an hour holds across both.
-      await documentClient.send(new UpdateCommand({ TableName: threadsTableName, ...sharedNoticeClaim(subject, nowSeconds) }), { abortSignal: AbortSignal.timeout(5000) });
+      await documentClient.send(new UpdateCommand({ TableName: threadsTableName, ...sharedNoticeClaim(subject, nowSeconds, kind) }), { abortSignal: AbortSignal.timeout(5000) });
       return true;
     } catch (error) {
       if (error instanceof Error && error.name === "ConditionalCheckFailedException") return false;

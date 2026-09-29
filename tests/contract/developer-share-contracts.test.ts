@@ -92,9 +92,9 @@ describe("share shapes (C1, C2, C6)", () => {
 
 describe("the shared thread's hourly notice claim (C10, F13)", () => {
   const subject = "T0BSHLLUGBD/C0123456789/1695500000.000001";
-  const claim = async (db: FakeDynamoDb, now: number) => {
+  const claim = async (db: FakeDynamoDb, now: number, kind?: "view" | "closed") => {
     try {
-      await db.send(new UpdateCommand({ TableName: "threads", ...sharedNoticeClaim(subject, now) }));
+      await db.send(new UpdateCommand({ TableName: "threads", ...sharedNoticeClaim(subject, now, kind) }));
       return true;
     } catch (error) {
       if (error instanceof Error && error.name === "ConditionalCheckFailedException") return false;
@@ -118,6 +118,23 @@ describe("the shared thread's hourly notice claim (C10, F13)", () => {
     expect(await claim(db, 1_003_599)).toBe(false);
     expect(await claim(db, 1_003_600)).toBe(true);
     expect(db.get(`THREAD#${subject}`, "SHARED_NOTICE")).toMatchObject({ noticedAt: 1_003_600, expiresAt: 1_010_800 });
+  });
+
+  it("claims the closed notice apart from the view-only one, on the same item (live check)", async () => {
+    expect(sharedNoticeClaim(subject, 1_000_000, "closed")).toEqual({
+      Key: sharedNoticeKey(subject),
+      UpdateExpression: "SET closedNoticedAt = :now, expiresAt = :expires",
+      ConditionExpression: "attribute_not_exists(closedNoticedAt) OR closedNoticedAt <= :cutoff",
+      ExpressionAttributeValues: { ":now": 1_000_000, ":expires": 1_007_200, ":cutoff": 996_400 },
+    });
+    const db = new FakeDynamoDb();
+    // A marker written before this change holds only noticedAt: it blocks the view-only notice, not the closed one.
+    expect(await claim(db, 1_000_000)).toBe(true);
+    expect(await claim(db, 1_001_080, "closed")).toBe(true);
+    expect(await claim(db, 1_002_000, "closed")).toBe(false);
+    expect(await claim(db, 1_002_000, "view")).toBe(false);
+    expect(await claim(db, 1_004_680, "closed")).toBe(true);
+    expect(db.get(`THREAD#${subject}`, "SHARED_NOTICE")).toMatchObject({ noticedAt: 1_000_000, closedNoticedAt: 1_004_680, expiresAt: 1_011_880 });
   });
 });
 

@@ -67,7 +67,7 @@ export interface SlackIngressDependencies {
    */
   sharedTask?: {
     lookup: (thread: SlackThread) => Promise<{ mode: "view" | "continue"; closed: boolean } | undefined>;
-    claimNotice: (threadSubject: string, nowSeconds: number) => Promise<boolean>;
+    claimNotice: (threadSubject: string, nowSeconds: number, kind: "view" | "closed") => Promise<boolean>;
   };
   now?: () => number;
   log?: SlackIngressLog;
@@ -177,7 +177,7 @@ export function createSlackIngressHandler(dependencies: SlackIngressDependencies
       if (shared !== undefined && (shared.mode === "view" || shared.closed)) {
         let notify = false;
         try {
-          notify = await dependencies.sharedTask.claimNotice(subject, nowSeconds);
+          notify = await dependencies.sharedTask.claimNotice(subject, nowSeconds, shared.closed ? "closed" : "view");
         } catch (error) {
           log("shared_task.notice_claim_failed", { eventId: mention.eventId, errorName: errorName(error) });
         }
@@ -548,10 +548,10 @@ function createAwsSlackIngressHandler() {
           const record = SharedTaskRecordSchema.parse(response.Item);
           return { mode: record.mode, closed: record.closedAt !== undefined };
         },
-        async claimNotice(threadSubject: string, nowSeconds: number) {
+        async claimNotice(threadSubject: string, nowSeconds: number, kind: "view" | "closed") {
           try {
             // The same claim the Slack service sends (F13), so one notice an hour holds across both.
-            await documentClient.send(new UpdateCommand({ TableName: threadsTableName, ...sharedNoticeClaim(threadSubject, nowSeconds) }));
+            await documentClient.send(new UpdateCommand({ TableName: threadsTableName, ...sharedNoticeClaim(threadSubject, nowSeconds, kind) }));
             return true;
           } catch (error) {
             if (error instanceof Error && error.name === "ConditionalCheckFailedException") return false;

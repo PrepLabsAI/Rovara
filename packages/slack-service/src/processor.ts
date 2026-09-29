@@ -66,7 +66,7 @@ export interface ThreadStore {
    * C10: claims the shared thread's hourly notice (the ingress's marker); true when this caller may
    * post it. Absent: the notice is posted every time a view-only or closed thread's message is processed.
    */
-  claimSharedNotice?(subject: string, nowSeconds: number): Promise<boolean>;
+  claimSharedNotice?(subject: string, nowSeconds: number, kind: "view" | "closed"): Promise<boolean>;
 }
 
 export interface TurnInput {
@@ -286,7 +286,7 @@ export async function processSlackRequest(
       let notify = true;
       if (dependencies.threads.claimSharedNotice !== undefined) {
         try {
-          notify = await dependencies.threads.claimSharedNotice(subject, Math.floor(now() / 1000));
+          notify = await dependencies.threads.claimSharedNotice(subject, Math.floor(now() / 1000), workspace.closed ? "closed" : "view");
         } catch (error) {
           log("shared_task.notice_claim_failed", { eventId: message.eventId, errorName: errorName(error) });
           notify = false;

@@ -89,10 +89,10 @@ function harness(options: {
           const found = options.shared?.threads[thread.threadTs];
           return found === undefined ? undefined : { mode: found.mode, closed: found.closed ?? false };
         },
-        claimNotice: async (subject: string, now: number) => {
+        claimNotice: async (subject: string, now: number, kind: "view" | "closed") => {
           if (options.shared?.claimThrows) throw Object.assign(new Error("DynamoDB unavailable"), { name: "InternalServerError" });
           try {
-            await threadsTable.send(new UpdateCommand({ TableName: "threads", ...sharedNoticeClaim(subject, now) }));
+            await threadsTable.send(new UpdateCommand({ TableName: "threads", ...sharedNoticeClaim(subject, now, kind) }));
             return true;
           } catch (error) {
             if (error instanceof Error && error.name === "ConditionalCheckFailedException") return false;
@@ -732,6 +732,27 @@ describe("shared task threads (spec 025 FR-035, C10)", () => {
     const h = harness({ shared: { threads: { "1695500000.000100": { mode: "continue", closed: true } } } });
     await send(h.handler, reply("Ev0000000105"));
     expect(h.posts).toEqual([{ channel, threadTs: "1695500000.000100", text: CLOSED_SHARED_NOTICE }]);
+    expect(h.queue).toEqual([]);
+  });
+
+  it("gives the closed notice once the task closes, even within the hour of a view-only notice (live check)", async () => {
+    const threads: Record<string, { mode: "view" | "continue"; closed?: boolean }> = { "1695500000.000100": { mode: "view" } };
+    const h = harness({ shared: { threads } });
+    await send(h.handler, reply("Ev0000000111"));
+    expect(h.posts.map((post) => post.text)).toEqual([VIEW_ONLY_NOTICE]);
+    // The task closes 18 minutes later: the closed notice has its own hourly claim.
+    threads["1695500000.000100"] = { mode: "view", closed: true };
+    h.clock.seconds += 18 * 60;
+    await send(h.handler, reply("Ev0000000112", undefined, h.clock.seconds));
+    expect(h.posts.map((post) => post.text)).toEqual([VIEW_ONLY_NOTICE, CLOSED_SHARED_NOTICE]);
+    // A second mention within the hour of the closed notice gets nothing.
+    h.clock.seconds += 30 * 60;
+    await send(h.handler, reply("Ev0000000113", undefined, h.clock.seconds));
+    expect(h.posts).toHaveLength(2);
+    // Closed wins: a closed thread never gets the view-only notice again, even once the view claim lapses.
+    h.clock.seconds += 20 * 60;
+    await send(h.handler, reply("Ev0000000114", undefined, h.clock.seconds));
+    expect(h.posts.map((post) => post.text)).toEqual([VIEW_ONLY_NOTICE, CLOSED_SHARED_NOTICE]);
     expect(h.queue).toEqual([]);
   });
 

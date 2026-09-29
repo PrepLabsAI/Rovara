@@ -1,8 +1,10 @@
 // tests/integration/shared-task-turns.test.ts
 // Spec 025 FR-054, C10, C12, C13: how the Slack service handles a shared task's thread.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CLOSED_SHARED_NOTICE, VIEW_ONLY_NOTICE, type SlackRequestMessage, type SlackThreadWorkspaceResult, type TurnRecord } from "../../packages/contracts/src/index.js";
+import { UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { CLOSED_SHARED_NOTICE, VIEW_ONLY_NOTICE, sharedNoticeClaim, type SlackRequestMessage, type SlackThreadWorkspaceResult, type TurnRecord } from "../../packages/contracts/src/index.js";
 import { processSlackRequest, type ProcessorDependencies } from "../../packages/slack-service/src/processor.js";
+import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { SHARED_CLOSE_REFUSED_MESSAGE, TASK_BUSY_WAIT_MESSAGE, TASK_STILL_BUSY_MESSAGE } from "../../packages/slack-service/src/shared-task.js";
 
 const thread = { teamId: "T0BSHLLUGBD", channelId: "C0123456789", threadTs: "1695500000.000100" };
@@ -193,6 +195,34 @@ describe("a thread that is not open to the channel (C10, Review Focus 2)", () =>
     const closed = harness([{ outcome: "VIEW_ONLY", taskId: TASK, closed: true }]);
     await processSlackRequest(message(), closed.dependencies, { finalAttempt: false });
     expect(closed.posts).toEqual([CLOSED_SHARED_NOTICE]);
+  });
+
+  it("claims the closed notice apart from the view-only one, so a close is still said within the hour (live check)", async () => {
+    const table = new FakeDynamoDb();
+    const kinds: string[] = [];
+    let clock = 1_000_000_000;
+    const turn = async (answer: SlackThreadWorkspaceResult) => {
+      const h = harness([answer]);
+      h.dependencies.now = () => clock;
+      h.dependencies.threads.claimSharedNotice = async (subject, nowSeconds, kind) => {
+        kinds.push(kind);
+        try {
+          await table.send(new UpdateCommand({ TableName: "threads", ...sharedNoticeClaim(subject, nowSeconds, kind) }));
+          return true;
+        } catch (error) {
+          if (error instanceof Error && error.name === "ConditionalCheckFailedException") return false;
+          throw error;
+        }
+      };
+      await processSlackRequest(message(), h.dependencies, { finalAttempt: false });
+      return h.posts;
+    };
+    expect(await turn({ outcome: "VIEW_ONLY", taskId: TASK, closed: false })).toEqual([VIEW_ONLY_NOTICE]);
+    clock += 18 * 60_000;
+    expect(await turn({ outcome: "VIEW_ONLY", taskId: TASK, closed: true })).toEqual([CLOSED_SHARED_NOTICE]);
+    clock += 30 * 60_000;
+    expect(await turn({ outcome: "VIEW_ONLY", taskId: TASK, closed: true })).toEqual([]);
+    expect(kinds).toEqual(["view", "closed", "closed"]);
   });
 
   it("stays silent and logs the error name when the notice claim throws", async () => {
