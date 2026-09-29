@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { STUCK_SETUP_MESSAGE, STUCK_SETUP_MS, setupWatchKey, sweepStuckSetups } from "../../packages/broker/src/aws/stuck-setup.js";
 import { noticesFromStream } from "../../packages/broker/src/developer/notifications.js";
 import { MAYA, createDeveloperTaskBroker, recordStream } from "../support/developer-task-broker.js";
-import { SLACK_CHANNEL, SLACK_TEAM, ensureWorkspace } from "../support/slack-broker.js";
+import { SLACK_CHANNEL, SLACK_TEAM, call, ensureWorkspace } from "../support/slack-broker.js";
 
 const INSTRUCTIONS = "Fix it PLANTED-INSTRUCTIONS-5c1e";
 
@@ -179,10 +179,19 @@ describe("the sweep (FR-055)", () => {
   });
 
   it("answers a late SUCCEEDED result for a swept prepare and queues nothing (Review Focus 4)", async () => {
-    const { db, sweep, finish, workspaceId, prepareId } = await starting();
+    const { db, sweep, handler, dev, taskId, workspaceId, prepareId } = await starting();
     await sweep(51);
-    await expect(finish(workspaceId, prepareId, "SUCCEEDED")).resolves.toBeDefined();
+    // Final review M9: the callback is answered 200 (so the worker stops retrying), with the swept record.
+    const capability = (db.find((item) => item.entityType === "OUTBOX" && item.operationId === prepareId)[0]!.invocation as { callbackCapability: string }).callbackCapability;
+    const late = await call(handler, {
+      method: "POST", path: `/v1/internal/workspaces/${workspaceId}/operations/${prepareId}/result`,
+      headers: { "x-agentx-callback-capability": capability }, body: { operationId: prepareId, status: "SUCCEEDED" },
+    });
+    expect(late.status).toBe(200);
+    expect(late.body).toMatchObject({ operation: { id: prepareId, status: "FAILED", error: STUCK_SETUP_MESSAGE } });
     expect(db.find((item) => item.entityType === "OPERATION" && item.workspaceId === workspaceId && item.kind === "task")).toHaveLength(0);
     expect(db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${prepareId}`)).toMatchObject({ status: "FAILED", error: STUCK_SETUP_MESSAGE });
+    // The developer still reads setup_failed after the late result.
+    expect((await dev(MAYA, "GET", `/v1/dev/tasks/${taskId}`)).body).toMatchObject({ task: { status: "FAILED", failure: { category: "setup_failed", message: STUCK_SETUP_MESSAGE } } });
   });
 });
