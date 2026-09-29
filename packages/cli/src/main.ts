@@ -35,6 +35,7 @@ import { developerLogin } from "./developer/login.js";
 import { fetchDeveloperWorkspaces, type DeveloperWorkspacesResult } from "./developer/workspaces.js";
 import { runWorkspacesCommand } from "./workspaces-ui/index.js";
 import { loadDeploymentSettings, type DeploymentSettings } from "./deployment.js";
+import { installMcp, MCP_CLIENTS, runCommand, type McpClientKind, type McpInstallDeps } from "./mcp/install.js";
 import { runMcpServer, type McpServeDeps } from "./mcp/serve.js";
 import { resumeCommand, runDeploy, runInitExport, type DeployCliDependencies, type DeployCommandOptions } from "./deploy/commands.js";
 import { cloudFormationStackReader, stsCallerIdentity, type CallerIdentity, type StackReader } from "./environments/adopt.js";
@@ -50,7 +51,7 @@ import { addSignInOptions, definedEntries, registerSigninCommands, secretSource,
 import { SIGNIN_FLAG_NAMES, type SigninFlags } from "./signin/collect.js";
 import type { SigninServices } from "./signin/commands.js";
 import { SystemCredentialTokenStore, type TokenStore } from "./token-store.js";
-import { CLI_VERSION } from "./version.js";
+import { CLI_VERSION, RELEASE_VERSION } from "./version.js";
 
 interface GlobalOptions {
   project?: string;
@@ -108,6 +109,8 @@ export interface CliDependencies {
   stdin?: Readable;
   /** `agentx mcp`'s clock for waits, for tests. */
   mcpClock?: McpServeDeps["clock"];
+  /** `agentx mcp install`'s runner for the claude command, for tests. */
+  runCommand?: McpInstallDeps["run"];
 }
 
 interface AuthenticatedDeployment {
@@ -764,7 +767,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     }
   };
 
-  program
+  const mcp = program
     .command("mcp")
     .description("run the AgentX MCP server for your AI tool (stdio); add it with agentx mcp install")
     .action(async (_options: unknown, command: Command) => {
@@ -789,6 +792,16 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         process.off("SIGTERM", stop);
         process.off("SIGINT", stop);
       }
+    });
+
+  mcp
+    .command("install")
+    .description("add the AgentX MCP server to Claude Code, Codex or Cursor")
+    .addOption(new Option("--client <client>", "the AI tool").choices([...MCP_CLIENTS]).makeOptionMandatory())
+    .option("--print", "only print the entry; change nothing", false)
+    .action(async (options: { client: McpClientKind; print: boolean }, command: Command) => {
+      const env = developerEnv(command);
+      services.stdout.write(await installMcp(options.client, { print: options.print, ...(env === undefined ? {} : { env }) }, { home, run: dependencies.runCommand ?? runCommand, version: RELEASE_VERSION }));
     });
 
   return program;
