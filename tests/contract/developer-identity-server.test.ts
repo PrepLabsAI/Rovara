@@ -36,7 +36,7 @@ describe("discovery (FR-001, FR-048)", () => {
   it("reports the environment, API version and the methods that can actually be used", async () => {
     const both = identityHarness({ oidc: {} });
     expect(json((await both.http(httpEvent("GET", "/v1/auth/.well-known/agentx-configuration"))).body)).toEqual({
-      env: "staging", apiVersion: "1.1", issuer: ISSUER, authorizationEndpoint: `${ISSUER}/authorize`, tokenEndpoint: `${ISSUER}/token`,
+      env: "staging", apiVersion: "1.2", issuer: ISSUER, authorizationEndpoint: `${ISSUER}/authorize`, tokenEndpoint: `${ISSUER}/token`,
       revocationEndpoint: `${ISSUER}/revoke`, clientId: "agentx-cli", methods: { slack: true, oidc: { displayName: "Okta" } },
     });
     // FR-006: Slack sign-in is refused while the team ID is unset, so it is not offered.

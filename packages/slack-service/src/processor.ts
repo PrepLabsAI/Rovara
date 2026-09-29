@@ -195,6 +195,11 @@ export async function processSlackRequest(
         finished = true;
         return;
       }
+      if (started.outcome === "REFUSED") {
+        await post("Only the developer who started this task can close it, from their AI tool.");
+        finished = true;
+        return;
+      }
       draft.workspaceId = started.workspaceId;
       if (started.outcome === "CLOSED") {
         await dependencies.threads.close(subject, { workspaceId: started.workspaceId, closedAt: started.closedAt });
@@ -244,6 +249,11 @@ export async function processSlackRequest(
       draft.disposition = "workspace_limit";
       log("request.limit_reached", { eventId: message.eventId, limit: workspace.limit, maximum: workspace.maximum });
       await post(limitMessage(workspace));
+      finished = true;
+      return;
+    }
+    if (workspace.outcome === "VIEW_ONLY") {
+      draft.disposition = "workspace_unavailable";
       finished = true;
       return;
     }

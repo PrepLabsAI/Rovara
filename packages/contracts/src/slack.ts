@@ -59,6 +59,8 @@ export const SlackThreadWorkspaceResultSchema = z.discriminatedUnion("outcome", 
       settingsRevision: z.number().int().positive().optional(),
       // The latest revision's action policy, sent only to a service that sends includeActionPolicy: true.
       actionPolicy: ActionPolicySchema.optional(),
+      // Spec 025 C11: a continue thread's task, sent only to a service that sends includeSharedTask: true.
+      sharedTask: z.object({ taskId: z.string().uuid(), developerName: z.string().min(1).max(200) }).strict().optional(),
     })
     .strict(),
   z
@@ -67,6 +69,8 @@ export const SlackThreadWorkspaceResultSchema = z.discriminatedUnion("outcome", 
       limit: SlackWorkspaceLimitSchema,
       maximum: z.number().int().positive(),
       starterThreads: z.array(SlackThreadSchema),
+      // C16: sent only to a service that sends includeOpenTaskCount: true.
+      openTaskCount: z.number().int().nonnegative().optional(),
     })
     .strict(),
   z
@@ -74,6 +78,14 @@ export const SlackThreadWorkspaceResultSchema = z.discriminatedUnion("outcome", 
       outcome: z.literal("CLOSED"),
       workspaceId: z.string().uuid(),
       closedAt: z.string().datetime(),
+    })
+    .strict(),
+  z
+    .object({
+      // Spec 025 C11: a view-only or closed shared thread; sent only to a service that sends includeSharedTask: true.
+      outcome: z.literal("VIEW_ONLY"),
+      taskId: z.string().uuid(),
+      closed: z.boolean(),
     })
     .strict(),
 ]);
@@ -97,6 +109,8 @@ export const SlackThreadPrepareResultSchema = z.discriminatedUnion("outcome", [
       limit: SlackWorkspaceLimitSchema,
       maximum: z.number().int().positive(),
       starterThreads: z.array(SlackThreadSchema),
+      // C16: sent only to a service that sends includeOpenTaskCount: true.
+      openTaskCount: z.number().int().nonnegative().optional(),
     })
     .strict(),
   z
@@ -121,6 +135,7 @@ export const SlackWorkspaceCloseStartResultSchema = z.discriminatedUnion("outcom
     operationId: z.string().uuid(),
     status: z.enum(["ACCEPTED", "DISPATCHING", "RUNNING", "CANCEL_REQUESTED", "SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"]),
   }).strict(),
+  z.object({ outcome: z.literal("REFUSED"), reason: z.literal("shared_task") }).strict(),
 ]);
 
 export const SlackWorkspaceCloseCompleteResultSchema = z.object({
@@ -170,6 +185,11 @@ export function slackThreadSubject(thread: SlackThread): string {
 
 export function slackThreadUrl(thread: SlackThread): string {
   return `https://slack.com/archives/${thread.channelId}/p${thread.threadTs.replace(".", "")}`;
+}
+
+/** C10: the hourly marker for a shared thread's fixed notice, in the Slack threads table. */
+export function sharedNoticeKey(subject: string): { pk: string; sk: "SHARED_NOTICE" } {
+  return { pk: `THREAD#${subject}`, sk: "SHARED_NOTICE" };
 }
 
 export function parseSlackThreadSubject(subject: string): SlackThread {

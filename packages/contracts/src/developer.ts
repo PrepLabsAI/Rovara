@@ -6,7 +6,7 @@ import { DeveloperTaskPolicySchema } from "./project.js";
 import { SlackChannelIdSchema, SlackUserIdSchema } from "./slack.js";
 import { WorkspaceStatusSchema } from "./workspace.js";
 
-export const DEVELOPER_API_VERSION = "1.1";
+export const DEVELOPER_API_VERSION = "1.2";
 export const AGENTX_CLI_CLIENT_ID = "agentx-cli";
 export const DEVELOPER_TOKEN_AUDIENCE = "agentx-developer";
 export const DEVELOPER_ACCESS_TOKEN_SECONDS = 3600;

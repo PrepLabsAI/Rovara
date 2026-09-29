@@ -20,6 +20,71 @@ export const DEVELOPER_TASK_LIST_DEFAULT = 20;
 export const DEVELOPER_WAIT_MAX_SECONDS = 600;
 export const UNKNOWN_CLIENT_NAME = "an AI tool";
 
+/** Spec 025 phase 25c: sharing a task to its Slack channel (FR-031 to FR-035, FR-054). */
+export const DEVELOPER_SHARE_SUMMARY_MAX = 1_500;
+export const SHARED_THREAD_NOTICE_INTERVAL_SECONDS = 3_600;
+export const CHANNEL_TURN_WAIT_MS = 30 * 60_000;
+export const SHARE_DELIVERY_WINDOW_MS = 60 * 60_000;
+export const CHANNEL_TURNS_MAX = 20;
+export const CHANNEL_TURN_REQUEST_MAX = 300;
+/** FR-031: the reasons a result gives when the project's policy changed what was asked. */
+export const SHARED_BY_POLICY = "required by project";
+export const VIEW_ONLY_BY_POLICY = "continue not allowed by project";
+/** FR-035 and US3 scenario 4: the fixed notices in a shared thread (Q1, Q3). */
+export const VIEW_ONLY_NOTICE =
+  "This thread follows a task that a developer is driving from their AI tool, so I don't act on messages here. To ask AgentX for something, post a new message in the channel; it starts its own thread workspace.";
+export const CLOSED_SHARED_NOTICE =
+  "The task this thread followed is closed, so I don't act on messages here. To ask AgentX for something, post a new message in the channel; it starts its own thread workspace.";
+
+export const DeveloperTaskShareSchema = z.object({
+  mode: DeveloperShareModeSchema,
+  channelId: z.string(),
+  /** A public channel's name only (R10). */
+  channelName: z.string().optional(),
+  sharedReason: z.enum(["requested", "required"]),
+  modeReason: z.literal("continue_not_allowed").optional(),
+  /** Absent while the notifier has not posted the start message yet (C6). */
+  threadUrl: z.string().url().optional(),
+  /** The start message could not be posted within an hour (C9). */
+  postFailed: z.boolean().optional(),
+});
+export type DeveloperTaskShare = z.infer<typeof DeveloperTaskShareSchema>;
+
+/** C15: one Slack turn a teammate ran on the task in its shared thread. */
+export const ChannelTurnSchema = z.object({
+  author: z.object({ slackUserId: z.string(), name: z.string().optional() }),
+  at: z.string(),
+  request: z.string().max(CHANNEL_TURN_REQUEST_MAX),
+  outcome: z.string(),
+});
+export type ChannelTurn = z.infer<typeof ChannelTurnSchema>;
+
+export const ShareDeveloperTaskRequestSchema = z
+  .object({ requestId: z.string().uuid(), shareMode: DeveloperShareModeSchema.optional(), channel: z.string().min(1).max(80).optional() })
+  .strict();
+export type ShareDeveloperTaskRequest = z.infer<typeof ShareDeveloperTaskRequestSchema>;
+
+/** C25: an AgentX admin switches a shared task's mode; no channel, no first share. */
+export const AdminShareModeRequestSchema = z.object({ requestId: z.string().uuid(), shareMode: DeveloperShareModeSchema }).strict();
+export type AdminShareModeRequest = z.infer<typeof AdminShareModeRequestSchema>;
+
+/** C2: the shared thread record, read by the Slack ingress and the broker's service identity. */
+export function sharedTaskKey(thread: { teamId: string; channelId: string; threadTs: string }): { pk: string; sk: "META" } {
+  return { pk: `SHARED_TASK#${thread.teamId}/${thread.channelId}/${thread.threadTs}`, sk: "META" };
+}
+export const SharedTaskRecordSchema = z.object({
+  taskId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  ownerKey: z.string().regex(/^[a-f0-9]{64}$/),
+  developerId: z.string().regex(/^[a-f0-9]{64}$/),
+  developerName: z.string().min(1).max(200),
+  project: z.string().min(1).max(63),
+  mode: DeveloperShareModeSchema,
+  sharedAt: z.string(),
+  closedAt: z.string().optional(),
+});
+export type SharedTaskRecord = z.infer<typeof SharedTaskRecordSchema>;
+
 export const DeveloperTaskStatusSchema = z.enum(["STARTING", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED", "CLOSED"]);
 export type DeveloperTaskStatus = z.infer<typeof DeveloperTaskStatusSchema>;
 export const ENDED_TASK_STATUSES: ReadonlySet<DeveloperTaskStatus> = new Set(["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED", "CLOSED"]);
@@ -45,7 +110,7 @@ export const StartDeveloperTaskRequestSchema = z
     instructions: DeveloperInstructionsSchema,
     title: z.string().max(DEVELOPER_TASK_TITLE_MAX).optional(),
     client: z.string().max(200).optional(),
-    // 25c: sharing. 25b accepts the fields and refuses a request to share (R9).
+    // FR-031: sharing. share_to_channel, or a project whose share is required, shares the task.
     shareToChannel: z.boolean().optional(),
     shareMode: DeveloperShareModeSchema.optional(),
     channel: z.string().min(1).max(80).optional(),
@@ -107,6 +172,10 @@ export const DeveloperTaskViewSchema = z.object({
   pullRequests: z.array(PullRequestSummarySchema).optional(),
   /** R22: what the latest close preflight found, when it refused to close. */
   unpublished: z.array(z.object({ repository: z.string(), reasons: z.array(z.string()) })).optional(),
+  /** C1: how the task is shared; absent for a private task. */
+  share: DeveloperTaskShareSchema.optional(),
+  /** C15: the shared thread's channel turns on this task, newest first. */
+  channelTurns: z.array(ChannelTurnSchema).max(CHANNEL_TURNS_MAX).optional(),
 });
 export type DeveloperTaskView = z.infer<typeof DeveloperTaskViewSchema>;
 

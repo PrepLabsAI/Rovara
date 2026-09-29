@@ -25,7 +25,7 @@ const configuration = {
 
 describe("developer sign-in contracts", () => {
   it("names the public client, audience and API version", () => {
-    expect([AGENTX_CLI_CLIENT_ID, DEVELOPER_TOKEN_AUDIENCE, DEVELOPER_API_VERSION]).toEqual(["agentx-cli", "agentx-developer", "1.1"]);
+    expect([AGENTX_CLI_CLIENT_ID, DEVELOPER_TOKEN_AUDIENCE, DEVELOPER_API_VERSION]).toEqual(["agentx-cli", "agentx-developer", "1.2"]);
   });
 
   it.each([
