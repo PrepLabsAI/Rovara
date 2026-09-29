@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -109,5 +109,74 @@ describe("doctor: connectors (FR-050, the 15d2 decision on saved warnings)", () 
 
   it("says so when there are no connectors", async () => {
     expect(await run({ connectors: [] })).toEqual([expect.objectContaining({ name: "connectors", status: "ok", detail: "no connectors are set up" })]);
+  });
+});
+
+describe("doctor: connectors (Task 7 fix round 1)", () => {
+  it("fails only the connector whose secret read throws, and still runs every other check", async () => {
+    const configDir = await projectDir([{ env: "staging", definition: payments([linear, jira], { githubMcp: { tools: [] } }) }]);
+    const secrets = memoryInitSecrets(connectorSecrets);
+    const throwing = { get: async (name: string) => {
+      if (name === "agentx/staging/connectors/linear") throw Object.assign(new Error("User is not authorized to perform secretsmanager:GetSecretValue"), { name: "AccessDeniedException" });
+      return secrets.get(name);
+    } };
+    const progress = { ...PROGRESS, connectors: [{ type: "jira" as const, ref: "jira", warning: "the Jira service account can also see issues in HR" }] };
+    const services = doctorServices({ configDir, secrets: throwing, vendors: fakeVendors({ jiraInside: ["PAY-1"] }) });
+    const checks = await connectorChecks(doctorContext({ services, progress }));
+    expect(checks).toContainEqual({ group: "connectors", name: "Linear (project payments)", status: "fail", detail: "could not read secret agentx/staging/connectors/linear (AccessDeniedException)", fix: "check that your AWS role can read it, then run agentx doctor again" });
+    expect(checks.find((entry) => entry.name === "Jira (project payments)")?.status).toBe("ok");
+    expect(checks.find((entry) => entry.name === "project payments")?.detail).toBe("uses the older integrations.githubMcp setting");
+    expect(checks.find((entry) => entry.name === "Jira warning")?.status).toBe("warn");
+    expect(JSON.stringify(checks)).not.toContain("not authorized");
+  });
+
+  it("marks a project file whose header matches but whose YAML does not parse, and an unreadable one, and doctor warns about each", async () => {
+    const configDir = await projectDir([{ env: "staging", definition: payments([linear]) }]);
+    const good = await readFile(join(configDir, "payments.yaml"), "utf8");
+    const header = good.split("\n").filter((line) => line.startsWith("#")).join("\n");
+    await writeFile(join(configDir, "broken.yaml"), `${header}\nname: [unclosed\n`);
+    await mkdir(join(configDir, "folder.yaml"));
+    const found = await environmentProjectFiles(configDir, "staging");
+    expect(found.map((file) => [file.path.split("/").at(-1), file.error])).toEqual([["broken.yaml", "invalid-yaml"], ["folder.yaml", "unreadable"], ["payments.yaml", undefined]]);
+    const checks = await connectorChecks(doctorContext({ services: doctorServices({ configDir, secrets: memoryInitSecrets(connectorSecrets) }) }));
+    expect(checks.find((entry) => entry.name === `project file ${join(configDir, "broken.yaml")}`)).toMatchObject({ status: "warn", detail: "has agentx's register line for environment staging, but is not valid YAML" });
+    expect(checks.find((entry) => entry.name === `project file ${join(configDir, "folder.yaml")}`)).toMatchObject({ status: "warn" });
+    expect(checks.find((entry) => entry.name === `project file ${join(configDir, "folder.yaml")}`)?.detail).toContain("could not be read (EISDIR)");
+    expect(checks.find((entry) => entry.name === "Linear (project payments)")?.status).toBe("ok");
+  });
+
+  it("skips, with a reason, a connector entry with no credentialRef or no scopes", async () => {
+    const checks = await run({ connectors: [{ name: "linear", type: "linear", scopes: [], tools: [] }, { name: "jira", type: "jira", credentialRef: "jira", tools: [] }] });
+    expect(checks).toEqual([
+      expect.objectContaining({ name: "Linear (project payments)", status: "skip", detail: "the connector entry has no credentialRef, so its secret is not known" }),
+      expect.objectContaining({ name: "Jira (project payments)", status: "skip", detail: "the connector entry has no scopes list" }),
+    ]);
+  });
+
+  it("fails a refused and an unreachable Jira token without repeating the token", async () => {
+    const refusedChecks = await run({ connectors: [jira], vendors: fakeVendors({ jiraRefuses: true }) });
+    expect(refusedChecks[0]).toMatchObject({ status: "fail", detail: "Atlassian refused the stored API token: it expired or was revoked", fix: "agentx --env staging connector add jira --project payments" });
+    const echoing = { ...fakeVendors(), jiraSearch: async () => { throw new Error(`bad token ${JIRA_TOKEN}`); } };
+    const unreachable = await run({ connectors: [jira], vendors: echoing });
+    expect(unreachable[0]).toMatchObject({ status: "fail", detail: "could not reach Atlassian to test the API token" });
+    for (const checks of [refusedChecks, unreachable]) expect(JSON.stringify(checks)).not.toContain(JIRA_TOKEN);
+  });
+
+  it("fails a secret with the wrong shape", async () => {
+    const secrets = { ...connectorSecrets, "agentx/staging/connectors/linear": JSON.stringify({ token: "SECRETwrongKEY" }) };
+    const checks = await run({ connectors: [linear], secrets });
+    expect(checks[0]).toMatchObject({ status: "fail", detail: "the secret agentx/staging/connectors/linear has the wrong shape", fix: "agentx --env staging connector add linear --project payments" });
+    expect(JSON.stringify(checks)).not.toContain("SECRETwrongKEY");
+  });
+
+  it("skips a credential registered by hand", async () => {
+    const checks = await run({ connectors: [{ ...linear, credentialRef: "linear-ops" }] });
+    expect(checks[0]).toMatchObject({ status: "skip", detail: "credential linear-ops was registered by hand, so its secret is not known here" });
+  });
+
+  it("warns when init recorded connectors but no project file of the environment is found", async () => {
+    const progress = { ...PROGRESS, connectors: [{ type: "linear" as const, ref: "linear" }] };
+    const checks = await connectorChecks(doctorContext({ services: doctorServices({ configDir: "/nonexistent-agentx-projects" }), progress }));
+    expect(checks).toEqual([expect.objectContaining({ name: "project files", status: "warn", detail: "agentx init added Linear, but no project file of environment staging is in /nonexistent-agentx-projects" })]);
   });
 });

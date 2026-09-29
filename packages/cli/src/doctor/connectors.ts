@@ -3,6 +3,7 @@
 // for Linear and Jira, still works. Asana is not refreshed here: a refresh rotates the token the
 // control plane holds (question 10). A vendor's own words never reach a check: they may repeat the key.
 import { OAuthRefreshTokenSecretSchema, StaticSecretSchema } from "@agentx/contracts";
+import { connectorSecretName } from "../setup/connectors/revision.js";
 import { environmentProjectFiles } from "../setup/project-add.js";
 import { check, type DoctorCheck, type DoctorContext } from "./checks.js";
 
@@ -20,8 +21,14 @@ async function connectorCheck(context: DoctorContext, project: string, connector
   const name = `${LABEL[connector.type]} (project ${project})`;
   const again = `agentx --env ${env} connector add ${connector.type} --project ${project}`;
   if (connector.credentialRef !== connector.type) return check("connectors", name, "skip", `credential ${connector.credentialRef} was registered by hand, so its secret is not known here`);
-  const secretName = `agentx/${env}/connectors/${connector.credentialRef}`;
-  const raw = await services.secrets.get(secretName);
+  const secretName = connectorSecretName(env, connector.type);
+  let raw: string | undefined;
+  try {
+    raw = await services.secrets.get(secretName);
+  } catch (error) {
+    // Only the error's name: AccessDenied, a KMS refusal, or a secret scheduled for deletion. Its message is not kept.
+    return check("connectors", name, "fail", `could not read secret ${secretName} (${error instanceof Error ? error.name : "unknown error"})`, "check that your AWS role can read it, then run agentx doctor again");
+  }
   if (raw === undefined) return check("connectors", name, "fail", `credentials missing: no secret ${secretName}`, again);
   const value = parseJson(raw);
   if (connector.type === "asana") {
@@ -56,8 +63,14 @@ async function connectorCheck(context: DoctorContext, project: string, connector
 
 export async function connectorChecks(context: DoctorContext): Promise<DoctorCheck[]> {
   const { env, progress, services } = context;
-  const files = await environmentProjectFiles(services.configDir, env);
+  const found = await environmentProjectFiles(services.configDir, env);
   const checks: DoctorCheck[] = [];
+  const fixFile = "fix the file or move it out of the project directory, then run agentx doctor again";
+  for (const file of found) {
+    if (file.error === "unreadable") checks.push(check("connectors", `project file ${file.path}`, "warn", `could not be read (${file.errorCode ?? "unknown"}), so its connectors were not checked`, fixFile));
+    if (file.error === "invalid-yaml") checks.push(check("connectors", `project file ${file.path}`, "warn", `has agentx's register line for environment ${env}, but is not valid YAML`, fixFile));
+  }
+  const files = found.filter((file) => file.error === undefined);
   for (const file of files) {
     const integrations = (file.definition.integrations ?? {}) as { githubMcp?: unknown; connectors?: unknown[] };
     if (integrations.githubMcp !== undefined) {
@@ -66,7 +79,9 @@ export async function connectorChecks(context: DoctorContext): Promise<DoctorChe
     for (const entry of integrations.connectors ?? []) {
       const connector = entry as Partial<KnownConnector> & { type?: string };
       if (connector.type !== "linear" && connector.type !== "jira" && connector.type !== "asana") continue;
-      if (typeof connector.credentialRef !== "string" || !Array.isArray(connector.scopes)) continue;
+      const label = `${LABEL[connector.type]} (project ${file.name})`;
+      if (typeof connector.credentialRef !== "string") { checks.push(check("connectors", label, "skip", "the connector entry has no credentialRef, so its secret is not known")); continue; }
+      if (!Array.isArray(connector.scopes)) { checks.push(check("connectors", label, "skip", "the connector entry has no scopes list")); continue; }
       checks.push(await connectorCheck(context, file.name, connector as KnownConnector));
     }
   }

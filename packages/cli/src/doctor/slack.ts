@@ -1,14 +1,29 @@
 // FR-050: the Slack token, the request URLs, and the bot's membership of the bound channel. Slack's
 // own "Verified" mark cannot be read without an app configuration token (15d1 decision), so the URLs
 // get the same signed self-probe agentx init sends.
-import { environmentStackName } from "@agentx/contracts";
-import { probeSlackUrls, readSlackBotToken, slackSecretName } from "../init/slack-app.js";
+import { AgentXError, environmentStackName } from "@agentx/contracts";
+import { probeSlackUrls, readSlackBotToken, slackSecretName, SlackSignatureRefusedError } from "../init/slack-app.js";
+import { SlackRateLimitedError } from "../setup/channel-add.js";
 import { plainMessage } from "../output.js";
 import { check, type DoctorCheck, type DoctorContext } from "./checks.js";
 
 const PROBE_TIMEOUT_MS = 30_000;
 /** Slack documents its error codes as lower case, digits and underscores; anything else is not echoed. */
 const safeCode = (code: string | undefined) => (code !== undefined && /^[a-z0-9_]{1,64}$/.test(code) ? code : "no reason given");
+
+/** The fix for a failed channel lookup, by what failed: slackChannelApi throws CONFIG_INVALID for a
+ * missing scope and for a workspace too large to search, RUNTIME_UNAVAILABLE for Slack's other
+ * refusals and HTTP errors, and a non-AgentX error when Slack cannot be reached at all. */
+function channelLookupFix(error: unknown, reinstall: string, project: { name: string; channelId?: string | undefined; teamId?: string | undefined } | undefined): string {
+  const network = "check this computer's network access to slack.com, then run agentx doctor again";
+  if (error instanceof SlackRateLimitedError) return "Slack is rate limiting the bot; run agentx doctor again in a minute";
+  if (!(error instanceof AgentXError)) return network;
+  const message = plainMessage(error);
+  if (message.includes("refused: missing_scope")) return `${reinstall} (its manifest grants channels:read, groups:read and channels:join)`;
+  if (error.code === "CONFIG_INVALID") return `bind it by ID: agentx admin slack bind --team ${project?.teamId ?? "<team-id>"} --channel ${project?.channelId ?? "<channel-id>"} --project ${project?.name ?? "<name>"}`;
+  if (message.includes(" refused: ")) return `Slack refused the bot's request (its error code is above); ${reinstall}`;
+  return network;
+}
 
 export async function slackChecks(context: DoctorContext): Promise<DoctorCheck[]> {
   const { env, settings, progress, services } = context;
@@ -45,14 +60,11 @@ export async function slackChecks(context: DoctorContext): Promise<DoctorCheck[]
       await probeSlackUrls({ eventsUrl: outputs.SlackEventsUrl, interactivityUrl: outputs.SlackInteractivityUrl, signingSecret: secret.signingSecret, fetch: services.fetch, now: services.now, sleep: services.sleep, write: () => undefined, timeoutMs: PROBE_TIMEOUT_MS, pollMs: 5_000 });
       checks.push(check("slack", "request URLs", "ok", "the events URL echoes a signed challenge and the interactivity URL answers; Slack's own Verified mark is on the app's Event Subscriptions page"));
     } catch (error) {
-      const message = plainMessage(error);
-      // probeSlackUrls words its 401 timeout for init (a new secret, "run agentx init again"); doctor's secret is not new.
-      const refused = /still refuses requests signed with the new signing secret/.exec(message);
-      if (refused !== null) {
-        const url = message.slice(0, refused.index).trim();
-        checks.push(check("slack", "request URLs", "fail", `${url} refuses requests signed with the signing secret stored in ${slackSecretName(env)}`, `check that ${slackSecretName(env)} holds the Slack app's Signing Secret (not the Client Secret) and that this computer's clock is correct (Slack refuses signatures older than 5 minutes), then run agentx doctor again`));
+      if (error instanceof SlackSignatureRefusedError) {
+        // init's words assume a secret it just stored; doctor's secret is not new.
+        checks.push(check("slack", "request URLs", "fail", `${error.url} refuses requests signed with the signing secret stored in ${slackSecretName(env)}`, `check that ${slackSecretName(env)} holds the Slack app's Signing Secret (not the Client Secret) and that this computer's clock is correct (Slack refuses signatures older than 5 minutes), then run agentx doctor again`));
       } else {
-        checks.push(check("slack", "request URLs", "fail", message.replace("then run agentx init again", "then run agentx doctor again"), `check that the Slack app's Request URLs are ${outputs.SlackEventsUrl} and ${outputs.SlackInteractivityUrl}, and the control plane's SlackIngress logs`));
+        checks.push(check("slack", "request URLs", "fail", plainMessage(error).replace("then run agentx init again", "then run agentx doctor again"), `check that the Slack app's Request URLs are ${outputs.SlackEventsUrl} and ${outputs.SlackInteractivityUrl}, and the control plane's SlackIngress logs`));
       }
     }
   }
@@ -67,7 +79,7 @@ export async function slackChecks(context: DoctorContext): Promise<DoctorCheck[]
   try {
     found = await services.slackChannels.find(token, channel);
   } catch (error) {
-    checks.push(check("slack", `#${channel}`, "fail", plainMessage(error), "check this computer's network access to slack.com, then run agentx doctor again"));
+    checks.push(check("slack", `#${channel}`, "fail", plainMessage(error), channelLookupFix(error, reinstall, progress?.project)));
     return checks;
   }
   if (found === undefined) checks.push(check("slack", `#${channel}`, "fail", "the channel no longer exists, or it is private and the bot is not in it", `in #${channel}, type /invite @${bot}, or bind another channel with agentx --env ${env} channel add`));

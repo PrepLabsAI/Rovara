@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { githubChecks } from "../../packages/cli/src/doctor/github.js";
 import { secretChecks } from "../../packages/cli/src/doctor/secrets.js";
 import { slackChecks } from "../../packages/cli/src/doctor/slack.js";
+import { probeSlackUrls, SlackSignatureRefusedError } from "../../packages/cli/src/init/slack-app.js";
 import { doctorContext, doctorServices, SECRETS, SIGNING_KEY } from "../support/doctor-fakes.js";
 import { fakeGitHubApi, fakeSlackApi, memoryInitSecrets, T0, TEST_BOT_TOKEN, TEST_PRIVATE_KEY, TEST_SIGNING_SECRET } from "../support/init-fakes.js";
 import { fakeSlackChannels } from "../support/setup-fakes.js";
@@ -196,5 +197,40 @@ describe("doctor: GitHub App (FR-050)", () => {
   it("skips when the GitHub App secret is unreadable (the secrets check reports it)", async () => {
     const context = withSecrets({ "agentx/staging/callback-signing-key": SIGNING_KEY });
     expect((await githubChecks(context))[0]?.status).toBe("skip");
+  });
+});
+
+describe("doctor: Slack and GitHub (Task 6 polish)", () => {
+  it("probeSlackUrls reports the 401 timeout as a typed error carrying the URL, with init's words", async () => {
+    let clock = T0;
+    const refusing = probeSlackUrls({ eventsUrl: "https://cp.example.test/slack/events", interactivityUrl: "https://cp.example.test/slack/interactivity", signingSecret: TEST_SIGNING_SECRET,
+      fetch: async () => new Response("{}", { status: 401 }), now: () => clock, sleep: async (ms) => { clock += ms; }, write: () => undefined, timeoutMs: 60_000, pollMs: 5_000 });
+    const error = await refusing.catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(SlackSignatureRefusedError);
+    expect((error as SlackSignatureRefusedError).url).toBe("https://cp.example.test/slack/events");
+    expect((error as Error).message).toContain("then run agentx init again");
+  });
+
+  const lookupFailing = (error: Error) => doctorContext({ services: doctorServices({ slackChannels: { ...fakeSlackChannels([]), find: async () => { throw error; } } }) });
+  const channelCheck = async (error: Error) => (await slackChecks(lookupFailing(error))).find((entry) => entry.name === "#payments")!;
+
+  it("chooses the channel lookup's fix by the error", async () => {
+    const scope = await channelCheck(new AgentXError("CONFIG_INVALID", "Slack conversations.list refused: missing_scope; reinstall the Slack app from its manifest so it has channels:read, groups:read and channels:join", 400));
+    expect(scope.fix).toContain("reinstall the Slack app");
+    expect(scope.fix).not.toContain("network");
+    const many = await channelCheck(new AgentXError("CONFIG_INVALID", "the workspace has more than 50000 channels to search; bind the channel by id with agentx admin slack bind --team <team-id> --channel <channel-id> --project <name>", 400));
+    expect(many.fix).toBe("bind it by ID: agentx admin slack bind --team T0TEAM --channel C0123456789 --project payments");
+    const network = await channelCheck(new TypeError("fetch failed"));
+    expect(network.fix).toContain("network access to slack.com");
+    const refused = await channelCheck(new AgentXError("RUNTIME_UNAVAILABLE", "Slack conversations.list refused: invalid_auth", 503));
+    expect(refused.fix).not.toContain("network");
+  });
+
+  it("blames a suspended installation only on HTTP 403 or 404", async () => {
+    const failing = (message: string) => doctorContext({ services: doctorServices({ github: { ...fakeGitHubApi({ installationId: 456 }), repositoryCount: async () => { throw new AgentXError("RUNTIME_UNAVAILABLE", message, 503); } } }) });
+    expect((await githubChecks(failing("GitHub repository list failed with HTTP 404")))[0]!.fix).toContain("the installation may be suspended");
+    const other = (await githubChecks(failing("GitHub repository list failed with HTTP 502")))[0]!;
+    expect(other.status).toBe("fail");
+    expect(other.fix).not.toContain("suspended");
   });
 });

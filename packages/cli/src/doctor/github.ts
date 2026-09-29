@@ -15,7 +15,7 @@ export async function githubChecks(context: DoctorContext): Promise<DoctorCheck[
     return [check("github", "GitHub App", "skip", `the secret ${githubAppSecretName(env)} cannot be read; the secrets check says why`)];
   }
   const jwt = githubAppJwt({ appId: app.appId, privateKey: app.privateKey, nowSeconds: Math.floor(services.now() / 1000) });
-  const settingsPage = `https://github.com/apps/${app.slug}`;
+  const appPage = `https://github.com/apps/${app.slug}`;
   let installations;
   try {
     installations = await services.github.listInstallations(jwt);
@@ -30,14 +30,19 @@ export async function githubChecks(context: DoctorContext): Promise<DoctorCheck[
     ? installations.find((entry) => entry.account.login.toLowerCase() === app.account.toLowerCase())
     : installations.find((entry) => String(entry.id) === wanted);
   if (installation === undefined) {
-    return [check("github", "GitHub App", "fail", `the GitHub App ${app.slug} is not installed on ${app.account}`, `install it again: ${settingsPage}/installations/new`)];
+    return [check("github", "GitHub App", "fail", `the GitHub App ${app.slug} is not installed on ${app.account}`, `install it again: ${appPage}/installations/new`)];
   }
   let count: number;
   try {
     const token = await services.github.installationToken(jwt, String(installation.id));
     count = await services.github.repositoryCount(token.token);
   } catch (error) {
-    return [check("github", "GitHub App", "fail", `installed on ${installation.account.login}, but its repositories could not be read: ${plainMessage(error)}`, "the installation may be suspended; check it in the installation settings on GitHub, then run agentx doctor again")];
+    const message = plainMessage(error);
+    // GitHub answers 403 or 404 for a suspended or removed installation; anything else is not blamed on it.
+    const fix = /\bHTTP (403|404)\b/.test(message)
+      ? "the installation may be suspended; check it in the installation settings on GitHub, then run agentx doctor again"
+      : "run agentx doctor again in a minute; if it keeps failing, check githubstatus.com and the app's installation settings on GitHub";
+    return [check("github", "GitHub App", "fail", `installed on ${installation.account.login}, but its repositories could not be read: ${message}`, fix)];
   }
   if (count === 0) return [check("github", "GitHub App", "fail", `installed on ${installation.account.login}, but it sees no repository`, "choose the repositories AgentX may use in the app's installation settings on GitHub")];
   return [check("github", "GitHub App", "ok", `installed on ${installation.account.login}, sees ${count} ${count === 1 ? "repository" : "repositories"}`)];

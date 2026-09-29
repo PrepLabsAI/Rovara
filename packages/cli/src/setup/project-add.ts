@@ -66,8 +66,12 @@ function fileHeader(path: string, register?: { env: string; binding: Ec2RuntimeB
   ].join("\n");
 }
 
-/** A project file that one environment's commands wrote, found by fileHeader's register line. */
-export interface EnvironmentProjectFile { path: string; name: string; launchTemplateId: string; definition: Record<string, unknown> }
+/** A project file that one environment's commands wrote, found by fileHeader's register line.
+ * `error` marks a file that cannot be used: "unreadable" (it could not be read, so it may or may not
+ * be this environment's; `errorCode` says why), or "invalid-yaml" (its register line names this
+ * environment, but its YAML does not parse). Such a file has an empty definition and launch
+ * template; callers report it rather than act on it. */
+export interface EnvironmentProjectFile { path: string; name: string; launchTemplateId: string; definition: Record<string, unknown>; error?: "unreadable" | "invalid-yaml"; errorCode?: string }
 
 /** fileHeader's register line; kept beside fileHeader so the reader and the writer change together (ruling F26). */
 const REGISTER_LINE = /^#\s+agentx admin project register --env (\S+) --file .+? --deployment-mode ec2-ebs --launch-template-id (\S+)/m;
@@ -86,14 +90,24 @@ export async function environmentProjectFiles(configDir: string, env: string): P
   const files: EnvironmentProjectFile[] = [];
   for (const entry of entries.filter((name) => name.endsWith(".yaml")).sort()) {
     const path = join(configDir, entry);
-    const text = await readFile(path, "utf8");
+    const stem = entry.slice(0, -".yaml".length);
+    let text: string;
+    try {
+      text = await readFile(path, "utf8");
+    } catch (error) {
+      files.push({ path, name: stem, launchTemplateId: "", definition: {}, error: "unreadable", errorCode: (error as NodeJS.ErrnoException).code ?? "unknown" });
+      continue;
+    }
     const match = REGISTER_LINE.exec(text);
     if (match === null || match[1] !== env || match[2] === undefined) continue;
     let parsed: unknown;
-    try { parsed = YAML.parse(text); } catch { continue; }
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+    try { parsed = YAML.parse(text); } catch { parsed = undefined; }
+    if (parsed === null || parsed === undefined || typeof parsed !== "object" || Array.isArray(parsed)) {
+      files.push({ path, name: stem, launchTemplateId: match[2], definition: {}, error: "invalid-yaml" });
+      continue;
+    }
     const definition = parsed as Record<string, unknown>;
-    files.push({ path, name: typeof definition.name === "string" ? definition.name : entry.slice(0, -".yaml".length), launchTemplateId: match[2], definition });
+    files.push({ path, name: typeof definition.name === "string" ? definition.name : stem, launchTemplateId: match[2], definition });
   }
   return files;
 }
