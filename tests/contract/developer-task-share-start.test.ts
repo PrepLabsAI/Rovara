@@ -108,6 +108,7 @@ describe("sharing at the start (FR-031)", () => {
     const refusal = await routeDeveloperTaskRequest({
       documentClient: db, tableName: "state", actions, now: () => Date.now(),
       checkAccess: async () => ({ revision: 1, policy: DEFAULT_DEVELOPER_TASK_POLICY, access: "granted", channelIds: [SLACK_CHANNEL] }),
+      projectChannelIds: async () => [],
     }, caller, { method: "POST", path: "/v1/dev/tasks", headers: {}, requestId: randomUUID(), body: JSON.stringify(start({ shareToChannel: true })) }, new URL("https://agentx.test/v1/dev/tasks")).then(() => undefined, (error: unknown) => error);
     expect(refusal).toBeInstanceOf(AgentXError);
     expect((refusal as AgentXError).code).toBe("CHANNEL_REQUIRED");

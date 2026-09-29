@@ -93,7 +93,7 @@ import { readWorkspaceLimits } from "../developer/limits.js";
 import { hashJson, isConditional } from "./broker-shared.js";
 import { channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, routeDeveloperRequest, type DeveloperApiConfiguration } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
-import { finishTaskClose } from "./developer-tasks.js";
+import { adminShareMode, finishTaskClose } from "./developer-tasks.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
@@ -497,6 +497,11 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       const stop = /^\/v1\/admin\/workspaces\/([0-9a-f-]+)\/stop$/.exec(url.pathname);
       if (request.method === "POST" && stop?.[1]) {
         return json({ workspace: await stopWorkspace(dependencies, identity, stop[1]) }, request.requestId, 202);
+      }
+      // Spec 025 C25: an admin switches a shared task's mode, within its project's policy.
+      const taskShareMode = /^\/v1\/admin\/tasks\/([0-9a-f-]{36})\/share-mode$/.exec(url.pathname);
+      if (request.method === "POST" && taskShareMode?.[1]) {
+        return json(await adminTaskShareMode(dependencies, identity, taskShareMode[1], body, tasks), request.requestId);
       }
 
       // Developer workflows run in Slack threads, which reach the same handlers through
@@ -3878,6 +3883,29 @@ async function requireAdministrator(
   if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
   const membership = await requireMembership(dependencies, identity.ownerKey, projectName);
   if (membership.role !== "administrator") throw agentXError("FORBIDDEN", "administrator project membership is required");
+}
+
+/**
+ * Spec 025 C25: the admin claim first, so a non-admin learns nothing about task IDs; then the task;
+ * then the administrator membership on the task's project (FR-015). The audit record names the
+ * admin by issuer and subject, and by the token's name or email claim when it has one.
+ */
+async function adminTaskShareMode(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, taskId: string, value: unknown, tasks: DeveloperTaskActions) {
+  if (!dependencies.developer) throw agentXError("NOT_FOUND", "developer tasks are not set up in this deployment");
+  if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
+  if (task === undefined) throw agentXError("TASK_NOT_FOUND", `no task ${taskId}`);
+  // FR-015's membership check, answered FORBIDDEN (requireAdministrator's missing-membership answer
+  // is NOT_FOUND, which would read as "no such task").
+  const membership = await getMembership(dependencies, identity.ownerKey, task.project);
+  if (membership?.role !== "administrator") throw agentXError("FORBIDDEN", "administrator project membership is required");
+  const claimed = [identity.claims.name, identity.claims.email].find((claim): claim is string => typeof claim === "string" && claim.trim() !== "");
+  return adminShareMode(
+    { documentClient: dependencies.documentClient, tableName: dependencies.tableName, actions: tasks, now: Date.now },
+    { issuer: identity.issuer, subject: identity.subject, ...(claimed === undefined ? {} : { displayName: claimed.trim() }) },
+    task,
+    value,
+  );
 }
 
 async function getItem<T>(dependencies: AwsBrokerDependencies, key: { pk: string; sk: string }): Promise<T | undefined> {

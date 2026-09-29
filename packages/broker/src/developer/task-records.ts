@@ -300,6 +300,8 @@ export function aiToolTurn(input: {
   response: string;
   operationId?: string | undefined;
   errorCode?: string | undefined;
+  /** C25: the AgentX admin who took this action on the developer's task (a share mode change). */
+  admin?: { issuer: string; subject: string; displayName?: string } | undefined;
 }): Record<string, unknown> & AiToolTurnRecord {
   const request = redactAndCap(input.request, TURN_TEXT_LIMIT);
   const response = redactAndCap(input.response, TURN_TEXT_LIMIT);
@@ -317,6 +319,10 @@ export function aiToolTurn(input: {
       ...(party.slackUserId === undefined ? {} : { slackUserId: party.slackUserId }),
     },
     client: party.client,
+    ...(input.admin === undefined ? {} : { admin: {
+      issuer: input.admin.issuer.slice(0, 512), subject: input.admin.subject.slice(0, 256),
+      ...(input.admin.displayName === undefined ? {} : { displayName: input.admin.displayName.slice(0, 200) }),
+    } }),
     receivedAt: input.receivedAt,
     ...(party.settingsRevision === undefined ? {} : { settingsRevision: party.settingsRevision }),
     ...(party.workspaceId === undefined ? {} : { workspaceId: party.workspaceId }),

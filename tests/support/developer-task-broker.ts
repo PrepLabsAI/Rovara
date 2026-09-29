@@ -2,7 +2,7 @@
 // the payments project bound to the test channel, two signed-in developers, and worker callbacks.
 import { randomUUID } from "node:crypto";
 import { vi } from "vitest";
-import type { ChannelInfoRequest, ChannelInfoResponse, ChannelMembersRequest, ChannelMembersResponse } from "@agentx/contracts";
+import { sharedTaskKey, type ChannelInfoRequest, type ChannelInfoResponse, type ChannelMembersRequest, type ChannelMembersResponse } from "@agentx/contracts";
 import type { DeveloperApiConfiguration } from "../../packages/broker/src/aws/developer-routes.js";
 import type { DeveloperTaskActions } from "../../packages/broker/src/aws/developer-task-actions.js";
 import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
@@ -154,4 +154,17 @@ export async function registerRevision(handler: Handler, revision: number, devel
 /** An admin grant (FR-013), so access does not depend on a bound channel. */
 export function grantProject(db: FakeDynamoDb, who: Developer, projectName = "payments"): void {
   db.set({ pk: `MEMBER#${who.developerId}`, sk: `PROJECT#${projectName}`, entityType: "MEMBERSHIP", ownerKey: who.developerId, projectName, role: "developer" });
+}
+
+/** What the notifier's start message leaves behind (Task 7): the thread on the task, and its record. */
+export function markThreadPosted(db: FakeDynamoDb, taskId: string, threadTs = "1695500000.000100"): string {
+  const task = db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { share: Record<string, unknown>; shareVersion: number; workspaceId: string; ownerKey: string; developerId: string; developerName: string; project: string };
+  const share = { ...task.share, threadTs };
+  db.set({ ...task, share, shareVersion: task.shareVersion + 1 });
+  const thread = { teamId: String(share.teamId), channelId: String(share.channelId), threadTs };
+  db.set({
+    ...sharedTaskKey(thread), entityType: "SHARED_TASK", taskId, workspaceId: task.workspaceId, ownerKey: task.ownerKey,
+    developerId: task.developerId, developerName: task.developerName, project: task.project, mode: share.mode, sharedAt: share.sharedAt,
+  });
+  return `${thread.teamId}/${thread.channelId}/${threadTs}`;
 }

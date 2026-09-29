@@ -480,6 +480,7 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
       ...(deps.developer.slackTeamId === undefined ? {} : { slackTeamId: deps.developer.slackTeamId }),
       actions: deps.tasks,
       checkAccess: (project) => checkProjectAccess(deps, caller, project),
+      projectChannelIds: async (project) => (await bindingsOf(deps)).filter((binding) => binding.projectName === project).map((binding) => binding.channelId).sort(),
       boundChannels: async (channelIds) => {
         const known = await channelNames(deps, channelIds);
         return channelIds.map((channelId) => {
