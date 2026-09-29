@@ -134,6 +134,19 @@ export function keptOperatorParameters(input: {
   return { kept, dropped };
 }
 
+/**
+ * Ruling F29: the one rule for which of a stack's deployed parameters an upgrade keeps, for
+ * `agentx upgrade` and `agentx upgrade --export` alike. The operator's settings (OPERATOR_PARAMETERS)
+ * and the secrets are kept, and on the control plane the developer sign-in choice. `agentx upgrade`
+ * keeps the operator settings with keptOperatorParameters, sends the secrets from Secrets Manager
+ * and the sign-in choice from SSM (the same values); the export marks each UsePreviousValue. Any
+ * other deployed parameter (one set by hand in the console) goes back to the template's default on
+ * both paths.
+ */
+export function upgradeKeptParameterNames(part: DeployPart): ReadonlySet<string> {
+  return new Set([...OPERATOR_PARAMETERS[part], ...SECRET_PARAMETERS, ...(part === "control-plane" ? SIGN_IN_PARAMETER_NAMES : [])]);
+}
+
 /** Throws the exact message a missing stack output must report, naming the real (`environment`-naming) stack name. */
 function requiredOutput(outputs: Partial<Record<DeployPart, StackOutputs>>, part: DeployPart, name: string, env: string): string {
   const value = outputs[part]?.[name];

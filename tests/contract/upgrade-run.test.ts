@@ -1,3 +1,6 @@
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { GetTemplateCommand } from "@aws-sdk/client-cloudformation";
 import type { ChangeSetChange, DeployRequest, StackDeployer } from "../../packages/cli/src/deploy/deployer.js";
@@ -277,10 +280,46 @@ describe("agentx upgrade (FR-042 to FR-044)", () => {
     await expect(runUpgrade({ ...options, yes: false }, h.deps)).rejects.toThrow("agentx upgrade needs --yes when stdin is not a terminal");
   });
 
-  it("never deploys when --export is given", async () => {
+  it("with --export, writes the bundle and deploys nothing", async () => {
+    const out = join(await mkdtemp(join(tmpdir(), "agentx-upgrade-run-export-")), "bundle");
     const h = await harness();
-    await expect(runUpgrade({ ...options, exportDir: "/tmp/bundle" }, h.deps)).rejects.toThrow("upgrade --export");
+    const result = await runUpgrade({ ...options, exportDir: out }, h.deps);
+    expect(result.exported).toBe(out);
     expect(h.deployer.deployed).toEqual([]);
+    expect(h.prepared).toEqual([]);
+    expect(h.doctorRuns).toEqual([]);
+    // No AWS write: the settings keep the old version, and no lock is taken.
+    expect((await readEnvironmentSettings(h.store, "staging"))?.version).toBe("1.2.3");
+    expect(h.store.values.has(lockParameterName("staging"))).toBe(false);
+    expect(await readdir(out)).toEqual(expect.arrayContaining(["README.md", "parameters", "templates", "packages"]));
+    expect(h.lines).toContain("Writing the upgrade of staging from 1.2.3 to 1.3.0 (templates engine) to a bundle");
+    await rm(dirname(out), { recursive: true, force: true });
+  });
+
+  it("with --export under the operator role, carries a changed access stack instead of refusing (question 9)", async () => {
+    const out = join(await mkdtemp(join(tmpdir(), "agentx-upgrade-run-export-")), "bundle");
+    const h = await harness({ caller: OPERATOR, isInteractive: () => false, loadRelease: async () => release("1.3.0", [], CHANGED_ACCESS_TEMPLATE) });
+    const result = await runUpgrade({ ...options, yes: false, exportDir: out }, h.deps);
+    expect(result.parts[0]).toBe("access");
+    expect(await readFile(join(out, "README.md"), "utf8")).toContain("create-change-set --stack-name agentx-staging-access ");
+    await rm(dirname(out), { recursive: true, force: true });
+  });
+
+  it("with --export, leaves out an unchanged access stack", async () => {
+    const out = join(await mkdtemp(join(tmpdir(), "agentx-upgrade-run-export-")), "bundle");
+    const h = await harness();
+    const result = await runUpgrade({ ...options, exportDir: out }, h.deps);
+    expect(result.parts).not.toContain("access");
+    expect(await readFile(join(out, "README.md"), "utf8")).not.toContain("--stack-name agentx-staging-access ");
+    await rm(dirname(out), { recursive: true, force: true });
+  });
+
+  it("with --export, still refuses an older release and a prerelease", async () => {
+    const out = join(await mkdtemp(join(tmpdir(), "agentx-upgrade-run-export-")), "bundle");
+    await expect(runUpgrade({ ...options, exportDir: out }, (await harness({ loadRelease: async () => release("1.1.0") })).deps)).rejects.toThrow("release 1.1.0 is older than 1.2.3");
+    await expect(runUpgrade({ ...options, exportDir: out }, (await harness({ loadRelease: async () => release("1.3.0-rc.1") })).deps)).rejects.toThrow("release 1.3.0-rc.1 is a prerelease");
+    expect(await readdir(dirname(out))).toEqual([]);
+    await rm(dirname(out), { recursive: true, force: true });
   });
 });
 
@@ -348,6 +387,17 @@ describe("the agentx upgrade command", () => {
     expect(io.out.join("")).toBe("Upgraded staging from 1.2.3 to 1.3.0.\n");
     expect(io.err.join("")).toContain("Upgrading staging from 1.2.3 to 1.3.0 (templates engine)");
     expect(io.out.join("") + io.err.join("")).not.toContain(CALLBACK_KEY);
+  });
+
+  it("with --export, says where the bundle is and who it is for", async () => {
+    const out = join(await mkdtemp(join(tmpdir(), "agentx-upgrade-cli-export-")), "bundle");
+    const h = await harness();
+    const io = capture();
+    const code = await executeCli(["--env", "staging", "upgrade", "--export", out], { ...io, upgrade: withoutWrite(h.deps) });
+    expect(code).toBe(0);
+    expect(io.out.join("")).toBe(`Wrote the upgrade of staging to 1.3.0 to ${out}; give it to your platform team.\n`);
+    expect(h.deployer.deployed).toEqual([]);
+    await rm(dirname(out), { recursive: true, force: true });
   });
 
   it("passes --to, --release and --allow-replace through, and prints JSON with --json", async () => {

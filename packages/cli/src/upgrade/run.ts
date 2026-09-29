@@ -17,6 +17,7 @@ import { readEnvironmentSettings, type EnvironmentSettings } from "../environmen
 import { isOperatorRole } from "../init/commands.js";
 import { plainMessage } from "../output.js";
 import { upgradeAnswers } from "./answers.js";
+import { writeUpgradeBundle } from "./export.js";
 import { cdkDiffRisks, cdkReviewedDeployer, guardData, upgradeConfirm } from "./review.js";
 import { notesText, refusePrereleaseTarget, upgradeDirection, type ReleaseNotes } from "./target.js";
 
@@ -90,6 +91,33 @@ export async function droppedConfigKeys(input: { release: LoadedRelease; env: st
   return dropped;
 }
 
+/** FR-026: the upgrade as files for a platform team's pipeline. No AWS write and no lock: it reads
+ * the stacks and writes a directory. A changed access stack is included for the platform team to
+ * deploy with its own credentials (question 9); an unchanged one is left out. */
+async function exportUpgrade(input: { options: UpgradeOptions; deps: UpgradeDependencies; settings: EnvironmentSettings; release: LoadedRelease; dir: string }): Promise<UpgradeResult> {
+  const { options, deps, settings, release } = input;
+  const { env } = settings;
+  const target = release.manifest.version;
+  deps.write(`Writing the upgrade of ${env} from ${settings.version} to ${target} (${settings.engine} engine) to a bundle`);
+  deps.write(notesText(await deps.notes(target), target));
+  const answers = await upgradeAnswers({ settings, stacks: deps.stacks, ...(options.images === undefined ? {} : { images: options.images }) });
+  const order = upgradeOrder(settings.identity.mode);
+  const accessStack = settings.stacks.access ?? environmentStackName(env, "access");
+  const includeAccess = await accessChanged({ cloudFormation: deps.cloudFormation, stackName: accessStack, release, region: settings.region, env });
+  const parts = order.filter((part) => part !== "access" || includeAccess);
+  for (const entry of await droppedConfigKeys({ release, env, parts, stacks: deps.stacks })) {
+    deps.write(`config key ${entry.key} (${entry.value}) is not in release ${target}, so the upgrade drops it; nothing replaces it`);
+  }
+  const outputs: Partial<Record<DeployPart, Record<string, string>>> = {};
+  const deployed: Partial<Record<DeployPart, Record<string, string>>> = {};
+  for (const part of order) {
+    const stack = await deps.stacks.describe(settings.stacks[part] ?? environmentStackName(env, part));
+    if (stack !== undefined) { outputs[part] = stack.outputs; deployed[part] = stack.parameters; }
+  }
+  const written = await writeUpgradeBundle({ dir: input.dir, settings, answers, release, parts, outputs, deployed });
+  return { env, from: settings.version, to: target, parts, exported: written.dir };
+}
+
 /** The settings an upgrade may run on. Read before the environment lock, and read again under it. */
 function upgradableSettings(settings: EnvironmentSettings | undefined, env: string): EnvironmentSettings {
   if (settings === undefined) throw agentXError("CONFIG_INVALID", `environment ${env} is not installed in this account and region; check --env and --region`);
@@ -100,16 +128,15 @@ function upgradableSettings(settings: EnvironmentSettings | undefined, env: stri
 export async function runUpgrade(options: UpgradeOptions, deps: UpgradeDependencies): Promise<UpgradeResult> {
   const { env } = options;
   const first = upgradableSettings(await readEnvironmentSettings(deps.store, env), env);
-  if (options.exportDir !== undefined) {
-    // Ruling F19 (FR-013): the bundle holds the published templates; deploying them onto
-    // cdk-deployed stacks would switch the environment's engine.
-    if (first.engine === "cdk") throw agentXError("CONFIG_INVALID", "upgrade --export writes the published templates; a cdk environment upgrades with --source. Run agentx upgrade --source <dir> with admin credentials instead");
-    throw agentXError("CONFIG_INVALID", "upgrade --export is not available in this agentx yet; run agentx upgrade with admin credentials instead, or ask your platform team to deploy the access stack");
+  // Ruling F19 (FR-013): the bundle holds the published templates; deploying them onto cdk-deployed
+  // stacks would switch the environment's engine.
+  if (options.exportDir !== undefined && first.engine === "cdk") {
+    throw agentXError("CONFIG_INVALID", "upgrade --export writes the published templates; a cdk environment upgrades with --source. Run agentx upgrade --source <dir> with admin credentials instead");
   }
   if (first.engine === "cdk" && options.source === undefined) {
     throw agentXError("CONFIG_INVALID", "the cdk engine upgrades from a checkout of the target release's tag; pass --source <dir>");
   }
-  if (!options.yes && !deps.isInteractive()) throw agentXError("CONFIG_INVALID", "agentx upgrade needs --yes when stdin is not a terminal");
+  if (options.exportDir === undefined && !options.yes && !deps.isInteractive()) throw agentXError("CONFIG_INVALID", "agentx upgrade needs --yes when stdin is not a terminal");
 
   const caller = await deps.identity.get();
   const operator = isOperatorRole(caller.arn, env);
@@ -131,6 +158,7 @@ export async function runUpgrade(options: UpgradeOptions, deps: UpgradeDependenc
   }
   // Checked here to fail fast, and again under the lock, where it counts.
   upgradeDirection(env, first.version, target);
+  if (options.exportDir !== undefined) return exportUpgrade({ options, deps, settings: first, release, dir: options.exportDir });
 
   // Question 3 under concurrency: another upgrade may finish between the read above and this lock,
   // so the settings are read again, and every check on them repeated, while the lock is held.

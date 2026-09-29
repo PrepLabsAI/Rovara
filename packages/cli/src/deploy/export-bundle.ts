@@ -718,7 +718,7 @@ whose deletion protection keeps it; its name is not unique, so it never blocks a
 
 /** Refuses when `dir` exists and already holds files. A dir that doesn't exist, or exists and is
  * empty, is fine — nothing is written by this check either way. */
-async function assertClaimable(dir: string): Promise<void> {
+export async function assertClaimable(dir: string): Promise<void> {
   let existing: string[];
   try {
     existing = await readdir(dir);
