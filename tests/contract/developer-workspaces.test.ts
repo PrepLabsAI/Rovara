@@ -144,6 +144,33 @@ describe("GET /v1/dev/workspaces (spec 041 FR-001, FR-002)", () => {
     expect(JSON.parse(response.body)).toMatchObject({ error: { code: "AUTH_REQUIRED" } });
   });
 
+  // Spec 025 FR-013/FR-014: this route resolves projects through listProjects, so a project's
+  // developerTasks policy gates channel access here exactly as on /v1/dev/projects.
+  it("does not list a project through channel membership when its policy turns channel access off", async () => {
+    db.set({ pk: "PROJECT#payments-api", sk: "REV#000000000008", entityType: "PROJECT", definition: { name: "payments-api", revision: 8, developerTasks: { channelMembersMayUse: false } } });
+    db.set(workspace({ id: uuid("08"), project: "payments-api", created: "2026-09-26T09:00:00.000Z", revision: 8 }));
+    db.set(workspace({ id: uuid("09"), project: "solo", created: "2026-09-25T09:00:00.000Z", revision: 1 }));
+    const body = JSON.parse((await call("/v1/dev/workspaces", claims())).body) as WorkspacesBody;
+    expect(body.projects.map((project) => project.name)).toEqual(["solo"]);
+    expect(body.workspaces.map((entry) => entry.id)).toEqual([uuid("09")]);
+  });
+
+  it("fails closed on a damaged policy: no channel access, so no workspaces through the channel", async () => {
+    db.set({ pk: "PROJECT#payments-api", sk: "REV#000000000008", entityType: "PROJECT", definition: { name: "payments-api", revision: 8, developerTasks: null } });
+    db.set(workspace({ id: uuid("10"), project: "payments-api", created: "2026-09-26T09:00:00.000Z", revision: 8 }));
+    const body = JSON.parse((await call("/v1/dev/workspaces", claims())).body) as WorkspacesBody;
+    expect(body.projects.map((project) => project.name)).toEqual(["solo"]);
+    expect(body.workspaces).toEqual([]);
+  });
+
+  it("still lists a granted project whose policy turns channel access off", async () => {
+    db.set({ pk: "PROJECT#solo", sk: "REV#000000000002", entityType: "PROJECT", definition: { name: "solo", revision: 2, developerTasks: { channelMembersMayUse: false } } });
+    db.set(workspace({ id: uuid("11"), project: "solo", created: "2026-09-26T09:00:00.000Z", revision: 2 }));
+    const body = JSON.parse((await call("/v1/dev/workspaces", claims())).body) as WorkspacesBody;
+    expect(body.projects.map((project) => project.name)).toEqual(["payments-api", "solo"]);
+    expect(body.workspaces.map((entry) => entry.id)).toEqual([uuid("11")]);
+  });
+
   it("answers 404 for a method it does not serve", async () => {
     const response = await call("/v1/dev/workspaces", claims(), "POST");
     expect(response.statusCode).toBe(404);
