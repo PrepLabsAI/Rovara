@@ -81,6 +81,8 @@ It then runs these steps in order, and records each one in SSM as it finishes:
 12. **alerts**: you confirm the email subscription (a PagerDuty or Opsgenie address confirms on its
     own); a test alarm is sent and you say whether it arrived.
 13. **e2e**: you mention the bot in the channel; `init` ends when AgentX replies in the thread.
+    Type @ and pick the bot from Slack's mention list. A workspace that had an older AgentX app
+    shows two bots with similar names: pick the one whose member ID `init` prints.
 
 **What you click or paste:** the GitHub App page (create, then pick repositories), the Slack app
 page (create, install), two Slack pastes (token and signing secret), two more for developer

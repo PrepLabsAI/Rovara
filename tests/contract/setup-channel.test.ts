@@ -190,7 +190,8 @@ describe("waiting for the threaded reply (FR-018 step 11)", () => {
     const pending = waitForThreadedReply({ env: "staging", session, fetch: plane.fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, rerun: "agentx init", write: (line) => lines.push(line), ...time,
       sleep: async (ms) => { await time.sleep(ms); plane.turns = [turn({ subject: `${TEAM}/C0PAY00001/1790000000.000100`, receivedAt: new Date(time.now()).toISOString(), disposition: "answered" })]; } });
     expect((await pending).eventId).toMatch(/^Ev/);
-    expect(lines[0]).toBe(`In #payments, post a message that mentions <@${BOT}>, for example "<@${BOT}> what can you do?". Waiting up to 10 minutes for AgentX to reply in its thread.`);
+    // Live check L2: a workspace that had an older AgentX app shows two bots in the mention list.
+    expect(lines[0]).toBe(`In #payments, post a message that mentions the bot, for example "@<the bot> what can you do?". Type @ and pick the bot from Slack's mention list: a workspace that had an older AgentX app shows two bots with similar names, and this one's member ID is ${BOT}. Waiting up to 10 minutes for AgentX to reply in its thread.`);
     expect(lines.at(-1)).toBe("AgentX replied in #payments in 8 seconds.");
   });
 
