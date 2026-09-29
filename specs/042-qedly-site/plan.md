@@ -498,6 +498,7 @@ Each page is moved and edited from existing README text, not invented. Sources:
 
 `docs/mcp-install.md` (from phase 25b) already exists and goes in the Connectors-and-tools group of the docs sidebar as-is.
 
+- [ ] **Step 0:** AgentX's `.gitignore` ignores the whole `docs/` folder (since its first commit), so a new page is silently left out of a commit. Add each new page with `git add -f docs/<page>.md`, or narrow that rule to what it was meant to ignore. `docs/project-configuration.md` was lost this way once.
 - [ ] **Step 1:** Write the six pages from the sources above. Keep the README sections in place and link them to the new pages. Removing duplicated README text is a later cleanup.
 - [ ] **Step 2:** Check that every relative link in `docs/` resolves:
 
