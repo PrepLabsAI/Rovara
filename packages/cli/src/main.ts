@@ -38,8 +38,6 @@ import { loadDeploymentSettings, type DeploymentSettings } from "./deployment.js
 import { installMcp, MCP_CLIENTS, runCommand, type McpClientKind, type McpInstallDeps } from "./mcp/install.js";
 import { runMcpServer, type McpServeDeps } from "./mcp/serve.js";
 import { resumeCommand, runDeploy, runInitExport, type DeployCliDependencies, type DeployCommandOptions } from "./deploy/commands.js";
-import { cliErrorFor, resumeCommand, runDeploy, runInitExport, type DeployCliDependencies, type DeployCommandOptions } from "./deploy/commands.js";
-import { resumeCommand, runDeploy, runInitExport, type DeployCliDependencies, type DeployCommandOptions } from "./deploy/commands.js";
 import { cloudFormationStackReader, stsCallerIdentity, type CallerIdentity, type StackReader } from "./environments/adopt.js";
 import { resolveDeploymentFile } from "./environments/cache.js";
 import { DEFAULT_CLASSIFIER_MODEL, DEFAULT_ORCHESTRATOR_MODEL, DEFAULT_WORKER_MODEL, type InitFlags } from "./init/answers.js";
