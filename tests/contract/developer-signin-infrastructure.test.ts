@@ -151,10 +151,10 @@ describe("developer sign-in infrastructure (named environments)", () => {
     expect(aliases.find((alias) => alias.AliasName === "alias/agentx/staging/developer-tokens")).toMatchObject({ TargetKeyId: { "Fn::GetAtt": [keyId, "Arn"] } });
   });
 
-  it("lets only the ingress, the orchestrator task role and DeveloperIdentity read the Slack secret (R2)", () => {
+  it("lets only the ingress, the orchestrator task role, DeveloperIdentity and the task notifier read the Slack secret (R2, FR-034)", () => {
     const [secretId] = ofType(named, "AWS::SecretsManager::Secret").find(([, resource]) => resource.Properties.Name === "agentx/staging/slack")!;
     const readers = rolesThatMay(named, "secretsmanager:GetSecretValue", secretId, SAMPLE_SLACK_SECRET_ARN);
-    expect(readers).toEqual(["DeveloperSignInFunctionServiceRole", "SlackIngressServiceRole", "SlackOrchestratorTaskRole"]);
+    expect(readers).toEqual(["DeveloperSignInFunctionServiceRole", "DeveloperTaskNotifierFunctionServiceRole", "SlackIngressServiceRole", "SlackOrchestratorTaskRole"]);
   });
 
   it("lets DeveloperIdentity read only its own company sign-in secret besides the Slack secret", () => {
@@ -276,5 +276,73 @@ describe("AI-tool turn records (spec 025 FR-037, R27)", () => {
   it("adds nothing to the legacy templates", () => {
     expect(grants(legacy).some(({ statement }) => (statement.Condition as Record<string, Record<string, unknown>> | undefined)?.["ForAllValues:StringLike"]?.["dynamodb:LeadingKeys"] !== undefined
       && JSON.stringify(statement.Condition).includes("TASK#"))).toBe(false);
+  });
+});
+
+describe("the developer task notifier (spec 025 phase 25c, named environments)", () => {
+  const stateId = () => ofType(named, "AWS::DynamoDB::Table").find(([id]) => withoutHash(id) === "State")![0];
+  const streamMappings = (template: TemplateJson) => ofType(template, "AWS::Lambda::EventSourceMapping")
+    .filter(([, mapping]) => JSON.stringify(mapping.Properties.EventSourceArn).includes("StreamArn"));
+
+  it("runs the notifier with its table, queue, Slack secret and metrics namespace", () => {
+    const [, notifier] = ofType(named, "AWS::Lambda::Function").find(([id]) => withoutHash(id) === "DeveloperTaskNotifierFunction")!;
+    const variables = (notifier.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+    expect(Object.keys(variables).sort()).toEqual(expect.arrayContaining(["AGENTX_METRICS_NAMESPACE", "NOTICE_QUEUE_URL", "SLACK_SECRET_ARN", "STATE_TABLE_NAME"]));
+  });
+
+  it("reads the state table's stream as its second and last reader, filtered to task, pointer and developer-operation changes (C7)", () => {
+    const mappings = streamMappings(named);
+    expect(mappings).toHaveLength(2);
+    const notifierMapping = mappings.find(([, mapping]) => JSON.stringify(mapping.Properties.FunctionName).includes("DeveloperTaskNotifierFunction"))![1];
+    const patterns = (notifierMapping.Properties.FilterCriteria as { Filters: Array<{ Pattern: string }> }).Filters.map((filter) => JSON.parse(filter.Pattern) as unknown);
+    expect(patterns).toEqual([
+      { dynamodb: { NewImage: { entityType: { S: ["DEVELOPER_TASK"] } } } },
+      { dynamodb: { NewImage: { entityType: { S: ["DEVELOPER_TASK_POINTER"] } } } },
+      { dynamodb: { NewImage: { entityType: { S: ["OPERATION"] }, requestedBy: { M: { kind: { S: ["developer"] } } }, status: { S: ["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"] } } } },
+    ]);
+    expect(notifierMapping.Properties).toMatchObject({ StartingPosition: "LATEST", MaximumRecordAgeInSeconds: 3600, BisectBatchOnFunctionError: true });
+  });
+
+  it("consumes its own queue with per-message failures and a dead-letter queue", () => {
+    const queueMappings = ofType(named, "AWS::Lambda::EventSourceMapping").filter(([, mapping]) => JSON.stringify(mapping.Properties.FunctionName).includes("DeveloperTaskNotifierFunction") && !JSON.stringify(mapping.Properties.EventSourceArn).includes("StreamArn"));
+    expect(queueMappings).toHaveLength(1);
+    // Ruling F15: one notice per invocation, so 10 s Slack calls never pass the 30 s timeout between a post and its marker.
+    expect(queueMappings[0]![1].Properties).toMatchObject({ FunctionResponseTypes: ["ReportBatchItemFailures"], BatchSize: 1 });
+    const [, notifier] = ofType(named, "AWS::Lambda::Function").find(([id]) => withoutHash(id) === "DeveloperTaskNotifierFunction")!;
+    expect(notifier.Properties).toMatchObject({ Timeout: 30 });
+    const [, queue] = ofType(named, "AWS::SQS::Queue").find(([id]) => withoutHash(id) === "DeveloperTaskNotifierNoticeQueue")!;
+    expect(queue.Properties).toMatchObject({ MessageRetentionPeriod: 86_400, VisibilityTimeout: 180, SqsManagedSseEnabled: true });
+    expect(queue.Properties.RedrivePolicy).toMatchObject({ maxReceiveCount: 100 });
+  });
+
+  it("gives the notifier only key-limited item access on the state table: no scan, no delete", () => {
+    const statements = statementsOfRole(named, "DeveloperTaskNotifierFunctionServiceRole").filter((statement) => reaches(named, statement, stateId(), "arn:aws:dynamodb:us-east-1:111122223333:table/state"));
+    const dynamo = statements.filter((statement) => touches(statement, "dynamodb") && !actionsOf(statement).some((action) => action.startsWith("dynamodb:DescribeStream") || action.startsWith("dynamodb:GetRecords") || action.startsWith("dynamodb:GetShardIterator") || action.startsWith("dynamodb:ListStreams")));
+    for (const statement of dynamo) {
+      expect(statement.Condition).toMatchObject({ "ForAllValues:StringLike": { "dynamodb:LeadingKeys": expect.any(Array) as unknown } });
+      for (const forbidden of ["dynamodb:Scan", "dynamodb:DeleteItem", "dynamodb:BatchWriteItem"]) expect(allows(statement, forbidden)).toBe(false);
+    }
+    const reads = dynamo.find((statement) => allows(statement, "dynamodb:GetItem"))!;
+    expect((reads.Condition!["ForAllValues:StringLike"] as Record<string, string[]>)["dynamodb:LeadingKeys"].sort()).toEqual(["DEVTASK#*", "OPERATION#*", "WORKSPACE#*"]);
+    const writes = dynamo.find((statement) => allows(statement, "dynamodb:PutItem"))!;
+    expect((writes.Condition!["ForAllValues:StringLike"] as Record<string, string[]>)["dynamodb:LeadingKeys"].sort()).toEqual(["DEVTASK#*", "SHARED_TASK#*"]);
+  });
+
+  it("lets the ingress read shared thread records, and the broker read Slack thread counters, by key", () => {
+    const [, ingress] = ofType(named, "AWS::Lambda::Function").find(([id]) => withoutHash(id) === "SlackIngress")!;
+    expect((ingress.Properties.Environment as { Variables: Record<string, unknown> }).Variables).toMatchObject({ SHARED_TASKS: "enabled" });
+    expect(statementsOfRole(named, "SlackIngressServiceRole")).toContainEqual(expect.objectContaining({
+      Action: "dynamodb:GetItem", Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SHARED_TASK#*"] } },
+    }));
+    expect(statementsOfRole(named, "BrokerServiceRole")).toContainEqual(expect.objectContaining({
+      Action: "dynamodb:GetItem", Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["THREAD#*"] } },
+    }));
+  });
+
+  it("adds none of it to the legacy template", () => {
+    expect(ofType(legacy, "AWS::Lambda::Function").map(([id]) => withoutHash(id))).not.toContain("DeveloperTaskNotifierFunction");
+    expect(streamMappings(legacy)).toHaveLength(1);
+    const [, ingress] = ofType(legacy, "AWS::Lambda::Function").find(([id]) => withoutHash(id) === "SlackIngress")!;
+    expect((ingress.Properties.Environment as { Variables: Record<string, unknown> }).Variables).not.toHaveProperty("SHARED_TASKS");
   });
 });
