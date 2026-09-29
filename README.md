@@ -106,7 +106,9 @@ Until a later release adds them to `init`, finish by hand: create your admin use
 `init` prints these steps at the end.
 
 Developers then sign in from their own machines with `agentx login <control plane URL>`, with no
-AWS credentials; `agentx whoami` shows which projects they can use.
+AWS credentials; `agentx whoami` shows which projects they can use, and `agentx workspaces` opens a
+page on `127.0.0.1` showing those projects and the workspaces in them (`--no-ui` prints the same
+list in the terminal).
 
 The full guide, including resuming, unattended installs, developer sign-in settings
 (`agentx signin`), and tearing an environment down, is in
@@ -117,7 +119,8 @@ The full guide, including resuming, unattended installs, developer sign-in setti
 ### 1. Install the administration client
 
 Developers work in Slack, and can also sign in from their own machines (`agentx login <url>`,
-`agentx whoami`) to see which projects they can use. Everything else the `agentx` executable does is
+`agentx whoami`, `agentx workspaces`) to see which projects they can use and what is running in
+them. Everything else the `agentx` executable does is
 administration: installing environments, registering projects, binding Slack channels, choosing how
 developers sign in, and stopping idle workspaces.
 

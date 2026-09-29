@@ -23,7 +23,7 @@ import {
   aws_sqs as sqs,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
-import { WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
+import { WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
 import { DeveloperSignIn, developerSignInParameters } from "./developer-signin.js";
 import { SessionLifecycle } from "./session-lifecycle.js";
@@ -182,6 +182,14 @@ export class ControlPlaneStack extends Stack {
       indexName: WORKSPACE_SESSION_STATE_INDEX.name,
       partitionKey: { name: WORKSPACE_SESSION_STATE_INDEX.partitionKey, type: dynamodb.AttributeType.STRING },
       sortKey: { name: WORKSPACE_SESSION_STATE_INDEX.sortKey, type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+    // Spec 041: GET /v1/dev/workspaces lists a project's workspaces through this sparse index.
+    // Only workspace META items carry `workspaceProject`, so nothing else is indexed.
+    state.addGlobalSecondaryIndex({
+      indexName: WORKSPACE_PROJECT_INDEX.name,
+      partitionKey: { name: WORKSPACE_PROJECT_INDEX.partitionKey, type: dynamodb.AttributeType.STRING },
+      sortKey: { name: WORKSPACE_PROJECT_INDEX.sortKey, type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.ALL,
     });
     // The dispatcher signs each invocation to an EC2 worker; workers verify with the public key

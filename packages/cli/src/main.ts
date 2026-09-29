@@ -30,6 +30,8 @@ import { loginWithPkce, openSystemBrowser, tokenStoreKey } from "./auth.js";
 import { loadProjectConfig } from "./config.js";
 import { developerLogout, fetchDeveloperProjects, logoutText, whoamiText } from "./developer/commands.js";
 import { developerLogin } from "./developer/login.js";
+import { fetchDeveloperWorkspaces, type DeveloperWorkspacesResult } from "./developer/workspaces.js";
+import { runWorkspacesCommand } from "./workspaces-ui/index.js";
 import { loadDeploymentSettings, type DeploymentSettings } from "./deployment.js";
 import { resumeCommand, runDeploy, runInitExport, type DeployCliDependencies, type DeployCommandOptions } from "./deploy/commands.js";
 import { cloudFormationStackReader, stsCallerIdentity, type CallerIdentity, type StackReader } from "./environments/adopt.js";
@@ -91,6 +93,14 @@ export interface CliDependencies {
   init?: InitCliDependencies;
   /** `agentx signin` overrides, for tests: never touch AWS, Slack or an identity provider. */
   signin?: Partial<SigninServices>;
+  /** `agentx workspaces` overrides, for tests: never reach the control plane or open a browser. */
+  workspaces?: {
+    read?: () => Promise<DeveloperWorkspacesResult>;
+    openBrowser?: (url: string) => Promise<void>;
+    waitForExit?: () => Promise<void>;
+    isInteractive?: () => boolean;
+    port?: number;
+  };
 }
 
 interface AuthenticatedDeployment {
@@ -265,6 +275,30 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       const globals = globalOptions(command);
       const result = await fetchDeveloperProjects(developerSession(), developerEnv(command));
       services.stdout.write(globals.json ? formatSuccess({ env: result.env, url: result.url, ...result.projects }, true) : whoamiText(result));
+    });
+
+  program
+    .command("workspaces")
+    .description("show your AgentX projects and the workspaces in them, on a page served from 127.0.0.1; --no-ui prints them instead")
+    .option("--no-ui", "print the list in the terminal instead of opening a browser")
+    .action(async (options: { ui: boolean }, command: Command) => {
+      const globals = globalOptions(command);
+      const overrides = dependencies.workspaces ?? {};
+      const env = developerEnv(command);
+      // --json is machine-readable output, so it never opens a browser; neither does a session with
+      // no terminal, where nobody is there to see the page open.
+      const interactive = (overrides.isInteractive ?? (() => process.stdin.isTTY === true))();
+      const ui = options.ui && !globals.json && interactive;
+      await runWorkspacesCommand({
+        read: overrides.read ?? (() => fetchDeveloperWorkspaces(developerSession(), env)),
+        ui,
+        json: globals.json,
+        stdout: services.stdout,
+        stderr: services.stderr,
+        openBrowser: overrides.openBrowser ?? openSystemBrowser,
+        ...(overrides.waitForExit === undefined ? {} : { waitForExit: overrides.waitForExit }),
+        ...(overrides.port === undefined ? {} : { port: overrides.port }),
+      });
     });
 
   registerSigninCommands(program, {

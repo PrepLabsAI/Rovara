@@ -4735,6 +4735,14 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             "AttributeName": "workspaceId",
             "AttributeType": "S",
           },
+          {
+            "AttributeName": "workspaceProject",
+            "AttributeType": "S",
+          },
+          {
+            "AttributeName": "workspaceCreatedAt",
+            "AttributeType": "S",
+          },
         ],
         "BillingMode": "PAY_PER_REQUEST",
         "GlobalSecondaryIndexes": [
@@ -4747,6 +4755,22 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
               },
               {
                 "AttributeName": "workspaceId",
+                "KeyType": "RANGE",
+              },
+            ],
+            "Projection": {
+              "ProjectionType": "ALL",
+            },
+          },
+          {
+            "IndexName": "byWorkspaceProject",
+            "KeySchema": [
+              {
+                "AttributeName": "workspaceProject",
+                "KeyType": "HASH",
+              },
+              {
+                "AttributeName": "workspaceCreatedAt",
                 "KeyType": "RANGE",
               },
             ],

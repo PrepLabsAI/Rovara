@@ -3,6 +3,7 @@
 import { z } from "zod";
 import { EnvironmentNameSchema } from "./environments.js";
 import { SlackChannelIdSchema, SlackUserIdSchema } from "./slack.js";
+import { WorkspaceStatusSchema } from "./workspace.js";
 
 export const DEVELOPER_API_VERSION = "1.0";
 export const AGENTX_CLI_CLIENT_ID = "agentx-cli";
@@ -84,6 +85,34 @@ export const DeveloperProjectsResponseSchema = z.object({
   notices: z.array(z.enum(["slack_unavailable"])),
 });
 export type DeveloperProjectsResponse = z.infer<typeof DeveloperProjectsResponseSchema>;
+
+/**
+ * Spec 041: one workspace as a developer may see it. It names what the workspace is and how it is
+ * doing, and nothing about how it runs: no owner key, no instance, no ARN, no manifest.
+ */
+export const DeveloperWorkspaceSchema = z.object({
+  id: z.string().uuid(),
+  projectName: z.string().min(1),
+  projectRevision: z.number().int().positive(),
+  status: WorkspaceStatusSchema,
+  /** True while a coding task holds the workspace, so the page can say "working" rather than "busy". */
+  busy: z.boolean(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type DeveloperWorkspace = z.infer<typeof DeveloperWorkspaceSchema>;
+
+/** The projects the caller may use, each with the workspaces that exist in it, newest first. */
+export const DeveloperWorkspacesResponseSchema = z.object({
+  developer: DeveloperSummarySchema,
+  projects: z.array(DeveloperProjectSchema),
+  workspaces: z.array(DeveloperWorkspaceSchema),
+  notices: z.array(z.enum(["slack_unavailable"])),
+});
+export type DeveloperWorkspacesResponse = z.infer<typeof DeveloperWorkspacesResponseSchema>;
+
+/** The most workspaces one listing returns per project, newest first. */
+export const DEVELOPER_WORKSPACES_PER_PROJECT = 200;
 
 /** The most channels one channel-members request may name; callers split longer lists. The
  * DeveloperIdentity function allows twice this many Slack calls per request, so a full batch of

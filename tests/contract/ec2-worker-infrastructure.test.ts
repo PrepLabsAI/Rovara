@@ -1,5 +1,5 @@
 import { Stack, type App } from "aws-cdk-lib";
-import { Template } from "aws-cdk-lib/assertions";
+import { Match, Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
 import { WORKSPACE_SESSION_STATE_INDEX } from "../../packages/contracts/src/session.js";
 import { buildAgentXApp } from "../../infra/lib/app.js";
@@ -154,15 +154,17 @@ describe("EC2 worker infrastructure (issue #82), shown for a named environment",
   });
 
   it("indexes SESSION items sparsely by state", () => {
+    // arrayWith, not the whole list: spec 041 adds a second index (byWorkspaceProject) to the same
+    // table, and this test is about the session one.
     controlPlane.hasResourceProperties("AWS::DynamoDB::Table", {
-      GlobalSecondaryIndexes: [{
+      GlobalSecondaryIndexes: Match.arrayWith([{
         IndexName: "bySessionState",
         KeySchema: [
           { AttributeName: "sessionState", KeyType: "HASH" },
           { AttributeName: "workspaceId", KeyType: "RANGE" },
         ],
         Projection: { ProjectionType: "ALL" },
-      }],
+      }]),
     });
   });
 

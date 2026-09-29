@@ -50,6 +50,8 @@ import {
   slackThreadSubject,
   slackThreadUrl,
   unhandledDeploymentMode,
+  workspaceProjectIndexAttributes,
+  workspaceRecordFields,
   type Operation,
   type OperationStatus,
   type CodeBuildCheckResult,
@@ -3120,10 +3122,7 @@ async function requireOwnedWorkspace(
 async function requireWorkspace(dependencies: AwsBrokerDependencies, workspaceId: string): Promise<WorkspaceInstance> {
   const item = await getItem<Record<string, unknown>>(dependencies, workspaceKey(workspaceId));
   if (!item) throw agentXError("NOT_FOUND", "workspace not found");
-  const workspace = Object.fromEntries(
-    Object.entries(item).filter(([key]) => !["pk", "sk", "entityType"].includes(key)),
-  );
-  return WorkspaceInstanceSchema.parse(workspace);
+  return WorkspaceInstanceSchema.parse(workspaceRecordFields(item));
 }
 
 async function getDefaultWorkspace(
@@ -3465,7 +3464,15 @@ function outboxRecord(
 }
 
 function workspaceItem(workspace: WorkspaceInstance) {
-  return { ...workspaceKey(workspace.id), entityType: "WORKSPACE", ...workspace };
+  // Spec 041: the sparse byWorkspaceProject index attributes make this record findable by project,
+  // which is how a developer's workspaces are listed. They are storage keys, not record fields, so
+  // workspaceRecordFields strips them again on the way back.
+  return {
+    ...workspaceKey(workspace.id),
+    entityType: "WORKSPACE",
+    ...workspaceProjectIndexAttributes(workspace),
+    ...workspace,
+  };
 }
 
 function membershipRecord(ownerKey: string, projectName: string, role: MembershipRecord["role"]): MembershipRecord {
