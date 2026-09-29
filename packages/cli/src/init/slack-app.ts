@@ -93,6 +93,14 @@ export class SlackTeamIdError extends AgentXError {
   }
 }
 
+/** probeSlackUrls' timeout: `url` kept answering 401 to requests signed with the signing secret it
+ * was given. The message is init's (a new secret); doctor words its own from `url`. */
+export class SlackSignatureRefusedError extends AgentXError {
+  constructor(message: string, readonly url: string) {
+    super("CONFIG_INVALID", message, errorStatus("CONFIG_INVALID"));
+  }
+}
+
 /** A Slack error code as Slack documents them (lower case, digits, underscores); anything else is not echoed. */
 function safeSlackErrorCode(code: string | undefined): string {
   if (code === undefined) return "no reason given";
@@ -191,7 +199,7 @@ export async function probeSlackUrls(input: {
   });
   const retry = async (url: string) => {
     if (input.now() >= deadline) {
-      throw agentXError("CONFIG_INVALID", `${url} still refuses requests signed with the new signing secret after ${Math.round(timeoutMs / 60_000)} minutes; check that you pasted the Signing Secret, not the Client Secret, and that this computer's clock is correct (Slack refuses signatures older than 5 minutes), then run agentx init again`);
+      throw new SlackSignatureRefusedError(`${url} still refuses requests signed with the new signing secret after ${Math.round(timeoutMs / 60_000)} minutes; check that you pasted the Signing Secret, not the Client Secret, and that this computer's clock is correct (Slack refuses signatures older than 5 minutes), then run agentx init again`, url);
     }
     if (!told) {
       input.write("Waiting for the Slack ingress to pick up the new signing secret (it keeps the old one for up to 5 minutes)");

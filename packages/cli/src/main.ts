@@ -46,12 +46,14 @@ import type { FinishFlags, SecretFlags } from "./init/context.js";
 import { parseConnectorsFlag } from "./init/finish-steps.js";
 import { runEnvAdopt, runEnvList, runEnvUse } from "./environments/commands.js";
 import { ssmParameterStore, type ParameterStore } from "./environments/parameter-store.js";
-import { settingsParameterName } from "./environments/settings.js";
+import { settingsParameterName, type EnvironmentSettings } from "./environments/settings.js";
 import { formatError, formatSuccess } from "./output.js";
 import { realSetupContext, type SetupCommandContext } from "./setup/command-context.js";
 import { registerSetupCommands } from "./setup/cli.js";
 import { registerConfigCommands } from "./config/cli.js";
 import type { ConfigServices } from "./config/commands.js";
+import { registerDoctorCommand } from "./doctor/cli.js";
+import type { DoctorServices } from "./doctor/checks.js";
 import { addSignInOptions, definedEntries, registerSigninCommands, secretSource, signInFlags, type SignInCommandOptions } from "./signin/cli.js";
 import { SIGNIN_FLAG_NAMES, type SigninFlags } from "./signin/collect.js";
 import type { SigninServices } from "./signin/commands.js";
@@ -104,6 +106,8 @@ export interface CliDependencies {
   signin?: Partial<SigninServices>;
   /** `agentx config` overrides, for tests: never touch AWS. */
   config?: Partial<ConfigServices>;
+  /** `agentx doctor` overrides, for tests: never touch AWS or a vendor. */
+  doctor?: { store?: ParameterStore; services?: (settings: EnvironmentSettings) => DoctorServices };
   /** `agentx workspaces` overrides, for tests: never reach the control plane or open a browser. */
   workspaces?: {
     read?: () => Promise<DeveloperWorkspacesResult>;
@@ -328,6 +332,12 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     parameterStore, fetch: services.fetchImplementation, stdout: services.stdout, stderr: services.stderr,
   });
   registerConfigCommands(program, { ...(dependencies.config === undefined ? {} : { overrides: dependencies.config }), parameterStore, fetch: services.fetchImplementation, stdout: services.stdout, stderr: services.stderr });
+
+  registerDoctorCommand(program, {
+    ...(dependencies.doctor?.store === undefined ? {} : { store: dependencies.doctor.store }),
+    ...(dependencies.doctor?.services === undefined ? {} : { services: dependencies.doctor.services }),
+    parameterStore, fetch: services.fetchImplementation, home, stdout: services.stdout, stderr: services.stderr,
+  });
 
   const admin = program.command("admin").description("administrator workflows");
   const adminProject = admin.command("project").description("administer registered projects");

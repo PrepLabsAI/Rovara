@@ -6,7 +6,7 @@ import { gzipSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 import type { CommandRunner } from "../../packages/cli/src/deploy/cdk-engine.js";
 import { realCommandRunner } from "../../packages/cli/src/deploy/commands.js";
-import { fetchRelease, releaseAssetUrls, releaseCacheDir } from "../../packages/cli/src/init/release-fetch.js";
+import { fetchRelease, readReleaseManifest, releaseAssetUrls, releaseCacheDir } from "../../packages/cli/src/init/release-fetch.js";
 import { CLI_VERSION, RELEASE_VERSION, isPrereleaseVersion } from "../../packages/cli/src/version.js";
 
 const dirs: string[] = [];
@@ -240,5 +240,29 @@ describe("the CLI's own version", () => {
     expect(isPrereleaseVersion("1.2.3")).toBe(false);
     expect(isPrereleaseVersion("1.2.3-beta.1")).toBe(true);
     expect(isPrereleaseVersion("1.2.3-rc.1")).toBe(true);
+  });
+});
+
+describe("readReleaseManifest (doctor's release check)", () => {
+  const manifest = { schemaVersion: 1, version: "1.2.3", gitCommit: "a".repeat(40), environmentPlaceholder: "qqenv-placeholderqq", templates: [], packages: [], images: {} };
+
+  it("reads the cached release.json without downloading", async () => {
+    const home = await mkdtemp(join(tmpdir(), "agentx-manifest-"));
+    await mkdir(join(home, ".agentx", "releases", "1.2.3"), { recursive: true });
+    await writeFile(join(home, ".agentx", "releases", "1.2.3", "release.json"), JSON.stringify(manifest));
+    const fetched: string[] = [];
+    const found = await readReleaseManifest({ version: "1.2.3", home, fetch: (async (url: string) => { fetched.push(url); return new Response("", { status: 500 }); }) as never });
+    expect(found?.version).toBe("1.2.3");
+    expect(fetched).toEqual([]);
+  });
+
+  it("downloads the published release.json, and answers undefined for anything unreadable", async () => {
+    const home = await mkdtemp(join(tmpdir(), "agentx-manifest-"));
+    const ok = await readReleaseManifest({ version: "1.2.3", home, fetch: (async () => new Response(JSON.stringify(manifest), { status: 200 })) });
+    expect(ok?.version).toBe("1.2.3");
+    expect(await readReleaseManifest({ version: "1.2.3", home, fetch: (async () => new Response("", { status: 404 })) })).toBeUndefined();
+    expect(await readReleaseManifest({ version: "1.2.3", home, fetch: (async () => new Response("not json", { status: 200 })) })).toBeUndefined();
+    expect(await readReleaseManifest({ version: "1.2.4", home, fetch: (async () => new Response(JSON.stringify(manifest), { status: 200 })) })).toBeUndefined();
+    expect(await readReleaseManifest({ version: "unversioned", home, fetch: (async () => { throw new Error("no call expected"); }) })).toBeUndefined();
   });
 });

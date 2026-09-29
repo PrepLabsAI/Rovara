@@ -13,3 +13,14 @@ export const CONFIG_AWS_ACTIONS: readonly string[] = [
   "secretsmanager:DescribeSecret", "s3:ListBucket",
   "sns:ListSubscriptionsByTopic", "sns:Subscribe",
 ];
+
+/** agentx doctor's reads. It never starts drift detection (question 5): it reads the last result
+ * from DescribeStacks. */
+export const DOCTOR_AWS_ACTIONS: readonly string[] = [
+  "ssm:GetParameter", "ssm:GetParametersByPath",
+  "cloudformation:DescribeStacks",
+  "secretsmanager:GetSecretValue",
+  "bedrock:InvokeModel",
+  "servicequotas:GetServiceQuota", "ec2:DescribeAddresses",
+  "sns:ListSubscriptionsByTopic", "budgets:ViewBudget",
+];

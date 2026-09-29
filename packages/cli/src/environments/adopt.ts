@@ -1,4 +1,4 @@
-import { DescribeStacksCommand, type CloudFormationClient } from "@aws-sdk/client-cloudformation";
+import { DescribeStacksCommand, type CloudFormationClient, type DescribeStacksCommandOutput } from "@aws-sdk/client-cloudformation";
 import { GetCallerIdentityCommand, type STSClient } from "@aws-sdk/client-sts";
 import { agentXError, DEFAULT_ENVIRONMENT, type StackPart } from "@agentx/contracts";
 import { ModelsAnswersSchema } from "../deploy/answer-schemas.js";
@@ -23,6 +23,8 @@ export interface StackDescription {
   outputs: Record<string, string>;
   parameters: Record<string, string>;
   status: string;
+  /** The last drift detection's result (StackDriftStatus), when CloudFormation reports one. Only read, never started. */
+  drift?: string;
 }
 
 export interface StackReader {
@@ -34,7 +36,10 @@ export interface CallerIdentity {
   get(): Promise<{ account: string; arn: string }>;
 }
 
-export function cloudFormationStackReader(client: CloudFormationClient): StackReader {
+/** Any client that answers DescribeStacks: a CloudFormationClient, or a test's fake. */
+export type DescribeStacksClient = { send(command: DescribeStacksCommand): Promise<DescribeStacksCommandOutput> };
+
+export function cloudFormationStackReader(client: CloudFormationClient | DescribeStacksClient): StackReader {
   return {
     async describe(stackName) {
       try {
@@ -49,6 +54,7 @@ export function cloudFormationStackReader(client: CloudFormationClient): StackRe
           parameters: Object.fromEntries(
             (stack.Parameters ?? []).flatMap((parameter) => (parameter.ParameterKey && parameter.ParameterValue !== undefined ? [[parameter.ParameterKey, parameter.ParameterValue]] : [])),
           ),
+          ...(stack.DriftInformation?.StackDriftStatus === undefined ? {} : { drift: stack.DriftInformation.StackDriftStatus }),
         };
       } catch (error) {
         if (error instanceof Error && error.name === "ValidationError" && /does not exist/.test(error.message)) return undefined;
