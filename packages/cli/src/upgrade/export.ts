@@ -8,7 +8,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { agentXError, environmentStackName } from "@agentx/contracts";
 import { templateParameterNames, upgradeKeptParameterNames, withDeclaredSignIn, type DeployAnswers } from "../deploy/deploy-environment.js";
 import { assertClaimable } from "../deploy/export-bundle.js";
-import { SECRET_PARAMETERS, stackParameters, type DeployPart, type StackOutputs } from "../deploy/parameters.js";
+import { MissingStackOutputError, SECRET_PARAMETERS, stackParameters, type DeployPart, type StackOutputs } from "../deploy/parameters.js";
 import { assertReleaseCoversRegion, type LoadedRelease } from "../deploy/release.js";
 import type { EnvironmentSettings } from "../environments/settings.js";
 
@@ -75,7 +75,15 @@ export async function writeUpgradeBundle(input: {
       const stackName = environmentStackName(env, part);
       const declared = templateParameterNames(release, part, env);
       // As deployEnvironment does: the stored sign-in is sent only for the names the target declares.
-      const raw = stackParameters(part, full, input.outputs);
+      let raw: Record<string, string>;
+      try {
+        raw = stackParameters(part, full, input.outputs);
+      } catch (error) {
+        // The outputs are the deployed ones: a target release that adds an output a later stack reads
+        // cannot be written as one bundle, since the earlier stack must run the release first.
+        if (!(error instanceof MissingStackOutputError)) throw error;
+        throw agentXError("CONFIG_INVALID", `release ${version} needs output ${error.output} of stack ${error.stackName}, which the deployed stack does not have yet, so one bundle cannot upgrade ${stackName}. Run agentx --env ${env} upgrade --to ${version} with admin credentials instead: it deploys ${error.stackName} first, then reads its new output`);
+      }
       const computed = part === "control-plane" && input.answers.developerSignIn !== undefined ? withDeclaredSignIn(raw, declared) : raw;
       const parameters = parameterFile({ part, version, computed, deployed: input.deployed[part], declared });
       await write(`parameters/${part}.json`, `${JSON.stringify(parameters, null, 2)}\n`);

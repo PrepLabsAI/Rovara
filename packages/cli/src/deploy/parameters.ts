@@ -115,10 +115,18 @@ export function privateImageUri(publicRef: string, target: { account: string; re
   return `${target.account}.dkr.ecr.${target.region}.${hostSuffix}/${target.prefix}/${rest}`;
 }
 
+/** A stack output a later stack's parameters need is missing: typed, so upgrade --export can say what to do instead. */
+export class MissingStackOutputError extends Error {
+  constructor(readonly stackName: string, readonly output: string) {
+    super(`stack ${stackName} has no output ${output}`);
+    this.name = "MissingStackOutputError";
+  }
+}
+
 /** Throws the exact message a missing stack output must report. */
 function required(outputs: Partial<Record<DeployPart, StackOutputs>>, part: DeployPart, name: string, env: string): string {
   const value = outputs[part]?.[name];
-  if (value === undefined) throw new Error(`stack ${environmentStackName(env, part)} has no output ${name}`);
+  if (value === undefined) throw new MissingStackOutputError(environmentStackName(env, part), name);
   return value;
 }
 

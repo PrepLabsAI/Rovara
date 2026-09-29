@@ -2,6 +2,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { CONTROL_PLANE_FOUNDATION_PARAMETERS } from "@agentx/contracts";
 import { OPERATOR_PARAMETERS, SECRET_PARAMETERS } from "../../packages/cli/src/deploy/parameters.js";
 import { upgradeKeptParameterNames } from "../../packages/cli/src/deploy/deploy-environment.js";
 import type { LoadedRelease } from "../../packages/cli/src/deploy/release.js";
@@ -114,6 +115,19 @@ describe("agentx upgrade --export (FR-026)", () => {
     const out = await freshDir();
     await expect(writeUpgradeBundle({ dir: out, settings, answers, release: await releaseWithPackage(), parts: ["control-plane"], outputs, deployed: { "control-plane": { GitHubAppId: "123" } } }))
       .rejects.toThrow("release 1.3.0 adds secret CallbackSigningKey, which a bundle cannot carry; run agentx upgrade with admin credentials");
+    expect(await readdir(join(out, ".."))).toEqual([]);
+  });
+
+  it("refuses, with the next step, a release whose stack reads an output the deployed stack does not have yet (final review M5)", async () => {
+    const out = await freshDir();
+    const [missing] = CONTROL_PLANE_FOUNDATION_PARAMETERS;
+    const foundation = { ...outputs.foundation } as Record<string, string>;
+    delete foundation[missing];
+    await expect(writeUpgradeBundle({ dir: out, settings, answers, release: await releaseWithPackage(), parts: ["control-plane"], outputs: { ...outputs, foundation }, deployed: { "control-plane": { CallbackSigningKey: "****" } } }))
+      .rejects.toMatchObject({
+        code: "CONFIG_INVALID",
+        message: `CONFIG_INVALID: release 1.3.0 needs output ${missing} of stack agentx-staging-foundation, which the deployed stack does not have yet, so one bundle cannot upgrade agentx-staging-control-plane. Run agentx --env staging upgrade --to 1.3.0 with admin credentials instead: it deploys agentx-staging-foundation first, then reads its new output`,
+      });
     expect(await readdir(join(out, ".."))).toEqual([]);
   });
 
