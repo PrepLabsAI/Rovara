@@ -132,7 +132,10 @@ describe("the thread's texts (FR-032, C8)", () => {
     for (const line of summary.split("\n")) expect(line.startsWith(">")).toBe(true);
   });
 
-  it("marks a summary the redaction cap cut, even when the rest fits", () => {
+  it("marks a summary the redaction cap cut, even when what is left fits", () => {
+    // Past the redaction ceiling, the cap drops the trailing token run, leaving "done": short
+    // enough to fit, so only the cap's truncated flag can put the marker there.
+    expect(endedReply({ status: "SUCCEEDED", summary: `done ${"x".repeat(7_000)}` })).toBe(`The task ended SUCCEEDED.\n>done${CUT_MARKER}`);
     const text = endedReply({ status: "SUCCEEDED", summary: "x".repeat(3_000) });
     expect(text.endsWith(CUT_MARKER)).toBe(true);
     expect(text.slice("The task ended SUCCEEDED.\n".length).length).toBeLessThanOrEqual(1_500);
