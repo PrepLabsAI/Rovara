@@ -31,7 +31,7 @@ QEDly (said "Q-E-D-lee", from Q.E.D., "which was to be shown") is the workspace 
   - The words "accountable", "provenance" and "receipt" appear on none of them.
   - None leads with "your cloud".
   - The headlines that stand out admit a risk rather than boast. Only Warp publishes a unit cost.
-- **Product truth.** An audit of `origin/mainline` at 9f1e839 (PR #144) is summarised in the claims ledger (Appendix B). Only claims with evidence may be stated as current fact.
+- **Product truth.** An audit of `origin/mainline` at 9f1e839 (PR #144), refreshed at d7d214b after installer phase 15d2 (#148) and the MCP server phase 25b (#149), is summarised in the claims ledger (Appendix B). Only claims with evidence may be stated as current fact.
 
 ## Positioning
 
@@ -255,7 +255,7 @@ People searching "self-hosted AI coding agent", "AI agent CI gates", "Claude Tag
    - How is it different from Claude Tag, Devin or Copilot's coding agent?
 10. **Install.** The install command again, and the footer.
 
-## Appendix B: Claims ledger (current claims, evidence at `origin/mainline` 9f1e839)
+## Appendix B: Claims ledger (current claims, evidence at `origin/mainline` d7d214b, refreshed 2026-09-29)
 
 | Claim (site wording) | Evidence |
 |---|---|
@@ -276,11 +276,13 @@ People searching "self-hosted AI coding agent", "AI agent CI gates", "Claude Tag
 | Runs your repository's own devcontainer. | PRs #125, #132 |
 | A task that repeats the same failing call stops itself. | PR #130; spec 033 |
 | One command sets up the whole deployment and shows a cost estimate first. | PRs #98, #73, #139; `packages/cli/src/init/plan.ts` |
+| Setup ends when someone mentions the bot in the new channel and gets a threaded reply: the admin user, first project, connectors, alerts and monthly budget are part of the same run. | PR #148; README "Install AgentX in your AWS account" steps 8-12 |
+| Hand a task to QEDly Code from Claude Code, Codex or Cursor, and follow it to a pull request. | PR #149; `docs/mcp-install.md`; spec 025 (verify live before launch) |
+| Developers sign in with Slack or their company's sign-in, with no AWS credentials. | PR #143; README "Install AgentX in your AWS account" |
 | Model choice is measured: in our 65-case test, run three times, Claude Sonnet 4.6 passed 58 of 65 at about $0.025 per turn. | `specs/015-installer/spec.md` l.527-536 |
 | GitHub, Linear, Jira and Asana, from the thread. | `packages/gateway/src/{github,linear,jira,asana}.ts` |
 
 Claims that are NOT current and may appear only with a status label:
 - OpenRouter in production: merged but not verified live, so it is not on the hero line.
-- Developer task hand-off from Claude Code or Cursor (`agentx mcp`, spec 025 phase 25b).
 - `agentx destroy`.
 - The Workspace, Passport, Outcomes and Cloud products.

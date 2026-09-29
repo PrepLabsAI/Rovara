@@ -8,7 +8,7 @@
 
 **Tech Stack:** Node 22, Astro 5 with Starlight, TypeScript, Vitest, `yaml`, `zod`, GitHub Actions, GitHub Pages, AWS CodeBuild (one AgentX gate), `@lhci/cli`, Buttondown.
 
-**Spec:** `specs/040-qedly-site/spec.md` (read it first: the positioning, Appendix A copy deck, and Appendix B claims ledger are inputs to Tasks 3, 7 and 8).
+**Spec:** `specs/042-qedly-site/spec.md` (read it first: the positioning, Appendix A copy deck, and Appendix B claims ledger are inputs to Tasks 3, 7 and 8).
 
 ## Owner TODO
 
@@ -480,12 +480,14 @@ Each page is moved and edited from existing README text, not invented. Sources:
 
 | Page | Source in README.md or code |
 |---|---|
-| `quickstart.md` | "Install AgentX in your AWS account" and "Use AgentX" steps 1-3 |
+| `quickstart.md` | "Install AgentX in your AWS account" (the 12-step `agentx init` run, as of #148) and "Use AgentX" |
 | `concepts.md` | "How AgentX is structured", "Working in a thread", "What a thread remembers", "Validate changes and create a pull request" |
 | `security.md` | "Connector credentials", "Actions that need your confirmation", the permission-boundary section of `docs/architecture-production.md`, and a "What AgentX does not protect against" section taken from that section's documented limits |
 | `cli.md` | `agentx --help` and each subcommand's `--help` output from a build of this commit, plus the exit-code paragraph |
 | `costs.md` | the cost-estimate inputs in `packages/cli/src/init/plan.ts`, the `usage.json` fields in `packages/contracts/src/usage.ts`, and the model bake-off table in `specs/015-installer/spec.md` |
 | `troubleshooting.md` | "Diagnostics" and the alarm guidance |
+
+`docs/mcp-install.md` (from phase 25b) already exists and goes in the Connectors-and-tools group of the docs sidebar as-is.
 
 - [ ] **Step 1:** Write the six pages from the sources above. Keep the README sections in place and link them to the new pages. Removing duplicated README text is a later cleanup.
 - [ ] **Step 2:** Check that every relative link in `docs/` resolves:
@@ -1091,10 +1093,10 @@ The SEO category penalises `noindex`. Before launch, the SEO assertion is expect
 ### Task 12: Follow-ups in AgentX and the launch PR (FR-034, FR-051, FR-060)
 
 **Files (AgentX repo):**
-- Create: an issue and then `specs/041-qed-pr-footer/spec.md`
+- Create: an issue and then `specs/043-qed-pr-footer/spec.md`
 - Modify at launch: `README.md` (pointer); site `src/config/site.ts` (`launched: true`, `docsRelease` real tag), `lighthouserc.json` (remove the `is-crawlable` exemption)
 
-- [ ] **Step 1: The ∎ PR footer as its own AgentX feature.** Open an issue with the spec 041 description. Today `slackAttributedBody` in `packages/broker/src/aws/broker.ts` appends "Requested in Slack thread … by …" when the publication starts, before gates run. The footer must list each gate's result on the exact commit, so it has to be written, or the PR body updated, in the publication callback after `assertCodeBuildGatesPassed`. The existing contract tests in `tests/contract/slack-control-plane.test.ts` (around line 1263) and `tests/contract/cloud-handlers.test.ts` (around line 560) pin the current body and must be updated in that feature's TDD cycle. Keep the product name out of the footer until the trademark clears. Use `∎ Checked: <gate> passed on <short sha>.`
+- [ ] **Step 1: The ∎ PR footer as its own AgentX feature.** Open an issue with the spec 043 description. Today `slackAttributedBody` in `packages/broker/src/aws/broker.ts` appends "Requested in Slack thread … by …" when the publication starts, before gates run. The footer must list each gate's result on the exact commit, so it has to be written, or the PR body updated, in the publication callback after `assertCodeBuildGatesPassed`. The existing contract tests in `tests/contract/slack-control-plane.test.ts` (around line 1263) and `tests/contract/cloud-handlers.test.ts` (around line 560) pin the current body and must be updated in that feature's TDD cycle. Keep the product name out of the footer until the trademark clears. Use `∎ Checked: <gate> passed on <short sha>.`
 - [ ] **Step 2: The launch PR**, opened only when FR-060 items 1-4 hold:
   1. Set `SITE.launched = true` and `SITE.docsRelease` to the first public tag.
   2. Remove the Lighthouse `is-crawlable` exemption.
