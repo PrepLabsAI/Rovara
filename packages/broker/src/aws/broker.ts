@@ -1840,8 +1840,7 @@ async function sharedThreadWorkspace(
 async function activeOperationForChannel(dependencies: AwsBrokerDependencies, workspace: WorkspaceInstance): Promise<{ operationId: string | null; developer: boolean }> {
   if (!workspace.activeOperationId) return { operationId: null, developer: false };
   const operation = await requireOperation(dependencies, workspace.id, workspace.activeOperationId);
-  const requester = operation.requestedBy;
-  const developer = requester !== undefined && "kind" in requester && requester.kind === "developer";
+  const developer = developerRequested(operation);
   return developer ? { operationId: null, developer: true } : { operationId: operation.id, developer: false };
 }
 
@@ -3832,6 +3831,11 @@ async function getArtifact(
   if (!artifact || artifact.ownerKey !== identity.ownerKey || typeof artifact.objectKey !== "string") {
     throw agentXError("NOT_FOUND", "artifact not found");
   }
+  if (identity.sharedTask?.state === "continue") {
+    // D22: an artifact of the developer's own run is theirs, answered as if it did not exist.
+    const operation = typeof artifact.operationId === "string" ? await getItem<OperationRecord>(dependencies, operationKey(workspaceId, artifact.operationId)) : undefined;
+    if (operation === undefined || developerRequested(operation)) throw agentXError("NOT_FOUND", "artifact not found");
+  }
   const object = await dependencies.s3.send(new GetObjectCommand({ Bucket: dependencies.artifactBucketName, Key: artifact.objectKey }));
   const content = object.Body ? await object.Body.transformToString("utf8") : "";
   return { id: artifactId, name: artifact.name, mediaType: artifact.mediaType, operationId: artifact.operationId, content };
@@ -3845,7 +3849,17 @@ async function getAuthorizedOperation(
 ): Promise<Operation> {
   const workspace = await requireOwnedWorkspace(dependencies, identity, workspaceId);
   await requireMembership(dependencies, identity.ownerKey, workspace.projectName);
-  return publicOperation(await requireOperation(dependencies, workspaceId, operationId));
+  const operation = await requireOperation(dependencies, workspaceId, operationId);
+  // D22: from a shared thread, the developer's own run (its status, result and events) answers
+  // exactly as an unknown operation does, so it cannot be probed. Channel operations stay readable.
+  if (identity.sharedTask?.state === "continue" && developerRequested(operation)) throw agentXError("NOT_FOUND", "operation not found");
+  return publicOperation(operation);
+}
+
+/** An operation a developer started from an AI tool (FR-022), rather than from Slack. */
+function developerRequested(operation: Pick<OperationRecord, "requestedBy">): boolean {
+  const requester = operation.requestedBy;
+  return requester !== undefined && "kind" in requester && requester.kind === "developer";
 }
 
 async function requireOwnedWorkspace(

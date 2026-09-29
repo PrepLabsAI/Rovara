@@ -82,6 +82,17 @@ export class FakeDynamoDb {
       const attribute = indexed[1]!.startsWith("#") ? names[indexed[1]!]! : indexed[1]!;
       return this.find((item) => item[attribute] !== undefined && item[attribute] === values[indexed[2]!]).map((item) => structuredClone(item));
     }
+    // A sort key range, as the operation events page reads it: `pk = :pk AND sk BETWEEN :a AND :b`.
+    const range = /^pk = :pk AND sk BETWEEN (:[a-zA-Z]+) AND (:[a-zA-Z]+)$/.exec(String(input.KeyConditionExpression));
+    if (range) {
+      const low = values[range[1]!] as string;
+      const high = values[range[2]!] as string;
+      const inRange = this.find((item) => item.pk === values[":pk"] && compareKeys(item.sk as string, low) >= 0 && compareKeys(item.sk as string, high) <= 0)
+        .sort((left, right) => compareKeys(left.sk as string, right.sk as string));
+      if (input.ScanIndexForward === false) inRange.reverse();
+      const limit = input.Limit as number | undefined;
+      return (limit === undefined ? inRange : inRange.slice(0, limit)).map((item) => structuredClone(item));
+    }
     const match = /^pk = :pk AND begins_with\(sk, (:[a-zA-Z]+)\)$/.exec(String(input.KeyConditionExpression));
     if (!match) throw new Error(`FakeDynamoDb does not support the key condition ${String(input.KeyConditionExpression)}`);
     const prefix = values[match[1]!] as string;

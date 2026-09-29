@@ -122,6 +122,57 @@ describe("a continue thread acts on the task's workspace (FR-054)", () => {
   });
 });
 
+describe("the developer's own run stays private from the thread (D22)", () => {
+  /** The service routes a teammate's orchestrator reads an operation through. */
+  const reads = (h: Awaited<ReturnType<typeof continueThread>>, subject: string, operationId: string, artifactId: string) => Promise.all([
+    teammate(h.handler, subject, PRIYA, "GET", `/v1/service/workspaces/${h.workspaceId}/operations/${operationId}`),
+    teammate(h.handler, subject, PRIYA, "GET", `/v1/service/workspaces/${h.workspaceId}/operations/${operationId}/events`),
+    teammate(h.handler, subject, PRIYA, "GET", `/v1/service/workspaces/${h.workspaceId}/artifacts/${artifactId}`),
+  ]);
+  const artifactOf = (h: Awaited<ReturnType<typeof continueThread>>, operationId: string) =>
+    String(h.db.find((item) => item.entityType === "ARTIFACT" && item.operationId === operationId)[0]?.id);
+
+  it("answers 404, as for an unknown operation, for the developer's operation on every read route", async () => {
+    const h = await continueThread();
+    await h.dev(MAYA, "POST", `/v1/dev/tasks/${h.taskId}/continue`, { requestId: randomUUID(), instructions: "keep going" });
+    const developers = String(h.active());
+    await h.events(h.workspaceId, developers, [{ type: "assistant.message", payload: { text: "private progress" } }]);
+    await h.artifact(h.workspaceId, developers, "notes.txt", "private notes");
+    const hidden = await reads(h, h.subject, developers, artifactOf(h, developers));
+    const unknown = await reads(h, h.subject, randomUUID(), randomUUID());
+    for (const [index, response] of hidden.entries()) {
+      expect(response.status).toBe(404);
+      expect(response.body.error).toEqual(unknown[index]!.body.error);
+      expect(JSON.stringify(response.body)).not.toContain("private");
+    }
+    // The developer's own AI-tool routes still read it.
+    expect(JSON.stringify((await h.dev(MAYA, "GET", `/v1/dev/tasks/${h.taskId}`)).body)).toContain(h.taskId);
+  });
+
+  it("still reads a channel operation, its events and its artifacts", async () => {
+    const h = await continueThread();
+    const channels = String(((await channelTask(h, "Priya")).body.operation as { id: string }).id);
+    await h.events(h.workspaceId, channels, [{ type: "assistant.message", payload: { text: "channel progress" } }]);
+    await h.artifact(h.workspaceId, channels, "lint.txt", "channel notes");
+    const [operation, events, artifact] = await reads(h, h.subject, channels, artifactOf(h, channels));
+    expect(operation.body.operation).toMatchObject({ id: channels });
+    expect(JSON.stringify(events.body)).toContain("channel progress");
+    expect(artifact.body.artifact).toMatchObject({ content: "channel notes" });
+  });
+
+  it("leaves an ordinary thread reading its own operations as before", async () => {
+    const h = await continueThread();
+    const other = `${SLACK_TEAM}/${h.subject.split("/")[1]}/1695500000.000900`;
+    const own = String((await teammate(h.handler, other, PRIYA, "POST", "/v1/service/threads/workspace", { requestId: randomUUID(), includeIntegrations: true })).body.workspaceId);
+    const conversation = String(((await teammate(h.handler, other, PRIYA, "POST", `/v1/service/workspaces/${own}/conversations`, {})).body.conversation as { id: string }).id);
+    const task = await teammate(h.handler, other, PRIYA, "POST", `/v1/service/workspaces/${own}/tasks`, { requestId: randomUUID(), conversationId: conversation, prompt: "hello" });
+    const operationId = String((task.body.operation as { id: string } | undefined)?.id ?? (h.db.get(`WORKSPACE#${own}`, "META") as { activeOperationId: string }).activeOperationId);
+    const read = await teammate(h.handler, other, PRIYA, "GET", `/v1/service/workspaces/${own}/operations/${operationId}`);
+    expect(read.status).toBe(200);
+    expect(read.body.operation).toMatchObject({ id: operationId });
+  });
+});
+
 describe("a thread that is not open to the channel (C11, Review Focus 2)", () => {
   it("answers VIEW_ONLY and creates nothing once the thread is view only", async () => {
     const h = await continueThread();
