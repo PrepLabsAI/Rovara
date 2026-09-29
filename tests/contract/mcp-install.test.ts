@@ -232,6 +232,19 @@ describe("installMcp (US7 scenarios 1 and 2)", () => {
     await expect(installMcp("claude-code", { print: false }, { home: await home(), run, version: "0.4.0" })).rejects.toThrow(/claude mcp add failed \(something broke\)[\s\S]*claude mcp add --scope user agentx -- npx/);
   });
 
+  it("says the previous entry was removed, and the exact command to add it back, when add fails after remove (final review M4)", async () => {
+    const run = vi.fn(async (_command: string, args: readonly string[]) => (args[1] === "add" ? { code: 1, stdout: "", stderr: "something broke\n" } : { code: 0, stdout: "Removed agentx", stderr: "" }));
+    const error: unknown = await installMcp("claude-code", { print: false }, { home: await home(), run, version: "0.4.0" }).catch((caught: unknown) => caught);
+    expect((error as Error).message).toContain("claude mcp add failed (something broke)");
+    expect((error as Error).message).toContain("the previous agentx entry was removed; add it back with:\n  claude mcp add --scope user agentx -- npx -y @charterarc/agentx@0.4.0 mcp");
+  });
+
+  it("does not say an entry was removed when there was none to remove", async () => {
+    const run = vi.fn(async (_command: string, args: readonly string[]) => (args[1] === "add" ? { code: 1, stdout: "", stderr: "something broke\n" } : { code: 1, stdout: "", stderr: "not found" }));
+    const error: unknown = await installMcp("claude-code", { print: false }, { home: await home(), run, version: "0.4.0" }).catch((caught: unknown) => caught);
+    expect((error as Error).message).not.toContain("removed");
+  });
+
   it("prints the command to run when Claude Code is not installed", async () => {
     const run = vi.fn(async () => { throw Object.assign(new Error("spawn claude ENOENT"), { code: "ENOENT" }); });
     await expect(installMcp("claude-code", { print: false }, { home: await home(), run, version: "0.4.0" })).rejects.toThrow(/claude mcp add --scope user agentx -- npx -y @charterarc\/agentx@0\.4\.0 mcp/);

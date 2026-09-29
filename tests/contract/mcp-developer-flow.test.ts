@@ -136,6 +136,50 @@ describe("hand off a task from an AI tool and move on (US1)", () => {
   });
 });
 
+describe("busy answers name the right next step (final review M1)", () => {
+  it("tells the AI tool to try the start again with the same request_id when the start's transaction fails", async () => {
+    const harness = await createDeveloperTaskBroker();
+    const { tool } = await signedInClient(harness, MAYA);
+    const original = harness.db.send;
+    let failed = 0;
+    harness.db.send = async (command) => {
+      const input = JSON.stringify(command.input);
+      if (failed === 0 && command.constructor.name === "TransactWriteCommand" && input.includes("DEVTASK#") && input.includes("IDEMPOTENCY")) {
+        failed += 1;
+        const items = (command.input as { TransactItems: unknown[] }).TransactItems;
+        throw Object.assign(new Error("Transaction cancelled"), {
+          name: "TransactionCanceledException",
+          CancellationReasons: items.map((_, index) => ({ Code: index === items.length - 2 ? "ConditionalCheckFailed" : "None" })),
+        });
+      }
+      return original(command);
+    };
+    const answer = await tool("agentx_start_task", { project: "payments", instructions: "Fix the flaky retry test" });
+    expect(failed).toBe(1);
+    expect(answer.error).toEqual({
+      code: "TASK_BUSY",
+      message: "AgentX could not start the task just now; try again with the same request_id",
+      next_step: "try again with the same request_id",
+    });
+  });
+
+  it("tells the AI tool to try the close again, not to wait or cancel, when a setup-failed close fails", async () => {
+    const harness = await createDeveloperTaskBroker();
+    const { tool } = await signedInClient(harness, MAYA);
+    const taskId = String((await tool("agentx_start_task", { project: "payments", instructions: "x" })).value.task_id);
+    const workspaceId = workspaceOf(harness, taskId);
+    await harness.finish(workspaceId, activeOf(harness, workspaceId), "FAILED", { error: "npm ci exited 1" });
+    // The organization counter lost this task's charge: not a race, not already released.
+    (harness.db.get("SLACK_LIMIT#T0BSHLLUGBD", "ORGANIZATION") as Record<string, unknown>).count = 0;
+    const answer = await tool("agentx_close_task", { task_id: taskId });
+    expect(answer.error).toEqual({
+      code: "TASK_BUSY",
+      message: "AgentX could not close this task just now; try agentx_close_task again, and ask an admin if it keeps failing",
+      next_step: "try agentx_close_task again in a moment, and ask an admin if it keeps failing",
+    });
+  });
+});
+
 describe("wait for a small task (US2)", () => {
   it("returns the finished task when it ends inside the wait", async () => {
     const harness = await createDeveloperTaskBroker();

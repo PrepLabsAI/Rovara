@@ -125,6 +125,8 @@ function requestIdFor(context: ToolContext, call: ToolCall, input: Record<string
   return call.requestIds === undefined ? context.newRequestId() : call.requestIds.idFor(content, context.now(), () => context.newRequestId());
 }
 const optional = (value: unknown) => value ?? null;
+/** What makes a cancel the same cancel: the tool and its task (final review M3). */
+const cancelContent = (taskId: unknown): readonly unknown[] => ["agentx_cancel_task", taskId];
 const eventsOf = (input: Record<string, unknown>) => (input.events as number | undefined) ?? DEVELOPER_EVENTS_DEFAULT;
 
 /**
@@ -309,6 +311,8 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
       const text = instructions(input.instructions);
       const id = requestIdFor(context, call, input, ["agentx_continue_task", input.task_id, text]);
       const task = await context.client.continueTask(input.task_id as string, { requestId: id, instructions: text });
+      // A new turn runs: a cancel after it must stop it, not repeat the cancel before it.
+      call.requestIds?.forget(cancelContent(input.task_id));
       return afterAction(context, call, "agentx_continue_task", task, (input.wait_seconds as number | undefined) ?? 0, id);
     },
   },
@@ -319,9 +323,10 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
       "Stops the work one of your tasks is running now, and shows its status after the request. The workspace and its changes stay, so you can still continue the task, open a pull request, or close it with agentx_close_task. Cancelling a task that is not running changes nothing.",
     inputSchema: { task_id: taskIdInput, request_id: requestIdInput },
     outputSchema: TaskShape,
-    async handler(context, input) {
-      // A fresh ID when left out: cancelling again later is a new request, and a repeat is harmless.
-      const task = await context.client.cancelTask(input.task_id as string, (input.request_id as string | undefined) ?? context.newRequestId());
+    async handler(context, input, call) {
+      // The remembered ID when left out (final review M3), as start and continue do: an AI tool's
+      // retry reaches AgentX as the same cancel. A second cancel within 15 minutes is a no-op.
+      const task = await context.client.cancelTask(input.task_id as string, requestIdFor(context, call, input, cancelContent(input.task_id)));
       return { structured: taskOutput(task), text: taskText(task) };
     },
   },

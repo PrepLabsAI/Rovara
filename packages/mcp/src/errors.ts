@@ -40,6 +40,13 @@ export const UPGRADE_AGENTX_STEP = "ask your AgentX admin to upgrade AgentX, or 
 /** CONTROL_PLANE_UNAVAILABLE's next step for a 4xx this CLI does not know: not a connection problem. */
 export const UNEXPECTED_ANSWER_STEP = "ask your AgentX admin, or try again later";
 
+/**
+ * Final review M1: TASK_BUSY's next step when a start or a close, not a running task, met a busy
+ * answer (the start's or close's own transaction failed): the action is tried again, not waited on.
+ */
+export const START_BUSY_STEP = "try again with the same request_id";
+export const CLOSE_BUSY_STEP = "try agentx_close_task again in a moment, and ask an admin if it keeps failing";
+
 export class ToolError extends Error {
   constructor(readonly code: ToolErrorCode, message: string, readonly nextStep: string = NEXT_STEPS[code]) {
     super(message);
@@ -84,13 +91,13 @@ export function signInStep(message: string, fallback: string): string {
 }
 
 /** A control-plane error answer as the tool error of FR-049; `secrets` never appear in its words. */
-export function toolErrorFromResponse(status: number, value: unknown, signInCommand: string, secrets: readonly string[] = []): ToolError {
+export function toolErrorFromResponse(status: number, value: unknown, signInCommand: string, secrets: readonly string[] = [], busyStep: string = NEXT_STEPS.TASK_BUSY): ToolError {
   const error = typeof value === "object" && value !== null ? (value as { error?: { code?: unknown; message?: unknown } }).error : undefined;
   const code = typeof error?.code === "string" ? error.code : undefined;
   const message = plainText(error?.message, `AgentX answered HTTP ${status}`, secrets);
   if (status === 401 || code === "AUTH_REQUIRED") return new ToolError("SIGN_IN_REQUIRED", message, `run ${signInCommand}`);
   if (code !== undefined && PASSED_THROUGH.has(code)) return new ToolError(code as ToolErrorCode, message);
-  if (code !== undefined && BUSY.has(code)) return new ToolError("TASK_BUSY", message);
+  if (code !== undefined && BUSY.has(code)) return new ToolError("TASK_BUSY", message, busyStep);
   if (code !== undefined && INVALID.has(code)) return new ToolError("INVALID_REQUEST", message);
   if (status >= 400 && status < 500) return new ToolError("CONTROL_PLANE_UNAVAILABLE", message, UNEXPECTED_ANSWER_STEP);
   return new ToolError("CONTROL_PLANE_UNAVAILABLE", message);

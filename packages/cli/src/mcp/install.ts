@@ -178,9 +178,15 @@ export async function installMcp(kind: McpClientKind, options: { print: boolean;
     const manual = `run this yourself once Claude Code is installed:\n  ${command}`;
     try {
       // A failed remove means there was no entry to replace.
-      await deps.run("claude", ["mcp", "remove", "--scope", "user", "agentx"]);
+      const removed = (await deps.run("claude", ["mcp", "remove", "--scope", "user", "agentx"])).code === 0;
       const result = await deps.run("claude", add);
-      if (result.code !== 0) throw agentXError("CONFIG_INVALID", `claude mcp add failed (${result.stderr.trim().slice(0, 300) || `exit ${result.code}`}); ${manual}`);
+      if (result.code !== 0) {
+        const failed = `claude mcp add failed (${result.stderr.trim().slice(0, 300) || `exit ${result.code}`})`;
+        // Final review M4: the old entry is gone, so say so, and how to put agentx back.
+        throw agentXError("CONFIG_INVALID", removed
+          ? `${failed}; the previous agentx entry was removed; add it back with:\n  ${command}`
+          : `${failed}; ${manual}`);
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") throw agentXError("CONFIG_INVALID", `Claude Code's claude command was not found; ${manual}`);
       throw error;

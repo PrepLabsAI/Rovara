@@ -31,4 +31,9 @@ export class RequestIdMemory {
     while (this.entries.size > MOST_ENTRIES) this.entries.delete(this.entries.keys().next().value!);
     return id;
   }
+
+  /** Forgets the ID remembered for `content`, so the next identical call is new work. */
+  forget(content: readonly unknown[]): void {
+    this.entries.delete(createHash("sha256").update(JSON.stringify(content)).digest("hex"));
+  }
 }

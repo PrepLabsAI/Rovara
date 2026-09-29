@@ -19,12 +19,17 @@ import {
   type StartDeveloperTaskRequest,
 } from "@agentx/contracts";
 import { z } from "zod";
-import { NEXT_STEPS, ToolError, isMeaningfulCode, plainText, signInStep, toolErrorFromResponse } from "./errors.js";
+import { CLOSE_BUSY_STEP, NEXT_STEPS, START_BUSY_STEP, ToolError, isMeaningfulCode, plainText, signInStep, toolErrorFromResponse } from "./errors.js";
 
 export interface ControlPlaneSession { baseUrl: string; accessToken: string; signInCommand: string }
 
 /** For a read inside a wait: its own deadline, and the tool call's signal, so a cancel ends it at once. */
-export interface CallOptions { signal?: AbortSignal; deadlineMs?: number }
+export interface CallOptions {
+  signal?: AbortSignal;
+  deadlineMs?: number;
+  /** TASK_BUSY's next step for a busy answer to this call (final review M1); the default is to wait or cancel. */
+  busyStep?: string;
+}
 
 export interface ControlPlaneClient {
   /** The environment's agentx-configuration, read without a token. */
@@ -150,7 +155,7 @@ export function httpControlPlaneClient(options: {
       // An outage is tried again; a 5xx that names what is wrong (SLACK_UNAVAILABLE) is the answer.
       if (response.status >= 500 && !isMeaningfulCode(errorCodeOf(value)) && await again(attempt)) continue;
       if (!response.ok) {
-        const error = toolErrorFromResponse(response.status, value, current.signInCommand, secrets);
+        const error = toolErrorFromResponse(response.status, value, current.signInCommand, secrets, call.busyStep);
         if (response.status === 401 && authorized) throw new Refused(error);
         throw error;
       }
@@ -187,7 +192,7 @@ export function httpControlPlaneClient(options: {
       return { env: value.env, apiVersion: value.apiVersion, baseUrl: current.baseUrl };
     },
     projects: () => call(DeveloperProjectsResponseSchema, "GET", "/v1/dev/projects"),
-    startTask: async (request) => task(await call(DeveloperTaskResponseSchema, "POST", "/v1/dev/tasks", request)),
+    startTask: async (request) => task(await call(DeveloperTaskResponseSchema, "POST", "/v1/dev/tasks", request, true, { busyStep: START_BUSY_STEP })),
     getTask: async (taskId, events, options) => task(await call(DeveloperTaskResponseSchema, "GET", path(taskId, `?events=${events}`), undefined, true, options)),
     listTasks: async (query) => {
       const search = new URLSearchParams({ limit: String(query.limit) });
@@ -197,7 +202,7 @@ export function httpControlPlaneClient(options: {
     },
     continueTask: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/continue"), request)),
     cancelTask: async (taskId, requestId) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/cancel"), { requestId })),
-    closeTask: (taskId, requestId) => call(DeveloperCloseResponseSchema, "POST", path(taskId, "/close"), { requestId }),
+    closeTask: (taskId, requestId) => call(DeveloperCloseResponseSchema, "POST", path(taskId, "/close"), { requestId }, true, { busyStep: CLOSE_BUSY_STEP }),
     openPullRequest: (taskId, request) => call(DeveloperPullRequestResponseSchema, "POST", path(taskId, "/pull-requests"), request),
   };
 }

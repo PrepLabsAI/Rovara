@@ -237,6 +237,38 @@ describe("request IDs when the AI tool leaves request_id out (Task 15 fix round 
       expect(DEVELOPER_TOOLS.find((tool) => tool.name === name)?.description, name).toContain("send your own request_id, or repeat the call unchanged");
     }
   });
+  it("sends the same requestId for two identical cancels, so a retry hits AgentX's idempotency (final review M3)", async () => {
+    const cancelTask = vi.fn(async () => view("CANCELLED"));
+    const mcp = await connect({ cancelTask }, { newRequestId: counter() });
+    await mcp.callTool({ name: "agentx_cancel_task", arguments: { task_id: TASK } });
+    await mcp.callTool({ name: "agentx_cancel_task", arguments: { task_id: TASK } });
+    const ids = cancelTask.mock.calls.map((call) => (call as unknown as [string, string])[1]);
+    expect(ids).toHaveLength(2);
+    expect(ids[0]).toBe(ids[1]);
+  });
+
+  it("gives a cancel sent after a continue a new requestId, so it stops the new turn", async () => {
+    const cancelTask = vi.fn(async () => view("CANCELLED"));
+    const continueTask = vi.fn(async () => view("RUNNING"));
+    const mcp = await connect({ cancelTask, continueTask }, { newRequestId: counter() });
+    await mcp.callTool({ name: "agentx_cancel_task", arguments: { task_id: TASK } });
+    await mcp.callTool({ name: "agentx_continue_task", arguments: { task_id: TASK, instructions: "Try again" } });
+    await mcp.callTool({ name: "agentx_cancel_task", arguments: { task_id: TASK } });
+    const ids = cancelTask.mock.calls.map((call) => (call as unknown as [string, string])[1]);
+    expect(ids).toHaveLength(2);
+    expect(ids[0]).not.toBe(ids[1]);
+  });
+
+  it("still gives each close a fresh requestId (final review M3)", async () => {
+    const closeTask = vi.fn(async () => ({ task: view("SUCCEEDED", { closing: true }), closed: false }));
+    const mcp = await connect({ closeTask }, { newRequestId: counter() });
+    await mcp.callTool({ name: "agentx_close_task", arguments: { task_id: TASK } });
+    await mcp.callTool({ name: "agentx_close_task", arguments: { task_id: TASK } });
+    const ids = closeTask.mock.calls.map((call) => (call as unknown as [string, string])[1]);
+    expect(ids).toHaveLength(2);
+    expect(ids[0]).not.toBe(ids[1]);
+  });
+
 });
 
 describe("the other task tools (FR-030)", () => {
