@@ -121,7 +121,7 @@ describe("runDoctor", () => {
 
   it("refuses an environment that is not installed, and the legacy deployment", async () => {
     await expect(runDoctor({ env: "staging", store: new MemoryParameterStore(), services: () => doctorServices() })).rejects.toThrow("environment staging is not installed in this account and region");
-    await expect(runDoctor({ env: "staging", store: await store({ ...SETTINGS, naming: "legacy" }), services: () => doctorServices() })).rejects.toThrow("agentx doctor checks environments installed with agentx init; staging uses the legacy stack names");
+    await expect(runDoctor({ env: "staging", store: await store({ ...SETTINGS, naming: "legacy" }), services: () => doctorServices() })).rejects.toThrow("agentx doctor checks environments installed with agentx init; staging uses the legacy stack names; check its stacks in the CloudFormation console, or run agentx --env <name> doctor for an environment installed with agentx init");
   });
 
   it("skips the budget check, not passes it, when the control-plane stack is missing", async () => {

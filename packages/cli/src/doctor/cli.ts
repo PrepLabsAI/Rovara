@@ -1,11 +1,12 @@
 // The `agentx doctor` command (FR-050, FR-051): prints every check, then exits non-zero when any
-// failed. --json prints the whole report.
+// failed. --json prints the whole report to stdout as {"ok": <no check failed>, "data": <report>};
+// on a failure, stderr also gets agentx's usual {"ok": false, "error": ...} document and the exit
+// code is 2.
 import { agentXError } from "@agentx/contracts";
 import type { Command } from "commander";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import type { EnvironmentSettings } from "../environments/settings.js";
 import type { TextWriter } from "../init/prompts.js";
-import { formatSuccess } from "../output.js";
 import { realDoctorServices } from "./aws.js";
 import { reportText, type DoctorServices } from "./checks.js";
 import { runDoctor } from "./run.js";
@@ -32,7 +33,9 @@ export function registerDoctorCommand(program: Command, context: DoctorCommandCo
         env: globals.env, store,
         services: context.services ?? ((settings) => realDoctorServices({ settings, store, fetch: context.fetch, home: context.home, configDir: globals.configDir, stderr: context.stderr })),
       });
-      context.stdout.write(globals.json ? formatSuccess(report, true) : reportText(report));
+      // With --json, stdout holds one document whose ok is false when any check failed; the error
+      // document on stderr (and exit code 2) says the same, as every agentx error does.
+      context.stdout.write(globals.json ? `${JSON.stringify({ ok: report.failed === 0, data: report })}\n` : reportText(report));
       if (report.failed > 0) {
         throw agentXError("CONFIG_INVALID", `${report.failed} doctor ${report.failed === 1 ? "check" : "checks"} failed; fix what each one names, then run agentx doctor again`);
       }

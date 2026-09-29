@@ -20,9 +20,15 @@ const GROUPS: ReadonlyArray<[DoctorGroup, (context: DoctorContext) => Promise<Do
 
 export async function runDoctor(input: { env: string; store: ParameterStore; services: (settings: EnvironmentSettings) => DoctorServices }): Promise<DoctorReport> {
   const { env, store } = input;
-  const settings = await readEnvironmentSettings(store, env);
+  // The first AWS call: without credentials or a region, the SDK's own words name no next step.
+  let settings: EnvironmentSettings | undefined;
+  try {
+    settings = await readEnvironmentSettings(store, env);
+  } catch (error) {
+    throw agentXError("CONFIG_INVALID", `could not read environment ${env}'s settings (${plainMessage(error)}); sign in to AWS for this account, pass --region if your AWS configuration names none, then run agentx doctor again`);
+  }
   if (settings === undefined) throw agentXError("CONFIG_INVALID", `environment ${env} is not installed in this account and region; check --env and --region`);
-  if (settings.naming !== "environment") throw agentXError("CONFIG_INVALID", `agentx doctor checks environments installed with agentx init; ${env} uses the legacy stack names`);
+  if (settings.naming !== "environment") throw agentXError("CONFIG_INVALID", `agentx doctor checks environments installed with agentx init; ${env} uses the legacy stack names; check its stacks in the CloudFormation console, or run agentx --env <name> doctor for an environment installed with agentx init`);
   const notes: DoctorCheck[] = [];
   const answers = await readInstallAnswers(store, env).catch((error: unknown) => { notes.push(check("stacks", "install answers", "warn", plainMessage(error))); return undefined; });
   const progress = await readInstallProgress(store, env).catch((error: unknown) => { notes.push(check("stacks", "install progress", "warn", plainMessage(error))); return undefined; });

@@ -35,7 +35,8 @@ export interface DoctorServices {
   slackChannels: SlackChannelApi;
   github: GitHubApi;
   vendors: VendorApi;
-  alerts: AlertsApi;
+  /** Read-only: doctor lists subscriptions and reads the budget, and can never subscribe or alarm. */
+  alerts: Pick<AlertsApi, "subscriptions" | "budget">;
   fetch: typeof fetch;
   /** Where project files live (the global --config-dir). */
   configDir: string;
