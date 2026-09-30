@@ -505,6 +505,16 @@ describe("the prerequisite checklist (spec 040 FR-023)", () => {
     ]);
   });
 
+  it("never reports a failing page callback as a CDK bootstrap read failure", async () => {
+    const onCheck = (check: PrerequisiteCheck) => { if (check.label === "CDK bootstrap" && check.ok) throw new Error("the page's card could not be drawn"); };
+    const done = checkPrerequisites({
+      answers: sampleAnswers({ engine: "cdk" }), release: fakeRelease(), caller: { account: "123456789012", arn: "arn:aws:sts::123456789012:assumed-role/Admin/alice" },
+      checks: passingChecks(), prompter: scriptedPrompter([]), write: () => undefined, onCheck,
+    });
+    const message = await done.then(() => "resolved", (error: unknown) => (error as Error).message);
+    expect(message).toBe("the page's card could not be drawn");
+  });
+
   it("reports a failed check with the same words the error lists", async () => {
     const reported: PrerequisiteCheck[] = [];
     const { done } = run(passingChecks({ ec2Quota: async () => 0 }), (check) => { reported.push(check); });

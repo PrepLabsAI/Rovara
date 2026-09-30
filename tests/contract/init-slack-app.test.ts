@@ -254,7 +254,21 @@ describe("Slack app step", () => {
         .rejects.toThrow("slackBotToken" in secretFlags ? "Slack refused the bot token (invalid_auth)" : "could not read --slack-signing-secret-file");
       expect(prompter.asked).not.toContain("Paste the Slack bot token and signing secret again?");
       expect(storedSlack(context).botToken).toBe("unset");
+      // The page still shows the failure on the Slack card.
+      expect(surface.cards.at(-1)).toMatchObject({ id: "slack", status: "failed" });
+      expect(surface.cards.at(-1)?.lines[0]).toContain("slackBotToken" in secretFlags ? "Slack refused the bot token (invalid_auth)" : "could not read --slack-signing-secret-file");
     }
+    // With no retry on the page, the card keeps the terminal's advice to run agentx init again.
+    const context = slackContext(["installed", TEST_SIGNING_SECRET], { surface, secretFlags: { slackBotToken: { envName: "BOT" } }, processEnv: { BOT: TEST_BOT_TOKEN } });
+    await expect(slackAppStep(fakeSlackApi({ botsInfo: async () => ({ ok: false, error: "missing_scope" }) })).run(context, progressHandle()))
+      .rejects.toThrow("Slack bots.info did not return the app id (missing_scope); run agentx init again");
+    expect(surface.cards.at(-1)).toMatchObject({ id: "slack", status: "failed", lines: ["Slack bots.info did not return the app id (missing_scope); run agentx init again", "Nothing was saved."] });
+  });
+
+  it("without a page, a credential from an environment variable that Slack refuses fails with no card", async () => {
+    const context = slackContext(["installed", TEST_SIGNING_SECRET], { secretFlags: { slackBotToken: { envName: "BOT" } }, processEnv: { BOT: TEST_BOT_TOKEN } });
+    await expect(slackAppStep(fakeSlackApi({ authTest: async () => ({ ok: false, error: "invalid_auth" }) })).run(context, progressHandle()))
+      .rejects.toThrow("CONFIG_INVALID: Slack refused the bot token (invalid_auth); copy it again from OAuth & Permissions");
   });
 
   it("reads the token and signing secret from files or environment variables under --yes", async () => {

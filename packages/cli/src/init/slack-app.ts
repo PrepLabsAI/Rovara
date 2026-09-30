@@ -9,7 +9,7 @@ import { createHmac, randomBytes } from "node:crypto";
 import { AgentXError, agentXError, environmentStackName, errorStatus } from "@agentx/contracts";
 import type { InitContext, InitSecrets } from "./context.js";
 import { checkSlackBotToken, checkSlackSigningSecret, fieldCheck, secretFromSource, type SecretSource } from "./prompts.js";
-import { retryOnPage } from "./retry.js";
+import { problemText, retryOnPage } from "./retry.js";
 import type { InitStep, ProgressHandle } from "./steps.js";
 import { slackAppCard, type SlackCardInput, slackUrlsCard, type SlackUrlsCardInput } from "./ui/cards.js";
 
@@ -325,7 +325,17 @@ export function slackAppStep(api: SlackApi): InitStep<InitContext> {
       const bot = await retryOnPage({
         surface: pastedOnPage ? context.surface : undefined, prompter: context.prompter, question: "Paste the Slack bot token and signing secret again?",
         failed: (problem) => show({ stage: "refused", problem }),
-        run: () => collectBot(context, api, progress, show),
+        run: pastedOnPage || context.surface === undefined
+          ? () => collectBot(context, api, progress, show)
+          : async () => {
+            try {
+              return await collectBot(context, api, progress, show);
+            } catch (error) {
+              // No paste again here, so the card keeps the terminal's whole advice.
+              show({ stage: "refused", problem: problemText(error), retry: false });
+              throw error;
+            }
+          },
       });
 
       // Read, merge, write: a concurrent writer (this step alongside `agentx signin enable slack`)

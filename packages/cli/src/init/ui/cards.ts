@@ -95,7 +95,9 @@ export type SlackCardInput =
   | { stage: "create"; appName: string; createUrl: string }
   | { stage: "credentials"; appName: string }
   | { stage: "bot"; user: string; team: string }
-  | { stage: "refused"; problem: string }
+  /** `retry: false` when the page cannot offer a paste again: the problem is shown whole, with its
+   * advice to run agentx init again. */
+  | { stage: "refused"; problem: string; retry?: false }
   | { stage: "approval"; appName: string; rerun: string }
   | { stage: "done"; appId: string; teamId: string };
 
@@ -121,7 +123,7 @@ export function slackAppCard(input: SlackCardInput): WizardCard {
     case "bot": return { ...base, status: "waiting", lines: [`Slack says this token belongs to the bot @${input.user} in workspace ${input.team}.`] };
     case "refused": return {
       ...base, status: "failed",
-      lines: [onPageProblem(input.problem), ...(/nothing was saved/i.test(input.problem) ? [] : ["Nothing was saved."])],
+      lines: [input.retry === false ? input.problem : onPageProblem(input.problem), ...(/nothing was saved/i.test(input.problem) ? [] : ["Nothing was saved."])],
     };
     case "approval": return { ...base, status: "waiting", lines: [`Slack is waiting for a workspace admin to approve "${input.appName}".`, `Once it is installed, run ${input.rerun}; it continues here.`] };
     case "done": return { ...base, status: "ok", lines: [`Slack app ${input.appId} is installed in workspace ${input.teamId}.`] };

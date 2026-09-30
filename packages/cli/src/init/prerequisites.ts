@@ -255,15 +255,18 @@ export async function checkPrerequisites(input: {
     const npx = await checks.commandVersion("npx");
     if (npx === undefined) failed("npx", "the cdk engine needs npx (it comes with npm)");
     else input.onCheck?.({ label: "npx", ok: true, detail: `npx ${npx.trim()}` });
+    let bootstrapRead = false;
     try {
       needsBootstrap = !(await checks.cdkBootstrapped());
-      if (!needsBootstrap) input.onCheck?.({ label: "CDK bootstrap", ok: true, detail: `CDK is bootstrapped in ${region}` });
+      bootstrapRead = true;
     } catch (error) {
       // Item 4: a failed read of the bootstrap parameter (anything other than "not bootstrapped",
       // which cdkBootstrapped() already turns into `false`) is one more collected problem, not an
       // early abort: every other check still runs, and cdk bootstrap is not offered this run.
       failed("CDK bootstrap", `could not check CDK bootstrap: ${errorMessage(error)}; check your credentials can read SSM`);
     }
+    // Outside the try: a failing page callback is never reported as a failed bootstrap read.
+    if (bootstrapRead && !needsBootstrap) input.onCheck?.({ label: "CDK bootstrap", ok: true, detail: `CDK is bootstrapped in ${region}` });
   }
 
   // cdk bootstrap creates the CDKToolkit stack (Review Focus 5's sibling concern): offered only
