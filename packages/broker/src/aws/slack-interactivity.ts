@@ -20,6 +20,7 @@ import {
   pendingConfirmationFromItem,
   queuedBehindAttributes,
   slackThreadSubject,
+  type AdminChangePressEvent,
   type PendingConfirmation,
   type SlackRequestMessage,
   type SlackThread,
@@ -143,9 +144,9 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
     }
     // Spec 025 E14: an admin change's buttons live in a direct message (a D... channel), which the
     // thread-based parsing below refuses; they are read here, and only these two action IDs.
-    const press = dependencies.adminChange === undefined ? undefined : adminChangePress(payload);
-    if (press !== undefined && dependencies.adminChange !== undefined) {
-      const adminChange = dependencies.adminChange;
+    const adminChange = dependencies.adminChange;
+    const press = adminChange === undefined ? undefined : adminChangePress(payload);
+    if (press !== undefined && adminChange !== undefined) {
       const answer = async (text: string): Promise<void> => {
         try {
           await dependencies.respondEphemeral?.(press.responseUrl, text);
@@ -486,6 +487,14 @@ export function createAwsSlackInteractivityHandler() {
   });
 }
 
+/** The broker's press event (E14), exactly what `isAdminChangePressEvent` accepts. */
+export function adminChangePressEvent(press: Parameters<NonNullable<SlackInteractivityDependencies["adminChange"]>["press"]>[0]): AdminChangePressEvent {
+  return {
+    source: "agentx.slack-ingress", action: "admin-change-press", changeId: press.changeId, click: press.click, slackUserId: press.slackUserId,
+    ...(press.teamId === undefined ? {} : { teamId: press.teamId }),
+  };
+}
+
 /**
  * The press hand-over for the ingress Lambda: an asynchronous invoke of the broker, so Slack's
  * 3-second answer never waits on an apply (the broker records the outcome), and a by-key read of
@@ -501,7 +510,7 @@ function awsAdminChangePress(
     async press(press) {
       const response = await lambda.send(new InvokeCommand({
         FunctionName: brokerFunctionName, InvocationType: "Event",
-        Payload: Buffer.from(JSON.stringify({ source: "agentx.slack-ingress", action: "admin-change-press", ...press })),
+        Payload: Buffer.from(JSON.stringify(adminChangePressEvent(press))),
       }));
       // An asynchronous invoke that Lambda accepted answers 202.
       if (response.StatusCode !== 202) throw Object.assign(new Error("broker invoke was not accepted"), { name: "BrokerInvokeNotAccepted" });

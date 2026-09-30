@@ -3,10 +3,11 @@
 // presser hears at once that it was received; every other button keeps today's handling.
 import { createHmac } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
+import { isAdminChangePressEvent } from "../../packages/contracts/src/index.js";
 import {
   ADMIN_CHANGE_CANCEL_RECEIVED_TEXT,
   ADMIN_CHANGE_RECEIVED_TEXT,
-  UNKNOWN_BUTTON_TEXT,
+  adminChangePressEvent,
   createSlackInteractivityHandler,
   type SlackActionHandler,
 } from "../../packages/broker/src/aws/slack-interactivity.js";
@@ -94,7 +95,6 @@ describe("an admin change press (E14)", () => {
     expect(press).not.toHaveBeenCalled();
     expect(handle).not.toHaveBeenCalled();
     expect(respondEphemeral).not.toHaveBeenCalled();
-    expect(respondEphemeral).not.toHaveBeenCalledWith(expect.anything(), UNKNOWN_BUTTON_TEXT);
   });
 
   it("never logs or echoes the Slack token, signature or payload, and its answers carry no em dash", async () => {
@@ -111,5 +111,14 @@ describe("an admin change press (E14)", () => {
     for (const planted of [BOT_TOKEN, SIGNING, request.headers["x-slack-signature"], "hooks.slack.com", "AgentX needs your confirmation", "boom"]) expect(everything).not.toContain(planted);
     expect(lines).toContainEqual(JSON.stringify({ name: "admin_change.press_failed", fields: { changeId: CHANGE, errorName: "Error" } }));
     for (const text of [...answers, ADMIN_CHANGE_RECEIVED_TEXT, ADMIN_CHANGE_CANCEL_RECEIVED_TEXT]) expect(text).not.toContain("—");
+  });
+
+  it("builds the broker's press event exactly as the broker accepts it (strict schema)", () => {
+    const withTeam = adminChangePressEvent({ changeId: CHANGE, click: "confirm", slackUserId: "U0ADA00001", teamId: "T0BSHLLUGBD" });
+    expect(withTeam).toEqual({ source: "agentx.slack-ingress", action: "admin-change-press", changeId: CHANGE, click: "confirm", slackUserId: "U0ADA00001", teamId: "T0BSHLLUGBD" });
+    expect(isAdminChangePressEvent(withTeam)).toBe(true);
+    const withoutTeam = adminChangePressEvent({ changeId: CHANGE, click: "cancel", slackUserId: "U0ADA00001" });
+    expect(withoutTeam).not.toHaveProperty("teamId");
+    expect(isAdminChangePressEvent(JSON.parse(JSON.stringify(withoutTeam)))).toBe(true);
   });
 });
