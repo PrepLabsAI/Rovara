@@ -186,13 +186,14 @@ export class ControlPlaneApi implements OrchestrationApi, OperationPollingTransp
    * operation that already finished answers as a duplicate with its own status, and nothing is
    * queued; otherwise the answer is the queued cancel operation.
    */
-  async cancelOperation(input: { workspaceId: string; operationId: string }): Promise<{ duplicate: boolean; status: string }> {
+  async cancelOperation(input: { workspaceId: string; operationId: string }): Promise<{ duplicate: true; status: string } | { duplicate: false }> {
     this.assertWorkspace(input.workspaceId);
     const value = object(await this.request(
       `/v1/workspaces/${this.workspaceId}/operations/${encodeURIComponent(input.operationId)}/cancel`,
       { method: "POST" },
     ));
-    return { duplicate: value.duplicate === true, status: OperationSchema.parse(value.operation).status };
+    // Only the finished target's status is read, so a queued cancel never fails on the rest of the answer.
+    return value.duplicate === true ? { duplicate: true, status: OperationSchema.parse(value.operation).status } : { duplicate: false };
   }
 
   async getOperation(operationId: string): Promise<Operation> {

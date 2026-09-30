@@ -143,6 +143,12 @@ describe("the Slack service's thread client", () => {
       expect(db.find((item) => item.entityType === "OUTBOX" && (item.invocation as { kind?: string } | undefined)?.kind === "cancel")).toHaveLength(0);
     });
 
+    it("counts a queued cancel as requested without reading the rest of the broker's answer", async () => {
+      const signedFetch: typeof fetch = async () => new Response(JSON.stringify({ operation: { id: randomUUID() }, duplicate: false }), { status: 202 });
+      const api = createThreadApi({ controlPlaneUrl: "https://agentx.example.test", signedFetch });
+      expect(await api.cancelOperation!(randomUUID(), randomUUID())).toEqual({ outcome: "requested" });
+    });
+
     it("throws the broker's refusal, so the caller can log it", async () => {
       const { handler, workspaceId } = await runningTask();
       await expect(threadApi(handler).cancelOperation!(workspaceId, randomUUID())).rejects.toMatchObject({ code: "NOT_FOUND" });

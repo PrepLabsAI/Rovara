@@ -601,7 +601,7 @@ describe("stopping the task nobody waits on any more (issue 167)", () => {
     expect(cancelOperation).toHaveBeenCalledWith(workspaceId, OPERATION);
     expect(order).toEqual(["cancel", "forget"]);
     expect(posts.at(-1)).toBe(`AgentX could not process this request: Slack chat.postMessage failed: HTTP 500\n\n${ABANDONED_TASK_FINISHED_TEXT}`);
-    expect(ABANDONED_TASK_FINISHED_TEXT).toBe("The task this request started had already finished. Ask me again if you want its result.");
+    expect(ABANDONED_TASK_FINISHED_TEXT).toBe("The task this request started had already finished. Ask me again if you still want it.");
     expect(logs).toContainEqual({ event: "turn.task_cancel_skipped", fields: { eventId: "EvWORK000058", workspaceId, operationId: OPERATION, status: "SUCCEEDED" } });
     expect(logs.some((entry) => entry.event === "turn.task_cancelled")).toBe(false);
     expect(meta.activeTurn).toBeUndefined();

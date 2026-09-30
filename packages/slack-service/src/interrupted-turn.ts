@@ -35,7 +35,7 @@ export const HANDOFF_FINAL_CANCEL_FAILED_TEXT = "AgentX restarted while working 
 /** Issue 167: follows the last attempt's failure notice once the task it started was asked to stop. */
 export const ABANDONED_TASK_TEXT = "I asked the task this request started to stop. Ask me again if you still want it.";
 /** Issue 167: follows the last attempt's failure notice when that task had already finished. */
-export const ABANDONED_TASK_FINISHED_TEXT = "The task this request started had already finished. Ask me again if you want its result.";
+export const ABANDONED_TASK_FINISHED_TEXT = "The task this request started had already finished. Ask me again if you still want it.";
 /** Issue 167: follows the last attempt's failure notice when that task could not be cancelled. */
 export const ABANDONED_TASK_CANCEL_FAILED_TEXT = "I could not stop the task this request started, so it may still finish on its own. Ask me again if you still want it.";
 export const RESUME_NOT_FOUND_TEXT = "AgentX restarted while working on this, and I can no longer find the task it started, so I can't post its result. Ask me again if you still want it.";
