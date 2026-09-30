@@ -2,6 +2,7 @@
 // responses with the non-strict schemas here, so a newer control plane can add fields.
 import { z } from "zod";
 import { EnvironmentNameSchema } from "./environments.js";
+import { looseCopy } from "./loose.js";
 import { DeveloperTaskPolicySchema } from "./project.js";
 import { SlackChannelIdSchema, SlackUserIdSchema } from "./slack.js";
 import { WorkspaceStatusSchema } from "./workspace.js";
@@ -71,40 +72,6 @@ export const DeveloperSummarySchema = z.object({
   email: z.string().email().optional(),
 });
 export type DeveloperSummary = z.infer<typeof DeveloperSummarySchema>;
-
-interface IntrospectableDef {
-  type: string;
-  innerType?: z.ZodTypeAny;
-  defaultValue?: unknown;
-}
-
-/**
- * F6: rebuilds a zod object schema so every nested object accepts unknown keys, not only the
- * outermost one (a plain `.passthrough()` only loosens the schema it is called on; a strict
- * sub-object such as `DeveloperTaskPolicySchema.shareMode`, wrapped in `.default()`, stays
- * strict). Walks `.shape` recursively, unwrapping `.default()`/`.optional()`/`.nullable()` and
- * rewrapping the loosened inner type the same way, so the field list is still defined exactly
- * once, in the schema passed in.
- */
-function looseCopy<Output>(schema: z.ZodType<Output>): z.ZodType<Output> {
-  const def = (schema as unknown as { _zod: { def: IntrospectableDef } })._zod.def;
-  if (def.type === "object") {
-    const shape = (schema as unknown as { shape: Record<string, z.ZodTypeAny> }).shape;
-    const loosened: Record<string, z.ZodTypeAny> = {};
-    for (const [key, value] of Object.entries(shape)) loosened[key] = looseCopy(value);
-    return z.object(loosened).passthrough() as unknown as z.ZodType<Output>;
-  }
-  if (def.type === "default" && def.innerType) {
-    return looseCopy(def.innerType).default(def.defaultValue as never) as unknown as z.ZodType<Output>;
-  }
-  if (def.type === "optional" && def.innerType) {
-    return looseCopy(def.innerType).optional() as unknown as z.ZodType<Output>;
-  }
-  if (def.type === "nullable" && def.innerType) {
-    return looseCopy(def.innerType).nullable() as unknown as z.ZodType<Output>;
-  }
-  return schema;
-}
 
 /**
  * F6: a non-strict copy of `DeveloperTaskPolicySchema` (`project.ts`), used only to parse a

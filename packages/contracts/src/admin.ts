@@ -5,6 +5,7 @@
 // object, so each top-level response schema is `.passthrough()` to keep them.
 import { z } from "zod";
 import { DeveloperTaskFailureCategorySchema } from "./developer-tasks.js";
+import { looseCopy } from "./loose.js";
 import { DeveloperTaskPolicySchema } from "./project.js";
 import { SlackChannelIdSchema, SlackTeamIdSchema, SlackUserIdSchema } from "./slack.js";
 import { WorkspaceStatusSchema } from "./workspace.js";
@@ -28,16 +29,34 @@ const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
 const Uuid = z.string().uuid();
 const Hex64 = z.string().regex(/^[a-f0-9]{64}$/);
 
+/**
+ * An ISO instant written one way (millisecond precision), so index keys sort by time whatever
+ * precision the caller used. Refuses a time that only looks like ISO, such as month 13 or 30
+ * February (Date would roll it over, so the date and time must round-trip unchanged).
+ */
+function canonicalInstant(at: string): string {
+  const refuse = (): never => {
+    throw new Error("an index key needs an ISO time such as 2026-09-30T08:15:00.000Z");
+  };
+  if (!ISO.test(at)) return refuse();
+  const ms = Date.parse(at);
+  if (Number.isNaN(ms)) return refuse();
+  const canonical = new Date(ms).toISOString();
+  if (canonical.slice(0, 19) !== at.slice(0, 19)) return refuse();
+  return canonical;
+}
+
 /** The UTC day an index item belongs to. */
 export function indexDay(at: string): string {
-  if (!ISO.test(at)) throw new Error("an index key needs an ISO time such as 2026-09-30T08:15:00.000Z");
-  return at.slice(0, 10);
+  return canonicalInstant(at).slice(0, 10);
 }
 export function failureIndexKey(endedAt: string, operationId: string): { pk: string; sk: string } {
-  return { pk: `FAILURE#${indexDay(endedAt)}`, sk: `${endedAt}#${operationId}` };
+  const at = canonicalInstant(endedAt);
+  return { pk: `FAILURE#${indexDay(at)}`, sk: `${at}#${operationId}` };
 }
 export function usageIndexKey(at: string, operationId: string): { pk: string; sk: string } {
-  return { pk: `USAGE#${indexDay(at)}`, sk: `${at}#${operationId}` };
+  const time = canonicalInstant(at);
+  return { pk: `USAGE#${indexDay(time)}`, sk: `${time}#${operationId}` };
 }
 /**
  * A6 (Q5, owner answer 2026-09-30): the TTL attribute of every failure and usage item. Named
@@ -45,8 +64,7 @@ export function usageIndexKey(at: string, operationId: string): { pk: string; sk
  */
 export const INDEX_EXPIRY_ATTRIBUTE = "indexExpiresAt";
 export function indexExpiresAt(at: string): number {
-  indexDay(at);
-  return Math.floor(Date.parse(at) / 1000) + ADMIN_INDEX_RETENTION_DAYS * 86_400;
+  return Math.floor(Date.parse(canonicalInstant(at)) / 1000) + ADMIN_INDEX_RETENTION_DAYS * 86_400;
 }
 /** A3: one row per registered project, written with each registration from 25d on. */
 export function projectCatalogKey(name: string): { pk: string; sk: string } {
@@ -56,13 +74,24 @@ export function projectCatalogKey(name: string): { pk: string; sk: string } {
 export const AdminOriginSchema = z.enum(["slack", "ai_tool"]);
 export type AdminOrigin = z.infer<typeof AdminOriginSchema>;
 
-/** A5: who asked for the operation, as the operation record says. */
+const RequesterSlackShape = { kind: z.literal("slack"), teamId: SlackTeamIdSchema, userId: SlackUserIdSchema };
+const RequesterDeveloperShape = { kind: z.literal("developer"), developerId: Hex64, provider: z.enum(["slack", "oidc"]), name: z.string().min(1).max(200).optional() };
+const RequesterNoneShape = { kind: z.literal("none") };
+
+/** A5: who asked for the operation, as the operation record says. Strict: the index side. */
 export const AdminRequesterSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("slack"), teamId: SlackTeamIdSchema, userId: SlackUserIdSchema }).strict(),
-  z.object({ kind: z.literal("developer"), developerId: Hex64, provider: z.enum(["slack", "oidc"]), name: z.string().min(1).max(200).optional() }).strict(),
-  z.object({ kind: z.literal("none") }).strict(),
+  z.object(RequesterSlackShape).strict(),
+  z.object(RequesterDeveloperShape).strict(),
+  z.object(RequesterNoneShape).strict(),
 ]);
 export type AdminRequester = z.infer<typeof AdminRequesterSchema>;
+
+/** The same requester on the wire: the kinds stay closed, a newer control plane may add fields. */
+const AdminRequesterWireSchema = z.discriminatedUnion("kind", [
+  z.object(RequesterSlackShape).passthrough(),
+  z.object(RequesterDeveloperShape).passthrough(),
+  z.object(RequesterNoneShape).passthrough(),
+]);
 
 const IndexIdentity = {
   operationId: Uuid,
@@ -86,6 +115,9 @@ export const FailureIndexRecordSchema = z.object({
 });
 export type FailureIndexRecord = z.infer<typeof FailureIndexRecordSchema>;
 
+/** A failure as the failures answer carries it: the stored record's fields, loose all the way down. */
+const AdminFailureSchema = FailureIndexRecordSchema.extend({ requester: AdminRequesterWireSchema }).passthrough();
+
 export const UsageIndexRecordSchema = z.object({
   ...IndexIdentity,
   at: z.string().regex(ISO),
@@ -104,7 +136,8 @@ export const AdminProjectSchema = z.object({
   repositories: z.array(z.object({ name: z.string(), url: z.string() })),
   runtimeMode: z.string(),
   connectors: z.array(z.object({ name: z.string(), type: z.string() })),
-  developerTasks: DeveloperTaskPolicySchema,
+  /** A loose copy (looseCopy), so a new policy field at any depth does not fail the answer. */
+  developerTasks: looseCopy(DeveloperTaskPolicySchema),
 });
 export const AdminProjectsResponseSchema = z.object({ projects: z.array(AdminProjectSchema) }).passthrough();
 export type AdminProjectsResponse = z.infer<typeof AdminProjectsResponseSchema>;
@@ -122,7 +155,7 @@ export const AdminBindingsResponseSchema = z.object({ bindings: z.array(AdminBin
 export type AdminBindingsResponse = z.infer<typeof AdminBindingsResponseSchema>;
 
 export const AdminFailuresResponseSchema = z.object({
-  failures: z.array(FailureIndexRecordSchema),
+  failures: z.array(AdminFailureSchema),
   since: z.string(),
   until: z.string(),
   skipped: z.number().int().nonnegative().optional(),

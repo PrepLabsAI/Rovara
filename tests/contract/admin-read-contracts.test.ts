@@ -4,10 +4,16 @@ import { describe, expect, it } from "vitest";
 import {
   ADMIN_API_VERSION,
   ADMIN_INDEX_RETENTION_DAYS,
+  ADMIN_LIST_MAX,
+  ADMIN_USAGE_READ_MAX,
+  AdminBindingsResponseSchema,
+  AdminFailuresResponseSchema,
   AdminHealthResponseSchema,
   AdminMeResponseSchema,
+  AdminProjectsResponseSchema,
   AdminRequesterSchema,
   AdminUsageGroupBySchema,
+  AdminUsageResponseSchema,
   AdminWorkspacesResponseSchema,
   DEVELOPER_API_VERSION,
   FailureIndexRecordSchema,
@@ -105,5 +111,78 @@ describe("DeveloperIdentity's new invoke requests (A11 to A13)", () => {
     expect(SlackUserByEmailRequestSchema.safeParse({ kind: "slack-user-by-email", email: "not an email" }).success).toBe(false);
     expect(SlackAuthCheckRequestSchema.parse({ kind: "slack-auth-check" })).toEqual({ kind: "slack-auth-check" });
     expect(SlackAuthCheckRequestSchema.safeParse({ kind: "slack-auth-check", token: "xoxb-1" }).success).toBe(false);
+  });
+});
+
+// Task 1 fix round 1: review findings (Important 1, Minors 1, 2 and 5).
+const FAILURE = {
+  operationId: OPERATION, workspaceId: WORKSPACE, project: "payments", origin: "ai_tool",
+  requester: { kind: "developer", developerId: "d".repeat(64), provider: "slack", name: "Maya Chen" },
+  kind: "prepare", status: "FAILED", category: "setup_failed", error: "npm ci exited 1", endedAt: ENDED,
+};
+const PROJECT = {
+  name: "payments", latestRevision: 3, registeredAt: ENDED,
+  repositories: [{ name: "api", url: "https://github.com/example/api" }], runtimeMode: "ec2-ebs",
+  connectors: [{ name: "github", type: "github" }],
+  developerTasks: { enabled: true, share: "optional", shareMode: { default: "view", allowContinue: true }, channelMembersMayUse: true },
+};
+
+describe("the wire answers read fields a newer control plane adds at any depth (Important 1)", () => {
+  it("reads a project whose task policy has a new field, also inside shareMode", () => {
+    const answer = AdminProjectsResponseSchema.parse({
+      projects: [{ ...PROJECT, developerTasks: { ...PROJECT.developerTasks, newPolicyField: 1, shareMode: { default: "view", allowContinue: true, newShareField: true } } }],
+    });
+    expect(answer.projects[0]?.developerTasks).toMatchObject({ enabled: true });
+  });
+
+  it("reads a failure whose requester has a new field, while the stored record stays strict", () => {
+    const withNewRequesterField = { ...FAILURE, requester: { ...FAILURE.requester, team: "platform" } };
+    const answer = AdminFailuresResponseSchema.parse({ failures: [withNewRequesterField], since: ENDED, until: ENDED });
+    expect(answer.failures[0]?.requester).toMatchObject({ kind: "developer" });
+    expect(AdminFailuresResponseSchema.parse({ failures: [{ ...FAILURE, requester: { kind: "none", why: "admin" } }], since: ENDED, until: ENDED }).failures).toHaveLength(1);
+    expect(FailureIndexRecordSchema.safeParse(withNewRequesterField).success).toBe(false);
+    expect(AdminRequesterSchema.safeParse({ kind: "none", why: "admin" }).success).toBe(false);
+  });
+
+  it("keeps closed enums closed on the wire", () => {
+    expect(AdminFailuresResponseSchema.safeParse({ failures: [{ ...FAILURE, category: "cosmic_rays" }], since: ENDED, until: ENDED }).success).toBe(false);
+    expect(AdminFailuresResponseSchema.safeParse({ failures: [{ ...FAILURE, requester: { kind: "robot" } }], since: ENDED, until: ENDED }).success).toBe(false);
+  });
+
+  it("keeps an extra top-level field on every admin answer (Minor 5)", () => {
+    const answers: Array<[{ parse: (value: unknown) => unknown }, Record<string, unknown>]> = [
+      [AdminProjectsResponseSchema, { projects: [PROJECT] }],
+      [AdminBindingsResponseSchema, { bindings: [{ teamId: "T0BSHLLUGBD", channelId: "C0123456789", projectName: "payments", updatedAt: ENDED }], notices: [] }],
+      [AdminFailuresResponseSchema, { failures: [FAILURE], since: ENDED, until: ENDED }],
+      [AdminUsageResponseSchema, { groupBy: "day", since: ENDED, until: ENDED, groups: [], truncated: false }],
+      [AdminWorkspacesResponseSchema, { workspaces: [], limits: { perPerson: 3, perOrganization: 20, source: "setting" }, counts: { organization: 0 }, truncated: false }],
+      [AdminHealthResponseSchema, { version: { developerApi: "1.2", adminApi: "1.0" }, alarms: [], alarmsCheck: { status: "ok" }, deadLetterQueues: [], slack: { status: "ok" }, github: { status: "ok" }, workerModes: [], workspaces: {}, workspacesTruncated: false }],
+      [AdminMeResponseSchema, { issuer: "i", subject: "s", slack: { linked: true, userId: "U0PRIYA001" } }],
+    ];
+    for (const [schema, answer] of answers) expect(schema.parse({ ...answer, extra: "kept" })).toMatchObject({ extra: "kept" });
+  });
+
+  it("pins the list and usage read limits (Minor 5)", () => {
+    expect(ADMIN_LIST_MAX).toBe(100);
+    expect(ADMIN_USAGE_READ_MAX).toBe(5_000);
+  });
+});
+
+describe("the index keys take only real instants, written one way (Minors 1 and 2)", () => {
+  it("writes each time at millisecond precision so keys sort by time", () => {
+    expect(failureIndexKey("2026-09-30T08:15:00Z", OPERATION).sk).toBe(`2026-09-30T08:15:00.000Z#${OPERATION}`);
+    expect(usageIndexKey("2026-09-30T08:15:00.5Z", OPERATION).sk).toBe(`2026-09-30T08:15:00.500Z#${OPERATION}`);
+    const earlier = failureIndexKey("2026-09-30T08:15:00Z", OPERATION).sk;
+    const later = failureIndexKey("2026-09-30T08:15:00.500Z", OPERATION).sk;
+    expect(earlier < later).toBe(true);
+  });
+
+  it("refuses a time that looks like ISO but is no real instant", () => {
+    for (const at of ["2026-13-45T99:00:00Z", "2026-02-30T08:15:00Z"]) {
+      expect(() => indexDay(at)).toThrow("an index key needs an ISO time");
+      expect(() => failureIndexKey(at, OPERATION)).toThrow("an index key needs an ISO time");
+      expect(() => usageIndexKey(at, OPERATION)).toThrow("an index key needs an ISO time");
+      expect(() => indexExpiresAt(at)).toThrow("an index key needs an ISO time");
+    }
   });
 });
