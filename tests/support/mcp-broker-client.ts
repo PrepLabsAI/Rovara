@@ -44,7 +44,7 @@ export async function signedInClient(harness: Harness, who: Developer | undefine
   const stderr: string[] = [];
   let now = 0;
   const server = agentxMcpServer({
-    home, tokenStore, fetch: mcpBrokerFetch(harness), adminSignedIn: async () => false, stderr: { write: (text: string) => stderr.push(text) },
+    home, tokenStore, fetch: mcpBrokerFetch(harness), adminSignedIn: async () => false, adminSession: async () => undefined, stderr: { write: (text: string) => stderr.push(text) },
     clock: { now: () => now, sleep: async (ms) => { now += ms; await onSleep(); } },
   });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();

@@ -4,13 +4,18 @@ import { randomUUID } from "node:crypto";
 import type { Readable, Writable } from "node:stream";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { compatibilityChecker, createAgentXMcpServer, httpControlPlaneClient, type ControlPlaneClient } from "@agentx/mcp";
+import {
+  ADMIN_READ_TOOLS, NEXT_STEPS, NOT_OFFERED, UPGRADE_AGENTX_STEP, ToolError, adminApiFits, compatibilityChecker, createAgentXMcpServer, httpAdminClient,
+  httpControlPlaneClient, type AdminOffer, type AdminSession, type ControlPlaneClient,
+} from "@agentx/mcp";
 import { developerAccessToken, type DeveloperSessionDeps } from "../developer/session.js";
 import { CLI_VERSION } from "../version.js";
 
 export interface McpServeDeps extends DeveloperSessionDeps {
   env?: string;
   adminSignedIn(env: string | undefined): Promise<boolean>;
+  /** Spec 025 A14: this computer's unexpired admin sign-in for the environment, or undefined. Never refreshed (Q4). */
+  adminSession(env: string | undefined): Promise<AdminSession | undefined>;
   stderr: { write(text: string): unknown };
   clock?: { now(): number; sleep(ms: number, signal: AbortSignal): Promise<void> };
 }
@@ -58,15 +63,35 @@ export function agentxMcpServer(deps: McpServeDeps): McpServer {
   // One checker for the server's life, outside the per-call context, so its 10-minute cache holds.
   const compatibility = compatibilityChecker(client, { now });
   const log = stderrLog(deps);
+  // A14: the admin sign-in as stored; an absent or expired one is ADMIN_REQUIRED, never refreshed (Q4).
+  const admin = httpAdminClient({
+    fetch: deps.fetch,
+    session: async () => {
+      const session = await deps.adminSession(deps.env);
+      if (session === undefined) throw NOT_OFFERED;
+      return session;
+    },
+  });
+  // A15 and A1: offered with an unexpired admin sign-in and an admin API that fits. The checker's
+  // 10-minute cache holds, so the 30-second check does not read the configuration each time.
+  const adminOffer = async (): Promise<AdminOffer> => {
+    if ((await deps.adminSession(deps.env)) === undefined) return { admin: NOT_OFFERED };
+    const fit = adminApiFits((await compatibility()).adminApiVersion);
+    if (fit !== "fits") return { admin: new ToolError("UPGRADE_REQUIRED", "this AgentX has no admin tools for this CLI yet", fit === "incompatible" ? NEXT_STEPS.UPGRADE_REQUIRED : UPGRADE_AGENTX_STEP) };
+    return { admin: undefined };
+  };
   return createAgentXMcpServer({
     version: CLI_VERSION,
     log,
+    adminTools: ADMIN_READ_TOOLS,
+    adminOffer,
     context: (clientName) => ({
       client,
       clientName,
       serverVersion: CLI_VERSION,
       adminSignedIn: () => deps.adminSignedIn(deps.env),
       compatibility,
+      admin,
       now,
       sleep: (ms: number, signal: AbortSignal) => (deps.clock === undefined ? abortableSleep(ms, signal) : deps.clock.sleep(ms, signal)),
       newRequestId: randomUUID,
