@@ -57,8 +57,8 @@ function lastLines(text: string, limit: number): string {
 }
 
 /**
- * A command's output as the worker stores it (#170): redacted first, then cut to its last `limit`
- * characters, from a whole line, so a secret straddling the cut leaves no fragment behind.
+ * A command's output as the worker stores it (#170): redacted first, then cut to at most its last
+ * `limit` bytes (so also characters), from a whole line, so a secret straddling the cut leaves no fragment behind.
  */
 export function storedCommandOutput(text: string, limit = MAX_COMMAND_OUTPUT_BYTES): string {
   return redactedTail(text, limit);

@@ -473,6 +473,12 @@ describe("publication check results (#170)", () => {
     // Cut first, the last 30 characters would keep the token's end, which no pattern matches.
     expect(storedCommandOutput(`${"x".repeat(10)}${TOKEN}\nlast\n`, 30)).toBe(`${"x".repeat(10)}[REDACTED]\nlast\n`);
     expect(storedCommandOutput(`${"a".repeat(50)}\nsecond ${TOKEN}\nthird\n`, 40)).toBe("second [REDACTED]\nthird\n");
+    // A Git error cut to its last 16 KiB, with a token across the cut.
+    // Cut first, the last 16 KiB would start 20 characters into the token.
+    const gitError = `${TOKEN}\n${"r".repeat(16_384 + 20 - TOKEN.length - 16)}\nfatal: failed\n`;
+    const shownError = storedCommandOutput(gitError, 16_384);
+    expect(shownError).not.toContain(TOKEN.slice(-10));
+    expect(shownError.endsWith("fatal: failed\n")).toBe(true);
   });
 
   it("redacts a Git error before it is cut (#170 review)", async () => {

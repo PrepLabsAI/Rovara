@@ -380,6 +380,20 @@ describe("the collected process under the devcontainer CLI (#154)", () => {
     expect(result.stdout.endsWith("after the key\n")).toBe(true);
   });
 
+  it("redacts a private key that the cut splits in output of multi-byte characters (#170 review)", () => {
+    // Each filler line is 3 bytes a character, so a cut counted in characters would keep the key's
+    // end without its BEGIN line.
+    const collector = tailCollector(200, 60);
+    collector.add(Buffer.from("日本語日本語日本語\n".repeat(20)));
+    collector.add(Buffer.from("-----BEGIN RSA PRIVATE KEY-----\nKEYBODY1\nKEYBODY2\n-----END RSA PRIVATE KEY-----\n"));
+    // The last 260 bytes kept start inside the key, after its BEGIN line.
+    collector.add(Buffer.from("日本語日本語日本語\n".repeat(7)));
+    const text = collector.text();
+    expect(text).not.toContain("KEYBODY");
+    expect(Buffer.byteLength(text)).toBeLessThanOrEqual(200);
+    expect(text.endsWith("日本語日本語日本語\n")).toBe(true);
+  });
+
   it("keeps no fragment of a token when the last write is larger than twice the limit (#170 review)", () => {
     const collector = tailCollector(20, 0);
     collector.add(Buffer.from("line1\nSECRET_ghp_abcdefghijklmnopqrstuvwxyz\nend\n"));

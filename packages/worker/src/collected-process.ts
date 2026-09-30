@@ -41,7 +41,7 @@ export const REDACTION_MARGIN_BYTES = 65_536;
 /**
  * Runs a process and collects the last MAX_COMMAND_OUTPUT_BYTES of each output stream. More
  * output than that never stops the process, and output that is cut is redacted before the cut
- * (#170). An abort resolves with exitCode null; a process that cannot start rejects. The process
+ * (#170); output that is not cut comes back unredacted, so a caller that stores it must redact it. An abort resolves with exitCode null; a process that cannot start rejects. The process
  * leads its own process group: a timeout or an abort sends SIGTERM to the group, then SIGKILL after
  * the grace period (#170). This stops local processes only; a command the process runs somewhere
  * else, such as in a devcontainer, is not signalled.
@@ -101,6 +101,8 @@ export function runCollected(executable: string, args: readonly string[], option
       : undefined;
     const onAbort = () => {
       stop();
+      // No output reaches onStdout or onStderr after the abort has returned.
+      stopReading();
       settle(() => resolvePromise({ exitCode: null, stdout: stdout.text(), stderr: stderr.text() }));
     };
     const settle = (finish: () => void) => {
@@ -139,8 +141,8 @@ function signalGroup(child: ChildProcess, signal: NodeJS.Signals): void {
 
 /**
  * Keeps the last `limit` bytes written, plus `margin` more raw bytes. Output longer than `limit`
- * is redacted over the whole kept window, then cut to its last `limit` characters, from a whole
- * line (#170).
+ * is redacted over the whole kept window, then cut to at most its last `limit` bytes, from a whole
+ * line (#170). Shorter output comes back as written, not redacted: callers that store it redact it.
  */
 export function tailCollector(limit = MAX_COMMAND_OUTPUT_BYTES, margin = REDACTION_MARGIN_BYTES): { add(data: Buffer): void; text(): string } {
   const keep = limit + margin;
@@ -166,21 +168,28 @@ export function tailCollector(limit = MAX_COMMAND_OUTPUT_BYTES, margin = REDACTI
       // A raw cut can start inside a UTF-8 sequence: skip its continuation bytes.
       let start = 0;
       while (rawCut && start < window.length && start < 3 && ((window[start] ?? 0) & 0xc0) === 0x80) start += 1;
-      return redactedTail(window.subarray(start).toString("utf8"), limit, rawCut);
+      return redactedTail(window.subarray(start).toString("utf8"), limit, rawCut ? margin : undefined);
     },
   };
 }
 
 /**
- * Redacts the text, then keeps its last `limit` characters (#170). When that cuts it, or when
- * `alreadyCut` says its start was cut before, it starts at the first whole line, or else after the
- * first whitespace, so that no fragment of a secret the cut split is kept.
+ * Redacts the text, then keeps at most its last `limit` bytes of UTF-8 (so also at most `limit`
+ * characters) (#170). `rawCutMargin` says the text's start was already cut raw, and that many
+ * bytes at its start were kept only so that redaction sees whole secrets: they are dropped too.
+ * A cut output starts at its first whole line, or else after its first whitespace, so that no
+ * fragment of a secret the cut split is kept.
  */
-export function redactedTail(text: string, limit: number, alreadyCut = false): string {
+export function redactedTail(text: string, limit: number, rawCutMargin?: number): string {
   const redacted = redactText(text);
-  const cutHere = redacted.length > limit;
-  if (!cutHere && !alreadyCut) return redacted;
-  return withoutSplitPair(fromWholeLine(cutHere ? redacted.slice(redacted.length - limit) : redacted), "start");
+  const bytes = Buffer.from(redacted, "utf8");
+  const keep = rawCutMargin === undefined ? limit : Math.min(limit, Math.max(0, bytes.length - rawCutMargin));
+  if (bytes.length <= keep && rawCutMargin === undefined) return redacted;
+  const kept = bytes.subarray(bytes.length - keep);
+  // A cut can start inside a UTF-8 sequence: skip its continuation bytes.
+  let start = 0;
+  while (start < kept.length && start < 3 && ((kept[start] ?? 0) & 0xc0) === 0x80) start += 1;
+  return fromWholeLine(kept.subarray(start).toString("utf8"));
 }
 
 function fromWholeLine(text: string): string {
