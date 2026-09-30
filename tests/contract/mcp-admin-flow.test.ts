@@ -36,6 +36,8 @@ describe("an admin looks at AgentX from an AI tool (US5)", () => {
     const { harness, taskId } = await failedTask();
     const mcp = await adminSignedInClient(harness);
     await expect.poll(async () => (await mcp.names()).filter((name) => name.startsWith("agentx_admin_"))).toEqual(ADMIN_TOOLS);
+    // FR-038: admin reads change nothing. Every command the eight tool calls send is a read.
+    const sentBefore = harness.db.commandNames().length;
 
     const failed = await mcp.tool("agentx_admin_failed_tasks");
     expect(normalized(failed.value)).toEqual({
@@ -62,6 +64,9 @@ describe("an admin looks at AgentX from an AI tool (US5)", () => {
     expect((await mcp.tool("agentx_admin_usage", { group_by: "origin" })).value).toMatchObject({ group_by: "origin", truncated: false });
     expect((await mcp.tool("agentx_admin_health")).value).toMatchObject({ version: { developer_api: "1.2", admin_api: "1.0" }, worker_modes: [{ mode: "ec2-ebs", configured: true }] });
     expect((await mcp.tool("agentx_admin_list_credentials")).value).toMatchObject({ references: expect.any(Array) as unknown });
+    const sentByTools = harness.db.commandNames().slice(sentBefore);
+    expect(sentByTools.length).toBeGreaterThan(0);
+    expect([...new Set(sentByTools)].sort()).toEqual(["GetCommand", "QueryCommand"]);
   });
 
   it("offers no admin tool to a developer without an admin sign-in, and refuses a direct call with ADMIN_REQUIRED", async () => {
