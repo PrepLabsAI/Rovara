@@ -10,7 +10,7 @@ import { runDoctor } from "../doctor/run.js";
 import { cloudFormationStackReader, stsCallerIdentity } from "../environments/adopt.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import type { TextWriter } from "../init/prompts.js";
-import { fetchRelease } from "../init/release-fetch.js";
+import { fetchRelease, sourceRelease } from "../init/release-fetch.js";
 import { formatSuccess } from "../output.js";
 import { RELEASE_VERSION } from "../version.js";
 import { runUpgrade, type UpgradeDependencies } from "./run.js";
@@ -54,6 +54,7 @@ export function registerUpgradeCommand(program: Command, context: UpgradeCommand
         cloudFormation: overrides.cloudFormation ?? new CloudFormationClient(aws),
         identity: overrides.identity ?? stsCallerIdentity(new STSClient(aws)),
         loadRelease: overrides.loadRelease ?? (async (input) => loadRelease(input.releaseDir ?? await fetchRelease({ version: input.version, home: context.home, fetch: context.fetch, runner, write }))),
+        sourceRelease: overrides.sourceRelease ?? (async (input) => (await sourceRelease({ runner, source: input.source, images: input.images, fetch: context.fetch })).release),
         notes: overrides.notes ?? ((version) => releaseNotes({ fetch: context.fetch, version })),
         prepare: overrides.prepare ?? ((input) => prepareDeployment({
           engine: input.settings.engine, env: input.settings.env, region: input.settings.region, account: input.settings.account,

@@ -72,6 +72,7 @@ async function harness(overrides: Partial<UpgradeDependencies> & { caller?: stri
     cloudFormation: { async send(command: unknown) { if (command instanceof GetTemplateCommand) return { TemplateBody: ACCESS_TEMPLATE }; throw new Error("unexpected"); } },
     identity: { get: async () => ({ account: "123456789012", arn: overrides.caller ?? ADMIN }) },
     loadRelease: async () => release(),
+    sourceRelease: async () => { throw new Error("test setup: no source release expected"); },
     notes: async () => ({ text: "Fixes.", url: "https://example.test" }),
     prepare: async (input) => {
       prepared.push(input.settings.env);
@@ -409,9 +410,47 @@ describe("agentx upgrade with the cdk engine", () => {
     expect(result.doctor).toEqual({ failed: 0, warned: 0 });
   });
 
-  it("tells a source-built CLI that the cdk engine still reads the release's images and notes (live check L7)", async () => {
-    const h = await cdk({ cliVersion: undefined });
-    await expect(runUpgrade({ ...options, source: "/src" }, h.deps)).rejects.toThrow("this agentx was built from source, so it has no release of its own; the cdk engine builds the stacks from --source, but still reads the release's images and notes from --release <dir> (npm run release:build builds one), or pass --to <version>");
+  // Issue 152 replaces live check L7's refusal: a source-built CLI takes the version from the tag.
+  it("with a source-built CLI and no --release or --to, builds the release from --source: the tag's version", async () => {
+    const built: Array<{ source: string; images?: { worker?: string; slack?: string } }> = [];
+    const h = await cdk({
+      cliVersion: undefined,
+      loadRelease: async () => { throw new Error("test setup: no release directory or download expected"); },
+      sourceRelease: async (input) => { built.push(input); return release("1.3.0"); },
+    });
+    const images = { worker: `123456789012.dkr.ecr.us-east-1.amazonaws.com/w@sha256:${"d".repeat(64)}` };
+    const result = await runUpgrade({ ...options, source: "/src", images }, h.deps);
+    expect(built).toEqual([{ source: "/src", images }]);
+    expect(result).toMatchObject({ from: "1.2.3", to: "1.3.0" });
+    expect((await readEnvironmentSettings(h.store, "staging"))?.version).toBe("1.3.0");
+  });
+
+  it("with --to or --release, loads that release as before (prepare then checks it is the source's tag)", async () => {
+    const loaded: Array<{ releaseDir?: string; version?: string }> = [];
+    const h = await cdk({
+      cliVersion: undefined,
+      loadRelease: async (input) => { loaded.push(input); return release("1.3.0"); },
+      sourceRelease: async () => { throw new Error("test setup: no source release expected"); },
+    });
+    await runUpgrade({ ...options, source: "/src", to: "1.3.0" }, h.deps);
+    expect(loaded).toEqual([{ version: "1.3.0" }]);
+  });
+
+  it("reports the config keys the synth drops, not the ones the release's templates drop (issue 152)", async () => {
+    // The release's template declares the thread limit; the synth of the source no longer does.
+    const h = await cdk({
+      controlPlane: { GitHubAppId: "123", GitHubAppPrivateKeySecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/github-app-AbCdEf", BudgetMonthlyUsd: "250", SlackThreadTurnsPerMinute: "12", CallbackSigningKey: "****" },
+      loadRelease: async () => release("1.3.0", ["BudgetScope", "SlackThreadTurnsPerMinute"]),
+    });
+    const prepare = h.deps.prepare.bind(h.deps);
+    h.deps.prepare = async (input) => ({ ...(await prepare(input)), declaredParameters: (part) => new Set(part === "control-plane" ? ["BudgetMonthlyUsd"] : []) });
+    await runUpgrade({ ...options, source: "/src" }, h.deps);
+    // Exactly the synth's drop: the budget, which the release's template does not declare, is kept.
+    expect(h.lines.filter((line) => line.startsWith("config key"))).toEqual(["config key limits.threadTurnsPerMinute (12) is not in release 1.3.0, so the upgrade drops it; nothing replaces it"]);
+    expect(h.lines).toContain("kept agentx-staging-control-plane: BudgetMonthlyUsd; not in this release, so not sent: SlackThreadTurnsPerMinute");
+    const controlPlane = h.deployer.requests.find((request) => request.stackName === "agentx-staging-control-plane")!;
+    expect(controlPlane.parameters.BudgetMonthlyUsd).toBe("250");
+    expect(controlPlane.parameters).not.toHaveProperty("SlackThreadTurnsPerMinute");
   });
 
   it("needs --source", async () => {
@@ -479,6 +518,18 @@ describe("the agentx upgrade command", () => {
     expect(loaded).toEqual([{ releaseDir: "/releases/1.3.0" }]);
     expect(h.deployer.deployed).toContain("agentx-staging-control-plane");
     expect(JSON.parse(io.out.join(""))).toMatchObject({ ok: true, data: { env: "staging", from: "1.2.3", to: "1.3.0" } });
+  });
+
+  it("passes --source and the image flags to the source release of a source-built CLI's cdk upgrade (issue 152)", async () => {
+    const built: Array<{ source: string; images?: { worker?: string; slack?: string } }> = [];
+    const h = await harness({ cliVersion: undefined, sourceRelease: async (input) => { built.push(input); return release(); } });
+    await writeEnvironmentSettings(h.store, { ...INSTALLED, engine: "cdk" });
+    const io = capture();
+    const slack = `123456789012.dkr.ecr.us-east-1.amazonaws.com/s@sha256:${"e".repeat(64)}`;
+    const code = await executeCli(["--env", "staging", "upgrade", "--yes", "--source", "/src", "--slack-image", slack], { ...io, upgrade: withoutWrite(h.deps) });
+    expect(io.err.join("")).not.toContain("AgentX error");
+    expect(code).toBe(0);
+    expect(built).toEqual([{ source: "/src", images: { slack } }]);
   });
 });
 
