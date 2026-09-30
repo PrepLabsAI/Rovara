@@ -1,4 +1,4 @@
-import { slackThreadUrl, type SlackThread, type SlackWorkspaceLimit } from "@agentx/contracts";
+import { redactAndCap, slackThreadUrl, type SlackThread, type SlackWorkspaceLimit } from "@agentx/contracts";
 import { escapeText } from "./slack-format.js";
 
 // Thread notices follow the reply formatting (spec 014 FR-022): the static texts below contain no
@@ -14,8 +14,23 @@ export const PREPARATION_SLOW_MESSAGE = "This thread's workspace is taking longe
 export const WORKSPACE_UNCONFIRMED_MESSAGE =
   "AgentX could not confirm this thread's workspace setup. Mention me again in this thread in a few minutes.";
 
-export function preparationFailedMessage(status: string): string {
-  return `AgentX could not set up this thread's workspace (${escapeText(status)}). Mention me again in this thread to retry.`;
+/** #154: how much of the setup error the thread is shown. */
+export const PREPARATION_FAILURE_REASON_MAX = 300;
+const COMMAND_FAILURE = /^(?:setup step|readiness check) \d+ \(/;
+
+/**
+ * The thread's setup failure notice. With the worker's error (#154), it adds the reason, redacted
+ * and capped, and asks an administrator to fix a failed setup or readiness command.
+ */
+export function preparationFailedMessage(status: string, error?: string): string {
+  const head = `AgentX could not set up this thread's workspace (${escapeText(status)}).`;
+  const reason = error?.replace(/\s+/g, " ").trim() ?? "";
+  if (reason === "") return `${head} Mention me again in this thread to retry.`;
+  const next = COMMAND_FAILURE.test(reason)
+    ? "Ask an administrator to fix the project's setup commands, then mention me again in this thread to retry."
+    : "Mention me again in this thread to retry.";
+  const capped = redactAndCap(reason, PREPARATION_FAILURE_REASON_MAX - 3);
+  return `${head} ${next}\nReason: ${escapeText(capped.truncated ? `${capped.text}...` : capped.text)}`;
 }
 
 export function limitMessage(result: { limit: SlackWorkspaceLimit; maximum: number; starterThreads: readonly SlackThread[]; openTaskCount?: number | undefined }): string {

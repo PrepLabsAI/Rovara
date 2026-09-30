@@ -318,7 +318,7 @@ export async function processSlackRequest(
       if (prepared.status !== "SUCCEEDED") {
         draft.disposition = "workspace_unavailable";
         log("workspace.preparation_failed", { eventId: message.eventId, status: prepared.status });
-        await post(preparationFailedMessage(prepared.status));
+        await post(preparationFailedMessage(prepared.status, prepared.error));
         finished = true;
         return;
       }

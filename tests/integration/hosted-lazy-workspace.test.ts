@@ -171,7 +171,8 @@ describe("workspace only when needed, end to end", () => {
     s.prepareOutcome = "FAILED";
     await turnIn(s, 1, "list the files in the repository", { coding: true });
     expect(postsIn(s, 1)).toEqual([
-      WORKING, SETTING_UP, "AgentX could not set up this thread's workspace (FAILED). Mention me again in this thread to retry.", CODING_ANSWER,
+      // #154: the thread is also told the worker's (redacted) reason.
+      WORKING, SETTING_UP, "AgentX could not set up this thread's workspace (FAILED). Mention me again in this thread to retry.\nReason: clone failed", CODING_ANSWER,
     ]);
     expect(s.toolResults.at(-1)).toBe(JSON.stringify(unavailableRefusal("workspace setup failed")));
     expect(s.db.get(`SLACK_LIMIT#${SLACK_TEAM}`, `MEMBER#${pratik}`)).toMatchObject({ count: 1 });
