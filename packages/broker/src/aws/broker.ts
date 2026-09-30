@@ -103,7 +103,7 @@ import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConf
 import { developerTokenVerifier } from "../developer/verify-token.js";
 import { completedTurn, developerFooter, inertName, taskKey, taskOwnerKey, taskOwnerSubject, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type StoredEvent } from "../developer/task-records.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
-import { hashJson, isConditional, isTemporaryAwsError } from "./broker-shared.js";
+import { hashJson, isConditional, isTemporaryAwsError, workerPrompt } from "./broker-shared.js";
 import { channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, type DeveloperApiConfiguration } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
 import { adminShareMode, finishTaskClose } from "./developer-tasks.js";
@@ -378,7 +378,7 @@ function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTas
     },
     pullRequests: async (workspaceId) => (await query(`WORKSPACE#${workspaceId}`, "PULL_REQUEST#"))
       .map((item) => ({ repository: String(item.repository), number: Number(item.number), url: String(item.url), state: item.state as "open" | "closed" | "merged" })),
-    acceptTask: (identity, workspaceId, request, extra) => acceptTask(dependencies, identity, workspaceId, request, extra),
+    acceptTask: (identity, workspaceId, request, extra, options) => acceptTask(dependencies, identity, workspaceId, request, extra, options),
     acceptPullRequest: (identity, workspaceId, request, extra) => acceptPullRequest(dependencies, identity, workspaceId, request, extra),
     cancelRunning: async (identity, workspace, extra) => {
       if (workspace.ownerKey !== identity.ownerKey) throw agentXError("NOT_FOUND", "workspace not found");
@@ -2238,7 +2238,7 @@ async function createConversation(
 async function taskOperationParts(
   dependencies: AwsBrokerDependencies,
   workspace: WorkspaceInstance,
-  input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester } },
+  input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester }; shared?: boolean },
   now: string,
 ): Promise<{ operation: OperationRecord; outbox: ReturnType<typeof outboxRecord>; fence: number }> {
   const settings = await requireLatestProject(dependencies, workspace.projectName);
@@ -2269,7 +2269,8 @@ async function taskOperationParts(
     callbackCapability: issueCapability(dependencies, workspace.id, operationId, fence),
     payload: {
       conversationId: input.conversationId,
-      prompt: input.prompt,
+      // 25c note 1: the hash above is the request's own; only the worker's copy gets the re-read line.
+      prompt: workerPrompt(input.prompt, input.shared === true),
       conversationStarted: input.conversationStarted,
       ...(resolvedModel.model === undefined ? {} : { model: resolvedModel.model }),
       ...(resolvedModel.diagnostic === undefined ? {} : { modelSelectionDiagnostic: resolvedModel.diagnostic }),
@@ -2284,6 +2285,7 @@ async function acceptTask(
   workspaceId: string,
   value: unknown,
   extra: ExtraItems = () => [],
+  options: { sharedTask?: boolean } = {},
 ): Promise<{ operation: Operation; duplicate: boolean }> {
   assertNoUntrustedRoutingFields(value);
   const request = OperationRequestSchema.parse(value);
@@ -2317,6 +2319,8 @@ async function acceptTask(
     prompt: request.prompt,
     conversationStarted,
     requester: requesterOf(identity),
+    // 25c note 1: a turn from the shared thread, or the developer's own turn on a shared task.
+    shared: identity.sharedTask !== undefined || options.sharedTask === true,
   }, now);
   try {
     await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
