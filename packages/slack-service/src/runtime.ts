@@ -116,3 +116,21 @@ export function stopModelOnAbort(signal: AbortSignal | undefined, runtime: { ses
   signal.addEventListener("abort", stop, { once: true });
   return () => signal.removeEventListener("abort", stop);
 }
+
+/**
+ * Issue 157: runs one hosted turn that the processor may hand off. A turn handed off while its
+ * runtime was being made never prompts the model; one handed off mid-turn has its model stopped.
+ */
+export async function runHostedTurn<T>(
+  runtime: { session: { abort(): Promise<void> } },
+  signal: AbortSignal | undefined,
+  run: () => Promise<T>,
+): Promise<T> {
+  if (signal?.aborted === true) throw new Error("the turn was handed off before the model started");
+  const letGo = stopModelOnAbort(signal, runtime);
+  try {
+    return await run();
+  } finally {
+    letGo();
+  }
+}

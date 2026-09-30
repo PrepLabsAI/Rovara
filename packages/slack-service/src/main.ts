@@ -23,7 +23,7 @@ import { createSignedServiceFetch } from "./signing-fetch.js";
 import { createSlackUserNames } from "./user-names.js";
 import { createThreadApi } from "./thread-api.js";
 import { HANDOFF_MILLISECONDS, activeTurnFromItem } from "./interrupted-turn.js";
-import { classifierTimeoutMs, createHostedClassifier, createHostedSlackRuntime, gateDecisionLogFields, stopModelOnAbort } from "./runtime.js";
+import { classifierTimeoutMs, createHostedClassifier, createHostedSlackRuntime, gateDecisionLogFields, runHostedTurn } from "./runtime.js";
 import { DynamoTurnRecordWriter } from "./turn-records.js";
 
 const MAX_RECEIVE_COUNT = 5;
@@ -239,10 +239,9 @@ async function runTurn(input: TurnInput): Promise<string> {
       // One line per gate decision until turn records carry them; never the call's arguments.
       onGateDecision: (decision) => log("gate.decision", gateDecisionLogFields(input.message.eventId, decision)),
     });
-    // Issue 157: a handed-off turn's model stops, and its unfinished session is not saved.
-    const letGo = stopModelOnAbort(input.signal, runtime);
     try {
-      const response = await runOrchestratorTurn(runtime, input.message.text, input.recorder);
+      // Issue 157: a handed-off turn's model stops (or never starts), and its unfinished session is not saved.
+      const response = await runHostedTurn(runtime, input.signal, () => runOrchestratorTurn(runtime, input.message.text, input.recorder));
       const written = runtime.session.sessionManager.getSessionFile();
       if (input.signal?.aborted !== true && written !== undefined && await exists(written)) {
         await s3.send(new PutObjectCommand({
@@ -254,7 +253,6 @@ async function runTurn(input: TurnInput): Promise<string> {
       }
       return response;
     } finally {
-      letGo();
       await runtime.dispose();
     }
   } finally {

@@ -204,6 +204,23 @@ describe("handing a turn off when the service stops", () => {
   });
 });
 
+describe("a hand-off notice Slack refuses", () => {
+  for (const finalAttempt of [false, true]) {
+    it(`is logged, and ${finalAttempt ? "the last delivery still finishes" : "the message is still released"}`, async () => {
+      const handoff = new AbortController();
+      const { logs, finish, dependencies } = harness(blockedTurn(() => handoff.abort()));
+      dependencies.post = async (_thread, text) => {
+        if (text === HANDOFF_TASK_TEXT || text === HANDOFF_FINAL_TEXT) throw new Error("Slack chat.postMessage failed: HTTP 500");
+      };
+      const attempt = processSlackRequest(slackMessage("EvWORK000016", "fix the bug"), dependencies, { finalAttempt, handoff: handoff.signal });
+      if (finalAttempt) await attempt;
+      else await expect(attempt).rejects.toBeInstanceOf(TurnHandedOffError);
+      expect(logs).toContainEqual({ event: "turn.interrupted_notice_failed", fields: { eventId: "EvWORK000016", errorName: "Error" } });
+      expect(finish).toHaveBeenCalledTimes(finalAttempt ? 1 : 0);
+    });
+  }
+});
+
 describe("resuming a redelivered turn", () => {
   const remembered = (eventId: string): ActiveTurn => ({ eventId, workspaceId, operationId: OPERATION });
 

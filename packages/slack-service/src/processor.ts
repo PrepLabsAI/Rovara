@@ -564,7 +564,9 @@ export async function processSlackRequest(
       // The last allowed delivery: a release would only send the message to the dead-letter queue.
       draft.disposition = "abandoned";
       delete draft.responseText;
-      await post(HANDOFF_FINAL_TEXT).catch(() => undefined);
+      await post(HANDOFF_FINAL_TEXT).catch((postError: unknown) => {
+        log("turn.interrupted_notice_failed", { eventId: message.eventId, errorName: errorName(postError) });
+      });
       finished = true;
       return;
     }

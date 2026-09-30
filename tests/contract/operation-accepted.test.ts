@@ -2,7 +2,7 @@
 // tool waits on it, so a turn stopped mid-wait can be re-attached to that operation later.
 import { describe, expect, it, vi } from "vitest";
 import { createOrchestrationTools } from "../../packages/orchestrator/src/orchestration-tools.js";
-import { createHostedSlackRuntime, stopModelOnAbort } from "../../packages/slack-service/src/runtime.js";
+import { createHostedSlackRuntime, runHostedTurn, stopModelOnAbort } from "../../packages/slack-service/src/runtime.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
 
 const OPERATION = "11111111-1111-4111-8111-111111111111";
@@ -117,6 +117,32 @@ describe("stopping a handed-off turn's model", () => {
   it("does nothing without a signal", () => {
     const abort = vi.fn(async () => undefined);
     stopModelOnAbort(undefined, { session: { abort } })();
+    expect(abort).not.toHaveBeenCalled();
+  });
+});
+
+describe("running a hosted turn that may be handed off", () => {
+  it("never prompts the model when the turn was handed off while its runtime was being made", async () => {
+    const abort = vi.fn(async () => undefined);
+    const run = vi.fn(async () => "answered");
+    await expect(runHostedTurn({ session: { abort } }, AbortSignal.abort(), run)).rejects.toThrow("handed off");
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("stops the model when the hand-off comes mid-turn, and lets go of the signal afterwards", async () => {
+    const abort = vi.fn(async () => undefined);
+    const controller = new AbortController();
+    const answer = await runHostedTurn({ session: { abort } }, controller.signal, async () => {
+      controller.abort();
+      return "partial";
+    });
+    expect(answer).toBe("partial");
+    expect(abort).toHaveBeenCalledOnce();
+  });
+
+  it("runs the turn as before without a signal", async () => {
+    const abort = vi.fn(async () => undefined);
+    expect(await runHostedTurn({ session: { abort } }, undefined, async () => "answered")).toBe("answered");
     expect(abort).not.toHaveBeenCalled();
   });
 });
