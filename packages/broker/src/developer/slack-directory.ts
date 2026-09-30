@@ -211,8 +211,11 @@ export function slackDirectory(input: {
       if (reply === undefined) return { ok: false, error: "slack_unavailable" };
       if (reply.body.ok !== true || typeof reply.body.team_id !== "string") {
         refused("auth.test", reply);
-        return { ok: false, error: errorCode(reply.body.error) ?? "no_error_code" };
+        // Only an error that is already code-shaped passes: rejected, not stripped (R9).
+        const error = reply.body.error;
+        return { ok: false, error: typeof error === "string" && /^[a-z_]{1,64}$/.test(error) ? error : "no_error_code" };
       }
+      // The team is reported, not checked against input.teamId, on purpose: the health route compares it.
       return { ok: true, teamId: reply.body.team_id };
     },
   };

@@ -70,6 +70,8 @@ function logDeveloperEvent(entry: Record<string, string>): void {
 }
 const errorName = (error: unknown) => (error instanceof Error ? error.name : "UnknownError");
 const SLACK_UNAVAILABLE = { ok: false, error: "slack_unavailable" } as const;
+/** A Slack or DeveloperIdentity error code: the only error text that may reach a log or an answer (R9). */
+const SLACK_ERROR_CODE = /^[a-z_]{1,64}$/;
 type IdentityRefusal = typeof SLACK_UNAVAILABLE | { ok: false; error: "invalid_request" };
 
 /**
@@ -110,7 +112,8 @@ async function identityInvoke<T>(
     logDeveloperEvent({ event: `${event}_invalid_request`, reason: "the identity function refused the broker's request; this is a broker bug" });
     return { ok: false, error: "invalid_request" };
   }
-  return failed({ reason: "reply_error", error: reply.ok === false && reply.error === "slack_unavailable" ? "slack_unavailable" : "malformed_reply" });
+  // Only a code-shaped reply error (such as token_revoked) is logged; never free text.
+  return failed({ reason: "reply_error", error: reply.ok === false && typeof reply.error === "string" && SLACK_ERROR_CODE.test(reply.error) ? reply.error : "malformed_reply" });
 }
 
 /** The broker's channel-members check (FR-013) through the DeveloperIdentity function. */
@@ -146,7 +149,7 @@ export function slackAuthCheckThroughLambda(invoke: (payload: Uint8Array) => Pro
     let refusal: string | undefined;
     const answer = await identityInvoke(invoke, { kind: "slack-auth-check" }, (reply) => {
       if (reply.ok === true && typeof reply.teamId === "string") return { ok: true as const, teamId: reply.teamId };
-      if (reply.ok === false && typeof reply.error === "string" && /^[a-z_]{1,64}$/.test(reply.error) && reply.error !== "invalid_request") refusal = reply.error;
+      if (reply.ok === false && typeof reply.error === "string" && SLACK_ERROR_CODE.test(reply.error) && reply.error !== "invalid_request") refusal = reply.error;
       return undefined;
     }, "developer.slack_auth_check");
     if (answer.ok) return answer;

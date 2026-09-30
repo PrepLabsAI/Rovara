@@ -15,6 +15,12 @@ describe("DeveloperIdentity's email lookup and auth check (A12, A13)", () => {
     expect(await harness.handler({ kind: "slack-user-by-email", email: "not an email" } as never)).toEqual({ ok: false, error: "invalid_request" });
   });
 
+  it("answers slack_unavailable when Slack cannot answer the email lookup", async () => {
+    const harness = identityHarness({ slackUsers: [{ userId: "U0ADA00001", teamId: TEAM, name: "Ada", email: "ada@example.com" }] });
+    harness.slack.state.down = true;
+    expect(await harness.handler({ kind: "slack-user-by-email", email: "ada@example.com" } as never)).toEqual({ ok: false, error: "slack_unavailable" });
+  });
+
   it("checks the bot token with auth.test, and says when Slack refuses it, never naming the token", async () => {
     const slack = fakeSlack({ users: [] });
     const directory = slackDirectory({ teamId: TEAM, botToken: async () => BOT_TOKEN, fetch: routeFetch(slack.handler), now: Date.now });
@@ -25,6 +31,15 @@ describe("DeveloperIdentity's email lookup and auth check (A12, A13)", () => {
     expect(answer).toEqual({ ok: false, error: "invalid_auth" });
     expect(JSON.stringify(answer)).not.toContain("xoxb-");
     expect(problems).toEqual([{ method: "auth.test", status: 200, error: "invalid_auth" }]);
+  });
+
+  it("answers no_error_code for a Slack error that is not code-shaped, rejecting it rather than stripping it", async () => {
+    const slack = fakeSlack({ users: [] });
+    const directory = slackDirectory({ teamId: TEAM, botToken: async () => BOT_TOKEN, fetch: routeFetch(slack.handler), now: Date.now });
+    slack.state.botError = "Token-Revoked";
+    expect(await directory.authTest()).toEqual({ ok: false, error: "no_error_code" });
+    slack.state.botError = "token_revoked";
+    expect(await directory.authTest()).toEqual({ ok: false, error: "token_revoked" });
   });
 
   it("serves the auth check invoke, and refuses a malformed one", async () => {
@@ -47,6 +62,10 @@ describe("DeveloperIdentity's email lookup and auth check (A12, A13)", () => {
     expect(await broken({ kind: "slack-user-by-email", email: "ada@example.com" })).toEqual({ ok: false, error: "slack_unavailable" });
     const check = slackAuthCheckThroughLambda(vi.fn(async () => reply({ ok: false, error: "token_revoked" })));
     expect(await check()).toEqual({ ok: false, error: "token_revoked" });
+    const crashed = slackAuthCheckThroughLambda(vi.fn(async () => ({ FunctionError: "Unhandled" })));
+    expect(await crashed()).toEqual({ ok: false, error: "slack_unavailable" });
+    const unavailable = slackAuthCheckThroughLambda(vi.fn(async () => reply({ ok: false, error: "slack_unavailable" })));
+    expect(await unavailable()).toEqual({ ok: false, error: "slack_unavailable" });
   });
 
   it("passes only a code-shaped Slack error through the auth check, never free text or a token (R9)", async () => {
@@ -62,6 +81,13 @@ describe("DeveloperIdentity's email lookup and auth check (A12, A13)", () => {
       const ok = await good();
       expect(ok).toEqual({ ok: true, teamId: TEAM });
       expect(JSON.stringify(ok)).not.toContain(BOT_TOKEN);
+      const revoked = slackAuthCheckThroughLambda(vi.fn(async () => reply({ ok: false, error: "token_revoked" })));
+      expect(await revoked()).toEqual({ ok: false, error: "token_revoked" });
+      const failures = lines.map((line) => JSON.parse(line) as Record<string, unknown>).filter((entry) => entry.event === "developer.slack_auth_check_failed");
+      expect(failures.at(-1)).toMatchObject({ reason: "reply_error", error: "token_revoked" });
+      expect(failures[0]).toMatchObject({ reason: "reply_error", error: "malformed_reply" });
+      expect(lines.join("\n")).not.toContain(BOT_TOKEN);
+      expect(lines.join("\n")).not.toContain("xoxb-");
     } finally {
       spy.mockRestore();
     }
