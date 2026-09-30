@@ -361,16 +361,25 @@ const displayName = (name: string) => redactAndCap(name, DISPLAY_NAME_MAX).text;
 const requesterKey = (value: unknown): string => {
   const requester = value as { kind?: string; userId?: string; developerId?: string; name?: string } | undefined;
   if (requester?.kind === "slack" || (requester?.kind === undefined && typeof requester?.userId === "string")) return `slack:${requester.userId}`;
-  if (requester?.kind === "developer") return `developer:${requester.name === undefined ? requester.developerId?.slice(0, 12) ?? "unknown" : displayName(requester.name)}`;
+  if (requester?.kind === "developer") {
+    // One group per developer: two people can share a display name, or names that redact the same.
+    const id = requester.developerId?.slice(0, 8) ?? "unknown";
+    return `developer:${requester.name === undefined ? id : `${displayName(requester.name)} (${id})`}`;
+  }
   return "none";
 };
 
 /** How many unreadable turn records one log line names; the count is always exact. */
 const LOGGED_ID_LIMIT = 10;
+/**
+ * The most turn record pages one usage read takes (at most 100 records evaluated each). The origin
+ * filter drops AI-tool records after DynamoDB reads them, so pages, not kept records, bound the time.
+ */
+const USAGE_TURN_PAGES_MAX = 2 * (ADMIN_USAGE_READ_MAX / ADMIN_LIST_MAX);
 
 /**
  * A9: worker usage items day partition by day, then Slack turn records; at most 5,000 read from
- * each source. An item or a turn's usage that no longer parses is counted and logged, never dropped
+ * each source, and at most USAGE_TURN_PAGES_MAX turn record pages. An item or a turn's usage that no longer parses is counted and logged, never dropped
  * silently; a turn with no usage at all is a known zero (R14).
  */
 async function usageEntries(deps: AdminReadDependencies, window: { since: string; until: string }): Promise<{ entries: UsageEntry[]; truncated: boolean; skipped: number }> {
@@ -417,11 +426,16 @@ async function usageEntries(deps: AdminReadDependencies, window: { since: string
     let unreadableCount = 0;
     let key: Parameters<TurnRecordSource["page"]>[0]["exclusiveStartKey"];
     let turns = 0;
+    let pages = 0;
     do {
       const page = await deps.turns.page({ since: window.since, until: window.until, limit: Math.min(ADMIN_LIST_MAX, ADMIN_USAGE_READ_MAX - turns), nowSeconds: Math.floor(deps.now() / 1000), ...(key === undefined ? {} : { exclusiveStartKey: key }), filter: { origin: "slack" } });
+      pages += 1;
+      // One lookup per new workspace, all of a page at once, cached across pages (as TurnRecordExport does).
+      const unseen = [...new Set(page.items.flatMap((item) => (typeof item.workspaceId === "string" && !projects.has(item.workspaceId) ? [item.workspaceId] : [])))];
+      const found = await Promise.all(unseen.map(async (workspaceId) => [workspaceId, await projectOf(workspaceId)] as const));
+      for (const [workspaceId, project] of found) projects.set(workspaceId, project);
       for (const item of page.items) {
         const workspaceId = typeof item.workspaceId === "string" ? item.workspaceId : undefined;
-        if (workspaceId !== undefined && !projects.has(workspaceId)) projects.set(workspaceId, await projectOf(workspaceId));
         const telemetry = item.usage === undefined ? undefined : TaskUsageTelemetrySchema.safeParse(item.usage);
         if (telemetry?.success === false) {
           unreadableCount += 1;
@@ -438,7 +452,7 @@ async function usageEntries(deps: AdminReadDependencies, window: { since: string
         turns += 1;
       }
       key = page.lastEvaluatedKey;
-      if (turns >= ADMIN_USAGE_READ_MAX) { truncated = truncated || key !== undefined; key = undefined; }
+      if (turns >= ADMIN_USAGE_READ_MAX || pages >= USAGE_TURN_PAGES_MAX) { truncated = truncated || key !== undefined; key = undefined; }
     } while (key !== undefined);
     // IDs only: a turn record holds redacted request and response text, which never reaches a log.
     if (unreadableCount > 0) deps.log({ event: "admin.usage_unreadable", count: unreadableCount, eventIds: unreadable });

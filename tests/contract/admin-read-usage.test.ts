@@ -44,7 +44,7 @@ describe("GET /v1/admin/usage (FR-030, A9)", () => {
     db.set(usage(at, 1));
     db.set(usage(at, 2, { origin: "ai_tool", requester: { kind: "developer", developerId: "d".repeat(64), provider: "slack", name: "Maya Chen" } }));
     const keys = async (groupBy: string) => ((await admin("GET", `/v1/admin/usage?group_by=${groupBy}`)).body.groups as Array<{ key: string }>).map((group) => group.key).sort();
-    expect(await keys("requester")).toEqual(["developer:Maya Chen", "slack:U0PRIYA001"]);
+    expect(await keys("requester")).toEqual(["developer:Maya Chen (dddddddd)", "slack:U0PRIYA001"]);
     expect(await keys("origin")).toEqual(["ai_tool", "slack"]);
     expect(await keys("day")).toEqual([at.slice(0, 10)]);
   });
@@ -156,4 +156,64 @@ describe("GET /v1/admin/usage (FR-030, A9)", () => {
     expect((answer.body.groups as Array<{ turns: number }>)[0]?.turns).toBe(5_000);
     expect(answer.body.truncated).toBe(true);
   });
+
+  // Final review, item 2: a requester group is one developer, never one display name.
+  it("keeps two developers with the same name in separate requester groups", async () => {
+    const { db, admin } = await createAdminReadBroker();
+    const developer = (id: string) => ({ origin: "ai_tool", requester: { kind: "developer", developerId: id.repeat(64), provider: "slack", name: "Maya Chen" } });
+    db.set(usage(hoursAgo(1), 1, developer("a")));
+    db.set(usage(hoursAgo(2), 2, developer("b")));
+    db.set(usage(hoursAgo(3), 3, { ...developer("b"), requester: { kind: "developer", developerId: "b".repeat(64), provider: "slack" } }));
+    const groups = (await admin("GET", "/v1/admin/usage?group_by=requester")).body.groups as Array<{ key: string; tasks: number }>;
+    expect(groups.map((group) => [group.key, group.tasks]).sort()).toEqual([
+      ["developer:Maya Chen (aaaaaaaa)", 1],
+      ["developer:Maya Chen (bbbbbbbb)", 1],
+      ["developer:bbbbbbbb", 1],
+    ]);
+  });
+
+  // Final review, item 3: the route stays inside the broker's 30 s.
+  it("looks up a page's workspaces in parallel, not one turn record at a time", async () => {
+    const { db, admin } = await createAdminReadBroker();
+    const workspaces = ["44444444-4444-4444-8444-444444444441", "44444444-4444-4444-8444-444444444442", "44444444-4444-4444-8444-444444444443"];
+    workspaces.forEach((workspaceId, n) => {
+      db.set({ pk: `WORKSPACE#${workspaceId}`, sk: "META", projectName: `project-${n}` });
+      db.set({ ...turn(hoursAgo(1, n), `EvPAR00000${n}`, false), workspaceId });
+    });
+    const send = db.send;
+    let inFlight = 0;
+    let most = 0;
+    db.send = async (command) => {
+      const key = (command.input as { Key?: { pk?: string; sk?: string } }).Key;
+      if (command.constructor.name !== "GetCommand" || key?.sk !== "META" || !String(key.pk).startsWith("WORKSPACE#")) return send(command);
+      inFlight += 1;
+      most = Math.max(most, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      try {
+        return await send(command);
+      } finally {
+        inFlight -= 1;
+      }
+    };
+    const answer = await admin("GET", "/v1/admin/usage?group_by=project");
+    expect((answer.body.groups as Array<{ key: string }>).map((group) => group.key).sort()).toEqual(["project-0", "project-1", "project-2"]);
+    expect(most).toBe(3);
+  });
+
+  it("counts turn record pages filtered away toward the cap, and says it stopped early", async () => {
+    const { db, admin } = await createAdminReadBroker();
+    // 10,000 AI-tool records, newest first, then one Slack turn: the filter returns nothing for 100 pages.
+    for (let n = 0; n < 10_000; n += 1) db.set({ ...turn(hoursAgo(1, n), `EvAIT${n.toString().padStart(7, "0")}`, false), origin: "ai_tool" });
+    db.set(turn(hoursAgo(2), "EvSLACK000001", true));
+    const send = db.send;
+    let turnPages = 0;
+    db.send = async (command) => {
+      if (command.constructor.name === "QueryCommand" && String((command.input as { KeyConditionExpression?: string }).KeyConditionExpression).includes("exportPk")) turnPages += 1;
+      return send(command);
+    };
+    const answer = await admin("GET", `/v1/admin/usage?group_by=requester&since=${encodeURIComponent(hoursAgo(26))}`);
+    expect(turnPages).toBe(100);
+    expect(answer.body.groups).toEqual([]);
+    expect(answer.body.truncated).toBe(true);
+  }, 30_000);
 });
