@@ -24,7 +24,16 @@ export const HANDOFF_MILLISECONDS = 90_000;
 export const HANDOFF_TASK_TEXT = "AgentX restarted while working on this. The task is still running; I'll post its result here.";
 export const HANDOFF_TEXT = "AgentX restarted while working on this. I'll pick this request up again in a moment.";
 export const HANDOFF_APPROVED_TEXT = "AgentX restarted while working on this. What you approved may already have started, so I won't run it again.";
-export const HANDOFF_FINAL_TEXT = "AgentX restarted while working on this and has already retried it too many times, so I stopped. Ask me again if you still want it.";
+/** Issue 167: the last delivery's hand-off, once the task it started was cancelled. */
+export const HANDOFF_FINAL_TEXT = "AgentX restarted while working on this and has already retried it too many times, so I stopped the task it started. Ask me again if you still want it.";
+/** The last delivery's hand-off when the turn had started no task. */
+export const HANDOFF_FINAL_IDLE_TEXT = "AgentX restarted while working on this and has already retried it too many times, so I stopped. Ask me again if you still want it.";
+/** Issue 167: the last delivery's hand-off when the task it started could not be cancelled. */
+export const HANDOFF_FINAL_CANCEL_FAILED_TEXT = "AgentX restarted while working on this and has already retried it too many times. I could not stop the task it started, so it may still finish on its own. Ask me again if you still want it.";
+/** Issue 167: follows the last attempt's failure notice once the task it started was cancelled. */
+export const ABANDONED_TASK_TEXT = "I stopped the task this request started. Ask me again if you still want it.";
+/** Issue 167: follows the last attempt's failure notice when that task could not be cancelled. */
+export const ABANDONED_TASK_CANCEL_FAILED_TEXT = "I could not stop the task this request started, so it may still finish on its own. Ask me again if you still want it.";
 export const RESUME_NOT_FOUND_TEXT = "AgentX restarted while working on this, and I can no longer find the task it started, so I can't post its result. Ask me again if you still want it.";
 export const CONTINUE_TEXT = "Ask me to continue for any step after this one (for example the pull request).";
 

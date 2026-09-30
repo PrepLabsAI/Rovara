@@ -181,6 +181,18 @@ export class ControlPlaneApi implements OrchestrationApi, OperationPollingTransp
     };
   }
 
+  /**
+   * Issue 167: asks the worker to cancel an operation through the broker's cancel route. An
+   * operation that already finished answers as a duplicate, which is success here too.
+   */
+  async cancelOperation(input: { workspaceId: string; operationId: string }): Promise<void> {
+    this.assertWorkspace(input.workspaceId);
+    object(await this.request(
+      `/v1/workspaces/${this.workspaceId}/operations/${encodeURIComponent(input.operationId)}/cancel`,
+      { method: "POST" },
+    ));
+  }
+
   async getOperation(operationId: string): Promise<Operation> {
     const value = object(await this.request(
       `/v1/workspaces/${this.workspaceId}/operations/${encodeURIComponent(operationId)}`,

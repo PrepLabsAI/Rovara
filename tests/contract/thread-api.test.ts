@@ -5,7 +5,8 @@ import { createSignedServiceFetch } from "../../packages/slack-service/src/signi
 import { createThreadApi } from "../../packages/slack-service/src/thread-api.js";
 import { brokerFetch } from "../support/broker-fetch.js";
 import {
-  SLACK_CHANNEL, SLACK_TEAM, createBroker, lazyEnsureWorkspace, loadSlackBroker, registerSlackProject, type Handler,
+  SLACK_CHANNEL, SLACK_TEAM, createBroker, ensureWorkspace, finishOperation, lazyEnsureWorkspace, loadSlackBroker, markReady, registerSlackProject, serviceCall,
+  type Handler,
 } from "../support/slack-broker.js";
 
 const thread = `${SLACK_TEAM}/${SLACK_CHANNEL}/1695500000.000001`;
@@ -98,5 +99,52 @@ describe("the Slack service's thread client", () => {
     const api = threadApi(handler);
     await expect(api.listProjectModels!()).resolves.toMatchObject({ source: "default", current: { label: "Balanced" } });
     await expect(api.selectProjectModel!({ provider: "amazon-bedrock", modelId: "fast" })).resolves.toMatchObject({ source: "selection", current: { label: "Fast" } });
+  });
+
+  // Issue 167: the turn that gave up for good cancels its task through the existing cancel route.
+  describe("cancelling a thread's task", () => {
+    async function runningTask() {
+      const broker = createBroker();
+      await registerSlackProject(broker.handler);
+      const workspaceId = (await ensureWorkspace(broker.handler, thread, pratik)).body.workspaceId as string;
+      markReady(broker.db, workspaceId);
+      const conversation = await serviceCall(broker.handler, thread, pratik, "POST", `/v1/service/workspaces/${workspaceId}/conversations`);
+      const task = await serviceCall(broker.handler, thread, pratik, "POST", `/v1/service/workspaces/${workspaceId}/tasks`, {
+        requestId: randomUUID(), conversationId: (conversation.body.conversation as { id: string }).id, prompt: "run the tests",
+      });
+      expect(task.status).toBe(202);
+      return { ...broker, workspaceId, operationId: (task.body.operation as { id: string }).id };
+    }
+
+    it("asks the worker to cancel the running task through the operation cancel route", async () => {
+      const { db, handler, workspaceId, operationId } = await runningTask();
+      const paths: string[] = [];
+      const toBroker = brokerFetch(handler);
+      const signedFetch = createSignedServiceFetch({
+        region: "us-east-1", credentials: { accessKeyId: "test-key", secretAccessKey: "test-secret" },
+        thread: parseSlackThreadSubject(thread), userId: pratik,
+        baseFetch: async (input, init) => {
+          paths.push(`${init?.method ?? "GET"} ${new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url).pathname}`);
+          return toBroker(input, init);
+        },
+      });
+      await createThreadApi({ controlPlaneUrl: "https://agentx.example.test", signedFetch }).cancelOperation!(workspaceId, operationId);
+      expect(paths).toEqual([`POST /v1/service/workspaces/${workspaceId}/operations/${operationId}/cancel`]);
+      expect(db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`)).toMatchObject({ status: "CANCEL_REQUESTED" });
+      const cancel = db.find((item) => item.entityType === "OUTBOX" && (item.invocation as { kind?: string } | undefined)?.kind === "cancel")[0];
+      expect(cancel?.invocation).toMatchObject({ kind: "cancel", payload: { targetOperationId: operationId } });
+    });
+
+    it("answers a task that already finished as success, and queues no cancel", async () => {
+      const { db, handler, workspaceId, operationId } = await runningTask();
+      await finishOperation(handler, db, workspaceId, operationId, "SUCCEEDED");
+      await expect(threadApi(handler).cancelOperation!(workspaceId, operationId)).resolves.toBeUndefined();
+      expect(db.find((item) => item.entityType === "OUTBOX" && (item.invocation as { kind?: string } | undefined)?.kind === "cancel")).toHaveLength(0);
+    });
+
+    it("throws the broker's refusal, so the caller can log it", async () => {
+      const { handler, workspaceId } = await runningTask();
+      await expect(threadApi(handler).cancelOperation!(workspaceId, randomUUID())).rejects.toMatchObject({ code: "NOT_FOUND" });
+    });
   });
 });

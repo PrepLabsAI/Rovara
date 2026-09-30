@@ -71,6 +71,9 @@ export function createThreadApi(options: { controlPlaneUrl: string; signedFetch:
         ...(result.error === undefined ? {} : { error: result.error }),
       };
     },
+    async cancelOperation(workspaceId, operationId) {
+      await client(workspaceId).cancelOperation({ workspaceId, operationId });
+    },
     async createConversation(workspaceId) {
       return (await client(workspaceId).createConversation()).id;
     },

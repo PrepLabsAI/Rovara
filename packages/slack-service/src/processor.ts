@@ -31,7 +31,7 @@ import { escapeText, slackReplyText } from "./slack-format.js";
 import { buildTurnRecord, emitTurnMetrics, type TurnDraft, type TurnRecordSink } from "./turn-records.js";
 import { matchApprovedModel, modelName, modelOptionsMessage, parseModelCommand } from "./model-command.js";
 import {
-  HANDOFF_APPROVED_TEXT, HANDOFF_FINAL_TEXT, HANDOFF_TASK_TEXT, HANDOFF_TEXT, RESUME_NOT_FOUND_TEXT, TurnHandedOffError, resumedResultText, turnNoteText,
+  ABANDONED_TASK_CANCEL_FAILED_TEXT, ABANDONED_TASK_TEXT, HANDOFF_APPROVED_TEXT, HANDOFF_FINAL_CANCEL_FAILED_TEXT, HANDOFF_FINAL_IDLE_TEXT, HANDOFF_FINAL_TEXT, HANDOFF_TASK_TEXT, HANDOFF_TEXT, RESUME_NOT_FOUND_TEXT, TurnHandedOffError, resumedResultText, turnNoteText,
   type ActiveTurn, type TurnNote,
 } from "./interrupted-turn.js";
 import { SHARED_CLOSE_REFUSED_MESSAGE, SHARED_SETUP_FAILED_MESSAGE, TASK_STILL_BUSY_MESSAGE, taskBusy, waitForIdleTask } from "./shared-task.js";
@@ -45,6 +45,11 @@ export interface ThreadServiceApi {
   waitForOperation(workspaceId: string, operationId: string, signal?: AbortSignal): Promise<{ status: string; error?: string | undefined; result?: unknown }>;
   /** Issue 157: waits for a worker task and returns its final response; without it, a resumed turn posts the status alone. */
   taskResult?(workspaceId: string, operationId: string, signal?: AbortSignal): Promise<{ status: string; response?: string | undefined; error?: string | undefined }>;
+  /**
+   * Issue 167: asks the worker to cancel a task (a finished one is left as it is). Called only when
+   * a Slack turn gives up for good, so nobody will ever read the task's result.
+   */
+  cancelOperation?(workspaceId: string, operationId: string): Promise<void>;
   createConversation(workspaceId: string): Promise<string>;
   listProjectModels?(): Promise<ProjectModelOptions>;
   selectProjectModel?(model: ModelIdentifier): Promise<ProjectModelOptions>;
@@ -138,10 +143,15 @@ export interface ProcessorDependencies {
   userName?: (userId: string) => Promise<string | undefined>;
   /** Issue 157: how long the hand-off notice may take before the message is released anyway. Default 10 seconds. */
   handoffNoticeMilliseconds?: number;
+  /** Issue 167: how long cancelling an abandoned task may take before the turn finishes anyway. Default 5 seconds. */
+  cancelTaskMilliseconds?: number;
 }
 
 /** Issue 157: a save already in flight at the hand-off gets this long to land. */
 const PENDING_SAVE_MILLISECONDS = 5_000;
+
+/** Issue 167: cancelling an abandoned task gets this long, well inside the time left before SIGKILL. */
+const CANCEL_TASK_MILLISECONDS = 5_000;
 
 /** Where a reply's Details button points, and how to post it. */
 interface ReplyDetails {
@@ -269,6 +279,27 @@ export async function processSlackRequest(
   // Issue 157: a save of it still in flight, and whether this attempt claimed a confirmation.
   let pendingSave: Promise<void> | undefined;
   let claimed = false;
+  // Issue 167: the task this attempt last started, saved or not, so a turn that gives up for good can cancel it.
+  let accepted: { workspaceId: string; operationId: string } | undefined;
+  /**
+   * Issue 167: cancels the task this attempt started or resumed, once the last delivery gives up on
+   * it, so it stops holding the workspace (and its compute). Bounded, and never throws: the turn
+   * must still finish before SIGKILL. Undefined when there was no task; otherwise whether it was cancelled.
+   */
+  const cancelAbandonedTask = async (): Promise<boolean | undefined> => {
+    const target = accepted ?? remembered;
+    if (target === undefined) return undefined;
+    const fields = { eventId: message.eventId, workspaceId: target.workspaceId, operationId: target.operationId };
+    try {
+      if (api.cancelOperation === undefined) throw Object.assign(new Error("the thread API cannot cancel tasks"), { name: "CancelUnavailable" });
+      await withinMilliseconds(api.cancelOperation(target.workspaceId, target.operationId), dependencies.cancelTaskMilliseconds ?? CANCEL_TASK_MILLISECONDS);
+      log("turn.task_cancelled", fields);
+      return true;
+    } catch (error) {
+      log("turn.task_cancel_failed", { ...fields, errorName: errorName(error) });
+      return false;
+    }
+  };
   try {
     // Issue 157: a redelivery of an attempt that ended while the thread still remembered its worker
     // operation (a hand-off, or a crash before the reply was posted) re-attaches to that operation. It runs no model, gate or new work, so an approved call never runs twice.
@@ -501,6 +532,7 @@ export async function processSlackRequest(
     const onOperationAccepted = async (operationId: string): Promise<void> => {
       // After the hand-off the redelivery owns the thread; a late acceptance must not move it.
       if (handedOff || saveActiveTurn === undefined) return;
+      accepted = { workspaceId: workspaceForTurn, operationId };
       // An approval's own text is only "yes": the note names what was approved instead.
       const approved = claimed ? confirmation?.session.approvals.map((approval) => approval.summary).join("; ") : undefined;
       const active: ActiveTurn = { eventId: message.eventId, workspaceId: workspaceForTurn, operationId, ...(approved ? { request: `the member approved: ${approved}` } : {}) };
@@ -639,7 +671,9 @@ export async function processSlackRequest(
       // The last allowed delivery: a release would only send the message to the dead-letter queue.
       draft.disposition = "abandoned";
       delete draft.responseText;
-      await notice(HANDOFF_FINAL_TEXT);
+      // Issue 167: nobody will wait on the task any more, so it is stopped before the thread forgets it.
+      const cancelled = await cancelAbandonedTask();
+      await notice(cancelled === undefined ? HANDOFF_FINAL_IDLE_TEXT : cancelled ? HANDOFF_FINAL_TEXT : HANDOFF_FINAL_CANCEL_FAILED_TEXT);
       if (remembered !== undefined) await forgetActiveTurn();
       finished = true;
       return;
@@ -651,7 +685,11 @@ export async function processSlackRequest(
     // The member sees the abandonment notice, so the record keeps that rather than an unposted answer.
     delete draft.responseText;
     log("request.abandoned", { eventId: message.eventId, errorName: errorName(error) });
-    await post(`AgentX could not process this request: ${escapeText(safeMessage(error))}`).catch(() => undefined);
+    // Issue 167: as at a final hand-off, the task this attempt started is stopped before it is forgotten.
+    const cancelled = await cancelAbandonedTask();
+    const abandoned = `AgentX could not process this request: ${escapeText(safeMessage(error))}`;
+    await post(cancelled === undefined ? abandoned : `${abandoned}\n\n${cancelled ? ABANDONED_TASK_TEXT : ABANDONED_TASK_CANCEL_FAILED_TEXT}`).catch(() => undefined);
+    if (remembered !== undefined) await forgetActiveTurn();
     finished = true;
   } finally {
     if (finished) {
