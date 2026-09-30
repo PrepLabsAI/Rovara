@@ -486,6 +486,25 @@ describe("the prerequisite checklist (spec 040 FR-023)", () => {
     expect(reported[1]).toEqual({ label: "EC2 vCPU quota", ok: true, detail: "EC2 Standard on-demand vCPU quota is 32 in us-east-1" });
   });
 
+  it("reports passing Node, npx and CDK bootstrap checks for the cdk engine, and still writes no line for them", async () => {
+    const lists = async (onCheck?: (check: PrerequisiteCheck) => void) => {
+      const lines: string[] = [];
+      await checkPrerequisites({
+        answers: sampleAnswers({ engine: "cdk" }), release: fakeRelease(), caller: { account: "123456789012", arn: "arn:aws:sts::123456789012:assumed-role/Admin/alice" },
+        checks: passingChecks(), prompter: scriptedPrompter([]), write: (line) => { lines.push(line); }, ...(onCheck === undefined ? {} : { onCheck }),
+      });
+      return lines;
+    };
+    const reported: PrerequisiteCheck[] = [];
+    const withList = await lists((check) => { reported.push(check); });
+    expect(withList).toEqual(await lists());
+    expect(reported.slice(-3)).toEqual([
+      { label: "Node", ok: true, detail: "Node v22.20.0" },
+      { label: "npx", ok: true, detail: "npx 10.9.0" },
+      { label: "CDK bootstrap", ok: true, detail: "CDK is bootstrapped in us-east-1" },
+    ]);
+  });
+
   it("reports a failed check with the same words the error lists", async () => {
     const reported: PrerequisiteCheck[] = [];
     const { done } = run(passingChecks({ ec2Quota: async () => 0 }), (check) => { reported.push(check); });

@@ -10,6 +10,7 @@ import { terminalPrompter } from "../../packages/cli/src/init/prompts.js";
 import {
   browserThatCreatesGitHubApp, fakeGitHubApi, initContext, memoryInitSecrets, progressHandle, sampleAnswers, scriptedPrompter, T0, TEST_PRIVATE_KEY, TEST_PUBLIC_KEY,
 } from "../support/init-fakes.js";
+import type { WizardCard } from "../../packages/cli/src/init/ui/protocol.js";
 
 const homes: string[] = [];
 afterEach(async () => { await Promise.all(homes.splice(0).map((home) => rm(home, { recursive: true, force: true }))); });
@@ -90,6 +91,20 @@ describe("GitHub App step", () => {
     expect(opened).toContain("https://github.com/apps/agentx-acme-staging/installations/new");
     expect(context.lines.join("\n")).not.toContain("PRIVATE KEY");
     expect(JSON.stringify(progress.value())).not.toContain("PRIVATE KEY");
+  });
+
+  it("writes 'If no browser opens' only on the terminal path; on the page the address is the card's button", async () => {
+    const terminal = initContext({ openBrowser: browserThatCreatesGitHubApp([]) });
+    homes.push(terminal.home);
+    expect((await githubAppStep(fakeGitHubApi()).run(terminal, progressHandle())).status).toBe("done");
+    expect(terminal.lines.some((line) => /^If no browser opens, open http:\/\/127\.0\.0\.1:\d+\//.test(line))).toBe(true);
+
+    const cards: WizardCard[] = [];
+    const page = initContext({ openBrowser: browserThatCreatesGitHubApp([]), surface: { card: (card) => { cards.push(card); } } });
+    homes.push(page.home);
+    expect((await githubAppStep(fakeGitHubApi()).run(page, progressHandle())).status).toBe("done");
+    expect(page.lines.some((line) => line.startsWith("If no browser opens"))).toBe(false);
+    expect(cards[0]?.link?.label).toBe("Create the GitHub App");
   });
 
   it("refuses an app created under another account, saving nothing and saying how to delete it", async () => {

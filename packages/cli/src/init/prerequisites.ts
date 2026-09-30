@@ -248,11 +248,16 @@ export async function checkPrerequisites(input: {
 
   let needsBootstrap = false;
   if (answers.engine === "cdk") {
+    // A passing Node, npx or bootstrap check writes no line, as before; the page still lists it.
     const node = await checks.commandVersion("node");
     if (node === undefined || !nodeVersionOk(node)) failed("Node", `the cdk engine needs Node 22.19 or later (found ${node?.trim() ?? "no node"})`);
-    if ((await checks.commandVersion("npx")) === undefined) failed("npx", "the cdk engine needs npx (it comes with npm)");
+    else input.onCheck?.({ label: "Node", ok: true, detail: `Node ${node.trim()}` });
+    const npx = await checks.commandVersion("npx");
+    if (npx === undefined) failed("npx", "the cdk engine needs npx (it comes with npm)");
+    else input.onCheck?.({ label: "npx", ok: true, detail: `npx ${npx.trim()}` });
     try {
       needsBootstrap = !(await checks.cdkBootstrapped());
+      if (!needsBootstrap) input.onCheck?.({ label: "CDK bootstrap", ok: true, detail: `CDK is bootstrapped in ${region}` });
     } catch (error) {
       // Item 4: a failed read of the bootstrap parameter (anything other than "not bootstrapped",
       // which cdkBootstrapped() already turns into `false`) is one more collected problem, not an

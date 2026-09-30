@@ -208,7 +208,8 @@ async function createWithManifest(context: InitContext, api: GitHubApi): Promise
     let code: string;
     let opened = false;
     if (context.openBrowser !== undefined) {
-      context.write(`If no browser opens, open ${listener.startUrl}`);
+      // On the page the address is a button, not a browser that might not open.
+      if (context.surface === undefined) context.write(`If no browser opens, open ${listener.startUrl}`);
       opened = await context.openBrowser(listener.startUrl);
     }
     if (opened) {

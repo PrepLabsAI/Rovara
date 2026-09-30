@@ -8,7 +8,7 @@
 import { createHmac, randomBytes } from "node:crypto";
 import { AgentXError, agentXError, environmentStackName, errorStatus } from "@agentx/contracts";
 import type { InitContext, InitSecrets } from "./context.js";
-import { checkSlackBotToken, checkSlackSigningSecret, fieldCheck, secretFromSource } from "./prompts.js";
+import { checkSlackBotToken, checkSlackSigningSecret, fieldCheck, secretFromSource, type SecretSource } from "./prompts.js";
 import { retryOnPage } from "./retry.js";
 import type { InitStep, ProgressHandle } from "./steps.js";
 import { slackAppCard, type SlackCardInput, slackUrlsCard, type SlackUrlsCardInput } from "./ui/cards.js";
@@ -301,7 +301,8 @@ export function slackAppStep(api: SlackApi): InitStep<InitContext> {
         show({ stage: "create", appName, createUrl: url });
       } else {
         context.write(`Create the Slack app "${appName}" from AgentX's manifest: pick the workspace, press Next, then Create, then Install to Workspace. If your workspace needs an admin to approve new apps, choose Request to Install.`);
-        context.write(`If no browser opens, open: ${url}`);
+        // On the page the address is the card's button, not a browser that might not open.
+        if (context.surface === undefined) context.write(`If no browser opens, open: ${url}`);
         if (context.openBrowser !== undefined) await context.openBrowser(url);
         show({ stage: "create", appName, createUrl: url });
       }
@@ -316,9 +317,13 @@ export function slackAppStep(api: SlackApi): InitStep<InitContext> {
 
       context.write("Copy the Bot User OAuth Token from OAuth & Permissions, and the Signing Secret from Basic Information, App Credentials.");
       show({ stage: "credentials", appName });
-      // Q8: on the page, a token Slack refuses is pasted again; the terminal stops, as before.
+      // Q8: on the page, a token Slack refuses is pasted again; the terminal stops, as before. A
+      // credential read from a file or an environment variable cannot be pasted again, so then the
+      // page stops as the terminal does.
+      const fromSource = (source: SecretSource | undefined) => source?.file !== undefined || source?.envName !== undefined;
+      const pastedOnPage = !fromSource(context.secretFlags.slackBotToken) && !fromSource(context.secretFlags.slackSigningSecret);
       const bot = await retryOnPage({
-        surface: context.surface, prompter: context.prompter, question: "Paste the Slack bot token and signing secret again?",
+        surface: pastedOnPage ? context.surface : undefined, prompter: context.prompter, question: "Paste the Slack bot token and signing secret again?",
         failed: (problem) => show({ stage: "refused", problem }),
         run: () => collectBot(context, api, progress, show),
       });

@@ -232,6 +232,31 @@ describe("Slack app step", () => {
     expect(storedSlack(context).botToken).toBe("unset");
   });
 
+  it("on the page, the create address is the card's button, so no 'If no browser opens' line is written", async () => {
+    const surface = { cards: [] as WizardCard[], card(card: WizardCard) { this.cards.push(card); } };
+    const context = slackContext(["installed", TEST_BOT_TOKEN, TEST_SIGNING_SECRET, true], { surface });
+    expect(await slackAppStep(fakeSlackApi()).run(context, progressHandle())).toMatchObject({ status: "done" });
+    expect(context.lines.some((line) => line.startsWith("If no browser opens"))).toBe(false);
+    expect(surface.cards[0]?.link?.url).toMatch(/^https:\/\/api\.slack\.com\/apps\?new_app=1&manifest_json=/);
+  });
+
+  it("M19: on the page, a refused token read from an environment variable is not offered for pasting again", async () => {
+    const surface = { cards: [] as WizardCard[], card(card: WizardCard) { this.cards.push(card); } };
+    // The bot token from an environment variable (the signing secret pasted); the signing secret
+    // from a file that cannot be read (the bot token pasted).
+    for (const [secretFlags, pasted] of [
+      [{ slackBotToken: { envName: "BOT" } }, TEST_SIGNING_SECRET],
+      [{ slackSigningSecret: { file: "/nonexistent/signing-secret" } }, TEST_BOT_TOKEN],
+    ] as const) {
+      const context = slackContext(["installed", pasted], { surface, secretFlags, processEnv: { BOT: TEST_BOT_TOKEN } });
+      const prompter = context.prompter as ReturnType<typeof scriptedPrompter>;
+      await expect(slackAppStep(fakeSlackApi({ authTest: async () => ({ ok: false, error: "invalid_auth" }) })).run(context, progressHandle()))
+        .rejects.toThrow("slackBotToken" in secretFlags ? "Slack refused the bot token (invalid_auth)" : "could not read --slack-signing-secret-file");
+      expect(prompter.asked).not.toContain("Paste the Slack bot token and signing secret again?");
+      expect(storedSlack(context).botToken).toBe("unset");
+    }
+  });
+
   it("reads the token and signing secret from files or environment variables under --yes", async () => {
     const context = slackContext([], {
       secretFlags: { slackBotToken: { envName: "BOT" }, slackSigningSecret: { envName: "SIGNING" } },
@@ -385,6 +410,24 @@ describe("verifying the Slack URLs after the Slack service deploys", () => {
     expect(surface.cards[1]?.lines).toContain("The Slack service keeps the old signing secret for up to 5 minutes; checking again every 15 seconds.");
     expect(surface.cards[3]?.link).toEqual({ url: "https://api.slack.com/apps/A0APP/event-subscriptions", label: "Open Event Subscriptions" });
     expect(JSON.stringify(surface.cards)).not.toContain(TEST_SIGNING_SECRET);
+  });
+
+  it("FR-041: on the page, a probe that fails outright shows readable words, with no error code, and asks to run it again", async () => {
+    const surface = page();
+    const ingress = slackIngressFetch({ signingSecret: TEST_SIGNING_SECRET });
+    let calls = 0;
+    const flaky = (async (url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      calls += 1;
+      return calls === 1 ? new Response("upstream error", { status: 500 }) : ingress(url, init);
+    }) as typeof fetch;
+    const context = slackContext([true, true], { fetch: flaky, surface });
+    context.secrets.values.set(SLACK_SECRET, JSON.stringify({ signingSecret: TEST_SIGNING_SECRET, botToken: TEST_BOT_TOKEN }));
+    await verifySlackUrls(context, withSlack());
+    expect((context.prompter as ReturnType<typeof scriptedPrompter>).asked).toEqual(["Run the Request URL check again?", "Does Slack show the Request URL as Verified?"]);
+    const failed = surface.cards.find((card) => card.status === "failed");
+    expect(failed?.lines[0]).toBe(`${EVENTS} answered HTTP 500; check the control plane's SlackIngress logs`);
+    expect(failed?.lines[0]).not.toMatch(/^[A-Z_]+: /);
+    expect(surface.cards.at(-1)?.status).toBe("ok");
   });
 
   it("FR-041: without a page, a check Slack has not verified still stops at once and asks nothing more", async () => {
