@@ -263,11 +263,17 @@ describe("AI-tool turn records (spec 025 FR-037, R27)", () => {
   it("lets the broker put items in TurnRecords only under TASK#, and (spec 025 25e) admin change audit records under CHANGE#", () => {
     const puts = grants(named).filter(({ role, statement }) => role === brokerRole(named) && allows(statement, "dynamodb:PutItem") && JSON.stringify(statement.Resource).includes(turnTable(named)));
     expect(puts).toHaveLength(2);
-    expect(puts[0]!.statement.Condition).toEqual({ "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["TASK#*"] } });
-    expect(actionsOf(puts[0]!.statement)).toEqual(["dynamodb:PutItem"]);
+    // Each statement is chosen by its leading keys, so the order CDK emits them in does not matter.
+    const putUnder = (key: string) => puts.filter(({ statement }) => JSON.stringify((statement.Condition as Record<string, Record<string, unknown>> | undefined)?.["ForAllValues:StringLike"]?.["dynamodb:LeadingKeys"]) === JSON.stringify([key]));
+    const tasks = putUnder("TASK#*");
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]!.statement.Condition).toEqual({ "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["TASK#*"] } });
+    expect(actionsOf(tasks[0]!.statement)).toEqual(["dynamodb:PutItem"]);
     // Spec 025 E3, FR-051: an admin change's audit record is written once, then stepped forward.
-    expect(puts[1]!.statement.Condition).toEqual({ "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["CHANGE#*"] } });
-    expect(actionsOf(puts[1]!.statement)).toEqual(["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:GetItem"]);
+    const changes = putUnder("CHANGE#*");
+    expect(changes).toHaveLength(1);
+    expect(changes[0]!.statement.Condition).toEqual({ "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["CHANGE#*"] } });
+    expect(actionsOf(changes[0]!.statement)).toEqual(["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:GetItem"]);
   });
 
   it("gives the broker no other write on TurnRecords: no delete or batch write, and an update only on CHANGE# audit records", () => {
@@ -342,8 +348,11 @@ describe("the developer task notifier (spec 025 phase 25c, named environments)",
       expect(statement.Condition).toMatchObject({ "ForAllValues:StringLike": { "dynamodb:LeadingKeys": expect.any(Array) as unknown } });
       for (const forbidden of ["dynamodb:Scan", "dynamodb:DeleteItem", "dynamodb:BatchWriteItem"]) expect(allows(statement, forbidden)).toBe(false);
     }
-    const reads = dynamo.find((statement) => allows(statement, "dynamodb:GetItem"))!;
-    expect((reads.Condition!["ForAllValues:StringLike"] as Record<string, string[]>)["dynamodb:LeadingKeys"].sort()).toEqual(["DEVTASK#*", "OPERATION#*", "WORKSPACE#*"]);
+    // The task read is chosen by its leading keys, not by position among the GetItem statements.
+    const reads = dynamo.filter((statement) => allows(statement, "dynamodb:GetItem") && (statement.Condition!["ForAllValues:StringLike"] as Record<string, string[]>)["dynamodb:LeadingKeys"].includes("DEVTASK#*"));
+    expect(reads).toHaveLength(1);
+    expect([...(reads[0]!.Condition!["ForAllValues:StringLike"] as Record<string, string[]>)["dynamodb:LeadingKeys"]].sort()).toEqual(["DEVTASK#*", "OPERATION#*", "WORKSPACE#*"]);
+    expect(actionsOf(reads[0]!).sort()).toEqual(["dynamodb:GetItem", "dynamodb:Query"]);
     const keysOf = (statement: Statement) => (statement.Condition!["ForAllValues:StringLike"] as Record<string, string[]>)["dynamodb:LeadingKeys"];
     const writes = dynamo.filter((statement) => allows(statement, "dynamodb:PutItem") || allows(statement, "dynamodb:UpdateItem"));
     expect(writes).toHaveLength(3);
