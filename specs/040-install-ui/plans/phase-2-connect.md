@@ -105,13 +105,16 @@ PRs.
 ## Review Focus
 
 1. **GitHub sends the browser back after the run has stopped waiting** (the 15-minute timeout, or
-   the run ended). Expected: `/github/created` is no longer mounted, so it gets the ordinary token
-   refusal (401) and resolves nothing; the step has already failed with "no GitHub App was created
-   within 15 minutes; run agentx init again". Pinned in Task 5 (`init-ui-github.test.ts`, "a
+   the run ended). Expected: `/github/created` is no longer mounted, so it gets the ordinary
+   refusal (403 for GitHub's cross-site visit, 401 without its headers) and resolves nothing; the
+   step has already failed with "no GitHub App was created within 15 minutes; run agentx init
+   again". Pinned in Task 5 (`init-ui-github.test.ts`, "a
    callback after the wait ended is refused like any other request").
 2. **The operator presses "Create the GitHub App" twice** and two GitHub tabs send the browser back.
-   Expected: the first callback resolves the code, the second is refused (401), and GitHub is asked
-   for exactly one conversion. Pinned in Task 5 ("takes the first callback only").
+   Expected: the first callback resolves the code, the second gets the ordinary refusal (403 for
+   GitHub's cross-site visit, 401 without its headers), and GitHub is asked for exactly one
+   conversion. Pinned in Task 5 ("takes GitHub's cross-site redirect with the right state, once,
+   and resolves the code").
 3. **A token pasted with a trailing newline or the terminal's bracketed-paste markers.** Expected:
    the masked field accepts it, `checkSlackBotToken` sees the clean value, and nothing is echoed.
    Pinned in Task 6 (`init-ui-prompter.test.ts`, "secret runs the field check on the cleaned value").
@@ -2506,6 +2509,8 @@ git commit -m "docs(spec-040): record the phase 2 rulings and the owner's answer
 ---
 
 ### Task 10: Live check (deferred to the combined final live check) in a throwaway environment (owner present)
+
+Status: deferred to the combined final live check (owner, 2026-09-30); not run in this phase.
 
 > **Deferred to the combined final live check (owner, 2026-09-30).** No live testing happens until
 > spec 025 phases 25d and 25e and spec 040 phases 2 to 4 are all built. This task is not run when
