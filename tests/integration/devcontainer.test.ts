@@ -306,6 +306,14 @@ describe("the collected process under the devcontainer CLI (#154)", () => {
     await expect(runCollected("agentx-no-such-command-154", [])).rejects.toThrow(/ENOENT/);
   });
 
+  it("starts cut output at a whole line, so no fragment of a line split by the cut is kept (#170)", async () => {
+    const script = "process.stdout.write(\"0123456789abcdef\\n\".repeat(200000)); process.stdout.write(\"END\\n\");";
+    const result = await runCollected(process.execPath, ["-e", script]);
+    expect(result.stdout.length).toBeLessThanOrEqual(1_048_576);
+    expect(result.stdout.startsWith("0123456789abcdef\n")).toBe(true);
+    expect(result.stdout.endsWith("\nEND\n")).toBe(true);
+  });
+
   it("keeps the last 1 MiB of output, not the first", async () => {
     const script = "process.stderr.write(\"x\".repeat(3 * 1048576)); process.stderr.write(\"END-OF-OUTPUT\");";
     const result = await runCollected(process.execPath, ["-e", script]);

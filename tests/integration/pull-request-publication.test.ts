@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import type { WorkerInvocation } from "@agentx/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { publishWorkspace, runReadinessChecks } from "../../packages/worker/src/publish.js";
+import { storedCommandOutput } from "../../packages/worker/src/command-failure.js";
 
 const execFileAsync = promisify(execFile);
 const temporaryDirectories: string[] = [];
@@ -467,6 +468,12 @@ describe("publication check results (#170)", () => {
     expect(check!.stdout.startsWith("line of output\n")).toBe(true);
     expect(check!.stdout).not.toContain(TOKEN);
   }, 30_000);
+
+  it("redacts stored output before cutting it, and starts a cut output at a whole line", () => {
+    // Cut first, the last 30 characters would keep the token's end, which no pattern matches.
+    expect(storedCommandOutput(`${"x".repeat(10)}${TOKEN}\nlast\n`, 30)).toBe(`${"x".repeat(10)}[REDACTED]\nlast\n`);
+    expect(storedCommandOutput(`${"a".repeat(50)}\nsecond ${TOKEN}\nthird\n`, 40)).toBe("second [REDACTED]\nthird\n");
+  });
 
   it("says timed_out only when the timer fired: a signal or a failed start is a failure", async () => {
     const fixture = await createFixture();
