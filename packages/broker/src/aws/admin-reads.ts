@@ -14,6 +14,7 @@ import {
   SlackTeamIdSchema,
   agentXError,
   developerTaskPolicy,
+  redactAndCap,
   type AdminBindingsResponse,
   type AdminFailuresResponse,
   type AdminProjectsResponse,
@@ -128,6 +129,9 @@ async function listProjects(deps: AdminReadDependencies, identity: Authenticated
   return { projects };
 }
 
+/** Slack caps a channel name at 80 characters; the cap leaves room for a redaction marker. */
+const CHANNEL_NAME_MAX = 200;
+
 /** A11: names for public channels, privacy for all; `available` is false when no name could be read. */
 export async function channelLabels(deps: AdminReadDependencies, channelIds: readonly string[]): Promise<{ labels: Map<string, { name?: string; private: boolean }>; available: boolean }> {
   const labels = new Map<string, { name?: string; private: boolean }>();
@@ -137,9 +141,12 @@ export async function channelLabels(deps: AdminReadDependencies, channelIds: rea
     for (let start = 0; start < unique.length; start += CHANNEL_MEMBERS_MAX_CHANNELS) {
       const answer = await deps.channelInfo({ kind: "channel-info", channelIds: unique.slice(start, start + CHANNEL_MEMBERS_MAX_CHANNELS) });
       if (!answer.ok) return { labels, available: false };
+      // A channel Slack does not return (deleted, or out of the bot's sight) gets no label, so it is
+      // listed by ID without name or privacy; the lookup itself worked, so `available` stays true.
       for (const channel of answer.channels) {
         // Until Task 11 adds the member check (Q7 as answered), a private channel stays ID only.
-        labels.set(channel.channelId, channel.isPrivate ? { private: true } : { name: channel.name, private: false });
+        // A16: a name is text from Slack, so it is redacted and capped before any answer carries it.
+        labels.set(channel.channelId, channel.isPrivate ? { private: true } : { name: redactAndCap(channel.name, CHANNEL_NAME_MAX).text, private: false });
       }
     }
   } catch (error) {
@@ -195,9 +202,9 @@ export function timeWindow(url: URL, now: number, defaultHours: number): { since
   const until = timeParam(url, "until", now);
   const since = timeParam(url, "since", until - defaultHours * HOUR_MS);
   if (since > until) throw agentXError("CONFIG_INVALID", "since must be before until");
+  if (since < now - ADMIN_INDEX_RETENTION_DAYS * DAY_MS) throw agentXError("CONFIG_INVALID", "AgentX keeps these records 30 days; ask for at most the last 30 days");
   // A7: the window itself spans at most 30 days, so a far-future `until` never walks thousands of day partitions.
   if (until - since > ADMIN_INDEX_RETENTION_DAYS * DAY_MS) throw agentXError("CONFIG_INVALID", "a window spans at most 30 days; move since or until closer together");
-  if (since < now - ADMIN_INDEX_RETENTION_DAYS * DAY_MS) throw agentXError("CONFIG_INVALID", "AgentX keeps these records 30 days; ask for at most the last 30 days");
   return { since: new Date(since).toISOString(), until: new Date(until).toISOString() };
 }
 
@@ -224,7 +231,7 @@ export async function readFailures(deps: AdminReadDependencies, window: { since:
     const pk = `FAILURE#${new Date(day).toISOString().slice(0, 10)}`;
     let start: Record<string, unknown> | undefined;
     do {
-      const filters = [...(options.project === undefined ? [] : ["#project = :project"]), ...(options.category === undefined ? [] : ["category = :category"])];
+      const filters = [...(options.project === undefined ? [] : ["#project = :project"]), ...(options.category === undefined ? [] : ["#category = :category"])];
       const page = await deps.documentClient.send(new QueryCommand({
         TableName: deps.tableName,
         KeyConditionExpression: "pk = :pk AND sk BETWEEN :low AND :high",
@@ -233,7 +240,12 @@ export async function readFailures(deps: AdminReadDependencies, window: { since:
           ...(options.project === undefined ? {} : { ":project": options.project }),
           ...(options.category === undefined ? {} : { ":category": options.category }),
         },
-        ...(options.project === undefined ? {} : { ExpressionAttributeNames: { "#project": "project" } }),
+        ...(filters.length === 0 ? {} : {
+          ExpressionAttributeNames: {
+            ...(options.project === undefined ? {} : { "#project": "project" }),
+            ...(options.category === undefined ? {} : { "#category": "category" }),
+          },
+        }),
         ...(filters.length === 0 ? {} : { FilterExpression: filters.join(" AND ") }),
         ScanIndexForward: false,
         Limit: ADMIN_LIST_MAX,

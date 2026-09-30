@@ -1,8 +1,10 @@
 // tests/contract/admin-read-failures.test.ts
 // Spec 025 A7, US5 scenario 3: failures in a window, newest first, from the failure index.
 import { describe, expect, it } from "vitest";
+import { readFailures, type AdminReadDependencies } from "../../packages/broker/src/aws/admin-reads.js";
 import { failureIndexKey } from "../../packages/contracts/src/index.js";
 import { createAdminReadBroker } from "../support/admin-read-broker.js";
+import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const failure = (endedAt: string, n: number, extra: Record<string, unknown> = {}) => {
   const operationId = `1111111${n}-1111-4111-8111-111111111111`;
@@ -50,6 +52,25 @@ describe("GET /v1/admin/failures (FR-038, A7)", () => {
     for (const query of [`since=${old}`, "since=2026-09-30T10:00:00.000Z&until=2026-09-30T09:00:00.000Z", "limit=0", "limit=101", "project=%3Cscript%3E", "since=yesterday", `since=${new Date(Date.now() - 86_400_000).toISOString()}&until=2999-01-01T00:00:00.000Z`]) {
       expect((await admin("GET", `/v1/admin/failures?${query}`)).body.error, query).toMatchObject({ code: "CONFIG_INVALID" });
     }
+  });
+
+  it("says the index keeps 30 days when since is older than that", async () => {
+    const { admin } = await createAdminReadBroker();
+    const old = new Date(Date.now() - 31 * 86_400_000).toISOString();
+    expect((await admin("GET", `/v1/admin/failures?since=${old}`)).body.error).toEqual({
+      code: "CONFIG_INVALID", message: "AgentX keeps these records 30 days; ask for at most the last 30 days",
+    });
+  });
+
+  it("reads only the asked category when readFailures is given one (Task 12's latest dispatch failure)", async () => {
+    const db = new FakeDynamoDb();
+    const at = (hoursAgo: number) => new Date(Date.now() - hoursAgo * 3_600_000).toISOString();
+    db.set(failure(at(1), 1));
+    db.set(failure(at(2), 2, { category: "worker_unavailable" }));
+    const deps = { documentClient: db, tableName: "state", limitDefaults: { member: 1, organization: 1 }, now: () => Date.now(), log: () => undefined } as unknown as AdminReadDependencies;
+    const answer = await readFailures(deps, { since: at(24), until: at(0) }, { limit: 10, category: "worker_unavailable" });
+    expect(answer.failures.map((entry) => entry.operationId)).toEqual(["11111112-1111-4111-8111-111111111111"]);
+    expect(answer.skipped).toBe(0);
   });
 
   it("never shows an item past its indexExpiresAt, which TTL deletes up to 48 hours late (A6)", async () => {

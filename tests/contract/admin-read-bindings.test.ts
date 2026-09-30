@@ -36,6 +36,24 @@ describe("GET /v1/admin/slack/bindings (FR-038, FR-030)", () => {
     expect((await failing.admin("GET", "/v1/admin/slack/bindings")).body.notices).toEqual(["channel_names_unavailable"]);
   });
 
+  it("redacts a token-shaped public channel name (A16) and lists a channel the lookup does not return by ID", async () => {
+    const planted = `xoxb-${"1".repeat(12)}-${"2".repeat(13)}-${"a".repeat(24)}`;
+    const channelInfo = async (request: { channelIds: string[] }) => ({
+      ok: true as const,
+      channels: request.channelIds.filter((channelId) => channelId === SLACK_CHANNEL).map((channelId) => ({ channelId, name: planted, isPrivate: false })),
+    });
+    const { admin, handler } = await createAdminReadBroker({ channelInfo });
+    await bindChannel(handler, "C0MISSING01");
+    const answer = await admin("GET", "/v1/admin/slack/bindings");
+    const bindings = answer.body.bindings as Array<Record<string, unknown>>;
+    expect(bindings[0]).toMatchObject({ channelId: SLACK_CHANNEL, private: false });
+    expect(bindings[0]?.channelName).toContain("[REDACTED]");
+    expect(JSON.stringify(answer.body)).not.toContain(planted);
+    // A channel Slack did not return (deleted, or the bot cannot see it) is listed by ID, with neither name nor privacy.
+    expect(bindings[1]).toEqual({ teamId: SLACK_TEAM, channelId: "C0MISSING01", projectName: "payments", updatedAt: expect.any(String) as unknown });
+    expect(answer.body.notices).toEqual([]);
+  });
+
   it("asks for team= where the environment records no Slack team, and refuses a malformed one", async () => {
     const { admin } = await createAdminReadBroker({ slackTeamId: null });
     expect((await admin("GET", "/v1/admin/slack/bindings")).body.error).toEqual({
