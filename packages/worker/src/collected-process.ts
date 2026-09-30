@@ -46,7 +46,13 @@ export function runCollected(executable: string, args: readonly string[], option
     child.on("exit", () => { exited = true; });
     const timer = options.timeoutMs
       ? setTimeout(() => {
-        if (exited) return;
+        if (exited) {
+          // The process is done, but a child it left running holds the output open: stop reading,
+          // so "close" fires, without calling the process timed out.
+          child.stdout.destroy();
+          child.stderr.destroy();
+          return;
+        }
         timedOut = true;
         child.kill("SIGTERM");
       }, options.timeoutMs)

@@ -246,7 +246,7 @@ describe("a failed setup or readiness command (#154)", () => {
     const { message } = await preparing("missing-cwd", {
       setup: [{ cwd: "repo/missing-cwd/nowhere", executable: "true", args: [], timeoutSeconds: 10 }],
     });
-    expect(message).toMatch(/^setup step 0 \(true in repo\/missing-cwd\/nowhere\) could not run\nLast lines:\n.*ENOENT/);
+    expect(message).toBe("setup step 0 (true in repo/missing-cwd/nowhere) could not run\nLast lines:\ndirectory does not exist in this workspace: repo/missing-cwd/nowhere");
   });
 
   it("caps the command at 120 characters", async () => {

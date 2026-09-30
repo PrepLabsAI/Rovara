@@ -347,7 +347,9 @@ export async function runProjectCommand(
   rootPath: string,
 ): Promise<CommandResult> {
   const cwd = containedPath(rootPath, command.cwd);
-  const cwdStat = await stat(cwd);
+  // The workspace-relative path only: Node's own error would show the worker's absolute path (#154).
+  const cwdStat = await stat(cwd).catch(() => undefined);
+  if (cwdStat === undefined) throw new Error(`directory does not exist in this workspace: ${command.cwd}`);
   if (!cwdStat.isDirectory()) throw new Error(`command cwd is not a directory: ${command.cwd}`);
   let result: CollectedProcess;
   try {

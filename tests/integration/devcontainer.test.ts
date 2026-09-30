@@ -269,6 +269,14 @@ describe("the collected process under the devcontainer CLI (#154)", () => {
     expect(result).not.toHaveProperty("signal");
   });
 
+  it("stops waiting at the timeout for a child that holds the output open after the process exited (#154 review)", async () => {
+    const started = Date.now();
+    const result = await runCollected("sh", ["-c", "sleep 5 & exit 4"], { timeoutMs: 300 });
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(result.exitCode).toBe(4);
+    expect(result).not.toHaveProperty("timedOut");
+  });
+
   it("rejects when the executable does not exist", async () => {
     await expect(runCollected("agentx-no-such-command-154", [])).rejects.toThrow(/ENOENT/);
   });
