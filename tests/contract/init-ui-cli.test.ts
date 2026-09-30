@@ -11,6 +11,7 @@ import { environmentStackName } from "@agentx/contracts";
 import { executeCli } from "../../packages/cli/src/main.js";
 import { environmentCachePath } from "../../packages/cli/src/environments/cache.js";
 import type { InitCliDependencies } from "../../packages/cli/src/init/commands.js";
+import { NO_BROWSER_LINE } from "../../packages/cli/src/init/ui-mode.js";
 import { INIT_STEP_IDS, installAnswersParameterName, readInstallProgress } from "../../packages/cli/src/init/install-state.js";
 import { readEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import {
@@ -627,5 +628,44 @@ describe("agentx init --ui", () => {
     expect(code).toBe(0);
     expect(operator.states.at(-1)?.cards?.map((card) => card.id)).toEqual(expect.arrayContaining(["admin", "project", "channel", "reply", "ready"]));
     expect(operator.states.at(-1)?.cards?.find((card) => card.id === "ready")?.status).toBe("ok");
+  });
+
+  it("FR-001: with neither flag, an interactive terminal that can open a browser gets the page", async () => {
+    const h = await harness();
+    const operator = fakeWizardOperator([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
+    // No --ui, and no injected prompter: the default decides.
+    expect(await h.run([], { openBrowser: operator.open, isInteractive: () => true, browserAvailable: () => true })).toBe(0);
+    await operator.settled();
+    expect(operator.opened[0]).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/\?t=/);
+    expect(operator.remaining()).toBe(0);
+    expect(h.printed()).not.toContain(NO_BROWSER_LINE);
+  });
+
+  // The terminal path refuses without a TTY; a developer running the suite with one attached would
+  // be asked on stdin instead, so the test runs only where stdin is not a TTY (always, in CI).
+  it.skipIf(process.stdin.isTTY === true)("User Story 4: with no browser, the terminal asks, after one line saying how to get the page", async () => {
+    const h = await harness();
+    const refused = fakeWizardOperator([]);
+    // No TTY in the test process: the terminal path refuses, as before, but only after the line.
+    expect(await h.run([], { openBrowser: refused.open, isInteractive: () => true, browserAvailable: () => false })).not.toBe(0);
+    expect(refused.opened).toEqual([]);
+    expect(h.printed()).toContain("No browser here, so agentx init asks in this terminal. To use the install page instead, run agentx init --ui --no-browser and open the address it prints (over SSH, forward its port with ssh -L).");
+  });
+
+  it.skipIf(process.stdin.isTTY === true)("--no-browser with neither flag is the terminal, with the same line", async () => {
+    const h = await harness();
+    const none = fakeWizardOperator([]);
+    expect(await h.run(["--no-browser"], { openBrowser: none.open, isInteractive: () => true, browserAvailable: () => true })).not.toBe(0);
+    expect(none.opened).toEqual([]);
+    expect(h.printed()).toContain("No browser here, so agentx init asks in this terminal.");
+  });
+
+  it.skipIf(process.stdin.isTTY === true)("over SSH (the run's own environment) the default is the terminal, with the same line", async () => {
+    const h = await harness();
+    const none = fakeWizardOperator([]);
+    // No browserAvailable override: the SSH_CONNECTION below reaches it only through processEnv.
+    expect(await h.run([], { openBrowser: none.open, isInteractive: () => true, processEnv: { SSH_CONNECTION: "10.0.0.2 51000 10.0.0.1 22" } })).not.toBe(0);
+    expect(none.opened).toEqual([]);
+    expect(h.printed()).toContain(NO_BROWSER_LINE);
   });
 });

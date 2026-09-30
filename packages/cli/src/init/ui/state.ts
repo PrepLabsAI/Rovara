@@ -28,6 +28,8 @@ export interface WizardHub {
   snapshot(): WizardSnapshot;
   state(): WizardState;
   subscribe(listener: WizardListener): () => void;
+  /** How many pages are connected now (their event streams). */
+  connected(): number;
   /** One line for the log pane (the same line `agentx init` writes to stderr). */
   log(line: string): void;
   /** The checklist, in the order the steps run, before any of them has. */
@@ -41,6 +43,9 @@ export interface WizardHub {
    * started, done, skipped or waiting), and when the card that offered the same address is
    * replaced by one that no longer offers it. */
   showLink(link: WizardLink): void;
+  /** Drops the run's link: the address it offered no longer leads anywhere useful (a sign-in
+   * that failed). */
+  clearLink(): void;
   /** Publishes a question and resolves with the answer the page posts, once `check` accepts it. */
   ask(question: NewQuestion, check: AnswerCheck): Promise<string>;
   /** The page's answer. Returns the message to show on the field, or undefined when accepted. */
@@ -147,6 +152,7 @@ export function createWizardHub(env: string): WizardHub {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
+    connected: () => listeners.size,
     log: appendLog,
     setSteps(next) {
       steps = next.map((step) => ({ id: step.id, title: step.title, status: "pending" }));
@@ -185,6 +191,10 @@ export function createWizardHub(env: string): WizardHub {
         return;
       }
       link = next;
+      publish();
+    },
+    clearLink() {
+      link = undefined;
       publish();
     },
     async ask(next, check) {

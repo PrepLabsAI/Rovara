@@ -51,7 +51,11 @@ export function adminUserStep(): InitStep<InitContext> {
     async run(context, progress) {
       const settings = await requireSettings(context);
       const recorded = progress.current().admin;
-      const show = (card: AdminCardInput) => context.surface?.card(adminCard(card));
+      const show = (card: AdminCardInput) => {
+        // A failed sign-in's address is stale: the page drops its button, and a retry offers its own.
+        if (card.stage === "failed") context.surface?.clearLink?.();
+        context.surface?.card(adminCard(card));
+      };
       // FR-050 (Q7): on the page, a sign-in that fails or times out can be tried again; the
       // terminal stops, as before. The sign-in page itself is the page's Next button (Q5).
       const signIn = (who: string, createdEmail?: string) => retryOnPage({
@@ -135,11 +139,22 @@ export function firstProjectStep(): InitStep<InitContext> {
       if (project.channelId === undefined) {
         const slack = progress.current().slack;
         if (slack === undefined) throw agentXError("CONFIG_INVALID", "install progress has no Slack app facts; the Slack app step must finish first, so run agentx init again");
-        const bound = await addChannel({
-          session, botToken: await readSlackBotToken(context.secrets, context.env), teamId: slack.teamId, botUserId: slack.botUserId, projectName: project.name,
-          prompter: context.prompter, write: context.write, sleep: context.sleep, now: context.now, services: context.setup, flags: context.flags,
-          onWaiting: (channelName) => context.surface?.card(channelCard({ stage: "waiting", channelName, botUserId: slack.botUserId })),
-        });
+        let waitingFor: string | undefined;
+        let bound: Awaited<ReturnType<typeof addChannel>>;
+        try {
+          bound = await addChannel({
+            session, botToken: await readSlackBotToken(context.secrets, context.env), teamId: slack.teamId, botUserId: slack.botUserId, projectName: project.name,
+            prompter: context.prompter, write: context.write, sleep: context.sleep, now: context.now, services: context.setup, flags: context.flags,
+            onWaiting: (channelName) => {
+              waitingFor = channelName;
+              context.surface?.card(channelCard({ stage: "waiting", channelName, botUserId: slack.botUserId }));
+            },
+          });
+        } catch (error) {
+          // The invite wait is over: the page says so instead of still waiting.
+          if (waitingFor !== undefined) context.surface?.card(channelCard({ stage: "failed", channelName: waitingFor, problem: problemText(error) }));
+          throw error;
+        }
         project = { ...project, channelId: bound.channelId, channelName: bound.channelName, teamId: slack.teamId };
         await progress.update({ project });
       }

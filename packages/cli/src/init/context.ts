@@ -84,7 +84,11 @@ export interface FinishFlags {
 
 /** The install page, with --ui only. Steps show what they are doing on it, next to the lines they
  * already write; with no page, every step behaves exactly as before. */
-export interface InstallSurface { card(card: WizardCard): void }
+export interface InstallSurface {
+  card(card: WizardCard): void;
+  /** Drops the page's run link (the button the run waits on), when what it opened has failed. */
+  clearLink?(): void;
+}
 
 /** Where the GitHub App's manifest form is served and GitHub's redirect is received: the terminal
  * path's one-time listener (github-app.ts's startManifestListener), or the wizard's own address

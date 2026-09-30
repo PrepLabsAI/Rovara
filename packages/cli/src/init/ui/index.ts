@@ -15,6 +15,37 @@ import type { WizardPhase, WizardResume } from "./protocol.js";
 import { startWizardServer, type WizardServer } from "./server.js";
 import { createWizardHub, isShowableLink, type WizardHub } from "./state.js";
 
+/** Q3: how long a question, or a page button, may wait with no page connected before the terminal
+ * says where it is. */
+export const PAGE_CLOSED_MS = 60_000;
+const REMINDER_CHECK_MS = 5_000;
+
+export function pageClosedLine(url: string): string {
+  return `The install page is closed. Open ${url} to continue, or press Ctrl-C to stop; agentx init continues from here next time.`;
+}
+
+/** Says once per wait, in the terminal, where to reopen a page that has been closed for a minute.
+ * A wait is a question, or a run link with no question (the run waits on a page button: the GitHub
+ * App's create button, the admin sign-in). `check` is called on a timer; tests call it directly. */
+export function pageClosedReminder(input: { hub: WizardHub; url: string; write: (line: string) => void; now: () => number }): { check(): void } {
+  let lastConnected = input.now();
+  let reminded: string | undefined;
+  return {
+    check() {
+      if (input.hub.connected() > 0) {
+        lastConnected = input.now();
+        return;
+      }
+      const state = input.hub.state();
+      const waiting = state.question?.id ?? (state.link === undefined ? undefined : `link:${state.link.url}`);
+      if (waiting === undefined || waiting === reminded) return;
+      if (input.now() - lastConnected < PAGE_CLOSED_MS) return;
+      reminded = waiting;
+      input.write(pageClosedLine(input.url));
+    },
+  };
+}
+
 export interface InstallWizard {
   /** The loopback address the wizard was opened at, session token and all. */
   url: string;
@@ -63,13 +94,16 @@ export async function startInstallWizard(input: {
     input.write(`Open that address in a browser on this machine to continue. From another machine, first run: ssh -L ${server.port}:127.0.0.1:${server.port} <this host>`);
   }
   input.write("Every question agentx init asks is on that page; nothing else needs typing here.");
+  const reminder = pageClosedReminder({ hub, url: server.url, write: input.write, now: Date.now });
+  const timer = setInterval(() => reminder.check(), REMINDER_CHECK_MS);
+  timer.unref();
 
   let closed = false;
   return {
     url: server.url,
     hub,
     prompter: browserPrompter(hub),
-    surface: { card: (card) => hub.showCard(card) },
+    surface: { card: (card) => hub.showCard(card), clearLink: () => hub.clearLink() },
     openLink: async (url) => {
       hub.showLink({ url, label: linkLabel(url) });
       // A refused address is not on the page, so no one can open it: say so, as a browser that
@@ -86,6 +120,7 @@ export async function startInstallWizard(input: {
     async close() {
       if (closed) return;
       closed = true;
+      clearInterval(timer);
       // The hub first: it sends the page its "closed" event over the streams the server then ends.
       hub.close();
       await server.close();
