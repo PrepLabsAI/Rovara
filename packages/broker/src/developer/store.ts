@@ -329,20 +329,28 @@ export class DeveloperSignInStore {
     throw error;
   }
 
-  /** E9 (Q3): sessions that started before `at` end; `revoked` is untouched, so they may sign in again. */
+  /**
+   * E9 (Q3): sessions that started before `at` end; `revoked` is untouched, so they may sign in again.
+   * The end never moves backwards: an older `at` leaves a later end in place and still answers
+   * "ended". `at` is stored in toISOString's one format, so the condition's text order is time order.
+   */
   async endSessions(developerId: string, at: string): Promise<"ended" | "not_found"> {
+    const when = Date.parse(at);
+    if (!Number.isFinite(when)) throw new RangeError("endSessions needs a readable time");
+    const normalized = new Date(when).toISOString();
     try {
       await this.input.documentClient.send(new UpdateCommand({
         TableName: this.input.tableName,
         Key: { pk: `DEVELOPER#${developerId}`, sk: META },
         UpdateExpression: "SET sessionsEndedAt = :at",
-        ConditionExpression: "attribute_exists(pk)",
-        ExpressionAttributeValues: { ":at": at },
+        ConditionExpression: "attribute_exists(pk) AND (attribute_not_exists(sessionsEndedAt) OR sessionsEndedAt < :at)",
+        ExpressionAttributeValues: { ":at": normalized },
       }));
       return "ended";
     } catch (error) {
-      if (conditionFailed(error)) return "not_found";
-      throw error;
+      if (!conditionFailed(error)) throw error;
+      // The record exists with a later or equal end, or it does not exist at all.
+      return (await this.getDeveloper(developerId)) === undefined ? "not_found" : "ended";
     }
   }
 

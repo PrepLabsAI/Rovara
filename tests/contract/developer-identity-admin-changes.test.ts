@@ -72,6 +72,20 @@ describe("ending a developer's sessions (E9, Q3)", () => {
     expect((await harness.refresh(String(fresh.body.refresh_token))).status).toBe(200);
   });
 
+  it("never moves the end backwards: an older time after a newer one keeps the newer and still answers ended", async () => {
+    const harness = identityHarness({ slackUsers: [{ userId: "U0ADA00001", teamId: TEAM, name: "Ada" }] });
+    await harness.signIn("slack", "U0ADA00001");
+    const developerId = developerIdOf(harness.db);
+    const newer = "2026-09-27T13:00:00.000Z";
+    expect(await harness.handler({ kind: "end-developer-sessions", developerId, at: newer } as never)).toEqual({ ok: true });
+    expect(await harness.handler({ kind: "end-developer-sessions", developerId, at: "2026-09-27T12:30:00.000Z" } as never)).toEqual({ ok: true });
+    expect(await harness.handler({ kind: "end-developer-sessions", developerId, at: newer } as never)).toEqual({ ok: true });
+    // Without milliseconds the text sorts differently; the time is compared, not the text.
+    expect(await harness.handler({ kind: "end-developer-sessions", developerId, at: "2026-09-27T12:59:59Z" } as never)).toEqual({ ok: true });
+    expect(harness.db.get(`DEVELOPER#${developerId}`, "META")).toMatchObject({ sessionsEndedAt: newer });
+    expect(harness.logs.filter((entry) => entry.event === "signin.sessions_ended_by_admin").map((entry) => entry.result)).toEqual(["ended", "ended", "ended", "ended"]);
+  });
+
   it("answers not_found for a developer who never signed in", async () => {
     const harness = identityHarness({});
     expect(await harness.handler({ kind: "end-developer-sessions", developerId: "f".repeat(64), at: new Date().toISOString() } as never)).toEqual({ ok: false, error: "not_found" });
@@ -126,6 +140,8 @@ describe("a channel by name (E12, Q8)", () => {
     expect(await harness.handler({ kind: "channel-by-name", name: "secret-launch" } as never)).toEqual({ ok: true });
     expect(await harness.handler({ kind: "channel-by-name", name: "nope" } as never)).toEqual({ ok: true });
     expect(await harness.handler({ kind: "channel-by-name", name: "Not A Name!" } as never)).toEqual({ ok: false, error: "invalid_request" });
+    // The contract takes the bare name; the caller strips a leading # (Task 5).
+    expect(await harness.handler({ kind: "channel-by-name", name: "#ledger-dev" } as never)).toEqual({ ok: false, error: "invalid_request" });
   });
 
   it("asks Slack for public channels only, follows pages, and never resolves a channel Slack does not call public", async () => {
