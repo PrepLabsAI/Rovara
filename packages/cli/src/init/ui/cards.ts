@@ -262,7 +262,7 @@ export function replyCard(input: ReplyCardInput): WizardCard {
   const base = { id: "reply" as const, title: "Test reply" };
   if (input.stage === "done") return { ...base, status: "ok", lines: [`AgentX replied in #${input.channelName} in ${input.seconds} seconds.`] };
   const link = { url: slackChannelLink(input.teamId, input.channelId), label: `Open #${input.channelName} in Slack` };
-  if (input.stage === "failed") return { ...base, status: "failed", lines: [onPageProblem(input.problem), "Fix it, then answer Yes below to watch for a reply again."], link };
+  if (input.stage === "failed") return { ...base, status: "failed", lines: [onPageProblem(input.problem), "When it is fixed, answer Yes below to watch for a reply again."], link };
   return {
     ...base, status: "waiting",
     lines: [

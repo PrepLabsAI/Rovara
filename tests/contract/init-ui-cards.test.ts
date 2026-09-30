@@ -242,13 +242,13 @@ describe("the finishing cards", () => {
       ],
       link: { url: "https://slack.com/app_redirect?team=T0123456789&channel=C0PAY00001", label: "Open #payments in Slack" },
     });
-    expect(replyCard({ stage: "failed", ...WHERE, problem: "no AgentX reply in #payments within 10 minutes" })).toMatchObject({ status: "failed", lines: ["no AgentX reply in #payments within 10 minutes", "Fix it, then answer Yes below to watch for a reply again."] });
+    expect(replyCard({ stage: "failed", ...WHERE, problem: "no AgentX reply in #payments within 10 minutes" })).toMatchObject({ status: "failed", lines: ["no AgentX reply in #payments within 10 minutes", "When it is fixed, answer Yes below to watch for a reply again."] });
     expect(replyCard({ stage: "done", channelName: "payments", seconds: 12 })).toMatchObject({ status: "ok", lines: ["AgentX replied in #payments in 12 seconds."] });
   });
 
   it("R2: a failed test reply drops the reply watch's closing run agentx --env <env> init again", () => {
     const failed = replyCard({ stage: "failed", ...WHERE, problem: "the bot is not in #payments; invite it, then run agentx --env staging init again" });
-    expect(failed.lines).toEqual(["the bot is not in #payments; invite it", "Fix it, then answer Yes below to watch for a reply again."]);
+    expect(failed.lines).toEqual(["the bot is not in #payments; invite it", "When it is fixed, answer Yes below to watch for a reply again."]);
     expect(JSON.stringify(failed)).not.toContain("init again");
   });
 
