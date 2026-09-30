@@ -25,7 +25,7 @@ describe("GET /v1/admin/health (FR-030, A13)", () => {
       project: "payments", origin: "slack", requester: { kind: "none" }, kind: "task", status: "FAILED", category: "worker_unavailable", error: "RUNTIME_UNAVAILABLE: no capacity", endedAt: at });
     const answer = await admin("GET", "/v1/admin/health");
     expect(answer.body).toEqual({
-      version: { developerApi: "1.2", adminApi: "1.0", release: "0.0.6" },
+      version: { developerApi: "1.2", adminApi: "1.1", release: "0.0.6" },
       alarms: [{ name: "agentx-live25d-ConnectorBroken", state: "ALARM" }, { name: "agentx-live25d-SlackDeadLetters", state: "OK" }],
       alarmsCheck: { status: "warn", detail: "1 alarm in ALARM" },
       deadLetterQueues: [{ name: "dispatch", depth: 0 }, { name: "slack-requests", depth: 2 }],
@@ -43,7 +43,7 @@ describe("GET /v1/admin/health (FR-030, A13)", () => {
     const answer = await admin("GET", "/v1/admin/health");
     expect(answer.status).toBe(200);
     expect(answer.body).toMatchObject({
-      version: { developerApi: "1.2", adminApi: "1.0" },
+      version: { developerApi: "1.2", adminApi: "1.1" },
       alarms: [], alarmsCheck: { status: "unknown", detail: "could not read the alarms (AccessDenied)" },
       deadLetterQueues: [], deadLetterQueuesCheck: { status: "unknown", detail: "not set up in this deployment" },
       slack: { status: "failed", detail: "Slack refused the bot token (token_revoked)" },

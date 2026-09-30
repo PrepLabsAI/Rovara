@@ -62,7 +62,7 @@ describe("an admin looks at AgentX from an AI tool (US5)", () => {
       limits: { per_person: 3, per_organization: 20, source: "parameters" }, counts: { organization: 1 }, truncated: false,
     });
     expect((await mcp.tool("agentx_admin_usage", { group_by: "origin" })).value).toMatchObject({ group_by: "origin", truncated: false });
-    expect((await mcp.tool("agentx_admin_health")).value).toMatchObject({ version: { developer_api: "1.2", admin_api: "1.0" }, worker_modes: [{ mode: "ec2-ebs", configured: true }] });
+    expect((await mcp.tool("agentx_admin_health")).value).toMatchObject({ version: { developer_api: "1.2", admin_api: "1.1" }, worker_modes: [{ mode: "ec2-ebs", configured: true }] });
     expect((await mcp.tool("agentx_admin_list_credentials")).value).toMatchObject({ references: expect.any(Array) as unknown });
     const sentByTools = harness.db.commandNames().slice(sentBefore);
     expect(sentByTools.length).toBeGreaterThan(0);

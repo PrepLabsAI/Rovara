@@ -23,6 +23,10 @@ export const AgentXErrorCodeSchema = z.enum([
   "WORKSPACE_LIMIT",
   "SLACK_UNAVAILABLE",
   "CHANNEL_AMBIGUOUS",
+  "CONFIRMATION_UNAVAILABLE",
+  "CONFIRMATION_DECLINED",
+  "CONFIRMATION_EXPIRED",
+  "CHANGE_STALE",
 ]);
 
 export type AgentXErrorCode = z.infer<typeof AgentXErrorCodeSchema>;

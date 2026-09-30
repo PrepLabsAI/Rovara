@@ -52,7 +52,7 @@ describe("DeveloperIdentity's email lookup and auth check (A12, A13)", () => {
   it("reports the environment's admin API version beside the developer one (A1)", async () => {
     const harness = identityHarness({});
     const answer = await harness.http(httpEvent("GET", "/v1/auth/.well-known/agentx-configuration"));
-    expect(JSON.parse(answer.body)).toMatchObject({ apiVersion: "1.2", adminApiVersion: "1.0" });
+    expect(JSON.parse(answer.body)).toMatchObject({ apiVersion: "1.2", adminApiVersion: "1.1" });
   });
 
   it("goes through the broker's invoke helpers, failing closed as slack_unavailable", async () => {
