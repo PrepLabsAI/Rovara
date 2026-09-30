@@ -67,7 +67,8 @@ AgentX reply in its thread, with no command run by hand.
 `--yes` unattended installs, CI, CloudShell and SSH sessions keep working exactly as they do today.
 
 **Independent Test**: the existing `agentx init --yes` tests pass unchanged, and on a host with no
-browser the wizard prints its URL and falls back to the terminal prompter.
+browser init prints one line saying how to use the page (`--ui`, and `ssh -L` over SSH), then asks in
+the terminal (Q2).
 
 ## Requirements
 
@@ -76,9 +77,14 @@ browser the wizard prints its URL and falls back to the terminal prompter.
 - **FR-001**: `agentx init --ui` MUST start an HTTP server bound to `127.0.0.1` on an ephemeral
   port, open the operator's browser at it, and serve the wizard. `--no-ui` MUST force the terminal
   path. When neither is given, the UI is used if a browser is available and the session is
-  interactive; otherwise the terminal prompter is used.
+  interactive; otherwise the terminal prompter is used. A browser is available when the session is
+  not over SSH, not in CloudShell or CI, and the machine is macOS, or Linux with a display; Windows
+  uses the terminal by default (Q12). `--no-browser` with neither flag means the terminal. Without a
+  browser, in an interactive terminal with neither flag and no `--yes`, `init` prints one line saying
+  how to get the page, then asks in the terminal (Q2).
 - **FR-002**: The server MUST exit with the `init` run. It MUST NOT outlive the command, and MUST
-  NOT bind any address other than the loopback one.
+  NOT bind any address other than the loopback one. When a question waits and no page has been
+  connected for a minute, the terminal says once, for that question, where to reopen the page (Q3).
 - **FR-003**: A `browserPrompter()` MUST implement `Prompter` against the page: `ask`, `choose`,
   `confirm` and `secret` each render as a question and resolve with the posted answer. Validation
   rejections MUST be shown inline on the field rather than thrown as a failed run.
@@ -164,8 +170,9 @@ browser the wizard prints its URL and falls back to the terminal prompter.
 
 ### Packaging
 
-- **FR-060**: The wizard's static assets MUST ship in `release:build` output and in the published
-  npm package.
+- **FR-060**: The wizard's page, stylesheet and module are compiled into the CLI and ship in its
+  published npm package, which a pack test checks. `release:build` builds the CloudFormation release
+  and does not carry the CLI (Q11).
 - **FR-061**: The README and `docs/` install instructions MUST describe the UI path and `--no-ui`.
 
 ## Success Criteria
@@ -192,10 +199,11 @@ browser the wizard prints its URL and falls back to the terminal prompter.
 
 ## Decisions
 
-- **Location**: `packages/cli/src/init/ui/`, static assets built to `packages/cli/dist/ui/`. Not a
+- **Location**: `packages/cli/src/init/ui/`, the page's assets are text in `ui/page.ts`, compiled with the rest of the CLI (Q11). Not a
   separate package: it ships with the CLI and shares the init types.
 - **Terminal path stays**: the UI is additive. `InitCliDependencies` is already a DI seam, so the
-  UI is injected and the existing tests are untouched.
+  UI is injected and the existing tests are untouched. It stays the default for `--yes`, CI,
+  CloudShell, SSH and any session without a browser (Q1).
 - **Phasing**: (1) server, prompter, event/log stream, review and resume screens behind `--ui`;
   (2) the three connect screens and the prerequisite checklist; (3) admin user, project, channel
   bind and the test reply; (4) UI on by default plus packaging and docs. Phase 1 is shippable alone.
@@ -203,6 +211,7 @@ browser the wizard prints its URL and falls back to the terminal prompter.
   to the combined final live check (owner, 2026-09-30).
   Phase 3 built (PR after #161 merges); live check deferred to the combined final live check
   (owner, 2026-09-30).
+  Phase 4 built (PR after phases 2 and 3 merge); live check deferred to the combined final live check (owner, 2026-09-30).
 - **Cards.** The page's connect and finishing screens are status cards built in `ui/cards.ts` from
   facts a step already has; no card builder takes a secret. Steps reach the page through an
   optional `InstallSurface` on the init context, so the terminal path is unchanged (phase 2).
@@ -210,4 +219,7 @@ browser the wizard prints its URL and falls back to the terminal prompter.
   closing "run agentx ... init again" advice (phase 2); phase 3's test reply card follows the same
   rule (R2), and so does the admin card's failed sign-in. A failure the page offers no retry for
   (the test alarm, an OIDC token with no name to record) keeps its own next step.
-- Noted for phase 4: a failed sign-in's link stays as the page button while Sign in again? is asked, and a channel card stays waiting after the invite timeout.
+- Phase 4 fixed the two notes from phase 3. On the page, a failed sign-in drops its sign-in button,
+  so none is left while Sign in again? is asked. The channel card and the GitHub App card show
+  failed, with the error's own words and next step (the page offers no retry there), when their
+  wait times out or the step fails after a waiting card.
