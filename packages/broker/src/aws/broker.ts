@@ -109,7 +109,7 @@ import { attributionDroppedLog, callConnector, connectorCatalogKey, discoverConn
 import { resolveConnectors, BUILT_IN_CONNECTOR_TYPES, type ConnectorType, type ConnectorTypeContext, type ResolvedConnector } from "./connector-types.js";
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
 import { developerTokenVerifier } from "../developer/verify-token.js";
-import { aiToolTurn, completedTurn, developerFooter, inertName, partyOfTask, taskKey, taskOwnerKey, taskOwnerSubject, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type StoredEvent } from "../developer/task-records.js";
+import { aiToolTurn, completedTurn, developerFooter, inertName, OUTCOME, partyOfTask, taskKey, taskOwnerKey, taskOwnerSubject, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type StoredEvent } from "../developer/task-records.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
 import { hashJson, isConditional, isTemporaryAwsError } from "./broker-shared.js";
 import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, type DeveloperApiConfiguration } from "./developer-routes.js";
@@ -3776,18 +3776,28 @@ async function completedTurnItems(
       ended = { operation: target, status: cancelledTargetStatus(terminalStatus) };
     }
   }
-  // E20 (25c C22): a close that found unpublished work did not close; its refusal is its completed
-  // record, in the preflight result's transaction. A safe preflight's record is finishTaskClose's.
-  if (operation.kind === "close" && terminalStatus === "SUCCEEDED") {
-    const preflight = WorkspaceClosePreflightResultSchema.safeParse(outcome.result);
+  // E20 (25c C22): a close that did not close gets its completed record in the preflight result's
+  // transaction: refused for unpublished work, or the check's own outcome when it did not finish.
+  // A safe preflight's record is finishTaskClose's, which writes it with the close.
+  if (operation.kind === "close") {
     const requester = operation.requestedBy;
-    if (preflight.success && !preflight.data.safeToClose && requester !== undefined && "kind" in requester && requester.kind === "developer") {
+    const preflight = terminalStatus === "SUCCEEDED" ? WorkspaceClosePreflightResultSchema.safeParse(outcome.result) : undefined;
+    const refusal = preflight?.success === true && !preflight.data.safeToClose
+      ? `Not closed: unpublished work in ${preflight.data.repositories.map((repository) => `${repository.name} (${repository.reasons.join(", ")})`).join("; ")}`
+      : undefined;
+    const unfinished = terminalStatus !== "SUCCEEDED";
+    if ((refusal !== undefined || unfinished) && requester !== undefined && "kind" in requester && requester.kind === "developer") {
       const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
-      if (task === undefined) return [];
-      const listed = preflight.data.repositories.map((repository) => `${repository.name} (${repository.reasons.join(", ")})`).join("; ");
+      if (task === undefined) {
+        // The pointer and the task are written in one transaction, so this is not expected.
+        console.log(JSON.stringify({ component: "broker", event: "developer.task_record_missing", taskId: pointer.taskId, operationId: operation.id }));
+        return [];
+      }
       return [{ Put: { TableName: table, Item: aiToolTurn({
-        party: partyOfTask(task), turnId: operation.id, operationId: operation.id, action: "close", phase: "completed", outcome: "refused",
-        receivedAt: operation.createdAt, finishedAt: now, request: "close", response: `Not closed: unpublished work in ${listed}`,
+        party: partyOfTask(task), turnId: operation.id, operationId: operation.id, action: "close", phase: "completed",
+        outcome: refusal !== undefined ? "refused" : OUTCOME[terminalStatus] ?? "failed",
+        receivedAt: operation.createdAt, finishedAt: now, request: "close",
+        response: refusal ?? "Not closed: the check for unpublished work did not finish",
       }), ConditionExpression: "attribute_not_exists(pk)" } }];
     }
   }
@@ -3943,7 +3953,7 @@ async function recordTerminalResult(
     }
     throw agentXError("STALE_FENCE", "terminal callback no longer owns the workspace");
   }
-  if (closePreflight?.safeToClose === true && taskPointer !== undefined) await finishDeveloperClose(dependencies, taskPointer, operation.id);
+  if (closePreflight?.safeToClose === true && taskPointer !== undefined) await finishDeveloperClose(dependencies, taskPointer, operation.id, operation.createdAt);
   if (recordedStatus !== terminalStatus) return { ...operation, status: recordedStatus, updatedAt: now, error: FIRST_TASK_QUEUE_FAILED };
   return { ...operation, status: terminalStatus, updatedAt: now, ...(result === undefined ? {} : { result }), ...(error === undefined ? {} : { error }) };
 }
@@ -3954,14 +3964,14 @@ async function recordTerminalResult(
  * close); the worker's callback never fails because of it. A Slack workspace has no pointer and
  * keeps its own completion flow.
  */
-async function finishDeveloperClose(dependencies: AwsBrokerDependencies, pointer: DeveloperTaskPointerRecord, operationId: string): Promise<void> {
+async function finishDeveloperClose(dependencies: AwsBrokerDependencies, pointer: DeveloperTaskPointerRecord, operationId: string, requestedAt: string): Promise<void> {
   try {
     const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
     if (task === undefined) {
       console.log(JSON.stringify({ component: "broker", event: "developer.task_record_missing", taskId: pointer.taskId, operationId }));
       return;
     }
-    await finishTaskClose({ tableName: dependencies.tableName, actions: developerTaskActions(dependencies), documentClient: dependencies.documentClient }, task, operationId);
+    await finishTaskClose({ tableName: dependencies.tableName, actions: developerTaskActions(dependencies), documentClient: dependencies.documentClient }, task, operationId, [], requestedAt);
   } catch (error) {
     console.log(JSON.stringify({ component: "broker", event: "developer.task_close_failed", taskId: pointer.taskId, operationId, error: error instanceof Error ? error.name : "unknown" }));
   }

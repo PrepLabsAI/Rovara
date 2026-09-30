@@ -1,6 +1,6 @@
 // Spec 025 E20 (25c's C22): a close's outcome gets its completed audit record.
 import { randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AiToolTurnRecordSchema, TURN_EXPORT_PARTITION } from "../../packages/contracts/src/index.js";
 import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 
@@ -66,5 +66,71 @@ describe("a close's completed record (E20)", () => {
       expect([pk, sk, exportPk, exportSk, expiresAt].every((value) => value !== undefined)).toBe(true);
       expect(AiToolTurnRecordSchema.safeParse(stored).success).toBe(true);
     }
+  });
+});
+
+// Task 16 review: a preflight that did not finish, a missing task, and the close's request time.
+describe("a close's completed record: the rest of its outcomes (E20)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  async function preflighting() {
+    const harness = await readyTask();
+    await harness.finish(harness.workspaceId, harness.active(), "SUCCEEDED");
+    await harness.finish(harness.workspaceId, harness.active(), "SUCCEEDED");
+    await harness.dev(MAYA, "POST", `/v1/dev/tasks/${harness.taskId}/close`, { requestId: randomUUID() });
+    return { ...harness, preflightId: harness.active() };
+  }
+
+  it.each([["FAILED", "failed"], ["INTERRUPTED", "interrupted"], ["CANCELLED", "cancelled"]] as const)(
+    "records a close whose check for unpublished work ended %s",
+    async (status, outcome) => {
+      const { db, finish, taskId, workspaceId, preflightId } = await preflighting();
+      await finish(workspaceId, preflightId, status, { error: "the worker stopped" });
+      const completed = closeRecords(db, taskId).filter((record) => record.phase === "completed");
+      expect(completed).toEqual([expect.objectContaining({
+        outcome, operationId: preflightId, turnId: preflightId, exportPk: TURN_EXPORT_PARTITION,
+        responseText: "Not closed: the check for unpublished work did not finish",
+      })]);
+    },
+  );
+
+  it("logs a missing task record for a refused close instead of writing nothing silently", async () => {
+    const { db, finish, taskId, workspaceId, preflightId } = await preflighting();
+    db.delete(`DEVTASK#${taskId}`, "META");
+    const log = vi.spyOn(console, "log");
+    await finish(workspaceId, preflightId, "SUCCEEDED", { result: { safeToClose: false, repositories: [{ name: "demo", reasons: ["worktree_changes"] }] } });
+    const events = log.mock.calls.map(([line]) => { try { return JSON.parse(String(line)) as Record<string, unknown>; } catch { return {}; } });
+    expect(events).toContainEqual(expect.objectContaining({ event: "developer.task_record_missing", taskId, operationId: preflightId }));
+    expect(closeRecords(db, taskId).filter((record) => record.phase === "completed")).toEqual([]);
+  });
+
+  it("dates a close that completes from its request, with a key fixed by the close operation", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2026-09-30T10:00:00.000Z"));
+    const { db, finish, taskId, workspaceId, preflightId } = await preflighting();
+    const requested = String((db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${preflightId}`) as { createdAt: string }).createdAt);
+    vi.setSystemTime(new Date("2026-09-30T10:05:00.000Z"));
+    await finish(workspaceId, preflightId, "SUCCEEDED", { result: { safeToClose: true, repositories: [] } });
+    const [completed] = closeRecords(db, taskId).filter((record) => record.phase === "completed");
+    expect(completed).toMatchObject({ outcome: "succeeded", receivedAt: requested, sk: `TURN#${requested}#${preflightId}` });
+    expect(Date.parse(String(completed!.finishedAt))).toBeGreaterThanOrEqual(Date.parse("2026-09-30T10:05:00.000Z"));
+  });
+
+  it("dates a never-started task's close from its request, like its accepted record", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2026-09-30T10:00:00.000Z"));
+    const { db, dev, finish, taskId, workspaceId, active, deleteEc2Session } = await readyTask();
+    await finish(workspaceId, active(), "FAILED", { error: "npm ci exited 1" });
+    // The compute's removal takes a minute, so the close finishes well after it was requested.
+    deleteEc2Session.mockImplementationOnce(async () => { vi.setSystemTime(new Date("2026-09-30T10:01:00.000Z")); });
+    await dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/close`, { requestId: randomUUID() });
+    const accepted = closeRecords(db, taskId).find((record) => record.phase === "accepted");
+    const completed = closeRecords(db, taskId).find((record) => record.phase === "completed");
+    expect(deleteEc2Session).toHaveBeenCalled();
+    expect(completed).toMatchObject({ outcome: "succeeded", receivedAt: accepted!.receivedAt });
+    expect(Date.parse(String(completed!.finishedAt))).toBeGreaterThanOrEqual(Date.parse("2026-09-30T10:01:00.000Z"));
   });
 });

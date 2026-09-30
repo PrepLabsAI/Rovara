@@ -340,7 +340,8 @@ export function aiToolTurn(input: {
   return { ...aiToolTurnRecordKeys(record), ...record };
 }
 
-const OUTCOME: Record<string, AiToolTurnRecord["outcome"]> = { SUCCEEDED: "succeeded", FAILED: "failed", CANCELLED: "cancelled", INTERRUPTED: "interrupted" };
+/** A terminal operation status as a completed turn record's outcome. */
+export const OUTCOME: Record<string, AiToolTurnRecord["outcome"]> = { SUCCEEDED: "succeeded", FAILED: "failed", CANCELLED: "cancelled", INTERRUPTED: "interrupted" };
 
 /**
  * R12: the result of a developer's task or publish operation. Its turnId and receivedAt are the
