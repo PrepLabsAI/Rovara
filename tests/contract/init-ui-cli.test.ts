@@ -17,7 +17,7 @@ import {
   allStackOutputs, browserThatCreatesGitHubApp, fakeGitHubApi, fakeSlackApi, HOLDER, memoryInitSecrets, passingChecks, scriptedDeployer, scriptedPrompter,
   slackIngressFetch, T0, TEST_BOT_TOKEN, TEST_PRIVATE_KEY, TEST_SIGNING_SECRET,
 } from "../support/init-fakes.js";
-import { fakeWizardOperator } from "../support/wizard-browser.js";
+import { fakeWizardOperator, snapshotOnReconnect } from "../support/wizard-browser.js";
 import { SIGN_IN_PARAMETERS, fakeCloudFormation } from "../support/fake-cloudformation.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 import { ADMIN_EMAIL, FOUNDATION_OUTPUTS, fakeAlerts, fakeControlPlane, fakeRepositories, fakeSlackChannels, setupServices, turn } from "../support/setup-fakes.js";
@@ -450,6 +450,12 @@ describe("agentx init --ui", () => {
     // the GitHub code arrived through the wizard's own callback.
     expect(operator.asked).not.toContain("Paste that address (or just its code)");
     expect(operator.opened).toHaveLength(1);
+    expect(operator.remaining()).toBe(0);
+    expect(h.github.conversions).toEqual(["0123456789abcdef0123"]);
+    // The screens came in order: each card first appears after the one before it.
+    const firstSeen: string[] = [];
+    for (const card of operator.states.flatMap((state) => state.cards ?? [])) if (!firstSeen.includes(card.id)) firstSeen.push(card.id);
+    expect(firstSeen).toEqual(["aws", "prerequisites", "github", "slack", "slack-urls"]);
   });
 
   it("FR-012: no secret reaches a card, a link, the page's state, the log, the terminal, SSM or the cache", async () => {
@@ -463,12 +469,27 @@ describe("agentx init --ui", () => {
       expect(JSON.stringify(operator.states)).not.toContain(secret);
       expect(await h.everywhere()).not.toContain(secret);
     }
+    // Every secret really went through the run and was stored, so the absence above means something.
+    expect(operator.remaining()).toBe(0);
+    const app = JSON.parse(h.secrets.values.get("agentx/staging/github-app") ?? "{}") as { privateKey?: string };
+    expect(app.privateKey).toContain(TEST_PRIVATE_KEY.split("\n")[1] ?? "missing");
+    const slack = JSON.parse(h.secrets.values.get("agentx/staging/slack") ?? "{}") as Record<string, string>;
+    expect(slack).toMatchObject({ botToken: TEST_BOT_TOKEN, signingSecret: TEST_SIGNING_SECRET, clientSecret: "fedcba9876543210fedcba9876543210" });
+    expect(JSON.parse(h.secrets.values.get("agentx/staging/connectors/linear") ?? "{}")).toEqual({ apiKey: LINEAR_KEY });
   });
 
   it("a page that reconnects mid-install gets every card back in its snapshot", async () => {
     const h = await harness();
-    const { operator } = await h.runUi([...FIRST_RUN.slice(0, -1), false]);
+    // While the review question is open, a second page connects, as a reloaded tab would.
+    let reconnected: Awaited<ReturnType<typeof snapshotOnReconnect>> | undefined;
+    const operator = fakeWizardOperator([...FIRST_RUN.slice(0, -1), false], {
+      beforeAnswer: async (question, wizardUrl) => { if (question.text === "Create all of this?") reconnected = await snapshotOnReconnect(wizardUrl); },
+    });
+    await h.run(["--ui"], { openBrowser: operator.open });
+    await operator.settled();
     const review = operator.states.find((state) => state.question?.text === "Create all of this?");
     expect(review?.cards?.map((card) => card.id)).toEqual(["aws", "prerequisites"]);
+    expect(reconnected?.question?.text).toBe("Create all of this?");
+    expect(reconnected?.cards?.map((card) => card.id)).toEqual(["aws", "prerequisites"]);
   });
 });

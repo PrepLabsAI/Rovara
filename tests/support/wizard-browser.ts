@@ -27,7 +27,40 @@ export interface WizardOperator {
   remaining(): number;
 }
 
-export function fakeWizardOperator(script: ScriptedAnswer[], options: { githubCode?: string } = {}): WizardOperator {
+/** Opens a second event stream on the running wizard, as a page that reconnects would, and returns
+ * the snapshot it is sent first. */
+export async function snapshotOnReconnect(wizardUrl: string): Promise<WizardSnapshot> {
+  const { origin, searchParams } = new URL(wizardUrl);
+  const controller = new AbortController();
+  const response = await fetch(`${origin}/events`, { headers: { [WIZARD_TOKEN_HEADER]: searchParams.get(WIZARD_TOKEN_QUERY) ?? "" }, signal: controller.signal });
+  if (!response.ok) throw new Error(`the wizard answered HTTP ${response.status} for a second /events`);
+  const reader = (response.body as ReadableStream<Uint8Array>).getReader();
+  const decoder = new TextDecoder();
+  let buffered = "";
+  try {
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) throw new Error("the second /events closed before sending a snapshot");
+      buffered += decoder.decode(chunk.value, { stream: true });
+      const split = buffered.indexOf("\n\n");
+      if (split === -1) continue;
+      const frame = buffered.slice(0, split);
+      if (/^event: snapshot$/m.exec(frame) === null) throw new Error("the second /events did not start with a snapshot");
+      return JSON.parse(/^data: (.*)$/m.exec(frame)?.[1] ?? "null") as WizardSnapshot;
+    }
+  } finally {
+    controller.abort();
+  }
+}
+
+export function fakeWizardOperator(
+  script: ScriptedAnswer[],
+  options: {
+    githubCode?: string;
+    /** Awaited once for each new question, before it is answered, with the address the page opened on. */
+    beforeAnswer?: (question: NonNullable<WizardSnapshot["question"]>, wizardUrl: string) => Promise<void>;
+  } = {},
+): WizardOperator {
   const queue = [...script];
   const opened: string[] = [];
   const asked: string[] = [];
@@ -73,6 +106,7 @@ export function fakeWizardOperator(script: ScriptedAnswer[], options: { githubCo
       if (question.error !== undefined) fieldErrors.push(question.error);
       count += 1;
       if (count > MAX_QUESTIONS) throw new Error(`test setup: the wizard asked more than ${MAX_QUESTIONS} questions`);
+      await options.beforeAnswer?.(question, wizardUrl);
       const next = queue.shift();
       if (next === undefined) throw new Error(`test setup: no scripted answer for "${question.text}"`);
       if (question.kind === "confirm" && typeof next !== "boolean") throw new Error(`test setup: "${question.text}" wants true or false`);
