@@ -212,7 +212,7 @@ the terminal (Q2).
   to the combined final live check (owner, 2026-09-30).
   Phase 3 built, see PR #164; live check deferred to the combined final live check
   (owner, 2026-09-30).
-  Phase 4 built (PR after phases 2 and 3 merge); live check deferred to the combined final live
+  Phase 4 built, see PR #165; live check deferred to the combined final live
   check (owner, 2026-09-30).
 - **Cards.** The page's connect and finishing screens are status cards built in `ui/cards.ts` from
   facts a step already has; no card builder takes a secret. Steps reach the page through an
