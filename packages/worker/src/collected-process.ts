@@ -114,7 +114,7 @@ function signalGroup(child: ChildProcess, signal: NodeJS.Signals): void {
   child.kill(signal);
 }
 
-/** Keeps the last MAX_COMMAND_OUTPUT_BYTES written. */
+/** Keeps the last MAX_COMMAND_OUTPUT_BYTES written, from the first whole line after a cut. */
 export function tailCollector(limit = MAX_COMMAND_OUTPUT_BYTES): { add(data: Buffer): void; text(): string } {
   let chunks: Buffer[] = [];
   let size = 0;
@@ -130,9 +130,13 @@ export function tailCollector(limit = MAX_COMMAND_OUTPUT_BYTES): { add(data: Buf
     },
     text() {
       const all = Buffer.concat(chunks);
-      const kept = all.length > limit ? all.subarray(all.length - limit) : all;
-      // A cut can start inside a UTF-8 sequence: skip its continuation bytes.
-      let start = 0;
+      if (all.length <= limit) return all.toString("utf8");
+      const kept = all.subarray(all.length - limit);
+      // A cut lands inside a line, where it could leave part of a secret that redaction no longer
+      // recognizes: start at the next whole line (#170). Output without a line break keeps it all,
+      // but a cut can start inside a UTF-8 sequence: skip its continuation bytes.
+      const lineBreak = kept.indexOf(0x0a);
+      let start = lineBreak >= 0 && lineBreak < kept.length - 1 ? lineBreak + 1 : 0;
       while (start < kept.length && start < 3 && ((kept[start] ?? 0) & 0xc0) === 0x80) start += 1;
       return kept.subarray(start).toString("utf8");
     },
