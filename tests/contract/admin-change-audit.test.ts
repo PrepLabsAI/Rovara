@@ -102,6 +102,9 @@ describe("the audit record (E3)", () => {
     audit.db.set({ ...audit.db.get(`CHANGE#${CHANGE}`, "AUDIT")!, status: "unknown-status" });
     expect(await readAudit(audit, CHANGE)).toBeUndefined();
     expect(audit.logs).toContainEqual({ event: "admin_change.audit_unreadable", changeId: CHANGE });
+    audit.logs.length = 0;
+    expect((await listAudit(audit, { since: "2026-10-01T00:00:00.000Z", limit: 10 })).changes).toHaveLength(0);
+    expect(audit.logs).toEqual([{ event: "admin_change.audit_unreadable", changeId: CHANGE }]);
   });
 
   it("hands back a cursor when a filter leaves every read page empty, so nothing is silently cut off", async () => {

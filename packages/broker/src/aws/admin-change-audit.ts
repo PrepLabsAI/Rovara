@@ -155,7 +155,7 @@ export async function listAudit(store: AuditStore, query: { since: string; until
     for (; read < items.length && changes.length < query.limit; read += 1) {
       const item = items[read]!;
       const record = parse(item);
-      if (record === undefined) store.log({ event: "admin_change.audit_unreadable" });
+      if (record === undefined) store.log({ event: "admin_change.audit_unreadable", ...(typeof item.pk === "string" && item.pk.startsWith("CHANGE#") ? { changeId: item.pk.slice("CHANGE#".length) } : {}) });
       else changes.push(record);
     }
     if (read < items.length) {
