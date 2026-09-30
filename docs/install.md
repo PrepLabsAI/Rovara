@@ -67,9 +67,11 @@ Keep the tab open until the install finishes. If the tab is closed, `init` keeps
 after a minute, prints the address again in the terminal. Open it to carry on, or press Ctrl-C
 and run `init` again later (it continues where it stopped).
 
-`--no-ui` asks every question in this terminal instead. `--yes` and CI runs always use the
-terminal. Over SSH, in AWS CloudShell, or with `--no-browser`, `init` also asks in the terminal,
-and first prints:
+`--no-ui` asks every question in this terminal instead. `--yes` also uses the terminal, and
+answers every question for you. A CI run has no one to type answers, so it needs `--yes` (or
+`--ui`); without either, it stops. Over SSH, in AWS CloudShell, on Linux with no display, on
+Windows, or with `--no-browser`, `init` asks in the terminal. In an interactive terminal without
+`--yes`, it first prints this line:
 
 > No browser here, so agentx init asks in this terminal. To use the install page instead, run agentx init --ui --no-browser and open the address it prints (over SSH, forward its port with ssh -L).
 

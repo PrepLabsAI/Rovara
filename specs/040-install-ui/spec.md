@@ -199,8 +199,9 @@ the terminal (Q2).
 
 ## Decisions
 
-- **Location**: `packages/cli/src/init/ui/`, the page's assets are text in `ui/page.ts`, compiled with the rest of the CLI (Q11). Not a
-  separate package: it ships with the CLI and shares the init types.
+- **Location**: `packages/cli/src/init/ui/`. The page's assets are text in `ui/page.ts`, compiled
+  with the rest of the CLI (Q11). Not a separate package: it ships with the CLI and shares the init
+  types.
 - **Terminal path stays**: the UI is additive. `InitCliDependencies` is already a DI seam, so the
   UI is injected and the existing tests are untouched. It stays the default for `--yes`, CI,
   CloudShell, SSH and any session without a browser (Q1).
@@ -211,7 +212,8 @@ the terminal (Q2).
   to the combined final live check (owner, 2026-09-30).
   Phase 3 built (PR after #161 merges); live check deferred to the combined final live check
   (owner, 2026-09-30).
-  Phase 4 built (PR after phases 2 and 3 merge); live check deferred to the combined final live check (owner, 2026-09-30).
+  Phase 4 built (PR after phases 2 and 3 merge); live check deferred to the combined final live
+  check (owner, 2026-09-30).
 - **Cards.** The page's connect and finishing screens are status cards built in `ui/cards.ts` from
   facts a step already has; no card builder takes a secret. Steps reach the page through an
   optional `InstallSurface` on the init context, so the terminal path is unchanged (phase 2).
@@ -219,7 +221,7 @@ the terminal (Q2).
   closing "run agentx ... init again" advice (phase 2); phase 3's test reply card follows the same
   rule (R2), and so does the admin card's failed sign-in. A failure the page offers no retry for
   (the test alarm, an OIDC token with no name to record) keeps its own next step.
-- Phase 4 fixed the two notes from phase 3. On the page, a failed sign-in drops its sign-in button,
-  so none is left while Sign in again? is asked. The channel card and the GitHub App card show
-  failed, with the error's own words and next step (the page offers no retry there), when their
-  wait times out or the step fails after a waiting card.
+- Phase 4 fixed the two notes from phase 3, and the GitHub App card the same way. On the page, a
+  failed sign-in drops its sign-in button, so none is left while Sign in again? is asked. The
+  channel card and the GitHub App card show failed, with the error's own words and next step (the
+  page offers no retry there), when their wait times out or the step fails after a waiting card.

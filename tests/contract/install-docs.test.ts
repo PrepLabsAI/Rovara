@@ -10,8 +10,11 @@ const read = (path: string) => readFileSync(path, "utf8");
 describe("the install docs (FR-061)", () => {
   it("the install guide describes the page, --no-ui, SSH, and a closed tab", () => {
     const guide = read("docs/install.md");
-    const section = guide.slice(guide.indexOf("### The install page"));
-    expect(guide.indexOf("### The install page")).toBeGreaterThan(0);
+    const start = guide.indexOf("### The install page");
+    expect(start).toBeGreaterThan(0);
+    // The section ends at the next "## " heading, so every word below must be in it.
+    const end = guide.indexOf("\n## ", start);
+    const section = guide.slice(start, end === -1 ? undefined : end);
     for (const text of ["127.0.0.1", "--no-ui", "--ui", "ssh -L", "CloudShell", "--yes", "closed", "never shown again"]) expect(section).toContain(text);
     // The guide quotes the line init prints on a machine with no browser.
     expect(guide).toContain(NO_BROWSER_LINE);
