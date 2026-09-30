@@ -2,7 +2,7 @@
 // Spec 025 phase 25e: the admin read broker with admin changes on, a clock the changes read, a
 // linked Slack user for the admin, and the ingress's press event.
 import { randomUUID } from "node:crypto";
-import type { AdminChangeInput, ChannelInfoRequest, ChannelInfoResponse, ChannelMembersRequest, ChannelMembersResponse } from "@agentx/contracts";
+import type { AdminChangeInput, EndDeveloperSessionsRequest, ChannelInfoRequest, ChannelInfoResponse, ChannelMembersRequest, ChannelMembersResponse } from "@agentx/contracts";
 import { createAdminReadBroker } from "./admin-read-broker.js";
 import { SLACK_TEAM, issuer } from "./slack-broker.js";
 
@@ -27,13 +27,15 @@ export async function createAdminChangeBroker(options: {
     : Response.json({ sub: "admin-subject", email: "ada@example.com", email_verified: true, name: "Ada" }));
   /** Set `down` to make DeveloperIdentity's channel-by-name lookup answer that Slack is unreachable. */
   const channelLookup = { down: false };
+  /** Every DeveloperIdentity call to end a developer's sessions: the only effect of revoke_signin outside the table. */
+  const endedSessions: EndDeveloperSessionsRequest[] = [];
   const slackUserByEmail = async () => (options.slackLinked === false ? { ok: true as const } : { ok: true as const, userId: ADMIN_SLACK });
   const harness = await createAdminReadBroker({
     ...(options.channelInfo === undefined ? {} : { channelInfo: options.channelInfo }),
     ...(options.channelMembers === undefined ? {} : { channelMembers: options.channelMembers }),
     developerExtra: {
       slackUserByEmail,
-      endDeveloperSessions: async () => ({ ok: true }),
+      endDeveloperSessions: async (request: EndDeveloperSessionsRequest) => { endedSessions.push(request); return { ok: true }; },
       channelByName: async ({ name }) => (channelLookup.down ? { ok: false, error: "slack_unavailable" } : name === "ledger-dev" ? { ok: true, channel: { channelId: "C0LEDGER01", name } } : { ok: true }),
     },
     brokerExtra: {
@@ -52,7 +54,7 @@ export async function createAdminChangeBroker(options: {
     return JSON.parse(response.body) as { outcome: string; changeId: string; traceId?: string };
   };
   return {
-    ...harness, clock, metrics, propose, press, channelLookup,
+    ...harness, clock, metrics, propose, press, channelLookup, endedSessions,
     get: (id: string, subject?: string) => call("GET", `/v1/admin/changes/${id}`, undefined, subject),
     list: (query = "") => call("GET", `/v1/admin/changes${query}`),
     slack: (id: string, subject?: string) => call("POST", `/v1/admin/changes/${id}/slack`, {}, subject),

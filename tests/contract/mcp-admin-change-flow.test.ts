@@ -65,8 +65,31 @@ describe("an admin changes AgentX from an AI tool (US6)", () => {
       expect(answer.error, name).toMatchObject({ code: "CONFIRMATION_DECLINED" });
       expect(stateOf(broker.db), name).toBe(before);
     }
+    // revoke_signin acts outside the table, through DeveloperIdentity: no declined call reached it.
+    // stop_workspace's cancel acts only through the table (the cancel operation and its outbox), so stateOf covers it.
+    expect(broker.endedSessions).toEqual([]);
     // FR-051: one record per request, each declined.
     expect(broker.db.find((item) => item.entityType === "ADMIN_CHANGE_AUDIT").map((item) => item.outcome)).toEqual(calls.map(() => "declined"));
+  });
+
+  it("reaches DeveloperIdentity once for an accepted revoke, and changes the table for an accepted stop (SC-005's positive controls)", async () => {
+    const broker = await createAdminChangeBroker();
+    const started = await broker.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix it", client: "claude-code" });
+    const task = broker.db.get(`DEVTASK#${(started.body.task as { taskId: string }).taskId}`, "META") as { workspaceId: string };
+    await broker.finish(task.workspaceId, String((broker.db.get(`WORKSPACE#${task.workspaceId}`, "META") as { activeOperationId: string }).activeOperationId), "SUCCEEDED");
+    const mcp = await adminSignedInClient(broker, { elicitation: "accept", clock: broker.clock, config: CONFIG });
+    await expect.poll(async () => (await mcp.names()).includes("agentx_admin_revoke_signin")).toBe(true);
+    expect((await mcp.tool("agentx_admin_revoke_signin", { developer: MAYA.developerId })).value).toMatchObject({ outcome: "applied" });
+    expect(broker.endedSessions).toEqual([expect.objectContaining({ kind: "end-developer-sessions", developerId: MAYA.developerId })]);
+    const before = stateOf(broker.db);
+    const stopped = await mcp.tool("agentx_admin_stop_workspace", { workspace_id: task.workspaceId });
+    expect(stopped.value).toMatchObject({ outcome: "applied", result: { outcome: "CANCEL_REQUESTED" } });
+    const target = String((stopped.value.result as { targetOperationId: string }).targetOperationId);
+    // The cancel acts only through the table: the task operation's status, and a cancel invocation in the outbox for the runtime.
+    expect(broker.db.get(`WORKSPACE#${task.workspaceId}`, `OPERATION#${target}`)).toMatchObject({ status: "CANCEL_REQUESTED" });
+    expect(broker.db.find((item) => item.entityType === "OUTBOX" && (item.invocation as { kind?: string } | undefined)?.kind === "cancel")).toHaveLength(1);
+    expect(stateOf(broker.db)).not.toBe(before);
+    expect(broker.endedSessions).toHaveLength(1);
   });
 
   it("confirms by the Slack button in a client without the pop-up, even after the wait, and never twice", async () => {
@@ -91,8 +114,10 @@ describe("an admin changes AgentX from an AI tool (US6)", () => {
     const broker = await createAdminChangeBroker();
     const mcp = await adminSignedInClient(broker, { elicitation: false, clock: broker.clock, config: CONFIG });
     await expect.poll(async () => (await mcp.names()).includes("agentx_admin_bind_channel")).toBe(true);
+    const before = broker.clock.now();
     const waiting = await mcp.tool("agentx_admin_bind_channel", { channel: "C0LEDGER01", project: "payments" });
     expect(waiting.value).toMatchObject({ outcome: "awaiting_confirmation" });
+    expect(broker.clock.now() - before).toBeGreaterThanOrEqual(5 * 60_000);
     broker.clock.advance(6 * 60_000);
     const record = ((await mcp.tool("agentx_admin_changes")).value.changes as Array<Record<string, unknown>>)[0];
     expect(record).toMatchObject({ change_id: waiting.value.change_id, outcome: "expired" });
@@ -201,7 +226,9 @@ describe("one trace ID from the MCP server to the stored change (SC-011, FR-052,
     for (const entry of traced) expect(entry.traceId, String(entry.event)).toBe(sentTrace);
     expect(slack.posts).toHaveLength(1);
     expect(slack.updates).toHaveLength(1);
-    for (const entry of slack.logged.filter((line) => line.changeId === changeId)) expect(entry.traceId, String(entry.event)).toBe(sentTrace);
+    const notified = slack.logged.filter((line) => line.changeId === changeId);
+    expect(notified.length).toBeGreaterThan(0);
+    for (const entry of notified) expect(entry.traceId, String(entry.event)).toBe(sentTrace);
     expect(slack.logged.map((line) => line.event)).toContain("admin_change.dm_posted");
   });
 });
@@ -308,7 +335,7 @@ describe("a planted secret, end to end (SC-004, ruling R3)", () => {
     expect(JSON.stringify(broker.db.find((item) => item.entityType === "ADMIN_CHANGE" && item.kind === "register_project_revision"))).toContain(PLANTED);
     // The credential tool's planted input is refused at planning, before any change is stored.
     const credential = await popUp.tool("agentx_admin_register_credential", { ref: "linear", type: "static-secret", secret_name: `agentx/connectors/${PLANTED}` });
-    expect(credential.isError).toBe(true);
+    expect(credential.error).toMatchObject({ code: "INVALID_REQUEST" });
     expect(broker.db.find((item) => item.entityType === "ADMIN_CHANGE" && item.kind === "register_credential")).toEqual([]);
     await popUp.tool("agentx_admin_changes");
     await mcp.tool("agentx_admin_changes");

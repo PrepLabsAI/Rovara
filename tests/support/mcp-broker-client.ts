@@ -134,6 +134,7 @@ export async function adminSignedInClient(harness: Harness, options: {
   });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   await server.connect(serverSide);
+  // No pop-up unless asked for, so 25d's clients (which pass no option) stay exactly as they were.
   const elicitation = options.elicitation ?? false;
   const client = new Client({ name: "claude-code", version: "2.1.0" }, { capabilities: elicitation === false ? {} : { elicitation: { form: {} } } });
   /** Every pop-up's message, as the admin saw it. */
