@@ -1085,6 +1085,7 @@ Run the mobile preset too: add a second `lighthouserc.mobile.json` with `"preset
   2. In both Lighthouse configs, replace the per-audit SEO lines with `"categories:seo": ["error", { "minScore": 0.95 }]`.
   3. Set the site repository variables `DOCS_REF` and `CLAIMS_REF` to empty (the defaults then use `SITE.docsRelease`), and `RECEIPTS_ALLOW_EMPTY` to empty.
   4. Replace README line 3 ("A software factory with …", a banned phrase) with the product line from Appendix A, then add the FR-034 README pointer in AgentX: "AgentX is QEDly Code, the first product from [QEDly](https://qedly.github.io). Docs: [qedly.github.io/docs](https://qedly.github.io/docs/agentx/quickstart/)."
+  5. Right after the repository is public: Settings → Code security → Private vulnerability reporting → Enable, so the "Report a vulnerability" button that SECURITY.md (PrepLabsAI/AgentX#162) points to exists.
 - [ ] **Step 3: Verify after merge.**
   - `https://qedly.github.io/llms.txt` does not contain "open source" (the Asana and Jira pages at the release tag carry the source-available wording from this branch).
   - `curl -s https://qedly.github.io/robots.txt` shows `Allow: /`.
