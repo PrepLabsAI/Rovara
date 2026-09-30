@@ -1,0 +1,65 @@
+name: Bug report
+description: Something in AgentX does not work as the docs say it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. **Security problems do not go here**: follow SECURITY.md to report them privately.
+        Remove tokens, secrets, message text and customer data from anything you paste.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The output of `agentx --version`, or the commit you built from.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where it happened
+      options:
+        - Installing (init, deploy, upgrade, destroy)
+        - Slack thread
+        - AI tool (agentx mcp)
+        - Pull request or CodeBuild gates
+        - Connectors (GitHub, Linear, Jira, Asana)
+        - CLI command
+        - Docs
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, and what AgentX did.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: What should have happened. Link the doc that says so, if there is one.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1.
+        2.
+        3.
+  - type: textarea
+    id: doctor
+    attributes:
+      label: agentx doctor output
+      description: For an installed environment, the output of `agentx --env <name> doctor`, with secrets removed.
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant log lines, such as the event names from docs/troubleshooting.md, with secrets and message text removed.
+      render: text
