@@ -8,14 +8,14 @@
 import { randomUUID } from "node:crypto";
 import { GetCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  ADMIN_CHANGE_APPLYING_STALE_MS, ADMIN_CHANGE_EFFECT_MAX, ADMIN_CHANGE_TTL_MS, AdminChangeOutcomeSchema, AdminChangePendingRecordSchema, AgentXError, AgentXErrorCodeSchema,
+  ADMIN_CHANGE_APPLYING_STALE_MS, ADMIN_CHANGE_EFFECT_MAX, ADMIN_LIST_MAX, ADMIN_CHANGE_TTL_MS, AdminChangeOutcomeSchema, AdminChangePendingRecordSchema, AgentXError, AgentXErrorCodeSchema,
   ApplyAdminChangeRequestSchema, DeclineAdminChangeRequestSchema, INDEX_EXPIRY_ATTRIBUTE, ProposeAdminChangeRequestSchema, SlackUserIdSchema,
   adminChangeItemExpiresAt, adminChangeKey, adminChangeRequestKey, agentXError, outcomeOfStatus, redactSecrets, redactText,
   type AdminChangeAuditRecord, type AdminChangePressEvent, type AdminChangeStatus, type AdminChangeView, type AdminMeResponse, type ConfirmationMethod,
   type PendingChange, type RefusedAttemptReason,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
-import { auditStepItem, listAudit, logChangeStep, proposalItem, readAudit, recordRefusedAttempt, writeProposal, type AuditStep, type AuditStore } from "./admin-change-audit.js";
+import { auditStepItem, listAudit, logChangeStep, proposalItem, readAudit, recordRefusedAttempt, writeProposal, type AuditStep, type AuditStore, type TransactItem } from "./admin-change-audit.js";
 import { planChange, stateHash, type ChangePlan, type PlanDependencies } from "./admin-change-plans.js";
 import { listLimitParam, validTime } from "./turns.js";
 
@@ -47,6 +47,7 @@ const TRACE = /^[A-Za-z0-9._-]{1,128}$/;
 const CHANGE_PATH = /^\/v1\/admin\/changes\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\/(slack|apply|decline))?$/;
 const LIST_DEFAULT_DAYS = 7;
 const LIST_DEFAULT_LIMIT = 25;
+const SETTLE_PAGES_MAX = 10;
 const ERROR_MESSAGE_MAX = 1_000;
 const NOT_APPLIED = "the change could not be applied; check the state, then ask again";
 const APPLY_UNFINISHED = "the apply did not finish; check the state, then ask again";
@@ -83,6 +84,11 @@ function viewOf(deps: AdminChangeDependencies, change: PendingChange, forPlanner
   };
 }
 
+/** One TransactWriteItems call; the items are typed, so the compiler checks each one's shape. */
+async function transact(deps: AdminChangeDependencies, items: TransactItem[]): Promise<void> {
+  await deps.documentClient.send(new TransactWriteCommand({ TransactItems: items }));
+}
+
 async function getPending(deps: AdminChangeDependencies, changeId: string): Promise<PendingChange | undefined> {
   const response = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: adminChangeKey(changeId), ConsistentRead: true })) as { Item?: Record<string, unknown> };
   if (response.Item === undefined) return undefined;
@@ -112,10 +118,10 @@ async function transition(deps: AdminChangeDependencies, change: PendingChange, 
     return `#g${index} = :g${index}`;
   })];
   try {
-    await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [
+    await transact(deps, [
       { Update: { TableName: deps.tableName, Key: adminChangeKey(change.changeId), UpdateExpression: `SET ${assignments.join(", ")}`, ConditionExpression: "#status = :from", ExpressionAttributeNames: names, ExpressionAttributeValues: values } },
       auditStepItem(deps.audit.tableName, change.changeId, { ...step, status: to }),
-    ] as never }));
+    ]);
   } catch (error) {
     if (conditional(error)) return false;
     throw error;
@@ -135,6 +141,9 @@ async function settle(deps: AdminChangeDependencies, change: PendingChange): Pro
     }
     return (await getPending(deps, change.changeId)) ?? change;
   }
+  // E5: the broker Lambda's timeout (30 seconds, packagedFunction's default) is well below these 2
+  // minutes, so an apply still running when a read marks it failed cannot happen in practice; if
+  // it ever did, applyOnce logs admin_change.applied_unrecorded.
   if (change.status === "applying" && (change.claimedAt === undefined || now - Date.parse(change.claimedAt) > ADMIN_CHANGE_APPLYING_STALE_MS)) {
     const error = { code: "RUNTIME_UNAVAILABLE", message: APPLY_UNFINISHED };
     if (await transition(deps, change, "applying", "failed", { failedAt: iso(now), error }, { error })) {
@@ -286,11 +295,11 @@ async function propose(deps: AdminChangeDependencies, identity: AuthenticatedIde
   }
   const pending = stored.data;
   try {
-    await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [
+    await transact(deps, [
       { Put: { TableName: deps.tableName, Item: pending, ConditionExpression: "attribute_not_exists(pk)" } },
       { Put: { TableName: deps.tableName, Item: { ...adminChangeRequestKey(identity.ownerKey, request.requestId), entityType: "ADMIN_CHANGE_REQUEST", changeId, [INDEX_EXPIRY_ATTRIBUTE]: adminChangeItemExpiresAt(proposedAt) }, ConditionExpression: "attribute_not_exists(pk)" } },
       proposalItem(deps.audit.tableName, { ...base, change, effect, methodsOffered: offered, status: "pending" }),
-    ] as never }));
+    ]);
   } catch (error) {
     if (!conditional(error)) throw error;
     // The same request ID raced this one; answer the change it made.
@@ -326,14 +335,20 @@ async function applyOnce(deps: AdminChangeDependencies, change: PendingChange, a
   };
   const who = { methodUsed: how.method, ...(how.pressedBy === undefined ? {} : { pressedBy: how.pressedBy }) };
   // B4: the stored Slack user, so the re-plan reads what the planning read (a press has no token).
-  let fresh: ChangePlan | Error;
+  let fresh: ChangePlan | AgentXError;
   try {
     fresh = await planChange(deps.plans, applier, change.input, change.slackUserId === undefined ? {} : { slackUserId: change.slackUserId });
   } catch (error) {
-    fresh = error instanceof Error ? error : new Error("plan failed");
+    if (!(error instanceof AgentXError)) {
+      // A throttle or a failed lookup says nothing about the state: never apply, and leave the
+      // change pending so the admin can confirm again within its 10 minutes.
+      logChangeStep(deps.log, "replan_unavailable", { ...traced(change), error: errorName(error) });
+      throw agentXError("RUNTIME_UNAVAILABLE", `change ${change.changeId} could not be checked against the current state just now; try again`);
+    }
+    fresh = error;
   }
-  if (fresh instanceof Error || stateHash(fresh.snapshot) !== change.stateHash) {
-    // Task 6 carry (b): a re-plan that is itself refused is a stale state too, and never applies.
+  if (fresh instanceof AgentXError || stateHash(fresh.snapshot) !== change.stateHash) {
+    // Task 6 carry (b): a re-plan the planner refuses is a stale state too, and never applies.
     const why = fresh instanceof AgentXError ? ` (${stripCode(fresh.message, fresh.code)})` : "";
     const error = { code: "CHANGE_STALE", message: cap(redactText(`what change ${change.changeId} was planned against has changed${why}; ask for the change again`), ERROR_MESSAGE_MAX) };
     if (!(await transition(deps, change, "pending", "failed", { ...answered, failedAt: iso(now), error }, { ...who, error }))) throw await refuseAsItIs(deps, change, how.pressedBy);
@@ -342,7 +357,7 @@ async function applyOnce(deps: AdminChangeDependencies, change: PendingChange, a
     throw agentXError("CHANGE_STALE", error.message);
   }
   try {
-    await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [
+    await transact(deps, [
       { Update: {
         TableName: deps.tableName, Key: adminChangeKey(change.changeId),
         UpdateExpression: `SET #status = :applying, claimedAt = :now, methodUsed = :method${how.pressedBy === undefined ? "" : ", pressedBy = :pressedBy"}`,
@@ -352,7 +367,7 @@ async function applyOnce(deps: AdminChangeDependencies, change: PendingChange, a
         ExpressionAttributeValues: { ":applying": "applying", ":pending": "pending", ":now": iso(now), ":method": how.method, ...(how.pressedBy === undefined ? {} : { ":pressedBy": how.pressedBy }) },
       } },
       auditStepItem(deps.audit.tableName, change.changeId, { ...answered, status: "applying" }),
-    ] as never }));
+    ]);
   } catch (error) {
     if (!conditional(error)) throw error;
     throw await refuseAsItIs(deps, change, how.pressedBy);
@@ -407,6 +422,11 @@ async function decline(deps: AdminChangeDependencies, identity: AuthenticatedIde
     await refuseAttempt(deps, changeId, "method_not_offered");
     throw agentXError("CONFIG_INVALID", "method must be elicitation or cli, and reason declined, cancelled or failed");
   }
+  if (!change.methodsOffered.includes(body.data.method)) {
+    await refuseAttempt(deps, changeId, "method_not_offered");
+    logChangeStep(deps.log, "refused", { ...traced(change), error: "method_not_offered" });
+    throw agentXError("CONFIRMATION_UNAVAILABLE", `the ${body.data.method === "cli" ? "CLI" : "pop-up"} was not offered for change ${changeId}; decline it by ${change.methodsOffered.join(" or ")}, or let it expire`);
+  }
   const answeredAt = body.data.answeredAt ?? iso(deps.now());
   if (!(await transition(deps, change, "pending", "declined", { answeredAt, methodUsed: body.data.method }, { methodUsed: body.data.method }))) throw await refuseAsItIs(deps, change);
   logChangeStep(deps.log, "declined", { ...traced(change), outcome: "declined" });
@@ -423,10 +443,10 @@ async function startSlack(deps: AdminChangeDependencies, identity: Authenticated
   if (change.slackRequestedAt !== undefined) return { status: 200, body: { change: viewOf(deps, change, true) } };
   const requestedAt = iso(deps.now());
   try {
-    await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [
+    await transact(deps, [
       { Update: { TableName: deps.tableName, Key: adminChangeKey(changeId), UpdateExpression: "SET slackRequestedAt = :at", ConditionExpression: "#status = :pending AND attribute_not_exists(slackRequestedAt)", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":at": requestedAt, ":pending": "pending" } } },
       auditStepItem(deps.audit.tableName, changeId, { confirmationRequestedAt: requestedAt }),
-    ] as never }));
+    ]);
   } catch (error) {
     if (!conditional(error)) throw error;
     // Another start won the race, or the change moved on meanwhile.
@@ -443,6 +463,8 @@ async function startSlack(deps: AdminChangeDependencies, identity: Authenticated
 async function pressFailure(deps: AdminChangeDependencies, change: PendingChange, error: unknown): Promise<PressOutcome> {
   if (error instanceof AgentXError && error.code === "CHANGE_STALE") return "stale";
   const current = await getPending(deps, change.changeId);
+  // The re-plan could not read the state: nothing applied, and the change stays pending.
+  if (current?.status === "pending" && error instanceof AgentXError && error.code === "RUNTIME_UNAVAILABLE") return "failed";
   if (current?.status === "expired") return "expired";
   if (current?.status === "failed") return "failed";
   return "not_pending";
@@ -490,6 +512,29 @@ export async function pressAdminChange(deps: AdminChangeDependencies, event: Adm
   }
 }
 
+/** E3: every read after its expiry shows a change expired (and one stuck applying failed), recording it on the way. */
+async function settleRecord(deps: AdminChangeDependencies, record: AdminChangeAuditRecord, now: number): Promise<AdminChangeAuditRecord> {
+  const unsettled = (record.status === "pending" && now >= Date.parse(record.proposedAt) + ADMIN_CHANGE_TTL_MS) || record.status === "applying";
+  const pending = unsettled ? await getPending(deps, record.changeId) : undefined;
+  if (pending === undefined) return record;
+  const settled = await settle(deps, pending);
+  return settled.status === pending.status ? record : (await readAudit(deps.audit, record.changeId)) ?? record;
+}
+
+/** Settles every change still `statuses` in the window, a bounded number of pages at a time. */
+async function settleWindow(deps: AdminChangeDependencies, window: { since: string; until?: string; admin?: string }, statuses: AdminChangeStatus[]): Promise<void> {
+  const now = deps.now();
+  let cursor: string | undefined;
+  for (let pages = 0; pages < SETTLE_PAGES_MAX; pages += 1) {
+    const page = await listAudit(deps.audit, { ...window, status: statuses, limit: ADMIN_LIST_MAX, ...(cursor === undefined ? {} : { cursor }) });
+    for (const record of page.changes) await settleRecord(deps, record, now);
+    if (page.cursor === undefined) return;
+    cursor = page.cursor;
+  }
+  // Ten pages of unsettled changes in one window; the rest settle on a later read.
+  deps.log({ event: "admin_change.settle_capped", statuses: statuses.join(",") });
+}
+
 async function list(deps: AdminChangeDependencies, url: URL): Promise<Answer> {
   const now = deps.now();
   const text = (name: string) => url.searchParams.get(name) ?? undefined;
@@ -507,25 +552,17 @@ async function list(deps: AdminChangeDependencies, url: URL): Promise<Answer> {
   const limit = listLimitParam(url.searchParams.get("limit"), LIST_DEFAULT_LIMIT);
   const admin = text("admin");
   const cursor = text("cursor");
+  const window = { since, ...(until === undefined ? {} : { until }), ...(admin === undefined ? {} : { admin: admin.slice(0, 256) }) };
+  // The outcome filter runs on the stored outcome, so an expired or stuck change nobody touched
+  // since would be left out: settle those in the window first, and the filtered read finds them.
+  if (outcome?.data === "expired" || outcome?.data === "failed") await settleWindow(deps, window, outcome.data === "expired" ? ["pending"] : ["applying"]);
   const page = await listAudit(deps.audit, {
-    since, limit,
-    ...(until === undefined ? {} : { until }),
-    ...(admin === undefined ? {} : { admin: admin.slice(0, 256) }),
+    ...window, limit,
     ...(outcome === undefined ? {} : { outcome: outcome.data }),
     ...(cursor === undefined ? {} : { cursor }),
   });
-  // E3: every read after its expiry shows a change expired (and one stuck applying failed), recording it on the way.
   const changes: AdminChangeAuditRecord[] = [];
-  for (const record of page.changes) {
-    const unsettled = (record.status === "pending" && now >= Date.parse(record.proposedAt) + ADMIN_CHANGE_TTL_MS) || record.status === "applying";
-    const pending = unsettled ? await getPending(deps, record.changeId) : undefined;
-    if (pending === undefined) {
-      changes.push(record);
-      continue;
-    }
-    const settled = await settle(deps, pending);
-    changes.push(settled.status === pending.status ? record : (await readAudit(deps.audit, record.changeId)) ?? record);
-  }
+  for (const record of page.changes) changes.push(await settleRecord(deps, record, now));
   return { status: 200, body: { changes, ...(page.cursor === undefined ? {} : { cursor: page.cursor }) } };
 }
 

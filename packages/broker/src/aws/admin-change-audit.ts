@@ -2,11 +2,14 @@
 // Spec 025 E3, FR-051, FR-052: the audit record of each admin change request, in the TurnRecords
 // table (30 days by TTL), under its own export partition. Written once, then only stepped forward:
 // the outcome, once set, never changes, and no route writes this record. Log lines carry IDs only.
-import { GetCommand, PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { GetCommand, PutCommand, QueryCommand, UpdateCommand, type TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
 import {
   ADMIN_CHANGES_PARTITION, ADMIN_CHANGE_REFUSED_ATTEMPTS_MAX, AdminChangeAuditRecordSchema, adminChangeAuditKeys, agentXError, outcomeOfStatus, redactSecrets,
-  type AdminChangeAuditRecord, type AdminChangeOutcome, type RefusedAttemptReason,
+  type AdminChangeAuditRecord, type AdminChangeOutcome, type AdminChangeStatus, type RefusedAttemptReason,
 } from "@agentx/contracts";
+
+/** One item of a TransactWriteItems call, so every item's shape is checked by the compiler. */
+export type TransactItem = NonNullable<TransactWriteCommandInput["TransactItems"]>[number];
 
 export interface AuditStore {
   documentClient: { send(command: unknown): Promise<unknown> };
@@ -27,7 +30,7 @@ const AuditStepSchema = AdminChangeAuditRecordSchema.pick({
 const RefusedAttemptsSchema = AdminChangeAuditRecordSchema.shape.refusedAttempts;
 
 /** The proposal's put, for a transaction; the proposed change holds no secret value (FR-051). */
-export function proposalItem(tableName: string, record: AdminChangeAuditRecord): { Put: Record<string, unknown> } {
+export function proposalItem(tableName: string, record: AdminChangeAuditRecord): { Put: NonNullable<TransactItem["Put"]> } {
   const safe = AdminChangeAuditRecordSchema.parse({
     ...record,
     change: redactSecrets(record.change) as Record<string, unknown>,
@@ -41,7 +44,7 @@ export function proposalItem(tableName: string, record: AdminChangeAuditRecord):
 }
 
 /** One step forward, for a transaction: never once an outcome is set, and only on an existing record. */
-export function auditStepItem(tableName: string, changeId: string, step: AuditStep): { Update: Record<string, unknown> } {
+export function auditStepItem(tableName: string, changeId: string, step: AuditStep): { Update: NonNullable<TransactItem["Update"]> } {
   const safe = AuditStepSchema.parse({
     ...step,
     ...(step.result === undefined ? {} : { result: redactSecrets(step.result) }),
@@ -68,7 +71,7 @@ export function auditStepItem(tableName: string, changeId: string, step: AuditSt
 }
 
 export async function writeProposal(store: AuditStore, record: AdminChangeAuditRecord): Promise<void> {
-  await store.documentClient.send(new PutCommand(proposalItem(store.tableName, record).Put as never));
+  await store.documentClient.send(new PutCommand(proposalItem(store.tableName, record).Put));
   const outcome = outcomeOfStatus(record.status);
   if (outcome !== undefined) store.metric(outcome);
 }
@@ -76,7 +79,7 @@ export async function writeProposal(store: AuditStore, record: AdminChangeAuditR
 export async function recordAuditStep(store: AuditStore, changeId: string, proposedAt: string, step: AuditStep): Promise<void> {
   if (Object.values(step).every((value) => value === undefined)) return;
   try {
-    await store.documentClient.send(new UpdateCommand(auditStepItem(store.tableName, changeId, step).Update as never));
+    await store.documentClient.send(new UpdateCommand(auditStepItem(store.tableName, changeId, step).Update));
   } catch (error) {
     if (error instanceof Error && error.name === "ConditionalCheckFailedException") {
       store.log({ event: "admin_change.audit_step_ignored", changeId, proposedAt });
@@ -126,7 +129,7 @@ function decode(cursor: string): Record<string, unknown> {
   }
 }
 
-export async function listAudit(store: AuditStore, query: { since: string; until?: string; admin?: string; outcome?: AdminChangeOutcome; limit: number; cursor?: string }): Promise<{ changes: AdminChangeAuditRecord[]; cursor?: string }> {
+export async function listAudit(store: AuditStore, query: { since: string; until?: string; admin?: string; outcome?: AdminChangeOutcome; status?: readonly AdminChangeStatus[]; limit: number; cursor?: string }): Promise<{ changes: AdminChangeAuditRecord[]; cursor?: string }> {
   const changes: AdminChangeAuditRecord[] = [];
   let start = query.cursor === undefined ? undefined : decode(query.cursor);
   // Where the next page resumes: after the last item read when this page stopped mid-read, else
@@ -134,7 +137,12 @@ export async function listAudit(store: AuditStore, query: { since: string; until
   // that empties every read page still hands back a cursor and nothing is cut off silently.
   let resume: Record<string, unknown> | undefined;
   for (let reads = 0; reads < 10 && changes.length < query.limit; reads += 1) {
-    const filters = [...(query.admin === undefined ? [] : ["admin.subject = :admin"]), ...(query.outcome === undefined ? [] : ["outcome = :outcome"])];
+    const statuses = query.status ?? [];
+    const filters = [
+      ...(query.admin === undefined ? [] : ["admin.subject = :admin"]),
+      ...(query.outcome === undefined ? [] : ["outcome = :outcome"]),
+      ...(statuses.length === 0 ? [] : [`(${statuses.map((_, index) => `#status = :status${index}`).join(" OR ")})`]),
+    ];
     const page = await store.documentClient.send(new QueryCommand({
       TableName: store.tableName,
       IndexName: "byTime",
@@ -144,7 +152,9 @@ export async function listAudit(store: AuditStore, query: { since: string; until
         ...(query.until === undefined ? {} : { ":until": `${query.until}\uffff` }),
         ...(query.admin === undefined ? {} : { ":admin": query.admin }),
         ...(query.outcome === undefined ? {} : { ":outcome": query.outcome }),
+        ...Object.fromEntries(statuses.map((status, index) => [`:status${index}`, status])),
       },
+      ...(statuses.length === 0 ? {} : { ExpressionAttributeNames: { "#status": "status" } }),
       ...(filters.length === 0 ? {} : { FilterExpression: filters.join(" AND ") }),
       ScanIndexForward: false,
       Limit: query.limit,
