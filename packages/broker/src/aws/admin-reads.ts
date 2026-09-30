@@ -2,9 +2,12 @@
 // list routes do (A2), and reads by key or by index: no route scans the table, and no route writes.
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import {
+  CHANNEL_MEMBERS_MAX_CHANNELS,
   PROJECT_CATALOG_PK,
+  SlackTeamIdSchema,
   agentXError,
   developerTaskPolicy,
+  type AdminBindingsResponse,
   type AdminProjectsResponse,
   type ChannelInfoRequest,
   type ChannelInfoResponse,
@@ -116,6 +119,53 @@ async function listProjects(deps: AdminReadDependencies, identity: Authenticated
   return { projects };
 }
 
+/** A11: names for public channels, privacy for all; `available` is false when no name could be read. */
+export async function channelLabels(deps: AdminReadDependencies, channelIds: readonly string[]): Promise<{ labels: Map<string, { name?: string; private: boolean }>; available: boolean }> {
+  const labels = new Map<string, { name?: string; private: boolean }>();
+  const unique = [...new Set(channelIds)].sort();
+  if (deps.channelInfo === undefined) return { labels, available: unique.length === 0 };
+  try {
+    for (let start = 0; start < unique.length; start += CHANNEL_MEMBERS_MAX_CHANNELS) {
+      const answer = await deps.channelInfo({ kind: "channel-info", channelIds: unique.slice(start, start + CHANNEL_MEMBERS_MAX_CHANNELS) });
+      if (!answer.ok) return { labels, available: false };
+      for (const channel of answer.channels) {
+        // Until Task 11 adds the member check (Q7 as answered), a private channel stays ID only.
+        labels.set(channel.channelId, channel.isPrivate ? { private: true } : { name: channel.name, private: false });
+      }
+    }
+  } catch (error) {
+    deps.log({ event: "admin.channel_info_failed", error: error instanceof Error ? error.name : "unknown" });
+    return { labels, available: false };
+  }
+  return { labels, available: true };
+}
+
+async function listBindings(deps: AdminReadDependencies, url: URL): Promise<AdminBindingsResponse> {
+  const asked = url.searchParams.get("team");
+  const team = asked === null ? deps.slackTeamId : SlackTeamIdSchema.safeParse(asked).success ? asked : null;
+  if (team === null) throw agentXError("CONFIG_INVALID", "team must be a Slack team ID, such as T0123456789");
+  if (team === undefined) throw agentXError("CONFIG_INVALID", "this environment records no Slack team; send team=<team ID>, such as team=T0123456789");
+  const items = await queryAllItems(deps, `SLACK_BINDING#${team}`, "CHANNEL#");
+  const rows = items.filter((item) => typeof item.channelId === "string" && typeof item.projectName === "string");
+  const { labels, available } = await channelLabels(deps, rows.map((item) => String(item.channelId)));
+  return {
+    bindings: rows
+      .map((item) => {
+        const label = labels.get(String(item.channelId));
+        return {
+          teamId: team,
+          channelId: String(item.channelId),
+          ...(label?.name === undefined ? {} : { channelName: label.name }),
+          ...(label === undefined ? {} : { private: label.private }),
+          projectName: String(item.projectName),
+          updatedAt: typeof item.updatedAt === "string" ? item.updatedAt : "",
+        };
+      })
+      .sort((left, right) => left.channelId.localeCompare(right.channelId)),
+    notices: available ? [] : ["channel_names_unavailable"],
+  };
+}
+
 /** The answer for an admin read route, or undefined when the request is not one. */
 export async function routeAdminRead(
   deps: AdminReadDependencies,
@@ -135,4 +185,5 @@ type AdminRead = (deps: AdminReadDependencies, identity: AuthenticatedIdentity, 
 /** Each later task adds its route here. */
 const ADMIN_READS: Record<string, AdminRead> = {
   "/v1/admin/projects": (deps, identity) => listProjects(deps, identity),
+  "/v1/admin/slack/bindings": (deps, _identity, url) => listBindings(deps, url),
 };
