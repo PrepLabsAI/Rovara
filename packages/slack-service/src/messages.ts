@@ -24,13 +24,26 @@ const COMMAND_FAILURE = /^(?:setup step|readiness check) \d+ \(/;
  */
 export function preparationFailedMessage(status: string, error?: string): string {
   const head = `AgentX could not set up this thread's workspace (${escapeText(status)}).`;
-  const reason = error?.replace(/\s+/g, " ").trim() ?? "";
+  // Redacted before its lines are joined, since some redaction rules work line by line; the
+  // redaction reads a bounded amount (redactAndCap), far more than the notice shows.
+  const redacted = redactAndCap(error ?? "", PREPARATION_FAILURE_REASON_MAX * 4);
+  const reason = redacted.text.replace(/\s+/g, " ").trim();
   if (reason === "") return `${head} Mention me again in this thread to retry.`;
   const next = COMMAND_FAILURE.test(reason)
     ? "Ask an administrator to fix the project's setup commands, then mention me again in this thread to retry."
     : "Mention me again in this thread to retry.";
-  const capped = redactAndCap(reason, PREPARATION_FAILURE_REASON_MAX - 3);
-  return `${head} ${next}\nReason: ${escapeText(capped.truncated ? `${capped.text}...` : capped.text)}`;
+  return `${head} ${next}\nReason: ${fitEscapedReason(escapeText(reason), redacted.truncated)}`;
+}
+
+/** Cuts escaped text to PREPARATION_FAILURE_REASON_MAX, marker included, never inside an entity. */
+function fitEscapedReason(escaped: string, alreadyCut: boolean): string {
+  if (escaped.length <= PREPARATION_FAILURE_REASON_MAX && !alreadyCut) return escaped;
+  let cut = Math.min(escaped.length, PREPARATION_FAILURE_REASON_MAX - 3);
+  const entity = escaped.lastIndexOf("&", cut - 1);
+  if (entity !== -1 && !escaped.slice(entity, cut).includes(";")) cut = entity;
+  const code = escaped.charCodeAt(cut - 1);
+  if (code >= 0xd800 && code <= 0xdbff) cut -= 1;
+  return `${escaped.slice(0, cut)}...`;
 }
 
 export function limitMessage(result: { limit: SlackWorkspaceLimit; maximum: number; starterThreads: readonly SlackThread[]; openTaskCount?: number | undefined }): string {

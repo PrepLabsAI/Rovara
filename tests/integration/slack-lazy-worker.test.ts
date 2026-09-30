@@ -145,6 +145,24 @@ describe("the lazy worker", () => {
     expect(reason.endsWith("...")).toBe(true);
   });
 
+  it("keeps the escaped reason within 300 characters, without cutting an entity (#154 review)", async () => {
+    const h = lazyHarness(started, "FAILED", { wait: async () => ({ status: "FAILED", error: `setup step 0 (make in repo/app) exited 2\nLast lines:\n${"<a&b> ".repeat(300)}` }) });
+    await h.worker.ensureReady();
+    const reason = h.posts.at(-1)!.split("\nReason: ")[1]!;
+    expect(reason.length).toBeLessThanOrEqual(300);
+    expect(reason.endsWith("...")).toBe(true);
+    expect(reason).not.toMatch(/[<>]/);
+    expect(reason.slice(0, -3)).toMatch(/(?:&lt;|&gt;|&amp;|[^&])$/);
+    expect(reason.slice(0, -3)).not.toMatch(/&[a-z]*$/);
+  });
+
+  it("redacts a multi-line secret block before it joins the reason's lines (#154 review)", async () => {
+    const key = ["-----BEGIN OPENSSH PRIVATE KEY-----", "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ", "-----END OPENSSH PRIVATE KEY-----"].join("\n");
+    const h = lazyHarness(started, "FAILED", { wait: async () => ({ status: "FAILED", error: `setup step 0 (sh -c cat in repo/app) exited 1\nLast lines:\n${key}` }) });
+    await h.worker.ensureReady();
+    expect(h.posts.at(-1)).not.toContain("b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ");
+  });
+
   it("reports a failed setup in the thread and refuses the worker for the rest of the turn", async () => {
     const h = lazyHarness(started, "FAILED");
     expect(await h.worker.ensureReady()).toEqual(unavailableRefusal("workspace setup failed"));

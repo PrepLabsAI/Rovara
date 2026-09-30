@@ -182,7 +182,13 @@ export async function prepareWorkspace(options: PrepareWorkspaceOptions): Promis
 
     for (const [index, command] of project.setup.entries()) {
       if (manifest.completedSetupSteps.includes(index)) continue;
-      const result = await commandRunner(command, index, canonicalRoot);
+      let result: CommandResult;
+      try {
+        result = await commandRunner(command, index, canonicalRoot);
+      } catch (error) {
+        // For example, the step's directory does not exist: still say which step (#154).
+        result = { exitCode: -1, stdout: "", stderr: error instanceof Error ? error.message : "setup command could not run" };
+      }
       if (result.exitCode !== 0) {
         throw new Error(describeCommandFailure("setup step", index, command, result));
       }

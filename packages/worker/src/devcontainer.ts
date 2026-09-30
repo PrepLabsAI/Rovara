@@ -135,6 +135,7 @@ export async function ensureDevcontainer(cli: DevcontainerCli, target: Devcontai
       remoteWorkspaceFolder: typeof outcome.remoteWorkspaceFolder === "string" ? outcome.remoteWorkspaceFolder : "",
     };
   }
+  if (result.timedOut === true) throw new Error(`devcontainer did not start: timed out after ${UP_TIMEOUT_MS / 60_000} min`);
   const reason = [outcome?.message, outcome?.description].filter((part) => typeof part === "string").join(": ");
   throw new Error(`devcontainer did not start${reason ? `: ${reason}` : ` (exit ${String(result.exitCode)})`}`);
 }

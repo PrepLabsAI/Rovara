@@ -75,6 +75,11 @@ describe("the devcontainer CLI seam", () => {
     await expect(ensureDevcontainer(failing, target)).rejects.toThrow("devcontainer did not start: Command failed: image not found");
   });
 
+  it("says a devcontainer start timed out, and after how long (#154 review)", async () => {
+    const stuck: DevcontainerCli = { run: async () => ({ exitCode: null, signal: "SIGTERM", timedOut: true, stdout: "", stderr: "" }) };
+    await expect(ensureDevcontainer(stuck, target)).rejects.toThrow("devcontainer did not start: timed out after 20 min");
+  });
+
   it("runs a project command in its directory inside the devcontainer", async () => {
     const { cli, calls, options } = fakeCli(() => ({ exitCode: 3, stdout: "out", stderr: "err" }));
     const result = await runDevcontainerCommand(cli, target, { cwd: "repo/sample/apps", executable: "npm", args: ["run", "test"], timeoutSeconds: 60 });
@@ -255,6 +260,17 @@ describe("the collected process under the devcontainer CLI (#154)", () => {
   it("stops a process at its timeout with SIGTERM and says so", async () => {
     const result = await runCollected(process.execPath, ["-e", "setInterval(() => undefined, 1000)"], { timeoutMs: 200 });
     expect(result).toMatchObject({ exitCode: null, signal: "SIGTERM", timedOut: true });
+  });
+
+  it("does not call a process timed out when it exited before its timeout, while a child held its output open (#154 review)", async () => {
+    const result = await runCollected("sh", ["-c", "sleep 2 & exit 4"], { timeoutMs: 300 });
+    expect(result.exitCode).toBe(4);
+    expect(result).not.toHaveProperty("timedOut");
+    expect(result).not.toHaveProperty("signal");
+  });
+
+  it("rejects when the executable does not exist", async () => {
+    await expect(runCollected("agentx-no-such-command-154", [])).rejects.toThrow(/ENOENT/);
   });
 
   it("keeps the last 1 MiB of output, not the first", async () => {

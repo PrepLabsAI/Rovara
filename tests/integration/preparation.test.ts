@@ -235,6 +235,20 @@ describe("a failed setup or readiness command (#154)", () => {
     expect(message.endsWith("noise\nthe real error")).toBe(true);
   });
 
+  it("says a step could not run when its executable does not exist (#154 review)", async () => {
+    const { message } = await preparing("missing-exe", {
+      setup: [{ cwd: "repo/missing-exe", executable: "agentx-no-such-command-154", args: [], timeoutSeconds: 10 }],
+    });
+    expect(message).toMatch(/^setup step 0 \(agentx-no-such-command-154 in repo\/missing-exe\) could not run\nLast lines:\n.*ENOENT/);
+  });
+
+  it("names the step when its directory does not exist (#154 review)", async () => {
+    const { message } = await preparing("missing-cwd", {
+      setup: [{ cwd: "repo/missing-cwd/nowhere", executable: "true", args: [], timeoutSeconds: 10 }],
+    });
+    expect(message).toMatch(/^setup step 0 \(true in repo\/missing-cwd\/nowhere\) could not run\nLast lines:\n.*ENOENT/);
+  });
+
   it("caps the command at 120 characters", async () => {
     const { message } = await preparing("long", {
       setup: [{ cwd: "repo/long", executable: "sh", args: ["-c", `exit 1; ${"x".repeat(300)}`], timeoutSeconds: 10 }],

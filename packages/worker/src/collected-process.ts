@@ -40,8 +40,16 @@ export function runCollected(executable: string, args: readonly string[], option
     const stderr = tailCollector();
     let timedOut = false;
     let settled = false;
+    // "close" waits for every holder of the output pipes, which can include a child the process
+    // left running; the timeout counts only while the process itself has not exited.
+    let exited = false;
+    child.on("exit", () => { exited = true; });
     const timer = options.timeoutMs
-      ? setTimeout(() => { timedOut = true; child.kill("SIGTERM"); }, options.timeoutMs)
+      ? setTimeout(() => {
+        if (exited) return;
+        timedOut = true;
+        child.kill("SIGTERM");
+      }, options.timeoutMs)
       : undefined;
     const settle = (finish: () => void) => {
       if (settled) return;
