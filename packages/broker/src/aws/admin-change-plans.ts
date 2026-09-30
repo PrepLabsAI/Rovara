@@ -3,12 +3,17 @@
 // changes nothing: it says what will happen, hashes what it read, and says how to apply it through
 // the existing handler. Every value it shows passes through redaction first.
 import {
-  ADMIN_CHANGE_EFFECT_MAX, AgentXNameSchema, CredentialRegistrationSchema, SlackChannelIdSchema, agentXError, redactSecrets, redactText,
+  ADMIN_CHANGE_EFFECT_MAX, AgentXNameSchema, CredentialRegistrationSchema, SlackChannelIdSchema, WorkspaceInstanceSchema, agentXError, developerTaskPolicy,
+  redactSecrets, redactText, workspaceRecordFields,
   type AdminChangeInput, type AdminChangeKind, type ChannelByNameRequest, type ChannelByNameResponse, type ProjectDefinition,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
-import type { AdminActionDependencies } from "./admin-actions.js";
-import { adminProjects, channelLabels, getStateItem, latestProjectRecord, privateChannelsFor, queryAllItems, type AdminReadDependencies } from "./admin-reads.js";
+import { MAX_PER_ORGANIZATION, MAX_PER_PERSON, isWholeLimit, readWorkspaceLimits, WORKSPACE_LIMITS_KEY } from "../developer/limits.js";
+import {
+  endSessions, grantProjectAccess, projectGrant, resolveDeveloper, revokeProjectAccess, setWorkspaceLimits,
+  type AdminActionDependencies, type ResolvedDeveloper,
+} from "./admin-actions.js";
+import { adminProjects, channelLabels, getStateItem, latestProjectRecord, privateChannelsFor, queryAllItems, workspaceOwner, type AdminReadDependencies } from "./admin-reads.js";
 import { hashJson } from "./broker-shared.js";
 import type { CredentialRegistry } from "./credentials.js";
 
@@ -263,11 +268,168 @@ const planCredential: Planner = async (deps, identity, input) => {
   };
 };
 
+/** How a developer is named in an effect: by profile once they signed in, else by what the admin gave. */
+function describeDeveloper(resolved: ResolvedDeveloper): string {
+  if (resolved.profile !== undefined) return `${resolved.profile.displayName} (signs in with ${resolved.profile.provider === "slack" ? "Slack" : "the company sign-in"})`;
+  if (resolved.slackUserId !== undefined) return `Slack user ${resolved.slackUserId} (not signed in to AgentX yet; the grant applies when they sign in with Slack)`;
+  return `developer ${resolved.developerId.slice(0, 12)} (not signed in to AgentX yet)`;
+}
+
+/** The admin claim alone (Q7): org-wide changes name no project. */
+const requireAdminClaim = (identity: AuthenticatedIdentity) => {
+  if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required; sign in as an AgentX administrator");
+};
+
+/**
+ * The project name is checked before any key is built from it (the grant and revoke actions
+ * interpolate it unchecked), and the project must be registered.
+ */
+async function projectMustExist(deps: PlanDependencies, identity: AuthenticatedIdentity, project: string) {
+  // The claim first, so a caller without it learns nothing about which projects exist.
+  requireAdminClaim(identity);
+  if (!AgentXNameSchema.safeParse(project).success) throw agentXError("CONFIG_INVALID", "project must be a project name such as payments");
+  const latest = await latestProjectRecord(deps.reads, project);
+  if (latest === undefined) throw agentXError("NOT_FOUND", `project ${project} is not registered; check the project's name, or register it with agentx admin project register`);
+  return latest;
+}
+
+/** The grant row as the hash covers it: its role and when it was made, so a new grant is new state. */
+async function grantRow(deps: PlanDependencies, project: string, developerId: string) {
+  const item = await getStateItem(deps.reads, { pk: `MEMBER#${developerId}`, sk: `PROJECT#${project}` });
+  if (item?.role !== "developer" && item?.role !== "administrator") return undefined;
+  return { role: item.role, grantedAt: typeof item.grantedAt === "string" ? item.grantedAt : null };
+}
+
+const planStop: Planner = async (deps, identity, input) => {
+  if (input.kind !== "stop_workspace") throw new Error("wrong planner");
+  // The claim first, so a caller without it learns nothing about workspaces.
+  requireAdminClaim(identity);
+  const item = await getStateItem(deps.reads, { pk: `WORKSPACE#${input.workspaceId}`, sk: "META" });
+  const parsed = item === undefined ? undefined : WorkspaceInstanceSchema.safeParse(workspaceRecordFields(item));
+  if (parsed === undefined || !parsed.success) throw agentXError("NOT_FOUND", `no workspace ${input.workspaceId}; check the workspace ID and plan again`);
+  const workspace = parsed.data;
+  await deps.handlers.requireAdministrator(identity, workspace.projectName);
+  // Q2: stopping compute by hand is not supported (idle compute stops on its own), so the change
+  // cancels the running task, through the admin cancel of #126.
+  if (workspace.activeOperationId === null) throw agentXError("CONFIG_INVALID", `nothing is running in workspace ${workspace.id}; its compute stops on its own when idle`);
+  const operation = await getStateItem(deps.reads, { pk: `WORKSPACE#${workspace.id}`, sk: `OPERATION#${workspace.activeOperationId}` });
+  if (operation?.kind !== "task") throw agentXError("CONFIG_INVALID", `the running operation is a ${typeof operation?.kind === "string" ? operation.kind : "setup"}, which AgentX does not cancel midway; wait for it to end`);
+  const { owner } = await workspaceOwner(deps.reads, workspace);
+  const who = owner.threadUrl ?? (owner.developerName === undefined ? "its owner" : `${owner.developerName}'s task`);
+  return {
+    effect: `Cancel the task running in workspace ${workspace.id} (project ${workspace.projectName}, ${who}, ${workspace.status}). Its conversation keeps what finished before; its compute stops on its own when idle.`,
+    details: { workspaceId: workspace.id, project: workspace.projectName, operationId: workspace.activeOperationId },
+    snapshot: { status: workspace.status, activeOperationId: workspace.activeOperationId, fence: workspace.fence },
+    // The admin cancel checks the applier's project administration itself (E6, FR-015).
+    apply: (applier) => deps.handlers.cancelWorkspaceTask(applier, workspace.id),
+  };
+};
+
+const planGrant: Planner = async (deps, identity, input) => {
+  if (input.kind !== "grant_project_access") throw new Error("wrong planner");
+  await projectMustExist(deps, identity, input.project);
+  await deps.handlers.requireAdministrator(identity, input.project);
+  const resolved = await resolveDeveloper(deps.actions, input.developer);
+  const current = await projectGrant(deps.actions, input.project, resolved.developerId);
+  if (current?.role === "developer") throw agentXError("CONFIG_INVALID", `${describeDeveloper(resolved)} already has a grant for ${input.project}; there is nothing to change`);
+  if (current?.role === "administrator") throw agentXError("CONFIG_INVALID", `${describeDeveloper(resolved)} already administers ${input.project}; there is nothing to change`);
+  const project = input.project;
+  return {
+    effect: `Grant ${describeDeveloper(resolved)} access to project ${project}. They have no grant today. They can then hand tasks to ${project} from their AI tool.`,
+    details: { developerId: resolved.developerId, via: resolved.via, project },
+    // Who the effect names is state too: a first sign-in since planning changes the effect.
+    snapshot: { grant: null, profile: resolved.profile === undefined ? null : { displayName: resolved.profile.displayName, provider: resolved.profile.provider } },
+    apply: async (applier) => {
+      // E6, FR-015: the applier must still administer the project.
+      await deps.handlers.requireAdministrator(applier, project);
+      return grantProjectAccess(deps.actions, { issuer: applier.issuer, subject: applier.subject }, project, resolved.developerId);
+    },
+  };
+};
+
+const planRevoke: Planner = async (deps, identity, input) => {
+  if (input.kind !== "revoke_project_access") throw new Error("wrong planner");
+  const latest = await projectMustExist(deps, identity, input.project);
+  await deps.handlers.requireAdministrator(identity, input.project);
+  const resolved = await resolveDeveloper(deps.actions, input.developer);
+  const current = await grantRow(deps, input.project, resolved.developerId);
+  // An administrator row is never a grant: revoking never removes an administrator.
+  if (current?.role !== "developer") throw agentXError("NOT_FOUND", `${describeDeveloper(resolved)} has no grant for ${input.project}, so there is nothing to revoke`);
+  const project = input.project;
+  const channelMembersMayUse = developerTaskPolicy(latest.definition).channelMembersMayUse;
+  const channels = channelMembersMayUse ? ` If they are a member of one of ${project}'s Slack channels, they keep access through it.` : "";
+  return {
+    effect: `Revoke the granted access of ${describeDeveloper(resolved)} to project ${project}. Their running tasks keep running.${channels}`,
+    details: { developerId: resolved.developerId, via: resolved.via, project },
+    snapshot: { grant: current, channelMembersMayUse, profile: resolved.profile === undefined ? null : { displayName: resolved.profile.displayName, provider: resolved.profile.provider } },
+    apply: async (applier) => {
+      await deps.handlers.requireAdministrator(applier, project);
+      return revokeProjectAccess(deps.actions, project, resolved.developerId);
+    },
+  };
+};
+
+const planEndSessions: Planner = async (deps, identity, input) => {
+  if (input.kind !== "revoke_signin") throw new Error("wrong planner");
+  requireAdminClaim(identity);
+  const resolved = await resolveDeveloper(deps.actions, input.developer);
+  if (resolved.profile === undefined) throw agentXError("NOT_FOUND", `${describeDeveloper(resolved)} has never signed in, so there is no sign-in to end`);
+  return {
+    effect: `End every AgentX sign-in session of ${describeDeveloper(resolved)}. Their AI tools stop reaching AgentX at once; they may sign in again with agentx login. Their running tasks keep running.`,
+    details: { developerId: resolved.developerId, via: resolved.via },
+    snapshot: { sessionsEndedAt: resolved.profile.sessionsEndedAt ?? null, profile: { displayName: resolved.profile.displayName, provider: resolved.profile.provider } },
+    apply: async () => endSessions(deps.actions, resolved.developerId),
+  };
+};
+
+/** How many people at or over the new limit the effect names; details carry the full count. */
+const EFFECT_PEOPLE_MAX = 10;
+
+const counterCount = (item: Record<string, unknown> | undefined): number => (typeof item?.count === "number" && item.count >= 0 ? item.count : 0);
+
+const planLimits: Planner = async (deps, identity, input) => {
+  if (input.kind !== "set_workspace_limits") throw new Error("wrong planner");
+  requireAdminClaim(identity);
+  if (input.perPerson === undefined && input.perOrganization === undefined) throw agentXError("CONFIG_INVALID", "give per_person, per_organization or both");
+  if (input.perPerson !== undefined && !isWholeLimit(input.perPerson, MAX_PER_PERSON)) throw agentXError("CONFIG_INVALID", `the per-person limit must be a whole number from 1 to ${MAX_PER_PERSON}`);
+  if (input.perOrganization !== undefined && !isWholeLimit(input.perOrganization, MAX_PER_ORGANIZATION)) throw agentXError("CONFIG_INVALID", `the organization limit must be a whole number from 1 to ${MAX_PER_ORGANIZATION}`);
+  const setting = await getStateItem(deps.reads, WORKSPACE_LIMITS_KEY);
+  const current = await readWorkspaceLimits(deps.reads.documentClient, deps.reads.tableName, deps.reads.limitDefaults, (entry) => deps.reads.log(entry));
+  const next = { perPerson: input.perPerson ?? current.member, perOrganization: input.perOrganization ?? current.organization };
+  if (next.perPerson > next.perOrganization) throw agentXError("CONFIG_INVALID", `the per-person limit (${next.perPerson}) cannot be more than the organization limit (${next.perOrganization}); give both, or a smaller per-person limit`);
+  const team = deps.reads.slackTeamId;
+  const members = team === undefined ? [] : await queryAllItems(deps.reads, `SLACK_LIMIT#${team}`, "MEMBER#");
+  // Developers without a Slack link count on their own DEVELOPER_LIMIT#<id> rows (one partition
+  // each), so they are not named here; the organization's total includes them.
+  const over = members
+    .filter((item) => counterCount(item) >= next.perPerson)
+    .map((item) => `Slack member ${String(item.sk).slice("MEMBER#".length)} (${counterCount(item)} open)`);
+  const organizationCount = (team === undefined ? 0 : counterCount(await getStateItem(deps.reads, { pk: `SLACK_LIMIT#${team}`, sk: "ORGANIZATION" })))
+    + counterCount(await getStateItem(deps.reads, { pk: "DEVELOPER_LIMIT#ORGANIZATION", sk: "ORGANIZATION" }));
+  const change = (value: number, was: number) => (value === was ? "(unchanged)" : `(now ${was})`);
+  const named = over.slice(0, EFFECT_PEOPLE_MAX).join(", ");
+  const more = over.length > EFFECT_PEOPLE_MAX ? `, and ${over.length - EFFECT_PEOPLE_MAX} more` : "";
+  const people = over.length === 0 ? "" : ` At or over ${next.perPerson} per person: ${named}${more}.`;
+  const orgNote = organizationCount >= next.perOrganization ? " The organization is at or over its new limit." : "";
+  const effect = `Set the workspace limits to ${next.perPerson} per person ${change(next.perPerson, current.member)} and ${next.perOrganization} for the organization ${change(next.perOrganization, current.organization)}. Open workspaces: ${organizationCount} of ${next.perOrganization}.${people}${orgNote} Existing workspaces keep running; a new one is refused while its person or the organization is at the limit.`;
+  return {
+    effect: effect.length > ADMIN_CHANGE_EFFECT_MAX ? `${effect.slice(0, ADMIN_CHANGE_EFFECT_MAX - 3)}...` : effect,
+    details: { current: { perPerson: current.member, perOrganization: current.organization, source: current.source }, next, organizationCount, over: over.length },
+    snapshot: { setting: setting === undefined ? null : { perPerson: setting.perPerson ?? null, perOrganization: setting.perOrganization ?? null, updatedAt: setting.updatedAt ?? null }, defaults: deps.reads.limitDefaults },
+    apply: async (applier) => setWorkspaceLimits(deps.actions, { issuer: applier.issuer, subject: applier.subject }, next),
+  };
+};
+
 export const PLANNERS: Partial<Record<AdminChangeKind, Planner>> = {
   bind_channel: planBind,
   unbind_channel: planUnbind,
   register_project_revision: planRevision,
   register_credential: planCredential,
+  stop_workspace: planStop,
+  grant_project_access: planGrant,
+  revoke_project_access: planRevoke,
+  revoke_signin: planEndSessions,
+  set_workspace_limits: planLimits,
 };
 
 /**
