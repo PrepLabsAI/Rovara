@@ -6,6 +6,11 @@ export const REPEAT_WARNING_AT = 3;
 export const REPEAT_LIMIT = 5;
 /** A backstop against any other runaway: tool calls one task may start. */
 export const TOOL_CALL_LIMIT = 200;
+/**
+ * Look-only tools. Their success does not end a failure streak, so reading a file between two
+ * identical failing edits is still a loop (#158).
+ */
+const LOOKUP_TOOLS: ReadonlySet<string> = new Set(["read", "grep", "find", "ls"]);
 
 export type ToolLoopAction =
   | { kind: "none" }
@@ -16,7 +21,8 @@ export type ToolLoopAction =
  * Watches one task's pi events for a model repeating the same failing tool call, and for too many
  * tool calls. A call counts as a repeat when the tool, its arguments and its error all match the
  * previous failing call, ignoring digits in the error (timestamps, durations, process IDs). Any
- * successful call ends the streak, so editing and rerunning a failing test is never a loop.
+ * successful call other than a lookup (read, grep, find, ls) ends the streak, so editing and
+ * rerunning a failing test is never a loop.
  */
 export class ToolLoopGuard {
   private readonly started = new Map<string, string>();
@@ -41,6 +47,7 @@ export class ToolLoopGuard {
     const call = callId === undefined ? undefined : this.started.get(callId);
     if (callId !== undefined) this.started.delete(callId);
     if (value.isError !== true || call === undefined) {
+      if (value.isError !== true && call !== undefined && LOOKUP_TOOLS.has(String(value.toolName))) return { kind: "none" };
       this.streakSignature = undefined;
       this.streak = 0;
       return { kind: "none" };

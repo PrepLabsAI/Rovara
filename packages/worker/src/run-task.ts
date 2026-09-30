@@ -127,12 +127,15 @@ export async function runTaskInvocation(
   const unregisterCancellation = dependencies.cancellationController?.register(invocation.operationId, session);
   // A model repeating the same failing call is told once, then stopped (#127).
   const loopGuard = new ToolLoopGuard();
+  // A task whose every edit or write failed, and that changed nothing, did not do its job (#158).
+  const fileChanges = new FileChangeAttempts();
   let loopStop: Error | undefined;
   // pi ends a turn normally even when its model call failed or was aborted; only the last assistant
   // message says so (#136).
   let lastAssistant: AssistantOutcome | undefined;
   const unsubscribe = session.subscribe((event) => {
     if (eventType(event) === "tool_end") toolEvidence.push(redactCredentials(event));
+    fileChanges.observe(event);
     void events.append(eventType(event), event).catch(() => undefined);
     lastAssistant = assistantOutcome(event) ?? lastAssistant;
     if (loopStop !== undefined) return;
@@ -150,6 +153,16 @@ export async function runTaskInvocation(
     let taskResult: TaskInvocationResult | undefined;
     let taskFailure: Error | undefined;
     let evidenceFailure: unknown;
+    let evidenceAttempted = false;
+    let diffAttempted = false;
+    const publishEvidence = async (): Promise<void> => {
+      evidenceAttempted = true;
+      await dependencies.artifactSink({
+        name: "test-and-tool-evidence.json",
+        mediaType: "application/json",
+        content: JSON.stringify(toolEvidence, null, 2),
+      });
+    };
     try {
       await events.append("lifecycle", {
         status: "RUNNING",
@@ -162,12 +175,13 @@ export async function runTaskInvocation(
       if (loopStop !== undefined) throw loopStop;
       const modelFailure = failedTurn(lastAssistant);
       if (modelFailure !== undefined) throw modelFailure;
-      await publishWorkspaceDiff(dependencies.rootPath, dependencies.artifactSink);
-      await dependencies.artifactSink({
-        name: "test-and-tool-evidence.json",
-        mediaType: "application/json",
-        content: JSON.stringify(toolEvidence, null, 2),
-      });
+      diffAttempted = true;
+      const { changed } = await publishWorkspaceDiff(dependencies.rootPath, dependencies.artifactSink);
+      await publishEvidence();
+      const noChange = fileChanges.noChangeFailure(changed);
+      if (noChange !== undefined) throw noChange;
+      const warning = fileChanges.emptyDiffWarning(changed);
+      if (warning !== undefined) await events.append("progress", { message: warning });
       outcome = "SUCCEEDED";
       await events.append("result", {
         status: "SUCCEEDED",
@@ -191,6 +205,21 @@ export async function runTaskInvocation(
           await events.append("error", { message: taskFailure.message });
         } catch (reportingError) {
           evidenceFailure = reportingError;
+        }
+      }
+      // Best effort, like usage: a failed task keeps what it did, for the member and for debugging.
+      if (!evidenceAttempted) {
+        try {
+          await publishEvidence();
+        } catch (artifactError) {
+          evidenceFailure ??= artifactError;
+        }
+      }
+      if (!diffAttempted) {
+        try {
+          await publishWorkspaceDiff(dependencies.rootPath, dependencies.artifactSink);
+        } catch (artifactError) {
+          evidenceFailure ??= artifactError;
         }
       }
     }
@@ -227,6 +256,79 @@ export async function runTaskInvocation(
     unregisterCancellation?.();
     session.dispose();
   }
+}
+
+const FILE_CHANGE_TOOLS: ReadonlySet<string> = new Set(["edit", "write"]);
+const MAX_REPORTED_PATH = 200;
+
+/**
+ * Counts the agent's edit and write calls, and keeps the file and a fixed-wording reason for the
+ * last failure. The tool's own error text is never kept, so the task's error names files, never
+ * file contents.
+ */
+class FileChangeAttempts {
+  private readonly paths = new Map<string, string>();
+  private readonly tools = new Set<string>();
+  private tried = 0;
+  private failed = 0;
+  private last: { path: string; reason: string } | undefined;
+
+  observe(event: unknown): void {
+    if (!event || typeof event !== "object") return;
+    const value = event as { type?: unknown; toolCallId?: unknown; toolName?: unknown; args?: unknown; isError?: unknown; result?: unknown };
+    if (typeof value.toolName !== "string" || !FILE_CHANGE_TOOLS.has(value.toolName)) return;
+    const callId = typeof value.toolCallId === "string" ? value.toolCallId : undefined;
+    if (value.type === "tool_execution_start") {
+      const path = value.args && typeof value.args === "object" ? (value.args as { path?: unknown }).path : undefined;
+      if (callId !== undefined && typeof path === "string") this.paths.set(callId, path);
+      return;
+    }
+    if (value.type !== "tool_execution_end") return;
+    const path = callId === undefined ? undefined : this.paths.get(callId);
+    if (callId !== undefined) this.paths.delete(callId);
+    this.tried += 1;
+    this.tools.add(value.toolName);
+    if (value.isError !== true) return;
+    this.failed += 1;
+    this.last = {
+      path: path === undefined ? "unknown file" : String(redactCredentials(path)).slice(0, MAX_REPORTED_PATH),
+      reason: failureReason(value.toolName, value.result),
+    };
+  }
+
+  /** The task's error when the agent tried to change files, every try failed, and no repository changed. */
+  noChangeFailure(changed: boolean): Error | undefined {
+    if (changed || this.tried === 0 || this.failed !== this.tried || this.last === undefined) return undefined;
+    const kinds = ["edit", "write"].filter((tool) => this.tools.has(tool)).join(" and ");
+    const count = this.tried === 1 ? `the only ${kinds} call failed` : `all ${this.tried} ${kinds} calls failed`;
+    return agentXError("OPERATION_INTERRUPTED", `no file changed: ${count} (last: ${this.last.path}, ${this.last.reason})`);
+  }
+
+  /** A warning when edits or writes succeeded but no repository changed; the task still succeeds. */
+  emptyDiffWarning(changed: boolean): string | undefined {
+    const succeeded = this.tried - this.failed;
+    if (changed || succeeded === 0) return undefined;
+    return `The agent reported ${succeeded} successful edit or write ${succeeded === 1 ? "call" : "calls"}, but no repository changed. ` +
+      "The edits may have landed outside the project's repositories.";
+  }
+}
+
+function failureReason(toolName: string, result: unknown): string {
+  const text = toolResultText(result);
+  if (/Could not find (the exact text|edits\[\d+\])/.test(text)) return "the text to replace was not found";
+  if (/Found \d+ occurrences of/.test(text)) return "the text to replace matched more than once";
+  if (/No changes made to/.test(text)) return "the replacement produced identical content";
+  return `the ${toolName} returned an error`;
+}
+
+function toolResultText(result: unknown): string {
+  if (typeof result === "string") return result;
+  const content = result && typeof result === "object" ? (result as { content?: unknown }).content : undefined;
+  if (!Array.isArray(content)) return "";
+  return content.map((part: unknown) => {
+    const text = part && typeof part === "object" ? (part as { text?: unknown }).text : undefined;
+    return typeof text === "string" ? text : "";
+  }).join("");
 }
 
 interface AssistantOutcome {

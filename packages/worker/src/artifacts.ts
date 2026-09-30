@@ -21,11 +21,16 @@ export interface WorkerArtifact {
 
 export type ArtifactSink = (artifact: WorkerArtifact) => Promise<void>;
 
-export async function publishWorkspaceDiff(rootPath: string, sink: ArtifactSink): Promise<void> {
+/**
+ * Publishes every repository's status and diff as one artifact. `changed` is true when any
+ * repository's `git status` lists a change, including an untracked file (#158).
+ */
+export async function publishWorkspaceDiff(rootPath: string, sink: ArtifactSink): Promise<{ changed: boolean }> {
   const manifest = JSON.parse(
     await readFile(resolve(rootPath, ".agentx/preparation-manifest.json"), "utf8"),
   ) as PreparationManifest;
   const sections: string[] = [];
+  let changed = false;
   for (const repository of manifest.repositories) {
     const directory = resolve(rootPath, repository.path);
     const { stdout } = await execFileAsync(
@@ -38,6 +43,7 @@ export async function publishWorkspaceDiff(rootPath: string, sink: ArtifactSink)
       ["-C", directory, "status", "--short", "--untracked-files=all"],
       { timeout: 30_000, maxBuffer: MAX_GIT_OUTPUT_BYTES, env: gitSafeEnvironment(directory) },
     );
+    if (status.trim() !== "") changed = true;
     sections.push(`## ${repository.name}\n\n### status\n${status}\n### diff\n${stdout}`);
   }
   await sink({
@@ -45,6 +51,7 @@ export async function publishWorkspaceDiff(rootPath: string, sink: ArtifactSink)
     mediaType: "text/plain; charset=utf-8",
     content: boundWorkspaceDiff(String(redactCredentials(sections.join("\n")))),
   });
+  return { changed };
 }
 
 export function boundWorkspaceDiff(content: string): string {
