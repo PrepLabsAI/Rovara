@@ -83,16 +83,21 @@ export const handler = createOutboxPublisherHandler({
   },
   index: (records, options) => indexActivity(records, {
     // A4: the SDK has no default request timeout; the index's signal aborts a hung request.
-    get: async (key, requestOptions) => ((await documentClient.send(new GetCommand({ TableName: required(tableName, "STATE_TABLE_NAME"), Key: key, ConsistentRead: true }), { abortSignal: requestOptions?.signal })) as { Item?: Record<string, unknown> }).Item,
+    get: async (key, requestOptions) => ((await documentClient.send(new GetCommand({ TableName: required(tableName, "STATE_TABLE_NAME"), Key: key, ConsistentRead: true }), abortOptions(requestOptions?.signal))) as { Item?: Record<string, unknown> }).Item,
     put: async (item, requestOptions) => {
       try {
-        await documentClient.send(new PutCommand({ TableName: required(tableName, "STATE_TABLE_NAME"), Item: item, ConditionExpression: "attribute_not_exists(pk)" }), { abortSignal: requestOptions?.signal });
+        await documentClient.send(new PutCommand({ TableName: required(tableName, "STATE_TABLE_NAME"), Item: item, ConditionExpression: "attribute_not_exists(pk)" }), abortOptions(requestOptions?.signal));
       } catch (error) {
         if (!(error instanceof Error) || error.name !== "ConditionalCheckFailedException") throw error;
       }
     },
   }, (entry) => console.log(JSON.stringify({ component: "outbox-publisher", ...entry })), options?.deadline ?? Date.now() + INDEX_DEFAULT_BUDGET_MS),
 });
+
+/** The SDK's per-request options: the index's abort signal, when it gave one. */
+function abortOptions(signal: AbortSignal | undefined): { abortSignal?: AbortSignal } {
+  return signal === undefined ? {} : { abortSignal: signal };
+}
 
 function required(value: string | undefined, name: string): string {
   return value ?? requiredEnvironment(name);
