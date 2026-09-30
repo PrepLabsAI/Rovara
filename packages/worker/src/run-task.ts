@@ -1,5 +1,5 @@
 import { readFile, realpath } from "node:fs/promises";
-import { isAbsolute, relative, resolve } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { WorkerInvocationSchema, agentXError, type WorkerInvocation } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { publishWorkspaceDiff, workspaceFingerprint, type ArtifactSink } from "./artifacts.js";
@@ -191,7 +191,18 @@ export async function runTaskInvocation(
       diffAttempted = true;
       const { changed: dirty } = await publishWorkspaceDiff(dependencies.rootPath, dependencies.artifactSink);
       await publishEvidence();
-      const changed = dirty && (before === undefined || await workspaceFingerprint(dependencies.rootPath) !== before);
+      // With a before state, "changed" means this turn changed the tree (a revert counts); without
+      // one, or when the after state cannot be read, a non-empty diff counts as a change.
+      let changed = dirty;
+      if (before !== undefined) {
+        try {
+          changed = await workspaceFingerprint(dependencies.rootPath) !== before;
+        } catch {
+          await events.append("progress", {
+            message: "AgentX could not record the workspace state after this task; it judged the task by the final diff only.",
+          });
+        }
+      }
       const noChange = fileChanges.noChangeFailure(changed);
       if (noChange !== undefined) throw noChange;
       const warning = fileChanges.emptyDiffWarning(changed);
@@ -321,8 +332,9 @@ class FileChangeAttempts {
 
   /** The path relative to the workspace when it is inside it, without control characters, redacted and bounded. */
   private reportedPath(path: string): string {
-    const clean = [...path].filter((character) => character.charCodeAt(0) > 0x1f && character !== "\u007f").join("");
-    const root = isAbsolute(clean) ? this.roots.find((candidate) => !relative(candidate, clean).startsWith("..")) : undefined;
+    // Control and format characters (bidi overrides, line separators) would garble a message people read.
+    const clean = path.replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, "");
+    const root = isAbsolute(clean) ? this.roots.find((candidate) => isInside(candidate, clean)) : undefined;
     const shown = root === undefined ? clean : relative(root, clean) || ".";
     return String(redactCredentials(shown)).slice(0, MAX_REPORTED_PATH);
   }
@@ -342,6 +354,11 @@ class FileChangeAttempts {
     return `The agent reported ${succeeded} successful edit or write ${succeeded === 1 ? "call" : "calls"}, but no repository changed. ` +
       "The edits may have landed outside the project's repositories or in files git ignores.";
   }
+}
+
+function isInside(root: string, path: string): boolean {
+  const inner = relative(root, path);
+  return !(inner === ".." || inner.startsWith(`..${sep}`) || isAbsolute(inner));
 }
 
 function failureReason(toolName: string, text: string): string {

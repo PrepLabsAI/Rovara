@@ -241,6 +241,43 @@ describe("review follow-ups (#158)", () => {
     await expect(second.result).resolves.toBeDefined();
   });
 
+  it("a later turn that reverts an earlier turn's change succeeds, even though the tree ends clean", async () => {
+    const prepared = await preparedRepository();
+    const conversationId = randomUUID();
+    await runScripted([effect(async (repository) => writeFile(join(repository, "README.md"), "turn one\n"))], { prepared, conversationId });
+    const second = await runScripted([
+      edit("README.md", true),
+      effect(async (repository) => { await run("git", ["-C", repository, "checkout", "--", "README.md"]); }),
+    ], { prepared, conversationId, conversationStarted: true });
+    await expect(second.result).resolves.toBeDefined();
+  });
+
+  it("judges the task by the final diff, and says so, when the state after the task cannot be read", async () => {
+    const prepared = await preparedRepository();
+    const { events, result } = await runScripted([
+      edit("README.md", true),
+      effect(async (repository) => writeFile(join(repository, "README.md"), "changed\n")),
+    ], {
+      prepared,
+      // The diff is published, then the manifest the fingerprint needs is gone.
+      artifactSink: async (artifact) => {
+        if (artifact.name === "workspace.diff") await writeFile(join(prepared.rootPath, ".agentx/preparation-manifest.json"), "not json");
+      },
+    });
+    await expect(result).resolves.toBeDefined();
+    expect(progressMessages(events)).toContainEqual(
+      "AgentX could not record the workspace state after this task; it judged the task by the final diff only.",
+    );
+  });
+
+  it("shows a file whose name starts with two dots by its relative path, and strips invisible characters", async () => {
+    const prepared = await preparedRepository();
+    const { result } = await runScripted([edit(join(prepared.rootPath, "..no\u202ete\u0085s.md"), true)], { prepared });
+    const failure = await result.then(() => undefined, (error: unknown) => error as Error);
+    expect(failure?.message).toContain("(last: ..notes.md, the text to replace was not found)");
+    expect(failure?.message).not.toContain(prepared.rootPath);
+  });
+
   it("edits that report the file already holds the text are not failures: the task succeeds", async () => {
     const { events, result } = await runScripted([
       edit("README.md", true, "No changes made to README.md. The replacement produced identical content. This might indicate an issue with special characters or the text not existing as expected."),

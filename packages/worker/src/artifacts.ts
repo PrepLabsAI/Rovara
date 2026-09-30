@@ -58,7 +58,8 @@ export async function publishWorkspaceDiff(rootPath: string, sink: ArtifactSink)
 /**
  * A digest of every repository's uncommitted state: its status, its diff against HEAD, and the
  * size and modification time of each untracked file. Two equal digests mean a task changed
- * nothing, even when an earlier turn left the tree changed (#158).
+ * nothing, even when an earlier turn left the tree changed (#158). An untracked directory that
+ * git lists as one entry (such as a nested repository) is covered only by its own size and time.
  */
 export async function workspaceFingerprint(rootPath: string): Promise<string> {
   const manifest = JSON.parse(
