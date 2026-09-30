@@ -12,9 +12,10 @@ import { argumentsHash } from "../../packages/orchestrator/src/action-gate.js";
 import { createDynamoConfirmationStore } from "../../packages/slack-service/src/confirmation-store.js";
 import { ALREADY_USED_BY_THIS_REQUEST_TEXT } from "../../packages/slack-service/src/confirmations.js";
 import {
-  ABANDONED_TASK_CANCEL_FAILED_TEXT, ABANDONED_TASK_TEXT, CONTINUE_TEXT, HANDOFF_APPROVED_TEXT, HANDOFF_FINAL_CANCEL_FAILED_TEXT, HANDOFF_FINAL_IDLE_TEXT, HANDOFF_FINAL_TEXT, HANDOFF_TASK_TEXT, HANDOFF_TEXT, RESUME_NOT_FOUND_TEXT, TurnHandedOffError, type ActiveTurn, type TurnNote,
+  ABANDONED_TASK_CANCEL_FAILED_TEXT, ABANDONED_TASK_FINISHED_TEXT, ABANDONED_TASK_TEXT, CONTINUE_TEXT, HANDOFF_APPROVED_TEXT, HANDOFF_FINAL_CANCEL_FAILED_TEXT,
+  HANDOFF_FINAL_FINISHED_TEXT, HANDOFF_FINAL_IDLE_TEXT, HANDOFF_FINAL_TEXT, HANDOFF_TASK_TEXT, HANDOFF_TEXT, RESUME_NOT_FOUND_TEXT, TurnHandedOffError, type ActiveTurn, type TurnNote,
 } from "../../packages/slack-service/src/interrupted-turn.js";
-import { processSlackRequest, type ProcessorDependencies, type ThreadState, type TurnInput } from "../../packages/slack-service/src/processor.js";
+import { processSlackRequest, type CancelOutcome, type ProcessorDependencies, type ThreadState, type TurnInput } from "../../packages/slack-service/src/processor.js";
 import { agentXError } from "../../packages/contracts/src/index.js";
 import { preparationFailedMessage } from "../../packages/slack-service/src/messages.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -36,7 +37,7 @@ function slackMessage(eventId: string, text: string, overrides: Partial<SlackReq
 function harness(turn: (input: TurnInput) => Promise<string>, options: {
   taskResult?: (workspaceId: string, operationId: string, signal?: AbortSignal) => Promise<{ status: string; response?: string; error?: string }>;
   status?: "READY" | "UNPREPARED";
-  cancelOperation?: (workspaceId: string, operationId: string) => Promise<void>;
+  cancelOperation?: (workspaceId: string, operationId: string) => Promise<CancelOutcome>;
 } = {}) {
   const db = new FakeDynamoDb();
   let now = start;
@@ -53,7 +54,8 @@ function harness(turn: (input: TurnInput) => Promise<string>, options: {
   const finish = vi.fn(async () => undefined);
   const taskResult = vi.fn(options.taskResult ?? (async (_workspace: string, operationId: string) => ({ status: "SUCCEEDED", response: `finished ${operationId}` })));
   const waitForOperation = vi.fn(async () => ({ status: "SUCCEEDED" }));
-  const cancelOperation = vi.fn(options.cancelOperation ?? (async () => undefined));
+  // A task still running when the turn gives up: the broker queues its cancel.
+  const cancelOperation = vi.fn(options.cancelOperation ?? (async (): Promise<CancelOutcome> => ({ outcome: "requested" })));
   const saveActiveTurn = vi.fn(async (_subject: string, active: ActiveTurn) => {
     meta.activeTurn = active;
   });
@@ -505,18 +507,18 @@ describe("the next turn after a resume", () => {
 // Issue 167: when the Slack turn gives up for good, nobody will ever read its task's result, so the
 // task is cancelled rather than left holding the workspace (and its EC2 instance) until it ends.
 describe("stopping the task nobody waits on any more (issue 167)", () => {
-  it("cancels the remembered task on a final-attempt hand-off, before forgetting it, and says it stopped the task", async () => {
+  it("asks the remembered task to stop on a final-attempt hand-off, before forgetting it, and says so", async () => {
     const handoff = new AbortController();
     const order: string[] = [];
     const { posts, logs, meta, finish, cancelOperation, clearActiveTurn, dependencies } = harness(blockedTurn(() => handoff.abort()));
-    cancelOperation.mockImplementation(async () => { order.push("cancel"); });
+    cancelOperation.mockImplementation(async () => { order.push("cancel"); return { outcome: "requested" }; });
     clearActiveTurn.mockImplementation(async () => { order.push("forget"); delete meta.activeTurn; });
     await processSlackRequest(slackMessage("EvWORK000051", "fix the bug"), dependencies, { finalAttempt: true, handoff: handoff.signal });
     expect(cancelOperation).toHaveBeenCalledOnce();
     expect(cancelOperation).toHaveBeenCalledWith(workspaceId, OPERATION);
     expect(order).toEqual(["cancel", "forget"]);
     expect(posts.at(-1)).toBe(HANDOFF_FINAL_TEXT);
-    expect(HANDOFF_FINAL_TEXT).toBe("AgentX restarted while working on this and has already retried it too many times, so I stopped the task it started. Ask me again if you still want it.");
+    expect(HANDOFF_FINAL_TEXT).toBe("AgentX restarted while working on this and has already retried it too many times, so I asked the task it started to stop. Ask me again if you still want it.");
     expect(logs).toContainEqual({ event: "turn.task_cancelled", fields: { eventId: "EvWORK000051", workspaceId, operationId: OPERATION } });
     expect(meta.activeTurn).toBeUndefined();
     expect(finish).toHaveBeenCalledOnce();
@@ -580,13 +582,14 @@ describe("stopping the task nobody waits on any more (issue 167)", () => {
     expect(posts.at(-1)).toBe(HANDOFF_FINAL_TEXT);
   });
 
-  it("cancels the remembered task when the last attempt fails, forgets it, and says so", async () => {
+  it("tries to cancel the remembered task when the last attempt fails, forgets it, and never claims it stopped a task that had finished", async () => {
     const order: string[] = [];
     const { cancelOperation, clearActiveTurn, posts, logs, meta, finish, dependencies } = harness(async (input) => {
       await input.onOperationAccepted!(OPERATION);
       return "Fixed it.";
     });
-    cancelOperation.mockImplementation(async () => { order.push("cancel"); });
+    // The turn waited for its task, so the broker finds it already finished.
+    cancelOperation.mockImplementation(async () => { order.push("cancel"); return { outcome: "finished", status: "SUCCEEDED" }; });
     clearActiveTurn.mockImplementation(async () => { order.push("forget"); delete meta.activeTurn; });
     const post = dependencies.post;
     dependencies.post = async (thread, text) => {
@@ -597,9 +600,10 @@ describe("stopping the task nobody waits on any more (issue 167)", () => {
     expect(cancelOperation).toHaveBeenCalledOnce();
     expect(cancelOperation).toHaveBeenCalledWith(workspaceId, OPERATION);
     expect(order).toEqual(["cancel", "forget"]);
-    expect(posts.at(-1)).toBe(`AgentX could not process this request: Slack chat.postMessage failed: HTTP 500\n\n${ABANDONED_TASK_TEXT}`);
-    expect(ABANDONED_TASK_TEXT).toBe("I stopped the task this request started. Ask me again if you still want it.");
-    expect(logs).toContainEqual({ event: "turn.task_cancelled", fields: { eventId: "EvWORK000058", workspaceId, operationId: OPERATION } });
+    expect(posts.at(-1)).toBe(`AgentX could not process this request: Slack chat.postMessage failed: HTTP 500\n\n${ABANDONED_TASK_FINISHED_TEXT}`);
+    expect(ABANDONED_TASK_FINISHED_TEXT).toBe("The task this request started had already finished. Ask me again if you want its result.");
+    expect(logs).toContainEqual({ event: "turn.task_cancel_skipped", fields: { eventId: "EvWORK000058", workspaceId, operationId: OPERATION, status: "SUCCEEDED" } });
+    expect(logs.some((entry) => entry.event === "turn.task_cancelled")).toBe(false);
     expect(meta.activeTurn).toBeUndefined();
     expect(finish).toHaveBeenCalledOnce();
   });
@@ -611,7 +615,8 @@ describe("stopping the task nobody waits on any more (issue 167)", () => {
     meta.activeTurn = { eventId: "EvWORK000059", workspaceId, operationId: OPERATION };
     await processSlackRequest(slackMessage("EvWORK000059", "fix the bug"), dependencies, { finalAttempt: true, redelivered: true });
     expect(cancelOperation).toHaveBeenCalledWith(workspaceId, OPERATION);
-    expect(posts.at(-1)).toContain(ABANDONED_TASK_TEXT);
+    expect(posts.at(-1)).toBe(`AgentX could not process this request: RUNTIME_UNAVAILABLE: control plane request failed with HTTP 503\n\n${ABANDONED_TASK_TEXT}`);
+    expect(ABANDONED_TASK_TEXT).toBe("I asked the task this request started to stop. Ask me again if you still want it.");
     expect(meta.activeTurn).toBeUndefined();
     expect(finish).toHaveBeenCalledOnce();
   });
@@ -626,6 +631,55 @@ describe("stopping the task nobody waits on any more (issue 167)", () => {
     expect(cancelOperation).toHaveBeenCalledWith(workspaceId, OPERATION);
     expect(posts.at(-1)).toBe(HANDOFF_FINAL_TEXT);
     expect(meta.activeTurn).toBeUndefined();
+    expect(finish).toHaveBeenCalledOnce();
+  });
+
+  it("says the task had already finished, not that it stopped it, on a final hand-off after the task ended", async () => {
+    const handoff = new AbortController();
+    const { posts, logs, dependencies } = harness(blockedTurn(() => handoff.abort()), { cancelOperation: async () => ({ outcome: "finished", status: "FAILED" }) });
+    await processSlackRequest(slackMessage("EvWORK000065", "fix the bug"), dependencies, { finalAttempt: true, handoff: handoff.signal });
+    expect(posts.at(-1)).toBe(HANDOFF_FINAL_FINISHED_TEXT);
+    expect(HANDOFF_FINAL_FINISHED_TEXT).toBe("AgentX restarted while working on this and has already retried it too many times, so I stopped. The task it started had already finished. Ask me again if you still want it.");
+    expect(logs).toContainEqual({ event: "turn.task_cancel_skipped", fields: { eventId: "EvWORK000065", workspaceId, operationId: OPERATION, status: "FAILED" } });
+  });
+
+  it("cancels a task the broker accepts only after the final hand-off, and logs it", async () => {
+    const handoff = new AbortController();
+    let late: (() => Promise<void>) | undefined;
+    const { cancelOperation, logs, dependencies } = harness(async (input) => {
+      late = () => input.onOperationAccepted!(OPERATION);
+      handoff.abort();
+      return new Promise<string>(() => undefined);
+    });
+    await processSlackRequest(slackMessage("EvWORK000066", "fix the bug"), dependencies, { finalAttempt: true, handoff: handoff.signal });
+    expect(cancelOperation).not.toHaveBeenCalled();
+    await late!();
+    expect(cancelOperation).toHaveBeenCalledWith(workspaceId, OPERATION);
+    expect(logs).toContainEqual({ event: "turn.task_cancelled", fields: { eventId: "EvWORK000066", workspaceId, operationId: OPERATION } });
+  });
+
+  it("never cancels a task accepted after a hand-off that is not final, as before", async () => {
+    const handoff = new AbortController();
+    let late: (() => Promise<void>) | undefined;
+    const { cancelOperation, dependencies } = harness(async (input) => {
+      late = () => input.onOperationAccepted!(OPERATION);
+      handoff.abort();
+      return new Promise<string>(() => undefined);
+    });
+    await expect(processSlackRequest(slackMessage("EvWORK000067", "fix the bug"), dependencies, { finalAttempt: false, handoff: handoff.signal }))
+      .rejects.toBeInstanceOf(TurnHandedOffError);
+    await late!();
+    expect(cancelOperation).not.toHaveBeenCalled();
+  });
+
+  it("logs a last-attempt failure notice Slack refuses", async () => {
+    const { logs, finish, dependencies } = harness(async (input) => {
+      await input.onOperationAccepted!(OPERATION);
+      return "Fixed it.";
+    });
+    dependencies.post = async () => { throw Object.assign(new Error("Slack chat.postMessage failed: HTTP 500"), { name: "SlackError" }); };
+    await processSlackRequest(slackMessage("EvWORK000068", "fix the bug"), dependencies, { finalAttempt: true });
+    expect(logs).toContainEqual({ event: "request.abandoned_notice_failed", fields: { eventId: "EvWORK000068", errorName: "SlackError" } });
     expect(finish).toHaveBeenCalledOnce();
   });
 

@@ -128,17 +128,18 @@ describe("the Slack service's thread client", () => {
           return toBroker(input, init);
         },
       });
-      await createThreadApi({ controlPlaneUrl: "https://agentx.example.test", signedFetch }).cancelOperation!(workspaceId, operationId);
+      expect(await createThreadApi({ controlPlaneUrl: "https://agentx.example.test", signedFetch }).cancelOperation!(workspaceId, operationId))
+        .toEqual({ outcome: "requested" });
       expect(paths).toEqual([`POST /v1/service/workspaces/${workspaceId}/operations/${operationId}/cancel`]);
       expect(db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`)).toMatchObject({ status: "CANCEL_REQUESTED" });
       const cancel = db.find((item) => item.entityType === "OUTBOX" && (item.invocation as { kind?: string } | undefined)?.kind === "cancel")[0];
       expect(cancel?.invocation).toMatchObject({ kind: "cancel", payload: { targetOperationId: operationId } });
     });
 
-    it("answers a task that already finished as success, and queues no cancel", async () => {
+    it("answers a task that already finished as finished, with its status, and queues no cancel", async () => {
       const { db, handler, workspaceId, operationId } = await runningTask();
       await finishOperation(handler, db, workspaceId, operationId, "SUCCEEDED");
-      await expect(threadApi(handler).cancelOperation!(workspaceId, operationId)).resolves.toBeUndefined();
+      expect(await threadApi(handler).cancelOperation!(workspaceId, operationId)).toEqual({ outcome: "finished", status: "SUCCEEDED" });
       expect(db.find((item) => item.entityType === "OUTBOX" && (item.invocation as { kind?: string } | undefined)?.kind === "cancel")).toHaveLength(0);
     });
 
