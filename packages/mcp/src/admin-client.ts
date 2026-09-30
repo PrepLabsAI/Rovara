@@ -4,12 +4,13 @@
 import { randomUUID } from "node:crypto";
 import {
   AdminBindingsResponseSchema, AdminFailuresResponseSchema, AdminHealthResponseSchema, AdminMeResponseSchema, AdminProjectsResponseSchema,
-  AdminUsageResponseSchema, AdminWorkspacesResponseSchema,
-  type AdminBindingsResponse, type AdminFailuresResponse, type AdminHealthResponse, type AdminMeResponse, type AdminProjectsResponse,
+  AdminChangeResponseWireSchema, AdminChangesResponseWireSchema, AdminUsageResponseSchema, AdminWorkspacesResponseSchema,
+  type AdminBindingsResponse, type AdminChangeOutcome, type AdminChangeViewWire, type AdminChangesResponseWire,
+  type ApplyAdminChangeRequest, type DeclineAdminChangeRequest, type ProposeAdminChangeRequest, type AdminFailuresResponse, type AdminHealthResponse, type AdminMeResponse, type AdminProjectsResponse,
   type AdminUsageGroupBy, type AdminUsageResponse, type AdminWorkspacesResponse,
 } from "@agentx/contracts";
 import { z } from "zod";
-import { NEXT_STEPS, ToolError, UNEXPECTED_ANSWER_STEP, UPGRADE_AGENTX_STEP, plainText } from "./errors.js";
+import { NEXT_STEPS, ToolError, UNEXPECTED_ANSWER_STEP, UPGRADE_AGENTX_STEP, plainText, type ToolErrorCode } from "./errors.js";
 
 export const ADMIN_SIGN_IN_STEP = "run npx @charterarc/agentx login --admin";
 export interface AdminSession { baseUrl: string; accessToken: string }
@@ -17,6 +18,7 @@ export type AdminFailuresQuery = { since?: string; until?: string; project?: str
 export type AdminTurnsQuery = { since: string; until?: string; project?: string; origin?: "slack" | "ai_tool"; thread?: string; task?: string; limit?: number; cursor?: string };
 export type AdminUsageQuery = { since?: string; until?: string; groupBy: AdminUsageGroupBy };
 export type AdminWorkspacesQuery = { project?: string; status?: string; limit?: number };
+export type AdminChangesQuery = { since?: string; until?: string; admin?: string; outcome?: AdminChangeOutcome; limit?: number; cursor?: string };
 const AdminCredentialsResponseSchema = z.object({ credentials: z.array(z.object({ ref: z.string(), type: z.string(), secretName: z.string(), registeredAt: z.string().optional(), builtIn: z.boolean().optional() })) });
 export type AdminCredentialsResponse = z.infer<typeof AdminCredentialsResponseSchema>;
 const AdminTurnsPageSchema = z.object({ turns: z.array(z.record(z.string(), z.unknown())), cursor: z.string().optional(), skipped: z.number().int().nonnegative().optional() });
@@ -33,7 +35,23 @@ export interface AdminControlPlaneClient {
   bindings(): Promise<AdminBindingsResponse>;
   credentials(): Promise<AdminCredentialsResponse>;
   workspaces(query: AdminWorkspacesQuery): Promise<AdminWorkspacesResponse>;
+  // Spec 025 E4: the change routes. Answers are read loosely (R1): a newer control plane's status,
+  // kind or method is a plain string here, and the driver treats one it does not know as neither
+  // applied nor pending. Each takes the change tool call's one trace ID (FR-052).
+  proposeChange(request: ProposeAdminChangeRequest, traceId: string): Promise<AdminChangeViewWire>;
+  getChange(changeId: string, traceId: string): Promise<AdminChangeViewWire>;
+  startSlackConfirmation(changeId: string, traceId: string): Promise<AdminChangeViewWire>;
+  applyChange(changeId: string, body: ApplyAdminChangeRequest, traceId: string): Promise<AdminChangeViewWire>;
+  declineChange(changeId: string, body: DeclineAdminChangeRequest, traceId: string): Promise<AdminChangeViewWire>;
+  changes(query: AdminChangesQuery): Promise<AdminChangesResponseWire>;
 }
+
+const ChangeView = AdminChangeResponseWireSchema.transform((value) => value.change);
+/** Q9, E15: the change refusals keep their own code; the broker's words name the change. */
+const CHANGE_CODES = new Set(["CONFIRMATION_UNAVAILABLE", "CONFIRMATION_DECLINED", "CONFIRMATION_EXPIRED", "CHANGE_STALE"] as const);
+/** Input the control plane refuses on a change: the broker's words say which. */
+const CHANGE_INVALID = new Set(["NOT_FOUND", "PROJECT_REVISION_MISMATCH", "WORKSPACE_BUSY", "IDEMPOTENCY_CONFLICT"]);
+export const PROJECT_ADMIN_STEP = "ask an AgentX admin who administers that project to make this change";
 
 /** The broker's catch-all refusal for a path it does not serve: a control plane from before 25d. */
 const NOT_AN_ADMIN_ROUTE = "this endpoint serves administration only";
@@ -47,6 +65,12 @@ function refusal(status: number, value: unknown, secret: string): ToolError {
   const message = plainText(error?.message, `AgentX answered HTTP ${status}`, [secret]);
   if (status === 401 || code === "AUTH_REQUIRED") return new ToolError("ADMIN_REQUIRED", "AgentX refused this computer's admin sign-in, or it has expired", ADMIN_SIGN_IN_STEP);
   if (code === "FORBIDDEN" && message.includes(NOT_AN_ADMIN_ROUTE)) return new ToolError("UPGRADE_REQUIRED", "this AgentX has no admin read routes yet", UPGRADE_AGENTX_STEP);
+  if (code !== undefined && (CHANGE_CODES as Set<string>).has(code)) return new ToolError(code as ToolErrorCode, message);
+  if (code === "SLACK_UNAVAILABLE") return new ToolError("SLACK_UNAVAILABLE", message);
+  // FR-015: the admin may change only projects they administer.
+  if (code === "FORBIDDEN" && message.includes("membership")) return new ToolError("ADMIN_REQUIRED", message, PROJECT_ADMIN_STEP);
+  // A NOT_FOUND from requireMembership reads "project not found" for a project the admin does not administer.
+  if (code !== undefined && CHANGE_INVALID.has(code)) return new ToolError("INVALID_REQUEST", message);
   if (code === "FORBIDDEN") return new ToolError("ADMIN_REQUIRED", `AgentX refused: ${message}`, ADMIN_SIGN_IN_STEP);
   if (code === "CONFIG_INVALID") return new ToolError("INVALID_REQUEST", message);
   return new ToolError("CONTROL_PLANE_UNAVAILABLE", message, status >= 500 ? NEXT_STEPS.CONTROL_PLANE_UNAVAILABLE : UNEXPECTED_ANSWER_STEP);
@@ -64,7 +88,7 @@ export function httpAdminClient(options: { session(): Promise<AdminSession>; fet
   const now = (): number => (options.now ? options.now() : Date.now());
   const deadlineMs = options.deadlineMs ?? DEADLINE_MS;
   const sleep = (ms: number): Promise<void> => (options.sleep ? options.sleep(ms) : new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  async function get<T>(schema: z.ZodType<T>, path: string): Promise<T> {
+  async function send<T>(schema: z.ZodType<T>, method: "GET" | "POST", path: string, body: unknown, traceId: string | undefined, attempts: number): Promise<T> {
     // A ToolError from the session (ADMIN_REQUIRED: no admin sign-in held, Task 16) passes through.
     const session = await options.session();
     const where = plainText(session.baseUrl, "its URL", [session.accessToken]);
@@ -72,7 +96,7 @@ export function httpAdminClient(options: { session(): Promise<AdminSession>; fet
     /** Waits before the next try, or answers false when there is no try left or no time for one. */
     const again = async (attempt: number): Promise<boolean> => {
       const delay = 250 * attempt;
-      if (attempt >= tries || now() - started + delay >= deadlineMs) return false;
+      if (attempt >= attempts || now() - started + delay >= deadlineMs) return false;
       await sleep(delay);
       return true;
     };
@@ -81,8 +105,13 @@ export function httpAdminClient(options: { session(): Promise<AdminSession>; fet
       let text: string;
       try {
         response = await options.fetch(`${session.baseUrl}${path}`, {
-          method: "GET",
-          headers: { authorization: `Bearer ${session.accessToken}`, "x-agentx-trace-id": options.traceId?.() ?? randomUUID() },
+          method,
+          headers: {
+            authorization: `Bearer ${session.accessToken}`,
+            "x-agentx-trace-id": traceId ?? options.traceId?.() ?? randomUUID(),
+            ...(body === undefined ? {} : { "content-type": "application/json" }),
+          },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
           // Each try gets what is left of the deadline, at most 30 seconds.
           signal: AbortSignal.timeout(Math.max(1, Math.min(REQUEST_TIMEOUT_MS, deadlineMs - (now() - started)))),
         });
@@ -101,6 +130,7 @@ export function httpAdminClient(options: { session(): Promise<AdminSession>; fet
       return parsed.data;
     }
   }
+  const get = <T>(schema: z.ZodType<T>, path: string): Promise<T> => send(schema, "GET", path, undefined, undefined, tries);
   return {
     me: () => get(AdminMeResponseSchema, "/v1/admin/me"),
     health: () => get(AdminHealthResponseSchema, "/v1/admin/health"),
@@ -111,5 +141,13 @@ export function httpAdminClient(options: { session(): Promise<AdminSession>; fet
     bindings: () => get(AdminBindingsResponseSchema, "/v1/admin/slack/bindings"),
     credentials: () => get(AdminCredentialsResponseSchema, "/v1/admin/credentials"),
     workspaces: (query) => get(AdminWorkspacesResponseSchema, `/v1/admin/workspaces${search({ project: query.project, status: query.status, limit: query.limit })}`),
+    // Only the proposal is retried: its requestId makes a repeat the same request. An apply, a
+    // decline or a Slack step is sent once. changeId is a UUID the control plane made.
+    proposeChange: (request, traceId) => send(ChangeView, "POST", "/v1/admin/changes", request, traceId, tries),
+    getChange: (changeId, traceId) => send(ChangeView, "GET", `/v1/admin/changes/${encodeURIComponent(changeId)}`, undefined, traceId, tries),
+    startSlackConfirmation: (changeId, traceId) => send(ChangeView, "POST", `/v1/admin/changes/${encodeURIComponent(changeId)}/slack`, {}, traceId, 1),
+    applyChange: (changeId, body, traceId) => send(ChangeView, "POST", `/v1/admin/changes/${encodeURIComponent(changeId)}/apply`, body, traceId, 1),
+    declineChange: (changeId, body, traceId) => send(ChangeView, "POST", `/v1/admin/changes/${encodeURIComponent(changeId)}/decline`, body, traceId, 1),
+    changes: (query) => send(AdminChangesResponseWireSchema, "GET", `/v1/admin/changes${search({ since: query.since, until: query.until, admin: query.admin, outcome: query.outcome, limit: query.limit, cursor: query.cursor })}`, undefined, undefined, tries),
   };
 }

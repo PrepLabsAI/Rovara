@@ -32,6 +32,11 @@ export interface ToolCall {
   /** The server's memory of request IDs made for calls that left request_id out. */
   requestIds?: RequestIdMemory;
   log?(entry: Record<string, unknown>): void;
+  /**
+   * Spec 025 FR-041: the client's own pop-up, asking yes or no; absent when the client declared no
+   * form elicitation. "failed" when it could not be shown or answered in time.
+   */
+  elicit?(message: string, timeoutMs: number, signal: AbortSignal): Promise<"accept" | "decline" | "cancel" | "failed">;
 }
 export interface ToolResult { structured: Record<string, unknown>; text: string }
 export interface ToolDefinition {

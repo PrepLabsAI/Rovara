@@ -4,6 +4,7 @@ export * from "./client.js";
 export * from "./errors.js";
 export * from "./offer.js";
 export * from "./compatibility.js";
+export * from "./confirmation.js";
 export * from "./request-ids.js";
 export * from "./server.js";
 export * from "./tools.js";
