@@ -191,7 +191,7 @@ browser the wizard prints its URL and falls back to the terminal prompter.
 - **Phasing**: (1) server, prompter, event/log stream, review and resume screens behind `--ui`;
   (2) the three connect screens and the prerequisite checklist; (3) admin user, project, channel
   bind and the test reply; (4) UI on by default plus packaging and docs. Phase 1 is shippable alone.
-  Phase 2 built (PR to be opened from branch feat/040-install-ui-rest); its live check is deferred
+  Phase 2 built, see PR #161; its live check is deferred
   to the combined final live check (owner, 2026-09-30).
 - **Cards.** The page's connect and finishing screens are status cards built in `ui/cards.ts` from
   facts a step already has; no card builder takes a secret. Steps reach the page through an
