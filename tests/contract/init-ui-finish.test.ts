@@ -50,7 +50,7 @@ describe("the admin user on the page (FR-050)", () => {
     expect(surface.cards.map((card) => [card.id, card.status])).toEqual([["admin", "waiting"], ["admin", "failed"], ["admin", "waiting"], ["admin", "ok"]]);
   });
 
-  it("Task 7: a failed sign-in's button leaves the page while Sign in again? is asked, and the retry's own button appears", async () => {
+  it("a failed sign-in's button leaves the page while Sign in again? is asked, and the retry's own button appears", async () => {
     const wizard = await startInstallWizard({ env: "staging", write: () => undefined });
     try {
       let sessions = 0;
@@ -105,7 +105,7 @@ describe("the admin user on the page (FR-050)", () => {
       expect(surface.cards[1]?.lines).toEqual([problemText(failure)]);
     });
 
-    it("Task 7: a token the page cannot retry drops the sign-in's button when the failed card shows", async () => {
+    it("a token the page cannot retry drops the sign-in's button when the failed card shows", async () => {
       const wizard = await startInstallWizard({ env: "staging", write: () => undefined });
       try {
         const token = accessToken({ groups: ["agentx-admins"] });
@@ -152,7 +152,7 @@ describe("the first project on the page, resumed (M6)", () => {
   });
 });
 
-describe("the first project's channel wait on the page (Task 7)", () => {
+describe("the first project's channel wait on the page", () => {
   const slackSecrets = () => memoryInitSecrets({ "agentx/staging/slack": JSON.stringify({ botToken: TEST_BOT_TOKEN, signingSecret: TEST_SIGNING_SECRET }) });
   const recordedProject = () => progressHandle({
     ...emptyProgress("staging", T0),

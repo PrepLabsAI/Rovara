@@ -2,19 +2,19 @@ import { createVerify } from "node:crypto";
 import { createServer, request as httpRequest } from "node:http";
 import { rm } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
+import { agentXError } from "@agentx/contracts";
 import {
   githubAppJwt, githubAppManifest, githubAppSecretName, githubAppStep, githubNewAppUrl, githubRestApi, manifestFormPage, parseManifestCallback, startManifestListener,
 } from "../../packages/cli/src/init/github-app.js";
 import { emptyProgress } from "../../packages/cli/src/init/install-state.js";
 import { terminalPrompter } from "../../packages/cli/src/init/prompts.js";
-import {
-  browserThatCreatesGitHubApp, fakeGitHubApi, initContext, memoryInitSecrets, progressHandle, sampleAnswers, scriptedPrompter, T0, TEST_PRIVATE_KEY, TEST_PUBLIC_KEY,
-} from "../support/init-fakes.js";
-import type { WizardCard } from "../../packages/cli/src/init/ui/protocol.js";
-import { agentXError } from "@agentx/contracts";
 import { problemText } from "../../packages/cli/src/init/retry.js";
 import { githubCard } from "../../packages/cli/src/init/ui/cards.js";
 import { startInstallWizard } from "../../packages/cli/src/init/ui/index.js";
+import type { WizardCard } from "../../packages/cli/src/init/ui/protocol.js";
+import {
+  browserThatCreatesGitHubApp, fakeGitHubApi, initContext, memoryInitSecrets, progressHandle, sampleAnswers, scriptedPrompter, T0, TEST_PRIVATE_KEY, TEST_PUBLIC_KEY,
+} from "../support/init-fakes.js";
 
 const homes: string[] = [];
 afterEach(async () => { await Promise.all(homes.splice(0).map((home) => rm(home, { recursive: true, force: true }))); });
@@ -157,7 +157,7 @@ describe("GitHub App step", () => {
       .rejects.toThrow("the GitHub App was not installed on acme within 15 minutes; install it at https://github.com/apps/agentx-acme-staging/installations/new, then run agentx init again");
   });
 
-  describe("a wait that fails on the page shows a failed card (Task 7)", () => {
+  describe("a wait that fails on the page shows a failed card", () => {
     const recorded = () => ({
       secrets: memoryInitSecrets({ [SECRET]: JSON.stringify({ appId: "424242", slug: "agentx-acme-staging", account: "acme", privateKey: TEST_PRIVATE_KEY }) }),
       progress: progressHandle({ ...emptyProgress("staging", T0), github: { account: "acme", appId: "424242", slug: "agentx-acme-staging", privateKeySecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/github-app-AbCdEf" } }),
@@ -200,6 +200,33 @@ describe("GitHub App step", () => {
       await expect(githubAppStep(api).run(context, progressHandle())).rejects.toBe(refused);
       expect(cards.map((card) => card.status)).toEqual(["waiting", "failed"]);
       expect(cards.at(-1)).toEqual(githubCard({ stage: "failed", problem: "GitHub manifest conversion failed with HTTP 422" }));
+    });
+
+    it("a failure after the create card, on the page, shows the failed GitHub card and drops the create button", async () => {
+      const refused = agentXError("RUNTIME_UNAVAILABLE", "GitHub manifest conversion failed with HTTP 422");
+      const wizard = await startInstallWizard({ env: "staging", write: () => undefined });
+      try {
+        const creates = browserThatCreatesGitHubApp([]);
+        const shown: string[] = [];
+        // The page's button first (as --ui does), then the operator presses it and GitHub creates the app.
+        const openBrowser = async (url: string) => {
+          await wizard.openLink(url);
+          shown.push(wizard.hub.state().link?.url ?? "");
+          return creates(url);
+        };
+        const context = initContext({ openBrowser, surface: wizard.surface });
+        homes.push(context.home);
+        const api = { ...fakeGitHubApi(), convertManifest: async () => { throw refused; } };
+        await expect(githubAppStep(api).run(context, progressHandle())).rejects.toBe(refused);
+        expect(shown).toHaveLength(1);
+        expect(shown[0]).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/github\/start/);
+        const card = wizard.hub.state().cards?.find((each) => each.id === "github");
+        expect(card).toEqual(githubCard({ stage: "failed", problem: "GitHub manifest conversion failed with HTTP 422" }));
+        expect(card?.status).toBe("failed");
+        expect(wizard.hub.state().link).toBeUndefined();
+      } finally {
+        await wizard.close();
+      }
     });
 
     it("a failure before any GitHub card shows none", async () => {
