@@ -32,9 +32,9 @@ export function registerUpgradeCommand(program: Command, context: UpgradeCommand
   program
     .command("upgrade")
     .description("upgrade an environment to a newer release: shows the release notes and every change, stops on a data replacement unless you name it, then runs doctor (operator role; the cdk engine needs admin credentials)")
-    .option("--to <version>", "the release to upgrade to; default: this agentx's own release")
+    .option("--to <version>", "the release to upgrade to; default: this agentx's own release, or for an agentx built from source upgrading a cdk environment, the --source tag")
     .option("--release <dir>", "a release directory (agentx release build output) instead of downloading one")
-    .option("--source <dir>", "the cdk engine only: a clean checkout of the target release's tag")
+    .option("--source <dir>", "the cdk engine only: a clean checkout of the target release's tag; --to or --release, when given, must match it")
     .option("--allow-replace <logical-id>", "accept replacing or deleting this table, user pool, bucket, key or secret; repeat for each", collect, [])
     .option("--export <dir>", "write the upgrade for a platform team's pipeline instead of deploying it")
     .option("--worker-image <digest-ref>", "worker image by digest (testing only)")
