@@ -1,10 +1,16 @@
 import { GetCommand, QueryCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { AiToolTurnRecordSchema, TURN_EXPORT_PAGE, TURN_EXPORT_PARTITION, TurnRecordSchema, agentXError, type ExportedTurnRecord } from "@agentx/contracts";
+import {
+  ADMIN_LIST_MAX, ADMIN_TURN_FILTER_PAGES, AgentXNameSchema, AiToolTurnRecordSchema, TURN_EXPORT_PAGE, TURN_EXPORT_PARTITION, TurnRecordSchema,
+  agentXError, parseSlackThreadSubject, type ExportedTurnRecord,
+} from "@agentx/contracts";
 
 export interface TurnRecordStartKey { pk: string; sk: string; exportPk: string; exportSk: string }
 
+/** Spec 025 A8: the filters an admin read may ask for. */
+export interface TurnFilter { origin?: "slack" | "ai_tool"; thread?: string; task?: string }
+
 export interface TurnRecordSource {
-  page(input: { since: string; limit: number; nowSeconds: number; exclusiveStartKey?: TurnRecordStartKey }): Promise<{
+  page(input: { since: string; until?: string; limit: number; nowSeconds: number; exclusiveStartKey?: TurnRecordStartKey; filter?: TurnFilter }): Promise<{
     items: Record<string, unknown>[];
     lastEvaluatedKey?: TurnRecordStartKey;
   }>;
@@ -20,6 +26,7 @@ const KEY_PART_LIMIT = 256;
 /** How many malformed keys and field names one log line lists; the count is always exact. */
 const LOGGED_KEY_LIMIT = 10;
 const CURSOR_INVALID = "cursor is invalid; start the export again without it";
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 /**
  * The most JSON one export page carries. Lambda refuses a synchronous response over 6 MB, so a
  * page of 100 large records would fail every time; stop well short and hand out a cursor.
@@ -31,13 +38,24 @@ const PAGE_ENVELOPE_BYTES = 4_096;
 export function dynamoTurnRecordSource(client: Client, tableName: string): TurnRecordSource {
   return {
     async page(input) {
+      const filters = ["expiresAt > :now"];
+      const values: Record<string, unknown> = { ":partition": TURN_EXPORT_PARTITION, ":since": input.since, ":now": input.nowSeconds };
+      if (input.until !== undefined) values[":until"] = `${input.until}\uffff`;
+      if (input.filter?.origin !== undefined) {
+        // A Slack record written before spec 025 has no origin at all.
+        filters.push(input.filter.origin === "slack" ? "(attribute_not_exists(origin) OR origin = :origin)" : "origin = :origin");
+        values[":origin"] = input.filter.origin;
+      }
+      if (input.filter?.thread !== undefined) { filters.push("subject = :subject"); values[":subject"] = input.filter.thread; }
+      // FR-037 and 25c's C13: AI-tool records and teammates' channel turns both carry taskId.
+      if (input.filter?.task !== undefined) { filters.push("taskId = :task"); values[":task"] = input.filter.task; }
       const response = await client.send(new QueryCommand({
         TableName: tableName,
         IndexName: "byTime",
-        KeyConditionExpression: "exportPk = :partition AND exportSk >= :since",
+        KeyConditionExpression: input.until === undefined ? "exportPk = :partition AND exportSk >= :since" : "exportPk = :partition AND exportSk BETWEEN :since AND :until",
         // DynamoDB deletes expired items up to 48 hours late; never return one.
-        FilterExpression: "expiresAt > :now",
-        ExpressionAttributeValues: { ":partition": TURN_EXPORT_PARTITION, ":since": input.since, ":now": input.nowSeconds },
+        FilterExpression: filters.join(" AND "),
+        ExpressionAttributeValues: values,
         ScanIndexForward: false,
         Limit: input.limit,
         ...(input.exclusiveStartKey === undefined ? {} : { ExclusiveStartKey: input.exclusiveStartKey }),
@@ -77,25 +95,49 @@ export class TurnRecordExport {
       throw agentXError("CONFIG_INVALID", "since must be an ISO 8601 time such as 2026-09-17T00:00:00.000Z");
     }
     const since = new Date(rawSince).toISOString();
+    // Spec 025 A8: the admin filters. The CLI's export sends none of them and reads as before.
+    const untilText = query.get("until");
+    if (untilText !== null && !validTime(untilText)) throw agentXError("CONFIG_INVALID", "until must be an ISO 8601 time such as 2026-09-30T00:00:00.000Z");
+    const until = untilText === null ? undefined : new Date(untilText).toISOString();
+    if (until !== undefined && until < since) throw agentXError("CONFIG_INVALID", "until must be after since");
+    const filter = turnFilter(query);
+    const wantedProject = query.get("project");
+    if (wantedProject !== null && !AgentXNameSchema.safeParse(wantedProject).success) throw agentXError("CONFIG_INVALID", "project must be an AgentX project name");
+    const limitText = query.get("limit");
+    if (limitText !== null && (!/^\d{1,3}$/.test(limitText) || Number(limitText) < 1 || Number(limitText) > ADMIN_LIST_MAX)) {
+      throw agentXError("CONFIG_INVALID", `limit must be a whole number from 1 to ${ADMIN_LIST_MAX}`);
+    }
+    const limit = limitText === null ? TURN_EXPORT_PAGE : Number(limitText);
+    const filtered = filter !== undefined || wantedProject !== null;
     const cursor = query.get("cursor");
-    const exclusiveStartKey = cursor === null ? undefined : decodeCursor(cursor, since);
+    const exclusiveStartKey = cursor === null ? undefined : decodeCursor(cursor, since, until);
     const nowSeconds = Math.floor((this.options.now ?? Date.now)() / 1000);
     const log = this.options.log ?? ((line: string) => console.log(line));
-    let page: Awaited<ReturnType<TurnRecordSource["page"]>>;
+    // Without a filter this reads once, exactly as before; with one it reads on to fill limit,
+    // at most ADMIN_TURN_FILTER_PAGES index pages per call, then hands out a cursor.
+    const items: Record<string, unknown>[] = [];
+    let lastEvaluatedKey: TurnRecordStartKey | undefined = exclusiveStartKey;
+    let reads = 0;
     try {
-      page = await this.options.source.page({
-        since, limit: TURN_EXPORT_PAGE, nowSeconds,
-        ...(exclusiveStartKey === undefined ? {} : { exclusiveStartKey }),
-      });
+      do {
+        const page = await this.options.source.page({
+          since, ...(until === undefined ? {} : { until }), limit, nowSeconds,
+          ...(lastEvaluatedKey === undefined ? {} : { exclusiveStartKey: lastEvaluatedKey }),
+          ...(filter === undefined ? {} : { filter }),
+        });
+        items.push(...page.items);
+        lastEvaluatedKey = page.lastEvaluatedKey;
+        reads += 1;
+      } while (filtered && lastEvaluatedKey !== undefined && items.length < limit && reads < ADMIN_TURN_FILTER_PAGES);
     } catch (error) {
       log(JSON.stringify({ component: "broker", event: "turn_record.read_failed", errorName: errorName(error) }));
       throw agentXError("RUNTIME_UNAVAILABLE", "could not read turn records; try again");
     }
     let next: string | undefined;
-    if (page.lastEvaluatedKey !== undefined) {
-      next = Buffer.from(JSON.stringify(page.lastEvaluatedKey)).toString("base64url");
+    if (lastEvaluatedKey !== undefined) {
+      next = Buffer.from(JSON.stringify(lastEvaluatedKey)).toString("base64url");
       // A cursor the next call would refuse strands the caller mid-export; say so now instead.
-      if (!acceptableCursor(next, since)) {
+      if (!acceptableCursor(next, since, until)) {
         log(JSON.stringify({ component: "broker", event: "turn_record.cursor_unusable" }));
         throw agentXError("RUNTIME_UNAVAILABLE", "could not continue the turn record export; try again");
       }
@@ -106,7 +148,7 @@ export class TurnRecordExport {
     const invalidKeys: string[] = [];
     const invalidFields = new Set<string>();
     let invalid = 0;
-    for (const item of page.items) {
+    for (const item of items) {
       if (typeof item.expiresAt === "number" && item.expiresAt <= nowSeconds) continue;
       const schema = item.origin === "ai_tool" ? AiToolTurnRecordSchema : TurnRecordSchema;
       const parsed = schema.safeParse(Object.fromEntries(Object.entries(item).filter(([key]) => !STORAGE_KEYS.has(key))));
@@ -135,23 +177,37 @@ export class TurnRecordExport {
         return undefined;
       }),
     ] as const)));
-    const turns: ExportedTurnRecord[] = [];
+    const projectOf = ({ record }: { record: ExportedTurnRecord }) => record.workspaceId === undefined ? undefined : projects.get(record.workspaceId);
+    // A record with no workspace has no project, so a project filter drops it too.
+    let kept = wantedProject === null ? records : records.filter((entry) => projectOf(entry) === wantedProject);
     let skipped = invalid;
+    if (kept.length > limit) {
+      // Several filtered pages can carry more than limit; resume after the last record kept.
+      const last = kept[limit - 1]?.key;
+      next = last === undefined ? undefined : Buffer.from(JSON.stringify(last)).toString("base64url");
+      if (next === undefined || !acceptableCursor(next, since, until)) {
+        log(JSON.stringify({ component: "broker", event: "turn_record.cursor_unusable" }));
+        throw agentXError("RUNTIME_UNAVAILABLE", "could not continue the turn record export; try again");
+      }
+      skipped = kept[limit]?.invalidBefore ?? invalid;
+      kept = kept.slice(0, limit);
+    }
+    const turns: ExportedTurnRecord[] = [];
     let bytes = PAGE_ENVELOPE_BYTES;
-    for (const [index, { record }] of records.entries()) {
-      const project = record.workspaceId === undefined ? undefined : projects.get(record.workspaceId);
-      const turn = project === undefined ? record : { ...record, project };
+    for (const [index, entry] of kept.entries()) {
+      const project = projectOf(entry);
+      const turn = project === undefined ? entry.record : { ...entry.record, project };
       bytes += Buffer.byteLength(JSON.stringify(turn)) + 1;
       // Always carry at least one record, so a page can never come back empty and stuck.
       if (bytes > TURN_EXPORT_PAGE_BYTES && turns.length > 0) {
         // Resume after the last record this page carries; the records left out come next time.
-        const last = records[index - 1]?.key;
+        const last = kept[index - 1]?.key;
         next = last === undefined ? undefined : Buffer.from(JSON.stringify(last)).toString("base64url");
-        if (next === undefined || !acceptableCursor(next, since)) {
+        if (next === undefined || !acceptableCursor(next, since, until)) {
           log(JSON.stringify({ component: "broker", event: "turn_record.cursor_unusable" }));
           throw agentXError("RUNTIME_UNAVAILABLE", "could not continue the turn record export; try again");
         }
-        skipped = records[index]?.invalidBefore ?? invalid;
+        skipped = kept[index]?.invalidBefore ?? invalid;
         break;
       }
       turns.push(turn);
@@ -165,17 +221,17 @@ export class TurnRecordExport {
  * condition whatever the start key, but a forged key is refused here so a caller gets a clear
  * CONFIG_INVALID and never a start key outside the export partition or the since window.
  */
-function decodeCursor(cursor: string, since: string): TurnRecordStartKey {
-  const key = parseCursor(cursor, since);
+function decodeCursor(cursor: string, since: string, until: string | undefined): TurnRecordStartKey {
+  const key = parseCursor(cursor, since, until);
   if (key === undefined) throw agentXError("CONFIG_INVALID", CURSOR_INVALID);
   return key;
 }
 
-function acceptableCursor(cursor: string, since: string): boolean {
-  return parseCursor(cursor, since) !== undefined;
+function acceptableCursor(cursor: string, since: string, until: string | undefined): boolean {
+  return parseCursor(cursor, since, until) !== undefined;
 }
 
-function parseCursor(cursor: string, since: string): TurnRecordStartKey | undefined {
+function parseCursor(cursor: string, since: string, until: string | undefined): TurnRecordStartKey | undefined {
   if (cursor.length === 0 || cursor.length > CURSOR_LIMIT || !/^[A-Za-z0-9_-]+$/.test(cursor)) return undefined;
   let value: unknown;
   try {
@@ -191,7 +247,27 @@ function parseCursor(cursor: string, since: string): TurnRecordStartKey | undefi
   if ([key.pk, key.sk, key.exportSk].some((part) => part.length > KEY_PART_LIMIT)) return undefined;
   // The same string comparison the key condition uses.
   if (key.exportSk < since) return undefined;
+  // Spec 025 A8: a cursor past until is outside the window the key condition reads.
+  if (until !== undefined && key.exportSk > `${until}\uffff`) return undefined;
   return key;
+}
+
+/** Spec 025 A8: origin, thread and task, checked; undefined when none was asked for. */
+function turnFilter(query: URLSearchParams): TurnFilter | undefined {
+  const origin = query.get("origin");
+  const thread = query.get("thread");
+  const task = query.get("task");
+  if (origin !== null && origin !== "slack" && origin !== "ai_tool") throw agentXError("CONFIG_INVALID", "origin must be slack or ai_tool");
+  if (thread !== null) {
+    try {
+      parseSlackThreadSubject(thread);
+    } catch {
+      throw agentXError("CONFIG_INVALID", "thread must be a thread subject such as T0123456789/C0123456789/1695500000.000100");
+    }
+  }
+  if (task !== null && !UUID.test(task)) throw agentXError("CONFIG_INVALID", "task must be a task ID");
+  const filter: TurnFilter = { ...(origin === null ? {} : { origin }), ...(thread === null ? {} : { thread }), ...(task === null ? {} : { task }) };
+  return Object.keys(filter).length === 0 ? undefined : filter;
 }
 
 function startKey(value: unknown): TurnRecordStartKey | undefined {
