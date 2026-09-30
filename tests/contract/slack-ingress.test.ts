@@ -1,6 +1,7 @@
 import { createHash, createHmac } from "node:crypto";
+import { UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it } from "vitest";
-import { SlackRequestMessageSchema, type SlackRequestMessage } from "../../packages/contracts/src/index.js";
+import { CLOSED_SHARED_NOTICE, SlackRequestMessageSchema, VIEW_ONLY_NOTICE, sharedNoticeClaim, sharedNoticeKey, type SlackRequestMessage } from "../../packages/contracts/src/index.js";
 import {
   createSlackIngressHandler,
   parseSlackSecrets,
@@ -8,6 +9,7 @@ import {
   validSignature,
 } from "../../packages/broker/src/aws/slack-ingress.js";
 import type { SlackMemberCheck } from "../../packages/broker/src/aws/slack-members.js";
+import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const signingSecret = "8f742231b10e8888abcd99yyyzzz85a5";
 const team = "T0BSHLLUGBD";
@@ -26,6 +28,7 @@ function harness(options: {
   failRelease?: number;
   failDecrement?: number;
   stop?: { outcome?: "CANCEL_REQUESTED" | "NOTHING_RUNNING"; throws?: boolean };
+  shared?: { threads: Record<string, { mode: "view" | "continue"; closed?: boolean }>; lookupThrows?: boolean; claimThrows?: boolean };
 } = {}) {
   const stopCalls: Array<{ thread: unknown; userId: string }> = [];
   const memberChecks: string[] = [];
@@ -33,6 +36,9 @@ function harness(options: {
   const turnWindows: Array<{ subject: string; windowStart: number; expiresAt: number }> = [];
   const turnReleases: Array<{ subject: string; windowStart: number }> = [];
   const turnCounts = new Map<string, number>();
+  // The hourly claim is the one the AWS wiring sends (F13), evaluated by the fake table.
+  const threadsTable = new FakeDynamoDb();
+  const noticedAt = (subject: string) => sharedNoticeKeyItem(threadsTable, subject)?.noticedAt;
   let countFailures = options.failCount ?? 0;
   let decrementFailures = options.failDecrement ?? 0;
   const claimed = new Set<string>();
@@ -76,6 +82,25 @@ function harness(options: {
       if (options.failPost) throw new Error("Slack unavailable");
       posts.push(input);
     },
+    ...(options.shared === undefined ? {} : {
+      sharedTask: {
+        lookup: async (thread: { threadTs: string }) => {
+          if (options.shared?.lookupThrows) throw Object.assign(new Error("DynamoDB unavailable"), { name: "InternalServerError" });
+          const found = options.shared?.threads[thread.threadTs];
+          return found === undefined ? undefined : { mode: found.mode, closed: found.closed ?? false };
+        },
+        claimNotice: async (subject: string, now: number, kind: "view" | "closed") => {
+          if (options.shared?.claimThrows) throw Object.assign(new Error("DynamoDB unavailable"), { name: "InternalServerError" });
+          try {
+            await threadsTable.send(new UpdateCommand({ TableName: "threads", ...sharedNoticeClaim(subject, now, kind) }));
+            return true;
+          } catch (error) {
+            if (error instanceof Error && error.name === "ConditionalCheckFailedException") return false;
+            throw error;
+          }
+        },
+      },
+    }),
     now: () => clock.seconds * 1_000,
     log: (event, fields) => logs.push({ event, fields }),
     ...(options.stop === undefined ? {} : {
@@ -120,7 +145,12 @@ function harness(options: {
       },
     }),
   });
-  return { handler, queue, posts, pending, logs, memberChecks, clock, turnWindows, turnReleases, stopCalls };
+  return { handler, queue, posts, pending, logs, memberChecks, clock, turnWindows, turnReleases, stopCalls, noticedAt };
+}
+
+function sharedNoticeKeyItem(table: FakeDynamoDb, subject: string): { noticedAt?: unknown } | undefined {
+  const key = sharedNoticeKey(subject);
+  return table.get(key.pk, key.sk);
 }
 
 function signedEvent(payload: unknown, options: { timestamp?: number; signature?: string; base64?: boolean } = {}) {
@@ -667,5 +697,117 @@ describe("the stop command (#126)", () => {
     const { handler, queue } = harness();
     await send(handler, stopMention("stop"));
     expect(queue.map((entry) => entry.message.text)).toEqual(["stop"]);
+  });
+});
+
+describe("shared task threads (spec 025 FR-035, C10)", () => {
+  // `at` signs the request at the harness clock's time, so a request an hour later is still fresh.
+  const reply = (eventId: string, text = `<@${bot}> also bump the version`, at = nowSeconds) =>
+    signedEvent(mention({ eventId, event: { ts: "1695500000.000200", thread_ts: "1695500000.000100", text } }), { timestamp: at });
+
+  it("answers a mention in a view-only thread with the fixed notice, and queues nothing (US3 scenario 4)", async () => {
+    const h = harness({ shared: { threads: { "1695500000.000100": { mode: "view" } } }, turnsPerMinute: 6 });
+    const response = await send(h.handler, reply("Ev0000000101"));
+    expect(response.status).toBe(200);
+    expect(h.queue).toEqual([]);
+    expect(h.pending.size).toBe(0);
+    expect(h.turnWindows).toEqual([]);
+    expect(h.posts).toEqual([{ channel, threadTs: "1695500000.000100", text: VIEW_ONLY_NOTICE }]);
+  });
+
+  it("says it at most once an hour per thread", async () => {
+    const h = harness({ shared: { threads: { "1695500000.000100": { mode: "view" } } } });
+    await send(h.handler, reply("Ev0000000102"));
+    h.clock.seconds += 1_800;
+    expect((await send(h.handler, reply("Ev0000000103", undefined, h.clock.seconds))).status).toBe(200);
+    expect(h.posts).toHaveLength(1);
+    h.clock.seconds += 1_801;
+    expect((await send(h.handler, reply("Ev0000000104", undefined, h.clock.seconds))).status).toBe(200);
+    expect(h.posts).toHaveLength(2);
+    expect(h.queue).toEqual([]);
+    expect(h.noticedAt(`${team}/${channel}/1695500000.000100`)).toBe(nowSeconds + 3_601);
+  });
+
+  it("gives a closed task's thread the closed notice, whatever its mode (C24)", async () => {
+    const h = harness({ shared: { threads: { "1695500000.000100": { mode: "continue", closed: true } } } });
+    await send(h.handler, reply("Ev0000000105"));
+    expect(h.posts).toEqual([{ channel, threadTs: "1695500000.000100", text: CLOSED_SHARED_NOTICE }]);
+    expect(h.queue).toEqual([]);
+  });
+
+  it("gives the closed notice once the task closes, even within the hour of a view-only notice (live check)", async () => {
+    const threads: Record<string, { mode: "view" | "continue"; closed?: boolean }> = { "1695500000.000100": { mode: "view" } };
+    const h = harness({ shared: { threads } });
+    await send(h.handler, reply("Ev0000000111"));
+    expect(h.posts.map((post) => post.text)).toEqual([VIEW_ONLY_NOTICE]);
+    // The task closes 18 minutes later: the closed notice has its own hourly claim.
+    threads["1695500000.000100"] = { mode: "view", closed: true };
+    h.clock.seconds += 18 * 60;
+    await send(h.handler, reply("Ev0000000112", undefined, h.clock.seconds));
+    expect(h.posts.map((post) => post.text)).toEqual([VIEW_ONLY_NOTICE, CLOSED_SHARED_NOTICE]);
+    // A second mention within the hour of the closed notice gets nothing.
+    h.clock.seconds += 30 * 60;
+    await send(h.handler, reply("Ev0000000113", undefined, h.clock.seconds));
+    expect(h.posts).toHaveLength(2);
+    // Closed wins: a closed thread never gets the view-only notice again, even once the view claim lapses.
+    h.clock.seconds += 20 * 60;
+    await send(h.handler, reply("Ev0000000114", undefined, h.clock.seconds));
+    expect(h.posts.map((post) => post.text)).toEqual([VIEW_ONLY_NOTICE, CLOSED_SHARED_NOTICE]);
+    expect(h.queue).toEqual([]);
+  });
+
+  it("does not stop anything from a view-only thread", async () => {
+    const h = harness({ shared: { threads: { "1695500000.000100": { mode: "view" } } }, stop: {} });
+    await send(h.handler, reply("Ev0000000106", `<@${bot}> stop`));
+    expect(h.stopCalls).toEqual([]);
+  });
+
+  it("queues a continue thread's mention exactly as any thread message, in the thread's group (FR-035)", async () => {
+    const shared = harness({ shared: { threads: { "1695500000.000100": { mode: "continue" } } }, turnsPerMinute: 6 });
+    const plain = harness({ turnsPerMinute: 6 });
+    await send(shared.handler, reply("Ev0000000107"));
+    await send(plain.handler, reply("Ev0000000107"));
+    expect(shared.queue).toHaveLength(1);
+    expect(shared.queue).toEqual(plain.queue);
+    expect(shared.posts).toEqual(plain.posts);
+    expect(shared.turnWindows).toEqual(plain.turnWindows);
+  });
+
+  it("answers 500 and releases the event when the shared record cannot be read, so Slack retries", async () => {
+    const shared = { threads: {}, lookupThrows: true };
+    const h = harness({ shared });
+    const response = await send(h.handler, reply("Ev0000000108"));
+    expect(response.status).toBe(500);
+    expect(h.queue).toEqual([]);
+    expect(h.logs).toContainEqual({ event: "shared_task.lookup_failed", fields: { eventId: "Ev0000000108", errorName: "InternalServerError" } });
+    // The claim was released, so Slack's retry of the same event is handled as new.
+    shared.lookupThrows = false;
+    expect((await send(h.handler, reply("Ev0000000108"))).status).toBe(200);
+    expect(h.queue).toHaveLength(1);
+  });
+
+  it("treats every thread as ordinary without the shared-task switch (the legacy deployment)", async () => {
+    const h = harness();
+    await send(h.handler, reply("Ev0000000109"));
+    expect(h.queue).toHaveLength(1);
+  });
+
+  it("stays silent and queues nothing when the notice claim throws", async () => {
+    const h = harness({ shared: { threads: { "1695500000.000100": { mode: "view" } }, claimThrows: true }, turnsPerMinute: 6 });
+    const response = await send(h.handler, reply("Ev0000000111"));
+    expect(response.status).toBe(200);
+    expect(h.posts).toEqual([]);
+    expect(h.queue).toEqual([]);
+    expect(h.turnWindows).toEqual([]);
+    expect(h.logs).toContainEqual({ event: "shared_task.notice_claim_failed", fields: { eventId: "Ev0000000111", errorName: "InternalServerError" } });
+    expect(h.logs).toContainEqual({ event: "shared_task.not_run", fields: { eventId: "Ev0000000111", closed: false, notified: false } });
+  });
+
+  it("never logs the mention's text", async () => {
+    const secret = "PLANTED-REQUEST-TEXT-7f3a";
+    const h = harness({ shared: { threads: { "1695500000.000100": { mode: "view" } } } });
+    await send(h.handler, reply("Ev0000000110", `<@${bot}> ${secret}`));
+    expect(JSON.stringify(h.logs)).not.toContain(secret);
+    expect(h.logs).toContainEqual({ event: "shared_task.not_run", fields: { eventId: "Ev0000000110", closed: false, notified: true } });
   });
 });

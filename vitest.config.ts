@@ -6,6 +6,7 @@ export default defineConfig({
     globalSetup: ["tests/support/test-temp-dir.ts"],
     include: ["tests/**/*.test.ts", "packages/**/*.test.ts"],
     passWithNoTests: false,
-    testTimeout: 10_000,
+    // CDK synth tests outgrow 10 s under a loaded full gate.
+    testTimeout: 60_000,
   },
 });

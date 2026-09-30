@@ -559,7 +559,7 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   | `agentx_continue_task` | `task_id`; `instructions`; `wait_seconds` (optional) | as `agentx_start_task` |
   | `agentx_cancel_task` | `task_id` | status after the request |
   | `agentx_close_task` | `task_id` | the task with `closing` while AgentX checks for unpublished work, at once; `agentx_get_task` then shows `CLOSED`, or `unpublished` with each repository and why; an optional `message` gives more detail |
-  | `agentx_share_task` | `task_id`; `share_mode` (optional); `channel` (optional) | thread link and mode; on a task already shared, it changes the mode (within the project's policy) |
+  | `agentx_share_task` | `task_id`; `share_mode` (optional); `channel` (optional) | the task, with the thread link once AgentX has posted it (`agentx_get_task` shows it within seconds), and its mode; on a task already shared, it changes the mode (within the project's policy) |
   | `agentx_open_pull_request` | `task_id`; `title`; `body` (optional); `repository` (optional when the project has one repository, else from the task's pinned starting revision); `draft` (optional, default true) | the publish operation's ID and status, at once; the PR URL appears in `agentx_get_task` once published |
 
   Only `agentx_start_task`, `agentx_continue_task` and `agentx_wait_for_task` wait; every other tool
@@ -568,7 +568,18 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   client-level retry of the same call reuses the same ID instead of starting a second task or
   duplicate action, and returns the ID it used as `request_id` in the output; `agentx_cancel_task`
   and `agentx_close_task` instead take a fresh ID on every call, since repeating either is exactly
-  what calling it again means (build ruling, 2026-09-28).
+  what calling it again means (build ruling, 2026-09-28). A successful `agentx_share_task` forgets
+  the remembered IDs of the other modes, so view, then continue, then view again within 15 minutes
+  is three changes, not a replay of the first (build ruling, 2026-09-29).
+
+  Only the developer who owns a task may share it; the developer or an AgentX admin may switch a
+  shared task between view only and continue, within the project's `shareMode` policy, the admin
+  through `POST /v1/admin/tasks/{taskId}/share-mode` or `agentx admin task share-mode --task <id>
+  --mode view|continue`, audited with the admin's name (owner decision, changed, 2026-09-29; Q2,
+  C25). The admin path changes the mode only: it cannot make the first share or change the channel,
+  it refuses a closed task, and it answers only `{ taskId, share }` (the mode, channel and thread
+  link), never the task's title or results (D22; build ruling F5, 2026-09-29). There is no MCP
+  admin tool for it until phases 25d and 25e.
 
   **Admin read tools** (no confirmation)
 
@@ -607,17 +618,31 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   channel; otherwise the start MUST be refused (`CHANNEL_REQUIRED` or `CHANNEL_AMBIGUOUS`) before
   anything starts. The share mode is the developer's `share_mode`, else the project's
   `shareMode.default`; when `allowContinue` is false it MUST be `view`. When the policy forced
-  sharing or view only, the result MUST say so.
+  sharing or view only, the result MUST say so (`required by project`, `continue not allowed by
+  project`). Sharing into a private bound channel MUST need the developer to be a member of it;
+  otherwise the start or share is refused with `CHANNEL_REQUIRED` and "you are not a member of that
+  private channel; join it first, or share to one of the project's public channels" (owner
+  decision, 2026-09-29; Q10). This fails closed: when AgentX cannot tell whether a channel is
+  private (Slack's channel-info lookup did not answer, or is not set up in the environment), the
+  channel is treated as private, so only a developer AgentX can confirm as a member may share into
+  it. A developer with no linked Slack user then cannot share into it, and gets `SLACK_UNAVAILABLE`
+  saying to try again, or, where channel-info is not set up, to ask the admin to finish the Slack
+  setup (build ruling, 2026-09-29). A failed membership lookup refuses too.
 - **FR-032**: A shared task's thread MUST show:
   - the start message: the developer (a Slack mention when linked, else their display name), the
     client name, the title, the project, and the mode: in view only, that follow-ups happen in the
     developer's AI tool; in continue, that channel members may mention AgentX here to steer it;
-  - replies when the workspace is ready, when an operation the developer started ends (status, and
-    the summary up to 1,500 characters, redacted), when a pull request opens (its URL), when the
-    mode changes, and when the task is cancelled or closed;
+  - replies when the workspace is ready, when the workspace could not be set up ("The workspace
+    could not be set up, so the task did not run: " and the redacted error; C8), when an operation
+    the developer started ends (status, and the summary up to 1,500 characters, redacted and then
+    fitted to 1,500 characters after Slack escaping; build ruling F21, 2026-09-29), when a pull
+    request opens (its URL), when the mode changes, and when the task is cancelled or closed;
   - in continue mode, the ordinary Slack turn replies to teammates' mentions.
 
   The developer's instructions beyond the title, events, diffs and artifacts MUST NOT be posted.
+  Each reply is dated by its change's own time, to the millisecond, so a task shared later posts its
+  start message with the current status and none of the replies from before the share (US3 scenario
+  9; build ruling F7, 2026-09-29).
 - **FR-033**: The client name MUST come from the MCP `initialize` request's `clientInfo.name`,
   mapped to `Claude Code`, `Codex` or `Cursor` for their known names, and otherwise to "an AI tool".
   It MUST be at most 40 characters and cleaned like Slack display names.
@@ -625,15 +650,30 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   `DeveloperTaskNotifier` function, the only new role that may read the Slack secret, triggered by
   the task's status changes and by new pending changes. Failed posts MUST be retried for 1 hour and
   then counted in the failed Slack delivery metric (spec 015 FR-045). Replies to teammates' turns in
-  continue mode are posted by the Slack service, as for every Slack turn.
+  continue mode are posted by the Slack service, as for every Slack turn. The notifier is triggered
+  by the control plane's state table stream, filtered to task, pointer and developer-operation
+  changes, and posts from its own queue; it is the stream's second and last reader (C7, D23). A
+  later need (such as 25e's Slack Confirm DMs) adds a filter to that trigger, never a third reader.
 - **FR-035**: The control plane MUST keep a record for each shared thread
   (`SHARED_TASK#{team}/{channel}/{threadTs}`) with the task, its workspace owner key and the mode.
   The Slack ingress MUST check it for every mention in a thread:
   - in view only, it MUST answer with one fixed notice per hour per thread, without creating a
-    thread workspace or queueing a turn;
+    thread workspace or queueing a turn. The notice reads: "This thread follows a task that a
+    developer is driving from their AI tool, so I don't act on messages here. To ask AgentX for
+    something, post a new message in the channel; it starts its own thread workspace." (owner
+    decision, 2026-09-29; Q1);
+  - a closed task's thread gets a closed notice, at most once an hour, and runs nothing: "The task
+    this thread followed is closed, so I don't act on messages here." followed by the same second
+    sentence (owner decision, 2026-09-29; Q3, C24). The close itself posts "The task is closed, and
+    its workspace is released. This thread no longer drives it." and the notifier posts nothing
+    after it;
   - in continue, it MUST queue the message exactly as it queues any thread message today: on the
     Slack request FIFO queue, in the thread's message group, after the same checks (a person, a
     member of the bound channel, the thread's rate limit).
+
+  The ingress and the Slack service claim the hourly notice with one shared conditional write, so a
+  message queued before a switch to view only, or before a close, is answered by the same once an
+  hour (build ruling F13, 2026-09-29).
 - **FR-054**: In continue mode, the Slack service MUST handle a queued message as an ordinary Slack
   turn with the orchestrator model, the action gate and the thread's conversation, but acting on the
   task's workspace: the broker's service identity MUST resolve a shared thread in continue mode to
@@ -641,14 +681,29 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   requester of every operation the turn starts. A turn MUST start only when the task's workspace has
   no active operation; it MUST wait up to 30 minutes for that, then answer that the task is still
   busy. No new workspace is created and no workspace limit is charged. The developer's own
-  instructions still go straight to the worker (FR-019).
+  instructions still go straight to the worker (FR-019). A teammate's `stop` in a continue thread
+  cancels the running task operation, whoever started it; `close this workspace` in a shared thread
+  is refused (owner decision, 2026-09-29; Q8, C11). A stop stops nothing when the thread is view
+  only or closed (those get their notice instead), or when the channel now serves another project
+  (build ruling F16, 2026-09-29).
+
+  The developer's own run stays private from the channel (D22; build rulings, 2026-09-29): while it
+  runs, the broker tells the teammate's orchestrator only that the task is busy
+  (`activeOperation: "developer"`, with no operation ID), and the service operation, events and
+  artifact routes answer a developer-requested operation from a shared thread with 404, exactly as
+  an unknown one. Operations a channel turn started stay readable. A teammate's operation writes an
+  ordinary Slack turn record naming the teammate, never an AI-tool `completed` record under the
+  developer's name (FR-037; build ruling F3, 2026-09-29). When the developer meets a channel turn,
+  `TASK_BUSY` names the teammate and says "at least N more channel messages are waiting" only when
+  there are any: the count is a floor (build ruling F18, 2026-09-29).
 
 **Visibility and audit**
 
 - **FR-036**: A developer task MUST be visible through `/v1/dev/*` only to the developer who started
   it. Any other caller MUST get `TASK_NOT_FOUND`.
 - **FR-037**: Each action on a developer task (start, continue, a pull-request request, cancel or
-  close) MUST write an `accepted` record in its own transaction, and each task or publish operation
+  close, and a share or mode change, action `share`, owner decision 2026-09-29, Q9; an admin's mode
+  change names the admin) MUST write an `accepted` record in its own transaction, and each task or publish operation
   MUST write a `completed` record, holding the result summary, when it ends; a start refused after
   its request parses MUST write a `refused` record (owner decision, 2026-09-28). The one exception:
   a cancel that finds nothing running has no action transaction to write the `accepted` record in,
@@ -659,7 +714,8 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   the instructions redacted and capped as
   request text and the result summary as response text, and appear in `GET /v1/admin/turns` and
   `agentx_admin_turns`. Teammates' turns in continue mode are ordinary Slack turn records that also carry
-  `taskId`.
+  `taskId`. A close's outcome gets its `completed` record in phase 25e (C22); until then a close has
+  its `accepted` record only.
 - **FR-038**: The control plane MUST index each operation that ends `FAILED` or `INTERRUPTED`
   (`FAILURE#{yyyy-mm-dd}` / `{endedAt}#{operationId}`, 30-day expiry) for `agentx_admin_failed_tasks`.
   It MUST also serve `GET /v1/admin/projects`, `GET /v1/admin/slack/bindings`,
@@ -771,6 +827,9 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   a `1.0` control plane, which has no developer task routes at all), every tool MUST also refuse
   with `UPGRADE_REQUIRED`, asking an admin to upgrade AgentX: a minor-version gap in that direction
   means routes this phase needs are simply missing, not merely different (build ruling, 2026-09-28).
+  `DEVELOPER_API_VERSION` is `1.1` from phase 25b and moves to `1.2` in phase 25c, which adds the
+  share route; an MCP server from 25c refuses a 25b control plane with `UPGRADE_REQUIRED` and "ask
+  your AgentX admin to upgrade AgentX" (owner decision, 2026-09-29; Q7).
 
 **Errors**
 
@@ -815,11 +874,20 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
     Personal workspaces not tied to a task stay retired.
 
 - **FR-055**: A developer task's workspace MUST NOT stay in setup forever. A sweep MUST mark failed
-  any prepare still running 15 minutes after it started, whatever the instance's health, with a fixed
-  message that setup did not finish; the workspace then reads `setup_failed` and frees its slot, as
-  with any other failed setup. Once the sweep exists, a temporary AWS error (throttling, or a 5xx)
-  while queuing the task's first instructions MUST be retried rather than failing the start at once.
-  Phase 25c.
+  any prepare still running 50 minutes after it started (owner decision, 2026-09-29, raised from 15
+  minutes because the provisioner allows 45), whatever the instance's health, with a fixed message
+  that setup did not finish ("setup did not finish within 50 minutes; close this task and start a
+  new one"); the workspace then reads `setup_failed`, and closing the task frees its slot (FR-020),
+  as with any other failed setup (build ruling F20, 2026-09-29). Only developer-task prepares are
+  watched; the sweep runs in the session reconciler, every 10 minutes, so a stuck setup is failed
+  between 50 and 60 minutes after it started (owner decisions, 2026-09-29; Q4, Q5, C17). The sweep
+  also runs in the legacy deployment's reconciler, where it reads one empty partition per run and
+  emits the `ReconcilerStuckSetups` metric as 0; this is accepted, and no template changes (build
+  ruling F17, 2026-09-29). A failed sweep is logged and counted, the reconciler's other metrics are
+  still emitted, and the run then fails so the existing reconciler error alarm sees it. Once the
+  sweep exists, a temporary AWS error (throttling, or a 5xx) while queuing the task's first
+  instructions MUST be retried rather than failing the start at once: the broker answers 503 and
+  records nothing, and the worker sends its result again (D21). Phase 25c.
 
 ### Key Entities
 
@@ -864,7 +932,8 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   removed or weakened; lists of commands, error codes and constants gain the new entries, and
   `DEVELOPER_API_VERSION` moves to `1.1` (owner decision, 2026-09-28). This covers updating
   `tests/contract/developer-identity-server.test.ts`'s expected `apiVersion` from `"1.0"` to `"1.1"`,
-  the same kind of additive change as every other list here.
+  the same kind of additive change as every other list here. In phase 25c it moves to `1.2`
+  (owner decision, 2026-09-29; Q7), with the same kind of update to the expected version.
 - **SC-009**: The developer task contract tests pass with an `ec2-ebs` runtime binding, and no
   developer task code reads the deployment mode (owner decision, 2026-09-28).
 - **SC-010**: One tool definition module serves the stdio server, proved by a test that compares the
@@ -965,6 +1034,34 @@ one. Eleven were accepted as recommended; one (6) was changed:
 12. **SC-008 and the API version. Accepted.** The expected `DEVELOPER_API_VERSION` in
     `tests/contract/developer-contracts.test.ts` changes from `"1.0"` to `"1.1"`. SC-008 means no
     assertion is removed or weakened.
+
+Owner decisions on the phase 25c build (binding, 2026-09-29). Building phase 25c (sharing, and the
+stuck-setup sweep) raised ten questions (plans/phase-25c-questions.md); the owner answered all ten.
+Q2 was changed, Q7 approved, Q10 raised during the build; the rest were accepted as recommended.
+Separately, the owner raised the stuck-setup limit from 15 to 50 minutes, because the instance
+provisioner allows 45 (FR-055, D21).
+
+1. **The view-only notice's words (FR-035). Accepted.** The fixed text FR-035 gives; a closed
+   task's thread gets its own first sentence and the same second one.
+2. **Who may switch a shared task's mode (FR-030). Changed.** The owning developer or an AgentX
+   admin, within the project's `shareMode` policy. The admin uses `agentx admin task share-mode` or
+   `POST /v1/admin/tasks/{taskId}/share-mode`, changes the mode only, and is audited by name.
+3. **A shared thread after the close (FR-035). Accepted.** The close posts "closed" and the thread
+   stops: later mentions get the closed notice, at most once an hour, and nothing runs.
+4. **Which setups the sweep covers (FR-055). Accepted.** Developer-task prepares only; Slack
+   thread setups keep their existing handling.
+5. **When the clock starts (FR-055). Accepted.** At the task's start (the prepare's creation). The
+   limit itself is 50 minutes.
+6. **Whether the start waits for the thread link (FR-030). Accepted.** No: the start and share
+   answer at once with `share_posting: true`, and `agentx_get_task` shows the link within seconds.
+7. **The developer API version (FR-048, SC-008). Approved.** `DEVELOPER_API_VERSION` moves to
+   `1.2`.
+8. **Stop in a continue thread (FR-054). Accepted.** A teammate's stop cancels the running task
+   operation, whoever started it.
+9. **Auditing a share (FR-037). Accepted.** A share or mode change writes an `accepted` record with
+   the new action `share`.
+10. **A private channel (FR-031). Refuse.** Sharing into a private bound channel needs the
+    developer to be a member of it.
 
 Decisions made in this spec, all owner-confirmed on 2026-09-27:
 
@@ -1102,10 +1199,53 @@ Decisions made in this spec, all owner-confirmed on 2026-09-27:
   2026-09-28). In 25b, a temporary AWS error while queuing a task's first instructions fails the
   start at once: the worker gives up after three silent callback attempts, and nothing else ends a
   prepare on a healthy instance, so retrying would leave the workspace stuck in setup with its slot
-  taken. A sweep in the existing reaper or reconciler that fails any prepare older than 15 minutes
-  covers this and every other cause (a lost callback, a hung worker), stays inside the control plane,
+  taken. A sweep in the existing reaper or reconciler that fails any prepare older than 50 minutes
+  (owner decision, 2026-09-29, raised from 15 minutes because the provisioner allows 45) covers this and every other cause (a lost callback, a hung worker), stays inside the control plane,
   and makes the retry safe. A "last attempt" field in the worker's callback was rejected: it covers
-  only this one case and changes the worker contract. FR-055 carries this, in 25c.
+  only this one case and changes the worker contract. FR-055 carries this, in 25c. The worker
+  retries a failed result callback three times after the first try, waiting about 2, 8 and 30
+  seconds (about 40 seconds in all, instead of 250 and 500 milliseconds), so a throttled or briefly
+  failing control plane has a real chance to accept the result before the 50-minute sweep ends the
+  setup (build ruling, 2026-09-29). This needs a new worker image to reach an install.
+- **D23. The notifier reads the state table's stream and posts from its own queue** (build
+  ruling C7, owner-approved with the phase 25c plan, 2026-09-29). The `DeveloperTaskNotifier` is
+  triggered by the state table's stream, filtered to task, pointer and developer-operation changes;
+  it turns each change into a notice on its own queue and posts from there, retrying for an hour.
+  Why not a send from the broker: the broker may not read the Slack secret (FR-034), a send inside
+  the broker's request would add Slack's latency and failures to every developer call, and a send
+  after the commit could be lost when the Lambda ends. The stream carries every committed change
+  exactly as stored, so nothing is posted for a change that did not commit, and nothing committed is
+  missed. It is the stream's second and last reader; later needs add filters.
+- **D24. A task's share state lives on the task, replaced whole under `shareVersion`** (build
+  ruling C1, owner-approved with the phase 25c plan, 2026-09-29). The share (mode, channel, reason,
+  thread, times) is one field of the developer task record. Every writer (the start, the share
+  route, the admin route, the notifier recording the thread, a close) replaces it whole on the
+  condition that `shareVersion` has not moved, and retries from a fresh read when it has. The
+  notifier records the thread on the task and writes the `SHARED_TASK` record in one transaction,
+  and a close that meets a changed share re-reads it, so the thread record never misses the close
+  (build ruling F4). Why: two writers merging parts of the share could leave a thread whose mode or
+  close the ingress never sees.
+- **D25. The broker resolves a continue thread to the task's owner key** (build ruling C11,
+  owner-approved with the phase 25c plan, 2026-09-29). When the Slack service asks for a shared
+  thread's workspace, the broker reads the `SHARED_TASK` record: in continue mode, on a channel that
+  still serves the task's project, the service identity acts on the task's workspace with the
+  task's owner key, and the teammate is the requester (FR-054). A view-only thread, a closed task's
+  thread, and a thread whose channel now serves another project answer `VIEW_ONLY` (with `closed`
+  set for a closed task), so no thread workspace is made for them and nothing runs. Why: the
+  existing thread machinery (queue, gate, conversation) then serves continue turns unchanged, and
+  the one place that decides who may act on the task is the broker.
+- **D26. The developer's own run stays private from a shared thread** (build ruling, 2026-09-29,
+  under D22). A teammate's orchestrator learns only that the task is busy, never the developer's
+  operation ID, and gets 404 for the developer's operations, events and artifacts, exactly as for an
+  unknown ID. The busy signal is still sent, so a teammate's turn waits for the developer's run
+  instead of colliding with it. FR-054 carries this.
+- **D27. A closing task still counts, and the Slack limit reply counts AI-tool tasks** (build
+  ruling, 2026-09-29; the 25b follow-up from owner decision 10). A task holds its workspace slot
+  until its close completes, so a closing task still counts toward the limit and toward the open
+  task count the Slack limit reply gives. When a member reaches the per-person limit, the Slack
+  reply also says how many of their workspaces are tasks started from an AI tool, and to close one
+  there with `agentx_close_task`. Only the count reaches the channel, never a task's title or ID
+  (D22).
 
 ## Assumptions and Scope
 

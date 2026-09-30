@@ -3,8 +3,11 @@ import { DEVELOPER_API_VERSION, apiVersionCompatible } from "@agentx/contracts";
 import type { ControlPlaneClient } from "./client.js";
 import { NEXT_STEPS, ToolError, UPGRADE_AGENTX_STEP, plainText } from "./errors.js";
 
-/** Developer tasks arrived in API 1.1; a 1.0 control plane has only GET /v1/dev/projects. */
-export const REQUIRED_SERVER_MINOR = 1;
+/**
+ * Developer tasks arrived in API 1.1 (a 1.0 control plane has only GET /v1/dev/projects).
+ * Spec 025 C20: the share route arrived in API 1.2.
+ */
+export const REQUIRED_SERVER_MINOR = 2;
 
 export interface Compatibility { env: string; apiVersion: string; notice?: string }
 
@@ -32,7 +35,7 @@ export function compatibilityChecker(client: ControlPlaneClient, options: { now?
     // Ruling S1: when AgentX, not this CLI, is the older side, only an admin can fix it.
     const agentxOlder = server !== undefined && (server[0] < mine[0] || (server[0] === mine[0] && server[1] < REQUIRED_SERVER_MINOR));
     if (agentxOlder) {
-      throw new ToolError("UPGRADE_REQUIRED", `${where} answers API ${served}, which is older than this CLI's ${DEVELOPER_API_VERSION} and has no developer tasks`, UPGRADE_AGENTX_STEP);
+      throw new ToolError("UPGRADE_REQUIRED", `${where} answers API ${served}, which is older than this CLI's ${DEVELOPER_API_VERSION} and lacks the task routes it needs`, UPGRADE_AGENTX_STEP);
     }
     if (!compatible) {
       throw new ToolError("UPGRADE_REQUIRED", `this CLI speaks AgentX API ${DEVELOPER_API_VERSION}, but ${where} answers ${served}`, NEXT_STEPS.UPGRADE_REQUIRED);

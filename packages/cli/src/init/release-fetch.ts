@@ -4,7 +4,7 @@
 // its entries are checked for containment (assertArchiveEntriesAreSafe, assertExtractedTreeIsContained).
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, sep } from "node:path";
-import { agentXError } from "@agentx/contracts";
+import { agentXError, ReleaseManifestSchema, type ReleaseManifest } from "@agentx/contracts";
 import type { CommandRunner } from "../deploy/cdk-engine.js";
 
 export const RELEASE_REPOSITORY = "PrepLabsAI/AgentX";
@@ -106,10 +106,14 @@ async function makeRemovable(path: string): Promise<void> {
  * cache and only renamed into place once it checks out, so a failed or interrupted fetch never
  * leaves a half-written release directory. `loadRelease` then checks every file's checksum.
  */
-export async function fetchRelease(input: { version: string | undefined; home: string; fetch: typeof fetch; runner: CommandRunner; write(line: string): void }): Promise<string> {
+export async function fetchRelease(input: { version: string | undefined; engine?: "templates" | "cdk" | undefined; home: string; fetch: typeof fetch; runner: CommandRunner; write(line: string): void }): Promise<string> {
   const { version } = input;
   if (version === undefined) {
-    throw agentXError("CONFIG_INVALID", "this agentx was built from source and has no published release to download; pass --release <dir> (npm run release:build builds one)");
+    // Live check L7: --source replaces the templates, not the release's images and notes.
+    const next = input.engine === "cdk"
+      ? "--engine cdk builds the stacks from --source, but still reads the release's images and notes from --release <dir>"
+      : "pass --release <dir>";
+    throw agentXError("CONFIG_INVALID", `this agentx was built from source and has no published release to download; ${next} (npm run release:build builds one)`);
   }
   const urls = releaseAssetUrls(version);
   const published = await download(input.fetch, urls.manifest, version);
@@ -147,4 +151,25 @@ export async function fetchRelease(input: { version: string | undefined; home: s
       input.write(`could not remove temporary files in ${scratch}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
+}
+
+/** A release's manifest: the local release cache when it holds that version, else the published
+ * release.json (read-only, 15-second limit). Undefined when neither can be read, or when what was
+ * read names another version: doctor then says it could not compare, and fails nothing. */
+export async function readReleaseManifest(input: { version: string; home: string; fetch: typeof fetch }): Promise<ReleaseManifest | undefined> {
+  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(input.version)) return undefined;
+  let text = await readFile(join(releaseCacheDir(input.home, input.version), "release.json"), "utf8").catch(() => undefined);
+  if (text === undefined) {
+    try {
+      const response = await input.fetch(releaseAssetUrls(input.version).manifest, { signal: AbortSignal.timeout(15_000) });
+      if (!response.ok) return undefined;
+      text = await response.text();
+    } catch {
+      return undefined;
+    }
+  }
+  let json: unknown;
+  try { json = JSON.parse(text); } catch { return undefined; }
+  const parsed = ReleaseManifestSchema.safeParse(json);
+  return parsed.success && parsed.data.version === input.version ? parsed.data : undefined;
 }

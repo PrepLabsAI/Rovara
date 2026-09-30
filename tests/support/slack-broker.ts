@@ -55,6 +55,8 @@ export function createBroker(options: {
   credentialRegistry?: CredentialRegistry;
   developer?: DeveloperApiConfiguration;
   turnRecordsTableName?: string;
+  /** The Slack threads table the broker reads a shared thread's waiting count from (spec 025 C14). */
+  slackThreadsTableName?: string;
   /** Artifact storage; a bare mock that answers nothing when absent. */
   s3?: { send: (command: never) => Promise<unknown> };
 } = {}) {
@@ -80,6 +82,7 @@ export function createBroker(options: {
     ...(options.credentialRegistry ? { credentialRegistry: options.credentialRegistry } : {}),
     ...(options.developer ? { developer: options.developer } : {}),
     ...(options.turnRecordsTableName ? { turnRecordsTableName: options.turnRecordsTableName } : {}),
+    ...(options.slackThreadsTableName ? { slackThreadsTableName: options.slackThreadsTableName } : {}),
     ...(options.slack === false
       ? {}
       : {

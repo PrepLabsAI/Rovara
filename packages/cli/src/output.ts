@@ -33,6 +33,12 @@ export function exitCodeForError(code: AgentXErrorCode): number {
   return 7;
 }
 
+/** An error's own words, without AgentXError's "CODE: " prefix. */
+export function plainMessage(error: unknown): string {
+  if (error instanceof AgentXError) return stripCodePrefix(error.message, error.code);
+  return error instanceof Error ? error.message : String(error);
+}
+
 function stripCodePrefix(message: string, code: string): string {
   const prefix = `${code}: `;
   return message.startsWith(prefix) ? message.slice(prefix.length) : message;

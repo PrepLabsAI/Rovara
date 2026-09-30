@@ -1,13 +1,16 @@
 // A hosted broker with developer sign-in for developer task tests: the Slack harness's fake table,
 // the payments project bound to the test channel, two signed-in developers, and worker callbacks.
 import { randomUUID } from "node:crypto";
+import { marshall } from "@aws-sdk/util-dynamodb";
 import { vi } from "vitest";
-import type { ChannelInfoRequest, ChannelInfoResponse, ChannelMembersRequest, ChannelMembersResponse } from "@agentx/contracts";
+import { sharedTaskKey, type ChannelInfoRequest, type ChannelInfoResponse, type ChannelMembersRequest, type ChannelMembersResponse } from "@agentx/contracts";
 import type { DeveloperApiConfiguration } from "../../packages/broker/src/aws/developer-routes.js";
 import type { DeveloperTaskActions } from "../../packages/broker/src/aws/developer-task-actions.js";
+import type { StreamRecord } from "../../packages/broker/src/developer/notifications.js";
 import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
 import { localSigner } from "./developer-fakes.js";
-import { SLACK_CHANNEL, SLACK_TEAM, call, createBroker, loadSlackBroker, registerSlackProject } from "./slack-broker.js";
+import type { FakeDynamoDb } from "./fake-dynamodb.js";
+import { SLACK_CHANNEL, SLACK_TEAM, call, createBroker, loadSlackBroker, orchestratorPrincipal, registerSlackProject, type Handler } from "./slack-broker.js";
 
 export const DEV_ISSUER = "https://abc123.execute-api.us-east-1.amazonaws.com/v1/auth";
 export interface Developer { developerId: string; name: string; provider: "slack" | "oidc"; sessionId: string; slackUserId?: string }
@@ -58,16 +61,17 @@ export async function createDeveloperTaskBroker(options: {
   /** null: the environment has no Slack team ID. */
   slackTeamId?: string | null;
   channelMembers?: (request: ChannelMembersRequest) => Promise<ChannelMembersResponse>;
-  channelInfo?: (request: ChannelInfoRequest) => Promise<ChannelInfoResponse>;
+  /** null: the environment has no channel-info lookup configured at all. */
+  channelInfo?: ((request: ChannelInfoRequest) => Promise<ChannelInfoResponse>) | null;
   register?: boolean;
 } = {}) {
   const module = await loadSlackBroker() as unknown as { createDeveloperTaskActions: (input: never) => DeveloperTaskActions };
   const channelMembers = vi.fn(options.channelMembers ?? (async (request: ChannelMembersRequest): Promise<ChannelMembersResponse> => ({ ok: true, memberOf: request.slackUserId === MAYA.slackUserId ? request.channelIds.filter((id) => id === SLACK_CHANNEL) : [] })));
-  const channelInfo = vi.fn(options.channelInfo ?? (async (request: ChannelInfoRequest): Promise<ChannelInfoResponse> => ({ ok: true, channels: request.channelIds.map((channelId) => ({ channelId, name: "payments-dev", isPrivate: false })) })));
+  const channelInfo = vi.fn((options.channelInfo === null ? undefined : options.channelInfo) ?? (async (request: ChannelInfoRequest): Promise<ChannelInfoResponse> => ({ ok: true, channels: request.channelIds.map((channelId) => ({ channelId, name: "payments-dev", isPrivate: false })) })));
   const developer: DeveloperApiConfiguration = {
     issuer: DEV_ISSUER, env: "staging", methods: { slack: true, oidc: true },
     ...(options.slackTeamId === null ? {} : { slackTeamId: options.slackTeamId ?? SLACK_TEAM }),
-    signInTableName: "signin", channelMembers, channelInfo,
+    signInTableName: "signin", channelMembers, ...(options.channelInfo === null ? {} : { channelInfo }),
     verifyAccessToken: developerTokenVerifier({ issuer: DEV_ISSUER, keys: async () => [await signer.publicJwk()], now: () => Date.now() }),
   };
   const s3 = memoryS3();
@@ -75,7 +79,7 @@ export async function createDeveloperTaskBroker(options: {
     s3,
     ...(options.memberLimit === undefined ? {} : { memberLimit: options.memberLimit }),
     ...(options.organizationLimit === undefined ? {} : { organizationLimit: options.organizationLimit }),
-    developer, turnRecordsTableName: "turns",
+    developer, turnRecordsTableName: "turns", slackThreadsTableName: "threads",
   });
   const actions = module.createDeveloperTaskActions(brokerInput as never);
   for (const who of [MAYA, OMAR]) {
@@ -119,4 +123,81 @@ export async function createDeveloperTaskBroker(options: {
     artifact: (workspaceId: string, operationId: string, name: string, content: string) =>
       callback(workspaceId, operationId, "artifacts", { name, mediaType: "text/plain", content }),
   };
+}
+
+const ADMIN = { subject: "admin-subject", admin: true };
+
+/** Binds another Slack channel of the test team to a project, as `agentx admin slack bind` does. */
+export async function bindChannel(handler: Handler, channelId: string, projectName = "payments"): Promise<void> {
+  const response = await call(handler, { method: "PUT", path: `/v1/admin/slack/bindings/${SLACK_TEAM}/${channelId}`, user: ADMIN, body: { projectName } });
+  if (response.status !== 200) throw new Error(`binding failed: ${JSON.stringify(response.body)}`);
+}
+
+export async function unbindChannel(handler: Handler, channelId: string): Promise<void> {
+  const response = await call(handler, { method: "DELETE", path: `/v1/admin/slack/bindings/${SLACK_TEAM}/${channelId}`, user: ADMIN });
+  if (response.status !== 200) throw new Error(`unbinding failed: ${JSON.stringify(response.body)}`);
+}
+
+/** Registers revision `revision` of payments with the given developerTasks, as an administrator (FR-014). */
+export async function registerRevision(handler: Handler, revision: number, developerTasks: Record<string, unknown>): Promise<void> {
+  const response = await call(handler, {
+    method: "POST", path: "/v1/admin/projects", user: ADMIN,
+    body: {
+      definition: {
+        name: "payments", revision,
+        repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "github-app" }],
+        setup: [], readiness: [], orchestratorInstructions: "Delegate work.", developerTasks,
+      },
+      runtimeBinding: { deploymentMode: "ec2-ebs", launchTemplateId: "lt-0123456789abcdef0", subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0123456789abcdef0" }], volumeSizeGiB: 20, volumeType: "gp3" },
+    },
+  });
+  if (response.status !== 201) throw new Error(`registration failed: ${JSON.stringify(response.body)}`);
+}
+
+/** An admin grant (FR-013), so access does not depend on a bound channel. */
+export function grantProject(db: FakeDynamoDb, who: Developer, projectName = "payments"): void {
+  db.set({ pk: `MEMBER#${who.developerId}`, sk: `PROJECT#${projectName}`, entityType: "MEMBERSHIP", ownerKey: who.developerId, projectName, role: "developer" });
+}
+
+/** What the notifier's start message leaves behind (Task 7): the thread on the task, and its record. */
+export function markThreadPosted(db: FakeDynamoDb, taskId: string, threadTs = "1695500000.000100"): string {
+  const task = db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { share: Record<string, unknown>; shareVersion: number; workspaceId: string; ownerKey: string; developerId: string; developerName: string; project: string };
+  const share = { ...task.share, threadTs };
+  db.set({ ...task, share, shareVersion: task.shareVersion + 1 });
+  const thread = { teamId: String(share.teamId), channelId: String(share.channelId), threadTs };
+  db.set({
+    ...sharedTaskKey(thread), entityType: "SHARED_TASK", taskId, workspaceId: task.workspaceId, ownerKey: task.ownerKey,
+    developerId: task.developerId, developerName: task.developerName, project: task.project, mode: share.mode, sharedAt: share.sharedAt,
+  });
+  return `${thread.teamId}/${thread.channelId}/${threadTs}`;
+}
+
+/** A teammate's request through the Slack orchestrator's service route, in a shared thread (FR-054). */
+export function teammate(handler: Handler, subject: string, slackUserId: string, method: string, path: string, body?: unknown, name?: string) {
+  return call(handler, {
+    method, path,
+    service: { principal: orchestratorPrincipal, thread: subject, slackUser: slackUserId },
+    ...(name === undefined ? {} : { headers: { "x-agentx-slack-user-name": encodeURIComponent(name) } }),
+    ...(body === undefined ? {} : { body }),
+  });
+}
+
+/** Every committed write since the last take(), as the state table's stream would deliver it. */
+export function recordStream(db: FakeDynamoDb): { take(): StreamRecord[] } {
+  let records: StreamRecord[] = [];
+  let sequence = 0;
+  const image = (item: Record<string, unknown>) => marshall(item, { removeUndefinedValues: true, convertClassInstanceToMap: true });
+  db.onWrite(({ before, after }) => {
+    sequence += 1;
+    records.push({
+      eventID: `event-${sequence}`,
+      eventName: before === undefined ? "INSERT" : after === undefined ? "REMOVE" : "MODIFY",
+      dynamodb: {
+        ApproximateCreationDateTime: Math.floor(Date.now() / 1000),
+        ...(after === undefined ? {} : { NewImage: image(after) }),
+        ...(before === undefined ? {} : { OldImage: image(before) }),
+      },
+    });
+  });
+  return { take: () => { const taken = records; records = []; return taken; } };
 }

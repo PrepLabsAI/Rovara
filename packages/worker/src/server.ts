@@ -22,8 +22,16 @@ export interface WorkerTerminalResult {
   error?: string;
 }
 
+/**
+ * Waits before each retry of a failed terminal callback: long enough to outlast real AWS
+ * throttling, so the broker's retry of a temporary error can succeed (about 40 s in all).
+ */
+export const TERMINAL_CALLBACK_RETRY_DELAYS_MS = [2_000, 8_000, 30_000] as const;
+
 export interface WorkerServerCallbacks {
   onTerminal?: (result: WorkerTerminalResult, invocation: WorkerInvocation) => Promise<void>;
+  /** Injectable wait between terminal callback retries; tests pass one that does not wait. */
+  retrySleep?: (ms: number) => Promise<void>;
 }
 
 export interface WorkerServerState {
@@ -166,15 +174,21 @@ async function reportTerminal(
   terminal: WorkerTerminalResult,
   invocation: WorkerInvocation,
 ): Promise<void> {
-  if (!state.callbacks.onTerminal) return;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  const { onTerminal, retrySleep = sleep } = state.callbacks;
+  if (!onTerminal) return;
+  for (let attempt = 0; attempt <= TERMINAL_CALLBACK_RETRY_DELAYS_MS.length; attempt += 1) {
     try {
-      await state.callbacks.onTerminal(terminal, invocation);
+      await onTerminal(terminal, invocation);
       return;
     } catch {
-      if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
+      const delay = TERMINAL_CALLBACK_RETRY_DELAYS_MS[attempt];
+      if (delay !== undefined) await retrySleep(delay);
     }
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function unauthorized(reason: InvokeRejection): Response {

@@ -16,10 +16,11 @@ import {
   type DeveloperTaskListItem,
   type DeveloperTaskStatus,
   type DeveloperTaskView,
+  type ShareDeveloperTaskRequest,
   type StartDeveloperTaskRequest,
 } from "@agentx/contracts";
 import { z } from "zod";
-import { CLOSE_BUSY_STEP, NEXT_STEPS, START_BUSY_STEP, ToolError, isMeaningfulCode, plainText, signInStep, toolErrorFromResponse } from "./errors.js";
+import { CLOSE_BUSY_STEP, NEXT_STEPS, SHARE_BUSY_STEP, START_BUSY_STEP, ToolError, isMeaningfulCode, plainText, signInStep, toolErrorFromResponse } from "./errors.js";
 
 export interface ControlPlaneSession { baseUrl: string; accessToken: string; signInCommand: string }
 
@@ -42,6 +43,8 @@ export interface ControlPlaneClient {
   cancelTask(taskId: string, requestId: string): Promise<DeveloperTaskView>;
   closeTask(taskId: string, requestId: string): Promise<DeveloperCloseResponse>;
   openPullRequest(taskId: string, request: DeveloperPullRequestRequest): Promise<DeveloperPullRequestResponse>;
+  /** Spec 025 FR-030: shares the task, or changes a shared task's mode (API 1.2). */
+  shareTask(taskId: string, request: ShareDeveloperTaskRequest): Promise<DeveloperTaskView>;
 }
 
 const ConfigurationSchema = z.object({ env: z.string(), apiVersion: z.string() });
@@ -204,5 +207,6 @@ export function httpControlPlaneClient(options: {
     cancelTask: async (taskId, requestId) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/cancel"), { requestId })),
     closeTask: (taskId, requestId) => call(DeveloperCloseResponseSchema, "POST", path(taskId, "/close"), { requestId }, true, { busyStep: CLOSE_BUSY_STEP }),
     openPullRequest: (taskId, request) => call(DeveloperPullRequestResponseSchema, "POST", path(taskId, "/pull-requests"), request),
+    shareTask: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/share"), request, true, { busyStep: SHARE_BUSY_STEP })),
   };
 }

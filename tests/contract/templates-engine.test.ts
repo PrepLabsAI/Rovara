@@ -697,6 +697,11 @@ describe("templates engine", () => {
     expect(fake.inputs("CreateChangeSet")).toEqual([]);
   });
 
+  it("offers agentx destroy for a stack in ROLLBACK_COMPLETE, as well as the exact delete", async () => {
+    const fake = fakeClients({ PutObject: [{}], DescribeStacks: [stack("ROLLBACK_COMPLETE")] });
+    await expect(deployer(fake).deploy(request("identity"))).rejects.toThrow("or remove the whole environment with agentx --env staging destroy --region us-east-1");
+  });
+
   it("treats REVIEW_IN_PROGRESS as a create", async () => {
     const fake = fakeClients({
       HeadObject: [{ Metadata: { sha256: sha256(zipBytes[RUNTIME_ASSET]!) } }],

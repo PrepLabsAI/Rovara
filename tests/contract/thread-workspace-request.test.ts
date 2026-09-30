@@ -6,6 +6,7 @@ describe("the Slack service's thread workspace request", () => {
     expect(threadWorkspaceRequest("request-1")).toEqual({
       requestId: "request-1", includeIntegrations: true, includeSettingsRevision: true, includeConnectors: true,
       includeAllConnectorTypes: true, includeRecoverableOperations: true, lazyPreparation: true, includeActionPolicy: true,
+      includeSharedTask: true, includeOpenTaskCount: true,
     });
   });
 });

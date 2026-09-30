@@ -25,6 +25,7 @@ import { listCredentials, registerCredential } from "./admin/credential.js";
 import { cliRuntimeBinding, registerProject } from "./admin/register.js";
 import { bindSlackChannel, unbindSlackChannel } from "./admin/slack.js";
 import { stopWorkspace } from "./admin/stop.js";
+import { setTaskShareMode } from "./admin/task-share-mode.js";
 import { cancelWorkspaceTask } from "./admin/cancel.js";
 import { exportTurns, parseSince } from "./admin/turns.js";
 import { loginWithPkce, openSystemBrowser, tokenStoreKey } from "./auth.js";
@@ -43,14 +44,23 @@ import { resolveDeploymentFile } from "./environments/cache.js";
 import { DEFAULT_CLASSIFIER_MODEL, DEFAULT_ORCHESTRATOR_MODEL, DEFAULT_WORKER_MODEL, type InitFlags } from "./init/answers.js";
 import { runInit, type InitCliDependencies, type InitOptions } from "./init/commands.js";
 import type { FinishFlags, SecretFlags } from "./init/context.js";
+import { INIT_STEP_IDS, type InitStepId } from "./init/install-state.js";
 import { parseConnectorsFlag } from "./init/finish-steps.js";
 import { runEnvAdopt, runEnvList, runEnvUse } from "./environments/commands.js";
 import { ssmParameterStore, type ParameterStore } from "./environments/parameter-store.js";
-import { settingsParameterName } from "./environments/settings.js";
+import { settingsParameterName, type EnvironmentSettings } from "./environments/settings.js";
 import { formatError, formatSuccess } from "./output.js";
 import { realSetupContext, type SetupCommandContext } from "./setup/command-context.js";
 import { registerSetupCommands } from "./setup/cli.js";
+import { registerConfigCommands } from "./config/cli.js";
+import type { ConfigServices } from "./config/commands.js";
+import { registerDoctorCommand } from "./doctor/cli.js";
+import type { DoctorServices } from "./doctor/checks.js";
 import { addSignInOptions, definedEntries, registerSigninCommands, secretSource, signInFlags, type SignInCommandOptions } from "./signin/cli.js";
+import { registerDestroyCommand } from "./destroy/cli.js";
+import type { DestroyDependencies } from "./destroy/run.js";
+import { registerUpgradeCommand } from "./upgrade/cli.js";
+import type { UpgradeDependencies } from "./upgrade/run.js";
 import { SIGNIN_FLAG_NAMES, type SigninFlags } from "./signin/collect.js";
 import type { SigninServices } from "./signin/commands.js";
 import { SystemCredentialTokenStore, type TokenStore } from "./token-store.js";
@@ -100,6 +110,14 @@ export interface CliDependencies {
   init?: InitCliDependencies;
   /** `agentx signin` overrides, for tests: never touch AWS, Slack or an identity provider. */
   signin?: Partial<SigninServices>;
+  /** `agentx config` overrides, for tests: never touch AWS. */
+  config?: Partial<ConfigServices>;
+  /** `agentx doctor` overrides, for tests: never touch AWS or a vendor. */
+  doctor?: { store?: ParameterStore; services?: (settings: EnvironmentSettings) => DoctorServices };
+  /** `agentx upgrade` overrides, for tests: never touch AWS or GitHub. */
+  upgrade?: Partial<UpgradeDependencies>;
+  /** `agentx destroy` overrides, for tests: never touch AWS. */
+  destroy?: Partial<DestroyDependencies>;
   /** `agentx workspaces` overrides, for tests: never reach the control plane or open a browser. */
   workspaces?: {
     read?: () => Promise<DeveloperWorkspacesResult>;
@@ -323,6 +341,22 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     ...(dependencies.signin === undefined ? {} : { overrides: dependencies.signin }),
     parameterStore, fetch: services.fetchImplementation, stdout: services.stdout, stderr: services.stderr,
   });
+  registerConfigCommands(program, { ...(dependencies.config === undefined ? {} : { overrides: dependencies.config }), parameterStore, fetch: services.fetchImplementation, stdout: services.stdout, stderr: services.stderr });
+
+  registerDoctorCommand(program, {
+    ...(dependencies.doctor?.store === undefined ? {} : { store: dependencies.doctor.store }),
+    ...(dependencies.doctor?.services === undefined ? {} : { services: dependencies.doctor.services }),
+    parameterStore, fetch: services.fetchImplementation, home, stdout: services.stdout, stderr: services.stderr,
+  });
+  registerUpgradeCommand(program, {
+    ...(dependencies.upgrade === undefined ? {} : { overrides: dependencies.upgrade }),
+    ...(dependencies.deploy === undefined ? {} : { deploy: dependencies.deploy }),
+    parameterStore, fetch: services.fetchImplementation, home, stdout: services.stdout, stderr: services.stderr,
+  });
+  registerDestroyCommand(program, {
+    ...(dependencies.destroy === undefined ? {} : { overrides: dependencies.destroy }),
+    parameterStore, stdin: dependencies.stdin ?? process.stdin, home, tokenStore: services.tokenStore, stdout: services.stdout, stderr: services.stderr,
+  });
 
   const admin = program.command("admin").description("administrator workflows");
   const adminProject = admin.command("project").description("administer registered projects");
@@ -542,6 +576,23 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       }
     });
 
+  const adminTask = admin.command("task").description("administer tasks started from AI tools");
+  adminTask
+    .command("share-mode")
+    .description("switch a shared task between view only and continue, within its project's policy")
+    .requiredOption("--task <task-id>", "the task to change")
+    .requiredOption("--mode <mode>", "view or continue")
+    .action(async (options: { task: string; mode: string }, command: Command) => {
+      if (options.mode !== "view" && options.mode !== "continue") throw agentXError("CONFIG_INVALID", "--mode must be view or continue");
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(options.task)) {
+        throw agentXError("CONFIG_INVALID", "--task must be a task ID, such as 44444444-4444-4444-8444-444444444444; agentx admin turns export shows task IDs");
+      }
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      const result = await setTaskShareMode({ controlPlaneUrl: settings.controlPlaneUrl, accessToken, taskId: options.task, mode: options.mode }, services.fetchImplementation);
+      services.stdout.write(formatSuccess(result, globals.json));
+    });
+
   registerSetupCommands(program, dependencies.setup ?? realSetupContext({
     parameterStore, fetch: services.fetchImplementation, tokenStore: services.tokenStore, stdout: services.stdout, stderr: services.stderr,
   }));
@@ -724,11 +775,14 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--asana-project <gid>", "the Asana project's GID"),
   )
     .addOption(new Option(`${SIGNIN_FLAG_NAMES.methods} <method>`, "how developers sign in: Slack (default), your company's sign-in (oidc), or both").choices(["slack", "oidc", "both"]))
+    // Checked in initOptions, not with .choices(): commander would exit the process on a bad value.
+    .option("--stop-after <step>", "run the steps up to and including this one, then stop; agentx init again finishes (for automated tests)")
     .action(async (
       options: InitCommandOptions & { export?: string },
       command: Command,
     ) => {
       const globals = globalOptions(command);
+      if (options.export !== undefined && options.stopAfter !== undefined) throw agentXError("CONFIG_INVALID", "--stop-after cannot be used with --export, which runs no init step; drop one of them");
       if (options.export === undefined) {
         const result = await runInit(initOptions(globals, options, command), dependencies.init ?? {}, { stderr: services.stderr, home });
         if (globals.json) {
@@ -737,6 +791,10 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         }
         if (result.status === "waiting") {
           services.stdout.write(`${result.message}\n`);
+          return;
+        }
+        if (result.stoppedAfter !== undefined) {
+          services.stdout.write(`Stopped after the ${result.stoppedAfter} step, as --stop-after asked. Run agentx init --env ${result.env} --region ${options.region ?? "<region>"} again to finish.\n`);
           return;
         }
         services.stdout.write(`${result.ready ?? `AgentX environment ${result.env} is deployed. Control plane: ${result.controlPlaneUrl ?? "unknown"}`}\n`);
@@ -910,7 +968,7 @@ function parsePort(value: string): number {
 
 interface InitCommandOptions extends SignInCommandOptions {
   region?: string; account?: string; release?: string; engine?: "templates" | "cdk"; source?: string;
-  resume: boolean; yes: boolean; browser: boolean; fromBundle?: string;
+  resume: boolean; yes: boolean; browser: boolean; fromBundle?: string; stopAfter?: string;
   /** --ui / --no-ui. Undefined when neither was given: in this release that is the terminal. */
   ui?: boolean;
   identity: "cognito" | "oidc"; oidcIssuer?: string; oidcAudience?: string; oidcClientId?: string; adminClaim?: string; adminValues?: string;
@@ -936,6 +994,10 @@ interface InitCommandOptions extends SignInCommandOptions {
  * --identity, --no-alerts's true) must never silently answer a question init would otherwise ask. */
 function initOptions(globals: GlobalOptions, options: InitCommandOptions, command: Command): InitOptions {
   const { env } = globals;
+  const { stopAfter } = options;
+  if (stopAfter !== undefined && !isInitStepId(stopAfter)) {
+    throw agentXError("CONFIG_INVALID", `--stop-after ${JSON.stringify(stopAfter)} names no init step; use one of: ${INIT_STEP_IDS.join(", ")}`);
+  }
   // A --connectors typo fails here, before anything is asked or deployed.
   if (options.connectors !== undefined) parseConnectorsFlag(options.connectors);
   const finishFlags = definedEntries<FinishFlags>({
@@ -1000,7 +1062,12 @@ function initOptions(globals: GlobalOptions, options: InitCommandOptions, comman
     ...(options.slackInstall === undefined ? {} : { slackInstall: options.slackInstall }),
     finishFlags,
     configDir: globals.configDir,
+    ...(stopAfter === undefined ? {} : { stopAfter }),
   };
+}
+
+function isInitStepId(value: string): value is InitStepId {
+  return (INIT_STEP_IDS as readonly string[]).includes(value);
 }
 
 function globalOptions(command: Command): GlobalOptions {

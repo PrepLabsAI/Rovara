@@ -18,15 +18,23 @@ export function preparationFailedMessage(status: string): string {
   return `AgentX could not set up this thread's workspace (${escapeText(status)}). Mention me again in this thread to retry.`;
 }
 
-export function limitMessage(result: { limit: SlackWorkspaceLimit; maximum: number; starterThreads: readonly SlackThread[] }): string {
+export function limitMessage(result: { limit: SlackWorkspaceLimit; maximum: number; starterThreads: readonly SlackThread[]; openTaskCount?: number | undefined }): string {
   if (result.limit === "ORGANIZATION") {
     return `This organization already has ${result.maximum} AgentX workspaces, the most allowed, so I can't start a new one. ` +
       "Continue in an existing thread, or ask an administrator to raise the limit.";
   }
+  const head = `You already have ${result.maximum} AgentX workspaces, the most one person can have, so I can't start a new one.`;
+  // C16: the member's AI-tool tasks count against the same limit. Only their number is said here:
+  // a task's title stays with its developer, never in the channel (D22).
+  const tasks = result.openTaskCount ?? 0;
+  if (result.starterThreads.length === 0 && tasks > 0) {
+    const which = tasks === 1 ? "One of them is a task" : `${tasks} of them are tasks`;
+    return `${head} ${which} started from an AI tool; close one there with agentx_close_task to free a workspace.`;
+  }
   const links = result.starterThreads.map((thread, index) => `• <${escapeText(slackThreadUrl(thread))}|Thread ${index + 1}>`);
   return [
-    `You already have ${result.maximum} AgentX workspaces, the most one person can have, so I can't start a new one. ` +
-      "Continue in one of your existing threads instead:",
+    `${head} Continue in one of your existing threads instead:`,
     ...links,
+    ...(tasks > 0 ? [`You also have ${tasks} task${tasks === 1 ? "" : "s"} started from an AI tool; closing one there with agentx_close_task frees a workspace.`] : []),
   ].join("\n");
 }

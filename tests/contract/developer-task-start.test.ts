@@ -3,8 +3,8 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { NEXT_STEPS } from "../../packages/mcp/src/index.js";
-import { MAYA, OMAR, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
-import { SLACK_CHANNEL, SLACK_TEAM, call, ensureWorkspace } from "../support/slack-broker.js";
+import { MAYA, OMAR, createDeveloperTaskBroker, grantProject, registerRevision, unbindChannel } from "../support/developer-task-broker.js";
+import { SLACK_CHANNEL, SLACK_TEAM, ensureWorkspace } from "../support/slack-broker.js";
 
 const start = (overrides: Record<string, unknown> = {}) => ({ requestId: randomUUID(), project: "payments", instructions: "Fix the flaky retry test", client: "claude-code", ...overrides });
 const workspaces = (db: { find(predicate: (item: Record<string, unknown>) => boolean): unknown[] }) => db.find((item) => item.entityType === "WORKSPACE");
@@ -104,15 +104,17 @@ describe("the start's refusals, in FR-018's order, before anything starts", () =
     expect(refusals(db).map((item) => (item.error as { code: string }).code)).toEqual(["PROJECT_TASKS_DISABLED"]);
   });
 
-  it("CHANNEL_REQUIRED, not yet available, for a start that asks to share or a project that requires it (R9)", async () => {
+  it("CHANNEL_REQUIRED when a share has no bound channel, for a start that asks or a project that requires it (C4)", async () => {
     const { db, handler, dev } = await createDeveloperTaskBroker();
+    grantProject(db, MAYA);
+    await unbindChannel(handler, SLACK_CHANNEL);
     const asked = await dev(MAYA, "POST", "/v1/dev/tasks", start({ shareToChannel: true, shareMode: "view" }));
     expect(asked.body.error).toMatchObject({ code: "CHANNEL_REQUIRED" });
-    expect(String((asked.body.error as { message: string }).message)).toContain("not available yet");
+    expect(String((asked.body.error as { message: string }).message)).toContain("has no Slack channel bound");
     await registerRevision(handler, 2, { share: "required" });
     const required = await dev(MAYA, "POST", "/v1/dev/tasks", start());
     expect(required.body.error).toMatchObject({ code: "CHANNEL_REQUIRED" });
-    expect(String((required.body.error as { message: string }).message)).toContain("requires");
+    expect(String((required.body.error as { message: string }).message)).toContain("has no Slack channel bound");
     expect(workspaces(db)).toHaveLength(0);
   });
 
@@ -217,18 +219,22 @@ describe("the start's audit records (R12)", () => {
   });
 
   it("names what is wrong in the refusal's message and leaves the next step to the MCP server, so it is said once", async () => {
-    const { handler, dev } = await createDeveloperTaskBroker();
+    const { db, handler, dev } = await createDeveloperTaskBroker();
+    grantProject(db, MAYA);
+    await unbindChannel(handler, SLACK_CHANNEL);
     const shared = await dev(MAYA, "POST", "/v1/dev/tasks", start({ shareToChannel: true }));
-    expect((shared.body.error as { message: string }).message).toBe("sharing tasks to Slack is not available yet in this AgentX");
+    expect((shared.body.error as { message: string }).message).toBe("project `payments` has no Slack channel bound to it, so the task cannot be shared");
     const missing = await dev(MAYA, "POST", "/v1/dev/tasks", start({ project: "nope" }));
     expect((missing.body.error as { message: string }).message).toBe("project `nope` doesn't exist in this AgentX");
     await registerRevision(handler, 2, { share: "required" });
     const required = await dev(MAYA, "POST", "/v1/dev/tasks", start());
-    expect((required.body.error as { message: string }).message).toBe("project `payments` requires tasks to be shared to its Slack channel, which this AgentX cannot do yet");
+    expect((required.body.error as { message: string }).message).toBe("project `payments` has no Slack channel bound to it, so the task cannot be shared");
   });
 
   it("writes the refused record for a refusal after the checks, with its error code and no workspace", async () => {
     const { db, handler, dev } = await createDeveloperTaskBroker();
+    grantProject(db, MAYA);
+    await unbindChannel(handler, SLACK_CHANNEL);
     await registerRevision(handler, 2, { share: "required" });
     await dev(MAYA, "POST", "/v1/dev/tasks", start());
     expect(workspaces(db)).toHaveLength(0);
@@ -389,19 +395,3 @@ describe("shared broker helpers (ruling F9)", () => {
     expect(source("broker-shared.ts")).toMatch(/export function isConditional/);
   });
 });
-
-/** Registers revision `revision` of payments with the given developerTasks, as an administrator. */
-async function registerRevision(handler: Parameters<typeof call>[0], revision: number, developerTasks: Record<string, unknown>) {
-  const response = await call(handler, {
-    method: "POST", path: "/v1/admin/projects", user: { subject: "admin-subject", admin: true },
-    body: {
-      definition: {
-        name: "payments", revision,
-        repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "github-app" }],
-        setup: [], readiness: [], orchestratorInstructions: "Delegate work.", developerTasks,
-      },
-      runtimeBinding: { deploymentMode: "ec2-ebs", launchTemplateId: "lt-0123456789abcdef0", subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0123456789abcdef0" }], volumeSizeGiB: 20, volumeType: "gp3" },
-    },
-  });
-  if (response.status !== 201) throw new Error(`registration failed: ${JSON.stringify(response.body)}`);
-}

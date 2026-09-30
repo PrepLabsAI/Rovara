@@ -51,6 +51,7 @@ orchestratorInstructions: Delegate every repository read, edit, build, and test 
 | `models` | no | The models a channel may choose from (below). |
 | `integrations` | no | Connector tools the orchestrator may use (below). |
 | `actionPolicy` | no | Rules that tighten or loosen which tool calls ask for confirmation (below). |
+| `developerTasks` | no | How the project treats tasks started from an AI tool (below). |
 
 A file that still has `schemaVersion`, `controlPlaneUrl`, `auth` or `environment` is refused, and
 the error names those fields. The first three moved to the deployment file; the release pins the
@@ -124,6 +125,32 @@ an optional `connector` and `whenArguments`, a `reason`, and exactly one of `out
 `ask` or `deny`) or `treatAs` (`read`, `create`, `change` or `destructive`). How rules combine
 with AgentX's built-in confirmations is described in
 [Actions that need your confirmation](../README.md#actions-that-need-your-confirmation).
+
+### Developer tasks
+
+```yaml
+developerTasks:
+  enabled: true
+  share: optional          # or required
+  shareMode:
+    default: view          # or continue
+    allowContinue: true
+  channelMembersMayUse: true
+```
+
+Every field is optional; the values above are the defaults, and a project without the block uses
+them.
+
+- `enabled`: whether developers may start tasks on this project from an AI tool.
+- `channelMembersMayUse`: whether members of the project's bound Slack channels may use it from
+  an AI tool. With `false`, only people an admin granted access to the project directly may.
+  Direct grants arrive with spec 025 phase 25e (the admin tool `agentx_admin_grant_project_access`);
+  until then, channel membership is the only way in, so leave this `true`.
+- `share`: with `required`, every task is shared into a bound channel when it starts.
+- `shareMode.default`: the mode a shared task gets when none is asked for.
+- `shareMode.allowContinue`: with `false`, every shared task is view only.
+
+See [Sharing a task to Slack](mcp-install.md#sharing-a-task-to-slack).
 
 ## Register and bind
 

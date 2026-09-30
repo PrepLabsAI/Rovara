@@ -11,7 +11,9 @@ export type DeployEvent =
   | { kind: "changes"; stackName: string; changes: ChangeSetChange[] }
   | { kind: "no-changes"; stackName: string }
   | { kind: "deploying"; stackName: string }
-  | { kind: "deployed"; stackName: string };
+  | { kind: "deployed"; stackName: string }
+  /** An upgrade kept these operator parameters' deployed values; `dropped` names ones this release no longer declares. Names only, never values. */
+  | { kind: "kept"; stackName: string; kept: string[]; dropped: string[] };
 
 export interface DeployRequest {
   part: DeployPart;

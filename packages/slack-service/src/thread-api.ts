@@ -39,10 +39,10 @@ export function createThreadApi(options: { controlPlaneUrl: string; signedFetch:
       return SlackThreadWorkspaceResultSchema.parse(await servicePost("/v1/threads/workspace", threadWorkspaceRequest(requestId), "thread workspace request failed"));
     },
     async prepareWorkspace(requestId) {
-      return SlackThreadPrepareResultSchema.parse(await servicePost("/v1/threads/workspace/prepare", { requestId }, "thread workspace preparation failed"));
+      return SlackThreadPrepareResultSchema.parse(await servicePost("/v1/threads/workspace/prepare", { requestId, includeOpenTaskCount: true, includeSharedTask: true }, "thread workspace preparation failed"));
     },
     async startClose(requestId) {
-      return SlackWorkspaceCloseStartResultSchema.parse(await servicePost("/v1/threads/workspace/close", { requestId }, "workspace close request failed"));
+      return SlackWorkspaceCloseStartResultSchema.parse(await servicePost("/v1/threads/workspace/close", { requestId, includeSharedTask: true }, "workspace close request failed"));
     },
     async completeClose(requestId, operationId) {
       return SlackWorkspaceCloseCompleteResultSchema.parse(

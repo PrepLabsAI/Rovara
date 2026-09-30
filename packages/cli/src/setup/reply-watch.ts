@@ -26,7 +26,8 @@ export async function waitForThreadedReply(input: {
   const started = input.now();
   const since = new Date(started - EARLY_MS).toISOString();
   const prefix = `${input.teamId}/${input.channelId}/`;
-  input.write(`In #${input.channelName}, post a message that mentions <@${input.botUserId}>, for example "<@${input.botUserId}> what can you do?". Waiting up to ${minutes} for AgentX to reply in its thread.`);
+  // Live check L2: a workspace that had an older AgentX app shows two bots with similar names.
+  input.write(`In #${input.channelName}, post a message that mentions the bot, for example "@<the bot> what can you do?". Type @ and pick the bot from Slack's mention list: a workspace that had an older AgentX app shows two bots with similar names, and this one's member ID is ${input.botUserId}. Waiting up to ${minutes} for AgentX to reply in its thread.`);
   for (;;) {
     const turns: WatchedTurn[] = [];
     await exportTurns({ ...input.session, since, write: (line) => { turns.push(JSON.parse(line) as WatchedTurn); } }, input.fetch);

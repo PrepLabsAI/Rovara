@@ -30,6 +30,7 @@ FROM public.ecr.aws/docker/library/node:22.23.2-bookworm-slim@sha256:83f487e0a63
 ARG TARGETARCH
 ARG DOCKER_VERSION=29.8.1
 ARG COMPOSE_VERSION=v5.5.1
+ARG UV_VERSION=0.12.20
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
@@ -46,14 +47,31 @@ RUN set -eu; \
     curl -fsSL -o /tmp/docker-compose "https://github.com/docker/compose/releases/download/$COMPOSE_VERSION/docker-compose-linux-$arch"; \
     echo "$compose_sha  /tmp/docker-compose" | sha256sum -c -; \
     install -D -m 0755 /tmp/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+# uv, which runs a Python repository's setup and tests. Pinned by the release's published SHA-256,
+# checked against the downloads (2026-09-29).
+RUN set -eu; \
+    case "$TARGETARCH" in \
+      arm64) uv_arch=aarch64; uv_sha=8a7aad7bc76a2fae5151566ff3e43eacce0b2a113d5e4de3e4afe3e58fa2441e ;; \
+      amd64) uv_arch=x86_64; uv_sha=6590717592ace991ff83a63fef799e3ad9d33ecc8f96c5d6bdd732496e79337f ;; \
+      *) echo "unsupported architecture $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/uv.tgz "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-$uv_arch-unknown-linux-gnu.tar.gz"; \
+    echo "$uv_sha  /tmp/uv.tgz" | sha256sum -c -; \
+    tar -xzf /tmp/uv.tgz -C /tmp; \
+    install -m 0755 "/tmp/uv-$uv_arch-unknown-linux-gnu/uv" /usr/local/bin/uv; \
+    install -m 0755 "/tmp/uv-$uv_arch-unknown-linux-gnu/uvx" /usr/local/bin/uvx
 
 FROM public.ecr.aws/docker/library/node:22.23.2-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
 
+# Python 3, pip and venv (Debian bookworm) so a Python repository's tests run; a project's
+# devcontainer (#121) is the route for anything else.
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates git openssh-client \
+    && apt-get install --yes --no-install-recommends ca-certificates git openssh-client python3 python3-pip python3-venv \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=tools /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=tools /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+COPY --from=tools /usr/local/bin/uv /usr/local/bin/uv
+COPY --from=tools /usr/local/bin/uvx /usr/local/bin/uvx
 WORKDIR /opt/agentx
 COPY --from=build /opt/agentx/node_modules ./node_modules
 COPY --from=build /opt/agentx/packages/model-runtime ./packages/model-runtime

@@ -311,7 +311,8 @@ describe("Slack sign-in support in the app (FR-044, R10, R11)", () => {
     const refused = fakeSlackApi({ authTest: async () => ({ ok: false, error: "invalid_auth" }) });
     let message = "";
     try { await readSlackTeamIdFromSecret({ secrets, api: refused, secretId: SLACK_SECRET }); } catch (error) { message = (error as Error).message; }
-    expect(message).toContain("Slack refused the stored bot token (invalid_auth); run the Slack app step of agentx init again");
+    // Live check L1: the same next step as doctor's bot token check; a finished init skips its Slack app step.
+    expect(message).toBe(`CONFIG_INVALID: Slack refused the stored bot token (invalid_auth); reinstall the Slack app (api.slack.com/apps, Install App), then store its new Bot User OAuth Token in ${SLACK_SECRET} (docs/day-two.md, "Replace the Slack bot token")`);
     expect(message).not.toContain(TEST_BOT_TOKEN);
   });
 

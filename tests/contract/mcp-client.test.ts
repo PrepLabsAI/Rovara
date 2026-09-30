@@ -1,7 +1,7 @@
 // tests/contract/mcp-client.test.ts
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { agentXError } from "@agentx/contracts";
-import { NEXT_STEPS, TOOL_ERROR_CODES, ToolError, UNEXPECTED_ANSWER_STEP, UPGRADE_AGENTX_STEP, httpControlPlaneClient, signInStep } from "../../packages/mcp/src/index.js";
+import { NEXT_STEPS, SHARE_BUSY_STEP, TOOL_ERROR_CODES, ToolError, UNEXPECTED_ANSWER_STEP, UPGRADE_AGENTX_STEP, httpControlPlaneClient, signInStep } from "../../packages/mcp/src/index.js";
 
 const TOKEN = "eyJhbGciOiJSUzI1NiJ9.planted-access-token.sig";
 const session = async () => ({ baseUrl: "https://agentx.example.test", accessToken: TOKEN, signInCommand: "npx @charterarc/agentx login https://agentx.example.test" });
@@ -25,6 +25,18 @@ describe("the control-plane client (FR-027)", () => {
     expect(new Headers(init.headers).get("authorization")).toBe(`Bearer ${TOKEN}`);
     expect(new Headers(init.headers).get("x-agentx-trace-id")).toBe("trace-1");
     expect(JSON.parse(init.body as string)).toEqual(start);
+  });
+
+  it("shares a task through the share route, and a busy answer says to try the share again (spec 025 C21)", async () => {
+    const request = { requestId: "33333333-3333-4333-8333-333333333333", shareMode: "continue" as const, channel: "#payments-dev" };
+    const fetch = vi.fn(async () => reply(200, { task: { ...view, shared: true, share: { mode: "continue", channelId: "C0123456789", sharedReason: "requested" } } }));
+    expect((await client(fetch).shareTask(view.taskId, request)).share).toMatchObject({ mode: "continue" });
+    const [url, init] = fetch.mock.calls[0]! as unknown as [string, RequestInit];
+    expect(url).toBe(`https://agentx.example.test/v1/dev/tasks/${view.taskId}/share`);
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string)).toEqual(request);
+    const busy = vi.fn(async () => reply(409, { error: { code: "WORKSPACE_BUSY", message: "the task changed while sharing; try agentx_share_task again" } }));
+    await expect(client(busy).shareTask(view.taskId, request)).rejects.toMatchObject({ code: "TASK_BUSY", nextStep: SHARE_BUSY_STEP });
   });
 
   it("reads the configuration without a token", async () => {
@@ -86,6 +98,7 @@ describe("the control-plane client (FR-027)", () => {
     ["WORKSPACE_NOT_READY", 409, "TASK_BUSY"],
     ["STALE_FENCE", 409, "TASK_BUSY"],
     ["CHANNEL_REQUIRED", 409, "CHANNEL_REQUIRED"],
+    ["CHANNEL_AMBIGUOUS", 409, "CHANNEL_AMBIGUOUS"],
     ["WORKSPACE_LIMIT", 409, "WORKSPACE_LIMIT"],
     ["SLACK_UNAVAILABLE", 503, "SLACK_UNAVAILABLE"],
     ["CONFIG_INVALID", 400, "INVALID_REQUEST"],
@@ -275,7 +288,8 @@ describe("the control-plane client (FR-027)", () => {
     expect(UPGRADE_AGENTX_STEP).toContain("ask your AgentX admin to upgrade AgentX");
   });
 
-  it("gives CHANNEL_REQUIRED a next step that fits a project which requires sharing as well as a start that asked to share", () => {
-    expect(NEXT_STEPS.CHANNEL_REQUIRED).toBe("use the project's Slack channel; if the project does not require sharing, start the task again without share_to_channel");
+  it("gives CHANNEL_REQUIRED and CHANNEL_AMBIGUOUS next steps that fit what is left once sharing exists (C21, ruling F22)", () => {
+    expect(NEXT_STEPS.CHANNEL_REQUIRED).toBe("send channel with one of the bound channels the message names, or ask an AgentX admin to bind one");
+    expect(NEXT_STEPS.CHANNEL_AMBIGUOUS).toBe("send channel with one of the channels the message names");
   });
 });

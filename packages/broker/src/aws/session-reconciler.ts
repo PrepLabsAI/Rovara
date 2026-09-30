@@ -13,6 +13,7 @@ import type { Ec2RuntimeBinding, WorkspaceSession, WorkspaceSessionState } from 
 import { requiredEnvironment } from "./lambda.js";
 import { failActiveOperation } from "./outbox-failure.js";
 import { SessionManager, workspaceBinding } from "./sessions.js";
+import { sweepStuckSetups } from "./stuck-setup.js";
 
 /** A just-launched instance or just-created volume is not judged until its session has recorded it. */
 export const GRACE_MS = 15 * 60_000;
@@ -38,6 +39,8 @@ export interface ReconcilerReport {
   requeued: string[];
   closedVolumesDeleted: string[];
   quarantinedVolumes: string[];
+  /** Spec 025 FR-055: workspaces whose developer-task setup the sweep failed this run. */
+  stuckSetups: string[];
 }
 
 export interface ReconcilerDependencies {
@@ -57,6 +60,8 @@ export interface ReconcilerDependencies {
   closedAt: (workspaceId: string) => Promise<string | undefined>;
   binding: (workspaceId: string) => Promise<Ec2RuntimeBinding | undefined>;
   emit: (metrics: Record<string, number>) => void;
+  /** Spec 025 FR-055: fails developer-task prepares 50 minutes old; absent in tests that do not need it. */
+  sweepStuckSetups?: (now: Date) => Promise<{ failed: string[] }>;
   now?: () => Date;
   log?: (entry: Record<string, unknown>) => void;
 }
@@ -77,7 +82,7 @@ export function createReconcilerHandler(dependencies: ReconcilerDependencies) {
     const now = (dependencies.now?.() ?? new Date()).getTime();
     const report: ReconcilerReport = {
       orphanInstances: [], lostInstances: [], unresponsiveInstances: [], stuckProvisioning: [], restartedProvisioning: [],
-      stuckDeleting: [], requeued: [], closedVolumesDeleted: [], quarantinedVolumes: [],
+      stuckDeleting: [], requeued: [], closedVolumesDeleted: [], quarantinedVolumes: [], stuckSetups: [],
     };
     const sessions = new Map<string, WorkspaceSession>();
     for (const state of LIVE_STATES) {
@@ -135,6 +140,20 @@ export function createReconcilerHandler(dependencies: ReconcilerDependencies) {
       log({ event: "reconciler.volume_quarantined", volumeId: volume.volumeId, workspaceId: volume.workspaceId });
     }
 
+    // FR-055, C17: last, so a failure here never stops the EC2 repairs above. A failed sweep is
+    // logged (its error name only) and counted, the metrics are still emitted (F17), and the run
+    // then fails so the existing SessionReconcilerErrors alarm still sees it.
+    let sweepError: Error | undefined;
+    if (dependencies.sweepStuckSetups !== undefined) {
+      try {
+        // The sweep logs each failed setup itself (stuck_setup.failed), so nothing is repeated here.
+        report.stuckSetups = (await dependencies.sweepStuckSetups(new Date(now))).failed;
+      } catch (error) {
+        sweepError = error instanceof Error ? error : new Error("stuck-setup sweep failed");
+        log({ event: "reconciler.stuck_setup_sweep_failed", errorName: error instanceof Error ? error.name : "unknown" });
+      }
+    }
+
     dependencies.emit({
       ReconcilerOrphanInstances: report.orphanInstances.length,
       ReconcilerLostInstances: report.lostInstances.length,
@@ -144,7 +163,10 @@ export function createReconcilerHandler(dependencies: ReconcilerDependencies) {
       ReconcilerRequeued: report.requeued.length,
       ReconcilerClosedVolumesDeleted: report.closedVolumesDeleted.length,
       ReconcilerQuarantinedVolumes: report.quarantinedVolumes.length,
+      ReconcilerStuckSetups: report.stuckSetups.length,
+      ReconcilerStuckSetupErrors: sweepError === undefined ? 0 : 1,
     });
+    if (sweepError !== undefined) throw sweepError;
     return report;
   };
 }
@@ -343,6 +365,7 @@ export const handler = createReconcilerHandler({
     return item?.status === "CLOSED" ? item.closedAt : undefined;
   },
   binding: (workspaceId) => workspaceBinding(documentClient, tableName, workspaceId),
+  sweepStuckSetups: (now) => sweepStuckSetups(documentClient, tableName, now, (entry) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }))),
   emit(metrics) {
     console.log(JSON.stringify({
       _aws: {

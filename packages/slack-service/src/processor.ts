@@ -1,4 +1,6 @@
 import {
+  CLOSED_SHARED_NOTICE,
+  VIEW_ONLY_NOTICE,
   detailsButtonValue,
   detailsReplyBlocks,
   slackThreadSubject,
@@ -28,6 +30,7 @@ import { NEW_WORKSPACE_MESSAGE, STILL_PREPARING_MESSAGE, limitMessage, preparati
 import { escapeText, slackReplyText } from "./slack-format.js";
 import { buildTurnRecord, emitTurnMetrics, type TurnDraft, type TurnRecordSink } from "./turn-records.js";
 import { matchApprovedModel, modelName, modelOptionsMessage, parseModelCommand } from "./model-command.js";
+import { SHARED_CLOSE_REFUSED_MESSAGE, SHARED_SETUP_FAILED_MESSAGE, TASK_STILL_BUSY_MESSAGE, taskBusy, waitForIdleTask } from "./shared-task.js";
 
 export interface ThreadServiceApi {
   ensureWorkspace(requestId: string): Promise<SlackThreadWorkspaceResult>;
@@ -59,6 +62,11 @@ export interface ThreadStore {
   finish(subject: string): Promise<void>;
   /** Remembers the connectors whose next discovery should ask for a refresh; an empty list clears them. */
   saveRefreshConnectors?(subject: string, connectors: string[]): Promise<void>;
+  /**
+   * C10: claims the shared thread's hourly notice (the ingress's marker); true when this caller may
+   * post it. Absent: the notice is posted every time a view-only or closed thread's message is processed.
+   */
+  claimSharedNotice?(subject: string, nowSeconds: number, kind: "view" | "closed"): Promise<boolean>;
 }
 
 export interface TurnInput {
@@ -104,6 +112,8 @@ export interface ProcessorDependencies {
    * without it, replies are text only, exactly as before.
    */
   postWithBlocks?: (thread: SlackThread, text: string, blocks: unknown[]) => Promise<void>;
+  /** C13: a Slack member's display name, for a continue-mode turn's record. */
+  userName?: (userId: string) => Promise<string | undefined>;
 }
 
 /** Where a reply's Details button points, and how to post it. */
@@ -195,6 +205,11 @@ export async function processSlackRequest(
         finished = true;
         return;
       }
+      if (started.outcome === "REFUSED") {
+        await post(SHARED_CLOSE_REFUSED_MESSAGE);
+        finished = true;
+        return;
+      }
       draft.workspaceId = started.workspaceId;
       if (started.outcome === "CLOSED") {
         await dependencies.threads.close(subject, { workspaceId: started.workspaceId, closedAt: started.closedAt });
@@ -239,11 +254,46 @@ export async function processSlackRequest(
       }
       confirmation = check;
     }
-    const workspace = await api.ensureWorkspace(deterministicUuid(`${message.eventId}:workspace`));
+    const workspaceRequestId = deterministicUuid(`${message.eventId}:workspace`);
+    let workspace = await api.ensureWorkspace(workspaceRequestId);
+    // Spec 025 FR-054, C12: a continue thread's turn starts only once the task's workspace is idle.
+    if (taskBusy(workspace) && workspace.sharedTask !== undefined) {
+      const taskId = workspace.sharedTask.taskId;
+      const idle = await waitForIdleTask({ api, requestId: workspaceRequestId, first: workspace, post, log, eventId: message.eventId, now, announce: options.redelivered !== true });
+      if (idle === "BUSY") {
+        draft.disposition = "workspace_unavailable";
+        draft.taskId = taskId;
+        log("shared_task.still_busy", { eventId: message.eventId });
+        await post(TASK_STILL_BUSY_MESSAGE);
+        finished = true;
+        return;
+      }
+      workspace = idle;
+      // The member was told to wait, so the start is said again (spec 014 FR-026).
+      waitedForSetup = true;
+    }
     if (workspace.outcome === "LIMIT_REACHED") {
       draft.disposition = "workspace_limit";
       log("request.limit_reached", { eventId: message.eventId, limit: workspace.limit, maximum: workspace.maximum });
       await post(limitMessage(workspace));
+      finished = true;
+      return;
+    }
+    // C10: a view-only or closed shared thread; the message was queued before the switch.
+    if (workspace.outcome === "VIEW_ONLY") {
+      draft.disposition = "workspace_unavailable";
+      draft.taskId = workspace.taskId;
+      let notify = true;
+      if (dependencies.threads.claimSharedNotice !== undefined) {
+        try {
+          notify = await dependencies.threads.claimSharedNotice(subject, Math.floor(now() / 1000), workspace.closed ? "closed" : "view");
+        } catch (error) {
+          log("shared_task.notice_claim_failed", { eventId: message.eventId, errorName: errorName(error) });
+          notify = false;
+        }
+      }
+      log("shared_task.not_run", { eventId: message.eventId, closed: workspace.closed, notified: notify });
+      if (notify) await post(workspace.closed ? CLOSED_SHARED_NOTICE : VIEW_ONLY_NOTICE);
       finished = true;
       return;
     }
@@ -255,6 +305,13 @@ export async function processSlackRequest(
       return;
     }
     if (workspace.settingsRevision !== undefined) draft.settingsRevision = workspace.settingsRevision;
+    // C13: a continue-mode turn names its task and the teammate on its record.
+    const shared = workspace.sharedTask;
+    if (shared !== undefined) {
+      draft.taskId = shared.taskId;
+      const name = (await dependencies.userName?.(message.userId).catch(() => undefined))?.trim().slice(0, 80);
+      if (name) draft.requesterName = name;
+    }
     if (workspace.status === "PREPARING" && workspace.operationId) {
       await post(workspace.created ? NEW_WORKSPACE_MESSAGE : STILL_PREPARING_MESSAGE);
       const prepared = await api.waitForOperation(workspace.workspaceId, workspace.operationId);
@@ -269,6 +326,13 @@ export async function processSlackRequest(
     } else if (workspace.status !== "UNPREPARED" && !RUNNABLE_STATUSES.has(workspace.status)) {
       draft.disposition = "workspace_unavailable";
       log("workspace.unavailable", { eventId: message.eventId, status: workspace.status });
+      // Final review M5: a shared task's failed setup is never retried from the thread (C11), so
+      // mentioning again cannot help; only its developer can start the task again.
+      if (shared !== undefined && workspace.status === "PREPARATION_FAILED") {
+        await post(SHARED_SETUP_FAILED_MESSAGE);
+        finished = true;
+        return;
+      }
       await post(`This thread's workspace is not available right now (${escapeText(workspace.status)}). Mention me again later to retry.`);
       finished = true;
       return;
@@ -376,7 +440,9 @@ export async function processSlackRequest(
       }
     }
     if (!quiet) {
-      const chunks = splitSlackMessage(slackReplyText(response));
+      // C13: in a continue thread, the reply names the teammate it answers.
+      const mention = shared === undefined ? "" : `<@${message.userId}> `;
+      const chunks = splitSlackMessage(`${mention}${slackReplyText(response)}`);
       const details = replyDetails(dependencies, recorder, message);
       for (const [index, chunk] of chunks.entries()) {
         if (details !== undefined && index === chunks.length - 1) await postWithDetails(details, chunk);

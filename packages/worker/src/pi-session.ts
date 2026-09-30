@@ -23,6 +23,7 @@ import {
   appendRepositoryContextFiles,
   loadRepositoryContextFiles,
   readPreparedRepositories,
+  workspaceRepositoriesNote,
   type RepositoryContextFile,
 } from "./repository-context.js";
 import type { PiCacheRetention } from "./usage.js";
@@ -56,7 +57,7 @@ export interface PiSessionInput {
   sessionDirectory: string;
   agentDirectory: string;
   model: WorkspaceModelConfiguration;
-  /** Each prepared repository's own context file, which Pi cannot discover from the root. */
+  /** AgentX's workspace note, then each prepared repository's own context file, which Pi cannot discover from the root. */
   contextFiles: RepositoryContextFile[];
   /** Where the agent's shell runs instead of the worker: the project's devcontainer (#121). */
   bashOperations?: BashOperations;
@@ -266,7 +267,10 @@ async function loadWorkspaceContextFiles(
   const repositories = await readPreparedRepositories(rootPath);
   const { files, diagnostics } = await loadRepositoryContextFiles(rootPath, repositories);
   for (const diagnostic of diagnostics) onDiagnostic?.(diagnostic);
-  return devcontainerPaths === undefined ? files : [...files, devcontainerContextFile(devcontainerPaths)];
+  // AgentX's note comes first and is present with or without the repositories' own files.
+  const note = workspaceRepositoriesNote(repositories);
+  const loaded = note === undefined ? files : [note, ...files];
+  return devcontainerPaths === undefined ? loaded : [...loaded, devcontainerContextFile(devcontainerPaths)];
 }
 
 function assertContained(parent: string, child: string): void {

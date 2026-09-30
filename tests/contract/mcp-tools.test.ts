@@ -22,7 +22,7 @@ async function connect(client: Partial<ControlPlaneClient>, overrides: Partial<T
   const context = (name: string | undefined): ToolContext => ({
     client: client as ControlPlaneClient, clientName: name, serverVersion: "0.4.0",
     adminSignedIn: async () => false,
-    compatibility: async () => ({ env: "staging", apiVersion: "1.1" }),
+    compatibility: async () => ({ env: "staging", apiVersion: "1.2" }),
     now: () => now, sleep: async (ms) => { now += ms; await new Promise((resolve) => setTimeout(resolve, 1)); },
     newRequestId: () => "33333333-3333-4333-8333-333333333333",
     ...overrides,
@@ -41,7 +41,7 @@ describe("the tool list (FR-027, FR-028, SC-010)", () => {
     expect(tools.map((tool) => tool.name)).toEqual(DEVELOPER_TOOLS.map((tool) => tool.name));
     expect(tools.map((tool) => tool.name)).toEqual([
       "agentx_whoami", "agentx_list_projects", "agentx_start_task", "agentx_get_task", "agentx_wait_for_task",
-      "agentx_list_tasks", "agentx_continue_task", "agentx_cancel_task", "agentx_close_task", "agentx_open_pull_request",
+      "agentx_list_tasks", "agentx_continue_task", "agentx_cancel_task", "agentx_close_task", "agentx_share_task", "agentx_open_pull_request",
     ]);
     for (const tool of tools) expect(tool.outputSchema, tool.name).toBeDefined();
     expect(JSON.stringify(tools)).not.toContain("\u2014");
@@ -58,9 +58,9 @@ describe("the tool list (FR-027, FR-028, SC-010)", () => {
     }
   });
 
-  it("offers no share tool and no admin tool in this phase", async () => {
+  it("offers the owner's share tool and no admin tool in this phase (Q2: an admin switches a mode with the CLI)", async () => {
     const { tools } = await (await connect({})).listTools();
-    expect(tools.map((tool) => tool.name).filter((name) => name.includes("share") || name.includes("admin"))).toEqual([]);
+    expect(tools.map((tool) => tool.name).filter((name) => name.includes("share") || name.includes("admin"))).toEqual(["agentx_share_task"]);
   });
 });
 
@@ -411,8 +411,8 @@ describe("versions (FR-048, R23, ruling S1)", () => {
 
   const configured = (apiVersion: string) => ({ configuration: vi.fn(async () => ({ env: "staging", apiVersion, baseUrl: "https://agentx.example.test" })) });
 
-  it("needs minor version 1: a 1.0 control plane asks for an AgentX upgrade (ruling S1)", async () => {
-    expect(REQUIRED_SERVER_MINOR).toBe(1);
+  it("needs minor version 2: a 1.0 control plane asks for an AgentX upgrade (ruling S1)", async () => {
+    expect(REQUIRED_SERVER_MINOR).toBe(2);
     const failure = await compatibilityChecker(configured("1.0") as unknown as ControlPlaneClient)().catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(ToolError);
     expect(failure).toMatchObject({ code: "UPGRADE_REQUIRED", nextStep: UPGRADE_AGENTX_STEP });
@@ -423,8 +423,10 @@ describe("versions (FR-048, R23, ruling S1)", () => {
     await expect(compatibilityChecker(configured("0.9") as unknown as ControlPlaneClient)()).rejects.toMatchObject({ code: "UPGRADE_REQUIRED", nextStep: UPGRADE_AGENTX_STEP });
   });
 
-  it("works with 1.1 and gives a notice for a newer minor", async () => {
-    expect(await compatibilityChecker(configured("1.1") as unknown as ControlPlaneClient)()).toEqual({ env: "staging", apiVersion: "1.1" });
+  it("works with 1.2 and gives a notice for a newer minor", async () => {
+    expect(await compatibilityChecker(configured("1.2") as unknown as ControlPlaneClient)()).toEqual({ env: "staging", apiVersion: "1.2" });
+    // C20: a 25b control plane (1.1) has no share route, so only an AgentX upgrade helps.
+    await expect(compatibilityChecker(configured("1.1") as unknown as ControlPlaneClient)()).rejects.toMatchObject({ code: "UPGRADE_REQUIRED", nextStep: UPGRADE_AGENTX_STEP });
     const newer = await compatibilityChecker(configured("1.3") as unknown as ControlPlaneClient)();
     expect(newer).toMatchObject({ env: "staging", apiVersion: "1.3" });
     expect(newer.notice).toContain("mcp install");
@@ -432,7 +434,7 @@ describe("versions (FR-048, R23, ruling S1)", () => {
 
   it("asks AgentX again only after 10 minutes, and never keeps a refusal", async () => {
     let now = 0;
-    const client = configured("1.1");
+    const client = configured("1.2");
     const check = compatibilityChecker(client as unknown as ControlPlaneClient, { now: () => now });
     await check();
     now = 599_999;

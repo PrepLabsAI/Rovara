@@ -2,7 +2,7 @@
 // broker builds it (createDeveloperTaskActions) over the existing handlers, so the routes never
 // reach into broker.ts internals.
 import type { TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
-import type { Operation, OperationRequest, PullRequestRequest, WorkspaceInstance } from "@agentx/contracts";
+import type { ChannelTurn, Operation, OperationRequest, PullRequestRequest, WorkspaceInstance } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import type { StoredEvent } from "../developer/task-records.js";
 import type { RegisteredProjectRecord } from "./broker.js";
@@ -50,4 +50,11 @@ export interface DeveloperTaskActions {
   deleteCompute(workspace: WorkspaceInstance): Promise<void>;
   /** Writes items in one transaction. Unchecked: callers must load the owned task and check project access first. */
   transact(items: TransactItems): Promise<void>;
+  /** C15: the shared thread's Slack turn records that name this task, newest first, at most `limit`. Unchecked: callers must load the owned task first. */
+  channelTurns(threadSubject: string, taskId: string, limit: number): Promise<ChannelTurn[]>;
+  /**
+   * C14: who started this operation from the shared thread, if a teammate did, and at least how many
+   * channel messages wait behind it (F18: a floor). Unchecked: callers must load the owned task first.
+   */
+  channelActivity(input: { taskId: string; operationId: string; threadSubject: string }): Promise<{ driver?: { slackUserId: string; name?: string }; waiting: number }>;
 }

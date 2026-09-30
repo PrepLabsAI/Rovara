@@ -32,6 +32,14 @@ const unreadableLockMessage = (env: string, name: string) =>
 
 const heldMessage = (env: string, held: LockRecord) => `environment ${env} is locked by ${held.holder} running "${held.command}" since ${held.acquiredAt}`;
 
+/** What to do about a lock another command holds right now. */
+const WAIT_AND_RETRY = "wait for it to finish, then run the same agentx command again";
+
+/** For a fresh lock whose command may have been killed: any caller of any command gets it, including
+ * one (config set, env adopt) that never offers a takeover itself. */
+const notRunningNote = (name: string) =>
+  `If it is no longer running, agentx init, upgrade and destroy offer a takeover once the lock is 2 hours old, or delete it now (aws ssm delete-parameter --name ${name} --region <region>)`;
+
 /**
  * Another command already took the stale lock before we could (racedHeld is what it now holds), or
  * the stale lock was simply released while we waited for takeover confirmation (racedHeld is
@@ -40,7 +48,7 @@ const heldMessage = (env: string, held: LockRecord) => `environment ${env} is lo
 const takeoverRaceMessage = (env: string, racedHeld: LockRecord | undefined) =>
   racedHeld === undefined
     ? `environment ${env}'s lock was released while this command waited for takeover confirmation; run the command again`
-    : `${heldMessage(env, racedHeld)}, which took over the lock first`;
+    : `${heldMessage(env, racedHeld)}, which took over the lock first; ${WAIT_AND_RETRY}`;
 
 /**
  * By the time we tried to re-create the lock, another command's own createOnly put had already
@@ -52,7 +60,7 @@ const takeoverRaceMessage = (env: string, racedHeld: LockRecord | undefined) =>
 const postDeleteRaceMessage = (env: string, racedHeld: LockRecord | undefined) =>
   racedHeld === undefined
     ? `environment ${env}'s lock was acquired and released by another command between this command's delete and re-create; run the command again`
-    : `${heldMessage(env, racedHeld)}, which acquired the lock between this command's delete and re-create`;
+    : `${heldMessage(env, racedHeld)}, which acquired the lock between this command's delete and re-create; ${WAIT_AND_RETRY}`;
 
 /**
  * The lock we held was replaced by someone else's takeover while our own work was still running
@@ -106,7 +114,7 @@ export async function withEnvironmentLock<T>(input: {
 
     const stale = now() - Date.parse(held.acquiredAt) > STALE_LOCK_MS;
     const ownEarlierRun = input.takeOverOwn === true && held.holder === input.holder && held.command === input.command;
-    if (!stale && !ownEarlierRun) throw agentXError("CONFIG_INVALID", heldMessage(input.env, held));
+    if (!stale && !ownEarlierRun) throw agentXError("CONFIG_INVALID", `${heldMessage(input.env, held)}; ${WAIT_AND_RETRY}. ${notRunningNote(name)}`);
     const why = stale
       ? "older than 2 hours"
       : `your own earlier "${held.command}"; confirm the takeover only if that run is no longer going`;

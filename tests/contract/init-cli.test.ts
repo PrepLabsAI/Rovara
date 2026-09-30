@@ -153,6 +153,44 @@ describe("agentx init", () => {
     expect(initSteps({ github: fakeGitHubApi(), slack: fakeSlackApi() }).map((step) => step.id)).toEqual([...INIT_STEP_IDS]);
   });
 
+  it("stops after the step --stop-after names, records it, and says how to finish", async () => {
+    const h = await harness();
+    expect(await h.run(["--stop-after", "developer-signin"], { prompter: scriptedPrompter([...FIRST_RUN, ...SLACK, ...SIGNIN]) })).toBe(0);
+    const progress = await readInstallProgress(h.store, "staging");
+    expect(progress?.steps["developer-signin"]?.status).toBe("done");
+    expect(progress?.steps["admin-user"]).toBeUndefined();
+    expect(h.printed()).toContain("Stopped after the developer-signin step, as --stop-after asked. Run agentx init --env staging --region us-east-1 again to finish.");
+    expect(h.store.values.has(lockParameterName("staging"))).toBe(false);
+  });
+
+  it("finishes a run --stop-after cut short on the next plain run, from the step after the one it named", async () => {
+    const h = await harness();
+    expect(await h.run(["--stop-after", "developer-signin"], { prompter: scriptedPrompter([...FIRST_RUN, ...SLACK, ...SIGNIN]) })).toBe(0);
+    const mark = h.mark();
+    const prompter = scriptedPrompter([...FINISH]);
+    expect(await h.run(["--json"], { prompter })).toBe(0);
+    expect(prompter.remaining()).toBe(0);
+    const result = (JSON.parse(h.printedSince(mark).split("\n").find((line) => line.startsWith("{\"ok\"")) ?? "{}") as { data?: { status: string; ran: string[]; skipped: string[]; stoppedAfter?: string } }).data;
+    expect(result?.status).toBe("complete");
+    expect(result?.ran).toContain("admin-user");
+    const beforeStop = ["access", "core", "github-app", "control-plane", "slack-app", "slack-service", "developer-signin"];
+    expect(result?.skipped).toEqual(expect.arrayContaining(beforeStop));
+    expect(result?.ran.filter((id) => beforeStop.includes(id))).toEqual([]);
+    expect(result?.stoppedAfter).toBeUndefined();
+  });
+
+  it("refuses --stop-after with --export, which runs no init step", async () => {
+    const h = await harness();
+    expect(await h.run(["--export", join(h.home, "bundle"), "--stop-after", "developer-signin"], { prompter: scriptedPrompter([]) })).not.toBe(0);
+    expect(h.printed()).toContain("--stop-after cannot be used with --export");
+  });
+
+  it("refuses a --stop-after that names no step", async () => {
+    const h = await harness();
+    expect(await h.run(["--stop-after", "everything"], { prompter: scriptedPrompter([]) })).not.toBe(0);
+    expect(h.printed()).toContain("--stop-after");
+  });
+
   it("a first run asks, checks, shows the plan, deploys every stack, creates both apps, writes settings and the local cache, and ends on a threaded Slack reply", async () => {
     // The harness's finishing services (F15): one repository, the payments channel, a confirmed
     // alert subscription and the $100 budget FIRST_RUN takes (F16), and a turn received a day later.
@@ -540,7 +578,7 @@ describe("agentx init", () => {
     h.store.values.set(lockParameterName("staging"), JSON.stringify({ holder: "arn:aws:sts::123456789012:assumed-role/Admin/bob", command: "deploy install", acquiredAt: new Date(T0).toISOString() }));
     const code = await h.run([...UNATTENDED, "--alert-webhook-env", "HOOK"], { processEnv: { ...UNATTENDED_ENV, HOOK: WEBHOOK } });
     expect(code).toBe(2);
-    expect(h.printed()).toContain("locked by arn:aws:sts::123456789012:assumed-role/Admin/bob");
+    expect(h.printed()).toContain(`locked by arn:aws:sts::123456789012:assumed-role/Admin/bob running "deploy install" since ${new Date(T0).toISOString()}; wait for it to finish, then run the same agentx command again`);
     expect(h.store.values.has(installAnswersParameterName("staging"))).toBe(false);
     expect(h.secrets.values.has("agentx/staging/alert-endpoint")).toBe(false);
   });
