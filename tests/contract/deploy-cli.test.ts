@@ -7,7 +7,8 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { environmentStackName } from "@agentx/contracts";
-import type { CommandRunner } from "../../packages/cli/src/deploy/cdk-engine.js";
+import { CDK_CONSTRUCT_IDS, type CommandRunner } from "../../packages/cli/src/deploy/cdk-engine.js";
+import type { DeployPart } from "../../packages/cli/src/deploy/parameters.js";
 import type { CallerIdentity } from "../../packages/cli/src/environments/adopt.js";
 import type { DeployRequest, StackDeployer, StackOutputs } from "../../packages/cli/src/deploy/deployer.js";
 import type { ParameterStore } from "../../packages/cli/src/environments/parameter-store.js";
@@ -291,13 +292,26 @@ function confirmingFakeDeployer(scripted: Record<string, StackOutputs>): StackDe
  * writes `scripted` to whatever file it's asked for (a superset every time; `cdkDeployer.deploy`
  * only ever reads its own stack's key back out), and records the outputs directory it saw so a test
  * can confirm it's removed afterward. */
-function cleanCdkRunner(scripted: Record<string, StackOutputs>): CommandRunner & { outputsDir?: string } {
-  const runner: CommandRunner & { outputsDir?: string } = {
+function cleanCdkRunner(scripted: Record<string, StackOutputs>, declared: Partial<Record<DeployPart, string[]>> = {}): CommandRunner & { outputsDir?: string; synthDirs: string[] } {
+  const runner: CommandRunner & { outputsDir?: string; synthDirs: string[] } = {
     outputsDir: undefined,
+    synthDirs: [],
     async run(command, args) {
       if (command === "git") {
         if (args[0] === "status") return { stdout: "" };
         return { stdout: `v${RELEASE_VERSION}\n` };
+      }
+      // Issue 152: `cdk synth -o <dir>` writes a cloud assembly whose stacks declare `declared`.
+      if (args[2] === "synth") {
+        const outDir = args[args.indexOf("-o") + 1] as string;
+        runner.synthDirs.push(outDir);
+        const artifacts: Record<string, unknown> = {};
+        for (const [part, id] of Object.entries(CDK_CONSTRUCT_IDS) as Array<[DeployPart, string]>) {
+          await writeFile(join(outDir, `${id}.template.json`), JSON.stringify({ Parameters: Object.fromEntries((declared[part] ?? []).map((name) => [name, { Type: "String" }])) }));
+          artifacts[id] = { type: "aws:cloudformation:stack", properties: { templateFile: `${id}.template.json`, stackName: stackName(part) } };
+        }
+        await writeFile(join(outDir, "manifest.json"), JSON.stringify({ version: "54.0.0", artifacts }));
+        return { stdout: "" };
       }
       const outIndex = args.indexOf("--outputs-file");
       if (outIndex >= 0) {
@@ -678,16 +692,52 @@ describe("agentx deploy", () => {
     );
 
     expect(code).toBe(0);
-    expect(calls.slice(0, 5).map((call) => call.line)).toEqual([
+    // Issue 152: one synth of the built source, before any deploy, reads the declared parameters.
+    expect(calls.slice(0, 6).map((call) => call.line)).toEqual([
       "git status --porcelain",
       "git tag --points-at HEAD",
       "npm ci",
       "npm run build",
+      "npx --no-install cdk synth",
       "npx --no-install cdk deploy",
     ]);
     expect(calls[2]).toMatchObject({ display: "npm ci", cwd: "/some/source" });
     expect(calls[3]).toMatchObject({ display: "npm run build", cwd: "/some/source" });
-    expect(calls.slice(4).every((call) => call.line === "npx --no-install cdk deploy")).toBe(true);
+    expect(calls[4]).toMatchObject({ cwd: "/some/source" });
+    expect(calls.slice(5).every((call) => call.line === "npx --no-install cdk deploy")).toBe(true);
+  });
+
+  it("--engine cdk sends only the stored sign-in keys its synth of the source declares (issue 152)", async () => {
+    // The release's placeholder templates declare nothing; the synth declares two sign-in keys.
+    const releaseDir = await emptyReleaseDir();
+    const answersPath = await writeAnswers();
+    const store = new MemoryParameterStore();
+    await store.put("/cdk-bootstrap/hnb659fds/version", "21");
+    await store.put("/agentx/staging/slack/teamId", "T0TEAM1");
+    await store.put("/agentx/staging/signin", JSON.stringify({ schemaVersion: 1, env: "staging", slack: true, updatedAt: "2026-09-27T00:00:00.000Z", updatedBy: `arn:aws:iam::${ACCOUNT}:user/alice` }));
+    const inner = cleanCdkRunner(scriptedOutputs(), { "control-plane": ["SlackTeamId", "DeveloperSignInSlack"] });
+    const deploys: string[][] = [];
+    const runner: CommandRunner = {
+      async run(command, args, options) {
+        if (args[2] === "deploy") deploys.push(args);
+        return inner.run(command, args, options);
+      },
+    };
+    const io = capture();
+
+    const code = await executeCli(
+      ["deploy", "--mode", "install", "--engine", "cdk", "--release", releaseDir, "--answers", answersPath, "--source", "/some/source", "--yes"],
+      { ...io, deploy: safeDeployDeps({ identity: fakeIdentity, store, secrets: memorySecrets(), commandRunner: runner }) },
+    );
+
+    expect(code).toBe(0);
+    expect(inner.synthDirs).toHaveLength(1);
+    await expect(stat(inner.synthDirs[0] as string)).rejects.toThrow();
+    const controlPlane = deploys.find((args) => args[3] === "AgentXControlPlane")!;
+    const sent = controlPlane.flatMap((arg, index) => (controlPlane[index - 1] === "--parameters" ? [arg.slice(arg.indexOf(":") + 1, arg.indexOf("="))] : []));
+    expect(sent).toEqual(expect.arrayContaining(["SlackTeamId", "DeveloperSignInSlack"]));
+    expect(sent).not.toContain("DeveloperSignInSlackSince");
+    expect(sent).not.toContain("DeveloperOidcIssuer");
   });
 
   it("prints progress and never a parameter value", async () => {
