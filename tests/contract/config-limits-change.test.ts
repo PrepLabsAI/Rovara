@@ -4,6 +4,7 @@
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
 import { tokenStoreKey } from "../../packages/cli/src/auth.js";
 import { executeCli } from "../../packages/cli/src/main.js";
@@ -25,6 +26,7 @@ function brokerFetch(harness: Awaited<ReturnType<typeof createAdminChangeBroker>
   };
 }
 
+const LEGACY_REFUSAL = "limits.workspacesPerMember changes through AgentX's admin change path, which only environments installed with agentx init have, not the legacy deployment; nothing changed. To change it there, update the AgentXControlPlane stack parameter SlackMemberWorkspaceLimit";
 const SESSION = { controlPlaneUrl: "https://abc123.execute-api.us-east-1.amazonaws.com", accessToken: "admin-token-for-tests" };
 
 describe("agentx config set limits.* (FR-053, owner requirement)", () => {
@@ -105,14 +107,38 @@ describe("agentx config set limits.* (FR-053, owner requirement)", () => {
     let fetched = false;
     const services = await configServicesFor({ store, adminSession: async () => SESSION, fetch: (async () => { fetched = true; return Response.json({}); }) as unknown as typeof fetch });
     await expect(runConfigSet(services, "production", { key: "limits.workspacesPerMember", value: "5", yes: true }))
-      .rejects.toThrow("limits.workspacesPerMember changes through AgentX's admin change path, which only environments installed with agentx init have, not the legacy deployment; nothing changed. The legacy deployment keeps its stack parameter SlackMemberWorkspaceLimit");
+      .rejects.toThrow(LEGACY_REFUSAL);
     expect(fetched).toBe(false);
+  });
+
+  it("refuses the same way for production before agentx env adopt, when it has no settings record at all", async () => {
+    let fetched = false;
+    const services = await configServicesFor({ store: new MemoryParameterStore(), adminSession: async () => SESSION, fetch: (async () => { fetched = true; return Response.json({}); }) as unknown as typeof fetch });
+    await expect(runConfigSet(services, "production", { key: "limits.workspacesPerMember", value: "5", yes: true })).rejects.toThrow(LEGACY_REFUSAL);
+    // Any other environment with no settings is still not installed.
+    await expect(runConfigSet(services, "staging", { key: "limits.workspacesPerMember", value: "5", yes: true })).rejects.toThrow("environment staging is not installed in this account and region; check --env and --region");
+    expect(fetched).toBe(false);
+  });
+
+  it("refuses without --yes when nobody can answer the prompt, before anything is planned", async () => {
+    const harness = await createAdminChangeBroker();
+    const services = await configServicesFor({ adminSession: async () => SESSION, fetch: brokerFetch(harness), canAsk: false });
+    await expect(runConfigSet(services, "staging", { key: "limits.workspacesPerMember", value: "2", yes: false }))
+      .rejects.toMatchObject({ code: "CONFIRMATION_UNAVAILABLE", message: expect.stringContaining("limits.workspacesPerMember needs a yes: run the command in a terminal to answer its prompt, or pass --yes; nothing changed") as unknown });
+    expect(harness.db.find((item) => item.entityType === "ADMIN_CHANGE_AUDIT")).toEqual([]);
   });
 
   describe("through agentx config set", () => {
     const deployment = { controlPlaneUrl: "http://127.0.0.1:8787", auth: { issuer: "https://identity.example.test", clientId: "agentx-client", audience: "agentx-api" } };
     const TOKEN = "access-secret-7f3a";
-    async function cli(options: { signedIn: boolean; prompter: boolean }) {
+    /** A terminal's stdin when `tty`, with `answer` typed into it; otherwise a pipe with nothing in it. */
+    function input(tty: boolean, answer?: string): PassThrough & { isTTY?: boolean } {
+      const stream: PassThrough & { isTTY?: boolean } = new PassThrough();
+      if (tty) stream.isTTY = true;
+      if (answer !== undefined) stream.write(answer);
+      return stream;
+    }
+    async function cli(options: { signedIn: boolean; prompter: boolean; stdin?: PassThrough & { isTTY?: boolean } }) {
       const harness = await createAdminChangeBroker();
       const directory = await mkdtemp(join(tmpdir(), "agentx-config-limits-"));
       const deploymentFile = join(directory, "deployment.yaml");
@@ -128,6 +154,7 @@ describe("agentx config set limits.* (FR-053, owner requirement)", () => {
       const io = {
         fetchImplementation: (async (...args: Parameters<typeof fetch>) => { fetched += 1; return fetch(...args); }) as typeof fetch,
         tokenStore: tokens,
+        stdin: options.stdin ?? input(false),
         config: { ...config, ...(options.prompter ? { prompter } : {}), write: (line: string) => { stderr += `${line}\n`; } },
         stdout: { write: (text: string) => { stdout += text; return true; } },
         stderr: { write: (text: string) => { stderr += text; return true; } },
@@ -149,9 +176,27 @@ describe("agentx config set limits.* (FR-053, owner requirement)", () => {
     it("without --yes and without a terminal, refuses before anything is planned", async () => {
       const session = await cli({ signedIn: true, prompter: false });
       expect(await session.run(["limits.workspacesPerMember", "2"])).not.toBe(0);
+      expect(session.stderr()).toContain("[CONFIRMATION_UNAVAILABLE]");
       expect(session.stderr()).toContain("limits.workspacesPerMember needs a yes: run the command in a terminal to answer its prompt, or pass --yes");
       expect(session.fetched()).toBe(0);
       expect(session.harness.db.find((item) => item.entityType === "ADMIN_CHANGE_AUDIT")).toEqual([]);
+    });
+
+    it("without a terminal, a bad value is refused for what it is, not for the missing terminal", async () => {
+      const session = await cli({ signedIn: true, prompter: false });
+      expect(await session.run(["limits.workspacesPerMember", "51"])).not.toBe(0);
+      expect(session.stderr()).toContain("from 1 to 50");
+      expect(session.stderr()).not.toContain("needs a yes");
+      expect(session.fetched()).toBe(0);
+    });
+
+    it("in a terminal, asks with the effect; n declines it, and the command says nothing changed", async () => {
+      const session = await cli({ signedIn: true, prompter: false, stdin: input(true, "n\r") });
+      expect(await session.run(["limits.workspacesPerOrg", "40"])).toBe(0);
+      expect(session.stderr()).toContain("Apply this change? [y/N]");
+      expect(session.stdout()).toBe("Nothing changed.\n");
+      expect(session.harness.db.get("SETTINGS", "WORKSPACE_LIMITS")).toBeUndefined();
+      expect(session.harness.db.find((item) => item.entityType === "ADMIN_CHANGE_AUDIT")[0]).toMatchObject({ outcome: "declined", methodUsed: "cli" });
     });
 
     it("without the admin sign-in, says to sign in and plans nothing", async () => {

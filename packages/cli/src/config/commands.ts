@@ -37,13 +37,20 @@ export interface ConfigServices {
   adminSession?(env: string): Promise<{ controlPlaneUrl: string; accessToken: string } | undefined>;
   /** How the workspace limits' change path reaches the control plane; the global fetch when absent. */
   fetch?: typeof fetch;
+  /** False when nobody can answer a prompt (no terminal): a workspace limits change then needs --yes. */
+  canAsk?: boolean;
 }
 
 export interface ConfigRow { key: string; value: string; where: string; description: string }
 
+const notInstalled = (env: string) => agentXError("CONFIG_INVALID", `environment ${env} is not installed in this account and region; check --env and --region`);
+
+/** The deployment's live environment name; before agentx env adopt it has no settings record, and it is still the legacy deployment. */
+const LEGACY_ENV = "production";
+
 async function installed(services: ConfigServices, env: string): Promise<EnvironmentSettings> {
   const settings = await readEnvironmentSettings(services.store, env);
-  if (settings === undefined) throw agentXError("CONFIG_INVALID", `environment ${env} is not installed in this account and region; check --env and --region`);
+  if (settings === undefined) throw notInstalled(env);
   if (settings.naming !== "environment") throw agentXError("CONFIG_INVALID", `agentx config works on environments installed with agentx init; ${env} uses the legacy stack names`);
   return settings;
 }
@@ -209,13 +216,18 @@ async function setLimitsThroughChange(
   if (input.value === undefined) throw agentXError("CONFIG_INVALID", `give the new value: agentx config set ${entry.key} <value>`);
   const value = Number(entry.parse(input.value));
   const settings = await readEnvironmentSettings(services.store, env);
-  if (settings === undefined) throw agentXError("CONFIG_INVALID", `environment ${env} is not installed in this account and region; check --env and --region`);
-  // D14: the legacy deployment has no admin change routes.
-  if (settings.naming !== "environment") {
-    throw agentXError("CONFIG_INVALID", `${entry.key} changes through AgentX's admin change path, which only environments installed with agentx init have, not the legacy deployment; nothing changed. The legacy deployment keeps its stack parameter ${target.installDefault.parameter}`);
+  // D14: the legacy deployment has no admin change routes: adopted (settings naming legacy), or not
+  // yet adopted (production with no settings record).
+  if (settings === undefined ? env === LEGACY_ENV : settings.naming !== "environment") {
+    throw agentXError("CONFIG_INVALID", `${entry.key} changes through AgentX's admin change path, which only environments installed with agentx init have, not the legacy deployment; nothing changed. To change it there, update the AgentXControlPlane stack parameter ${target.installDefault.parameter}`);
   }
+  if (settings === undefined) throw notInstalled(env);
   const session = await services.adminSession?.(env);
   if (session === undefined) throw agentXError("AUTH_REQUIRED", `${entry.key} changes through AgentX's admin change path, which needs this computer's admin sign-in; run agentx --env ${env} login --admin, then try again`);
+  // SC-005: checked before anything is planned.
+  if (!input.yes && services.canAsk === false) {
+    throw agentXError("CONFIRMATION_UNAVAILABLE", `${entry.key} needs a yes: run the command in a terminal to answer its prompt, or pass --yes; nothing changed`);
+  }
   // With a prompt, the effect is shown once, in the question; with --yes it is printed as runCliChange writes it.
   let held: string | undefined;
   let first = true;

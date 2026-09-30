@@ -358,6 +358,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
   });
   registerConfigCommands(program, {
     ...(dependencies.config === undefined ? {} : { overrides: dependencies.config }), parameterStore, fetch: services.fetchImplementation, stdout: services.stdout, stderr: services.stderr,
+    stdin: dependencies.stdin ?? process.stdin,
     // Spec 025 FR-053: the workspace limits change with the admin sign-in of the environment --env names.
     adminSession: async (env: string) => {
       const session = await adminSessionFor(env);
