@@ -561,6 +561,7 @@ describe("agentx init --ui", () => {
     expect(operator.states.at(-1)?.cards?.find((card) => card.id === "connectors")?.lines).toEqual(["Connected to payments-api: Linear."]);
     expect(operator.states.at(-1)?.cards?.find((card) => card.id === "alerts")?.lines).toEqual(["Alerts go to ops@example.com, and the test alarm arrived."]);
   });
+
   it("FR-052: the page ends on a ready card that needs no command to finish, and the outcome is still readyText", async () => {
     const h = await harness();
     const { code, operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
@@ -582,6 +583,7 @@ describe("agentx init --ui", () => {
     expect(code).toBe(0);
     expect(operator.states.at(-1)?.cards?.some((card) => card.id === "ready")).toBe(false);
   });
+
   it("User Story 3 and SC-003: a first install on the page ends with a reply, every card ok, and nothing typed in the terminal", async () => {
     const h = await harness();
     const { code, operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
@@ -624,5 +626,6 @@ describe("agentx init --ui", () => {
     const { code, operator } = await h.runUi([...SLACK, ...SIGNIN, ...FINISH]);
     expect(code).toBe(0);
     expect(operator.states.at(-1)?.cards?.map((card) => card.id)).toEqual(expect.arrayContaining(["admin", "project", "channel", "reply", "ready"]));
+    expect(operator.states.at(-1)?.cards?.find((card) => card.id === "ready")?.status).toBe("ok");
   });
 });
