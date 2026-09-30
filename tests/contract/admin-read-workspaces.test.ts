@@ -41,4 +41,27 @@ describe("GET /v1/admin/workspaces (FR-030, A10)", () => {
     expect((await harness.admin("GET", "/v1/admin/workspaces?limit=1")).body).toMatchObject({ truncated: true });
     expect((await harness.admin("GET", "/v1/admin/workspaces?status=ASLEEP")).body.error).toMatchObject({ code: "CONFIG_INVALID" });
   });
+
+  // Fix round 1 (review of Tasks 8 and 9).
+  it("lists the most recently active workspace first", async () => {
+    const harness = await createAdminReadBroker();
+    for (const ts of ["1695500000.000401", "1695500000.000402"]) await ensureWorkspace(harness.handler, `${SLACK_TEAM}/${SLACK_CHANNEL}/${ts}`, "U0PRIYA001");
+    const [older, newer] = harness.db.find((item) => item.entityType === "WORKSPACE");
+    // The first one written is made the older by activity, so table order and activity order differ.
+    harness.db.set({ ...older!, updatedAt: "2026-01-01T00:00:00.000Z" });
+    const rows = (await harness.admin("GET", "/v1/admin/workspaces")).body.workspaces as Array<{ id: string }>;
+    expect(rows.map((row) => row.id)).toEqual([newer!.id, older!.id]);
+  });
+
+  it("redacts a token-shaped developer name in a task's owner (A16)", async () => {
+    const harness = await createAdminReadBroker();
+    const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix it", client: "claude-code" });
+    const taskId = (started.body.task as { taskId: string }).taskId;
+    const planted = `xoxb-${"1".repeat(12)}-${"2".repeat(13)}-${"a".repeat(24)}`;
+    harness.db.set({ ...harness.db.get(`DEVTASK#${taskId}`, "META")!, developerName: planted });
+    const answer = await harness.admin("GET", "/v1/admin/workspaces");
+    expect(JSON.stringify(answer.body)).not.toContain(planted);
+    const rows = answer.body.workspaces as Array<{ owner: { developerName?: string } }>;
+    expect(rows[0]?.owner.developerName).toContain("[REDACTED]");
+  });
 });

@@ -40,7 +40,7 @@ import {
 import type { AuthenticatedIdentity } from "../auth.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
 import { taskKey, taskPointerKey } from "../developer/task-records.js";
-import type { TurnRecordSource } from "./turns.js";
+import { workspaceProjectReader, type TurnRecordSource } from "./turns.js";
 
 export interface AdminReadDependencies {
   documentClient: { send(command: unknown): Promise<unknown> };
@@ -296,77 +296,104 @@ async function listFailures(deps: AdminReadDependencies, url: URL): Promise<Admi
 
 interface UsageEntry { project: string; origin: string; requester: string; day: string; turn: boolean; task: boolean; durationMs: number; input: number; output: number; cost: number | null }
 
+/** Slack caps a display name well below this; the cap leaves room for a redaction marker. */
+const DISPLAY_NAME_MAX = 200;
+/** A16: a developer's display name comes from their identity provider, so it is redacted and capped like a channel name. */
+const displayName = (name: string) => redactAndCap(name, DISPLAY_NAME_MAX).text;
+
 const requesterKey = (value: unknown): string => {
   const requester = value as { kind?: string; userId?: string; developerId?: string; name?: string } | undefined;
   if (requester?.kind === "slack" || (requester?.kind === undefined && typeof requester?.userId === "string")) return `slack:${requester.userId}`;
-  if (requester?.kind === "developer") return `developer:${requester.name ?? requester.developerId?.slice(0, 12) ?? "unknown"}`;
+  if (requester?.kind === "developer") return `developer:${requester.name === undefined ? requester.developerId?.slice(0, 12) ?? "unknown" : displayName(requester.name)}`;
   return "none";
 };
 
-/** A9: worker usage items day partition by day, then Slack turn records; at most 5,000 of each. */
-async function usageEntries(deps: AdminReadDependencies, window: { since: string; until: string }): Promise<{ entries: UsageEntry[]; truncated: boolean }> {
+/** How many unreadable turn records one log line names; the count is always exact. */
+const LOGGED_ID_LIMIT = 10;
+
+/**
+ * A9: worker usage items day partition by day, then Slack turn records; at most 5,000 read from
+ * each source. An item or a turn's usage that no longer parses is counted and logged, never dropped
+ * silently; a turn with no usage at all is a known zero (R14).
+ */
+async function usageEntries(deps: AdminReadDependencies, window: { since: string; until: string }): Promise<{ entries: UsageEntry[]; truncated: boolean; skipped: number }> {
   const entries: UsageEntry[] = [];
   let truncated = false;
-  let tasks = 0;
-  for (let day = Date.parse(window.since.slice(0, 10)); day <= Date.parse(window.until.slice(0, 10)) && tasks < ADMIN_USAGE_READ_MAX; day += DAY_MS) {
+  let read = 0;
+  let skipped = 0;
+  const lastDay = Date.parse(window.until.slice(0, 10));
+  for (let day = Date.parse(window.since.slice(0, 10)); day <= lastDay && read < ADMIN_USAGE_READ_MAX; day += DAY_MS) {
     let start: Record<string, unknown> | undefined;
     do {
       const page = await deps.documentClient.send(new QueryCommand({
         TableName: deps.tableName,
         KeyConditionExpression: "pk = :pk AND sk BETWEEN :low AND :high",
         ExpressionAttributeValues: { ":pk": `USAGE#${new Date(day).toISOString().slice(0, 10)}`, ":low": window.since, ":high": `${window.until}\uffff` },
-        Limit: ADMIN_LIST_MAX,
+        // Never past the cap: the last page asks only for what remains.
+        Limit: Math.min(ADMIN_LIST_MAX, ADMIN_USAGE_READ_MAX - read),
         ConsistentRead: true,
         ...(start === undefined ? {} : { ExclusiveStartKey: start }),
       })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> };
       for (const item of page.Items ?? []) {
+        read += 1;
         if (expired(deps, item)) continue;
         const parsed = UsageIndexRecordSchema.safeParse(withoutKeys(item));
-        if (!parsed.success) continue;
+        if (!parsed.success) {
+          skipped += 1;
+          continue;
+        }
         const usage = parsed.data;
         entries.push({ project: usage.project, origin: usage.origin, requester: requesterKey(usage.requester), day: usage.at.slice(0, 10), turn: false, task: true, durationMs: usage.durationMs, input: usage.inputTokens, output: usage.outputTokens, cost: usage.costUsd });
-        tasks += 1;
       }
       start = page.LastEvaluatedKey;
-      if (tasks >= ADMIN_USAGE_READ_MAX) {
-        truncated = start !== undefined || day < Date.parse(window.until.slice(0, 10));
+      if (read >= ADMIN_USAGE_READ_MAX) {
+        truncated = start !== undefined || day < lastDay;
         start = undefined;
       }
     } while (start !== undefined);
   }
+  if (skipped > 0) deps.log({ event: "admin.usage_index_unreadable", count: skipped });
   if (deps.turns !== undefined) {
+    const projectOf = workspaceProjectReader(deps.documentClient, deps.tableName);
     const projects = new Map<string, string | undefined>();
+    const unreadable: string[] = [];
+    let unreadableCount = 0;
     let key: Parameters<TurnRecordSource["page"]>[0]["exclusiveStartKey"];
     let turns = 0;
     do {
-      const page = await deps.turns.page({ since: window.since, until: window.until, limit: ADMIN_LIST_MAX, nowSeconds: Math.floor(deps.now() / 1000), ...(key === undefined ? {} : { exclusiveStartKey: key }), filter: { origin: "slack" } });
+      const page = await deps.turns.page({ since: window.since, until: window.until, limit: Math.min(ADMIN_LIST_MAX, ADMIN_USAGE_READ_MAX - turns), nowSeconds: Math.floor(deps.now() / 1000), ...(key === undefined ? {} : { exclusiveStartKey: key }), filter: { origin: "slack" } });
       for (const item of page.items) {
         const workspaceId = typeof item.workspaceId === "string" ? item.workspaceId : undefined;
-        if (workspaceId !== undefined && !projects.has(workspaceId)) {
-          const workspace = await getStateItem(deps, { pk: `WORKSPACE#${workspaceId}`, sk: "META" });
-          projects.set(workspaceId, typeof workspace?.projectName === "string" ? workspace.projectName : undefined);
+        if (workspaceId !== undefined && !projects.has(workspaceId)) projects.set(workspaceId, await projectOf(workspaceId));
+        const telemetry = item.usage === undefined ? undefined : TaskUsageTelemetrySchema.safeParse(item.usage);
+        if (telemetry?.success === false) {
+          unreadableCount += 1;
+          if (unreadable.length < LOGGED_ID_LIMIT && typeof item.eventId === "string") unreadable.push(item.eventId);
         }
-        const telemetry = TaskUsageTelemetrySchema.safeParse(item.usage);
+        const known = telemetry?.success === true ? telemetry.data : undefined;
         entries.push({
           project: (workspaceId === undefined ? undefined : projects.get(workspaceId)) ?? "unknown", origin: "slack", requester: requesterKey(item.requestedBy),
           day: String(item.receivedAt).slice(0, 10), turn: true, task: false, durationMs: 0,
-          input: telemetry.success ? telemetry.data.tokens.input : 0, output: telemetry.success ? telemetry.data.tokens.output : 0,
-          cost: telemetry.success ? telemetry.data.costUsd : 0,
+          input: known?.tokens.input ?? 0, output: known?.tokens.output ?? 0,
+          // No usage at all is a known zero (R14); usage that no longer parses is an unknown cost.
+          cost: telemetry === undefined ? 0 : known === undefined ? null : known.costUsd,
         });
         turns += 1;
       }
       key = page.lastEvaluatedKey;
       if (turns >= ADMIN_USAGE_READ_MAX) { truncated = truncated || key !== undefined; key = undefined; }
     } while (key !== undefined);
+    // IDs only: a turn record holds redacted request and response text, which never reaches a log.
+    if (unreadableCount > 0) deps.log({ event: "admin.usage_unreadable", count: unreadableCount, eventIds: unreadable });
   }
-  return { entries, truncated };
+  return { entries, truncated, skipped };
 }
 
 async function usageSummary(deps: AdminReadDependencies, url: URL): Promise<AdminUsageResponse> {
   const groupBy = AdminUsageGroupBySchema.safeParse(url.searchParams.get("group_by"));
   if (!groupBy.success) throw agentXError("CONFIG_INVALID", "group_by must be project, requester, origin or day");
   const window = timeWindow(url, deps.now(), 24 * 7);
-  const { entries, truncated } = await usageEntries(deps, window);
+  const { entries, truncated, skipped } = await usageEntries(deps, window);
   const groups = new Map<string, AdminUsageResponse["groups"][number]>();
   for (const entry of entries) {
     const key = entry[groupBy.data];
@@ -382,7 +409,7 @@ async function usageSummary(deps: AdminReadDependencies, url: URL): Promise<Admi
   }
   // The costliest first, then by key, so the answer reads the same each time.
   const sorted = [...groups.values()].sort((left, right) => right.costUsd - left.costUsd || left.key.localeCompare(right.key));
-  return { groupBy: groupBy.data, ...window, groups: sorted, truncated };
+  return { groupBy: groupBy.data, ...window, groups: sorted, truncated, ...(skipped > 0 ? { skipped } : {}) };
 }
 
 /** A10: a project's workspaces from spec 041's byWorkspaceProject index, newest first, at most `cap`. Task 12 counts statuses with it. */
@@ -420,7 +447,7 @@ export async function workspaceOwner(deps: AdminReadDependencies, workspace: Wor
   const pointer = await getStateItem(deps, taskPointerKey(workspace.id));
   if (typeof pointer?.taskId === "string") {
     const task = await getStateItem(deps, taskKey(pointer.taskId));
-    return { origin: "ai_tool", owner: { taskId: pointer.taskId, ...(typeof task?.developerName === "string" ? { developerName: task.developerName } : {}) } };
+    return { origin: "ai_tool", owner: { taskId: pointer.taskId, ...(typeof task?.developerName === "string" ? { developerName: displayName(task.developerName) } : {}) } };
   }
   const thread = await getStateItem(deps, { pk: `SLACK_THREAD#${workspace.ownerKey}`, sk: "META" });
   if (typeof thread?.thread === "string") {
@@ -430,6 +457,8 @@ export async function workspaceOwner(deps: AdminReadDependencies, workspace: Wor
       // An unreadable subject is shown as no owner, never echoed.
     }
   }
+  // No task pointer and no readable thread record: a Slack thread workspace (the only other owner
+  // kind), or one an admin prepared, shown without an owner rather than guessed at.
   return { origin: "slack", owner: {} };
 }
 
