@@ -5,10 +5,11 @@ import { rm } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import { agentXError } from "@agentx/contracts";
 import { writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
-import { adminUserStep } from "../../packages/cli/src/init/finish-steps.js";
+import { adminUserStep, alertsStep } from "../../packages/cli/src/init/finish-steps.js";
+import { alertsCard } from "../../packages/cli/src/init/ui/cards.js";
 import type { WizardCard } from "../../packages/cli/src/init/ui/protocol.js";
-import { initContext, progressHandle, scriptedPrompter, type TestInitContext } from "../support/init-fakes.js";
-import { ADMIN_EMAIL, CONTROL_PLANE, fakeCognito, setupServices, STAGING_SETTINGS } from "../support/setup-fakes.js";
+import { initContext, progressHandle, sampleAnswers, scriptedPrompter, type TestInitContext } from "../support/init-fakes.js";
+import { ADMIN_EMAIL, CONTROL_PLANE, fakeAlerts, fakeCognito, setupServices, STAGING_SETTINGS } from "../support/setup-fakes.js";
 
 let context: TestInitContext | undefined;
 afterEach(async () => { if (context !== undefined) await rm(context.home, { recursive: true, force: true }); context = undefined; });
@@ -50,5 +51,51 @@ describe("the admin user on the page (FR-050)", () => {
     await writeEnvironmentSettings(context.store, STAGING_SETTINGS);
     await expect(adminUserStep().run(context, progressHandle())).rejects.toBe(TIMED_OUT);
     expect((context.prompter as ReturnType<typeof scriptedPrompter>).asked).toEqual(["Your email address, for your AgentX admin user"]);
+  });
+});
+
+describe("the alerts on the page", () => {
+  const TOPIC = "arn:aws:sns:us-east-1:123456789012:agentx-staging-alerts";
+  const setupFor = (alerts: ReturnType<typeof fakeAlerts>) => setupServices({ alerts, stackOutputs: async () => ({ OperatorAlertsTopicArn: TOPIC }) });
+  const answers = sampleAnswers({ alert: { kind: "email", address: "ops@example.com" } });
+
+  it("Review Focus 4: waits on the page for the confirmation, checks again without subscribing twice, then sends the test alarm", async () => {
+    const surface = page();
+    const alerts = fakeAlerts({ confirmAfterPolls: 1_000_000, budgetUsd: 100 });
+    const base = scriptedPrompter([true, true]);
+    // The operator confirms the email while the card is up, then answers Yes.
+    const prompter = { ...base, confirm: async (question: string, options: { defaultValue: boolean }) => { if (question.startsWith("Have you confirmed")) alerts.confirmAll(); return base.confirm(question, options); } };
+    context = initContext({ answers, prompter, surface, setup: setupFor(alerts) });
+    await writeEnvironmentSettings(context.store, STAGING_SETTINGS);
+    expect(await alertsStep().run(context, progressHandle())).toEqual({ status: "done", note: "alerts to ops@example.com, test alarm received" });
+    expect(alerts.subscribed).toHaveLength(1);
+    expect(base.asked[0]).toBe("Have you confirmed the subscription? Answer Yes to check again.");
+    // The run's own 10-minute wait, then the confirm card after it, then done.
+    expect(surface.cards.map((card) => card.status)).toEqual(["waiting", "waiting", "ok"]);
+    expect(surface.cards[0]?.lines).toEqual(alertsCard({ stage: "waiting", shownAs: "ops@example.com" }).lines);
+    expect(surface.cards[1]?.lines).toEqual(alertsCard({ stage: "confirm", shownAs: "ops@example.com" }).lines);
+  });
+
+  it("the terminal path still stops and says to run agentx init again when nobody has confirmed", async () => {
+    const alerts = fakeAlerts({ confirmAfterPolls: 1_000_000, budgetUsd: 100 });
+    context = initContext({ answers, prompter: scriptedPrompter([]), setup: setupFor(alerts) });
+    await writeEnvironmentSettings(context.store, STAGING_SETTINGS);
+    const outcome = await alertsStep().run(context, progressHandle());
+    expect(outcome).toMatchObject({ status: "waiting" });
+  });
+
+  it("saying no on the page stops the same way", async () => {
+    const alerts = fakeAlerts({ confirmAfterPolls: 1_000_000, budgetUsd: 100 });
+    context = initContext({ answers, prompter: scriptedPrompter([false]), surface: page(), setup: setupFor(alerts) });
+    await writeEnvironmentSettings(context.store, STAGING_SETTINGS);
+    expect(await alertsStep().run(context, progressHandle())).toMatchObject({ status: "waiting" });
+  });
+
+  it("--no-alerts shows that there is no alert address yet", async () => {
+    const surface = page();
+    context = initContext({ answers: sampleAnswers({ alert: { kind: "none" } }), prompter: scriptedPrompter([]), surface, setup: setupFor(fakeAlerts()) });
+    await writeEnvironmentSettings(context.store, STAGING_SETTINGS);
+    expect(await alertsStep().run(context, progressHandle())).toMatchObject({ status: "done" });
+    expect(surface.cards).toEqual([alertsCard({ stage: "none" })]);
   });
 });

@@ -20,7 +20,7 @@ import { CONNECTOR_LABELS, CONNECTOR_TYPES, type ConnectorType, type InstallProg
 import { retryOnPage } from "./retry.js";
 import { readSlackBotToken } from "./slack-app.js";
 import type { InitStep } from "./steps.js";
-import { adminCard, channelCard, projectCard, type AdminCardInput } from "./ui/cards.js";
+import { adminCard, alertsCard, channelCard, connectorsCard, projectCard, type AdminCardInput } from "./ui/cards.js";
 
 /** The environment's settings, which the Slack service step writes; every finishing step and the
  * admin session need them (F21: one message, used by both). */
@@ -191,6 +191,10 @@ export function connectorsStep(): InitStep<InitContext> {
       const connected = (progress.current().connectors ?? []).map((entry) => CONNECTOR_LABELS[entry.type]);
       // --connectors none, which --yes without --connectors also means (main.ts).
       if (wanted?.size === 0 && connected.length === 0) context.write(`No connectors added; add them later with agentx --env ${context.env} connector add linear|jira|asana`);
+      context.surface?.card(connectorsCard({
+        projectName: project.name,
+        connected: (progress.current().connectors ?? []).map((entry) => ({ label: CONNECTOR_LABELS[entry.type], ...(entry.warning === undefined ? {} : { warning: entry.warning }) })),
+      }));
       return { status: "done", note: connected.length === 0 ? "no connectors" : `connected ${connected.join(", ")}` };
     },
   };
@@ -210,7 +214,10 @@ export function alertsStep(): InitStep<InitContext> {
         context.write(`Budget agentx-${context.env}-monthly: $${limit} a month.${answers.budget.scope === "tag" ? ` ${BUDGET_TAG_NOTE}` : ""}`);
       }
       // --no-alerts: nothing to subscribe and nothing to test.
-      if (answers.alert.kind === "none") return { status: "done", note: "no alert address (agentx config set alerts.address, phase 15e)" };
+      if (answers.alert.kind === "none") {
+        context.surface?.card(alertsCard({ stage: "none" }));
+        return { status: "done", note: "no alert address (agentx config set alerts.address, phase 15e)" };
+      }
       const recorded = progress.current().alerts ?? { subscribed: false, tested: false };
       const shownAs = answers.alert.kind === "email" ? answers.alert.address : answers.alert.display;
       const topicArn = await alertsTopicArn({ stackOutputs: context.setup.stackOutputs, stackName: settings.stacks["control-plane"], next: "run agentx init again" });
@@ -218,13 +225,27 @@ export function alertsStep(): InitStep<InitContext> {
         const target: AlertTarget = answers.alert.kind === "email"
           ? { kind: "email", address: answers.alert.address }
           : { kind: "webhook", display: answers.alert.display, endpoint: await requireWebhook(context, answers.alert.secretName) };
-        const state = await ensureSubscribed({ api: context.setup.alerts, topicArn, target, write: context.write, sleep: context.sleep, now: context.now });
+        const surface = context.surface;
+        // On the page, a card shows the run's own wait for the confirmation while it polls.
+        const subscribe = () => ensureSubscribed({
+          api: context.setup.alerts, topicArn, target, write: context.write, sleep: context.sleep, now: context.now,
+          ...(surface === undefined ? {} : { onWaiting: () => surface.card(alertsCard({ stage: "waiting", shownAs })) }),
+        });
+        let state = await subscribe();
+        // Q7: on the page, the operator confirms and checks again; ensureSubscribed never
+        // subscribes an address twice. The terminal stops and says to run init again, as before.
+        while (state === "pending" && surface !== undefined) {
+          surface.card(alertsCard({ stage: "confirm", shownAs }));
+          if (!(await context.prompter.confirm("Have you confirmed the subscription? Answer Yes to check again.", { defaultValue: true }))) break;
+          state = await subscribe();
+        }
         if (state === "pending") return { status: "waiting", message: `Confirm the alert subscription for ${shownAs} (the AWS Notifications email, or your webhook's SubscribeURL), then run agentx init --env ${context.env} --region ${answers.region} again.` };
         // Recorded before the test alarm, so a failed test is retried without subscribing again.
         await progress.update({ alerts: { subscribed: true, tested: false } });
       }
       await sendTestAlarm({ api: context.setup.alerts, topicArn, env: context.env, shownAs, prompter: context.prompter, write: context.write, sleep: context.sleep, now: context.now });
       await progress.update({ alerts: { subscribed: true, tested: true } });
+      context.surface?.card(alertsCard({ stage: "done", shownAs }));
       return { status: "done", note: `alerts to ${shownAs}, test alarm received` };
     },
   };

@@ -479,7 +479,7 @@ describe("agentx init --ui", () => {
     expect(code).toBe(0);
     const last = operator.states.at(-1);
     expect(last?.cards?.map((card) => [card.id, card.status])).toEqual([
-      ["aws", "ok"], ["prerequisites", "ok"], ["github", "ok"], ["slack", "ok"], ["slack-urls", "ok"], ["admin", "ok"], ["project", "ok"], ["channel", "ok"],
+      ["aws", "ok"], ["prerequisites", "ok"], ["github", "ok"], ["slack", "ok"], ["slack-urls", "ok"], ["admin", "ok"], ["project", "ok"], ["channel", "ok"], ["connectors", "ok"], ["alerts", "ok"],
     ]);
     // Every answer came from the scripted operator, and no answer was an address pasted back:
     // the GitHub code arrived through the wizard's own callback.
@@ -490,7 +490,7 @@ describe("agentx init --ui", () => {
     // The screens came in order: each card first appears after the one before it.
     const firstSeen: string[] = [];
     for (const card of operator.states.flatMap((state) => state.cards ?? [])) if (!firstSeen.includes(card.id)) firstSeen.push(card.id);
-    expect(firstSeen).toEqual(["aws", "prerequisites", "github", "slack", "slack-urls", "admin", "project", "channel"]);
+    expect(firstSeen).toEqual(["aws", "prerequisites", "github", "slack", "slack-urls", "admin", "project", "channel", "connectors", "alerts"]);
   });
 
   it("FR-012: no secret reaches a card, a link, the page's state, the log, the terminal, SSM or the cache", async () => {
@@ -552,5 +552,13 @@ describe("agentx init --ui", () => {
     expect(channel.map((card) => card.status)).toContain("waiting");
     expect(channel.at(-1)).toMatchObject({ status: "ok", lines: ["#payments is bound to project payments-api."] });
     expect(operator.states.at(-1)?.cards?.find((card) => card.id === "project")?.lines).toEqual(["Project payments-api, revision 1, for acme/payments-api, runs on EC2 workers."]);
+  });
+
+  it("the connectors card lists what was connected", async () => {
+    const h = await harness();
+    const { code, operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH_WITH_LINEAR]);
+    expect(code).toBe(0);
+    expect(operator.states.at(-1)?.cards?.find((card) => card.id === "connectors")?.lines).toEqual(["Connected to payments-api: Linear."]);
+    expect(operator.states.at(-1)?.cards?.find((card) => card.id === "alerts")?.lines).toEqual(["Alerts go to ops@example.com, and the test alarm arrived."]);
   });
 });
