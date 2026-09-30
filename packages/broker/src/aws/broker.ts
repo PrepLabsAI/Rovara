@@ -21,6 +21,7 @@ import {
 import {
   AgentXError,
   CHANNEL_TURN_REQUEST_MAX,
+  CONNECTOR_SECRET_PREFIX,
   ChannelTurnSchema,
   DEVELOPER_TASK_OWNER_ISSUER,
   SharedTaskRecordSchema,
@@ -90,6 +91,8 @@ import {
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { queryAllItems, routeAdminRead, type AdminReadDependencies } from "./admin-reads.js";
+import type { AdminChangeHandlers, PlanDependencies } from "./admin-change-plans.js";
+import { ZodError } from "zod";
 import { healthProbes } from "./health-probes.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import { GitHubAppCredentialProvider, privateKeyFromSecret } from "../github-app.js";
@@ -339,6 +342,65 @@ function adminReadDependencies(dependencies: AwsBrokerDependencies): AdminReadDe
     now: Date.now,
     log: (entry) => console.log(JSON.stringify({ component: "broker", ...entry })),
     ...dependencies.adminReads,
+  };
+}
+
+/** Spec 025 phase 25e: the existing admin handlers a confirmed change applies through (FR-040). */
+function adminChangeHandlers(dependencies: AwsBrokerDependencies): AdminChangeHandlers {
+  return {
+    requireAdministrator: (identity, project) => requireAdministrator(dependencies, identity, project),
+    bindChannel: async (identity, teamId, channelId, project) => putSlackBinding(dependencies, identity, teamId, channelId, { projectName: project }),
+    unbindChannel: async (identity, teamId, channelId) => deleteSlackBinding(dependencies, identity, teamId, channelId),
+    checkRevision: async (identity, definitionValue, runtimeBindingValue) => {
+      if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+      let definition: ProjectDefinition;
+      try {
+        ({ definition } = parseRegistrationInput({ definition: definitionValue, runtimeBinding: runtimeBindingValue }));
+      } catch (error) {
+        // registerProject answers a schema failure as the route does; a plan names the first problem.
+        if (!(error instanceof ZodError)) throw error;
+        const issue = error.issues[0];
+        throw agentXError("CONFIG_INVALID", `the project definition is invalid: ${issue?.path.join(".") || "definition"}: ${issue?.message ?? "invalid"}; fix it and plan again`);
+      }
+      if (await getItem(dependencies, projectKey(definition.name, definition.revision)) !== undefined) {
+        throw agentXError("CONFIG_INVALID", `revision ${definition.revision} of ${definition.name} is already registered; use a newer revision number`);
+      }
+      // C8: the vendor preflight runs here, at planning, and never again at apply.
+      const preflight = await registrationChecks(dependencies, identity, definition, true);
+      return { definition, warnings: registrationWarnings(toolBudget(approvedToolCount(definition)).warning, preflight) };
+    },
+    registerRevision: async (identity, definition, runtimeBinding) => registerProject(dependencies, identity, { definition, runtimeBinding, preflight: false }),
+    registerCredential: async (identity, registration) => {
+      if (!dependencies.credentialRegistry) throw agentXError("RUNTIME_UNAVAILABLE", "connector credentials are not configured in this deployment; ask whoever deploys AgentX to set them up");
+      return dependencies.credentialRegistry.register(identity, registration);
+    },
+    cancelWorkspaceTask: async (identity, workspaceId) => cancelWorkspaceTask(dependencies, identity, workspaceId),
+  };
+}
+
+/** Spec 025 phase 25e: what change plans read and apply through; tests build it the same way. */
+export function createPlanDependencies(input: AwsBrokerInput): PlanDependencies {
+  return planDependencies(brokerDependencies(input));
+}
+
+function planDependencies(dependencies: AwsBrokerDependencies): PlanDependencies {
+  const developer = dependencies.developer;
+  const registry = dependencies.credentialRegistry;
+  return {
+    reads: adminReadDependencies(dependencies),
+    actions: {
+      documentClient: dependencies.documentClient, tableName: dependencies.tableName,
+      ...(developer === undefined ? {} : { signInTableName: developer.signInTableName }),
+      ...(developer?.slackTeamId === undefined ? {} : { slackTeamId: developer.slackTeamId }),
+      limitDefaults: { member: dependencies.slack?.memberWorkspaceLimit ?? 3, organization: dependencies.slack?.organizationWorkspaceLimit ?? 20 },
+      ...(developer?.endDeveloperSessions === undefined ? {} : { endDeveloperSessions: developer.endDeveloperSessions }),
+      now: Date.now,
+    },
+    handlers: adminChangeHandlers(dependencies),
+    ...(developer?.channelByName === undefined ? {} : { channelByName: developer.channelByName }),
+    ...(registry === undefined ? {} : { credentials: registry, builtInCredentialRef: registry.builtInRef }),
+    // C5: the prefix the registry itself enforces.
+    connectorSecretPrefix: registry?.connectorSecretPrefix ?? CONNECTOR_SECRET_PREFIX,
   };
 }
 
@@ -799,13 +861,8 @@ function gitHubContext(identity: AuthenticatedIdentity, workspace: WorkspaceInst
   };
 }
 
-async function registerProject(
-  dependencies: AwsBrokerDependencies,
-  identity: AuthenticatedIdentity,
-  value: unknown,
-  checked?: { report?: RegistrationPreflight },
-): Promise<{ project: Omit<RegisteredProjectRecord, "pk" | "sk">; duplicate: boolean; warnings?: string[]; preflight?: RegistrationPreflight }> {
-  if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+/** The registration request's parse, shared by registerProject and a change plan (spec 025 C4). */
+function parseRegistrationInput(value: unknown): { definition: ProjectDefinition; runtimeBinding: ReturnType<typeof parseRuntimeBinding>; wantsPreflight: boolean } {
   const input = object(value, "project registration");
   const retired = legacyProjectFields(input.definition);
   if (retired.length > 0) {
@@ -814,7 +871,36 @@ async function registerProject(
   const definition = ProjectDefinitionSchema.parse(input.definition);
   const runtimeBinding = parseRuntimeBinding(input.runtimeBinding);
   // Preflight contacts the vendor, so it runs only when the caller asks; older clients never do.
-  const wantsPreflight = input.preflight === true;
+  return { definition, runtimeBinding, wantsPreflight: input.preflight === true };
+}
+
+/** Registration's refusals and preflight, for a new revision; registerProject and a change plan share them. */
+async function registrationChecks(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, definition: ProjectDefinition, wantsPreflight: boolean): Promise<RegistrationPreflight | undefined> {
+  const budget = toolBudget(approvedToolCount(definition));
+  const connectors = () => resolveConnectors(definition, connectorTypeContext(dependencies), dependencies.connectorTypes);
+  const nameProblems = presentedNameProblems(definition);
+  if (nameProblems.length > 0) throw agentXError("CONFIG_INVALID", nameProblems.join("; "));
+  if (budget.refusal) throw agentXError("CONFIG_INVALID", budget.refusal);
+  const credentialProblems = await credentialRefusals(connectors(), dependencies.credentialRegistry);
+  if (credentialProblems.length > 0) throw agentXError("CONFIG_INVALID", credentialProblems.join("; "));
+  // A repository the GitHub App cannot reach would otherwise fail only at prepare (#123).
+  for (const repository of definition.repositories) {
+    await dependencies.checkRepositoryAccess?.(repository);
+  }
+  if (!wantsPreflight) return undefined;
+  const result = await preflightConnectors(connectors(), definition, identity.ownerKey);
+  if (result.refusals.length > 0) throw agentXError("CONFIG_INVALID", result.refusals.join("; "));
+  return result.report;
+}
+
+async function registerProject(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  value: unknown,
+  checked?: { report?: RegistrationPreflight },
+): Promise<{ project: Omit<RegisteredProjectRecord, "pk" | "sk">; duplicate: boolean; warnings?: string[]; preflight?: RegistrationPreflight }> {
+  if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+  const { definition, runtimeBinding, wantsPreflight } = parseRegistrationInput(value);
   const budget = toolBudget(approvedToolCount(definition));
   const connectors = () => resolveConnectors(definition, connectorTypeContext(dependencies), dependencies.connectorTypes);
   const respond = (project: Omit<RegisteredProjectRecord, "pk" | "sk">, duplicate: boolean, preflight: RegistrationPreflight | undefined) => {
@@ -839,21 +925,7 @@ async function registerProject(
       ?? (wantsPreflight ? (await preflightConnectors(connectors(), definition, identity.ownerKey)).report : undefined);
     return respond(withoutKeys(existing), true, preflight);
   }
-  const nameProblems = presentedNameProblems(definition);
-  if (nameProblems.length > 0) throw agentXError("CONFIG_INVALID", nameProblems.join("; "));
-  if (budget.refusal) throw agentXError("CONFIG_INVALID", budget.refusal);
-  const credentialProblems = await credentialRefusals(connectors(), dependencies.credentialRegistry);
-  if (credentialProblems.length > 0) throw agentXError("CONFIG_INVALID", credentialProblems.join("; "));
-  // A repository the GitHub App cannot reach would otherwise fail only at prepare (#123).
-  for (const repository of definition.repositories) {
-    await dependencies.checkRepositoryAccess?.(repository);
-  }
-  let preflight: RegistrationPreflight | undefined;
-  if (wantsPreflight) {
-    const result = await preflightConnectors(connectors(), definition, identity.ownerKey);
-    if (result.refusals.length > 0) throw agentXError("CONFIG_INVALID", result.refusals.join("; "));
-    preflight = result.report;
-  }
+  const preflight = await registrationChecks(dependencies, identity, definition, wantsPreflight);
   const now = new Date().toISOString();
   const record: RegisteredProjectRecord = {
     ...key,
