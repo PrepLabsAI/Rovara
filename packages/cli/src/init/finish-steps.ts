@@ -13,14 +13,14 @@ import { addJira } from "../setup/connectors/jira.js";
 import { addLinear } from "../setup/connectors/linear.js";
 import { addProject } from "../setup/project-add.js";
 import { installationToken } from "../setup/project-files.js";
-import { waitForThreadedReply } from "../setup/reply-watch.js";
+import { REPLY_WAIT_MS, waitForThreadedReply } from "../setup/reply-watch.js";
 import { BUDGET_TAG_NOTE, checkAlertWebhook } from "./answers.js";
 import type { InitContext } from "./context.js";
 import { CONNECTOR_LABELS, CONNECTOR_TYPES, type ConnectorType, type InstallProgress } from "./install-state.js";
 import { retryOnPage } from "./retry.js";
 import { readSlackBotToken } from "./slack-app.js";
 import type { InitStep } from "./steps.js";
-import { adminCard, alertsCard, channelCard, connectorsCard, projectCard, type AdminCardInput } from "./ui/cards.js";
+import { adminCard, alertsCard, channelCard, connectorsCard, projectCard, replyCard, type AdminCardInput, type ReplyCardInput } from "./ui/cards.js";
 
 /** The environment's settings, which the Slack service step writes; every finishing step and the
  * admin session need them (F21: one message, used by both). */
@@ -269,10 +269,24 @@ export function e2eStep(): InitStep<InitContext> {
       if (project?.channelId === undefined || project.channelName === undefined || slack === undefined) {
         throw agentXError("CONFIG_INVALID", "install progress has no bound channel; the first-project step must finish first, so run agentx init again");
       }
-      const reply = await waitForThreadedReply({
-        env: context.env, session: await context.adminSession(), fetch: context.setup.fetch, teamId: slack.teamId, channelId: project.channelId,
-        channelName: project.channelName, botUserId: slack.botUserId, rerun: `agentx --env ${context.env} init`, write: context.write, sleep: context.sleep, now: context.now,
+      const where = { channelName: project.channelName, channelId: project.channelId, teamId: slack.teamId };
+      const show = (card: ReplyCardInput) => context.surface?.card(replyCard(card));
+      const reported = new Set<string>();
+      // FR-051 (Q7): on the page, the card says what to fix and the operator watches again; the
+      // terminal stops with the same advice, as before.
+      const reply = await retryOnPage({
+        surface: context.surface, prompter: context.prompter, question: "Watch for the reply again?",
+        failed: (problem) => show({ stage: "failed", ...where, problem }),
+        run: async () => {
+          show({ stage: "waiting", ...where, botUserId: slack.botUserId, minutes: Math.round(REPLY_WAIT_MS / 60_000) });
+          return waitForThreadedReply({
+            env: context.env, session: await context.adminSession(), fetch: context.setup.fetch, teamId: slack.teamId, channelId: where.channelId,
+            channelName: where.channelName, botUserId: slack.botUserId, rerun: `agentx --env ${context.env} init`, write: context.write, sleep: context.sleep, now: context.now,
+            reported,
+          });
+        },
       });
+      show({ stage: "done", channelName: project.channelName, seconds: reply.seconds });
       return { status: "done", note: `a mention in #${project.channelName} got a threaded reply in ${reply.seconds} seconds` };
     },
   };

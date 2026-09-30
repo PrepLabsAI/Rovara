@@ -234,6 +234,20 @@ describe("waiting for the threaded reply (FR-018 step 11)", () => {
       .rejects.toThrow("AgentX replied in #payments, but the turn ended as failed (WorkerUnavailable); see agentx --env staging admin turns export --since 15m, fix it, then run agentx init again");
   });
 
+  it("skips turns already reported, and adds a newly failed one before it throws (spec 040 FR-051)", async () => {
+    const plane = fakeControlPlane();
+    const old = turn({ subject: `${TEAM}/C0PAY00001/1.1`, receivedAt: new Date(T0 + 1000).toISOString(), disposition: "error" });
+    const fresh = turn({ subject: `${TEAM}/C0PAY00001/2.1`, receivedAt: new Date(T0 + 2000).toISOString(), disposition: "failed" });
+    plane.turns = [old, fresh];
+    const reported = new Set([String(old.eventId)]);
+    await expect(waitForThreadedReply({ env: "staging", session, fetch: plane.fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, rerun: "agentx init", write: () => undefined, ...clock(), reported }))
+      .rejects.toThrow("but the turn ended as failed;");
+    expect([...reported]).toEqual([String(old.eventId), String(fresh.eventId)]);
+    // With both reported, the watch waits for a new mention and gives up at the deadline instead.
+    await expect(waitForThreadedReply({ env: "staging", session, fetch: plane.fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, rerun: "agentx init", write: () => undefined, ...clock(), timeoutMs: 60_000, reported }))
+      .rejects.toThrow("no AgentX reply in #payments within 1 minute;");
+  });
+
   it("asks the export for turns since just before the prompt", async () => {
     const plane = fakeControlPlane();
     plane.turns = [turn({ subject: `${TEAM}/C0PAY00001/1.1`, receivedAt: new Date(T0 + 1000).toISOString() })];

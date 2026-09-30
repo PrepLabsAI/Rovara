@@ -5,11 +5,12 @@ import { rm } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import { agentXError } from "@agentx/contracts";
 import { writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
-import { adminUserStep, alertsStep } from "../../packages/cli/src/init/finish-steps.js";
+import { adminUserStep, alertsStep, e2eStep } from "../../packages/cli/src/init/finish-steps.js";
+import { emptyProgress } from "../../packages/cli/src/init/install-state.js";
 import { alertsCard } from "../../packages/cli/src/init/ui/cards.js";
 import type { WizardCard } from "../../packages/cli/src/init/ui/protocol.js";
-import { initContext, progressHandle, sampleAnswers, scriptedPrompter, type TestInitContext } from "../support/init-fakes.js";
-import { ADMIN_EMAIL, CONTROL_PLANE, fakeAlerts, fakeCognito, setupServices, STAGING_SETTINGS } from "../support/setup-fakes.js";
+import { initContext, progressHandle, sampleAnswers, scriptedPrompter, T0, type TestInitContext } from "../support/init-fakes.js";
+import { ADMIN_EMAIL, CONTROL_PLANE, fakeAlerts, fakeCognito, fakeControlPlane, setupServices, STAGING_SETTINGS, turn } from "../support/setup-fakes.js";
 
 let context: TestInitContext | undefined;
 afterEach(async () => { if (context !== undefined) await rm(context.home, { recursive: true, force: true }); context = undefined; });
@@ -97,5 +98,59 @@ describe("the alerts on the page", () => {
     await writeEnvironmentSettings(context.store, STAGING_SETTINGS);
     expect(await alertsStep().run(context, progressHandle())).toMatchObject({ status: "done" });
     expect(surface.cards).toEqual([alertsCard({ stage: "none" })]);
+  });
+});
+
+describe("the test reply on the page (FR-051)", () => {
+  const progress = () => progressHandle({
+    ...emptyProgress("staging", T0),
+    slack: { appId: "A0APP00001", teamId: "T0123456789", botUserId: "U0BOT00001" },
+    project: { name: "payments-api", revision: 1, channelName: "payments", channelId: "C0PAY00001", teamId: "T0123456789" },
+  });
+  const SUBJECT = "T0123456789/C0PAY00001/1790000000.000100";
+
+  it("shows how to mention the bot and a link to the channel, then the reply", async () => {
+    const surface = page();
+    const plane = fakeControlPlane();
+    plane.turns = [turn({ subject: SUBJECT, receivedAt: new Date(T0 + 2000).toISOString(), disposition: "answered", durationMs: 12_000 })];
+    context = initContext({ surface, setup: setupServices({ fetch: plane.fetch }), adminSession: async () => session });
+    await e2eStep().run(context, progress());
+    expect(surface.cards.map((card) => [card.status, card.link?.url])).toEqual([
+      ["waiting", "https://slack.com/app_redirect?team=T0123456789&channel=C0PAY00001"],
+      ["ok", undefined],
+    ]);
+    expect(surface.cards[0]?.lines[1]).toContain("this one's member ID is U0BOT00001");
+  });
+
+  it("Review Focus 1: counts a mention made just before the watch started", async () => {
+    const plane = fakeControlPlane();
+    plane.turns = [turn({ subject: SUBJECT, receivedAt: new Date(T0 - 3000).toISOString(), disposition: "answered", durationMs: 9_000 })];
+    context = initContext({ surface: page(), setup: setupServices({ fetch: plane.fetch }), adminSession: async () => session });
+    expect(await e2eStep().run(context, progress())).toEqual({ status: "done", note: "a mention in #payments got a threaded reply in 9 seconds" });
+  });
+
+  it("Review Focus 3: a second watch does not fail on the turn the first one reported, and waits for a new mention", async () => {
+    const surface = page();
+    const plane = fakeControlPlane();
+    plane.turns = [turn({ subject: SUBJECT, receivedAt: new Date(T0 + 2000).toISOString(), disposition: "error" })];
+    const base = scriptedPrompter([true]);
+    const prompter = { ...base, confirm: async (question: string, options: { defaultValue: boolean }) => {
+      // The operator fixes the problem and mentions the bot again before answering Yes.
+      plane.turns.push(turn({ subject: "T0123456789/C0PAY00001/1790000100.000100", receivedAt: new Date((context?.now() ?? T0) + 1000).toISOString(), disposition: "answered", durationMs: 7_000 }));
+      return base.confirm(question, options);
+    } };
+    context = initContext({ prompter, surface, setup: setupServices({ fetch: plane.fetch }), adminSession: async () => session });
+    expect(await e2eStep().run(context, progress())).toEqual({ status: "done", note: "a mention in #payments got a threaded reply in 7 seconds" });
+    expect(base.asked).toEqual(["Watch for the reply again?"]);
+    expect(surface.cards.find((card) => card.status === "failed")?.lines[0]).toContain("but the turn ended as error");
+    // Ruling R2: on the page the card says to answer Yes below, not to run init again.
+    expect(surface.cards.find((card) => card.status === "failed")?.lines.join(" ")).not.toContain("init again");
+  });
+
+  it("without a page, a failed reply still stops with what to fix", async () => {
+    const plane = fakeControlPlane();
+    plane.turns = [turn({ subject: SUBJECT, receivedAt: new Date(T0 + 2000).toISOString(), disposition: "error" })];
+    context = initContext({ setup: setupServices({ fetch: plane.fetch }), adminSession: async () => session });
+    await expect(e2eStep().run(context, progress())).rejects.toThrow("but the turn ended as error; see agentx --env staging admin turns export --since 15m, fix it, then run agentx --env staging init again");
   });
 });
