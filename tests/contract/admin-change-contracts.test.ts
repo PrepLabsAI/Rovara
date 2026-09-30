@@ -139,6 +139,9 @@ describe("records (E2, E3)", () => {
     expect(AdminChangePendingRecordSchema.safeParse({ ...pendingRecord, input: { kind: "bind_channel", channel: "C0123456789" } }).success).toBe(false);
     expect(AdminChangePendingRecordSchema.safeParse({ ...pendingRecord, pk: `CHANGE#${CHANGE}` }).success).toBe(false);
     expect(AdminChangePendingRecordSchema.safeParse({ ...pendingRecord, pk: "ADMIN_CHANGE#77777777-7777-4777-8777-777777777777" }).success).toBe(false);
+    // E13 (Task 8): the notifier's claim and edit times stay readable by the broker.
+    expect(AdminChangePendingRecordSchema.parse({ ...pendingRecord, dmClaimedAt: PROPOSED, dm: { channel: "D0123456789", ts: "1.2", postedAt: PROPOSED }, dmEditedAt: PROPOSED })).toMatchObject({ dmClaimedAt: PROPOSED, dmEditedAt: PROPOSED });
+    expect(AdminChangePendingRecordSchema.safeParse({ ...pendingRecord, dmEditedAt: "yesterday" }).success).toBe(false);
   });
 
   it("reads a stored request ID's item strictly, with its TTL", () => {

@@ -8,7 +8,7 @@ export interface StreamRecord {
   eventName?: string;
   dynamodb?: { ApproximateCreationDateTime?: number; NewImage?: Record<string, AttributeValue>; OldImage?: Record<string, AttributeValue> };
 }
-export type NoticeKind = "start" | "mode" | "closed" | "cancelled" | "ready" | "setup_failed" | "ended" | "pull_request";
+export type NoticeKind = "start" | "mode" | "closed" | "cancelled" | "ready" | "setup_failed" | "ended" | "pull_request" | "admin_change_dm" | "admin_change_outcome";
 export interface Notice {
   /** Fixed per change, so a repeated delivery posts once (C9). */
   id: string;
@@ -19,9 +19,13 @@ export interface Notice {
   workspaceId?: string;
   operationId?: string;
   mode?: "view" | "continue";
+  /** Spec 025 E13: the admin change a direct message is about. */
+  changeId?: string;
 }
 
 const TERMINAL = new Set(["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"]);
+/** Spec 025 E2: the statuses an admin change ends in. */
+const ENDED_CHANGE = new Set(["applied", "declined", "expired", "failed"]);
 const text = (value: unknown) => (typeof value === "string" ? value : "");
 const record = (value: unknown) => (value && typeof value === "object" ? (value as Record<string, unknown>) : undefined);
 
@@ -57,6 +61,18 @@ export function noticesOf(previous: Record<string, unknown> | undefined, next: R
       }
       if (next.kind === "publish" && next.status === "SUCCEEDED") return [{ ...base, id: `${base.operationId}:pull_request`, kind: "pull_request" }];
       if (next.kind === "task" || next.kind === "publish") return [{ ...base, id: `${base.operationId}:ended`, kind: "ended" }];
+      return [];
+    }
+    case "ADMIN_CHANGE": {
+      // Spec 025 E13: the Slack step started, or a change with a message ended. Only stored
+      // statuses count: a press that left the change pending (Task 7's `unavailable`) keeps the
+      // buttons. A TTL removal has no new image and never reaches here.
+      const changeId = text(next.changeId);
+      if (changeId === "") return [];
+      if (next.status === "pending" && next.slackRequestedAt != null && previous?.slackRequestedAt == null) return [{ id: `${changeId}:dm`, kind: "admin_change_dm", changeId, at }];
+      // A message recorded after the change ended (the change was answered while it posted) is edited too.
+      const ended = ENDED_CHANGE.has(text(next.status));
+      if (ended && next.dm != null && (previous?.status !== next.status || previous?.dm == null)) return [{ id: `${changeId}:outcome`, kind: "admin_change_outcome", changeId, at }];
       return [];
     }
     default:

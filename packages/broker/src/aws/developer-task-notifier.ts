@@ -2,30 +2,36 @@
 // secret. The state table's stream (filtered in infra) brings changes, which become notices on the
 // notifier's own queue; the queue brings each notice back, and it is posted once. Logs carry event
 // names, IDs, notice kinds and Slack error codes only: never a token, a post's text or a task's text.
+// Spec 025 E13: it also posts an admin change's Slack Confirm message, and edits it when the change ends.
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { ChangeMessageVisibilityCommand, SQSClient, SendMessageBatchCommand } from "@aws-sdk/client-sqs";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, lastAssistantResponse, sharedTaskKey } from "@agentx/contracts";
+import { AdminChangePendingRecordSchema, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, adminChangeKey, lastAssistantResponse, sharedTaskKey, type PendingChange } from "@agentx/contracts";
+import { adminChangeMessage, adminChangeOutcomeMessage } from "../developer/change-messages.js";
 import { readStream, type Notice, type StreamRecord } from "../developer/notifications.js";
 import { CANCELLED_REPLY, CLOSED_REPLY, READY_REPLY, endedReply, modeReply, pullRequestReply, setupFailedReply, startMessage } from "../developer/share-messages.js";
 import { deriveTaskStatus, failureCategory, taskKey, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type OperationFacts, type TaskShare } from "../developer/task-records.js";
 import { isConditional } from "./broker-shared.js";
 import { requiredEnvironment } from "./lambda.js";
 import { parseSlackSecrets } from "./slack-ingress.js";
-import { SlackPostError, chatPostMessage } from "./slack-web.js";
+import { SlackPostError, chatPostMessage, chatUpdate } from "./slack-web.js";
 
 type Client = { send(command: unknown): Promise<unknown> };
 const errorName = (error: unknown) => (error instanceof Error ? error.name : "unknown");
 interface QueueRecord { eventSource: "aws:sqs"; messageId: string; receiptHandle: string; body: string; attributes?: { ApproximateReceiveCount?: string } }
-interface PostInput { channel: string; threadTs?: string; text: string }
+interface PostInput { channel: string; threadTs?: string; text: string; blocks?: unknown[] }
+interface UpdateInput { channel: string; ts: string; text: string; blocks: unknown[] }
 
 export interface NotifierDependencies {
   documentClient: Client;
   tableName: string;
   enqueue(notices: readonly Notice[]): Promise<void>;
   retryLater(receiptHandle: string, seconds: number): Promise<void>;
-  post(input: PostInput): Promise<{ ts: string }>;
+  /** The answer's channel is the direct message's own ID when the post went to a user (E13). */
+  post(input: PostInput): Promise<{ ts: string; channel?: string }>;
+  /** Spec 025 E13: chat.update, to edit an admin change's message when it ends. */
+  update?(input: UpdateInput): Promise<void>;
   now(): number;
   log(entry: Record<string, unknown>): void;
   /** One `SlackDeliveryFailed` count (spec 015 FR-045's alarm sums it). */
@@ -43,7 +49,7 @@ class StartPending extends Error {
 /** 30, 60, 120, 240, 480, then 900 seconds, by the delivery attempt that failed. */
 export const retryDelaySeconds = (attempt: number): number => Math.min(900, 30 * 2 ** Math.max(0, Math.min(attempt - 1, 5)));
 
-const NOTICE_KINDS = new Set(["start", "mode", "closed", "cancelled", "ready", "setup_failed", "ended", "pull_request"]);
+const NOTICE_KINDS = new Set(["start", "mode", "closed", "cancelled", "ready", "setup_failed", "ended", "pull_request", "admin_change_dm", "admin_change_outcome"]);
 /** The statuses an ended operation can have; only these reach the reply text, which does not escape them. */
 const ENDED_STATUSES = new Set(["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"]);
 
@@ -212,6 +218,106 @@ async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord &
 
 type Outcome = "posted" | "recorded" | "not_shared" | "before_share" | "after_close" | "delivered" | "no_thread" | "stale";
 
+/** Another delivery of an admin change's message holds the claim: this one is retried (C9). */
+class DmPending extends Error {
+  constructor() {
+    super("the admin change's message is being posted");
+    this.name = "DmPending";
+  }
+}
+
+/** A claim older than this was left by a delivery that died between claiming and posting; longer than a post's timeout. */
+const DM_CLAIM_MS = 60_000;
+
+/** The stored change, read strictly as the broker reads it; an unreadable one is named by its ID only. */
+async function readChange(deps: NotifierDependencies, changeId: string): Promise<PendingChange | undefined> {
+  const item = await getItem<Record<string, unknown>>(deps, adminChangeKey(changeId));
+  if (item === undefined) return undefined;
+  const parsed = AdminChangePendingRecordSchema.safeParse(item);
+  if (!parsed.success) {
+    deps.log({ event: "admin_change.unreadable", changeId });
+    return undefined;
+  }
+  return parsed.data;
+}
+
+/**
+ * Spec 025 E13: posts the change's Confirm message once, to the planning admin's own linked Slack
+ * user, and edits it once the change has ended. Every write conditions on the item existing, so a
+ * change the TTL removed meanwhile is never recreated as a fragment.
+ */
+async function deliverAdminChange(deps: NotifierDependencies, notice: Notice): Promise<Outcome> {
+  if (notice.changeId === undefined) return "stale";
+  const key = adminChangeKey(notice.changeId);
+  const change = await readChange(deps, notice.changeId);
+  if (change === undefined) return "stale";
+  if (notice.kind === "admin_change_outcome") {
+    if (change.dm === undefined || change.dmEditedAt !== undefined) return "delivered";
+    if (deps.update === undefined) return "stale";
+    // Only a stored end edits the message: a still-pending change keeps its buttons (C13).
+    const message = adminChangeOutcomeMessage(change);
+    if (message === undefined) return "stale";
+    await deps.update({ channel: change.dm.channel, ts: change.dm.ts, ...message });
+    try {
+      // Ruling B2: a top-level attribute, so the fake and DynamoDB agree on it.
+      await deps.documentClient.send(new UpdateCommand({
+        TableName: deps.tableName, Key: key, UpdateExpression: "SET dmEditedAt = :now",
+        ConditionExpression: "attribute_exists(pk) AND attribute_exists(dm) AND attribute_not_exists(dmEditedAt)",
+        ExpressionAttributeValues: { ":now": new Date(deps.now()).toISOString() },
+      }));
+    } catch (error) {
+      // Another delivery edited it too, with the same text; or the TTL removed the change.
+      if (!isConditional(error)) throw error;
+    }
+    deps.log({ event: "admin_change.dm_edited", changeId: change.changeId, traceId: change.traceId, status: change.status });
+    return "posted";
+  }
+  if (change.dm !== undefined) return "delivered";
+  if (change.status !== "pending" || deps.now() >= Date.parse(change.expiresAt) || change.slackUserId === undefined) return "stale";
+  const claimedAt = new Date(deps.now()).toISOString();
+  try {
+    await deps.documentClient.send(new UpdateCommand({
+      TableName: deps.tableName, Key: key, UpdateExpression: "SET dmClaimedAt = :now",
+      ConditionExpression: "attribute_exists(pk) AND attribute_not_exists(dm) AND (attribute_not_exists(dmClaimedAt) OR dmClaimedAt < :stale)",
+      ExpressionAttributeValues: { ":now": claimedAt, ":stale": new Date(deps.now() - DM_CLAIM_MS).toISOString() },
+    }));
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+    // Another delivery is posting it now; this one is retried and then finds it delivered.
+    throw new DmPending();
+  }
+  let posted: { ts: string; channel?: string };
+  try {
+    posted = await deps.post({ channel: change.slackUserId, ...adminChangeMessage(change, deps.now()) });
+  } catch (error) {
+    // Gives the claim back at once, so the retry need not wait for it to lapse. Best effort.
+    try {
+      await deps.documentClient.send(new UpdateCommand({
+        TableName: deps.tableName, Key: key, UpdateExpression: "REMOVE dmClaimedAt", ConditionExpression: "dmClaimedAt = :mine",
+        ExpressionAttributeValues: { ":mine": claimedAt },
+      }));
+    } catch (releaseError) {
+      deps.log({ event: "admin_change.dm_release_failed", changeId: change.changeId, traceId: change.traceId, error: errorName(releaseError) });
+    }
+    throw error;
+  }
+  try {
+    await deps.documentClient.send(new UpdateCommand({
+      TableName: deps.tableName, Key: key, UpdateExpression: "SET dm = :dm",
+      ConditionExpression: "attribute_exists(pk) AND attribute_not_exists(dm)",
+      ExpressionAttributeValues: { ":dm": { channel: posted.channel ?? change.slackUserId, ts: posted.ts, postedAt: new Date(deps.now()).toISOString() } },
+    }));
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+    // The TTL removed the change while it posted: the message stays, and a press answers not found.
+    deps.log({ event: "admin_change.dm_unrecorded", changeId: change.changeId, traceId: change.traceId });
+    return "stale";
+  }
+  // FR-052: the notifier's step, with the change and trace IDs.
+  deps.log({ event: "admin_change.dm_posted", changeId: change.changeId, traceId: change.traceId });
+  return "posted";
+}
+
 /** How long one delivery holds the start message's post (final review M3); longer than a post's timeout. */
 const START_LEASE_MS = 60_000;
 
@@ -346,7 +452,8 @@ export function createNotifierHandler(deps: NotifierDependencies) {
         continue;
       }
       try {
-        deps.log({ event: "developer_notifier.notice", kind: notice.kind, noticeId: notice.id, outcome: await deliver(deps, notice) });
+        const outcome = notice.kind === "admin_change_dm" || notice.kind === "admin_change_outcome" ? await deliverAdminChange(deps, notice) : await deliver(deps, notice);
+        deps.log({ event: "developer_notifier.notice", kind: notice.kind, noticeId: notice.id, outcome });
       } catch (error) {
         const reason = error instanceof SlackPostError ? error.slackError : errorName(error);
         if (deps.now() - Date.parse(notice.at) < SHARE_DELIVERY_WINDOW_MS) {
@@ -384,8 +491,8 @@ const SECRET_CACHE_MS = 5 * 60_000;
 /** Slack's answers that mean the token itself is bad: the next post loads it again. */
 const REFUSED_TOKEN = new Set(["invalid_auth", "token_revoked"]);
 
-/** chat.postMessage with the bot token cached for five minutes, and dropped when Slack refuses it. */
-export function cachedSlackPoster(loadToken: () => Promise<string>, now: () => number = Date.now, fetchImplementation: typeof fetch = fetch): (input: PostInput) => Promise<{ ts: string }> {
+/** The bot token cached for five minutes, and dropped when Slack refuses it; shared by every Slack call. */
+export function cachedBotToken(loadToken: () => Promise<string>, now: () => number = Date.now): <T>(call: (token: string) => Promise<T>) => Promise<T> {
   let cached: { value: Promise<string>; loadedAt: number } | undefined;
   const token = (): Promise<string> => {
     if (cached === undefined || now() - cached.loadedAt > SECRET_CACHE_MS) {
@@ -396,15 +503,32 @@ export function cachedSlackPoster(loadToken: () => Promise<string>, now: () => n
     }
     return cached.value;
   };
-  return async (input) => {
+  return async (call) => {
     const entry = cached;
     try {
-      return await chatPostMessage(await token(), input, fetchImplementation);
+      return await call(await token());
     } catch (error) {
       if (error instanceof SlackPostError && REFUSED_TOKEN.has(error.slackError) && (entry === undefined || cached === entry)) cached = undefined;
       throw error;
     }
   };
+}
+
+/** chat.postMessage and chat.update on one cached bot token (E13). */
+export function cachedSlackClient(loadToken: () => Promise<string>, now: () => number = Date.now, fetchImplementation: typeof fetch = fetch): {
+  post: (input: PostInput) => Promise<{ ts: string; channel?: string }>;
+  update: (input: UpdateInput) => Promise<void>;
+} {
+  const withToken = cachedBotToken(loadToken, now);
+  return {
+    post: (input) => withToken((token) => chatPostMessage(token, input, fetchImplementation)),
+    update: (input) => withToken((token) => chatUpdate(token, input, fetchImplementation)),
+  };
+}
+
+/** chat.postMessage with the bot token cached for five minutes, and dropped when Slack refuses it. */
+export function cachedSlackPoster(loadToken: () => Promise<string>, now: () => number = Date.now, fetchImplementation: typeof fetch = fetch): (input: PostInput) => Promise<{ ts: string; channel?: string }> {
+  return cachedSlackClient(loadToken, now, fetchImplementation).post;
 }
 
 /** The Lambda's own dependencies, built on first use: the environment is read only then. */
@@ -414,7 +538,7 @@ function createAwsNotifierHandler() {
   const sqs = new SQSClient(awsClientConfiguration);
   const secretsManager = new SecretsManagerClient(awsClientConfiguration);
   const queueUrl = () => requiredEnvironment("NOTICE_QUEUE_URL");
-  const post = cachedSlackPoster(() => secretsManager.send(new GetSecretValueCommand({ SecretId: requiredEnvironment("SLACK_SECRET_ARN") }))
+  const slack = cachedSlackClient(() => secretsManager.send(new GetSecretValueCommand({ SecretId: requiredEnvironment("SLACK_SECRET_ARN") }))
     .then((response) => parseSlackSecrets(response.SecretString ?? "").botToken));
   return createNotifierHandler({
     documentClient,
@@ -433,7 +557,8 @@ function createAwsNotifierHandler() {
     async retryLater(receiptHandle, seconds) {
       await sqs.send(new ChangeMessageVisibilityCommand({ QueueUrl: queueUrl(), ReceiptHandle: receiptHandle, VisibilityTimeout: seconds }));
     },
-    post,
+    post: slack.post,
+    update: slack.update,
     now: Date.now,
     log: (entry) => console.log(JSON.stringify({ component: "developer-task-notifier", ...entry })),
     deliveryFailed: () => console.log(JSON.stringify({

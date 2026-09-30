@@ -217,6 +217,10 @@ export const AdminChangePendingRecordSchema = z.object({
   claimedAt: Time.optional(),
   slackRequestedAt: Time.optional(),
   dm: z.object({ channel: z.string().min(1).max(64), ts: z.string().min(1).max(64), postedAt: Time, editedAt: Time.optional() }).strict().optional(),
+  /** E13: the notifier's claim on posting the direct message, so two deliveries never both post it. */
+  dmClaimedAt: Time.optional(),
+  /** E13: when the notifier edited the message with the outcome (top level, ruling B2). */
+  dmEditedAt: Time.optional(),
   methodUsed: ConfirmationMethodSchema.optional(),
   pressedBy: SlackUserIdSchema.optional(),
   result: z.record(z.string(), z.unknown()).optional(),
