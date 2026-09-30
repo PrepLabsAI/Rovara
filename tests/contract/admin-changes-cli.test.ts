@@ -215,10 +215,13 @@ describe("askToApply (Q6): the terminal prompt", () => {
   it("answers yes to y or yes, and no to n, no or an empty line", async () => {
     for (const [line, expected] of [["y", true], ["yes", true], ["Y", true], ["n", false], ["no", false], ["", false]] as const) {
       const io = terminal();
+      const before = io.signals.listenerCount("SIGINT");
       const answer = askToApply("Apply this change?", io);
+      expect(io.signals.listenerCount("SIGINT")).toBe(before + 1);
       io.input.write(`${line}\n`);
       expect(await answer).toBe(expected);
       expect(io.shown()).toContain("Apply this change? [y/N]");
+      expect(io.signals.listenerCount("SIGINT")).toBe(before);
     }
   });
 
@@ -282,6 +285,16 @@ describe("the commands (E17)", () => {
     expect(await executeCli([...session.globals, "admin", "project", "grant", "--project", "Not A Name", "--developer", "someone@example.com"], session.io(fetch))).toBe(2);
     expect(session.stderr()).toContain("--project");
     expect(session.stderr()).not.toContain("someone@example.com");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("refuses a --developer over 254 characters with its own words, without echoing it", async () => {
+    const session = await signedIn();
+    const fetch = vi.fn() as unknown as typeof globalThis.fetch;
+    const long = `${"a".repeat(250)}@example.com`;
+    expect(await executeCli([...session.globals, "admin", "project", "grant", "--project", "payments", "--developer", long], session.io(fetch))).toBe(2);
+    expect(session.stderr()).toContain("--developer must be at most 254 characters");
+    expect(session.stderr()).not.toContain(long);
     expect(fetch).not.toHaveBeenCalled();
   });
 

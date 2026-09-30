@@ -417,14 +417,18 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         // Checked here, not by commander, so the refusal is AgentX's own and names what to do.
         // The program's own --project can take the value first, as it does for admin slack bind.
         const globals = globalOptions(command);
+        // The global --project takes the value when given (as for admin slack bind), so read both.
         const projectName = options.project ?? globals.project;
         if (projectName === undefined) throw agentXError("CONFIG_INVALID", `--project is required: name the project, such as agentx admin project ${action} --project payments --developer U0123456789`);
         const project = AgentXNameSchema.safeParse(projectName);
         if (!project.success) throw agentXError("CONFIG_INVALID", "--project must be a project name: a lowercase letter, then up to 62 lowercase letters, digits or hyphens");
         // The developer reference is never echoed: it may be an email.
         const developer = options.developer?.trim();
-        if (developer === undefined || developer === "" || developer.length > 254) {
+        if (developer === undefined || developer === "") {
           throw agentXError("CONFIG_INVALID", "--developer is required: a Slack user ID such as U0123456789, the email they signed in to AgentX with, or a developer ID");
+        }
+        if (developer.length > 254) {
+          throw agentXError("CONFIG_INVALID", "--developer must be at most 254 characters; name them by Slack user ID, the email they signed in with, or developer ID");
         }
         const confirm = changeConfirmer(options.yes);
         const { settings, accessToken } = await authenticate(globals, services.tokenStore);
