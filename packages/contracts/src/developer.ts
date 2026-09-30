@@ -191,3 +191,13 @@ export type ChannelInfoResponse =
   | { ok: true; channels: Array<{ channelId: string; name: string; isPrivate: boolean }> }
   | { ok: false; error: "slack_unavailable" }
   | { ok: false; error: "invalid_request" };
+
+/** Spec 025 A12: the broker asks DeveloperIdentity which Slack user owns a verified email (FR-012's lookup). */
+export const SlackUserByEmailRequestSchema = z.object({ kind: z.literal("slack-user-by-email"), email: z.string().email().max(254) }).strict();
+export type SlackUserByEmailRequest = z.infer<typeof SlackUserByEmailRequestSchema>;
+export type SlackUserByEmailResponse = { ok: true; userId?: string } | { ok: false; error: "slack_unavailable" | "invalid_request" };
+
+/** Spec 025 A13: the health route's Slack token check (auth.test), through DeveloperIdentity. */
+export const SlackAuthCheckRequestSchema = z.object({ kind: z.literal("slack-auth-check") }).strict();
+export type SlackAuthCheckRequest = z.infer<typeof SlackAuthCheckRequestSchema>;
+export type SlackAuthCheckResponse = { ok: true; teamId: string } | { ok: false; error: string };
