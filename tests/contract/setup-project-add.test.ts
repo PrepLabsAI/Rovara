@@ -225,6 +225,15 @@ describe("agentx project add (FR-040)", () => {
       .rejects.toThrow("project registration failed with HTTP 409: revision 1 of payments-api already exists");
     await expect(readFile(join(configDir, "payments-api.yaml"), "utf8")).rejects.toThrow("ENOENT");
   });
+  it("tells the install page which repository it chose, and returns what it always returned", async () => {
+    const chosen: string[] = [];
+    const result = await addProject({
+      env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter(["acme/payments-api", "", true]), write: () => undefined, services: services(), flags: {},
+      onRepository: (fullName) => { chosen.push(fullName); },
+    });
+    expect(chosen).toEqual(["acme/payments-api"]);
+    expect(result).toEqual({ name: "payments-api", revision: 1, file: join(configDir, "payments-api.yaml") });
+  });
 });
 
 describe("the first-project init step", () => {

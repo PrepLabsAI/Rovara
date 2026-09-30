@@ -20,7 +20,7 @@ import { CONNECTOR_LABELS, CONNECTOR_TYPES, type ConnectorType, type InstallProg
 import { retryOnPage } from "./retry.js";
 import { readSlackBotToken } from "./slack-app.js";
 import type { InitStep } from "./steps.js";
-import { adminCard, type AdminCardInput } from "./ui/cards.js";
+import { adminCard, channelCard, projectCard, type AdminCardInput } from "./ui/cards.js";
 
 /** The environment's settings, which the Slack service step writes; every finishing step and the
  * admin session need them (F21: one message, used by both). */
@@ -104,6 +104,7 @@ export function firstProjectStep(): InitStep<InitContext> {
     async run(context, progress) {
       const session = await context.adminSession();
       let project = progress.current().project;
+      let shown = false;
       if (project === undefined) {
         const installationId = progress.current().github?.installationId;
         const githubToken = await installationToken({
@@ -111,20 +112,30 @@ export function firstProjectStep(): InitStep<InitContext> {
           ...(installationId === undefined ? {} : { installationId }),
           nowSeconds: Math.floor(context.now() / 1000),
         });
-        const added = await addProject({ env: context.env, session, githubToken, prompter: context.prompter, write: context.write, services: context.setup, flags: context.flags });
+        let repository: string | undefined;
+        const added = await addProject({
+          env: context.env, session, githubToken, prompter: context.prompter, write: context.write, services: context.setup, flags: context.flags,
+          onRepository: (fullName) => { repository = fullName; },
+        });
         project = { name: added.name, revision: added.revision };
         await progress.update({ project });
+        context.surface?.card(projectCard({ name: added.name, revision: added.revision, ...(repository === undefined ? {} : { repository }) }));
+        shown = true;
       }
+      // A project an earlier run recorded is shown without its repository.
+      if (!shown) context.surface?.card(projectCard({ name: project.name, revision: project.revision }));
       if (project.channelId === undefined) {
         const slack = progress.current().slack;
         if (slack === undefined) throw agentXError("CONFIG_INVALID", "install progress has no Slack app facts; the Slack app step must finish first, so run agentx init again");
         const bound = await addChannel({
           session, botToken: await readSlackBotToken(context.secrets, context.env), teamId: slack.teamId, botUserId: slack.botUserId, projectName: project.name,
           prompter: context.prompter, write: context.write, sleep: context.sleep, now: context.now, services: context.setup, flags: context.flags,
+          onWaiting: (channelName) => context.surface?.card(channelCard({ stage: "waiting", channelName, botUserId: slack.botUserId })),
         });
         project = { ...project, channelId: bound.channelId, channelName: bound.channelName, teamId: slack.teamId };
         await progress.update({ project });
       }
+      if (project.channelName !== undefined) context.surface?.card(channelCard({ stage: "done", channelName: project.channelName, projectName: project.name }));
       return { status: "done", note: `project ${project.name} in #${project.channelName ?? project.channelId}` };
     },
   };

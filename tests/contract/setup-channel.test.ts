@@ -365,3 +365,21 @@ describe("the first-project init step's channel", () => {
       .rejects.toThrow("install progress has no Slack app facts; the Slack app step must finish first, so run agentx init again");
   });
 });
+
+describe("the invite wait, told to the install page (spec 040 phase 3)", () => {
+  it("calls onWaiting once, with the channel's name, when the bot cannot see it yet", async () => {
+    const waited: string[] = [];
+    const lines: string[] = [];
+    const plane = fakeControlPlane();
+    const bound = await addChannel({
+      session, botToken: "xoxb-1", teamId: TEAM, botUserId: BOT, projectName: "payments-api",
+      prompter: scriptedPrompter(["payments"]), write: (line) => { lines.push(line); }, ...clock(),
+      services: { fetch: plane.fetch, slackChannels: fakeSlackChannels([{ id: "C0PAY00001", name: "payments", isPrivate: true, isMember: true }], { visibleAfterFinds: 3 }) },
+      flags: {}, onWaiting: (name) => { waited.push(name); },
+    });
+    expect(bound).toEqual({ channelId: "C0PAY00001", channelName: "payments" });
+    expect(waited).toEqual(["payments"]);
+    // The terminal's line is unchanged.
+    expect(lines).toContain(`The bot cannot see #payments yet. If #payments is private, type /invite <@${BOT}> in it; if it does not exist, create it. Waiting up to 10 minutes.`);
+  });
+});
