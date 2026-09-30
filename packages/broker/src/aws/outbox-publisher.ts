@@ -3,7 +3,7 @@ import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from "@
 import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
 import { unmarshall } from "@aws-sdk/util-dynamodb";
 import type { StreamRecord } from "../developer/notifications.js";
-import { INDEX_DEFAULT_BUDGET_MS, indexActivity } from "./activity-index.js";
+import { INDEX_DEFAULT_BUDGET_MS, byDeadline, indexActivity } from "./activity-index.js";
 import { requiredEnvironment, type DurableOutboxRecord } from "./lambda.js";
 
 export interface DynamoStreamEvent {
@@ -37,9 +37,13 @@ export function createOutboxPublisherHandler(dependencies: {
     if (dependencies.index !== undefined) {
       try {
         const records = event.Records ?? [];
-        await (context === undefined
-          ? dependencies.index(records)
-          : dependencies.index(records, { deadline: Date.now() + context.getRemainingTimeInMillis() - INDEX_SAFETY_MARGIN_MS }));
+        if (context === undefined) {
+          await dependencies.index(records);
+        } else {
+          // A4: the index is abandoned at its deadline even if it never settles, so the batch ends in time.
+          const deadline = Date.now() + context.getRemainingTimeInMillis() - INDEX_SAFETY_MARGIN_MS;
+          await byDeadline(deadline, () => dependencies.index!(records, { deadline }));
+        }
       } catch (error) {
         // A4: dispatch never waits on, or repeats for, the index; the error's name only.
         console.log(JSON.stringify({ component: "outbox-publisher", event: "activity_index.write_failed", error: error instanceof Error ? error.name : "unknown" }));
@@ -78,10 +82,11 @@ export const handler = createOutboxPublisherHandler({
     }
   },
   index: (records, options) => indexActivity(records, {
-    get: async (key) => ((await documentClient.send(new GetCommand({ TableName: required(tableName, "STATE_TABLE_NAME"), Key: key, ConsistentRead: true }))) as { Item?: Record<string, unknown> }).Item,
-    put: async (item) => {
+    // A4: the SDK has no default request timeout; the index's signal aborts a hung request.
+    get: async (key, requestOptions) => ((await documentClient.send(new GetCommand({ TableName: required(tableName, "STATE_TABLE_NAME"), Key: key, ConsistentRead: true }), { abortSignal: requestOptions?.signal })) as { Item?: Record<string, unknown> }).Item,
+    put: async (item, requestOptions) => {
       try {
-        await documentClient.send(new PutCommand({ TableName: required(tableName, "STATE_TABLE_NAME"), Item: item, ConditionExpression: "attribute_not_exists(pk)" }));
+        await documentClient.send(new PutCommand({ TableName: required(tableName, "STATE_TABLE_NAME"), Item: item, ConditionExpression: "attribute_not_exists(pk)" }), { abortSignal: requestOptions?.signal });
       } catch (error) {
         if (!(error instanceof Error) || error.name !== "ConditionalCheckFailedException") throw error;
       }

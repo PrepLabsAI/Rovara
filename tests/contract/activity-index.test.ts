@@ -239,4 +239,18 @@ describe("the index's deadline (A4)", () => {
       vi.useRealTimers();
     }
   });
+
+  it("gives up on a store call that never answers once the deadline passes, and hands each call an abort signal", async () => {
+    const index = store(slackWorkspace);
+    const signals: Array<AbortSignal | undefined> = [];
+    index.get = (_key, options) => { signals.push(options?.signal); return new Promise(() => undefined); };
+    const log = vi.fn();
+    const result = await indexActivity([failedAt(OPERATION, "2026-09-30T08:15:00.000Z"), failedAt(SECOND, "2026-09-30T08:16:00.000Z")], index, log, Date.now() + 50);
+    expect(result).toEqual({ failures: 0, usage: 0, failed: 1 });
+    expect(index.puts).toEqual([]);
+    expect(signals.length).toBeGreaterThan(0);
+    expect(signals.every((signal) => signal instanceof AbortSignal && signal.aborted)).toBe(true);
+    expect(log).toHaveBeenCalledWith({ event: "activity_index.write_failed", operationId: OPERATION, error: "TimeoutError" });
+    expect(log).toHaveBeenCalledWith({ event: "activity_index.deadline_reached", skipped: 1 });
+  }, 2_000);
 });

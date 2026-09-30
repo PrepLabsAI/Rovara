@@ -21,10 +21,30 @@ import {
 import { failureCategory, taskKey, taskPointerKey } from "../developer/task-records.js";
 import type { StreamRecord } from "../developer/notifications.js";
 
+/** A4: aborted at the index's deadline; a store passes it to each request it sends. */
+export interface IndexStoreOptions { signal?: AbortSignal }
+
 export interface IndexStore {
-  get(key: { pk: string; sk: string }): Promise<Record<string, unknown> | undefined>;
+  get(key: { pk: string; sk: string }, options?: IndexStoreOptions): Promise<Record<string, unknown> | undefined>;
   /** Conditioned attribute_not_exists(pk): a replayed record writes nothing twice. */
-  put(item: Record<string, unknown>): Promise<void>;
+  put(item: Record<string, unknown>, options?: IndexStoreOptions): Promise<void>;
+}
+
+/** Settles by `deadline` (epoch milliseconds): rejects with a TimeoutError when `run` has not answered by then. */
+export function byDeadline<T>(deadline: number, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const signal = AbortSignal.timeout(Math.max(1, deadline - Date.now()));
+  const timedOut = new Promise<never>((_, reject) => {
+    signal.addEventListener("abort", () => reject(signal.reason as Error), { once: true });
+  });
+  return Promise.race([run(signal), timedOut]);
+}
+
+/** A4: every store call is bounded by the deadline, so a hung request cannot outlive the publisher. */
+function bounded(store: IndexStore, deadline: number): IndexStore {
+  return {
+    get: (key) => byDeadline(deadline, (signal) => store.get(key, { signal })),
+    put: (item) => byDeadline(deadline, (signal) => store.put(item, { signal })),
+  };
 }
 
 const TERMINAL = new Set(["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"]);
@@ -119,10 +139,11 @@ async function usageItem(store: IndexStore, event: Record<string, unknown>): Pro
  */
 export async function indexActivity(
   records: readonly StreamRecord[],
-  store: IndexStore,
+  unbounded: IndexStore,
   log: (entry: Record<string, unknown>) => void,
   deadline: number = Date.now() + INDEX_DEFAULT_BUDGET_MS,
 ): Promise<{ failures: number; usage: number; failed: number }> {
+  const store = bounded(unbounded, deadline);
   const result = { failures: 0, usage: 0, failed: 0 };
   const work: Array<{ failure: boolean; next: Record<string, unknown> }> = [];
   for (const entry of records) {
