@@ -1,5 +1,5 @@
 import { createServer, type Server } from "node:http";
-import { AgentXError, WorkerInvocationSchema, type WorkerInvocation } from "@agentx/contracts";
+import { AgentXError, WorkerInvocationSchema, redactText, type WorkerInvocation } from "@agentx/contracts";
 import type { OperationJournal } from "./journal.js";
 import { WorkerOperationCancelledError } from "./cancel.js";
 import {
@@ -155,7 +155,9 @@ async function executeInBackground(invocation: WorkerInvocation, state: WorkerSe
       await state.journal.transition(invocation.operationId, "CANCELLED", error.message);
       terminal = { operationId: invocation.operationId, status: "CANCELLED", error: error.message };
     } else {
-      const message = error instanceof Error ? error.message : "worker execution failed";
+      // Redacted before the journal stores it on disk or the terminal callback sends it: an error
+      // can carry a command's or Git's output (#170).
+      const message = redactText(error instanceof Error ? error.message : "worker execution failed");
       await state.journal.transition(
         invocation.operationId,
         "FAILED",
