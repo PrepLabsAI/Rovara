@@ -3,7 +3,7 @@
 // counts, names, codes and error classes only.
 import { ADMIN_API_VERSION, DEVELOPER_API_VERSION, type AdminHealthCheck, type AdminHealthResponse, type SlackAuthCheckResponse } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
-import { adminProjectNames, latestProjectRecord, projectWorkspaceRows, readFailures, type AdminReadDependencies } from "./admin-reads.js";
+import { adminProjects, projectWorkspaceRows, readFailures, type AdminReadDependencies } from "./admin-reads.js";
 
 /** Function-valued fields, not methods, so a probe can be called on its own (no `this`). */
 export interface AdminHealthProbes {
@@ -38,6 +38,19 @@ const failed = (what: string, ms: number, error: unknown): AdminHealthCheck => (
   ? { status: "unknown", detail: `did not answer within ${ms / 1000} seconds` }
   : { status: "unknown", detail: `could not read ${what} (${errorName(error)})` });
 
+const queueCount = (count: number) => `${count} queue${count === 1 ? "" : "s"}`;
+/**
+ * R18: messages waiting in any queue warn (naming how many could not be read as well); otherwise
+ * a queue whose depth could not be read makes the check unknown; otherwise all are empty.
+ */
+function queuesCheck(depths: ReadonlyArray<{ depth: number | null }>): AdminHealthCheck {
+  const holding = depths.filter((queue) => queue.depth !== null && queue.depth > 0).length;
+  const unread = depths.filter((queue) => queue.depth === null).length;
+  if (holding > 0) return { status: "warn", detail: `${queueCount(holding)} ${holding === 1 ? "holds" : "hold"} messages${unread === 0 ? "" : `; ${unread} could not be read`}` };
+  if (unread > 0) return { status: "unknown", detail: `${unread} of ${queueCount(depths.length)} could not be read` };
+  return { status: "ok", detail: `${queueCount(depths.length)}, all empty` };
+}
+
 export async function adminHealth(deps: AdminReadDependencies, identity: AuthenticatedIdentity): Promise<AdminHealthResponse> {
   const probes: AdminHealthProbes = deps.health ?? {};
   const ms = probes.timeoutMs ?? PROBE_TIMEOUT_MS;
@@ -53,13 +66,13 @@ export async function adminHealth(deps: AdminReadDependencies, identity: Authent
       return { alarms: [], alarmsCheck: failed("the alarms", ms, error) };
     }
   };
-  const queuesPart = async (): Promise<AdminHealthResponse["deadLetterQueues"]> => {
-    if (probes.queueDepths === undefined) return [];
+  const queuesPart = async (): Promise<Pick<AdminHealthResponse, "deadLetterQueues" | "deadLetterQueuesCheck">> => {
+    if (probes.queueDepths === undefined) return { deadLetterQueues: [], deadLetterQueuesCheck: NOT_SET_UP };
     try {
-      return await within(ms, probes.queueDepths);
+      const depths = await within(ms, probes.queueDepths);
+      return { deadLetterQueues: depths, deadLetterQueuesCheck: queuesCheck(depths) };
     } catch (error) {
-      deps.log({ event: "admin.health_queues_failed", error: error instanceof ProbeTimeout ? "timeout" : errorName(error) });
-      return [];
+      return { deadLetterQueues: [], deadLetterQueuesCheck: failed("the dead-letter queues", ms, error) };
     }
   };
   const slackPart = async (): Promise<AdminHealthCheck> => {
@@ -88,17 +101,12 @@ export async function adminHealth(deps: AdminReadDependencies, identity: Authent
     }
   };
   const statePart = async (): Promise<Pick<AdminHealthResponse, "workerModes" | "workspaces" | "workspacesTruncated">> => {
-    const names = await adminProjectNames(deps, identity);
-    const modes = new Set<string>();
+    const projects = await adminProjects(deps, identity);
+    const modes = new Set(projects.map((project) => project.latest.runtimeBinding.deploymentMode));
+    const reads = await Promise.all(projects.map((project) => projectWorkspaceRows(deps, project.name, WORKSPACE_COUNT_CAP)));
     const workspaces: Record<string, number> = {};
-    let workspacesTruncated = false;
-    for (const name of names) {
-      const latest = await latestProjectRecord(deps, name);
-      if (latest !== undefined) modes.add(latest.runtimeBinding.deploymentMode);
-      const { rows, truncated } = await projectWorkspaceRows(deps, name, WORKSPACE_COUNT_CAP);
-      workspacesTruncated = workspacesTruncated || truncated;
-      for (const row of rows) if (row.status !== "CLOSED") workspaces[row.status] = (workspaces[row.status] ?? 0) + 1;
-    }
+    const workspacesTruncated = reads.some((read) => read.truncated);
+    for (const { rows } of reads) for (const row of rows) if (row.status !== "CLOSED") workspaces[row.status] = (workspaces[row.status] ?? 0) + 1;
     const window = { since: new Date(now - 86_400_000).toISOString(), until: new Date(now).toISOString() };
     const [latest] = (await readFailures(deps, window, { limit: 1, category: "worker_unavailable" })).failures;
     // FR-024: ec2-ebs is the only worker mode; it is configured when a project's latest revision binds it.
@@ -111,6 +119,6 @@ export async function adminHealth(deps: AdminReadDependencies, identity: Authent
   const [alarms, deadLetterQueues, slack, github, state] = await Promise.all([alarmsPart(), queuesPart(), slackPart(), githubPart(), statePart()]);
   return {
     version: { developerApi: DEVELOPER_API_VERSION, adminApi: ADMIN_API_VERSION, ...(probes.release === undefined ? {} : { release: probes.release }) },
-    ...alarms, deadLetterQueues, slack, github, ...state,
+    ...alarms, ...deadLetterQueues, slack, github, ...state,
   };
 }

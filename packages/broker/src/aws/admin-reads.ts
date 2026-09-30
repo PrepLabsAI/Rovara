@@ -110,8 +110,8 @@ export async function adminProjectNames(deps: AdminReadDependencies, identity: A
   return (await adminProjects(deps, identity)).map((project) => project.name);
 }
 
-/** A3's names with each one's latest revision, read once: the read that proves a name also serves the list. */
-async function adminProjects(deps: AdminReadDependencies, identity: AuthenticatedIdentity): Promise<Array<{ name: string; latest: LatestProjectRecord }>> {
+/** A3's names with each one's latest revision, read once: the read that proves a name also serves the list and the health route. */
+export async function adminProjects(deps: AdminReadDependencies, identity: AuthenticatedIdentity): Promise<Array<{ name: string; latest: LatestProjectRecord }>> {
   const [catalog, bindings, memberships] = await Promise.all([
     queryAllItems(deps, PROJECT_CATALOG_PK, "PROJECT#"),
     deps.slackTeamId === undefined ? Promise.resolve([]) : queryAllItems(deps, `SLACK_BINDING#${deps.slackTeamId}`, "CHANNEL#"),

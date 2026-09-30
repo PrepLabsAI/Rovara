@@ -207,6 +207,8 @@ export const AdminHealthResponseSchema = z.object({
   alarms: z.array(z.object({ name: z.string(), state: z.string() })),
   alarmsCheck: AdminHealthCheckSchema,
   deadLetterQueues: z.array(z.object({ name: z.string(), depth: z.number().int().nonnegative().nullable() })),
+  /** R18: the queues' own check; optional so an older control plane's answer still parses. */
+  deadLetterQueuesCheck: AdminHealthCheckSchema.optional(),
   slack: AdminHealthCheckSchema,
   github: AdminHealthCheckSchema,
   workerModes: z.array(z.object({

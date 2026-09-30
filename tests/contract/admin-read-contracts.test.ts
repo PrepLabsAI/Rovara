@@ -99,6 +99,13 @@ describe("the wire shapes", () => {
     expect(health.slack).toEqual({ status: "unknown", detail: "not set up" });
   });
 
+  it("takes the dead-letter queues' check when there is one, and parses an answer without it (R18)", () => {
+    const answer = { version: { developerApi: "1.2", adminApi: "1.0" }, alarms: [], alarmsCheck: { status: "ok" }, deadLetterQueues: [], slack: { status: "ok" }, github: { status: "ok" }, workerModes: [], workspaces: {}, workspacesTruncated: false };
+    expect(AdminHealthResponseSchema.parse({ ...answer, deadLetterQueuesCheck: { status: "warn", detail: "1 queue holds messages" } }).deadLetterQueuesCheck).toEqual({ status: "warn", detail: "1 queue holds messages" });
+    expect(AdminHealthResponseSchema.parse(answer).deadLetterQueuesCheck).toBeUndefined();
+    expect(AdminHealthResponseSchema.safeParse({ ...answer, deadLetterQueuesCheck: { status: "fine" } }).success).toBe(false);
+  });
+
   it("says why an admin has no Slack link", () => {
     expect(AdminMeResponseSchema.parse({ issuer: "https://identity.example.test", subject: "admin-subject", slack: { linked: false, reason: "no_email" } }).slack.reason).toBe("no_email");
     expect(AdminMeResponseSchema.safeParse({ issuer: "i", subject: "s", slack: { linked: false, reason: "because" } }).success).toBe(false);
