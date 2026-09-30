@@ -16,20 +16,31 @@ afterEach(async () => {
 describe("workspace close preflight", () => {
   it("redacts a Git error before it is cut (#170 review)", async () => {
     const token = `ghp_${"C1l2O3s4E5".repeat(4)}`;
-    const root = await mkdtemp(join(tmpdir(), "agentx-close-test-"));
-    temporaryDirectories.push(root);
-    const checkout = join(root, "repo", "demo");
-    await mkdir(checkout, { recursive: true });
-    // Git names the missing directory, whose path holds a token, in its error.
-    await writeFile(join(checkout, ".git"), `gitdir: ${join(root, token, "missing")}\n`, "utf8");
-    await mkdir(join(root, ".agentx"), { recursive: true });
-    await writeFile(join(root, ".agentx", "preparation-manifest.json"), JSON.stringify({
-      schemaVersion: 2,
-      complete: true,
-      repositories: [{ name: "demo", path: "repo/demo" }],
-    }), "utf8");
-    const failure = await inspectWorkspaceForClose(root).then(() => undefined, (error: unknown) => error as Error);
+    const fixture = await createFixture();
+    // A stand-in git, first on PATH, fails with a token that the 16 KiB cut would split, so the
+    // test does not depend on what the machine's own git prints.
+    const bin = await mkdtemp(join(tmpdir(), "agentx-fake-git-"));
+    temporaryDirectories.push(bin);
+    const filler = 16_384 + 20 - token.length - 1 - "\nfatal: bad object\n".length;
+    await writeFile(join(bin, "git"), [
+      "#!/bin/sh",
+      `printf '%s\\n' '${token}' >&2`,
+      `head -c ${filler} /dev/zero | tr '\\0' r >&2`,
+      "printf '\\nfatal: bad object\\n' >&2",
+      "exit 128",
+      "",
+    ].join("\n"), { mode: 0o755 });
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path ?? ""}`;
+    let failure: Error | undefined;
+    try {
+      failure = await inspectWorkspaceForClose(fixture.root).then(() => undefined, (error: unknown) => error as Error);
+    } finally {
+      process.env.PATH = path;
+    }
     expect(failure?.message).toContain("[REDACTED]");
+    expect(failure?.message).toMatch(/fatal: bad object\n?$/);
+    expect(failure?.message).not.toContain(token.slice(-16));
     expect(failure?.message).not.toContain(token.slice(4));
   });
 
