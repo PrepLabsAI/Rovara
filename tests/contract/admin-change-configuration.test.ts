@@ -6,7 +6,7 @@ import { developerIdentityConfigFromEnvironment } from "../../packages/broker/sr
 import { httpEvent, identityHarness } from "../support/developer-fakes.js";
 
 describe("the environment's confirmation methods (FR-041)", () => {
-  it("reports the pop-up on by default, and Slack when Slack sign-in and a team are set up", async () => {
+  it("reports the pop-up on by default, and Slack when a team is set up", async () => {
     const harness = identityHarness({});
     expect(JSON.parse((await harness.http(httpEvent("GET", "/v1/auth/.well-known/agentx-configuration"))).body)).toMatchObject({ confirm: { elicitation: true, slack: true } });
     const noTeam = identityHarness({ teamId: undefined });
