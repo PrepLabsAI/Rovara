@@ -7,7 +7,7 @@ export type InitUiMode = { mode: "page" } | { mode: "terminal"; noBrowser?: true
 
 /** Printed before the terminal's first question when only the missing browser kept the page away. */
 export const NO_BROWSER_LINE =
-  "No browser here, so agentx init asks in this terminal. To use the install page instead, run agentx init --ui and open the address it prints (over SSH, forward its port with ssh -L).";
+  "No browser here, so agentx init asks in this terminal. To use the install page instead, run agentx init --ui --no-browser and open the address it prints (over SSH, forward its port with ssh -L).";
 
 export function resolveUiMode(input: { ui: boolean | undefined; yes: boolean; injectedPrompter: boolean; interactive: boolean; browser: boolean }): InitUiMode {
   if (input.ui === true) return { mode: "page" };

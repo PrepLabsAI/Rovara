@@ -710,7 +710,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--resume", "only continue an install already under way; never start a new one", false)
     .option("--from-bundle <dir>", "with --resume: continue an install whose access stack a platform team deployed from this export bundle")
     .option("--yes", "answer every question with its default or its flag, without asking; the plan is still printed. Confirmations such as the Slack bot and workspace check and \"Request URL Verified?\" are answered yes, so check the printed summary afterwards", false)
-    .option("--no-browser", "print every address to open instead of opening a browser")
+    .option("--no-browser", "print every address to open instead of opening a browser, and ask in the terminal unless --ui is given")
     .option("--ui", "ask every question on a page on 127.0.0.1 (the default in an interactive terminal that can open a browser)")
     .option("--no-ui", "ask every question in the terminal")
     .addOption(new Option("--identity <mode>", "identity provider").choices(["cognito", "oidc"]).default("cognito"))

@@ -71,7 +71,7 @@ and run `init` again later (it continues where it stopped).
 terminal. Over SSH, in AWS CloudShell, or with `--no-browser`, `init` also asks in the terminal,
 and first prints:
 
-> No browser here, so agentx init asks in this terminal. To use the install page instead, run agentx init --ui and open the address it prints (over SSH, forward its port with ssh -L).
+> No browser here, so agentx init asks in this terminal. To use the install page instead, run agentx init --ui --no-browser and open the address it prints (over SSH, forward its port with ssh -L).
 
 Over SSH, run `agentx init --ui --no-browser`. It prints the page's address and the command that
 forwards its port. Run that command on your own computer (`ssh -L <port>:127.0.0.1:<port> <host>`)
