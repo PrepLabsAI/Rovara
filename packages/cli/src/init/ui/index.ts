@@ -15,7 +15,8 @@ import type { WizardPhase, WizardResume } from "./protocol.js";
 import { startWizardServer, type WizardServer } from "./server.js";
 import { createWizardHub, isShowableLink, type WizardHub } from "./state.js";
 
-/** Q3: how long a question may wait with no page connected before the terminal says where it is. */
+/** Q3: how long a question, or a page button, may wait with no page connected before the terminal
+ * says where it is. */
 export const PAGE_CLOSED_MS = 60_000;
 const REMINDER_CHECK_MS = 5_000;
 
@@ -23,8 +24,9 @@ export function pageClosedLine(url: string): string {
   return `The install page is closed. Open ${url} to continue, or press Ctrl-C to stop; agentx init continues from here next time.`;
 }
 
-/** Says once per question, in the terminal, where to reopen a page that has been closed for a
- * minute. `check` is called on a timer; tests call it directly. */
+/** Says once per wait, in the terminal, where to reopen a page that has been closed for a minute.
+ * A wait is a question, or a run link with no question (the run waits on a page button: the GitHub
+ * App's create button, the admin sign-in). `check` is called on a timer; tests call it directly. */
 export function pageClosedReminder(input: { hub: WizardHub; url: string; write: (line: string) => void; now: () => number }): { check(): void } {
   let lastConnected = input.now();
   let reminded: string | undefined;
@@ -34,7 +36,8 @@ export function pageClosedReminder(input: { hub: WizardHub; url: string; write: 
         lastConnected = input.now();
         return;
       }
-      const waiting = input.hub.state().question?.id;
+      const state = input.hub.state();
+      const waiting = state.question?.id ?? (state.link === undefined ? undefined : `link:${state.link.url}`);
       if (waiting === undefined || waiting === reminded) return;
       if (input.now() - lastConnected < PAGE_CLOSED_MS) return;
       reminded = waiting;
