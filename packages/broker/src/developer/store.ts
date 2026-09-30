@@ -12,7 +12,7 @@ import {
 import { pkceChallengeMatches, randomToken, sha256Hex } from "./tokens.js";
 
 export interface AuthRequestRecord { id: string; clientRedirectUri: string; clientState: string; codeChallenge: string; nonce: string; method?: DeveloperSignInMethod; consumedAt?: string; expiresAt: number }
-export interface DeveloperRecord { developerId: string; provider: DeveloperSignInMethod; issuer: string; subject: string; displayName: string; email?: string; slackUserId?: string; firstSignInAt: string; lastSignInAt: string; revoked: boolean }
+export interface DeveloperRecord { developerId: string; provider: DeveloperSignInMethod; issuer: string; subject: string; displayName: string; email?: string; slackUserId?: string; firstSignInAt: string; lastSignInAt: string; revoked: boolean; sessionsEndedAt?: string }
 export interface SessionRecord { sessionId: string; developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; startedAt: string; endsAt: number; lastRefreshAt?: string; revokedAt?: string; revokedReason?: string }
 
 /** A method's enabled-since cutoff from its environment variable, epoch seconds; "0", empty or unreadable means none. */
@@ -27,6 +27,13 @@ export function startedBeforeMethodOn(startedAt: string, since: number | undefin
   if (since === undefined || since <= 0) return false;
   const started = Date.parse(startedAt);
   return !Number.isFinite(started) || started < since * 1000;
+}
+/** E9: whether an admin ended this session: it started before the developer's `sessionsEndedAt`. Fails closed on an unreadable time. */
+export function endedByAdmin(startedAt: string, sessionsEndedAt: string | undefined): boolean {
+  if (sessionsEndedAt === undefined) return false;
+  const started = Date.parse(startedAt);
+  const ended = Date.parse(sessionsEndedAt);
+  return !Number.isFinite(started) || !Number.isFinite(ended) || started < ended;
 }
 export type RefreshLookup =
   | { kind: "active"; session: SessionRecord; tokenHash: string }
@@ -45,6 +52,11 @@ interface RefreshRecord { sessionId: string; expiresAt: number; usedAt?: string;
 interface CancellationReason { Code?: string }
 
 export const META = "META";
+
+/** E8: the email index's key, the SHA-256 of the trimmed, lowercased email, so no email is stored as a key. */
+export function emailIndexKey(email: string): { pk: string; sk: "META" } {
+  return { pk: `EMAIL#${sha256Hex(email.trim().toLowerCase())}`, sk: META };
+}
 const conditionFailed = (error: unknown) =>
   error instanceof Error && (error.name === "ConditionalCheckFailedException" || error.name === "TransactionCanceledException");
 
@@ -153,6 +165,10 @@ export class DeveloperSignInStore {
       UpdateExpression: `SET ${setClauses.join(", ")}${removeClauses.length > 0 ? ` REMOVE ${removeClauses.join(", ")}` : ""}`,
       ExpressionAttributeValues: values,
     }));
+    if (profile.email !== undefined) {
+      // E8 (Q4): the latest sign-in with this verified email wins; the email itself is not stored here.
+      await this.put({ ...emailIndexKey(profile.email), entityType: "DEVELOPER_EMAIL", developerId: profile.developerId, updatedAt: at });
+    }
     const stored = await this.getDeveloper(profile.developerId);
     if (stored === undefined) throw new Error("developer upsert did not persist");
     return stored;
@@ -311,6 +327,23 @@ export class DeveloperSignInStore {
     if (reasons[0]?.Code === "ConditionalCheckFailed") return { reused: true };
     if (reasons[2]?.Code === "ConditionalCheckFailed") return { ended: true };
     throw error;
+  }
+
+  /** E9 (Q3): sessions that started before `at` end; `revoked` is untouched, so they may sign in again. */
+  async endSessions(developerId: string, at: string): Promise<"ended" | "not_found"> {
+    try {
+      await this.input.documentClient.send(new UpdateCommand({
+        TableName: this.input.tableName,
+        Key: { pk: `DEVELOPER#${developerId}`, sk: META },
+        UpdateExpression: "SET sessionsEndedAt = :at",
+        ConditionExpression: "attribute_exists(pk)",
+        ExpressionAttributeValues: { ":at": at },
+      }));
+      return "ended";
+    } catch (error) {
+      if (conditionFailed(error)) return "not_found";
+      throw error;
+    }
   }
 
   async revokeSession(sessionId: string, reason: string): Promise<void> {

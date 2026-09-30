@@ -13,6 +13,8 @@ import {
   agentXError,
   developerTaskPolicy,
   workspaceRecordFields,
+  type ChannelByNameRequest,
+  type ChannelByNameResponse,
   type ChannelInfoRequest,
   type ChannelInfoResponse,
   type ChannelMembersRequest,
@@ -22,6 +24,8 @@ import {
   type DeveloperTaskPolicy,
   type DeveloperWorkspace,
   type DeveloperWorkspacesResponse,
+  type EndDeveloperSessionsRequest,
+  type EndDeveloperSessionsResponse,
   type SlackAuthCheckRequest,
   type SlackAuthCheckResponse,
   type SlackChannelBinding,
@@ -29,7 +33,7 @@ import {
   type SlackUserByEmailResponse,
 } from "@agentx/contracts";
 import { accessDeniedMessage, resolveDeveloperAccess } from "../developer/access.js";
-import { META, methodSince, startedBeforeMethodOn, type DeveloperRecord, type SessionRecord } from "../developer/store.js";
+import { META, endedByAdmin, methodSince, startedBeforeMethodOn, type DeveloperRecord, type SessionRecord } from "../developer/store.js";
 import type { DeveloperTaskActions } from "./developer-task-actions.js";
 import { routeDeveloperTaskRequest } from "./developer-tasks.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
@@ -48,6 +52,10 @@ export interface DeveloperApiConfiguration {
   slackUserByEmail?: (request: SlackUserByEmailRequest) => Promise<SlackUserByEmailResponse>;
   /** Spec 025 A13: the health route's Slack token check. */
   slackAuthCheck?: () => Promise<SlackAuthCheckResponse>;
+  /** Spec 025 E9: an admin ends a developer's sign-in sessions, through DeveloperIdentity (the broker only reads the sign-in table). */
+  endDeveloperSessions?: (request: EndDeveloperSessionsRequest) => Promise<EndDeveloperSessionsResponse>;
+  /** Spec 025 E12: a public channel by its name, through DeveloperIdentity. */
+  channelByName?: (request: ChannelByNameRequest) => Promise<ChannelByNameResponse>;
   /** Verifies the Authorization header's developer access token (D17; verify-token.ts) and returns its claims. */
   verifyAccessToken(authorization: string | undefined): Promise<Record<string, unknown>>;
 }
@@ -83,7 +91,7 @@ type IdentityRefusal = typeof SLACK_UNAVAILABLE | { ok: false; error: "invalid_r
  */
 async function identityInvoke<T>(
   invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>,
-  request: ChannelMembersRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest,
+  request: ChannelMembersRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest,
   readReply: (reply: Record<string, unknown>) => T | undefined,
   event: string,
 ): Promise<T | IdentityRefusal> {
@@ -155,6 +163,34 @@ export function slackAuthCheckThroughLambda(invoke: (payload: Uint8Array) => Pro
     if (answer.ok) return answer;
     return { ok: false, error: refusal ?? answer.error };
   };
+}
+
+/**
+ * E9: ends a developer's sessions through DeveloperIdentity. A not_found reply is an answer (the
+ * developer never signed in), not a failure, so it is neither logged as one nor turned into
+ * unavailable (C15). Every other failure is unavailable.
+ */
+export function endDeveloperSessionsThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: EndDeveloperSessionsRequest) => Promise<EndDeveloperSessionsResponse> {
+  return async (request) => {
+    const answer = await identityInvoke(invoke, request, (reply): EndDeveloperSessionsResponse | undefined => {
+      if (reply.ok === true) return { ok: true };
+      if (reply.ok === false && reply.error === "not_found") return { ok: false, error: "not_found" };
+      return undefined;
+    }, "developer.end_sessions");
+    if (answer.ok || answer.error === "not_found" || answer.error === "invalid_request") return answer;
+    return { ok: false, error: "unavailable" };
+  };
+}
+
+/** E12 (Q8): a public channel by name through DeveloperIdentity; fails closed as slack_unavailable. */
+export function channelByNameThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: ChannelByNameRequest) => Promise<ChannelByNameResponse> {
+  return (request) => identityInvoke(invoke, request, (reply) => {
+    if (reply.ok !== true) return undefined;
+    const channel = reply.channel as { channelId?: unknown; name?: unknown } | undefined;
+    return typeof channel?.channelId === "string" && typeof channel.name === "string"
+      ? { ok: true as const, channel: { channelId: channel.channelId, name: channel.name } }
+      : { ok: true as const };
+  }, "developer.channel_by_name");
 }
 
 /** The broker's copy of each method's enabled-since cutoff (FR-045), from its environment. */
@@ -230,8 +266,12 @@ export async function authenticateDeveloper(deps: DeveloperRouteDependencies, cl
   if (startedBeforeMethodOn(session.startedAt, deps.developer.since?.[token.amr])) {
     throw agentXError("AUTH_REQUIRED", `your sign-in ended when ${token.amr === "slack" ? "Slack" : "company sign-in"} was turned off; sign in again with agentx login <url>`);
   }
-  const developer = await getSignIn<Pick<DeveloperRecord, "displayName" | "slackUserId" | "email" | "revoked">>(deps, `DEVELOPER#${token.developerId}`);
+  const developer = await getSignIn<Pick<DeveloperRecord, "displayName" | "slackUserId" | "email" | "revoked" | "sessionsEndedAt">>(deps, `DEVELOPER#${token.developerId}`);
   if (developer === undefined || developer.revoked) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  if (endedByAdmin(session.startedAt, developer.sessionsEndedAt)) {
+    // E9: D16's per-request check ends the session at once; the token endpoint revokes it at its next refresh.
+    throw agentXError("AUTH_REQUIRED", "an AgentX admin ended your sign-in; run agentx login <url> again");
+  }
   return {
     ...token,
     name: developer.displayName,
