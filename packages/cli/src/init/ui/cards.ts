@@ -169,7 +169,8 @@ export function slackChannelLink(teamId: string, channelId: string): string {
 
 export type AdminCardInput =
   | { stage: "signing-in"; who: string; createdEmail?: string }
-  | { stage: "failed"; problem: string }
+  /** `retry: false` when the page cannot offer to sign in again: the problem is shown whole. */
+  | { stage: "failed"; problem: string; retry?: false }
   | { stage: "done"; username: string };
 
 /** FR-050: the admin user and the operator's sign-in. The sign-in page's address comes from the
@@ -184,7 +185,10 @@ export function adminCard(input: AdminCardInput): WizardCard {
         `Sign in to AgentX as ${input.who} in the tab the button opens. This page moves on by itself once you have.`,
       ],
     };
-    case "failed": return { ...base, status: "failed", lines: [input.problem, "Answer Yes below to sign in again."] };
+    case "failed": return {
+      ...base, status: "failed",
+      lines: input.retry === false ? [input.problem] : [onPageProblem(input.problem), "Answer Yes below to sign in again."],
+    };
     case "done": return { ...base, status: "ok", lines: [`Signed in to AgentX as ${input.username}.`] };
   }
 }

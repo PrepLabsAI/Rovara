@@ -260,9 +260,14 @@ describe("the finishing cards", () => {
     expect(onPageProblem("Slack said ratelimited; run agentx --env prod-eu init again")).toBe("Slack said ratelimited");
   });
 
-  it("the admin card keeps a failed sign-in's problem whole", () => {
+  it("M1: the admin card drops a failed sign-in's closing run agentx init again, since the page offers to sign in again", () => {
     expect(adminCard({ stage: "failed", problem: "your sign-in token has no email or sub claim; fix it, then run agentx init again" }).lines[0])
-      .toBe("your sign-in token has no email or sub claim; fix it, then run agentx init again");
+      .toBe("your sign-in token has no email or sub claim; fix it");
+  });
+
+  it("M2: an admin card the page offers no retry for keeps the problem whole, and asks nothing", () => {
+    expect(adminCard({ stage: "failed", problem: "your sign-in token has no email or sub claim; fix it, then run agentx init again", retry: false }))
+      .toEqual({ id: "admin", title: "Admin user", status: "failed", lines: ["your sign-in token has no email or sub claim; fix it, then run agentx init again"] });
   });
 
   it("FR-052 and Q10: the ready card says what works now, and puts every command under Later", () => {

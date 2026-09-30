@@ -88,7 +88,14 @@ export function adminUserStep(): InitStep<InitContext> {
         throw agentXError("CONFIG_INVALID", `the install's answers name no admin claim; AgentX cannot check that you are an administrator of your own OIDC provider, and an install's answers cannot change halfway. Start a new install with another --env, passing --admin-claim and --admin-values`);
       }
       const session = await signIn("an administrator of your company's sign-in");
-      const username = oidcAdminName(session.accessToken);
+      let username: string;
+      try {
+        username = oidcAdminName(session.accessToken);
+      } catch (error) {
+        // Signing in again would bring the same token back, so the page offers no retry here.
+        show({ stage: "failed", problem: problemText(error), retry: false });
+        throw error;
+      }
       await progress.update({ admin: { username, mode: "oidc" } });
       show({ stage: "done", username });
       return { status: "done", note: `admin ${username} signed in with your OIDC provider` };

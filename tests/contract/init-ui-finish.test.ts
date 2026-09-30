@@ -11,7 +11,7 @@ import { problemText } from "../../packages/cli/src/init/retry.js";
 import { alertsCard } from "../../packages/cli/src/init/ui/cards.js";
 import type { WizardCard } from "../../packages/cli/src/init/ui/protocol.js";
 import { initContext, progressHandle, sampleAnswers, scriptedPrompter, T0, type TestInitContext } from "../support/init-fakes.js";
-import { ADMIN_EMAIL, CONTROL_PLANE, fakeAlerts, fakeCognito, fakeControlPlane, setupServices, STAGING_SETTINGS, turn } from "../support/setup-fakes.js";
+import { accessToken, ADMIN_EMAIL, CONTROL_PLANE, fakeAlerts, fakeCognito, fakeControlPlane, setupServices, STAGING_SETTINGS, turn } from "../support/setup-fakes.js";
 
 let context: TestInitContext | undefined;
 afterEach(async () => { if (context !== undefined) await rm(context.home, { recursive: true, force: true }); context = undefined; });
@@ -46,6 +46,35 @@ describe("the admin user on the page (FR-050)", () => {
     expect(sessions).toBe(2);
     expect((context.prompter as ReturnType<typeof scriptedPrompter>).asked).toEqual(["Your email address, for your AgentX admin user", "Sign in again?"]);
     expect(surface.cards.find((card) => card.status === "failed")?.lines[0]).toBe("the AgentX sign-in did not finish within 10 minutes; run agentx init again and finish signing in as the admin user in the browser");
+  });
+
+  describe("with your own OIDC provider (M2)", () => {
+    const OIDC_SETTINGS = { ...STAGING_SETTINGS, identity: { mode: "oidc" as const, issuer: "https://login.example.com", audience: "agentx", clientId: "cli" } };
+    const oidcAnswers = sampleAnswers({ identity: { mode: "oidc", issuer: "https://login.example.com", audience: "agentx", clientId: "cli", adminClaim: "groups", adminValues: ["agentx-admins"] } });
+
+    it("shows the sign-in wait for an administrator of your company's sign-in, then who signed in", async () => {
+      const surface = page();
+      const token = accessToken({ sub: "00u1abcd", email: "bob@example.com", groups: ["agentx-admins"] });
+      context = initContext({ answers: oidcAnswers, prompter: scriptedPrompter([]), surface, adminSession: async () => ({ controlPlaneUrl: CONTROL_PLANE, accessToken: token }) });
+      await writeEnvironmentSettings(context.store, OIDC_SETTINGS);
+      expect(await adminUserStep().run(context, progressHandle())).toEqual({ status: "done", note: "admin bob@example.com signed in with your OIDC provider" });
+      expect(surface.cards.map((card) => [card.id, card.status, card.lines])).toEqual([
+        ["admin", "waiting", ["Sign in to AgentX as an administrator of your company's sign-in in the tab the button opens. This page moves on by itself once you have."]],
+        ["admin", "ok", ["Signed in to AgentX as bob@example.com."]],
+      ]);
+    });
+
+    it("a token with no email or sub claim shows a failed admin card, and the step rejects with that error", async () => {
+      const surface = page();
+      const token = accessToken({ groups: ["agentx-admins"] });
+      context = initContext({ answers: oidcAnswers, prompter: scriptedPrompter([]), surface, adminSession: async () => ({ controlPlaneUrl: CONTROL_PLANE, accessToken: token }) });
+      await writeEnvironmentSettings(context.store, OIDC_SETTINGS);
+      const failure = await adminUserStep().run(context, progressHandle()).then(() => undefined, (error: unknown) => error);
+      expect((failure as Error).message).toContain("your sign-in token has no email or sub claim of 3 to 128 characters");
+      expect((context.prompter as ReturnType<typeof scriptedPrompter>).asked).toEqual([]);
+      expect(surface.cards.map((card) => [card.id, card.status])).toEqual([["admin", "waiting"], ["admin", "failed"]]);
+      expect(surface.cards[1]?.lines).toEqual([problemText(failure)]);
+    });
   });
 
   it("the terminal path stops on a timed-out sign-in, as before", async () => {
