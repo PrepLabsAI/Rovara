@@ -402,4 +402,39 @@ describe("agentx init --ui", () => {
     expect(stages).toContain("Install agentx-acme-staging on acme and choose the repositories AgentX may use.");
     expect(stages.at(-1)).toBe("agentx-acme-staging is installed on acme.");
   });
+
+  it("FR-040: the Slack app is created from a button, and a wrong token is refused on the field", async () => {
+    const h = await harness();
+    const typo = "xoxp-9999-USERtokenVALUE";
+    const { code, operator } = await h.runUi([...FIRST_RUN, "installed", typo, TEST_BOT_TOKEN, TEST_SIGNING_SECRET, true, true, ...SIGNIN, ...FINISH]);
+    expect(code).toBe(0);
+    expect(operator.clicked.some((url) => url.startsWith("https://api.slack.com/apps?new_app=1&manifest_json="))).toBe(true);
+    expect(operator.fieldErrors).toContain("that is a user token (xoxp-); paste the Bot User OAuth Token from OAuth & Permissions, which starts with xoxb-");
+    expect(operator.asked.filter((question) => question === "Slack bot token")).toHaveLength(2);
+    expect(JSON.stringify(operator.states)).not.toContain("USERtokenVALUE");
+    expect(await h.everywhere()).not.toContain("USERtokenVALUE");
+    const slack = operator.states.at(-1)?.cards?.find((card) => card.id === "slack");
+    expect(slack).toMatchObject({ status: "ok", lines: ["Slack app A0APP is installed in workspace T0TEAM."] });
+  });
+
+  it("Q8: when Slack refuses a token that looks right, the page asks for both again and saves nothing until one works", async () => {
+    const h = await harness();
+    let tests = 0;
+    const slack = fakeSlackApi({
+      authTest: async () => { tests += 1; return tests === 1 ? { ok: false, error: "invalid_auth" } : { ok: true, user_id: "U0BOT", bot_id: "B0BOT", team_id: "T0TEAM", team: "Acme", url: "https://acme.slack.com/", user: "agentx" }; },
+    });
+    const operator = fakeWizardOperator([...FIRST_RUN, "installed", TEST_BOT_TOKEN, TEST_SIGNING_SECRET, true, TEST_BOT_TOKEN, TEST_SIGNING_SECRET, true, true, ...SIGNIN, ...FINISH]);
+    expect(await h.run(["--ui"], { openBrowser: operator.open, slack })).toBe(0);
+    await operator.settled();
+    expect(operator.asked).toContain("Paste the Slack bot token and signing secret again?");
+    const refused = operator.states.flatMap((state) => state.cards ?? []).find((card) => card.id === "slack" && card.status === "failed");
+    expect(refused?.lines).toContain("Slack refused the bot token (invalid_auth); copy it again from OAuth & Permissions");
+  });
+
+  it("Q8: the terminal path still stops when Slack refuses the token", async () => {
+    const h = await harness();
+    const slack = fakeSlackApi({ authTest: async () => ({ ok: false, error: "invalid_auth" }) });
+    expect(await h.run([], { prompter: scriptedPrompter([...FIRST_RUN, "installed", TEST_BOT_TOKEN, TEST_SIGNING_SECRET]), slack })).not.toBe(0);
+    expect(h.printed()).toContain("Slack refused the bot token (invalid_auth); copy it again from OAuth & Permissions");
+  });
 });

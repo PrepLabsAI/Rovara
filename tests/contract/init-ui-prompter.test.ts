@@ -2,6 +2,7 @@
 // cancellation -- and that no secret typed into the page reaches anything the page, an `InitEvent`
 // or a progress note can read back.
 import { describe, expect, it } from "vitest";
+import { checkSlackBotToken, fieldCheck } from "../../packages/cli/src/init/prompts.js";
 import { browserPrompter } from "../../packages/cli/src/init/ui/prompter.js";
 import { createWizardHub, type WizardHub } from "../../packages/cli/src/init/ui/state.js";
 import type { WizardQuestion } from "../../packages/cli/src/init/ui/protocol.js";
@@ -182,5 +183,18 @@ describe("the wizard's state", () => {
     hub.finish("AgentX environment staging is installed.");
     hub.close();
     expect(seen).toEqual(["log:fetching the release", "state:running:1", "state:finished:1", "closed"]);
+  });
+});
+
+describe("inline checks on a secret field (FR-040)", () => {
+  it("secret runs the field check on the cleaned value, and shows its refusal without the value", async () => {
+    const { hub, prompter } = setup();
+    const answer = prompter.secret("Slack bot token", { flag: "--slack-bot-token", validate: fieldCheck(checkSlackBotToken) });
+    const refusal = post(hub, "xoxp-9999-USERtokenVALUE");
+    expect(refusal).toBe("that is a user token (xoxp-); paste the Bot User OAuth Token from OAuth & Permissions, which starts with xoxb-");
+    expect(JSON.stringify(hub.snapshot())).not.toContain("USERtokenVALUE");
+    // Review Focus 3: a paste with markers and a trailing newline is cleaned before the check.
+    expect(post(hub, "\u001b[200~xoxb-1111-2222-SECRETbotTOKENvalue\u001b[201~\n")).toBeUndefined();
+    await expect(answer).resolves.toBe("xoxb-1111-2222-SECRETbotTOKENvalue");
   });
 });

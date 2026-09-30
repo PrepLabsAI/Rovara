@@ -83,3 +83,37 @@ export function githubCard(input: GitHubCardInput): WizardCard {
     case "done": return { ...base, status: "ok", lines: [`${input.slug} is installed on ${input.account}.`] };
   }
 }
+
+export type SlackCardInput =
+  | { stage: "create"; appName: string; createUrl: string }
+  | { stage: "credentials"; appName: string }
+  | { stage: "bot"; user: string; team: string }
+  | { stage: "refused"; problem: string }
+  | { stage: "approval"; appName: string; rerun: string }
+  | { stage: "done"; appId: string; teamId: string };
+
+/** FR-040: the Slack app, from the create button to its stored credentials. */
+export function slackAppCard(input: SlackCardInput): WizardCard {
+  const base = { id: "slack" as const, title: "Slack app" };
+  switch (input.stage) {
+    case "create": return {
+      ...base, status: "waiting",
+      lines: [
+        `Create the Slack app "${input.appName}" from AgentX's manifest: pick the workspace, press Next, then Create, then Install to Workspace.`,
+        "If your workspace needs an admin to approve new apps, choose Request to Install, then answer Not yet below.",
+      ],
+      link: { url: input.createUrl, label: "Create the Slack app" },
+    };
+    case "credentials": return {
+      ...base, status: "waiting",
+      lines: [
+        "Paste the Bot User OAuth Token (OAuth & Permissions) and the Signing Secret (Basic Information, App Credentials) below.",
+        "Both go straight to AWS Secrets Manager and are never shown again.",
+      ],
+    };
+    case "bot": return { ...base, status: "waiting", lines: [`Slack says this token belongs to the bot @${input.user} in workspace ${input.team}.`] };
+    case "refused": return { ...base, status: "failed", lines: [input.problem, "Nothing was saved."] };
+    case "approval": return { ...base, status: "waiting", lines: [`Slack is waiting for a workspace admin to approve "${input.appName}".`, `Once it is installed, run ${input.rerun}; it continues here.`] };
+    case "done": return { ...base, status: "ok", lines: [`Slack app ${input.appId} is installed in workspace ${input.teamId}.`] };
+  }
+}
