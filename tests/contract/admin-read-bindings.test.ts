@@ -1,6 +1,7 @@
 // tests/contract/admin-read-bindings.test.ts
 // Spec 025 A11: channel bindings, with public channels' names and private channels by ID only.
 import { describe, expect, it, vi } from "vitest";
+import { channelLabels } from "../../packages/broker/src/aws/admin-reads.js";
 import { createAdminReadBroker } from "../support/admin-read-broker.js";
 import { bindChannel } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM, issuer } from "../support/slack-broker.js";
@@ -104,5 +105,20 @@ describe("private channel names for a member admin (A11, Q7 as answered)", () =>
     expect(row).toMatchObject({ private: true });
     expect(row?.channelName).toContain("[REDACTED]");
     expect(JSON.stringify(row)).not.toContain(planted);
+  });
+});
+
+describe("channel names across lookup pages (A11)", () => {
+  it("keeps the names already read when a later page fails, and says names are unavailable", async () => {
+    const ids = Array.from({ length: 51 }, (_, index) => `C0PAGE${String(index).padStart(5, "0")}`);
+    let page = 0;
+    const { labels, available } = await channelLabels({
+      channelInfo: async (request: { channelIds: string[] }) => (page++ === 0 ? { ok: true as const, channels: request.channelIds.map((channelId) => ({ channelId, name: `name-${channelId}`, isPrivate: false })) } : { ok: false as const, error: "slack_unavailable" as const }),
+      log: vi.fn(),
+    } as unknown as Parameters<typeof channelLabels>[0], ids);
+    expect(available).toBe(false);
+    expect(labels.size).toBe(50);
+    expect(labels.get(ids[0] as string)).toEqual({ name: `name-${ids[0] as string}`, private: false });
+    expect(labels.has(ids[50] as string)).toBe(false);
   });
 });

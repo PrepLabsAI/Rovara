@@ -2,7 +2,7 @@
 // often carries no email, so the issuer's userinfo endpoint is asked, with the admin's own token.
 // Only a verified email counts. The token is never logged, and only a hash of it is kept as a key.
 import { createHash } from "node:crypto";
-import type { AdminMeResponse, SlackUserByEmailRequest, SlackUserByEmailResponse } from "@agentx/contracts";
+import { redactAndCap, type AdminMeResponse, type SlackUserByEmailRequest, type SlackUserByEmailResponse } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 
 export interface AdminMeDependencies {
@@ -16,52 +16,71 @@ type Profile = { name?: string; email?: string };
 
 const verified = (value: unknown) => value === true || value === "true";
 const text = (value: unknown, max: number) => (typeof value === "string" && value.trim() !== "" ? value.trim().slice(0, max) : undefined);
-const profileOf = (claims: Record<string, unknown>): Profile => {
-  const email = verified(claims.email_verified) ? text(claims.email, 254) : undefined;
-  const name = text(claims.name, 200) ?? email;
-  return { ...(name === undefined ? {} : { name }), ...(email === undefined ? {} : { email }) };
+/** A16: a display name is text from the identity provider, so it is redacted and capped as channel names are. */
+const displayName = (value: unknown) => {
+  const found = text(value, 1_000);
+  return found === undefined ? undefined : redactAndCap(found, 200).text;
+};
+const claimsOf = (claims: Record<string, unknown>) => ({ name: displayName(claims.name), email: verified(claims.email_verified) ? text(claims.email, 254) : undefined });
+/** The token's name first, then userinfo's, then the email. */
+const profileFrom = (name: string | undefined, email: string | undefined): Profile => {
+  const shown = name ?? email;
+  return { ...(shown === undefined ? {} : { name: shown }), ...(email === undefined ? {} : { email }) };
 };
 
 export function adminIdentityReader(deps: AdminMeDependencies & { now(): number; log(entry: Record<string, unknown>): void }) {
   const cacheMs = deps.cacheMs ?? 300_000;
   const timeoutMs = deps.timeoutMs ?? 3_000;
   const profiles = new Map<string, { at: number; profile: Profile }>();
-  let userinfoEndpoint: Promise<string | undefined> | undefined;
+  let userinfoEndpoint: { at: number; url: Promise<string | undefined> } | undefined;
 
-  const getJson = async (url: string, headers: Record<string, string> = {}): Promise<Record<string, unknown> | undefined> => {
+  /** Logs `event` with the HTTP status or the error's name only: never the URL, headers or body. */
+  const getJson = async (event: string, url: string, headers: Record<string, string> = {}): Promise<Record<string, unknown> | undefined> => {
     try {
       const response = await deps.fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs), redirect: "error" });
-      if (!response.ok) return undefined;
+      if (!response.ok) {
+        deps.log({ event, status: response.status });
+        return undefined;
+      }
       const body: unknown = await response.json();
       return typeof body === "object" && body !== null ? body as Record<string, unknown> : undefined;
     } catch (error) {
-      deps.log({ event: "admin.userinfo_failed", error: error instanceof Error ? error.name : "unknown" });
+      deps.log({ event, error: error instanceof Error ? error.name : "unknown" });
       return undefined;
     }
   };
   const endpoint = (): Promise<string | undefined> => {
-    userinfoEndpoint ??= getJson(`${deps.issuer.replace(/\/$/, "")}/.well-known/openid-configuration`).then((document) => {
-      const value = document?.userinfo_endpoint;
-      const found = typeof value === "string" && value.startsWith("https://") ? value : undefined;
-      // A failed discovery is tried again next time; a document without the endpoint is kept.
-      if (document === undefined) userinfoEndpoint = undefined;
-      return found;
-    });
-    return userinfoEndpoint;
+    // A document is kept for the cache time, so an issuer that adds userinfo later is found again.
+    if (userinfoEndpoint !== undefined && deps.now() - userinfoEndpoint.at < cacheMs) return userinfoEndpoint.url;
+    const entry = {
+      at: deps.now(),
+      url: getJson("admin.discovery_failed", `${deps.issuer.replace(/\/$/, "")}/.well-known/openid-configuration`).then((document) => {
+        // A failed discovery is never kept: the next call tries again.
+        if (document === undefined && userinfoEndpoint === entry) userinfoEndpoint = undefined;
+        const value = document?.userinfo_endpoint;
+        return typeof value === "string" && value.startsWith("https://") ? value : undefined;
+      }),
+    };
+    userinfoEndpoint = entry;
+    return entry.url;
   };
 
   async function profile(identity: AuthenticatedIdentity, authorization: string | undefined): Promise<Profile> {
-    const own = profileOf(identity.claims);
+    const claims = claimsOf(identity.claims);
+    const own = profileFrom(claims.name, claims.email);
+    // Defense in depth: only a token from the admin issuer is ever sent to its userinfo endpoint.
+    if (identity.issuer !== deps.issuer) return own;
     if (own.email !== undefined || authorization === undefined || !/^Bearer \S+$/.test(authorization)) return own;
     const key = createHash("sha256").update(authorization).digest("hex");
     const cached = profiles.get(key);
     if (cached !== undefined && deps.now() - cached.at < cacheMs) return cached.profile;
     const url = await endpoint();
     if (url === undefined) return own;
-    const claims = await getJson(url, { authorization });
-    // userinfo's sub must be the token's own; a mismatch is ignored rather than trusted.
-    if (claims === undefined || claims.sub !== identity.subject) return own;
-    const found = { ...own, ...profileOf(claims) };
+    const answer = await getJson("admin.userinfo_failed", url, { authorization });
+    // userinfo's sub must be the token's own; a mismatch is ignored rather than trusted, and never kept.
+    if (answer === undefined || answer.sub !== identity.subject) return own;
+    const info = claimsOf(answer);
+    const found = profileFrom(claims.name ?? info.name, info.email);
     const oldest = profiles.size >= 500 ? profiles.keys().next().value : undefined;
     if (oldest !== undefined) profiles.delete(oldest);
     profiles.set(key, { at: deps.now(), profile: found });
