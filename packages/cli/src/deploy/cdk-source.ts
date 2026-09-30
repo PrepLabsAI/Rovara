@@ -19,12 +19,19 @@ const CHECK_OUT = "check out a release tag (vX.Y.Z) cleanly";
 
 /**
  * The release version of a clean checkout: the one release tag (vX.Y.Z) at HEAD, and HEAD's commit.
- * Refuses a checkout with uncommitted changes (before reading its tags), one at no release tag, and
- * one at several: the version must never be a guess.
+ * Refuses a source that is not a git checkout, one with uncommitted changes (before reading its
+ * tags), one at no release tag, and one at several final release tags: the version must never be a
+ * guess. A final tag wins over prerelease tags on the same commit.
  */
 export async function sourceReleaseVersion(input: { runner: CommandRunner; source: string }): Promise<{ version: string; gitCommit: string }> {
   const { runner, source } = input;
-  const { stdout: status } = await runner.run("git", ["status", "--porcelain"], { cwd: source, display: "git status --porcelain" });
+  let status: string;
+  try {
+    ({ stdout: status } = await runner.run("git", ["status", "--porcelain"], { cwd: source, display: "git status --porcelain" }));
+  } catch (error) {
+    const firstLine = errorMessage(error).split("\n")[0];
+    throw Object.assign(agentXError("CONFIG_INVALID", `${source} is not a git checkout (${firstLine}); ${CHECK_OUT}`), { cause: error });
+  }
   if (status.trim() !== "") throw agentXError("CONFIG_INVALID", `source at ${source} has uncommitted changes; ${CHECK_OUT}`);
 
   let tags: string[];
@@ -36,9 +43,13 @@ export async function sourceReleaseVersion(input: { runner: CommandRunner; sourc
     throw Object.assign(agentXError("CONFIG_INVALID", `the cdk engine takes the release version from the tag of --source, but ${source} is at no tag (${firstLine}); ${CHECK_OUT}`), { cause: error });
   }
   const releaseTags = tags.filter((tag) => RELEASE_TAG.test(tag));
+  // An rc promoted to the final release on the same commit carries both tags: the final one is the
+  // version. Only when there is no final tag does a prerelease tag count (init and upgrade refuse it).
+  const finalTags = releaseTags.filter((tag) => !tag.includes("-"));
+  const candidates = finalTags.length > 0 ? finalTags : releaseTags;
   const prefix = `the cdk engine takes the release version from the tag of --source, but ${source} is at`;
-  if (releaseTags.length > 1) throw agentXError("CONFIG_INVALID", `${prefix} several release tags (${releaseTags.join(", ")}); pass --release <dir> for the one you mean`);
-  const [tag] = releaseTags;
+  if (candidates.length > 1) throw agentXError("CONFIG_INVALID", `${prefix} several release tags (${candidates.join(", ")}); check out a commit with one release tag, or pass --release <dir> for the one you mean`);
+  const [tag] = candidates;
   if (tag === undefined) {
     throw agentXError("CONFIG_INVALID", `${prefix} ${tags.length === 0 ? "no release tag" : `${tags.join(", ")}, not a release tag`}; ${CHECK_OUT}`);
   }

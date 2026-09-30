@@ -397,7 +397,22 @@ describe("the cdk source (issue 152)", () => {
 
   it("refuses a checkout whose HEAD carries several release tags", async () => {
     await expect(sourceReleaseVersion({ runner: tagRunner({ tags: "v1.4.0\nv1.4.1\n" }), source: "/src" }))
-      .rejects.toThrow("/src is at several release tags (v1.4.0, v1.4.1); pass --release <dir> for the one you mean");
+      .rejects.toThrow("/src is at several release tags (v1.4.0, v1.4.1); check out a commit with one release tag, or pass --release <dir> for the one you mean");
+  });
+
+  it("takes the final tag when an rc was promoted on the same commit (review I1)", async () => {
+    await expect(sourceReleaseVersion({ runner: tagRunner({ tags: "v1.4.0-rc.2\nv1.4.0\n" }), source: "/src" })).resolves.toMatchObject({ version: "1.4.0" });
+    // With no final tag, the one prerelease tag is the version; init and upgrade then refuse a prerelease.
+    await expect(sourceReleaseVersion({ runner: tagRunner({ tags: "v1.4.0-rc.2\n" }), source: "/src" })).resolves.toMatchObject({ version: "1.4.0-rc.2" });
+    await expect(sourceReleaseVersion({ runner: tagRunner({ tags: "v1.4.0-rc.1\nv1.4.0-rc.2\n" }), source: "/src" })).rejects.toThrow("several release tags (v1.4.0-rc.1, v1.4.0-rc.2)");
+  });
+
+  it("names a source that is not a git checkout (review M8)", async () => {
+    const notGit: CommandRunner = { async run() { throw new Error("git status --porcelain exited with code 128:\nfatal: not a git repository"); } };
+    const error = await sourceReleaseVersion({ runner: notGit, source: "/src" }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(AgentXError);
+    expect((error as Error).message).toContain("/src is not a git checkout (git status --porcelain exited with code 128:); check out a release tag (vX.Y.Z) cleanly");
+    expect((error as Error).cause).toBeDefined();
   });
 
   it("refuses a dirty checkout before reading its tags", async () => {
