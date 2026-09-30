@@ -398,8 +398,8 @@ npx @charterarc/agentx logout
 
 Tokens are kept in the operating system's credential store; `~/.agentx/developer.yaml` holds only
 addresses. A developer can use a project when an administrator granted access or when they are a member
-of the project's bound Slack channel. Handing tasks to AgentX from an AI tool (`agentx mcp`) arrives in a
-later release (spec 025, phase 25b).
+of the project's bound Slack channel. To hand tasks to AgentX from an AI tool, a developer runs
+`agentx mcp install --client claude-code|codex|cursor` once; see [docs/mcp-install.md](mcp-install.md).
 
 ## Deploying an environment
 

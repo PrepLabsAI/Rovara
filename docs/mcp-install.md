@@ -120,11 +120,52 @@ MCP TypeScript SDK, pass `onprogress` and `resetTimeoutOnProgress: true` in the 
 otherwise the SDK gives up after its default of 60 seconds while AgentX is still waiting. Claude Code,
 Codex and Cursor handle this themselves.
 
-Tasks from your AI tool are private: only you see their titles, instructions, progress and results.
-Others who can use the project see only that a workspace exists, with its status and times, in
-`agentx workspaces`. Every action is recorded for your
-admins. Each task keeps a workspace until you close it ("close my AgentX task"), and open tasks
-count against the same limit as your Slack threads (3 at a time unless your admin changed it).
+Tasks from your AI tool are private unless you share them, or the project requires sharing (see
+below). For a private task, only you see its title, instructions, progress and results. Others who
+can use the project see only that a workspace exists, with its status and times, in
+`agentx workspaces`. Every action is recorded for your admins. Each task keeps a workspace until
+you close it ("close my AgentX task"), and open tasks count against the same limit as your Slack
+threads (3 at a time unless your admin changed it).
+
+## Sharing a task to Slack
+
+You can share a task into one of its project's Slack channels, so your team can follow it. Ask
+your AI tool to "share my AgentX task in Slack", or to share it when it starts. It calls
+`agentx_share_task` (or `agentx_start_task` with `share_to_channel`). If the project has more than
+one channel, say which one.
+
+There are two modes:
+
+- **View only** (`view`): the channel follows the task, and you keep driving it from your AI tool.
+  If someone mentions AgentX in the thread, AgentX replies with a notice and runs nothing.
+- **Continue** (`continue`): channel members can also mention AgentX in the thread to steer the
+  task. Their requests run on the task's workspace one at a time, and each names who sent it.
+
+AgentX posts a new thread in the channel within seconds. The thread says who started the task,
+from which AI tool, its title, the project and its status. AgentX then posts there when the
+workspace is ready, when the task ends (with the worker's summary), when a pull request opens,
+when the mode changes, and when you close the task. Your instructions are not posted.
+`agentx_get_task` shows the thread's link once it is posted.
+
+To change the mode later, ask your AI tool to share the task again with the other mode. The
+channel cannot change, and a shared task stays shared.
+
+Your admin sets what a project allows, in its `developerTasks` settings:
+
+- `share`: `optional` (the default) or `required`. With `required`, every task is shared when it
+  starts.
+- `shareMode.default`: the mode used when you do not ask for one; `view` unless your admin changed
+  it.
+- `shareMode.allowContinue`: with `false`, every shared task is view only, even if you ask for
+  continue.
+
+`agentx_list_projects` shows each project's settings. To share into a private channel, you must be
+a member of it. An admin can also switch a shared task between the two modes, within the same
+settings:
+
+```
+agentx --env <env> admin task share-mode --task <task-id> --mode view|continue
+```
 
 ## When something goes wrong
 

@@ -238,3 +238,21 @@ managed, so a Python project's setup command should make a virtual environment
 - `agentx --env <env> signin check`: checks every piece sign-in needs, and says what to fix.
 
 Developers need no AWS credentials: they run `npx @charterarc/agentx login <control plane URL>`.
+To hand tasks to AgentX from Claude Code, Codex or Cursor, and to share them to Slack, they follow
+[docs/mcp-install.md](mcp-install.md).
+
+## Shared tasks
+
+A developer can share a task from their AI tool into a project's Slack channel, view only or open
+to the channel (continue). A project's `developerTasks` settings decide whether sharing is required,
+the default mode and whether continue is allowed; see
+[docs/project-configuration.md](project-configuration.md#developer-tasks). To switch a shared task's
+mode, sign in as an admin (`agentx --env <env> login`) and run:
+
+```sh
+agentx --env <env> admin task share-mode --task <task-id> --mode view|continue
+```
+
+The mode stays within the project's settings: with continue not allowed, the task stays view only.
+An admin cannot share a private task or move a shared one to another channel. `agentx --env <env>
+admin turns export --since 7d` shows task IDs.
