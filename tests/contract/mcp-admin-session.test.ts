@@ -5,11 +5,20 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { ReadBuffer, serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
+import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it, vi } from "vitest";
+import { executeCli } from "../../packages/cli/src/main.js";
+import { tokenStoreKey } from "../../packages/cli/src/auth.js";
+import { cacheFromSettings, writeEnvironmentCache } from "../../packages/cli/src/environments/cache.js";
+import { stagingSettings } from "../support/environment-fixtures.js";
 import { agentxMcpServer } from "../../packages/cli/src/mcp/serve.js";
 import { saveDeveloperEnvironment, developerTokenKey } from "../../packages/cli/src/developer/config.js";
 import { InMemoryTokenStore } from "../../packages/cli/src/token-store.js";
 import { toolError } from "../support/mcp-tool-error.js";
+import { NEXT_STEPS, UPGRADE_AGENTX_STEP } from "../../packages/mcp/src/errors.js";
 
 const URL_BASE = "https://abc123.execute-api.us-east-1.amazonaws.com";
 const ISSUER = `${URL_BASE}/v1/auth`;
@@ -66,6 +75,78 @@ describe("agentx mcp and the admin sign-in (A14)", () => {
     expect((await client.listTools()).tools).toHaveLength(11);
     const whoami = await client.callTool({ name: "agentx_whoami", arguments: {} });
     expect(JSON.stringify(whoami.content)).toContain("AgentX has no admin tools yet; ask your AgentX admin to upgrade AgentX");
-    expect(toolError(await client.callTool({ name: "agentx_admin_health", arguments: {} }))).toMatchObject({ code: "UPGRADE_REQUIRED" });
+    expect(toolError(await client.callTool({ name: "agentx_admin_health", arguments: {} }))).toMatchObject({ code: "UPGRADE_REQUIRED", next_step: UPGRADE_AGENTX_STEP });
+  });
+
+  it("offers no admin tool against a control plane whose admin API major differs, and a direct call says to upgrade the CLI", async () => {
+    const { client } = await server({ admin: { expiresAt: Date.now() + 600_000 }, adminApiVersion: "2.0" });
+    await client.callTool({ name: "agentx_whoami", arguments: {} });
+    expect((await client.listTools()).tools).toHaveLength(11);
+    expect(toolError(await client.callTool({ name: "agentx_admin_health", arguments: {} }))).toMatchObject({ code: "UPGRADE_REQUIRED", next_step: NEXT_STEPS.UPGRADE_REQUIRED });
+  });
+});
+
+/** A client transport over the in-process `agentx mcp` command's stdin and stdout. */
+function streamTransport(toServer: PassThrough, fromServer: PassThrough): Transport {
+  const buffer = new ReadBuffer();
+  const transport: Transport = {
+    start: async () => {
+      fromServer.on("data", (chunk: Buffer) => {
+        buffer.append(chunk);
+        for (let message = buffer.readMessage(); message !== null; message = buffer.readMessage()) transport.onmessage?.(message);
+      });
+    },
+    send: async (message: JSONRPCMessage) => { toServer.write(serializeMessage(message)); },
+    close: async () => { toServer.end(); transport.onclose?.(); },
+  };
+  return transport;
+}
+
+describe("agentx mcp's own admin sign-in (main.ts, A14)", () => {
+  async function cli(admin: { expiresAt: number }) {
+    const home = await mkdtemp(join(tmpdir(), "agentx-admin-mcp-cli-"));
+    const tokenStore = new InMemoryTokenStore();
+    // The recorded environment's cache, with a trailing slash on the control plane's URL.
+    const settings = { ...stagingSettings, controlPlaneUrl: `${URL_BASE}/` };
+    await writeEnvironmentCache(home, settings);
+    await saveDeveloperEnvironment(home, "staging", { url: URL_BASE, issuer: ISSUER, tokenEndpoint: `${ISSUER}/token`, revocationEndpoint: `${ISSUER}/revoke` });
+    await tokenStore.set(developerTokenKey(ISSUER), { accessToken: "developer-token", refreshToken: `agxr_${"a".repeat(43)}`, expiresAt: Date.now() + 3_600_000 });
+    await tokenStore.set(tokenStoreKey(cacheFromSettings(settings).auth), { accessToken: ADMIN_TOKEN, expiresAt: admin.expiresAt });
+    const fetch = vi.fn(async (input: string | URL) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/v1/auth/.well-known/agentx-configuration") return Response.json({ env: "staging", apiVersion: "1.2", adminApiVersion: "1.0" });
+      if (url.pathname === "/v1/admin/projects") return Response.json({ projects: [] });
+      return Response.json({ developer: { id: "d".repeat(64), name: "Ada", provider: "slack" }, projects: [], notices: [] });
+    });
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const stderr: string[] = [];
+    const running = executeCli(["mcp"], { environments: { home }, tokenStore, fetchImplementation: fetch, stdin, stdout, stderr: { write: (text: string) => stderr.push(text) } });
+    const client = new Client({ name: "claude-code", version: "2.1.0" });
+    await client.connect(streamTransport(stdin, stdout));
+    return { client, fetch, stderr, stop: async () => { await client.close(); return running; } };
+  }
+
+  it("reads the recorded environment's admin token, and calls the control plane's URL without its trailing slash", async () => {
+    const { client, fetch, stderr, stop } = await cli({ expiresAt: Date.now() + 600_000 });
+    await expect.poll(async () => (await client.listTools()).tools.length).toBe(19);
+    const result = await client.callTool({ name: "agentx_admin_list_projects", arguments: {} });
+    expect(result.structuredContent).toEqual({ projects: [] });
+    const call = fetch.mock.calls.find((entry) => new URL(String(entry[0])).pathname.endsWith("/admin/projects")) as unknown as [string, RequestInit];
+    expect(String(call[0])).toBe(`${URL_BASE}/v1/admin/projects`);
+    expect(new Headers(call[1].headers).get("authorization")).toBe(`Bearer ${ADMIN_TOKEN}`);
+    expect(await stop()).toBe(0);
+    expect(stderr.join("")).not.toContain(ADMIN_TOKEN);
+  });
+
+  it("answers no admin sign-in for an expired admin token, and never refreshes it", async () => {
+    const { client, fetch, stderr, stop } = await cli({ expiresAt: Date.now() - 1 });
+    const whoami = await client.callTool({ name: "agentx_whoami", arguments: {} });
+    expect(whoami.structuredContent).toMatchObject({ admin: false });
+    expect((await client.listTools()).tools).toHaveLength(11);
+    expect(toolError(await client.callTool({ name: "agentx_admin_list_projects", arguments: {} }))).toMatchObject({ code: "ADMIN_REQUIRED", next_step: "run npx @charterarc/agentx login --admin" });
+    expect(fetch.mock.calls.some((entry) => new URL(String(entry[0])).pathname.includes("/token") || new URL(String(entry[0])).pathname.startsWith("/v1/admin/"))).toBe(false);
+    expect(await stop()).toBe(0);
+    expect(stderr.join("")).not.toContain(ADMIN_TOKEN);
   });
 });
