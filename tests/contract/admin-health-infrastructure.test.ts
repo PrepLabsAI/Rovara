@@ -1,0 +1,67 @@
+// Spec 025 A13 and A6: the broker's health grants are exact, the index TTL is on, and both exist
+// only in named environments.
+import { execFileSync } from "node:child_process";
+import { App } from "aws-cdk-lib";
+import { Template } from "aws-cdk-lib/assertions";
+import { describe, expect, it } from "vitest";
+import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
+import { environmentNaming } from "../../infra/lib/naming.js";
+
+type Statement = { Action: string | string[]; Resource: unknown };
+type Policy = { Properties: { PolicyDocument: { Statement: Statement[] }; Roles: Array<{ Ref?: string }> } };
+type LambdaFunction = { Properties: { Environment?: { Variables?: Record<string, unknown> } } };
+
+function brokerStatements(template: Template): Statement[] {
+  return (Object.values(template.findResources("AWS::IAM::Policy")) as Policy[])
+    .filter((policy) => policy.Properties.Roles.some((role) => role.Ref?.startsWith("BrokerServiceRole")))
+    .flatMap((policy) => policy.Properties.PolicyDocument.Statement);
+}
+function brokerEnvironment(template: Template): Record<string, unknown> {
+  const functions = Object.entries(template.findResources("AWS::Lambda::Function") as Record<string, LambdaFunction>);
+  const broker = functions.find(([id]) => /^Broker[0-9A-F]{8}$/.test(id));
+  return broker?.[1].Properties.Environment?.Variables ?? {};
+}
+
+describe("the health route's grants (A13)", () => {
+  const named = Template.fromStack(new ControlPlaneStack(new App(), "HealthControlPlane", { naming: environmentNaming("live25d") }));
+  const legacy = Template.fromStack(new ControlPlaneStack(new App(), "HealthLegacyControlPlane"));
+
+  it("lets the broker describe the environment's alarms, by their name prefix only", () => {
+    const describe = brokerStatements(named).filter((statement) => statement.Action === "cloudwatch:DescribeAlarms");
+    expect(describe).toHaveLength(1);
+    expect(JSON.stringify(describe[0]?.Resource)).toContain(":alarm:agentx-live25d-*");
+    expect(brokerEnvironment(named).AGENTX_ALARM_PREFIX).toBe("agentx-live25d-");
+  });
+
+  it("lets the broker read the attributes of exactly the four dead-letter queues", () => {
+    const queues = brokerStatements(named).filter((statement) => statement.Action === "sqs:GetQueueAttributes");
+    expect(queues).toHaveLength(1);
+    expect(queues[0]?.Resource).toHaveLength(4);
+    const listed = JSON.stringify(brokerEnvironment(named).HEALTH_DEAD_LETTER_QUEUES);
+    for (const queue of ["DispatchDeadLetterQueue", "SlackRequestDeadLetterQueue", "NoticeDeadLetterQueue", "StreamFailureQueue"]) expect(listed).toContain(queue);
+  });
+
+  it("expires index items by TTL on indexExpiresAt in a named environment, and tells the reconciler so (A6, Q5)", () => {
+    const tables = Object.values(named.findResources("AWS::DynamoDB::Table") as Record<string, { Properties: { StreamSpecification?: unknown; TimeToLiveSpecification?: unknown } }>);
+    const state = tables.filter((table) => table.Properties.StreamSpecification !== undefined);
+    expect(state).toHaveLength(1);
+    expect(state[0]?.Properties.TimeToLiveSpecification).toEqual({ AttributeName: "indexExpiresAt", Enabled: true });
+    const functions = Object.entries(named.findResources("AWS::Lambda::Function") as Record<string, LambdaFunction>);
+    const reconciler = functions.find(([id]) => /Reconciler[0-9A-F]{8}$/.test(id));
+    expect(reconciler?.[1].Properties.Environment?.Variables).toMatchObject({ INDEX_EXPIRY: "ttl" });
+  });
+
+  it("names indexExpiresAt only where index items are written or read, so the TTL deletes nothing else", () => {
+    const allowed = new Set(["packages/contracts/src/admin.ts", "packages/broker/src/aws/activity-index.ts", "packages/broker/src/aws/admin-reads.ts", "infra/lib/control-plane.ts"]);
+    const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
+    expect(found.filter((file) => !allowed.has(file))).toEqual([]);
+  });
+
+  it("adds nothing to the legacy template", () => {
+    expect(brokerStatements(legacy).some((statement) => statement.Action === "cloudwatch:DescribeAlarms" || statement.Action === "sqs:GetQueueAttributes")).toBe(false);
+    const legacyTables = Object.values(legacy.findResources("AWS::DynamoDB::Table") as Record<string, { Properties: { StreamSpecification?: unknown; TimeToLiveSpecification?: unknown } }>);
+    expect(legacyTables.find((table) => table.Properties.StreamSpecification !== undefined)?.Properties.TimeToLiveSpecification).toBeUndefined();
+    expect(brokerEnvironment(legacy)).not.toHaveProperty("AGENTX_ALARM_PREFIX");
+    expect(brokerEnvironment(legacy)).not.toHaveProperty("HEALTH_DEAD_LETTER_QUEUES");
+  });
+});

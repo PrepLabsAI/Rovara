@@ -22,10 +22,12 @@ const oneOf = (values: string[]) => lambda.FilterRule.or(...values) as unknown;
 export class DeveloperTaskNotifier extends Construct {
   readonly function: lambdaNodejs.NodejsFunction;
   readonly queue: sqs.Queue;
+  readonly deadLetters: sqs.Queue;
+  readonly streamFailures: sqs.Queue;
 
   constructor(scope: Construct, id: string, props: DeveloperTaskNotifierProps) {
     super(scope, id);
-    const deadLetters = new sqs.Queue(this, "NoticeDeadLetterQueue", {
+    this.deadLetters = new sqs.Queue(this, "NoticeDeadLetterQueue", {
       encryption: sqs.QueueEncryption.SQS_MANAGED, enforceSSL: true, retentionPeriod: Duration.days(14),
     });
     // C9: a notice is retried for one hour, then counted and dropped; one day of retention is ample,
@@ -35,11 +37,11 @@ export class DeveloperTaskNotifier extends Construct {
       retentionPeriod: Duration.days(1),
       // Six times the function's timeout, as AWS advises for an SQS event source.
       visibilityTimeout: Duration.seconds(180),
-      deadLetterQueue: { queue: deadLetters, maxReceiveCount: 100 },
+      deadLetterQueue: { queue: this.deadLetters, maxReceiveCount: 100 },
     });
     // A stream batch that still fails after its retries (the notice queue refusing sends, say) is
     // recorded here: shard and sequence numbers only, never an item's images.
-    const streamFailures = new sqs.Queue(this, "StreamFailureQueue", {
+    this.streamFailures = new sqs.Queue(this, "StreamFailureQueue", {
       encryption: sqs.QueueEncryption.SQS_MANAGED, enforceSSL: true, retentionPeriod: Duration.days(14),
     });
     const deadLetterAlarm = (id: string, suffix: string, queue: sqs.Queue, description: string) => new cloudwatch.Alarm(this, id, {
@@ -51,9 +53,9 @@ export class DeveloperTaskNotifier extends Construct {
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     }).addAlarmAction(props.notifyOperator);
-    deadLetterAlarm("NoticeDeadLettersAlarm", "DeveloperNoticeDeadLetters", deadLetters,
+    deadLetterAlarm("NoticeDeadLettersAlarm", "DeveloperNoticeDeadLetters", this.deadLetters,
       "A shared task's notice exhausted its receives and is in the notice dead-letter queue. Check the developer task notifier logs for its message ID.");
-    deadLetterAlarm("StreamFailuresAlarm", "DeveloperNoticeStreamFailures", streamFailures,
+    deadLetterAlarm("StreamFailuresAlarm", "DeveloperNoticeStreamFailures", this.streamFailures,
       "A batch of state table changes could not be turned into shared task notices, so a thread may have missed updates. Check the developer task notifier logs, and the failure queue for the shard and sequence numbers.");
     this.function = packagedFunction(this, "Function", "packages/broker/src/aws/developer-task-notifier.ts", {
       STATE_TABLE_NAME: props.state.tableName,
@@ -93,7 +95,7 @@ export class DeveloperTaskNotifier extends Construct {
       retryAttempts: 10,
       bisectBatchOnError: true,
       maxRecordAge: Duration.hours(1),
-      onFailure: new eventSources.SqsDlq(streamFailures),
+      onFailure: new eventSources.SqsDlq(this.streamFailures),
       filters: [
         lambda.FilterCriteria.filter({ dynamodb: { NewImage: { entityType: { S: equals("DEVELOPER_TASK") } } } }),
         lambda.FilterCriteria.filter({ dynamodb: { NewImage: { entityType: { S: equals("DEVELOPER_TASK_POINTER") } } } }),

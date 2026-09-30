@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { CloudWatchClient, DescribeAlarmsCommand } from "@aws-sdk/client-cloudwatch";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import {
@@ -12,6 +13,7 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
+import { GetQueueAttributesCommand, SQSClient } from "@aws-sdk/client-sqs";
 import {
   GetSecretValueCommand,
   SecretsManagerClient,
@@ -88,6 +90,7 @@ import {
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { queryAllItems, routeAdminRead, type AdminReadDependencies } from "./admin-reads.js";
+import type { AdminHealthProbes } from "./admin-health.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import { GitHubAppCredentialProvider, privateKeyFromSecret } from "../github-app.js";
 import { CatalogCache } from "@agentx/gateway";
@@ -4596,6 +4599,43 @@ function developerConfiguration(): DeveloperApiConfiguration | undefined {
 }
 const developer = developerConfiguration();
 
+// Spec 025 A13: the health route's production probes, built only from what the environment
+// provides (named environments set both variables; the legacy deployment sets neither, so alarms
+// and queues answer "not set up"). A client is called only when a request asks for health.
+const cloudWatch = new CloudWatchClient(awsClientConfiguration);
+const sqs = new SQSClient(awsClientConfiguration);
+function healthProbes(): AdminHealthProbes {
+  const prefix = process.env.AGENTX_ALARM_PREFIX;
+  const queues = process.env.HEALTH_DEAD_LETTER_QUEUES;
+  return {
+    ...(process.env.AGENTX_RELEASE_VERSION ? { release: process.env.AGENTX_RELEASE_VERSION } : {}),
+    ...(prefix ? {
+      alarms: async () => {
+        const found: Array<{ name: string; state: string }> = [];
+        let NextToken: string | undefined;
+        do {
+          const page = await cloudWatch.send(new DescribeAlarmsCommand({ AlarmNamePrefix: prefix, MaxRecords: 100, ...(NextToken === undefined ? {} : { NextToken }) }));
+          for (const alarm of [...(page.MetricAlarms ?? []), ...(page.CompositeAlarms ?? [])]) found.push({ name: alarm.AlarmName ?? "", state: alarm.StateValue ?? "INSUFFICIENT_DATA" });
+          NextToken = page.NextToken;
+        } while (NextToken !== undefined);
+        return found;
+      },
+    } : {}),
+    ...(queues ? {
+      queueDepths: async () => Promise.all(Object.entries(JSON.parse(queues) as Record<string, string>).map(async ([name, url]) => {
+        try {
+          const attributes = await sqs.send(new GetQueueAttributesCommand({ QueueUrl: url, AttributeNames: ["ApproximateNumberOfMessages"] }));
+          return { name, depth: Number(attributes.Attributes?.ApproximateNumberOfMessages ?? "0") };
+        } catch {
+          return { name, depth: null };
+        }
+      })),
+    } : {}),
+    ...(developer?.slackAuthCheck === undefined ? {} : { slackAuthCheck: developer.slackAuthCheck }),
+    githubInstallations: () => githubCredentials.installationCount(),
+  };
+}
+
 export const handler = createAwsBrokerHandler({
   documentClient,
   s3,
@@ -4617,7 +4657,10 @@ export const handler = createAwsBrokerHandler({
   codeBuild,
   ...(developer ? { developer } : {}),
   // Spec 025 A12: set only here, so a test harness without its own `me` never reaches the network.
-  adminReads: { me: { issuer: requiredEnvironment("OIDC_ISSUER"), fetch, ...(developer?.slackUserByEmail === undefined ? {} : { slackUserByEmail: developer.slackUserByEmail }) } },
+  adminReads: {
+    me: { issuer: requiredEnvironment("OIDC_ISSUER"), fetch, ...(developer?.slackUserByEmail === undefined ? {} : { slackUserByEmail: developer.slackUserByEmail }) },
+    health: healthProbes(),
+  },
   ...(process.env.TURN_RECORDS_TABLE_NAME ? { turnRecordsTableName: process.env.TURN_RECORDS_TABLE_NAME } : {}),
   ...(process.env.SLACK_THREADS_TABLE_NAME ? { slackThreadsTableName: process.env.SLACK_THREADS_TABLE_NAME } : {}),
   ...(process.env.SLACK_ORCHESTRATOR_ROLE_ARN
