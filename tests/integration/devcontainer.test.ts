@@ -15,7 +15,7 @@ import {
   type DevcontainerCli,
   type DevcontainerProcess,
 } from "../../packages/worker/src/devcontainer.js";
-import { runCollected } from "../../packages/worker/src/collected-process.js";
+import { TIMEOUT_KILL_GRACE_MS, runCollected } from "../../packages/worker/src/collected-process.js";
 import type { PiSessionAdapter, PiSessionInput } from "../../packages/worker/src/pi-session.js";
 import { prepareWorkspace } from "../../packages/worker/src/prepare.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
@@ -275,6 +275,31 @@ describe("the collected process under the devcontainer CLI (#154)", () => {
     expect(Date.now() - started).toBeLessThan(3_000);
     expect(result.exitCode).toBe(4);
     expect(result).not.toHaveProperty("timedOut");
+  });
+
+  it("kills a process that ignores SIGTERM once the grace period after its timeout ends (#170)", async () => {
+    const started = Date.now();
+    const script = "process.on('SIGTERM', () => undefined); setInterval(() => undefined, 1000); console.log('ready')";
+    const result = await runCollected(process.execPath, ["-e", script], { timeoutMs: 300, killGraceMs: 300 });
+    expect(result).toMatchObject({ exitCode: null, signal: "SIGKILL", timedOut: true });
+    expect(Date.now() - started).toBeLessThan(3_000);
+  });
+
+  it("signals the whole process group at a timeout, so a grandchild stops too (#170)", async () => {
+    // The shell prints its background child's process ID, then waits for it. The grandchild holds
+    // the output open, so the result comes back early only when it was stopped too.
+    const started = Date.now();
+    const result = await runCollected("sh", ["-c", "sleep 30 & echo $!; wait"], { timeoutMs: 300, killGraceMs: 300 });
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(result.timedOut).toBe(true);
+    const grandchild = Number.parseInt(result.stdout.trim(), 10);
+    expect(Number.isInteger(grandchild) && grandchild > 0).toBe(true);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+    expect(() => process.kill(grandchild, 0)).toThrow(/ESRCH/);
+  });
+
+  it("waits 5 seconds after SIGTERM before SIGKILL by default (#170)", () => {
+    expect(TIMEOUT_KILL_GRACE_MS).toBe(5_000);
   });
 
   it("rejects when the executable does not exist", async () => {
