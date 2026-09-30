@@ -56,6 +56,8 @@ export function developerIdentityConfigFromEnvironment(env: NodeJS.ProcessEnv): 
     env: required(env, "AGENTX_ENV"),
     issuer: required(env, "DEVELOPER_TOKEN_ISSUER"),
     slack: { enabled: env.DEVELOPER_SIGNIN_SLACK === "enabled", ...(teamId === "" ? {} : { teamId }), ...sinceFrom(env.DEVELOPER_SIGNIN_SLACK_SINCE) },
+    // Spec 025 E16: absent means the pop-up is allowed; only named environments set it.
+    ...(env.MCP_CONFIRM_ELICITATION === "disabled" ? { confirmElicitation: false } : {}),
   };
   if (issuer === "") return config;
   const withOidc = { ...config, oidc: { displayName: env.DEVELOPER_OIDC_DISPLAY_NAME || "Company sign-in", ...sinceFrom(env.DEVELOPER_OIDC_SINCE) } };

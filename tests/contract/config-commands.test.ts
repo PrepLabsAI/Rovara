@@ -76,7 +76,7 @@ describe("agentx config list and get", () => {
     expect(rows.find((row) => row.key === "models.orchestrator")?.value).toBe("us.anthropic.claude-sonnet-4-6");
     expect(rows.find((row) => row.key === "alerts.address")?.value).toBe("none");
     expect(rows.find((row) => row.key === "limits.workspacesPerMember")?.value).toBe("3 (install-time default; the control plane may hold a newer setting)");
-    expect(rows).toHaveLength(11);
+    expect(rows).toHaveLength(12);
   });
 
   it("never shows the alert address itself, only that it is set", async () => {

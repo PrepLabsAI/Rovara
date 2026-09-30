@@ -166,6 +166,7 @@ place:
 | `alerts.slowTurnMinutes` | stack parameter SlowTurnMinutes on agentx-<env>-slack | 5 | 1 to 60 |
 | `budget.monthlyUsd` | stack parameter BudgetMonthlyUsd on agentx-<env>-control-plane | 0 | 0 for none |
 | `budget.scope` | stack parameter BudgetScope on agentx-<env>-control-plane | tag | tag or account |
+| `mcp.confirmElicitation` | stack parameter McpConfirmElicitation on agentx-<env>-control-plane | enabled | enabled or disabled; disabled leaves only the Slack Confirm button or the CLI to confirm an admin change |
 
 - **Models.** A new model must answer a one-token call before anything changes. `set` then
   updates the stack, the settings and the install answers, so `upgrade` and `init --resume` keep

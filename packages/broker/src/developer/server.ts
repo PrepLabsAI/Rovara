@@ -16,6 +16,7 @@ import {
   SlackAuthCheckRequestSchema,
   SlackUserByEmailRequestSchema,
   isLoopbackRedirectUri,
+  type AgentXConfigurationConfirm,
   type ChannelByNameRequest,
   type ChannelByNameResponse,
   type ChannelInfoRequest,
@@ -38,7 +39,7 @@ import { issueAccessToken, type TokenSigner } from "./tokens.js";
 
 /** `since` (epoch seconds, FR-045): when the method was last turned on. A session started before it
  * was ended by the disable in between, so it never comes back when the method is on again. */
-export interface DeveloperIdentityConfig { env: string; issuer: string; slack: { enabled: boolean; teamId?: string; since?: number }; oidc?: { displayName: string; since?: number } }
+export interface DeveloperIdentityConfig { env: string; issuer: string; slack: { enabled: boolean; teamId?: string; since?: number }; oidc?: { displayName: string; since?: number }; confirmElicitation?: boolean }
 export interface DeveloperIdentityDependencies {
   config: DeveloperIdentityConfig;
   store: DeveloperSignInStore;
@@ -362,6 +363,9 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       revocationEndpoint: endpoint("/revoke"),
       clientId: AGENTX_CLI_CLIENT_ID,
       methods: { slack: methods.includes("slack"), oidc: methods.includes("oidc") && config.oidc !== undefined ? { displayName: config.oidc.displayName } : null },
+      // FR-041, E16: the methods this environment allows; the MCP server adds the client's and the admin's own.
+      // Slack needs the team set up, not Slack sign-in (controller ruling R5): each change checks the admin's own link.
+      confirm: { elicitation: config.confirmElicitation !== false, slack: config.slack.teamId !== undefined } satisfies AgentXConfigurationConfirm,
     };
   };
 
