@@ -558,9 +558,13 @@ existing threads and gives their open task count. It still answers any part of t
 connectors can answer. In the maintainers' deployment, an administrator changes the limits with the
 `AgentXControlPlane` parameters `SlackMemberWorkspaceLimit` and `SlackOrganizationWorkspaceLimit`.
 An installed environment starts from the same defaults, and `agentx --env <name> config get
-limits.workspacesPerMember` (or `limits.workspacesPerOrg`) shows them. `config set` cannot change
-them yet. Spec 025 phase 25e adds the way to change them: the admin tool
-`agentx_admin_set_workspace_limits`, and `config set` for these two keys.
+limits.workspacesPerMember` (or `limits.workspacesPerOrg`) shows them. To change them, an
+administrator signed in with `agentx --env <name> login --admin` runs `agentx --env <name> config
+set limits.workspacesPerMember <n>` (1 to 50) or `limits.workspacesPerOrg <n>` (1 to 1000), or uses
+the admin tool `agentx_admin_set_workspace_limits`. Either way the change goes through the admin
+change path: AgentX shows who is at or over the new limit, asks "Apply this change?" (`--yes`
+answers for you), and records the change. Workspaces already open keep running; the next creation
+uses the new limit.
 
 To stop the thread's running coding task, mention AgentX in the thread with just a stop request:
 

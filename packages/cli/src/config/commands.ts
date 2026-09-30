@@ -3,6 +3,7 @@
 // SSM value; the workspace limits are the control plane's setting (spec 025 FR-053). list and get
 // never print the alert address, which can be a webhook secret: only whether it is set.
 import { agentXError, environmentStackName } from "@agentx/contracts";
+import { runCliChange } from "../admin/changes.js";
 import type { CallerIdentity, StackReader } from "../environments/adopt.js";
 import { withEnvironmentLock } from "../environments/lock.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
@@ -14,6 +15,7 @@ import { readInstallAnswers, writeInstallAnswers } from "../init/install-state.j
 import { modelCheckProblem, type PrerequisiteChecks } from "../init/prerequisites.js";
 import { secretFromSource, type Prompter, type SecretSource } from "../init/prompts.js";
 import { alertsTopicArn, ensureSubscribed, type AlertsApi } from "../setup/alerts.js";
+import { CLI_VERSION } from "../version.js";
 import { CONFIG_KEYS, configKey, whereText, type ConfigKey, type ModelRole } from "./keys.js";
 
 export interface ConfigServices {
@@ -31,12 +33,13 @@ export interface ConfigServices {
   now: () => number;
   sleep: (ms: number) => Promise<void>;
   pollMs?: number;
+  /** Spec 025 FR-053: this computer's unexpired admin sign-in for the environment, for the workspace limits' change path. */
+  adminSession?(env: string): Promise<{ controlPlaneUrl: string; accessToken: string } | undefined>;
+  /** How the workspace limits' change path reaches the control plane; the global fetch when absent. */
+  fetch?: typeof fetch;
 }
 
 export interface ConfigRow { key: string; value: string; where: string; description: string }
-
-const LIMITS_REFUSAL = (key: string) =>
-  `${key} is the control plane's workspace limits setting; AgentX changes it with the admin change tool from spec 025 phase 25e, which this release does not have yet. Until then, new installs take the stack parameter as their default`;
 
 async function installed(services: ConfigServices, env: string): Promise<EnvironmentSettings> {
   const settings = await readEnvironmentSettings(services.store, env);
@@ -145,7 +148,7 @@ async function modelRecorded(services: ConfigServices, env: string, settings: En
 export async function runConfigSet(services: ConfigServices, env: string, input: { key: string; value?: string; valueSource?: SecretSource; yes: boolean }): Promise<{ changed: boolean }> {
   const entry = configKey(input.key);
   const { target } = entry;
-  if (target.kind === "control-plane-setting") throw agentXError("CONFIG_INVALID", LIMITS_REFUSAL(entry.key));
+  if (target.kind === "control-plane-setting") return setLimitsThroughChange(services, env, entry, target, input);
   if (target.kind === "settings") return setAlertAddress(services, env, input);
   if (input.value === undefined) throw agentXError("CONFIG_INVALID", `give the new value: agentx config set ${entry.key} <value>`);
   const value = entry.parse(input.value);
@@ -192,6 +195,52 @@ export async function runConfigSet(services: ConfigServices, env: string, input:
     }
     return { changed: result.changed };
   });
+}
+
+/**
+ * Spec 025 FR-053, E17: the workspace limits change through the admin change path, with its audit.
+ * The control plane plans the change (keeping the other limit as it is) and says who is at or over
+ * the new one; the person typing the command confirms it (the cli method), or --yes does.
+ */
+async function setLimitsThroughChange(
+  services: ConfigServices, env: string, entry: ConfigKey,
+  target: Extract<ConfigKey["target"], { kind: "control-plane-setting" }>, input: { value?: string; yes: boolean },
+): Promise<{ changed: boolean }> {
+  if (input.value === undefined) throw agentXError("CONFIG_INVALID", `give the new value: agentx config set ${entry.key} <value>`);
+  const value = Number(entry.parse(input.value));
+  const settings = await readEnvironmentSettings(services.store, env);
+  if (settings === undefined) throw agentXError("CONFIG_INVALID", `environment ${env} is not installed in this account and region; check --env and --region`);
+  // D14: the legacy deployment has no admin change routes.
+  if (settings.naming !== "environment") {
+    throw agentXError("CONFIG_INVALID", `${entry.key} changes through AgentX's admin change path, which only environments installed with agentx init have, not the legacy deployment; nothing changed. The legacy deployment keeps its stack parameter ${target.installDefault.parameter}`);
+  }
+  const session = await services.adminSession?.(env);
+  if (session === undefined) throw agentXError("AUTH_REQUIRED", `${entry.key} changes through AgentX's admin change path, which needs this computer's admin sign-in; run agentx --env ${env} login --admin, then try again`);
+  // With a prompt, the effect is shown once, in the question; with --yes it is printed as runCliChange writes it.
+  let held: string | undefined;
+  let first = true;
+  const flush = () => { if (held !== undefined) services.write(held); held = undefined; };
+  let result: Awaited<ReturnType<typeof runCliChange>>;
+  try {
+    result = await runCliChange({
+      controlPlaneUrl: session.controlPlaneUrl, accessToken: session.accessToken, cliVersion: CLI_VERSION,
+      change: { kind: "set_workspace_limits", [target.field]: value },
+      confirm: async (effect) => {
+        if (input.yes) return true;
+        if (held !== effect) flush();
+        held = undefined;
+        return services.prompter.confirm(`${effect}\nApply this change?`, { defaultValue: false });
+      },
+      write: (line) => {
+        if (first && !input.yes) { first = false; held = line; return; }
+        flush();
+        services.write(line);
+      },
+    }, services.fetch ?? fetch);
+  } finally {
+    flush();
+  }
+  return { changed: result.outcome === "applied" };
 }
 
 /** alerts.address: an email from the command line, or a webhook from a file, variable or hidden

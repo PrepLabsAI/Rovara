@@ -219,6 +219,17 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     return { settings, accessToken: tokens.accessToken };
   }
 
+  /** This computer's unexpired admin sign-in (agentx --env <name> login --admin) for an environment by name. Never refreshed (Q4). */
+  async function adminSessionFor(name: string): Promise<AdminSession | undefined> {
+    try {
+      const settings = await deploymentSettings({ ...globalOptions(program), env: name });
+      const tokens = await services.tokenStore.get(tokenStoreKey(settings.auth));
+      return tokens !== undefined && tokens.expiresAt > Date.now() ? { baseUrl: settings.controlPlaneUrl.replace(/\/$/, ""), accessToken: tokens.accessToken } : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   /** The developer sign-in's session dependencies: this computer's home and token store. */
   const developerSession = () => ({ home, tokenStore: services.tokenStore, fetch: services.fetchImplementation });
 
@@ -345,7 +356,14 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     ...(dependencies.signin === undefined ? {} : { overrides: dependencies.signin }),
     parameterStore, fetch: services.fetchImplementation, stdout: services.stdout, stderr: services.stderr,
   });
-  registerConfigCommands(program, { ...(dependencies.config === undefined ? {} : { overrides: dependencies.config }), parameterStore, fetch: services.fetchImplementation, stdout: services.stdout, stderr: services.stderr });
+  registerConfigCommands(program, {
+    ...(dependencies.config === undefined ? {} : { overrides: dependencies.config }), parameterStore, fetch: services.fetchImplementation, stdout: services.stdout, stderr: services.stderr,
+    // Spec 025 FR-053: the workspace limits change with the admin sign-in of the environment --env names.
+    adminSession: async (env: string) => {
+      const session = await adminSessionFor(env);
+      return session === undefined ? undefined : { controlPlaneUrl: session.baseUrl, accessToken: session.accessToken };
+    },
+  });
 
   registerDoctorCommand(program, {
     ...(dependencies.doctor?.store === undefined ? {} : { store: dependencies.doctor.store }),
@@ -919,14 +937,13 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
 
   /** R24 and spec 025 A14: this computer's unexpired admin sign-in for the developer's environment. Never refreshed (Q4). */
   const adminSession = async (env: string | undefined): Promise<AdminSession | undefined> => {
+    let name: string;
     try {
-      const name = (await resolveDeveloperEnvironment(home, env)).env;
-      const settings = await deploymentSettings({ ...globalOptions(program), env: name });
-      const tokens = await services.tokenStore.get(tokenStoreKey(settings.auth));
-      return tokens !== undefined && tokens.expiresAt > Date.now() ? { baseUrl: settings.controlPlaneUrl.replace(/\/$/, ""), accessToken: tokens.accessToken } : undefined;
+      name = (await resolveDeveloperEnvironment(home, env)).env;
     } catch {
       return undefined;
     }
+    return adminSessionFor(name);
   };
   const adminSignedIn = async (env: string | undefined): Promise<boolean> => (await adminSession(env)) !== undefined;
 
