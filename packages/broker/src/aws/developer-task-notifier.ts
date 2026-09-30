@@ -255,7 +255,7 @@ async function releaseStart(deps: NotifierDependencies, marker: { pk: string; sk
   }
 }
 
-interface NoticeMarker { deliveredAt?: string; postedTs?: string }
+interface NoticeMarker { deliveredAt?: string; postedTs?: string; postingUntil?: number }
 
 /**
  * C1: a start message posted but not recorded keeps its ts on the notice's marker, so the next
@@ -291,6 +291,11 @@ async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outc
       await recordThread(deps, task.taskId, delivered.postedTs, marker);
       return "recorded";
     }
+    // 25c note 3 (owner answer, 2026-09-30): a start post may have landed without its ts being kept,
+    // so the next post can be a second start message. Left as is; these logs count how often.
+    if (delivered?.postingUntil !== undefined && delivered.postingUntil < deps.now()) {
+      deps.log({ event: "developer_notifier.start_post_uncertain", reason: "claim_lapsed", taskId: task.taskId });
+    }
     const until = deps.now() + START_LEASE_MS;
     if (!await claimStart(deps, marker, until)) {
       const current = await getItem<NoticeMarker>(deps, marker);
@@ -310,6 +315,9 @@ async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outc
         text: startMessage({ developerName: task.developerName, slackUserId: task.slackUserId, client: task.client, title: task.title, project: task.project, mode: share.mode, status, sharedReason: share.sharedReason }),
       }));
     } catch (error) {
+      // A SlackPostError is Slack's own answer: nothing was posted. Any other error (an abort, a
+      // timeout, a lost connection) may have come after Slack accepted the post.
+      if (!(error instanceof SlackPostError)) deps.log({ event: "developer_notifier.start_post_uncertain", reason: "post_error", taskId: task.taskId, error: errorName(error) });
       await releaseStart(deps, marker, until);
       throw error;
     }

@@ -441,3 +441,63 @@ describe("notice markers expire after 30 days (25c note 2)", () => {
     expect(h.db.get(`DEVTASK#${h.taskId}`, `NOTICE#${h.taskId}:start`)).toMatchObject({ postedTs: expect.any(String) as string, indexExpiresAt: expiry(h) });
   });
 });
+
+describe("an uncertain start post is logged (25c note 3)", () => {
+  const uncertain = (logs: Array<Record<string, unknown>>) => logs.filter((entry) => entry.event === "developer_notifier.start_post_uncertain");
+
+  it("logs a start post that failed without Slack's answer, once, with the error's name only", async () => {
+    let calls = 0;
+    const h = await notifierHarness({ shareToChannel: true }, {
+      post: async () => { calls += 1; throw Object.assign(new Error(`the operation was aborted ${BOT_TOKEN}`), { name: "TimeoutError" }); },
+    });
+    await h.pump();
+    expect(calls).toBe(1);
+    expect(uncertain(h.logs)).toEqual([{ event: "developer_notifier.start_post_uncertain", reason: "post_error", taskId: h.taskId, error: "TimeoutError" }]);
+    expect(JSON.stringify(h.logs)).not.toContain(BOT_TOKEN);
+  });
+
+  it("does not log a post Slack refused", async () => {
+    const h = await notifierHarness();
+    h.fail("ratelimited");
+    await h.pump();
+    expect(uncertain(h.logs)).toEqual([]);
+  });
+
+  it("does not log a reply's failed post, only the start's", async () => {
+    let failReplies = false;
+    let ts = 1_695_500_000_000_300;
+    const h = await notifierHarness({ shareToChannel: true }, {
+      post: async (input) => {
+        if (failReplies && input.threadTs !== undefined) throw Object.assign(new Error("fetch failed"), { name: "TypeError" });
+        ts += 1;
+        const text = String(ts);
+        return { ts: `${text.slice(0, 10)}.${text.slice(10)}` };
+      },
+    });
+    await h.pump();
+    failReplies = true;
+    await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
+    await h.pump();
+    expect(uncertain(h.logs)).toEqual([]);
+  });
+
+  it("logs a lapsed start claim with no posted ts, once, and posts again", async () => {
+    const h = await notifierHarness();
+    await h.handle({ Records: h.stream.take().map((record) => ({ ...record, eventSource: "aws:dynamodb" })) });
+    // A delivery claimed the post and then died before it recorded anything.
+    h.db.set({ pk: `DEVTASK#${h.taskId}`, sk: `NOTICE#${h.taskId}:start`, entityType: "NOTICE", postingUntil: h.now() - 1 });
+    await h.pump();
+    expect(h.posts).toHaveLength(1);
+    expect(uncertain(h.logs)).toEqual([{ event: "developer_notifier.start_post_uncertain", reason: "claim_lapsed", taskId: h.taskId }]);
+  });
+
+  it("does not log a start claim given back after Slack refused the post", async () => {
+    const h = await notifierHarness();
+    h.fail("ratelimited");
+    await h.pump();
+    h.fail(undefined);
+    await h.pump();
+    expect(h.posts).toHaveLength(1);
+    expect(uncertain(h.logs)).toEqual([]);
+  });
+});
