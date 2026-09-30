@@ -131,6 +131,9 @@ describe("records (E2, E3)", () => {
     expect(parsed).toEqual(pendingRecord);
     expect(AdminChangePendingRecordSchema.parse({ ...pendingRecord, status: "applied", methodUsed: "slack", pressedBy: "U0ADA00001", slackRequestedAt: PROPOSED, claimedAt: PROPOSED, dm: { channel: "D0123456789", ts: "1.2", postedAt: PROPOSED }, result: { ok: true } })).toMatchObject({ status: "applied" });
     expect(AdminChangePendingRecordSchema.safeParse(omit(pendingRecord, INDEX_EXPIRY_ATTRIBUTE)).success).toBe(false);
+    // R4 (B4): a member planning admin's confirmation text is stored beside the ID-only effect.
+    expect(AdminChangePendingRecordSchema.parse({ ...pendingRecord, confirmationEffect: "Bind channel #secret-launch (C0PRIVATE01, a private channel)." })).toMatchObject({ confirmationEffect: expect.stringContaining("#secret-launch") as unknown });
+    expect(AdminChangePendingRecordSchema.safeParse({ ...pendingRecord, confirmationEffect: "x".repeat(4_001) }).success).toBe(false);
     expect(AdminChangePendingRecordSchema.safeParse({ ...pendingRecord, surprise: 1 }).success).toBe(false);
     expect(AdminChangePendingRecordSchema.safeParse({ ...pendingRecord, status: "archived" }).success).toBe(false);
     expect(AdminChangePendingRecordSchema.safeParse({ ...pendingRecord, input: { kind: "bind_channel", channel: "C0123456789" } }).success).toBe(false);

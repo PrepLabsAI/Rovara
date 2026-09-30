@@ -88,9 +88,14 @@ import {
   type ProjectModelOptions,
   projectCatalogKey,
   type ChannelMembersRequest,
+  isAdminChangePressEvent,
+  type AdminChangeOutcome,
+  type AdminChangePressEvent,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
-import { queryAllItems, routeAdminRead, type AdminReadDependencies } from "./admin-reads.js";
+import { adminReader, queryAllItems, routeAdminRead, type AdminReadDependencies } from "./admin-reads.js";
+import { outcomeMetric } from "./admin-change-audit.js";
+import { pressAdminChange, routeAdminChange, type AdminChangeDependencies } from "./admin-changes.js";
 import type { AdminChangeHandlers, PlanDependencies } from "./admin-change-plans.js";
 import { ZodError } from "zod";
 import { healthProbes } from "./health-probes.js";
@@ -277,6 +282,8 @@ interface AwsBrokerDependencies {
   slackThreadsTableName?: string;
   /** Spec 025 phase 25d: the admin read routes' injected probes and clock; the defaults serve production. */
   adminReads?: Partial<Pick<AdminReadDependencies, "me" | "health" | "now" | "log">>;
+  /** Spec 025 phase 25e: the admin changes' method switch, clock and metric; the defaults serve production. */
+  adminChanges?: { confirm?: { elicitation: boolean; slack: boolean }; now?: () => number; metric?: (outcome: AdminChangeOutcome) => void };
 }
 
 /**
@@ -408,6 +415,32 @@ function planDependencies(dependencies: AwsBrokerDependencies): PlanDependencies
   };
 }
 
+/** Spec 025 phase 25e: admin changes exist only with developer sign-in and a TurnRecords table (D14). */
+function adminChangeDependencies(dependencies: AwsBrokerDependencies, reads: AdminReadDependencies): AdminChangeDependencies | undefined {
+  const developer = dependencies.developer;
+  if (developer === undefined || dependencies.turnRecordsTableName === undefined) return undefined;
+  const log = (entry: Record<string, unknown>) => console.log(JSON.stringify({ component: "broker", ...entry }));
+  const reader = adminReader(reads);
+  const now = dependencies.adminChanges?.now ?? Date.now;
+  return {
+    documentClient: dependencies.documentClient,
+    tableName: dependencies.tableName,
+    audit: {
+      documentClient: dependencies.documentClient, tableName: dependencies.turnRecordsTableName, now, log,
+      metric: dependencies.adminChanges?.metric ?? outcomeMetric(process.env.AGENTX_METRICS_NAMESPACE || "AgentX"),
+    },
+    plans: planDependencies(dependencies),
+    ...(reader === undefined ? {} : { identity: reader }),
+    ...(developer.slackTeamId === undefined ? {} : { slackTeamId: developer.slackTeamId }),
+    // E16: the environment's pop-up switch. R5: Slack is a method wherever a Slack team is set up,
+    // whatever Slack sign-in says; each change still needs the admin's own linked Slack user (FR-041).
+    confirm: dependencies.adminChanges?.confirm ?? { elicitation: process.env.MCP_CONFIRM_ELICITATION !== "disabled", slack: developer.slackTeamId !== undefined },
+    now,
+    newId: randomUUID,
+    log,
+  };
+}
+
 function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTaskActions {
   /** Every page of a partition's items under a prefix (the admin reads' shared query loop). */
   const query = (pk: string, prefix: string) => queryAllItems(dependencies, pk, prefix);
@@ -527,7 +560,18 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
   // Spec 025: the broker actions the developer task routes call, built once per handler.
   const tasks = developerTaskActions(dependencies);
   const adminReads = adminReadDependencies(dependencies);
-  return async (event: HttpApiV2Event | SlackStopTaskEvent): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
+  const adminChanges = adminChangeDependencies(dependencies, adminReads);
+  return async (event: HttpApiV2Event | SlackStopTaskEvent | AdminChangePressEvent): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
+    // Spec 025 E14: a Slack Confirm or Cancel press, invoked directly by the ingress (never through API Gateway).
+    if (isAdminChangePressEvent(event)) {
+      if (adminChanges === undefined) return json({ error: { code: "NOT_FOUND", message: "admin changes are not set up in this deployment" } }, "slack-ingress", 404);
+      try {
+        return json(await pressAdminChange(adminChanges, event), "slack-ingress");
+      } catch (error) {
+        console.log(JSON.stringify({ component: "broker", event: "admin_change.press_failed", changeId: event.changeId, error: error instanceof AgentXError ? error.code : error instanceof Error ? error.name : "unknown" }));
+        return json({ outcome: "failed", changeId: event.changeId }, "slack-ingress", 500);
+      }
+    }
     if (isSlackStopTaskEvent(event)) {
       try {
         return json(await stopSlackThreadTask(dependencies, event), "slack-ingress");
@@ -608,6 +652,9 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         adminValues: dependencies.adminValues,
       });
       const body = parseBody(request.body);
+      // Spec 025 phase 25e: admin changes (FR-039 to FR-041, FR-052).
+      const changed = await routeAdminChange(adminChanges, identity, { method: request.method, headers: request.headers, body }, url);
+      if (changed !== undefined) return json(changed.body, request.requestId, changed.status);
       // Spec 025 phase 25d: the admin read routes (FR-038), each behind the admin claim (A2).
       const adminRead = await routeAdminRead(adminReads, identity, request, url);
       if (adminRead !== undefined) return json(adminRead, request.requestId);

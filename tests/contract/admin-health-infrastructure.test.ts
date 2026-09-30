@@ -60,7 +60,7 @@ describe("the health route's grants (A13)", () => {
   });
 
   it("names indexExpiresAt only where index items are written or read, so the TTL deletes nothing else", () => {
-    const allowed = new Set(["packages/contracts/src/admin.ts", "packages/broker/src/aws/activity-index.ts", "packages/broker/src/aws/admin-reads.ts", "infra/lib/control-plane.ts", "packages/contracts/src/admin-changes.ts"]);
+    const allowed = new Set(["packages/contracts/src/admin.ts", "packages/broker/src/aws/activity-index.ts", "packages/broker/src/aws/admin-reads.ts", "infra/lib/control-plane.ts", "packages/contracts/src/admin-changes.ts", "packages/broker/src/aws/admin-changes.ts"]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);
   });

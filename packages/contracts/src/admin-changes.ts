@@ -202,6 +202,8 @@ export const AdminChangePendingRecordSchema = z.object({
   kind: AdminChangeKindSchema,
   input: AdminChangeInputSchema,
   effect: z.string().max(ADMIN_CHANGE_EFFECT_MAX),
+  /** R4 (B4): the effect naming a private channel to a member planning admin; shown only to them, never audited. */
+  confirmationEffect: z.string().max(ADMIN_CHANGE_EFFECT_MAX).optional(),
   details: z.record(z.string(), z.unknown()),
   stateHash: z.string().min(1).max(128),
   admin: z.object({ issuer: z.string().min(1).max(512), subject: z.string().min(1).max(256), ownerKey: z.string().min(1).max(256), displayName: z.string().min(1).max(200).optional() }).strict(),
