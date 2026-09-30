@@ -13,7 +13,7 @@ import { deriveTaskStatus, failureCategory, taskKey, taskPointerKey, type Develo
 import { isConditional } from "./broker-shared.js";
 import { requiredEnvironment } from "./lambda.js";
 import { parseSlackSecrets } from "./slack-ingress.js";
-import { SlackPostError, chatPostMessage } from "./slack-web.js";
+import { SlackPostError, chatPostMessage, postMayHaveLanded } from "./slack-web.js";
 
 type Client = { send(command: unknown): Promise<unknown> };
 const errorName = (error: unknown) => (error instanceof Error ? error.name : "unknown");
@@ -293,9 +293,7 @@ async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outc
     }
     // 25c note 3 (owner answer, 2026-09-30): a start post may have landed without its ts being kept,
     // so the next post can be a second start message. Left as is; these logs count how often.
-    if (delivered?.postingUntil !== undefined && delivered.postingUntil < deps.now()) {
-      deps.log({ event: "developer_notifier.start_post_uncertain", reason: "claim_lapsed", taskId: task.taskId });
-    }
+    const lapsed = delivered?.postingUntil !== undefined && delivered.postingUntil < deps.now();
     const until = deps.now() + START_LEASE_MS;
     if (!await claimStart(deps, marker, until)) {
       const current = await getItem<NoticeMarker>(deps, marker);
@@ -307,6 +305,8 @@ async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outc
       // Another delivery is posting it now: this one is retried, and then finds it delivered.
       throw new StartPending();
     }
+    // Logged by the delivery that won the claim only, so one lapse is counted once.
+    if (lapsed) deps.log({ event: "developer_notifier.start_post_uncertain", reason: "claim_lapsed", taskId: task.taskId });
     const status = await currentStatus(deps, task);
     let ts: string;
     try {
@@ -315,9 +315,8 @@ async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outc
         text: startMessage({ developerName: task.developerName, slackUserId: task.slackUserId, client: task.client, title: task.title, project: task.project, mode: share.mode, status, sharedReason: share.sharedReason }),
       }));
     } catch (error) {
-      // A SlackPostError is Slack's own answer: nothing was posted. Any other error (an abort, a
-      // timeout, a lost connection) may have come after Slack accepted the post.
-      if (!(error instanceof SlackPostError)) deps.log({ event: "developer_notifier.start_post_uncertain", reason: "post_error", taskId: task.taskId, error: errorName(error) });
+      // Slack's own error code means nothing was posted; a lost or unreadable answer may not.
+      if (postMayHaveLanded(error)) deps.log({ event: "developer_notifier.start_post_uncertain", reason: "post_error", taskId: task.taskId, error: errorName(error) });
       await releaseStart(deps, marker, until);
       throw error;
     }

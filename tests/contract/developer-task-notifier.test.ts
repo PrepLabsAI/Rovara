@@ -445,15 +445,54 @@ describe("notice markers expire after 30 days (25c note 2)", () => {
 describe("an uncertain start post is logged (25c note 3)", () => {
   const uncertain = (logs: Array<Record<string, unknown>>) => logs.filter((entry) => entry.event === "developer_notifier.start_post_uncertain");
 
-  it("logs a start post that failed without Slack's answer, once, with the error's name only", async () => {
+  /** The real poster, over a fake fetch: what the Lambda posts with. */
+  const poster = (fetchImplementation: () => Promise<Response>, loadToken: () => Promise<string> = async () => BOT_TOKEN) =>
+    cachedSlackPoster(loadToken, Date.now, fetchImplementation);
+
+  it("logs a start post whose request failed before Slack answered, once, with the error's name only", async () => {
     let calls = 0;
     const h = await notifierHarness({ shareToChannel: true }, {
-      post: async () => { calls += 1; throw Object.assign(new Error(`the operation was aborted ${BOT_TOKEN}`), { name: "TimeoutError" }); },
+      post: poster(async () => { calls += 1; throw Object.assign(new Error(`the operation was aborted ${BOT_TOKEN}`), { name: "TimeoutError" }); }),
     });
     await h.pump();
     expect(calls).toBe(1);
     expect(uncertain(h.logs)).toEqual([{ event: "developer_notifier.start_post_uncertain", reason: "post_error", taskId: h.taskId, error: "TimeoutError" }]);
     expect(JSON.stringify(h.logs)).not.toContain(BOT_TOKEN);
+  });
+
+  it("logs a start post whose 2xx answer could not be read, since Slack may have posted it", async () => {
+    const h = await notifierHarness({ shareToChannel: true }, {
+      post: poster(async () => ({ ok: true, status: 200, json: async () => { throw Object.assign(new Error("body cut off"), { name: "AbortError" }); } }) as unknown as Response),
+    });
+    await h.pump();
+    expect(uncertain(h.logs)).toEqual([{ event: "developer_notifier.start_post_uncertain", reason: "post_error", taskId: h.taskId, error: "SlackPostError" }]);
+  });
+
+  it("logs a start post that met a 5xx answer", async () => {
+    const h = await notifierHarness({ shareToChannel: true }, {
+      post: poster(async () => ({ ok: false, status: 503, json: async () => { throw new Error("not json"); } }) as unknown as Response),
+    });
+    await h.pump();
+    expect(uncertain(h.logs)).toHaveLength(1);
+  });
+
+  it("does not log a start post that never left because the bot token could not be loaded", async () => {
+    let fetched = 0;
+    const h = await notifierHarness({ shareToChannel: true }, {
+      post: poster(async () => { fetched += 1; throw new Error("unreachable"); }, async () => { throw Object.assign(new Error("throttled"), { name: "ThrottlingException" }); }),
+    });
+    await h.pump();
+    expect(fetched).toBe(0);
+    expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.retry", kind: "start", reason: "ThrottlingException" }));
+    expect(uncertain(h.logs)).toEqual([]);
+  });
+
+  it("does not log a start post Slack refused with its own error code", async () => {
+    const h = await notifierHarness({ shareToChannel: true }, {
+      post: poster(async () => ({ ok: true, status: 200, json: async () => ({ ok: false, error: "channel_not_found" }) }) as unknown as Response),
+    });
+    await h.pump();
+    expect(uncertain(h.logs)).toEqual([]);
   });
 
   it("does not log a post Slack refused", async () => {
@@ -488,6 +527,21 @@ describe("an uncertain start post is logged (25c note 3)", () => {
     h.db.set({ pk: `DEVTASK#${h.taskId}`, sk: `NOTICE#${h.taskId}:start`, entityType: "NOTICE", postingUntil: h.now() - 1 });
     await h.pump();
     expect(h.posts).toHaveLength(1);
+    expect(uncertain(h.logs)).toEqual([{ event: "developer_notifier.start_post_uncertain", reason: "claim_lapsed", taskId: h.taskId }]);
+  });
+
+  it("logs a lapsed claim once when two deliveries find it at the same time, from the one that wins the claim", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const h = await notifierHarness({ shareToChannel: true }, { post: async () => { await gate; return { ts: "1695500000.000200" }; } });
+    await h.handle({ Records: h.stream.take().map((record) => ({ ...record, eventSource: "aws:dynamodb" })) });
+    const start = h.queue.find((entry) => entry.notice.kind === "start")!.notice;
+    h.db.set({ pk: `DEVTASK#${h.taskId}`, sk: `NOTICE#${h.taskId}:start`, entityType: "NOTICE", postingUntil: h.now() - 1 });
+    const delivery = (id: string) => h.handle({ Records: [{ eventSource: "aws:sqs", messageId: id, receiptHandle: id, body: JSON.stringify(start), attributes: { ApproximateReceiveCount: "1" } }] });
+    const both = Promise.all([delivery("first"), delivery("second")]);
+    await vi.waitFor(() => expect(uncertain(h.logs)).toHaveLength(1));
+    release();
+    await both;
     expect(uncertain(h.logs)).toEqual([{ event: "developer_notifier.start_post_uncertain", reason: "claim_lapsed", taskId: h.taskId }]);
   });
 

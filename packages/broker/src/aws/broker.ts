@@ -2264,6 +2264,11 @@ async function taskOperationParts(
     ...input.requester,
   });
   operation.settingsRevision = settings.definition.revision;
+  // 25c note 1: the hash above is the request's own; only the worker's copy gets the re-read line.
+  const prompt = workerPrompt(input.prompt, input.shared === true);
+  if (input.shared === true && prompt === input.prompt) {
+    console.log(JSON.stringify({ component: "broker", event: "developer.shared_reread_omitted", operationId }));
+  }
   const invocation: WorkerInvocation = {
     protocolVersion: 1,
     kind: "task",
@@ -2274,8 +2279,7 @@ async function taskOperationParts(
     callbackCapability: issueCapability(dependencies, workspace.id, operationId, fence),
     payload: {
       conversationId: input.conversationId,
-      // 25c note 1: the hash above is the request's own; only the worker's copy gets the re-read line.
-      prompt: workerPrompt(input.prompt, input.shared === true),
+      prompt,
       conversationStarted: input.conversationStarted,
       ...(resolvedModel.model === undefined ? {} : { model: resolvedModel.model }),
       ...(resolvedModel.diagnostic === undefined ? {} : { modelSelectionDiagnostic: resolvedModel.diagnostic }),
@@ -2324,8 +2328,8 @@ async function acceptTask(
     prompt: request.prompt,
     conversationStarted,
     requester: requesterOf(identity),
-    // 25c note 1: a turn from the shared thread, or the developer's own turn on a shared task.
-    shared: identity.sharedTask !== undefined || options.sharedTask === true,
+    // 25c note 1: a turn from an open shared thread, or the developer's own turn on a shared task.
+    shared: identity.sharedTask?.state === "continue" || options.sharedTask === true,
   }, now);
   try {
     await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [

@@ -81,6 +81,15 @@ describe("the health route's grants (A13)", () => {
     const writes = notifier.split("\n").filter((line) => line.includes("noticeExpiry(deps)"));
     expect(writes.length).toBeGreaterThanOrEqual(4);
     for (const line of writes) expect(line).toMatch(/entityType: "NOTICE"|":expires": noticeExpiry/);
+    // Nothing else in the notifier names the attribute: no other item there can carry it.
+    const named = notifier.split("\n").filter((line) => /indexExpiresAt|INDEX_EXPIRY_ATTRIBUTE/.test(line)).map((line) => line.trim());
+    expect(named).toHaveLength(4);
+    expect(named[0]).toMatch(/^import \{ INDEX_EXPIRY_ATTRIBUTE, .*indexExpiresAt, .*\} from "@agentx\/contracts";$/);
+    expect(named.slice(1)).toEqual([
+      "const noticeExpiry = (deps: NotifierDependencies) => ({ [INDEX_EXPIRY_ATTRIBUTE]: indexExpiresAt(new Date(deps.now()).toISOString()) });",
+      'ExpressionAttributeNames: { "#expires": INDEX_EXPIRY_ATTRIBUTE },',
+      'ExpressionAttributeValues: { ":notice": "NOTICE", ":until": until, ":now": deps.now(), ":expires": noticeExpiry(deps)[INDEX_EXPIRY_ATTRIBUTE] },',
+    ]);
   });
 
   it("adds nothing to the legacy template", () => {
