@@ -162,12 +162,35 @@ describe("a change tool's confirmation (FR-041, SC-005)", () => {
     const trace = (proposeChange.mock.calls[0] as unknown as [unknown, string])[1];
     expect(startSlackConfirmation).toHaveBeenCalledWith(CHANGE, trace);
     for (const poll of getChange.mock.calls) expect((poll as unknown as [string, string])[1]).toBe(trace);
-    // The sleep between polls gets the tool call's own signal.
+    // Every sleep between polls got this tool call's own signal (a new one per call, never aborted here).
     expect(sleeps.length).toBeGreaterThan(0);
-    for (const signal of sleeps) expect(signal).toBeInstanceOf(AbortSignal);
+    expect(new Set(sleeps).size).toBe(1);
     await client.callTool(call);
     const ids = proposeChange.mock.calls.map((entry) => (entry as unknown as [{ requestId: string }])[0].requestId);
     expect(ids[1]).toBe(ids[0]);
+  });
+
+  it("ends the Slack wait at once when the tool call is cancelled: the sleep has the call's own signal (review fix 2)", async () => {
+    const slackPending = { ...pending, methodsOffered: ["slack" as const] };
+    const sleeping: AbortSignal[] = [];
+    // A sleep that only ends when its signal aborts: the wait can end only through the call's cancel.
+    const clock = { now: () => Date.parse("2026-10-02T09:00:01.000Z"), sleep: (_ms: number, signal: AbortSignal) => new Promise<void>((resolve) => { sleeping.push(signal); signal.addEventListener("abort", () => resolve(), { once: true }); }) };
+    const getChange = vi.fn(async () => slackPending);
+    const applyChange = vi.fn(async () => ({ ...slackPending, status: "applied" as const }));
+    const { client } = await connect({ admin: { proposeChange: async () => slackPending, startSlackConfirmation: async () => slackPending, getChange, applyChange }, elicitation: false, confirmation: { elicitation: false, slack: true }, clock, offer: async () => ({ admin: undefined, audit: undefined, changes: undefined }) });
+    await offered(client, "agentx_admin_revoke_signin");
+    const cancel = new AbortController();
+    const running = client.callTool({ name: "agentx_admin_revoke_signin", arguments: { developer: "U0123456789" } }, undefined, { signal: cancel.signal });
+    await expect.poll(() => sleeping.length).toBe(1);
+    expect(sleeping[0]!.aborted).toBe(false);
+    cancel.abort();
+    await expect(running).rejects.toThrow();
+    await expect.poll(() => sleeping[0]!.aborted).toBe(true);
+    // The wait ended: no poll after the cancel, no second sleep, and nothing applied.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(getChange).not.toHaveBeenCalled();
+    expect(sleeping).toHaveLength(1);
+    expect(applyChange).not.toHaveBeenCalled();
   });
 
   it("offers elicitation only when the environment allows it, and Slack only when the admin's link does", async () => {
@@ -209,12 +232,21 @@ describe("a change tool's confirmation (FR-041, SC-005)", () => {
     expect(proposeChange).toHaveBeenCalledWith(expect.objectContaining({ change: { kind: "bind_channel", channel: "C0LEDGER01", project: "ledger" }, methods: ["elicitation"] }), expect.any(String));
   });
 
-  it("names the change and says it is still waiting when AgentX is applying it already", async () => {
-    const { client } = await connect({ admin: { proposeChange: async () => ({ ...pending, status: "applying" as const }) } });
+  it("names the change and says it is still waiting when AgentX is applying it already, and a retry asks about that same change", async () => {
+    let next = 0;
+    const newRequestId = () => `00000000-0000-4000-8000-${String(++next).padStart(12, "0")}`;
+    const proposeChange = vi.fn(async () => ({ ...pending, status: "applying" as const }));
+    const { client } = await connect({ admin: { proposeChange }, newRequestId });
     await offered(client, "agentx_admin_unbind_channel");
-    const refused = toolError(await client.callTool({ name: "agentx_admin_unbind_channel", arguments: { channel: "C0LEDGER01" } }));
+    const call = { name: "agentx_admin_unbind_channel", arguments: { channel: "C0LEDGER01" } };
+    const refused = toolError(await client.callTool(call));
     expect(refused.message).toContain(CHANGE);
     expect(refused.next_step).toContain("agentx_admin_changes");
+    // Review fix 1: an applying change has not ended, so the retry learns its outcome, not a new change.
+    await client.callTool(call);
+    const ids = proposeChange.mock.calls.map((entry) => (entry as unknown as [{ requestId: string }])[0].requestId);
+    expect(ids).toHaveLength(2);
+    expect(ids[1]).toBe(ids[0]);
   });
 
   it("says channel names work with or without #", () => {

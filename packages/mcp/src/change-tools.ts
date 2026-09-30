@@ -32,6 +32,8 @@ async function runChange(context: ToolContext, call: ToolCall, input: Record<str
   const content = contentOf(change);
   const requestId = requestIdFor(context, call, input, content);
   let settled: ConfirmationOutcome | undefined;
+  /** A change AgentX is applying has not ended either: a retry learns its outcome (review fix 1). */
+  let applying = false;
   try {
     const planned = await admin.proposeChange({
       requestId, change, methods,
@@ -50,6 +52,7 @@ async function runChange(context: ToolContext, call: ToolCall, input: Record<str
     } else if (planned.status === "applied") {
       settled = { outcome: "applied", change: planned };
     } else if (planned.status === "applying") {
+      applying = true;
       throw new ToolError("CONTROL_PLANE_UNAVAILABLE", `change ${planned.changeId}: AgentX is applying it now`, APPLYING_STEP);
     } else {
       throw changeError(planned);
@@ -57,8 +60,8 @@ async function runChange(context: ToolContext, call: ToolCall, input: Record<str
   } finally {
     // B3, FR-049: a change that ended (applied, declined, expired, stale, refused or failed) is
     // forgotten, so asking for it again plans a new change. Only one still waiting for its Slack
-    // Confirm keeps its request ID, so an unchanged retry is that same change.
-    if (settled?.outcome !== "awaiting_confirmation") call.requestIds?.forget(content);
+    // Confirm, or one AgentX is applying, keeps its request ID, so an unchanged retry is that same change.
+    if (settled?.outcome !== "awaiting_confirmation" && !applying) call.requestIds?.forget(content);
   }
   const view = settled.change;
   return {
