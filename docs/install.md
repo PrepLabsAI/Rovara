@@ -55,7 +55,7 @@ npx @charterarc/agentx --env <env> init --region <region>
 
 In a terminal on your own computer, `init` opens a page in your browser, served from this computer
 only (`127.0.0.1`). Everything `init` asks is asked there: which AWS profile and account it installs
-into (with a Sign in button when your session has expired), the prerequisites as a checklist, the
+into (with a Sign in choice when your session has expired), the prerequisites as a checklist, the
 plan and its monthly cost with Yes and No buttons to create it or not, then each step with its
 status. The GitHub App and the Slack app are made from buttons on the page, and the page moves on
 by itself once GitHub sends you back. Secrets (the Slack token and signing secret, connector keys)
@@ -64,18 +64,18 @@ and the field is emptied as soon as it is sent. The install ends on the page onc
 in your channel for the first time.
 
 Keep the tab open until the install finishes. If the tab is closed, `init` keeps waiting and,
-after a minute, prints the address again in the terminal. Open it to carry on, or press Ctrl-C and run
-`init` again later (it continues where it stopped).
+after a minute, prints the address again in the terminal. Open it to carry on, or press Ctrl-C
+and run `init` again later (it continues where it stopped).
 
-`--no-ui` asks every question in this terminal instead. `init` also uses the terminal on its own
-where no browser can open: over SSH, in AWS CloudShell, in CI, and with `--yes` or `--no-browser`.
-It then prints:
+`--no-ui` asks every question in this terminal instead. `--yes` and CI runs always use the
+terminal. Over SSH, in AWS CloudShell, or with `--no-browser`, `init` also asks in the terminal,
+and first prints:
 
 > No browser here, so agentx init asks in this terminal. To use the install page instead, run agentx init --ui and open the address it prints (over SSH, forward its port with ssh -L).
 
-Over SSH, `agentx init --ui` prints the page's address and the command that forwards its port.
-Run that command on your own computer (`ssh -L <port>:127.0.0.1:<port> <host>`) and open the
-address there.
+Over SSH, run `agentx init --ui --no-browser`. It prints the page's address and the command that
+forwards its port. Run that command on your own computer (`ssh -L <port>:127.0.0.1:<port> <host>`)
+and open the address there.
 
 `init` asks its questions first: the region, identity (Cognito, or your own OIDC provider), the
 models, the alert address, a monthly budget, and your GitHub account. It checks the
@@ -120,9 +120,9 @@ done step never runs again. When the Slack workspace needs an admin to approve t
 stops with status "waiting" and exit code 0. Once approved, run it again.
 
 **No browser.** `--no-browser` prints every address instead of opening it, and keeps `init` in the
-terminal unless you also pass `--ui`. Over SSH, forward the port it names
-(`ssh -L 8765:127.0.0.1:8765 <host>`). When `init` cannot open a browser, it says so and carries
-on as if you gave `--no-browser`.
+terminal unless you also pass `--ui`. Over SSH, forward the port each address names. For
+example, the admin sign-in page uses `ssh -L 8765:127.0.0.1:8765 <host>`. When `init` cannot
+open a browser, it says so and prints the address to open instead.
 
 **Unattended.** `--yes` answers every question from its flag or its default. It needs `--region`.
 Secrets never go in a flag's value: pass a file or an environment variable name. For example:
