@@ -8,7 +8,8 @@ import type { WorkerInvocation } from "@agentx/contracts";
 import { describe, expect, it } from "vitest";
 import { publishWorkspaceDiff, type WorkerArtifact } from "../../packages/worker/src/artifacts.js";
 import type { WorkerEvent } from "../../packages/worker/src/events.js";
-import type { PiSessionAdapter } from "../../packages/worker/src/pi-session.js";
+import { WorkerCancellationController } from "../../packages/worker/src/cancel.js";
+import type { PiSessionAdapter, PiSessionHandle } from "../../packages/worker/src/pi-session.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
 
 const run = promisify(execFile);
@@ -30,38 +31,62 @@ interface Outcome {
   result: Promise<unknown>;
 }
 
-async function runScripted(steps: Step[]): Promise<Outcome> {
-  const { rootPath, repository } = await preparedRepository();
+interface ScriptOptions {
+  prepared?: { rootPath: string; repository: string };
+  conversationId?: string;
+  conversationStarted?: boolean;
+  cancellationController?: WorkerCancellationController;
+  operationId?: string;
+  /** Runs after the scripted steps, before the model's final message. */
+  afterSteps?: () => Promise<void>;
+  /** The final assistant message's stop reason; a cancelled pi turn ends "aborted". */
+  stopReason?: string;
+  /** Replaces the default artifact sink; the artifacts it accepts are still recorded. */
+  artifactSink?: (artifact: WorkerArtifact) => Promise<void>;
+}
+
+async function runScripted(steps: Step[], options: ScriptOptions = {}): Promise<Outcome> {
+  const { rootPath, repository } = options.prepared ?? await preparedRepository();
   let listener: (event: unknown) => void = () => undefined;
+  const handle = (sessionFile: string): PiSessionHandle => ({
+    conversationId: "scripted", sessionFile,
+    async prompt() {
+      for (const step of steps) {
+        if ("effect" in step) { await step.effect(repository); continue; }
+        const toolCallId = randomUUID();
+        listener({ type: "tool_execution_start", toolCallId, toolName: step.tool, args: step.args });
+        listener({ type: "tool_execution_end", toolCallId, toolName: step.tool, isError: step.isError, result: { content: [{ type: "text", text: step.text }] } });
+      }
+      await options.afterSteps?.();
+      listener({ type: "message_end", message: { role: "assistant", stopReason: options.stopReason ?? "stop" } });
+    },
+    async abort() {},
+    getModel: () => ({ provider: "fixture", modelId: "fixture" }),
+    getSessionStats: () => ({ sessionFile, sessionId: "scripted", userMessages: 1, assistantMessages: 1, toolCalls: steps.length, toolResults: steps.length, totalMessages: 3, tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 }, cost: 0 }),
+    subscribe: (next) => { listener = next; return () => { listener = () => undefined; }; },
+    dispose: () => undefined,
+  });
   const adapter: PiSessionAdapter = {
     async create({ sessionDirectory }) {
-      const sessionFile = join(sessionDirectory, "scripted.jsonl");
+      await mkdir(sessionDirectory, { recursive: true });
+      const sessionFile = join(sessionDirectory, `${randomUUID()}.jsonl`);
       await writeFile(sessionFile, "");
-      return {
-        conversationId: "scripted", sessionFile,
-        async prompt() {
-          for (const step of steps) {
-            if ("effect" in step) { await step.effect(repository); continue; }
-            const toolCallId = randomUUID();
-            listener({ type: "tool_execution_start", toolCallId, toolName: step.tool, args: step.args });
-            listener({ type: "tool_execution_end", toolCallId, toolName: step.tool, isError: step.isError, result: { content: [{ type: "text", text: step.text }] } });
-          }
-          listener({ type: "message_end", message: { role: "assistant", stopReason: "stop" } });
-        },
-        async abort() {},
-        getModel: () => ({ provider: "fixture", modelId: "fixture" }),
-        getSessionStats: () => ({ sessionFile, sessionId: "scripted", userMessages: 1, assistantMessages: 1, toolCalls: steps.length, toolResults: steps.length, totalMessages: 3, tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 }, cost: 0 }),
-        subscribe: (next) => { listener = next; return () => { listener = () => undefined; }; },
-        dispose: () => undefined,
-      };
+      return handle(sessionFile);
+    },
+    async open({ sessionFile }) {
+      return handle(sessionFile);
     },
   };
   const events: WorkerEvent[] = [];
   const artifacts: WorkerArtifact[] = [];
-  const result = runTaskInvocation(taskInvocation(), {
+  const result = runTaskInvocation(taskInvocation(options), {
     rootPath, model: { provider: "fixture", modelId: "fixture" }, piAdapter: adapter,
     eventSink: async (batch) => { events.push(...batch); },
-    artifactSink: async (artifact) => { artifacts.push(artifact); },
+    artifactSink: async (artifact) => {
+      await options.artifactSink?.(artifact);
+      artifacts.push(artifact);
+    },
+    ...(options.cancellationController === undefined ? {} : { cancellationController: options.cancellationController }),
   });
   await result.catch(() => undefined);
   return { events, artifacts, result };
@@ -175,8 +200,100 @@ describe("tasks that must still succeed (#158)", () => {
     await expect(result).resolves.toBeDefined();
     expect(usageOutcome(events)).toBe("SUCCEEDED");
     expect(progressMessages(events)).toContainEqual(
-      "The agent reported 1 successful edit or write call, but no repository changed. The edits may have landed outside the project's repositories.",
+      "The agent reported 1 successful edit or write call, but no repository changed. The edits may have landed outside the project's repositories or in files git ignores.",
     );
+  });
+});
+
+describe("review follow-ups (#158)", () => {
+  it("a later turn whose edits all fail is caught even when an earlier turn left the tree changed", async () => {
+    const prepared = await preparedRepository();
+    const conversationId = randomUUID();
+    const first = await runScripted([
+      edit("README.md", false),
+      effect(async (repository) => writeFile(join(repository, "README.md"), "turn one\n")),
+    ], { prepared, conversationId });
+    await expect(first.result).resolves.toBeDefined();
+
+    const second = await runScripted([edit("README.md", true)], { prepared, conversationId, conversationStarted: true });
+    await expect(second.result).rejects.toThrow("no file changed: the only edit call failed (last: README.md, the text to replace was not found)");
+  });
+
+  it("a later turn that edits an already modified file again succeeds", async () => {
+    const prepared = await preparedRepository();
+    const conversationId = randomUUID();
+    await runScripted([effect(async (repository) => writeFile(join(repository, "README.md"), "turn one\n"))], { prepared, conversationId });
+    const second = await runScripted([
+      edit("README.md", true),
+      effect(async (repository) => writeFile(join(repository, "README.md"), "turn two\n")),
+    ], { prepared, conversationId, conversationStarted: true });
+    await expect(second.result).resolves.toBeDefined();
+  });
+
+  it("a later turn that rewrites an untracked file from an earlier turn succeeds", async () => {
+    const prepared = await preparedRepository();
+    const conversationId = randomUUID();
+    await runScripted([effect(async (repository) => writeFile(join(repository, "NOTES.md"), "one\n"))], { prepared, conversationId });
+    const second = await runScripted([
+      edit("NOTES.md", true),
+      effect(async (repository) => writeFile(join(repository, "NOTES.md"), "two\n")),
+    ], { prepared, conversationId, conversationStarted: true });
+    await expect(second.result).resolves.toBeDefined();
+  });
+
+  it("edits that report the file already holds the text are not failures: the task succeeds", async () => {
+    const { events, result } = await runScripted([
+      edit("README.md", true, "No changes made to README.md. The replacement produced identical content. This might indicate an issue with special characters or the text not existing as expected."),
+    ]);
+    await expect(result).resolves.toBeDefined();
+    expect(progressMessages(events).some((message) => /no repository changed/i.test(message))).toBe(false);
+  });
+
+  it("names a file under the workspace by its relative path and strips control characters", async () => {
+    const prepared = await preparedRepository();
+    const { result } = await runScripted([edit(join(prepared.rootPath, "repo/app/READ\nME.md"), true)], { prepared });
+    const failure = await result.then(() => undefined, (error: unknown) => error as Error);
+    expect(failure?.message).toContain("(last: repo/app/README.md, the text to replace was not found)");
+    expect(failure?.message).not.toContain(prepared.rootPath);
+  });
+
+  it("a cancelled task keeps its tool evidence but does not wait for a workspace diff", async () => {
+    const cancellationController = new WorkerCancellationController();
+    const operationId = randomUUID();
+    const { events, artifacts, result } = await runScripted([edit("README.md", true)], {
+      cancellationController, operationId, stopReason: "aborted",
+      afterSteps: async () => { await cancellationController.cancel(operationId); },
+    });
+    await expect(result).rejects.toThrow(/was cancelled/);
+    expect(usageOutcome(events)).toBe("CANCELLED");
+    const names = artifacts.map(({ name }) => name);
+    expect(names).toContain("test-and-tool-evidence.json");
+    expect(names).not.toContain("workspace.diff");
+  });
+
+  it("says so when a failed task could not save its workspace diff", async () => {
+    // The loop guard stops this task before the diff, so the diff is saved on the failure path.
+    const { events, result } = await runScripted(Array.from({ length: 6 }, () => edit("README.md", true)), {
+      artifactSink: async (artifact) => {
+        if (artifact.name === "workspace.diff") throw new Error("artifact store rejected secret-looking detail");
+      },
+    });
+    await expect(result).rejects.toThrow(/repeated the same failing edit call 5 times/);
+    const messages = progressMessages(events);
+    expect(messages).toContainEqual("AgentX could not save workspace.diff for this task.");
+    expect(messages.some((message) => message.includes("secret-looking detail"))).toBe(false);
+  });
+
+  it("a task stopped by the loop guard saves its tool evidence and the workspace diff", async () => {
+    const failingEdit = () => edit("README.md", true);
+    const lookup = () => tool("read", { path: "README.md" });
+    const { artifacts, result } = await runScripted(
+      Array.from({ length: 6 }, () => [lookup(), failingEdit()]).flat(),
+    );
+    await expect(result).rejects.toThrow(/repeated the same failing edit call 5 times/);
+    const names = artifacts.map(({ name }) => name);
+    expect(names).toContain("test-and-tool-evidence.json");
+    expect(names).toContain("workspace.diff");
   });
 });
 
@@ -242,9 +359,13 @@ async function preparedRepository(): Promise<{ rootPath: string; repository: str
   return { rootPath, repository };
 }
 
-function taskInvocation(): Extract<WorkerInvocation, { kind: "task" }> {
+function taskInvocation(options: ScriptOptions = {}): Extract<WorkerInvocation, { kind: "task" }> {
   return {
-    protocolVersion: 1, kind: "task", operationId: randomUUID(), workspaceId: randomUUID(), fence: 1, projectRevision: 1,
-    callbackCapability: "c".repeat(64), payload: { conversationId: randomUUID(), prompt: "update the README" },
+    protocolVersion: 1, kind: "task", operationId: options.operationId ?? randomUUID(), workspaceId: randomUUID(), fence: 1, projectRevision: 1,
+    callbackCapability: "c".repeat(64),
+    payload: {
+      conversationId: options.conversationId ?? randomUUID(), prompt: "update the README",
+      ...(options.conversationStarted === undefined ? {} : { conversationStarted: options.conversationStarted }),
+    },
   };
 }

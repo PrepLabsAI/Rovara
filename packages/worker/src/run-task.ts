@@ -1,8 +1,8 @@
 import { readFile, realpath } from "node:fs/promises";
-import { resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 import { WorkerInvocationSchema, agentXError, type WorkerInvocation } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
-import { publishWorkspaceDiff, type ArtifactSink } from "./artifacts.js";
+import { publishWorkspaceDiff, workspaceFingerprint, type ArtifactSink } from "./artifacts.js";
 import { WorkspaceConversationStore, type ConversationRecord } from "./conversations.js";
 import {
   createDevcontainerCli,
@@ -128,7 +128,7 @@ export async function runTaskInvocation(
   // A model repeating the same failing call is told once, then stopped (#127).
   const loopGuard = new ToolLoopGuard();
   // A task whose every edit or write failed, and that changed nothing, did not do its job (#158).
-  const fileChanges = new FileChangeAttempts();
+  const fileChanges = new FileChangeAttempts([canonicalRoot, resolve(dependencies.rootPath)]);
   let loopStop: Error | undefined;
   // pi ends a turn normally even when its model call failed or was aborted; only the last assistant
   // message says so (#136).
@@ -155,6 +155,9 @@ export async function runTaskInvocation(
     let evidenceFailure: unknown;
     let evidenceAttempted = false;
     let diffAttempted = false;
+    const reportUnsaved = async (name: string): Promise<void> => {
+      await events.append("progress", { message: `AgentX could not save ${name} for this task.` }).catch(() => undefined);
+    };
     const publishEvidence = async (): Promise<void> => {
       evidenceAttempted = true;
       await dependencies.artifactSink({
@@ -170,14 +173,25 @@ export async function runTaskInvocation(
         conversation: { started: true, reopened: registered !== undefined },
       });
       for (const message of contextDiagnostics) await events.append("progress", { message });
+      // The state before the prompt, so a turn is judged by what it changed, not by what earlier
+      // turns left in the tree (#158).
+      let before: string | undefined;
+      try {
+        before = await workspaceFingerprint(dependencies.rootPath);
+      } catch {
+        await events.append("progress", {
+          message: "AgentX could not record the workspace state before this task; it will judge the task by the final diff only.",
+        });
+      }
       await session.prompt(invocation.payload.prompt);
       // An abort can end the prompt without an error; the guard's reason is the task's outcome.
       if (loopStop !== undefined) throw loopStop;
       const modelFailure = failedTurn(lastAssistant);
       if (modelFailure !== undefined) throw modelFailure;
       diffAttempted = true;
-      const { changed } = await publishWorkspaceDiff(dependencies.rootPath, dependencies.artifactSink);
+      const { changed: dirty } = await publishWorkspaceDiff(dependencies.rootPath, dependencies.artifactSink);
       await publishEvidence();
+      const changed = dirty && (before === undefined || await workspaceFingerprint(dependencies.rootPath) !== before);
       const noChange = fileChanges.noChangeFailure(changed);
       if (noChange !== undefined) throw noChange;
       const warning = fileChanges.emptyDiffWarning(changed);
@@ -208,18 +222,21 @@ export async function runTaskInvocation(
         }
       }
       // Best effort, like usage: a failed task keeps what it did, for the member and for debugging.
+      // A cancelled task does not wait for git to diff the workspace; its evidence is cheap.
       if (!evidenceAttempted) {
         try {
           await publishEvidence();
         } catch (artifactError) {
           evidenceFailure ??= artifactError;
+          await reportUnsaved("test-and-tool-evidence.json");
         }
       }
-      if (!diffAttempted) {
+      if (!diffAttempted && outcome !== "CANCELLED") {
         try {
           await publishWorkspaceDiff(dependencies.rootPath, dependencies.artifactSink);
         } catch (artifactError) {
           evidenceFailure ??= artifactError;
+          await reportUnsaved("workspace.diff");
         }
       }
     }
@@ -267,6 +284,8 @@ const MAX_REPORTED_PATH = 200;
  * file contents.
  */
 class FileChangeAttempts {
+  constructor(private readonly roots: readonly string[]) {}
+
   private readonly paths = new Map<string, string>();
   private readonly tools = new Set<string>();
   private tried = 0;
@@ -286,14 +305,26 @@ class FileChangeAttempts {
     if (value.type !== "tool_execution_end") return;
     const path = callId === undefined ? undefined : this.paths.get(callId);
     if (callId !== undefined) this.paths.delete(callId);
+    const text = toolResultText(value.result);
+    // pi refuses an edit whose result equals the file: the change is already there. That is
+    // neither a try nor a failure.
+    if (value.isError === true && /No changes made to/.test(text)) return;
     this.tried += 1;
     this.tools.add(value.toolName);
     if (value.isError !== true) return;
     this.failed += 1;
     this.last = {
-      path: path === undefined ? "unknown file" : String(redactCredentials(path)).slice(0, MAX_REPORTED_PATH),
-      reason: failureReason(value.toolName, value.result),
+      path: path === undefined ? "unknown file" : this.reportedPath(path),
+      reason: failureReason(value.toolName, text),
     };
+  }
+
+  /** The path relative to the workspace when it is inside it, without control characters, redacted and bounded. */
+  private reportedPath(path: string): string {
+    const clean = [...path].filter((character) => character.charCodeAt(0) > 0x1f && character !== "\u007f").join("");
+    const root = isAbsolute(clean) ? this.roots.find((candidate) => !relative(candidate, clean).startsWith("..")) : undefined;
+    const shown = root === undefined ? clean : relative(root, clean) || ".";
+    return String(redactCredentials(shown)).slice(0, MAX_REPORTED_PATH);
   }
 
   /** The task's error when the agent tried to change files, every try failed, and no repository changed. */
@@ -309,15 +340,13 @@ class FileChangeAttempts {
     const succeeded = this.tried - this.failed;
     if (changed || succeeded === 0) return undefined;
     return `The agent reported ${succeeded} successful edit or write ${succeeded === 1 ? "call" : "calls"}, but no repository changed. ` +
-      "The edits may have landed outside the project's repositories.";
+      "The edits may have landed outside the project's repositories or in files git ignores.";
   }
 }
 
-function failureReason(toolName: string, result: unknown): string {
-  const text = toolResultText(result);
+function failureReason(toolName: string, text: string): string {
   if (/Could not find (the exact text|edits\[\d+\])/.test(text)) return "the text to replace was not found";
   if (/Found \d+ occurrences of/.test(text)) return "the text to replace matched more than once";
-  if (/No changes made to/.test(text)) return "the replacement produced identical content";
   return `the ${toolName} returned an error`;
 }
 

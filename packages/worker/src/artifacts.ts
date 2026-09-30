@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readFile, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 import type { PreparationManifest } from "./prepare.js";
@@ -52,6 +53,38 @@ export async function publishWorkspaceDiff(rootPath: string, sink: ArtifactSink)
     content: boundWorkspaceDiff(String(redactCredentials(sections.join("\n")))),
   });
   return { changed };
+}
+
+/**
+ * A digest of every repository's uncommitted state: its status, its diff against HEAD, and the
+ * size and modification time of each untracked file. Two equal digests mean a task changed
+ * nothing, even when an earlier turn left the tree changed (#158).
+ */
+export async function workspaceFingerprint(rootPath: string): Promise<string> {
+  const manifest = JSON.parse(
+    await readFile(resolve(rootPath, ".agentx/preparation-manifest.json"), "utf8"),
+  ) as PreparationManifest;
+  const hash = createHash("sha256");
+  for (const repository of manifest.repositories) {
+    const directory = resolve(rootPath, repository.path);
+    const { stdout: status } = await execFileAsync(
+      "git",
+      ["-C", directory, "status", "--porcelain", "-z", "--untracked-files=all"],
+      { timeout: 30_000, maxBuffer: MAX_GIT_OUTPUT_BYTES, env: gitSafeEnvironment(directory) },
+    );
+    const { stdout: diff } = await execFileAsync(
+      "git",
+      ["-C", directory, "diff", "--no-ext-diff", "--binary", "HEAD", "--"],
+      { timeout: 60_000, maxBuffer: MAX_GIT_OUTPUT_BYTES, env: gitSafeEnvironment(directory) },
+    );
+    hash.update(`${repository.name}\u0000${status}\u0000${diff}\u0000`);
+    for (const entry of status.split("\u0000")) {
+      if (!entry.startsWith("?? ")) continue;
+      const file = await stat(resolve(directory, entry.slice(3))).catch(() => undefined);
+      hash.update(`${entry}\u0000${file?.size ?? -1}\u0000${file?.mtimeMs ?? -1}\u0000`);
+    }
+  }
+  return hash.digest("hex");
 }
 
 export function boundWorkspaceDiff(content: string): string {
