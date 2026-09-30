@@ -5,13 +5,13 @@ import { rm } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import { agentXError } from "@agentx/contracts";
 import { writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
-import { adminUserStep, alertsStep, e2eStep } from "../../packages/cli/src/init/finish-steps.js";
+import { adminUserStep, alertsStep, e2eStep, firstProjectStep } from "../../packages/cli/src/init/finish-steps.js";
 import { emptyProgress } from "../../packages/cli/src/init/install-state.js";
 import { problemText } from "../../packages/cli/src/init/retry.js";
-import { alertsCard } from "../../packages/cli/src/init/ui/cards.js";
+import { alertsCard, channelCard, projectCard } from "../../packages/cli/src/init/ui/cards.js";
 import type { WizardCard } from "../../packages/cli/src/init/ui/protocol.js";
 import { initContext, progressHandle, sampleAnswers, scriptedPrompter, T0, type TestInitContext } from "../support/init-fakes.js";
-import { accessToken, ADMIN_EMAIL, CONTROL_PLANE, fakeAlerts, fakeCognito, fakeControlPlane, setupServices, STAGING_SETTINGS, turn } from "../support/setup-fakes.js";
+import { accessToken, ADMIN_EMAIL, CONTROL_PLANE, fakeAlerts, fakeCognito, fakeControlPlane, fakeSlackChannels, setupServices, STAGING_SETTINGS, turn } from "../support/setup-fakes.js";
 
 let context: TestInitContext | undefined;
 afterEach(async () => { if (context !== undefined) await rm(context.home, { recursive: true, force: true }); context = undefined; });
@@ -46,6 +46,7 @@ describe("the admin user on the page (FR-050)", () => {
     expect(sessions).toBe(2);
     expect((context.prompter as ReturnType<typeof scriptedPrompter>).asked).toEqual(["Your email address, for your AgentX admin user", "Sign in again?"]);
     expect(surface.cards.find((card) => card.status === "failed")?.lines[0]).toBe("the AgentX sign-in did not finish within 10 minutes; run agentx init again and finish signing in as the admin user in the browser");
+    expect(surface.cards.map((card) => [card.id, card.status])).toEqual([["admin", "waiting"], ["admin", "failed"], ["admin", "waiting"], ["admin", "ok"]]);
   });
 
   describe("with your own OIDC provider (M2)", () => {
@@ -82,6 +83,27 @@ describe("the admin user on the page (FR-050)", () => {
     await writeEnvironmentSettings(context.store, STAGING_SETTINGS);
     await expect(adminUserStep().run(context, progressHandle())).rejects.toBe(TIMED_OUT);
     expect((context.prompter as ReturnType<typeof scriptedPrompter>).asked).toEqual(["Your email address, for your AgentX admin user"]);
+  });
+});
+
+describe("the first project on the page, resumed (M6)", () => {
+  it("an earlier run's project is shown without its repository, then its channel, with no invite wait", async () => {
+    const surface = page();
+    const slackChannels = fakeSlackChannels([]);
+    context = initContext({ prompter: scriptedPrompter([]), surface, setup: setupServices({ slackChannels }), adminSession: async () => session });
+    await writeEnvironmentSettings(context.store, STAGING_SETTINGS);
+    const progress = progressHandle({
+      ...emptyProgress("staging", T0),
+      slack: { appId: "A0APP00001", teamId: "T0123456789", botUserId: "U0BOT00001" },
+      project: { name: "payments-api", revision: 1, channelName: "payments", channelId: "C0PAY00001", teamId: "T0123456789" },
+    });
+    expect(await firstProjectStep().run(context, progress)).toEqual({ status: "done", note: "project payments-api in #payments" });
+    expect(surface.cards).toEqual([
+      projectCard({ name: "payments-api", revision: 1 }),
+      channelCard({ stage: "done", channelName: "payments", projectName: "payments-api" }),
+    ]);
+    expect(surface.cards[0]?.lines).toEqual(["Project payments-api, revision 1, runs on EC2 workers."]);
+    expect(slackChannels.finds()).toBe(0);
   });
 });
 
@@ -145,10 +167,13 @@ describe("the alerts on the page", () => {
   });
 
   it("saying no on the page stops the same way", async () => {
+    const surface = page();
     const alerts = fakeAlerts({ confirmAfterPolls: 1_000_000, budgetUsd: 100 });
-    context = initContext({ answers, prompter: scriptedPrompter([false]), surface: page(), setup: setupFor(alerts) });
+    context = initContext({ answers, prompter: scriptedPrompter([false]), surface, setup: setupFor(alerts) });
     await writeEnvironmentSettings(context.store, STAGING_SETTINGS);
     expect(await alertsStep().run(context, progressHandle())).toMatchObject({ status: "waiting" });
+    expect((context.prompter as ReturnType<typeof scriptedPrompter>).asked).toEqual(["Have you confirmed the subscription? Answer Yes to check again."]);
+    expect(surface.cards.map((card) => card.status)).toEqual(["waiting", "waiting"]);
   });
 
   it("--no-alerts shows that there is no alert address yet", async () => {
