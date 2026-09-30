@@ -7,8 +7,9 @@ import { createServer } from "node:http";
 import { agentXError } from "@agentx/contracts";
 import type { InitContext, ManifestHost, OpenManifestHost } from "./context.js";
 import { checkPrivateKeyPem, secretFromSource } from "./prompts.js";
-import type { InitStep } from "./steps.js";
-import { githubCard } from "./ui/cards.js";
+import { problemText } from "./retry.js";
+import type { InitStep, ProgressHandle, StepOutcome } from "./steps.js";
+import { githubCard, type GitHubCardInput } from "./ui/cards.js";
 
 export const AGENTX_HOMEPAGE = "https://github.com/PrepLabsAI/AgentX";
 export const GITHUB_WAIT_MS = 15 * 60 * 1000;
@@ -192,7 +193,7 @@ const appSettingsUrl = (owner: { login: string; type: string }, slug: string) =>
 const installationSettingsUrl = (accountType: "organization" | "user", account: string, id: string) =>
   accountType === "organization" ? `https://github.com/organizations/${account}/settings/installations/${id}` : `https://github.com/settings/installations/${id}`;
 
-async function createWithManifest(context: InitContext, api: GitHubApi): Promise<AppSecret & { owner: { login: string; type: string } }> {
+async function createWithManifest(context: InitContext, api: GitHubApi, show: (card: GitHubCardInput) => void): Promise<AppSecret & { owner: { login: string; type: string } }> {
   const { account, accountType, appName } = context.answers.github;
   const state = randomBytes(16).toString("hex");
   const actionUrl = githubNewAppUrl({ account, accountType, state });
@@ -204,7 +205,7 @@ async function createWithManifest(context: InitContext, api: GitHubApi): Promise
   });
   try {
     context.write(`Create the GitHub App "${appName}" for ${account}: GitHub opens with everything filled in; press Create GitHub App.`);
-    context.surface?.card(githubCard({ stage: "create", appName, account, startUrl: listener.startUrl }));
+    show({ stage: "create", appName, account, startUrl: listener.startUrl });
     let code: string;
     let opened = false;
     if (context.openBrowser !== undefined) {
@@ -240,101 +241,117 @@ export function githubAppStep(api: GitHubApi): InitStep<InitContext> {
     id: "github-app",
     title: "Create and install the GitHub App",
     async run(context, progress) {
-      const { account, accountType } = context.answers.github;
-      const name = githubAppSecretName(context.env);
-      const requireArn = async () => {
-        const arn = await context.secrets.arn(name);
-        if (arn === undefined) throw agentXError("RUNTIME_UNAVAILABLE", `secret ${name} was just stored but cannot be described; run agentx init again`);
-        return arn;
+      // A GitHub card left waiting when the step fails would say it still waits: the page shows
+      // the failure instead. With no page nothing is shown, and the error is the same either way.
+      let waiting = false;
+      const show = (card: GitHubCardInput) => {
+        waiting = card.stage !== "done";
+        context.surface?.card(githubCard(card));
       };
-      const jwtFor = (appId: string, privateKey: string) => githubAppJwt({ appId, privateKey, nowSeconds: Math.floor(context.now() / 1000) });
-
-      let app = progress.current().github;
-      let privateKey: string | undefined;
-      const preMade = context.preMadeGitHubApp;
-      if (app !== undefined && preMade !== undefined && app.appId !== preMade.appId) {
-        throw agentXError("CONFIG_INVALID", `this install already uses GitHub App ${app.appId}, not ${preMade.appId} from --github-app-id; pass --github-app-id ${app.appId}, or leave the GitHub App flags off to continue with the recorded app`);
+      try {
+        return await runGitHubAppStep(context, progress, api, show);
+      } catch (error) {
+        if (waiting) context.surface?.card(githubCard({ stage: "failed", problem: problemText(error) }));
+        throw error;
       }
-      if (app === undefined) {
-        const leftover = await context.secrets.get(name);
-        if (leftover !== undefined) {
-          const recovered = parseAppSecret(leftover, name);
-          if (preMade !== undefined && recovered.appId !== preMade.appId) {
-            throw agentXError("CONFIG_INVALID", `secret ${name} holds GitHub App ${recovered.appId}, not ${preMade.appId} from --github-app-id; pass --github-app-id ${recovered.appId}, or delete the secret (aws secretsmanager delete-secret --secret-id ${name} --force-delete-without-recovery) and run agentx init again`);
-          }
-          privateKey = recovered.privateKey;
-          app = { account: recovered.account, appId: recovered.appId, slug: recovered.slug, privateKeySecretArn: await requireArn() };
-          await progress.update({ github: app });
-          context.write(`Found the GitHub App ${recovered.slug} an earlier run created.`);
-        }
-      }
-      if (app === undefined) {
-        const created = preMade !== undefined ? await usePreMadeApp(context, api, preMade.appId) : await createWithManifest(context, api);
-        if (created.owner.login.toLowerCase() !== account.toLowerCase()) {
-          // An app made beforehand is the owner's own: point at the flag, never tell them to delete it.
-          if (preMade !== undefined) {
-            throw agentXError("CONFIG_INVALID", `GitHub App ${preMade.appId} belongs to ${created.owner.login}, not ${account}; nothing was saved. Check --github-app-id and run agentx init again`);
-          }
-          throw agentXError("CONFIG_INVALID", `the GitHub App was created under ${created.owner.login}, not ${account}; nothing was saved. Delete it at ${appSettingsUrl(created.owner, created.slug)}/advanced and run agentx init again`);
-        }
-        try {
-          await context.secrets.create(name, JSON.stringify({ appId: created.appId, slug: created.slug, account, privateKey: created.privateKey }));
-        } catch (error) {
-          // Only the error's name: never its message or cause, which could echo the request.
-          const reason = error instanceof Error ? error.name : "unknown error";
-          const next = preMade !== undefined
-            ? "fix that and run agentx init again"
-            : `GitHub cannot show the key again, so delete the app at ${appSettingsUrl(created.owner, created.slug)}/advanced and run agentx init again`;
-          throw agentXError("RUNTIME_UNAVAILABLE", `could not store the private key of the ${preMade !== undefined ? "" : "new "}GitHub App ${created.slug} in ${name} (${reason}); ${next}`);
-        }
-        privateKey = created.privateKey;
-        app = { account, appId: created.appId, slug: created.slug, privateKeySecretArn: await requireArn() };
-        await progress.update({ github: app });
-      }
-      if (privateKey === undefined) {
-        const stored = await context.secrets.get(name);
-        if (stored === undefined) throw agentXError("CONFIG_INVALID", `secret ${name} is missing; delete the GitHub App ${app.slug} and run agentx init again`);
-        privateKey = parseAppSecret(stored, name).privateKey;
-      }
-
-      const installUrl = `https://github.com/apps/${app.slug}/installations/new`;
-      const deadline = context.now() + GITHUB_WAIT_MS;
-      let installationId = context.preMadeGitHubApp?.installationId;
-      if (installationId !== undefined) {
-        const listed = await api.listInstallations(jwtFor(app.appId, privateKey));
-        if (!listed.some((entry) => String(entry.id) === installationId && entry.account.login.toLowerCase() === account.toLowerCase())) {
-          throw agentXError("CONFIG_INVALID", `installation ${installationId} of GitHub App ${app.appId} is not on ${account}; check --github-installation-id`);
-        }
-      } else {
-        context.surface?.card(githubCard({ stage: "install", slug: app.slug, account, installUrl }));
-        context.write(`Install the app on ${account} and choose the repositories AgentX may use: ${installUrl}`);
-        if (context.openBrowser !== undefined) await context.openBrowser(installUrl);
-        for (;;) {
-          const match = (await api.listInstallations(jwtFor(app.appId, privateKey))).find((entry) => entry.account.login.toLowerCase() === account.toLowerCase());
-          if (match !== undefined) { installationId = String(match.id); break; }
-          if (context.now() >= deadline) {
-            throw agentXError("CONFIG_INVALID", `the GitHub App was not installed on ${account} within 15 minutes; install it at ${installUrl}, then run agentx init again`);
-          }
-          await context.sleep(POLL_MS);
-        }
-      }
-
-      let told = false;
-      let token: { token: string; expiresAt: number } | undefined;
-      for (;;) {
-        if (token === undefined || context.now() >= token.expiresAt - TOKEN_RENEW_MS) token = await api.installationToken(jwtFor(app.appId, privateKey), installationId);
-        if ((await api.repositoryCount(token.token)) > 0) break;
-        if (!told) {
-          context.write(`The app is installed but can see no repositories. Choose at least one at ${installationSettingsUrl(accountType, account, installationId)}`);
-          context.surface?.card(githubCard({ stage: "repositories", slug: app.slug, account, settingsUrl: installationSettingsUrl(accountType, account, installationId) }));
-          told = true;
-        }
-        if (context.now() >= deadline) throw agentXError("CONFIG_INVALID", `the GitHub App can see no repositories; choose at least one at ${installationSettingsUrl(accountType, account, installationId)}, then run agentx init again`);
-        await context.sleep(POLL_MS);
-      }
-      await progress.update({ github: { ...app, installationId } });
-      context.surface?.card(githubCard({ stage: "done", slug: app.slug, account }));
-      return { status: "done", note: `GitHub App ${app.slug} installed on ${account}` };
     },
   };
+}
+
+async function runGitHubAppStep(context: InitContext, progress: ProgressHandle, api: GitHubApi, show: (card: GitHubCardInput) => void): Promise<StepOutcome> {
+  const { account, accountType } = context.answers.github;
+  const name = githubAppSecretName(context.env);
+  const requireArn = async () => {
+    const arn = await context.secrets.arn(name);
+    if (arn === undefined) throw agentXError("RUNTIME_UNAVAILABLE", `secret ${name} was just stored but cannot be described; run agentx init again`);
+    return arn;
+  };
+  const jwtFor = (appId: string, privateKey: string) => githubAppJwt({ appId, privateKey, nowSeconds: Math.floor(context.now() / 1000) });
+
+  let app = progress.current().github;
+  let privateKey: string | undefined;
+  const preMade = context.preMadeGitHubApp;
+  if (app !== undefined && preMade !== undefined && app.appId !== preMade.appId) {
+    throw agentXError("CONFIG_INVALID", `this install already uses GitHub App ${app.appId}, not ${preMade.appId} from --github-app-id; pass --github-app-id ${app.appId}, or leave the GitHub App flags off to continue with the recorded app`);
+  }
+  if (app === undefined) {
+    const leftover = await context.secrets.get(name);
+    if (leftover !== undefined) {
+      const recovered = parseAppSecret(leftover, name);
+      if (preMade !== undefined && recovered.appId !== preMade.appId) {
+        throw agentXError("CONFIG_INVALID", `secret ${name} holds GitHub App ${recovered.appId}, not ${preMade.appId} from --github-app-id; pass --github-app-id ${recovered.appId}, or delete the secret (aws secretsmanager delete-secret --secret-id ${name} --force-delete-without-recovery) and run agentx init again`);
+      }
+      privateKey = recovered.privateKey;
+      app = { account: recovered.account, appId: recovered.appId, slug: recovered.slug, privateKeySecretArn: await requireArn() };
+      await progress.update({ github: app });
+      context.write(`Found the GitHub App ${recovered.slug} an earlier run created.`);
+    }
+  }
+  if (app === undefined) {
+    const created = preMade !== undefined ? await usePreMadeApp(context, api, preMade.appId) : await createWithManifest(context, api, show);
+    if (created.owner.login.toLowerCase() !== account.toLowerCase()) {
+      // An app made beforehand is the owner's own: point at the flag, never tell them to delete it.
+      if (preMade !== undefined) {
+        throw agentXError("CONFIG_INVALID", `GitHub App ${preMade.appId} belongs to ${created.owner.login}, not ${account}; nothing was saved. Check --github-app-id and run agentx init again`);
+      }
+      throw agentXError("CONFIG_INVALID", `the GitHub App was created under ${created.owner.login}, not ${account}; nothing was saved. Delete it at ${appSettingsUrl(created.owner, created.slug)}/advanced and run agentx init again`);
+    }
+    try {
+      await context.secrets.create(name, JSON.stringify({ appId: created.appId, slug: created.slug, account, privateKey: created.privateKey }));
+    } catch (error) {
+      // Only the error's name: never its message or cause, which could echo the request.
+      const reason = error instanceof Error ? error.name : "unknown error";
+      const next = preMade !== undefined
+        ? "fix that and run agentx init again"
+        : `GitHub cannot show the key again, so delete the app at ${appSettingsUrl(created.owner, created.slug)}/advanced and run agentx init again`;
+      throw agentXError("RUNTIME_UNAVAILABLE", `could not store the private key of the ${preMade !== undefined ? "" : "new "}GitHub App ${created.slug} in ${name} (${reason}); ${next}`);
+    }
+    privateKey = created.privateKey;
+    app = { account, appId: created.appId, slug: created.slug, privateKeySecretArn: await requireArn() };
+    await progress.update({ github: app });
+  }
+  if (privateKey === undefined) {
+    const stored = await context.secrets.get(name);
+    if (stored === undefined) throw agentXError("CONFIG_INVALID", `secret ${name} is missing; delete the GitHub App ${app.slug} and run agentx init again`);
+    privateKey = parseAppSecret(stored, name).privateKey;
+  }
+
+  const installUrl = `https://github.com/apps/${app.slug}/installations/new`;
+  const deadline = context.now() + GITHUB_WAIT_MS;
+  let installationId = context.preMadeGitHubApp?.installationId;
+  if (installationId !== undefined) {
+    const listed = await api.listInstallations(jwtFor(app.appId, privateKey));
+    if (!listed.some((entry) => String(entry.id) === installationId && entry.account.login.toLowerCase() === account.toLowerCase())) {
+      throw agentXError("CONFIG_INVALID", `installation ${installationId} of GitHub App ${app.appId} is not on ${account}; check --github-installation-id`);
+    }
+  } else {
+    show({ stage: "install", slug: app.slug, account, installUrl });
+    context.write(`Install the app on ${account} and choose the repositories AgentX may use: ${installUrl}`);
+    if (context.openBrowser !== undefined) await context.openBrowser(installUrl);
+    for (;;) {
+      const match = (await api.listInstallations(jwtFor(app.appId, privateKey))).find((entry) => entry.account.login.toLowerCase() === account.toLowerCase());
+      if (match !== undefined) { installationId = String(match.id); break; }
+      if (context.now() >= deadline) {
+        throw agentXError("CONFIG_INVALID", `the GitHub App was not installed on ${account} within 15 minutes; install it at ${installUrl}, then run agentx init again`);
+      }
+      await context.sleep(POLL_MS);
+    }
+  }
+
+  let told = false;
+  let token: { token: string; expiresAt: number } | undefined;
+  for (;;) {
+    if (token === undefined || context.now() >= token.expiresAt - TOKEN_RENEW_MS) token = await api.installationToken(jwtFor(app.appId, privateKey), installationId);
+    if ((await api.repositoryCount(token.token)) > 0) break;
+    if (!told) {
+      context.write(`The app is installed but can see no repositories. Choose at least one at ${installationSettingsUrl(accountType, account, installationId)}`);
+      show({ stage: "repositories", slug: app.slug, account, settingsUrl: installationSettingsUrl(accountType, account, installationId) });
+      told = true;
+    }
+    if (context.now() >= deadline) throw agentXError("CONFIG_INVALID", `the GitHub App can see no repositories; choose at least one at ${installationSettingsUrl(accountType, account, installationId)}, then run agentx init again`);
+    await context.sleep(POLL_MS);
+  }
+  await progress.update({ github: { ...app, installationId } });
+  show({ stage: "done", slug: app.slug, account });
+  return { status: "done", note: `GitHub App ${app.slug} installed on ${account}` };
 }

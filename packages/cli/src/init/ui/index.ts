@@ -100,7 +100,7 @@ export async function startInstallWizard(input: {
     url: server.url,
     hub,
     prompter: browserPrompter(hub),
-    surface: { card: (card) => hub.showCard(card) },
+    surface: { card: (card) => hub.showCard(card), clearLink: () => hub.clearLink() },
     openLink: async (url) => {
       hub.showLink({ url, label: linkLabel(url) });
       // A refused address is not on the page, so no one can open it: say so, as a browser that

@@ -2,10 +2,10 @@
 // question, and the rules that keep a link, or a secret, from reaching the page by accident.
 import { describe, expect, it } from "vitest";
 import { emptyProgress } from "../../packages/cli/src/init/install-state.js";
-import { adminCard, alertsCard, channelCard, connectorsCard, onPageProblem, projectCard, readyCard, replyCard, slackAppCard, slackChannelLink, slackUrlsCard } from "../../packages/cli/src/init/ui/cards.js";
+import { adminCard, alertsCard, channelCard, connectorsCard, githubCard, onPageProblem, projectCard, readyCard, replyCard, slackAppCard, slackChannelLink, slackUrlsCard } from "../../packages/cli/src/init/ui/cards.js";
 import { startInstallWizard } from "../../packages/cli/src/init/ui/index.js";
 import { WIZARD_JS, wizardHtml } from "../../packages/cli/src/init/ui/page.js";
-import type { WizardCard } from "../../packages/cli/src/init/ui/protocol.js";
+import type { WizardCard, WizardState } from "../../packages/cli/src/init/ui/protocol.js";
 import { createWizardHub, isShowableLink, LINK_REFUSED } from "../../packages/cli/src/init/ui/state.js";
 
 const card = (overrides: Partial<WizardCard> = {}): WizardCard => ({ id: "github", title: "GitHub App", status: "waiting", lines: ["one"], ...overrides });
@@ -93,6 +93,19 @@ describe("links", () => {
     expect(hub.state().link).toBeUndefined();
     // The refusal is logged without the address, which could be anything.
     expect(hub.snapshot().log).toEqual([LINK_REFUSED, LINK_REFUSED]);
+  });
+
+  it("clearLink drops the run's link, and does nothing when there is none", () => {
+    const hub = createWizardHub("staging");
+    const states: WizardState[] = [];
+    hub.subscribe({ state: (state) => { states.push(state); }, log: () => undefined, closed: () => undefined });
+    hub.showLink({ url: "https://login.example.com/authorize?attempt=1", label: "Open login.example.com" });
+    hub.clearLink();
+    expect(hub.state().link).toBeUndefined();
+    // It is published, so a page already open drops the button too.
+    expect(states.at(-1)).not.toHaveProperty("link");
+    hub.clearLink();
+    expect(hub.state().link).toBeUndefined();
   });
 
   it("clears the run's link when its step ends, or when the next one starts", () => {
@@ -197,6 +210,16 @@ describe("the finishing cards", () => {
       lines: ["The bot cannot see #payments yet.", "If #payments is private, type /invite <@U0BOT00001> in it; if it does not exist, create it. This page moves on by itself (up to 10 minutes)."],
     });
     expect(channelCard({ stage: "done", channelName: "payments", projectName: "payments-api" })).toMatchObject({ status: "ok", lines: ["#payments is bound to project payments-api."] });
+  });
+
+  it("a channel wait that timed out is failed, with the problem whole, since the page offers no retry", () => {
+    const problem = "the bot cannot see a channel named #payments after 10 minutes; create it in Slack (or invite the bot to it, if it is private), then run this again";
+    expect(channelCard({ stage: "failed", channelName: "payments", problem })).toEqual({ id: "channel", title: "Slack channel", status: "failed", lines: [problem] });
+  });
+
+  it("a GitHub App wait that failed is failed, with the problem whole and no link", () => {
+    const problem = "the GitHub App was not installed on acme within 15 minutes; install it at https://github.com/apps/agentx-acme-staging/installations/new, then run agentx init again";
+    expect(githubCard({ stage: "failed", problem })).toEqual({ id: "github", title: "GitHub App", status: "failed", lines: [problem] });
   });
 
   it("connectors and alerts, naming a webhook only by its display form", () => {

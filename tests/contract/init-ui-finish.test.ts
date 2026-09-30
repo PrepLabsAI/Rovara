@@ -9,8 +9,9 @@ import { adminUserStep, alertsStep, e2eStep, firstProjectStep } from "../../pack
 import { emptyProgress } from "../../packages/cli/src/init/install-state.js";
 import { problemText } from "../../packages/cli/src/init/retry.js";
 import { alertsCard, channelCard, projectCard } from "../../packages/cli/src/init/ui/cards.js";
-import type { WizardCard } from "../../packages/cli/src/init/ui/protocol.js";
-import { initContext, progressHandle, sampleAnswers, scriptedPrompter, T0, type TestInitContext } from "../support/init-fakes.js";
+import { startInstallWizard } from "../../packages/cli/src/init/ui/index.js";
+import type { WizardCard, WizardLink } from "../../packages/cli/src/init/ui/protocol.js";
+import { initContext, memoryInitSecrets, progressHandle, sampleAnswers, scriptedPrompter, T0, TEST_BOT_TOKEN, TEST_SIGNING_SECRET, type TestInitContext } from "../support/init-fakes.js";
 import { accessToken, ADMIN_EMAIL, CONTROL_PLANE, fakeAlerts, fakeCognito, fakeControlPlane, fakeSlackChannels, setupServices, STAGING_SETTINGS, turn } from "../support/setup-fakes.js";
 
 let context: TestInitContext | undefined;
@@ -49,6 +50,33 @@ describe("the admin user on the page (FR-050)", () => {
     expect(surface.cards.map((card) => [card.id, card.status])).toEqual([["admin", "waiting"], ["admin", "failed"], ["admin", "waiting"], ["admin", "ok"]]);
   });
 
+  it("Task 7: a failed sign-in's button leaves the page while Sign in again? is asked, and the retry's own button appears", async () => {
+    const wizard = await startInstallWizard({ env: "staging", write: () => undefined });
+    try {
+      let sessions = 0;
+      const linkWhenAsked: Array<WizardLink | undefined> = [];
+      const prompter = scriptedPrompter([ADMIN_EMAIL, true]);
+      const watching = { ...prompter, confirm: async (...args: Parameters<typeof prompter.confirm>) => { linkWhenAsked.push(wizard.hub.state().link); return prompter.confirm(...args); } };
+      context = initContext({
+        prompter: watching, surface: wizard.surface, setup: setupServices({ cognito: fakeCognito() }),
+        // As context.adminSession does on the page: the sign-in address becomes the page's button.
+        adminSession: async () => {
+          sessions += 1;
+          await wizard.openLink(`https://login.example.com/authorize?attempt=${sessions}`);
+          if (sessions === 1) throw TIMED_OUT;
+          return session;
+        },
+      });
+      await writeEnvironmentSettings(context.store, STAGING_SETTINGS);
+      await adminUserStep().run(context, progressHandle());
+      expect(prompter.asked).toEqual(["Your email address, for your AgentX admin user", "Sign in again?"]);
+      expect(linkWhenAsked).toEqual([undefined]);
+      expect(wizard.hub.state().link?.url).toBe("https://login.example.com/authorize?attempt=2");
+    } finally {
+      await wizard.close();
+    }
+  });
+
   describe("with your own OIDC provider (M2)", () => {
     const OIDC_SETTINGS = { ...STAGING_SETTINGS, identity: { mode: "oidc" as const, issuer: "https://login.example.com", audience: "agentx", clientId: "cli" } };
     const oidcAnswers = sampleAnswers({ identity: { mode: "oidc", issuer: "https://login.example.com", audience: "agentx", clientId: "cli", adminClaim: "groups", adminValues: ["agentx-admins"] } });
@@ -75,6 +103,23 @@ describe("the admin user on the page (FR-050)", () => {
       expect((context.prompter as ReturnType<typeof scriptedPrompter>).asked).toEqual([]);
       expect(surface.cards.map((card) => [card.id, card.status])).toEqual([["admin", "waiting"], ["admin", "failed"]]);
       expect(surface.cards[1]?.lines).toEqual([problemText(failure)]);
+    });
+
+    it("Task 7: a token the page cannot retry drops the sign-in's button when the failed card shows", async () => {
+      const wizard = await startInstallWizard({ env: "staging", write: () => undefined });
+      try {
+        const token = accessToken({ groups: ["agentx-admins"] });
+        context = initContext({
+          answers: oidcAnswers, prompter: scriptedPrompter([]), surface: wizard.surface,
+          adminSession: async () => { await wizard.openLink("https://login.example.com/authorize"); return { controlPlaneUrl: CONTROL_PLANE, accessToken: token }; },
+        });
+        await writeEnvironmentSettings(context.store, OIDC_SETTINGS);
+        await expect(adminUserStep().run(context, progressHandle())).rejects.toThrow("your sign-in token has no email or sub claim");
+        expect(wizard.hub.state().cards?.find((card) => card.id === "admin")?.status).toBe("failed");
+        expect(wizard.hub.state().link).toBeUndefined();
+      } finally {
+        await wizard.close();
+      }
     });
   });
 
@@ -104,6 +149,37 @@ describe("the first project on the page, resumed (M6)", () => {
     ]);
     expect(surface.cards[0]?.lines).toEqual(["Project payments-api, revision 1, runs on EC2 workers."]);
     expect(slackChannels.finds()).toBe(0);
+  });
+});
+
+describe("the first project's channel wait on the page (Task 7)", () => {
+  const slackSecrets = () => memoryInitSecrets({ "agentx/staging/slack": JSON.stringify({ botToken: TEST_BOT_TOKEN, signingSecret: TEST_SIGNING_SECRET }) });
+  const recordedProject = () => progressHandle({
+    ...emptyProgress("staging", T0),
+    slack: { appId: "A0APP00001", teamId: "T0123456789", botUserId: "U0BOT00001" },
+    project: { name: "payments-api", revision: 1 },
+  });
+
+  it("an invite wait that times out shows the failed channel card with the problem, and the step rejects with that error", async () => {
+    const surface = page();
+    context = initContext({ prompter: scriptedPrompter(["payments"]), surface, secrets: slackSecrets(), setup: setupServices({ slackChannels: fakeSlackChannels([]) }), adminSession: async () => session });
+    await writeEnvironmentSettings(context.store, STAGING_SETTINGS);
+    const failure = await firstProjectStep().run(context, recordedProject()).then(() => undefined, (error: unknown) => error);
+    expect((failure as Error).message).toContain("the bot cannot see a channel named #payments after 10 minutes");
+    expect(surface.cards).toEqual([
+      projectCard({ name: "payments-api", revision: 1 }),
+      channelCard({ stage: "waiting", channelName: "payments", botUserId: "U0BOT00001" }),
+      channelCard({ stage: "failed", channelName: "payments", problem: problemText(failure) }),
+    ]);
+    expect(surface.cards[2]?.lines).toEqual(["the bot cannot see a channel named #payments after 10 minutes; create it in Slack (or invite the bot to it, if it is private), then run this again"]);
+  });
+
+  it("a failure before the invite wait shows no channel card", async () => {
+    const surface = page();
+    context = initContext({ prompter: scriptedPrompter([]), surface, secrets: slackSecrets(), flags: { channel: "not a channel!" }, setup: setupServices({ slackChannels: fakeSlackChannels([]) }), adminSession: async () => session });
+    await writeEnvironmentSettings(context.store, STAGING_SETTINGS);
+    await expect(firstProjectStep().run(context, recordedProject())).rejects.toThrow("--channel must be a Slack channel name");
+    expect(surface.cards).toEqual([projectCard({ name: "payments-api", revision: 1 })]);
   });
 });
 

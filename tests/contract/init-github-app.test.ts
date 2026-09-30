@@ -11,6 +11,10 @@ import {
   browserThatCreatesGitHubApp, fakeGitHubApi, initContext, memoryInitSecrets, progressHandle, sampleAnswers, scriptedPrompter, T0, TEST_PRIVATE_KEY, TEST_PUBLIC_KEY,
 } from "../support/init-fakes.js";
 import type { WizardCard } from "../../packages/cli/src/init/ui/protocol.js";
+import { agentXError } from "@agentx/contracts";
+import { problemText } from "../../packages/cli/src/init/retry.js";
+import { githubCard } from "../../packages/cli/src/init/ui/cards.js";
+import { startInstallWizard } from "../../packages/cli/src/init/ui/index.js";
 
 const homes: string[] = [];
 afterEach(async () => { await Promise.all(homes.splice(0).map((home) => rm(home, { recursive: true, force: true }))); });
@@ -151,6 +155,61 @@ describe("GitHub App step", () => {
     homes.push(context.home);
     await expect(githubAppStep(fakeGitHubApi({ installAfterPolls: 1_000_000 })).run(context, progressHandle()))
       .rejects.toThrow("the GitHub App was not installed on acme within 15 minutes; install it at https://github.com/apps/agentx-acme-staging/installations/new, then run agentx init again");
+  });
+
+  describe("a wait that fails on the page shows a failed card (Task 7)", () => {
+    const recorded = () => ({
+      secrets: memoryInitSecrets({ [SECRET]: JSON.stringify({ appId: "424242", slug: "agentx-acme-staging", account: "acme", privateKey: TEST_PRIVATE_KEY }) }),
+      progress: progressHandle({ ...emptyProgress("staging", T0), github: { account: "acme", appId: "424242", slug: "agentx-acme-staging", privateKeySecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/github-app-AbCdEf" } }),
+    });
+
+    it("an installation wait that times out shows the failed GitHub card, and the page drops the install page's button", async () => {
+      const wizard = await startInstallWizard({ env: "staging", write: () => undefined });
+      try {
+        const { secrets, progress } = recorded();
+        const context = initContext({ secrets, surface: wizard.surface, openBrowser: wizard.openLink });
+        homes.push(context.home);
+        const failure = await githubAppStep(fakeGitHubApi({ installAfterPolls: 1_000_000 })).run(context, progress).then(() => undefined, (error: unknown) => error);
+        expect((failure as Error).message).toBe("CONFIG_INVALID: the GitHub App was not installed on acme within 15 minutes; install it at https://github.com/apps/agentx-acme-staging/installations/new, then run agentx init again");
+        const card = wizard.hub.state().cards?.find((shown) => shown.id === "github");
+        expect(card).toEqual(githubCard({ stage: "failed", problem: problemText(failure) }));
+        expect(card?.lines).toEqual(["the GitHub App was not installed on acme within 15 minutes; install it at https://github.com/apps/agentx-acme-staging/installations/new, then run agentx init again"]);
+        expect(wizard.hub.state().link).toBeUndefined();
+      } finally {
+        await wizard.close();
+      }
+    });
+
+    it("a repositories wait that times out shows the failed GitHub card", async () => {
+      const { secrets, progress } = recorded();
+      const cards: WizardCard[] = [];
+      const context = initContext({ secrets, surface: { card: (card) => { cards.push(card); } } });
+      homes.push(context.home);
+      const failure = await githubAppStep(fakeGitHubApi({ repositoryCounts: [0] })).run(context, progress).then(() => undefined, (error: unknown) => error);
+      expect((failure as Error).message).toContain("the GitHub App can see no repositories");
+      expect(cards.map((card) => card.status)).toEqual(["waiting", "waiting", "failed"]);
+      expect(cards.at(-1)).toEqual(githubCard({ stage: "failed", problem: problemText(failure) }));
+    });
+
+    it("a failure after the create card shows the failed GitHub card, and the step rejects with that error", async () => {
+      const refused = agentXError("RUNTIME_UNAVAILABLE", "GitHub manifest conversion failed with HTTP 422");
+      const cards: WizardCard[] = [];
+      const context = initContext({ openBrowser: browserThatCreatesGitHubApp([]), surface: { card: (card) => { cards.push(card); } } });
+      homes.push(context.home);
+      const api = { ...fakeGitHubApi(), convertManifest: async () => { throw refused; } };
+      await expect(githubAppStep(api).run(context, progressHandle())).rejects.toBe(refused);
+      expect(cards.map((card) => card.status)).toEqual(["waiting", "failed"]);
+      expect(cards.at(-1)).toEqual(githubCard({ stage: "failed", problem: "GitHub manifest conversion failed with HTTP 422" }));
+    });
+
+    it("a failure before any GitHub card shows none", async () => {
+      const cards: WizardCard[] = [];
+      const context = initContext({ surface: { card: (card) => { cards.push(card); } }, preMadeGitHubApp: { appId: "999" } });
+      homes.push(context.home);
+      const { progress } = recorded();
+      await expect(githubAppStep(fakeGitHubApi()).run(context, progress)).rejects.toThrow("this install already uses GitHub App 424242, not 999 from --github-app-id");
+      expect(cards).toEqual([]);
+    });
   });
 
   it("with --no-browser, takes the pasted redirect address", async () => {

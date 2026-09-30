@@ -67,7 +67,9 @@ export type GitHubCardInput =
   | { stage: "create"; appName: string; account: string; startUrl: string }
   | { stage: "install"; slug: string; account: string; installUrl: string }
   | { stage: "repositories"; slug: string; account: string; settingsUrl: string }
-  | { stage: "done"; slug: string; account: string };
+  | { stage: "done"; slug: string; account: string }
+  /** A wait or check that failed. The page offers no retry, so the problem keeps its own next step. */
+  | { stage: "failed"; problem: string };
 
 /** FR-030 and FR-031: creating the app, then the installation wait, as one card. */
 export function githubCard(input: GitHubCardInput): WizardCard {
@@ -89,6 +91,7 @@ export function githubCard(input: GitHubCardInput): WizardCard {
       link: { url: input.settingsUrl, label: "Choose repositories" },
     };
     case "done": return { ...base, status: "ok", lines: [`${input.slug} is installed on ${input.account}.`] };
+    case "failed": return { ...base, status: "failed", lines: [input.problem] };
   }
 }
 
@@ -202,11 +205,14 @@ export function projectCard(input: { name: string; revision: number; repository?
 
 export type ChannelCardInput =
   | { stage: "waiting"; channelName: string; botUserId: string }
-  | { stage: "done"; channelName: string; projectName: string };
+  | { stage: "done"; channelName: string; projectName: string }
+  /** The invite wait timed out. The page offers no retry, so the problem keeps its own next step. */
+  | { stage: "failed"; channelName: string; problem: string };
 
 export function channelCard(input: ChannelCardInput): WizardCard {
   const base = { id: "channel" as const, title: "Slack channel" };
   if (input.stage === "done") return { ...base, status: "ok", lines: [`#${input.channelName} is bound to project ${input.projectName}.`] };
+  if (input.stage === "failed") return { ...base, status: "failed", lines: [input.problem] };
   return {
     ...base, status: "waiting",
     lines: [

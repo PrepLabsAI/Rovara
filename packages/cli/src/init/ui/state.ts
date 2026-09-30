@@ -43,6 +43,9 @@ export interface WizardHub {
    * started, done, skipped or waiting), and when the card that offered the same address is
    * replaced by one that no longer offers it. */
   showLink(link: WizardLink): void;
+  /** Drops the run's link: the address it offered no longer leads anywhere useful (a sign-in
+   * that failed). */
+  clearLink(): void;
   /** Publishes a question and resolves with the answer the page posts, once `check` accepts it. */
   ask(question: NewQuestion, check: AnswerCheck): Promise<string>;
   /** The page's answer. Returns the message to show on the field, or undefined when accepted. */
@@ -188,6 +191,10 @@ export function createWizardHub(env: string): WizardHub {
         return;
       }
       link = next;
+      publish();
+    },
+    clearLink() {
+      link = undefined;
       publish();
     },
     async ask(next, check) {
