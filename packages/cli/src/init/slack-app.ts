@@ -11,7 +11,7 @@ import type { InitContext, InitSecrets } from "./context.js";
 import { checkSlackBotToken, checkSlackSigningSecret, fieldCheck, secretFromSource } from "./prompts.js";
 import { retryOnPage } from "./retry.js";
 import type { InitStep, ProgressHandle } from "./steps.js";
-import { slackAppCard, type SlackCardInput } from "./ui/cards.js";
+import { slackAppCard, type SlackCardInput, slackUrlsCard, type SlackUrlsCardInput } from "./ui/cards.js";
 
 // channels:join, channels:read and groups:read serve 15d2's `channel add`; users:read.email and
 // im:write serve developer sign-in (spec 025 FR-044). Adding scopes later forces a reinstall (R10).
@@ -197,6 +197,8 @@ async function echoedChallenge(response: Response): Promise<unknown> {
 export async function probeSlackUrls(input: {
   eventsUrl: string; interactivityUrl: string; signingSecret: string; fetch: typeof fetch; now(): number; sleep(ms: number): Promise<void>; write(line: string): void;
   timeoutMs?: number; pollMs?: number;
+  /** Called once, when the probe starts waiting for the ingress to pick up the new signing secret. */
+  onWaiting?: () => void;
 }): Promise<void> {
   const timeoutMs = input.timeoutMs ?? SLACK_PROBE_TIMEOUT_MS;
   const deadline = input.now() + timeoutMs;
@@ -212,6 +214,7 @@ export async function probeSlackUrls(input: {
     }
     if (!told) {
       input.write("Waiting for the Slack ingress to pick up the new signing secret (it keeps the old one for up to 5 minutes)");
+      input.onWaiting?.();
       told = true;
     }
     await input.sleep(input.pollMs ?? PROBE_POLL_MS);
@@ -378,12 +381,26 @@ export async function verifySlackUrls(context: InitContext, progress: ProgressHa
   const signingSecret = storedSigningSecret(await context.secrets.get(name));
   if (signingSecret === undefined) throw agentXError("CONFIG_INVALID", `secret ${name} holds no Slack signing secret; run agentx init again to repeat the Slack app step`);
   const { eventsUrl, interactivityUrl } = await controlPlaneSlackUrls(context);
-  await probeSlackUrls({ eventsUrl, interactivityUrl, signingSecret, fetch: context.fetch, now: context.now, sleep: context.sleep, write: context.write });
   const appId = progress.current().slack?.appId;
   const page = appId === undefined ? "https://api.slack.com/apps" : `https://api.slack.com/apps/${appId}/event-subscriptions`;
-  context.write(`AgentX now answers Slack's URL check. Open ${page}; if the Request URL is not marked Verified, press Retry.`);
-  if (context.openBrowser !== undefined) await context.openBrowser(page);
-  if (!(await context.prompter.confirm("Does Slack show the Request URL as Verified?", { defaultValue: true }))) {
-    throw agentXError("CONFIG_INVALID", `Slack has not verified ${eventsUrl}. On ${page}, press Retry; if it still fails, look for invalid_signature in the control plane's SlackIngress logs, then run agentx init again`);
-  }
+  const show = (card: SlackUrlsCardInput) => context.surface?.card(slackUrlsCard(card));
+  // FR-041 (Q7): on the page, a failed check runs again after the fix; the terminal stops, as before.
+  await retryOnPage({
+    surface: context.surface, prompter: context.prompter, question: "Run the Request URL check again?",
+    failed: (problem) => show({ stage: "failed", problem, pageUrl: page }),
+    run: async () => {
+      show({ stage: "checking", eventsUrl });
+      await probeSlackUrls({
+        eventsUrl, interactivityUrl, signingSecret, fetch: context.fetch, now: context.now, sleep: context.sleep, write: context.write,
+        onWaiting: () => show({ stage: "waiting-for-secret", eventsUrl }),
+      });
+      context.write(`AgentX now answers Slack's URL check. Open ${page}; if the Request URL is not marked Verified, press Retry.`);
+      show({ stage: "verify", pageUrl: page });
+      if (context.openBrowser !== undefined) await context.openBrowser(page);
+      if (!(await context.prompter.confirm("Does Slack show the Request URL as Verified?", { defaultValue: true }))) {
+        throw agentXError("CONFIG_INVALID", `Slack has not verified ${eventsUrl}. On ${page}, press Retry; if it still fails, look for invalid_signature in the control plane's SlackIngress logs, then run agentx init again`);
+      }
+    },
+  });
+  show({ stage: "done", eventsUrl });
 }

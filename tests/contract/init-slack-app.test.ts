@@ -11,6 +11,7 @@ import { emptyProgress } from "../../packages/cli/src/init/install-state.js";
 import {
   allStackOutputs, fakeSlackApi, initContext, memoryInitSecrets, progressHandle, scriptedDeployer, scriptedPrompter, slackIngressFetch, T0, TEST_BOT_TOKEN, TEST_SIGNING_SECRET, type TestInitContext,
 } from "../support/init-fakes.js";
+import type { WizardCard } from "../../packages/cli/src/init/ui/protocol.js";
 
 const homes: string[] = [];
 afterEach(async () => { await Promise.all(homes.splice(0).map((home) => rm(home, { recursive: true, force: true }))); });
@@ -363,5 +364,33 @@ describe("verifying the Slack URLs after the Slack service deploys", () => {
     context.secrets.values.set(SLACK_SECRET, JSON.stringify({ signingSecret: TEST_SIGNING_SECRET, botToken: TEST_BOT_TOKEN }));
     await expect(verifySlackUrls(context, progressHandle({ ...emptyProgress("staging", T0), slack: { appId: "A0APP", teamId: "T0TEAM", botUserId: "U0BOT" } })))
       .rejects.toThrow("Slack has not verified");
+  });
+
+  const withSlack = () => progressHandle({ ...emptyProgress("staging", T0), slack: { appId: "A0APP", teamId: "T0TEAM", botUserId: "U0BOT" } });
+  const page = () => { const cards: WizardCard[] = []; return { cards, card: (card: WizardCard) => { cards.push(card); } }; };
+
+  it("FR-041: on the page, a check Slack has not verified runs again, and the card shows each stage", async () => {
+    const surface = page();
+    // Not verified; yes, run it again; verified.
+    const context = slackContext([false, true, true], { fetch: slackIngressFetch({ signingSecret: TEST_SIGNING_SECRET, staleFor: 1 }), surface });
+    context.secrets.values.set(SLACK_SECRET, JSON.stringify({ signingSecret: TEST_SIGNING_SECRET, botToken: TEST_BOT_TOKEN }));
+    await verifySlackUrls(context, withSlack());
+    expect((context.prompter as ReturnType<typeof scriptedPrompter>).asked).toEqual([
+      "Does Slack show the Request URL as Verified?", "Run the Request URL check again?", "Does Slack show the Request URL as Verified?",
+    ]);
+    expect(surface.cards.map((card) => [card.id, card.status])).toEqual([
+      ["slack-urls", "running"], ["slack-urls", "running"], ["slack-urls", "waiting"], ["slack-urls", "failed"],
+      ["slack-urls", "running"], ["slack-urls", "waiting"], ["slack-urls", "ok"],
+    ]);
+    expect(surface.cards[1]?.lines).toContain("The Slack service keeps the old signing secret for up to 5 minutes; checking again every 15 seconds.");
+    expect(surface.cards[3]?.link).toEqual({ url: "https://api.slack.com/apps/A0APP/event-subscriptions", label: "Open Event Subscriptions" });
+    expect(JSON.stringify(surface.cards)).not.toContain(TEST_SIGNING_SECRET);
+  });
+
+  it("FR-041: without a page, a check Slack has not verified still stops at once and asks nothing more", async () => {
+    const context = slackContext([false], { fetch: slackIngressFetch({ signingSecret: TEST_SIGNING_SECRET }) });
+    context.secrets.values.set(SLACK_SECRET, JSON.stringify({ signingSecret: TEST_SIGNING_SECRET, botToken: TEST_BOT_TOKEN }));
+    await expect(verifySlackUrls(context, withSlack())).rejects.toThrow("Slack has not verified");
+    expect((context.prompter as ReturnType<typeof scriptedPrompter>).asked).toEqual(["Does Slack show the Request URL as Verified?"]);
   });
 });

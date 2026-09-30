@@ -117,3 +117,30 @@ export function slackAppCard(input: SlackCardInput): WizardCard {
     case "done": return { ...base, status: "ok", lines: [`Slack app ${input.appId} is installed in workspace ${input.teamId}.`] };
   }
 }
+
+export type SlackUrlsCardInput =
+  | { stage: "checking"; eventsUrl: string }
+  | { stage: "waiting-for-secret"; eventsUrl: string }
+  | { stage: "verify"; pageUrl: string }
+  | { stage: "failed"; problem: string; pageUrl: string }
+  | { stage: "done"; eventsUrl: string };
+
+/** FR-041: the Request URL check, live, and run again after a fix. */
+export function slackUrlsCard(input: SlackUrlsCardInput): WizardCard {
+  const base = { id: "slack-urls" as const, title: "Slack Request URL" };
+  const events = { url: "", label: "Open Event Subscriptions" };
+  switch (input.stage) {
+    case "checking": return { ...base, status: "running", lines: [`Sending ${input.eventsUrl} a signed test request, the way Slack will.`] };
+    case "waiting-for-secret": return {
+      ...base, status: "running",
+      lines: [`Sending ${input.eventsUrl} a signed test request, the way Slack will.`, "The Slack service keeps the old signing secret for up to 5 minutes; checking again every 15 seconds."],
+    };
+    case "verify": return {
+      ...base, status: "waiting",
+      lines: ["AgentX answers Slack's URL check.", "Open Event Subscriptions. If the Request URL is not marked Verified, press Retry there, then answer below."],
+      link: { ...events, url: input.pageUrl },
+    };
+    case "failed": return { ...base, status: "failed", lines: [input.problem, "Fix it, then answer Yes below to run the check again."], link: { ...events, url: input.pageUrl } };
+    case "done": return { ...base, status: "ok", lines: [`Slack has verified ${input.eventsUrl}.`] };
+  }
+}
