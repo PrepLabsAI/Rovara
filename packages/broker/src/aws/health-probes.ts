@@ -43,7 +43,13 @@ export function healthProbes(input: HealthProbeInput): AdminHealthProbes {
           // CloudWatch always returns both fields; the fallbacks only keep the types total. An
           // empty name matches no alarm an admin would act on, and INSUFFICIENT_DATA is neither
           // OK nor ALARM, so a missing field can never hide a firing alarm or report one falsely.
-          for (const alarm of [...(page.MetricAlarms ?? []), ...(page.CompositeAlarms ?? [])]) found.push({ name: alarm.AlarmName ?? "", state: alarm.StateValue ?? "INSUFFICIENT_DATA" });
+          for (const alarm of [...(page.MetricAlarms ?? []), ...(page.CompositeAlarms ?? [])]) {
+            const name = alarm.AlarmName ?? "";
+            // Alarm suffixes are single words (infra naming.alarmName), so a further hyphen after
+            // the prefix names a sibling environment: prod's prefix also matches agentx-prod-eu-*.
+            if (name.startsWith(prefix) && name.slice(prefix.length).includes("-")) continue;
+            found.push({ name, state: alarm.StateValue ?? "INSUFFICIENT_DATA" });
+          }
           NextToken = page.NextToken;
         } while (NextToken !== undefined);
         return found;

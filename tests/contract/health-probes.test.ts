@@ -68,6 +68,20 @@ describe("the broker's production health probes (A13)", () => {
     ]);
   });
 
+  it("leaves out a sibling environment's alarms that share the prefix (prod's prefix also matches prod-eu)", async () => {
+    // Alarm suffixes are single words (infra naming.alarmName), so a further hyphen after the
+    // prefix belongs to another environment: agentx-prod-eu-SlackDeadLetters is prod-eu's.
+    const { input } = fakes({ pages: [
+      { $metadata: {}, MetricAlarms: [
+        { AlarmName: "agentx-prod-SlackDeadLetters", StateValue: "OK" },
+        { AlarmName: "agentx-prod-eu-SlackDeadLetters", StateValue: "ALARM" },
+        { AlarmName: "agentx-prod-foundation-SessionReaperErrors", StateValue: "ALARM" },
+      ] },
+    ] });
+    const probes = healthProbes({ ...input, alarmPrefix: "agentx-prod-" });
+    expect(await probes.alarms?.()).toEqual([{ name: "agentx-prod-SlackDeadLetters", state: "OK" }]);
+  });
+
   it("reads each listed queue's depth; a missing count or a failed read is null, logged without the URL", async () => {
     const { input, queueCalls, logs } = fakes({ queues: {
       "https://sqs.example/dispatch": { $metadata: {}, Attributes: { ApproximateNumberOfMessages: "3" } },
