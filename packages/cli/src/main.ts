@@ -27,6 +27,7 @@ import { bindSlackChannel, unbindSlackChannel } from "./admin/slack.js";
 import { stopWorkspace } from "./admin/stop.js";
 import { setTaskShareMode } from "./admin/task-share-mode.js";
 import { cancelWorkspaceTask } from "./admin/cancel.js";
+import { askToApply, exportChanges, runCliChange } from "./admin/changes.js";
 import { exportTurns, parseSince } from "./admin/turns.js";
 import { loginWithPkce, openSystemBrowser, tokenStoreKey } from "./auth.js";
 import { loadProjectConfig } from "./config.js";
@@ -138,6 +139,8 @@ export interface CliDependencies {
   /** `agentx project add` and the other setup commands (phase 15d2), for tests: never touch AWS,
    * GitHub, Slack or the control plane. */
   setup?: SetupCommandContext;
+  /** Answers the admin change commands' "Apply this change?" prompt, for tests (spec 025 Q6). */
+  confirm?(question: string): Promise<boolean>;
 }
 
 interface AuthenticatedDeployment {
@@ -393,6 +396,51 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       for (const warning of registrationWarnings(result, definition)) services.stderr.write(`Warning: ${warning}\n`);
     });
 
+  // Spec 025 E17 (Q6): a person typing the command is the confirmation; --yes answers for them.
+  // Without --yes the prompt needs a terminal, checked before anything is planned.
+  const changeConfirmer = (yes: boolean): ((question: string) => Promise<boolean>) => {
+    if (yes) return async () => true;
+    if (dependencies.confirm !== undefined) return (question) => dependencies.confirm!(question);
+    if (process.stdin.isTTY !== true) throw agentXError("CONFIG_INVALID", "this change needs a yes: run the command in a terminal to answer its prompt, or pass --yes");
+    return (question) => askToApply(question, { input: process.stdin, output: process.stderr, signals: process });
+  };
+  for (const action of ["grant", "revoke"] as const) {
+    adminProject
+      .command(action)
+      .description(action === "grant"
+        ? "let a developer hand tasks to a project from an AI tool: shows the change and asks first"
+        : "remove a developer's granted access to a project: shows the change and asks first")
+      .option("--project <name>", "the project's name (required)")
+      .option("--developer <who>", "a Slack user ID such as U0123456789, the email they signed in with, or a developer ID (required)")
+      .option("--yes", "apply without asking; the change is still printed", false)
+      .action(async (options: { project?: string; developer?: string; yes: boolean }, command: Command) => {
+        // Checked here, not by commander, so the refusal is AgentX's own and names what to do.
+        // The program's own --project can take the value first, as it does for admin slack bind.
+        const globals = globalOptions(command);
+        const projectName = options.project ?? globals.project;
+        if (projectName === undefined) throw agentXError("CONFIG_INVALID", `--project is required: name the project, such as agentx admin project ${action} --project payments --developer U0123456789`);
+        const project = AgentXNameSchema.safeParse(projectName);
+        if (!project.success) throw agentXError("CONFIG_INVALID", "--project must be a project name: a lowercase letter, then up to 62 lowercase letters, digits or hyphens");
+        // The developer reference is never echoed: it may be an email.
+        const developer = options.developer?.trim();
+        if (developer === undefined || developer === "" || developer.length > 254) {
+          throw agentXError("CONFIG_INVALID", "--developer is required: a Slack user ID such as U0123456789, the email they signed in to AgentX with, or a developer ID");
+        }
+        const confirm = changeConfirmer(options.yes);
+        const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+        const result = await runCliChange({
+          controlPlaneUrl: settings.controlPlaneUrl,
+          accessToken,
+          cliVersion: CLI_VERSION,
+          change: { kind: action === "grant" ? "grant_project_access" : "revoke_project_access", project: project.data, developer },
+          // The effect is already printed above the prompt.
+          confirm: () => confirm("Apply this change?"),
+          write: (line) => { services.stderr.write(`${line}\n`); },
+        }, services.fetchImplementation);
+        services.stdout.write(formatSuccess({ outcome: result.outcome, changeId: result.change.changeId }, globals.json));
+      });
+  }
+
   const adminWorkspace = admin.command("workspace").description("administer AgentX workspaces");
   adminWorkspace
     .command("cancel")
@@ -592,6 +640,26 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       const { settings, accessToken } = await authenticate(globals, services.tokenStore);
       const result = await setTaskShareMode({ controlPlaneUrl: settings.controlPlaneUrl, accessToken, taskId: options.task, mode: options.mode }, services.fetchImplementation);
       services.stdout.write(formatSuccess(result, globals.json));
+    });
+
+  // Spec 025 FR-052: registered after the existing admin commands, so their order is unchanged.
+  admin
+    .command("changes")
+    .description("list admin change records (kept 30 days): who asked, the change, how it was confirmed and how it ended; --json writes JSON Lines")
+    .requiredOption("--since <duration>", "how far back, such as 30m, 12h or 7d (at most 30d)")
+    .action(async (options: { since: string }, command: Command) => {
+      const globals = globalOptions(command);
+      const since = parseSince(options.since, Date.now(), "change records");
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      const result = await exportChanges({
+        controlPlaneUrl: settings.controlPlaneUrl,
+        accessToken,
+        since,
+        json: globals.json,
+        write: (line) => { services.stdout.write(line); },
+      }, services.fetchImplementation);
+      // stdout carries only the records, so the count goes to stderr.
+      services.stderr.write(`${result.exported} change record${result.exported === 1 ? "" : "s"} since ${result.since}\n`);
     });
 
   registerSetupCommands(program, dependencies.setup ?? realSetupContext({
