@@ -22,6 +22,17 @@ interface WriteAction {
 export class FakeDynamoDb {
   readonly items = new Map<string, Item>();
   private readonly listeners = new Set<(change: { before?: Item; after?: Item }) => void>();
+  /** Constructor names of every command sent, in order (spec 025 A3: no route scans). */
+  private readonly sent: string[] = [];
+
+  commandNames(): string[] {
+    return [...this.sent];
+  }
+
+  /** Removes one item without a stream record, as seeding does. */
+  delete(pk: string, sk: string): void {
+    this.items.delete(itemKey(pk, sk));
+  }
 
   /** Each committed write's item before and after, as a DynamoDB stream record carries them. `set` (seeding) is not reported. */
   onWrite(listener: (change: { before?: Item; after?: Item }) => void): () => void {
@@ -42,6 +53,7 @@ export class FakeDynamoDb {
   }
 
   send = async (command: Command): Promise<unknown> => {
+    this.sent.push(command.constructor.name);
     await Promise.resolve();
     const input = command.input;
     switch (command.constructor.name) {
@@ -51,7 +63,7 @@ export class FakeDynamoDb {
         return { Item: item === undefined ? undefined : structuredClone(item) };
       }
       case "QueryCommand":
-        return { Items: this.query(input) };
+        return this.queryPage(input);
       case "PutCommand":
       case "UpdateCommand":
       case "DeleteCommand":
@@ -70,18 +82,74 @@ export class FakeDynamoDb {
     }
   };
 
+  /**
+   * DynamoDB's order of work: the key condition, the start key, then `Limit` items evaluated, then
+   * the filter. LastEvaluatedKey is handed out only when `Limit` stopped the read early, keyed by
+   * the table's keys plus, for an index, the index's own key attributes.
+   */
+  private queryPage(input: Record<string, unknown>): { Items: Item[]; LastEvaluatedKey?: Record<string, unknown> } {
+    const limit = input.Limit as number | undefined;
+    const evaluated = this.query({ ...input, Limit: undefined });
+    const page = limit === undefined ? evaluated : evaluated.slice(0, limit);
+    const filter = input.FilterExpression as string | undefined;
+    const names = (input.ExpressionAttributeNames ?? {}) as Names;
+    const values = (input.ExpressionAttributeValues ?? {}) as Values;
+    const items = filter === undefined ? page : page.filter((item) => evaluateCondition(filter, item, names, values));
+    const last = page.at(-1);
+    if (limit === undefined || evaluated.length <= limit || last === undefined) return { Items: items };
+    const indexKeys = input.IndexName === undefined ? [] : this.indexAttributes(input);
+    return { Items: items, LastEvaluatedKey: Object.fromEntries(["pk", "sk", ...indexKeys].map((name) => [name, last[name]])) };
+  }
+
+  /** The key attributes an index query names: the partition attribute, and the sort attribute of a range. */
+  private indexAttributes(input: Record<string, unknown>): string[] {
+    const names = (input.ExpressionAttributeNames ?? {}) as Names;
+    const name = (token: string) => (token.startsWith("#") ? names[token]! : token);
+    const ranged = INDEX_RANGE.exec(String(input.KeyConditionExpression));
+    if (ranged) return [name(ranged[1]!), name(ranged[3]!)];
+    const indexed = INDEX_EQUALS.exec(String(input.KeyConditionExpression));
+    return indexed ? [name(indexed[1]!)] : [];
+  }
+
   // Supports `pk = :pk AND begins_with(sk, :<name>)`, the key condition shape the broker uses (a
   // project's latest revision, credential records and a credential's cached tokens), and
   // `pk = :pk AND sk < :<name>`, the stuck-setup sweep's "older than" range (spec 025 C17).
   private query(input: Record<string, unknown>): Item[] {
     const values = input.ExpressionAttributeValues as Values;
     if (input.IndexName !== undefined) {
-      // A secondary index keyed by one attribute: `<attribute> = :value`, sparse like DynamoDB's.
       const names = (input.ExpressionAttributeNames ?? {}) as Names;
-      const indexed = /^(#?[A-Za-z0-9_]+) = (:[A-Za-z0-9_]+)$/.exec(String(input.KeyConditionExpression));
+      // An index with a sort key range, as the turn and workspace reads send it (spec 025 phase 25d):
+      // `<attribute> = :v AND <sort> >= :a` or `<attribute> = :v AND <sort> BETWEEN :a AND :b`.
+      const name = (token: string) => (token.startsWith("#") ? names[token]! : token);
+      const ranged = INDEX_RANGE.exec(String(input.KeyConditionExpression));
+      if (ranged) {
+        const [partition, sort] = [name(ranged[1]!), name(ranged[3]!)];
+        const low = values[ranged[5]!] as string;
+        const high = ranged[6] === undefined ? undefined : values[ranged[6]] as string;
+        const found = this.find((item) => item[partition] === values[ranged[2]!] && typeof item[sort] === "string"
+          && compareKeys(item[sort], low) >= 0 && (high === undefined || compareKeys(item[sort], high) <= 0))
+          // Items that share a sort value keep one order, by table key, so a page boundary between them skips nothing.
+          .sort((left, right) => compareTuples(indexOrder(left, sort), indexOrder(right, sort)));
+        if (input.ScanIndexForward === false) found.reverse();
+        const start = input.ExclusiveStartKey as Record<string, unknown> | undefined;
+        const after = start === undefined
+          ? found
+          : found.filter((item) => compareTuples(indexOrder(item, sort), indexOrder(start, sort)) * (input.ScanIndexForward === false ? -1 : 1) > 0);
+        return after.map((item) => structuredClone(item));
+      }
+      // A secondary index keyed by one attribute: `<attribute> = :value`, sparse like DynamoDB's.
+      const indexed = INDEX_EQUALS.exec(String(input.KeyConditionExpression));
       if (!indexed) throw new Error(`FakeDynamoDb does not support the index key condition ${String(input.KeyConditionExpression)}`);
       const attribute = indexed[1]!.startsWith("#") ? names[indexed[1]!]! : indexed[1]!;
-      return this.find((item) => item[attribute] !== undefined && item[attribute] === values[indexed[2]!]).map((item) => structuredClone(item));
+      // The table's own (insertion) order, as before; ExclusiveStartKey resumes after that item in it.
+      const found = this.find((item) => item[attribute] !== undefined && item[attribute] === values[indexed[2]!]);
+      const start = input.ExclusiveStartKey as { pk?: unknown; sk?: unknown } | undefined;
+      if (start === undefined) return found.map((item) => structuredClone(item));
+      const position = found.findIndex((item) => item.pk === start.pk && item.sk === start.sk);
+      if (position === -1) {
+        throw Object.assign(new Error("FakeDynamoDb resumes a single-attribute index only after an item still in it"), { name: "ValidationException" });
+      }
+      return found.slice(position + 1).map((item) => structuredClone(item));
     }
     // A sort key range, as the operation events page reads it: `pk = :pk AND sk BETWEEN :a AND :b`.
     const range = /^pk = :pk AND sk BETWEEN (:[a-zA-Z]+) AND (:[a-zA-Z]+)$/.exec(String(input.KeyConditionExpression));
@@ -91,8 +159,12 @@ export class FakeDynamoDb {
       const inRange = this.find((item) => item.pk === values[":pk"] && compareKeys(item.sk as string, low) >= 0 && compareKeys(item.sk as string, high) <= 0)
         .sort((left, right) => compareKeys(left.sk as string, right.sk as string));
       if (input.ScanIndexForward === false) inRange.reverse();
-      const limit = input.Limit as number | undefined;
-      return (limit === undefined ? inRange : inRange.slice(0, limit)).map((item) => structuredClone(item));
+      // ExclusiveStartKey resumes after that key in the query's direction, as in the begins_with branch.
+      const start = input.ExclusiveStartKey as { sk?: unknown } | undefined;
+      const after = start === undefined
+        ? inRange
+        : inRange.filter((item) => compareKeys(item.sk as string, String(start.sk)) * (input.ScanIndexForward === false ? -1 : 1) > 0);
+      return after.map((item) => structuredClone(item));
     }
     // The stuck-setup sweep's "older than" range (spec 025 C17).
     const before = /^pk = :pk AND sk < (:[a-zA-Z]+)$/.exec(String(input.KeyConditionExpression));
@@ -100,8 +172,10 @@ export class FakeDynamoDb {
       const bound = values[before[1]!] as string;
       const found = this.find((item) => item.pk === values[":pk"] && compareKeys(item.sk as string, bound) < 0)
         .sort((left, right) => compareKeys(left.sk as string, right.sk as string));
-      const limit = input.Limit as number | undefined;
-      return (limit === undefined ? found : found.slice(0, limit)).map((item) => structuredClone(item));
+      // ExclusiveStartKey resumes after that key (this range is read oldest first only).
+      const start = input.ExclusiveStartKey as { sk?: unknown } | undefined;
+      const after = start === undefined ? found : found.filter((item) => compareKeys(item.sk as string, String(start.sk)) > 0);
+      return after.map((item) => structuredClone(item));
     }
     const match = /^pk = :pk AND begins_with\(sk, (:[a-zA-Z]+)\)$/.exec(String(input.KeyConditionExpression));
     if (!match) throw new Error(`FakeDynamoDb does not support the key condition ${String(input.KeyConditionExpression)}`);
@@ -111,7 +185,7 @@ export class FakeDynamoDb {
     if (input.ScanIndexForward === false) items.reverse();
     // ExclusiveStartKey resumes after that key in the query's direction. DynamoDB refuses a start
     // key from another partition, without a sort key, or outside the key condition's range, and so
-    // does this fake. (No LastEvaluatedKey is handed out.)
+    // does this fake. (queryPage hands out LastEvaluatedKey when Limit stops the read early.)
     const start = input.ExclusiveStartKey as { pk?: unknown; sk?: unknown } | undefined;
     if (start !== undefined && (start.pk !== values[":pk"] || typeof start.sk !== "string" || !start.sk.startsWith(prefix))) {
       throw Object.assign(new Error("The provided starting key is invalid"), { name: "ValidationException" });
@@ -119,8 +193,7 @@ export class FakeDynamoDb {
     const after = start === undefined
       ? items
       : items.filter((item) => compareKeys(item.sk as string, String(start.sk)) * (input.ScanIndexForward === false ? -1 : 1) > 0);
-    const limit = input.Limit as number | undefined;
-    return (limit === undefined ? after : after.slice(0, limit)).map((item) => structuredClone(item));
+    return after.map((item) => structuredClone(item));
   }
 
   private commit(actions: WriteAction[], errorName: string): void {
@@ -153,6 +226,22 @@ export class FakeDynamoDb {
       }
     }
   }
+}
+
+const INDEX_EQUALS = /^(#?[A-Za-z0-9_]+) = (:[A-Za-z0-9_]+)$/;
+const INDEX_RANGE = /^(#?[A-Za-z0-9_]+) = (:[A-Za-z0-9_]+) AND (#?[A-Za-z0-9_]+) (>=|BETWEEN) (:[A-Za-z0-9_]+)(?: AND (:[A-Za-z0-9_]+))?$/;
+
+/** An index item's position: its sort value, then its table keys. */
+function indexOrder(item: Record<string, unknown>, sort: string): string[] {
+  return [String(item[sort]), String(item.pk), String(item.sk)];
+}
+
+function compareTuples(left: string[], right: string[]): number {
+  for (let index = 0; index < left.length; index += 1) {
+    const order = compareKeys(left[index]!, right[index]!);
+    if (order !== 0) return order;
+  }
+  return 0;
 }
 
 function itemKey(pk: string, sk: string): string {

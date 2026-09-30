@@ -6,8 +6,9 @@ import {
   DEVELOPER_WAIT_MAX_SECONDS, DeveloperInstructionsSchema, DeveloperTaskStatusSchema, SHARED_BY_POLICY, VIEW_ONLY_BY_POLICY, inertName, type DeveloperTaskView,
 } from "@agentx/contracts";
 import { z } from "zod";
+import type { AdminControlPlaneClient } from "./admin-client.js";
 import type { ControlPlaneClient } from "./client.js";
-import type { Compatibility } from "./compatibility.js";
+import { adminApiFits, type Compatibility } from "./compatibility.js";
 import { ToolError, plainText } from "./errors.js";
 import type { RequestIdMemory } from "./request-ids.js";
 import { waitForTask } from "./wait.js";
@@ -22,6 +23,8 @@ export interface ToolContext {
   now(): number;
   sleep(ms: number, signal: AbortSignal): Promise<void>;
   newRequestId(): string;
+  /** Spec 025 A14: the admin sign-in's client; absent when the server has none. */
+  admin?: AdminControlPlaneClient;
 }
 export interface ToolCall {
   signal: AbortSignal;
@@ -215,7 +218,8 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
           server_version: context.serverVersion, control_plane_api_version: compatibility.apiVersion,
           ...(compatibility.notice === undefined ? {} : { upgrade_notice: compatibility.notice }),
         },
-        text: `Signed in to AgentX ${compatibility.env} as ${developer.name} with ${method}. This computer ${admin ? "also holds an unexpired" : "holds no"} admin sign-in.${compatibility.notice === undefined ? "" : ` Note: ${compatibility.notice}.`}`,
+        // Spec 025 A1: an admin whose AgentX lacks a fitting admin API learns why no admin tool shows.
+        text: `Signed in to AgentX ${compatibility.env} as ${developer.name} with ${method}. This computer ${admin ? "also holds an unexpired" : "holds no"} admin sign-in.${compatibility.notice === undefined ? "" : ` Note: ${compatibility.notice}.`}${admin && adminApiFits(compatibility.adminApiVersion) !== "fits" ? " AgentX has no admin tools yet; ask your AgentX admin to upgrade AgentX." : ""}`,
       };
     },
   },

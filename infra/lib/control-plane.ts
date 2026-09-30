@@ -28,7 +28,7 @@ import {
   aws_sqs as sqs,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
-import { WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
+import { INDEX_EXPIRY_ATTRIBUTE, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
 import { DeveloperSignIn, developerSignInParameters } from "./developer-signin.js";
 import { DeveloperTaskNotifier } from "./developer-task-notifier.js";
@@ -96,6 +96,10 @@ export class ControlPlaneStack extends Stack {
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       // Retained: workspace and operation records must outlive a stack deletion.
       removalPolicy: RemovalPolicy.RETAIN,
+      // Spec 025 A6 (Q5, owner answer 2026-09-30): failure and usage index items expire by TTL in
+      // named environments. Adding a TTL to an existing table is an in-place update, and no other
+      // State item carries indexExpiresAt (a test pins it). The legacy table stays as it is.
+      ...(naming.env === undefined ? {} : { timeToLiveAttribute: INDEX_EXPIRY_ATTRIBUTE }),
     });
 
     const artifacts = new s3.Bucket(this, "Artifacts", {
@@ -624,7 +628,21 @@ export class ControlPlaneStack extends Stack {
         naming, env: naming.env, api, stage: defaultStage, brokerIntegration: integration, broker, slackSecret, parameters: signInParameters, turnRecords,
       });
       // Spec 025 phase 25c: sharing, named environments only (D14).
-      new DeveloperTaskNotifier(this, "DeveloperTaskNotifier", { naming, state, slackSecret, notifyOperator });
+      const notifier = new DeveloperTaskNotifier(this, "DeveloperTaskNotifier", { naming, state, slackSecret, notifyOperator });
+      // Spec 025 A13: the admin health route reads the environment's alarms, by name prefix, and
+      // the depths of its dead-letter queues. Read-only, and on exactly these resources.
+      const alarmPrefix = naming.alarmName("");
+      broker.addEnvironment("AGENTX_ALARM_PREFIX", alarmPrefix);
+      broker.addToRolePolicy(new iam.PolicyStatement({
+        actions: ["cloudwatch:DescribeAlarms"],
+        resources: [`arn:${this.partition}:cloudwatch:${this.region}:${this.account}:alarm:${alarmPrefix}*`],
+      }));
+      const deadLetterQueues = { dispatch: deadLetterQueue, "slack-requests": slackDeadLetterQueue, "developer-notices": notifier.deadLetters, "developer-notice-stream": notifier.streamFailures };
+      broker.addEnvironment("HEALTH_DEAD_LETTER_QUEUES", this.toJsonString(Object.fromEntries(Object.entries(deadLetterQueues).map(([name, queue]) => [name, queue.queueUrl]))));
+      broker.addToRolePolicy(new iam.PolicyStatement({
+        actions: ["sqs:GetQueueAttributes"],
+        resources: Object.values(deadLetterQueues).map((queue) => queue.queueArn),
+      }));
       // C10: the ingress reads shared thread records by key; its SLACK_BINDING# statement is unchanged.
       slackIngress.addEnvironment("SHARED_TASKS", "enabled");
       slackIngress.addToRolePolicy(new iam.PolicyStatement({
@@ -642,6 +660,8 @@ export class ControlPlaneStack extends Stack {
     }
 
     const sessions = new SessionLifecycle(this, "Sessions", { naming, state, invokeSigningKey, notifyOperator });
+    // A6: where the State table expires index items itself, the reconciler's legacy sweep is off.
+    if (naming.env !== undefined) sessions.reconciler.addEnvironment("INDEX_EXPIRY", "ttl");
     // Own both attachments in this releasable stack. Secret changes must never mutate the
     // protected foundation template or require a separate foundation change set.
     grantOpenRouterSecret(this, [slackOrchestratorRole.roleName, sessions.instanceRoleName]);

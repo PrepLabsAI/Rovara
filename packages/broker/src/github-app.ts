@@ -238,6 +238,17 @@ export class GitHubAppCredentialProvider {
     return { id: id as number, login };
   }
 
+  /** Spec 025 A13: how many accounts the App is installed on (the first 100), for the health route. */
+  async installationCount(): Promise<number> {
+    const response = await this.fetchImplementation("https://api.github.com/app/installations?per_page=100", {
+      headers: await this.appHeaders(), signal: AbortSignal.timeout(5_000), redirect: "error",
+    });
+    if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub App installations lookup failed with HTTP ${response.status}`);
+    const body: unknown = await response.json();
+    if (!Array.isArray(body)) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid installations response");
+    return body.length;
+  }
+
   private async appHeaders(): Promise<Record<string, string>> {
     const privateKey = await this.options.getPrivateKey();
     const jwt = createGitHubAppJwt(this.options.appId, privateKey, this.now());

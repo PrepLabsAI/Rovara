@@ -10,24 +10,39 @@ import { expect } from "vitest";
 import { agentxMcpServer } from "../../packages/cli/src/mcp/serve.js";
 import { developerTokenKey, saveDeveloperEnvironment } from "../../packages/cli/src/developer/config.js";
 import { InMemoryTokenStore } from "../../packages/cli/src/token-store.js";
-import { DEV_ISSUER, bearerFor, type createDeveloperTaskBroker, type Developer } from "./developer-task-broker.js";
+import { ADMIN_SUBJECT } from "./admin-read-broker.js";
+import { DEV_ISSUER, MAYA, bearerFor, type createDeveloperTaskBroker, type Developer } from "./developer-task-broker.js";
 import { toolError, type ParsedToolError } from "./mcp-tool-error.js";
+import { issuer } from "./slack-broker.js";
 
 type Harness = Awaited<ReturnType<typeof createDeveloperTaskBroker>>;
 
 export const URL_BASE = "https://abc123.execute-api.us-east-1.amazonaws.com";
 export const REFRESH_TOKEN = `agxr_${"a".repeat(43)}`;
+export const ADMIN_TOKEN = "admin-token-for-mcp-tests-7d1c";
+export const NON_ADMIN_TOKEN = "cognito-user-without-admin-group-2b9e";
 
-/** The control plane as the MCP server sees it: agentx-configuration, and /v1/dev/* on the broker. */
+/**
+ * The control plane as the MCP server sees it: agentx-configuration, /v1/dev/* on the broker, and
+ * /v1/admin/* behind API Gateway's JWT authorizer (ADMIN_TOKEN carries the admins group,
+ * NON_ADMIN_TOKEN none, and any other bearer is refused before the broker).
+ */
 export function mcpBrokerFetch(harness: Harness): typeof fetch {
   return async (input, init) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
-    if (url.pathname === "/v1/auth/.well-known/agentx-configuration") return Response.json({ env: "staging", apiVersion: "1.2", issuer: DEV_ISSUER });
+    if (url.pathname === "/v1/auth/.well-known/agentx-configuration") return Response.json({ env: "staging", apiVersion: "1.2", adminApiVersion: "1.0", issuer: DEV_ISSUER });
+    const authorization = new Headers(init?.headers).get("authorization") ?? "";
+    let authorizer: { jwt: { claims: Record<string, unknown> } } | undefined;
+    if (url.pathname.startsWith("/v1/admin/")) {
+      const bearer = authorization.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : "";
+      if (bearer !== ADMIN_TOKEN && bearer !== NON_ADMIN_TOKEN) return Response.json({ message: "Unauthorized" }, { status: 401 });
+      authorizer = { jwt: { claims: { iss: issuer, sub: ADMIN_SUBJECT, groups: bearer === ADMIN_TOKEN ? ["admins"] : [] } } };
+    }
     const response = await harness.handler({
       version: "2.0", rawPath: url.pathname, rawQueryString: url.search.slice(1),
-      headers: { authorization: new Headers(init?.headers).get("authorization") ?? "" },
+      headers: { authorization },
       ...(typeof init?.body === "string" ? { body: init.body } : {}),
-      requestContext: { requestId: randomUUID(), http: { method: init?.method ?? "GET" } },
+      requestContext: { requestId: randomUUID(), http: { method: init?.method ?? "GET" }, ...(authorizer === undefined ? {} : { authorizer }) },
     });
     return new Response(response.body, { status: response.statusCode, headers: { "content-type": "application/json" } });
   };
@@ -44,7 +59,7 @@ export async function signedInClient(harness: Harness, who: Developer | undefine
   const stderr: string[] = [];
   let now = 0;
   const server = agentxMcpServer({
-    home, tokenStore, fetch: mcpBrokerFetch(harness), adminSignedIn: async () => false, stderr: { write: (text: string) => stderr.push(text) },
+    home, tokenStore, fetch: mcpBrokerFetch(harness), adminSignedIn: async () => false, adminSession: async () => undefined, stderr: { write: (text: string) => stderr.push(text) },
     clock: { now: () => now, sleep: async (ms) => { now += ms; await onSleep(); } },
   });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
@@ -68,4 +83,32 @@ export async function signedInClient(harness: Harness, who: Developer | undefine
     }
   };
   return { tool, home, stderr, expectNoTokenLeaked };
+}
+
+/** Spec 025 phase 25d: `agentx mcp` with a developer sign-in and, unless `adminToken` is null, an admin sign-in. */
+export async function adminSignedInClient(harness: Harness, options: { adminToken?: string | null; who?: Developer } = {}) {
+  const home = await mkdtemp(join(tmpdir(), "agentx-mcp-admin-"));
+  const tokenStore = new InMemoryTokenStore();
+  await saveDeveloperEnvironment(home, "staging", { url: URL_BASE, issuer: DEV_ISSUER, tokenEndpoint: `${DEV_ISSUER}/token`, revocationEndpoint: `${DEV_ISSUER}/revoke` });
+  const developerToken = (await bearerFor(options.who ?? MAYA)).slice("Bearer ".length);
+  await tokenStore.set(developerTokenKey(DEV_ISSUER), { accessToken: developerToken, refreshToken: REFRESH_TOKEN, expiresAt: Date.now() + 3_600_000 });
+  const adminToken = options.adminToken === null ? undefined : options.adminToken ?? ADMIN_TOKEN;
+  const stderr: string[] = [];
+  const server = agentxMcpServer({
+    home, tokenStore, fetch: mcpBrokerFetch(harness), stderr: { write: (text: string) => stderr.push(text) },
+    adminSignedIn: async () => adminToken !== undefined,
+    adminSession: async () => (adminToken === undefined ? undefined : { baseUrl: URL_BASE, accessToken: adminToken }),
+  });
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverSide);
+  const client = new Client({ name: "claude-code", version: "2.1.0" });
+  await client.connect(clientSide);
+  const answers: string[] = [];
+  const tool = async (name: string, args: Record<string, unknown> = {}): Promise<ToolAnswer> => {
+    const result = await client.callTool({ name, arguments: args });
+    answers.push(JSON.stringify(result));
+    return result.isError === true ? { isError: true, value: {}, error: toolError(result) } : { isError: false, value: result.structuredContent as Record<string, unknown> };
+  };
+  const names = async () => (await client.listTools()).tools.map((entry) => entry.name);
+  return { tool, names, stderr, answers, developerToken };
 }

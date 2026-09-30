@@ -7,7 +7,7 @@ import { KMSClient } from "@aws-sdk/client-kms";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { createRemoteJWKSet, type JWTVerifyGetKey } from "jose";
-import type { ChannelInfoRequest, ChannelMembersRequest, DeveloperSignInMethod } from "@agentx/contracts";
+import type { ChannelInfoRequest, ChannelMembersRequest, DeveloperSignInMethod, SlackAuthCheckRequest, SlackUserByEmailRequest } from "@agentx/contracts";
 import { ProviderNotConfiguredError, oidcSignInProvider, slackSignInProvider, type SignInProvider } from "../developer/providers.js";
 import { createDeveloperIdentityHandler, type DeveloperIdentityConfig } from "../developer/server.js";
 import { slackDirectory } from "../developer/slack-directory.js";
@@ -179,7 +179,7 @@ function build(env: NodeJS.ProcessEnv): ReturnType<typeof createDeveloperIdentit
   });
 }
 
-export const handler = async (event: HttpApiV2Event | ChannelMembersRequest | ChannelInfoRequest) => {
+export const handler = async (event: HttpApiV2Event | ChannelMembersRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest) => {
   built ??= build(process.env);
   return built(event);
 };

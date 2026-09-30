@@ -64,6 +64,10 @@ export async function createDeveloperTaskBroker(options: {
   /** null: the environment has no channel-info lookup configured at all. */
   channelInfo?: ((request: ChannelInfoRequest) => Promise<ChannelInfoResponse>) | null;
   register?: boolean;
+  /** Spread into the DeveloperApiConfiguration last. */
+  developerExtra?: Partial<DeveloperApiConfiguration>;
+  /** Passed to createBroker as its `extra` broker input. */
+  brokerExtra?: Record<string, unknown>;
 } = {}) {
   const module = await loadSlackBroker() as unknown as { createDeveloperTaskActions: (input: never) => DeveloperTaskActions };
   const channelMembers = vi.fn(options.channelMembers ?? (async (request: ChannelMembersRequest): Promise<ChannelMembersResponse> => ({ ok: true, memberOf: request.slackUserId === MAYA.slackUserId ? request.channelIds.filter((id) => id === SLACK_CHANNEL) : [] })));
@@ -73,6 +77,7 @@ export async function createDeveloperTaskBroker(options: {
     ...(options.slackTeamId === null ? {} : { slackTeamId: options.slackTeamId ?? SLACK_TEAM }),
     signInTableName: "signin", channelMembers, ...(options.channelInfo === null ? {} : { channelInfo }),
     verifyAccessToken: developerTokenVerifier({ issuer: DEV_ISSUER, keys: async () => [await signer.publicJwk()], now: () => Date.now() }),
+    ...options.developerExtra,
   };
   const s3 = memoryS3();
   const { db, handler, deleteEc2Session, brokerInput } = createBroker({
@@ -80,6 +85,7 @@ export async function createDeveloperTaskBroker(options: {
     ...(options.memberLimit === undefined ? {} : { memberLimit: options.memberLimit }),
     ...(options.organizationLimit === undefined ? {} : { organizationLimit: options.organizationLimit }),
     developer, turnRecordsTableName: "turns", slackThreadsTableName: "threads",
+    ...(options.brokerExtra === undefined ? {} : { extra: options.brokerExtra }),
   });
   const actions = module.createDeveloperTaskActions(brokerInput as never);
   for (const who of [MAYA, OMAR]) {

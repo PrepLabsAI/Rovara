@@ -9,7 +9,23 @@ import { NEXT_STEPS, ToolError, UPGRADE_AGENTX_STEP, plainText } from "./errors.
  */
 export const REQUIRED_SERVER_MINOR = 2;
 
-export interface Compatibility { env: string; apiVersion: string; notice?: string }
+export interface Compatibility {
+  env: string;
+  apiVersion: string;
+  notice?: string;
+  /** Spec 025 A1: the control plane's admin API version; absent before 25d. */
+  adminApiVersion?: string;
+}
+
+/** Spec 025 A1: the admin read tools arrived in admin API 1.0. */
+export const REQUIRED_ADMIN_MINOR = 0;
+
+export function adminApiFits(version: string | undefined): "fits" | "missing" | "too_old" | "incompatible" {
+  if (version === undefined) return "missing";
+  const match = /^(\d+)\.(\d+)$/.exec(version);
+  if (match === null || match[1] !== "1") return "incompatible";
+  return Number(match[2]) >= REQUIRED_ADMIN_MINOR ? "fits" : "too_old";
+}
 
 const version = (value: string): [number, number] | undefined => {
   const match = /^(\d+)\.(\d+)$/.exec(value);
@@ -43,6 +59,7 @@ export function compatibilityChecker(client: ControlPlaneClient, options: { now?
     const value: Compatibility = {
       env: configuration.env,
       apiVersion: configuration.apiVersion,
+      ...(configuration.adminApiVersion === undefined ? {} : { adminApiVersion: configuration.adminApiVersion }),
       ...(upgradeNotice ? { notice: `a newer AgentX CLI is available for API ${configuration.apiVersion}; ${NEXT_STEPS.UPGRADE_REQUIRED}` } : {}),
     };
     cached = { at: now(), value };

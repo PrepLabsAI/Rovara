@@ -13,6 +13,7 @@ import type { Ec2RuntimeBinding, WorkspaceSession, WorkspaceSessionState } from 
 import { requiredEnvironment } from "./lambda.js";
 import { failActiveOperation } from "./outbox-failure.js";
 import { SessionManager, workspaceBinding } from "./sessions.js";
+import { expireIndexDays, indexSweepWanted } from "./index-expiry.js";
 import { sweepStuckSetups } from "./stuck-setup.js";
 
 /** A just-launched instance or just-created volume is not judged until its session has recorded it. */
@@ -62,6 +63,8 @@ export interface ReconcilerDependencies {
   emit: (metrics: Record<string, number>) => void;
   /** Spec 025 FR-055: fails developer-task prepares 50 minutes old; absent in tests that do not need it. */
   sweepStuckSetups?: (now: Date) => Promise<{ failed: string[] }>;
+  /** Spec 025 A6: deletes failure and usage index days older than 30 days; absent in tests that do not need it. */
+  expireIndexDays?: (now: Date) => Promise<{ deleted: number }>;
   now?: () => Date;
   log?: (entry: Record<string, unknown>) => void;
 }
@@ -151,6 +154,16 @@ export function createReconcilerHandler(dependencies: ReconcilerDependencies) {
       } catch (error) {
         sweepError = error instanceof Error ? error : new Error("stuck-setup sweep failed");
         log({ event: "reconciler.stuck_setup_sweep_failed", errorName: error instanceof Error ? error.name : "unknown" });
+      }
+    }
+
+    // Spec 025 A6: housekeeping. A failure is logged by its error name and the run goes on; the
+    // next run's 15-day look-back catches the day up, so no metric or report field changes.
+    if (dependencies.expireIndexDays !== undefined) {
+      try {
+        await dependencies.expireIndexDays(new Date(now));
+      } catch (error) {
+        log({ event: "reconciler.index_expiry_failed", errorName: error instanceof Error ? error.name : "unknown" });
       }
     }
 
@@ -366,6 +379,7 @@ export const handler = createReconcilerHandler({
   },
   binding: (workspaceId) => workspaceBinding(documentClient, tableName, workspaceId),
   sweepStuckSetups: (now) => sweepStuckSetups(documentClient, tableName, now, (entry) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }))),
+  ...(indexSweepWanted(process.env) ? { expireIndexDays: (now: Date) => expireIndexDays(documentClient, tableName, now, (entry) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }))) } : {}),
   emit(metrics) {
     console.log(JSON.stringify({
       _aws: {
