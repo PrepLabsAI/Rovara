@@ -2,7 +2,7 @@
 // Spec 025 E8, E9, E19: the handlers 25e's change tools apply that had no admin command before.
 import { describe, expect, it, vi } from "vitest";
 import { developerIdForSlackUser, endSessions, grantProjectAccess, projectGrant, resolveDeveloper, revokeProjectAccess, setWorkspaceLimits, type AdminActionDependencies } from "../../packages/broker/src/aws/admin-actions.js";
-import { readWorkspaceLimits } from "../../packages/broker/src/developer/limits.js";
+import { MAX_PER_ORGANIZATION, MAX_PER_PERSON, isWholeLimit, readWorkspaceLimits } from "../../packages/broker/src/developer/limits.js";
 import { emailIndexKey } from "../../packages/broker/src/developer/store.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
@@ -52,6 +52,10 @@ describe("who a developer is (E8, Q4)", () => {
     await expect(resolveDeveloper(d, "ghost@example.com")).rejects.toMatchObject({ code: "NOT_FOUND", message: NOT_SIGNED_IN });
     d.db.set({ pk: `DEVELOPER#${ghost}`, sk: "META", provider: "oidc", displayName: "Ghost", revoked: false });
     await expect(resolveDeveloper(d, "ghost@example.com")).rejects.toMatchObject({ code: "NOT_FOUND", message: NOT_SIGNED_IN });
+    // A malformed developer ID in the index is never followed, even to a record that holds the email.
+    d.db.set({ ...emailIndexKey("odd@example.com"), developerId: "not-hex" });
+    d.db.set({ pk: "DEVELOPER#not-hex", sk: "META", provider: "oidc", displayName: "Odd", email: "odd@example.com", revoked: false });
+    await expect(resolveDeveloper(d, "odd@example.com")).rejects.toMatchObject({ code: "NOT_FOUND", message: NOT_SIGNED_IN });
   });
 
   it("names nobody by email where developer sign-in is not set up", async () => {
@@ -79,7 +83,38 @@ describe("grants (FR-013.1)", () => {
   });
 });
 
+describe("a grant that races another write (FR-013.1)", () => {
+  function racing(role: "developer" | "administrator") {
+    const d = deps();
+    const id = developerIdForSlackUser("U0ADA00001");
+    const send = d.db.send.bind(d.db);
+    // Another writer adds the row between the grant's read and its conditional put.
+    d.documentClient = { send: async (command: unknown) => {
+      if ((command as { constructor: { name: string } }).constructor.name === "PutCommand") d.db.set({ pk: `MEMBER#${id}`, sk: "PROJECT#payments", entityType: "MEMBERSHIP", ownerKey: id, projectName: "payments", role });
+      return send(command);
+    } };
+    return { d, id };
+  }
+
+  it("refuses when an administrator row won the race, and keeps it as it is", async () => {
+    const { d, id } = racing("administrator");
+    await expect(grantProjectAccess(d, ADMIN, "payments", id)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    expect(d.db.get(`MEMBER#${id}`, "PROJECT#payments")).toMatchObject({ role: "administrator" });
+    expect(d.db.get(`MEMBER#${id}`, "PROJECT#payments")).not.toHaveProperty("grantedBy");
+  });
+
+  it("says already granted when a developer row won the race", async () => {
+    const { d, id } = racing("developer");
+    expect(await grantProjectAccess(d, ADMIN, "payments", id)).toEqual({ granted: true, already: true });
+  });
+});
+
 describe("the workspace limits setting (E19, FR-053)", () => {
+  it("shares its bounds with the reader", () => {
+    expect([MAX_PER_PERSON, MAX_PER_ORGANIZATION]).toEqual([50, 1_000]);
+    expect([isWholeLimit(1, 50), isWholeLimit(50, 50), isWholeLimit(0, 50), isWholeLimit(51, 50), isWholeLimit(2.5, 50), isWholeLimit("3", 50)]).toEqual([true, true, false, false, false, false]);
+  });
+
   it("writes the setting the broker already reads, with who and when", async () => {
     const d = deps();
     expect(await setWorkspaceLimits(d, ADMIN, { perPerson: 5, perOrganization: 40 })).toEqual({ perPerson: 5, perOrganization: 40, updatedAt: "2026-10-02T09:00:00.000Z" });

@@ -3,7 +3,7 @@
 // is called only by a confirmed change (Task 7) or by the CLI's own change path (Tasks 14, 15).
 import { DeleteCommand, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { SLACK_OIDC_ISSUER, SlackUserIdSchema, agentXError, type EndDeveloperSessionsRequest, type EndDeveloperSessionsResponse } from "@agentx/contracts";
-import { WORKSPACE_LIMITS_KEY } from "../developer/limits.js";
+import { MAX_PER_ORGANIZATION, MAX_PER_PERSON, WORKSPACE_LIMITS_KEY, isWholeLimit } from "../developer/limits.js";
 import { emailIndexKey } from "../developer/store.js";
 import { ownerKeyForSubject } from "./lambda.js";
 
@@ -26,9 +26,6 @@ export interface ResolvedDeveloper {
 
 const HEX64 = /^[a-f0-9]{64}$/;
 const EMAIL = /^[^\s@]{1,64}@[^\s@]{1,190}\.[^\s@]{2,63}$/;
-// The same bounds readWorkspaceLimits accepts, so a written setting is never one the broker ignores.
-const MAX_PER_PERSON = 50;
-const MAX_PER_ORGANIZATION = 1_000;
 // Never the email itself: an error can reach a log, a tool result or a Slack post.
 const EMAIL_NOT_SIGNED_IN = "nobody has signed in to AgentX with that email yet; name them by Slack user ID, or ask them to sign in first";
 const conditional = (error: unknown) => error instanceof Error && error.name === "ConditionalCheckFailedException";
@@ -125,12 +122,11 @@ export async function revokeProjectAccess(deps: AdminActionDependencies, project
   }
 }
 
-const whole = (value: number, max: number) => Number.isInteger(value) && value >= 1 && value <= max;
-
 /** E19, FR-053: the setting the broker reads at each workspace creation. */
 export async function setWorkspaceLimits(deps: AdminActionDependencies, admin: { issuer: string; subject: string }, limits: { perPerson: number; perOrganization: number }): Promise<{ perPerson: number; perOrganization: number; updatedAt: string }> {
-  if (!whole(limits.perPerson, MAX_PER_PERSON)) throw agentXError("CONFIG_INVALID", `the per-person limit must be a whole number from 1 to ${MAX_PER_PERSON}`);
-  if (!whole(limits.perOrganization, MAX_PER_ORGANIZATION)) throw agentXError("CONFIG_INVALID", `the organization limit must be a whole number from 1 to ${MAX_PER_ORGANIZATION}`);
+  // The bounds readWorkspaceLimits accepts, so a written setting is never one the broker ignores.
+  if (!isWholeLimit(limits.perPerson, MAX_PER_PERSON)) throw agentXError("CONFIG_INVALID", `the per-person limit must be a whole number from 1 to ${MAX_PER_PERSON}`);
+  if (!isWholeLimit(limits.perOrganization, MAX_PER_ORGANIZATION)) throw agentXError("CONFIG_INVALID", `the organization limit must be a whole number from 1 to ${MAX_PER_ORGANIZATION}`);
   if (limits.perPerson > limits.perOrganization) throw agentXError("CONFIG_INVALID", `the per-person limit (${limits.perPerson}) cannot be more than the organization limit (${limits.perOrganization})`);
   const updatedAt = new Date(deps.now()).toISOString();
   await deps.documentClient.send(new PutCommand({

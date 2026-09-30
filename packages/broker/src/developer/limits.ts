@@ -10,7 +10,10 @@ export const WORKSPACE_LIMITS_KEY = { pk: "SETTINGS", sk: "WORKSPACE_LIMITS" } a
 export interface WorkspaceLimits { member: number; organization: number; source: "setting" | "parameters" }
 
 const defaultLog = (entry: Record<string, unknown>) => console.log(JSON.stringify({ component: "broker", ...entry }));
-const whole = (value: unknown, max: number): value is number => Number.isInteger(value) && (value as number) >= 1 && (value as number) <= max;
+/** FR-053: the bounds a setting must meet to be read; the admin writer refuses anything outside them. */
+export const MAX_PER_PERSON = 50;
+export const MAX_PER_ORGANIZATION = 1_000;
+export const isWholeLimit = (value: unknown, max: number): value is number => Number.isInteger(value) && (value as number) >= 1 && (value as number) <= max;
 
 export async function readWorkspaceLimits(
   client: Client,
@@ -24,7 +27,7 @@ export async function readWorkspaceLimits(
   const member = item.perPerson;
   const organization = item.perOrganization;
   // FR-053: the per-person limit never exceeds the per-organization one.
-  if (!whole(member, 50) || !whole(organization, 1_000) || member > organization) {
+  if (!isWholeLimit(member, MAX_PER_PERSON) || !isWholeLimit(organization, MAX_PER_ORGANIZATION) || member > organization) {
     log({ event: "workspace_limits.invalid_setting" });
     return { ...fallback, source: "parameters" };
   }
