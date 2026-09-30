@@ -3,7 +3,7 @@
 // changes nothing: it says what will happen, hashes what it read, and says how to apply it through
 // the existing handler. Every value it shows passes through redaction first.
 import {
-  ADMIN_CHANGE_EFFECT_MAX, AgentXNameSchema, CredentialRegistrationSchema, SlackChannelIdSchema, agentXError, redactSecrets, redactText,
+  ADMIN_CHANGE_EFFECT_MAX, AgentXNameSchema, CredentialRegistrationSchema, SlackChannelIdSchema, agentXError, isCredentialKey, redactSecrets, redactText,
   type AdminChangeInput, type AdminChangeKind, type ChannelByNameRequest, type ChannelByNameResponse, type ProjectDefinition,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
@@ -55,10 +55,19 @@ const show = (value: unknown): string => {
   return text.length > SHOWN_VALUE_MAX ? `${text.slice(0, SHOWN_VALUE_MAX - 3)}...` : text;
 };
 
-function leaves(value: unknown, path: string, into: Map<string, unknown>): Map<string, unknown> {
-  if (Array.isArray(value)) value.forEach((entry, index) => leaves(entry, `${path}[${index}]`, into));
-  else if (value !== null && typeof value === "object") for (const [key, entry] of Object.entries(value)) leaves(entry, path === "" ? key : `${path}.${key}`, into);
-  else into.set(path, value);
+const REDACTED = "[REDACTED]";
+
+/** Each leaf by path; a leaf under a credential-named key, or a credential-named pair's value, is marked secret (as redactSecrets decides). */
+function leaves(value: unknown, path: string, into: Map<string, { value: unknown; secret: boolean }>, secret = false): Map<string, { value: unknown; secret: boolean }> {
+  if (Array.isArray(value)) value.forEach((entry, index) => leaves(entry, `${path}[${index}]`, into, secret));
+  else if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const pairName = [record.name, record.key, record.Name, record.Key].find((name) => typeof name === "string");
+    const pairSecret = typeof pairName === "string" && isCredentialKey(pairName);
+    for (const [key, entry] of Object.entries(record)) {
+      leaves(entry, path === "" ? key : `${path}.${key}`, into, secret || isCredentialKey(key) || (pairSecret && /^value$/i.test(key)));
+    }
+  } else into.set(path, { value, secret });
   return into;
 }
 
@@ -66,22 +75,24 @@ function leaves(value: unknown, path: string, into: Map<string, unknown>): Map<s
 export function fieldDiff(before: unknown, after: unknown, max = 200): Array<{ field: string; from?: string; to?: string }> {
   const old = leaves(before, "", new Map());
   const next = leaves(after, "", new Map());
+  const shown = (leaf: { value: unknown; secret: boolean }) => show(leaf.secret && leaf.value !== null && leaf.value !== undefined ? REDACTED : leaf.value);
   const changes: Array<{ field: string; from?: string; to?: string }> = [];
   // A field name is the definition's own text, so it is redacted like a value.
-  for (const [field, value] of next) {
-    if (!old.has(field)) changes.push({ field: redactText(field), to: show(value) });
-    else if (JSON.stringify(old.get(field)) !== JSON.stringify(value)) changes.push({ field: redactText(field), from: show(old.get(field)), to: show(value) });
+  for (const [field, leaf] of next) {
+    const was = old.get(field);
+    if (was === undefined) changes.push({ field: redactText(field), to: shown(leaf) });
+    else if (JSON.stringify(was.value) !== JSON.stringify(leaf.value)) changes.push({ field: redactText(field), from: shown(was), to: shown(leaf) });
   }
-  for (const [field, value] of old) if (!next.has(field)) changes.push({ field: redactText(field), from: show(value) });
+  for (const [field, leaf] of old) if (!next.has(field)) changes.push({ field: redactText(field), from: shown(leaf) });
   return changes.slice(0, max);
 }
 
 /** FR-030: a credential tool refuses any input that looks like a secret value. */
 export function looksLikeSecret(value: string): boolean {
   if (redactText(value) !== value) return true;
-  // A long unbroken run of key-like characters is refused too, whatever its prefix; a descriptive
-  // name broken by "-", "_", "." or "/" is not.
-  return /[A-Za-z0-9+=]{32,}/.test(value);
+  // A long unbroken run of key-like characters is refused too, whatever its prefix. Only "/" and "."
+  // separate, so a base64url secret with "_" or "-" inside is caught; a dotted or pathed name is not.
+  return value.split(/[/.]/).some((part) => part.length >= 32 && /^[A-Za-z0-9_+=-]+$/.test(part));
 }
 
 const CHANNEL_NAME = /^[a-z0-9][a-z0-9._-]{0,79}$/;
@@ -212,6 +223,10 @@ type ConnectorsOf = { integrations?: { connectors?: Array<{ credentialRef?: unkn
 
 const planCredential: Planner = async (deps, identity, input) => {
   if (input.kind !== "register_credential") throw new Error("wrong planner");
+  // Defence in depth: the route checks the claim too, and registration checks it again at apply.
+  if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required; sign in as an AgentX administrator");
+  if (deps.credentials === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "connector credentials are not configured in this deployment; ask whoever deploys AgentX to set them up");
+  const credentials = deps.credentials;
   // FR-030: refuse anything that looks like a secret value before it is read, shown or stored.
   if ([input.ref, input.type, input.secretName].some(looksLikeSecret)) throw agentXError("CONFIG_INVALID", `that input looks like a secret value; give the secret's name under ${deps.connectorSecretPrefix}, never its value`);
   const parsed = CredentialRegistrationSchema.safeParse({ ref: input.ref, type: input.type, secretName: input.secretName });
@@ -222,10 +237,9 @@ const planCredential: Planner = async (deps, identity, input) => {
   const registration = parsed.data;
   if (!registration.secretName.startsWith(deps.connectorSecretPrefix)) throw agentXError("CONFIG_INVALID", `the secret name must be ${deps.connectorSecretPrefix}<name> in this deployment; create the secret there and plan again`);
   if (registration.ref === deps.builtInCredentialRef) throw agentXError("CONFIG_INVALID", `${registration.ref} is the built-in GitHub App credential and cannot be replaced; register the connector's credential under another reference`);
-  if (deps.credentials === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "connector credentials are not configured in this deployment; ask whoever deploys AgentX to set them up");
   const [current, check, projects] = await Promise.all([
-    deps.credentials.registration(registration.ref),
-    deps.credentials.checkSecret(registration),
+    credentials.registration(registration.ref),
+    credentials.checkSecret(registration),
     // C6: the admin's project list, read once with each latest revision.
     adminProjects(deps.reads, identity),
   ]);

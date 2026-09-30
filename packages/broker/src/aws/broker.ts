@@ -369,7 +369,11 @@ function adminChangeHandlers(dependencies: AwsBrokerDependencies): AdminChangeHa
       const preflight = await registrationChecks(dependencies, identity, definition, true);
       return { definition, warnings: registrationWarnings(toolBudget(approvedToolCount(definition)).warning, preflight) };
     },
-    registerRevision: async (identity, definition, runtimeBinding) => registerProject(dependencies, identity, { definition, runtimeBinding, preflight: false }),
+    registerRevision: async (identity, definition, runtimeBinding) => {
+      // E6, FR-015: the applier must still administer the project; registerProject itself checks only the claim.
+      await requireAdministrator(dependencies, identity, definition.name);
+      return registerProject(dependencies, identity, { definition, runtimeBinding, preflight: false });
+    },
     registerCredential: async (identity, registration) => {
       if (!dependencies.credentialRegistry) throw agentXError("RUNTIME_UNAVAILABLE", "connector credentials are not configured in this deployment; ask whoever deploys AgentX to set them up");
       return dependencies.credentialRegistry.register(identity, registration);

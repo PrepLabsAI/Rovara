@@ -97,6 +97,17 @@ describe("binding and unbinding (E7, E12)", () => {
     expect(db.get(`SLACK_BINDING#${SLACK_TEAM}`, `CHANNEL#${SLACK_CHANNEL}`)).toBeUndefined();
   });
 
+  it("rechecks project administration at apply: a bind or unbind by an admin who lost it changes nothing (E6, FR-015)", async () => {
+    const { deps, identity, db } = await harness();
+    const bind = await planChange(deps, identity, { kind: "bind_channel", channel: "C0LEDGER01", project: "payments" });
+    const unbind = await planChange(deps, identity, { kind: "unbind_channel", channel: SLACK_CHANNEL });
+    db.delete(`MEMBER#${identity.ownerKey}`, "PROJECT#payments");
+    await expect(bind.apply(identity)).rejects.toMatchObject({ code: expect.stringMatching(/^(FORBIDDEN|NOT_FOUND)$/) as unknown });
+    await expect(unbind.apply(identity)).rejects.toMatchObject({ code: expect.stringMatching(/^(FORBIDDEN|NOT_FOUND)$/) as unknown });
+    expect(db.get(`SLACK_BINDING#${SLACK_TEAM}`, "CHANNEL#C0LEDGER01")).toBeUndefined();
+    expect(db.get(`SLACK_BINDING#${SLACK_TEAM}`, `CHANNEL#${SLACK_CHANNEL}`)).toMatchObject({ projectName: "payments" });
+  });
+
   it("refuses an admin who does not administer the project (FR-015)", async () => {
     const { deps } = await harness();
     await expect(planChange(deps, { ...admin, ownerKey: "f".repeat(64) }, { kind: "unbind_channel", channel: SLACK_CHANNEL })).rejects.toMatchObject({ code: "NOT_FOUND" });
@@ -126,6 +137,15 @@ describe("a project revision (E7, E11)", () => {
     const result = await plan.apply(identity);
     expect(result).not.toHaveProperty("preflight");
     expect(db.get("PROJECT#payments", `REV#${"2".padStart(12, "0")}`)).toMatchObject({ entityType: "PROJECT" });
+  });
+
+  it("rechecks project administration at apply: a revision by an admin who lost it is refused and writes nothing (E6, FR-015)", async () => {
+    const { deps, identity, db } = await harness();
+    const plan = await planChange(deps, identity, { kind: "register_project_revision", definition: { name: "payments", revision: 2, repositories: [repository], setup: [], readiness: [], orchestratorInstructions: "Delegate." } });
+    db.delete(`MEMBER#${identity.ownerKey}`, "PROJECT#payments");
+    await expect(plan.apply(identity)).rejects.toMatchObject({ code: expect.stringMatching(/^(FORBIDDEN|NOT_FOUND)$/) as unknown });
+    expect(db.get("PROJECT#payments", `REV#${"2".padStart(12, "0")}`)).toBeUndefined();
+    expect(db.get(`MEMBER#${identity.ownerKey}`, "PROJECT#payments")).toBeUndefined();
   });
 
   it("redacts a planted secret in a revision's diff, and refuses a secret-looking credential input", async () => {
@@ -172,6 +192,14 @@ describe("a credential (E7, Q7)", () => {
     expect(stateHash(replacing.snapshot)).not.toBe(stateHash(plan.snapshot));
   });
 
+  it("refuses a caller without the admin claim, and says when credentials are not configured before any other check", async () => {
+    const { deps, identity } = await harness();
+    await expect(planChange(deps, { ...identity, isAdministrator: false }, { kind: "register_credential", ref: "linear", type: "static-secret", secretName: "agentx/connectors/linear" })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    const bare: PlanDependencies = { ...deps };
+    delete bare.credentials;
+    await expect(planChange(bare, identity, { kind: "register_credential", ref: "github-app", type: "static-secret", secretName: "agentx/other/linear" })).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+  });
+
   it("refuses the built-in GitHub App reference and a name outside the connector prefix (C6)", async () => {
     const { deps, identity } = await harness();
     await expect(planChange(deps, identity, { kind: "register_credential", ref: "github-app", type: "static-secret", secretName: "agentx/connectors/linear" })).rejects.toMatchObject({ code: "CONFIG_INVALID", message: "CONFIG_INVALID: github-app is the built-in GitHub App credential and cannot be replaced; register the connector's credential under another reference" });
@@ -198,10 +226,21 @@ describe("the helpers", () => {
     ]);
   });
 
+  it("shows a value under a credential-named key, or a credential-named pair's value, as redacted", () => {
+    const before = { integrations: { connectors: [{ name: "linear" }, { name: "jira", apiKey: "plain-value-1" }] }, env: [{ name: "DB_PASSWORD", value: "plain-value-2" }] };
+    const after = { integrations: { connectors: [{ name: "linear" }] }, env: [{ name: "DB_PASSWORD", value: "plain-value-3" }] };
+    const changes = fieldDiff(before, after);
+    expect(changes).toContainEqual({ field: "integrations.connectors[1].apiKey", from: '"[REDACTED]"' });
+    expect(changes).toContainEqual({ field: "env[0].value", from: '"[REDACTED]"', to: '"[REDACTED]"' });
+    expect(JSON.stringify(changes)).not.toMatch(/plain-value/);
+  });
+
   it("knows a secret-looking value", () => {
     expect(looksLikeSecret(PLANTED)).toBe(true);
     expect(looksLikeSecret("x".repeat(40))).toBe(true);
     expect(looksLikeSecret("agentx/connectors/linear")).toBe(false);
-    expect(looksLikeSecret("agentx/connectors/a-long-but-plain-descriptive-secret-name")).toBe(false);
+    // Only "/" and "." separate: a base64url secret with "_" or "-" inside is caught.
+    expect(looksLikeSecret(`agentx/connectors/${"Ab3_".repeat(5)}${"x-9Z".repeat(5)}`)).toBe(true);
+    expect(looksLikeSecret("agentx/connectors/linear.production.api.key.for.payments")).toBe(false);
   });
 });
