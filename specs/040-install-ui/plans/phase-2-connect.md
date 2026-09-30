@@ -106,13 +106,13 @@ PRs.
 
 1. **GitHub sends the browser back after the run has stopped waiting** (the 15-minute timeout, or
    the run ended). Expected: `/github/created` is no longer mounted, so it gets the ordinary
-   refusal (403 for GitHub's cross-site visit, 401 without its headers) and resolves nothing; the
+   refusal (403 for GitHub's cross-site visit, 401 without a session token) and resolves nothing; the
    step has already failed with "no GitHub App was created within 15 minutes; run agentx init
    again". Pinned in Task 5 (`init-ui-github.test.ts`, "a
    callback after the wait ended is refused like any other request").
 2. **The operator presses "Create the GitHub App" twice** and two GitHub tabs send the browser back.
    Expected: the first callback resolves the code, the second gets the ordinary refusal (403 for
-   GitHub's cross-site visit, 401 without its headers), and GitHub is asked for exactly one
+   GitHub's cross-site visit, 401 without a session token), and GitHub is asked for exactly one
    conversion. Pinned in Task 5 ("takes GitHub's cross-site redirect with the right state, once,
    and resolves the code").
 3. **A token pasted with a trailing newline or the terminal's bracketed-paste markers.** Expected:
@@ -124,8 +124,8 @@ PRs.
    (`init-aws-account.test.ts`, "shows a sign-in that could not run and asks again").
 5. **The operator fixes a quota and checks the prerequisites again.** Expected: every check runs
    again, and the new card lists only the new results, not the old failures. Pinned in Task 4
-   (`init-prerequisites.test.ts`, "checks everything again, and the card lists only the new
-   results").
+   (`init-ui-cli.test.ts`, "FR-023: a failed prerequisite is a checklist on the page, and checking
+   again after the fix goes on").
 
 ---
 
