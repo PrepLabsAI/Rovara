@@ -277,6 +277,21 @@ describe("a failed setup or readiness command (#154)", () => {
     expect(JSON.stringify(manifest.failure)).not.toContain(TOKEN.slice(0, 12));
   });
 
+  it("stores a readiness check's output in the manifest redacted, never raw (#170)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentx-workspace-"));
+    const source = await createGitFixture("stored");
+    const project = {
+      ...fixtureProject([{ name: "stored", commit: source.commit }]),
+      readiness: [{ cwd: "repo/stored", executable: "sh", args: ["-c", `echo "token ${TOKEN}"; echo "again ${TOKEN}" >&2`], timeoutSeconds: 10 }],
+    } satisfies ProjectDefinition;
+    const materializer: RepositoryMaterializer = async (_repository, destination) => {
+      await run("git", ["clone", "--quiet", source.directory, destination]);
+    };
+    const manifest = await prepareWorkspace({ rootPath: root, project, materializer });
+    expect(manifest.readinessResults[0]).toMatchObject({ ready: true, stdout: "token [REDACTED]\n", stderr: "again [REDACTED]\n" });
+    expect(await readFile(join(root, ".agentx/preparation-manifest.json"), "utf8")).not.toContain(TOKEN);
+  });
+
   it("names the first failed readiness check, how it failed, and how many more failed", async () => {
     const { message } = await preparing("ready", {
       readiness: [
