@@ -173,12 +173,23 @@ Use this when you want CDK's own diffs. It deploys the same release.
    npx @charterarc/agentx --env <env> init --region <region> --engine cdk --source agentx-<version>
    ```
 
-   `init` runs `npm ci` and `npm run build` in the checkout, then `cdk deploy` one stack at a time.
-   The steps and questions are the same as above.
+   `init` runs `npm ci` and `npm run build` in the checkout, then `cdk synth` once to read which
+   parameters each stack takes, then `cdk deploy` one stack at a time. The steps and questions are
+   the same as above.
 
-   The cdk engine builds the stacks from `--source`, but still reads the release's images and
-   notes. A published `agentx` downloads them. An `agentx` built from source has no published
-   release, so also pass `--release <dir>` (`npm run release:build` builds one).
+   A published `agentx` downloads its own release for the images and notes. An `agentx` built from
+   source needs no release when you pass `--engine cdk` and `--source` on the command line:
+
+   - The version is the checkout's release tag (`v<version>`). The checkout must be clean and at
+     exactly one release tag.
+   - The images come from `--worker-image` and `--slack-image` when you pass both. Otherwise `init`
+     downloads that tag's `release.json` from GitHub (only that file, not the release archive).
+     It must be the release built from the same commit.
+   - The regions to choose from are the ones in that `release.json`. Without it, pass `--region`,
+     or set the region in your AWS configuration.
+
+   `--release <dir>` still works with the cdk engine. It must hold the release of the checkout's
+   tag, or `init` stops before the plan.
 
 **The one difference in secret handling.** The CDK CLI takes the callback signing key only as a
 `cdk deploy --parameters` argument. So while that command runs, the key is visible in your own
@@ -187,7 +198,8 @@ and in the output. The templates engine passes the key to CloudFormation without
 a command line.
 
 An environment keeps its engine. Upgrades of a cdk environment need `--source` and admin
-credentials (see [docs/day-two.md](day-two.md)).
+credentials (see [docs/day-two.md](day-two.md)). An `agentx` built from source upgrades to the
+checkout's tag, with no `--release` or `--to`.
 
 ## Through your platform team (export)
 

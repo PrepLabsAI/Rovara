@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { agentXError, environmentStackName } from "@agentx/contracts";
+import { CDK_CONSTRUCT_IDS } from "../../packages/cli/src/deploy/cdk-engine.js";
 import { prepareDeployment } from "../../packages/cli/src/deploy/commands.js";
 import { executeCli } from "../../packages/cli/src/main.js";
 import { environmentCachePath } from "../../packages/cli/src/environments/cache.js";
@@ -106,7 +107,15 @@ async function harness(options: { releaseVersion?: string; regions?: string[] } 
       init: { ...deps, ...overrides },
     });
   const run = (argv: string[], overrides: Partial<InitCliDependencies> = {}) => runWithoutRegion(["--region", "us-east-1", ...argv], overrides);
-  return { store, secrets, deployer, github, opened, out, err, home, release, plane, alerts, cognito, setup, deps, run, runWithoutRegion,
+  /** Issue 152: no --release (and no --region unless argv gives one), as a source-built agentx runs with --engine cdk --source. */
+  const runWithoutRelease = (argv: string[], overrides: Partial<InitCliDependencies> = {}) =>
+    executeCli(["--env", "staging", "init", ...argv], {
+      stdout: { write: (text: string) => out.push(text) },
+      stderr: { write: (text: string) => err.push(text) },
+      environments: { home },
+      init: { ...deps, ...overrides },
+    });
+  return { store, secrets, deployer, github, opened, out, err, home, release, plane, alerts, cognito, setup, deps, run, runWithoutRegion, runWithoutRelease,
     printed: () => `${out.join("")}${err.join("")}`,
     /** Where the output stands now, and everything printed since (one run's output, on a rerun). */
     mark: () => ({ out: out.length, err: err.length }),
@@ -564,6 +573,190 @@ describe("agentx init", () => {
     expect(h.printed()).toContain("the cdk engine needs --source <a checkout of tag v1.2.3>");
     expect(h.printed()).not.toContain("Estimated monthly total");
     expect(h.store.calls.filter((call) => call.op === "put")).toEqual([]);
+  });
+
+  // Issue 152: a source-built agentx with --engine cdk --source needs no release directory.
+  describe("a source-built agentx with --engine cdk --source (issue 152)", () => {
+    const HEAD = "e".repeat(40);
+    const WORKER = `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx/worker@sha256:${"d".repeat(64)}`;
+    const SLACK_IMAGE = `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx/slack@sha256:${"e".repeat(64)}`;
+    const IMAGES = ["--worker-image", WORKER, "--slack-image", SLACK_IMAGE];
+    const MANIFEST_URL = "https://github.com/PrepLabsAI/AgentX/releases/download/v1.4.0/release.json";
+    /** A clean checkout at tag v1.4.0. */
+    const taggedSource = { async run(_command: string, args: string[]) {
+      if (args[0] === "status") return { stdout: "" };
+      if (args[0] === "rev-parse") return { stdout: `${HEAD}\n` };
+      return { stdout: "v1.4.0\n" };
+    } };
+    /** GitHub serves `manifest` (or nothing) for the tag; every other address goes to `inner`. */
+    const githubRelease = (inner: typeof fetch, manifest?: string): typeof fetch & { github: string[] } => {
+      const requested: string[] = [];
+      const handler = async (url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        const target = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+        if (!target.startsWith("https://github.com/PrepLabsAI/AgentX/releases/")) return inner(url, init);
+        requested.push(target);
+        return target === MANIFEST_URL && manifest !== undefined ? new Response(manifest, { status: 200 }) : new Response("Not Found", { status: 404 });
+      };
+      return Object.assign(handler, { github: requested });
+    };
+    const publishedManifest = JSON.stringify({
+      schemaVersion: 1, version: "1.4.0", gitCommit: HEAD, environmentPlaceholder: "qqenv-placeholderqq",
+      templates: ["us-east-1", "us-west-2"].map((region) => ({ region, part: "access", file: `templates/${region}/access.template.json`, sha256: "0".repeat(64) })),
+      packages: [], images: { worker: `public.ecr.aws/agentx/agentx-worker@sha256:${"b".repeat(64)}`, slack: `public.ecr.aws/agentx/agentx-slack@sha256:${"c".repeat(64)}` },
+    });
+
+    it("installs with both image flags and no release: the version is the tag's, and nothing is downloaded", async () => {
+      const h = await harness();
+      const fetchWithGitHub = githubRelease(h.deps.fetch as typeof fetch);
+      const prompter = scriptedPrompter([...FIRST_RUN.slice(1), ...SLACK, ...SIGNIN, ...FINISH]);
+      const code = await h.runWithoutRelease(["--region", "us-east-1", "--engine", "cdk", "--source", "/src", ...IMAGES], {
+        releaseVersion: null, fetch: fetchWithGitHub, prompter, deploy: { ...h.deps.deploy, commandRunner: taggedSource },
+      });
+      expect(h.printed()).not.toContain("AgentX error");
+      expect(code).toBe(0);
+      expect(fetchWithGitHub.github).toEqual([]);
+      expect(await readInstallAnswers(h.store, "staging")).toMatchObject({ engine: "cdk", releaseVersion: "1.4.0", images: { worker: WORKER, slack: SLACK_IMAGE } });
+      expect((await readEnvironmentSettings(h.store, "staging"))?.version).toBe("1.4.0");
+    });
+
+    it("without image flags, reads the tag's release.json and never the tarball, and offers its regions", async () => {
+      const h = await harness();
+      const fetchWithGitHub = githubRelease(h.deps.fetch as typeof fetch, publishedManifest);
+      // us-west-2 is only in the published release.json, not in the harness's release directory.
+      const prompter = scriptedPrompter(["us-west-2", ...FIRST_RUN.slice(1)]);
+      const code = await h.runWithoutRelease(["--engine", "cdk", "--source", "/src", "--stop-after", "prerequisites"], {
+        releaseVersion: null, fetch: fetchWithGitHub, prompter, deploy: { ...h.deps.deploy, commandRunner: taggedSource },
+      });
+      expect(h.printed()).not.toContain("AgentX error");
+      expect(code).toBe(0);
+      expect(prompter.asked[0]).toBe("AWS region");
+      expect(fetchWithGitHub.github).toEqual([MANIFEST_URL]);
+      expect(await readInstallAnswers(h.store, "staging")).toMatchObject({ engine: "cdk", releaseVersion: "1.4.0", region: "us-west-2" });
+    });
+
+    it("takes the region from the AWS configuration when there is no release.json to list regions", async () => {
+      const h = await harness();
+      const prompter = scriptedPrompter([...FIRST_RUN.slice(1)]);
+      const code = await h.runWithoutRelease(["--engine", "cdk", "--source", "/src", ...IMAGES, "--stop-after", "prerequisites"], {
+        releaseVersion: null, fetch: githubRelease(h.deps.fetch as typeof fetch), prompter, processEnv: { AWS_REGION: "eu-west-1" }, deploy: { ...h.deps.deploy, commandRunner: taggedSource },
+      });
+      expect(h.printed()).not.toContain("AgentX error");
+      expect(code).toBe(0);
+      expect(prompter.asked).not.toContain("AWS region");
+      expect(await readInstallAnswers(h.store, "staging")).toMatchObject({ region: "eu-west-1" });
+      // Review M6: the region taken without asking is said.
+      expect(h.printed()).toContain("Region eu-west-1, from your AWS configuration; pass --region to choose another");
+    });
+
+    it("offers and defaults to the configured region although release.json does not list it: the cdk engine synthesizes for any region (review M7)", async () => {
+      const h = await harness();
+      const prompter = scriptedPrompter(["", ...FIRST_RUN.slice(1)]);
+      const code = await h.runWithoutRelease(["--engine", "cdk", "--source", "/src", "--stop-after", "prerequisites"], {
+        releaseVersion: null, fetch: githubRelease(h.deps.fetch as typeof fetch, publishedManifest), prompter, processEnv: { AWS_REGION: "eu-west-1" }, deploy: { ...h.deps.deploy, commandRunner: taggedSource },
+      });
+      expect(h.printed()).not.toContain("AgentX error");
+      expect(code).toBe(0);
+      expect(await readInstallAnswers(h.store, "staging")).toMatchObject({ region: "eu-west-1" });
+    });
+
+    it("resumes an install begun with both image flags without them, although the tag has no published release.json (review I2)", async () => {
+      const h = await harness();
+      const first = await h.runWithoutRelease(["--region", "us-east-1", "--engine", "cdk", "--source", "/src", ...IMAGES, "--stop-after", "prerequisites"], {
+        releaseVersion: null, fetch: githubRelease(h.deps.fetch as typeof fetch), prompter: scriptedPrompter([...FIRST_RUN.slice(1)]), deploy: { ...h.deps.deploy, commandRunner: taggedSource },
+      });
+      expect(first).toBe(0);
+      const mark = h.mark();
+      const prompter = scriptedPrompter([...SLACK, ...SIGNIN, ...FINISH]);
+      const code = await h.runWithoutRelease(["--region", "us-east-1", "--engine", "cdk", "--source", "/src"], {
+        releaseVersion: null, fetch: githubRelease(h.deps.fetch as typeof fetch), prompter, deploy: { ...h.deps.deploy, commandRunner: taggedSource },
+      });
+      expect(h.printedSince(mark)).not.toContain("AgentX error");
+      expect(code).toBe(0);
+      expect(h.printedSince(mark)).toContain("Resuming the install of environment staging.");
+      expect((await readEnvironmentSettings(h.store, "staging"))?.version).toBe("1.4.0");
+    });
+
+    it("runs the real cdk deployment: build, one synth whose folder is removed, then cdk deploy (review M9)", async () => {
+      const h = await harness();
+      await h.store.put("/cdk-bootstrap/hnb659fds/version", "21");
+      const calls: Array<{ line: string; cwd: string }> = [];
+      const synthDirs: string[] = [];
+      const runner = {
+        async run(command: string, args: string[], options: { cwd: string }) {
+          calls.push({ line: [command, ...args.slice(0, 3)].join(" "), cwd: options.cwd });
+          if (command === "git") return taggedSource.run(command, args);
+          if (args[2] === "synth") {
+            const outDir = args[args.indexOf("-o") + 1] as string;
+            synthDirs.push(outDir);
+            const artifacts: Record<string, unknown> = {};
+            for (const [part, id] of Object.entries(CDK_CONSTRUCT_IDS)) {
+              await writeFile(join(outDir, `${id}.template.json`), JSON.stringify({ Parameters: {} }));
+              artifacts[id] = { type: "aws:cloudformation:stack", properties: { templateFile: `${id}.template.json`, stackName: environmentStackName("staging", part as never) } };
+            }
+            await writeFile(join(outDir, "manifest.json"), JSON.stringify({ version: "54.0.0", artifacts }));
+          }
+          const outputsFile = args.indexOf("--outputs-file") >= 0 ? args[args.indexOf("--outputs-file") + 1] : undefined;
+          if (outputsFile !== undefined) await writeFile(outputsFile, JSON.stringify(allStackOutputs()));
+          return { stdout: "" };
+        },
+      };
+      // No deployer override: the real prepareDeployment builds the cdk engine.
+      const deploy = { ...h.deps.deploy };
+      delete deploy.deployer;
+      const code = await h.runWithoutRelease(["--region", "us-east-1", "--engine", "cdk", "--source", "/src", ...IMAGES, "--stop-after", "access"], {
+        releaseVersion: null, fetch: githubRelease(h.deps.fetch as typeof fetch), prompter: scriptedPrompter([...FIRST_RUN.slice(1)]),
+        deploy: { ...deploy, commandRunner: runner, stackOutputs: async () => undefined },
+      });
+      expect(h.printed()).not.toContain("AgentX error");
+      expect(code).toBe(0);
+      const lines = calls.filter((call) => call.line.startsWith("npm") || call.line.startsWith("npx")).map((call) => call.line);
+      expect(lines).toEqual(["npm ci", "npm run build", "npx --no-install cdk synth", "npx --no-install cdk deploy"]);
+      expect(calls.every((call) => call.cwd === "/src")).toBe(true);
+      expect(synthDirs).toHaveLength(1);
+      await expect(stat(synthDirs[0] as string)).rejects.toThrow();
+    });
+
+    it("refuses with no region anywhere, naming --region, before asking anything", async () => {
+      const h = await harness();
+      const prompter = scriptedPrompter([]);
+      const code = await h.runWithoutRelease(["--engine", "cdk", "--source", "/src", ...IMAGES], {
+        releaseVersion: null, fetch: githubRelease(h.deps.fetch as typeof fetch), prompter, deploy: { ...h.deps.deploy, commandRunner: taggedSource },
+      });
+      expect(code).toBe(2);
+      expect(h.printed()).toContain("with no release.json there is no list of regions to choose from; pass --region <region>, or set a region in your AWS configuration");
+      expect(prompter.asked).toEqual([]);
+    });
+
+    // Review I2: a resume's saved answers may hold the images, so the refusal waits for the store
+    // read, but still comes before any question.
+    it("refuses when the tag has no published release.json and an image flag is missing, naming both flags, before asking anything", async () => {
+      const h = await harness();
+      const prompter = scriptedPrompter([]);
+      const code = await h.runWithoutRelease(["--region", "us-east-1", "--engine", "cdk", "--source", "/src", "--worker-image", WORKER], {
+        releaseVersion: null, fetch: githubRelease(h.deps.fetch as typeof fetch), prompter, deploy: { ...h.deps.deploy, commandRunner: taggedSource },
+      });
+      expect(code).toBe(2);
+      expect(h.printed()).toContain(`release 1.4.0 has no published release.json at ${MANIFEST_URL}, so its images are unknown; pass --worker-image and --slack-image, or --release <dir>`);
+      expect(prompter.asked).toEqual([]);
+      expect(h.store.calls.filter((call) => call.op === "put")).toEqual([]);
+    });
+
+    it("needs --source on the command line", async () => {
+      const h = await harness();
+      const code = await h.runWithoutRelease(["--region", "us-east-1", "--engine", "cdk", ...IMAGES], { releaseVersion: null, prompter: scriptedPrompter([]) });
+      expect(code).toBe(2);
+      expect(h.printed()).toContain("the cdk engine needs --source <a checkout of a release tag>");
+    });
+
+    it("refuses a --release that does not match the source's tag, before showing the plan", async () => {
+      const h = await harness();
+      // The harness's --release holds 1.2.3; the checkout is at v1.4.0.
+      const code = await h.run(["--engine", "cdk", "--source", "/src"], { prompter: scriptedPrompter(FIRST_RUN.slice(1, -1)), deploy: { ...h.deps.deploy, commandRunner: taggedSource } });
+      expect(code).toBe(2);
+      expect(h.printed()).toContain("the cdk engine must run from a checkout of tag v1.2.3; /src is at v1.4.0");
+      expect(h.printed()).not.toContain("Estimated monthly total");
+      expect(h.store.calls.filter((call) => call.op === "put")).toEqual([]);
+    });
   });
 
   it("refuses --account that is not the account of the AWS credentials", async () => {
