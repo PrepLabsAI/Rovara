@@ -87,6 +87,8 @@ import {
   type ProjectModelOptions,
   projectCatalogKey,
   type ChannelMembersRequest,
+  INDEX_EXPIRY_ATTRIBUTE,
+  indexExpiresAt,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { queryAllItems, routeAdminRead, type AdminReadDependencies } from "./admin-reads.js";
@@ -2076,6 +2078,9 @@ function channelOperation(dependencies: AwsBrokerDependencies, identity: Authent
     Item: {
       pk: `DEVTASK#${shared.taskId}`, sk: `CHANNEL_OPERATION#${operation.id}`, entityType: "CHANNEL_OPERATION",
       slackUserId: slack.requester.userId, ...(slack.requesterName === undefined ? {} : { name: slack.requesterName }), createdAt: operation.createdAt,
+      // 25c note 2: the State table's TTL attribute, 30 days on; the busy read needs it only while the
+      // operation runs. Shared threads exist only in named environments, whose State table expires on it.
+      [INDEX_EXPIRY_ATTRIBUTE]: indexExpiresAt(operation.createdAt),
     },
     ConditionExpression: "attribute_not_exists(pk)",
   } }];

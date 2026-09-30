@@ -6,7 +6,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { ChangeMessageVisibilityCommand, SQSClient, SendMessageBatchCommand } from "@aws-sdk/client-sqs";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, lastAssistantResponse, sharedTaskKey } from "@agentx/contracts";
+import { INDEX_EXPIRY_ATTRIBUTE, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, indexExpiresAt, lastAssistantResponse, sharedTaskKey } from "@agentx/contracts";
 import { readStream, type Notice, type StreamRecord } from "../developer/notifications.js";
 import { CANCELLED_REPLY, CLOSED_REPLY, READY_REPLY, endedReply, modeReply, pullRequestReply, setupFailedReply, startMessage } from "../developer/share-messages.js";
 import { deriveTaskStatus, failureCategory, taskKey, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type OperationFacts, type TaskShare } from "../developer/task-records.js";
@@ -62,12 +62,19 @@ async function getItem<T>(deps: NotifierDependencies, key: { pk: string; sk: str
   return ((await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: key, ConsistentRead: true }))) as { Item?: T }).Item;
 }
 
+/**
+ * 25c note 2 (owner answer, 2026-09-30): every NOTICE item carries the State table's TTL attribute,
+ * 30 days on, far past the hour a notice is delivered in. Only named environments run the notifier,
+ * and their State table expires items on this attribute.
+ */
+const noticeExpiry = (deps: NotifierDependencies) => ({ [INDEX_EXPIRY_ATTRIBUTE]: indexExpiresAt(new Date(deps.now()).toISOString()) });
+
 /** A delivered marker replaces a start's posted-but-unrecorded marker, never another delivered one. */
 const MARKER_CONDITION = "attribute_not_exists(pk) OR attribute_not_exists(deliveredAt)";
 
 async function putMarker(deps: NotifierDependencies, marker: { pk: string; sk: string }): Promise<void> {
   try {
-    await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, Item: { ...marker, entityType: "NOTICE", deliveredAt: new Date(deps.now()).toISOString() }, ConditionExpression: MARKER_CONDITION }));
+    await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, Item: { ...marker, entityType: "NOTICE", deliveredAt: new Date(deps.now()).toISOString(), ...noticeExpiry(deps) }, ConditionExpression: MARKER_CONDITION }));
   } catch (error) {
     if (!isConditional(error)) throw error;
   }
@@ -139,7 +146,7 @@ async function recordThread(deps: NotifierDependencies, taskId: string, threadTs
           },
           ConditionExpression: "attribute_not_exists(pk)",
         } },
-        { Put: { TableName: deps.tableName, Item: { ...marker, entityType: "NOTICE", deliveredAt: now }, ConditionExpression: MARKER_CONDITION } },
+        { Put: { TableName: deps.tableName, Item: { ...marker, entityType: "NOTICE", deliveredAt: now, ...noticeExpiry(deps) }, ConditionExpression: MARKER_CONDITION } },
       ] }));
       return;
     } catch (error) {
@@ -224,9 +231,10 @@ async function claimStart(deps: NotifierDependencies, marker: { pk: string; sk: 
   try {
     await deps.documentClient.send(new UpdateCommand({
       TableName: deps.tableName, Key: marker,
-      UpdateExpression: "SET entityType = :notice, postingUntil = :until",
+      UpdateExpression: "SET entityType = :notice, postingUntil = :until, #expires = :expires",
       ConditionExpression: "attribute_not_exists(deliveredAt) AND attribute_not_exists(postedTs) AND (attribute_not_exists(postingUntil) OR postingUntil < :now)",
-      ExpressionAttributeValues: { ":notice": "NOTICE", ":until": until, ":now": deps.now() },
+      ExpressionAttributeNames: { "#expires": INDEX_EXPIRY_ATTRIBUTE },
+      ExpressionAttributeValues: { ":notice": "NOTICE", ":until": until, ":now": deps.now(), ":expires": noticeExpiry(deps)[INDEX_EXPIRY_ATTRIBUTE] },
     }));
     return true;
   } catch (error) {
@@ -256,7 +264,7 @@ interface NoticeMarker { deliveredAt?: string; postedTs?: string }
  */
 async function keepPostedTs(deps: NotifierDependencies, marker: { pk: string; sk: string }, ts: string): Promise<void> {
   try {
-    await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, Item: { ...marker, entityType: "NOTICE", postedTs: ts } }));
+    await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, Item: { ...marker, entityType: "NOTICE", postedTs: ts, ...noticeExpiry(deps) } }));
   } catch (error) {
     deps.log({ event: "developer_notifier.posted_ts_lost", error: errorName(error) });
   }

@@ -4,6 +4,7 @@
 import { randomUUID } from "node:crypto";
 import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it, vi } from "vitest";
+import { indexExpiresAt } from "@agentx/contracts";
 import { SlackPostError, chatPostMessage } from "../../packages/broker/src/aws/slack-web.js";
 import { cachedSlackPoster, createNotifierHandler, retryDelaySeconds } from "../../packages/broker/src/aws/developer-task-notifier.js";
 import type { Notice } from "../../packages/broker/src/developer/notifications.js";
@@ -58,7 +59,7 @@ async function notifierHarness(body: Record<string, unknown> = { shareToChannel:
   const active = () => String((harness.db.get(`WORKSPACE#${workspaceId}`, "META") as { activeOperationId: string }).activeOperationId);
   return {
     ...harness, stream, posts, queue, logs, pump, handle, taskId, workspaceId, active, deliveryFailed, retryLater,
-    advance: (ms: number) => { clock += ms; }, fail: (code: string | undefined) => { failing = code; },
+    advance: (ms: number) => { clock += ms; }, fail: (code: string | undefined) => { failing = code; }, now: () => clock,
   };
 }
 
@@ -399,5 +400,44 @@ describe("chat.postMessage", () => {
     await post({ channel: SLACK_CHANNEL, text: "hi" });
     // Loaded once at first, and once after each refusal; a rate limit keeps the token.
     expect(loadToken).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("notice markers expire after 30 days (25c note 2)", () => {
+  const expiry = (h: { now(): number }) => indexExpiresAt(new Date(h.now()).toISOString());
+  const notices = (db: FakeDynamoDb) => db.find((item) => item.entityType === "NOTICE");
+
+  it("gives every delivered marker, the start's and each reply's, the TTL attribute", async () => {
+    const h = await notifierHarness();
+    await h.pump();
+    await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
+    await h.pump();
+    await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
+    await h.pump();
+    const markers = notices(h.db);
+    expect(markers.length).toBeGreaterThanOrEqual(3);
+    for (const marker of markers) expect(marker).toMatchObject({ deliveredAt: expect.any(String) as string, indexExpiresAt: expiry(h) });
+  });
+
+  it("gives a start claim whose post failed the TTL attribute", async () => {
+    const h = await notifierHarness();
+    h.fail("ratelimited");
+    await h.pump();
+    const claim = h.db.get(`DEVTASK#${h.taskId}`, `NOTICE#${h.taskId}:start`);
+    expect(claim).not.toHaveProperty("deliveredAt");
+    expect(claim).toMatchObject({ indexExpiresAt: expiry(h) });
+  });
+
+  it("gives a kept start ts the TTL attribute", async () => {
+    const h = await notifierHarness({ shareToChannel: true }, {
+      documentClient: (db) => ({
+        send: async (command: unknown) => {
+          if (command instanceof TransactWriteCommand) throw Object.assign(new Error("the table is unavailable"), { name: "InternalServerError" });
+          return db.send(command as Parameters<FakeDynamoDb["send"]>[0]);
+        },
+      }),
+    });
+    await h.pump();
+    expect(h.db.get(`DEVTASK#${h.taskId}`, `NOTICE#${h.taskId}:start`)).toMatchObject({ postedTs: expect.any(String) as string, indexExpiresAt: expiry(h) });
   });
 });

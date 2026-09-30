@@ -97,8 +97,10 @@ export class ControlPlaneStack extends Stack {
       // Retained: workspace and operation records must outlive a stack deletion.
       removalPolicy: RemovalPolicy.RETAIN,
       // Spec 025 A6 (Q5, owner answer 2026-09-30): failure and usage index items expire by TTL in
-      // named environments. Adding a TTL to an existing table is an in-place update, and no other
-      // State item carries indexExpiresAt (a test pins it). The legacy table stays as it is.
+      // named environments. Adding a TTL to an existing table is an in-place update. 25c note 2: the
+      // sharing items, NOTICE and CHANNEL_OPERATION, expire on it too; they exist only in named
+      // environments (D14). No other State item carries indexExpiresAt (a test pins the files that
+      // name it). The legacy table stays as it is.
       ...(naming.env === undefined ? {} : { timeToLiveAttribute: INDEX_EXPIRY_ATTRIBUTE }),
     });
 

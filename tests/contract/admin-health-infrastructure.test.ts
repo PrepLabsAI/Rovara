@@ -1,6 +1,7 @@
 // Spec 025 A13 and A6: the broker's health grants are exact, the index TTL is on, and both exist
 // only in named environments.
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { App } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
@@ -59,10 +60,27 @@ describe("the health route's grants (A13)", () => {
     expect(reconciler?.[1].Properties.Environment?.Variables).toMatchObject({ INDEX_EXPIRY: "ttl" });
   });
 
-  it("names indexExpiresAt only where index items are written or read, so the TTL deletes nothing else", () => {
-    const allowed = new Set(["packages/contracts/src/admin.ts", "packages/broker/src/aws/activity-index.ts", "packages/broker/src/aws/admin-reads.ts", "infra/lib/control-plane.ts"]);
+  // 25c note 2 (owner answer, 2026-09-30): NOTICE (the notifier) and CHANNEL_OPERATION (broker.ts) items expire on it too.
+  it("names indexExpiresAt only where index, notice and channel-operation items are written or read, so the TTL deletes nothing else", () => {
+    const allowed = new Set([
+      "packages/contracts/src/admin.ts", "packages/broker/src/aws/activity-index.ts", "packages/broker/src/aws/admin-reads.ts", "infra/lib/control-plane.ts",
+      "packages/broker/src/aws/developer-task-notifier.ts", "packages/broker/src/aws/broker.ts",
+    ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);
+  });
+
+  it("sets the TTL attribute in broker.ts on the channel-operation marker alone, and in the notifier on NOTICE items alone (25c note 2)", () => {
+    const broker = readFileSync("packages/broker/src/aws/broker.ts", "utf8");
+    const brokerUses = broker.split("\n").filter((line) => /indexExpiresAt\(|INDEX_EXPIRY_ATTRIBUTE\]/.test(line));
+    expect(brokerUses).toEqual(["      [INDEX_EXPIRY_ATTRIBUTE]: indexExpiresAt(operation.createdAt),"]);
+    const channelOperation = broker.slice(broker.indexOf("function channelOperation("), broker.indexOf("function requesterOf("));
+    expect(channelOperation).toContain('entityType: "CHANNEL_OPERATION"');
+    expect(channelOperation).toContain(brokerUses[0]);
+    const notifier = readFileSync("packages/broker/src/aws/developer-task-notifier.ts", "utf8");
+    const writes = notifier.split("\n").filter((line) => line.includes("noticeExpiry(deps)"));
+    expect(writes.length).toBeGreaterThanOrEqual(4);
+    for (const line of writes) expect(line).toMatch(/entityType: "NOTICE"|":expires": noticeExpiry/);
   });
 
   it("adds nothing to the legacy template", () => {
