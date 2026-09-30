@@ -57,7 +57,7 @@ const TaskShape = {
   channel: z.object({ id: z.string(), name: z.string().optional() }).optional(),
   thread_url: z.string().optional(), share_posting: z.boolean().optional(), share_post_failed: z.boolean().optional(),
   channel_turns: z.array(z.object({ author: z.string(), slack_user: z.string(), at: z.string(), request: z.string(), outcome: z.string() })).optional(),
-  closing: z.boolean().optional(), created_at: z.string(), updated_at: z.string(),
+  closing: z.boolean().optional(), created_at: z.string(), updated_at: z.string().describe("when the latest request on this task started; share changes do not move it"),
   events: z.array(z.object({ at: z.string(), kind: z.string(), text: z.string() })),
   summary: z.string().optional(),
   changed_files: z.array(z.object({ repository: z.string(), path: z.string(), added: z.number(), removed: z.number() })).optional(),
@@ -323,7 +323,7 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
       status: DeveloperTaskStatusSchema.optional().describe("only tasks with this status"),
       limit: z.number().int().min(1).max(DEVELOPER_TASK_LIST_MAX).optional().describe("how many tasks to show, 1 to 50; 20 by default"),
     },
-    outputSchema: { tasks: z.array(z.object({ task_id: z.string(), title: z.string(), project: z.string(), status: z.string(), created_at: z.string(), updated_at: z.string(), shared: z.boolean() })) },
+    outputSchema: { tasks: z.array(z.object({ task_id: z.string(), title: z.string(), project: z.string(), status: z.string(), created_at: z.string(), updated_at: z.string().describe("when the latest request on this task started; share changes do not move it"), shared: z.boolean() })) },
     async handler(context, input) {
       const tasks = await context.client.listTasks({
         limit: (input.limit as number | undefined) ?? DEVELOPER_TASK_LIST_DEFAULT,
