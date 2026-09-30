@@ -27,14 +27,16 @@ afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { 
 const tmp = async (prefix: string) => { const dir = await mkdtemp(join(tmpdir(), prefix)); dirs.push(dir); return dir; };
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 
-async function releaseDir(): Promise<string> {
+async function releaseDir(regions: readonly string[] = ["us-east-1"]): Promise<string> {
   const dir = await tmp("agentx-init-ui-release-");
   const templates = [];
-  await mkdir(join(dir, "templates", "us-east-1"), { recursive: true });
-  for (const part of ["access", "foundation", "identity", "control-plane", "runtime", "slack"]) {
-    const file = `templates/us-east-1/${part}.template.json`;
-    await writeFile(join(dir, file), "{}");
-    templates.push({ region: "us-east-1", part, file, sha256: sha256("{}") });
+  for (const region of regions) {
+    await mkdir(join(dir, "templates", region), { recursive: true });
+    for (const part of ["access", "foundation", "identity", "control-plane", "runtime", "slack"]) {
+      const file = `templates/${region}/${part}.template.json`;
+      await writeFile(join(dir, file), "{}");
+      templates.push({ region, part, file, sha256: sha256("{}") });
+    }
   }
   await writeFile(join(dir, "release.json"), JSON.stringify({
     schemaVersion: 1, version: "1.2.3", gitCommit: "a".repeat(40), environmentPlaceholder: "qqenv-placeholderqq", templates, packages: [],
@@ -343,6 +345,22 @@ describe("agentx init --ui", () => {
     expect(region?.choices?.map((choice) => choice.value)).toEqual(["us-east-1"]);
   });
 
+  it("FR-022: with no AWS_REGION, the picked profile's region is the region question's default", async () => {
+    const h = await harness();
+    await mkdir(join(h.home, ".aws"), { recursive: true });
+    await writeFile(join(h.home, ".aws", "config"), "[default]\nregion = us-east-1\n[profile dev]\nsso_session = acme\nregion = us-west-2\n");
+    // The profile, then the region (us-east-1, not the default), then the first-run answers, and no to the plan.
+    const operator = fakeWizardOperator(["dev", "us-east-1", ...FIRST_RUN.slice(0, -1), false]);
+    await executeCli(["--env", "staging", "init", "--release", await releaseDir(["us-east-1", "us-west-2"]), "--ui"], {
+      stdout: { write: () => undefined }, stderr: { write: () => undefined }, environments: { home: h.home },
+      init: { ...h.base, openBrowser: operator.open, processEnv: {} },
+    });
+    await operator.settled();
+    const region = operator.states.find((state) => state.question?.text === "AWS region")?.question;
+    expect(region?.choices?.map((choice) => choice.value)).toEqual(["us-east-1", "us-west-2"]);
+    expect(region?.defaultValue).toBe("us-west-2");
+  });
+
   it("FR-023: a failed prerequisite is a checklist on the page, and checking again after the fix goes on", async () => {
     const h = await harness();
     let quotaReads = 0;
@@ -371,6 +389,11 @@ describe("agentx init --ui", () => {
     const operator = fakeWizardOperator([...FIRST_RUN.slice(0, -1), false]);
     expect(await h.run(["--ui"], { openBrowser: operator.open, checks: passingChecks({ ec2Quota: async () => 0 }) })).not.toBe(0);
     await operator.settled();
+    // The question came with the failed checklist beside it.
+    const asking = operator.states.find((state) => state.question?.text === "Check the prerequisites again?");
+    const card = asking?.cards?.find((shown) => shown.id === "prerequisites");
+    expect(card?.status).toBe("failed");
+    expect(card?.checks?.find((check) => check.label === "EC2 vCPU quota")).toMatchObject({ ok: false });
     expect(h.printed()).toContain("init cannot start; nothing was created");
     expect(h.deployer.requests).toEqual([]);
     expect(h.store.values.has(installAnswersParameterName("staging"))).toBe(false);
@@ -423,10 +446,22 @@ describe("agentx init --ui", () => {
     const slack = fakeSlackApi({
       authTest: async () => { tests += 1; return tests === 1 ? { ok: false, error: "invalid_auth" } : { ok: true, user_id: "U0BOT", bot_id: "B0BOT", team_id: "T0TEAM", team: "Acme", url: "https://acme.slack.com/", user: "agentx" }; },
     });
-    const operator = fakeWizardOperator([...FIRST_RUN, "installed", TEST_BOT_TOKEN, TEST_SIGNING_SECRET, true, TEST_BOT_TOKEN, TEST_SIGNING_SECRET, true, true, ...SIGNIN, ...FINISH]);
+    // What was stored when the page asked to paste again, after the first refusal.
+    let atRefusal: { secret: string | undefined; slack: unknown } | undefined;
+    const operator = fakeWizardOperator([...FIRST_RUN, "installed", TEST_BOT_TOKEN, TEST_SIGNING_SECRET, true, TEST_BOT_TOKEN, TEST_SIGNING_SECRET, true, true, ...SIGNIN, ...FINISH], {
+      beforeAnswer: async (question) => {
+        if (question.text === "Paste the Slack bot token and signing secret again?") {
+          atRefusal = { secret: h.secrets.values.get("agentx/staging/slack"), slack: (await readInstallProgress(h.store, "staging"))?.slack };
+        }
+      },
+    });
     expect(await h.run(["--ui"], { openBrowser: operator.open, slack })).toBe(0);
     await operator.settled();
     expect(operator.asked).toContain("Paste the Slack bot token and signing secret again?");
+    // Nothing was saved after the refusal: the secret holds what it held before, and no Slack app is recorded.
+    expect(atRefusal).toEqual({ secret: JSON.stringify({ botToken: "unset", signingSecret: "placeholder" }), slack: undefined });
+    // Once a token worked, both were stored.
+    expect(JSON.parse(h.secrets.values.get("agentx/staging/slack") ?? "{}")).toMatchObject({ botToken: TEST_BOT_TOKEN, signingSecret: TEST_SIGNING_SECRET });
     const refused = operator.states.flatMap((state) => state.cards ?? []).find((card) => card.id === "slack" && card.status === "failed");
     expect(refused?.lines).toContain("Slack refused the bot token (invalid_auth); copy it again from OAuth & Permissions");
   });
