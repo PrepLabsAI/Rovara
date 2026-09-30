@@ -10,32 +10,50 @@ import { ToolError } from "./errors.js";
 export interface AdminOffer { admin: ToolError | undefined }
 interface Switchable { enable(): void; disable(): void; enabled: boolean }
 
-const NOT_OFFERED = new ToolError("ADMIN_REQUIRED", "this computer holds no unexpired admin sign-in for AgentX", ADMIN_SIGN_IN_STEP);
+/** Why the admin tools are hidden before any check has answered, or when none can be made. */
+export const NOT_OFFERED = new ToolError("ADMIN_REQUIRED", "this computer holds no unexpired admin sign-in for AgentX", ADMIN_SIGN_IN_STEP);
 
 export class ToolOffer {
   private current: AdminOffer = { admin: NOT_OFFERED };
   private running: Promise<void> | undefined;
+  /** A refresh asked for during a read: that read may predate what changed, so one more follows. */
+  private again = false;
   private timer: ReturnType<typeof setInterval> | undefined;
 
   constructor(private readonly options: { tools: Map<string, Switchable>; read(): Promise<AdminOffer>; log?(entry: Record<string, unknown>): void }) {}
 
-  /** Reads the offer and switches the tools; one read at a time, and a failed read changes nothing. */
+  /**
+   * Reads the offer and switches the tools; one read at a time, and a failed read changes nothing.
+   * A refresh asked for during a read queues one more read after it (at most one), and resolves
+   * when that read is done.
+   */
   refresh(): Promise<void> {
-    this.running ??= (async () => {
-      try {
-        this.current = await this.options.read();
-      } catch (error) {
-        // The error's name only: its message could hold anything.
-        this.options.log?.({ event: "offer.check_failed", error: error instanceof Error ? error.name : "unknown" });
-        return;
-      }
-      const offered = this.current.admin === undefined;
-      for (const tool of this.options.tools.values()) {
-        if (offered && !tool.enabled) tool.enable();
-        if (!offered && tool.enabled) tool.disable();
-      }
+    if (this.running !== undefined) {
+      this.again = true;
+      return this.running;
+    }
+    this.running = (async () => {
+      do {
+        this.again = false;
+        await this.readOnce();
+      } while (this.again);
     })().finally(() => { this.running = undefined; });
     return this.running;
+  }
+
+  private async readOnce(): Promise<void> {
+    try {
+      this.current = await this.options.read();
+    } catch (error) {
+      // The error's name only: its message could hold anything.
+      this.options.log?.({ event: "offer.check_failed", error: error instanceof Error ? error.name : "unknown" });
+      return;
+    }
+    const offered = this.current.admin === undefined;
+    for (const tool of this.options.tools.values()) {
+      if (offered && !tool.enabled) tool.enable();
+      if (!offered && tool.enabled) tool.disable();
+    }
   }
 
   /** Why a hidden admin tool is refused, or undefined for any other tool. */
@@ -83,6 +101,7 @@ export function guardTransport(inner: Transport, refusal: (name: string) => Tool
   inner.onerror = (error) => { failed?.(error); guarded.onerror?.(error); };
   const earlier = inner.onmessage;
   inner.onmessage = (message, extra) => {
+    // An earlier onmessage is an observer of every inbound message, a refused tools/call included.
     earlier?.(message, extra);
     if (isToolCall(message)) {
       const refused = refusal(message.params.name);

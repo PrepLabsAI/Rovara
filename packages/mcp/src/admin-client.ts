@@ -38,6 +38,8 @@ export interface AdminControlPlaneClient {
 /** The broker's catch-all refusal for a path it does not serve: a control plane from before 25d. */
 const NOT_AN_ADMIN_ROUTE = "this endpoint serves administration only";
 const REQUEST_TIMEOUT_MS = 30_000;
+/** No call, retries included, takes longer than this (the developer client's DEADLINE_MS). */
+const DEADLINE_MS = 45_000;
 
 function refusal(status: number, value: unknown, secret: string): ToolError {
   const error = typeof value === "object" && value !== null ? (value as { error?: { code?: unknown; message?: unknown } }).error : undefined;
@@ -57,13 +59,23 @@ const search = (values: Record<string, string | number | undefined>) => {
   return text === "" ? "" : `?${text}`;
 };
 
-export function httpAdminClient(options: { session(): Promise<AdminSession>; fetch: typeof fetch; traceId?(): string; tries?: number; sleep?(ms: number): Promise<void> }): AdminControlPlaneClient {
+export function httpAdminClient(options: { session(): Promise<AdminSession>; fetch: typeof fetch; traceId?(): string; tries?: number; sleep?(ms: number): Promise<void>; now?(): number; deadlineMs?: number }): AdminControlPlaneClient {
   const tries = Math.max(1, options.tries ?? 3);
+  const now = (): number => (options.now ? options.now() : Date.now());
+  const deadlineMs = options.deadlineMs ?? DEADLINE_MS;
   const sleep = (ms: number): Promise<void> => (options.sleep ? options.sleep(ms) : new Promise<void>((resolve) => setTimeout(resolve, ms)));
   async function get<T>(schema: z.ZodType<T>, path: string): Promise<T> {
     // A ToolError from the session (ADMIN_REQUIRED: no admin sign-in held, Task 16) passes through.
     const session = await options.session();
     const where = plainText(session.baseUrl, "its URL", [session.accessToken]);
+    const started = now();
+    /** Waits before the next try, or answers false when there is no try left or no time for one. */
+    const again = async (attempt: number): Promise<boolean> => {
+      const delay = 250 * attempt;
+      if (attempt >= tries || now() - started + delay >= deadlineMs) return false;
+      await sleep(delay);
+      return true;
+    };
     for (let attempt = 1; ; attempt += 1) {
       let response: Response;
       let text: string;
@@ -71,17 +83,18 @@ export function httpAdminClient(options: { session(): Promise<AdminSession>; fet
         response = await options.fetch(`${session.baseUrl}${path}`, {
           method: "GET",
           headers: { authorization: `Bearer ${session.accessToken}`, "x-agentx-trace-id": options.traceId?.() ?? randomUUID() },
-          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          // Each try gets what is left of the deadline, at most 30 seconds.
+          signal: AbortSignal.timeout(Math.max(1, Math.min(REQUEST_TIMEOUT_MS, deadlineMs - (now() - started)))),
         });
         text = await response.text().catch(() => "");
       } catch {
         // The fetch error's own words are never shown: they can quote the request.
-        if (attempt < tries) { await sleep(250 * attempt); continue; }
-        throw new ToolError("CONTROL_PLANE_UNAVAILABLE", `could not reach AgentX at ${where} after ${attempt} tries`);
+        if (await again(attempt)) continue;
+        throw new ToolError("CONTROL_PLANE_UNAVAILABLE", `could not reach AgentX at ${where}${attempt > 1 ? ` after ${attempt} tries` : ""}`);
       }
       let value: unknown;
       try { value = JSON.parse(text) as unknown; } catch { value = undefined; }
-      if (response.status >= 500 && attempt < tries) { await sleep(250 * attempt); continue; }
+      if (response.status >= 500 && await again(attempt)) continue;
       if (!response.ok) throw refusal(response.status, value, session.accessToken);
       const parsed = schema.safeParse(value);
       if (!parsed.success) throw new ToolError("CONTROL_PLANE_UNAVAILABLE", "AgentX answered with something this version of the CLI cannot read; upgrade it", NEXT_STEPS.UPGRADE_REQUIRED);

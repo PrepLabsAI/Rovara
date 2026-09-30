@@ -132,8 +132,33 @@ describe("the offer without an admin check, and its timer (A15)", () => {
     const second = offer.refresh();
     expect(read).toHaveBeenCalledTimes(1);
     release();
+    // Review fix: the second refresh, asked for during the first read, is one more read after it.
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+    release();
     await Promise.all([first, second]);
+    expect(read).toHaveBeenCalledTimes(2);
     expect(tool.enabled).toBe(true);
+  });
+});
+
+describe("the offer's queued recheck (A15, review fix)", () => {
+  it("reads once more after the current read when a refresh is asked for during it, queueing at most one", async () => {
+    const releases: Array<(offer: AdminOffer) => void> = [];
+    const read = vi.fn(() => new Promise<AdminOffer>((resolve) => { releases.push(resolve); }));
+    const tool = { enabled: false, enable: () => { tool.enabled = true; }, disable: () => { tool.enabled = false; } };
+    const offer = new ToolOffer({ tools: new Map([["t", tool]]), read });
+    const first = offer.refresh();
+    const second = offer.refresh();
+    const third = offer.refresh();
+    expect(read).toHaveBeenCalledTimes(1);
+    releases[0]!({ admin: undefined });
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+    expect(tool.enabled).toBe(true);
+    // The queued read's answer is the one kept: the sign-in expired meanwhile.
+    releases[1]!({ admin: new ToolError("ADMIN_REQUIRED", "expired") });
+    await Promise.all([first, second, third]);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(tool.enabled).toBe(false);
   });
 });
 
@@ -194,6 +219,17 @@ describe("the hidden-tool guard (A15)", () => {
     await guarded.close();
     expect(order).toEqual(["earlier error boom", "guarded error boom", "earlier close", "guarded close"]);
     expect(earlierMessages).toEqual([message]);
+    // The earlier onmessage observes every inbound message, a refused tools/call too.
+    const refusing = fakeTransport();
+    const seenBefore: JSONRPCMessage[] = [];
+    const passedOn: JSONRPCMessage[] = [];
+    refusing.inner.onmessage = (inbound) => { seenBefore.push(inbound); };
+    const guardedRefusing = guardTransport(refusing.inner, () => new ToolError("ADMIN_REQUIRED", "no"), answer);
+    guardedRefusing.onmessage = (inbound) => { passedOn.push(inbound); };
+    const refusedCall: JSONRPCMessage = { jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "agentx_admin_probe" } };
+    refusing.inner.onmessage?.(refusedCall);
+    expect(seenBefore).toEqual([refusedCall]);
+    expect(passedOn).toEqual([]);
     expect(spies.close).toHaveBeenCalledTimes(1);
   });
 

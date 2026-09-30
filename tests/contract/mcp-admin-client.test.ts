@@ -93,6 +93,25 @@ describe("the admin client's refusals and outages (A14, secrets)", () => {
     expect(outage).toHaveBeenCalledTimes(3);
   });
 
+  it("gives up within one overall deadline across its tries (45 seconds, like the developer client)", async () => {
+    let now = 0;
+    const slow = vi.fn(async () => { now += 44_900; throw new TypeError("fetch failed"); });
+    const sleeps: number[] = [];
+    const client = httpAdminClient({ session, fetch: slow, now: () => now, sleep: async (ms) => { sleeps.push(ms); now += ms; }, tries: 3 });
+    await expect(client.projects()).rejects.toMatchObject({ code: "CONTROL_PLANE_UNAVAILABLE" });
+    // The first try used 44.9 s; the back-off alone would pass 45 s, so no second try starts.
+    expect(slow).toHaveBeenCalledTimes(1);
+    expect(sleeps).toEqual([]);
+    let later = 0;
+    // Two 22.4 s answers and a 250 ms back-off leave no room for the third try's 500 ms back-off.
+    const outage = vi.fn(async () => { later += 22_400; return new Response("{}", { status: 503 }); });
+    const outageSleeps: number[] = [];
+    const failing = httpAdminClient({ session, fetch: outage, now: () => later, sleep: async (ms) => { outageSleeps.push(ms); later += ms; }, tries: 3 });
+    await expect(failing.projects()).rejects.toMatchObject({ code: "CONTROL_PLANE_UNAVAILABLE" });
+    expect(outage).toHaveBeenCalledTimes(2);
+    expect(outageSleeps).toEqual([250]);
+  });
+
   it("reads every route at its path", async () => {
     const fetch = vi.fn(async () => new Response("{}", { status: 200 }));
     const client = httpAdminClient({ session, fetch: fetch });

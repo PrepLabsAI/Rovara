@@ -4,9 +4,8 @@
 import { McpServer, type RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { DEVELOPER_TASK_SUMMARY_MAX, redactSecrets, redactText } from "@agentx/contracts";
-import { ADMIN_SIGN_IN_STEP } from "./admin-client.js";
 import { ToolError } from "./errors.js";
-import { ToolOffer, guardTransport, type AdminOffer } from "./offer.js";
+import { NOT_OFFERED, ToolOffer, guardTransport, type AdminOffer } from "./offer.js";
 import { RequestIdMemory } from "./request-ids.js";
 import { DEVELOPER_TOOLS, type ToolCall, type ToolContext, type ToolDefinition } from "./tools.js";
 
@@ -61,10 +60,9 @@ export function createAgentXMcpServer(options: {
   const requestIds = new RequestIdMemory();
   // Filled below; the offer switches whatever the map holds.
   const adminRegistered = new Map<string, RegisteredTool>();
-  const hidden = new ToolError("ADMIN_REQUIRED", "this computer holds no unexpired admin sign-in for AgentX", ADMIN_SIGN_IN_STEP);
   const offer = new ToolOffer({
     tools: adminRegistered,
-    read: options.adminOffer ?? (async () => ({ admin: hidden })),
+    read: options.adminOffer ?? (async () => ({ admin: NOT_OFFERED })),
     ...(options.log === undefined ? {} : { log: (entry: Record<string, unknown>) => options.log?.(entry) }),
   });
   const register = (tool: ToolDefinition): RegisteredTool => server.registerTool(tool.name, { title: tool.title, description: tool.description, inputSchema: tool.inputSchema, outputSchema: tool.outputSchema }, async (input: Record<string, unknown>, extra) => {
