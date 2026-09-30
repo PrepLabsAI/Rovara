@@ -48,7 +48,7 @@ import { problemText, retryOnPage } from "./retry.js";
 import { developerSignInStep } from "./signin-step.js";
 import { slackAppStep, slackWebApi, verifySlackUrls, type SlackApi } from "./slack-app.js";
 import { runInitSteps, type InitEvent, type InitRunResult, type InitStep } from "./steps.js";
-import { prerequisitesCard } from "./ui/cards.js";
+import { prerequisitesCard, readyCard } from "./ui/cards.js";
 import { startInstallWizard, type InstallWizard } from "./ui/index.js";
 import type { WizardResume } from "./ui/protocol.js";
 
@@ -619,6 +619,11 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     }
     const settings = result.status === "complete" ? await readEnvironmentSettings(store, env) : undefined;
     const progress = result.status === "complete" ? await readInstallProgress(store, env) : undefined;
+    // FR-052: the page's last card says what works now; the terminal and the page's outcome keep
+    // readyText.
+    if (surface !== undefined && settings !== undefined && progress !== undefined) {
+      surface.card(readyCard({ env, controlPlaneUrl: settings.controlPlaneUrl, progress }));
+    }
     return {
       ...result, env, resumed: stored !== undefined,
       ...(settings === undefined ? {} : { controlPlaneUrl: settings.controlPlaneUrl }),

@@ -16,6 +16,7 @@ export type InitStepId = (typeof INIT_STEP_IDS)[number];
 
 export const CONNECTOR_TYPES = ["linear", "jira", "asana"] as const;
 export type ConnectorType = (typeof CONNECTOR_TYPES)[number];
+export const CONNECTOR_LABELS = { linear: "Linear", jira: "Jira", asana: "Asana" } as const;
 export const SSM_STANDARD_VALUE_LIMIT = 4096;
 
 const SECRET_ARN = /^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:\d{12}:secret:.+$/;

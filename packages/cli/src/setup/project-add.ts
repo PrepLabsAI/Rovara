@@ -186,6 +186,8 @@ export async function addProject(input: {
   env: string; session: AdminSession; githubToken: string; prompter: Prompter; write: (line: string) => void;
   services: Pick<SetupServices, "fetch" | "repositories" | "stackOutputs" | "configDir">;
   flags: { projectName?: string; repository?: string; setupCommand?: string; testCommand?: string };
+  /** The install page's project card (spec 040 phase 3): told the repository once it is chosen. */
+  onRepository?: (fullName: string) => void;
 }): Promise<{ name: string; revision: number; file: string }> {
   const { prompter, flags } = input;
   const configDir = input.services.configDir;
@@ -196,7 +198,11 @@ export async function addProject(input: {
   // The name comes first when it is given, so an unchanged rerun asks GitHub and the control plane
   // nothing. Otherwise its default is the chosen repository's name.
   let repository: RepositoryInfo | undefined;
-  const chosenRepository = async () => chooseRepository(await input.services.repositories.list(input.githubToken), prompter, flags.repository);
+  const chosenRepository = async () => {
+    const picked = await chooseRepository(await input.services.repositories.list(input.githubToken), prompter, flags.repository);
+    input.onRepository?.(picked.fullName);
+    return picked;
+  };
   let name = flags.projectName;
   if (name === undefined) {
     repository = await chosenRepository();

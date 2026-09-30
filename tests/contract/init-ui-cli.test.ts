@@ -122,7 +122,7 @@ async function harness() {
     return { code, operator };
   };
   return {
-    store, secrets, deployer, github, plane, out, err, home, base, run, runUi,
+    store, secrets, deployer, github, plane, setup, out, err, home, base, run, runUi,
     printed: () => `${out.join("")}${err.join("")}`,
     /** The terminal, every SSM value, this machine's environment cache, and the project files the
      * finishing steps wrote. */
@@ -479,7 +479,7 @@ describe("agentx init --ui", () => {
     expect(code).toBe(0);
     const last = operator.states.at(-1);
     expect(last?.cards?.map((card) => [card.id, card.status])).toEqual([
-      ["aws", "ok"], ["prerequisites", "ok"], ["github", "ok"], ["slack", "ok"], ["slack-urls", "ok"],
+      ["aws", "ok"], ["prerequisites", "ok"], ["github", "ok"], ["slack", "ok"], ["slack-urls", "ok"], ["admin", "ok"], ["project", "ok"], ["channel", "ok"], ["connectors", "ok"], ["alerts", "ok"], ["reply", "ok"], ["ready", "ok"],
     ]);
     // Every answer came from the scripted operator, and no answer was an address pasted back:
     // the GitHub code arrived through the wizard's own callback.
@@ -490,7 +490,7 @@ describe("agentx init --ui", () => {
     // The screens came in order: each card first appears after the one before it.
     const firstSeen: string[] = [];
     for (const card of operator.states.flatMap((state) => state.cards ?? [])) if (!firstSeen.includes(card.id)) firstSeen.push(card.id);
-    expect(firstSeen).toEqual(["aws", "prerequisites", "github", "slack", "slack-urls"]);
+    expect(firstSeen).toEqual(["aws", "prerequisites", "github", "slack", "slack-urls", "admin", "project", "channel", "connectors", "alerts", "reply", "ready"]);
   });
 
   it("FR-012: no secret reaches a card, a link, the page's state, the log, the terminal, SSM or the cache", async () => {
@@ -526,5 +526,106 @@ describe("agentx init --ui", () => {
     expect(review?.cards?.map((card) => card.id)).toEqual(["aws", "prerequisites"]);
     expect(reconnected?.question?.text).toBe("Create all of this?");
     expect(reconnected?.cards?.map((card) => card.id)).toEqual(["aws", "prerequisites"]);
+  });
+
+  it("FR-050 and Q5: the admin sign-in page is a button on the install page, never a tab opened by itself", async () => {
+    const h = await harness();
+    const SIGN_IN = "https://auth.example.test/oauth2/authorize?client_id=c&state=s";
+    const login: typeof h.setup.login = async (options) => { await options.openBrowser?.(SIGN_IN); return h.setup.login(options); };
+    const operator = fakeWizardOperator([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
+    expect(await h.run(["--ui"], { openBrowser: operator.open, setup: { ...h.setup, login } })).toBe(0);
+    await operator.settled();
+    expect(operator.clicked).toContain(SIGN_IN);
+    expect(operator.opened).toHaveLength(1);
+    const during = operator.states.find((state) => state.link?.url === SIGN_IN);
+    expect(during?.link?.label).toBe("Open auth.example.test");
+    expect(during?.cards?.find((card) => card.id === "admin")?.status).toBe("waiting");
+  });
+
+  it("Review Focus 2: a private channel shows the invite wait, then the binding, and the project card shows the repository", async () => {
+    const h = await harness();
+    const slackChannels = fakeSlackChannels([{ id: "C0PAY00001", name: "payments", isPrivate: true, isMember: true }], { visibleAfterFinds: 3 });
+    const operator = fakeWizardOperator([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
+    expect(await h.run(["--ui"], { openBrowser: operator.open, setup: { ...h.setup, slackChannels } })).toBe(0);
+    await operator.settled();
+    const channel = operator.states.flatMap((state) => state.cards?.filter((card) => card.id === "channel") ?? []);
+    expect(channel.map((card) => card.status)).toContain("waiting");
+    expect(channel.at(-1)).toMatchObject({ status: "ok", lines: ["#payments is bound to project payments-api."] });
+    expect(operator.states.at(-1)?.cards?.find((card) => card.id === "project")?.lines).toEqual(["Project payments-api, revision 1, for acme/payments-api, runs on EC2 workers."]);
+  });
+
+  it("the connectors card lists what was connected", async () => {
+    const h = await harness();
+    const { code, operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH_WITH_LINEAR]);
+    expect(code).toBe(0);
+    expect(operator.states.at(-1)?.cards?.find((card) => card.id === "connectors")?.lines).toEqual(["Connected to payments-api: Linear."]);
+    expect(operator.states.at(-1)?.cards?.find((card) => card.id === "alerts")?.lines).toEqual(["Alerts go to ops@example.com, and the test alarm arrived."]);
+  });
+
+  it("FR-052: the page ends on a ready card that needs no command to finish, and the outcome is still readyText", async () => {
+    const h = await harness();
+    const { code, operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
+    expect(code).toBe(0);
+    const last = operator.states.at(-1);
+    const ready = last?.cards?.find((card) => card.id === "ready");
+    expect(ready?.lines[0]).toBe("AgentX environment staging is ready.");
+    expect(ready?.link?.url).toBe("https://slack.com/app_redirect?team=T0TEAM&channel=C0PAY00001");
+    const later = ready?.lines.indexOf("Later, if you want more:") ?? -1;
+    expect(later).toBeGreaterThan(0);
+    expect(ready?.lines.slice(0, later).some((line) => line.includes("agentx --env"))).toBe(false);
+    // The phase 1 outcome is unchanged: the same summary the terminal prints.
+    expect(last?.outcome).toContain("AgentX environment staging is ready.");
+  });
+
+  it("a run stopped with --stop-after shows no ready card", async () => {
+    const h = await harness();
+    const { code, operator } = await h.runUi([...FIRST_RUN], ["--stop-after", "prerequisites"]);
+    expect(code).toBe(0);
+    expect(operator.states.at(-1)?.cards?.some((card) => card.id === "ready")).toBe(false);
+  });
+
+  it("User Story 3 and SC-003: a first install on the page ends with a reply, every card ok, and nothing typed in the terminal", async () => {
+    const h = await harness();
+    const { code, operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
+    expect(code).toBe(0);
+    expect(operator.states.at(-1)?.cards?.map((card) => [card.id, card.status])).toEqual([
+      ["aws", "ok"], ["prerequisites", "ok"], ["github", "ok"], ["slack", "ok"], ["slack-urls", "ok"],
+      ["admin", "ok"], ["project", "ok"], ["channel", "ok"], ["connectors", "ok"], ["alerts", "ok"], ["reply", "ok"], ["ready", "ok"],
+    ]);
+    expect(h.plane.bindings).toEqual(["T0TEAM/C0PAY00001"]);
+    expect(operator.opened).toHaveLength(1);
+  });
+
+  it("FR-012: no finishing secret reaches a card", async () => {
+    const h = await harness();
+    // The finishing steps' seams record what they were handed, so each secret below is proved to
+    // have gone through the run before its absence from the cards is checked.
+    const linearKeys: string[] = [];
+    const vendors = { ...h.setup.vendors, linearTeams: async (key: string) => { linearKeys.push(key); return h.setup.vendors.linearTeams(key); } };
+    const slackChannels = fakeSlackChannels([{ id: "C0PAY00001", name: "payments", isPrivate: false, isMember: true }]);
+    const operator = fakeWizardOperator([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH_WITH_LINEAR]);
+    const code = await h.run(["--ui"], { openBrowser: operator.open, setup: { ...h.setup, vendors, slackChannels } });
+    await operator.settled();
+    expect(code).toBe(0);
+    expect(operator.remaining()).toBe(0);
+    expect(linearKeys).toContain(LINEAR_KEY);
+    expect(JSON.parse(h.secrets.values.get("agentx/staging/connectors/linear") ?? "{}")).toEqual({ apiKey: LINEAR_KEY });
+    expect(slackChannels.tokens.length).toBeGreaterThan(0);
+    expect(slackChannels.tokens.every((token) => token === TEST_BOT_TOKEN)).toBe(true);
+    expect(JSON.parse(h.secrets.values.get("agentx/staging/slack") ?? "{}")).toMatchObject({ botToken: TEST_BOT_TOKEN, clientSecret: "fedcba9876543210fedcba9876543210" });
+    const cards = JSON.stringify(operator.states.map((state) => state.cards));
+    expect(cards).toContain("\"ready\"");
+    for (const secret of [LINEAR_KEY, TEST_BOT_TOKEN, "fedcba9876543210fedcba9876543210"]) expect(cards).not.toContain(secret);
+  });
+
+  it("a resumed install shows the finishing cards of the steps it runs", async () => {
+    const h = await harness();
+    h.deployer.fail.set(environmentStackName("staging", "control-plane"), new Error("Resource limit exceeded"));
+    expect(await h.run([], { prompter: scriptedPrompter(FIRST_RUN) })).not.toBe(0);
+    h.deployer.fail.clear();
+    const { code, operator } = await h.runUi([...SLACK, ...SIGNIN, ...FINISH]);
+    expect(code).toBe(0);
+    expect(operator.states.at(-1)?.cards?.map((card) => card.id)).toEqual(expect.arrayContaining(["admin", "project", "channel", "reply", "ready"]));
+    expect(operator.states.at(-1)?.cards?.find((card) => card.id === "ready")?.status).toBe("ok");
   });
 });

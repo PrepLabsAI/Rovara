@@ -234,6 +234,33 @@ describe("waiting for the threaded reply (FR-018 step 11)", () => {
       .rejects.toThrow("AgentX replied in #payments, but the turn ended as failed (WorkerUnavailable); see agentx --env staging admin turns export --since 15m, fix it, then run agentx init again");
   });
 
+  it("skips turns already reported, and adds a newly failed one before it throws (spec 040 FR-051)", async () => {
+    const plane = fakeControlPlane();
+    const old = turn({ subject: `${TEAM}/C0PAY00001/1.1`, receivedAt: new Date(T0 + 1000).toISOString(), disposition: "error" });
+    const fresh = turn({ subject: `${TEAM}/C0PAY00001/2.1`, receivedAt: new Date(T0 + 2000).toISOString(), disposition: "failed" });
+    plane.turns = [old, fresh];
+    const reported = new Set([String(old.eventId)]);
+    await expect(waitForThreadedReply({ env: "staging", session, fetch: plane.fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, rerun: "agentx init", write: () => undefined, ...clock(), reported }))
+      .rejects.toThrow("but the turn ended as failed;");
+    expect([...reported]).toEqual([String(old.eventId), String(fresh.eventId)]);
+    // With both reported, the watch waits for a new mention and gives up at the deadline instead.
+    await expect(waitForThreadedReply({ env: "staging", session, fetch: plane.fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, rerun: "agentx init", write: () => undefined, ...clock(), timeoutMs: 60_000, reported }))
+      .rejects.toThrow("no AgentX reply in #payments within 1 minute;");
+  });
+
+  it("M3: reports every failed turn it saw, so a second watch skips them all", async () => {
+    const plane = fakeControlPlane();
+    const first = turn({ subject: `${TEAM}/C0PAY00001/1.1`, receivedAt: new Date(T0 + 1000).toISOString(), disposition: "error" });
+    const second = turn({ subject: `${TEAM}/C0PAY00001/2.1`, receivedAt: new Date(T0 + 2000).toISOString(), disposition: "failed" });
+    plane.turns = [first, second];
+    const reported = new Set<string>();
+    await expect(waitForThreadedReply({ env: "staging", session, fetch: plane.fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, rerun: "agentx init", write: () => undefined, ...clock(), reported }))
+      .rejects.toThrow("but the turn ended as error;");
+    expect([...reported]).toEqual([String(first.eventId), String(second.eventId)]);
+    await expect(waitForThreadedReply({ env: "staging", session, fetch: plane.fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, rerun: "agentx init", write: () => undefined, ...clock(), timeoutMs: 60_000, reported }))
+      .rejects.toThrow("no AgentX reply in #payments within 1 minute;");
+  });
+
   it("asks the export for turns since just before the prompt", async () => {
     const plane = fakeControlPlane();
     plane.turns = [turn({ subject: `${TEAM}/C0PAY00001/1.1`, receivedAt: new Date(T0 + 1000).toISOString() })];
@@ -363,5 +390,23 @@ describe("the first-project init step's channel", () => {
     const progress = progressHandle({ ...progressHandle().value(), project: PROJECT });
     await expect(firstProjectStep().run(context(), progress))
       .rejects.toThrow("install progress has no Slack app facts; the Slack app step must finish first, so run agentx init again");
+  });
+});
+
+describe("the invite wait, told to the install page (spec 040 phase 3)", () => {
+  it("calls onWaiting once, with the channel's name, when the bot cannot see it yet", async () => {
+    const waited: string[] = [];
+    const lines: string[] = [];
+    const plane = fakeControlPlane();
+    const bound = await addChannel({
+      session, botToken: "xoxb-1", teamId: TEAM, botUserId: BOT, projectName: "payments-api",
+      prompter: scriptedPrompter(["payments"]), write: (line) => { lines.push(line); }, ...clock(),
+      services: { fetch: plane.fetch, slackChannels: fakeSlackChannels([{ id: "C0PAY00001", name: "payments", isPrivate: true, isMember: true }], { visibleAfterFinds: 3 }) },
+      flags: {}, onWaiting: (name) => { waited.push(name); },
+    });
+    expect(bound).toEqual({ channelId: "C0PAY00001", channelName: "payments" });
+    expect(waited).toEqual(["payments"]);
+    // The terminal's line is unchanged.
+    expect(lines).toContain(`The bot cannot see #payments yet. If #payments is private, type /invite <@${BOT}> in it; if it does not exist, create it. Waiting up to 10 minutes.`);
   });
 });

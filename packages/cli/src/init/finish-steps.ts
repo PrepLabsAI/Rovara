@@ -13,12 +13,14 @@ import { addJira } from "../setup/connectors/jira.js";
 import { addLinear } from "../setup/connectors/linear.js";
 import { addProject } from "../setup/project-add.js";
 import { installationToken } from "../setup/project-files.js";
-import { waitForThreadedReply } from "../setup/reply-watch.js";
+import { REPLY_WAIT_MS, waitForThreadedReply } from "../setup/reply-watch.js";
 import { BUDGET_TAG_NOTE, checkAlertWebhook } from "./answers.js";
 import type { InitContext } from "./context.js";
-import { CONNECTOR_TYPES, type ConnectorType, type InstallProgress } from "./install-state.js";
+import { CONNECTOR_LABELS, CONNECTOR_TYPES, type ConnectorType, type InstallProgress } from "./install-state.js";
+import { problemText, retryOnPage } from "./retry.js";
 import { readSlackBotToken } from "./slack-app.js";
 import type { InitStep } from "./steps.js";
+import { adminCard, alertsCard, channelCard, connectorsCard, projectCard, replyCard, type AdminCardInput, type ReplyCardInput } from "./ui/cards.js";
 
 /** The environment's settings, which the Slack service step writes; every finishing step and the
  * admin session need them (F21: one message, used by both). */
@@ -49,18 +51,31 @@ export function adminUserStep(): InitStep<InitContext> {
     async run(context, progress) {
       const settings = await requireSettings(context);
       const recorded = progress.current().admin;
+      const show = (card: AdminCardInput) => context.surface?.card(adminCard(card));
+      // FR-050 (Q7): on the page, a sign-in that fails or times out can be tried again; the
+      // terminal stops, as before. The sign-in page itself is the page's Next button (Q5).
+      const signIn = (who: string, createdEmail?: string) => retryOnPage({
+        surface: context.surface, prompter: context.prompter, question: "Sign in again?",
+        failed: (problem) => show({ stage: "failed", problem }),
+        run: async () => {
+          show({ stage: "signing-in", who, ...(createdEmail === undefined ? {} : { createdEmail }) });
+          return context.adminSession();
+        },
+      });
       if (settings.identity.mode === "cognito") {
         const email = recorded?.username ?? context.flags.adminEmail ?? await context.prompter.ask("Your email address, for your AgentX admin user", {
           flag: "--admin-email", validate: (value) => (AlertEmailSchema.safeParse(value).success ? undefined : "must be an email address"),
         });
+        let created = false;
         if (recorded === undefined) {
-          await ensureCognitoAdmin({
+          created = (await ensureCognitoAdmin({
             cognito: context.setup.cognito, poolId: userPoolId(settings), email, write: context.write,
             confirm: (question) => context.prompter.confirm(question, { defaultValue: false }),
-          });
+          })).created;
           await progress.update({ admin: { username: email, mode: "cognito" } });
         }
-        await context.adminSession();
+        await signIn(email, created ? email : undefined);
+        show({ stage: "done", username: email });
         return { status: "done", note: `admin ${email}` };
       }
       // F13 and C6 (FR-021): with your own OIDC, the admin claim is what makes someone an AgentX
@@ -72,9 +87,17 @@ export function adminUserStep(): InitStep<InitContext> {
       if (identity.adminClaim === undefined || identity.adminValues === undefined) {
         throw agentXError("CONFIG_INVALID", `the install's answers name no admin claim; AgentX cannot check that you are an administrator of your own OIDC provider, and an install's answers cannot change halfway. Start a new install with another --env, passing --admin-claim and --admin-values`);
       }
-      const session = await context.adminSession();
-      const username = oidcAdminName(session.accessToken);
+      const session = await signIn("an administrator of your company's sign-in");
+      let username: string;
+      try {
+        username = oidcAdminName(session.accessToken);
+      } catch (error) {
+        // Signing in again would bring the same token back, so the page offers no retry here.
+        show({ stage: "failed", problem: problemText(error), retry: false });
+        throw error;
+      }
       await progress.update({ admin: { username, mode: "oidc" } });
+      show({ stage: "done", username });
       return { status: "done", note: `admin ${username} signed in with your OIDC provider` };
     },
   };
@@ -88,6 +111,7 @@ export function firstProjectStep(): InitStep<InitContext> {
     async run(context, progress) {
       const session = await context.adminSession();
       let project = progress.current().project;
+      let shown = false;
       if (project === undefined) {
         const installationId = progress.current().github?.installationId;
         const githubToken = await installationToken({
@@ -95,26 +119,39 @@ export function firstProjectStep(): InitStep<InitContext> {
           ...(installationId === undefined ? {} : { installationId }),
           nowSeconds: Math.floor(context.now() / 1000),
         });
-        const added = await addProject({ env: context.env, session, githubToken, prompter: context.prompter, write: context.write, services: context.setup, flags: context.flags });
+        let repository: string | undefined;
+        const added = await addProject({
+          env: context.env, session, githubToken, prompter: context.prompter, write: context.write, services: context.setup, flags: context.flags,
+          onRepository: (fullName) => { repository = fullName; },
+        });
         project = { name: added.name, revision: added.revision };
         await progress.update({ project });
+        context.surface?.card(projectCard({ name: added.name, revision: added.revision, ...(repository === undefined ? {} : { repository }) }));
+        shown = true;
       }
+      // A project an earlier run recorded is shown without its repository, as is one added by an
+      // unchanged rerun with --project-name, which chooses no repository.
+      if (!shown) context.surface?.card(projectCard({ name: project.name, revision: project.revision }));
       if (project.channelId === undefined) {
         const slack = progress.current().slack;
         if (slack === undefined) throw agentXError("CONFIG_INVALID", "install progress has no Slack app facts; the Slack app step must finish first, so run agentx init again");
         const bound = await addChannel({
           session, botToken: await readSlackBotToken(context.secrets, context.env), teamId: slack.teamId, botUserId: slack.botUserId, projectName: project.name,
           prompter: context.prompter, write: context.write, sleep: context.sleep, now: context.now, services: context.setup, flags: context.flags,
+          onWaiting: (channelName) => context.surface?.card(channelCard({ stage: "waiting", channelName, botUserId: slack.botUserId })),
         });
         project = { ...project, channelId: bound.channelId, channelName: bound.channelName, teamId: slack.teamId };
         await progress.update({ project });
       }
+      if (project.channelName !== undefined) context.surface?.card(channelCard({ stage: "done", channelName: project.channelName, projectName: project.name }));
       return { status: "done", note: `project ${project.name} in #${project.channelName ?? project.channelId}` };
     },
   };
 }
 
-export const CONNECTOR_LABELS = { linear: "Linear", jira: "Jira", asana: "Asana" } as const;
+// CONNECTOR_LABELS lives in install-state.ts so the page cards can read it without importing this
+// module; re-exported so existing imports keep working.
+export { CONNECTOR_LABELS };
 
 const isConnectorType = (value: string): value is ConnectorType => (CONNECTOR_TYPES as readonly string[]).includes(value);
 
@@ -162,6 +199,10 @@ export function connectorsStep(): InitStep<InitContext> {
       const connected = (progress.current().connectors ?? []).map((entry) => CONNECTOR_LABELS[entry.type]);
       // --connectors none, which --yes without --connectors also means (main.ts).
       if (wanted?.size === 0 && connected.length === 0) context.write(`No connectors added; add them later with agentx --env ${context.env} connector add linear|jira|asana`);
+      context.surface?.card(connectorsCard({
+        projectName: project.name,
+        connected: (progress.current().connectors ?? []).map((entry) => ({ label: CONNECTOR_LABELS[entry.type], ...(entry.warning === undefined ? {} : { warning: entry.warning }) })),
+      }));
       return { status: "done", note: connected.length === 0 ? "no connectors" : `connected ${connected.join(", ")}` };
     },
   };
@@ -181,7 +222,10 @@ export function alertsStep(): InitStep<InitContext> {
         context.write(`Budget agentx-${context.env}-monthly: $${limit} a month.${answers.budget.scope === "tag" ? ` ${BUDGET_TAG_NOTE}` : ""}`);
       }
       // --no-alerts: nothing to subscribe and nothing to test.
-      if (answers.alert.kind === "none") return { status: "done", note: "no alert address (agentx config set alerts.address, phase 15e)" };
+      if (answers.alert.kind === "none") {
+        context.surface?.card(alertsCard({ stage: "none" }));
+        return { status: "done", note: "no alert address (agentx config set alerts.address, phase 15e)" };
+      }
       const recorded = progress.current().alerts ?? { subscribed: false, tested: false };
       const shownAs = answers.alert.kind === "email" ? answers.alert.address : answers.alert.display;
       const topicArn = await alertsTopicArn({ stackOutputs: context.setup.stackOutputs, stackName: settings.stacks["control-plane"], next: "run agentx init again" });
@@ -189,13 +233,34 @@ export function alertsStep(): InitStep<InitContext> {
         const target: AlertTarget = answers.alert.kind === "email"
           ? { kind: "email", address: answers.alert.address }
           : { kind: "webhook", display: answers.alert.display, endpoint: await requireWebhook(context, answers.alert.secretName) };
-        const state = await ensureSubscribed({ api: context.setup.alerts, topicArn, target, write: context.write, sleep: context.sleep, now: context.now });
+        const surface = context.surface;
+        // On the page, a card shows the run's own wait for the confirmation while it polls.
+        const subscribe = () => ensureSubscribed({
+          api: context.setup.alerts, topicArn, target, write: context.write, sleep: context.sleep, now: context.now,
+          ...(surface === undefined ? {} : { onWaiting: () => surface.card(alertsCard({ stage: "waiting", shownAs })) }),
+        });
+        let state = await subscribe();
+        // Q7: on the page, the operator confirms and checks again; ensureSubscribed never
+        // subscribes an address twice. The terminal stops and says to run init again, as before.
+        while (state === "pending" && surface !== undefined) {
+          surface.card(alertsCard({ stage: "confirm", shownAs }));
+          if (!(await context.prompter.confirm("Have you confirmed the subscription? Answer Yes to check again.", { defaultValue: true }))) break;
+          state = await subscribe();
+        }
         if (state === "pending") return { status: "waiting", message: `Confirm the alert subscription for ${shownAs} (the AWS Notifications email, or your webhook's SubscribeURL), then run agentx init --env ${context.env} --region ${answers.region} again.` };
         // Recorded before the test alarm, so a failed test is retried without subscribing again.
         await progress.update({ alerts: { subscribed: true, tested: false } });
       }
-      await sendTestAlarm({ api: context.setup.alerts, topicArn, env: context.env, shownAs, prompter: context.prompter, write: context.write, sleep: context.sleep, now: context.now });
+      context.surface?.card(alertsCard({ stage: "testing", shownAs }));
+      try {
+        await sendTestAlarm({ api: context.setup.alerts, topicArn, env: context.env, shownAs, prompter: context.prompter, write: context.write, sleep: context.sleep, now: context.now });
+      } catch (error) {
+        // No retry on the page for the test alarm: the card shows the terminal's own next step.
+        context.surface?.card(alertsCard({ stage: "failed", problem: problemText(error) }));
+        throw error;
+      }
       await progress.update({ alerts: { subscribed: true, tested: true } });
+      context.surface?.card(alertsCard({ stage: "done", shownAs }));
       return { status: "done", note: `alerts to ${shownAs}, test alarm received` };
     },
   };
@@ -219,10 +284,24 @@ export function e2eStep(): InitStep<InitContext> {
       if (project?.channelId === undefined || project.channelName === undefined || slack === undefined) {
         throw agentXError("CONFIG_INVALID", "install progress has no bound channel; the first-project step must finish first, so run agentx init again");
       }
-      const reply = await waitForThreadedReply({
-        env: context.env, session: await context.adminSession(), fetch: context.setup.fetch, teamId: slack.teamId, channelId: project.channelId,
-        channelName: project.channelName, botUserId: slack.botUserId, rerun: `agentx --env ${context.env} init`, write: context.write, sleep: context.sleep, now: context.now,
+      const where = { channelName: project.channelName, channelId: project.channelId, teamId: slack.teamId };
+      const show = (card: ReplyCardInput) => context.surface?.card(replyCard(card));
+      const reported = new Set<string>();
+      // FR-051 (Q7): on the page, the card says what to fix and the operator watches again; the
+      // terminal stops with the same advice, as before.
+      const reply = await retryOnPage({
+        surface: context.surface, prompter: context.prompter, question: "Watch for the reply again?",
+        failed: (problem) => show({ stage: "failed", ...where, problem }),
+        run: async () => {
+          show({ stage: "waiting", ...where, botUserId: slack.botUserId, minutes: Math.round(REPLY_WAIT_MS / 60_000) });
+          return waitForThreadedReply({
+            env: context.env, session: await context.adminSession(), fetch: context.setup.fetch, teamId: slack.teamId, channelId: where.channelId,
+            channelName: where.channelName, botUserId: slack.botUserId, rerun: `agentx --env ${context.env} init`, write: context.write, sleep: context.sleep, now: context.now,
+            reported,
+          });
+        },
       });
+      show({ stage: "done", channelName: project.channelName, seconds: reply.seconds });
       return { status: "done", note: `a mention in #${project.channelName} got a threaded reply in ${reply.seconds} seconds` };
     },
   };

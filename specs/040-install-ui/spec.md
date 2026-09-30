@@ -148,11 +148,19 @@ browser the wizard prints its URL and falls back to the terminal prompter.
 ### Finish the job
 
 - **FR-050**: After deployment the wizard MUST create the Cognito admin user, sign the operator in,
-  register the first project and bind a Slack channel, as screens in the same run.
+  register the first project and bind a Slack channel, as screens in the same run. On the page,
+  the sign-in page is a button (Q5), and a sign-in that fails or times out can be tried again (Q7).
+  A private channel's invite wait and the alert subscription's confirmation are cards that resolve
+  by themselves: the alert card waits on the page (up to 10 minutes) and, after that, the alert
+  wait can be checked again on the page.
 - **FR-051**: The final screen MUST confirm a real reply in the bound channel, and MUST report what
-  to fix when it does not arrive.
-- **FR-052**: `nextStepsText()`'s manual follow-up commands MUST be removed from the UI path once
-  FR-050 and FR-051 hold.
+  to fix when it does not arrive. A second watch ignores a turn the first one already reported as
+  failed. On the page, a failed or missed reply can be watched for again (Q7); the terminal path
+  stops as before.
+- **FR-052**: The page's last card leads with what works now (where to talk to AgentX, how
+  developers sign in) and lists the optional day-2 commands under 'Later, if you want more'. No
+  command is needed to finish; `nextStepsText()` no longer exists (spec 015 phase 15d2 removed
+  it). (Q10.)
 
 ### Packaging
 
@@ -193,6 +201,13 @@ browser the wizard prints its URL and falls back to the terminal prompter.
   bind and the test reply; (4) UI on by default plus packaging and docs. Phase 1 is shippable alone.
   Phase 2 built, see PR #161; its live check is deferred
   to the combined final live check (owner, 2026-09-30).
+  Phase 3 built, see PR #164; live check deferred to the combined final live check
+  (owner, 2026-09-30).
 - **Cards.** The page's connect and finishing screens are status cards built in `ui/cards.ts` from
   facts a step already has; no card builder takes a secret. Steps reach the page through an
   optional `InstallSurface` on the init context, so the terminal path is unchanged (phase 2).
+- **Retry on the page.** Where the page offers to try again, its failure cards drop the terminal's
+  closing "run agentx ... init again" advice (phase 2); phase 3's test reply card follows the same
+  rule (R2), and so does the admin card's failed sign-in. A failure the page offers no retry for
+  (the test alarm, an OIDC token with no name to record) keeps its own next step.
+- Noted for phase 4: a failed sign-in's link stays as the page button while Sign in again? is asked, and a channel card stays waiting after the invite timeout.
