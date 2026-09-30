@@ -25,6 +25,8 @@ export async function createAdminChangeBroker(options: {
   const fetch: typeof globalThis.fetch = async (input) => ((typeof input === "string" ? input : input instanceof URL ? input.href : input.url).endsWith("/.well-known/openid-configuration")
     ? Response.json({ issuer, userinfo_endpoint: "https://identity.example.test/userinfo" })
     : Response.json({ sub: "admin-subject", email: "ada@example.com", email_verified: true, name: "Ada" }));
+  /** Set `down` to make DeveloperIdentity's channel-by-name lookup answer that Slack is unreachable. */
+  const channelLookup = { down: false };
   const slackUserByEmail = async () => (options.slackLinked === false ? { ok: true as const } : { ok: true as const, userId: ADMIN_SLACK });
   const harness = await createAdminReadBroker({
     ...(options.channelInfo === undefined ? {} : { channelInfo: options.channelInfo }),
@@ -32,7 +34,7 @@ export async function createAdminChangeBroker(options: {
     developerExtra: {
       slackUserByEmail,
       endDeveloperSessions: async () => ({ ok: true }),
-      channelByName: async ({ name }) => (name === "ledger-dev" ? { ok: true, channel: { channelId: "C0LEDGER01", name } } : { ok: true }),
+      channelByName: async ({ name }) => (channelLookup.down ? { ok: false, error: "slack_unavailable" } : name === "ledger-dev" ? { ok: true, channel: { channelId: "C0LEDGER01", name } } : { ok: true }),
     },
     brokerExtra: {
       // A test's own `me` replaces the production default whole, so it names the lookup too.
@@ -50,7 +52,7 @@ export async function createAdminChangeBroker(options: {
     return JSON.parse(response.body) as { outcome: string; changeId: string; traceId?: string };
   };
   return {
-    ...harness, clock, metrics, propose, press,
+    ...harness, clock, metrics, propose, press, channelLookup,
     get: (id: string, subject?: string) => call("GET", `/v1/admin/changes/${id}`, undefined, subject),
     list: (query = "") => call("GET", `/v1/admin/changes${query}`),
     slack: (id: string, subject?: string) => call("POST", `/v1/admin/changes/${id}/slack`, {}, subject),

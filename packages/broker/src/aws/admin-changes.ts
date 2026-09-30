@@ -37,7 +37,8 @@ export interface AdminChangeDependencies {
   log: (entry: Record<string, unknown>) => void;
 }
 export type { PendingChange } from "@agentx/contracts";
-export type PressOutcome = "applied" | "declined" | "refused" | "expired" | "not_pending" | "stale" | "failed" | "not_found";
+/** `unavailable`: nothing applied and the change is still pending, so the admin may press again. */
+export type PressOutcome = "applied" | "declined" | "refused" | "expired" | "not_pending" | "stale" | "failed" | "unavailable" | "not_found";
 type Answer = { status: number; body: unknown };
 /** How a confirmation arrived: the method, the Slack presser, and the client's own times. */
 type Confirmation = { method: ConfirmationMethod; pressedBy?: string; requestedAt?: string; answeredAt?: string };
@@ -52,6 +53,17 @@ const ERROR_MESSAGE_MAX = 1_000;
 const NOT_APPLIED = "the change could not be applied; check the state, then ask again";
 const APPLY_UNFINISHED = "the apply did not finish; check the state, then ask again";
 const NOT_PLANNED = "the change could not be planned; try again";
+/** A planner's refusal that says nothing about the state: Slack or AWS could not be reached. */
+const TRANSIENT = new Set<string>(["SLACK_UNAVAILABLE", "RUNTIME_UNAVAILABLE"]);
+/** How each method is named in a refusal's "what to do next". */
+const METHOD_NAMES: Record<ConfirmationMethod, { confirm: string; decline: string }> = {
+  elicitation: { confirm: "the pop-up", decline: "the pop-up" },
+  cli: { confirm: "the CLI prompt", decline: "the CLI prompt" },
+  slack: { confirm: "the Slack Confirm button", decline: "the Slack Cancel button" },
+};
+const methodsNamed = (methods: readonly ConfirmationMethod[], as: "confirm" | "decline") => methods.map((method) => METHOD_NAMES[method][as]).join(" or ");
+/** Nothing applied and the change is still pending: the admin may confirm again (never CHANGE_STALE). */
+const tryAgain = (changeId: string, what: string) => agentXError("RUNTIME_UNAVAILABLE", `change ${changeId} could not be ${what} just now; try again`);
 /** The pending item's own fields a step may set: the stored record is strict (E2), so only these. */
 type PendingFields = Partial<Pick<PendingChange, "claimedAt" | "methodUsed" | "pressedBy" | "result" | "error">>;
 
@@ -339,11 +351,11 @@ async function applyOnce(deps: AdminChangeDependencies, change: PendingChange, a
   try {
     fresh = await planChange(deps.plans, applier, change.input, change.slackUserId === undefined ? {} : { slackUserId: change.slackUserId });
   } catch (error) {
-    if (!(error instanceof AgentXError)) {
-      // A throttle or a failed lookup says nothing about the state: never apply, and leave the
-      // change pending so the admin can confirm again within its 10 minutes.
+    if (!(error instanceof AgentXError) || TRANSIENT.has(error.code)) {
+      // A throttle, a failed lookup or an unreachable Slack says nothing about the state: never
+      // apply, and leave the change pending so the admin can confirm again within its 10 minutes.
       logChangeStep(deps.log, "replan_unavailable", { ...traced(change), error: errorName(error) });
-      throw agentXError("RUNTIME_UNAVAILABLE", `change ${change.changeId} could not be checked against the current state just now; try again`);
+      throw tryAgain(change.changeId, "checked against the current state");
     }
     fresh = error;
   }
@@ -369,8 +381,19 @@ async function applyOnce(deps: AdminChangeDependencies, change: PendingChange, a
       auditStepItem(deps.audit.tableName, change.changeId, { ...answered, status: "applying" }),
     ]);
   } catch (error) {
-    if (!conditional(error)) throw error;
-    throw await refuseAsItIs(deps, change, how.pressedBy);
+    if (conditional(error)) throw await refuseAsItIs(deps, change, how.pressedBy);
+    // A throttled or ambiguous claim: the change as it is now. Still pending means nothing
+    // applied; applying means the claim was written and its answer lost, so the handler never
+    // runs here and the change reads failed after 2 minutes (at most once either way).
+    logChangeStep(deps.log, "claim_unavailable", { ...traced(change), error: errorName(error) });
+    let current: PendingChange | undefined;
+    try {
+      current = await getPending(deps, change.changeId);
+    } catch {
+      throw tryAgain(change.changeId, "confirmed");
+    }
+    if (current === undefined || current.status === "pending") throw tryAgain(change.changeId, "confirmed");
+    throw await refuseAsItIs(deps, current, how.pressedBy);
   }
   logChangeStep(deps.log, "claimed", traced(change));
   const applying: PendingChange = { ...change, status: "applying", claimedAt: iso(now), ...who };
@@ -404,7 +427,7 @@ async function apply(deps: AdminChangeDependencies, identity: AuthenticatedIdent
   if (!change.methodsOffered.includes(body.data.method) || (body.data.method === "elicitation" && !deps.confirm.elicitation)) {
     await refuseAttempt(deps, changeId, "method_not_offered");
     logChangeStep(deps.log, "refused", { ...traced(change), error: "method_not_offered" });
-    throw agentXError("CONFIRMATION_UNAVAILABLE", `the ${body.data.method === "cli" ? "CLI" : "pop-up"} confirmation was not offered for change ${changeId}; confirm it by ${change.methodsOffered.join(" or ")}, or ask for the change again`);
+    throw agentXError("CONFIRMATION_UNAVAILABLE", `${METHOD_NAMES[body.data.method].confirm} was not offered for change ${changeId}; confirm it with ${methodsNamed(change.methodsOffered, "confirm")}, or ask for the change again`);
   }
   const applied = await applyOnce(deps, change, identity, {
     method: body.data.method,
@@ -425,7 +448,7 @@ async function decline(deps: AdminChangeDependencies, identity: AuthenticatedIde
   if (!change.methodsOffered.includes(body.data.method)) {
     await refuseAttempt(deps, changeId, "method_not_offered");
     logChangeStep(deps.log, "refused", { ...traced(change), error: "method_not_offered" });
-    throw agentXError("CONFIRMATION_UNAVAILABLE", `the ${body.data.method === "cli" ? "CLI" : "pop-up"} was not offered for change ${changeId}; decline it by ${change.methodsOffered.join(" or ")}, or let it expire`);
+    throw agentXError("CONFIRMATION_UNAVAILABLE", `${METHOD_NAMES[body.data.method].decline} was not offered for change ${changeId}; decline it with ${methodsNamed(change.methodsOffered, "decline")}, or let it expire`);
   }
   const answeredAt = body.data.answeredAt ?? iso(deps.now());
   if (!(await transition(deps, change, "pending", "declined", { answeredAt, methodUsed: body.data.method }, { methodUsed: body.data.method }))) throw await refuseAsItIs(deps, change);
@@ -438,7 +461,7 @@ async function startSlack(deps: AdminChangeDependencies, identity: Authenticated
   await requirePending(deps, change);
   if (!change.methodsOffered.includes("slack") || !deps.confirm.slack) {
     await refuseAttempt(deps, changeId, "method_not_offered");
-    throw agentXError("CONFIRMATION_UNAVAILABLE", `the Slack Confirm button was not offered for change ${changeId}; confirm it by ${change.methodsOffered.join(" or ")}, or ask for the change again`);
+    throw agentXError("CONFIRMATION_UNAVAILABLE", `the Slack Confirm button was not offered for change ${changeId}; confirm it with ${methodsNamed(change.methodsOffered, "confirm")}, or ask for the change again`);
   }
   if (change.slackRequestedAt !== undefined) return { status: 200, body: { change: viewOf(deps, change, true) } };
   const requestedAt = iso(deps.now());
@@ -464,7 +487,7 @@ async function pressFailure(deps: AdminChangeDependencies, change: PendingChange
   if (error instanceof AgentXError && error.code === "CHANGE_STALE") return "stale";
   const current = await getPending(deps, change.changeId);
   // The re-plan could not read the state: nothing applied, and the change stays pending.
-  if (current?.status === "pending" && error instanceof AgentXError && error.code === "RUNTIME_UNAVAILABLE") return "failed";
+  if (current?.status === "pending" && error instanceof AgentXError && error.code === "RUNTIME_UNAVAILABLE") return "unavailable";
   if (current?.status === "expired") return "expired";
   if (current?.status === "failed") return "failed";
   return "not_pending";

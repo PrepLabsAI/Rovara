@@ -211,7 +211,7 @@ describe("confirming by the pop-up (FR-040, SC-005)", () => {
       return send(command);
     };
     expect((await broker.apply(id)).body.error).toEqual({ code: "RUNTIME_UNAVAILABLE", message: `change ${id} could not be checked against the current state just now; try again` });
-    expect(await broker.press(id, "confirm")).toMatchObject({ outcome: "failed", changeId: id });
+    expect(await broker.press(id, "confirm")).toMatchObject({ outcome: "unavailable", changeId: id });
     expect(binding(broker.db)).toBeUndefined();
     expect(broker.pending(id)).toMatchObject({ status: "pending" });
     expect(broker.audit(id)).toMatchObject({ status: "pending" });
@@ -220,6 +220,60 @@ describe("confirming by the pop-up (FR-040, SC-005)", () => {
     expect(logged("admin_change.claimed")).toEqual([]);
     broker.db.send = send;
     expect((await broker.apply(id)).body.change).toMatchObject({ status: "applied" });
+  });
+
+  it("leaves the change pending to try again when the re-plan cannot reach Slack", async () => {
+    const broker = await createAdminChangeBroker();
+    // A channel given by name: the re-plan looks it up in Slack again.
+    const id = changeId(await broker.propose(BIND, ["elicitation", "slack"]));
+    await broker.slack(id);
+    broker.channelLookup.down = true;
+    expect((await broker.apply(id)).body.error).toEqual({ code: "RUNTIME_UNAVAILABLE", message: `change ${id} could not be checked against the current state just now; try again` });
+    expect(await broker.press(id, "confirm")).toMatchObject({ outcome: "unavailable", changeId: id });
+    expect(binding(broker.db)).toBeUndefined();
+    expect(broker.pending(id)).toMatchObject({ status: "pending" });
+    expect(broker.audit(id)).not.toHaveProperty("outcome");
+    expect(broker.audit(id)).not.toHaveProperty("refusedAttempts");
+    expect(logged("admin_change.replan_unavailable")).toEqual([expect.objectContaining({ changeId: id, error: "SLACK_UNAVAILABLE" }), expect.objectContaining({ changeId: id, error: "SLACK_UNAVAILABLE" })]);
+    broker.channelLookup.down = false;
+    expect(await broker.press(id, "confirm")).toMatchObject({ outcome: "applied" });
+    expect(binding(broker.db)).toMatchObject({ projectName: "payments" });
+  });
+
+  it("answers unavailable, never not_pending, when the claim's write fails and the change is still pending", async () => {
+    const broker = await createAdminChangeBroker();
+    const id = changeId(await broker.propose(BIND, ["elicitation", "slack"]));
+    await broker.slack(id);
+    const send = broker.db.send;
+    const claim = (command: { constructor: { name: string }; input: unknown }) => command.constructor.name === "TransactWriteCommand" && JSON.stringify(command.input).includes(":applying");
+    broker.db.send = async (command) => {
+      if (claim(command)) throw Object.assign(new Error("Rate exceeded"), { name: "ThrottlingException" });
+      return send(command);
+    };
+    expect(await broker.press(id, "confirm")).toMatchObject({ outcome: "unavailable", changeId: id });
+    expect((await broker.apply(id)).body.error).toEqual({ code: "RUNTIME_UNAVAILABLE", message: `change ${id} could not be confirmed just now; try again` });
+    expect(broker.pending(id)).toMatchObject({ status: "pending" });
+    expect(binding(broker.db)).toBeUndefined();
+    // An ambiguous failure: the claim was written, but its answer was lost. It never applies twice, or at all here.
+    broker.db.send = async (command) => {
+      const result = await send(command);
+      if (claim(command)) throw Object.assign(new Error("socket hang up"), { name: "TimeoutError" });
+      return result;
+    };
+    expect(await broker.press(id, "confirm")).toMatchObject({ outcome: "not_pending", changeId: id });
+    broker.db.send = send;
+    expect(broker.pending(id)).toMatchObject({ status: "applying" });
+    expect(binding(broker.db)).toBeUndefined();
+    broker.clock.advance(2 * 60_000 + 1);
+    expect((await broker.get(id)).body.change).toMatchObject({ status: "failed" });
+    expect(logged("admin_change.claim_unavailable")).toHaveLength(3);
+  });
+
+  it("names the Slack Cancel button when a decline by another method is refused", async () => {
+    const broker = await createAdminChangeBroker();
+    const id = changeId(await broker.propose(BIND, ["slack"]));
+    expect((await broker.decline(id)).body.error).toEqual({ code: "CONFIRMATION_UNAVAILABLE", message: `the pop-up was not offered for change ${id}; decline it with the Slack Cancel button, or let it expire` });
+    expect(broker.pending(id)).toMatchObject({ status: "pending" });
   });
 
   it("records a handler's failure as failed, with the error's code only", async () => {
