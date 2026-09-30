@@ -295,4 +295,23 @@ describe("agentx init --ui", () => {
     expect((await readInstallProgress(h.store, "staging"))?.steps.access).toMatchObject({ status: "done", note: "deployed by your platform team from the export bundle" });
     expect(deployer.requests.map((request) => request.part)).toEqual(["foundation"]);
   });
+
+  it("Q5: every other site is a button on the page, and the installer opens only the page itself", async () => {
+    const h = await harness();
+    const { code, operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
+    expect(code).toBe(0);
+    expect(operator.opened).toHaveLength(1);
+    expect(operator.opened[0]).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/\?t=/);
+    expect(operator.clicked).toContain("https://github.com/apps/agentx-acme-staging/installations/new");
+    expect(operator.clicked).toContain("https://api.slack.com/apps/A0APP/event-subscriptions");
+    expect(operator.clicked.some((url) => /^http:\/\/127\.0\.0\.1:\d+\/github\/start/.test(url))).toBe(true);
+  });
+
+  it("the terminal path still opens every site in the system browser", async () => {
+    const h = await harness();
+    const opened: string[] = [];
+    expect(await h.run([], { prompter: scriptedPrompter([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]), openBrowser: browserThatCreatesGitHubApp(opened) })).toBe(0);
+    expect(opened).toContain("https://github.com/apps/agentx-acme-staging/installations/new");
+    expect(opened).toContain("https://api.slack.com/apps/A0APP/event-subscriptions");
+  });
 });

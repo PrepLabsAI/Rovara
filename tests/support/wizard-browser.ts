@@ -14,6 +14,8 @@ export interface WizardOperator {
   open: (url: string) => Promise<boolean>;
   /** Every address the run asked a browser to open. */
   opened: string[];
+  /** Every link the page offered, in the order the operator clicked it (Q5). */
+  clicked: string[];
   /** Every question the page showed, in order. */
   asked: string[];
   /** Every state the page saw, oldest first. */
@@ -33,6 +35,21 @@ export function fakeWizardOperator(script: ScriptedAnswer[], options: { githubCo
   const fieldErrors: string[] = [];
   let driving: Promise<void> = Promise.resolve();
   let failure: unknown;
+  const clicked: string[] = [];
+  /** What a person's browser does with a link the page offers: GitHub's form page is played back
+   * as GitHub (a redirect to the callback with a code and the page's state); anything else is
+   * only recorded. Works for the terminal path's one-time listener and for the wizard's own
+   * /github/start (Task 5), whose address carries the session token. */
+  const visit = async (url: string): Promise<void> => {
+    if (!/^http:\/\/127\.0\.0\.1:\d+\/github\/start/.test(url)) return;
+    const page = await (await fetch(url)).text();
+    const state = /[?&]state=([a-f0-9]+)/.exec(page)?.[1];
+    const callback = new URL("/github/created", new URL(url).origin);
+    callback.searchParams.set("code", options.githubCode ?? "0123456789abcdef0123");
+    callback.searchParams.set("state", state ?? "missing");
+    // GitHub's redirect is a cross-site top-level visit with no session token.
+    await fetch(callback, { headers: { "sec-fetch-site": "cross-site", referer: "https://github.com/" } });
+  };
 
   /** Reads the page's own event stream, so the driver sees every state the page would, in order
    * and with no polling race against the end of the run. */
@@ -46,6 +63,11 @@ export function fakeWizardOperator(script: ScriptedAnswer[], options: { githubCo
 
     const onState = async (state: Omit<WizardSnapshot, "log">): Promise<void> => {
       states.push({ ...state, log: [...log] });
+      for (const link of [state.link, ...(state.cards ?? []).map((card) => card.link)]) {
+        if (link === undefined || clicked.includes(link.url)) continue;
+        clicked.push(link.url);
+        await visit(link.url);
+      }
       const question = state.question;
       if (question === undefined || question.id === answered) return;
       if (question.error !== undefined) fieldErrors.push(question.error);
@@ -96,6 +118,7 @@ export function fakeWizardOperator(script: ScriptedAnswer[], options: { githubCo
 
   return {
     opened,
+    clicked,
     asked,
     states,
     fieldErrors,
@@ -106,13 +129,7 @@ export function fakeWizardOperator(script: ScriptedAnswer[], options: { githubCo
     },
     async open(url) {
       opened.push(url);
-      if (url.includes("/github/start")) {
-        // GitHub, played back: read the pre-filled form and redirect to the listener with a code.
-        const page = await (await fetch(url)).text();
-        const state = /[?&]state=([a-f0-9]+)/.exec(page)?.[1];
-        await fetch(`${url.replace("/github/start", "/github/created")}?code=${options.githubCode ?? "0123456789abcdef0123"}&state=${state ?? "missing"}`);
-        return true;
-      }
+      if (url.includes("/github/start")) { await visit(url); return true; }
       if (url.startsWith("http://127.0.0.1:") && new URL(url).searchParams.has(WIZARD_TOKEN_QUERY)) {
         driving = drive(url).catch((error: unknown) => { failure = error; });
       }

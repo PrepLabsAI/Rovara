@@ -442,6 +442,12 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   if (answers.engine === "cdk" && options.source === undefined) throw agentXError("CONFIG_INVALID", `the cdk engine needs --source <a checkout of tag v${answers.releaseVersion}>`);
 
   const activePrompter = prompter;
+  // With --ui, the page's cards; the terminal path has none (SC-004).
+  const surface = session.wizard?.surface;
+  // Q5: with --ui, every other site is a button on the page. The terminal path opens the system
+  // browser, or prints the address with --no-browser, as before.
+  const stepBrowser = session.wizard?.openLink
+    ?? (options.browser ? neverThrowingBrowser(deps.openBrowser ?? openSystemBrowser, write) : undefined);
   const finalAnswers = answers;
   // A first run's OpenRouter key is not stored until after the plan, so the check uses it directly.
   const pendingKey = collected?.openRouterKey === undefined
@@ -503,7 +509,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     const settings = await readSettingsOrThrow(store, env);
     return openAdminSession({
       settings, services: setup, write, now,
-      ...(options.browser ? { openBrowser: neverThrowingBrowser(deps.openBrowser ?? openSystemBrowser, write) } : {}),
+      ...(stepBrowser === undefined ? {} : { openBrowser: stepBrowser }),
       ...(adminClaim === undefined ? {} : { adminClaim }),
     });
   };
@@ -518,7 +524,8 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     secrets,
     prompter: activePrompter,
     write,
-    ...(options.browser ? { openBrowser: neverThrowingBrowser(deps.openBrowser ?? openSystemBrowser, write) } : {}),
+    ...(stepBrowser === undefined ? {} : { openBrowser: stepBrowser }),
+    ...(surface === undefined ? {} : { surface }),
     now,
     sleep,
     fetch: fetchImplementation,
