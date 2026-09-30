@@ -290,11 +290,6 @@ function startKey(value: unknown): TurnRecordStartKey | undefined {
   return value as TurnRecordStartKey;
 }
 
-/**
- * An ISO 8601 time that names a real instant as written. V8's Date.parse rolls impossible values
- * forward (2026-02-31 becomes March 3, T24:00 the next day), so the written calendar date must
- * exist and the hour must be 00 to 23.
- */
 /** `limit` from 1 to ADMIN_LIST_MAX, or `fallback` when absent; the admin read routes share it. */
 export function listLimitParam(value: string | null, fallback: number): number {
   if (value === null) return fallback;
@@ -302,7 +297,12 @@ export function listLimitParam(value: string | null, fallback: number): number {
   return Number(value);
 }
 
-/** An ISO 8601 time that names a real date and hour: February 31 or hour 24 is refused, not rolled over. */
+/**
+ * An ISO 8601 time that names a real instant as written. V8's Date.parse rolls impossible values
+ * forward (2026-02-31 becomes March 3, T24:00 the next day), so the written calendar date must
+ * exist and the hour must be 00 to 23: February 31 or hour 24 is refused, not rolled over. The
+ * admin read routes share it.
+ */
 export function validTime(value: string): boolean {
   const match = ISO_TIME.exec(value);
   if (!match || Number.isNaN(Date.parse(value))) return false;
