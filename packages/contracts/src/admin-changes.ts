@@ -137,21 +137,31 @@ export type AdminChangesResponse = z.infer<typeof AdminChangesResponseSchema>;
 // The wire variants (R1, R23): the same fields, with the closed sets as plain strings and every
 // object loose, so a newer control plane's value or field never fails an older client's read.
 const WireError = z.object({ code: z.string(), message: z.string() }).passthrough();
+// A newer control plane's longer text, times or IDs never fail either: no length, uuid or datetime limits.
 const WireOverrides = {
   kind: z.string(),
   status: z.string(),
+  effect: z.string(),
   methodsOffered: z.array(z.string()),
   methodUsed: z.string().optional(),
   error: WireError.optional(),
 };
-export const AdminChangeViewWireSchema = looseCopy(AdminChangeViewSchema.extend(WireOverrides));
+export const AdminChangeViewWireSchema = looseCopy(AdminChangeViewSchema.extend({ ...WireOverrides, createdAt: z.string(), expiresAt: z.string() }));
 export type AdminChangeViewWire = z.infer<typeof AdminChangeViewWireSchema>;
 export const AdminChangeResponseWireSchema = z.object({ change: AdminChangeViewWireSchema }).passthrough();
 export type AdminChangeResponseWire = z.infer<typeof AdminChangeResponseWireSchema>;
 export const AdminChangeAuditRecordWireSchema = looseCopy(AdminChangeAuditRecordSchema.extend({
   ...WireOverrides,
+  traceId: z.string(),
+  client: z.object({ cliVersion: z.string(), mcpClientName: z.string().optional(), mcpClientVersion: z.string().optional() }),
   outcome: z.string().optional(),
   pressedBy: z.string().optional(),
+  proposedAt: z.string(),
+  confirmationRequestedAt: z.string().optional(),
+  answeredAt: z.string().optional(),
+  appliedAt: z.string().optional(),
+  failedAt: z.string().optional(),
+  expiredAt: z.string().optional(),
   refusedAttempts: lastRefusedAttempts(z.object({ at: z.string(), reason: z.string(), slackUserId: z.string().optional() }).passthrough()).optional(),
 }));
 export type AdminChangeAuditRecordWire = z.infer<typeof AdminChangeAuditRecordWireSchema>;
@@ -185,7 +195,7 @@ export function adminChangeAuditKeys(changeId: string, proposedAt: string) {
  * where admin changes exist) at proposedAt plus 30 days, so it outlives the audit's reads of it.
  */
 export const AdminChangePendingRecordSchema = z.object({
-  pk: z.string().startsWith("ADMIN_CHANGE#"),
+  pk: z.string(),
   sk: z.literal("META"),
   entityType: z.literal("ADMIN_CHANGE"),
   changeId: Uuid,
@@ -210,7 +220,7 @@ export const AdminChangePendingRecordSchema = z.object({
   result: z.record(z.string(), z.unknown()).optional(),
   error: ChangeError.optional(),
   [INDEX_EXPIRY_ATTRIBUTE]: z.number().int().positive(),
-}).strict().refine((record) => record.input.kind === record.kind && record.pk === adminChangeKey(record.changeId).pk, { message: "the pending change's key, kind and input disagree" });
+}).strict().refine((record) => record.input.kind === record.kind && record.pk === adminChangeKey(record.changeId).pk, { message: "the pending change's key, kind and input disagree" }); // The refine pins pk exactly.
 export type AdminChangePendingRecord = z.infer<typeof AdminChangePendingRecordSchema>;
 /** The broker's and notifier's name for a stored pending change (Tasks 7, 8, 9). */
 export type PendingChange = AdminChangePendingRecord;

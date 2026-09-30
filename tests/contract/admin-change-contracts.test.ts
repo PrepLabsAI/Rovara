@@ -8,6 +8,7 @@ import {
   ADMIN_CHANGE_TTL_MS,
   AdminChangeAuditRecordSchema,
   AdminChangeAuditRecordWireSchema,
+  AdminChangeClientSchema,
   AdminChangeInputSchema,
   AdminChangeKindSchema,
   AdminChangePendingRecordSchema,
@@ -18,7 +19,9 @@ import {
   AdminChangeViewWireSchema,
   AdminChangesResponseSchema,
   AdminChangesResponseWireSchema,
+  AgentXConfigurationConfirmSchema,
   ApplyAdminChangeRequestSchema,
+  DeclineAdminChangeRequestSchema,
   INDEX_EXPIRY_ATTRIBUTE,
   ProposeAdminChangeRequestSchema,
   adminChangeAuditKeys,
@@ -58,6 +61,28 @@ describe("change requests (E1)", () => {
     expect(ProposeAdminChangeRequestSchema.parse(request)).toMatchObject({ methods: ["elicitation", "slack"] });
     expect(ProposeAdminChangeRequestSchema.safeParse({ ...request, methods: [] }).success).toBe(false);
     expect(ProposeAdminChangeRequestSchema.safeParse({ ...request, methods: ["email"] }).success).toBe(false);
+  });
+
+  it("takes only the client's own fields, and the MCP client's (FR-051)", () => {
+    expect(AdminChangeClientSchema.parse({ cliVersion: "0.0.7" })).toEqual({ cliVersion: "0.0.7" });
+    expect(AdminChangeClientSchema.safeParse({ cliVersion: "0.0.7", os: "darwin" }).success).toBe(false);
+    expect(AdminChangeClientSchema.safeParse({ cliVersion: "0.0.7", mcpClient: { name: "claude-code", build: 1 } }).success).toBe(false);
+    expect(AdminChangeClientSchema.safeParse({ cliVersion: "" }).success).toBe(false);
+  });
+
+  it("declines by elicitation or the CLI, with a reason, never by a Slack press through the route (E4)", () => {
+    expect(DeclineAdminChangeRequestSchema.parse({ method: "cli", reason: "declined" })).toEqual({ method: "cli", reason: "declined" });
+    expect(DeclineAdminChangeRequestSchema.parse({ method: "elicitation", reason: "cancelled", answeredAt: PROPOSED })).toMatchObject({ reason: "cancelled" });
+    expect(DeclineAdminChangeRequestSchema.safeParse({ method: "slack", reason: "declined" }).success).toBe(false);
+    expect(DeclineAdminChangeRequestSchema.safeParse({ method: "cli" }).success).toBe(false);
+    expect(DeclineAdminChangeRequestSchema.safeParse({ method: "cli", reason: "bored" }).success).toBe(false);
+    expect(DeclineAdminChangeRequestSchema.safeParse({ method: "cli", reason: "declined", extra: 1 }).success).toBe(false);
+  });
+
+  it("reports the environment's confirmation methods as two booleans (E16)", () => {
+    expect(AgentXConfigurationConfirmSchema.parse({ elicitation: true, slack: false })).toEqual({ elicitation: true, slack: false });
+    expect(AgentXConfigurationConfirmSchema.safeParse({ elicitation: "enabled", slack: false }).success).toBe(false);
+    expect(AgentXConfigurationConfirmSchema.safeParse({ elicitation: true }).success).toBe(false);
   });
 
   it("applies only by elicitation or the CLI through the route: a Slack press has its own path (E4)", () => {
@@ -109,6 +134,8 @@ describe("records (E2, E3)", () => {
     expect(AdminChangePendingRecordSchema.safeParse({ ...pendingRecord, surprise: 1 }).success).toBe(false);
     expect(AdminChangePendingRecordSchema.safeParse({ ...pendingRecord, status: "archived" }).success).toBe(false);
     expect(AdminChangePendingRecordSchema.safeParse({ ...pendingRecord, input: { kind: "bind_channel", channel: "C0123456789" } }).success).toBe(false);
+    expect(AdminChangePendingRecordSchema.safeParse({ ...pendingRecord, pk: `CHANGE#${CHANGE}` }).success).toBe(false);
+    expect(AdminChangePendingRecordSchema.safeParse({ ...pendingRecord, pk: "ADMIN_CHANGE#77777777-7777-4777-8777-777777777777" }).success).toBe(false);
   });
 
   it("reads a stored request ID's item strictly, with its TTL", () => {
@@ -151,6 +178,16 @@ describe("wire answers (R1, R23)", () => {
     expect(AdminChangeViewWireSchema.parse({ ...view, ...future, later: 1 })).toMatchObject({ ...future, later: 1 });
     expect(AdminChangeResponseSchema.safeParse({ change: { ...view, ...future } }).success).toBe(false);
     expect(AdminChangeResponseWireSchema.parse({ change: { ...view, ...future }, later: 1 })).toMatchObject({ change: future, later: 1 });
+  });
+
+  it("reads a newer control plane's longer or reshaped strings on the wire, which the strict schemas refuse (R23)", () => {
+    const long = "x".repeat(5_000);
+    expect(AdminChangeViewSchema.safeParse({ ...view, effect: long }).success).toBe(false);
+    expect(AdminChangeViewWireSchema.parse({ ...view, effect: long, createdAt: "tomorrow", expiresAt: "later", error: { code: "C".repeat(100), message: long } })).toMatchObject({ effect: long, createdAt: "tomorrow" });
+    const record = { ...auditRecord, effect: long, traceId: long, proposedAt: "2026-10-02", appliedAt: "soon", error: { code: "X", message: long }, client: { cliVersion: long, mcpClientName: long, mcpClientVersion: long }, refusedAttempts: [{ at: "earlier", reason: "another_person" }] };
+    expect(AdminChangeAuditRecordSchema.safeParse({ ...auditRecord, effect: long }).success).toBe(false);
+    expect(AdminChangeAuditRecordSchema.safeParse(record).success).toBe(false);
+    expect(AdminChangeAuditRecordWireSchema.parse(record)).toMatchObject({ effect: long, traceId: long, proposedAt: "2026-10-02", client: { cliVersion: long } });
   });
 
   it("reads an unknown future outcome and refusal reason in the listed audit records, loose all the way down", () => {
