@@ -41,12 +41,14 @@ import { githubAppStep, githubRestApi, type GitHubApi } from "./github-app.js";
 import { listAwsProfiles, pickAwsProfile, resolveCaller } from "./aws-account.js";
 import { emptyProgress, readInstallAnswers, readInstallProgress, writeInstallProgress, type InitAnswers, type InitStepId } from "./install-state.js";
 import { confirmInstallPlan } from "./plan.js";
-import { awsPrerequisiteChecks, checkPrerequisites, type PrerequisiteChecks } from "./prerequisites.js";
+import { awsPrerequisiteChecks, checkPrerequisites, type PrerequisiteCheck, type PrerequisiteChecks } from "./prerequisites.js";
 import { processPrompter, secretFromSource, unattendedPrompter, type Prompter } from "./prompts.js";
 import { fetchRelease } from "./release-fetch.js";
+import { retryOnPage } from "./retry.js";
 import { developerSignInStep } from "./signin-step.js";
 import { slackAppStep, slackWebApi, verifySlackUrls, type SlackApi } from "./slack-app.js";
 import { runInitSteps, type InitEvent, type InitRunResult, type InitStep } from "./steps.js";
+import { prerequisitesCard } from "./ui/cards.js";
 import { startInstallWizard, type InstallWizard } from "./ui/index.js";
 import type { WizardResume } from "./ui/protocol.js";
 
@@ -467,7 +469,29 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   const pendingKey = collected?.openRouterKey === undefined
     ? undefined
     : { key: collected.openRouterKey, ...(collected.openRouterProviders === undefined ? {} : { providers: collected.openRouterProviders }) };
-  const runPrerequisites = () => checkPrerequisites({ answers: finalAnswers, release, caller, checks, prompter: activePrompter, write, ...(pendingKey === undefined ? {} : { openRouterKey: pendingKey }) });
+  // FR-023 (Q7): on the page, the checks are a checklist, and a failure can be checked again
+  // after the fix; the terminal path stops with the collected problems, as before.
+  const runPrerequisites = () => retryOnPage({
+    surface, prompter: activePrompter, question: "Check the prerequisites again?",
+    // The card already lists every failed check, so the retry shows nothing of its own.
+    failed: () => undefined,
+    run: async () => {
+      const found: PrerequisiteCheck[] = [];
+      const show = (status: "running" | "ok" | "failed") => surface?.card(prerequisitesCard({ status, checks: found }));
+      show("running");
+      try {
+        await checkPrerequisites({
+          answers: finalAnswers, release, caller, checks, prompter: activePrompter, write,
+          onCheck: (check) => { found.push(check); show("running"); },
+          ...(pendingKey === undefined ? {} : { openRouterKey: pendingKey }),
+        });
+      } catch (error) {
+        show("failed");
+        throw error;
+      }
+      show("ok");
+    },
+  });
   let prerequisitesPassed = false;
   let rotatedWebhook: string | undefined;
   let rotatedOpenRouterKey: string | undefined;

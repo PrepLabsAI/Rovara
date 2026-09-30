@@ -39,6 +39,9 @@ export type ModelRole = "orchestrator" | "classifier" | "worker";
 export type OpenRouterCheckConfig = Partial<NonNullable<ModelsAnswers["openRouter"]>>;
 /** An OpenRouter key collected by init's questions, not yet stored in Secrets Manager. */
 export interface PendingOpenRouterKey { key: string; providers?: readonly string[] }
+/** One prerequisite's result, for the page's checklist (spec 040 FR-023). `detail` is the ok line
+ * without its "ok " prefix, or the problem exactly as the error lists it. */
+export interface PrerequisiteCheck { label: string; ok: boolean; detail: string }
 
 export const DEDICATED_ACCOUNT_NOTE =
   "AgentX recommends a dedicated AWS account for each install: environments that share an account are not a security boundary against each other.";
@@ -133,24 +136,29 @@ export async function checkPrerequisites(input: {
   answers: InitAnswers; release: ReleaseCoverage; caller: { account: string; arn: string };
   checks: PrerequisiteChecks; prompter: Prompter; write: (line: string) => void;
   openRouterKey?: PendingOpenRouterKey;
+  onCheck?: (check: PrerequisiteCheck) => void;
 }): Promise<void> {
   const { answers, checks, write } = input;
   const { region } = answers;
   const problems: string[] = [];
+  // Each check is reported as it finishes (the page's checklist); the lines written and the
+  // problems collected are exactly what they were before.
+  const passed = (label: string, line: string) => { write(line); input.onCheck?.({ label, ok: true, detail: line.replace(/^ok /, "") }); };
+  const failed = (label: string, problem: string) => { problems.push(problem); input.onCheck?.({ label, ok: false, detail: problem }); };
   write(`AWS account ${input.caller.account} as ${input.caller.arn}`);
   write(DEDICATED_ACCOUNT_NOTE);
 
   // The same check and wording as agentx deploy's, collected with every other problem.
   const regionProblem = releaseRegionProblem(input.release, region);
-  if (regionProblem !== undefined) problems.push(regionProblem);
+  if (regionProblem !== undefined) failed("Region", regionProblem); else input.onCheck?.({ label: "Region", ok: true, detail: `${region} is covered by this release` });
 
   try {
     const quota = await checks.ec2Quota();
     if (!Number.isFinite(quota) || quota < 1) {
-      problems.push(`EC2 Standard on-demand vCPU quota in ${region} must be at least 1 for an m6g.medium worker; request an increase in Service Quotas`);
-    } else write(`ok EC2 Standard on-demand vCPU quota is ${quota} in ${region}`);
+      failed("EC2 vCPU quota", `EC2 Standard on-demand vCPU quota in ${region} must be at least 1 for an m6g.medium worker; request an increase in Service Quotas`);
+    } else passed("EC2 vCPU quota", `ok EC2 Standard on-demand vCPU quota is ${quota} in ${region}`);
   } catch (error) {
-    problems.push(`could not check EC2 vCPU quota in ${region}: ${errorMessage(error)}; check Service Quotas read permission and your network`);
+    failed("EC2 vCPU quota", `could not check EC2 vCPU quota in ${region}: ${errorMessage(error)}; check Service Quotas read permission and your network`);
   }
 
   // The foundation stack's NAT gateways fail five minutes in when the region is out of addresses.
@@ -159,12 +167,12 @@ export async function checkPrerequisites(input: {
     if (!Number.isFinite(quota) || !Number.isFinite(allocated)) throw new Error("the Elastic IP quota or address count did not return a number");
     const free = Math.max(0, quota - allocated);
     if (free < NAT_ELASTIC_IPS) {
-      problems.push(`this environment needs ${NAT_ELASTIC_IPS} Elastic IPs for its NAT gateways, but ${allocated} of the ${quota} allowed in ${region} are already allocated. `
+      failed("Elastic IPs", `this environment needs ${NAT_ELASTIC_IPS} Elastic IPs for its NAT gateways, but ${allocated} of the ${quota} allowed in ${region} are already allocated. `
         + `Release addresses you no longer use, or raise the EC2-VPC Elastic IPs quota (L-0263D0A3) in Service Quotas: `
         + `aws service-quotas request-service-quota-increase --service-code ec2 --quota-code L-0263D0A3 --desired-value ${allocated + NAT_ELASTIC_IPS} --region ${region}`);
-    } else write(`ok ${free} of ${quota} EC2-VPC Elastic IPs free in ${region}; this environment needs ${NAT_ELASTIC_IPS}`);
+    } else passed("Elastic IPs", `ok ${free} of ${quota} EC2-VPC Elastic IPs free in ${region}; this environment needs ${NAT_ELASTIC_IPS}`);
   } catch (error) {
-    problems.push(`could not check Elastic IPs in ${region}: ${errorMessage(error)}; check EC2 DescribeAddresses and Service Quotas read permission and your network`);
+    failed("Elastic IPs", `could not check Elastic IPs in ${region}: ${errorMessage(error)}; check EC2 DescribeAddresses and Service Quotas read permission and your network`);
   }
 
   const roles: Array<[ModelRole, string]> = [
@@ -188,7 +196,7 @@ export async function checkPrerequisites(input: {
         if (answers.models.openRouter) await checks.openRouter(modelId, answers.models.openRouter);
         else if (pending !== undefined) await checks.openRouter(modelId, pending.providers === undefined ? {} : { providers: [...pending.providers] }, pending.key);
         seen.add(identifier);
-        write(`ok ${identifier} supports tools and answers`);
+        passed(`Model ${identifier}`, `ok ${identifier} supports tools and answers`);
       } catch (error) {
         if (error instanceof MissingOpenRouterSecret) {
           const fallback = defaultBedrockModel(role);
@@ -196,12 +204,12 @@ export async function checkPrerequisites(input: {
             const fallbackKey = `${fallback.provider}/${fallback.modelId}`;
             if (!seen.has(fallbackKey)) await checks.converse(fallback.modelId);
             seen.add(fallbackKey);
-            write(`ok ${identifier}: OpenRouter secret missing; using default ${fallback.provider}/${fallback.modelId}`);
+            passed(`Model ${identifier}`, `ok ${identifier}: OpenRouter secret missing; using default ${fallback.provider}/${fallback.modelId}`);
           } catch (fallbackError) {
-            problems.push(modelCheckProblem({ modelId: fallback.modelId, role, region, error: fallbackError }));
+            failed(`Model ${fallback.modelId}`, modelCheckProblem({ modelId: fallback.modelId, role, region, error: fallbackError }));
           }
         } else {
-          problems.push(`${identifier}: OpenRouter preflight failed; check the model's tool support, secret read permission, key credits and routing allowlist`);
+          failed(`Model ${identifier}`, `${identifier}: OpenRouter preflight failed; check the model's tool support, secret read permission, key credits and routing allowlist`);
         }
       }
       continue;
@@ -215,9 +223,9 @@ export async function checkPrerequisites(input: {
         await checks.sleep(2000);
         await checks.converse(modelId);
       }
-      write(`ok ${modelId} answers`);
+      passed(`Model ${modelId}`, `ok ${modelId} answers`);
     } catch (error) {
-      problems.push(modelCheckProblem({ modelId, role, region, error }));
+      failed(`Model ${modelId}`, modelCheckProblem({ modelId, role, region, error }));
     }
   }
 
@@ -228,28 +236,28 @@ export async function checkPrerequisites(input: {
       const document = (await checks.oidcDiscovery(answers.identity.issuer)) as { issuer?: unknown };
       const named = typeof document.issuer === "string" ? document.issuer.replace(/\/$/, "") : undefined;
       // Item 6: name a next step for a mismatched issuer too.
-      if (named !== issuer) problems.push(`the OIDC discovery document at ${url} names issuer ${named ?? "nothing"}, not ${issuer}; check --oidc-issuer`);
-      else write(`ok OIDC discovery at ${url}`);
+      if (named !== issuer) failed("OIDC discovery", `the OIDC discovery document at ${url} names issuer ${named ?? "nothing"}, not ${issuer}; check --oidc-issuer`);
+      else passed("OIDC discovery", `ok OIDC discovery at ${url}`);
     } catch (error) {
       // Item 3: awsPrerequisiteChecks' own oidcDiscovery already builds a complete message (naming
       // the issuer/URL and saying to check --oidc-issuer) for every failure it can throw, so it is
       // reported as-is rather than wrapped a second time.
-      problems.push(errorMessage(error));
+      failed("OIDC discovery", errorMessage(error));
     }
   }
 
   let needsBootstrap = false;
   if (answers.engine === "cdk") {
     const node = await checks.commandVersion("node");
-    if (node === undefined || !nodeVersionOk(node)) problems.push(`the cdk engine needs Node 22.19 or later (found ${node?.trim() ?? "no node"})`);
-    if ((await checks.commandVersion("npx")) === undefined) problems.push("the cdk engine needs npx (it comes with npm)");
+    if (node === undefined || !nodeVersionOk(node)) failed("Node", `the cdk engine needs Node 22.19 or later (found ${node?.trim() ?? "no node"})`);
+    if ((await checks.commandVersion("npx")) === undefined) failed("npx", "the cdk engine needs npx (it comes with npm)");
     try {
       needsBootstrap = !(await checks.cdkBootstrapped());
     } catch (error) {
       // Item 4: a failed read of the bootstrap parameter (anything other than "not bootstrapped",
       // which cdkBootstrapped() already turns into `false`) is one more collected problem, not an
       // early abort: every other check still runs, and cdk bootstrap is not offered this run.
-      problems.push(`could not check CDK bootstrap: ${errorMessage(error)}; check your credentials can read SSM`);
+      failed("CDK bootstrap", `could not check CDK bootstrap: ${errorMessage(error)}; check your credentials can read SSM`);
     }
   }
 
@@ -261,9 +269,9 @@ export async function checkPrerequisites(input: {
     write(`CDK is not bootstrapped in ${region}. cdk bootstrap creates the CDKToolkit stack (an S3 bucket, an ECR repository and deploy roles) that the cdk engine needs.`);
     if (await input.prompter.confirm(`Run cdk bootstrap ${target} now?`, { defaultValue: false })) {
       await checks.runCdkBootstrap();
-      write(`ok CDK bootstrapped in ${region}`);
+      passed("CDK bootstrap", `ok CDK bootstrapped in ${region}`);
     } else {
-      problems.push(`CDK is not bootstrapped in ${region}; run npx cdk bootstrap ${target}, or use --engine templates, which needs no bootstrap`);
+      failed("CDK bootstrap", `CDK is not bootstrapped in ${region}; run npx cdk bootstrap ${target}, or use --engine templates, which needs no bootstrap`);
     }
   }
 

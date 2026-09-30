@@ -3,7 +3,7 @@
 // screens). Every card is built here, from facts a step already has, so the page's words are
 // tested in one place and the page only lays text out. No builder takes a secret, so no card can
 // carry one (FR-012).
-import { DEDICATED_ACCOUNT_NOTE } from "../prerequisites.js";
+import { DEDICATED_ACCOUNT_NOTE, type PrerequisiteCheck } from "../prerequisites.js";
 import type { WizardCard } from "./protocol.js";
 
 /** A button's label for an address the run opens: "Open github.com". */
@@ -43,4 +43,14 @@ export function awsSignedOutCard(input: { profile?: string; problem: string; sig
       next,
     ],
   };
+}
+
+/** The prerequisites as a checklist (FR-023): each check with its own result, as it finishes. */
+export function prerequisitesCard(input: { status: "running" | "ok" | "failed"; checks: readonly PrerequisiteCheck[] }): WizardCard {
+  const lines = input.status === "running"
+    ? ["Checking this account and region before anything is created."]
+    : input.status === "ok"
+      ? ["Every check passed."]
+      : ["Nothing has been created. Fix each item marked with a cross, then answer Yes below to check again."];
+  return { id: "prerequisites", title: "Prerequisites", status: input.status, lines, checks: input.checks.map((check) => ({ ...check })) };
 }

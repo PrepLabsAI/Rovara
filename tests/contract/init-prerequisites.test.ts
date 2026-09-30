@@ -12,6 +12,7 @@ import {
   endpointMissing,
   modelCheckProblem,
   NAT_ELASTIC_IPS,
+  type PrerequisiteCheck,
   withDeadline,
 } from "../../packages/cli/src/init/prerequisites.js";
 import type { InitAnswers } from "../../packages/cli/src/init/install-state.js";
@@ -458,5 +459,39 @@ describe("fix round 1", () => {
     expect(sa).toBe(
       "anthropic.claude-haiku-4-5-20251001-v1:0 must be called through an inference profile in sa-east-1; use the inference profile id listed in the Bedrock console for sa-east-1 instead (--worker-model)",
     );
+  });
+});
+
+describe("the prerequisite checklist (spec 040 FR-023)", () => {
+  const run = (checks: ReturnType<typeof passingChecks>, onCheck?: (check: PrerequisiteCheck) => void) => {
+    const lines: string[] = [];
+    const done = checkPrerequisites({
+      answers: sampleAnswers(), release: fakeRelease(), caller: { account: "123456789012", arn: "arn:aws:sts::123456789012:assumed-role/Admin/alice" },
+      checks, prompter: scriptedPrompter([]), write: (line) => { lines.push(line); }, ...(onCheck === undefined ? {} : { onCheck }),
+    });
+    return { lines, done };
+  };
+
+  it("reports each check as it finishes, and writes exactly the lines it wrote before", async () => {
+    const reported: PrerequisiteCheck[] = [];
+    const withList = run(passingChecks(), (check) => { reported.push(check); });
+    await withList.done;
+    const without = run(passingChecks());
+    await without.done;
+    expect(withList.lines).toEqual(without.lines);
+    expect(reported.map((check) => [check.label, check.ok])).toEqual([
+      ["Region", true], ["EC2 vCPU quota", true], ["Elastic IPs", true],
+      ...[...new Set([sampleAnswers().models.orchestrator, sampleAnswers().models.classifier, sampleAnswers().models.worker])].map((model) => [`Model ${model}`, true]),
+    ]);
+    expect(reported[1]).toEqual({ label: "EC2 vCPU quota", ok: true, detail: "EC2 Standard on-demand vCPU quota is 32 in us-east-1" });
+  });
+
+  it("reports a failed check with the same words the error lists", async () => {
+    const reported: PrerequisiteCheck[] = [];
+    const { done } = run(passingChecks({ ec2Quota: async () => 0 }), (check) => { reported.push(check); });
+    await expect(done).rejects.toThrow("EC2 Standard on-demand vCPU quota in us-east-1 must be at least 1");
+    expect(reported.find((check) => check.label === "EC2 vCPU quota")).toEqual({
+      label: "EC2 vCPU quota", ok: false, detail: "EC2 Standard on-demand vCPU quota in us-east-1 must be at least 1 for an m6g.medium worker; request an increase in Service Quotas",
+    });
   });
 });

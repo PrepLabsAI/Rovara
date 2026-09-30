@@ -342,4 +342,33 @@ describe("agentx init --ui", () => {
     const region = operator.states.find((state) => state.question?.text === "AWS region")?.question;
     expect(region?.choices?.map((choice) => choice.value)).toEqual(["us-east-1"]);
   });
+
+  it("FR-023: a failed prerequisite is a checklist on the page, and checking again after the fix goes on", async () => {
+    const h = await harness();
+    let quotaReads = 0;
+    const checks = passingChecks({ ec2Quota: async () => { quotaReads += 1; return quotaReads === 1 ? 0 : 32; } });
+    // Every first-run answer, then "Check the prerequisites again?" yes, then the review screen.
+    const operator = fakeWizardOperator([...FIRST_RUN.slice(0, -1), true, true, ...SLACK, ...SIGNIN, ...FINISH]);
+    expect(await h.run(["--ui"], { openBrowser: operator.open, checks })).toBe(0);
+    await operator.settled();
+    expect(operator.asked).toContain("Check the prerequisites again?");
+    const cards = operator.states.flatMap((state) => state.cards?.filter((card) => card.id === "prerequisites") ?? []);
+    const failed = cards.find((card) => card.status === "failed");
+    expect(failed?.checks?.find((check) => check.label === "EC2 vCPU quota")).toMatchObject({ ok: false });
+    // Review Focus 5: the card after the fix lists only the new results.
+    const last = cards.at(-1);
+    expect(last?.status).toBe("ok");
+    expect(last?.checks?.every((check) => check.ok)).toBe(true);
+    expect(last?.checks?.filter((check) => check.label === "EC2 vCPU quota")).toHaveLength(1);
+  });
+
+  it("FR-023: saying no to checking again creates nothing", async () => {
+    const h = await harness();
+    const operator = fakeWizardOperator([...FIRST_RUN.slice(0, -1), false]);
+    expect(await h.run(["--ui"], { openBrowser: operator.open, checks: passingChecks({ ec2Quota: async () => 0 }) })).not.toBe(0);
+    await operator.settled();
+    expect(h.printed()).toContain("init cannot start; nothing was created");
+    expect(h.deployer.requests).toEqual([]);
+    expect(h.store.values.has(installAnswersParameterName("staging"))).toBe(false);
+  });
 });
