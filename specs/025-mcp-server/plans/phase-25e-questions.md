@@ -3,8 +3,9 @@
 Planning phase 25e (admin changes with confirmation and audit) raised eleven product decisions the
 spec leaves open. The plan, [phase-25e-admin-changes.md](phase-25e-admin-changes.md), follows each
 recommendation; every task that depends on one says "Depends on Q<n>", and Task 18 records the
-answers in the spec. If an answer differs from the recommendation, the owning task changes first,
-with its tests.
+answers in the spec. The owner answered all eleven as recommended on 2026-09-30. Separately, the
+owner deferred all live testing until 25d, 25e and spec 040 phases 2 to 4 are built; the plan's
+Task 19 is now the checklist for that combined final live check.
 
 Two owner requirements of 2026-09-29 are already in the plan and are not questions:
 `agentx_admin_grant_project_access` with a CLI equivalent (`agentx admin project grant`, and
@@ -29,6 +30,8 @@ change in two places.
 
 **Depends on it:** Tasks 10, 11.
 
+**Owner answer (2026-09-30):** A, the recommendation, accepted: the `McpConfirmElicitation` stack parameter, changed with `agentx config set mcp.confirmElicitation`.
+
 ## Q2. What does "stop a workspace" do?
 
 FR-030 lists `agentx_admin_stop_workspace`. Today's `agentx admin workspace stop` always answers
@@ -47,6 +50,8 @@ same tool.
 
 **Depends on it:** Task 6.
 
+**Owner answer (2026-09-30):** A, the recommendation, accepted: cancel the running task; compute stops when idle.
+
 ## Q3. Does "revoke sign-in" block the person, or only end their sessions?
 
 FR-030: "the developer and their open sign-in sessions, which end at once". AgentX already has a
@@ -62,6 +67,8 @@ account or company account is the real control, and access still needs a project
 channel). B can be added later as its own tool with an undo.
 
 **Depends on it:** Tasks 3, 6.
+
+**Owner answer (2026-09-30):** A, the recommendation, accepted: end every session; the person may sign in again.
 
 ## Q4. Can an admin grant access to someone who has never signed in?
 
@@ -81,6 +88,8 @@ by email (or the admin uses their Slack ID). B can be added later without changi
 
 **Depends on it:** Tasks 3, 4, 6.
 
+**Owner answer (2026-09-30):** A, the recommendation, accepted: by Slack user ID before first sign-in; by email only after.
+
 ## Q5. Where does a new revision's worker setup come from?
 
 `agentx_admin_register_project_revision` takes only the project definition (FR-030). Registration
@@ -95,6 +104,8 @@ flags.
 **Cost if wrong:** low; B is an added input later.
 
 **Depends on it:** Task 5.
+
+**Owner answer (2026-09-30):** A, the recommendation, accepted: a new revision copies the latest revision's worker settings; a first revision goes through the CLI.
 
 ## Q6. How do the new CLI commands confirm a change?
 
@@ -118,6 +129,8 @@ CLI's change runner.
 
 **Depends on it:** Tasks 7, 14, 15.
 
+**Owner answer (2026-09-30):** A, the recommendation, accepted: the CLI shows the effect, asks "Apply this change?" (or `--yes`), is audited as `cli`, and `agentx config set limits.*` needs the admin sign-in.
+
 ## Q7. Who may make changes that are not about one project?
 
 Project changes need the admin's `administrator` membership of that project (FR-015). A connector
@@ -132,6 +145,8 @@ credential, ending a developer's sign-in and the workspace limits are not about 
 
 **Depends on it:** Tasks 4, 5, 6.
 
+**Owner answer (2026-09-30):** A, the recommendation, accepted: any AgentX admin, for changes not about one project.
+
 ## Q8. May an admin name a channel by its name?
 
 FR-030 says the bind tool takes "channel (ID or name)". Finding a channel by name means asking Slack
@@ -145,6 +160,8 @@ for the workspace's channel list.
 **Cost if wrong:** low; the lookup is one function.
 
 **Depends on it:** Tasks 3, 5.
+
+**Owner answer (2026-09-30):** A, the recommendation, accepted: a channel ID, or a public channel's name.
 
 ## Q9. Are a declined, expired or stale change results, or errors?
 
@@ -162,6 +179,8 @@ failed or awaiting_confirmation)". FR-049 lists `CONFIRMATION_DECLINED`, `CONFIR
 
 **Depends on it:** Tasks 7, 12, 13.
 
+**Owner answer (2026-09-30):** A, the recommendation, accepted: `applied` and `awaiting_confirmation` are results; declined, expired and stale changes are error codes naming the change.
+
 ## Q10. Is there an admin change tool for a shared task's mode?
 
 In 25c the owner let an admin switch a shared task between view only and continue, through `agentx
@@ -176,6 +195,8 @@ tool.
 
 **Depends on it:** nothing in this plan (Not in this phase).
 
+**Owner answer (2026-09-30):** A, the recommendation, accepted: no share-mode change tool in this phase.
+
 ## Q11. Does the admin API version move to 1.1?
 
 25d (its Q1) gave the admin API its own version, 1.0. This phase adds the change routes and `GET
@@ -189,3 +210,5 @@ tool.
 **Cost if wrong:** one constant either way; A is the rule 25d set.
 
 **Depends on it:** Tasks 1, 13.
+
+**Owner answer (2026-09-30):** A, the recommendation, accepted: the admin API moves to 1.1.

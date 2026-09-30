@@ -1,9 +1,11 @@
 # Phase 25d: Owner Questions
 
 Planning phase 25d (the admin read tools and routes) raised seven product decisions the spec leaves
-open. The plan, [phase-25d-admin-reads.md](phase-25d-admin-reads.md), follows each recommendation;
-every task that depends on one says "Depends on Q<n>", and Task 18 records the answers in the spec.
-If an answer differs from the recommendation, the owning task changes first, with its tests.
+open. The owner answered all seven on 2026-09-30: five as recommended, Q5 and Q7 changed. The
+plan, [phase-25d-admin-reads.md](phase-25d-admin-reads.md), follows the answers; every task that
+depends on one says "Depends on Q<n>", and Task 18 records the answers in the spec. Separately, the
+owner deferred all live testing until 25d, 25e and spec 040 phases 2 to 4 are built; the plan's
+Task 19 is now the checklist for that combined final live check.
 
 ## Q1. Does adding the admin tools bump the developer API version?
 
@@ -24,6 +26,8 @@ an upgrade window; 25e would then move only the admin version (to 1.1).
 
 **Depends on it:** Tasks 1, 10, 14, 16.
 
+**Owner answer (2026-09-30):** A, the recommendation, accepted: `adminApiVersion` 1.0, `DEVELOPER_API_VERSION` stays 1.2.
+
 ## Q2. Which projects does the admin project list show?
 
 AgentX has no list of all projects today, and the plan never scans the table (a scan gets slower
@@ -43,6 +47,8 @@ it can be added later without changing anything in A.
 
 **Depends on it:** Task 2 (and Tasks 9, 12, which reuse the list).
 
+**Owner answer (2026-09-30):** A, the recommendation, accepted.
+
 ## Q3. How does AgentX learn an admin's email?
 
 `GET /v1/admin/me` must say whether the signed-in admin matches a Slack user (FR-041), which 25e's
@@ -59,10 +65,12 @@ carry no email.
   it is one more setup step, and a mistyped link would send Confirm buttons to the wrong person.
 
 **Cost if wrong:** A is one module; if an environment's sign-in has no `userinfo`, the admin simply
-has no Slack link and uses the pop-up confirmation instead. The live check (Task 19 Step 8) checks
-Cognito's answer before 25e relies on it.
+has no Slack link and uses the pop-up confirmation instead. The deferred combined final live check
+(Task 19 Step 8) checks Cognito's answer.
 
 **Depends on it:** Task 11.
+
+**Owner answer (2026-09-30):** A, the recommendation, accepted: the admin issuer's `userinfo` endpoint.
 
 ## Q4. Does the MCP server renew an expired admin sign-in by itself?
 
@@ -81,6 +89,8 @@ change later (the developer sign-in already renews this way).
 
 **Depends on it:** Task 16.
 
+**Owner answer (2026-09-30):** A, the recommendation, accepted: no renewal of the admin sign-in in the MCP server.
+
 ## Q5. How do failure and usage records expire after 30 days?
 
 FR-038 says the failure index keeps 30 days. The state table has no automatic expiry, and adding
@@ -98,6 +108,8 @@ retained table in every named environment and leaves legacy records forever.
 
 **Depends on it:** Task 5.
 
+**Owner answer (2026-09-30):** changed. Use DynamoDB TTL on the failure and usage records in installed (named) environments only: each record carries `indexExpiresAt`, and the named environment's State table enables TTL on that attribute (no other State item carries it; a test pins that). Keep the reconciler cleanup only for the legacy deployment, whose templates stay byte-identical. The plan's A6 and Tasks 1, 4, 5, 6, 8 and 13 follow this.
+
 ## Q6. What does `agentx_admin_usage` count?
 
 FR-030 asks for turns, tasks, task time, tokens and cost "as the usage records carry it". Two kinds
@@ -113,6 +125,8 @@ the orchestrator model's tokens.
 
 **Depends on it:** Task 8.
 
+**Owner answer (2026-09-30):** A, the recommendation, accepted: Slack turns and worker tasks, with unknown costs counted separately.
+
 ## Q7. Do admins see private channel names in the AI tool?
 
 For developers, a private channel's name never leaves AgentX (rule R10); only its ID does. Admin
@@ -126,3 +140,5 @@ results also go into the AI tool's model context.
 **Cost if wrong:** one line in one function either way.
 
 **Depends on it:** Task 3.
+
+**Owner answer (2026-09-30):** changed, to a middle option: an admin sees a private channel's name only when the admin's linked Slack user is a member of that channel (checked with `conversations.members`, the same cache rules as the developer access checks); otherwise its ID only. Public channel names are always shown. The plan's A11 and Tasks 3, 11 and 15 follow this.

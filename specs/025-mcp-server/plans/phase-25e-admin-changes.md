@@ -55,8 +55,9 @@ whatever its outcome, leaves one audit record with a trace ID that admins read w
 The phase map is in [README.md](README.md). It builds on phase 25d's interfaces
 ([phase-25d-admin-reads.md](phase-25d-admin-reads.md)): `AdminReadDependencies` and its helpers,
 `adminIdentityReader`, `httpAdminClient`, `ToolOffer`, `guardTransport` and `ADMIN_READ_TOOLS`.
-Open product questions are in [phase-25e-questions.md](phase-25e-questions.md): this plan follows
-each recommendation, and every task that depends on one says "Depends on Q<n>".
+The product questions and the owner's answers (2026-09-30, all as recommended) are in
+[phase-25e-questions.md](phase-25e-questions.md); every task that depends on one says "Depends on
+Q<n>".
 
 **Branch:** `feat/025e-admin-changes`, cut from mainline once 25d has merged. One PR, against
 `mainline`. No stacked PRs.
@@ -197,9 +198,9 @@ recommendation of an open owner question.
 
 ## Owner questions
 
-[phase-25e-questions.md](phase-25e-questions.md) lists eleven questions the spec leaves open. This
-plan follows each recommendation. Task 18 records the owner's answers in the spec; if an answer
-differs from the recommendation, the owning task changes first, with its tests.
+[phase-25e-questions.md](phase-25e-questions.md) lists eleven questions the spec leaves open. The
+owner answered all eleven as recommended on 2026-09-30, and this plan follows them. Task 18 records
+the answers in the spec.
 
 ## Global Constraints
 
@@ -211,6 +212,9 @@ differs from the recommendation, the owning task changes first, with its tests.
 - **The 25a to 25d live checks' lessons hold:** no resource that CloudFormation validates at create
   time against our own API; the live check runs in a throwaway named environment with the owner
   present, and only one throwaway environment fits in the account at a time (the Elastic IP quota).
+- **Live testing is deferred** (owner, 2026-09-30): no live check runs until 25d, 25e and spec 040
+  phases 2 to 4 are all built. Task 19 is the checklist for that combined final live check, not a
+  step of this phase.
 - **No test reaches AWS, Slack, GitHub or an IdP.** Every client is injected. The only real network
   use in tests is `127.0.0.1`.
 - **Zero changes apply without a valid confirmation** (SC-005). Every change route and the press
@@ -5107,7 +5111,13 @@ git commit -m "docs(spec-025): record the phase 25e rulings and the owner's answ
 
 ---
 
-### Task 19: Live check in a throwaway environment (owner present)
+### Task 19 (deferred): Live check in a throwaway environment (owner present)
+
+**Deferred to the combined final live check (owner, 2026-09-30).** No live testing runs until 25d,
+25e and spec 040 phases 2 to 4 are all built. This task is not part of this phase's build or PR:
+its steps below are this phase's checklist for that combined final check, run then in one
+throwaway environment (instead of a separate `live25e`), with the owner present.
+
 
 This task changes no code unless it finds a defect. A defect is fixed with a failing test first, in
 the task that owns the code, then reviewed. It tests the real flow: Claude Code's pop-up, the Slack
@@ -5182,7 +5192,7 @@ It uses a new environment, `live25e`, in `us-east-1`.
   `live25e` remains, so the next live check has room.
 - [ ] **Step 13: Record the evidence** in the PR description: each scenario's outcome and timing
   (how long the DM took to arrive; how long a press took to apply), each defect fixed, and any
-  finding that changes a ruling above. Raise those with the owner before merge.
+  finding that changes a ruling above. Raise those with the owner before the combined release.
 
 ## Not in this phase
 

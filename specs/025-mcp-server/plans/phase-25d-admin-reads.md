@@ -17,8 +17,10 @@ confirmation, change nothing, and never carry a secret.
   reader of every committed change in every deployment, also writes a failure index item
   (`FAILURE#<day>` / `<endedAt>#<operationId>`) when an operation ends `FAILED` or `INTERRUPTED`,
   and a usage index item (`USAGE#<day>` / `<at>#<operationId>`) when a worker stores its `usage`
-  event (spec 011). No new stream reader (C7), no template change. The session reconciler deletes
-  index days older than 30 days **(Q5)**.
+  event (spec 011). No new stream reader (C7). Each index item carries `indexExpiresAt` (30 days
+  on): in installed (named) environments the State table's TTL deletes it; the legacy deployment,
+  whose template stays byte-identical, keeps no TTL, and there the session reconciler deletes index
+  days older than 30 days **(Q5, owner answer changed)**.
 - **A project catalog** (`PROJECT_CATALOG` / `PROJECT#<name>`) is written with every registration
   from this phase on; the admin project list is the catalog, the bound channels' projects and the
   calling admin's own memberships **(Q2)**, so no route ever scans the table.
@@ -44,9 +46,9 @@ confirmation, change nothing, and never carry a secret.
 - 25c's carry-over: `agentx_admin_turns`'s `task_id` filter, which also lists the task's channel
   turns (25c's "Not in this phase").
 
-The phase map is in [README.md](README.md). Open product questions are in
-[phase-25d-questions.md](phase-25d-questions.md): this plan follows each recommendation, and every
-task that depends on one says "Depends on Q<n>".
+The phase map is in [README.md](README.md). The product questions and the owner's answers
+(2026-09-30) are in [phase-25d-questions.md](phase-25d-questions.md); every task that depends on
+one says "Depends on Q<n>".
 
 **Branch:** `feat/025d-admin-reads`, cut from mainline `59ff7e3` (25c merged as PR #159). One PR,
 against `mainline`. No stacked PRs.
@@ -88,10 +90,15 @@ recommendation of an open owner question.
   usage item: the same identity fields, the time of the `usage` event, the task's duration (the
   event's time less the operation's creation), input and output tokens, and `costUsd` as the
   telemetry carries it (spec 011, `null` when unknown). Task 4.
-- **A6. Index days expire after 30 days (Q5).** Each reconciler run deletes `FAILURE#` and
-  `USAGE#` items of the days 31 to 45 back (at most 500 deletes a run, so a missed day is caught
-  up); every read also stops at 30 days. The State table gets no TTL, so no template changes.
-  Task 5.
+- **A6. Index items expire after 30 days (Q5, owner answer 2026-09-30: changed).** Each failure
+  and usage item carries `indexExpiresAt`, epoch seconds 30 days after its time (A5). In installed
+  (named) environments the State table gets a TTL on `indexExpiresAt` (named environments only; no
+  other State item carries that attribute today, which a test pins), so DynamoDB deletes the items.
+  The legacy deployment's template stays byte-identical, with no TTL; there, and only there, each
+  reconciler run deletes `FAILURE#` and `USAGE#` items of the days 31 to 45 back (at most 500
+  deletes a run). The reconciler knows which by `INDEX_EXPIRY=ttl`, set on it in named environments
+  only. Every read also stops at 30 days, and skips an item whose `indexExpiresAt` has passed
+  (DynamoDB deletes up to 48 hours late). Tasks 1, 4, 5, 6, 8, 13.
 - **A7. Failures (FR-038, US5 scenario 3).** `GET /v1/admin/failures?since&until&project&limit`:
   `since` defaults to 24 hours ago, `until` to now, the window is at most 30 days, `limit` is 1 to
   100 (25 by default). Newest first, day partition by day, each read `sk BETWEEN`. An item that no
@@ -118,12 +125,16 @@ recommendation of an open owner question.
   (setting or stack parameters, FR-053) and the organization counters' counts. At most `limit`
   rows (1 to 100, 50 by default), `truncated` when more exist. Workspaces created before spec 041
   are not in the index, as spec 041 already says. Task 9.
-- **A11. Channels.** `GET /v1/admin/slack/bindings`: the bindings of the environment's Slack team,
-  or of `team=<T...>` where the environment records none (the legacy deployment). Names come from
-  DeveloperIdentity's channel-info lookup where it is set up; a private channel is listed by ID
-  with `private: true`, never by name (R10's rule, kept for admins because a tool result goes into
-  a model's context) **(Q7)**. Without the lookup, channels are listed by ID with the notice
-  `channel_names_unavailable`. Task 3.
+- **A11. Channels (Q7, owner answer 2026-09-30: changed to the middle option).**
+  `GET /v1/admin/slack/bindings`: the bindings of the environment's Slack team, or of `team=<T...>`
+  where the environment records none (the legacy deployment). Names come from DeveloperIdentity's
+  channel-info lookup where it is set up. A public channel's name is always shown. A private
+  channel's name is shown only when the calling admin's linked Slack user (A12) is a member of it,
+  checked with DeveloperIdentity's channel-members lookup (`conversations.members`, the same
+  10-minute cache as the developer access checks); otherwise it is listed by ID with
+  `private: true`. A failed or missing membership check fails closed (ID only). Without the
+  channel-info lookup, channels are listed by ID with the notice `channel_names_unavailable`.
+  Tasks 3 (public names, private by ID), 11 (a member admin sees the private name).
 - **A12. Who the admin is (Q3).** `GET /v1/admin/me` answers the token's issuer and subject, and a
   name and verified email: from the token's own claims when it carries them, else from the admin
   issuer's OIDC `userinfo` endpoint, called with the admin's own bearer token (found through the
@@ -163,9 +174,11 @@ recommendation of an open owner question.
 
 ## Owner questions
 
-[phase-25d-questions.md](phase-25d-questions.md) lists seven questions the spec leaves open. This
-plan follows each recommendation. Task 18 records the owner's answers in the spec; if an answer
-differs from the recommendation, the owning task changes first, with its tests.
+[phase-25d-questions.md](phase-25d-questions.md) lists seven questions the spec leaves open. The
+owner answered all seven on 2026-09-30: five as recommended; Q5 changed (TTL in named environments,
+the reconciler cleanup only in the legacy deployment, A6) and Q7 changed (a private channel's name
+for an admin who is a member of it, A11). This plan follows the answers. Task 18 records them in
+the spec.
 
 ## Global Constraints
 
@@ -186,7 +199,10 @@ differs from the recommendation, the owning task changes first, with its tests.
   text in logs. Logs carry event names, IDs, reasons and error names only. Every task that handles
   one plants a known value and asserts it appears nowhere it must not.
 - **Reads change nothing.** No admin read route writes the State table, the TurnRecords table or
-  the sign-in table (the index writer and the expiry sweep are background jobs, not routes).
+  the sign-in table (the index writer and the legacy expiry sweep are background jobs, not routes).
+- **Live testing is deferred** (owner, 2026-09-30): no live check runs until 25d, 25e and spec 040
+  phases 2 to 4 are all built. Task 19 is the checklist for that combined final live check, not a
+  step of this phase.
 - **Least privilege.** New IAM statements name exact actions and resources (the environment's alarm
   prefix, the dead-letter queues' ARNs); no `*` resource unless the action has no resource type,
   and then the task says so with the Service Authorization Reference's words.
@@ -206,7 +222,9 @@ differs from the recommendation, the owning task changes first, with its tests.
     default; windows at most 30 days; errors at most 1,000 characters; usage reads at most 5,000
     of each source; filtered turn reads at most 10 index pages per call; probes 3 seconds; the
     availability check every 30 seconds;
-  - DeveloperIdentity invoke kinds `slack-user-by-email` and `slack-auth-check`.
+  - DeveloperIdentity invoke kinds `slack-user-by-email` and `slack-auth-check`;
+  - the index items' TTL attribute `indexExpiresAt` (epoch seconds), and the reconciler's
+    `INDEX_EXPIRY=ttl` (named environments only).
 - **Copy:** plain words; every error says what to do next; no em dashes in any user-facing text,
   tool description, AWS resource name or description.
 - **The gate:** `npm run typecheck && npm run lint && npm run build && npm test && npm run infra:synth`.
@@ -259,7 +277,7 @@ differs from the recommendation, the owning task changes first, with its tests.
 | `packages/broker/src/aws/broker.ts` (modify) | the catalog write, the route wiring, the admin read dependencies, the probes | 2, 8, 10, 11, 13 |
 | `packages/broker/src/aws/activity-index.ts` | the failure and usage index writer | 4 |
 | `packages/broker/src/aws/outbox-publisher.ts` (modify) | run the index writer after dispatch | 4 |
-| `packages/broker/src/aws/index-expiry.ts` | delete index days older than 30 days | 5 |
+| `packages/broker/src/aws/index-expiry.ts` | delete index days older than 30 days, legacy deployment only | 5 |
 | `packages/broker/src/aws/session-reconciler.ts` (modify) | run the expiry | 5 |
 | `packages/broker/src/aws/turns.ts` (modify) | the turn filters | 7 |
 | `packages/broker/src/developer/server.ts`, `slack-directory.ts` (modify) | the two invoke kinds; `authTest` | 10 |
@@ -267,7 +285,7 @@ differs from the recommendation, the owning task changes first, with its tests.
 | `packages/broker/src/aws/admin-me.ts` | who the admin is: claims, userinfo, Slack link | 11 |
 | `packages/broker/src/aws/admin-health.ts` | the health route and its probes | 12 |
 | `packages/broker/src/github-app.ts` (modify) | `installationCount()` | 12 |
-| `infra/lib/control-plane.ts`, `infra/lib/developer-task-notifier.ts` (modify) | the health grants and variables, named environments only | 13 |
+| `infra/lib/control-plane.ts`, `infra/lib/developer-task-notifier.ts` (modify) | the health grants and variables, the State table's TTL on `indexExpiresAt`, the reconciler's `INDEX_EXPIRY=ttl`; named environments only | 13 |
 | `packages/mcp/src/admin-client.ts` | the admin control-plane client | 14 |
 | `packages/mcp/src/offer.ts` | availability, enable and disable, the transport guard | 14 |
 | `packages/mcp/src/server.ts`, `client.ts`, `compatibility.ts`, `tools.ts`, `index.ts` (modify) | register admin tools, the admin version, the context's admin client | 14, 16 |
@@ -302,6 +320,8 @@ A1, A5, A7 to A13's shapes, and the two new DeveloperIdentity invoke requests. *
     `ADMIN_TURN_FILTER_PAGES = 10`, `PROJECT_CATALOG_PK = "PROJECT_CATALOG"`;
   - keys `failureIndexKey(endedAt, operationId)`, `usageIndexKey(at, operationId)`,
     `projectCatalogKey(name)`, `indexDay(at)`;
+  - A6: `INDEX_EXPIRY_ATTRIBUTE = "indexExpiresAt"` and `indexExpiresAt(at: string): number` (epoch
+    seconds, 30 days after `at`);
   - `AdminOriginSchema`, `AdminRequesterSchema` / `AdminRequester`;
   - `FailureIndexRecordSchema` / `FailureIndexRecord`, `UsageIndexRecordSchema` / `UsageIndexRecord`;
   - wire schemas (non-strict, so a newer control plane may add fields): `AdminProjectsResponseSchema`,
@@ -328,11 +348,13 @@ import {
   AdminWorkspacesResponseSchema,
   DEVELOPER_API_VERSION,
   FailureIndexRecordSchema,
+  INDEX_EXPIRY_ATTRIBUTE,
   SlackAuthCheckRequestSchema,
   SlackUserByEmailRequestSchema,
   UsageIndexRecordSchema,
   failureIndexKey,
   indexDay,
+  indexExpiresAt,
   projectCatalogKey,
   usageIndexKey,
 } from "../../packages/contracts/src/index.js";
@@ -351,6 +373,11 @@ describe("the index keys (FR-038, A5)", () => {
 
   it("refuses an index key for a time that is not an ISO instant", () => {
     expect(() => failureIndexKey("yesterday", OPERATION)).toThrow("an ISO time");
+  });
+
+  it("gives each index item its TTL attribute, 30 days on (A6, Q5)", () => {
+    expect(INDEX_EXPIRY_ATTRIBUTE).toBe("indexExpiresAt");
+    expect(indexExpiresAt(ENDED)).toBe(Math.floor(Date.parse(ENDED) / 1000) + 30 * 86_400);
   });
 });
 
@@ -466,6 +493,15 @@ export function failureIndexKey(endedAt: string, operationId: string): { pk: str
 }
 export function usageIndexKey(at: string, operationId: string): { pk: string; sk: string } {
   return { pk: `USAGE#${indexDay(at)}`, sk: `${at}#${operationId}` };
+}
+/**
+ * A6 (Q5, owner answer 2026-09-30): the TTL attribute of every failure and usage item. Named
+ * environments' State table expires items on it; the legacy deployment's reconciler deletes them.
+ */
+export const INDEX_EXPIRY_ATTRIBUTE = "indexExpiresAt";
+export function indexExpiresAt(at: string): number {
+  indexDay(at);
+  return Math.floor(Date.parse(at) / 1000) + ADMIN_INDEX_RETENTION_DAYS * 86_400;
 }
 /** A3: one row per registered project, written with each registration from 25d on. */
 export function projectCatalogKey(name: string): { pk: string; sk: string } {
@@ -1057,7 +1093,9 @@ git commit -m "feat(broker): the project catalog and GET /v1/admin/projects (spe
 
 ### Task 3: `GET /v1/admin/slack/bindings`
 
-A11. **Depends on Q7** (private channel names).
+A11's public names, with private channels by ID; Task 11 adds the owner's Q7 answer (a private
+channel's name for an admin who is a member of it), once the admin's Slack link exists.
+**Depends on Q7.**
 
 **Files:**
 - Modify: `packages/broker/src/aws/admin-reads.ts`
@@ -1146,7 +1184,7 @@ export async function channelLabels(deps: AdminReadDependencies, channelIds: rea
       const answer = await deps.channelInfo({ kind: "channel-info", channelIds: unique.slice(start, start + CHANNEL_MEMBERS_MAX_CHANNELS) });
       if (!answer.ok) return { labels, available: false };
       for (const channel of answer.channels) {
-        // Q7: a private channel's name never leaves the control plane, for admins too.
+        // Until Task 11 adds the member check (Q7 as answered), a private channel stays ID only.
         labels.set(channel.channelId, channel.isPrivate ? { private: true } : { name: channel.name, private: false });
       }
     }
@@ -1214,7 +1252,7 @@ A4, A5. FR-038's failure index, and the usage index A9 reads.
 
 **Interfaces:**
 - Consumes: `failureIndexKey`, `usageIndexKey`, `FailureIndexRecord`, `UsageIndexRecord`,
-  `AdminRequester`, `ADMIN_ERROR_TEXT_MAX` (Task 1); `TaskUsageTelemetrySchema`, `redactAndCap`
+  `AdminRequester`, `ADMIN_ERROR_TEXT_MAX`, `INDEX_EXPIRY_ATTRIBUTE`, `indexExpiresAt` (Task 1); `TaskUsageTelemetrySchema`, `redactAndCap`
   (contracts); `failureCategory`, `taskPointerKey`, `taskKey` (`packages/broker/src/developer/task-records.ts`);
   `StreamRecord` (`packages/broker/src/developer/notifications.ts`).
 - Produces:
@@ -1275,6 +1313,7 @@ describe("the failure index (FR-038, A5)", () => {
     expect(result).toEqual({ failures: 1, usage: 0, failed: 0 });
     expect(index.puts).toEqual([{
       pk: "FAILURE#2026-09-30", sk: `2026-09-30T08:15:00.000Z#${OPERATION}`, entityType: "FAILURE_INDEX",
+      indexExpiresAt: Math.floor(Date.parse("2026-09-30T08:15:00.000Z") / 1000) + 30 * 86_400,
       operationId: OPERATION, workspaceId: WORKSPACE, project: "payments", origin: "slack",
       requester: { kind: "slack", teamId: "T0BSHLLUGBD", userId: "U0PRIYA001" },
       kind: "task", status: "FAILED", category: "task_failed", error: "npm test exited 1", endedAt: "2026-09-30T08:15:00.000Z",
@@ -1337,6 +1376,7 @@ describe("the usage index (A5, A9)", () => {
     expect(result.usage).toBe(1);
     expect(index.puts[0]).toEqual({
       pk: "USAGE#2026-09-30", sk: `2026-09-30T08:10:00.000Z#${OPERATION}`, entityType: "USAGE_INDEX",
+      indexExpiresAt: Math.floor(Date.parse("2026-09-30T08:10:00.000Z") / 1000) + 30 * 86_400,
       operationId: OPERATION, workspaceId: WORKSPACE, project: "payments", origin: "slack",
       requester: { kind: "slack", teamId: "T0BSHLLUGBD", userId: "U0PRIYA001" }, thread: "T0BSHLLUGBD/C0123456789/1695500000.000100",
       at: "2026-09-30T08:10:00.000Z", durationMs: 600_000, inputTokens: 1_000, outputTokens: 200, costUsd: 0.42,
@@ -1416,8 +1456,10 @@ Expected: FAIL: `activity-index.js` does not exist; the publisher takes no `inde
 import { unmarshall } from "@aws-sdk/util-dynamodb";
 import {
   ADMIN_ERROR_TEXT_MAX,
+  INDEX_EXPIRY_ATTRIBUTE,
   TaskUsageTelemetrySchema,
   failureIndexKey,
+  indexExpiresAt,
   redactAndCap,
   usageIndexKey,
   type AdminRequester,
@@ -1482,7 +1524,7 @@ async function failureItem(store: IndexStore, next: Record<string, unknown>): Pr
     error: redactAndCap(error ?? `the ${kind} operation ended ${status}`, ADMIN_ERROR_TEXT_MAX).text,
     endedAt, ...link(context),
   };
-  return { ...failureIndexKey(endedAt, indexed.operationId), entityType: "FAILURE_INDEX", ...indexed };
+  return { ...failureIndexKey(endedAt, indexed.operationId), entityType: "FAILURE_INDEX", [INDEX_EXPIRY_ATTRIBUTE]: indexExpiresAt(endedAt), ...indexed };
 }
 
 async function usageItem(store: IndexStore, event: Record<string, unknown>): Promise<Record<string, unknown> | "unreadable"> {
@@ -1499,7 +1541,7 @@ async function usageItem(store: IndexStore, event: Record<string, unknown>): Pro
     at, durationMs: Math.max(0, Date.parse(at) - (Number.isFinite(created) ? created : Date.parse(at))),
     inputTokens: telemetry.data.tokens.input, outputTokens: telemetry.data.tokens.output, costUsd: telemetry.data.costUsd,
   };
-  return { ...usageIndexKey(at, operationId), entityType: "USAGE_INDEX", ...indexed };
+  return { ...usageIndexKey(at, operationId), entityType: "USAGE_INDEX", [INDEX_EXPIRY_ATTRIBUTE]: indexExpiresAt(at), ...indexed };
 }
 
 export async function indexActivity(records: readonly StreamRecord[], store: IndexStore, log: (entry: Record<string, unknown>) => void): Promise<{ failures: number; usage: number; failed: number }> {
@@ -1592,9 +1634,10 @@ git commit -m "feat(broker): failure and usage indexes from the state table's st
 ```
 
 ---
-### Task 5: Index days expire after 30 days
+### Task 5: Index days expire after 30 days in the legacy deployment
 
-A6. **Depends on Q5.**
+A6. **Depends on Q5** (owner answer 2026-09-30: TTL in named environments, Task 13; this sweep only
+where the State table has no TTL, the legacy deployment).
 
 **Files:**
 - Create: `packages/broker/src/aws/index-expiry.ts`
@@ -1605,6 +1648,7 @@ A6. **Depends on Q5.**
 - Consumes: `ADMIN_INDEX_RETENTION_DAYS` (Task 1); `FakeDynamoDb` (Task 2's `queryPage`).
 - Produces: `export const INDEX_EXPIRY_DELETES_PER_RUN = 500;`,
   `export const INDEX_EXPIRY_LOOKBACK_DAYS = 15;`,
+  `export function indexSweepWanted(env: NodeJS.ProcessEnv): boolean` (false when `INDEX_EXPIRY=ttl`),
   `export async function expireIndexDays(client: { send(command: unknown): Promise<unknown> }, tableName: string, now: Date, log?: (entry: Record<string, unknown>) => void): Promise<{ deleted: number }>`;
   `ReconcilerDependencies.expireIndexDays?: (now: Date) => Promise<{ deleted: number }>`.
 
@@ -1612,9 +1656,10 @@ A6. **Depends on Q5.**
 
 ```ts
 // tests/contract/index-expiry.test.ts
-// Spec 025 A6 (Q5): failure and usage index items older than 30 days are deleted by the reconciler.
+// Spec 025 A6 (Q5): where the State table has no TTL (the legacy deployment), the reconciler deletes
+// failure and usage index items older than 30 days.
 import { describe, expect, it, vi } from "vitest";
-import { expireIndexDays, INDEX_EXPIRY_DELETES_PER_RUN } from "../../packages/broker/src/aws/index-expiry.js";
+import { expireIndexDays, indexSweepWanted, INDEX_EXPIRY_DELETES_PER_RUN } from "../../packages/broker/src/aws/index-expiry.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const NOW = new Date("2026-10-31T06:00:00.000Z");
@@ -1635,6 +1680,11 @@ describe("index expiry (A6)", () => {
     for (let n = 0; n < 520; n += 1) db.set(item("FAILURE#", "2026-09-29", n));
     expect(await expireIndexDays(db, "state", NOW)).toEqual({ deleted: INDEX_EXPIRY_DELETES_PER_RUN });
     expect(await expireIndexDays(db, "state", NOW)).toEqual({ deleted: 20 });
+  });
+
+  it("runs only where the State table has no TTL (INDEX_EXPIRY=ttl is set in named environments)", () => {
+    expect(indexSweepWanted({})).toBe(true);
+    expect(indexSweepWanted({ INDEX_EXPIRY: "ttl" })).toBe(false);
   });
 
   it("touches nothing else in those partitions' neighbourhood", async () => {
@@ -1674,8 +1724,9 @@ Expected: FAIL: `index-expiry.js` does not exist.
 
 ```ts
 // packages/broker/src/aws/index-expiry.ts
-// Spec 025 A6 (Q5): the failure and usage index days are kept 30 days (FR-038). The State table has
-// no TTL and gets none (the legacy template does not change), so the reconciler deletes old days.
+// Spec 025 A6 (Q5, owner answer 2026-09-30): the failure and usage index days are kept 30 days
+// (FR-038). Named environments' State table expires them by TTL on indexExpiresAt; the legacy
+// deployment's has no TTL (its template does not change), so there the reconciler deletes old days.
 // It looks 15 days back past the retention, so a run that failed or was skipped is caught up.
 import { DeleteCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { ADMIN_INDEX_RETENTION_DAYS } from "@agentx/contracts";
@@ -1684,6 +1735,11 @@ type Client = { send(command: unknown): Promise<unknown> };
 export const INDEX_EXPIRY_DELETES_PER_RUN = 500;
 export const INDEX_EXPIRY_LOOKBACK_DAYS = 15;
 const DAY_MS = 86_400_000;
+
+/** The sweep runs only where the State table has no TTL: Task 13 sets INDEX_EXPIRY=ttl in named environments. */
+export function indexSweepWanted(env: NodeJS.ProcessEnv): boolean {
+  return env.INDEX_EXPIRY !== "ttl";
+}
 const PREFIXES = ["FAILURE#", "USAGE#"] as const;
 
 export async function expireIndexDays(client: Client, tableName: string, now: Date, log: (entry: Record<string, unknown>) => void = () => undefined): Promise<{ deleted: number }> {
@@ -1729,8 +1785,8 @@ In `packages/broker/src/aws/session-reconciler.ts`:
     }
 ```
 
-- in the module's AWS dependencies, beside `sweepStuckSetups`:
-  `expireIndexDays: (now) => expireIndexDays(documentClient, tableName, now, (entry) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }))),`
+- in the module's AWS dependencies, beside `sweepStuckSetups`, only where it is wanted:
+  `...(indexSweepWanted(process.env) ? { expireIndexDays: (now: Date) => expireIndexDays(documentClient, tableName, now, (entry) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }))) } : {}),`
 
 The reconciler's role already has `grantReadWriteData` on the State table (session-lifecycle.ts),
 which includes `Query` and `DeleteItem`.
@@ -1744,7 +1800,7 @@ Expected: PASS; the reconciler's metrics and report are unchanged.
 
 ```bash
 git add packages/broker/src/aws/index-expiry.ts packages/broker/src/aws/session-reconciler.ts tests/contract/index-expiry.test.ts tests/contract/session-reconciler.test.ts
-git commit -m "feat(broker): the reconciler deletes index days older than 30 days (spec 025 phase 25d)"
+git commit -m "feat(broker): the legacy reconciler deletes index days older than 30 days (spec 025 phase 25d)"
 ```
 
 ---
@@ -1821,6 +1877,13 @@ describe("GET /v1/admin/failures (FR-038, A7)", () => {
     }
   });
 
+  it("never shows an item past its indexExpiresAt, which TTL deletes up to 48 hours late (A6)", async () => {
+    const { db, admin } = await createAdminReadBroker();
+    const at = new Date(Date.now() - 3_600_000).toISOString();
+    db.set({ ...failure(at, 1), indexExpiresAt: Math.floor(Date.now() / 1000) - 1 });
+    expect((await admin("GET", "/v1/admin/failures")).body.failures).toEqual([]);
+  });
+
   it("leaves out an item that no longer parses, and counts it", async () => {
     const { db, admin } = await createAdminReadBroker();
     const at = new Date(Date.now() - 3_600_000).toISOString();
@@ -1837,15 +1900,17 @@ Expected: FAIL: the route answers the catch-all `FORBIDDEN`.
 
 - [ ] **Step 3: Add the route**
 
-In `packages/broker/src/aws/admin-reads.ts`, import `ADMIN_FAILURES_DEFAULT_HOURS`,
-`ADMIN_FAILURES_DEFAULT_LIMIT`, `ADMIN_INDEX_RETENTION_DAYS`, `ADMIN_LIST_MAX`, `AgentXNameSchema`,
+In `packages/broker/src/aws/admin-reads.ts`, import `INDEX_EXPIRY_ATTRIBUTE`,
+`ADMIN_FAILURES_DEFAULT_HOURS`, `ADMIN_FAILURES_DEFAULT_LIMIT`, `ADMIN_INDEX_RETENTION_DAYS`, `ADMIN_LIST_MAX`, `AgentXNameSchema`,
 `FailureIndexRecordSchema`, `type AdminFailuresResponse` and `type FailureIndexRecord`, and add:
 
 ```ts
 const HOUR_MS = 3_600_000;
 const DAY_MS = 86_400_000;
 const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/;
-const STORAGE_KEYS = new Set(["pk", "sk", "entityType"]);
+const STORAGE_KEYS = new Set(["pk", "sk", "entityType", INDEX_EXPIRY_ATTRIBUTE]);
+/** A6: DynamoDB's TTL deletes up to 48 hours late; an item past its expiry is never shown. */
+const expired = (deps: AdminReadDependencies, item: Record<string, unknown>) => typeof item[INDEX_EXPIRY_ATTRIBUTE] === "number" && (item[INDEX_EXPIRY_ATTRIBUTE] as number) <= Math.floor(deps.now() / 1000);
 const withoutKeys = (item: Record<string, unknown>) => Object.fromEntries(Object.entries(item).filter(([key]) => !STORAGE_KEYS.has(key)));
 
 function timeParam(url: URL, name: string, fallback: number): number {
@@ -1904,6 +1969,7 @@ export async function readFailures(deps: AdminReadDependencies, window: { since:
         ...(start === undefined ? {} : { ExclusiveStartKey: start }),
       })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> };
       for (const item of page.Items ?? []) {
+        if (expired(deps, item)) continue;
         const parsed = FailureIndexRecordSchema.safeParse(withoutKeys(item));
         if (!parsed.success) {
           skipped += 1;
@@ -2287,6 +2353,7 @@ async function usageEntries(deps: AdminReadDependencies, window: { since: string
         ...(start === undefined ? {} : { ExclusiveStartKey: start }),
       })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> };
       for (const item of page.Items ?? []) {
+        if (expired(deps, item)) continue;
         const parsed = UsageIndexRecordSchema.safeParse(withoutKeys(item));
         if (!parsed.success) continue;
         const usage = parsed.data;
@@ -2748,13 +2815,16 @@ git commit -m "feat(broker): DeveloperIdentity email lookup and Slack auth check
 
 ### Task 11: `GET /v1/admin/me`
 
-A12. **Depends on Q3** (how AgentX learns the admin's email).
+A12, and A11's private channel names for a member admin. **Depends on Q3** (how AgentX learns the
+admin's email) and **Q7** (owner answer 2026-09-30: a private channel's name for an admin whose
+linked Slack user is a member of it).
 
 **Files:**
 - Create: `packages/broker/src/aws/admin-me.ts`
-- Modify: `packages/broker/src/aws/admin-reads.ts` (the `me` field's type; the route)
-- Modify: `packages/broker/src/aws/broker.ts` (the production `me` dependencies)
-- Test: `tests/contract/admin-me.test.ts`
+- Modify: `packages/broker/src/aws/admin-reads.ts` (the `me` field's type; the route; `channelLabels`
+  reveals a private name to a member admin)
+- Modify: `packages/broker/src/aws/broker.ts` (the production `me` and `channelMembers` dependencies)
+- Test: `tests/contract/admin-me.test.ts`; modify `tests/contract/admin-read-bindings.test.ts`
 
 **Interfaces:**
 - Consumes: `AdminMeResponse` (Task 1); `SlackUserByEmailRequest`, `SlackUserByEmailResponse`
@@ -2763,7 +2833,10 @@ A12. **Depends on Q3** (how AgentX learns the admin's email).
   - `export interface AdminMeDependencies { issuer: string; fetch: typeof fetch; slackUserByEmail?: (request: SlackUserByEmailRequest) => Promise<SlackUserByEmailResponse>; cacheMs?: number; timeoutMs?: number }`
     (`AdminReadDependencies.me` takes this type);
   - `export function adminIdentityReader(deps: AdminMeDependencies & { now(): number; log(entry: Record<string, unknown>): void }): { profile(identity: AuthenticatedIdentity, authorization: string | undefined): Promise<{ name?: string; email?: string }>; me(identity: AuthenticatedIdentity, authorization: string | undefined): Promise<AdminMeResponse> }`
-    (25e reads `profile` for the audit name and `me` for the Slack link).
+    (25e reads `profile` for the audit name and `me` for the Slack link);
+  - `AdminReadDependencies.channelMembers?: (request: ChannelMembersRequest) => Promise<ChannelMembersResponse>`;
+  - `channelLabels(deps, channelIds, options?: { reveal?: (privateIds: string[]) => Promise<ReadonlySet<string>> })`:
+    a private channel's name is kept only for the IDs `reveal` answers.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2994,21 +3067,123 @@ and in `ADMIN_READS`:
   },
 ```
 
-In `adminReadDependencies` (broker.ts), the production default is
-`me: { issuer: dependencies.issuer, fetch, ...(developer?.slackUserByEmail === undefined ? {} : { slackUserByEmail: developer.slackUserByEmail }) }`,
-placed before `...dependencies.adminReads` so a test's own `me` wins. `adminReadDependencies` is
-built once per handler (Task 2), so the reader's caches live for the Lambda's life.
+In broker.ts's bootstrap (the module-level `createAwsBrokerHandler({...})` call), pass
+`adminReads: { me: { issuer: requiredEnvironment("OIDC_ISSUER"), fetch, ...(developer?.slackUserByEmail === undefined ? {} : { slackUserByEmail: developer.slackUserByEmail }) } }`
+(Task 13 adds `health` to the same object). It is set only there, never as a default inside
+`adminReadDependencies`, so a test harness without its own `me` has no reader and never reaches
+the network. `adminReadDependencies` is built once per handler (Task 2), so the reader's caches live
+for the Lambda's life.
+
+- [ ] **Step 4b: A private channel's name for an admin who is a member of it (A11, Q7)**
+
+Add to `tests/contract/admin-read-bindings.test.ts`:
+
+```ts
+import { issuer } from "../support/slack-broker.js";
+
+describe("private channel names for a member admin (A11, Q7 as answered)", () => {
+  const userinfo = (async (input: string | URL | Request) => (String(input).endsWith("/.well-known/openid-configuration")
+    ? Response.json({ issuer, userinfo_endpoint: "https://identity.example.test/userinfo" })
+    : Response.json({ sub: "admin-subject", email: "ada@example.com", email_verified: true }))) as unknown as typeof globalThis.fetch;
+  const channelInfo = async (request: { channelIds: string[] }) => ({ ok: true as const, channels: request.channelIds.map((channelId) => (channelId === "C0PRIVATE01" ? { channelId, name: "secret-launch", isPrivate: true } : { channelId, name: "payments-dev", isPrivate: false })) });
+  async function broker(options: { linked: boolean; member: boolean; membersFail?: boolean }) {
+    const harness = await createAdminReadBroker({
+      channelInfo,
+      channelMembers: async (request) => (options.membersFail ? { ok: false, error: "slack_unavailable" } : { ok: true, memberOf: options.member && request.slackUserId === "U0ADA00001" ? request.channelIds.filter((id) => id === "C0PRIVATE01") : [] }),
+      brokerExtra: { adminReads: { me: { issuer, fetch: userinfo, slackUserByEmail: async () => (options.linked ? { ok: true, userId: "U0ADA00001" } : { ok: true }) } } },
+    });
+    await bindChannel(harness.handler, "C0PRIVATE01");
+    return harness;
+  }
+  const privateRow = async (options: { linked: boolean; member: boolean; membersFail?: boolean }) =>
+    ((await (await broker(options)).admin("GET", "/v1/admin/slack/bindings")).body.bindings as Array<Record<string, unknown>>).find((row) => row.channelId === "C0PRIVATE01");
+
+  it("shows a private channel's name when the admin's linked Slack user is a member of it", async () => {
+    expect(await privateRow({ linked: true, member: true })).toMatchObject({ channelName: "secret-launch", private: true });
+  });
+
+  it("lists it by ID only when the admin is not a member, has no Slack link, or the check fails", async () => {
+    for (const options of [{ linked: true, member: false }, { linked: false, member: true }, { linked: true, member: true, membersFail: true }]) {
+      const row = await privateRow(options);
+      expect(row, JSON.stringify(options)).toMatchObject({ private: true });
+      expect(row, JSON.stringify(options)).not.toHaveProperty("channelName");
+    }
+  });
+});
+```
+
+Task 3's first test (no Slack link in that harness) keeps its expectation: the private channel by
+ID only. Then, in `admin-reads.ts`:
+- add `channelMembers?` to `AdminReadDependencies`, and in `adminReadDependencies` (broker.ts)
+  `...(developer?.channelMembers === undefined ? {} : { channelMembers: developer.channelMembers })`;
+- change `channelLabels` to collect the channel-info answers first, then decide names:
+
+```ts
+export async function channelLabels(deps: AdminReadDependencies, channelIds: readonly string[], options: { reveal?: (privateIds: string[]) => Promise<ReadonlySet<string>> } = {}): Promise<{ labels: Map<string, { name?: string; private: boolean }>; available: boolean }> {
+  const labels = new Map<string, { name?: string; private: boolean }>();
+  const unique = [...new Set(channelIds)].sort();
+  if (deps.channelInfo === undefined) return { labels, available: unique.length === 0 };
+  const found = new Map<string, { name: string; isPrivate: boolean }>();
+  let available = true;
+  try {
+    for (let start = 0; start < unique.length; start += CHANNEL_MEMBERS_MAX_CHANNELS) {
+      const answer = await deps.channelInfo({ kind: "channel-info", channelIds: unique.slice(start, start + CHANNEL_MEMBERS_MAX_CHANNELS) });
+      if (!answer.ok) { available = false; break; }
+      for (const channel of answer.channels) found.set(channel.channelId, { name: channel.name, isPrivate: channel.isPrivate });
+    }
+  } catch (error) {
+    deps.log({ event: "admin.channel_info_failed", error: error instanceof Error ? error.name : "unknown" });
+    available = false;
+  }
+  const privateIds = [...found].filter(([, channel]) => channel.isPrivate).map(([channelId]) => channelId);
+  // Q7 as answered: a private channel's name only for an admin who is a member; any failure keeps the ID only.
+  const revealed = privateIds.length === 0 || options.reveal === undefined ? new Set<string>() : await options.reveal(privateIds).catch(() => new Set<string>());
+  for (const [channelId, channel] of found) {
+    labels.set(channelId, !channel.isPrivate ? { name: channel.name, private: false } : revealed.has(channelId) ? { name: channel.name, private: true } : { private: true });
+  }
+  return { labels, available };
+}
+```
+
+- give `listBindings` the identity and the request, and build `reveal` from the admin's Slack link
+  (A12) and the channel-members check (the same DeveloperIdentity lookup, with its 10-minute cache,
+  that developer access uses):
+
+```ts
+function memberReveal(deps: AdminReadDependencies, identity: AuthenticatedIdentity, authorization: string | undefined): ((privateIds: string[]) => Promise<ReadonlySet<string>>) | undefined {
+  const reader = adminReader(deps);
+  const members = deps.channelMembers;
+  if (reader === undefined || members === undefined) return undefined;
+  // Asked only when a private channel is bound, so a list of public channels needs no userinfo call.
+  return async (privateIds) => {
+    const slackUserId = (await reader.me(identity, authorization)).slack.userId;
+    if (slackUserId === undefined) return new Set();
+    const memberOf = new Set<string>();
+    for (let start = 0; start < privateIds.length; start += CHANNEL_MEMBERS_MAX_CHANNELS) {
+      const answer = await members({ kind: "channel-members", slackUserId, channelIds: privateIds.slice(start, start + CHANNEL_MEMBERS_MAX_CHANNELS) });
+      if (!answer.ok) return new Set();
+      for (const channelId of answer.memberOf) memberOf.add(channelId);
+    }
+    return memberOf;
+  };
+}
+```
+
+  In `listBindings`, pass `{ reveal }` (when defined) to `channelLabels`, and in `ADMIN_READS` call
+  it as `(deps, identity, url, request) => listBindings(deps, identity, url, request.headers.authorization)`.
+  25e's change plans call `channelLabels` without `reveal`, so a change's effect names a private
+  channel by ID only.
 
 - [ ] **Step 5: Run the tests**
 
-Run: `npx vitest run tests/contract/admin-me.test.ts`
+Run: `npx vitest run tests/contract/admin-me.test.ts tests/contract/admin-read-bindings.test.ts`
 Expected: PASS.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add packages/broker/src/aws/admin-me.ts packages/broker/src/aws/admin-reads.ts packages/broker/src/aws/broker.ts tests/contract/admin-me.test.ts
-git commit -m "feat(broker): GET /v1/admin/me with the admin's verified email and Slack link (spec 025 phase 25d)"
+git add packages/broker/src/aws/admin-me.ts packages/broker/src/aws/admin-reads.ts packages/broker/src/aws/broker.ts tests/contract/admin-me.test.ts tests/contract/admin-read-bindings.test.ts
+git commit -m "feat(broker): GET /v1/admin/me, and private channel names for a member admin (spec 025 phase 25d)"
 ```
 
 ---
@@ -3255,10 +3430,10 @@ git commit -m "feat(broker): GET /v1/admin/health from bounded probes (spec 025 
 
 ---
 
-### Task 13: The health probes' grants and wiring, named environments only
+### Task 13: The health probes' grants, the index TTL, and their wiring, named environments only
 
-A13's production probes. Infrastructure, so a fresh reviewer checks least privilege and the legacy
-templates.
+A13's production probes, and A6's TTL (Q5, owner answer 2026-09-30). Infrastructure, so a fresh
+reviewer checks least privilege and the legacy templates.
 
 **Files:**
 - Modify: `infra/lib/control-plane.ts`
@@ -3273,6 +3448,9 @@ templates.
   (`agentx-<env>-`), `HEALTH_DEAD_LETTER_QUEUES` (JSON `{ "<name>": "<queue URL>" }`); IAM:
   `cloudwatch:DescribeAlarms` and `sqs:GetQueueAttributes`, each on exact resources.
   `DeveloperTaskNotifier` gains `readonly deadLetters: sqs.Queue; readonly streamFailures: sqs.Queue`.
+  A6: the named environment's State table gets `TimeToLiveSpecification` on `indexExpiresAt`
+  (`INDEX_EXPIRY_ATTRIBUTE`), and the reconciler gets `INDEX_EXPIRY=ttl`; the legacy template has
+  neither.
 
 - [ ] **Step 1: Confirm the IAM resource types (read-only)**
 
@@ -3287,7 +3465,9 @@ names (the probe asks with `AlarmNamePrefix`).
 
 ```ts
 // tests/contract/admin-health-infrastructure.test.ts
-// Spec 025 A13: the broker's health grants are exact, and exist only in named environments.
+// Spec 025 A13 and A6: the broker's health grants are exact, the index TTL is on, and both exist
+// only in named environments.
+import { execFileSync } from "node:child_process";
 import { App } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
@@ -3328,8 +3508,26 @@ describe("the health route's grants (A13)", () => {
     for (const queue of ["DispatchDeadLetterQueue", "SlackRequestDeadLetterQueue", "NoticeDeadLetterQueue", "StreamFailureQueue"]) expect(listed).toContain(queue);
   });
 
+  it("expires index items by TTL on indexExpiresAt in a named environment, and tells the reconciler so (A6, Q5)", () => {
+    const tables = Object.values(named.findResources("AWS::DynamoDB::Table") as Record<string, { Properties: { StreamSpecification?: unknown; TimeToLiveSpecification?: unknown } }>);
+    const state = tables.filter((table) => table.Properties.StreamSpecification !== undefined);
+    expect(state).toHaveLength(1);
+    expect(state[0]?.Properties.TimeToLiveSpecification).toEqual({ AttributeName: "indexExpiresAt", Enabled: true });
+    const functions = Object.entries(named.findResources("AWS::Lambda::Function") as Record<string, LambdaFunction>);
+    const reconciler = functions.find(([id]) => /Reconciler[0-9A-F]{8}$/.test(id));
+    expect(reconciler?.[1].Properties.Environment?.Variables).toMatchObject({ INDEX_EXPIRY: "ttl" });
+  });
+
+  it("names indexExpiresAt only where index items are written or read, so the TTL deletes nothing else", () => {
+    const allowed = new Set(["packages/contracts/src/admin.ts", "packages/broker/src/aws/activity-index.ts", "packages/broker/src/aws/admin-reads.ts", "infra/lib/control-plane.ts"]);
+    const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
+    expect(found.filter((file) => !allowed.has(file))).toEqual([]);
+  });
+
   it("adds nothing to the legacy template", () => {
     expect(brokerStatements(legacy).some((statement) => statement.Action === "cloudwatch:DescribeAlarms" || statement.Action === "sqs:GetQueueAttributes")).toBe(false);
+    const legacyTables = Object.values(legacy.findResources("AWS::DynamoDB::Table") as Record<string, { Properties: { StreamSpecification?: unknown; TimeToLiveSpecification?: unknown } }>);
+    expect(legacyTables.find((table) => table.Properties.StreamSpecification !== undefined)?.Properties.TimeToLiveSpecification).toBeUndefined();
     expect(brokerEnvironment(legacy)).not.toHaveProperty("AGENTX_ALARM_PREFIX");
     expect(brokerEnvironment(legacy)).not.toHaveProperty("HEALTH_DEAD_LETTER_QUEUES");
   });
@@ -3374,6 +3572,23 @@ keep the notifier in a constant (`const notifier = new DeveloperTaskNotifier(...
 
 `naming.alarmName("")` is `agentx-<env>-` for a named environment (infra/lib/naming.ts line 118).
 
+For A6, in the State table's props (control-plane.ts), add the TTL for named environments only,
+and after `const sessions = new SessionLifecycle(...)` tell the reconciler:
+
+```ts
+      // Spec 025 A6 (Q5, owner answer 2026-09-30): failure and usage index items expire by TTL in
+      // named environments. Adding a TTL to an existing table is an in-place update, and no other
+      // State item carries indexExpiresAt (a test pins it). The legacy table stays as it is.
+      ...(naming.env === undefined ? {} : { timeToLiveAttribute: INDEX_EXPIRY_ATTRIBUTE }),
+```
+
+```ts
+    // A6: where the State table expires index items itself, the reconciler's legacy sweep is off.
+    if (naming.env !== undefined) sessions.reconciler.addEnvironment("INDEX_EXPIRY", "ttl");
+```
+
+(import `INDEX_EXPIRY_ATTRIBUTE` from `@agentx/contracts`).
+
 - [ ] **Step 5: Wire the production probes**
 
 In `packages/broker/src/aws/broker.ts`'s bootstrap, build the probes only from what the environment
@@ -3415,7 +3630,7 @@ function healthProbes(): AdminHealthProbes {
 }
 ```
 
-and pass `adminReads: { health: healthProbes() }`. Import `CloudWatchClient`,
+and add `health: healthProbes()` to the bootstrap's `adminReads` object (beside Task 11's `me`). Import `CloudWatchClient`,
 `DescribeAlarmsCommand` (`@aws-sdk/client-cloudwatch`) and `SQSClient`, `GetQueueAttributesCommand`
 (`@aws-sdk/client-sqs`); add `@aws-sdk/client-cloudwatch` to `packages/broker/package.json` at the
 same pinned version as the repository's other `@aws-sdk/*` packages if it is not already there. In
@@ -3431,7 +3646,7 @@ Expected: PASS; the legacy templates are byte-identical.
 
 ```bash
 git add infra/lib/control-plane.ts infra/lib/developer-task-notifier.ts packages/broker/src/aws/broker.ts packages/broker/package.json package-lock.json tests/contract/admin-health-infrastructure.test.ts
-git commit -m "feat(infra): the admin health route's read-only grants, named environments only (spec 025 phase 25d)"
+git commit -m "feat(infra): the admin health route's read-only grants and the index TTL, named environments only (spec 025 phase 25d)"
 ```
 
 ---
@@ -4224,7 +4439,7 @@ export const ADMIN_READ_TOOLS: readonly ToolDefinition[] = [
   {
     name: "agentx_admin_list_channels",
     title: "List AgentX channel bindings",
-    description: "Lists the Slack channels bound to projects: the channel's ID, its name when it is public (a private channel is shown by ID only), the project, and when the binding last changed.",
+    description: "Lists the Slack channels bound to projects: the channel's ID, its name when it is public or when your linked Slack user is a member of the private channel (otherwise a private channel is shown by ID only), the project, and when the binding last changed.",
     inputSchema: {},
     outputSchema: { bindings: z.array(z.object({ channel_id: z.string(), channel_name: z.string().optional(), private: z.boolean().optional(), project: z.string(), updated_at: z.string() })), notices: z.array(z.string()) },
     async handler(context) {
@@ -4681,19 +4896,21 @@ task records it.
   - FR-030: `agentx_admin_turns`: "`thread` or `task_id`; `task_id` matches the task's own records
     and the channel turns that carry its ID"; `agentx_admin_failed_tasks`: "turn record link: the
     thread subject or the task ID to pass to `agentx_admin_turns`"; `agentx_admin_list_channels`:
-    "a private channel by ID only" (Q7); `agentx_admin_usage`: what `turns`, `tasks` and
+    "a private channel's name only when the admin's linked Slack user is a member of it, else its ID" (Q7 as answered); `agentx_admin_usage`: what `turns`, `tasks` and
     `cost_unknown` count (Q6, A9).
   - FR-038: "The failure index, and a usage index of workers' usage events, are written by the
     outbox publisher from the state table's stream, best effort (a failed index write never delays
-    dispatch), and deleted by the session reconciler 30 days on (Q5, A4, A6). The admin project list
+    dispatch), and expire 30 days on: by the State table's TTL on `indexExpiresAt` in installed
+    environments, and by the session reconciler in the legacy deployment (Q5 as answered, A4, A6). The admin project list
     is a project catalog written at each registration, together with the environment team's bound
     projects and the caller's own memberships; no route scans the table (Q2, A3).
     `GET /v1/admin/me` names the admin's verified email from the token, or from the admin issuer's
     `userinfo` endpoint, and whether it matches one Slack user (Q3, A12)."
   - FR-048: "`/v1/auth/.well-known/agentx-configuration` also reports `adminApiVersion`."
   - Decisions: add **D28** (A1: the admin API's own version, and why not `DEVELOPER_API_VERSION`
-    1.3), **D29** (A4: the stream-derived indexes in the outbox publisher, and why not a third
-    stream reader or a write in every operation path), **D30** (A3: the project catalog and why no
+    1.3), **D29** (A4, A6: the stream-derived indexes in the outbox publisher, and why not a third
+    stream reader or a write in every operation path; their TTL in named environments and the
+    reconciler's sweep in the legacy deployment), **D30** (A3: the project catalog and why no
     scan), and **D31** (A12: the admin's email from `userinfo`), each one paragraph, marked with the
     owner's decision date.
 - [ ] **Step 2: Update the phase README.** The 25c row starts "Merged as PR #159."; the 25d row
@@ -4707,7 +4924,13 @@ git commit -m "docs(spec-025): record the phase 25d rulings and the owner's answ
 
 ---
 
-### Task 19: Live check in a throwaway environment (owner present)
+### Task 19 (deferred): Live check in a throwaway environment (owner present)
+
+**Deferred to the combined final live check (owner, 2026-09-30).** No live testing runs until 25d,
+25e and spec 040 phases 2 to 4 are all built. This task is not part of this phase's build or PR:
+its steps below are this phase's checklist for that combined final check, run then in one
+throwaway environment (instead of a separate `live25d`), with the owner present.
+
 
 This task changes no code unless it finds a defect. A defect is fixed with a failing test first, in
 the task that owns the code, then reviewed. It tests the real flow: Claude Code, `agentx mcp`, an
@@ -4799,7 +5022,7 @@ JS
   phase's live check has room.
 - [ ] **Step 12: Record the evidence** in the PR description: the commands, outcomes and timings
   (how long the admin tools took to appear and to disappear), each defect fixed, and any finding
-  that changes a ruling above. Raise those with the owner before merge.
+  that changes a ruling above. Raise those with the owner before the combined release.
 
 ## Not in this phase
 
@@ -4825,7 +5048,7 @@ JS
   committed results: Task 17's expected objects. 25c's carry-over (`task_id` with channel turns):
   Task 7, and Task 17's turns call.
 - **Placeholder scan.** Every code step shows its code. Two steps read a fact first and say what to
-  do with the answer: Task 13 Step 1 (the IAM resource types) and Task 19 Step 8 (whether Cognito's
+  do with the answer: Task 13 Step 1 (the IAM resource types) and the deferred Task 19 Step 8 (whether Cognito's
   `userinfo` answered). Task 14 Step 6 keeps today's tool handler body as it is and says so.
 - **Type consistency.** `AdminReadDependencies` is Task 2's, with `me` typed in Task 11, `health` in
   Task 12 and `turns` added in Task 8, each by the task that owns it. `FailureIndexRecord` and
@@ -4836,5 +5059,10 @@ JS
   for the tasks named in their Interfaces.
 - **Review Focus.** Each line has its test in the owning task: 1 in Task 14, 2 in Tasks 4 and 17,
   3 in Task 4, 4 in Task 7, 5 in Task 11.
+- **Owner answers (2026-09-30).** Q5 changed: A6 and Tasks 1 (the TTL attribute), 4 (written on
+  each item), 5 (the sweep, legacy only), 6 and 8 (reads skip an expired item) and 13 (the named
+  table's TTL, the reconciler's switch, the test that nothing else names the attribute). Q7 changed:
+  A11 and Tasks 3 (unchanged: public names, private by ID), 11 (the member check) and 15 (the tool's
+  description). The live check is deferred (Task 19).
 - **Owner questions.** Q1 to Q7 each name the tasks that depend on them; Task 18 records the
   answers, and stops for any answer that differs from the recommendation.

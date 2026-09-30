@@ -18,4 +18,6 @@ admin changes come last because they carry the confirmation machinery, and reuse
 the Slack Confirm button.
 
 Each phase that changes behavior ends with the live check in the spec's Testing section, with the
-owner present, in a throwaway environment.
+owner present, in a throwaway environment. From 25d on (owner, 2026-09-30), live testing is
+deferred until 25d, 25e and spec 040 phases 2 to 4 are all built: each plan's live-check task is
+its checklist for one combined final live check.
