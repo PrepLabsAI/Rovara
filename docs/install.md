@@ -211,3 +211,4 @@ access stack from it with their credentials; you deploy the rest with the operat
 - Upgrades, settings, more projects, channels and connectors: [docs/day-two.md](day-two.md).
 - Removing it: [docs/teardown.md](teardown.md).
 - Moving it to another AWS account: [docs/move-account.md](move-account.md).
+- Developers' AI tools (Claude Code, Codex, Cursor): [docs/mcp-install.md](mcp-install.md).
