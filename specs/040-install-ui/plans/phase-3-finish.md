@@ -735,6 +735,10 @@ git commit -m "feat(init-ui): the first project and channel screens, with the in
 
 Depends on Q7.
 
+> **As built (ruling R3):** `ensureSubscribed` takes an optional `onWaiting`, so the page shows an
+> alerts "waiting" card while the confirmation wait runs (up to 10 minutes), then the "confirm" card
+> below; the first test's statuses are `["waiting", "waiting", "ok"]`.
+
 **Interfaces:**
 - Consumes: Task 1's `connectorsCard`, `alertsCard`.
 
